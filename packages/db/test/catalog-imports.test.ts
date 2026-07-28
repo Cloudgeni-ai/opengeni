@@ -86,7 +86,7 @@ describe("catalog import persistence", () => {
     expect(catalogItem).toMatchObject({
       name: "Mobbin",
       description:
-        "Search real-world UI & UX design references for mobile apps, web apps, and websites with Mobbin.",
+        "Search Mobbin’s library for real-world product screens, flows, and UI/UX references. Requires a paid Mobbin plan (Pro, Team, or Enterprise). Provider-managed usage credits apply.",
       homepageUrl: "https://mobbin.com/mcp",
       endpointUrl: "https://api.mobbin.com/mcp",
       installUrl: "https://docs.mobbin.com/mcp",

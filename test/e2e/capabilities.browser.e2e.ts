@@ -253,7 +253,10 @@ describe("capabilities browser e2e", () => {
       });
       await setTheme(page, "light");
       await openMobbinSheet(page, false);
-      await expectText(page.getByRole("dialog"), "Search real-world UI & UX design references");
+      await expectText(
+        page.getByRole("dialog"),
+        "Search Mobbin’s library for real-world product screens, flows, and UI/UX references. Requires a paid Mobbin plan (Pro, Team, or Enterprise). Provider-managed usage credits apply.",
+      );
       await expectText(page.getByRole("dialog"), "docs.mobbin.com");
       await expectVisible(page.getByRole("dialog").getByRole("button", { name: "Connect Mobbin" }));
       await assertAccessibleAndBounded(page, '[role="dialog"]');
@@ -591,7 +594,7 @@ function mobbinCapability(mode: MobbinUiState["mode"]) {
     source: "registry",
     name: "Mobbin",
     description:
-      "Search real-world UI & UX design references for mobile apps, web apps, and websites with Mobbin.",
+      "Search Mobbin’s library for real-world product screens, flows, and UI/UX references. Requires a paid Mobbin plan (Pro, Team, or Enterprise). Provider-managed usage credits apply.",
     category: "integrations",
     tags: ["mcp", "integration", "verified", "oauth2"],
     homepageUrl: "https://mobbin.com/mcp",

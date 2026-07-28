@@ -173,7 +173,7 @@ describe("integrations.sh catalog import normalization", () => {
       domain: "mobbin.com",
       name: "Mobbin",
       description:
-        "Search real-world UI & UX design references for mobile apps, web apps, and websites with Mobbin.",
+        "Search Mobbin’s library for real-world product screens, flows, and UI/UX references. Requires a paid Mobbin plan (Pro, Team, or Enterprise). Provider-managed usage credits apply.",
       mcpUrl: "https://api.mobbin.com/mcp",
       transport: "streamable-http",
       authKind: "oauth2",
@@ -204,7 +204,7 @@ describe("integrations.sh catalog import normalization", () => {
       providerDomain: "mobbin.com",
       name: "Mobbin",
       description:
-        "Search real-world UI & UX design references for mobile apps, web apps, and websites with Mobbin.",
+        "Search Mobbin’s library for real-world product screens, flows, and UI/UX references. Requires a paid Mobbin plan (Pro, Team, or Enterprise). Provider-managed usage credits apply.",
       mcpUrl: "https://api.mobbin.com/mcp",
       authKind: "oauth2",
       scopesHint: ["openid"],
