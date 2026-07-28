@@ -225,6 +225,11 @@ function DetailBody({
               <ExternalMetaLink href={item.homepageUrl} />
             </MetaRow>
           ) : null}
+          {item.installUrl && item.installUrl !== item.homepageUrl ? (
+            <MetaRow label="Setup">
+              <ExternalMetaLink href={item.installUrl} />
+            </MetaRow>
+          ) : null}
           {item.endpointUrl ? (
             <MetaRow label="Endpoint">
               <span className="min-w-0 truncate font-mono text-fg-muted">{item.endpointUrl}</span>

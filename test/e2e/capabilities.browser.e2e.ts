@@ -10,7 +10,10 @@ const repoRoot = new URL("../..", import.meta.url).pathname;
 const workspaceId = "00000000-0000-4000-8000-000000000017";
 const accountId = "00000000-0000-4000-8000-000000000018";
 const capabilityId = "skill:browser-focus";
+const mobbinCapabilityId = "mcp:integrations-sh:mobbin-com-browser-fixture";
+const mobbinConnectionId = "00000000-0000-4000-8000-000000000120";
 const evidenceDir = new URL("../../.agent/evidence/capabilities-focus/", import.meta.url).pathname;
+const mobbinEvidenceDir = new URL("../../.agent/evidence/mobbin-mcp/", import.meta.url).pathname;
 const apiContractRevision = "2026-07-turn-instructions-v1";
 
 type CapabilityState = {
@@ -19,7 +22,13 @@ type CapabilityState = {
   enableCalls: number;
 };
 
-describe("capabilities focus restoration browser e2e", () => {
+type MobbinUiState = {
+  mode: "disconnected" | "connected" | "revoked";
+  oauthStarts: number;
+  oauthRequest: Record<string, unknown> | null;
+};
+
+describe("capabilities browser e2e", () => {
   let browser: Browser;
   let web: StartedProcess;
   let webBaseUrl: string;
@@ -27,7 +36,10 @@ describe("capabilities focus restoration browser e2e", () => {
   beforeAll(async () => {
     const webPort = await freePort();
     webBaseUrl = `http://127.0.0.1:${webPort}`;
-    await mkdir(evidenceDir, { recursive: true });
+    await Promise.all([
+      mkdir(evidenceDir, { recursive: true }),
+      mkdir(mobbinEvidenceDir, { recursive: true }),
+    ]);
     web = await startProcess(
       [
         "bun",
@@ -198,6 +210,124 @@ describe("capabilities focus restoration browser e2e", () => {
       await context.close();
     }
   }, 60_000);
+
+  test("Mobbin OAuth states stay truthful, bounded, accessible, and responsive", async () => {
+    const state: MobbinUiState = {
+      mode: "disconnected",
+      oauthStarts: 0,
+      oauthRequest: null,
+    };
+    const authorizationOrigin = "https://ujasntkfphywizsdaapi.supabase.co";
+    const desktop = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    const page = await desktop.newPage();
+    try {
+      await installCapabilityApi(page, state);
+      await page.route(`${authorizationOrigin}/**`, async (route) => {
+        const url = new URL(route.request().url());
+        expect(url.pathname).toBe("/auth/v1/oauth/authorize");
+        expect(url.searchParams.get("resource")).toBe("https://api.mobbin.com/mcp");
+        expect(url.searchParams.get("scope")).toBe("openid");
+        expect(url.searchParams.get("code_challenge_method")).toBe("S256");
+        await route.fulfill({
+          status: 200,
+          contentType: "text/html",
+          body: `<!doctype html>
+            <html lang="en" style="color-scheme:dark">
+              <head>
+                <meta name="viewport" content="width=device-width,initial-scale=1">
+                <title>Mobbin authorization fixture</title>
+                <style>
+                  *{box-sizing:border-box} body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0d1117;color:#f2f4f8;font:16px system-ui,sans-serif;padding:24px}
+                  main{width:min(100%,460px);padding:32px;border:1px solid #30363d;border-radius:20px;background:#161b22;box-shadow:0 24px 80px #0008}
+                  .brand{display:grid;place-items:center;width:48px;height:48px;border-radius:14px;background:#282f3a;color:#dce3ee;font-weight:700}
+                  h1{font-size:25px;margin:20px 0 10px} p{line-height:1.55;color:#aeb8c7} code{color:#d7e3f4} .fixture{font-size:12px;color:#8994a3;border-top:1px solid #30363d;margin-top:24px;padding-top:18px}
+                </style>
+              </head>
+              <body><main aria-labelledby="authorization-heading"><div class="brand" aria-hidden="true">M</div><h1 id="authorization-heading">Authorize Mobbin for OpenGeni</h1><p>Requested access: <code>openid</code></p><p>You would return to OpenGeni after approving access.</p><p class="fixture">Browser evidence fixture - no account, client, credential, or token was used.</p></main></body>
+            </html>`,
+        });
+      });
+
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
+        waitUntil: "networkidle",
+      });
+      await setTheme(page, "light");
+      await openMobbinSheet(page, false);
+      await expectText(page.getByRole("dialog"), "Search real-world UI & UX design references");
+      await expectText(page.getByRole("dialog"), "docs.mobbin.com");
+      await expectVisible(page.getByRole("dialog").getByRole("button", { name: "Connect Mobbin" }));
+      await assertAccessibleAndBounded(page, '[role="dialog"]');
+      await page.screenshot({
+        path: `${mobbinEvidenceDir}disconnected-desktop-light.png`,
+        fullPage: true,
+      });
+
+      await setTheme(page, "dark");
+      await page.screenshot({
+        path: `${mobbinEvidenceDir}connect-desktop-dark.png`,
+        fullPage: true,
+      });
+      await Promise.all([
+        page.waitForURL(`${authorizationOrigin}/**`),
+        page.getByRole("dialog").getByRole("button", { name: "Connect Mobbin" }).click(),
+      ]);
+      await expectVisible(page.getByRole("heading", { name: "Authorize Mobbin for OpenGeni" }));
+      expect(state.oauthStarts).toBe(1);
+      expect(state.oauthRequest).toMatchObject({
+        mcpUrl: "https://api.mobbin.com/mcp",
+        providerDomain: "mobbin.com",
+      });
+      await assertAccessibleAndBounded(page, "main");
+      await page.screenshot({
+        path: `${mobbinEvidenceDir}authorization-desktop-dark.png`,
+        fullPage: true,
+      });
+
+      state.mode = "connected";
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
+        waitUntil: "networkidle",
+      });
+      await setTheme(page, "dark");
+      await openMobbinSheet(page, true);
+      await expectText(page.getByRole("dialog"), "Connected to mobbin.com");
+      await assertAccessibleAndBounded(page, '[role="dialog"]');
+      await page.screenshot({
+        path: `${mobbinEvidenceDir}connected-desktop-dark.png`,
+        fullPage: true,
+      });
+    } finally {
+      await desktop.close();
+    }
+
+    state.mode = "revoked";
+    const mobile = await browser.newContext({
+      viewport: { width: 390, height: 844 },
+      hasTouch: true,
+      isMobile: true,
+      colorScheme: "dark",
+    });
+    const mobilePage = await mobile.newPage();
+    try {
+      await installCapabilityApi(mobilePage, state);
+      await mobilePage.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
+        waitUntil: "networkidle",
+      });
+      await setTheme(mobilePage, "dark");
+      await expectText(mobilePage.getByRole("region", { name: "Capabilities" }), "Needs attention");
+      await openMobbinSheet(mobilePage, true);
+      await expectText(mobilePage.getByRole("dialog"), "Reconnect to restore access");
+      await expectVisible(
+        mobilePage.getByRole("dialog").getByRole("button", { name: "Reconnect Mobbin" }),
+      );
+      await assertAccessibleAndBounded(mobilePage, '[role="dialog"]');
+      await mobilePage.screenshot({
+        path: `${mobbinEvidenceDir}revoked-needs-attention-mobile-dark.png`,
+        fullPage: true,
+      });
+    } finally {
+      await mobile.close();
+    }
+  }, 90_000);
 });
 
 async function openBrowseSheet(page: Page) {
@@ -212,6 +342,37 @@ async function openBrowseSheet(page: Page) {
   await expectVisible(page.getByRole("dialog"));
   await expectText(page.getByRole("dialog"), "Example capability");
   return opener;
+}
+
+async function openMobbinSheet(page: Page, enabled: boolean): Promise<void> {
+  const opener = enabled
+    ? page.locator(`[data-capability-focus-target][data-capability-id="${mobbinCapabilityId}"]`)
+    : page.getByRole("button").filter({ hasText: "Mobbin" }).first();
+  await expectVisible(opener);
+  await opener.click();
+  await expectVisible(page.getByRole("dialog"));
+  await expectText(page.getByRole("dialog"), "Mobbin");
+}
+
+async function assertAccessibleAndBounded(page: Page, selector: string): Promise<void> {
+  const axe = await new AxeBuilder({ page }).include(selector).analyze();
+  expect(axe.violations).toEqual([]);
+  expect(
+    await page.evaluate(
+      () =>
+        document.documentElement.scrollWidth <= window.innerWidth &&
+        document.body.scrollWidth <= window.innerWidth,
+    ),
+  ).toBe(true);
+}
+
+async function setTheme(page: Page, theme: "light" | "dark"): Promise<void> {
+  await page.evaluate(async (nextTheme) => {
+    document.documentElement.setAttribute("data-og-theme", nextTheme);
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+    });
+  }, theme);
 }
 
 async function expectVisible(locator: import("playwright").Locator): Promise<void> {
@@ -232,7 +393,10 @@ async function expectText(locator: import("playwright").Locator, expected: strin
   expect((await locator.textContent()) ?? "").toContain(expected);
 }
 
-async function installCapabilityApi(page: Page, state: CapabilityState): Promise<void> {
+async function installCapabilityApi(
+  page: Page,
+  state: CapabilityState | MobbinUiState,
+): Promise<void> {
   await page.route("http://127.0.0.1:9/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -295,10 +459,13 @@ async function installCapabilityApi(page: Page, state: CapabilityState): Promise
       return json([workspace()]);
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/capabilities`) {
-      return json({ items: [capability(state.enabled)], installations: [] });
+      return json({
+        items: ["mode" in state ? mobbinCapability(state.mode) : capability(state.enabled)],
+        installations: [],
+      });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/connections`) {
-      return json({ connections: [] });
+      return json({ connections: "mode" in state ? mobbinConnections(state.mode) : [] });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/packs`) {
       return json({ packs: [], installations: [] });
@@ -313,6 +480,21 @@ async function installCapabilityApi(page: Page, state: CapabilityState): Promise
       return json({ sessions: [], pinned: [], pinnedTruncated: false, nextCursor: null });
     }
     if (
+      "mode" in state &&
+      request.method() === "POST" &&
+      url.pathname === `/v1/workspaces/${workspaceId}/connections/oauth/start`
+    ) {
+      state.oauthStarts += 1;
+      state.oauthRequest = request.postDataJSON() as Record<string, unknown>;
+      return json({
+        state: "mobbin-browser-fixture",
+        authorizationUrl:
+          "https://ujasntkfphywizsdaapi.supabase.co/auth/v1/oauth/authorize?resource=https%3A%2F%2Fapi.mobbin.com%2Fmcp&scope=openid&code_challenge_method=S256",
+        expiresAt: new Date(Date.now() + 300_000).toISOString(),
+      });
+    }
+    if (
+      !("mode" in state) &&
       request.method() === "POST" &&
       url.pathname ===
         `/v1/workspaces/${workspaceId}/capabilities/${encodeURIComponent(capabilityId)}/enable`
@@ -399,4 +581,89 @@ function capability(enabled: boolean) {
     createdAt: new Date(0).toISOString(),
     updatedAt: new Date(0).toISOString(),
   };
+}
+
+function mobbinCapability(mode: MobbinUiState["mode"]) {
+  const enabled = mode !== "disconnected";
+  return {
+    id: mobbinCapabilityId,
+    kind: "mcp",
+    source: "registry",
+    name: "Mobbin",
+    description:
+      "Search real-world UI & UX design references for mobile apps, web apps, and websites with Mobbin.",
+    category: "integrations",
+    tags: ["mcp", "integration", "verified", "oauth2"],
+    homepageUrl: "https://mobbin.com/mcp",
+    endpointUrl: "https://api.mobbin.com/mcp",
+    installUrl: "https://docs.mobbin.com/mcp",
+    authModel: "credential_ref",
+    providerDomain: "mobbin.com",
+    surfaceType: "mcp",
+    transport: "streamable-http",
+    mcpUrl: "https://api.mobbin.com/mcp",
+    authKind: "oauth2",
+    credentialFacts: [],
+    tier: "verified",
+    provenance: "official:mcp-registry:com.mobbin/mobbin@1.0.1",
+    logoAssetPath: null,
+    importBatchId: "00000000-0000-4000-8000-000000000121",
+    stale: false,
+    staleAt: null,
+    tools: [],
+    runtime: {
+      available: true,
+      mcpServerId: "cap-integrations-sh-mobbin-com-browser-fixture",
+      transport: "streamable-http",
+      notes: "Requires a connected OAuth credential.",
+      catalogTrust: { state: "trusted", reason: "verified_probe" },
+    },
+    enabled,
+    enabledReason: enabled ? "explicit" : null,
+    connectionRef: enabled
+      ? { connectionId: mobbinConnectionId, providerDomain: "mobbin.com", kind: "oauth2" }
+      : null,
+    metadata: {
+      registry: "integrations.sh",
+      providerDomain: "mobbin.com",
+      scopesHint: ["openid"],
+      logoSource: "generic_monogram",
+      documentationUrl: "https://docs.mobbin.com/mcp",
+      officialMcpRegistry: {
+        name: "com.mobbin/mobbin",
+        version: "1.0.1",
+        status: "active",
+        isLatest: true,
+      },
+      mcpProbe: { status: "real", reason: "auth_challenge", httpStatus: 401 },
+    },
+    createdAt: new Date(0).toISOString(),
+    updatedAt: new Date(0).toISOString(),
+  };
+}
+
+function mobbinConnections(mode: MobbinUiState["mode"]) {
+  if (mode === "disconnected") return [];
+  return [
+    {
+      id: mobbinConnectionId,
+      accountId,
+      workspaceId,
+      subjectId: "browser-focus-subject",
+      providerDomain: "mobbin.com",
+      kind: "oauth2",
+      status: mode === "connected" ? "active" : "revoked",
+      grantedScopes: ["openid"],
+      expiresAt: null,
+      lastRefreshAt: null,
+      lastUsedAt: null,
+      lastError: mode === "revoked" ? "Authorization was revoked." : null,
+      version: 1,
+      metadata: {},
+      createdBySubjectId: "browser-focus-subject",
+      updatedBySubjectId: "browser-focus-subject",
+      createdAt: new Date(0).toISOString(),
+      updatedAt: new Date(0).toISOString(),
+    },
+  ];
 }
