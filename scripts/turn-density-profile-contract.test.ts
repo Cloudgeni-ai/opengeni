@@ -8,9 +8,9 @@ test("uses the granted workspace subject for synthetic turn execution", async ()
     "utf8",
   );
 
-  expect(source).toContain(
-    "const profileSubjectId = `operator:turn-density-profile:${runId}`;",
-  );
+  expect(source).toContain("const profileSubjectId = `operator:turn-density-profile:${runId}`;");
   expect(source.match(/subjectId: profileSubjectId/g)).toHaveLength(2);
   expect(source).not.toContain('subjectId: "turn-density-profile"');
+  expect(source).toContain(".delete(schema.managedAccounts)");
+  expect(source).toContain(".where(eq(schema.managedAccounts.id, accountId))");
 });

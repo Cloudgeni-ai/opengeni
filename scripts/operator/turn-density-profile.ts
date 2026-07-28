@@ -4,13 +4,13 @@ import {
   bootstrapWorkspace,
   createDb,
   createSession,
-  deleteWorkspace,
   enqueueSessionTurn,
   withWorkspaceRls,
 } from "@opengeni/db";
 import * as schema from "@opengeni/db/schema";
 import { createProductionAgentRuntime } from "@opengeni/runtime";
 import { MemoryEventBus, ScriptedModel } from "@opengeni/testing";
+import { eq } from "drizzle-orm";
 import { createTurnActivities } from "../../apps/worker/src/activities";
 
 const MIB = 1024 * 1024;
@@ -213,11 +213,20 @@ try {
 } finally {
   model.release();
   await Promise.allSettled(runs);
-  if (workspaceId) {
-    await deleteWorkspace(dbClient.db, workspaceId).catch((error) => {
-      console.error(`Density workspace cleanup failed: ${errorMessage(error)}`);
-      process.exitCode = 1;
-    });
+  if (accountId) {
+    await dbClient.db
+      .delete(schema.managedAccounts)
+      .where(eq(schema.managedAccounts.id, accountId))
+      .catch((error) => {
+        console.error(`Density account cleanup failed: ${errorMessage(error)}`);
+        process.exitCode = 1;
+      });
+  } else if (workspaceId) {
+    // accountId and workspaceId are assigned from the same bootstrap result.
+    // Keep the branch explicit so a future partial-bootstrap refactor cannot
+    // silently leave a workspace behind.
+    console.error("Density profile cannot clean a workspace without its managed account");
+    process.exitCode = 1;
   }
   await dbClient.close();
 }
