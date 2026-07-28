@@ -83,7 +83,10 @@ web and route `/v1`, `/healthz`, `/metrics`, `/install.sh`, `/install.ps1`,
 `/uninstall.sh`, `/opengeni-agent-minisign.pub`, and `/agent` to the API. Give
 the NATS websocket, relay, and MinIO API their own private TLS ports. Set
 `selfhosted.natsUrl`, `selfhosted.relayUrl`, and `minio.publicEndpoint` to those
-private URLs.
+private URLs. Also set `OPENGENI_PUBLIC_BASE_URL` to the browser/API origin. The
+API uses it when serving the installer, so an enrolled machine downloads the
+agent version baked into this deployment rather than falling back to the public
+archive.
 
 For a tailnet-only deployment, `OPENGENI_AUTH_REQUIRED=false` and
 `OPENGENI_PRODUCT_ACCESS_MODE=local` mean there is no shared deployment access
@@ -341,8 +344,11 @@ bun run deployment:connected-machine-load -- \
 
 The command runs a harmless marker command, warms every supplied session route,
 then applies a concurrency staircase. It reports request throughput, p50/p95/p99
-latency, and typed failure counts. Pass multiple `--session-id` values to spread
-the test over several machine-backed sessions. Use
+latency, and typed failure counts. Before the first write, it reads one supplied
+session to discover the target's `X-OpenGeni-Api-Contract` revision and sends
+that revision on every terminal probe; older targets that do not advertise a
+contract remain supported. Pass multiple `--session-id` values to spread the
+test over several machine-backed sessions. Use
 `--deployment-access-key` or `--product-token` only when the deployment enables
 that boundary; neither credential is printed.
 
@@ -353,6 +359,11 @@ memory, or useful development-task throughput. Use
 run a smaller representative set of real development tasks before choosing an
 active-turn concurrency target. A large number of durable idle sessions is not
 equivalent to the same number of simultaneously executing turns.
+
+Direct file, Git, and synchronous terminal APIs follow a machine-targeted
+session's active pointer from the first request. They use API → NATS → enrolled
+agent request/reply and do not need a preceding model turn, a turn worker, or a
+cloud-sandbox lease.
 
 For Azure Blob-backed deployments, no object host rewrite should be needed because upload/download URLs are public Azure Blob SAS URLs:
 

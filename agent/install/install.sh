@@ -32,8 +32,10 @@
 #   OPENGENI_SYSTEM=1          Install to /usr/local/bin (needs sudo/root).
 #   OPENGENI_ENROLL_TOKEN      Non-interactive enroll token (CI/automation/fleet):
 #                              the script runs `enroll --token <tok>
-#                              --non-interactive` itself — the token IS the grant,
-#                              so there is NO device-approve step. The workspace is
+#                              --non-interactive --force` itself — the token IS
+#                              the requested fresh grant, so it replaces any
+#                              enrollment already present on the machine and
+#                              needs NO device-approve step. The workspace is
 #                              encoded in the token; OPENGENI_WORKSPACE_ID is not
 #                              needed on this path.
 #   OPENGENI_NO_RUN=1          Do not start a foreground run; just print the
@@ -672,11 +674,13 @@ finish() {
     # (not the api.opengeni.ai default) even when the agent's env-inherit path is
     # ever bypassed. The agent also reads $OPENGENI_API_URL via clap, so the env
     # alone would suffice — this is belt-and-suspenders. The workspace is encoded
-    # in the token, so no --workspace-id is needed on this path.
+    # in the token, so no --workspace-id is needed on this path. A supplied token
+    # is an explicit request for this enrollment; --force prevents a previous
+    # control-plane credential from being silently reused.
     if [ -n "${OPENGENI_API_URL:-}" ]; then
-      "$_bin" --api-url "$OPENGENI_API_URL" enroll --token "$OPENGENI_ENROLL_TOKEN" --non-interactive
+      "$_bin" --api-url "$OPENGENI_API_URL" enroll --token "$OPENGENI_ENROLL_TOKEN" --non-interactive --force
     else
-      "$_bin" enroll --token "$OPENGENI_ENROLL_TOKEN" --non-interactive
+      "$_bin" enroll --token "$OPENGENI_ENROLL_TOKEN" --non-interactive --force
     fi
     log "enrolled. Start the agent (foreground) with:  $_bin run"
     return 0
