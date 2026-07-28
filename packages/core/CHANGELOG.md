@@ -1,5 +1,20 @@
 # @opengeni/core
 
+## 0.11.6
+
+### Patch Changes
+
+- 85cb323: Restore provider-native web search for workspace-default Codex sessions while preserving explicit
+  tool narrowing, child policy ceilings, version-fenced policy adoption, and structured URL citations.
+- Updated dependencies [85cb323]
+  - @opengeni/config@0.7.4
+  - @opengeni/contracts@0.19.2
+  - @opengeni/db@0.12.4
+  - @opengeni/documents@0.2.34
+  - @opengeni/runtime@0.13.8
+  - @opengeni/storage@0.2.28
+  - @opengeni/events@0.3.25
+
 ## 0.11.5
 
 ### Patch Changes
