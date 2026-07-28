@@ -4703,6 +4703,8 @@ export const ConnectionMetadata = z.object({
   lastUsedAt: z.string().nullable(),
   lastError: z.string().nullable(),
   version: z.number().int().positive(),
+  verifiedInstallAt: z.string().datetime({ offset: true }).nullable().optional(),
+  verifiedInstallVersion: z.number().int().positive().nullable().optional(),
   metadata: z.record(z.string(), z.unknown()),
   createdBySubjectId: z.string().nullable(),
   updatedBySubjectId: z.string().nullable(),

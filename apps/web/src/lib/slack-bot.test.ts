@@ -25,6 +25,8 @@ function connection(overrides: Partial<ConnectionMetadata> = {}): ConnectionMeta
     lastUsedAt: null,
     lastError: null,
     version: 1,
+    verifiedInstallAt: now,
+    verifiedInstallVersion: 1,
     metadata: {
       credentialRole: OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
       credentialLabel: OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
@@ -67,6 +69,11 @@ describe("OpenGeni Slack bot UI connection filtering", () => {
     expect(activeOpenGeniSlackBotConnections(candidates).map((item) => item.id)).toEqual([
       connectionId,
     ]);
+    expect(
+      activeOpenGeniSlackBotConnections([
+        connection({ verifiedInstallAt: null, verifiedInstallVersion: null }),
+      ]),
+    ).toEqual([]);
     expect(openGeniSlackBotUiMetadata(valid)).toMatchObject({
       credentialRole: OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
       slackTeamId: "T_TEST",

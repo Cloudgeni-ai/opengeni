@@ -23,7 +23,12 @@ const connectionId = "33333333-3333-4333-8333-333333333333";
 const taskId = "44444444-4444-4444-8444-444444444444";
 const runId = "55555555-5555-4555-8555-555555555555";
 
-function botConnection(overrides: Partial<ConnectionMetadata> = {}): ConnectionMetadata {
+type BotConnection = ConnectionMetadata & {
+  verifiedInstallAt: string | null;
+  verifiedInstallVersion: number | null;
+};
+
+function botConnection(overrides: Partial<BotConnection> = {}): BotConnection {
   const now = new Date(0).toISOString();
   return {
     id: connectionId,
@@ -39,6 +44,8 @@ function botConnection(overrides: Partial<ConnectionMetadata> = {}): ConnectionM
     lastUsedAt: null,
     lastError: null,
     version: 1,
+    verifiedInstallAt: now,
+    verifiedInstallVersion: 1,
     metadata: {
       credentialRole: OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
       credentialLabel: OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
@@ -75,6 +82,8 @@ function scheduledSession(
 describe("OpenGeni Slack bot trust predicates", () => {
   test("requires the shared app role and exact bot scopes", () => {
     expect(isOpenGeniSlackBotConnection(botConnection())).toBe(true);
+    expect(isOpenGeniSlackBotConnection(botConnection({ verifiedInstallAt: null }))).toBe(false);
+    expect(isOpenGeniSlackBotConnection(botConnection({ verifiedInstallVersion: 2 }))).toBe(false);
     expect(isOpenGeniSlackBotConnection(botConnection({ subjectId: "subject-a" }))).toBe(false);
     expect(isOpenGeniSlackBotConnection(botConnection({ kind: "oauth2" }))).toBe(false);
     expect(

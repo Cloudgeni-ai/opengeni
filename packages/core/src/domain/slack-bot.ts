@@ -9,7 +9,11 @@ import {
   type OpenGeniSlackBotConnectionMetadata as OpenGeniSlackBotMetadata,
   type Session,
 } from "@opengeni/contracts";
-import { getConnectionMetadata, type Database } from "@opengeni/db";
+import {
+  getConnectionMetadata,
+  type ConnectionMetadataWithVerification,
+  type Database,
+} from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 import { requirePermission } from "../access";
 
@@ -20,9 +24,16 @@ export function openGeniSlackBotMetadata(
   return parsed.success ? parsed.data : null;
 }
 
-export function isOpenGeniSlackBotConnection(connection: ConnectionMetadata): boolean {
+export function isOpenGeniSlackBotConnection(
+  connection: ConnectionMetadata &
+    Partial<
+      Pick<ConnectionMetadataWithVerification, "verifiedInstallAt" | "verifiedInstallVersion">
+    >,
+): boolean {
   const granted = new Set(connection.grantedScopes);
   return (
+    connection.verifiedInstallAt != null &&
+    connection.verifiedInstallVersion === connection.version &&
     connection.subjectId === null &&
     connection.providerDomain === "slack.com" &&
     connection.kind === "app_install" &&

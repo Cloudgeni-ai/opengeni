@@ -19,6 +19,8 @@ export function openGeniSlackBotUiMetadata(
   const metadata = connection.metadata;
   const grantedScopes = new Set(connection.grantedScopes);
   if (
+    connection.verifiedInstallAt == null ||
+    connection.verifiedInstallVersion !== connection.version ||
     connection.subjectId !== null ||
     connection.providerDomain !== "slack.com" ||
     connection.kind !== "app_install" ||

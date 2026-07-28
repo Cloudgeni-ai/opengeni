@@ -110,6 +110,17 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "a Slack bot connection can only be reinstalled for its original Slack workspace",
       });
     }
+    if (
+      existingMetadata &&
+      (existingMetadata.botId !== verified.metadata.botId ||
+        existingMetadata.botUserId !== verified.metadata.botUserId)
+    ) {
+      throw new HTTPException(409, {
+        message:
+          "a different Slack bot requires a new connection and explicit scheduled-task rebinding",
+      });
+    }
+    const verifiedInstallAt = new Date(verified.metadata.verifiedAt);
     const connection = existing
       ? await updateConnection(db, {
           workspaceId,
@@ -123,6 +134,8 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           credentialEncrypted,
           grantedScopes: verified.grantedScopes,
           expiresAt: null,
+          verifiedInstallAt,
+          verifiedInstallVersion: existing.version + 1,
           metadata: verified.metadata,
           updatedBySubjectId: grant.subjectId,
         })
@@ -135,6 +148,8 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           credentialEncrypted,
           grantedScopes: verified.grantedScopes,
           expiresAt: null,
+          verifiedInstallAt,
+          verifiedInstallVersion: 1,
           metadata: verified.metadata,
           createdBySubjectId: grant.subjectId,
         });
