@@ -1,5 +1,18 @@
 # @opengeni/db
 
+## 0.13.0
+
+### Minor Changes
+
+- 06a5801: Add the backend workspace instruction-policy revision, activation, rollback, audit, API, and SDK control surface.
+
+### Patch Changes
+
+- Updated dependencies [06a5801]
+- Updated dependencies [9326255]
+  - @opengeni/contracts@0.20.0
+  - @opengeni/config@0.7.7
+
 ## 0.12.6
 
 ### Patch Changes
