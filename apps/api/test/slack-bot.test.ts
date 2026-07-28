@@ -348,7 +348,59 @@ async function connectBot(
   return { response, body };
 }
 
+async function connectBotToken(
+  workspace: { accountId: string; workspaceId: string },
+  slackFetch: typeof globalThis.fetch,
+  connectionId?: string,
+) {
+  const response = await app(slackFetch).request(
+    `/v1/workspaces/${workspace.workspaceId}/connections/slack-bot/token`,
+    {
+      method: "POST",
+      headers: {
+        authorization: await bearer(workspace, "subject-a", [
+          "connections:read",
+          "connections:write",
+        ]),
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        token: fixtureBotToken(),
+        ...(connectionId ? { connectionId } : {}),
+      }),
+    },
+  );
+  const body = (await response.json()) as { connection: { id: string } };
+  return { response, body };
+}
+
 describe("OpenGeni Slack bot connection", () => {
+  test("accepts a pasted Bot User OAuth Token through the dedicated validation route", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const result = await connectBotToken(workspace, fakeSlack().fetch);
+    expect(result.response.status).toBe(201);
+    expect(result.body.connection.id).not.toBe("");
+    expect(JSON.stringify(result.body)).not.toContain(fixtureBotToken());
+
+    const connection = await getConnectionMetadata(
+      client.db,
+      workspace.workspaceId,
+      result.body.connection.id,
+      null,
+    );
+    expect(connection).toMatchObject({
+      providerDomain: "slack.com",
+      kind: "app_install",
+      status: "active",
+      verifiedInstallVersion: 1,
+      metadata: {
+        credentialRole: OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
+        slackTeamId: "T_OPEN_GENI",
+      },
+    });
+  });
+
   test("validates and binds a shared bot without exposing its credential", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -436,14 +488,16 @@ describe("OpenGeni Slack bot connection", () => {
     const workspace = await freshWorkspace();
     const originalSlack = fakeSlack();
     const connected = await connectBot(workspace, originalSlack.fetch);
-    expect(connected.response.status).toBe(201);
+    expect(connected.response.status).toBe(302);
+    expect(connected.response.headers.get("location")).toContain("slack=connected");
 
     const reinstalled = await connectBot(
       workspace,
       fakeSlack().fetch,
       connected.body.connection.id,
     );
-    expect(reinstalled.response.status).toBe(200);
+    expect(reinstalled.response.status).toBe(302);
+    expect(reinstalled.response.headers.get("location")).toContain("slack=connected");
     const current = await getConnectionMetadata(
       client.db,
       workspace.workspaceId,
@@ -461,7 +515,8 @@ describe("OpenGeni Slack bot connection", () => {
       fakeSlack({ botId: "B_DIFFERENT", botUserId: "U_DIFFERENT" }).fetch,
       connected.body.connection.id,
     );
-    expect(substituted.response.status).toBe(409);
+    expect(substituted.response.status).toBe(302);
+    expect(substituted.response.headers.get("location")).toContain("slack=error");
     expect(JSON.stringify(substituted.body)).not.toContain(fixtureBotToken());
     const unchanged = await getConnectionMetadata(
       client.db,

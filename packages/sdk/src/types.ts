@@ -413,6 +413,13 @@ export type OpenGeniSlackBotInstallRequest = {
   connectionId?: string | undefined;
 };
 
+export type ConnectOpenGeniSlackBotRequest = {
+  /** Write-only Bot User OAuth Token copied from Slack OAuth & Permissions. */
+  token: string;
+  /** Existing OpenGeni Slack bot connection to reinstall in place. */
+  connectionId?: string | undefined;
+};
+
 export type OpenGeniSlackBotInstallStart = {
   authorizationUrl: string;
   expiresAt: string;

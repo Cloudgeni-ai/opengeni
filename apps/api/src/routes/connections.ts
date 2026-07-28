@@ -1,4 +1,5 @@
 import {
+  ConnectOpenGeniSlackBotRequest,
   ConnectionResponse,
   CreateConnectionRequest,
   IntegrationClientMetadata,
@@ -136,6 +137,42 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         expiresAt: new Date(Date.now() + oauthStateTtlMs).toISOString(),
       }),
     );
+  });
+
+  app.post("/v1/workspaces/:workspaceId/connections/slack-bot/token", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
+    const payload = ConnectOpenGeniSlackBotRequest.parse(await c.req.json());
+    const existing = payload.connectionId
+      ? await getConnectionMetadata(db, workspaceId, payload.connectionId, grant.subjectId)
+      : null;
+    if (payload.connectionId && !existing) {
+      throw new HTTPException(404, { message: "connection not found" });
+    }
+    if (existing && !isOpenGeniSlackBotConnection(existing)) {
+      throw new HTTPException(422, {
+        message: "connectionId is not an OpenGeni Slack bot connection",
+      });
+    }
+    const verified = await verifyOpenGeniSlackBotCredential(
+      payload.token,
+      deps.slackFetch ?? fetch,
+    );
+    const connection = await persistOpenGeniSlackBotConnection({
+      deps,
+      state: {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+        returnPath: `/workspaces/${workspaceId}/capabilities`,
+        ...(existing ? { connectionId: existing.id, connectionVersion: existing.version } : {}),
+        nonce: "manual-token",
+        iat: Math.floor(Date.now() / 1000),
+      },
+      token: payload.token,
+      verified,
+    });
+    return c.json(ConnectionResponse.parse({ connection }), existing ? 200 : 201);
   });
 
   app.get("/v1/integrations/slack/callback", async (c) => {

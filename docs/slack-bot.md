@@ -33,7 +33,7 @@ settings:
 
 Event Subscriptions are disabled by omission. Do not enable Socket Mode, Event Subscriptions, token rotation, or add `channels:join`, `chat:write.public`, or other scopes. OpenGeni rejects an installation whose reported bot scopes do not exactly match the manifest. Self-hosted deployments replace `https://app.opengeni.ai` with their stable HTTPS `OPENGENI_PUBLIC_BASE_URL`.
 
-Configure the deployment with the Slack app's client credentials:
+No Slack client configuration is required for the token-paste flow. To also offer one-click Slack OAuth installation, configure the deployment with the Slack app's client credentials:
 
 - `OPENGENI_SLACK_CLIENT_ID`
 - `OPENGENI_SLACK_CLIENT_SECRET`
@@ -45,9 +45,9 @@ Enable **Manage Distribution → Public Distribution** in Slack so any workspace
 ## Install and connect
 
 1. In the intended OpenGeni workspace, open **Capabilities → OpenGeni Slack bot**.
-2. Choose **Install in Slack**. OpenGeni creates a signed, workspace-bound, single-use OAuth state and redirects the browser to Slack without a hard-coded Slack team.
-3. Review and approve the requested scopes in Slack. Slack returns the browser to `/v1/integrations/slack/callback`; OpenGeni exchanges the temporary code server-side.
-4. OpenGeni verifies the bot token, exact scope set, Slack workspace, bot identity, and exact `OpenGeni` display name. It stores the token only in the encrypted connection credential column. API responses, browser URLs, session events, MCP results, and audit events contain only non-secret connection/team/role facts.
+2. For the simplest setup, open the Slack app's **OAuth & Permissions** page, copy its **Bot User OAuth Token** (`xoxb-…`), paste it into OpenGeni, and choose **Connect token**.
+3. If the OpenGeni deployment has one-click OAuth configured, **Install through Slack** is also available. OpenGeni creates a signed, workspace-bound, single-use OAuth state and redirects the browser to Slack without a hard-coded Slack team. Review and approve the scopes; Slack then returns the browser to `/v1/integrations/slack/callback` for a server-side code exchange.
+4. With either method, OpenGeni verifies the bot token, exact scope set, Slack workspace, bot identity, and exact `OpenGeni` display name. It stores the token only in the encrypted connection credential column. API responses, browser URLs, session events, MCP results, and audit events contain only non-secret connection/team/role facts.
 
 The connection is bound to the authenticated OpenGeni account and workspace by the normal RLS-scoped `connections` row. It is workspace-shared (`subjectId = null`) and cannot be fabricated or modified through generic connection metadata APIs. A server-owned verification timestamp and credential-version marker distinguish this dedicated validated install from caller-written legacy connection JSON. Markerless rows fail closed. During a rolling release, any older generic writer that replaces the credential or asserted bot identity automatically clears the marker at the database boundary.
 
@@ -72,7 +72,7 @@ In **Scheduled tasks → Advanced → OpenGeni Slack bot**, select an active bot
 If the Slack app is reinstalled or its credential changes:
 
 1. Return to **Capabilities → OpenGeni Slack bot**.
-2. Choose **Reinstall in Slack** and approve the installation in the **same Slack workspace**.
+2. Paste the replacement **Bot User OAuth Token** and choose **Reinstall with token**, or choose **Reinstall through Slack** when one-click OAuth is configured. The replacement must belong to the **same Slack workspace and bot principal**.
 
 OpenGeni updates the existing connection in place so scheduled-task references remain stable, but only when the Slack team ID, bot ID, and bot user ID all match the original verified installation. A different bot principal—even in the same Slack workspace and with the same display name—requires a new OpenGeni connection and explicit scheduled-task rebinding. If the manifest name or scopes changed, restore the exact manifest and reinstall in Slack before retrying.
 

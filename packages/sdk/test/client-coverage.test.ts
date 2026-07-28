@@ -1040,6 +1040,27 @@ describe("OpenGeniClient connections", () => {
     expect(JSON.parse(requests[0]!.body!)).toEqual({ connectionId: "conn-1" });
   });
 
+  test("connectOpenGeniSlackBot sends the write-only token to the dedicated route", async () => {
+    const connection = fakeConnection({
+      providerDomain: "slack.com",
+      kind: "app_install",
+    });
+    const { client, requests } = makeClient(() => jsonResponse({ connection }, 201));
+    const connected = await client.connectOpenGeniSlackBot(WORKSPACE_ID, {
+      token: "xoxb-fixture-token",
+      connectionId: "conn-1",
+    });
+    expect(connected).toEqual(connection);
+    expect(requests[0]!.method).toBe("POST");
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/connections/slack-bot/token`,
+    );
+    expect(JSON.parse(requests[0]!.body!)).toEqual({
+      token: "xoxb-fixture-token",
+      connectionId: "conn-1",
+    });
+  });
+
   test("catalogAssetUrl builds a public v1 URL and is null-safe", () => {
     const { client } = makeClient(() => jsonResponse({}));
     expect(

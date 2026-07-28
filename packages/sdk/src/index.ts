@@ -160,6 +160,7 @@ export type {
   CompactSessionContextResult,
   ClientSessionEventInput,
   CompleteFileUploadResponse,
+  ConnectOpenGeniSlackBotRequest,
   ConnectionKind,
   ConnectionMetadata,
   ConnectionResponse,

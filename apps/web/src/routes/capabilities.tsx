@@ -82,6 +82,7 @@ export function CapabilitiesRoute({
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<Error | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [slackBotToken, setSlackBotToken] = useState("");
   const [slackBotBusy, setSlackBotBusy] = useState(false);
 
   const [filter, setFilter] = useState<CapabilityFilter>(
@@ -218,6 +219,29 @@ export function CapabilitiesRoute({
       toast.error("Couldn't start the OpenGeni Slack installation", {
         description: error instanceof Error ? error.message : String(error),
       });
+      setSlackBotBusy(false);
+    }
+  }
+
+  async function connectSlackBotToken() {
+    const token = slackBotToken.trim();
+    if (!token) return;
+    setSlackBotBusy(true);
+    try {
+      await client.connectOpenGeniSlackBot(workspaceId, {
+        token,
+        ...(slackBotConnection ? { connectionId: slackBotConnection.id } : {}),
+      });
+      await refresh();
+      toast.success(
+        slackBotConnection ? "OpenGeni Slack bot reinstalled" : "OpenGeni Slack bot connected",
+      );
+    } catch (error) {
+      toast.error("Couldn't connect the OpenGeni Slack bot", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setSlackBotToken("");
       setSlackBotBusy(false);
     }
   }
@@ -778,9 +802,9 @@ export function CapabilitiesRoute({
                 </div>
               </div>
               <p className="mt-3 max-w-3xl text-xs text-fg-muted">
-                Install <strong>OpenGeni</strong> in your Slack workspace. Slack will show the
-                permissions before approval, then return you here automatically. The workspace bot
-                token is exchanged server-side, encrypted, and never shown in the browser.
+                Connect <strong>OpenGeni</strong> by pasting its Bot User OAuth Token from Slack, or
+                use the direct Slack installation flow. The token is sent once, validated,
+                encrypted, and never returned by the API.
               </p>
               <p className="mt-2 max-w-3xl text-2xs text-fg-subtle">
                 Required bot scopes: chat:write, im:write, channels:read, channels:history,
@@ -811,10 +835,49 @@ export function CapabilitiesRoute({
               </Button>
             ) : null}
           </div>
+          <form
+            className="mt-4 flex flex-col gap-2 sm:flex-row"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void connectSlackBotToken();
+            }}
+          >
+            <Input
+              type="password"
+              value={slackBotToken}
+              onChange={(event) => setSlackBotToken(event.target.value)}
+              placeholder="Paste Bot User OAuth Token (xoxb-…)"
+              aria-label="Slack Bot User OAuth Token"
+              autoComplete="off"
+              spellCheck={false}
+              className="sm:max-w-md"
+            />
+            <Button type="submit" disabled={slackBotBusy || !slackBotToken.trim()}>
+              {slackBotBusy ? <Loader2Icon className="animate-spin" /> : <PlugIcon />}
+              {slackBotConnection ? "Reinstall with token" : "Connect token"}
+            </Button>
+          </form>
+          <p className="mt-2 text-2xs text-fg-subtle">
+            Copy it from{" "}
+            <a
+              href="https://api.slack.com/apps/A0BL4BRE2E7/oauth"
+              target="_blank"
+              rel="noreferrer"
+              className="text-brand hover:underline"
+            >
+              Slack OAuth &amp; Permissions
+            </a>
+            .
+          </p>
+          <div className="mt-4 flex items-center gap-3">
+            <span className="h-px flex-1 bg-border" />
+            <span className="text-2xs uppercase tracking-wide text-fg-subtle">or</span>
+            <span className="h-px flex-1 bg-border" />
+          </div>
           <div className="mt-4">
             <Button type="button" disabled={slackBotBusy} onClick={() => void installSlackBot()}>
               {slackBotBusy ? <Loader2Icon className="animate-spin" /> : <PlugIcon />}
-              {slackBotConnection ? "Reinstall in Slack" : "Install in Slack"}
+              {slackBotConnection ? "Reinstall through Slack" : "Install through Slack"}
             </Button>
           </div>
         </section>
