@@ -951,6 +951,10 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
     label: "/v1/workspaces/:workspaceId/connections/oauth/start",
   },
   {
+    pattern: /^\/v1\/workspaces\/[^/]+\/connections\/slack-bot$/,
+    label: "/v1/workspaces/:workspaceId/connections/slack-bot",
+  },
+  {
     pattern: /^\/v1\/workspaces\/[^/]+\/connections\/[^/]+$/,
     label: "/v1/workspaces/:workspaceId/connections/:connectionId",
   },

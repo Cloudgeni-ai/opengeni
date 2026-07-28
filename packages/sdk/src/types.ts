@@ -406,6 +406,13 @@ export type CreateConnectionRequest = {
   metadata?: Record<string, unknown> | undefined;
 };
 
+export type ConnectOpenGeniSlackBotRequest = {
+  /** Write-only Slack bot token. It is never returned by the API. */
+  token: string;
+  /** Existing OpenGeni Slack bot connection to reinstall in place. */
+  connectionId?: string | undefined;
+};
+
 export type UpdateConnectionRequest = {
   providerDomain?: string | undefined;
   subjectId?: string | null | undefined;
@@ -1506,6 +1513,7 @@ export type ScheduledTaskAgentConfig = {
   resources: ResourceRef[];
   tools: ToolRef[];
   metadata: Record<string, unknown>;
+  slackBotConnectionId?: string | undefined;
   model?: string | undefined;
   reasoningEffort?: ReasoningEffort | undefined;
   sandboxBackend?: SandboxBackend | undefined;
@@ -2488,6 +2496,7 @@ export type ScheduledTaskAgentConfigInput = {
   resources?: ResourceRef[] | undefined;
   tools?: ToolRef[] | undefined;
   metadata?: Record<string, unknown> | undefined;
+  slackBotConnectionId?: string | undefined;
   model?: string | undefined;
   reasoningEffort?: ReasoningEffort | undefined;
   sandboxBackend?: SandboxBackend | undefined;

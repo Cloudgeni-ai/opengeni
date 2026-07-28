@@ -53,6 +53,7 @@ import {
   type SheetSelection,
 } from "@/lib/capabilities";
 import { listViewState } from "@/lib/load-state";
+import { openGeniSlackBotUiMetadata } from "@/lib/slack-bot";
 import { cn } from "@/lib/utils";
 import type { CapabilityCatalogItem, CapabilityPack, ConnectionMetadata } from "@/types";
 
@@ -81,6 +82,8 @@ export function CapabilitiesRoute({
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<Error | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [slackBotToken, setSlackBotToken] = useState("");
+  const [slackBotBusy, setSlackBotBusy] = useState(false);
 
   const [filter, setFilter] = useState<CapabilityFilter>(
     initialSection === "packs" ? "pack" : "all",
@@ -119,6 +122,11 @@ export function CapabilitiesRoute({
   const enabledItems = useMemo(() => filtered.filter((item) => item.enabled), [filtered]);
   const browseItems = useMemo(() => filtered.filter((item) => !item.enabled), [filtered]);
   const visibleBrowse = browseItems.slice(0, visibleCount);
+  const slackBotConnection =
+    connections?.find((connection) => openGeniSlackBotUiMetadata(connection) !== null) ?? null;
+  const slackBotMetadata = slackBotConnection
+    ? openGeniSlackBotUiMetadata(slackBotConnection)
+    : null;
 
   const showPacks = filter === "all" || filter === "pack";
   const showCatalog = filter !== "pack";
@@ -198,6 +206,45 @@ export function CapabilitiesRoute({
   function refreshAll() {
     void refresh();
     void packs.refresh();
+  }
+
+  async function connectSlackBot() {
+    if (!slackBotToken) return;
+    setSlackBotBusy(true);
+    try {
+      await client.connectOpenGeniSlackBot(workspaceId, {
+        token: slackBotToken,
+        ...(slackBotConnection ? { connectionId: slackBotConnection.id } : {}),
+      });
+      setSlackBotToken("");
+      await refresh();
+      toast.success(
+        slackBotConnection ? "OpenGeni Slack bot reinstalled" : "OpenGeni Slack bot connected",
+      );
+    } catch (error) {
+      setSlackBotToken("");
+      toast.error("Couldn't connect the OpenGeni Slack bot", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setSlackBotBusy(false);
+    }
+  }
+
+  async function disconnectSlackBot() {
+    if (!slackBotConnection) return;
+    setSlackBotBusy(true);
+    try {
+      await client.deleteConnection(workspaceId, slackBotConnection.id);
+      await refresh();
+      toast.success("OpenGeni Slack bot disconnected");
+    } catch (error) {
+      toast.error("Couldn't disconnect the OpenGeni Slack bot", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setSlackBotBusy(false);
+    }
   }
 
   // `snapshotFallback` defaults to `registry` (a registry result renders from its
@@ -721,6 +768,82 @@ export function CapabilitiesRoute({
             </>
           }
         />
+
+        <section
+          className="mt-6 rounded-xl border border-border bg-surface p-4"
+          aria-labelledby="slack-bot-heading"
+        >
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="grid size-8 place-items-center rounded-lg bg-brand/10 text-brand">
+                  <PlugIcon className="size-4" />
+                </span>
+                <div>
+                  <h2 id="slack-bot-heading" className="text-sm font-semibold text-fg">
+                    OpenGeni Slack bot
+                  </h2>
+                  <p className="text-2xs text-fg-subtle">Workspace-shared bot identity</p>
+                </div>
+              </div>
+              <p className="mt-3 max-w-3xl text-xs text-fg-muted">
+                Install the Slack app named and displayed exactly <strong>OpenGeni</strong>, then
+                enter its bot token here. The credential is sent once to the server, encrypted, and
+                never returned. This is separate from your subject-owned hosted Slack OAuth
+                connection.
+              </p>
+              <p className="mt-2 max-w-3xl text-2xs text-fg-subtle">
+                Required bot scopes: chat:write, im:write, channels:read, channels:history,
+                groups:read, groups:history, users:read. Socket Mode, Event Subscriptions, token
+                rotation, channels:join, and chat:write.public must remain off.
+              </p>
+              {slackBotConnection && slackBotMetadata ? (
+                <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
+                  <span className="rounded-full border border-border px-2 py-1 text-fg-muted">
+                    {slackBotMetadata.slackTeamName}
+                  </span>
+                  <span className="rounded-full border border-border px-2 py-1 text-fg-muted">
+                    {slackBotConnection.status === "active" ? "Connected" : "Needs reinstall"}
+                  </span>
+                  <span className="font-mono text-2xs text-fg-subtle">{slackBotConnection.id}</span>
+                </div>
+              ) : null}
+            </div>
+            {slackBotConnection?.status === "active" ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                disabled={slackBotBusy}
+                onClick={() => void disconnectSlackBot()}
+              >
+                Disconnect
+              </Button>
+            ) : null}
+          </div>
+          <form
+            className="mt-4 flex flex-col gap-2 sm:flex-row"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void connectSlackBot();
+            }}
+          >
+            <Input
+              type="password"
+              value={slackBotToken}
+              onChange={(event) => setSlackBotToken(event.target.value)}
+              placeholder="Slack bot token"
+              aria-label="Slack bot token"
+              autoComplete="off"
+              spellCheck={false}
+              className="sm:max-w-md"
+            />
+            <Button type="submit" disabled={slackBotBusy || !slackBotToken}>
+              {slackBotBusy ? <Loader2Icon className="animate-spin" /> : <PlugIcon />}
+              {slackBotConnection ? "Validate and reinstall" : "Validate and connect"}
+            </Button>
+          </form>
+        </section>
 
         {/* Primary search — front and center. */}
         <div className="relative mt-6">
