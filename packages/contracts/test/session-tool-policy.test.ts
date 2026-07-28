@@ -50,10 +50,10 @@ describe("session tool policy contracts", () => {
       selectedIds: ["cap-docs"],
       effectiveIds: ["cap-docs", "opengeni"],
       mandatoryIds: ["opengeni"],
-      lazyRouter: { state: "disabled", deferredIds: [] },
+      lazyRouter: { state: "required", deferredIds: ["cap-docs"] },
       configuredIds: ["cap-docs", "opengeni"],
       droppedIds: [],
-      counts: { selected: 1, effective: 2, mandatory: 1, deferred: 0, configured: 2, dropped: 0 },
+      counts: { selected: 1, effective: 2, mandatory: 1, deferred: 1, configured: 2, dropped: 0 },
       idsTruncated: false,
     });
     expect(JSON.stringify(policy)).not.toContain("https://");

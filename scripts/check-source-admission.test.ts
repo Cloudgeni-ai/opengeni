@@ -22,6 +22,7 @@ type FixtureOptions = {
   comparisonBaseSha?: string;
   comparisonHeadSha?: string;
   comparisonMergeBaseSha?: string;
+  comparisonBehindBy?: number;
   comparisonStatus?: string;
   eventBaseSha?: string;
   eventHeadSha?: string;
@@ -176,7 +177,7 @@ function fixture(options: FixtureOptions = {}) {
         base_commit: { sha: options.comparisonBaseSha ?? baseSha },
         merge_base_commit: { sha: options.comparisonMergeBaseSha ?? baseSha },
         commits: [{ sha: options.comparisonHeadSha ?? headSha }],
-        behind_by: 0,
+        behind_by: options.comparisonBehindBy ?? 0,
         ahead_by: 1,
       };
     } else if (
@@ -296,28 +297,20 @@ describe("source admission", () => {
     ).rejects.toThrow("pull-request head SHA changed");
   });
 
-  test("rejects a stale transplant whose merge base is not current main", async () => {
-    const api = fixture({ comparisonMergeBaseSha: "8".repeat(40) });
-    await expect(
-      verifySourceAdmission({
-        env: context(),
-        event: event(),
-        fetchImpl: api.fetchImpl,
-        logger: api.logger,
-      }),
-    ).rejects.toThrow("current main is not the candidate head merge base");
-  });
+  test("admits a genuinely behind and diverged candidate head", async () => {
+    const api = fixture({
+      comparisonBehindBy: 2,
+      comparisonMergeBaseSha: "8".repeat(40),
+      comparisonStatus: "diverged",
+    });
+    const result = await verifySourceAdmission({
+      env: context(),
+      event: event(),
+      fetchImpl: api.fetchImpl,
+      logger: api.logger,
+    });
 
-  test("rejects a candidate that is not strictly ahead of current main", async () => {
-    const api = fixture({ comparisonStatus: "diverged" });
-    await expect(
-      verifySourceAdmission({
-        env: context(),
-        event: event(),
-        fetchImpl: api.fetchImpl,
-        logger: api.logger,
-      }),
-    ).rejects.toThrow("candidate head is not strictly ahead");
+    expect(result.manifest.map(({ path }) => path)).toEqual(["README.md", CONTRACT.helperPath]);
   });
 
   test("rejects truncated recursive trees", async () => {

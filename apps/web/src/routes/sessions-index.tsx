@@ -50,7 +50,7 @@ import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/ui/notice";
 import { Select } from "@/components/ui/select";
 import { StatusDot, type StatusTone } from "@/components/ui/status-dot";
-import { useAppContext } from "@/context";
+import { useAppContext, useLatestCallback } from "@/context";
 import { groupSessionsForRail, relativeTimeLabel } from "@/lib/sessions-group";
 import { useCodexModels } from "@/lib/use-codex-models";
 import { isMachineComputeSelectable } from "@/lib/machine-selectability";
@@ -67,7 +67,11 @@ import {
   type ManagedSandboxTarget,
   type SessionDraft,
 } from "@/lib/session-create";
-import { buildTools } from "@/lib/session-tools";
+import {
+  newSessionDraftToolPolicy,
+  rehydrateRepositoryResources,
+  repositorySelectionFromResources,
+} from "@/lib/session-tools";
 import { useNewSessionDraft, type NewSessionDraftEditable } from "@/lib/use-new-session-draft";
 import { cn } from "@/lib/utils";
 import {
@@ -96,6 +100,7 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
   const [message, setMessage] = useState("");
   const [optionsOpen, setOptionsOpen] = useState(false);
   const [draft, setDraft] = useState<SessionDraft>(() => emptySessionDraft());
+  const [toolSelectionExplicit, setToolSelectionExplicit] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [createdSessionAuthority, setCreatedSessionAuthority] =
     useState<CreatedSessionRouteAuthority | null>(null);
@@ -105,11 +110,31 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
   }, [resetSessionView, workspaceId]);
 
   const computeReady = isSessionDraftComputeReady(draft);
+  const workspaceDefaultToolIds = useMemo(
+    () => ["opengeni", ...context.workspaceDefaultToolIds],
+    [context.workspaceDefaultToolIds],
+  );
+  const persistedToolPolicy = useMemo(
+    () =>
+      newSessionDraftToolPolicy({
+        selectedMcpServerIds: context.selectedCapabilityToolIds,
+        workspaceDefaultMcpServerIds: workspaceDefaultToolIds,
+        catalogReady: context.workspaceMcpCatalogReady,
+        explicit: toolSelectionExplicit,
+      }),
+    [
+      context.selectedCapabilityToolIds,
+      context.workspaceMcpCatalogReady,
+      toolSelectionExplicit,
+      workspaceDefaultToolIds,
+    ],
+  );
   const persistedValue = useMemo(
     () => ({
       text: message,
-      resources: attachments.readyResources,
-      tools: buildTools(undefined, [...context.selectedCapabilityToolIds]),
+      resources: [...context.currentResources, ...attachments.readyResources],
+      tools: persistedToolPolicy.tools,
+      toolsProvided: persistedToolPolicy.toolsProvided,
       model: context.model,
       reasoningEffort: context.reasoningEffort,
       options: newSessionDraftOptionsFromSessionDraft(draft),
@@ -118,24 +143,54 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
       attachments.readyResources,
       context.model,
       context.reasoningEffort,
-      context.selectedCapabilityToolIds,
+      context.currentResources,
       draft,
       message,
+      persistedToolPolicy,
     ],
   );
+  const hydrateResources = useLatestCallback((resources: NewSessionDraftEditable["resources"]) =>
+    rehydrateRepositoryResources(resources, context.githubRepos),
+  );
+  const setModel = context.setModel;
+  const setReasoningEffort = context.setReasoningEffort;
+  const setSelectedCapabilityToolIds = context.setSelectedCapabilityToolIds;
+  const setManualRepos = context.setManualRepos;
+  const setSelectedRepoIds = context.setSelectedRepoIds;
+  const setSelectedRepoRefs = context.setSelectedRepoRefs;
+  const githubRepos = context.githubRepos;
+  const workspaceDefaultToolIdsForHydration = context.workspaceDefaultToolIds;
   const applyRemoteDraft = useCallback(
     (remote: NewSessionDraftEditable) => {
       setMessage(remote.text);
       setDraft(sessionDraftFromNewSessionDraftOptions(remote.options));
-      context.setModel(remote.model);
-      context.setReasoningEffort(remote.reasoningEffort);
-      const selected = new Set(remote.tools.map((tool) => tool.id));
+      setModel(remote.model);
+      setReasoningEffort(remote.reasoningEffort);
+      setToolSelectionExplicit(remote.toolsProvided);
+      const selected = new Set(
+        remote.toolsProvided
+          ? remote.tools.map((tool) => tool.id)
+          : ["opengeni", ...workspaceDefaultToolIdsForHydration],
+      );
       // `files` is the hidden download helper automatically paired with the
       // visible Document Search selection, not a standalone picker choice.
       if (selected.has("docs")) selected.delete("files");
-      context.setSelectedCapabilityToolIds(selected);
+      setSelectedCapabilityToolIds(selected);
+      const repositorySelection = repositorySelectionFromResources(remote.resources, githubRepos);
+      setManualRepos(repositorySelection.manualRepos);
+      setSelectedRepoIds(repositorySelection.selectedRepoIds);
+      setSelectedRepoRefs(repositorySelection.selectedRepoRefs);
     },
-    [context],
+    [
+      setManualRepos,
+      setModel,
+      setReasoningEffort,
+      setSelectedCapabilityToolIds,
+      setSelectedRepoIds,
+      setSelectedRepoRefs,
+      githubRepos,
+      workspaceDefaultToolIdsForHydration,
+    ],
   );
   const newSessionDraft = useNewSessionDraft({
     workspaceId,
@@ -143,6 +198,8 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
     value: persistedValue,
     onApplyRemote: applyRemoteDraft,
     restoreReadyFiles: attachments.restoreReadyFiles,
+    hydrateResources,
+    resourceHydrationReady: context.githubCatalogReady && context.workspaceMcpCatalogReady,
   });
   const busy = context.busy || submitting;
 
@@ -203,7 +260,10 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
             // This render's resources are the immutable create snapshot. Files
             // can still be added through paste/drop/picker while the request is
             // in flight; those newer ids belong to the next draft.
-            const submittedResources = persistedValue.resources;
+            const submittedResources =
+              draft.compute.kind === "machine"
+                ? attachments.readyResources
+                : persistedValue.resources;
             const flushed = await newSessionDraft.flush();
             if (!flushed) return null;
             const submission = submissionFromSessionDraft(draft);
@@ -300,6 +360,10 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
               <SessionControlStrip
                 workspaceId={workspaceId}
                 disabled={busy || newSessionDraft.loading}
+                onToolSelectionChange={(ids) => {
+                  setToolSelectionExplicit(true);
+                  context.setSelectedCapabilityToolIds(ids);
+                }}
               />
             }
           />
@@ -420,9 +484,11 @@ function RecentSessionRow({ workspaceId, session }: { workspaceId: string; sessi
 function SessionControlStrip({
   workspaceId,
   disabled,
+  onToolSelectionChange,
 }: {
   workspaceId: string;
   disabled: boolean;
+  onToolSelectionChange: (ids: Set<string>) => void;
 }) {
   const context = useAppContext();
   const codexModels = useCodexModels(workspaceId);
@@ -441,7 +507,7 @@ function SessionControlStrip({
         servers={context.toolMcpServers}
         selectedIds={context.selectedCapabilityToolIds}
         disabled={disabled}
-        onChange={context.setSelectedCapabilityToolIds}
+        onChange={onToolSelectionChange}
       />
     </div>
   );
@@ -461,6 +527,7 @@ function WorkspaceRepositoryPicker({
   return (
     <RepositoryContextPicker
       configured={context.githubStatus?.configured === true}
+      status={context.githubStatus?.status ?? "disabled"}
       installUrl={context.githubStatus?.installUrl ?? null}
       linkUrl={context.githubStatus?.linkUrl ?? null}
       installations={context.githubStatus?.installations ?? []}

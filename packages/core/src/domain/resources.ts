@@ -301,6 +301,15 @@ export async function validateGitHubRepositorySelection(
   }
 }
 
+/**
+ * A 422 from repository selection validation is an authoritative stale or
+ * revoked identity. Other failures (for example a database/catalog outage)
+ * leave the result unknown and must not cause draft hydration to delete it.
+ */
+export function isAuthoritativeGitHubRepositorySelectionError(error: unknown): boolean {
+  return error instanceof HTTPException && error.status === 422;
+}
+
 export async function validateFileResources(
   db: Database,
   workspaceId: string,

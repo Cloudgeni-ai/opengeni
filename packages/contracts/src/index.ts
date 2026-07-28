@@ -2178,10 +2178,21 @@ export type ConnectionCredentialsPort = {
 
 export type GitHubInstallationSummary = {
   installationId: number;
+  accountId: number;
   accountLogin: string | null;
   accountType: string | null;
   suspended: boolean;
 };
+
+export type GitHubInstallationAuthorityKind = "personal_owner" | "organization_owner";
+
+export interface GitHubInstallationBindingProof {
+  actorId: number;
+  actorLogin: string;
+  authorityKind: GitHubInstallationAuthorityKind;
+  installation: GitHubInstallationSummary;
+  repositories: GitHubRepository[];
+}
 
 export type GitHubRepositoryPermissions = {
   admin: boolean;
@@ -2200,6 +2211,18 @@ export type GitHubUserInstallationAccess = GitHubInstallationSummary & {
 };
 
 export type GitHubAppApiPort = {
+  /**
+   * Exchange one fresh GitHub user-authorization code and prove current
+   * installation authority. Implementations must accept only exact personal
+   * ownership or active organization ownership; installation visibility,
+   * repository permission bits, and App Manager metadata are not authority.
+   * Organization ownership must be revalidated after repository discovery,
+   * immediately before returning the proof used by the durable bind.
+   */
+  authorizeInstallationBinding?: (input: {
+    code: string;
+    installationId: number;
+  }) => Promise<GitHubInstallationBindingProof>;
   authorizeUser?: (input: { code: string }) => Promise<GitHubUserInstallationAccess[]>;
   verifyInstallationAccessForUser?: (input: {
     code: string;
@@ -3704,6 +3727,8 @@ export const NewSessionDraft = z.object({
   text: z.string(),
   resources: z.array(ResourceRef),
   tools: z.array(ToolRef),
+  /** False means the workspace-default MCP policy is still inherited. */
+  toolsProvided: z.boolean().default(false),
   model: z.string().min(1),
   reasoningEffort: ReasoningEffort,
   options: NewSessionDraftOptions,
@@ -3715,6 +3740,7 @@ export const SaveNewSessionDraftRequest = NewSessionDraft.pick({
   text: true,
   resources: true,
   tools: true,
+  toolsProvided: true,
   model: true,
   reasoningEffort: true,
   options: true,
@@ -7614,10 +7640,18 @@ export type GitHubRepository = z.infer<typeof GitHubRepository>;
 export const GitHubRepositoryScope = z.enum(["all", "selected"]);
 export type GitHubRepositoryScope = z.infer<typeof GitHubRepositoryScope>;
 
+export const GitHubBindingStatus = z.enum(["disabled", "unbound", "bound"]);
+export type GitHubBindingStatus = z.infer<typeof GitHubBindingStatus>;
+
+export const GitHubInstallationLifecycle = z.enum(["active", "suspended", "deleted", "unverified"]);
+export type GitHubInstallationLifecycle = z.infer<typeof GitHubInstallationLifecycle>;
+
 export const GitHubInstallationBinding = z.object({
   installationId: z.number().int().positive(),
+  githubAccountId: z.number().int().positive().nullable(),
   accountLogin: z.string().nullable(),
   accountType: z.string().nullable(),
+  lifecycle: GitHubInstallationLifecycle,
   repositoryScope: GitHubRepositoryScope,
   repositoryCount: z.number().int().nonnegative(),
   createdAt: z.string(),
@@ -7627,6 +7661,7 @@ export type GitHubInstallationBinding = z.infer<typeof GitHubInstallationBinding
 
 export const GitHubAppInfo = z.object({
   configured: z.boolean(),
+  status: GitHubBindingStatus,
   appId: z.string().nullable(),
   clientId: z.string().nullable(),
   appSlug: z.string().nullable(),

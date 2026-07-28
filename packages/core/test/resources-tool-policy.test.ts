@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { HTTPException } from "hono/http-exception";
-import { assertToolRefsSubset, validateToolRefsForSessionPolicy } from "../src/domain/resources";
+import {
+  assertToolRefsSubset,
+  isAuthoritativeGitHubRepositorySelectionError,
+  validateToolRefsForSessionPolicy,
+} from "../src/domain/resources";
 import type { ToolRef } from "@opengeni/contracts";
 
 const settings = {
@@ -17,6 +21,14 @@ const mcp = (id: string, optional?: boolean): ToolRef => ({
 });
 
 describe("session resource tool policy fences", () => {
+  test("distinguishes authoritative repository revocation from unavailable validation", () => {
+    expect(isAuthoritativeGitHubRepositorySelectionError(new HTTPException(422))).toBe(true);
+    expect(isAuthoritativeGitHubRepositorySelectionError(new HTTPException(503))).toBe(false);
+    expect(isAuthoritativeGitHubRepositorySelectionError(new Error("catalog unavailable"))).toBe(
+      false,
+    );
+  });
+
   test("fixed policies reject widening and allow a strict narrowing", () => {
     expect(() => assertToolRefsSubset([mcp("static-configured")], [mcp("cap-docs")])).toThrow(
       HTTPException,

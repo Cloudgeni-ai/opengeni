@@ -288,6 +288,7 @@ describe("SDK / contracts parity", () => {
       text: "recover this",
       resources: [],
       tools: [],
+      toolsProvided: false,
       model: "gpt-5.6-sol",
       reasoningEffort: "high",
       options: {

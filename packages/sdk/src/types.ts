@@ -2367,6 +2367,8 @@ export type NewSessionDraft = {
   text: string;
   resources: ResourceRef[];
   tools: ToolRef[];
+  /** False inherits the workspace-default MCP policy; true preserves an explicit array. */
+  toolsProvided: boolean;
   model: string;
   reasoningEffort: ReasoningEffort;
   options: NewSessionDraftOptions;
@@ -3411,10 +3413,16 @@ export type GitHubRepository = {
 
 export type GitHubRepositoryScope = "all" | "selected";
 
+export type GitHubBindingStatus = "disabled" | "unbound" | "bound";
+
+export type GitHubInstallationLifecycle = "active" | "suspended" | "deleted" | "unverified";
+
 export type GitHubInstallationBinding = {
   installationId: number;
+  githubAccountId: number | null;
   accountLogin: string | null;
   accountType: string | null;
+  lifecycle: GitHubInstallationLifecycle;
   repositoryScope: GitHubRepositoryScope;
   repositoryCount: number;
   createdAt: string;
@@ -3423,12 +3431,14 @@ export type GitHubInstallationBinding = {
 
 export type GitHubAppInfo = {
   configured: boolean;
+  /** Truthful workspace binding state; server App credentials alone are not a binding. */
+  status: GitHubBindingStatus;
   appId: string | null;
   clientId: string | null;
   appSlug: string | null;
-  /** Reserved compatibility field; null while new installation binding is disabled. */
+  /** Fresh GitHub-controlled installation/configuration consent entry point. */
   installUrl: string | null;
-  /** Reserved compatibility field; null while new installation binding is disabled. */
+  /** Compatibility alias for installUrl; no repository-admin chooser is exposed. */
   linkUrl: string | null;
   /** Installation bindings owned independently by this workspace. */
   installations: GitHubInstallationBinding[];

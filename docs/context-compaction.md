@@ -57,6 +57,10 @@ consumption lags the SDK's background model loop, the guard uses the complete
 request estimate instead of binding delayed usage to a newer request. A durable prior-turn input count is only a
 conservative floor; it can never hide a larger active-history estimate. Attempt
 fencing prevents a stale worker from overwriting durable token state.
+MCP schemas marked `defer_loading:true` are excluded from that estimate because
+the provider excludes them from context until a bounded `tool_search_output`
+discloses a match. The disclosed definition is then ordinary structured history
+and is counted there.
 
 ## Model-facing tool output
 
