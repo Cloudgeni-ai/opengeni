@@ -9,7 +9,9 @@
 
 import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { testSettings } from "@opengeni/testing";
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   SandboxChannelAService,
   ChannelANotFoundError,
@@ -52,6 +54,7 @@ type LiveLocalSession = ChannelASession & {
 };
 
 const liveSessions: LiveLocalSession[] = [];
+const temporaryRoots: string[] = [];
 
 async function makeBox(): Promise<{ session: LiveLocalSession; root: string }> {
   const settings = testSettings({ sandboxBackend: "local", webSearchEnabled: false });
@@ -69,7 +72,70 @@ afterEach(async () => {
   for (const s of liveSessions.splice(0)) {
     if (!s.closed) await s.close().catch(() => undefined);
   }
+  for (const root of temporaryRoots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
+
+function runFixtureCommand(root: string, command: string): void {
+  const result = Bun.spawnSync(["/bin/bash", "-c", command], {
+    cwd: root,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  if (result.exitCode !== 0) {
+    throw new Error(
+      `fixture command failed (${result.exitCode}): ${Buffer.from(result.stderr).toString("utf8")}`,
+    );
+  }
+}
+
+function makeModalLikeExecOnlySession(root: string): {
+  session: ChannelASession;
+  truncatedResponses: () => number;
+} {
+  const retainedOutputChars = 1024 * 1024;
+  let truncated = 0;
+  return {
+    session: {
+      execCommand: async (args) => {
+        const child = Bun.spawn(["/bin/bash", "-c", args.cmd], {
+          cwd: args.workdir ?? root,
+          env: {
+            ...process.env,
+            // The production Modal image is Ubuntu/GNU. Keep this host-side
+            // adapter faithful when the test runs on macOS/BSD.
+            PATH: `/opt/homebrew/opt/coreutils/libexec/gnubin:${process.env.PATH ?? ""}`,
+          },
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const [stdout, stderr, exitCode] = await Promise.all([
+          new Response(child.stdout).text(),
+          new Response(child.stderr).text(),
+          child.exited,
+        ]);
+        let output = [stdout, stderr]
+          .filter((value) => value.length > 0)
+          .map((value) => value.trimEnd())
+          .join("\n");
+        if (output.length > retainedOutputChars) {
+          truncated += 1;
+          const dropped = output.length - retainedOutputChars;
+          output = `[...${dropped} characters truncated from process output...]\n${output.slice(
+            -retainedOutputChars,
+          )}`;
+        }
+        return [
+          "Chunk ID: modal-like",
+          "Wall time: 0.0000 seconds",
+          `Process exited with code ${exitCode}`,
+          "Output:",
+          output,
+        ].join("\n");
+      },
+    },
+    truncatedResponses: () => truncated,
+  };
+}
 
 describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
   test("write then read-back round-trips text", async () => {
@@ -1061,6 +1127,120 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
       timeoutMs: 20_000,
       emitStream: false,
     });
+  });
+
+  test("execCommand-only Git capture stays below Modal's retained-output cap", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-channel-a-modal-cap-"));
+    temporaryRoots.push(root);
+    const marker = "OPENGENI_MODAL_DIFF_TRANSPORT";
+    const outside = join(tmpdir(), `opengeni-channel-a-outside-${crypto.randomUUID()}.txt`);
+    temporaryRoots.push(outside);
+    runFixtureCommand(
+      root,
+      [
+        `printf 'outside secret' > '${outside}'`,
+        "git init -q",
+        "git config user.email test@opengeni.local",
+        "git config user.name OpenGeni",
+        "git config commit.gpgsign false",
+        `printf 'export const marker = "BASE";\\n' > server.ts`,
+        `printf 'base\\n' > staged-and-unstaged.txt`,
+        `printf 'delete me\\n' > deleted.txt`,
+        `printf 'rename me\\n' > old-name.txt`,
+        "git add -A",
+        "git commit -q -m baseline",
+        `printf 'export const marker = "${marker}";\\n' > server.ts`,
+        `printf 'staged ${marker}\\n' > staged-and-unstaged.txt`,
+        "git add staged-and-unstaged.txt",
+        `printf 'final ${marker}\\n' > staged-and-unstaged.txt`,
+        "git rm -q deleted.txt",
+        "git mv old-name.txt renamed.txt",
+        `printf 'untracked ${marker}\\n' > notes.txt`,
+        "head -c 2621440 /dev/zero > too-large.bin",
+        `ln -s server.ts internal-link`,
+        `ln -s '${outside}' external-link`,
+      ].join(" && "),
+    );
+    const modalLike = makeModalLikeExecOnlySession(root);
+    const svc = new SandboxChannelAService({
+      session: modalLike.session,
+      workspaceRoot: root,
+    });
+
+    const diff = await svc.gitDiff({
+      path: "",
+      staged: false,
+      includeUntracked: true,
+      fromRef: "HEAD",
+      pathspec: [],
+      contextLines: 3,
+      maxBytesPerFile: 2 * 1024 * 1024,
+    });
+
+    expect(modalLike.truncatedResponses()).toBe(0);
+    expect(
+      diff.files
+        .find((file) => file.path === "server.ts")
+        ?.hunks.some((hunk) => hunk.lines.some((line) => line.text.includes(marker))),
+    ).toBe(true);
+    expect(diff.files.find((file) => file.path === "staged-and-unstaged.txt")?.status).toBe(
+      "modified",
+    );
+    expect(diff.files.find((file) => file.path === "deleted.txt")?.status).toBe("deleted");
+    expect(diff.files.find((file) => file.path === "renamed.txt")?.oldPath).toBe("old-name.txt");
+    expect(
+      diff.files
+        .find((file) => file.path === "notes.txt")
+        ?.hunks[0]?.lines.some((line) => line.text.includes(marker)),
+    ).toBe(true);
+    expect(diff.files.find((file) => file.path === "too-large.bin")).toMatchObject({
+      status: "untracked",
+      isBinary: true,
+      additions: 0,
+      truncated: true,
+      hunks: [],
+    });
+    expect(
+      diff.files
+        .find((file) => file.path === "internal-link")
+        ?.hunks[0]?.lines.map((line) => line.text),
+    ).toEqual(["server.ts"]);
+    const external = diff.files.find((file) => file.path === "external-link");
+    expect(external?.hunks[0]?.lines.map((line) => line.text)).toEqual([outside]);
+    expect(JSON.stringify(external)).not.toContain("outside secret");
+  });
+
+  test("bounded Git capture preserves staged and untracked files before the first commit", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-channel-a-unborn-"));
+    temporaryRoots.push(root);
+    runFixtureCommand(
+      root,
+      [
+        "git init -q",
+        `printf 'staged before HEAD\\n' > staged.txt`,
+        "git add staged.txt",
+        `printf 'untracked before HEAD\\n' > untracked.txt`,
+      ].join(" && "),
+    );
+    const modalLike = makeModalLikeExecOnlySession(root);
+    const svc = new SandboxChannelAService({
+      session: modalLike.session,
+      workspaceRoot: root,
+    });
+
+    const diff = await svc.gitDiff({
+      path: "",
+      staged: false,
+      includeUntracked: true,
+      fromRef: "HEAD",
+      pathspec: [],
+      contextLines: 3,
+      maxBytesPerFile: 512 * 1024,
+    });
+
+    expect(modalLike.truncatedResponses()).toBe(0);
+    expect(diff.files.find((file) => file.path === "staged.txt")?.status).toBe("added");
+    expect(diff.files.find((file) => file.path === "untracked.txt")?.status).toBe("untracked");
   });
 
   test("git status outside a repo returns isRepo:false (not an error)", async () => {

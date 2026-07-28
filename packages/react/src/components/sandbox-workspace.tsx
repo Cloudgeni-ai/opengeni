@@ -90,6 +90,8 @@ function captureDegradedMessage(reason: string): string {
       return "Workspace capture is incomplete because repository discovery timed out. Live files remain authoritative.";
     case "repository_discovery_result_limit_exceeded":
       return "Workspace capture is incomplete because the repository limit was exceeded. Live files remain authoritative.";
+    case "repository_read_unavailable":
+      return "Workspace capture is incomplete because repository changes could not be read. Live files remain authoritative.";
     default:
       return "Workspace capture is incomplete because repository discovery failed. Live files remain authoritative.";
   }
