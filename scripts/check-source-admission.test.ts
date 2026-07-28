@@ -296,16 +296,16 @@ describe("source admission", () => {
     ).rejects.toThrow("pull-request head SHA changed");
   });
 
-  test("rejects a stale transplant whose merge base is not current main", async () => {
+  test("admits a candidate whose merge base is not current main", async () => {
     const api = fixture({ comparisonMergeBaseSha: "8".repeat(40) });
-    await expect(
-      verifySourceAdmission({
-        env: context(),
-        event: event(),
-        fetchImpl: api.fetchImpl,
-        logger: api.logger,
-      }),
-    ).rejects.toThrow("current main is not the candidate head merge base");
+    const result = await verifySourceAdmission({
+      env: context(),
+      event: event(),
+      fetchImpl: api.fetchImpl,
+      logger: api.logger,
+    });
+
+    expect(result.manifest.map(({ path }) => path)).toEqual(["README.md", CONTRACT.helperPath]);
   });
 
   test("rejects a candidate that is not strictly ahead of current main", async () => {

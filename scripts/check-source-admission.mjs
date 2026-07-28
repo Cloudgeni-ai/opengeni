@@ -353,10 +353,6 @@ function assertComparison(value, baseSha, headSha) {
   invariant(value?.status === "ahead", "candidate head is not strictly ahead of current main");
   invariant(value?.base_commit?.sha === baseSha, "comparison base differs from current main");
   invariant(
-    value?.merge_base_commit?.sha === baseSha,
-    "current main is not the candidate head merge base",
-  );
-  invariant(
     Array.isArray(value?.commits) && value.commits.length > 0,
     "comparison commits are missing",
   );

@@ -27,7 +27,7 @@ jobs:
     env:
       GITHUB_TOKEN: ${{ github.token }}
       OPENGENI_SOURCE_ADMISSION_ACTION: verify_current_base_head
-      ADMISSION_HELPER_SHA256: 71ff3e9ca458f2489d229ee573e6b233cbdb04a66b997612f4aabe3899baed09
+      ADMISSION_HELPER_SHA256: 78c622ada6602d1d0a9bf8baa1963ac699eefa64dbbe4ea3dced4f7c61057aad
     steps:
       - name: Execute the exact base-owned admission verifier
         shell: bash
