@@ -26,6 +26,7 @@ import {
   PtyResizeRequest,
   PtyWriteRequest,
   RenewSessionRealtimeRequest,
+  SyncSessionRealtimeLedgerRequest,
   SessionControlRequest,
   SESSION_EVENT_RAW_DELTA_TYPES,
   SessionEventPayloadMode,
@@ -64,7 +65,6 @@ import { streamTokenDegraded } from "@opengeni/config";
 import {
   acceptSessionApprovalDecision,
   acceptSessionHumanInputResponse,
-  assertSessionRealtimeOwnerInTransaction,
   clearSessionGoal,
   clearSessionContext,
   getOpenPtySession,
@@ -103,7 +103,10 @@ import {
   updatePtySessionActivity,
   QueueCommandConflictError,
   beginSessionRealtimeInTransaction,
+  claimSessionRealtimeConnectionInTransaction,
+  completeSessionRealtimeConnectionInTransaction,
   endSessionRealtimeInTransaction,
+  failSessionRealtimeConnectionInTransaction,
   NewSessionDraftConflictError,
   SessionCommandIdempotencyError,
   SessionControlConflictError,
@@ -113,6 +116,7 @@ import {
   HumanInputResponseValidationError,
   latestWorkspaceCapture,
   renewSessionRealtimeInTransaction,
+  syncSessionRealtimeLedgerInTransaction,
   withWorkspaceRls,
   workspaceCaptureAtRevision,
   type AppendEventInput,
@@ -661,21 +665,49 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
 
     c.header("cache-control", "private, no-store");
     try {
-      const { realtimeId, browserInstanceId, ownerKey, expectedVersion, ...providerRequest } =
-        parsed.data;
-      await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+      const {
+        realtimeId,
+        operationId,
+        browserInstanceId,
+        ownerKey,
+        expectedVersion,
+        expectedConnectionEpoch,
+        rotate,
+        ...providerRequest
+      } = parsed.data;
+      const claim = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
         scopedDb.transaction(async (tx) =>
-          assertSessionRealtimeOwnerInTransaction(tx as unknown as Database, {
+          claimSessionRealtimeConnectionInTransaction(tx as unknown as Database, {
             workspaceId,
             sessionId,
             realtimeId,
+            operationId,
             ownerSubjectId: grant.subjectId,
             browserInstanceId,
             ownerKey,
             expectedVersion,
+            expectedConnectionEpoch,
+            rotate,
           }),
         ),
       );
+      if (claim.replay) {
+        if (claim.connection.state !== "active" || !claim.connection.sdpAnswer) {
+          throw new SessionRealtimeConflictError(
+            "REALTIME_CONNECTION_STATE_CHANGED",
+            "Realtime connection operation cannot be replayed; rotate with a new operation",
+          );
+        }
+        return c.json({
+          sdp: claim.connection.sdpAnswer,
+          version: "v3" as const,
+          model: "gpt-live-1-boulder-alpha" as const,
+          connectionId: claim.connection.id,
+          connectionEpoch: claim.connection.connectionEpoch,
+          modeVersion: claim.modeVersion,
+          replay: true,
+        });
+      }
       const broker = buildSessionCodexRealtimeBroker(
         db,
         settings,
@@ -683,7 +715,46 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         sessionId,
         deps.codexFetch,
       );
-      return c.json(await broker({ request: providerRequest, signal: c.req.raw.signal }));
+      try {
+        const answer = await broker({ request: providerRequest, signal: c.req.raw.signal });
+        const completed = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+          scopedDb.transaction(async (tx) =>
+            completeSessionRealtimeConnectionInTransaction(tx as unknown as Database, {
+              workspaceId,
+              sessionId,
+              realtimeId,
+              connectionId: claim.connection.id,
+              operationId,
+              connectionEpoch: claim.connection.connectionEpoch,
+              sdpAnswer: answer.sdp,
+            }),
+          ),
+        );
+        return c.json({
+          ...answer,
+          connectionId: completed.connection.id,
+          connectionEpoch: completed.connection.connectionEpoch,
+          modeVersion: claim.modeVersion,
+          replay: false,
+        });
+      } catch (error) {
+        if (error instanceof CodexRealtimeBrokerError) {
+          await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+            scopedDb.transaction(async (tx) =>
+              failSessionRealtimeConnectionInTransaction(tx as unknown as Database, {
+                workspaceId,
+                sessionId,
+                realtimeId,
+                connectionId: claim.connection.id,
+                operationId,
+                connectionEpoch: claim.connection.connectionEpoch,
+                failureCode: error.reason,
+              }),
+            ),
+          ).catch(() => undefined);
+        }
+        throw error;
+      }
     } catch (error) {
       if (error instanceof SessionRealtimeConflictError) {
         throw sessionRealtimeHttpError(error);
@@ -707,6 +778,45 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       );
     }
   });
+
+  app.post(
+    "/v1/workspaces/:workspaceId/sessions/:sessionId/realtime/:realtimeId/sync",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const sessionId = c.req.param("sessionId");
+      const realtimeId = c.req.param("realtimeId");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+      if (
+        !z.string().uuid().safeParse(sessionId).success ||
+        !z.string().uuid().safeParse(realtimeId).success
+      ) {
+        throw new HTTPException(400, { message: "invalid realtime ledger id" });
+      }
+      const parsed = SyncSessionRealtimeLedgerRequest.safeParse(
+        await c.req.json().catch(() => null),
+      );
+      if (!parsed.success) {
+        throw new HTTPException(422, { message: "invalid realtime ledger sync request" });
+      }
+      try {
+        const result = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+          scopedDb.transaction(async (tx) =>
+            syncSessionRealtimeLedgerInTransaction(tx as unknown as Database, {
+              workspaceId,
+              sessionId,
+              realtimeId,
+              ownerSubjectId: grant.subjectId,
+              ...parsed.data,
+            }),
+          ),
+        );
+        c.header("cache-control", "private, no-store");
+        return c.json(result);
+      } catch (error) {
+        throw sessionRealtimeHttpError(error);
+      }
+    },
+  );
 
   // Personal pin only: this is organization state for the authenticated member,
   // not a mutation of the shared session. It deliberately requires read access
@@ -2708,6 +2818,9 @@ export function sessionAuthorizationOperationForHttp(
     return "session.realtime.start";
   }
   if (/^\/realtime\/[^/]+\/heartbeat$/.test(suffix) && verb === "PATCH") {
+    return "session.realtime.control";
+  }
+  if (/^\/realtime\/[^/]+\/sync$/.test(suffix) && verb === "POST") {
     return "session.realtime.control";
   }
   if (/^\/realtime\/[^/]+$/.test(suffix) && verb === "DELETE") {

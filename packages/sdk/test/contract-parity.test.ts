@@ -50,6 +50,8 @@ import {
   SessionHumanInputRequest as ContractSessionHumanInputRequest,
   SessionRealtimeMode as ContractSessionRealtimeMode,
   SessionRealtimeMutationResponse as ContractSessionRealtimeMutationResponse,
+  SyncSessionRealtimeLedgerRequest as ContractSyncSessionRealtimeLedgerRequest,
+  SyncSessionRealtimeLedgerResponse as ContractSyncSessionRealtimeLedgerResponse,
   RenewSessionRealtimeRequest as ContractRenewSessionRealtimeRequest,
   SessionStatus as ContractSessionStatus,
   SessionTurn as ContractSessionTurn,
@@ -136,6 +138,8 @@ import type {
   SessionMcpServerMetadata,
   SessionRealtimeMode,
   SessionRealtimeMutationResponse,
+  SyncSessionRealtimeLedgerRequest,
+  SyncSessionRealtimeLedgerResponse,
   RenewSessionRealtimeRequest,
   SessionStatus,
   SessionTurn,
@@ -199,6 +203,12 @@ describe("SDK / contracts parity", () => {
     const acceptMutation = (
       value: z.infer<typeof ContractSessionRealtimeMutationResponse>,
     ): SessionRealtimeMutationResponse => value;
+    const acceptSyncRequest = (
+      value: SyncSessionRealtimeLedgerRequest,
+    ): z.input<typeof ContractSyncSessionRealtimeLedgerRequest> => value;
+    const acceptSyncResponse = (
+      value: z.infer<typeof ContractSyncSessionRealtimeLedgerResponse>,
+    ): SyncSessionRealtimeLedgerResponse => value;
     expect(
       [
         acceptResponse,
@@ -208,6 +218,8 @@ describe("SDK / contracts parity", () => {
         acceptEnd,
         acceptMode,
         acceptMutation,
+        acceptSyncRequest,
+        acceptSyncResponse,
       ].every((fn) => typeof fn === "function"),
     ).toBe(true);
   });
