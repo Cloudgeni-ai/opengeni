@@ -17,6 +17,8 @@
       },
       "devDependencies": {
         "@axe-core/playwright": "4.10.2",
+        "@babel/parser": "7.29.7",
+        "@babel/types": "7.29.7",
         "@changesets/cli": "^2.31.0",
         "@opengeni/agent-proto": "workspace:*",
         "@opengeni/api-router": "workspace:*",
@@ -38,18 +40,17 @@
         "@temporalio/client": "^1.20.2",
         "@temporalio/worker": "^1.20.2",
         "@types/bun": "^1.3.14",
-        "@typescript/native-preview": "7.0.0-dev.20260707.2",
         "drizzle-orm": "^0.45.2",
         "oxfmt": "0.58.0",
         "oxlint": "1.73.0",
         "playwright": "^1.61.1",
         "postgres": "^3.4.9",
-        "typescript": "^6.0.3",
+        "typescript": "7.0.2",
       },
     },
     "apps/api": {
       "name": "@opengeni/api-router",
-      "version": "0.6.0",
+      "version": "0.11.7",
       "dependencies": {
         "@aws-sdk/client-s3": "^3.1044.0",
         "@aws-sdk/s3-request-presigner": "^3.1044.0",
@@ -81,7 +82,7 @@
         "@types/pg": "^8.20.0",
         "postgres": "^3.4.7",
         "tsup": "^8.5.0",
-        "typescript": "^6.0.3",
+        "typescript": "7.0.2",
       },
     },
     "apps/web": {
@@ -121,13 +122,13 @@
         "@types/react": "^19.2.14",
         "@types/react-dom": "^19.2.3",
         "@vitejs/plugin-react": "^6.0.1",
-        "typescript": "^6.0.3",
+        "typescript": "7.0.2",
         "vite": "^8.0.9",
       },
     },
     "apps/worker": {
       "name": "@opengeni/worker-bundle",
-      "version": "0.7.8",
+      "version": "0.11.7",
       "dependencies": {
         "@opengeni/agent-proto": "workspace:*",
         "@opengeni/codex": "workspace:*",
@@ -151,12 +152,12 @@
         "@opengeni/testing": "workspace:*",
         "postgres": "^3.4.9",
         "tsup": "^8.5.0",
-        "typescript": "^6.0.3",
+        "typescript": "7.0.2",
       },
     },
     "examples/northstar-support": {
       "name": "@opengeni/example-northstar-support",
-      "version": "0.0.4",
+      "version": "0.0.19",
       "dependencies": {
         "@modelcontextprotocol/sdk": "^1.29.0",
         "@opengeni/react": "workspace:*",
@@ -174,7 +175,7 @@
       "devDependencies": {
         "@types/react": "^19.2.14",
         "@types/react-dom": "^19.2.3",
-        "typescript": "^6.0.3",
+        "typescript": "7.0.2",
       },
     },
     "packages/agent-proto": {
@@ -186,23 +187,23 @@
       "devDependencies": {
         "ts-proto": "^2.7.7",
         "tsup": "^8.5.0",
-        "typescript": "^6.0.3",
+        "typescript": "7.0.2",
       },
     },
     "packages/codex": {
       "name": "@opengeni/codex",
-      "version": "0.2.5",
+      "version": "0.2.7",
       "dependencies": {
         "zod": "^4.2.1",
       },
       "devDependencies": {
         "tsup": "^8.5.0",
-        "typescript": "^6.0.3",
+        "typescript": "7.0.2",
       },
     },
     "packages/config": {
       "name": "@opengeni/config",
-      "version": "0.5.3",
+      "version": "0.7.5",
       "dependencies": {
         "@opengeni/codex": "workspace:*",
         "@opengeni/contracts": "workspace:*",
@@ -210,24 +211,24 @@
       },
       "devDependencies": {
         "tsup": "^8.5.0",
-        "typescript": "^6.0.3",
+        "typescript": "7.0.2",
       },
     },
     "packages/contracts": {
       "name": "@opengeni/contracts",
-      "version": "0.12.0",
+      "version": "0.19.3",
       "dependencies": {
         "@noble/hashes": "^1.8.0",
         "zod": "^4.2.1",
       },
       "devDependencies": {
         "tsup": "^8.5.0",
-        "typescript": "^6.0.3",
+        "typescript": "7.0.2",
       },
     },
     "packages/core": {
       "name": "@opengeni/core",
-      "version": "0.5.0",
+      "version": "0.11.7",
       "dependencies": {
         "@modelcontextprotocol/sdk": "^1.29.0",
         "@opengeni/codex": "workspace:*",
@@ -244,12 +245,12 @@
       "devDependencies": {
         "better-auth": "^1.6.14",
         "tsup": "^8.5.0",
-        "typescript": "^6.0.3",
+        "typescript": "7.0.2",
       },
     },
     "packages/db": {
       "name": "@opengeni/db",
-      "version": "0.8.0",
+      "version": "0.12.5",
       "dependencies": {
         "@opengeni/codex": "workspace:*",
         "@opengeni/config": "workspace:*",
@@ -262,7 +263,7 @@
         "@opengeni/testing": "workspace:*",
         "drizzle-kit": "^0.31.8",
         "tsup": "^8.5.0",
-        "typescript": "^6.0.3",
+        "typescript": "7.0.2",
       },
     },
     "packages/deployment": {
@@ -272,12 +273,12 @@
         "zod": "^4.2.1",
       },
       "devDependencies": {
-        "typescript": "^6.0.3",
+        "typescript": "7.0.2",
       },
     },
     "packages/documents": {
       "name": "@opengeni/documents",
-      "version": "0.2.15",
+      "version": "0.2.35",
       "dependencies": {
         "@llamaindex/liteparse": "^1.5.3",
         "@opengeni/config": "workspace:*",
@@ -289,12 +290,12 @@
       },
       "devDependencies": {
         "tsup": "^8.5.0",
-        "typescript": "^6.0.3",
+        "typescript": "7.0.2",
       },
     },
     "packages/events": {
       "name": "@opengeni/events",
-      "version": "0.3.6",
+      "version": "0.3.26",
       "dependencies": {
         "@opengeni/contracts": "workspace:*",
         "@opengeni/db": "workspace:*",
@@ -302,12 +303,12 @@
       },
       "devDependencies": {
         "tsup": "^8.5.0",
-        "typescript": "^6.0.3",
+        "typescript": "7.0.2",
       },
     },
     "packages/github": {
       "name": "@opengeni/github",
-      "version": "0.3.0",
+      "version": "0.3.17",
       "dependencies": {
         "@opengeni/config": "workspace:*",
         "@opengeni/contracts": "workspace:*",
@@ -315,18 +316,18 @@
       },
       "devDependencies": {
         "tsup": "^8.5.0",
-        "typescript": "^6.0.3",
+        "typescript": "7.0.2",
       },
     },
     "packages/network": {
       "name": "@opengeni/network",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "dependencies": {
         "undici": "^6.21.3",
       },
       "devDependencies": {
         "tsup": "^8.5.0",
-        "typescript": "^6.0.3",
+        "typescript": "7.0.2",
       },
     },
     "packages/observability": {
@@ -337,23 +338,23 @@
       },
       "devDependencies": {
         "tsup": "^8.5.0",
-        "typescript": "^6.0.3",
+        "typescript": "7.0.2",
       },
     },
     "packages/ogtool": {
       "name": "@opengeni/ogtool",
-      "version": "0.0.0",
+      "version": "0.1.0",
       "bin": {
         "ogtool": "./bin/ogtool.cjs",
       },
       "devDependencies": {
         "tsup": "^8.5.0",
-        "typescript": "^6.0.3",
+        "typescript": "7.0.2",
       },
     },
     "packages/react": {
       "name": "@opengeni/react",
-      "version": "0.17.0",
+      "version": "0.25.4",
       "dependencies": {
         "@bufbuild/protobuf": "^2.2.0",
         "@dnd-kit/core": "6.3.1",
@@ -399,7 +400,7 @@
         "react-dom": "^19.2.5",
         "tailwindcss": "^4.2.4",
         "tsup": "^8.5.0",
-        "typescript": "^6.0.3",
+        "typescript": "7.0.2",
         "vite": "^8.0.9",
       },
       "peerDependencies": {
@@ -437,7 +438,7 @@
     },
     "packages/runtime": {
       "name": "@opengeni/runtime",
-      "version": "0.8.2",
+      "version": "0.13.9",
       "dependencies": {
         "@modelcontextprotocol/sdk": "1.29.0",
         "@noble/hashes": "^1.8.0",
@@ -447,8 +448,8 @@
         "@opengeni/codex": "workspace:*",
         "@opengeni/config": "workspace:*",
         "@opengeni/contracts": "workspace:*",
-        "debug": "4.4.3",
         "@opengeni/network": "workspace:*",
+        "debug": "4.4.3",
         "modal": "0.7.6",
         "openai": "6.47.0",
         "ws": "8.21.1",
@@ -456,24 +457,24 @@
       "devDependencies": {
         "@openai/agents-core": "0.13.3",
         "tsup": "^8.5.0",
-        "typescript": "^6.0.3",
+        "typescript": "7.0.2",
         "zod": "4.4.3",
       },
     },
     "packages/sdk": {
       "name": "@opengeni/sdk",
-      "version": "0.17.0",
+      "version": "0.25.3",
       "devDependencies": {
         "@opengeni/contracts": "workspace:*",
         "@opengeni/deployment": "workspace:*",
         "tsup": "^8.5.0",
-        "typescript": "^6.0.3",
+        "typescript": "7.0.2",
         "zod": "^4.2.1",
       },
     },
     "packages/storage": {
       "name": "@opengeni/storage",
-      "version": "0.2.12",
+      "version": "0.2.29",
       "dependencies": {
         "@aws-sdk/client-s3": "^3.1044.0",
         "@aws-sdk/s3-request-presigner": "^3.1044.0",
@@ -484,7 +485,7 @@
       },
       "devDependencies": {
         "tsup": "^8.5.0",
-        "typescript": "^6.0.3",
+        "typescript": "7.0.2",
       },
     },
     "packages/testing": {
@@ -506,7 +507,7 @@
         "zod": "^4.2.1",
       },
       "devDependencies": {
-        "typescript": "^6.0.3",
+        "typescript": "7.0.2",
       },
     },
   },
@@ -1720,21 +1721,45 @@
 
     "@types/ws": ["@types/ws@8.18.1", "", { "dependencies": { "@types/node": "*" } }, "sha512-ThVF6DCVhA8kUGy+aazFQ4kXQ7E1Ty7A3ypFOe0IcJV8O/M511G99AW24irKrW56Wt44yG9+ij8FaqoBGkuBXg=="],
 
-    "@typescript/native-preview": ["@typescript/native-preview@7.0.0-dev.20260707.2", "", { "optionalDependencies": { "@typescript/native-preview-darwin-arm64": "7.0.0-dev.20260707.2", "@typescript/native-preview-darwin-x64": "7.0.0-dev.20260707.2", "@typescript/native-preview-linux-arm": "7.0.0-dev.20260707.2", "@typescript/native-preview-linux-arm64": "7.0.0-dev.20260707.2", "@typescript/native-preview-linux-x64": "7.0.0-dev.20260707.2", "@typescript/native-preview-win32-arm64": "7.0.0-dev.20260707.2", "@typescript/native-preview-win32-x64": "7.0.0-dev.20260707.2" }, "bin": { "tsgo": "bin/tsgo" } }, "sha512-oUGp+Rep/hqMhPunyinsALUwSlzHINSxitifPiSaeqoKOKD2OlR9NE3TaPqwsl4NlGslsOSUXI1JotWQzpYCPg=="],
+    "@typescript/typescript-aix-ppc64": ["@typescript/typescript-aix-ppc64@7.0.2", "", { "os": "aix", "cpu": "ppc64" }, "sha512-MTKKkWB7p/0E9xi1d1tHtZ5PiLkGEMIq88pK2CubZjOsLtYTLqhgIgi6zepFa+9GHZ6h05NMCkQxGKiPXMxXtQ=="],
 
-    "@typescript/native-preview-darwin-arm64": ["@typescript/native-preview-darwin-arm64@7.0.0-dev.20260707.2", "", { "os": "darwin", "cpu": "arm64" }, "sha512-wny2pgKjGbiZtnOIHVa3tXC1UfDqxNEFzyPGmiqybedG8hipG2Nfp0l5UxbaKCjkLacUpH/W5bP2hBOMVhCOzg=="],
+    "@typescript/typescript-darwin-arm64": ["@typescript/typescript-darwin-arm64@7.0.2", "", { "os": "darwin", "cpu": "arm64" }, "sha512-gowzar9MwS/aRWp6f3a4KUqzRjAZjOsmGNCM6LcTgXum+dBfgsBVMN+AgvOCCbguXyick6LJhpBszxMebJ8syA=="],
 
-    "@typescript/native-preview-darwin-x64": ["@typescript/native-preview-darwin-x64@7.0.0-dev.20260707.2", "", { "os": "darwin", "cpu": "x64" }, "sha512-Afc7M5zOwo+GpfcYwz5Z8HMB2tPVsui7nNIqEuuFB73MPdVqNn/Wmpe4tP4MRri0AtJnJknoHBaTJ/VDAp/Jhw=="],
+    "@typescript/typescript-darwin-x64": ["@typescript/typescript-darwin-x64@7.0.2", "", { "os": "darwin", "cpu": "x64" }, "sha512-SZ9xZInqApNlNGc9s0W1VSsktYSOe9cFqNOIqmN1Gs8SmkjKZYFt017G4VwPxASInODuAdbTW7sXiFUf893RgA=="],
 
-    "@typescript/native-preview-linux-arm": ["@typescript/native-preview-linux-arm@7.0.0-dev.20260707.2", "", { "os": "linux", "cpu": "arm" }, "sha512-hJm/UOqZTr9FHmR7uNm8VGX4oKtfWk0Jem0zPeJFNC8ckGUfSBueyiEYMZB+XmRc1aG4x1E46y3CplP4CLHvGQ=="],
+    "@typescript/typescript-freebsd-arm64": ["@typescript/typescript-freebsd-arm64@7.0.2", "", { "os": "freebsd", "cpu": "arm64" }, "sha512-W5NH4y/J0plIIS5b2xvTEkU7JFxyqdMAOgf+Ilhl0vHQXKO5dZoxd+C/jEtq56c4F3wk71RB4BMRQ2XdI+bwYQ=="],
 
-    "@typescript/native-preview-linux-arm64": ["@typescript/native-preview-linux-arm64@7.0.0-dev.20260707.2", "", { "os": "linux", "cpu": "arm64" }, "sha512-iITBa2WjjTI5N9t5l7Z4KoOSI+2zBlhbvFzsD/f8qX8QoKjz/Y4DPyBDgezYi8nkqjjksbgSOJ3/ykzhwrB9cg=="],
+    "@typescript/typescript-freebsd-x64": ["@typescript/typescript-freebsd-x64@7.0.2", "", { "os": "freebsd", "cpu": "x64" }, "sha512-UMGDx5sTpzNw3WiPebH7l90IWfJggEd+egHt/q6p7/Cm3zqoV7VxkGXt+3DxPIw8CcmvAB0j3sVVfbhX+M4Tpw=="],
 
-    "@typescript/native-preview-linux-x64": ["@typescript/native-preview-linux-x64@7.0.0-dev.20260707.2", "", { "os": "linux", "cpu": "x64" }, "sha512-du0dzi6y97Po5vDNdPJTyyijHCpaS22JLRnKZEJXBDaO9gCIymOv/5QQokFRuOlQm0bWl3i9PF4OVdGP6uAOQA=="],
+    "@typescript/typescript-linux-arm": ["@typescript/typescript-linux-arm@7.0.2", "", { "os": "linux", "cpu": "arm" }, "sha512-gffT3xPz9sR7j/YJExkyPntrI0P2EP9XbOyWzth2/Gs0RstK+90RBcO0ncXoXy/beYll1SXw846Nf2zdnEz0QQ=="],
 
-    "@typescript/native-preview-win32-arm64": ["@typescript/native-preview-win32-arm64@7.0.0-dev.20260707.2", "", { "os": "win32", "cpu": "arm64" }, "sha512-SsAwfhyHJ1akgBc+99z4+hwdbHsdWaKB8EwCNIMA6JfSLMeUjffrYvxu+vfMyxVtOVOz7RrRXRoiDiu4a2sCtg=="],
+    "@typescript/typescript-linux-arm64": ["@typescript/typescript-linux-arm64@7.0.2", "", { "os": "linux", "cpu": "arm64" }, "sha512-Qh4eU4/y3yDjnfjjyPYihMj5/ODIlmt+Bzu17OI+fiSRDW57QmU5SiN63exPRNJPKUzcc1INa1NXdrJ+MqHjUQ=="],
 
-    "@typescript/native-preview-win32-x64": ["@typescript/native-preview-win32-x64@7.0.0-dev.20260707.2", "", { "os": "win32", "cpu": "x64" }, "sha512-DL4u27stv0fo71sVhOzHSwE+YMZsbBijVI+kg5dLDLilSH79WFTJ8RSQ46vJrCMt+Gjlv/JOZP1PuLJDfioYeQ=="],
+    "@typescript/typescript-linux-loong64": ["@typescript/typescript-linux-loong64@7.0.2", "", { "os": "linux", "cpu": "none" }, "sha512-uEHck9i8hoAzXPiYRib1O7miOnz23SxIeVl6F4LXox+qov1K35jHcEW6VHKvZI+pyvl7fZEP4MCU5LYvIq1GuQ=="],
+
+    "@typescript/typescript-linux-mips64el": ["@typescript/typescript-linux-mips64el@7.0.2", "", { "os": "linux", "cpu": "none" }, "sha512-R4KvAMnE43W5Qeqb0Ly56O3mWMWIAgsMyz36DCaycd5nbg/9kzm0liw3JocfRqyJY0KPmzFjbswozXyW0DnIYA=="],
+
+    "@typescript/typescript-linux-ppc64": ["@typescript/typescript-linux-ppc64@7.0.2", "", { "os": "linux", "cpu": "ppc64" }, "sha512-DORx5b3sd/4S7eayxm4FQv+A7CrkUIGRaHiwI8oiHTAI1fAPWhF4J0vAlkC8biAlHSVVwxMQ3tjZ2/DVbnQiiA=="],
+
+    "@typescript/typescript-linux-riscv64": ["@typescript/typescript-linux-riscv64@7.0.2", "", { "os": "linux", "cpu": "none" }, "sha512-wf0jqEDOjrPRnKwYRyyJDRo11KMbvMFrU+q4zqKyChODBzvlkbhNQfKvLxQCcwTpdDaXSHZTVuh0JoCrKCUMHQ=="],
+
+    "@typescript/typescript-linux-s390x": ["@typescript/typescript-linux-s390x@7.0.2", "", { "os": "linux", "cpu": "s390x" }, "sha512-IkwJc3L7yhytWd/ewjyxNDfOmswCm9GWMJT/ue/dU4aZNbwZeYAetq42VyLmsmSjvoX7z74X6ZaYCtzAr0EuGw=="],
+
+    "@typescript/typescript-linux-x64": ["@typescript/typescript-linux-x64@7.0.2", "", { "os": "linux", "cpu": "x64" }, "sha512-EYdf2cNg7rgCWJnxCdJ+F3V39O8ihb37eHAu1LK8oAFizgTQbPOK7zHHXbPt8rX24COqODXeI3sIf0fCXG7H/A=="],
+
+    "@typescript/typescript-netbsd-arm64": ["@typescript/typescript-netbsd-arm64@7.0.2", "", { "os": "none", "cpu": "arm64" }, "sha512-+polYF4MF04aPpO5FTkHran9yUQDSXqy5GiSDKpsll5jy3l3+g9QLhpf39T+ePtefhXLOGrLl0QIjkQP6VnelA=="],
+
+    "@typescript/typescript-netbsd-x64": ["@typescript/typescript-netbsd-x64@7.0.2", "", { "os": "none", "cpu": "x64" }, "sha512-8YIT0EHM/3dq10ZOVF/A7pc/YSMtbcecct4rWtexrnSCHOPcpC2KTLXfTCR6vDpnSiY12heNb1GiN/wu+T/FyA=="],
+
+    "@typescript/typescript-openbsd-arm64": ["@typescript/typescript-openbsd-arm64@7.0.2", "", { "os": "openbsd", "cpu": "arm64" }, "sha512-APT8+ClYnuYm1u9+kgGXoMj2VzWzcymwh2gNSQVySHfkRDGOTVkoWLjCmOQSaO+PoqQ57B0flRp9SA+7GnnkzQ=="],
+
+    "@typescript/typescript-openbsd-x64": ["@typescript/typescript-openbsd-x64@7.0.2", "", { "os": "openbsd", "cpu": "x64" }, "sha512-yX7s+Q0Dln0Dt9tEzZsAjXXR/+ytBM7AlglaqyeMPxQszJ1JhlJdZ6jLA+IzldHtflX81em7lDao1xXu+aRRkg=="],
+
+    "@typescript/typescript-sunos-x64": ["@typescript/typescript-sunos-x64@7.0.2", "", { "os": "sunos", "cpu": "x64" }, "sha512-dLJDGaLZ1D4HPQn62u1n8mBDkJREwMsAkCdkwd4Ieqw+x3TUyTsqY0YiBCtE6H6OzzgGk3iuZ3vFWRS+E8/d1g=="],
+
+    "@typescript/typescript-win32-arm64": ["@typescript/typescript-win32-arm64@7.0.2", "", { "os": "win32", "cpu": "arm64" }, "sha512-Gyl1Vy6OsWesLzmq+EP0Fb7b4Nid5232AvcA2SFcdYreldpNtYFFofPjnt62y9hQy7VTaZp65ICJjuAQRaVcIQ=="],
+
+    "@typescript/typescript-win32-x64": ["@typescript/typescript-win32-x64@7.0.2", "", { "os": "win32", "cpu": "x64" }, "sha512-0BQ3HkAHHlKLSp1qRvf3SUhGpGsDuhB/jgFw75guyqbxJqEaS0Cw/VFO8i2nHglJUzQCRtMMR/IBAKE3ETMC4g=="],
 
     "@typespec/ts-http-runtime": ["@typespec/ts-http-runtime@0.3.5", "", { "dependencies": { "http-proxy-agent": "^7.0.0", "https-proxy-agent": "^7.0.0", "tslib": "^2.6.2" } }, "sha512-yURCknZhvywvQItHMMmFSo+fq5arCUIyz/CVk7jD89MSai7dkaX8ufjCWp3NttLojoTVbcE72ri+be/TnEbMHw=="],
 
@@ -2938,7 +2963,7 @@
 
     "type-is": ["type-is@2.0.1", "", { "dependencies": { "content-type": "^1.0.5", "media-typer": "^1.1.0", "mime-types": "^3.0.0" } }, "sha512-OZs6gsjF4vMp32qrCbiVSkrFmXtG/AZhY3t0iAMrMBiAZyV9oALtXO8hsrHbMXF9x6L3grlFuwW2oAz7cav+Gw=="],
 
-    "typescript": ["typescript@6.0.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw=="],
+    "typescript": ["typescript@7.0.2", "", { "optionalDependencies": { "@typescript/typescript-aix-ppc64": "7.0.2", "@typescript/typescript-darwin-arm64": "7.0.2", "@typescript/typescript-darwin-x64": "7.0.2", "@typescript/typescript-freebsd-arm64": "7.0.2", "@typescript/typescript-freebsd-x64": "7.0.2", "@typescript/typescript-linux-arm": "7.0.2", "@typescript/typescript-linux-arm64": "7.0.2", "@typescript/typescript-linux-loong64": "7.0.2", "@typescript/typescript-linux-mips64el": "7.0.2", "@typescript/typescript-linux-ppc64": "7.0.2", "@typescript/typescript-linux-riscv64": "7.0.2", "@typescript/typescript-linux-s390x": "7.0.2", "@typescript/typescript-linux-x64": "7.0.2", "@typescript/typescript-netbsd-arm64": "7.0.2", "@typescript/typescript-netbsd-x64": "7.0.2", "@typescript/typescript-openbsd-arm64": "7.0.2", "@typescript/typescript-openbsd-x64": "7.0.2", "@typescript/typescript-sunos-x64": "7.0.2", "@typescript/typescript-win32-arm64": "7.0.2", "@typescript/typescript-win32-x64": "7.0.2" }, "bin": { "tsc": "bin/tsc" } }, "sha512-8FYau96o3NKOhbjKi/qNvG/W5jhzxkbdm5sj9AbZ/5T5sWqn3hJgLfGx27sRKZWTvyzCP8dLRBTf5tBTSRVUNA=="],
 
     "ufo": ["ufo@1.6.4", "", {}, "sha512-JFNbkD1Svwe0KvGi8GOeLcP4kAWQ609twvCdcHxq1oSL8svv39ZuSvajcD8B+5D0eL4+s1Is2D/O6KN3qcTeRA=="],
 

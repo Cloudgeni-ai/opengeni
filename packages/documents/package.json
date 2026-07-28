@@ -26,8 +26,8 @@
     "provenance": true
   },
   "scripts": {
-    "build": "tsup",
-    "typecheck": "tsgo --noEmit",
+    "build": "tsup && bun ../../scripts/emit-package-declarations.ts",
+    "typecheck": "tsc --noEmit",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {
@@ -41,6 +41,6 @@
   },
   "devDependencies": {
     "tsup": "^8.5.0",
-    "typescript": "^6.0.3"
+    "typescript": "7.0.2"
   }
 }

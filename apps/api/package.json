@@ -33,8 +33,8 @@
   "scripts": {
     "dev": "bun --watch src/index.ts",
     "start": "bun src/index.ts",
-    "typecheck": "tsgo --noEmit",
-    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "build": "tsup && bun ../../scripts/emit-package-declarations.ts",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {
@@ -68,7 +68,7 @@
     "@types/pg": "^8.20.0",
     "postgres": "^3.4.7",
     "tsup": "^8.5.0",
-    "typescript": "^6.0.3"
+    "typescript": "7.0.2"
   },
   "engines": {
     "node": ">=18"

@@ -53,8 +53,8 @@
     "provenance": true
   },
   "scripts": {
-    "typecheck": "tsgo --noEmit",
-    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "build": "tsup && bun ../../scripts/emit-package-declarations.ts",
     "demo": "vite dev demo --port 3100",
     "demo:build": "vite build demo",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
@@ -104,7 +104,7 @@
     "react-dom": "^19.2.5",
     "tailwindcss": "^4.2.4",
     "tsup": "^8.5.0",
-    "typescript": "^6.0.3",
+    "typescript": "7.0.2",
     "vite": "^8.0.9"
   },
   "peerDependencies": {

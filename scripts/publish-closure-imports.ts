@@ -1,4 +1,5 @@
-import ts from "typescript";
+import { parse } from "@babel/parser";
+import { VISITOR_KEYS, type Node } from "@babel/types";
 
 export type RuntimeLoader = "js" | "jsx" | "ts" | "tsx";
 
@@ -13,41 +14,46 @@ export async function runtimeModuleSpecifiers(
 }
 
 export function declarationModuleSpecifiers(source: string, fileName: string): string[] {
-  const sourceFile = ts.createSourceFile(
-    fileName,
-    source,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.TS,
-  );
+  const sourceFile = parse(source, {
+    sourceFilename: fileName,
+    sourceType: "unambiguous",
+    plugins: ["typescript"],
+  });
   const specifiers = new Set<string>();
 
-  for (const directive of sourceFile.typeReferenceDirectives) {
-    specifiers.add(directive.fileName);
+  for (const match of source.matchAll(
+    /^\s*\/\/\/\s*<reference\s+types\s*=\s*["']([^"']+)["'][^>]*\/>/gm,
+  )) {
+    if (match[1]) specifiers.add(match[1]);
   }
 
-  function visit(node: ts.Node): void {
-    if (
-      (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
-      node.moduleSpecifier &&
-      ts.isStringLiteralLike(node.moduleSpecifier)
-    ) {
-      specifiers.add(node.moduleSpecifier.text);
+  function visit(node: Node): void {
+    if (node.type === "ImportDeclaration" && node.source.type === "StringLiteral") {
+      specifiers.add(node.source.value);
     } else if (
-      ts.isImportEqualsDeclaration(node) &&
-      ts.isExternalModuleReference(node.moduleReference) &&
-      node.moduleReference.expression &&
-      ts.isStringLiteralLike(node.moduleReference.expression)
+      (node.type === "ExportNamedDeclaration" || node.type === "ExportAllDeclaration") &&
+      node.source?.type === "StringLiteral"
     ) {
-      specifiers.add(node.moduleReference.expression.text);
+      specifiers.add(node.source.value);
     } else if (
-      ts.isImportTypeNode(node) &&
-      ts.isLiteralTypeNode(node.argument) &&
-      ts.isStringLiteralLike(node.argument.literal)
+      node.type === "TSImportEqualsDeclaration" &&
+      node.moduleReference.type === "TSExternalModuleReference" &&
+      node.moduleReference.expression.type === "StringLiteral"
     ) {
-      specifiers.add(node.argument.literal.text);
+      specifiers.add(node.moduleReference.expression.value);
+    } else if (node.type === "TSImportType" && node.argument.type === "StringLiteral") {
+      specifiers.add(node.argument.value);
     }
-    ts.forEachChild(node, visit);
+    for (const key of VISITOR_KEYS[node.type] ?? []) {
+      const child = (node as unknown as Record<string, unknown>)[key];
+      if (Array.isArray(child)) {
+        for (const entry of child) {
+          if (entry && typeof entry === "object" && "type" in entry) visit(entry as Node);
+        }
+      } else if (child && typeof child === "object" && "type" in child) {
+        visit(child as Node);
+      }
+    }
   }
 
   visit(sourceFile);
