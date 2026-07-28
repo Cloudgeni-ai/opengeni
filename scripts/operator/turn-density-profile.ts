@@ -21,9 +21,10 @@ const plateauSeconds = positiveInteger("OPENGENI_DENSITY_PLATEAU_SECONDS", 15);
 const hardLimitMiB = positiveNumber("OPENGENI_DENSITY_HARD_LIMIT_MIB_PER_TURN", 100);
 const targetMiB = positiveNumber("OPENGENI_DENSITY_TARGET_MIB_PER_TURN", 50);
 const runId = crypto.randomUUID();
+const profileSubjectId = `operator:turn-density-profile:${runId}`;
 const profileInitiator = {
   kind: "service" as const,
-  subjectId: "turn-density-profile",
+  subjectId: profileSubjectId,
   label: "Turn density profile",
 };
 
@@ -86,7 +87,7 @@ try {
     workspaceExternalSource: "operator:turn-density-profile",
     workspaceExternalId: runId,
     workspaceName: `Turn density profile ${runId}`,
-    subjectId: `operator:turn-density-profile:${runId}`,
+    subjectId: profileSubjectId,
     subjectLabel: "Turn density profile",
   });
   const grant = access.workspaceGrants[0];
