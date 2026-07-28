@@ -83,7 +83,7 @@ export function ActivityRail({
         const newFamily = index > 0 && familyOf(item) !== familyOf(items[index - 1]!);
         const row = renderActivity(item, toolRegistry, onOpenSession, onMemoryClick);
         return (
-          <div key={item.id} className={cn(newFamily && "mt-3")}>
+          <div key={item.id} data-og-timeline-row-anchor="" className={cn(newFamily && "mt-3")}>
             {row}
           </div>
         );

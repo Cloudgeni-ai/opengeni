@@ -33,10 +33,63 @@ import {
   type RepositoryGroup,
 } from "@/lib/session-tools";
 import { cn } from "@/lib/utils";
-import type { GitHubInstallationBinding, GitHubRepository, ResourceRef } from "@/types";
+import type {
+  GitHubBindingStatus,
+  GitHubInstallationBinding,
+  GitHubRepository,
+  ResourceRef,
+} from "@/types";
+
+export function repositoryBindingPresentation(
+  status: GitHubBindingStatus,
+  installUrl: string | null,
+): {
+  setupDescription: string;
+  emptyDescription: string;
+  connectUrl: string | null;
+  connectLabel: string;
+  healthy: boolean;
+  canRefresh: boolean;
+} {
+  if (status === "bound") {
+    return {
+      setupDescription:
+        "This workspace has a live GitHub App binding with an explicit repository allowlist.",
+      emptyDescription:
+        "This workspace has an active GitHub App binding, but none of its explicitly allowed repositories are currently shared by GitHub. Reconfigure the installation or refresh after policy approval.",
+      connectUrl: installUrl,
+      connectLabel: "Configure another installation",
+      healthy: true,
+      canRefresh: true,
+    };
+  }
+  if (status === "unbound") {
+    return {
+      setupDescription:
+        "GitHub App server credentials are configured, but this workspace has no usable installation binding.",
+      emptyDescription:
+        "GitHub App server credentials exist, but this workspace has no active installation binding. Connect as the personal owner or an organization owner; repository administrators and collaborators cannot bind.",
+      connectUrl: installUrl,
+      connectLabel: "Connect GitHub",
+      healthy: false,
+      canRefresh: false,
+    };
+  }
+  return {
+    setupDescription:
+      "Create a prefilled app, add the generated values to your .env, then restart the API and worker.",
+    emptyDescription:
+      "GitHub App server credentials are not configured. App registration alone does not connect repositories.",
+    connectUrl: null,
+    connectLabel: "Connect GitHub",
+    healthy: false,
+    canRefresh: false,
+  };
+}
 
 export function RepositoryContextPicker(props: {
   configured: boolean;
+  status: GitHubBindingStatus;
   installUrl: string | null;
   linkUrl: string | null;
   installations: GitHubInstallationBinding[];
@@ -68,6 +121,7 @@ export function RepositoryContextPicker(props: {
   const manualCount = props.manualRepos.filter((repo) => repo.url.trim().length > 0).length;
   const selectedCount = selectedInstalledCount + manualCount;
   const hasRepos = props.repositories.length > 0;
+  const bindingPresentation = repositoryBindingPresentation(props.status, props.installUrl);
   // Two-step inline confirm for removing a manual repo, so a stray click in a
   // dense picker doesn't drop a repo the user typed out.
   const [confirmRemoveId, setConfirmRemoveId] = useState<number | null>(null);
@@ -81,11 +135,7 @@ export function RepositoryContextPicker(props: {
   // disclosure once repositories are connected.
   const setupForm = (
     <div className="space-y-3">
-      <p className="text-xs leading-5 text-fg-muted">
-        {props.configured
-          ? "The app provides repository listing, scoped clone tokens, pushes, and pull requests."
-          : "Create a prefilled app, add the generated values to your .env, then restart the API and worker."}
-      </p>
+      <p className="text-xs leading-5 text-fg-muted">{bindingPresentation.setupDescription}</p>
       <div className="space-y-2">
         {!props.configured ? (
           <div className="min-w-0">
@@ -119,6 +169,14 @@ export function RepositoryContextPicker(props: {
               Create app
             </Button>
           ) : null}
+          {bindingPresentation.connectUrl ? (
+            <Button asChild type="button" size="sm" className="h-8 text-xs">
+              <a href={bindingPresentation.connectUrl}>
+                <GitPullRequestIcon className="size-3.5" />
+                {bindingPresentation.connectLabel}
+              </a>
+            </Button>
+          ) : null}
         </div>
       </div>
       {props.installations.length > 0 ? (
@@ -135,9 +193,11 @@ export function RepositoryContextPicker(props: {
                     {installation.accountLogin ?? `Installation ${installation.installationId}`}
                   </div>
                   <div className="text-2xs text-fg-subtle">
-                    {installation.repositoryScope === "all"
-                      ? "All installation repositories (legacy)"
-                      : `${installation.repositoryCount} workspace repositories`}
+                    {installation.lifecycle !== "active"
+                      ? `GitHub status: ${installation.lifecycle}`
+                      : installation.repositoryScope === "all"
+                        ? "All installation repositories (legacy)"
+                        : `${installation.repositoryCount} workspace repositories`}
                   </div>
                 </div>
                 {confirming ? (
@@ -182,8 +242,8 @@ export function RepositoryContextPicker(props: {
     </div>
   );
 
-  // Existing installation bindings can still be inspected and unlinked while
-  // new binding remains fail-closed.
+  // Stored bindings remain inspectable and unlinkable when provider lifecycle
+  // changes leave them unbound.
   const settingsDisclosure = (
     <Collapsible open={props.githubAppOpen} onOpenChange={props.onGitHubAppOpenChange}>
       <div className="border-t border-border/60 pt-1">
@@ -230,7 +290,7 @@ export function RepositoryContextPicker(props: {
           <span
             className={cn(
               "size-1.5 shrink-0 rounded-full",
-              props.configured ? "bg-status-idle" : "bg-status-waiting",
+              bindingPresentation.healthy ? "bg-status-idle" : "bg-status-waiting",
             )}
             aria-hidden="true"
           />
@@ -259,7 +319,7 @@ export function RepositoryContextPicker(props: {
               variant="ghost"
               size="icon-xs"
               onClick={() => void props.onRefresh()}
-              disabled={!props.configured || props.repoBusy}
+              disabled={!bindingPresentation.canRefresh || props.repoBusy}
               aria-label="Refresh repositories"
               className="size-7"
             >
@@ -269,12 +329,12 @@ export function RepositoryContextPicker(props: {
 
           <div className="max-h-[min(calc(var(--radix-dropdown-menu-content-available-height,70vh)-3.5rem),620px)] overflow-y-auto overscroll-contain">
             <div className="space-y-2.5 p-2.5">
-              {!props.configured ? (
+              {props.status === "disabled" ? (
                 <div className="space-y-3">
                   <EmptyState
                     icon={<GitBranchIcon className="size-5" />}
                     title="No repositories connected"
-                    description="App registration does not connect repositories. New installation binding is disabled; existing bindings can still be managed or unlinked."
+                    description={bindingPresentation.emptyDescription}
                   />
                   <div className="px-1 pt-1">{setupForm}</div>
                 </div>
@@ -288,7 +348,7 @@ export function RepositoryContextPicker(props: {
                   <EmptyState
                     icon={<GitBranchIcon className="size-5" />}
                     title="No repositories connected"
-                    description="The connected GitHub app isn't sharing any repositories with this workspace. Existing bindings can be unlinked, but new installation binding is temporarily disabled."
+                    description={bindingPresentation.emptyDescription}
                   />
                   {settingsDisclosure}
                 </div>
@@ -543,7 +603,7 @@ export function RepositoryContextPicker(props: {
 }
 
 export function ScheduledTaskRepositoryPicker(props: {
-  configured: boolean;
+  status: GitHubBindingStatus;
   repositories: GitHubRepository[];
   groups: RepositoryGroup[];
   resources: ResourceRef[];
@@ -618,17 +678,18 @@ export function ScheduledTaskRepositoryPicker(props: {
           variant="ghost"
           size="xs"
           onClick={() => void props.onRefresh()}
-          disabled={!props.configured || props.repoBusy || props.busy}
+          disabled={props.status !== "bound" || props.repoBusy || props.busy}
         >
           <RefreshCwIcon className={cn("size-3", props.repoBusy && "animate-spin")} />
           Refresh
         </Button>
       </div>
 
-      {!props.configured ? (
+      {props.status !== "bound" ? (
         <div className="p-3 text-xs leading-5 text-fg-muted">
-          App registration does not connect repositories. New installation binding is disabled;
-          existing bindings can still be managed or unlinked.
+          {props.status === "disabled"
+            ? "GitHub App server credentials are not configured."
+            : "GitHub App credentials exist, but this workspace has no active installation binding."}
         </div>
       ) : props.repoBusy ? (
         <div className="flex items-center gap-2 p-3 text-xs text-fg-muted">
@@ -636,7 +697,9 @@ export function ScheduledTaskRepositoryPicker(props: {
           Loading repositories
         </div>
       ) : props.repositories.length === 0 ? (
-        <div className="p-3 text-xs leading-5 text-fg-muted">No installed repositories found.</div>
+        <div className="p-3 text-xs leading-5 text-fg-muted">
+          The active binding currently shares no explicitly allowed repositories.
+        </div>
       ) : (
         <div className="max-h-72 overflow-auto">
           {props.groups.map((group) => (

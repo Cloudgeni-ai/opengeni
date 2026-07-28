@@ -23,6 +23,7 @@ import type {
   KnowledgeMemoryKind,
   KnowledgeMemoryStatus,
   KnowledgeSourceRef,
+  GitHubInstallationAuthorityKind,
   GitHubRepositoryScope,
   HostEventExport,
   HostEventExportBatch,
@@ -2068,10 +2069,17 @@ export type GitHubInstallation = {
   accountId: string;
   workspaceId: string;
   installationId: number;
+  githubAccountId: number | null;
   accountLogin: string | null;
   accountType: string | null;
   repositoryScope: GitHubRepositoryScope;
   linkedBySubjectId: string | null;
+  githubActorId: number | null;
+  githubActorLogin: string | null;
+  authorityKind: GitHubInstallationAuthorityKind | null;
+  authorityCheckedAt: string | null;
+  authorityExpiresAt: string | null;
+  authorityNonce: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -2079,6 +2087,59 @@ export type GitHubInstallation = {
 export type GitHubInstallationAccess = GitHubInstallation & {
   repositoryIds: number[];
 };
+
+export class GitHubInstallationAuthorityCommitError extends Error {
+  constructor() {
+    super("GitHub installation authority expired before the binding transaction completed");
+  }
+}
+
+const githubInstallationAuthorityMaxAgeMs = 10 * 60_000;
+
+/**
+ * True only for a binding created by the owner-authority transaction. Legacy
+ * installation rows remain visible for audit/unlink, but can never make a
+ * workspace healthy, enumerate repositories, or authorize a token mint.
+ *
+ * `authorityExpiresAt` is the expiry of the consumed proof, not of the durable
+ * delegation. A binding remains delegated after that instant; GitHub's live
+ * installation/repository checks govern its ongoing usability.
+ */
+export function hasAuditableGitHubInstallationAuthority(
+  installation: GitHubInstallationAccess,
+): boolean {
+  const checkedAt = installation.authorityCheckedAt
+    ? Date.parse(installation.authorityCheckedAt)
+    : Number.NaN;
+  const expiresAt = installation.authorityExpiresAt
+    ? Date.parse(installation.authorityExpiresAt)
+    : Number.NaN;
+  const common =
+    installation.repositoryScope === "selected" &&
+    installation.repositoryIds.length > 0 &&
+    installation.repositoryIds.every((id) => Number.isSafeInteger(id) && id > 0) &&
+    installation.githubAccountId !== null &&
+    Number.isSafeInteger(installation.githubAccountId) &&
+    installation.githubAccountId > 0 &&
+    Boolean(installation.accountLogin) &&
+    installation.githubActorId !== null &&
+    Number.isSafeInteger(installation.githubActorId) &&
+    installation.githubActorId > 0 &&
+    Boolean(installation.githubActorLogin) &&
+    Boolean(installation.linkedBySubjectId) &&
+    Boolean(installation.authorityNonce) &&
+    Number.isFinite(checkedAt) &&
+    Number.isFinite(expiresAt) &&
+    checkedAt < expiresAt;
+  if (!common) {
+    return false;
+  }
+  return installation.authorityKind === "personal_owner"
+    ? installation.accountType === "User" &&
+        installation.githubActorId === installation.githubAccountId
+    : installation.authorityKind === "organization_owner" &&
+        installation.accountType === "Organization";
+}
 
 export async function upsertGitHubInstallation(
   db: Database,
@@ -2119,6 +2180,9 @@ export async function upsertGitHubInstallation(
               : {}),
             updatedAt: new Date(),
           },
+          // This legacy metadata helper cannot mutate an owner-authorized row.
+          // New bindings use bindAuthorizedGitHubInstallationRepositories.
+          setWhere: isNull(schema.githubInstallations.authorityNonce),
         })
         .returning();
       if (!row) {
@@ -2180,6 +2244,8 @@ export async function bindGitHubInstallationRepositories(
               linkedBySubjectId: input.linkedBySubjectId,
               updatedAt: new Date(),
             },
+            // Preserve the immutable authority + allowlist audit boundary.
+            setWhere: isNull(schema.githubInstallations.authorityNonce),
           })
           .returning();
         if (!row) {
@@ -2206,6 +2272,192 @@ export async function bindGitHubInstallationRepositories(
         return { ...mapGitHubInstallation(row), repositoryIds };
       }),
   );
+}
+
+export async function bindAuthorizedGitHubInstallationRepositories(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    installationId: number;
+    githubAccountId: number;
+    accountLogin: string | null;
+    accountType: string | null;
+    linkedBySubjectId: string;
+    githubActorId: number;
+    githubActorLogin: string;
+    authorityKind: GitHubInstallationAuthorityKind;
+    authorityCheckedAt: Date;
+    authorityExpiresAt: Date;
+    authorityNonce: string;
+    repositoryIds: number[];
+  },
+): Promise<GitHubInstallationAccess | null> {
+  if (!Number.isSafeInteger(input.installationId) || input.installationId <= 0) {
+    throw new Error("GitHub installation id must be a positive safe integer");
+  }
+  if (!Number.isSafeInteger(input.githubAccountId) || input.githubAccountId <= 0) {
+    throw new Error("GitHub account id must be a positive safe integer");
+  }
+  if (!Number.isSafeInteger(input.githubActorId) || input.githubActorId <= 0) {
+    throw new Error("GitHub actor id must be a positive safe integer");
+  }
+  const authorityCheckedAtMs = input.authorityCheckedAt.getTime();
+  const authorityExpiresAtMs = input.authorityExpiresAt.getTime();
+  if (
+    !Number.isFinite(authorityCheckedAtMs) ||
+    !Number.isFinite(authorityExpiresAtMs) ||
+    authorityCheckedAtMs >= authorityExpiresAtMs ||
+    authorityExpiresAtMs - authorityCheckedAtMs > githubInstallationAuthorityMaxAgeMs ||
+    !input.authorityNonce ||
+    !input.githubActorLogin.trim() ||
+    !input.accountLogin?.trim() ||
+    !input.linkedBySubjectId.trim() ||
+    (input.authorityKind !== "personal_owner" && input.authorityKind !== "organization_owner") ||
+    (input.authorityKind === "personal_owner" &&
+      (input.accountType !== "User" || input.githubActorId !== input.githubAccountId)) ||
+    (input.authorityKind === "organization_owner" && input.accountType !== "Organization")
+  ) {
+    throw new Error("GitHub installation authority proof is invalid or expired");
+  }
+  const repositoryIds = [...new Set(input.repositoryIds)];
+  if (
+    repositoryIds.length === 0 ||
+    repositoryIds.length !== input.repositoryIds.length ||
+    repositoryIds.some((id) => !Number.isSafeInteger(id) || id <= 0)
+  ) {
+    throw new Error(
+      "GitHub repository ids must be a nonempty, unique list of positive safe integers",
+    );
+  }
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        await assertGitHubAuthorityWindowOpen(
+          tx,
+          input.authorityCheckedAt,
+          input.authorityExpiresAt,
+        );
+        await tx
+          .delete(schema.integrationOauthStateNonces)
+          .where(
+            and(
+              eq(schema.integrationOauthStateNonces.workspaceId, input.workspaceId),
+              lt(schema.integrationOauthStateNonces.expiresAt, input.authorityCheckedAt),
+            ),
+          );
+        const consumed = await tx
+          .insert(schema.integrationOauthStateNonces)
+          .values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: input.linkedBySubjectId,
+            nonce: input.authorityNonce,
+            expiresAt: input.authorityExpiresAt,
+            usedAt: input.authorityCheckedAt,
+          })
+          .onConflictDoNothing({ target: schema.integrationOauthStateNonces.nonce })
+          .returning({ nonce: schema.integrationOauthStateNonces.nonce });
+        if (consumed.length === 0) {
+          return null;
+        }
+
+        const [row] = await tx
+          .insert(schema.githubInstallations)
+          .values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            installationId: input.installationId,
+            githubAccountId: input.githubAccountId,
+            accountLogin: input.accountLogin,
+            accountType: input.accountType,
+            repositoryScope: "selected",
+            linkedBySubjectId: input.linkedBySubjectId,
+            githubActorId: input.githubActorId,
+            githubActorLogin: input.githubActorLogin,
+            authorityKind: input.authorityKind,
+            authorityCheckedAt: input.authorityCheckedAt,
+            authorityExpiresAt: input.authorityExpiresAt,
+            authorityNonce: input.authorityNonce,
+          })
+          .onConflictDoUpdate({
+            target: [
+              schema.githubInstallations.workspaceId,
+              schema.githubInstallations.installationId,
+            ],
+            set: {
+              accountId: input.accountId,
+              githubAccountId: input.githubAccountId,
+              accountLogin: input.accountLogin,
+              accountType: input.accountType,
+              repositoryScope: "selected",
+              linkedBySubjectId: input.linkedBySubjectId,
+              githubActorId: input.githubActorId,
+              githubActorLogin: input.githubActorLogin,
+              authorityKind: input.authorityKind,
+              authorityCheckedAt: input.authorityCheckedAt,
+              authorityExpiresAt: input.authorityExpiresAt,
+              authorityNonce: input.authorityNonce,
+              updatedAt: input.authorityCheckedAt,
+            },
+          })
+          .returning();
+        if (!row) {
+          throw new Error("Failed to bind GitHub installation");
+        }
+        await tx
+          .delete(schema.githubInstallationRepositories)
+          .where(
+            and(
+              eq(schema.githubInstallationRepositories.workspaceId, input.workspaceId),
+              eq(schema.githubInstallationRepositories.installationId, input.installationId),
+            ),
+          );
+        for (let offset = 0; offset < repositoryIds.length; offset += 1_000) {
+          await tx.insert(schema.githubInstallationRepositories).values(
+            repositoryIds.slice(offset, offset + 1_000).map((repositoryId) => ({
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              installationId: input.installationId,
+              repositoryId,
+            })),
+          );
+        }
+        // Recheck against the database clock after all writes. Throwing here
+        // rolls the transaction back if the proof expired while it was being
+        // committed, so no partial nonce or binding can survive.
+        await assertGitHubAuthorityWindowOpen(
+          tx,
+          input.authorityCheckedAt,
+          input.authorityExpiresAt,
+        );
+        return { ...mapGitHubInstallation(row), repositoryIds };
+      }),
+  );
+}
+
+async function assertGitHubAuthorityWindowOpen(
+  tx: Database,
+  checkedAt: Date,
+  expiresAt: Date,
+): Promise<void> {
+  // postgres.js does not serialize JavaScript Date instances passed through
+  // raw Drizzle SQL. Bind the already-validated ISO timestamp representation
+  // and retain PostgreSQL's timestamptz/database-clock authority checks.
+  const checkedAtIso = checkedAt.toISOString();
+  const expiresAtIso = expiresAt.toISOString();
+  const result = await tx.execute<{ valid: boolean }>(sql`
+    select (
+      ${checkedAtIso}::timestamptz <= clock_timestamp()
+      and clock_timestamp() < ${expiresAtIso}::timestamptz
+      and ${expiresAtIso}::timestamptz <= ${checkedAtIso}::timestamptz + interval '10 minutes'
+    ) as valid
+  `);
+  if (result[0]?.valid !== true) {
+    throw new GitHubInstallationAuthorityCommitError();
+  }
 }
 
 export async function listGitHubInstallationsForWorkspace(
@@ -2280,7 +2532,7 @@ export async function areGitHubRepositoriesAllowedForWorkspace(
   }
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [installation] = await scopedDb
-      .select({ repositoryScope: schema.githubInstallations.repositoryScope })
+      .select()
       .from(schema.githubInstallations)
       .where(
         and(
@@ -2291,9 +2543,6 @@ export async function areGitHubRepositoriesAllowedForWorkspace(
       .limit(1);
     if (!installation) {
       return false;
-    }
-    if (installation.repositoryScope === "all") {
-      return true;
     }
     const allowed = await scopedDb
       .select({
@@ -2307,7 +2556,13 @@ export async function areGitHubRepositoriesAllowedForWorkspace(
           inArray(schema.githubInstallationRepositories.repositoryId, requestedIds),
         ),
       );
-    return allowed.length === requestedIds.length;
+    if (allowed.length !== requestedIds.length) {
+      return false;
+    }
+    return hasAuditableGitHubInstallationAuthority({
+      ...mapGitHubInstallation(installation),
+      repositoryIds: allowed.map((row) => row.repositoryId),
+    });
   });
 }
 
@@ -34751,10 +35006,17 @@ function mapGitHubInstallation(
     accountId: row.accountId,
     workspaceId: row.workspaceId,
     installationId: row.installationId,
+    githubAccountId: row.githubAccountId,
     accountLogin: row.accountLogin,
     accountType: row.accountType,
     repositoryScope: row.repositoryScope as GitHubRepositoryScope,
     linkedBySubjectId: row.linkedBySubjectId,
+    githubActorId: row.githubActorId,
+    githubActorLogin: row.githubActorLogin,
+    authorityKind: row.authorityKind as GitHubInstallationAuthorityKind | null,
+    authorityCheckedAt: row.authorityCheckedAt?.toISOString() ?? null,
+    authorityExpiresAt: row.authorityExpiresAt?.toISOString() ?? null,
+    authorityNonce: row.authorityNonce,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };

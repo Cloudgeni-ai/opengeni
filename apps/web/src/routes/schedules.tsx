@@ -635,7 +635,7 @@ function ScheduledTaskForm(props: {
             Let the agent use OpenGeni tools
           </label>
           <ScheduledTaskRepositoryPicker
-            configured={context.githubStatus?.configured === true}
+            status={context.githubStatus?.status ?? "disabled"}
             repositories={context.githubRepos}
             groups={context.repositoryGroups}
             resources={form.resources}

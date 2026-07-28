@@ -136,12 +136,17 @@ describe("release schema contract", () => {
         (migrations.has("0125_document_drops_visibility.sql") ? 1 : 0) +
         (migrations.has("0126_document_access_constraints.sql") ? 1 : 0) +
         (migrations.has("0127_document_default_base_index.sql") ? 1 : 0) +
+        (migrations.has("0128_github_installation_authority.sql") ? 1 : 0) +
         (migrations.has("0129_workspace_instruction_policies.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "09369784952cec23c988cdf5cd794dc97ffdbd63b42e50f615ad3c3fbe6beceb",
+      "90bdea761d4f865b711562964ace115e7df4c0a4de09edb37309b49187530a33",
     );
     expect(contract.latestMigration).toBe("0129_workspace_instruction_policies.sql");
+    expect(migrations.get("0128_github_installation_authority.sql")).toMatchObject({
+      sha256: "365793b2a204a70e214adb90298b522acbb6dcfae22a46681a58f41a6938e6f0",
+      deploymentMode: "rolling",
+    });
     expect(migrations.get("0122_codex_capacity_same_turn.sql")).toMatchObject({
       sha256: "84e97abff7394d9fcca110012d9ceaede9ae683280a8a4a7335bcf9ec5d52d4e",
       deploymentMode: "maintenance",

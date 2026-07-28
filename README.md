@@ -314,9 +314,9 @@ From the web app:
 5. Create the app in GitHub. The callback page prints `OPENGENI_GITHUB_APP_*` lines and includes a copy button.
 6. Copy those lines into `.env`.
 7. Restart the API and worker, or restart everything with `bun run dev`.
-8. Keep the generated credentials available for a future authority-safe connection flow. App registration remains supported, but new workspace-installation binding is temporarily disabled.
+8. Reopen the repository picker and click **Connect GitHub**. Complete GitHub's installation/configuration screen and fresh user authorization as the personal-account owner or an active organization owner.
 
-All new installation binding is disabled. `GET /user/installations`, repository administrator permission, and `setup_action=request` do not prove that the current human may bind or manage an installation for an OpenGeni workspace. GitHub's own rules vary by account and organization policy: a personal-account user may install on their account; an organization owner may install for the organization; and a repository administrator may install only when the App's requested permissions and the organization's installation policy allow it. The GitHub App manager role does not itself grant installation authority. GitHub also documents the setup-URL `installation_id` as spoofable and recommends only associating it with the OAuth user, which proves visibility rather than install/configure authority. Consequently, both `installUrl` and `linkUrl` are `null`, legacy install/link states and callbacks return `410`, and an owner-approval request never creates a binding.
+OpenGeni reports App server configuration and workspace binding separately as `disabled`, `unbound`, or `bound`. It binds only after fresh GitHub authorization proves exact personal ownership or active organization ownership and then atomically stores the OpenGeni account/workspace/subject, GitHub actor/account/installation, one-time proof, and explicit repository IDs. Repository administration, collaboration, installation visibility, setup callback IDs, and App Manager status are never treated as installation authority. An organization approval request remains pending and unbound. See [GitHub App workspace bindings](docs/github-app.md) for the exact supported authority matrix, replay/expiry rules, lifecycle states, and operator requirements.
 
 For local development, the manifest callback can use the API origin from the running request. If you run behind a tunnel or deployed URL, set:
 
@@ -325,9 +325,9 @@ OPENGENI_GITHUB_APP_MANIFEST_BASE_URL=https://YOUR_DOMAIN
 OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET=change-me
 ```
 
-The generated App still configures `<baseUrl>/v1/github/oauth/callback` as its callback URL for compatibility, but OpenGeni does not exchange an OAuth code or persist a workspace binding through that callback while authority proof is disabled. Existing provider adapter methods remain ABI-compatible and are not an authorization grant.
+The generated App configures `<baseUrl>/v1/github/oauth/callback` and requests **Members: read** so GitHub can expose active organization-owner membership. Existing organization installations must approve the added permission before organization-owner self-service can succeed; unavailable proof fails closed.
 
-Existing database bindings created before repository allowlists were introduced retain `all` scope for compatibility. Migration 0095 and all selected-repository allowlists remain in place; no migration ordinal is reused or reordered. Session creation, first-party GitHub token minting, and GitHub-authenticated worker turn startup all recheck the current workspace binding, so unlinking or narrowing a binding also revokes queued and scheduled use before a new token is minted. Connected Machines remain exempt because they use their own git credentials and OpenGeni mints no GitHub token for them.
+Existing database rows created without an owner-authority receipt remain visible for audit/unlink as `unverified`, but they cannot enumerate repositories, authorize session resources, or mint installation tokens. Every new binding has a selected-repository allowlist. Session creation, repository listing, first-party GitHub token minting, and GitHub-authenticated worker turn startup recheck the workspace binding, so unlinking or narrowing it revokes queued and scheduled use before a new token is minted. Connected Machines remain exempt because they use their own git credentials and OpenGeni mints no GitHub token for them.
 
 The generated App does not register GitHub webhooks; repository listing, clone tokens, commits, pushes, and pull requests use installation access tokens.
 
