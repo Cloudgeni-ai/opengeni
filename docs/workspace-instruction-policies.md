@@ -97,8 +97,8 @@ The routes live below
 
 ## Legacy compatibility and inactive workspaces
 
-Migration `0129` performs no backfill. Creating or importing a draft does not
-create an active head.
+Migration `0130_workspace_instruction_policies.sql` performs no backfill.
+Creating or importing a draft does not create an active head.
 
 When a workspace has no instruction-policy activation head, this backend slice
 does not participate in prompt composition at all. Existing runtime behavior is
