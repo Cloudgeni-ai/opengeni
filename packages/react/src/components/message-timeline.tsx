@@ -150,16 +150,24 @@ export function MessageTimeline({
   // structurally impossible — the reader only ever sees it already at the
   // bottom. An empty timeline reveals immediately (there is nothing to anchor).
   const [revealed, setRevealed] = useState(false);
-  // Our own scrollTop assignments echo back as delayed scroll events. Track the
-  // actual clamped target rather than a boolean: if reader input lands before
-  // the echo, its different position must win and unpin bottom-follow. A true
-  // echo also must not recapture the visual anchor — during progressive prepend
-  // the next older row may already have mounted by the time that echo arrives.
-  const programmaticScrollTargetRef = useRef<number | null>(null);
+  // Our own scrollTop assignments echo back as delayed scroll events. Keep the
+  // ordered, clamped targets rather than only the latest one: successive
+  // ResizeObserver corrections can queue several echoes before the browser
+  // dispatches them. If reader input lands at a different position, its value
+  // wins and clears the pending echoes. A matching echo must not recapture the
+  // visual anchor while progressive prepend is still mounting older rows.
+  const programmaticScrollTargetsRef = useRef<number[]>([]);
   const assignScrollTop = useCallback((node: HTMLElement, value: number) => {
     const previous = node.scrollTop;
     node.scrollTop = value;
-    programmaticScrollTargetRef.current = node.scrollTop === previous ? null : node.scrollTop;
+    if (node.scrollTop === previous) {
+      return;
+    }
+    const pending = programmaticScrollTargetsRef.current;
+    pending.push(node.scrollTop);
+    if (pending.length > 32) {
+      pending.splice(0, pending.length - 32);
+    }
   }, []);
   // Mirror `pinned` into a ref so the ResizeObserver callback (a stable closure)
   // always reads the live value without re-subscribing on every scroll.
@@ -221,18 +229,40 @@ export function MessageTimeline({
     anchorRef.current = null;
   }, []);
 
-  // Follow the stream while pinned to the bottom; never fight the reader.
+  // Restore the user-owned anchor synchronously after React commits a frame.
+  // ResizeObserver remains a late-measurement fallback, but progressive history
+  // frames must be corrected before the browser can paint an intermediate jump.
+  const restoreAnchor = useCallback(
+    (node: HTMLElement) => {
+      if (autoFollow && pinnedRef.current) {
+        assignScrollTop(node, node.scrollHeight);
+        return;
+      }
+      const anchor = anchorRef.current;
+      if (!anchor || !anchor.el.isConnected) {
+        return;
+      }
+      const containerTop = node.getBoundingClientRect().top;
+      const now = anchor.el.getBoundingClientRect().top - containerTop;
+      const diff = now - anchor.top;
+      if (diff !== 0) {
+        assignScrollTop(node, node.scrollTop + diff);
+      }
+    },
+    [assignScrollTop, autoFollow],
+  );
+
   // A LAYOUT effect so the very first paint of a freshly loaded session is
   // already anchored at the bottom — no visible traversal down the history.
   useLayoutEffect(() => {
     const node = scrollRef.current;
-    if (node && autoFollow && pinned) {
-      assignScrollTop(node, node.scrollHeight);
+    if (node) {
+      restoreAnchor(node);
     }
     if (!revealed && groups.length > 0) {
       setRevealed(true);
     }
-  }, [resolvedItems, working, autoFollow, pinned, revealed, groups.length, assignScrollTop]);
+  }, [resolvedItems, working, revealed, groups.length, restoreAnchor]);
 
   // A cleared timeline (stream identity change) re-arms the reveal so the next
   // session also first paints at its bottom.
@@ -307,34 +337,26 @@ export function MessageTimeline({
       if (!current) {
         return;
       }
-      if (autoFollow && pinnedRef.current) {
-        assignScrollTop(current, current.scrollHeight);
-      } else {
-        const anchor = anchorRef.current;
-        if (anchor && anchor.el.isConnected) {
-          const containerTop = current.getBoundingClientRect().top;
-          const now = anchor.el.getBoundingClientRect().top - containerTop;
-          const diff = now - anchor.top;
-          if (diff !== 0) {
-            assignScrollTop(current, current.scrollTop + diff);
-          }
-        }
-      }
-      captureAnchor();
+      restoreAnchor(current);
     });
     observer.observe(inner);
     return () => observer.disconnect();
-  }, [autoFollow, captureAnchor, assignScrollTop]);
+  }, [restoreAnchor]);
 
   const onScroll = () => {
     const node = scrollRef.current;
     if (!node) {
       return;
     }
-    const programmaticTarget = programmaticScrollTargetRef.current;
-    const programmatic =
-      programmaticTarget !== null && Math.abs(node.scrollTop - programmaticTarget) <= 1;
-    programmaticScrollTargetRef.current = null;
+    const pending = programmaticScrollTargetsRef.current;
+    const programmaticIndex = pending.findIndex((target) => Math.abs(node.scrollTop - target) <= 1);
+    const programmatic = programmaticIndex >= 0;
+    if (programmatic) {
+      pending.splice(0, programmaticIndex + 1);
+    } else {
+      // A real reader scroll supersedes every delayed programmatic echo.
+      pending.length = 0;
+    }
     const nextPinned = node.scrollHeight - node.scrollTop - node.clientHeight < 48;
     // Echoes of our own assignments may PIN but never UNPIN — only the reader
     // scrolling away releases the bottom-follow.

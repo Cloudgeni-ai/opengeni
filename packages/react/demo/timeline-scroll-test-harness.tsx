@@ -3,6 +3,7 @@ import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 
 import { MessageTimeline, type TimelineItem } from "../src/index";
+import "./styles.css";
 
 type VisibleRow = { id: string | null; top: number | null };
 type TimelineScrollHarness = {
@@ -47,8 +48,9 @@ function streamedItem(text: string): TimelineItem {
 }
 
 function Harness() {
+  const adjacentPrepend = new URLSearchParams(window.location.search).has("adjacent");
   const [items, setItems] = useState(() => [
-    ...range(1_000, 120),
+    ...(adjacentPrepend ? range(1_040, 80) : range(1_000, 120)),
     streamedItem("Initial streamed response"),
   ]);
   const [grown, setGrown] = useState(false);
@@ -78,8 +80,13 @@ function Harness() {
     });
   }, [nextSequence]);
   const prepend = useCallback(() => {
-    flushSync(() => setItems((current) => [...range(900, 100), ...current]));
-  }, []);
+    flushSync(() =>
+      setItems((current) => [
+        ...(adjacentPrepend ? range(1_000, 40) : range(900, 100)),
+        ...current,
+      ]),
+    );
+  }, [adjacentPrepend]);
   const stream = useCallback(() => {
     flushSync(() => {
       setStreamed(true);
