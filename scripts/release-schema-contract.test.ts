@@ -135,12 +135,13 @@ describe("release schema contract", () => {
         (migrations.has("0124_session_event_duplicate_lookup.sql") ? 1 : 0) +
         (migrations.has("0125_document_drops_visibility.sql") ? 1 : 0) +
         (migrations.has("0126_document_access_constraints.sql") ? 1 : 0) +
-        (migrations.has("0127_document_default_base_index.sql") ? 1 : 0),
+        (migrations.has("0127_document_default_base_index.sql") ? 1 : 0) +
+        (migrations.has("0129_workspace_instruction_policies.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "988125394d6a6a96cecfa2a2f97c4d290daa802a749bf8e6fca6193848e3ae3f",
+      "cabb6dfb946145d8eb1626acf246446460525cb85d34ef1db426d9da35470243",
     );
-    expect(contract.latestMigration).toBe("0127_document_default_base_index.sql");
+    expect(contract.latestMigration).toBe("0129_workspace_instruction_policies.sql");
     expect(migrations.get("0122_codex_capacity_same_turn.sql")).toMatchObject({
       sha256: "84e97abff7394d9fcca110012d9ceaede9ae683280a8a4a7335bcf9ec5d52d4e",
       deploymentMode: "maintenance",
@@ -166,7 +167,7 @@ describe("release schema contract", () => {
     expect(
       contract.migrations
         .map((migration) => migration.path)
-        .filter((path) => /^(?:010[3-9]|011[0-9]|012[0-7])_/.test(path)),
+        .filter((path) => /^(?:010[3-9]|011[0-9]|012[0-79])_/.test(path)),
     ).toEqual([
       "0103_host_export_root_session.sql",
       "0104_host_export_root_session_backfill.sql",
@@ -183,6 +184,7 @@ describe("release schema contract", () => {
       "0125_document_drops_visibility.sql",
       "0126_document_access_constraints.sql",
       "0127_document_default_base_index.sql",
+      "0129_workspace_instruction_policies.sql",
     ]);
     expect(new Set(contract.migrations.map((migration) => migration.path)).size).toBe(
       contract.fileCount,
@@ -249,6 +251,10 @@ describe("release schema contract", () => {
     });
     expect(migrations.get("0127_document_default_base_index.sql")).toMatchObject({
       sha256: "7deb5fde59f2e0e336a18a72630a00348dc641041f7df60639b50df79b4c4480",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0129_workspace_instruction_policies.sql")).toMatchObject({
+      sha256: "8c4b9de6c7109137560599f26e0a8bf7f30a791485550a840238f024d7581770",
       deploymentMode: "rolling",
     });
   });

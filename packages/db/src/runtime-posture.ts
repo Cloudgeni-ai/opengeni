@@ -79,6 +79,9 @@ export const FORCE_RLS_TABLES = [
   "workspace_captures",
   "workspace_control_events",
   "workspace_inference_controls",
+  "workspace_instruction_policy_activation_events",
+  "workspace_instruction_policy_heads",
+  "workspace_instruction_policy_revisions",
   "workspace_model_policies",
   "workspace_packs",
   "workspace_session_activity_revisions",
@@ -185,6 +188,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "workspace_captures",
   "workspace_control_events",
   "workspace_inference_controls",
+  "workspace_instruction_policy_heads",
   "workspace_memberships",
   "workspace_model_policies",
   "workspace_packs",
@@ -197,8 +201,12 @@ export const RUNTIME_FULL_DML_TABLES = [
 /** Configuration is deployment-global and intentionally read-only at runtime. */
 export const RUNTIME_READ_ONLY_TABLES = ["nested_agent_depth_configuration"] as const;
 
-/** Spawn-denial evidence is append-only to the runtime, but remains queryable. */
-export const RUNTIME_READ_INSERT_TABLES = ["session_spawn_denials"] as const;
+/** Append-only evidence/revision tables are insertable and queryable, never mutable. */
+export const RUNTIME_READ_INSERT_TABLES = [
+  "session_spawn_denials",
+  "workspace_instruction_policy_activation_events",
+  "workspace_instruction_policy_revisions",
+] as const;
 
 /**
  * These FORCE-RLS tables are owned by security-definer host-export routines.
