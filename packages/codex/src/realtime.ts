@@ -7,6 +7,11 @@ import {
   CODEX_RESPONSES_BASE,
 } from "./constants";
 import type { CodexFetch } from "./device-code";
+import {
+  CODEX_REALTIME_INITIAL_ITEMS_MAX_COUNT,
+  CODEX_REALTIME_INITIAL_ITEMS_MAX_TOKENS,
+  type CodexRealtimeInitialItem,
+} from "./realtime-v3";
 
 const CODEX_REALTIME_CALL_URL = `${CODEX_RESPONSES_BASE}/realtime/calls?intent=quicksilver&architecture=avas`;
 const MAX_REALTIME_SDP_BYTES = 1024 * 1024;
@@ -34,6 +39,8 @@ export type CodexRealtimeCallInput = {
   version: typeof CODEX_REALTIME_VERSION;
   /** Server-owned session/thread binding; sent upstream but never returned. */
   sessionId: string;
+  /** Server-projected ordinary-session history for Frameless V3 bootstrap. */
+  initialItems?: CodexRealtimeInitialItem[] | undefined;
   instructions?: string | undefined;
   voice?: CodexRealtimeVoice | undefined;
 };
@@ -89,10 +96,16 @@ export async function createCodexRealtimeCall(
   validateRealtimeInput(input);
   const timeoutMs = options.timeoutMs ?? CODEX_REALTIME_CALL_TIMEOUT_MS;
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-    throw new CodexRealtimeError("invalid_request", "Codex realtime timeout must be positive");
+    throw new CodexRealtimeError(
+      "invalid_request",
+      "Codex realtime timeout must be positive",
+    );
   }
   if (options.signal?.aborted) {
-    throw new CodexRealtimeError("cancelled", "Codex realtime request cancelled");
+    throw new CodexRealtimeError(
+      "cancelled",
+      "Codex realtime request cancelled",
+    );
   }
 
   const controller = new AbortController();
@@ -104,7 +117,9 @@ export async function createCodexRealtimeCall(
   });
   const onAbort = (): void => {
     controller.abort(options.signal?.reason);
-    rejectCancellation?.(new CodexRealtimeError("cancelled", "Codex realtime request cancelled"));
+    rejectCancellation?.(
+      new CodexRealtimeError("cancelled", "Codex realtime request cancelled"),
+    );
   };
   options.signal?.addEventListener("abort", onAbort, { once: true });
 
@@ -112,7 +127,9 @@ export async function createCodexRealtimeCall(
     timeout = setTimeout(() => {
       timedOut = true;
       controller.abort();
-      reject(new CodexRealtimeError("timeout", "Codex realtime request timed out"));
+      reject(
+        new CodexRealtimeError("timeout", "Codex realtime request timed out"),
+      );
     }, timeoutMs);
   });
 
@@ -135,6 +152,23 @@ export async function createCodexRealtimeCall(
           },
           delegation: { type: "client" },
           model: CODEX_REALTIME_MODEL,
+          ...(input.initialItems?.length
+            ? {
+                initial_items: input.initialItems.map((item) => ({
+                  type: "message",
+                  role: item.role,
+                  content: [
+                    {
+                      type:
+                        item.role === "assistant"
+                          ? "output_text"
+                          : "input_text",
+                      text: item.text,
+                    },
+                  ],
+                })),
+              }
+            : {}),
         },
       }),
       signal: controller.signal,
@@ -175,12 +209,21 @@ export async function createCodexRealtimeCall(
   } catch (error) {
     if (error instanceof CodexRealtimeError) throw error;
     if (options.signal?.aborted) {
-      throw new CodexRealtimeError("cancelled", "Codex realtime request cancelled");
+      throw new CodexRealtimeError(
+        "cancelled",
+        "Codex realtime request cancelled",
+      );
     }
     if (timedOut || controller.signal.aborted) {
-      throw new CodexRealtimeError("timeout", "Codex realtime request timed out");
+      throw new CodexRealtimeError(
+        "timeout",
+        "Codex realtime request timed out",
+      );
     }
-    throw new CodexRealtimeError("network", "Codex realtime provider request failed");
+    throw new CodexRealtimeError(
+      "network",
+      "Codex realtime provider request failed",
+    );
   } finally {
     if (timeout) clearTimeout(timeout);
     options.signal?.removeEventListener("abort", onAbort);
@@ -193,10 +236,16 @@ export function selectCodexCredentialId(args: {
   activeCredentialId: string | null;
   connectedIds: ReadonlySet<string>;
 }): string | null {
-  if (args.sessionPinnedCredentialId && args.connectedIds.has(args.sessionPinnedCredentialId)) {
+  if (
+    args.sessionPinnedCredentialId &&
+    args.connectedIds.has(args.sessionPinnedCredentialId)
+  ) {
     return args.sessionPinnedCredentialId;
   }
-  if (args.activeCredentialId && args.connectedIds.has(args.activeCredentialId)) {
+  if (
+    args.activeCredentialId &&
+    args.connectedIds.has(args.activeCredentialId)
+  ) {
     return args.activeCredentialId;
   }
   return null;
@@ -210,16 +259,68 @@ function validateRealtimeInput(input: CodexRealtimeCallInput): void {
     );
   }
   if (!input.sessionId || input.sessionId.length > 128) {
-    throw new CodexRealtimeError("invalid_request", "Codex realtime session id is invalid");
+    throw new CodexRealtimeError(
+      "invalid_request",
+      "Codex realtime session id is invalid",
+    );
   }
   if (new TextEncoder().encode(input.sdp).byteLength > MAX_REALTIME_SDP_BYTES) {
-    throw new CodexRealtimeError("invalid_request", "Codex realtime SDP offer is too large");
+    throw new CodexRealtimeError(
+      "invalid_request",
+      "Codex realtime SDP offer is too large",
+    );
   }
   if (!isAudioSdp(input.sdp)) {
-    throw new CodexRealtimeError("invalid_request", "Codex realtime requires an audio SDP offer");
+    throw new CodexRealtimeError(
+      "invalid_request",
+      "Codex realtime requires an audio SDP offer",
+    );
   }
-  if (input.voice !== undefined && !CODEX_REALTIME_VOICES.includes(input.voice)) {
-    throw new CodexRealtimeError("invalid_request", "Codex realtime voice is unsupported");
+  if (
+    input.voice !== undefined &&
+    !CODEX_REALTIME_VOICES.includes(input.voice)
+  ) {
+    throw new CodexRealtimeError(
+      "invalid_request",
+      "Codex realtime voice is unsupported",
+    );
+  }
+  const initialItems = input.initialItems ?? [];
+  if (initialItems.length > CODEX_REALTIME_INITIAL_ITEMS_MAX_COUNT) {
+    throw new CodexRealtimeError(
+      "invalid_request",
+      `Codex realtime history exceeds ${CODEX_REALTIME_INITIAL_ITEMS_MAX_COUNT} items`,
+    );
+  }
+  let estimatedTokens = 0;
+  for (const item of initialItems) {
+    if (
+      (item.role !== "user" &&
+        item.role !== "developer" &&
+        item.role !== "assistant") ||
+      typeof item.text !== "string"
+    ) {
+      throw new CodexRealtimeError(
+        "invalid_request",
+        "Codex realtime history item is invalid",
+      );
+    }
+    const itemTokens = Math.ceil(
+      new TextEncoder().encode(item.text).byteLength / 4,
+    );
+    if (itemTokens > CODEX_REALTIME_INITIAL_ITEMS_MAX_TOKENS) {
+      throw new CodexRealtimeError(
+        "invalid_request",
+        "Codex realtime history item is too large",
+      );
+    }
+    estimatedTokens += itemTokens;
+  }
+  if (estimatedTokens > CODEX_REALTIME_INITIAL_ITEMS_MAX_TOKENS) {
+    throw new CodexRealtimeError(
+      "invalid_request",
+      "Codex realtime history is too large",
+    );
   }
 }
 
@@ -246,9 +347,17 @@ function providerHttpError(status: number): CodexRealtimeError {
     );
   }
   if (status === 429) {
-    return new CodexRealtimeError("rate_limited", "Codex realtime is rate limited", status);
+    return new CodexRealtimeError(
+      "rate_limited",
+      "Codex realtime is rate limited",
+      status,
+    );
   }
-  return new CodexRealtimeError("provider", "Codex realtime provider request failed", status);
+  return new CodexRealtimeError(
+    "provider",
+    "Codex realtime provider request failed",
+    status,
+  );
 }
 
 function validRealtimeLocation(location: string): boolean {
