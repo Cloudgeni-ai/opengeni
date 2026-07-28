@@ -29,7 +29,7 @@ type BuilderHandle = {
   result: Promise<BuilderResult>;
 };
 
-function createFixture(): string {
+function createFixture(options: { preserveDistDirectory?: boolean } = {}): string {
   const root = mkdtempSync(join(tmpdir(), "opengeni-build-cache-"));
   fixtureRoots.add(root);
 
@@ -112,8 +112,11 @@ if (variant === heldVariant && variant !== "A" && gate) {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
   }
 }
-rmSync(dist, { recursive: true, force: true });
-mkdirSync(dist, { recursive: true });
+${
+  options.preserveDistDirectory
+    ? "mkdirSync(dist, { recursive: true });"
+    : "rmSync(dist, { recursive: true, force: true });\nmkdirSync(dist, { recursive: true });"
+}
 writeFileSync(join(dist, "artifact.txt"), variant + "|" + linkedInput + "|" + modeInput + "\\n");
 if (variant === "B" && gate) {
   writeFileSync(marker("b-built"), "built\\n");
@@ -464,7 +467,9 @@ test("drains a killed builder's detached child before admitting its successor", 
 });
 
 test("keeps active B authoritative against stale A and interposing C", async () => {
-  const root = createFixture();
+  // Keep excluded output-directory events out of the input monitor's ambiguous
+  // parent-directory path while this test exercises concurrent lock generations.
+  const root = createFixture({ preserveDistDirectory: true });
   const lockPath = join(root, ".opengeni", "build-cache", "packages", "_opengeni_demo.json.lock");
   mkdirSync(lockPath, { recursive: true });
   writeFileSync(
