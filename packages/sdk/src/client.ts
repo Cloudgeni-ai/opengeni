@@ -120,6 +120,8 @@ import type {
   SessionHumanInputRequest,
   SessionLineageResponse,
   SessionRealtimeMutationResponse,
+  SyncSessionRealtimeLedgerRequest,
+  SyncSessionRealtimeLedgerResponse,
   RenewSessionRealtimeRequest,
   SessionMcpCredentialUpdateInput,
   UpdateSessionMcpApprovalPolicyRequest,
@@ -610,6 +612,20 @@ export class OpenGeniClient {
     return await this.requestJson<SessionRealtimeMutationResponse>(
       "PATCH",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/realtime/${realtimeId}/heartbeat`,
+      request,
+    );
+  }
+
+  /** Persist finalized V3 events, acknowledge delivery, and replay pending outbound context. */
+  async syncSessionRealtimeLedger(
+    workspaceId: string,
+    sessionId: string,
+    realtimeId: string,
+    request: SyncSessionRealtimeLedgerRequest,
+  ): Promise<SyncSessionRealtimeLedgerResponse> {
+    return await this.requestJson<SyncSessionRealtimeLedgerResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/realtime/${realtimeId}/sync`,
       request,
     );
   }

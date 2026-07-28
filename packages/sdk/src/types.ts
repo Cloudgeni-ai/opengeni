@@ -19,9 +19,12 @@ export type CodexRealtimeVoice =
 
 export type CodexRealtimeWebrtcRequest = {
   realtimeId: string;
+  operationId: string;
   browserInstanceId: string;
   ownerKey: string;
   expectedVersion: number;
+  expectedConnectionEpoch: number;
+  rotate: boolean;
   sdp: string;
   version: CodexRealtimeWebrtcVersion;
   instructions?: string | undefined;
@@ -32,6 +35,67 @@ export type CodexRealtimeWebrtcResponse = {
   sdp: string;
   version: CodexRealtimeWebrtcVersion;
   model: "gpt-live-1-boulder-alpha";
+  connectionId: string;
+  connectionEpoch: number;
+  modeVersion: number;
+  replay: boolean;
+};
+
+export type SessionRealtimeLedgerDirection = "provider_in" | "provider_out";
+export type SessionRealtimeLedgerKind =
+  | "user_transcript"
+  | "assistant_transcript"
+  | "delegation_call"
+  | "delegation_result"
+  | "interruption"
+  | "session_update"
+  | "error";
+
+export type SessionRealtimeLedgerEntry = {
+  id: string;
+  realtimeId: string;
+  operationId: string;
+  connectionEpoch: number;
+  sequence: number;
+  direction: SessionRealtimeLedgerDirection;
+  kind: SessionRealtimeLedgerKind;
+  role: "user" | "assistant" | null;
+  providerEventId: string | null;
+  delegationItemId: string | null;
+  sourceUpdateId: string | null;
+  historyItemId: string | null;
+  text: string | null;
+  payload: Record<string, unknown>;
+  clientAckedAt: string | null;
+  providerAckedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type SessionRealtimeInboundEntry = {
+  operationId: string;
+  kind: Exclude<SessionRealtimeLedgerKind, "delegation_result" | "session_update">;
+  role?: "user" | "assistant" | null | undefined;
+  providerEventId?: string | null | undefined;
+  delegationItemId?: string | null | undefined;
+  text?: string | null | undefined;
+  payload?: Record<string, unknown> | undefined;
+};
+
+export type SyncSessionRealtimeLedgerRequest = {
+  browserInstanceId: string;
+  ownerKey: string;
+  expectedVersion: number;
+  connectionId: string;
+  connectionEpoch: number;
+  entries?: SessionRealtimeInboundEntry[] | undefined;
+  clientAckThroughSequence?: number | null | undefined;
+  providerAckThroughSequence?: number | null | undefined;
+};
+
+export type SyncSessionRealtimeLedgerResponse = {
+  accepted: Array<{ entry: SessionRealtimeLedgerEntry; replay: boolean }>;
+  outbound: SessionRealtimeLedgerEntry[];
 };
 
 export type SessionRealtimeModel = "gpt-live-1-boulder-alpha";

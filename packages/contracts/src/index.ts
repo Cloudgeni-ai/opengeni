@@ -4015,7 +4015,10 @@ const SessionRealtimeOwnerProof = z.object({
 
 export const CodexRealtimeWebrtcRequest = SessionRealtimeOwnerProof.extend({
   realtimeId: z.string().uuid(),
+  operationId: z.string().uuid(),
   expectedVersion: z.number().int().positive(),
+  expectedConnectionEpoch: z.number().int().positive(),
+  rotate: z.boolean(),
   sdp: z
     .string()
     .min(1)
@@ -4026,15 +4029,98 @@ export const CodexRealtimeWebrtcRequest = SessionRealtimeOwnerProof.extend({
 }).strict();
 export type CodexRealtimeWebrtcRequest = z.infer<typeof CodexRealtimeWebrtcRequest>;
 
-export const CodexRealtimeWebrtcResponse = z.object({
-  sdp: z
-    .string()
-    .min(1)
-    .max(1024 * 1024),
-  version: CodexRealtimeWebrtcVersion,
-  model: z.literal("gpt-live-1-boulder-alpha"),
-});
+export const CodexRealtimeWebrtcResponse = z
+  .object({
+    sdp: z
+      .string()
+      .min(1)
+      .max(1024 * 1024),
+    version: CodexRealtimeWebrtcVersion,
+    model: z.literal("gpt-live-1-boulder-alpha"),
+    connectionId: z.string().uuid(),
+    connectionEpoch: z.number().int().positive(),
+    modeVersion: z.number().int().positive(),
+    replay: z.boolean(),
+  })
+  .strict();
 export type CodexRealtimeWebrtcResponse = z.infer<typeof CodexRealtimeWebrtcResponse>;
+
+export const SessionRealtimeLedgerDirection = z.enum(["provider_in", "provider_out"]);
+export type SessionRealtimeLedgerDirection = z.infer<typeof SessionRealtimeLedgerDirection>;
+
+export const SessionRealtimeLedgerKind = z.enum([
+  "user_transcript",
+  "assistant_transcript",
+  "delegation_call",
+  "delegation_result",
+  "interruption",
+  "session_update",
+  "error",
+]);
+export type SessionRealtimeLedgerKind = z.infer<typeof SessionRealtimeLedgerKind>;
+
+export const SessionRealtimeLedgerEntry = z
+  .object({
+    id: z.string().uuid(),
+    realtimeId: z.string().uuid(),
+    operationId: z.string().uuid(),
+    connectionEpoch: z.number().int().positive(),
+    sequence: z.number().int().positive(),
+    direction: SessionRealtimeLedgerDirection,
+    kind: SessionRealtimeLedgerKind,
+    role: z.enum(["user", "assistant"]).nullable(),
+    providerEventId: z.string().nullable(),
+    delegationItemId: z.string().nullable(),
+    sourceUpdateId: z.string().uuid().nullable(),
+    historyItemId: z.string().uuid().nullable(),
+    text: z.string().nullable(),
+    payload: z.record(z.string(), z.unknown()),
+    clientAckedAt: z.string().datetime().nullable(),
+    providerAckedAt: z.string().datetime().nullable(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .strict();
+export type SessionRealtimeLedgerEntry = z.infer<typeof SessionRealtimeLedgerEntry>;
+
+export const SessionRealtimeInboundEntry = z
+  .object({
+    operationId: z.string().uuid(),
+    kind: z.enum([
+      "user_transcript",
+      "assistant_transcript",
+      "delegation_call",
+      "interruption",
+      "error",
+    ]),
+    role: z.enum(["user", "assistant"]).nullable().optional(),
+    providerEventId: z.string().max(1024).nullable().optional(),
+    delegationItemId: z.string().max(1024).nullable().optional(),
+    text: z.string().max(131_072).nullable().optional(),
+    payload: z.record(z.string(), z.unknown()).optional(),
+  })
+  .strict();
+export type SessionRealtimeInboundEntry = z.infer<typeof SessionRealtimeInboundEntry>;
+
+export const SyncSessionRealtimeLedgerRequest = SessionRealtimeOwnerProof.extend({
+  expectedVersion: z.number().int().positive(),
+  connectionId: z.string().uuid(),
+  connectionEpoch: z.number().int().positive(),
+  entries: z.array(SessionRealtimeInboundEntry).max(64).optional(),
+  clientAckThroughSequence: z.number().int().nonnegative().nullable().optional(),
+  providerAckThroughSequence: z.number().int().nonnegative().nullable().optional(),
+}).strict();
+export type SyncSessionRealtimeLedgerRequest = z.infer<typeof SyncSessionRealtimeLedgerRequest>;
+
+export const SyncSessionRealtimeLedgerResponse = z
+  .object({
+    accepted: z.array(
+      z.object({ entry: SessionRealtimeLedgerEntry, replay: z.boolean() }).strict(),
+    ),
+    outbound: z.array(SessionRealtimeLedgerEntry),
+  })
+  .strict();
+export type SyncSessionRealtimeLedgerResponse = z.infer<typeof SyncSessionRealtimeLedgerResponse>;
 
 export const SessionRealtimeModel = z.literal("gpt-live-1-boulder-alpha");
 export type SessionRealtimeModel = z.infer<typeof SessionRealtimeModel>;

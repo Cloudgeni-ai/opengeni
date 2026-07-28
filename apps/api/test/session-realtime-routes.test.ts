@@ -1,6 +1,19 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
-import { createDb, createSession, bootstrapWorkspace, type DbClient } from "@opengeni/db";
+import {
+  bootstrapWorkspace,
+  claimSessionRealtimeConnectionInTransaction,
+  completeSessionRealtimeConnectionInTransaction,
+  createDb,
+  createSession,
+  encryptEnvironmentValue,
+  ensureCodexRotationSettings,
+  setActiveCodexCredential,
+  upsertCodexSubscriptionCredential,
+  withWorkspaceRls,
+  type Database,
+  type DbClient,
+} from "@opengeni/db";
 import { signDelegatedAccessToken } from "@opengeni/contracts";
 import {
   acquireSharedTestDatabase,
@@ -13,9 +26,12 @@ import { Hono } from "hono";
 import { registerSessionRoutes } from "../src/routes/sessions";
 
 const DELEGATION_SECRET = "session-realtime-routes-secret-with-32-bytes";
+const encryptionKey = Buffer.alloc(32, 11);
 const settings = testSettings({
   productAccessMode: "managed",
   delegationSecret: DELEGATION_SECRET,
+  environmentsEncryptionKey: encryptionKey.toString("base64"),
+  codexSubscriptionEnabled: true,
 });
 
 let shared: SharedTestDatabase;
@@ -56,9 +72,19 @@ beforeAll(async () => {
     objectStorage: null,
     documentIndexer: { indexDocument: noop },
     getDocumentServices: () => ({}) as never,
-    codexFetch: async () => {
+    codexFetch: async (input, init) => {
       providerCalls += 1;
-      throw new Error("provider must not be called without valid realtime owner proof");
+      const request = new Request(input, init);
+      const body = (await request.json()) as { sdp?: string };
+      if (body.sdp?.includes("a=force-failure")) {
+        throw new Error("forced provider transport failure");
+      }
+      return new Response(
+        "v=0\r\na=answer:provider-fixture\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n",
+        {
+          headers: { location: "/v1/live/rtc_api_test" },
+        },
+      );
     },
   } as unknown as ApiRouteDeps);
 }, 180_000);
@@ -81,6 +107,27 @@ async function fixture() {
     subjectId,
   });
   const grant = access.workspaceGrants[0]!;
+  const credential = await upsertCodexSubscriptionCredential(client.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId!,
+    credentialEncrypted: encryptEnvironmentValue(
+      encryptionKey,
+      JSON.stringify({
+        access_token: "test-access-token",
+        refresh_token: "test-refresh-token",
+        id_token: "test-id-token",
+      }),
+    ),
+    chatgptAccountId: `api-realtime-provider-${suffix}`,
+    scopes: null,
+    planType: "pro",
+    isFedramp: false,
+    expiresAt: new Date(Date.now() + 60 * 60_000),
+    lastRefreshAt: new Date(),
+    connectedBySubjectId: subjectId,
+  });
+  await ensureCodexRotationSettings(client.db, grant.accountId, grant.workspaceId!);
+  await setActiveCodexCredential(client.db, grant.workspaceId!, credential.id);
   const session = await createSession(client.db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId!,
@@ -100,6 +147,7 @@ async function fixture() {
   return {
     workspaceId: grant.workspaceId!,
     sessionId: session.id,
+    subjectId,
     headers: {
       authorization: `Bearer ${token}`,
       "content-type": "application/json",
@@ -254,9 +302,12 @@ describe("session realtime lifecycle HTTP routes (real PostgreSQL)", () => {
       headers: value.headers,
       body: JSON.stringify({
         realtimeId: started.mode.id,
+        operationId: crypto.randomUUID(),
         browserInstanceId: proof.browserInstanceId,
         ownerKey: `wrong-owner-key-${crypto.randomUUID()}-${crypto.randomUUID()}`,
         expectedVersion: started.mode.version,
+        expectedConnectionEpoch: 1,
+        rotate: false,
         sdp: offer,
         version: "v3",
       }),
@@ -268,14 +319,189 @@ describe("session realtime lifecycle HTTP routes (real PostgreSQL)", () => {
       headers: value.headers,
       body: JSON.stringify({
         realtimeId: started.mode.id,
+        operationId: crypto.randomUUID(),
         browserInstanceId: proof.browserInstanceId,
         ownerKey: proof.ownerKey,
         expectedVersion: started.mode.version + 1,
+        expectedConnectionEpoch: 1,
+        rotate: false,
         sdp: offer,
         version: "v3",
       }),
     });
     expect(staleVersion.status).toBe(409);
     expect(providerCalls).toBe(callsBefore);
+  });
+
+  test("durably fails an unsuccessful negotiation and requires a fresh rotation operation", async () => {
+    const value = await fixture();
+    const base = `http://x/v1/workspaces/${value.workspaceId}/sessions/${value.sessionId}/realtime`;
+    const proof = {
+      operationId: crypto.randomUUID(),
+      browserInstanceId: `browser-${crypto.randomUUID()}`,
+      ownerKey: `owner-key-${crypto.randomUUID()}-${crypto.randomUUID()}`,
+      model: "gpt-live-1-boulder-alpha",
+    };
+    const startedResponse = await app.request(base, {
+      method: "POST",
+      headers: value.headers,
+      body: JSON.stringify(proof),
+    });
+    const started = (await startedResponse.json()) as { mode: { id: string; version: number } };
+    const request = {
+      realtimeId: started.mode.id,
+      operationId: crypto.randomUUID(),
+      browserInstanceId: proof.browserInstanceId,
+      ownerKey: proof.ownerKey,
+      expectedVersion: started.mode.version,
+      expectedConnectionEpoch: 1,
+      rotate: false,
+      sdp: "v=0\r\na=force-failure\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n",
+      version: "v3",
+    };
+    const first = await app.request(`${base}/webrtc`, {
+      method: "POST",
+      headers: value.headers,
+      body: JSON.stringify(request),
+    });
+    expect(first.status).toBe(502);
+    const replay = await app.request(`${base}/webrtc`, {
+      method: "POST",
+      headers: value.headers,
+      body: JSON.stringify(request),
+    });
+    expect(replay.status).toBe(409);
+    expect(await replay.text()).toContain("rotate with a new operation");
+  });
+
+  test("durably completes a provider answer and replays it without a second provider call", async () => {
+    const value = await fixture();
+    const base = `http://x/v1/workspaces/${value.workspaceId}/sessions/${value.sessionId}/realtime`;
+    const proof = {
+      operationId: crypto.randomUUID(),
+      browserInstanceId: `browser-${crypto.randomUUID()}`,
+      ownerKey: `owner-key-${crypto.randomUUID()}-${crypto.randomUUID()}`,
+      model: "gpt-live-1-boulder-alpha",
+    };
+    const startedResponse = await app.request(base, {
+      method: "POST",
+      headers: value.headers,
+      body: JSON.stringify(proof),
+    });
+    const started = (await startedResponse.json()) as { mode: { id: string; version: number } };
+    const request = {
+      realtimeId: started.mode.id,
+      operationId: crypto.randomUUID(),
+      browserInstanceId: proof.browserInstanceId,
+      ownerKey: proof.ownerKey,
+      expectedVersion: started.mode.version,
+      expectedConnectionEpoch: 1,
+      rotate: false,
+      sdp: "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n",
+      version: "v3",
+    };
+    const callsBefore = providerCalls;
+    const first = await app.request(`${base}/webrtc`, {
+      method: "POST",
+      headers: value.headers,
+      body: JSON.stringify(request),
+    });
+    expect(first.status).toBe(200);
+    const answer = (await first.json()) as {
+      sdp: string;
+      connectionId: string;
+      connectionEpoch: number;
+      modeVersion: number;
+      replay: boolean;
+    };
+    expect(answer).toMatchObject({
+      sdp: "v=0\r\na=answer:provider-fixture\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n",
+      connectionEpoch: 1,
+      modeVersion: started.mode.version,
+      replay: false,
+    });
+    expect(providerCalls).toBe(callsBefore + 1);
+
+    const replay = await app.request(`${base}/webrtc`, {
+      method: "POST",
+      headers: value.headers,
+      body: JSON.stringify(request),
+    });
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({
+      sdp: answer.sdp,
+      connectionId: answer.connectionId,
+      replay: true,
+    });
+    expect(providerCalls).toBe(callsBefore + 1);
+  });
+
+  test("syncs finalized V3 ledger entries through the active epoch", async () => {
+    const value = await fixture();
+    const base = `http://x/v1/workspaces/${value.workspaceId}/sessions/${value.sessionId}/realtime`;
+    const proof = {
+      operationId: crypto.randomUUID(),
+      browserInstanceId: `browser-${crypto.randomUUID()}`,
+      ownerKey: `owner-key-${crypto.randomUUID()}-${crypto.randomUUID()}`,
+      model: "gpt-live-1-boulder-alpha",
+    };
+    const startedResponse = await app.request(base, {
+      method: "POST",
+      headers: value.headers,
+      body: JSON.stringify(proof),
+    });
+    const started = (await startedResponse.json()) as { mode: { id: string; version: number } };
+    const connectionOperationId = crypto.randomUUID();
+    const claimed = await withWorkspaceRls(client.db, value.workspaceId, (scopedDb) =>
+      scopedDb.transaction((tx) =>
+        claimSessionRealtimeConnectionInTransaction(tx as unknown as Database, {
+          workspaceId: value.workspaceId,
+          sessionId: value.sessionId,
+          realtimeId: started.mode.id,
+          operationId: connectionOperationId,
+          ownerSubjectId: value.subjectId,
+          browserInstanceId: proof.browserInstanceId,
+          ownerKey: proof.ownerKey,
+          expectedVersion: started.mode.version,
+          expectedConnectionEpoch: 1,
+          rotate: false,
+        }),
+      ),
+    );
+    await withWorkspaceRls(client.db, value.workspaceId, (scopedDb) =>
+      scopedDb.transaction((tx) =>
+        completeSessionRealtimeConnectionInTransaction(tx as unknown as Database, {
+          workspaceId: value.workspaceId,
+          sessionId: value.sessionId,
+          realtimeId: started.mode.id,
+          connectionId: claimed.connection.id,
+          operationId: connectionOperationId,
+          connectionEpoch: 1,
+          sdpAnswer: "v=0\r\na=answer:api-test\r\n",
+        }),
+      ),
+    );
+    const response = await app.request(`${base}/${started.mode.id}/sync`, {
+      method: "POST",
+      headers: value.headers,
+      body: JSON.stringify({
+        browserInstanceId: proof.browserInstanceId,
+        ownerKey: proof.ownerKey,
+        expectedVersion: started.mode.version,
+        connectionId: claimed.connection.id,
+        connectionEpoch: 1,
+        entries: [
+          {
+            operationId: crypto.randomUUID(),
+            kind: "user_transcript",
+            text: "finalized API voice input",
+          },
+        ],
+      }),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      accepted: [{ replay: false, entry: { kind: "user_transcript" } }],
+    });
   });
 });

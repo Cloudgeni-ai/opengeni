@@ -1,8 +1,5 @@
 import type { Settings } from "@opengeni/config";
-import type {
-  CodexRealtimeWebrtcRequest,
-  CodexRealtimeWebrtcResponse,
-} from "@opengeni/contracts";
+import type { CodexRealtimeWebrtcRequest, CodexRealtimeWebrtcResponse } from "@opengeni/contracts";
 import {
   CODEX_CLIENT_VERSION,
   CodexRealtimeError,
@@ -67,15 +64,17 @@ export type CodexRealtimeBrokerDependencies = {
     auth: CodexAuthHeaders,
     input: CodexRealtimeCallInput,
     options: { signal?: AbortSignal | undefined },
-  ): Promise<CodexRealtimeWebrtcResponse>;
+  ): Promise<CodexRealtimeProviderAnswer>;
 };
+
+export type CodexRealtimeProviderAnswer = Pick<
+  CodexRealtimeWebrtcResponse,
+  "sdp" | "version" | "model"
+>;
 
 export type CodexRealtimeBrokerInput = {
   sessionId: string;
-  request: Pick<
-    CodexRealtimeWebrtcRequest,
-    "sdp" | "version" | "instructions" | "voice"
-  >;
+  request: Pick<CodexRealtimeWebrtcRequest, "sdp" | "version" | "instructions" | "voice">;
   signal?: AbortSignal | undefined;
 };
 
@@ -86,7 +85,7 @@ export type CodexRealtimeBrokerInput = {
 export async function brokerSessionCodexRealtime(
   deps: CodexRealtimeBrokerDependencies,
   input: CodexRealtimeBrokerInput,
-): Promise<CodexRealtimeWebrtcResponse> {
+): Promise<CodexRealtimeProviderAnswer> {
   if (!deps.enabled) {
     throw new CodexRealtimeBrokerError(
       "subscription_disabled",
@@ -124,18 +123,11 @@ export async function brokerSessionCodexRealtime(
     initialItems,
   };
   try {
-    return await deps.createCall(
-      { ...token, clientVersion: CODEX_CLIENT_VERSION },
-      callInput,
-      {
-        signal: input.signal,
-      },
-    );
+    return await deps.createCall({ ...token, clientVersion: CODEX_CLIENT_VERSION }, callInput, {
+      signal: input.signal,
+    });
   } catch (error) {
-    if (
-      !(error instanceof CodexRealtimeError) ||
-      error.code !== "authentication"
-    ) {
+    if (!(error instanceof CodexRealtimeError) || error.code !== "authentication") {
       throw brokerProviderError(error);
     }
   }
@@ -149,18 +141,11 @@ export async function brokerSessionCodexRealtime(
     throw credentialError(error);
   }
   try {
-    return await deps.createCall(
-      { ...token, clientVersion: CODEX_CLIENT_VERSION },
-      callInput,
-      {
-        signal: input.signal,
-      },
-    );
+    return await deps.createCall({ ...token, clientVersion: CODEX_CLIENT_VERSION }, callInput, {
+      signal: input.signal,
+    });
   } catch (error) {
-    if (
-      error instanceof CodexRealtimeError &&
-      error.code === "authentication"
-    ) {
+    if (error instanceof CodexRealtimeError && error.code === "authentication") {
       throw new CodexRealtimeBrokerError(
         "reconnect_required",
         "Codex subscription must be reconnected for realtime",
@@ -178,9 +163,7 @@ export function buildSessionCodexRealtimeBroker(
   workspaceId: string,
   sessionId: string,
   fetchImpl: CodexFetch = fetch,
-): (
-  input: Omit<CodexRealtimeBrokerInput, "sessionId">,
-) => Promise<CodexRealtimeWebrtcResponse> {
+): (input: Omit<CodexRealtimeBrokerInput, "sessionId">) => Promise<CodexRealtimeProviderAnswer> {
   return async (input) =>
     await brokerSessionCodexRealtime(
       {
@@ -235,10 +218,7 @@ function credentialError(error: unknown): CodexRealtimeBrokerError {
 
 function brokerProviderError(error: unknown): CodexRealtimeBrokerError {
   if (!(error instanceof CodexRealtimeError)) {
-    return new CodexRealtimeBrokerError(
-      "network_error",
-      "Codex realtime provider request failed",
-    );
+    return new CodexRealtimeBrokerError("network_error", "Codex realtime provider request failed");
   }
   const reason: CodexRealtimeBrokerFailureReason =
     error.code === "invalid_request"
@@ -260,11 +240,7 @@ function brokerProviderError(error: unknown): CodexRealtimeBrokerError {
                     : error.code === "network"
                       ? "network_error"
                       : "provider_error";
-  return new CodexRealtimeBrokerError(
-    reason,
-    safeBrokerMessage(reason),
-    error.providerStatus,
-  );
+  return new CodexRealtimeBrokerError(reason, safeBrokerMessage(reason), error.providerStatus);
 }
 
 function safeBrokerMessage(reason: CodexRealtimeBrokerFailureReason): string {

@@ -12,6 +12,7 @@ import {
   createDb,
   createSession,
   endSessionRealtimeInTransaction,
+  failSessionRealtimeConnectionInTransaction,
   getActiveSessionHistoryItems,
   listOutstandingSessionSystemUpdates,
   SessionRealtimeConflictError,
@@ -141,6 +142,32 @@ async function expectConflict(
 }
 
 describe("session realtime ledger", () => {
+  test("idempotently fails only the exact negotiating connection", async () => {
+    const value = await fixture();
+    const first = await claimInitial(value);
+    const input = {
+      workspaceId: value.owner.workspaceId,
+      sessionId: value.owner.sessionId,
+      realtimeId: value.started.mode.id,
+      connectionId: first.claimed.connection.id,
+      operationId: first.claimed.connection.operationId,
+      connectionEpoch: first.claimed.connection.connectionEpoch,
+      failureCode: "provider_error",
+    };
+    const failed = await transaction(value.owner.workspaceId, (tx) =>
+      failSessionRealtimeConnectionInTransaction(tx, input),
+    );
+    expect(failed).toMatchObject({
+      replay: false,
+      connection: { state: "failed", failureCode: "provider_error" },
+    });
+    const replay = await transaction(value.owner.workspaceId, (tx) =>
+      failSessionRealtimeConnectionInTransaction(tx, input),
+    );
+    expect(replay).toMatchObject({ replay: true, connection: { id: failed.connection.id } });
+    await expectConflict(complete(value, first.claimed.connection), "REALTIME_CONNECTION_CHANGED");
+  });
+
   test("idempotently negotiates epoch one and fences its answer after a rotation", async () => {
     const value = await fixture();
     const first = await claimInitial(value);
@@ -150,13 +177,14 @@ describe("session realtime ledger", () => {
     expect(replay).toMatchObject({ replay: true, connection: { id: first.claimed.connection.id } });
     await complete(value, first.claimed.connection);
 
+    const rotationInput = {
+      ...ownerProof(value),
+      operationId: crypto.randomUUID(),
+      expectedConnectionEpoch: 1,
+      rotate: true,
+    };
     const rotated = await transaction(value.owner.workspaceId, (tx) =>
-      claimSessionRealtimeConnectionInTransaction(tx, {
-        ...ownerProof(value),
-        operationId: crypto.randomUUID(),
-        expectedConnectionEpoch: 1,
-        rotate: true,
-      }),
+      claimSessionRealtimeConnectionInTransaction(tx, rotationInput),
     );
     expect(rotated).toMatchObject({
       replay: false,
@@ -166,6 +194,14 @@ describe("session realtime ledger", () => {
     await expectConflict(complete(value, first.claimed.connection), "REALTIME_CONNECTION_CHANGED");
     const active = await complete(value, rotated.connection, "v=0\r\na=answer:rotated\r\n");
     expect(active.connection).toMatchObject({ state: "active", connectionEpoch: 2 });
+    const rotatedReplay = await transaction(value.owner.workspaceId, (tx) =>
+      claimSessionRealtimeConnectionInTransaction(tx, rotationInput),
+    );
+    expect(rotatedReplay).toMatchObject({
+      replay: true,
+      modeVersion: 2,
+      connection: { id: rotated.connection.id, state: "active" },
+    });
   });
 
   test("persists finalized transcripts once in ordinary session continuity", async () => {

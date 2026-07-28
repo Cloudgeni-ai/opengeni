@@ -12,9 +12,12 @@ export type CodexRealtimeNegotiator = (
 export type StartCodexRealtimeWebrtcOptions = {
   negotiate: CodexRealtimeNegotiator;
   realtimeId: string;
+  operationId: string;
   browserInstanceId: string;
   ownerKey: string;
   expectedVersion: number;
+  expectedConnectionEpoch: number;
+  rotate: boolean;
   signal?: AbortSignal | undefined;
   instructions?: string | undefined;
   voice?: CodexRealtimeVoice | undefined;
@@ -27,6 +30,9 @@ export type CodexRealtimeWebrtcSession = {
   readonly peerConnection: RTCPeerConnection;
   readonly events: RTCDataChannel;
   readonly media: MediaStream;
+  readonly connectionId: string;
+  readonly connectionEpoch: number;
+  readonly modeVersion: number;
   /** Idempotently close media, data channel, and peer transport. */
   stop(): void;
 };
@@ -81,9 +87,12 @@ export async function startCodexRealtimeWebrtc(
     const answer = await options.negotiate(
       {
         realtimeId: options.realtimeId,
+        operationId: options.operationId,
         browserInstanceId: options.browserInstanceId,
         ownerKey: options.ownerKey,
         expectedVersion: options.expectedVersion,
+        expectedConnectionEpoch: options.expectedConnectionEpoch,
+        rotate: options.rotate,
         sdp: localSdp,
         version: "v3",
         ...(options.instructions === undefined ? {} : { instructions: options.instructions }),
@@ -99,7 +108,15 @@ export async function startCodexRealtimeWebrtc(
       sdp: answer.sdp,
     });
     throwIfAborted(options.signal);
-    return { peerConnection, events, media, stop };
+    return {
+      peerConnection,
+      events,
+      media,
+      connectionId: answer.connectionId,
+      connectionEpoch: answer.connectionEpoch,
+      modeVersion: answer.modeVersion,
+      stop,
+    };
   } catch (error) {
     stop();
     throw error;

@@ -59,6 +59,18 @@ export type CompleteSessionRealtimeConnectionResult = {
   replay: boolean;
 };
 
+export type FailSessionRealtimeConnectionInput = Omit<
+  CompleteSessionRealtimeConnectionInput,
+  "sdpAnswer"
+> & {
+  failureCode: string;
+};
+
+export type FailSessionRealtimeConnectionResult = {
+  connection: SessionRealtimeConnection;
+  replay: boolean;
+};
+
 export type SessionRealtimeLedgerDirection = "provider_in" | "provider_out";
 
 export type SessionRealtimeLedgerKind =
@@ -94,19 +106,19 @@ export type SessionRealtimeLedgerEntry = {
 export type SessionRealtimeInboundEntryInput = {
   operationId: string;
   kind: Exclude<SessionRealtimeLedgerKind, "delegation_result" | "session_update">;
-  role?: "user" | "assistant" | null;
-  providerEventId?: string | null;
-  delegationItemId?: string | null;
-  text?: string | null;
-  payload?: Record<string, unknown>;
+  role?: "user" | "assistant" | null | undefined;
+  providerEventId?: string | null | undefined;
+  delegationItemId?: string | null | undefined;
+  text?: string | null | undefined;
+  payload?: Record<string, unknown> | undefined;
 };
 
 export type SyncSessionRealtimeLedgerInput = AssertSessionRealtimeOwnerInput & {
   connectionId: string;
   connectionEpoch: number;
-  entries?: SessionRealtimeInboundEntryInput[];
-  clientAckThroughSequence?: number | null;
-  providerAckThroughSequence?: number | null;
+  entries?: SessionRealtimeInboundEntryInput[] | undefined;
+  clientAckThroughSequence?: number | null | undefined;
+  providerAckThroughSequence?: number | null | undefined;
 };
 
 export type SyncSessionRealtimeLedgerResult = {
@@ -228,7 +240,24 @@ export async function claimSessionRealtimeConnectionInTransaction(
   input: ClaimSessionRealtimeConnectionInput,
 ): Promise<ClaimSessionRealtimeConnectionResult> {
   assertConnectionEpoch(input.expectedConnectionEpoch);
-  const mode = await assertSessionRealtimeOwnerInTransaction(db, input);
+  let staleRotationError: SessionRealtimeConflictError | null = null;
+  let mode;
+  try {
+    mode = await assertSessionRealtimeOwnerInTransaction(db, input);
+  } catch (error) {
+    if (
+      !input.rotate ||
+      !(error instanceof SessionRealtimeConflictError) ||
+      error.code !== "REALTIME_VERSION_CHANGED"
+    ) {
+      throw error;
+    }
+    staleRotationError = error;
+    mode = await assertSessionRealtimeOwnerInTransaction(db, {
+      ...input,
+      expectedVersion: input.expectedVersion + 1,
+    });
+  }
   const targetEpoch = input.rotate
     ? input.expectedConnectionEpoch + 1
     : input.expectedConnectionEpoch;
@@ -255,6 +284,7 @@ export async function claimSessionRealtimeConnectionInTransaction(
       replay: true,
     };
   }
+  if (staleRotationError) throw staleRotationError;
   if (mode.connectionEpoch !== input.expectedConnectionEpoch) {
     throw new SessionRealtimeConflictError(
       "REALTIME_CONNECTION_CHANGED",
@@ -451,6 +481,84 @@ export async function completeSessionRealtimeConnectionInTransaction(
     );
   }
   return { connection: mapConnection(completed), replay: false };
+}
+
+export async function failSessionRealtimeConnectionInTransaction(
+  db: Database,
+  input: FailSessionRealtimeConnectionInput,
+): Promise<FailSessionRealtimeConnectionResult> {
+  assertConnectionEpoch(input.connectionEpoch);
+  assertBoundedString(input.failureCode, 128, "Realtime connection failure code");
+  if (!/^[a-z0-9_.:-]+$/i.test(input.failureCode)) {
+    throw new Error("Realtime connection failure code is invalid");
+  }
+  await lockConnectionFinalizationMode(db, input);
+  const [connection] = await db
+    .select()
+    .from(schema.sessionRealtimeConnections)
+    .where(
+      and(
+        eq(schema.sessionRealtimeConnections.workspaceId, input.workspaceId),
+        eq(schema.sessionRealtimeConnections.sessionId, input.sessionId),
+        eq(schema.sessionRealtimeConnections.realtimeId, input.realtimeId),
+        eq(schema.sessionRealtimeConnections.id, input.connectionId),
+      ),
+    )
+    .for("update")
+    .limit(1);
+  if (!connection) {
+    throw new SessionRealtimeConflictError(
+      "REALTIME_CONNECTION_NOT_FOUND",
+      "Realtime connection claim not found",
+    );
+  }
+  if (
+    connection.operationId !== input.operationId ||
+    connection.connectionEpoch !== input.connectionEpoch
+  ) {
+    throw new SessionRealtimeConflictError(
+      "REALTIME_CONNECTION_CHANGED",
+      "Realtime connection claim changed",
+    );
+  }
+  if (connection.state === "failed") {
+    if (connection.failureCode !== input.failureCode) {
+      throw new SessionRealtimeConflictError(
+        "REALTIME_CONNECTION_STATE_CHANGED",
+        "Realtime connection was already failed with another code",
+      );
+    }
+    return { connection: mapConnection(connection), replay: true };
+  }
+  if (connection.state !== "negotiating") {
+    throw new SessionRealtimeConflictError(
+      "REALTIME_CONNECTION_CHANGED",
+      "Realtime connection is no longer negotiating",
+    );
+  }
+  const now = input.now ?? new Date();
+  const [failed] = await db
+    .update(schema.sessionRealtimeConnections)
+    .set({
+      state: "failed",
+      failureCode: input.failureCode,
+      closedAt: now,
+      updatedAt: now,
+    })
+    .where(
+      and(
+        eq(schema.sessionRealtimeConnections.id, input.connectionId),
+        eq(schema.sessionRealtimeConnections.state, "negotiating"),
+      ),
+    )
+    .returning();
+  if (!failed) {
+    throw new SessionRealtimeConflictError(
+      "REALTIME_CONNECTION_STATE_CHANGED",
+      "Realtime connection changed while negotiation failed",
+    );
+  }
+  return { connection: mapConnection(failed), replay: false };
 }
 
 async function nextLedgerSequence(db: Database, realtimeId: string): Promise<number> {

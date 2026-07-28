@@ -8,14 +8,21 @@ const offer = "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n";
 const answer = "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n";
 const lifecycleProof = {
   realtimeId: "33333333-3333-4333-8333-333333333333",
+  operationId: "22222222-2222-4222-8222-222222222222",
   browserInstanceId: "browser-test",
   ownerKey: "owner-key-11111111-1111-4111-8111-111111111111",
   expectedVersion: 1,
+  expectedConnectionEpoch: 1,
+  rotate: false,
 } as const;
 const negotiated: CodexRealtimeWebrtcResponse = {
   sdp: answer,
   version: "v3",
   model: "gpt-live-1-boulder-alpha",
+  connectionId: "55555555-5555-4555-8555-555555555555",
+  connectionEpoch: 1,
+  modeVersion: 1,
+  replay: false,
 };
 
 function browserFixture() {
@@ -90,6 +97,9 @@ describe("Codex realtime browser negotiation", () => {
     expect(session.peerConnection).toBe(fixture.peer);
     expect(session.events).toBe(fixture.events);
     expect(session.media).toBe(fixture.media);
+    expect(session.connectionId).toBe(negotiated.connectionId);
+    expect(session.connectionEpoch).toBe(1);
+    expect(session.modeVersion).toBe(1);
     expect(fixture.calls).toEqual([
       "data:oai-events",
       "addTrack",
@@ -182,7 +192,7 @@ describe("OpenGeniClient Codex realtime negotiation", () => {
     });
   });
 
-  test("exposes begin, heartbeat, and end lifecycle mutations on the ordinary session", async () => {
+  test("exposes begin, heartbeat, ledger sync, and end mutations on the ordinary session", async () => {
     const requests: Request[] = [];
     const client = new OpenGeniClient({
       baseUrl: "https://api.example.test",
@@ -206,6 +216,19 @@ describe("OpenGeniClient Codex realtime negotiation", () => {
     await client.heartbeatSessionRealtime(WORKSPACE_ID, SESSION_ID, lifecycleProof.realtimeId, {
       ...owner,
       expectedVersion: 1,
+    });
+    await client.syncSessionRealtimeLedger(WORKSPACE_ID, SESSION_ID, lifecycleProof.realtimeId, {
+      ...owner,
+      expectedVersion: 2,
+      connectionId: negotiated.connectionId,
+      connectionEpoch: 1,
+      entries: [
+        {
+          operationId: "66666666-6666-4666-8666-666666666666",
+          kind: "user_transcript",
+          text: "final voice input",
+        },
+      ],
     });
     await client.endSessionRealtime(WORKSPACE_ID, SESSION_ID, lifecycleProof.realtimeId, {
       ...owner,
@@ -235,6 +258,23 @@ describe("OpenGeniClient Codex realtime negotiation", () => {
         method: "PATCH",
         path: `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/realtime/${lifecycleProof.realtimeId}/heartbeat`,
         body: { ...owner, expectedVersion: 1 },
+      },
+      {
+        method: "POST",
+        path: `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/realtime/${lifecycleProof.realtimeId}/sync`,
+        body: {
+          ...owner,
+          expectedVersion: 2,
+          connectionId: negotiated.connectionId,
+          connectionEpoch: 1,
+          entries: [
+            {
+              operationId: "66666666-6666-4666-8666-666666666666",
+              kind: "user_transcript",
+              text: "final voice input",
+            },
+          ],
+        },
       },
       {
         method: "DELETE",
