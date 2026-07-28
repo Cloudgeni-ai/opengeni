@@ -163,9 +163,12 @@ describe("useNewSessionDraft", () => {
   });
 
   test("treats an old-server response without toolsProvided as explicit", async () => {
-    const legacy = remote(4, { tools: [{ kind: "mcp", id: "docs" }] });
-    delete (legacy as NewSessionDraft & { toolsProvided?: boolean }).toolsProvided;
-    const hook = await renderDraftHook(client({ getNewSessionDraft: async () => legacy }));
+    const { toolsProvided: _toolsProvided, ...legacy } = remote(4, {
+      tools: [{ kind: "mcp", id: "docs" }],
+    });
+    const hook = await renderDraftHook(
+      client({ getNewSessionDraft: async () => legacy as NewSessionDraft }),
+    );
     await flush();
 
     expect(hook.result.current.value.toolsProvided).toBe(true);
