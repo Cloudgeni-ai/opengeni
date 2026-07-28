@@ -40,6 +40,7 @@ describe("get.<domain> install routes", () => {
     // The real committed install.sh body (no secrets; curl|sh entrypoint).
     expect(body).toContain("OPENGENI_INSTALL_BASE_URL");
     expect(body).toContain("opengeni-agent");
+    expect(body).toContain('enroll --token "$OPENGENI_ENROLL_TOKEN" --non-interactive --force');
   });
 
   // "The agent ships inside the control-plane": a DEPLOYED control plane self-serves
@@ -77,6 +78,7 @@ describe("get.<domain> install routes", () => {
     expect(res.status).toBe(200);
     const body = await res.text();
     expect(body.length).toBeGreaterThan(0);
+    expect(body).toContain("enroll --token $enrollToken --non-interactive --force");
   });
 
   test("GET /uninstall.sh serves the uninstall script", async () => {

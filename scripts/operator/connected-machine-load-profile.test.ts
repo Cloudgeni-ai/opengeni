@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  discoverApiContract,
   executeBounded,
   parseConnectedMachineLoadArgs,
   percentile,
@@ -80,5 +81,54 @@ describe("Connected Machine load profile", () => {
 
     expect(completed).toBe(31);
     expect(peak).toBe(4);
+  });
+
+  test("discovers the target API contract through an authenticated read", async () => {
+    const args = parseConnectedMachineLoadArgs(
+      [
+        "--base-url",
+        "https://opengeni.example.test",
+        "--workspace-id",
+        "workspace-1",
+        "--session-id",
+        "session-1",
+      ],
+      {},
+    );
+    let requestedUrl = "";
+    let requestedHeaders: HeadersInit | undefined;
+    const contract = await discoverApiContract(
+      args,
+      { authorization: "Bearer product-token" },
+      async (input, init) => {
+        requestedUrl = String(input);
+        requestedHeaders = init?.headers;
+        return new Response("{}", {
+          headers: { "x-opengeni-api-contract": "contract-v2" },
+        });
+      },
+    );
+
+    expect(contract).toBe("contract-v2");
+    expect(requestedUrl).toBe(
+      "https://opengeni.example.test/v1/workspaces/workspace-1/sessions/session-1",
+    );
+    expect(requestedHeaders).toEqual({ authorization: "Bearer product-token" });
+  });
+
+  test("supports older targets that do not advertise an API contract", async () => {
+    const args = parseConnectedMachineLoadArgs(
+      [
+        "--base-url",
+        "https://opengeni.example.test",
+        "--workspace-id",
+        "workspace-1",
+        "--session-id",
+        "session-1",
+      ],
+      {},
+    );
+
+    expect(await discoverApiContract(args, {}, async () => new Response("{}"))).toBeNull();
   });
 });

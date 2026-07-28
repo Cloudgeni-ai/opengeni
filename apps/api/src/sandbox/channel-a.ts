@@ -3,16 +3,16 @@
 // The structured services (FileSystem / Git / Terminal) are SYNCHRONOUS point
 // queries served client -> API -> box IN-PROCESS. Each call:
 //
-//   1. acquires an exact direct-request lease holder (warming the box when cold — the
-//      same cold->warming CAS attachViewer runs; a Postgres txn the API OWNS),
-//   2. resumes the box BY ID from the group lease's resume_state envelope,
-//   3. builds ONE SandboxChannelAService around the live `session` handle,
-//   4. runs the op (fsList/gitDiff/ptyWrite/...), returns inline JSON,
-//   5. releases the viewer holder + drops the live handle.
+// For a provider-backed home it acquires an exact direct-request lease holder,
+// resumes the box by id, and releases the holder after the operation. For a
+// Connected Machine home it follows the durable active pointer directly and
+// uses its NATS request/reply control channel; it creates no phantom cloud lease.
+// Both paths build one SandboxChannelAService, run the operation, and return the
+// result inline.
 //
-// NO Temporal, NO worker RPC, NO NATS round-trip in this path — reads never ride
-// the bus (which would corrupt SSE gap-fill). Only the side-effect NOTIFICATIONS
-// (fs.changed/git.changed/terminal.pty.*) ride A1 via appendAndPublishEvents.
+// NO Temporal or worker RPC sits in this path. Provider-backed reads remain
+// process-local; Connected Machine operations necessarily ride NATS. Side-effect
+// notifications (fs.changed/git.changed/terminal.pty.*) ride A1.
 //
 // IMPORT DISCIPLINE: sandbox symbols come ONLY from @opengeni/runtime/sandbox
 // (the agent-loop-free leaf) — enforced by sandbox-access-import-guard.test.ts.
@@ -29,8 +29,10 @@ import type { Session } from "@opengeni/contracts";
 import {
   acquireLease,
   getSandboxSessionEnvelope,
+  getSandbox,
   loadWorkspaceEnvironmentForRun,
   markWarmLeaseInstanceLost,
+  readActiveSandbox,
   readLease,
   releaseLeaseHolder,
   type Database,
@@ -40,9 +42,11 @@ import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
 import { HTTPException } from "hono/http-exception";
 
 import {
+  buildSelfhostedBackendSession,
   establishSandboxSessionFromEnvelope,
   isProviderSandboxNotFoundError,
   SandboxChannelAService,
+  NatsControlRpc,
   ChannelAConflictError,
   ChannelANotFoundError,
   ChannelAUnsupportedError,
@@ -55,7 +59,7 @@ import {
   type EstablishedSandboxSession,
   type RoutingSandboxSession,
 } from "@opengeni/runtime/sandbox";
-import { wrapChannelABoxWithRouting } from "@opengeni/core";
+import { relayConfigFromSettings, wrapChannelABoxWithRouting } from "@opengeni/core";
 import { establishApiSandboxSpawner } from "./rematerialize";
 
 export type ChannelAServices = {
@@ -76,7 +80,9 @@ export type ChannelAContext = {
 // (for the pty exec-session epoch fence + revision seeding).
 export type ChannelAHandle = {
   service: SandboxChannelAService;
-  lease: LeaseSnapshot;
+  /** Connected Machine homes deliberately have no cloud lease. Durable PTYs
+   * require a real home-provider lease and reject this null case. */
+  lease: LeaseSnapshot | null;
   routingSession: RoutingSandboxSession;
   requestId: string;
 };
@@ -106,6 +112,117 @@ export async function withChannelA<T>(
   const requestId = crypto.randomUUID();
   const holderId = `direct:${requestId}`;
   const leaseTtlMs = settings.sandboxLeaseTtlMs;
+
+  // The STABLE run-environment used by both a cloud home and a machine home.
+  // It also carries the per-session Toolspace pointer selected below.
+  const workspaceEnvironment = await loadWorkspaceEnvironmentForRun(
+    db,
+    settings,
+    workspaceId,
+    session.environmentId,
+  );
+  const settingsForSession =
+    session.sandboxBackend !== settings.sandboxBackend
+      ? { ...settings, sandboxBackend: session.sandboxBackend }
+      : settings;
+  const environment = stableSandboxEnvironmentForRun(
+    settingsForSession,
+    workspaceEnvironment?.values ?? {},
+    { workspaceId },
+  );
+  if (hasGitCredentialRepositorySelection(session.resources)) {
+    applyGitAuthPointerEnvironment(
+      environment,
+      hasGitHubRepositorySelection(session.resources) ? githubAppBotIdentity(settings) : null,
+    );
+  }
+
+  const runEstablished = async (
+    routed: EstablishedSandboxSession,
+    lease: LeaseSnapshot | null,
+  ): Promise<T> => {
+    const emit = async (events: { type: string; payload: unknown }[]): Promise<void> => {
+      await appendAndPublishEvents(
+        db,
+        bus,
+        workspaceId,
+        session.id,
+        events.map((e) => ({ type: e.type as never, payload: e.payload })),
+      );
+    };
+    const routingSession = routed.session as RoutingSandboxSession;
+    const credentialSession = withRunCredentialsSession(routingSession as object, session.id);
+    const scopedSession = environment.OPENGENI_TOOLSPACE_TOKEN_FILE
+      ? withToolspaceTokenSession(
+          credentialSession,
+          toolspaceTokenFileFromEnvironment(environment, session.id),
+        )
+      : credentialSession;
+    const service = new SandboxChannelAService({
+      session: scopedSession as ChannelASession,
+      leaseEpoch: lease?.leaseEpoch ?? session.activeEpoch,
+      emit,
+    });
+    return await fn({ service, lease, routingSession, requestId });
+  };
+
+  // A machine-targeted top-level session has an honest selfhosted HOME label.
+  // It has no cloud provider box and therefore must not acquire or establish a
+  // phantom home lease before following its active machine pointer.
+  if (session.sandboxBackend === "selfhosted") {
+    let established: EstablishedSandboxSession | undefined;
+    try {
+      const pointer = await readActiveSandbox(db, workspaceId, session.id);
+      if (!pointer?.activeSandboxId) {
+        throw new HTTPException(409, {
+          message: "machine-home session has no active Connected Machine",
+        });
+      }
+      const sandbox = await getSandbox(db, workspaceId, pointer.activeSandboxId);
+      if (sandbox?.kind !== "selfhosted" || !sandbox.enrollmentId) {
+        throw new HTTPException(409, {
+          message: "machine-home session points to an unavailable Connected Machine",
+        });
+      }
+      const built = await buildSelfhostedBackendSession({
+        workspaceId,
+        agentId: sandbox.enrollmentId,
+        relay: relayConfigFromSettings(settings),
+        controlRpcFactory: () => new NatsControlRpc(async () => bus.getRequestConnection()),
+        epoch: pointer.activeEpoch,
+        environment,
+        workingDir: pointer.workingDir,
+        timeoutMs: settings.sandboxSelfhostedControlTimeoutMs,
+        execTimeoutMs: settings.sandboxSelfhostedExecTimeoutMs,
+      });
+      established = {
+        client: built.client,
+        session: built.session,
+        sessionState: { agentId: sandbox.enrollmentId },
+        instanceId: sandbox.enrollmentId,
+        backendId: "selfhosted",
+      };
+      const routed = wrapChannelABoxWithRouting(
+        { db, settings, bus },
+        {
+          accountId,
+          workspaceId,
+          sessionId: session.id,
+          pinnedSelfhosted: {
+            sandboxId: sandbox.id,
+            epoch: pointer.activeEpoch,
+          },
+          directRequest: { requestId, holderId },
+        },
+        established,
+      );
+      return await runEstablished(routed, null);
+    } catch (error) {
+      throw mapChannelAError(error);
+    } finally {
+      await dropEstablishedHandle(established);
+    }
+  }
 
   const release = async (): Promise<void> => {
     await releaseLeaseHolder(db, {
@@ -150,36 +267,6 @@ export async function withChannelA<T>(
 
   try {
     const envelope = await getSandboxSessionEnvelope(db, workspaceId, session.id);
-    // The STABLE run-environment a COLD box must be created with so a later worker
-    // turn's agent-manifest apply finds an EMPTY env delta (config base + git
-    // identity + decrypted workspace env + HOME + — for a repo-attached session —
-    // the stable git-auth pointers the turn declares). Only the rotating token
-    // VALUE stays off (it lives in the box file the clone hook seeds). Keyed off
-    // the SESSION's backend (the establish below passes backendOverride:
-    // session.sandboxBackend, and HOME/token-file/askpass are backend-derived),
-    // NOT the deployment default — mirrors sessionAttachEnvironment.
-    const workspaceEnvironment = await loadWorkspaceEnvironmentForRun(
-      db,
-      settings,
-      workspaceId,
-      session.environmentId,
-    );
-    const settingsForSession =
-      session.sandboxBackend !== settings.sandboxBackend
-        ? { ...settings, sandboxBackend: session.sandboxBackend }
-        : settings;
-    const environment = stableSandboxEnvironmentForRun(
-      settingsForSession,
-      workspaceEnvironment?.values ?? {},
-      { workspaceId },
-    );
-    if (hasGitCredentialRepositorySelection(session.resources)) {
-      applyGitAuthPointerEnvironment(
-        environment,
-        hasGitHubRepositorySelection(session.resources) ? githubAppBotIdentity(settings) : null,
-      );
-    }
-
     if (acquired.role === "spawner") {
       // We won the cold->warming CAS: establish the box from the envelope, then
       // commit warm. The established handle IS our live handle for the op.
@@ -261,22 +348,10 @@ export async function withChannelA<T>(
       }
     }
 
-    const emit = async (events: { type: string; payload: unknown }[]): Promise<void> => {
-      await appendAndPublishEvents(
-        db,
-        bus,
-        workspaceId,
-        session.id,
-        // SessionEventType is a string enum at the contract; the producer parses
-        // the payload, so this cast is the same shape the worker emits.
-        events.map((e) => ({ type: e.type as never, payload: e.payload })),
-      );
-    };
-
     // Route every call through the same proxy, even when hot-swap is disabled:
     // routing may be dormant, but its direct mutation admission is mandatory for
     // every persistable provider write.
-    const routedSession = wrapChannelABoxWithRouting(
+    const routed = wrapChannelABoxWithRouting(
       { db, settings, bus },
       {
         accountId,
@@ -291,22 +366,8 @@ export async function withChannelA<T>(
         directRequest: { requestId, holderId },
       },
       established,
-    ).session as RoutingSandboxSession;
-    const credentialSession = withRunCredentialsSession(routedSession as object, session.id);
-    const scopedSession = environment.OPENGENI_TOOLSPACE_TOKEN_FILE
-      ? withToolspaceTokenSession(
-          credentialSession,
-          toolspaceTokenFileFromEnvironment(environment, session.id),
-        )
-      : credentialSession;
-
-    const service = new SandboxChannelAService({
-      session: scopedSession as ChannelASession,
-      leaseEpoch: leaseSnapshot.leaseEpoch,
-      emit,
-    });
-
-    return await fn({ service, lease: leaseSnapshot, routingSession: routedSession, requestId });
+    );
+    return await runEstablished(routed, leaseSnapshot);
   } catch (error) {
     throw mapChannelAError(error);
   } finally {

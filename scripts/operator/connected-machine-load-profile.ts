@@ -41,6 +41,8 @@ interface StageResult {
   failureCounts: Record<string, number>;
 }
 
+type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+
 export function parseConnectedMachineLoadArgs(
   values: string[],
   env: Record<string, string | undefined> = process.env,
@@ -168,10 +170,15 @@ export async function executeBounded(
 
 async function main(): Promise<void> {
   const args = parseConnectedMachineLoadArgs(process.argv.slice(2));
-  const headers = {
+  const baseHeaders = {
     "content-type": "application/json",
     ...(args.deploymentAccessKey ? { "x-opengeni-access-key": args.deploymentAccessKey } : {}),
     ...(args.productToken ? { authorization: `Bearer ${args.productToken}` } : {}),
+  };
+  const apiContract = await discoverApiContract(args, baseHeaders);
+  const headers = {
+    ...baseHeaders,
+    ...(apiContract ? { "x-opengeni-api-contract": apiContract } : {}),
   };
 
   await warmUp(args, headers);
@@ -208,6 +215,28 @@ async function main(): Promise<void> {
     printHumanResult(result);
   }
   if (!result.verdict.passed) process.exitCode = 2;
+}
+
+export async function discoverApiContract(
+  args: ConnectedMachineLoadArgs,
+  headers: Record<string, string>,
+  fetchImpl: FetchLike = fetch,
+): Promise<string | null> {
+  const endpoint = new URL(
+    `/v1/workspaces/${encodeURIComponent(args.workspaceId)}/sessions/${encodeURIComponent(args.sessionIds[0]!)}`,
+    args.baseUrl,
+  );
+  const response = await fetchImpl(endpoint, {
+    method: "GET",
+    headers,
+    signal: AbortSignal.timeout(args.requestTimeoutMs),
+  });
+  if (!response.ok) {
+    throw new Error(`API contract discovery failed: ${await httpFailure(response)}`);
+  }
+  const contract = response.headers.get("x-opengeni-api-contract")?.trim() || null;
+  await response.arrayBuffer();
+  return contract;
 }
 
 async function warmUp(

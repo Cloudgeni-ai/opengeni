@@ -191,6 +191,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     handle: ChannelAHandle,
     pty: SandboxOpenPtySessionRow,
   ): Promise<SandboxRetainedProcess> => {
+    if (!handle.lease) {
+      throw new HTTPException(409, {
+        message: "durable interactive terminals require a session-home provider lease",
+      });
+    }
     const process = await getRetainedProcess(db, {
       workspaceId: ctx.workspaceId,
       sessionId: ctx.session.id,
@@ -2183,6 +2188,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }
     const ptyId = crypto.randomUUID();
     const out = await withChannelA({ db, settings, bus }, ctx, async (handle) => {
+      if (!handle.lease) {
+        throw new HTTPException(409, {
+          message: "durable interactive terminals require a session-home provider lease",
+        });
+      }
       const { service } = handle;
       const opened = await service.ptyOpen(req, ptyId);
       const execSessionId = opened.execSessionId;

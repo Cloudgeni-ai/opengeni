@@ -34,6 +34,7 @@ import { subjectFor } from "@opengeni/runtime";
 import type { AccessGrant } from "@opengeni/contracts";
 import { createSessionForRequest } from "@opengeni/core";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
+import { withChannelA } from "../src/sandbox/channel-a";
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -68,15 +69,29 @@ function busWithAgent(opts: { workspaceId: string; agentId: string }): MemoryEve
             requestId: req.requestId,
             result: { $case: "ping", ping: { nonce: op.ping.nonce, agentMonotonicMs: "0" } },
           }
-        : {
-            requestId: req.requestId,
-            error: {
-              code: ErrorCode.ERROR_CODE_UNSUPPORTED,
-              message: "unsupported",
-              retryable: false,
-              detail: {},
-            },
-          };
+        : op?.$case === "exec"
+          ? {
+              requestId: req.requestId,
+              result: {
+                $case: "exec",
+                exec: {
+                  exitCode: 0,
+                  stdout: new TextEncoder().encode("machine-home-ok\n"),
+                  stderr: new Uint8Array(0),
+                  timedOut: false,
+                  durationMs: "1",
+                },
+              },
+            }
+          : {
+              requestId: req.requestId,
+              error: {
+                code: ErrorCode.ERROR_CODE_UNSUPPORTED,
+                message: "unsupported",
+                retryable: false,
+                detail: {},
+              },
+            };
     return ControlResponse.encode(res).finish();
   });
   return bus;
@@ -213,6 +228,52 @@ describe("Stage-D honest label: machine-targeted home sandbox_backend", () => {
     const [turnRow] = await admin<{ sandbox_backend: string }[]>`
       select sandbox_backend from session_turns where session_id = ${session.id} limit 1`;
     expect(turnRow?.sandbox_backend).toBe("selfhosted");
+  }, 60_000);
+
+  test("the first direct terminal command routes to a machine home without a phantom lease", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, sandboxId, bus } = await seedMachine();
+    const session = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      {
+        initialMessage: "run direct commands on my laptop",
+        targetSandboxId: sandboxId,
+      },
+    );
+
+    const result = await withChannelA(
+      { db, settings, bus },
+      {
+        accountId,
+        workspaceId,
+        session,
+        subjectId: "subject",
+      },
+      async ({ service, lease }) => {
+        expect(lease).toBeNull();
+        return await service.terminalExec({
+          command: "echo machine-home-ok",
+          cwd: "",
+          timeoutMs: 1_000,
+          emitStream: false,
+        });
+      },
+    );
+
+    expect(result).toMatchObject({
+      running: false,
+      exitCode: 0,
+      stdout: "machine-home-ok\n",
+      stderr: "",
+    });
+    const [leaseCount] = await admin<{ count: string }[]>`
+      select count(*)::text as count
+      from sandbox_leases
+      where workspace_id = ${workspaceId}
+        and sandbox_group_id = ${session.sandboxGroupId}`;
+    expect(leaseCount?.count).toBe("0");
   }, 60_000);
 
   test("a macOS machine target ⇒ home sandbox_os 'macos' (derived from the enrollment)", async () => {
