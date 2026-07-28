@@ -1,5 +1,11 @@
 # @opengeni/sdk
 
+## 0.26.0
+
+### Minor Changes
+
+- 06a5801: Add the backend workspace instruction-policy revision, activation, rollback, audit, API, and SDK control surface.
+
 ## 0.25.5
 
 ### Patch Changes
