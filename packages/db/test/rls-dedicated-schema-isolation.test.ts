@@ -194,8 +194,8 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
     expect(posture.memberships).toEqual([]);
     expect(posture.ownedSchemas).toEqual([]);
     expect(posture.ownedRelations).toEqual([]);
-    expect(posture.tables.filter((table) => table.rlsEnabled)).toHaveLength(78);
-    expect(posture.tables.filter((table) => table.rlsActive)).toHaveLength(78);
+    expect(posture.tables.filter((table) => table.rlsEnabled)).toHaveLength(81);
+    expect(posture.tables.filter((table) => table.rlsActive)).toHaveLength(81);
     expect(
       posture.tables.filter(
         (table) => table.select && table.insert && table.update && table.delete,
@@ -210,6 +210,17 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
       update: false,
       delete: false,
     });
+    for (const tableName of [
+      "workspace_instruction_policy_activation_events",
+      "workspace_instruction_policy_revisions",
+    ]) {
+      expect(posture.tables.find((table) => table.name === tableName)).toMatchObject({
+        select: true,
+        insert: true,
+        update: false,
+        delete: false,
+      });
+    }
     for (const tableName of PROTECTED_NO_DIRECT_DML_TABLES) {
       expect(posture.tables.find((table) => table.name === tableName)).toMatchObject({
         rlsEnabled: true,

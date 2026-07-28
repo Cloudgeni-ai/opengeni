@@ -63,6 +63,7 @@ import { registerScheduledTaskRoutes } from "./routes/scheduled-tasks";
 import { registerSessionRoutes } from "./routes/sessions";
 import { registerSocialRoutes } from "./routes/social";
 import { registerWorkspaceRoutes } from "./routes/workspaces";
+import { registerWorkspaceInstructionPolicyRoutes } from "./routes/workspace-instruction-policies";
 import { projectClientModel } from "./model-catalog";
 
 export type {
@@ -417,6 +418,7 @@ export function createApp(deps: AppDependencies): Hono {
   registerGitHubRoutes(app, routeDeps);
   registerInstallRoutes(app, routeDeps);
   registerWorkspaceRoutes(app, routeDeps);
+  registerWorkspaceInstructionPolicyRoutes(app, routeDeps);
   registerSocialRoutes(app, routeDeps);
   registerConnectionRoutes(app, routeDeps);
   registerCapabilityRoutes(app, routeDeps);
