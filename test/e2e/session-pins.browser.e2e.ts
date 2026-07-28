@@ -7,6 +7,7 @@ import {
   acquireSharedTestDatabase,
   freePort,
   MemoryEventBus,
+  runCommand,
   startProcess,
   testSettings,
   waitFor,
@@ -79,12 +80,24 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
 
     const webPort = await freePort();
     webBaseUrl = `http://127.0.0.1:${webPort}`;
+    const webEnv = {
+      NODE_ENV: "production",
+      VITE_API_BASE_URL: apiBaseUrl,
+    };
+    const build = await runCommand(["bun", "run", "build"], {
+      cwd: `${repoRoot}/apps/web`,
+      env: webEnv,
+      timeoutMs: 120_000,
+    });
+    if (build.exitCode !== 0) {
+      throw new Error(`Production web build failed:\n${build.stdout}\n${build.stderr}`);
+    }
     web = await startProcess(
       [
         "bun",
         "run",
         "vite",
-        "dev",
+        "preview",
         "--port",
         String(webPort),
         "--strictPort",
@@ -93,7 +106,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       ],
       {
         cwd: `${repoRoot}/apps/web`,
-        env: { VITE_API_BASE_URL: apiBaseUrl },
+        env: webEnv,
         ready: async () =>
           (
             await fetch(webBaseUrl, {
@@ -139,6 +152,8 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     );
 
     const targetUrl = `${webBaseUrl}/workspaces/${workspaceId}/sessions/${target.id}`;
+    const initialCommits = await reactCommitCount(pageA);
+    expect(initialCommits).toBeGreaterThan(0);
     const successfulTargetPinMutation = (response: PlaywrightResponse): boolean => {
       const url = new URL(response.url());
       return (
@@ -162,6 +177,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await pageA.keyboard.press("Enter");
     await initialPinMutation;
     await pageA.getByRole("button", { name: "Unpin session" }).waitFor();
+    expect((await reactCommitCount(pageA)) - initialCommits).toBeLessThanOrEqual(64);
     const pinnedA = pageA.getByRole("group", { name: "Pinned" });
     await pinnedA.getByRole("button", { name: /^Open Master pin target/ }).waitFor();
     await pageA.waitForFunction(() =>
@@ -205,6 +221,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await pageA.getByRole("button", { name: "Unpin session" }).waitFor();
     await Promise.all([repinMutation, sameTabRepinRefresh]);
     await sameTabPinnedTarget.waitFor();
+    expect((await reactCommitCount(pageA)) - initialCommits).toBeLessThanOrEqual(128);
 
     // A genuinely separate browser context represents another device: it owns
     // independent document, cache, BroadcastChannel, and focus state, while the
@@ -386,6 +403,10 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await otherPage.reload();
     await otherPage.getByRole("button", { name: "Pin session" }).waitFor();
     expect(await otherPage.getByRole("group", { name: "Pinned" }).count()).toBe(0);
+
+    expect(browserPageErrors.get(deviceA)).toEqual([]);
+    expect(browserPageErrors.get(deviceB)).toEqual([]);
+    expect(browserPageErrors.get(otherMember)).toEqual([]);
 
     await otherMember.close();
     await deviceB.close();
@@ -1109,8 +1130,11 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       `Mobile pin ${"long title ".repeat(20)}`.slice(0, 200),
     );
     await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${target.id}`);
+    const initialCommits = await reactCommitCount(page);
+    expect(initialCommits).toBeGreaterThan(0);
     await page.getByRole("button", { name: "Pin session" }).click();
     await page.getByRole("button", { name: "Unpin session" }).waitFor();
+    expect((await reactCommitCount(page)) - initialCommits).toBeLessThanOrEqual(64);
 
     // Stress the compact pinned section with many long rows through the normal
     // browser-authenticated API. No direct DB mutation is used.
@@ -1190,6 +1214,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         );
       }
     }
+    expect(browserPageErrors.get(context)).toEqual([]);
     await context.close();
   }, 90_000);
 
@@ -1484,6 +1509,7 @@ function decodeBrowserSessionCursor(cursor: string): { snapshotId: string } {
 }
 
 const browserDiagnostics = new WeakMap<BrowserContext, string[]>();
+const browserPageErrors = new WeakMap<BrowserContext, string[]>();
 
 async function configuredContext(
   browser: Browser,
@@ -1491,7 +1517,9 @@ async function configuredContext(
 ): Promise<BrowserContext> {
   const context = await browser.newContext(options);
   const diagnostics: string[] = [];
+  const pageErrors: string[] = [];
   browserDiagnostics.set(context, diagnostics);
+  browserPageErrors.set(context, pageErrors);
   context.on("requestfailed", (request) => {
     diagnostics.push(
       `request failed: ${request.method()} ${request.url()} (${request.failure()?.errorText ?? "unknown"})`,
@@ -1509,15 +1537,52 @@ async function configuredContext(
       diagnostics.push(`console ${message.type()}: ${message.text()}`);
     }
   });
+  context.on("page", (page) => {
+    page.on("pageerror", (error) => pageErrors.push(String(error)));
+  });
+  await context.addInitScript(() => {
+    const windowWithReactProbe = window as Window & {
+      __opengeniReactCommitCount?: number;
+      __REACT_DEVTOOLS_GLOBAL_HOOK__?: {
+        supportsFiber?: boolean;
+        inject?: (renderer: unknown) => number;
+        onCommitFiberRoot?: (...args: unknown[]) => void;
+        onCommitFiberUnmount?: (...args: unknown[]) => void;
+      };
+    };
+    windowWithReactProbe.__opengeniReactCommitCount = 0;
+    const hook = windowWithReactProbe.__REACT_DEVTOOLS_GLOBAL_HOOK__ ?? {};
+    hook.supportsFiber = true;
+    hook.inject ??= () => 1;
+    hook.onCommitFiberRoot = () => {
+      windowWithReactProbe.__opengeniReactCommitCount =
+        (windowWithReactProbe.__opengeniReactCommitCount ?? 0) + 1;
+    };
+    hook.onCommitFiberUnmount ??= () => undefined;
+    windowWithReactProbe.__REACT_DEVTOOLS_GLOBAL_HOOK__ = hook;
+  });
   // The console's configured-token panel stores the supplied value under this
   // key. In this test-only configured deployment there is intentionally no
   // delegation secret, so the API uses its supported x-opengeni-subject
   // principal fallback; the placeholder merely satisfies the real console
   // gate and is never treated as a credential or persisted outside context.
   await context.addInitScript(() => {
+    // Playwright runs init scripts for the initial opaque about:blank document
+    // too. That document has no storage origin; avoid turning this test-owned
+    // setup into a pageerror that obscures application failures.
+    if (window.location.origin === "null") {
+      return;
+    }
     localStorage.setItem("opengeni.accessKey", "configured-test-placeholder");
   });
   return context;
+}
+
+async function reactCommitCount(page: Page): Promise<number> {
+  return await page.evaluate(
+    () =>
+      (window as Window & { __opengeniReactCommitCount?: number }).__opengeniReactCommitCount ?? 0,
+  );
 }
 
 async function workspaceFromPage(page: Page): Promise<string> {
