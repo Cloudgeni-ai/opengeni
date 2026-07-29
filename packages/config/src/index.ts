@@ -3243,6 +3243,7 @@ function positiveInt(value: unknown): number {
 function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
   const existing = settings.mcpServers.filter((server) => server.id !== "opengeni");
   const firstPartyMcpUrl = firstPartyMcpServerUrl(settings);
+  const firstPartyFilesMcpUrl = firstPartyFilesMcpServerUrl(firstPartyMcpUrl);
   const firstPartyDocsMcpUrl = firstPartyDocumentsMcpServerUrl(firstPartyMcpUrl);
   const hasFiles = existing.some((server) => server.id === "files");
   const hasDocs = existing.some((server) => server.id === "docs");
@@ -3270,7 +3271,7 @@ function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
           {
             id: "files",
             name: "Files",
-            url: firstPartyMcpUrl,
+            url: firstPartyFilesMcpUrl,
             allowedTools: ["files_get_download_url"],
             cacheToolsList: true,
           },
@@ -3344,6 +3345,10 @@ function firstPartyMcpServerUrl(settings: Settings): string {
 
 function firstPartyDocumentsMcpServerUrl(mcpUrl: string): string {
   return `${mcpUrl.replace(/\/+$/, "")}/docs`;
+}
+
+function firstPartyFilesMcpServerUrl(mcpUrl: string): string {
+  return `${mcpUrl.replace(/\/+$/, "")}/files`;
 }
 
 function validateSettings(settings: Settings): void {

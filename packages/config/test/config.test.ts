@@ -674,9 +674,9 @@ describe("sandbox preparation profiles", () => {
     });
     expect(settings.mcpServers.find((server) => server.id === "files")).toMatchObject({
       name: "Files",
-      url: `http://127.0.0.1:${settings.apiPort}/v1/workspaces/{workspaceId}/mcp`,
-      // Safe to cache: allowedTools pins it to a single tool that every grant
-      // can see, so its effective tool list is permission-invariant.
+      url: `http://127.0.0.1:${settings.apiPort}/v1/workspaces/{workspaceId}/mcp/files`,
+      // Dedicated endpoint plus exact allowedTools keeps this surface
+      // permission-invariant and prevents broad-server exposure.
       allowedTools: ["files_get_download_url"],
     });
     expect(settings.mcpServers.find((server) => server.id === "docs")).toMatchObject({
@@ -707,6 +707,9 @@ describe("sandbox preparation profiles", () => {
     );
     expect(settings.mcpServers.find((server) => server.id === "docs")?.url).toBe(
       "http://opengeni-api.opengeni.svc.cluster.local:8000/v1/workspaces/{workspaceId}/mcp/docs",
+    );
+    expect(settings.mcpServers.find((server) => server.id === "files")?.url).toBe(
+      "http://opengeni-api.opengeni.svc.cluster.local:8000/v1/workspaces/{workspaceId}/mcp/files",
     );
   });
 

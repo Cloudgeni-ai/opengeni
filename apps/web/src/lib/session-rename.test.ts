@@ -48,6 +48,7 @@ function session(patch: Partial<Session> = {}): Session {
     variableSetId: null,
     environmentId: null,
     firstPartyMcpPermissions: null,
+    firstPartyMcpTools: null,
     mcpServers: [],
     rootSessionId: "session-1",
     nestedAgentDepth: 0,

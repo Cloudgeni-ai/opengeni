@@ -16,6 +16,7 @@ import type {
   FileAsset,
   FileStatus,
   FileUploadStatus,
+  FirstPartyMcpToolName,
   HumanInputAnswer,
   HumanInputQuestion,
   HumanInputResponse,
@@ -13888,6 +13889,7 @@ export type SessionCreateInput = {
   rigId?: string | null;
   rigVersionId?: string | null;
   firstPartyMcpPermissions?: Permission[] | null;
+  firstPartyMcpTools?: FirstPartyMcpToolName[] | null;
   instructions?: string | null;
   parentSessionId?: string | null;
   createIdempotencyKey?: string | null;
@@ -14288,6 +14290,7 @@ async function createSessionInTransaction(
       rigId: input.rigId ?? null,
       rigVersionId: input.rigVersionId ?? null,
       firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
+      firstPartyMcpTools: input.firstPartyMcpTools ?? null,
       instructions: input.instructions ?? null,
       parentSessionId: input.parentSessionId ?? null,
       createIdempotencyKey,
@@ -35590,6 +35593,7 @@ function mapSession(
     rigId: row.rigId ?? null,
     rigVersionId: row.rigVersionId ?? null,
     firstPartyMcpPermissions: (row.firstPartyMcpPermissions as Permission[] | null) ?? null,
+    firstPartyMcpTools: (row.firstPartyMcpTools as FirstPartyMcpToolName[] | null) ?? null,
     mcpServers,
     parentSessionId: row.parentSessionId ?? null,
     rootSessionId: row.rootSessionId,

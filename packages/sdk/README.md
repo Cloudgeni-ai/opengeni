@@ -21,6 +21,8 @@ const client = new OpenGeniClient({
 const session = await client.createSession(workspaceId, {
   initialMessage: "Investigate the failing deploy on staging",
   resources: [{ kind: "repository", uri: "https://github.com/acme/app.git", ref: "main" }],
+  // Exact model-visible first-party surface; permissions remain independent.
+  firstPartyMcpTools: ["set_session_title"],
 });
 
 for await (const event of client.streamEvents(workspaceId, session.id)) {
@@ -29,6 +31,10 @@ for await (const event of client.streamEvents(workspaceId, session.id)) {
   }
 }
 ```
+
+Omit `firstPartyMcpTools` for the minimal self-management default. An explicit
+`[]` exposes no broad first-party tools; attached resources and separately
+selected `files`/`docs` MCP servers are unaffected.
 
 ## MCP tool output normalization
 
