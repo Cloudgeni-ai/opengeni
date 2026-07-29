@@ -5,6 +5,7 @@ import type {
   GitHubAppApiPort,
   ScheduledTask,
   SessionAuthorizationPort,
+  TurnInitiator,
 } from "@opengeni/contracts";
 import type { Database } from "@opengeni/db";
 import type { DocumentServices } from "@opengeni/documents";
@@ -53,8 +54,9 @@ export type SessionWorkflowClient = {
   deleteScheduledTaskSchedule: (input: { temporalScheduleId: string }) => Promise<void>;
   triggerScheduledTask: (input: {
     task: ScheduledTask;
-    agentRunUsageIdempotencyKey?: string;
-    triggerWorkflowId?: string;
+    agentRunUsageIdempotencyKey: string;
+    triggerWorkflowId: string;
+    initiator: TurnInitiator;
   }) => Promise<void>;
   startRigVerification: (input: {
     workspaceId: string;

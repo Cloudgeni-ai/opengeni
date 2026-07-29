@@ -3,6 +3,7 @@ import type {
   ConnectionCredentialsPort,
   EntitlementsPort,
   ScheduledTaskTriggerType,
+  TurnInitiator,
 } from "@opengeni/contracts";
 import type { Database } from "@opengeni/db";
 import type { DocumentServices } from "@opengeni/documents";
@@ -150,6 +151,18 @@ export type SettleSessionInterruptionsInput = {
 
 export type PersistSessionAttemptQuiescenceInput = SessionAttemptQuiescenceProof;
 
+export type ReconcileSessionAttemptQuiescenceInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  attemptId: string;
+  workflowId: string;
+};
+
+export type ReconcileSessionAttemptQuiescenceResult = {
+  action: "quiesced" | "pending" | "stale";
+};
+
 export type FailSessionAttemptInput = {
   accountId: string;
   workspaceId: string;
@@ -215,21 +228,37 @@ export type MaybeContinueGoalResult = {
 export type DispatchScheduledTaskRunInput = {
   workspaceId: string;
   taskId: string;
-  triggerType: ScheduledTaskTriggerType;
   /** Stable Temporal workflow identity; retries must reuse the same source row. */
   producerKey?: string;
-  agentRunUsageIdempotencyKey?: string;
-};
+} & (
+  | {
+      triggerType: Extract<ScheduledTaskTriggerType, "scheduled">;
+      agentRunUsageIdempotencyKey?: never;
+      initiator?: never;
+    }
+  | {
+      triggerType: Extract<ScheduledTaskTriggerType, "manual">;
+      agentRunUsageIdempotencyKey: string;
+      /** Exact identity used by the API-side charge for this same trigger. */
+      initiator: TurnInitiator;
+    }
+);
 
-export type DispatchScheduledTaskRunResult = {
-  action: "start" | "signal";
-  accountId: string;
-  workspaceId: string;
-  sessionId: string;
-  triggerEventId: string;
-  workflowId: string;
-  workflowWakeRevision: number | null;
-};
+export type DispatchScheduledTaskRunResult =
+  | { action: "deleted" }
+  | {
+      action: "blocked";
+      reason: "insufficient_credits" | "monthly_model_cost_limit" | "monthly_agent_run_limit";
+    }
+  | {
+      action: "start" | "signal";
+      accountId: string;
+      workspaceId: string;
+      sessionId: string;
+      triggerEventId: string;
+      workflowId: string;
+      workflowWakeRevision: number | null;
+    };
 
 export type IndexDocumentInput = {
   accountId: string;

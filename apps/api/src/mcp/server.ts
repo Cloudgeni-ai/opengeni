@@ -719,6 +719,7 @@ export function buildOpenGeniMcpServer(
           task,
           agentRunUsageIdempotencyKey,
           triggerWorkflowId,
+          initiator: { kind: "subject", subjectId: grant.subjectId },
         });
         await recordWorkspaceUsage(deps, {
           accountId: grant.accountId,

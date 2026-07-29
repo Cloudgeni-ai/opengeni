@@ -43,10 +43,12 @@ import {
   listWorkspaceControlEvents,
   isSessionCompactionRequested,
   markSessionAttemptQuiesced,
+  markSessionWorkflowWakeDelivered,
   insertRecording,
   getRecording,
   peekSessionWork,
   recoverSessionDispatch,
+  reconcileSessionAttemptQuiescence,
   requestSessionCompaction,
   requestSessionTurnRecovery,
   mutateSessionControlInTransaction,
@@ -3308,6 +3310,60 @@ describe("clean session control plane", () => {
         allowUninterrupted: true,
       }),
     ).toEqual(events);
+  });
+
+  test("a closed interrupted attempt converges from its fully settled durable writer set", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "run the predecessor");
+    const attemptId = crypto.randomUUID();
+    const workflowId = `session-${session.id}`;
+    const predecessor = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      workflowId,
+      { attemptId },
+    );
+    expect(predecessor).not.toBeNull();
+    const steered = await send(grant, session.id, "replace the vanished worker", "steer");
+    await settleSessionAttemptInterruptions(client.db, grant.workspaceId!, session.id, attemptId);
+    expect(
+      await markSessionWorkflowWakeDelivered(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        temporalWorkflowId: workflowId,
+        wakeRevision: steered.wakeRevision,
+      }),
+    ).toEqual({ action: "pending_admission", blocker: "pending_quiescence" });
+
+    const recovered = await reconcileSessionAttemptQuiescence(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      attemptId,
+      temporalWorkflowId: workflowId,
+    });
+    expect(recovered).toMatchObject({
+      action: "quiesced",
+      events: [
+        {
+          type: "session.queue.changed",
+          turnId: predecessor!.id,
+          turnAttemptId: attemptId,
+          payload: expect.objectContaining({ operation: "attempt_quiesced", attemptId }),
+        },
+      ],
+    });
+    expect(
+      await reconcileSessionAttemptQuiescence(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        attemptId,
+        temporalWorkflowId: workflowId,
+      }),
+    ).toEqual({ action: "quiesced", events: [] });
   });
 
   test("worker death recovers the same compaction execution without entering the queue", async () => {
