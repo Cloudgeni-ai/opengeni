@@ -319,6 +319,8 @@ try {
         "    () => ({",
         "      snapshot: null,",
         '      queue: [{ id: "turn-proof", workspaceId: "workspace-proof", sessionId: "session-proof", triggerEventId: "event-proof", temporalWorkflowId: "workflow-proof", status: "queued", source: "user", position: 1, prompt: "Review the queued host request", resources: [], tools: [], model: "host-model", reasoningEffort: "medium", sandboxBackend: "none", sandboxOs: null, metadata: {}, version: 1, executionGeneration: 0, activeAttemptId: null, lineage: {}, initiator: { kind: "service", subjectId: "host:proof" }, initiatorContext: {}, startedAt: null, finishedAt: null, createdAt: "2026-07-23T00:00:00.000Z", updatedAt: "2026-07-23T00:00:00.000Z" }],',
+        "      pendingInputs: [],",
+        "      pendingInputAttachment: null,",
         "      effectiveControl: null,",
         "      stoppingPreviousAttempt: false,",
         "      loading: false,",
@@ -375,7 +377,7 @@ try {
     ),
     writeFile(
       join(consumerRoot, "ssr.tsx"),
-      'import { renderToStaticMarkup } from "react-dom/server";\nimport { HostEmbeddedSurfaces } from "./presentation";\nconst markup = renderToStaticMarkup(<HostEmbeddedSurfaces />);\nfor (const expected of ["Open host entity", "1 queued prompt", "entity-proof", "What should change?", "Host model"]) { if (!markup.includes(expected)) throw new Error(`SSR output lost populated host surface: ${expected}`); }\nconsole.log(`SSR_OK bytes=${new TextEncoder().encode(markup).byteLength}`);\n',
+      'import { renderToStaticMarkup } from "react-dom/server";\nimport { HostEmbeddedSurfaces } from "./presentation";\nconst markup = renderToStaticMarkup(<HostEmbeddedSurfaces />);\nfor (const expected of ["Open host entity", "Loading inputs…", "entity-proof", "What should change?", "Host model"]) { if (!markup.includes(expected)) throw new Error(`SSR output lost populated host surface: ${expected}`); }\nconsole.log(`SSR_OK bytes=${new TextEncoder().encode(markup).byteLength}`);\n',
     ),
     writeFile(
       join(consumerRoot, "runtime-proof.ts"),
