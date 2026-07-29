@@ -212,11 +212,17 @@ once. No other result is replayed, and there is no public API-key or Codex
 WebSocket fallback.
 
 The SDK's `startCodexRealtimeWebrtc` helper lazily owns browser microphone,
-peer connection, and `oai-events` data-channel setup and closes them together.
-V3 event/delegation behavior remains client-owned; a server sideband/tool
-lifecycle and upstream call-stop endpoint are outside this transport slice.
-This conversation path is not composer speech-to-text and does not change the
-workspace transcription policy seam.
+peer connection, remote audio, and `oai-events` data-channel setup and closes
+them together. `createCodexRealtimeController` composes the same ordinary
+session's begin/heartbeat/end lifecycle with that transport and the pinned V3
+bridge. Finalized transcripts and proven delegation/error events flow through
+the durable server ledger; streaming audio deltas never do. Outbound session
+updates and delegation results replay until every provider-channel chunk sends
+and its exact sequence is ACKed. A session-scoped owner record in browser
+session storage permits replay of the same begin operation after reload; an
+active lifecycle without matching proof is shown as another/lost browser owner
+rather than silently creating a mode. This conversation path is not composer
+speech-to-text and does not change the workspace transcription policy seam.
 
 ### Native web search follows the durable session tool policy
 

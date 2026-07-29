@@ -21,6 +21,10 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
+    },
+    "./codex-realtime-controller": {
+      "types": "./src/codex-realtime-controller.ts",
+      "default": "./src/codex-realtime-controller.ts"
     }
   },
   "publishConfig": {

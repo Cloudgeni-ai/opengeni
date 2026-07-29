@@ -35,6 +35,21 @@ lost. The lifecycle and claim fence are canonical in
 `packages/db/src/session-realtime.ts`, `packages/db/src/index.ts`, and
 `apps/worker/src/workflows/session.ts`.
 
+The ordinary web session composes this durable mode through
+`createCodexRealtimeController`: begin is followed by microphone/remote-audio
+WebRTC negotiation, the pinned V3 bridge, periodic outbound-ledger sync, and a
+version-fenced heartbeat. While the durable lifecycle or same-owner recovery is
+active, the already-mounted composer and its draft stay in place but Send,
+Steer, model/reasoning/tool configuration, and queue mutations are disabled;
+the queue remains visible read-only. The owner operation and browser proof are
+scoped to session storage and never rendered or logged. Reload replays that
+same operation and rotates only the dead browser connection. Without matching
+proof, the surface truthfully remains lost-owner until an end/expiry event;
+there is no status API or newly invented logical mode. Canonical:
+`packages/sdk/src/codex-realtime-controller.ts`,
+`apps/web/src/components/session/codex-realtime-control.tsx`, and
+`apps/web/src/routes/session.tsx`.
+
 After end, completed realtime ledger history crosses into ordinary inference
 only inside the first eligible queued human/API text claim transaction. That
 transaction deterministically locks all ended unprojected modes in

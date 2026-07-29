@@ -36,6 +36,7 @@ import {
   UserMessageBody,
 } from "@/components/session/banners";
 import { ComposerAgentsPill } from "@/components/session/composer-agents-pill";
+import { sessionCodexRealtimeSynchronousLock } from "@/components/session/codex-realtime-policy";
 import { useRail } from "@/components/rail/rail-context";
 import { GoalSurface } from "@/components/session/goal-surface";
 import { SessionWorkspace } from "@/components/session/sandbox-workspace";
@@ -44,7 +45,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { Notice } from "@/components/ui/notice";
 import type { WorkspaceTab } from "@opengeni/react";
 import { useAppContext } from "@/context";
-import { useCodexModels } from "@/lib/use-codex-models";
+import { useCodexConnectionModels } from "@/lib/use-codex-models";
 import { normalizeProviderDomain } from "@/lib/capabilities";
 import {
   isTerminalSessionStatus,
@@ -59,6 +60,12 @@ import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
 const LazySessionInspector = lazy(() =>
   import("@/components/session/inspector").then(({ SessionInspector }) => ({
     default: SessionInspector,
+  })),
+);
+
+const LazyCodexRealtimeControl = lazy(() =>
+  import("@/components/session/codex-realtime-control").then(({ SessionCodexRealtimeControl }) => ({
+    default: SessionCodexRealtimeControl,
   })),
 );
 
@@ -529,8 +536,19 @@ function SessionChatPane(props: {
   resolveCapabilityName: (mcpServerId: string) => string | null;
 }) {
   const context = useAppContext();
-  const codexModels = useCodexModels(props.session.workspaceId);
+  const codexConnection = useCodexConnectionModels(props.session.workspaceId);
   const terminal = isTerminalSessionStatus(props.session.status);
+  const synchronousRealtimeLock = useMemo(
+    () =>
+      sessionCodexRealtimeSynchronousLock(
+        props.events,
+        props.session.workspaceId,
+        props.session.id,
+      ),
+    [props.events, props.session.id, props.session.workspaceId],
+  );
+  const [controllerRealtimeLock, setControllerRealtimeLock] = useState(false);
+  const ordinaryControlsLocked = synchronousRealtimeLock || controllerRealtimeLock;
   // Per-approval decision state: an in-flight decision disables both buttons for
   // that approval and shows progress; a settled one can never double-submit even
   // if the strip lingers for a beat before the status flips.
@@ -910,7 +928,28 @@ function SessionChatPane(props: {
       {/* The one compact control stack above the composer. Each surface hides
           when it has nothing to show, so the stack degrades to
           whichever one is present — or neither. */}
-      {!terminal ? <QueueSurface queue={props.queue} composer={composer} /> : null}
+      {!terminal ? (
+        <Suspense fallback={null}>
+          <LazyCodexRealtimeControl
+            client={context.client}
+            workspaceId={props.session.workspaceId}
+            sessionId={props.session.id}
+            sessionStatus={props.session.status}
+            effectiveControl={props.queue.effectiveControl ?? props.session.effectiveControl}
+            events={props.events}
+            eventsReady={!props.initialLoading}
+            codexConnected={codexConnection.connected}
+            onControlsLockedChange={setControllerRealtimeLock}
+          />
+        </Suspense>
+      ) : null}
+      {!terminal ? (
+        <QueueSurface
+          {...(ordinaryControlsLocked
+            ? { queue: props.queue, readOnly: true as const }
+            : { queue: props.queue, composer })}
+        />
+      ) : null}
       <GoalSurface session={props.session} goal={props.goal} />
       <ComposerAgentsPill workspaceId={props.session.workspaceId} nodes={props.agentNodes} />
 
@@ -928,7 +967,7 @@ function SessionChatPane(props: {
               sessionHref: (sessionId) =>
                 `/workspaces/${props.session.workspaceId}/sessions/${sessionId}`,
             }}
-            disabled={terminal}
+            disabled={terminal || ordinaryControlsLocked}
             commandContext={commandContext}
             onClearView={props.onClearView}
             fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
@@ -950,8 +989,8 @@ function SessionChatPane(props: {
                   config={context.clientConfig}
                   model={model}
                   effort={context.reasoningEffort}
-                  disabled={composer.sending}
-                  extraModels={codexModels}
+                  disabled={composer.sending || ordinaryControlsLocked}
+                  extraModels={codexConnection.models}
                   onModelChange={(value) => context.setModelForSession(props.session.id, value)}
                   onEffortChange={context.setReasoningEffort}
                 />
@@ -962,7 +1001,9 @@ function SessionChatPane(props: {
                   // this external picker. Keep the trigger fenced until that
                   // apply has settled; otherwise a click can be overwritten by
                   // the delayed draft response immediately afterward.
-                  disabled={composer.sending || composer.draftLoading || terminal}
+                  disabled={
+                    composer.sending || composer.draftLoading || terminal || ordinaryControlsLocked
+                  }
                   label="Tools for this turn"
                   onChange={(next) => {
                     setToolSelectionExplicit(true);
@@ -973,7 +1014,11 @@ function SessionChatPane(props: {
                   servers={context.toolMcpServers}
                   selectedIds={durableSessionToolIds}
                   disabled={
-                    composer.sending || terminal || durableToolsSaving || !durableToolsHydrated
+                    composer.sending ||
+                    terminal ||
+                    durableToolsSaving ||
+                    !durableToolsHydrated ||
+                    ordinaryControlsLocked
                   }
                   label={
                     durableToolsSaving
