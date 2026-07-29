@@ -26,6 +26,7 @@ function outbound(): SessionRealtimeLedgerEntry {
     delegationItemId: "delegation-1",
     sourceUpdateId: null,
     historyItemId: null,
+    turnId: null,
     text: "completed on the same session",
     payload: {},
     clientAckedAt: null,

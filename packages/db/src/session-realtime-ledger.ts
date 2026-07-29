@@ -1,4 +1,5 @@
-import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { ReasoningEffort } from "@opengeni/contracts";
+import { and, asc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 
 import { sanitizeEventPayload, sanitizeModelPayload } from "./event-payload-sanitizer";
 import type { Database } from "./index";
@@ -9,6 +10,8 @@ import {
   type AssertSessionRealtimeOwnerInput,
 } from "./session-realtime";
 import { lockSessionEventWriteRows } from "./session-control";
+import { registerSessionWorkflowWakeInTransaction } from "./session-control";
+import { initiatorColumns, type FrozenTurnInitiator } from "./turn-initiator";
 
 export const SESSION_REALTIME_LEDGER_MAX_BATCH = 64;
 export const SESSION_REALTIME_LEDGER_MAX_TEXT_BYTES = 131_072;
@@ -101,6 +104,7 @@ export type SessionRealtimeLedgerEntry = {
   delegationItemId: string | null;
   sourceUpdateId: string | null;
   historyItemId: string | null;
+  turnId: string | null;
   text: string | null;
   payload: Record<string, unknown>;
   clientAckedAt: string | null;
@@ -132,6 +136,15 @@ export type SyncSessionRealtimeLedgerInput = AssertSessionRealtimeOwnerInput & {
 export type SyncSessionRealtimeLedgerResult = {
   accepted: Array<{ entry: SessionRealtimeLedgerEntry; replay: boolean }>;
   outbound: SessionRealtimeLedgerEntry[];
+  eventIds: string[];
+  workflowWakeRevision: number | null;
+};
+
+export type SyncSessionRealtimeLedgerHooks = {
+  /** Test-only failure injection after both durable admission rows exist. */
+  afterDelegationAdmission?:
+    | ((admission: { entryId: string; turnId: string }) => void | Promise<void>)
+    | undefined;
 };
 
 export type AppendSessionRealtimeOutboundInput = {
@@ -189,6 +202,7 @@ function mapEntry(row: EntryRow): SessionRealtimeLedgerEntry {
     delegationItemId: row.delegationItemId,
     sourceUpdateId: row.sourceUpdateId,
     historyItemId: row.historyItemId,
+    turnId: row.turnId,
     text: row.text,
     payload: row.payload,
     clientAckedAt: row.clientAckedAt?.toISOString() ?? null,
@@ -681,6 +695,235 @@ async function validateActiveConnection(
   return connection;
 }
 
+function delegationCallFailure(
+  input: SessionRealtimeInboundEntryInput,
+): { code: "invalid_delegation_call"; message: string } | null {
+  if (!input.delegationItemId?.trim()) {
+    return {
+      code: "invalid_delegation_call",
+      message: "Realtime delegation call is missing its provider item identity",
+    };
+  }
+  if (!input.text?.trim()) {
+    return {
+      code: "invalid_delegation_call",
+      message: "Realtime delegation call is missing ordinary work instructions",
+    };
+  }
+  return null;
+}
+
+function delegationReplayMatches(
+  row: EntryRow,
+  input: SessionRealtimeInboundEntryInput,
+  payload: Record<string, unknown>,
+): boolean {
+  return (
+    row.kind === "delegation_call" &&
+    row.providerEventId === (input.providerEventId ?? null) &&
+    row.delegationItemId === (input.delegationItemId ?? null) &&
+    row.text === (input.text ?? null) &&
+    JSON.stringify(row.payload) === JSON.stringify(payload)
+  );
+}
+
+async function appendInvalidDelegationFailure(
+  db: Database,
+  input: Pick<
+    SyncSessionRealtimeLedgerInput,
+    "workspaceId" | "sessionId" | "realtimeId" | "connectionEpoch"
+  >,
+  accountId: string,
+  incoming: SessionRealtimeInboundEntryInput,
+  failure: NonNullable<ReturnType<typeof delegationCallFailure>>,
+  sequence: number,
+  now: Date,
+): Promise<void> {
+  await db.insert(schema.sessionRealtimeEntries).values({
+    accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    realtimeId: input.realtimeId,
+    operationId: crypto.randomUUID(),
+    connectionEpoch: input.connectionEpoch,
+    sequence,
+    direction: "provider_out",
+    kind: "error",
+    delegationItemId: incoming.delegationItemId ?? null,
+    text: failure.message,
+    payload: {
+      code: failure.code,
+      callOperationId: incoming.operationId,
+    },
+    createdAt: now,
+    updatedAt: now,
+  });
+}
+
+async function admitRealtimeDelegationInTransaction(
+  db: Database,
+  input: Pick<
+    SyncSessionRealtimeLedgerInput,
+    "workspaceId" | "sessionId" | "realtimeId" | "connectionEpoch" | "ownerSubjectId"
+  >,
+  accountId: string,
+  incoming: SessionRealtimeInboundEntryInput,
+  entryId: string,
+  now: Date,
+): Promise<{ turnId: string; eventIds: string[]; workflowId: string }> {
+  // This function is a session-event writer, so independently retain the
+  // canonical control/workspace/session prefix even though owner proof already
+  // acquired it in the enclosing transaction.
+  const locks = await lockSessionEventWriteRows(db, {
+    workspaceId: input.workspaceId,
+    controlLock: "share",
+    sessionIds: [input.sessionId],
+  });
+  const session = locks.sessions[0];
+  if (!session || session.accountId !== accountId || session.status === "cancelled") {
+    throw new SessionRealtimeConflictError("REALTIME_NOT_FOUND", "Session not found");
+  }
+
+  const [{ queued } = { queued: 0 }] = await db
+    .select({
+      queued: sql<number>`count(*) filter (where ${schema.sessionTurns.status} = 'queued')`,
+    })
+    .from(schema.sessionTurns)
+    .where(
+      and(
+        eq(schema.sessionTurns.workspaceId, input.workspaceId),
+        eq(schema.sessionTurns.sessionId, input.sessionId),
+      ),
+    );
+  const reasoning = ReasoningEffort.safeParse(session.metadata.reasoningEffort);
+  const initiator: FrozenTurnInitiator = {
+    initiator: { kind: "subject", subjectId: input.ownerSubjectId },
+    context: {
+      source: "realtime_provider_delegation",
+      realtimeId: input.realtimeId,
+      connectionEpoch: input.connectionEpoch,
+      delegationItemId: incoming.delegationItemId!,
+    },
+  };
+  const turnId = crypto.randomUUID();
+  const triggerEventId = crypto.randomUUID();
+  const workflowId = session.temporalWorkflowId ?? `session-${session.id}`;
+  const [turn] = await db
+    .insert(schema.sessionTurns)
+    .values({
+      id: turnId,
+      accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      triggerEventId,
+      temporalWorkflowId: workflowId,
+      status: "queued",
+      source: "api",
+      position: Number(queued) + 1,
+      prompt: incoming.text!,
+      resources: [],
+      tools: [],
+      toolsProvided: false,
+      model: session.model,
+      reasoningEffort: reasoning.success ? reasoning.data : "medium",
+      sandboxBackend: session.sandboxBackend,
+      metadata: {
+        delivery: "send",
+        realtimeDelegation: {
+          realtimeId: input.realtimeId,
+          connectionEpoch: input.connectionEpoch,
+          delegationItemId: incoming.delegationItemId,
+          ledgerEntryId: entryId,
+        },
+      },
+      lineage: {
+        actor: "realtime_provider",
+        realtimeId: input.realtimeId,
+        connectionEpoch: input.connectionEpoch,
+        delegationItemId: incoming.delegationItemId,
+      },
+      ...initiatorColumns(initiator),
+      createdAt: now,
+      updatedAt: now,
+    })
+    .returning({ id: schema.sessionTurns.id });
+  if (!turn) throw new Error("Failed to create realtime delegation turn");
+
+  const eventValues: Array<typeof schema.sessionEvents.$inferInsert> = [
+    {
+      id: triggerEventId,
+      accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      sequence: session.lastSequence + 1,
+      type: "user.message",
+      clientEventId: incoming.operationId,
+      payload: sanitizeEventPayload({
+        text: incoming.text,
+        delivery: "send",
+        initiator: initiator.initiator,
+        realtimeDelegation: {
+          realtimeId: input.realtimeId,
+          connectionEpoch: input.connectionEpoch,
+          delegationItemId: incoming.delegationItemId,
+        },
+      }),
+      occurredAt: now,
+    },
+    {
+      accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      sequence: session.lastSequence + 2,
+      type: "turn.queued",
+      turnId,
+      payload: {
+        turnId,
+        triggerEventId,
+        source: "api",
+        initiator: initiator.initiator,
+        realtimeDelegation: {
+          realtimeId: input.realtimeId,
+          connectionEpoch: input.connectionEpoch,
+          delegationItemId: incoming.delegationItemId,
+        },
+      },
+      occurredAt: now,
+    },
+  ];
+  const events = await db.insert(schema.sessionEvents).values(eventValues).returning({
+    id: schema.sessionEvents.id,
+  });
+  await db
+    .update(schema.sessions)
+    .set({
+      status: "queued",
+      queueVersion: session.queueVersion + 1,
+      queueHeadPosition: 0,
+      queueTailPosition: Number(queued) + 1,
+      lastSequence: session.lastSequence + eventValues.length,
+      updatedAt: now,
+    })
+    .where(
+      and(eq(schema.sessions.workspaceId, input.workspaceId), eq(schema.sessions.id, session.id)),
+    );
+  await db.insert(schema.auditEvents).values({
+    accountId,
+    workspaceId: input.workspaceId,
+    subjectId: input.ownerSubjectId,
+    action: "session.realtime.delegation.accept",
+    targetType: "session_turn",
+    targetId: turnId,
+    metadata: {
+      realtimeId: input.realtimeId,
+      connectionEpoch: input.connectionEpoch,
+      delegationItemId: incoming.delegationItemId,
+      ledgerEntryId: entryId,
+    },
+  });
+  return { turnId, eventIds: events.map(({ id }) => id), workflowId };
+}
+
 async function materializeRealtimeUpdates(
   db: Database,
   input: Pick<
@@ -764,6 +1007,7 @@ function assertAck(value: number | null | undefined, maximum: number): number | 
 export async function syncSessionRealtimeLedgerInTransaction(
   db: Database,
   input: SyncSessionRealtimeLedgerInput,
+  hooks: SyncSessionRealtimeLedgerHooks = {},
 ): Promise<SyncSessionRealtimeLedgerResult> {
   assertConnectionEpoch(input.connectionEpoch);
   if ((input.entries?.length ?? 0) > SESSION_REALTIME_LEDGER_MAX_BATCH) {
@@ -793,93 +1037,11 @@ export async function syncSessionRealtimeLedgerInTransaction(
 
   let nextSequence = await nextLedgerSequence(db, input.realtimeId);
   let historyPosition = await nextHistoryPosition(db, input.workspaceId, input.sessionId);
-  const accepted: SyncSessionRealtimeLedgerResult["accepted"] = [];
-  for (const incoming of input.entries ?? []) {
-    const [existing] = await db
-      .select()
-      .from(schema.sessionRealtimeEntries)
-      .where(
-        and(
-          eq(schema.sessionRealtimeEntries.realtimeId, input.realtimeId),
-          eq(schema.sessionRealtimeEntries.operationId, incoming.operationId),
-        ),
-      )
-      .limit(1);
-    if (existing) {
-      accepted.push({ entry: mapEntry(existing), replay: true });
-      continue;
-    }
-    const role = expectedRole(incoming);
-    const text = incoming.text ?? null;
-    assertBoundedString(text, SESSION_REALTIME_LEDGER_MAX_TEXT_BYTES, "Realtime text");
-    if (
-      (incoming.kind === "user_transcript" || incoming.kind === "assistant_transcript") &&
-      !text
-    ) {
-      throw new Error("Finalized realtime transcript text is required");
-    }
-    const payload = boundedPayload(incoming.payload);
-    const now = input.now ?? new Date();
-    let historyItemId: string | null = null;
-    if (incoming.kind === "user_transcript" || incoming.kind === "assistant_transcript") {
-      const [history] = await db
-        .insert(schema.sessionHistoryItems)
-        .values({
-          accountId: modeRow.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          position: historyPosition++,
-          item: sanitizeModelPayload({ type: "message", role, content: text }),
-          producerCodexCredentialId: null,
-          createdAt: now,
-        })
-        .returning({ id: schema.sessionHistoryItems.id });
-      if (!history) throw new Error("Failed to append finalized realtime transcript");
-      historyItemId = history.id;
-    }
-    const [entry] = await db
-      .insert(schema.sessionRealtimeEntries)
-      .values({
-        accountId: modeRow.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        realtimeId: input.realtimeId,
-        operationId: incoming.operationId,
-        connectionEpoch: input.connectionEpoch,
-        sequence: nextSequence++,
-        direction: "provider_in",
-        kind: incoming.kind,
-        role,
-        providerEventId: incoming.providerEventId ?? null,
-        delegationItemId: incoming.delegationItemId ?? null,
-        historyItemId,
-        text,
-        payload,
-        createdAt: now,
-        updatedAt: now,
-      })
-      .returning();
-    if (!entry) throw new Error("Failed to append realtime ledger entry");
-    accepted.push({ entry: mapEntry(entry), replay: false });
-  }
-
+  let providerStartupAcknowledged = connection.startupAcknowledgedAt !== null;
+  const eventIds: string[] = [];
+  let delegationTurns = 0;
+  let delegationWorkflowId: string | null = null;
   const now = input.now ?? new Date();
-  await materializeRealtimeUpdates(db, input, modeRow.accountId, () => nextSequence++, now);
-  const maximum = nextSequence - 1;
-  const clientAck = assertAck(input.clientAckThroughSequence, maximum);
-  if (clientAck !== null && clientAck > 0) {
-    await db
-      .update(schema.sessionRealtimeEntries)
-      .set({ clientAckedAt: now, updatedAt: now })
-      .where(
-        and(
-          eq(schema.sessionRealtimeEntries.realtimeId, input.realtimeId),
-          eq(schema.sessionRealtimeEntries.direction, "provider_out"),
-          isNull(schema.sessionRealtimeEntries.clientAckedAt),
-          sql`${schema.sessionRealtimeEntries.sequence} <= ${clientAck}`,
-        ),
-      );
-  }
   if (input.providerStarted) {
     assertBoundedString(
       input.providerStarted.providerSessionId,
@@ -920,6 +1082,149 @@ export async function syncSessionRealtimeLedgerInTransaction(
         );
       }
     }
+    providerStartupAcknowledged = true;
+  }
+  const accepted: SyncSessionRealtimeLedgerResult["accepted"] = [];
+  for (const incoming of input.entries ?? []) {
+    if (incoming.kind === "delegation_call" && !providerStartupAcknowledged) {
+      throw new SessionRealtimeConflictError(
+        "REALTIME_PROVIDER_NOT_STARTED",
+        "Realtime provider startup proof is required before delegation",
+      );
+    }
+    const payload = boundedPayload(incoming.payload);
+    const [existing] = await db
+      .select()
+      .from(schema.sessionRealtimeEntries)
+      .where(
+        and(
+          eq(schema.sessionRealtimeEntries.realtimeId, input.realtimeId),
+          incoming.kind === "delegation_call" && incoming.delegationItemId
+            ? or(
+                eq(schema.sessionRealtimeEntries.operationId, incoming.operationId),
+                and(
+                  eq(schema.sessionRealtimeEntries.kind, "delegation_call"),
+                  eq(schema.sessionRealtimeEntries.delegationItemId, incoming.delegationItemId),
+                ),
+              )
+            : eq(schema.sessionRealtimeEntries.operationId, incoming.operationId),
+        ),
+      )
+      .limit(1);
+    if (existing) {
+      if (
+        incoming.kind === "delegation_call" &&
+        !delegationReplayMatches(existing, incoming, payload)
+      ) {
+        throw new SessionRealtimeConflictError(
+          "REALTIME_DELEGATION_CHANGED",
+          "Realtime delegation operation was already used with different input",
+        );
+      }
+      accepted.push({ entry: mapEntry(existing), replay: true });
+      continue;
+    }
+    const role = expectedRole(incoming);
+    const text = incoming.text ?? null;
+    assertBoundedString(text, SESSION_REALTIME_LEDGER_MAX_TEXT_BYTES, "Realtime text");
+    if (
+      (incoming.kind === "user_transcript" || incoming.kind === "assistant_transcript") &&
+      !text
+    ) {
+      throw new Error("Finalized realtime transcript text is required");
+    }
+    let historyItemId: string | null = null;
+    if (incoming.kind === "user_transcript" || incoming.kind === "assistant_transcript") {
+      const [history] = await db
+        .insert(schema.sessionHistoryItems)
+        .values({
+          accountId: modeRow.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          position: historyPosition++,
+          item: sanitizeModelPayload({ type: "message", role, content: text }),
+          producerCodexCredentialId: null,
+          createdAt: now,
+        })
+        .returning({ id: schema.sessionHistoryItems.id });
+      if (!history) throw new Error("Failed to append finalized realtime transcript");
+      historyItemId = history.id;
+    }
+    let [entry] = await db
+      .insert(schema.sessionRealtimeEntries)
+      .values({
+        accountId: modeRow.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        realtimeId: input.realtimeId,
+        operationId: incoming.operationId,
+        connectionEpoch: input.connectionEpoch,
+        sequence: nextSequence++,
+        direction: "provider_in",
+        kind: incoming.kind,
+        role,
+        providerEventId: incoming.providerEventId ?? null,
+        delegationItemId: incoming.delegationItemId ?? null,
+        historyItemId,
+        text,
+        payload,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning();
+    if (!entry) throw new Error("Failed to append realtime ledger entry");
+    if (incoming.kind === "delegation_call") {
+      const failure = delegationCallFailure(incoming);
+      if (failure) {
+        await appendInvalidDelegationFailure(
+          db,
+          input,
+          modeRow.accountId,
+          incoming,
+          failure,
+          nextSequence++,
+          now,
+        );
+      } else {
+        const admission = await admitRealtimeDelegationInTransaction(
+          db,
+          input,
+          modeRow.accountId,
+          incoming,
+          entry.id,
+          now,
+        );
+        const [linked] = await db
+          .update(schema.sessionRealtimeEntries)
+          .set({ turnId: admission.turnId, updatedAt: now })
+          .where(eq(schema.sessionRealtimeEntries.id, entry.id))
+          .returning();
+        if (!linked) throw new Error("Failed to link realtime delegation turn");
+        entry = linked;
+        eventIds.push(...admission.eventIds);
+        delegationTurns += 1;
+        delegationWorkflowId = admission.workflowId;
+        await hooks.afterDelegationAdmission?.({ entryId: entry.id, turnId: admission.turnId });
+      }
+    }
+    accepted.push({ entry: mapEntry(entry), replay: false });
+  }
+
+  await materializeRealtimeUpdates(db, input, modeRow.accountId, () => nextSequence++, now);
+  const maximum = nextSequence - 1;
+  const clientAck = assertAck(input.clientAckThroughSequence, maximum);
+  if (clientAck !== null && clientAck > 0) {
+    await db
+      .update(schema.sessionRealtimeEntries)
+      .set({ clientAckedAt: now, updatedAt: now })
+      .where(
+        and(
+          eq(schema.sessionRealtimeEntries.realtimeId, input.realtimeId),
+          eq(schema.sessionRealtimeEntries.direction, "provider_out"),
+          isNull(schema.sessionRealtimeEntries.clientAckedAt),
+          sql`${schema.sessionRealtimeEntries.sequence} <= ${clientAck}`,
+        ),
+      );
   }
   if (input.providerStarted && connection.startupFenceSequence > 0) {
     await db
@@ -946,7 +1251,22 @@ export async function syncSessionRealtimeLedgerInTransaction(
     )
     .orderBy(asc(schema.sessionRealtimeEntries.sequence))
     .limit(SESSION_REALTIME_LEDGER_MAX_OUTBOUND);
-  return { accepted, outbound: outbound.map(mapEntry) };
+  const workflowWakeRevision =
+    delegationTurns > 0
+      ? await registerSessionWorkflowWakeInTransaction(db, {
+          accountId: modeRow.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          temporalWorkflowId: delegationWorkflowId ?? `session-${input.sessionId}`,
+          reason: "realtime_delegation",
+        })
+      : null;
+  return {
+    accepted,
+    outbound: outbound.map(mapEntry),
+    eventIds,
+    workflowWakeRevision,
+  };
 }
 
 export async function appendSessionRealtimeOutboundInTransaction(

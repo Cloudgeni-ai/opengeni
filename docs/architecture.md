@@ -295,6 +295,14 @@ flowchart LR
 
 An ordinary session may temporarily enter **connected-Codex GPT-Live realtime mode** without creating or forking another session. Admission and every ordinary workflow claim serialize on the same canonical PostgreSQL session lock: admitted ordinary/recovery/maintenance work makes realtime start reject, while an active realtime owner makes those claims remain pending until end or lease expiry. Human composer/queue/Send/Steer mutations are fenced only for that session; durable cross-session agent updates are still accepted but do not wake competing normal inference. `session_realtime_modes` stores the authenticated browser-owner hash, versioned lease, connection epoch, and lifecycle facts; it never stores provider credentials or audio. The browser's WebRTC negotiation must present the exact active owner/version, which the API consumes transactionally before sending only SDP/configuration through the connected-Codex broker. Canonical: `packages/db/src/session-realtime.ts`, `packages/db/src/session-queue-commands.ts`, `apps/api/src/routes/sessions.ts`, `apps/worker/src/workflows/session.ts`, and `packages/sdk/src/codex-realtime.ts`.
 
+Native provider delegation remains in that same session. Exact owner, connection
+epoch, and provider-start proof gate one transaction that accepts the provider
+call ledger row and creates one ordinary queued `session_turns` row plus its
+canonical events and durable workflow wake. The call's one-to-one `turn_id` is
+the terminal result/error projection seam. Invalid calls ledger one deterministic
+outbound error; a transient failure commits neither call nor turn. There is no
+child/fork session or after-commit admission worker.
+
 ---
 
 ## 5. The runtime spine — session → turn → run

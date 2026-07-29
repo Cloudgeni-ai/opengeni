@@ -1069,9 +1069,14 @@ export const sessionRealtimeEntries = pgTable(
     providerEventId: text("provider_event_id"),
     delegationItemId: text("delegation_item_id"),
     // The referenced tables are declared later in this schema module; the
-    // rolling migration owns both ON DELETE SET NULL foreign keys.
+    // rolling migration owns all three ON DELETE SET NULL foreign keys.
     sourceUpdateId: uuid("source_update_id"),
     historyItemId: uuid("history_item_id"),
+    // The rolling migration owns this ON DELETE SET NULL foreign key because
+    // sessionTurns is declared later in this schema module. A non-null value is
+    // the durable, one-to-one terminal-projection seam for an accepted provider
+    // delegation call; it never denotes a child/fork session.
+    turnId: uuid("turn_id"),
     text: text("text"),
     payload: jsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
     clientAckedAt: timestamp("client_acked_at", { withTimezone: true }),
@@ -1101,6 +1106,12 @@ export const sessionRealtimeEntries = pgTable(
     sourceUpdate: uniqueIndex("session_realtime_entries_source_update_uq")
       .on(table.realtimeId, table.sourceUpdateId)
       .where(sql`${table.sourceUpdateId} is not null`),
+    delegationTurn: uniqueIndex("session_realtime_entries_delegation_turn_uq")
+      .on(table.turnId)
+      .where(sql`${table.turnId} is not null`),
+    delegationCall: uniqueIndex("session_realtime_entries_delegation_call_uq")
+      .on(table.realtimeId, table.delegationItemId)
+      .where(sql`${table.kind} = 'delegation_call' and ${table.delegationItemId} is not null`),
     outboundPending: index("session_realtime_entries_outbound_pending_idx")
       .on(table.realtimeId, table.sequence)
       .where(
@@ -1135,6 +1146,10 @@ export const sessionRealtimeEntries = pgTable(
     payloadValid: check(
       "session_realtime_entries_payload_check",
       sql`octet_length(${table.payload}::text) <= 131072`,
+    ),
+    turnValid: check(
+      "session_realtime_entries_turn_check",
+      sql`${table.turnId} is null or ${table.kind} = 'delegation_call'`,
     ),
     transcriptValid: check(
       "session_realtime_entries_transcript_check",

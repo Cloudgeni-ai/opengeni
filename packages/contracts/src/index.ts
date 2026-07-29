@@ -3443,6 +3443,7 @@ export const SessionRealtimeLedgerEntry = z
     delegationItemId: z.string().nullable(),
     sourceUpdateId: z.string().uuid().nullable(),
     historyItemId: z.string().uuid().nullable(),
+    turnId: z.string().uuid().nullable(),
     text: z.string().nullable(),
     payload: z.record(z.string(), z.unknown()),
     clientAckedAt: z.string().datetime().nullable(),

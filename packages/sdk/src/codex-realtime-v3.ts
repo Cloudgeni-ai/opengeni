@@ -229,7 +229,7 @@ function sendOutbound(events: RTCDataChannel, entry: SessionRealtimeLedgerEntry)
   if (events.readyState !== "open") throw new Error("Codex realtime data channel is not open");
   const text = entry.text ?? JSON.stringify(entry.payload);
   const messages =
-    entry.kind === "delegation_result" && entry.delegationItemId
+    (entry.kind === "delegation_result" || entry.kind === "error") && entry.delegationItemId
       ? encodeCodexRealtimeV3DelegationContextAppend({
           delegationItemId: entry.delegationItemId,
           text,

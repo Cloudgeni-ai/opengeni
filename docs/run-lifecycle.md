@@ -35,6 +35,14 @@ lost. The lifecycle and claim fence are canonical in
 `packages/db/src/session-realtime.ts`, `packages/db/src/index.ts`, and
 `apps/worker/src/workflows/session.ts`.
 
+A provider `delegation.created` is the deliberate exception to realtime being
+turn-free: after exact owner, active connection epoch, and provider-start proof,
+one transaction ledgers the call and creates exactly one ordinary queued turn
+on that same session. The call row links one-to-one to the turn for later
+terminal result/error projection. Invalid calls receive a deterministic outbound
+error instead; transient admission failure rolls the call and turn back together.
+No child session, fork, handoff framework, or after-commit admission loop exists.
+
 Every accepted turn also carries one immutable `TurnInitiator`. Human/API
 Send and Steer capture the authenticated subject that accepted the command;
 schedules, goal continuation, compaction, and coalesced internal batches use

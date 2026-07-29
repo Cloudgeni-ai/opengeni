@@ -65,6 +65,7 @@ export type SessionRealtimeLedgerEntry = {
   delegationItemId: string | null;
   sourceUpdateId: string | null;
   historyItemId: string | null;
+  turnId: string | null;
   text: string | null;
   payload: Record<string, unknown>;
   clientAckedAt: string | null;
