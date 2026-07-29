@@ -1,5 +1,14 @@
 # @opengeni/events
 
+## 0.3.32
+
+### Patch Changes
+
+- 519d93c: Add validated inline per-session skills and discover skills directly from already-materialized repository resources.
+- Updated dependencies [519d93c]
+  - @opengeni/contracts@0.21.0
+  - @opengeni/db@0.13.4
+
 ## 0.3.31
 
 ### Patch Changes

@@ -1,5 +1,20 @@
 # @opengeni/core
 
+## 0.12.5
+
+### Patch Changes
+
+- 519d93c: Add validated inline per-session skills and discover skills directly from already-materialized repository resources.
+- 7b962a6: Honor valid delegated worker access in local mode so signed session and turn metadata, along with narrowed permissions, reach first-party MCP tools.
+- Updated dependencies [519d93c]
+  - @opengeni/contracts@0.21.0
+  - @opengeni/runtime@0.14.0
+  - @opengeni/config@0.7.10
+  - @opengeni/db@0.13.4
+  - @opengeni/documents@0.2.41
+  - @opengeni/events@0.3.32
+  - @opengeni/storage@0.2.34
+
 ## 0.12.4
 
 ### Patch Changes

@@ -1,5 +1,13 @@
 # @opengeni/config
 
+## 0.7.10
+
+### Patch Changes
+
+- 519d93c: Add validated inline per-session skills and discover skills directly from already-materialized repository resources.
+- Updated dependencies [519d93c]
+  - @opengeni/contracts@0.21.0
+
 ## 0.7.9
 
 ### Patch Changes
