@@ -353,12 +353,16 @@ export const codexSubscriptionCredentials = pgTable(
     // continues to own `version`; quota/cache writes own neither counter.
     allocatorVersion: integer("allocator_version").notNull().default(1),
     allocatorUpdatedBySubjectId: text("allocator_updated_by_subject_id"),
-    allocatorUpdatedAt: timestamp("allocator_updated_at", { withTimezone: true }),
+    allocatorUpdatedAt: timestamp("allocator_updated_at", {
+      withTimezone: true,
+    }),
     // Authoritative count-only summary cached from /wham/usage. Detailed rows
     // are never persisted as redemption authority; every first POST preflights
     // the provider's fresh detail endpoint.
     resetCreditAvailableCount: integer("reset_credit_available_count"),
-    resetCreditsCheckedAt: timestamp("reset_credits_checked_at", { withTimezone: true }),
+    resetCreditsCheckedAt: timestamp("reset_credits_checked_at", {
+      withTimezone: true,
+    }),
     // Set only by a direct Better Auth cookie connection/reconnection. Legacy,
     // configured, delegated, API-key, and agent-created rows remain view-only.
     connectedBySubjectId: text("connected_by_subject_id"),
@@ -408,7 +412,9 @@ export const codexResetRedemptionAttempts = pgTable(
     outcome: text("outcome"),
     claimHolderId: uuid("claim_holder_id"),
     claimExpiresAt: timestamp("claim_expires_at", { withTimezone: true }),
-    confirmationExpiresAt: timestamp("confirmation_expires_at", { withTimezone: true }).notNull(),
+    confirmationExpiresAt: timestamp("confirmation_expires_at", {
+      withTimezone: true,
+    }).notNull(),
     providerStartedAt: timestamp("provider_started_at", { withTimezone: true }),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     lastFailureKind: text("last_failure_kind"),
@@ -978,8 +984,12 @@ export const sessionRealtimeModes = pgTable(
     state: text("state").notNull().default("active"),
     version: integer("version").notNull().default(1),
     connectionEpoch: integer("connection_epoch").notNull().default(1),
-    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }).notNull(),
-    lastHeartbeatAt: timestamp("last_heartbeat_at", { withTimezone: true }).notNull(),
+    leaseExpiresAt: timestamp("lease_expires_at", {
+      withTimezone: true,
+    }).notNull(),
+    lastHeartbeatAt: timestamp("last_heartbeat_at", {
+      withTimezone: true,
+    }).notNull(),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
     endedAt: timestamp("ended_at", { withTimezone: true }),
     endReason: text("end_reason"),
@@ -987,7 +997,9 @@ export const sessionRealtimeModes = pgTable(
     // consumed only when an eligible ordinary queued turn atomically binds all
     // pending realtime history to one immutable projection row.
     contextProjectionId: uuid("context_projection_id"),
-    contextProjectedAt: timestamp("context_projected_at", { withTimezone: true }),
+    contextProjectedAt: timestamp("context_projected_at", {
+      withTimezone: true,
+    }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -1064,12 +1076,15 @@ export const sessionRealtimeConnections = pgTable(
     operationId: uuid("operation_id").notNull(),
     connectionEpoch: integer("connection_epoch").notNull(),
     startupFenceSequence: integer("startup_fence_sequence").notNull().default(0),
+    promotionMode: text("promotion_mode").notNull().default("legacy"),
     state: text("state").notNull().default("negotiating"),
     sdpAnswer: text("sdp_answer"),
     failureCode: text("failure_code"),
     providerSessionId: text("provider_session_id"),
     startupEventId: text("startup_event_id"),
-    startupAcknowledgedAt: timestamp("startup_acknowledged_at", { withTimezone: true }),
+    startupAcknowledgedAt: timestamp("startup_acknowledged_at", {
+      withTimezone: true,
+    }),
     negotiatedAt: timestamp("negotiated_at", { withTimezone: true }),
     closedAt: timestamp("closed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -1096,10 +1111,16 @@ export const sessionRealtimeConnections = pgTable(
     ),
     oneActive: uniqueIndex("session_realtime_connections_one_active_uq")
       .on(table.realtimeId)
-      .where(sql`${table.state} = 'active'`),
+      .where(
+        sql`(${table.promotionMode} = 'legacy' and ${table.state} in ('negotiating', 'ready', 'active'))
+          or (${table.promotionMode} = 'staged' and ${table.state} = 'active')`,
+      ),
     onePreparing: uniqueIndex("session_realtime_connections_one_preparing_uq")
       .on(table.realtimeId)
-      .where(sql`${table.state} in ('negotiating', 'ready')`),
+      .where(
+        sql`(${table.promotionMode} = 'legacy' and ${table.state} in ('negotiating', 'ready', 'active'))
+          or (${table.promotionMode} = 'staged' and ${table.state} in ('negotiating', 'ready'))`,
+      ),
     epochValid: check(
       "session_realtime_connections_epoch_check",
       sql`${table.connectionEpoch} >= 1`,
@@ -1107,6 +1128,10 @@ export const sessionRealtimeConnections = pgTable(
     startupFenceValid: check(
       "session_realtime_connections_startup_fence_check",
       sql`${table.startupFenceSequence} >= 0`,
+    ),
+    promotionModeValid: check(
+      "session_realtime_connections_promotion_mode_check",
+      sql`${table.promotionMode} in ('legacy', 'staged')`,
     ),
     stateValid: check(
       "session_realtime_connections_state_check",
@@ -2443,10 +2468,14 @@ export const sessionGoals = pgTable(
     // update, timeline events, usage row, and workflow-wake outbox row.
     // Temporal signals and workflow history are replaceable nudges over these
     // monotonic revisions.
-    continuationWakeRevision: bigint("continuation_wake_revision", { mode: "number" })
+    continuationWakeRevision: bigint("continuation_wake_revision", {
+      mode: "number",
+    })
       .notNull()
       .default(0),
-    continuationObservedRevision: bigint("continuation_observed_revision", { mode: "number" })
+    continuationObservedRevision: bigint("continuation_observed_revision", {
+      mode: "number",
+    })
       .notNull()
       .default(0),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
@@ -3011,7 +3040,9 @@ export const sandboxLeaseHolders = pgTable(
     leaseId: uuid("lease_id")
       .notNull()
       .references(() => sandboxLeases.id, { onDelete: "cascade" }),
-    kind: text("kind", { enum: ["turn", "viewer", "direct", "process"] }).notNull(),
+    kind: text("kind", {
+      enum: ["turn", "viewer", "direct", "process"],
+    }).notNull(),
     holderId: text("holder_id").notNull(),
     // The attributing session within the (possibly shared) group.
     subjectId: uuid("subject_id"),
@@ -3056,7 +3087,9 @@ export const sandboxWorkspaceMutationAdmissions = pgTable(
       .references(() => sandboxLeases.id, { onDelete: "cascade" }),
     sandboxGroupId: uuid("sandbox_group_id").notNull(),
     sessionId: uuid("session_id").notNull(),
-    actorKind: text("actor_kind", { enum: sandboxWorkspaceMutationActorKindValues }).notNull(),
+    actorKind: text("actor_kind", {
+      enum: sandboxWorkspaceMutationActorKindValues,
+    }).notNull(),
     actorId: uuid("actor_id").notNull(),
     // Exact turn authority is present only for actor_kind='turn'. Direct HTTP
     // requests and retained processes never invent a turn or quiescence owner.
@@ -3203,7 +3236,9 @@ export const sandboxRetainedProcesses = pgTable(
     sandboxGroupId: uuid("sandbox_group_id").notNull(),
     parentAdmissionId: uuid("parent_admission_id").notNull(),
     holderId: text("holder_id").notNull(),
-    ownerActorKind: text("owner_actor_kind", { enum: ["turn", "direct"] }).notNull(),
+    ownerActorKind: text("owner_actor_kind", {
+      enum: ["turn", "direct"],
+    }).notNull(),
     ownerActorId: uuid("owner_actor_id").notNull(),
     ownerTurnId: uuid("owner_turn_id"),
     ownerAttemptId: uuid("owner_attempt_id"),
@@ -3226,13 +3261,19 @@ export const sandboxRetainedProcesses = pgTable(
     // never exit/loss proof.
     reconcileAfter: timestamp("reconcile_after", { withTimezone: true }).notNull().defaultNow(),
     reconcileClaimId: uuid("reconcile_claim_id"),
-    reconcileClaimedAt: timestamp("reconcile_claimed_at", { withTimezone: true }),
+    reconcileClaimedAt: timestamp("reconcile_claimed_at", {
+      withTimezone: true,
+    }),
     reconcileAttempts: integer("reconcile_attempts").notNull().default(0),
     lastReconcileOutcome: text("last_reconcile_outcome"),
-    reconcileProofOutcome: text("reconcile_proof_outcome", { enum: ["exited", "lost"] }),
+    reconcileProofOutcome: text("reconcile_proof_outcome", {
+      enum: ["exited", "lost"],
+    }),
     reconcileProofExitCode: integer("reconcile_proof_exit_code"),
     reconcileProofReason: text("reconcile_proof_reason"),
-    reconcileProofObservedAt: timestamp("reconcile_proof_observed_at", { withTimezone: true }),
+    reconcileProofObservedAt: timestamp("reconcile_proof_observed_at", {
+      withTimezone: true,
+    }),
   },
   (table) => ({
     workspaceAccount: foreignKey({
@@ -3956,8 +3997,12 @@ export const githubInstallations = pgTable(
     githubActorId: bigint("github_actor_id", { mode: "number" }),
     githubActorLogin: text("github_actor_login"),
     authorityKind: text("authority_kind"),
-    authorityCheckedAt: timestamp("authority_checked_at", { withTimezone: true }),
-    authorityExpiresAt: timestamp("authority_expires_at", { withTimezone: true }),
+    authorityCheckedAt: timestamp("authority_checked_at", {
+      withTimezone: true,
+    }),
+    authorityExpiresAt: timestamp("authority_expires_at", {
+      withTimezone: true,
+    }),
     authorityNonce: text("authority_nonce"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -4191,7 +4236,9 @@ export const hostExportOutbox = pgTable(
     payload: jsonb("payload").$type<unknown>().notNull(),
     envelopeBytes: integer("envelope_bytes").notNull(),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
-    sourceRecordedAt: timestamp("source_recorded_at", { withTimezone: true }).notNull(),
+    sourceRecordedAt: timestamp("source_recorded_at", {
+      withTimezone: true,
+    }).notNull(),
     enqueuedAt: timestamp("enqueued_at", { withTimezone: true }).notNull(),
   },
   (table) => ({

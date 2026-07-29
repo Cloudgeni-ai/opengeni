@@ -153,11 +153,11 @@ describe("release schema contract", () => {
         (migrations.has("0135_session_realtime_connection_promotion.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "5d3fc240ae6a78fc44659ec9274b62fe9624d18fa4f2337bcc555e4ebf433b08",
+      "7d6a2057c1a239e76e3e4641ca190f3e7f43e4f98037bca07a3eaceeec1e35f4",
     );
     expect(contract.latestMigration).toBe("0135_session_realtime_connection_promotion.sql");
     expect(migrations.get("0135_session_realtime_connection_promotion.sql")).toMatchObject({
-      sha256: "76515538f328548db98aeed2d4bbbaf18024d99af77bb7518613edd8f2dcffca",
+      sha256: "8009eda105a02dcaaaa0e69fcd105224ae675e403daf7b406a0cb0e8099f0e38",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0134_session_realtime_context_projection.sql")).toMatchObject({

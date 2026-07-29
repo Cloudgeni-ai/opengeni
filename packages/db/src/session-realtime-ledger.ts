@@ -28,12 +28,15 @@ export type SessionRealtimeConnectionState =
   | "failed"
   | "closed";
 
+export type SessionRealtimeConnectionPromotionMode = "legacy" | "staged";
+
 export type SessionRealtimeConnection = {
   id: string;
   realtimeId: string;
   operationId: string;
   connectionEpoch: number;
   startupFenceSequence: number;
+  promotionMode: SessionRealtimeConnectionPromotionMode;
   state: SessionRealtimeConnectionState;
   sdpAnswer: string | null;
   failureCode: string | null;
@@ -50,6 +53,7 @@ export type ClaimSessionRealtimeConnectionInput = AssertSessionRealtimeOwnerInpu
   operationId: string;
   expectedConnectionEpoch: number;
   rotate: boolean;
+  promotionMode?: SessionRealtimeConnectionPromotionMode | undefined;
 };
 
 export type ClaimSessionRealtimeConnectionResult = {
@@ -214,6 +218,7 @@ function mapConnection(row: ConnectionRow): SessionRealtimeConnection {
     operationId: row.operationId,
     connectionEpoch: row.connectionEpoch,
     startupFenceSequence: row.startupFenceSequence,
+    promotionMode: row.promotionMode as SessionRealtimeConnectionPromotionMode,
     state: row.state as SessionRealtimeConnectionState,
     sdpAnswer: row.sdpAnswer,
     failureCode: row.failureCode,
@@ -459,6 +464,7 @@ export async function claimSessionRealtimeConnectionInTransaction(
   input: ClaimSessionRealtimeConnectionInput,
 ): Promise<ClaimSessionRealtimeConnectionResult> {
   assertConnectionEpoch(input.expectedConnectionEpoch);
+  const promotionMode = input.promotionMode ?? "staged";
   let staleRotationError: SessionRealtimeConflictError | null = null;
   let mode;
   try {
@@ -489,6 +495,7 @@ export async function claimSessionRealtimeConnectionInTransaction(
     .limit(1);
   if (existing) {
     if (
+      existing.promotionMode !== promotionMode ||
       (input.rotate && existing.connectionEpoch <= input.expectedConnectionEpoch) ||
       (!input.rotate && existing.connectionEpoch !== input.expectedConnectionEpoch)
     ) {
@@ -528,11 +535,31 @@ export async function claimSessionRealtimeConnectionInTransaction(
       "Realtime mode already has an open provider connection",
     );
   }
-  if (input.rotate && preparing) {
-    await db
-      .update(schema.sessionRealtimeConnections)
-      .set({ state: "closed", closedAt: now, updatedAt: now })
-      .where(eq(schema.sessionRealtimeConnections.id, preparing.id));
+  if (input.rotate) {
+    if (promotionMode === "staged") {
+      if (active?.promotionMode === "legacy" || preparing?.promotionMode === "legacy") {
+        throw new SessionRealtimeConflictError(
+          "REALTIME_CONNECTION_ACTIVE",
+          "Legacy realtime connection must finish rotating before staged promotion",
+        );
+      }
+      if (preparing) {
+        await db
+          .update(schema.sessionRealtimeConnections)
+          .set({ state: "closed", closedAt: now, updatedAt: now })
+          .where(eq(schema.sessionRealtimeConnections.id, preparing.id));
+      }
+    } else {
+      await db
+        .update(schema.sessionRealtimeConnections)
+        .set({ state: "closed", closedAt: now, updatedAt: now })
+        .where(
+          and(
+            eq(schema.sessionRealtimeConnections.realtimeId, input.realtimeId),
+            inArray(schema.sessionRealtimeConnections.state, ["negotiating", "ready", "active"]),
+          ),
+        );
+    }
   }
 
   const highestEpoch = connections.reduce(
@@ -540,6 +567,33 @@ export async function claimSessionRealtimeConnectionInTransaction(
     input.expectedConnectionEpoch,
   );
   const targetEpoch = input.rotate ? highestEpoch + 1 : input.expectedConnectionEpoch;
+
+  let modeVersion = mode.version;
+  if (input.rotate && promotionMode === "legacy") {
+    const [rotated] = await db
+      .update(schema.sessionRealtimeModes)
+      .set({
+        connectionEpoch: targetEpoch,
+        version: mode.version + 1,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(schema.sessionRealtimeModes.id, input.realtimeId),
+          eq(schema.sessionRealtimeModes.state, "active"),
+          eq(schema.sessionRealtimeModes.version, mode.version),
+          eq(schema.sessionRealtimeModes.connectionEpoch, input.expectedConnectionEpoch),
+        ),
+      )
+      .returning({ version: schema.sessionRealtimeModes.version });
+    if (!rotated) {
+      throw new SessionRealtimeConflictError(
+        "REALTIME_CONNECTION_CHANGED",
+        "Realtime connection changed while rotating",
+      );
+    }
+    modeVersion = rotated.version;
+  }
 
   const [modeRow] = await db
     .select({ accountId: schema.sessionRealtimeModes.accountId })
@@ -572,6 +626,7 @@ export async function claimSessionRealtimeConnectionInTransaction(
       operationId: input.operationId,
       connectionEpoch: targetEpoch,
       startupFenceSequence,
+      promotionMode,
       state: "negotiating",
       createdAt: now,
       updatedAt: now,
@@ -581,7 +636,7 @@ export async function claimSessionRealtimeConnectionInTransaction(
   return {
     connection: mapConnection(connection),
     startupEntries: startupEntries.map(mapEntry),
-    modeVersion: mode.version,
+    modeVersion,
     replay: false,
   };
 }
@@ -698,10 +753,11 @@ export async function completeSessionRealtimeConnectionInTransaction(
     );
   }
   const now = input.now ?? new Date();
+  const completedState = connection.promotionMode === "legacy" ? "active" : "ready";
   const [completed] = await db
     .update(schema.sessionRealtimeConnections)
     .set({
-      state: "ready",
+      state: completedState,
       sdpAnswer: input.sdpAnswer,
       negotiatedAt: now,
       updatedAt: now,
@@ -786,6 +842,7 @@ export async function activateSessionRealtimeConnectionInTransaction(
     };
   }
   if (
+    connection.promotionMode !== "staged" ||
     connection.state !== "ready" ||
     mode.connectionEpoch !== input.expectedConnectionEpoch ||
     connection.connectionEpoch < mode.connectionEpoch
@@ -1535,7 +1592,10 @@ export async function syncSessionRealtimeLedgerInTransaction(
         eventIds.push(...admission.eventIds);
         delegationTurns += 1;
         delegationWorkflowId = admission.workflowId;
-        await hooks.afterDelegationAdmission?.({ entryId: entry.id, turnId: admission.turnId });
+        await hooks.afterDelegationAdmission?.({
+          entryId: entry.id,
+          turnId: admission.turnId,
+        });
       }
     }
     accepted.push({ entry: mapEntry(entry), replay: false });
