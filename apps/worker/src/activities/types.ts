@@ -52,6 +52,12 @@ export type SessionAttemptQuiescenceProof = {
 
 export type SignalSessionAttemptQuiesced = (input: SessionAttemptQuiescenceProof) => Promise<void>;
 
+export type InspectSessionAttemptActivity = (input: {
+  workflowId: string;
+  workflowRunId: string;
+  activityId: string;
+}) => Promise<"pending" | "settled">;
+
 export type ActivityServices = {
   settings: Settings;
   db: Database;
@@ -64,6 +70,9 @@ export type ActivityServices = {
   /** Durable signalWithStart fallback used only after the activity's direct
    * physical-quiescence receipt write exhausts its bounded DB retries. */
   signalSessionAttemptQuiesced: SignalSessionAttemptQuiesced | null;
+  /** Server-authoritative Temporal activity lease inspection used only to
+   * recover a missing quiescence receipt after the original activity vanished. */
+  inspectSessionAttemptActivity: InspectSessionAttemptActivity | null;
   /** Revision-carrying capacity nudge; generic outbox repair is also sufficient. */
   signalCodexCapacityWorkflow?: SignalCodexCapacityWorkflow | null;
   // §7.5 P3 — host-entitlements port, the WORKER half of the same seam the API

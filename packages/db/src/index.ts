@@ -31177,12 +31177,65 @@ export type ReconcileSessionAttemptQuiescenceResult =
   | { action: "pending"; events: [] }
   | { action: "stale"; events: [] };
 
+export type SessionAttemptActivityRef = {
+  workflowId: string;
+  workflowRunId: string;
+  activityId: string;
+  quiesced: boolean;
+};
+
+export async function getSessionAttemptActivityRef(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    attemptId: string;
+    temporalWorkflowId: string;
+  },
+): Promise<SessionAttemptActivityRef | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [attempt] = await scopedDb
+        .select({
+          workflowId: schema.sessionTurnAttempts.temporalWorkflowId,
+          workflowRunId: schema.sessionTurnAttempts.temporalWorkflowRunId,
+          activityId: schema.sessionTurnAttempts.temporalActivityId,
+          quiescedAt: schema.sessionTurnAttempts.quiescedAt,
+        })
+        .from(schema.sessionTurnAttempts)
+        .where(
+          and(
+            eq(schema.sessionTurnAttempts.accountId, input.accountId),
+            eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
+            eq(schema.sessionTurnAttempts.sessionId, input.sessionId),
+            eq(schema.sessionTurnAttempts.id, input.attemptId),
+            eq(schema.sessionTurnAttempts.temporalWorkflowId, input.temporalWorkflowId),
+          ),
+        )
+        .limit(1);
+      return attempt
+        ? {
+            workflowId: attempt.workflowId,
+            workflowRunId: attempt.workflowRunId,
+            activityId: attempt.activityId,
+            quiesced: attempt.quiescedAt !== null,
+          }
+        : null;
+    },
+  );
+}
+
 /**
  * Recover the quiescence receipt when the original activity disappeared after
- * its attempt was durably interrupted. This is proof-based, not time-based:
- * the closed attempt cannot admit another workspace writer, and every writer it
- * did admit (including retained-process child writes) must carry a physical
- * settlement before the ordinary receipt transaction is allowed to run.
+ * its attempt was durably interrupted. The caller first proves through
+ * Temporal that the exact activity is absent or its server-owned heartbeat
+ * lease expired. The closed attempt then cannot admit another workspace writer,
+ * and every writer it did admit (including retained-process child writes) must
+ * carry a physical settlement before the ordinary receipt transaction is
+ * allowed to run.
  */
 export async function reconcileSessionAttemptQuiescence(
   db: Database,
@@ -31192,6 +31245,9 @@ export async function reconcileSessionAttemptQuiescence(
     sessionId: string;
     attemptId: string;
     temporalWorkflowId: string;
+    temporalWorkflowRunId: string;
+    temporalActivityId: string;
+    activitySettled: boolean;
   },
 ): Promise<ReconcileSessionAttemptQuiescenceResult> {
   const eligibility = await withRlsContext(
@@ -31203,6 +31259,8 @@ export async function reconcileSessionAttemptQuiescence(
         state: string;
         quiesced_at: Date | string | null;
         temporal_workflow_id: string;
+        temporal_workflow_run_id: string;
+        temporal_activity_id: string;
         interruption_settled: boolean;
         interruption_pending: boolean;
         writer_pending: boolean;
@@ -31212,6 +31270,8 @@ export async function reconcileSessionAttemptQuiescence(
           attempt.state,
           attempt.quiesced_at,
           attempt.temporal_workflow_id,
+          attempt.temporal_workflow_run_id,
+          attempt.temporal_activity_id,
           exists (
             select 1
             from session_attempt_interruptions interruption
@@ -31276,6 +31336,8 @@ export async function reconcileSessionAttemptQuiescence(
     !eligibility ||
     eligibility.account_id !== input.accountId ||
     eligibility.temporal_workflow_id !== input.temporalWorkflowId ||
+    eligibility.temporal_workflow_run_id !== input.temporalWorkflowRunId ||
+    eligibility.temporal_activity_id !== input.temporalActivityId ||
     eligibility.state !== "closed" ||
     !eligibility.interruption_settled ||
     eligibility.interruption_pending
@@ -31285,7 +31347,7 @@ export async function reconcileSessionAttemptQuiescence(
   if (eligibility.quiesced_at) {
     return { action: "quiesced", events: [] };
   }
-  if (eligibility.writer_pending) {
+  if (!input.activitySettled || eligibility.writer_pending) {
     return { action: "pending", events: [] };
   }
   const events = await markSessionAttemptQuiesced(db, {
@@ -31294,6 +31356,8 @@ export async function reconcileSessionAttemptQuiescence(
     sessionId: input.sessionId,
     attemptId: input.attemptId,
     temporalWorkflowId: input.temporalWorkflowId,
+    temporalWorkflowRunId: input.temporalWorkflowRunId,
+    temporalActivityId: input.temporalActivityId,
   });
   return { action: "quiesced", events };
 }

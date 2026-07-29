@@ -5,6 +5,7 @@ import {
   reconcileSessionAttemptQuiescence,
   peekSessionWork as peekSessionWorkDb,
   countQueuedTurns,
+  getSessionAttemptActivityRef,
   getSessionEvent,
   getSessionTurnForAttempt,
   expireSessionHumanInputRequest,
@@ -37,6 +38,7 @@ export type SessionStateActivityOverrides = Partial<{
   reconcileSessionAttemptQuiescence: typeof reconcileSessionAttemptQuiescence;
   peekSessionWork: typeof peekSessionWorkDb;
   countQueuedTurns: typeof countQueuedTurns;
+  getSessionAttemptActivityRef: typeof getSessionAttemptActivityRef;
   getSessionEvent: typeof getSessionEvent;
   getSessionTurnForAttempt: typeof getSessionTurnForAttempt;
   expireSessionHumanInputRequest: typeof expireSessionHumanInputRequest;
@@ -68,6 +70,8 @@ export function createSessionStateActivities(
     overrides.reconcileSessionAttemptQuiescence ?? reconcileSessionAttemptQuiescence;
   const peekSessionWorkFn = overrides.peekSessionWork ?? peekSessionWorkDb;
   const countQueuedTurnsFn = overrides.countQueuedTurns ?? countQueuedTurns;
+  const getSessionAttemptActivityRefFn =
+    overrides.getSessionAttemptActivityRef ?? getSessionAttemptActivityRef;
   const getSessionEventFn = overrides.getSessionEvent ?? getSessionEvent;
   const getSessionTurnForAttemptFn = overrides.getSessionTurnForAttempt ?? getSessionTurnForAttempt;
   const expireSessionHumanInputRequestFn =
@@ -195,13 +199,26 @@ export function createSessionStateActivities(
   async function reconcileSessionAttemptQuiescenceActivity(
     input: ReconcileSessionAttemptQuiescenceInput,
   ): Promise<ReconcileSessionAttemptQuiescenceResult> {
-    const { db, bus } = await services();
+    const { db, bus, inspectSessionAttemptActivity } = await services();
+    const activityRef = await getSessionAttemptActivityRefFn(db, {
+      ...input,
+      temporalWorkflowId: input.workflowId,
+    });
+    if (!activityRef) return { action: "stale" };
+    if (!activityRef.quiesced) {
+      if (!inspectSessionAttemptActivity) return { action: "pending" };
+      const state = await inspectSessionAttemptActivity(activityRef);
+      if (state === "pending") return { action: "pending" };
+    }
     const result = await reconcileSessionAttemptQuiescenceFn(db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
       attemptId: input.attemptId,
       temporalWorkflowId: input.workflowId,
+      temporalWorkflowRunId: activityRef.workflowRunId,
+      temporalActivityId: activityRef.activityId,
+      activitySettled: true,
     });
     if (result.events.length > 0) {
       await publishDurableSessionEventsFn(

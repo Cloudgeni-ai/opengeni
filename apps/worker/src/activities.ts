@@ -104,6 +104,7 @@ function createActivityServices(
         observability,
         wakeSessionWorkflow: dependencies.wakeSessionWorkflow ?? null,
         signalSessionAttemptQuiesced: dependencies.signalSessionAttemptQuiesced ?? null,
+        inspectSessionAttemptActivity: dependencies.inspectSessionAttemptActivity ?? null,
         signalCodexCapacityWorkflow: dependencies.signalCodexCapacityWorkflow ?? null,
         // §7.5 P3 — host-entitlements port. No constructed default: standalone
         // has no host meter, so unset → null → `ensureRunAllowed` reads the
