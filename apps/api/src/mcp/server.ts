@@ -776,6 +776,26 @@ function registerToolspaceProxyTools(server: McpServer, surface: ToolspaceMcpSur
   if (!surface) {
     return;
   }
+  // McpServer installs its tools/list handler lazily on the first registered
+  // tool. A legitimate empty Toolspace surface (no selected proxyable servers,
+  // no active turn, or all optional upstreams unavailable) must therefore seed
+  // and disable one invisible tool; otherwise `ogtool list` receives JSON-RPC
+  // "Method not found" instead of the valid `{ tools: [] }` response.
+  if (surface.tools.length === 0) {
+    server
+      .registerTool(
+        "__opengeni_empty_toolspace_surface__",
+        {
+          description: "Internal disabled placeholder for an empty Toolspace surface.",
+          inputSchema: z4.object({}),
+        },
+        async () => ({
+          content: [{ type: "text" as const, text: '{"unavailable":true}' }],
+        }),
+      )
+      .disable();
+    return;
+  }
   for (const tool of surface.tools) {
     server.registerTool(
       tool.name,
