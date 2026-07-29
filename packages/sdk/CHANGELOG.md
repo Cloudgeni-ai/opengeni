@@ -1,5 +1,12 @@
 # @opengeni/sdk
 
+## 0.27.1
+
+### Patch Changes
+
+- 8eaa377: Expose transport-tolerant MCP output normalization from the SDK and reuse it in the React timeline parser.
+- dfc3235: Separate first-party MCP authorization from exact per-session tool visibility, add fail-closed registration policy, and isolate file download URLs on the files MCP surface.
+
 ## 0.27.0
 
 ### Minor Changes

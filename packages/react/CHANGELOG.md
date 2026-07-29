@@ -1,5 +1,15 @@
 # @opengeni/react
 
+## 0.27.1
+
+### Patch Changes
+
+- 8eaa377: Add per-timeline `add`, `remove`, and `replace` customization for collapsed turn summary facets while preserving the existing defaults.
+- 8eaa377: Expose transport-tolerant MCP output normalization from the SDK and reuse it in the React timeline parser.
+- Updated dependencies [8eaa377]
+- Updated dependencies [dfc3235]
+  - @opengeni/sdk@0.27.1
+
 ## 0.27.0
 
 ### Patch Changes

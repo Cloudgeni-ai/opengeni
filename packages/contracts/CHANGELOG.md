@@ -1,5 +1,11 @@
 # @opengeni/contracts
 
+## 0.21.1
+
+### Patch Changes
+
+- dfc3235: Separate first-party MCP authorization from exact per-session tool visibility, add fail-closed registration policy, and isolate file download URLs on the files MCP surface.
+
 ## 0.21.0
 
 ### Minor Changes
