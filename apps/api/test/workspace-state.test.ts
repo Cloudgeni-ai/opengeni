@@ -1,17 +1,21 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   signDelegatedAccessToken,
+  WORKSPACE_STATE_MAX_BASES,
   WorkspaceStateResponse,
   type Permission,
 } from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
   bootstrapWorkspace,
+  completeFileUpload,
   createDb,
+  createFileUpload,
   deleteWorkspace,
   updateWorkspace,
   type DbClient,
 } from "@opengeni/db";
+import { addDocumentToBase, createDocumentBase, listDocumentBases } from "@opengeni/documents";
 import {
   acquireSharedTestDatabase,
   testSettings,
@@ -79,6 +83,25 @@ async function request(permissions: Permission[]): Promise<Response> {
   });
 }
 
+async function readyFile(name: string): Promise<string> {
+  const fileId = crypto.randomUUID();
+  const upload = await createFileUpload(client.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    fileId,
+    filename: `${name}.txt`,
+    safeFilename: `${name}.txt`,
+    contentType: "text/plain",
+    sizeBytes: 1,
+    sha256: "a".repeat(64),
+    bucket: "workspace-state-test",
+    objectKey: `workspace-state/${fileId}.txt`,
+    expiresAt: new Date(Date.now() + 60_000),
+  });
+  await completeFileUpload(client.db, grant.workspaceId, upload.uploadId);
+  return fileId;
+}
+
 describe("workspace state API authorization", () => {
   test("requires workspace read and withholds all knowledge facts without document search", async () => {
     const denied = await request(["documents:search"]);
@@ -113,6 +136,76 @@ describe("workspace state API authorization", () => {
         { code: "no_document_bases", relatedCount: 0 },
         { code: "no_memory_records", relatedCount: 0 },
       ],
+    });
+  });
+
+  test("bounds base rows while aggregating all and only subject-visible documents", async () => {
+    for (let index = 0; index < WORKSPACE_STATE_MAX_BASES + 1; index += 1) {
+      await createDocumentBase(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        name: `Inventory base ${String(index).padStart(2, "0")}`,
+      });
+    }
+    const targetBase = (await listDocumentBases(client.db, grant.workspaceId))[0]!;
+    await addDocumentToBase(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      baseId: targetBase.id,
+      fileId: await readyFile("workspace-visible"),
+      title: "workspace visible",
+      sourceKind: "repository",
+      visibility: "workspace",
+      createdBy: grant.subjectId,
+    });
+    await addDocumentToBase(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      baseId: targetBase.id,
+      fileId: await readyFile("owner-private"),
+      title: "owner private",
+      sourceKind: "email",
+      visibility: "private",
+      createdBy: grant.subjectId,
+    });
+    await addDocumentToBase(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      baseId: targetBase.id,
+      fileId: await readyFile("other-private"),
+      title: "other private",
+      sourceKind: "chat",
+      visibility: "private",
+      createdBy: "user:another-subject",
+    });
+
+    const response = await request(["workspace:read", "documents:search"]);
+    expect(response.status).toBe(200);
+    const body = WorkspaceStateResponse.parse(await response.json());
+    expect(body.knowledge.availability).toBe("available");
+    if (body.knowledge.availability !== "available") throw new Error("expected inventory");
+    expect(body.knowledge).toMatchObject({
+      coverage: "partial",
+      baseCount: WORKSPACE_STATE_MAX_BASES + 1,
+      basesTruncated: true,
+      inspectedVisibleDocumentCount: 2,
+      documentStatusCounts: { queued: 2, indexing: 0, ready: 0, failed: 0 },
+      sourceKindCounts: { repository: 1, email: 1, chat: 0 },
+    });
+    expect(body.knowledge.bases).toHaveLength(WORKSPACE_STATE_MAX_BASES);
+    expect(body.knowledge.bases.find((base) => base.id === targetBase.id)).toMatchObject({
+      visibleDocumentCount: 2,
+      statusCounts: { queued: 2, indexing: 0, ready: 0, failed: 0 },
+    });
+    expect(body.knowledge.gaps).toContainEqual({
+      code: "processing_documents",
+      severity: "info",
+      relatedCount: 2,
+    });
+    expect(body.knowledge.gaps).toContainEqual({
+      code: "partial_inventory",
+      severity: "info",
+      relatedCount: null,
     });
   });
 });

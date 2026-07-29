@@ -4,12 +4,11 @@ import {
   WORKSPACE_STATE_MAX_BASES,
   WORKSPACE_STATE_MAX_TOPICS,
   WORKSPACE_STATE_MEMORY_SAMPLE_LIMIT,
-  type Document,
-  type DocumentBase,
   type KnowledgeMemory,
   type WorkspaceInstructionPolicyHead,
   type WorkspaceInstructionPolicyListResponse,
 } from "@opengeni/contracts";
+import type { DocumentInventory } from "@opengeni/documents";
 
 import { projectWorkspaceState } from "../src/workspace-state-projection";
 
@@ -21,46 +20,17 @@ function id(sequence: number): string {
   return `00000000-0000-4000-8000-${String(sequence).padStart(12, "0")}`;
 }
 
-function base(sequence: number, name = `Base ${sequence}`): DocumentBase {
+function base(
+  sequence: number,
+  name = `Base ${sequence}`,
+  overrides: Partial<DocumentInventory["bases"][number]> = {},
+): DocumentInventory["bases"][number] {
   return {
     id: id(100 + sequence),
-    workspaceId: WORKSPACE_ID,
     name,
-    description: `private description ${sequence}`,
-    createdAt: NOW,
-    updatedAt: NOW,
-  };
-}
-
-function document(sequence: number, baseId: string, overrides: Partial<Document> = {}): Document {
-  return {
-    id: id(1_000 + sequence),
-    workspaceId: WORKSPACE_ID,
-    baseId,
-    fileId: id(2_000 + sequence),
-    status: "ready",
-    title: `secret title ${sequence}`,
-    parser: "secret parser",
-    chunkCount: 2,
-    error: "secret error body",
-    sourceKind: "document",
-    sourceUri: "https://secret.example/document",
-    sourceExternalId: "secret external id",
-    sourceTitle: "secret source title",
-    sourceAuthor: "secret author",
-    sourceCreatedAt: NOW,
-    sourceUpdatedAt: NOW,
-    sourceVersion: "secret version",
-    aclTags: ["secret-acl"],
-    visibility: "workspace",
-    createdBy: "secret subject",
-    agentAccess: true,
-    summary: "secret summary",
-    topics: ["Operations"],
-    curationStatus: "none",
-    curation: null,
-    createdAt: NOW,
-    updatedAt: NOW,
+    visibleDocumentCount: 0,
+    statusCounts: { queued: 0, indexing: 0, ready: 0, failed: 0 },
+    latestUpdatedAt: null,
     ...overrides,
   };
 }
@@ -166,25 +136,40 @@ describe("workspace state projection", () => {
 
   test("bounds, sanitizes, sorts, and labels partial aggregate coverage deterministically", () => {
     const bases = Array.from({ length: WORKSPACE_STATE_MAX_BASES + 1 }, (_, index) =>
-      base(index, index === 0 ? `  Primary   ${"x".repeat(300)}  ` : `Base ${index}`),
+      base(
+        index,
+        index === 0 ? `  Primary   ${"x".repeat(300)}  ` : `Base ${index}`,
+        index === 0
+          ? {
+              visibleDocumentCount: 3,
+              statusCounts: { queued: 1, indexing: 0, ready: 1, failed: 1 },
+              latestUpdatedAt: NOW,
+            }
+          : {},
+      ),
     );
-    const firstDocuments = [
-      document(1, bases[0]!.id, {
-        topics: Array.from({ length: WORKSPACE_STATE_MAX_TOPICS + 2 }, (_, index) =>
-          index === 0 ? "  Operations   Runbooks  " : `Topic ${String(index).padStart(2, "0")}`,
-        ),
-      }),
-      document(2, bases[0]!.id, {
-        status: "failed",
-        sourceKind: "repository",
-        topics: ["Operations Runbooks"],
-      }),
-      document(3, bases[0]!.id, { status: "queued", topics: [] }),
-    ];
-    const documentsByBase = new Map<string, Document[]>([[bases[0]!.id, firstDocuments]]);
-    documentsByBase.set(bases.at(-1)!.id, [
-      document(99, bases.at(-1)!.id, { topics: ["Must not be inspected"] }),
-    ]);
+    const documents: DocumentInventory = {
+      baseCount: WORKSPACE_STATE_MAX_BASES + 1,
+      bases,
+      visibleDocumentCount: 4,
+      statusCounts: { queued: 1, indexing: 0, ready: 2, failed: 1 },
+      sourceKindCounts: {
+        manual_upload: 0,
+        meeting_transcript: 0,
+        repository: 1,
+        email: 0,
+        chat: 0,
+        document: 3,
+        web: 0,
+        other: 0,
+      },
+      latestUpdatedAt: NOW,
+      topics: Array.from({ length: WORKSPACE_STATE_MAX_TOPICS }, (_, index) => ({
+        name: index === 0 ? "  Operations   Runbooks  " : `Topic ${String(index).padStart(2, "0")}`,
+        documentCount: index === 0 ? 2 : 1,
+      })),
+      topicsTruncated: true,
+    };
     const memories = Array.from({ length: WORKSPACE_STATE_MEMORY_SAMPLE_LIMIT + 1 }, (_, index) =>
       memory(index, index === 0 ? { status: "proposed", kind: "decision" } : {}),
     );
@@ -198,7 +183,7 @@ describe("workspace state projection", () => {
       generatedAt: NOW,
       workspaceAgentInstructions: null,
       policies: policies(activeHeads),
-      knowledge: { bases, documentsByBase, memories },
+      knowledge: { documents, memories },
     });
 
     expect(projected.policy.activeHeads).toHaveLength(WORKSPACE_STATE_MAX_ACTIVE_POLICY_HEADS);
@@ -209,8 +194,8 @@ describe("workspace state projection", () => {
       coverage: "partial",
       baseCount: WORKSPACE_STATE_MAX_BASES + 1,
       basesTruncated: true,
-      inspectedVisibleDocumentCount: 3,
-      documentStatusCounts: { queued: 1, indexing: 0, ready: 1, failed: 1 },
+      inspectedVisibleDocumentCount: 4,
+      documentStatusCounts: { queued: 1, indexing: 0, ready: 2, failed: 1 },
       memorySample: {
         recordCount: WORKSPACE_STATE_MEMORY_SAMPLE_LIMIT,
         limitReached: true,
@@ -233,18 +218,6 @@ describe("workspace state projection", () => {
       "pending_memory_review",
       "partial_inventory",
     ]);
-    const serialized = JSON.stringify(projected);
-    for (const secret of [
-      "secret title",
-      "secret parser",
-      "secret error",
-      "secret.example",
-      "secret-acl",
-      "secret summary",
-      "secret memory text",
-      "Must not be inspected",
-    ]) {
-      expect(serialized).not.toContain(secret);
-    }
+    expect(JSON.stringify(projected)).not.toContain("secret memory text");
   });
 });

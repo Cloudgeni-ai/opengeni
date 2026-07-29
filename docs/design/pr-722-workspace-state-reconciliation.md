@@ -81,7 +81,7 @@ The accepted implementation is limited to:
 - strict, bounded response contracts and a zero-dependency SDK mirror;
 - `workspace:read` endpoint authorization and independent
   `documents:search` knowledge gating;
-- subject-visible Documents plus a bounded newest Memory sample;
+- subject-visible bounded SQL document aggregates plus a bounded newest Memory sample;
 - policy-head and latest-revision metadata without bodies or provenance IDs;
 - explicit current read-time truth and `not_captured` policy-snapshot truth;
 - deterministic, non-persisted gap codes;

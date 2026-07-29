@@ -13,12 +13,14 @@ import {
   SettingsIcon,
   UsersIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import type { ReactNode } from "react";
 
 import { EmptyState, LoadErrorState, PageHeader } from "@/components/common";
 import { ContentPage } from "@/components/ui/content-layout";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
+
+import { useWorkspaceStateInventory } from "./workspace-state-loader";
 
 const GAP_LABELS: Record<WorkspaceStateGapCode, string> = {
   no_document_bases: "No document bases are configured.",
@@ -29,7 +31,7 @@ const GAP_LABELS: Record<WorkspaceStateGapCode, string> = {
   no_memory_records: "The newest memory sample is empty.",
   pending_memory_review: "Some sampled memories are awaiting review.",
   partial_inventory:
-    "The inventory reached a safety bound; shown counts cover only the inspected sample.",
+    "The inventory reached a safety bound; one or more lists or samples is truncated.",
 };
 
 function formatDate(value: string | null): string {
@@ -175,7 +177,7 @@ function KnowledgeInventory({
     >
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <Metric label="Document bases" value={knowledge.baseCount} />
-        <Metric label="Inspected documents" value={knowledge.inspectedVisibleDocumentCount} />
+        <Metric label="Visible documents" value={knowledge.inspectedVisibleDocumentCount} />
         <Metric label="Ready" value={knowledge.documentStatusCounts.ready} />
         <Metric label="Memory sample" value={knowledge.memorySample.recordCount} />
       </div>
@@ -240,7 +242,7 @@ function KnowledgeInventory({
             Topics
           </h3>
           {knowledge.topics.length === 0 ? (
-            <EmptyState>No topic metadata was found in the inspected documents.</EmptyState>
+            <EmptyState>No topic metadata was found in the visible documents.</EmptyState>
           ) : (
             <div className="flex flex-wrap gap-2 rounded-md border border-border p-3">
               {knowledge.topics.map((topic) => (
@@ -264,7 +266,7 @@ function KnowledgeInventory({
           Deterministic gap signals
         </h3>
         {knowledge.gaps.length === 0 ? (
-          <EmptyState>No structural gaps were detected in the inspected inventory.</EmptyState>
+          <EmptyState>No structural gaps were detected in the visible inventory.</EmptyState>
         ) : (
           <ul className="grid gap-2">
             {knowledge.gaps.map((gap) => (
@@ -336,25 +338,7 @@ function ExistingSources({ workspaceId }: { workspaceId: string }) {
 
 export function WorkspaceStateRoute({ workspaceId }: { workspaceId: string }) {
   const { client } = useAppContext();
-  const [state, setState] = useState<WorkspaceStateResponse | null>(null);
-  const [error, setError] = useState<Error | null>(null);
-  const [loading, setLoading] = useState(true);
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      setState(await client.getWorkspaceState(workspaceId));
-      setError(null);
-    } catch (loadError) {
-      setError(loadError instanceof Error ? loadError : new Error(String(loadError)));
-    } finally {
-      setLoading(false);
-    }
-  }, [client, workspaceId]);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
+  const { state, error, loading, reload } = useWorkspaceStateInventory(client, workspaceId);
 
   return (
     <ContentPage width="standard">
@@ -368,7 +352,7 @@ export function WorkspaceStateRoute({ workspaceId }: { workspaceId: string }) {
         <LoadErrorState
           title="Couldn't load workspace state"
           error={error}
-          onRetry={() => void load()}
+          onRetry={() => void reload()}
         />
       ) : null}
       {state ? (
@@ -377,7 +361,7 @@ export function WorkspaceStateRoute({ workspaceId }: { workspaceId: string }) {
             <LoadErrorState
               title="Couldn't refresh workspace state"
               error={error}
-              onRetry={() => void load()}
+              onRetry={() => void reload()}
             />
           ) : null}
           <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-surface-2/30 px-3 py-2 text-xs text-fg-muted">

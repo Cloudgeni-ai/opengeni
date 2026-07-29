@@ -1,6 +1,8 @@
 import {
   WORKSPACE_STATE_MAX_BASES,
+  WORKSPACE_STATE_MAX_TOPICS,
   WORKSPACE_STATE_MEMORY_SAMPLE_LIMIT,
+  WORKSPACE_STATE_TOPIC_MAX_CHARS,
   WorkspaceStateResponse,
 } from "@opengeni/contracts";
 import { hasPermission, requireAccessGrant, type ApiRouteDeps } from "@opengeni/core";
@@ -9,7 +11,7 @@ import {
   listKnowledgeMemories,
   listWorkspaceInstructionPolicyRevisions,
 } from "@opengeni/db";
-import { listDocumentBases, listDocuments } from "@opengeni/documents";
+import { getDocumentInventory } from "@opengeni/documents";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 
@@ -27,25 +29,18 @@ export function registerWorkspaceStateRoutes(app: Hono, deps: ApiRouteDeps): voi
       listWorkspaceInstructionPolicyRevisions(deps.db, workspaceId, { limit: 1 }),
       canInspectKnowledge
         ? (async () => {
-            const bases = await listDocumentBases(deps.db, workspaceId);
-            const selectedBases = bases.slice(0, WORKSPACE_STATE_MAX_BASES);
-            const [documentEntries, memories] = await Promise.all([
-              Promise.all(
-                selectedBases.map(
-                  async (base) =>
-                    [
-                      base.id,
-                      await listDocuments(deps.db, workspaceId, base.id, {
-                        viewerSubjectId: grant.subjectId,
-                      }),
-                    ] as const,
-                ),
-              ),
+            const [documents, memories] = await Promise.all([
+              getDocumentInventory(deps.db, workspaceId, {
+                baseLimit: WORKSPACE_STATE_MAX_BASES,
+                topicLimit: WORKSPACE_STATE_MAX_TOPICS,
+                topicMaxChars: WORKSPACE_STATE_TOPIC_MAX_CHARS,
+                access: { viewerSubjectId: grant.subjectId },
+              }),
               listKnowledgeMemories(deps.db, workspaceId, {
                 limit: WORKSPACE_STATE_MEMORY_SAMPLE_LIMIT,
               }),
             ]);
-            return { bases, documentsByBase: new Map(documentEntries), memories };
+            return { documents, memories };
           })()
         : Promise.resolve(null),
     ]);

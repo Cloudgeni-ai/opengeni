@@ -17,7 +17,10 @@ describe("read-only Workspace State surface", () => {
   });
 
   test("keeps the page read-only and explicit about loading, errors, bounds, and snapshot truth", async () => {
-    const route = await source("routes/workspace-state.tsx");
+    const [route, loader] = await Promise.all([
+      source("routes/workspace-state.tsx"),
+      source("routes/workspace-state-loader.ts"),
+    ]);
     for (const required of [
       "Loading workspace state",
       "Couldn't load workspace state",
@@ -34,8 +37,8 @@ describe("read-only Workspace State surface", () => {
     ]) {
       expect(route).toContain(required);
     }
-    expect(route).toContain("getWorkspaceState");
-    expect(route).not.toMatch(
+    expect(loader).toContain("getWorkspaceState");
+    expect(`${route}\n${loader}`).not.toMatch(
       /createWorkspaceInstruction|activateWorkspaceInstruction|updateKnowledgeMemory/,
     );
     expect(route).not.toMatch(/method:\s*["'](?:POST|PATCH|PUT|DELETE)/);

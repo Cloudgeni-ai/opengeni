@@ -8,6 +8,7 @@ import type {
   DocumentCurationStatus,
   DocumentSearchMode,
   DocumentSearchResult,
+  DocumentStatus,
   DocumentVisibility,
   FileAsset,
   KnowledgeSourceKind,
@@ -116,6 +117,37 @@ export type DocumentAccessFilter = {
    */
   agentOnly?: boolean | undefined;
 };
+
+export type DocumentInventoryStatusCounts = Record<DocumentStatus, number>;
+export type DocumentInventorySourceKindCounts = Record<KnowledgeSourceKind, number>;
+
+export type DocumentInventory = {
+  baseCount: number;
+  bases: Array<{
+    id: string;
+    name: string;
+    visibleDocumentCount: number;
+    statusCounts: DocumentInventoryStatusCounts;
+    latestUpdatedAt: string | null;
+  }>;
+  visibleDocumentCount: number;
+  statusCounts: DocumentInventoryStatusCounts;
+  sourceKindCounts: DocumentInventorySourceKindCounts;
+  latestUpdatedAt: string | null;
+  topics: Array<{ name: string; documentCount: number }>;
+  topicsTruncated: boolean;
+};
+
+export type DocumentInventoryInput = {
+  baseLimit: number;
+  topicLimit: number;
+  topicMaxChars: number;
+  access?: DocumentAccessFilter | undefined;
+};
+
+const DOCUMENT_INVENTORY_MAX_BASE_LIMIT = 100;
+const DOCUMENT_INVENTORY_MAX_TOPIC_LIMIT = 100;
+const DOCUMENT_INVENTORY_MAX_TOPIC_CHARS = 256;
 
 export type DocumentSearchInput = {
   workspaceId: string;
@@ -577,6 +609,158 @@ export async function listDocumentBases(
       .orderBy(desc(schema.documentBases.createdAt));
     return rows.map(mapDocumentBase);
   });
+}
+
+/**
+ * Return a bounded structural inventory without loading document records.
+ * Document predicates are applied independently to every aggregate so private
+ * counts and topic metadata remain scoped to the initiating grant subject.
+ */
+export async function getDocumentInventory(
+  db: Database,
+  workspaceId: string,
+  input: DocumentInventoryInput,
+): Promise<DocumentInventory> {
+  const baseLimit = requireDocumentInventoryLimit(
+    input.baseLimit,
+    DOCUMENT_INVENTORY_MAX_BASE_LIMIT,
+    "baseLimit",
+  );
+  const topicLimit = requireDocumentInventoryLimit(
+    input.topicLimit,
+    DOCUMENT_INVENTORY_MAX_TOPIC_LIMIT,
+    "topicLimit",
+  );
+  const topicMaxChars = requireDocumentInventoryLimit(
+    input.topicMaxChars,
+    DOCUMENT_INVENTORY_MAX_TOPIC_CHARS,
+    "topicMaxChars",
+  );
+
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [baseTotal] = await scopedDb
+      .select({ count: sql<number>`count(*)::int` })
+      .from(schema.documentBases)
+      .where(eq(schema.documentBases.workspaceId, workspaceId));
+
+    const baseJoin = and(
+      eq(schema.documents.workspaceId, workspaceId),
+      eq(schema.documents.baseId, schema.documentBases.id),
+      ...documentAccessConditions(input.access),
+    );
+    const baseRows = await scopedDb
+      .select({
+        id: schema.documentBases.id,
+        name: schema.documentBases.name,
+        visibleDocumentCount: sql<number>`count(${schema.documents.id})::int`,
+        queuedCount: sql<number>`count(${schema.documents.id}) filter (where ${schema.documents.status} = 'queued')::int`,
+        indexingCount: sql<number>`count(${schema.documents.id}) filter (where ${schema.documents.status} = 'indexing')::int`,
+        readyCount: sql<number>`count(${schema.documents.id}) filter (where ${schema.documents.status} = 'ready')::int`,
+        failedCount: sql<number>`count(${schema.documents.id}) filter (where ${schema.documents.status} = 'failed')::int`,
+        latestUpdatedAt: sql<Date | null>`max(${schema.documents.updatedAt})`,
+      })
+      .from(schema.documentBases)
+      .leftJoin(schema.documents, baseJoin)
+      .where(eq(schema.documentBases.workspaceId, workspaceId))
+      .groupBy(schema.documentBases.id, schema.documentBases.name, schema.documentBases.createdAt)
+      .orderBy(desc(schema.documentBases.createdAt), asc(schema.documentBases.id))
+      .limit(baseLimit);
+
+    const documentWhere = and(
+      eq(schema.documents.workspaceId, workspaceId),
+      ...documentAccessConditions(input.access),
+    );
+    const [summary] = await scopedDb
+      .select({
+        visibleDocumentCount: sql<number>`count(${schema.documents.id})::int`,
+        queuedCount: sql<number>`count(${schema.documents.id}) filter (where ${schema.documents.status} = 'queued')::int`,
+        indexingCount: sql<number>`count(${schema.documents.id}) filter (where ${schema.documents.status} = 'indexing')::int`,
+        readyCount: sql<number>`count(${schema.documents.id}) filter (where ${schema.documents.status} = 'ready')::int`,
+        failedCount: sql<number>`count(${schema.documents.id}) filter (where ${schema.documents.status} = 'failed')::int`,
+        manualUploadCount: sql<number>`count(${schema.documents.id}) filter (where ${schema.documents.sourceKind} = 'manual_upload')::int`,
+        meetingTranscriptCount: sql<number>`count(${schema.documents.id}) filter (where ${schema.documents.sourceKind} = 'meeting_transcript')::int`,
+        repositoryCount: sql<number>`count(${schema.documents.id}) filter (where ${schema.documents.sourceKind} = 'repository')::int`,
+        emailCount: sql<number>`count(${schema.documents.id}) filter (where ${schema.documents.sourceKind} = 'email')::int`,
+        chatCount: sql<number>`count(${schema.documents.id}) filter (where ${schema.documents.sourceKind} = 'chat')::int`,
+        documentCount: sql<number>`count(${schema.documents.id}) filter (where ${schema.documents.sourceKind} = 'document')::int`,
+        webCount: sql<number>`count(${schema.documents.id}) filter (where ${schema.documents.sourceKind} = 'web')::int`,
+        otherCount: sql<number>`count(${schema.documents.id}) filter (where ${schema.documents.sourceKind} = 'other')::int`,
+        latestUpdatedAt: sql<Date | null>`max(${schema.documents.updatedAt})`,
+      })
+      .from(schema.documents)
+      .where(documentWhere);
+
+    const topicName = sql<string>`left(regexp_replace(btrim(topic.value), '[[:space:]]+', ' ', 'g'), ${topicMaxChars})`;
+    const topicDocumentCount = sql<number>`count(distinct ${schema.documents.id})::int`;
+    const topicRows = await scopedDb
+      .select({ name: topicName, documentCount: topicDocumentCount })
+      .from(schema.documents)
+      .innerJoin(
+        sql`lateral jsonb_array_elements_text(${schema.documents.topics}) as topic(value)`,
+        sql`true`,
+      )
+      .where(and(documentWhere, sql`nullif(btrim(topic.value), '') is not null`))
+      .groupBy(sql`1`)
+      .orderBy(sql`2 desc`, sql`1 asc`)
+      .limit(topicLimit + 1);
+
+    const statusCounts = documentInventoryStatusCounts(summary ?? {});
+    const topics = topicRows.slice(0, topicLimit).map((topic) => ({
+      name: topic.name,
+      documentCount: Number(topic.documentCount),
+    }));
+    return {
+      baseCount: Number(baseTotal?.count ?? 0),
+      bases: baseRows.map((base) => ({
+        id: base.id,
+        name: base.name,
+        visibleDocumentCount: Number(base.visibleDocumentCount),
+        statusCounts: documentInventoryStatusCounts(base),
+        latestUpdatedAt: documentInventoryTimestamp(base.latestUpdatedAt),
+      })),
+      visibleDocumentCount: Number(summary?.visibleDocumentCount ?? 0),
+      statusCounts,
+      sourceKindCounts: {
+        manual_upload: Number(summary?.manualUploadCount ?? 0),
+        meeting_transcript: Number(summary?.meetingTranscriptCount ?? 0),
+        repository: Number(summary?.repositoryCount ?? 0),
+        email: Number(summary?.emailCount ?? 0),
+        chat: Number(summary?.chatCount ?? 0),
+        document: Number(summary?.documentCount ?? 0),
+        web: Number(summary?.webCount ?? 0),
+        other: Number(summary?.otherCount ?? 0),
+      },
+      latestUpdatedAt: documentInventoryTimestamp(summary?.latestUpdatedAt ?? null),
+      topics,
+      topicsTruncated: topicRows.length > topics.length,
+    };
+  });
+}
+
+function requireDocumentInventoryLimit(value: number, max: number, name: string): number {
+  if (!Number.isInteger(value) || value < 1 || value > max) {
+    throw new Error(`${name} must be an integer between 1 and ${max}`);
+  }
+  return value;
+}
+
+function documentInventoryStatusCounts(input: {
+  queuedCount?: number | null | undefined;
+  indexingCount?: number | null | undefined;
+  readyCount?: number | null | undefined;
+  failedCount?: number | null | undefined;
+}): DocumentInventoryStatusCounts {
+  return {
+    queued: Number(input.queuedCount ?? 0),
+    indexing: Number(input.indexingCount ?? 0),
+    ready: Number(input.readyCount ?? 0),
+    failed: Number(input.failedCount ?? 0),
+  };
+}
+
+function documentInventoryTimestamp(value: Date | string | null): string | null {
+  if (!value) return null;
+  return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
 }
 
 export async function getDocumentBase(

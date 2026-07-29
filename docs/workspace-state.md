@@ -38,8 +38,8 @@ returns `Cache-Control: private, no-store`.
 
 Knowledge facts are independently gated by `documents:search`:
 
-- with the permission, the server inspects document bases, subject-visible
-  documents, and the newest Memory sample;
+- with the permission, the server computes subject-visible document aggregates,
+  a bounded base/topic projection, and the newest Memory sample;
 - without it, `knowledge.availability` is `unavailable` and the response
   discloses no base, document, topic, source-kind, memory, freshness, or gap
   counts.
@@ -66,17 +66,19 @@ It returns only bounded metadata and aggregates:
 | Projection | Bound | Truncation truth |
 | --- | ---: | --- |
 | Active instruction-policy heads | 32 | `activeHeadsTruncated` |
-| Document bases inspected and returned | 24 | `basesTruncated`; `coverage=partial` |
+| Document bases returned | 24 | Separate exact `baseCount`; `basesTruncated`; `coverage=partial` |
+| Subject-visible document status/source totals | All matching rows via SQL aggregates | No document records are returned or sampled |
 | Topics returned | 24 | `topicsTruncated` |
 | Newest Memory records sampled | 100 | `memorySample.limitReached`; `coverage=partial` |
 
 Base names are normalized and clipped to 160 characters. Topic labels are
 normalized and clipped to 96 characters. Aggregate status and source-kind
-counts cover only subject-visible documents in the inspected bases. The
-response calls this value `inspectedVisibleDocumentCount`; it never presents a
-partial count as a workspace total. `baseCount` is the number of bases visible
-through the existing base-list API, while `memorySample.recordCount` is a sample
-count, not a total.
+counts cover all subject-visible documents through fixed-cardinality SQL
+aggregates; the endpoint never materializes `Document[]`. The existing response
+field `inspectedVisibleDocumentCount` is therefore an exact visible total, while
+base and topic rows remain bounded presentation lists. `baseCount` comes from a
+separate aggregate query, while `memorySample.recordCount` is a sample count,
+not a total.
 
 `generatedAt`, `latestDocumentUpdatedAt`, per-base `latestUpdatedAt`, and the
 Memory sample's `latestUpdatedAt` make freshness explicit.
@@ -99,14 +101,16 @@ Workspace State reports only which fallback source exists, never its content.
 
 ## Knowledge map and gap signals
 
-The knowledge map is computed in memory during the GET request. It is the safe,
-on-demand adaptation of PR #722's useful “sweep” concept; it is not a scheduled
-or Temporal workflow and writes no state.
+The knowledge map is computed on demand from bounded SQL aggregates plus a pure
+in-memory sanitizer during the GET request. It is the safe adaptation of PR
+#722's useful “sweep” concept; it is not a scheduled or Temporal workflow and
+writes no state.
 
-Gap signals are deterministic codes over the inspected records:
+Gap signals are deterministic codes over exact visible-document aggregates and
+the explicitly bounded base/topic/Memory projections:
 
 - no document bases;
-- no visible documents when complete base coverage proves that condition;
+- no subject-visible documents;
 - failed documents;
 - queued or indexing documents;
 - ready documents without topic metadata;

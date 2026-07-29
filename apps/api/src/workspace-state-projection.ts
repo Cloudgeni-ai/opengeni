@@ -1,7 +1,6 @@
 import {
   KnowledgeMemoryKind,
   KnowledgeMemoryStatus,
-  KnowledgeSourceKind,
   WORKSPACE_STATE_BASE_NAME_MAX_CHARS,
   WORKSPACE_STATE_MAX_ACTIVE_POLICY_HEADS,
   WORKSPACE_STATE_MAX_BASES,
@@ -10,21 +9,17 @@ import {
   WORKSPACE_STATE_MEMORY_SAMPLE_LIMIT,
   WORKSPACE_STATE_TOPIC_MAX_CHARS,
   WorkspaceStateResponse,
-  type Document,
-  type DocumentBase,
   type KnowledgeMemory,
   type WorkspaceInstructionPolicyListResponse,
-  type WorkspaceStateDocumentStatusCounts,
   type WorkspaceStateGap,
   type WorkspaceStateMemoryKindCounts,
   type WorkspaceStateMemoryStatusCounts,
   type WorkspaceStateResponse as WorkspaceStateResponseType,
-  type WorkspaceStateSourceKindCounts,
 } from "@opengeni/contracts";
+import type { DocumentInventory } from "@opengeni/documents";
 
 type KnowledgeProjectionInput = {
-  bases: DocumentBase[];
-  documentsByBase: ReadonlyMap<string, Document[]>;
+  documents: DocumentInventory;
   memories: KnowledgeMemory[];
 };
 
@@ -35,16 +30,6 @@ export type WorkspaceStateProjectionInput = {
   policies: WorkspaceInstructionPolicyListResponse;
   knowledge: KnowledgeProjectionInput | null;
 };
-
-function emptyDocumentStatusCounts(): WorkspaceStateDocumentStatusCounts {
-  return { queued: 0, indexing: 0, ready: 0, failed: 0 };
-}
-
-function emptySourceKindCounts(): WorkspaceStateSourceKindCounts {
-  return Object.fromEntries(
-    KnowledgeSourceKind.options.map((kind) => [kind, 0]),
-  ) as WorkspaceStateSourceKindCounts;
-}
 
 function emptyMemoryStatusCounts(): WorkspaceStateMemoryStatusCounts {
   return Object.fromEntries(
@@ -122,34 +107,25 @@ function policyProjection(input: WorkspaceStateProjectionInput) {
 }
 
 function availableKnowledgeProjection(knowledge: KnowledgeProjectionInput) {
-  const selectedBases = knowledge.bases.slice(0, WORKSPACE_STATE_MAX_BASES);
-  const aggregateStatuses = emptyDocumentStatusCounts();
-  const aggregateSources = emptySourceKindCounts();
+  const inventory = knowledge.documents;
+  const selectedBases = inventory.bases.slice(0, WORKSPACE_STATE_MAX_BASES);
+  const aggregateStatuses = { ...inventory.statusCounts };
+  const aggregateSources = { ...inventory.sourceKindCounts };
   const topicCounts = new Map<string, number>();
   const projectedBases = selectedBases.map((base) => {
-    const documents = knowledge.documentsByBase.get(base.id) ?? [];
-    const statusCounts = emptyDocumentStatusCounts();
-    for (const document of documents) {
-      statusCounts[document.status] += 1;
-      aggregateStatuses[document.status] += 1;
-      aggregateSources[document.sourceKind] += 1;
-      const topicsInDocument = new Set(
-        document.topics.map((topic) =>
-          boundedLabel(topic, WORKSPACE_STATE_TOPIC_MAX_CHARS, "Unlabeled topic"),
-        ),
-      );
-      for (const topic of topicsInDocument) {
-        topicCounts.set(topic, (topicCounts.get(topic) ?? 0) + 1);
-      }
-    }
     return {
       id: base.id,
       name: boundedLabel(base.name, WORKSPACE_STATE_BASE_NAME_MAX_CHARS, "Untitled base"),
-      visibleDocumentCount: documents.length,
-      statusCounts,
-      latestUpdatedAt: newestTimestamp(documents.map((document) => document.updatedAt)),
+      visibleDocumentCount: base.visibleDocumentCount,
+      statusCounts: base.statusCounts,
+      latestUpdatedAt: base.latestUpdatedAt,
     };
   });
+
+  for (const topic of inventory.topics) {
+    const name = boundedLabel(topic.name, WORKSPACE_STATE_TOPIC_MAX_CHARS, "Unlabeled topic");
+    topicCounts.set(name, (topicCounts.get(name) ?? 0) + topic.documentCount);
+  }
 
   const sortedTopics = [...topicCounts.entries()]
     .sort(
@@ -166,19 +142,17 @@ function availableKnowledgeProjection(knowledge: KnowledgeProjectionInput) {
     memoryKinds[memory.kind] += 1;
   }
 
-  const inspectedVisibleDocumentCount = projectedBases.reduce(
-    (total, base) => total + base.visibleDocumentCount,
-    0,
-  );
-  const basesTruncated = knowledge.bases.length > projectedBases.length;
+  const inspectedVisibleDocumentCount = inventory.visibleDocumentCount;
+  const basesTruncated = inventory.baseCount > projectedBases.length;
   const memoryLimitReached = memories.length === WORKSPACE_STATE_MEMORY_SAMPLE_LIMIT;
+  const inventoryPartial = basesTruncated || inventory.topicsTruncated || memoryLimitReached;
   const gaps: WorkspaceStateGap[] = [];
   const addGap = (gap: WorkspaceStateGap): void => {
     if (gaps.length < WORKSPACE_STATE_MAX_GAPS) gaps.push(gap);
   };
-  if (knowledge.bases.length === 0) {
+  if (inventory.baseCount === 0) {
     addGap({ code: "no_document_bases", severity: "info", relatedCount: 0 });
-  } else if (!basesTruncated && inspectedVisibleDocumentCount === 0) {
+  } else if (inspectedVisibleDocumentCount === 0) {
     addGap({ code: "no_visible_documents", severity: "info", relatedCount: 0 });
   }
   if (aggregateStatuses.failed > 0) {
@@ -213,22 +187,22 @@ function availableKnowledgeProjection(knowledge: KnowledgeProjectionInput) {
       relatedCount: memoryStatuses.proposed,
     });
   }
-  if (basesTruncated || memoryLimitReached) {
+  if (inventoryPartial) {
     addGap({ code: "partial_inventory", severity: "info", relatedCount: null });
   }
 
   return {
     availability: "available" as const,
-    coverage: basesTruncated || memoryLimitReached ? ("partial" as const) : ("complete" as const),
-    baseCount: knowledge.bases.length,
+    coverage: inventoryPartial ? ("partial" as const) : ("complete" as const),
+    baseCount: inventory.baseCount,
     bases: projectedBases,
     basesTruncated,
     inspectedVisibleDocumentCount,
     documentStatusCounts: aggregateStatuses,
     sourceKindCounts: aggregateSources,
     topics,
-    topicsTruncated: sortedTopics.length > topics.length,
-    latestDocumentUpdatedAt: newestTimestamp(projectedBases.map((base) => base.latestUpdatedAt)),
+    topicsTruncated: inventory.topicsTruncated || sortedTopics.length > topics.length,
+    latestDocumentUpdatedAt: inventory.latestUpdatedAt,
     memorySample: {
       recordCount: memories.length,
       sampleLimit: WORKSPACE_STATE_MEMORY_SAMPLE_LIMIT,

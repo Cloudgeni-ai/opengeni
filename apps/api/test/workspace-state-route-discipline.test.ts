@@ -22,6 +22,15 @@ describe("workspace state route discipline", () => {
     expect(route).toContain(": Promise.resolve(null)");
   });
 
+  test("uses one bounded aggregate inventory instead of materializing documents per base", () => {
+    expect(route).toContain("getDocumentInventory");
+    expect(route).toContain("baseLimit: WORKSPACE_STATE_MAX_BASES");
+    expect(route).toContain("topicLimit: WORKSPACE_STATE_MAX_TOPICS");
+    expect(route).not.toContain("listDocumentBases");
+    expect(route).not.toContain("listDocuments");
+    expect(route).not.toContain("Promise.all(selectedBases.map");
+  });
+
   test("exposes only a no-store GET route with no mutation registration", () => {
     expect(route).toContain('app.get("/v1/workspaces/:workspaceId/workspace-state"');
     expect(route).toContain('context.header("cache-control", "private, no-store")');
