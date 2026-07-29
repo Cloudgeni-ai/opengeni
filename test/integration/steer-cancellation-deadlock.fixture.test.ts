@@ -33,7 +33,7 @@ import { createActivityTestHarness } from "../../apps/worker/src/activities";
 import type { RunAgentTurnInput, RunAgentTurnResult } from "../../apps/worker/src/activities/types";
 import {
   CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
-  TURN_WORKER_MAX_CONCURRENT_TURNS,
+  turnWorkerConcurrencyOptions,
 } from "../../apps/worker/src/concurrency";
 import { turnTaskQueue } from "../../apps/worker/src/workflows/activities";
 import * as schema from "../../packages/db/src/schema";
@@ -678,7 +678,7 @@ async function fixtureWorker(
       namespace: "default",
       taskQueue: turnTaskQueue(taskQueue),
       activities: { runAgentTurn },
-      maxConcurrentActivityTaskExecutions: TURN_WORKER_MAX_CONCURRENT_TURNS,
+      ...turnWorkerConcurrencyOptions(testSettings()),
     }),
   ]);
   return {

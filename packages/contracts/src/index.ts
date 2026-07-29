@@ -4477,6 +4477,10 @@ export const ScheduledTaskAgentConfig = z.object({
   resources: z.array(ResourceRef).default([]),
   tools: z.array(ToolRef).default([]),
   metadata: z.record(z.string(), z.unknown()).default({}),
+  // Explicit workspace-shared OpenGeni Slack bot binding for scheduled runs.
+  // The worker copies this non-secret pointer into session metadata; the
+  // first-party Slack tools never fall back to a personal hosted-MCP grant.
+  slackBotConnectionId: z.string().uuid().optional(),
   model: z.string().min(1).optional(),
   reasoningEffort: ReasoningEffort.optional(),
   sandboxBackend: SandboxBackend.optional(),
@@ -4861,6 +4865,34 @@ export type ConnectionKind = z.infer<typeof ConnectionKind>;
 export const ConnectionStatus = z.enum(["active", "needs_reauth", "revoked", "error"]);
 export type ConnectionStatus = z.infer<typeof ConnectionStatus>;
 
+export const OPENGENI_SLACK_BOT_CREDENTIAL_ROLE = "opengeni_slack_bot" as const;
+export const OPENGENI_SLACK_BOT_CREDENTIAL_LABEL = "OpenGeni Slack bot" as const;
+export const OPENGENI_SLACK_BOT_SESSION_METADATA_KEY = "opengeniSlackBotConnectionId" as const;
+export const OPENGENI_SLACK_BOT_REQUIRED_SCOPES = [
+  "chat:write",
+  "im:write",
+  "channels:read",
+  "channels:history",
+  "groups:read",
+  "groups:history",
+  "users:read",
+] as const;
+export const OPENGENI_SLACK_BOT_FORBIDDEN_SCOPES = ["channels:join", "chat:write.public"] as const;
+
+export const OpenGeniSlackBotConnectionMetadata = z
+  .object({
+    credentialRole: z.literal(OPENGENI_SLACK_BOT_CREDENTIAL_ROLE),
+    credentialLabel: z.literal(OPENGENI_SLACK_BOT_CREDENTIAL_LABEL),
+    slackTeamId: z.string().min(1).max(64),
+    slackTeamName: z.string().min(1).max(256),
+    botUserId: z.string().min(1).max(64),
+    botId: z.string().min(1).max(64),
+    botDisplayName: z.literal("OpenGeni"),
+    verifiedAt: z.string().datetime({ offset: true }),
+  })
+  .passthrough();
+export type OpenGeniSlackBotConnectionMetadata = z.infer<typeof OpenGeniSlackBotConnectionMetadata>;
+
 export const ConnectionMetadata = z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),
@@ -4875,6 +4907,8 @@ export const ConnectionMetadata = z.object({
   lastUsedAt: z.string().nullable(),
   lastError: z.string().nullable(),
   version: z.number().int().positive(),
+  verifiedInstallAt: z.string().datetime({ offset: true }).nullable().optional(),
+  verifiedInstallVersion: z.number().int().positive().nullable().optional(),
   metadata: z.record(z.string(), z.unknown()),
   createdBySubjectId: z.string().nullable(),
   updatedBySubjectId: z.string().nullable(),
@@ -4896,6 +4930,16 @@ export const CreateConnectionRequest = z.object({
   metadata: z.record(z.string(), z.unknown()).default({}),
 });
 export type CreateConnectionRequest = z.infer<typeof CreateConnectionRequest>;
+
+/**
+ * Write-only Slack bot installation input. `token` is accepted only by the
+ * dedicated validated endpoint and is never represented in a response schema.
+ */
+export const ConnectOpenGeniSlackBotRequest = z.object({
+  token: z.string().trim().startsWith("xoxb-").max(8192),
+  connectionId: z.string().uuid().optional(),
+});
+export type ConnectOpenGeniSlackBotRequest = z.infer<typeof ConnectOpenGeniSlackBotRequest>;
 
 export const UpdateConnectionRequest = z.object({
   providerDomain: z.string().min(1).optional(),
@@ -6178,6 +6222,7 @@ export const WorkspaceCaptureDegradedReason = z.enum([
   "repository_discovery_command_failed",
   "repository_discovery_timed_out",
   "repository_discovery_result_limit_exceeded",
+  "repository_read_unavailable",
 ]);
 export type WorkspaceCaptureDegradedReason = z.infer<typeof WorkspaceCaptureDegradedReason>;
 

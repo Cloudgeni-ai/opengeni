@@ -1,6 +1,6 @@
 import type { SessionEvent } from "@opengeni/sdk";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { EmbeddedSessionClientLike } from "../client";
+import type { EmbeddedSessionEventClientLike } from "../client";
 
 export type AsyncListState<T> = {
   data: T | null;
@@ -215,7 +215,7 @@ export type SessionEventFeedOptions = {
  * `events` log or tails the stream directly (reconnect handled by the SDK).
  */
 export function useSessionEventTrigger(
-  client: EmbeddedSessionClientLike,
+  client: EmbeddedSessionEventClientLike,
   workspaceId: string,
   sessionId: string | null | undefined,
   match: (event: SessionEvent) => boolean,

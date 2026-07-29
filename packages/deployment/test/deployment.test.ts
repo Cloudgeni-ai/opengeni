@@ -108,9 +108,13 @@ describe("deployment contract", () => {
       2,
     );
     expect(plan.deployCommands.some((command) => command.includes("docker build"))).toBe(false);
+    expect(plan.deployCommands.join("\n")).not.toContain("OPENGENI_OPENAI_API_KEY");
     expect(plan.requiredSecretKeys).toContain("OPENGENI_ENROLLMENT_SIGNING_SECRET");
     expect(plan.requiredSecretKeys).toContain("OPENGENI_SELFHOSTED_NATS_CALLOUT_ACCOUNT_SEED");
     expect(plan.requiredSecretKeys).toContain("opengeni-postgres/POSTGRES_PASSWORD");
+    expect(plan.requiredSecretKeys).toContain(
+      "opengeni-runtime/OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY",
+    );
     expect(plan.requiredSecretKeys).toContain(
       "opengeni-migrations/OPENGENI_MIGRATIONS_DATABASE_URL",
     );

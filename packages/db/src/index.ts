@@ -1355,6 +1355,24 @@ export async function bootstrapWorkspace(
         })
         .where(eq(schema.workspaceMemberships.id, membership.id));
     }
+    // Access refreshes must retain workspaces created or granted after the
+    // default workspace. Restore account-scoped RLS before listing them.
+    await setRlsContext(tx as unknown as Database, {
+      accountId: workspace.accountId,
+      workspaceId: null,
+    });
+    const memberships = await tx
+      .select({
+        membership: schema.workspaceMemberships,
+        workspace: schema.workspaces,
+      })
+      .from(schema.workspaceMemberships)
+      .innerJoin(
+        schema.workspaces,
+        eq(schema.workspaceMemberships.workspaceId, schema.workspaces.id),
+      )
+      .where(eq(schema.workspaceMemberships.subjectId, input.subjectId))
+      .orderBy(desc(schema.workspaces.createdAt));
     return {
       mode: input.accountExternalSource === "opengeni:local" ? "local" : "configured",
       subjectId: input.subjectId,
@@ -1368,15 +1386,13 @@ export async function bootstrapWorkspace(
           permissions: input.accountPermissions ?? allAccountPermissions,
         },
       ],
-      workspaceGrants: [
-        {
-          workspaceId: workspace.id,
-          accountId: account.id,
-          subjectId: input.subjectId,
-          ...(input.subjectLabel ? { subjectLabel: input.subjectLabel } : {}),
-          permissions: workspacePermissions,
-        },
-      ],
+      workspaceGrants: memberships.map((row) => ({
+        workspaceId: row.workspace.id,
+        accountId: row.workspace.accountId,
+        subjectId: input.subjectId,
+        ...(input.subjectLabel ? { subjectLabel: input.subjectLabel } : {}),
+        permissions: row.membership.permissions as Permission[],
+      })),
       defaultAccountId: account.id,
       defaultWorkspaceId: workspace.id,
     };
@@ -3162,6 +3178,8 @@ export type CreateConnectionInput = {
   credentialEncrypted: string;
   grantedScopes?: string[];
   expiresAt?: Date | null;
+  verifiedInstallAt?: Date | null;
+  verifiedInstallVersion?: number | null;
   metadata?: Record<string, unknown>;
   createdBySubjectId?: string | null;
   updatedBySubjectId?: string | null;
@@ -3179,8 +3197,38 @@ export type UpdateConnectionInput = {
   credentialEncrypted?: string;
   grantedScopes?: string[];
   expiresAt?: Date | null;
+  verifiedInstallAt?: Date | null;
+  verifiedInstallVersion?: number | null;
   metadata?: Record<string, unknown>;
   updatedBySubjectId?: string | null;
+};
+
+/** Server-owned verification facts; public schemas expose them read-only and nullable. */
+export type ConnectionMetadataWithVerification = ConnectionMetadata & {
+  verifiedInstallAt: string | null;
+  verifiedInstallVersion: number | null;
+};
+
+export type SlackBotPostOperation = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  connectionId: string;
+  operationId: string;
+  clientMessageId: string;
+  targetKind: "channel" | "user";
+  targetId: string;
+  requestDigest: string;
+  status: "provider_started" | "completed";
+  claimHolderId: string | null;
+  claimExpiresAt: Date | null;
+  attemptCount: number;
+  lastFailureCode: string | null;
+  slackChannelId: string | null;
+  slackMessageTimestamp: string | null;
+  completedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
 };
 
 export type ConnectionCredentialForBroker = {
@@ -3313,6 +3361,7 @@ export type RegistryCapabilityCatalogItemInput = {
   importBatchId: string;
   scopesHint?: string[];
   homepageUrl?: string | null;
+  installUrl?: string | null;
   tags?: string[];
   metadata?: Record<string, unknown>;
 };
@@ -4181,7 +4230,7 @@ export async function upsertRegistryCapabilityCatalogItem(
     tags: input.tags ?? ["mcp", "integration", input.tier],
     homepageUrl: input.homepageUrl ?? `https://${input.providerDomain}`,
     endpointUrl: input.mcpUrl,
-    installUrl: input.homepageUrl ?? `https://${input.providerDomain}`,
+    installUrl: input.installUrl ?? input.homepageUrl ?? `https://${input.providerDomain}`,
     authModel: input.authKind === "none" ? null : "credential_ref",
     providerDomain: input.providerDomain,
     surfaceType: "mcp",
@@ -4741,6 +4790,8 @@ const connectionMetadataColumns = {
   lastUsedAt: schema.connections.lastUsedAt,
   lastError: schema.connections.lastError,
   version: schema.connections.version,
+  verifiedInstallAt: schema.connections.verifiedInstallAt,
+  verifiedInstallVersion: schema.connections.verifiedInstallVersion,
   metadata: schema.connections.metadata,
   createdBySubjectId: schema.connections.createdBySubjectId,
   updatedBySubjectId: schema.connections.updatedBySubjectId,
@@ -4757,7 +4808,7 @@ function connectionSubjectVisibility(subjectId?: string | null): SQL {
 export async function createConnection(
   db: Database,
   input: CreateConnectionInput,
-): Promise<ConnectionMetadata> {
+): Promise<ConnectionMetadataWithVerification> {
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -4774,6 +4825,8 @@ export async function createConnection(
           credentialEncrypted: input.credentialEncrypted,
           grantedScopes: input.grantedScopes ?? [],
           expiresAt: input.expiresAt ?? null,
+          verifiedInstallAt: input.verifiedInstallAt ?? null,
+          verifiedInstallVersion: input.verifiedInstallVersion ?? null,
           metadata: input.metadata ?? {},
           createdBySubjectId: input.createdBySubjectId ?? null,
           updatedBySubjectId: input.updatedBySubjectId ?? input.createdBySubjectId ?? null,
@@ -4791,7 +4844,7 @@ export async function listConnectionsMetadata(
   db: Database,
   workspaceId: string,
   subjectId?: string | null,
-): Promise<ConnectionMetadata[]> {
+): Promise<ConnectionMetadataWithVerification[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb
       .select(connectionMetadataColumns)
@@ -4812,7 +4865,7 @@ export async function getConnectionMetadata(
   workspaceId: string,
   connectionId: string,
   subjectId?: string | null,
-): Promise<ConnectionMetadata | null> {
+): Promise<ConnectionMetadataWithVerification | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
       .select(connectionMetadataColumns)
@@ -4832,7 +4885,7 @@ export async function getConnectionMetadata(
 export async function updateConnection(
   db: Database,
   input: UpdateConnectionInput,
-): Promise<ConnectionMetadata | null> {
+): Promise<ConnectionMetadataWithVerification | null> {
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
     const set = {
       updatedAt: new Date(),
@@ -4849,6 +4902,12 @@ export async function updateConnection(
         : {}),
       ...(input.grantedScopes !== undefined ? { grantedScopes: input.grantedScopes } : {}),
       ...(input.expiresAt !== undefined ? { expiresAt: input.expiresAt } : {}),
+      ...(input.verifiedInstallAt !== undefined
+        ? { verifiedInstallAt: input.verifiedInstallAt }
+        : {}),
+      ...(input.verifiedInstallVersion !== undefined
+        ? { verifiedInstallVersion: input.verifiedInstallVersion }
+        : {}),
       ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
       ...(input.updatedBySubjectId !== undefined
         ? { updatedBySubjectId: input.updatedBySubjectId }
@@ -4877,7 +4936,7 @@ export async function revokeConnection(
   workspaceId: string,
   connectionId: string,
   updatedBySubjectId?: string | null,
-): Promise<ConnectionMetadata | null> {
+): Promise<ConnectionMetadataWithVerification | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
       .update(schema.connections)
@@ -4886,6 +4945,13 @@ export async function revokeConnection(
         // The version bump invalidates any in-flight refresh's (id, version) CAS,
         // so a racing refresh cannot commit and flip the row back to active.
         version: sql`${schema.connections.version} + 1`,
+        // Status-only revocation does not replace the verified credential or bot
+        // identity. Carry the marker to the same new CAS version so the dedicated
+        // reinstall path can still recognize (but not use) the inactive row.
+        verifiedInstallVersion: sql`case
+          when ${schema.connections.verifiedInstallAt} is null then null
+          else ${schema.connections.version} + 1
+        end`,
         updatedBySubjectId: updatedBySubjectId ?? null,
         updatedAt: new Date(),
       })
@@ -4901,6 +4967,272 @@ export async function revokeConnection(
       )
       .returning(connectionMetadataColumns);
     return row ? mapConnectionMetadata(row) : null;
+  });
+}
+
+export type ClaimSlackBotPostOperationResult =
+  | { kind: "claimed" | "in_progress" | "completed"; operation: SlackBotPostOperation }
+  | { kind: "conflict" | "connection_not_found" };
+
+/**
+ * Claims one durable Slack post identity. The insert occurs before any provider
+ * call; retries retain the original client_msg_id and immutable request digest.
+ * A live claim suppresses concurrent sends, while a released/expired claim can
+ * be reclaimed after response loss or process death.
+ */
+export async function claimSlackBotPostOperation(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    connectionId: string;
+    operationId: string;
+    targetKind: "channel" | "user";
+    targetId: string;
+    requestDigest: string;
+    claimHolderId: string;
+    claimLeaseMs: number;
+  },
+): Promise<ClaimSlackBotPostOperationResult> {
+  const claimLeaseMs = Math.max(1, Math.min(Math.trunc(input.claimLeaseMs), 120_000));
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        const [connection] = await tx
+          .select({ id: schema.connections.id })
+          .from(schema.connections)
+          .where(
+            and(
+              eq(schema.connections.accountId, input.accountId),
+              eq(schema.connections.workspaceId, input.workspaceId),
+              eq(schema.connections.id, input.connectionId),
+            ),
+          )
+          .for("share")
+          .limit(1);
+        if (!connection) return { kind: "connection_not_found" } as const;
+
+        const [created] = await tx
+          .insert(schema.slackBotPostOperations)
+          .values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            connectionId: input.connectionId,
+            operationId: input.operationId,
+            clientMessageId: input.operationId,
+            targetKind: input.targetKind,
+            targetId: input.targetId,
+            requestDigest: input.requestDigest,
+            status: "provider_started",
+            claimHolderId: input.claimHolderId,
+            claimExpiresAt: sql`now() + (${claimLeaseMs} * interval '1 millisecond')`,
+            attemptCount: 1,
+          })
+          .onConflictDoNothing({
+            target: [
+              schema.slackBotPostOperations.workspaceId,
+              schema.slackBotPostOperations.connectionId,
+              schema.slackBotPostOperations.operationId,
+            ],
+          })
+          .returning();
+        if (created) {
+          return { kind: "claimed", operation: mapSlackBotPostOperation(created) } as const;
+        }
+
+        const [existing] = await tx
+          .select()
+          .from(schema.slackBotPostOperations)
+          .where(
+            and(
+              eq(schema.slackBotPostOperations.workspaceId, input.workspaceId),
+              eq(schema.slackBotPostOperations.connectionId, input.connectionId),
+              eq(schema.slackBotPostOperations.operationId, input.operationId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!existing) throw new Error("Slack post operation disappeared after conflict");
+        if (
+          existing.accountId !== input.accountId ||
+          existing.targetKind !== input.targetKind ||
+          existing.targetId !== input.targetId ||
+          existing.requestDigest !== input.requestDigest ||
+          existing.clientMessageId !== input.operationId
+        ) {
+          return { kind: "conflict" } as const;
+        }
+        if (existing.status === "completed") {
+          return { kind: "completed", operation: mapSlackBotPostOperation(existing) } as const;
+        }
+
+        const [reclaimed] = await tx
+          .update(schema.slackBotPostOperations)
+          .set({
+            claimHolderId: input.claimHolderId,
+            claimExpiresAt: sql`now() + (${claimLeaseMs} * interval '1 millisecond')`,
+            attemptCount: sql`${schema.slackBotPostOperations.attemptCount} + 1`,
+            lastFailureCode: null,
+            updatedAt: sql`now()`,
+          })
+          .where(
+            and(
+              eq(schema.slackBotPostOperations.id, existing.id),
+              or(
+                isNull(schema.slackBotPostOperations.claimHolderId),
+                lte(schema.slackBotPostOperations.claimExpiresAt, sql`now()`),
+              ),
+            ),
+          )
+          .returning();
+        return reclaimed
+          ? ({ kind: "claimed", operation: mapSlackBotPostOperation(reclaimed) } as const)
+          : ({ kind: "in_progress", operation: mapSlackBotPostOperation(existing) } as const);
+      }),
+  );
+}
+
+export async function releaseSlackBotPostOperationClaim(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    connectionId: string;
+    operationId: string;
+    claimHolderId: string;
+    failureCode: string;
+  },
+): Promise<boolean> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb
+        .update(schema.slackBotPostOperations)
+        .set({
+          claimHolderId: null,
+          claimExpiresAt: null,
+          lastFailureCode: input.failureCode.slice(0, 128),
+          updatedAt: sql`now()`,
+        })
+        .where(
+          and(
+            eq(schema.slackBotPostOperations.workspaceId, input.workspaceId),
+            eq(schema.slackBotPostOperations.connectionId, input.connectionId),
+            eq(schema.slackBotPostOperations.operationId, input.operationId),
+            eq(schema.slackBotPostOperations.status, "provider_started"),
+            eq(schema.slackBotPostOperations.claimHolderId, input.claimHolderId),
+          ),
+        )
+        .returning({ id: schema.slackBotPostOperations.id });
+      return rows.length === 1;
+    },
+  );
+}
+
+export type CompleteSlackBotPostOperationResult =
+  | { kind: "completed"; operation: SlackBotPostOperation; newlyCompleted: boolean }
+  | { kind: "not_found" | "not_owned" };
+
+/** Completion and the single success audit receipt commit atomically. */
+export async function completeSlackBotPostOperation(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    connectionId: string;
+    operationId: string;
+    claimHolderId: string;
+    slackChannelId: string;
+    slackMessageTimestamp: string;
+    subjectId?: string | null;
+    auditMetadata: Record<string, unknown>;
+  },
+): Promise<CompleteSlackBotPostOperationResult> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        const [current] = await tx
+          .select()
+          .from(schema.slackBotPostOperations)
+          .where(
+            and(
+              eq(schema.slackBotPostOperations.workspaceId, input.workspaceId),
+              eq(schema.slackBotPostOperations.connectionId, input.connectionId),
+              eq(schema.slackBotPostOperations.operationId, input.operationId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!current) return { kind: "not_found" } as const;
+        if (current.status === "completed") {
+          return {
+            kind: "completed",
+            operation: mapSlackBotPostOperation(current),
+            newlyCompleted: false,
+          } as const;
+        }
+        if (current.claimHolderId !== input.claimHolderId) {
+          return { kind: "not_owned" } as const;
+        }
+        const [completed] = await tx
+          .update(schema.slackBotPostOperations)
+          .set({
+            status: "completed",
+            claimHolderId: null,
+            claimExpiresAt: null,
+            lastFailureCode: null,
+            slackChannelId: input.slackChannelId,
+            slackMessageTimestamp: input.slackMessageTimestamp,
+            completedAt: sql`now()`,
+            updatedAt: sql`now()`,
+          })
+          .where(eq(schema.slackBotPostOperations.id, current.id))
+          .returning();
+        if (!completed) throw new Error("Slack post completion returned no row");
+        await tx.insert(schema.auditEvents).values({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: input.subjectId ?? null,
+          action: "slack_bot.message.post",
+          targetType: "connection",
+          targetId: input.connectionId,
+          metadata: input.auditMetadata,
+        });
+        return {
+          kind: "completed",
+          operation: mapSlackBotPostOperation(completed),
+          newlyCompleted: true,
+        } as const;
+      }),
+  );
+}
+
+export async function getSlackBotPostOperation(
+  db: Database,
+  workspaceId: string,
+  connectionId: string,
+  operationId: string,
+): Promise<SlackBotPostOperation | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.slackBotPostOperations)
+      .where(
+        and(
+          eq(schema.slackBotPostOperations.workspaceId, workspaceId),
+          eq(schema.slackBotPostOperations.connectionId, connectionId),
+          eq(schema.slackBotPostOperations.operationId, operationId),
+        ),
+      )
+      .limit(1);
+    return row ? mapSlackBotPostOperation(row) : null;
   });
 }
 
@@ -5037,6 +5369,10 @@ export async function setConnectionStatus(
         status,
         lastError,
         version: sql`${schema.connections.version} + 1`,
+        verifiedInstallVersion: sql`case
+          when ${schema.connections.verifiedInstallAt} is null then null
+          else ${schema.connections.version} + 1
+        end`,
         updatedAt: new Date(),
       })
       .where(
@@ -29358,6 +29694,12 @@ export async function claimSessionWorkForAttempt(
             and(
               eq(schema.sessionAttemptInterruptions.workspaceId, workspaceId),
               eq(schema.sessionAttemptInterruptions.sessionId, sessionId),
+              inArray(schema.sessionAttemptInterruptions.state, [
+                "pending",
+                "delivered",
+                "acknowledged",
+                "settled",
+              ]),
               isNull(schema.sessionTurnAttempts.quiescedAt),
             ),
           )
@@ -29649,20 +29991,27 @@ export async function claimSessionWorkForAttempt(
           )
           .limit(1)
           .for("update");
-        const rows = pendingAgentSteer
-          ? []
-          : await rawRows<{
-              id: string;
-              trigger_event_id: string;
-              metadata: Record<string, unknown>;
-            }>(
-              tx as unknown as Database,
-              sql`select id, trigger_event_id, metadata from session_turns
+        // A human/API Steer is the newest explicit replacement direction. It
+        // must claim next even when an older Agent Steer is pending; the
+        // internal instruction is delivered as context on that same human turn
+        // instead of manufacturing another system inference ahead of it.
+        // Ordinary queued sends retain the established Agent-Steer priority.
+        const rows = await rawRows<{
+          id: string;
+          trigger_event_id: string;
+          metadata: Record<string, unknown>;
+        }>(
+          tx as unknown as Database,
+          sql`select id, trigger_event_id, metadata from session_turns
               where workspace_id = ${workspaceId} and session_id = ${sessionId}
                 and status = 'queued' and source in ('user', 'api')
+                and (
+                  ${Boolean(pendingAgentSteer)} = false
+                  or metadata->>'delivery' = 'steer'
+                )
               order by position asc, created_at asc, id asc
               limit 1`,
-            );
+        );
         const queuedTurnPreview = rows[0];
         const queuedLocks = queuedTurnPreview
           ? await lockSessionEventWriteRows(tx as unknown as Database, {
@@ -33371,7 +33720,9 @@ export async function getSessionQueueSnapshot(
       version: session.queueVersion,
       effectiveControl: serializeEffectiveSessionControl(effectiveControl),
       stoppingPreviousAttempt:
-        latestInterruption !== null && latestInterruption.quiescedAt === null,
+        latestInterruption !== null &&
+        latestInterruption.interruptionState !== "rejected_stale" &&
+        latestInterruption.quiescedAt === null,
       items: rows.map(mapSessionTurn),
     };
   });
@@ -35651,12 +36002,14 @@ function mapConnectionMetadata(row: {
   lastUsedAt: Date | null;
   lastError: string | null;
   version: number;
+  verifiedInstallAt: Date | null;
+  verifiedInstallVersion: number | null;
   metadata: Record<string, unknown>;
   createdBySubjectId: string | null;
   updatedBySubjectId: string | null;
   createdAt: Date;
   updatedAt: Date;
-}): ConnectionMetadata {
+}): ConnectionMetadataWithVerification {
   return {
     id: row.id,
     accountId: row.accountId,
@@ -35671,11 +36024,39 @@ function mapConnectionMetadata(row: {
     lastUsedAt: row.lastUsedAt?.toISOString() ?? null,
     lastError: row.lastError,
     version: row.version,
+    verifiedInstallAt: row.verifiedInstallAt?.toISOString() ?? null,
+    verifiedInstallVersion: row.verifiedInstallVersion,
     metadata: row.metadata,
     createdBySubjectId: row.createdBySubjectId,
     updatedBySubjectId: row.updatedBySubjectId,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+function mapSlackBotPostOperation(
+  row: typeof schema.slackBotPostOperations.$inferSelect,
+): SlackBotPostOperation {
+  return {
+    id: row.id,
+    accountId: row.accountId,
+    workspaceId: row.workspaceId,
+    connectionId: row.connectionId,
+    operationId: row.operationId,
+    clientMessageId: row.clientMessageId,
+    targetKind: row.targetKind,
+    targetId: row.targetId,
+    requestDigest: row.requestDigest,
+    status: row.status,
+    claimHolderId: row.claimHolderId,
+    claimExpiresAt: row.claimExpiresAt,
+    attemptCount: row.attemptCount,
+    lastFailureCode: row.lastFailureCode,
+    slackChannelId: row.slackChannelId,
+    slackMessageTimestamp: row.slackMessageTimestamp,
+    completedAt: row.completedAt,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
   };
 }
 

@@ -3,6 +3,7 @@ import {
   configuredAllowedModels,
   configuredAllowedReasoningEfforts,
   configuredModels,
+  withCodexCatalogProvider,
 } from "@opengeni/config";
 import {
   ClientConfig,
@@ -308,6 +309,12 @@ export function createApp(deps: AppDependencies): Hono {
     return c.json(result, result.ok ? 200 : 503);
   });
 
+  app.get("/traffic-readyz", async (c) => {
+    const { db } = readinessChecks(deps);
+    const result = await runReadinessChecks({ db }, 2_000);
+    return c.json(result, result.ok ? 200 : 503);
+  });
+
   app.get("/metrics", async (c) =>
     c.text(await observability.prometheusMetrics(), 200, {
       "content-type": "text/plain; version=0.0.4; charset=utf-8",
@@ -316,18 +323,21 @@ export function createApp(deps: AppDependencies): Hono {
 
   app.get("/v1/config/client", (c) => {
     c.header("cache-control", "no-store");
+    const catalogSettings = deps.settings.codexSubscriptionEnabled
+      ? withCodexCatalogProvider(deps.settings)
+      : deps.settings;
     return c.json(
       ClientConfig.parse({
         deploymentRevision: deps.settings.deploymentRevision,
         apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
         ...(deps.settings.serverVersion ? { serverVersion: deps.settings.serverVersion } : {}),
-        defaultModel: canonicalizeConfiguredModelId(deps.settings, deps.settings.openaiModel),
-        allowedModels: configuredAllowedModels(deps.settings),
+        defaultModel: canonicalizeConfiguredModelId(catalogSettings, catalogSettings.openaiModel),
+        allowedModels: configuredAllowedModels(catalogSettings),
         // Provider-grouped model list for the picker. configuredModels() carries the
         // union of the built-in allow-list and every registry provider's models, in
         // selection order (default model first); project each to the client-safe
         // ClientModel shape (ConfiguredModel.providerId → ClientModel.provider).
-        models: configuredModels(deps.settings).map(projectClientModel),
+        models: configuredModels(catalogSettings).map(projectClientModel),
         defaultReasoningEffort: deps.settings.openaiReasoningEffort,
         allowedReasoningEfforts: configuredAllowedReasoningEfforts(deps.settings),
         mcpServers: deps.settings.mcpServers.map((server) => ({
@@ -576,7 +586,9 @@ function boundedCorrelationId(value: string | undefined): string | null {
 }
 
 type ReadinessCheckName = "db" | "nats" | "temporal";
-type ReadinessChecks = Record<ReadinessCheckName, () => Promise<void> | void>;
+type ReadinessCheck = () => Promise<void> | void;
+type ReadinessChecks = Record<ReadinessCheckName, ReadinessCheck>;
+type ReadinessCheckResult = { ok: boolean; error?: string };
 
 function readinessChecks(deps: AppDependencies): ReadinessChecks {
   return {
@@ -601,35 +613,30 @@ function readinessChecks(deps: AppDependencies): ReadinessChecks {
   };
 }
 
-async function runReadinessChecks(
-  checks: ReadinessChecks,
+async function runReadinessChecks<const Checks extends Readonly<Record<string, ReadinessCheck>>>(
+  checks: Checks,
   timeoutMs: number,
 ): Promise<{
   ok: boolean;
-  checks: Record<ReadinessCheckName, { ok: boolean; error?: string }>;
+  checks: { [Name in keyof Checks]: ReadinessCheckResult };
 }> {
   const entries = await Promise.all(
-    (Object.entries(checks) as Array<[ReadinessCheckName, () => Promise<void> | void]>).map(
-      async ([name, check]) => {
-        try {
-          await withTimeout(Promise.resolve().then(check), timeoutMs);
-          return [name, { ok: true }] as const;
-        } catch (error) {
-          return [
-            name,
-            {
-              ok: false,
-              error: error instanceof Error ? error.message : String(error),
-            },
-          ] as const;
-        }
-      },
-    ),
+    (Object.entries(checks) as Array<[keyof Checks, ReadinessCheck]>).map(async ([name, check]) => {
+      try {
+        await withTimeout(Promise.resolve().then(check), timeoutMs);
+        return [name, { ok: true }] as const;
+      } catch (error) {
+        return [
+          name,
+          {
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+          },
+        ] as const;
+      }
+    }),
   );
-  const result = Object.fromEntries(entries) as Record<
-    ReadinessCheckName,
-    { ok: boolean; error?: string }
-  >;
+  const result = Object.fromEntries(entries) as { [Name in keyof Checks]: ReadinessCheckResult };
   return {
     ok: Object.values(result).every((check) => check.ok),
     checks: result,
@@ -658,6 +665,7 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T
 const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /^\/healthz$/, label: "/healthz" },
   { pattern: /^\/readyz$/, label: "/readyz" },
+  { pattern: /^\/traffic-readyz$/, label: "/traffic-readyz" },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/codex\/connect\/start$/,
     label: "/v1/workspaces/:workspaceId/codex/connect/start",
@@ -951,6 +959,10 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/connections\/oauth\/start$/,
     label: "/v1/workspaces/:workspaceId/connections/oauth/start",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/connections\/slack-bot$/,
+    label: "/v1/workspaces/:workspaceId/connections/slack-bot",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/connections\/[^/]+$/,

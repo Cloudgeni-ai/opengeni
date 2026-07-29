@@ -169,6 +169,44 @@ describe("Temporal connection security", () => {
   });
 });
 
+describe("turn worker concurrency", () => {
+  test("keeps the ordinary deployment default fixed", () => {
+    const settings = withEnv({}, () => getSettings());
+    expect(settings.turnWorkerConcurrencyMode).toBe("fixed");
+    expect(settings.turnWorkerMaxConcurrentTurns).toBe(16);
+    expect(settings.turnWorkerTargetCpuUsage).toBe(0.8);
+    expect(settings.turnWorkerTargetMemoryUsage).toBe(0.75);
+  });
+
+  test("parses a bounded resource-based machine profile", () => {
+    const settings = withEnv(
+      {
+        OPENGENI_TURN_WORKER_CONCURRENCY_MODE: "resource-based",
+        OPENGENI_TURN_WORKER_MAX_CONCURRENT_TURNS: "256",
+        OPENGENI_TURN_WORKER_TARGET_CPU_USAGE: "0.85",
+        OPENGENI_TURN_WORKER_TARGET_MEMORY_USAGE: "0.8",
+      },
+      () => getSettings(),
+    );
+    expect(settings.turnWorkerConcurrencyMode).toBe("resource-based");
+    expect(settings.turnWorkerMaxConcurrentTurns).toBe(256);
+    expect(settings.turnWorkerTargetCpuUsage).toBe(0.85);
+    expect(settings.turnWorkerTargetMemoryUsage).toBe(0.8);
+  });
+
+  test("rejects invalid modes, ceilings, and resource targets", () => {
+    for (const env of [
+      { OPENGENI_TURN_WORKER_CONCURRENCY_MODE: "automatic" },
+      { OPENGENI_TURN_WORKER_MAX_CONCURRENT_TURNS: "0" },
+      { OPENGENI_TURN_WORKER_MAX_CONCURRENT_TURNS: "2001" },
+      { OPENGENI_TURN_WORKER_TARGET_CPU_USAGE: "1.1" },
+      { OPENGENI_TURN_WORKER_TARGET_MEMORY_USAGE: "0.81" },
+    ]) {
+      expect(() => withEnv(env, () => getSettings())).toThrow();
+    }
+  });
+});
+
 describe("runtime database role posture", () => {
   test("defaults to the restricted standalone role and accepts an explicit role", () => {
     expect(withEnv({}, () => getSettings()).runtimeDatabaseRole).toBe("opengeni_app");

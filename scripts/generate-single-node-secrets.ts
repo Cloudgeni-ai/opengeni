@@ -54,6 +54,7 @@ export async function generateSingleNodeSecretFiles(
   const ownerPassword = secret();
   const runtimePassword = secret();
   const minioPassword = secret();
+  const environmentsEncryptionKey = randomBytes(32).toString("base64");
   const enrollmentSigningSecret = secret();
   const streamTokenSecret = secret();
   const natsControlPassword = secret();
@@ -106,6 +107,7 @@ export async function generateSingleNodeSecretFiles(
             host: databaseHost,
             database: databaseName,
           }),
+          OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: environmentsEncryptionKey,
           OPENGENI_ENROLLMENT_SIGNING_SECRET: enrollmentSigningSecret,
           OPENGENI_STREAM_TOKEN_SECRET: streamTokenSecret,
           OPENGENI_SELFHOSTED_RELAY_TOKEN_SECRET: streamTokenSecret,

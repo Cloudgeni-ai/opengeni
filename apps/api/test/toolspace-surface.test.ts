@@ -29,6 +29,8 @@ import type { Observability } from "@opengeni/observability";
 import type { AccessGrant, McpCredentialsRequest, SessionTurn } from "@opengeni/contracts";
 import type { McpServerConfig } from "@opengeni/config";
 import type { ApiRouteDeps } from "@opengeni/core";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import {
   createDb,
   createSession,
@@ -48,6 +50,7 @@ import {
   toolspaceCanProxyServerId,
   type ToolspaceMcpSurface,
 } from "../src/mcp/toolspace";
+import { buildOpenGeniMcpServer } from "../src/mcp/server";
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -360,6 +363,35 @@ describe("connectionBrokerFetch response lifecycle", () => {
 });
 
 describe("prepareToolspaceMcpSurface", () => {
+  test("an empty Toolspace surface returns a valid empty tools/list", async () => {
+    if (!available) return;
+    const server = buildOpenGeniMcpServer(
+      makeDeps(200),
+      grantFor({
+        accountId: crypto.randomUUID(),
+        workspaceId: crypto.randomUUID(),
+        sessionId: crypto.randomUUID(),
+      }),
+      {
+        toolspace: {
+          sessionId: crypto.randomUUID(),
+          subjectId: "sandbox:empty",
+          tools: [],
+          close: async () => {},
+        },
+      },
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const mcpClient = new Client({ name: "empty-toolspace-test", version: "1" });
+    await server.connect(serverTransport);
+    await mcpClient.connect(clientTransport);
+    try {
+      expect((await mcpClient.listTools()).tools).toEqual([]);
+    } finally {
+      await Promise.all([mcpClient.close(), server.close()]);
+    }
+  });
+
   test("uses the host MCP credential port with the active turn's frozen initiator", async () => {
     if (!available) return;
     const server = startTestMcpServer({ requiredAuthorization: "Bearer cloud-connection" });

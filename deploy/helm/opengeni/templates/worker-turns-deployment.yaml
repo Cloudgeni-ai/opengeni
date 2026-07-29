@@ -68,11 +68,7 @@ spec:
             - name: OPENGENI_WORKER_ROLE
               value: turn
             {{- if or .Values.postgres.enabled .Values.temporal.enabled .Values.minio.enabled }}
-            {{- include "opengeni.generatedRuntimeEnv" . | nindent 12 }}
-            {{- if .Values.minio.enabled }}
-            - name: OPENGENI_OBJECT_STORAGE_ENDPOINT
-              value: {{ include "opengeni.minioInternalEndpoint" . | quote }}
-            {{- end }}
+            {{- include "opengeni.generatedRuntimeEnv" (dict "root" . "objectStorageEndpoint" (include "opengeni.minioInternalEndpoint" .)) | nindent 12 }}
             {{- end }}
           {{- if (((.Values.worker).probes).readiness).enabled }}
           readinessProbe:

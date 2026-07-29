@@ -1,5 +1,22 @@
 # @opengeni/config
 
+## 0.7.8
+
+### Patch Changes
+
+- Updated dependencies [ffd246c]
+  - @opengeni/contracts@0.20.1
+
+## 0.7.7
+
+### Patch Changes
+
+- 9326255: Let a single-machine turn worker adapt activity concurrency to whole-system CPU
+  and memory targets while preserving fixed per-worker concurrency elsewhere.
+- Updated dependencies [06a5801]
+- Updated dependencies [5511c24]
+  - @opengeni/contracts@0.20.0
+
 ## 0.7.6
 
 ### Patch Changes

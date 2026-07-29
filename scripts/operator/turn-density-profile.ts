@@ -4,13 +4,13 @@ import {
   bootstrapWorkspace,
   createDb,
   createSession,
-  deleteWorkspace,
   enqueueSessionTurn,
   withWorkspaceRls,
 } from "@opengeni/db";
 import * as schema from "@opengeni/db/schema";
 import { createProductionAgentRuntime } from "@opengeni/runtime";
-import { MemoryEventBus, ScriptedModel } from "@opengeni/testing";
+import { MemoryEventBus, ScriptedModel, startTestMcpServer } from "@opengeni/testing";
+import { eq } from "drizzle-orm";
 import { createTurnActivities } from "../../apps/worker/src/activities";
 
 const MIB = 1024 * 1024;
@@ -21,13 +21,21 @@ const plateauSeconds = positiveInteger("OPENGENI_DENSITY_PLATEAU_SECONDS", 15);
 const hardLimitMiB = positiveNumber("OPENGENI_DENSITY_HARD_LIMIT_MIB_PER_TURN", 100);
 const targetMiB = positiveNumber("OPENGENI_DENSITY_TARGET_MIB_PER_TURN", 50);
 const runId = crypto.randomUUID();
+const profileSubjectId = `operator:turn-density-profile:${runId}`;
 const profileInitiator = {
   kind: "service" as const,
-  subjectId: "turn-density-profile",
+  subjectId: profileSubjectId,
   label: "Turn density profile",
 };
 
 const productionSettings = getSettings();
+// The profile creates an isolated workspace that is intentionally absent from
+// the running deployment's user-facing access mode. Keep first-party MCP setup
+// in the measured turn, but terminate it locally so local/configured/managed
+// deployments all exercise the same density workload without borrowing a
+// production principal or access secret.
+const densityMcp = startTestMcpServer();
+const densityMcpUrl = `${densityMcp.url}?workspace={workspaceId}`;
 const settings: Settings = {
   ...productionSettings,
   environment: `${productionSettings.environment}-density-profile`,
@@ -57,6 +65,15 @@ const settings: Settings = {
   workspaceCaptureEnabled: false,
   integrationsEnabled: false,
   toolspaceEnabled: false,
+  opengeniMcpUrl: densityMcpUrl,
+  mcpServers: [
+    {
+      id: "opengeni",
+      name: "OpenGeni density profile",
+      url: densityMcpUrl,
+      cacheToolsList: false,
+    },
+  ],
 };
 
 const searchPath = dbSearchPath(settings);
@@ -77,6 +94,7 @@ const activities = createTurnActivities({
 let workspaceId: string | null = null;
 let accountId: string | null = null;
 let runs: Array<Promise<unknown>> = [];
+let runFailure: unknown = null;
 
 try {
   const access = await bootstrapWorkspace(dbClient.db, {
@@ -86,7 +104,7 @@ try {
     workspaceExternalSource: "operator:turn-density-profile",
     workspaceExternalId: runId,
     workspaceName: `Turn density profile ${runId}`,
-    subjectId: `operator:turn-density-profile:${runId}`,
+    subjectId: profileSubjectId,
     subjectLabel: "Turn density profile",
   });
   const grant = access.workspaceGrants[0];
@@ -209,17 +227,35 @@ try {
   };
   console.log(`OPENGENI_DENSITY_RESULT=${JSON.stringify(result)}`);
   if (!result.thresholds.hardLimitMet) process.exitCode = 2;
+} catch (error) {
+  runFailure = error;
 } finally {
   model.release();
   await Promise.allSettled(runs);
-  if (workspaceId) {
-    await deleteWorkspace(dbClient.db, workspaceId).catch((error) => {
-      console.error(`Density workspace cleanup failed: ${errorMessage(error)}`);
-      process.exitCode = 1;
-    });
+  if (accountId) {
+    await dbClient.db
+      .delete(schema.managedAccounts)
+      .where(eq(schema.managedAccounts.id, accountId))
+      .catch((error) => {
+        console.error(`Density account cleanup failed: ${errorMessage(error)}`);
+        process.exitCode = 1;
+      });
+  } else if (workspaceId) {
+    // accountId and workspaceId are assigned from the same bootstrap result.
+    // Keep the branch explicit so a future partial-bootstrap refactor cannot
+    // silently leave a workspace behind.
+    console.error("Density profile cannot clean a workspace without its managed account");
+    process.exitCode = 1;
   }
   await dbClient.close();
+  densityMcp.close();
 }
+
+if (runFailure) throw runFailure;
+// MCP clients retain keep-alive sockets after a successful run. All durable
+// cleanup and DB shutdown have completed above, so terminate this one-shot
+// operator process explicitly instead of idling until those sockets expire.
+process.exit(process.exitCode ?? 0);
 
 async function seedHistory(input: {
   accountId: string;

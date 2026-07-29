@@ -71,6 +71,7 @@ export type CatalogTier = "verified" | "community";
 export type CatalogIntegrationRow = {
   domain: string;
   name: string;
+  description?: string;
   mcpUrl: string;
   transport: "streamable-http";
   authKind: CatalogAuthKind;
@@ -79,6 +80,17 @@ export type CatalogIntegrationRow = {
   tier: CatalogTier;
   provenance: string;
   logoSourceUrl: string | null;
+  homepageUrl?: string;
+  installUrl?: string;
+  documentationUrl?: string;
+  registryName?: string;
+  registryVersion?: string;
+  registryStatus?: string;
+  registryIsLatest?: boolean;
+  registryPublishedAt?: string;
+  repositorySource?: string;
+  repositoryUrl?: string;
+  sourceCommit?: string;
   probe?: Record<string, unknown>;
   authContract?: Record<string, unknown>;
 };
@@ -109,7 +121,25 @@ const brandedNamesByMcpUrl = new Map([["https://mcp.linear.app/mcp", "Linear"]])
  */
 const officialCatalogContractsByMcpUrl = new Map<
   string,
-  Pick<CatalogIntegrationRow, "name" | "tier" | "provenance" | "authKind" | "scopesHint">
+  Pick<CatalogIntegrationRow, "name" | "tier" | "provenance" | "authKind" | "scopesHint"> &
+    Partial<
+      Pick<
+        CatalogIntegrationRow,
+        | "description"
+        | "logoSourceUrl"
+        | "homepageUrl"
+        | "installUrl"
+        | "documentationUrl"
+        | "registryName"
+        | "registryVersion"
+        | "registryStatus"
+        | "registryIsLatest"
+        | "registryPublishedAt"
+        | "repositorySource"
+        | "repositoryUrl"
+        | "sourceCommit"
+      >
+    >
 >([
   [
     "https://mcp.slack.com/mcp",
@@ -148,6 +178,33 @@ const officialCatalogContractsByMcpUrl = new Map<
         "groups:read",
         "mpim:read",
       ],
+    },
+  ],
+  [
+    "https://api.mobbin.com/mcp",
+    {
+      name: "Mobbin",
+      description:
+        "Search Mobbin’s library for real-world product screens, flows, and UI/UX references. Requires a paid Mobbin plan (Pro, Team, or Enterprise). Provider-managed usage credits apply.",
+      tier: "verified",
+      provenance: "official:mcp-registry:com.mobbin/mobbin@1.0.1",
+      authKind: "oauth2",
+      scopesHint: ["openid"],
+      // Mobbin has not published a reusable logo license with its MCP
+      // listing. Keep the catalog's calm monogram rather than copying an
+      // unlicensed vendor asset.
+      logoSourceUrl: null,
+      homepageUrl: "https://mobbin.com/mcp",
+      installUrl: "https://docs.mobbin.com/mcp/clients/overview",
+      documentationUrl: "https://docs.mobbin.com/mcp/introduction",
+      registryName: "com.mobbin/mobbin",
+      registryVersion: "1.0.1",
+      registryStatus: "active",
+      registryIsLatest: true,
+      registryPublishedAt: "2026-06-03T10:01:47.928592Z",
+      repositorySource: "github",
+      repositoryUrl: "https://github.com/mobbin/mobbin-mcp-server",
+      sourceCommit: "bbee2a6be34d251c580ba80bb8b407c87587aba7",
     },
   ],
 ]);
@@ -274,10 +331,20 @@ export function normalizeCatalogSnapshot(
     const authContract = normalizeAuthContract(
       candidate.authContract ?? asRecord(candidate.metadata)?.authContract,
     );
+    const logoSourceUrl =
+      official?.logoSourceUrl !== undefined
+        ? official.logoSourceUrl
+        : candidate.logoSourceUrl === null
+          ? null
+          : (safeCatalogUrl(candidate.logoAsset) ??
+            safeCatalogUrl(candidate.logoSourceUrl) ??
+            `https://integrations.sh/logo/${domain}`);
+    const registryIsLatest = official?.registryIsLatest ?? candidate.registryIsLatest;
     const row: CatalogIntegrationRow = {
       domain,
       name:
         official?.name ?? brandedNamesByMcpUrl.get(mcpUrl) ?? stringValue(candidate.name) ?? domain,
+      ...optionalString("description", official?.description ?? stringValue(candidate.description)),
       mcpUrl,
       transport: "streamable-http",
       authKind,
@@ -285,10 +352,45 @@ export function normalizeCatalogSnapshot(
       credentialFacts: recordArray(candidate.credentialFacts),
       tier: official?.tier ?? (provenance === "detected" ? "verified" : "community"),
       provenance: official?.provenance ?? provenance,
-      logoSourceUrl:
-        stringValue(candidate.logoAsset) ??
-        stringValue(candidate.logoSourceUrl) ??
-        `https://integrations.sh/logo/${domain}`,
+      logoSourceUrl,
+      ...optionalString(
+        "homepageUrl",
+        official?.homepageUrl ?? safeCatalogUrl(candidate.homepageUrl),
+      ),
+      ...optionalString("installUrl", official?.installUrl ?? safeCatalogUrl(candidate.installUrl)),
+      ...optionalString(
+        "documentationUrl",
+        official?.documentationUrl ?? safeCatalogUrl(candidate.documentationUrl),
+      ),
+      ...optionalString(
+        "registryName",
+        official?.registryName ?? stringValue(candidate.registryName),
+      ),
+      ...optionalString(
+        "registryVersion",
+        official?.registryVersion ?? stringValue(candidate.registryVersion),
+      ),
+      ...optionalString(
+        "registryStatus",
+        official?.registryStatus ?? stringValue(candidate.registryStatus),
+      ),
+      ...(typeof registryIsLatest === "boolean" ? { registryIsLatest } : {}),
+      ...optionalString(
+        "registryPublishedAt",
+        official?.registryPublishedAt ?? stringValue(candidate.registryPublishedAt),
+      ),
+      ...optionalString(
+        "repositorySource",
+        official?.repositorySource ?? stringValue(candidate.repositorySource),
+      ),
+      ...optionalString(
+        "repositoryUrl",
+        official?.repositoryUrl ?? safeCatalogUrl(candidate.repositoryUrl),
+      ),
+      ...optionalString(
+        "sourceCommit",
+        official?.sourceCommit ?? stringValue(candidate.sourceCommit),
+      ),
       ...(probe ? { probe } : {}),
       ...(authContract ? { authContract } : {}),
     };
@@ -398,7 +500,7 @@ export async function importIntegrationsCatalog(input: {
 
   for (const row of normalized.rows) {
     let logoAssetPath: string | null = null;
-    if (input.storeLogos !== false) {
+    if (input.storeLogos !== false && row.logoSourceUrl) {
       const logo = await storeLogoForRow(row, {
         storage: input.storage ?? null,
         fetchImpl: input.fetchImpl ?? fetch,
@@ -474,6 +576,7 @@ export function catalogRowToDbInput(
     id: catalogCapabilityId(row.domain, row.mcpUrl),
     providerDomain: row.domain,
     name: row.name,
+    description: row.description ?? null,
     mcpUrl: row.mcpUrl,
     transport: row.transport,
     authKind: row.authKind,
@@ -483,11 +586,33 @@ export function catalogRowToDbInput(
     logoAssetPath: input.logoAssetPath ?? null,
     importBatchId: input.importBatchId,
     scopesHint: row.scopesHint,
-    homepageUrl: `https://${row.domain}`,
+    homepageUrl: row.homepageUrl ?? `https://${row.domain}`,
+    installUrl: row.installUrl ?? row.homepageUrl ?? `https://${row.domain}`,
     tags: ["mcp", "integration", row.tier, row.authKind],
     metadata: {
-      logoSource: row.logoSourceUrl ? "integrations.sh" : "missing",
+      logoSource: row.logoSourceUrl ? "integrations.sh" : "generic_monogram",
       originalLogoUrl: row.logoSourceUrl,
+      ...(row.documentationUrl ? { documentationUrl: row.documentationUrl } : {}),
+      ...(row.registryName
+        ? {
+            officialMcpRegistry: {
+              name: row.registryName,
+              ...(row.registryVersion ? { version: row.registryVersion } : {}),
+              ...(row.registryStatus ? { status: row.registryStatus } : {}),
+              ...(row.registryIsLatest !== undefined ? { isLatest: row.registryIsLatest } : {}),
+              ...(row.registryPublishedAt ? { publishedAt: row.registryPublishedAt } : {}),
+              ...(row.repositoryUrl
+                ? {
+                    repository: {
+                      ...(row.repositorySource ? { source: row.repositorySource } : {}),
+                      url: row.repositoryUrl,
+                    },
+                  }
+                : {}),
+            },
+          }
+        : {}),
+      ...(row.sourceCommit ? { sourceCommit: row.sourceCommit } : {}),
       ...(row.probe ? { mcpProbe: row.probe } : {}),
       ...(row.authContract ? { authContract: row.authContract } : {}),
     },
@@ -501,7 +626,10 @@ export async function storeLogoForRow(
     fetchImpl: LogoFetch;
   },
 ): Promise<LogoStorageResult> {
-  const sourceUrl = row.logoSourceUrl ?? `https://integrations.sh/logo/${row.domain}`;
+  const sourceUrl = row.logoSourceUrl;
+  if (!sourceUrl) {
+    return { ok: false, sourceUrl: null, reason: "logo_source_not_published" };
+  }
   if (!input.storage) {
     return { ok: false, sourceUrl, reason: "object_storage_unavailable" };
   }
@@ -904,6 +1032,32 @@ function shortHash(value: string): string {
 
 function stringValue(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+function optionalString<Key extends string>(
+  key: Key,
+  value: string | null | undefined,
+): { [Property in Key]?: string } {
+  return value ? ({ [key]: value } as { [Property in Key]?: string }) : {};
+}
+
+function safeCatalogUrl(value: unknown): string | null {
+  const raw = stringValue(value);
+  if (!raw) return null;
+  try {
+    const parsed = new URL(raw);
+    if (
+      (parsed.protocol !== "https:" && parsed.protocol !== "http:") ||
+      parsed.username ||
+      parsed.password ||
+      parsed.hash
+    ) {
+      return null;
+    }
+    return parsed.toString();
+  } catch {
+    return null;
+  }
 }
 
 function stringArray(value: unknown): string[] {

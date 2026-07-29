@@ -1,5 +1,27 @@
 # @opengeni/react
 
+## 0.26.2
+
+### Patch Changes
+
+- f92af07: Give each session-only React hook an exact structural client contract so embedded hosts can use session reads, goals, lineage, file attachments, structured human input, and MCP approval policies without implementing unrelated composer, queue, workspace, or workbench APIs.
+
+## 0.26.1
+
+### Patch Changes
+
+- ffd246c: Keep workspace-capture Git status, diffs, and untracked files below provider retained-output limits, and publish an explicit degraded revision instead of an authoritative empty diff when repository reads fail.
+- Updated dependencies [ffd246c]
+  - @opengeni/sdk@0.26.1
+
+## 0.26.0
+
+### Patch Changes
+
+- Updated dependencies [06a5801]
+- Updated dependencies [5511c24]
+  - @opengeni/sdk@0.26.0
+
 ## 0.25.5
 
 ### Patch Changes

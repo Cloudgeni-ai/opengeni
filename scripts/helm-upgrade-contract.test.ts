@@ -42,13 +42,22 @@ describe("Helm database upgrade contract", () => {
       expect(workload).not.toContain('name: {{ include "opengeni.migrationSecretName" . }}');
     }
 
-    const restrictedRuntime = helpers.indexOf("{{- if .Values.postgres.runtime.existingSecret }}");
+    const restrictedRuntime = helpers.indexOf(
+      "{{- if $root.Values.postgres.runtime.existingSecret }}",
+    );
     const ownerPassword = helpers.indexOf("- name: OPENGENI_POSTGRES_PASSWORD");
     expect(restrictedRuntime).toBeGreaterThan(-1);
     expect(ownerPassword).toBeGreaterThan(restrictedRuntime);
     expect(helpers.slice(restrictedRuntime, ownerPassword)).toContain(
       "- name: OPENGENI_DATABASE_URL",
     );
+
+    for (const worker of [workerDeployment, turnWorkerDeployment]) {
+      expect(worker).toContain(
+        '"objectStorageEndpoint" (include "opengeni.minioInternalEndpoint" .)',
+      );
+      expect(worker).not.toContain("- name: OPENGENI_OBJECT_STORAGE_ENDPOINT");
+    }
   });
 
   test("ships a non-HA single-node profile with narrow private-edge services", async () => {
@@ -64,6 +73,9 @@ describe("Helm database upgrade contract", () => {
     expect(values).not.toContain("autoscaling:\n    enabled: true");
     expect(values).toContain("resources: null");
     expect(values).toContain("priorityClasses:\n  enabled: true");
+    expect(values).toContain("path: /traffic-readyz");
+    expect(values).toContain("OPENGENI_TURN_WORKER_CONCURRENCY_MODE: resource-based");
+    expect(values).toContain('OPENGENI_TURN_WORKER_MAX_CONCURRENT_TURNS: "256"');
     for (const tier of ["presentation", "execution", "control", "durable"]) {
       expect(defaults).toContain(`    ${tier}:`);
     }

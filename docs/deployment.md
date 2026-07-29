@@ -64,6 +64,20 @@ threshold when overriding `eviction-hard`; Kubernetes otherwise zeroes omitted
 defaults. This preserves elastic sharing while giving the kubelet room to
 enforce the intended order.
 
+The API's single-node readiness probe uses `/traffic-readyz`, which checks only
+Postgres. If NATS or Temporal restarts, Kubernetes keeps routing safe
+database-backed reads while commands that need the unavailable dependency fail
+explicitly and recover after reconnect. `/readyz` remains the complete
+Postgres/NATS/Temporal dependency report, so the outage is still visible to
+operators. Losing Postgres fails both readiness paths.
+
+The one turn worker uses Temporal's resource-based slot tuner. It admits more
+agent turns while whole-machine CPU stays below 80% and memory stays below 75%,
+up to 256 active turns; excess work remains durable in Temporal. This is a
+safety ceiling, not a reservation or a promise that 256 heavy turns fit. The
+ordinary chart default remains a fixed 16 turns per worker so multi-worker
+deployments can scale replicas predictably.
+
 The ordinary dependency services remain private `ClusterIP` services. Five
 one-port NodePort services are the complete private-edge surface:
 
@@ -79,11 +93,15 @@ The NATS client/monitor ports and MinIO admin console are not exposed. On K3s,
 bind NodePorts to loopback with
 `--kube-proxy-arg=nodeport-addresses=127.0.0.0/8`, then publish only the five
 loopback listeners through a private edge such as Tailscale Serve. Route `/` to
-web and route `/v1`, `/healthz`, `/metrics`, `/install.sh`, `/install.ps1`,
-`/uninstall.sh`, `/opengeni-agent-minisign.pub`, and `/agent` to the API. Give
-the NATS websocket, relay, and MinIO API their own private TLS ports. Set
+web and route `/v1`, `/healthz`, `/readyz`, `/traffic-readyz`, `/metrics`,
+`/install.sh`, `/install.ps1`, `/uninstall.sh`,
+`/opengeni-agent-minisign.pub`, and `/agent` to the API. Give the NATS
+websocket, relay, and MinIO API their own private TLS ports. Set
 `selfhosted.natsUrl`, `selfhosted.relayUrl`, and `minio.publicEndpoint` to those
-private URLs.
+private URLs. Also set `OPENGENI_PUBLIC_BASE_URL` to the browser/API origin. The
+API uses it when serving the installer, so an enrolled machine downloads the
+agent version baked into this deployment rather than falling back to the public
+archive.
 
 For a tailnet-only deployment, `OPENGENI_AUTH_REQUIRED=false` and
 `OPENGENI_PRODUCT_ACCESS_MODE=local` mean there is no shared deployment access
@@ -97,7 +115,7 @@ Create the four Secrets before installation:
 - `opengeni-postgres`: the Postgres owner `POSTGRES_PASSWORD`;
 - `opengeni-minio`: `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD`;
 - `opengeni-runtime`: the restricted `opengeni_app`
-  `OPENGENI_DATABASE_URL`, object-storage credentials, model-provider
+  `OPENGENI_DATABASE_URL`, the environments encryption key, object-storage
   credentials, and Connected Machine signing/NATS/relay secrets;
 - `opengeni-migrations`: the owner
   `OPENGENI_MIGRATIONS_DATABASE_URL`,
@@ -120,19 +138,21 @@ kubectl -n opengeni create secret generic opengeni-postgres \
 kubectl -n opengeni create secret generic opengeni-minio \
   --from-env-file=.agent/generated/single-node/secrets/minio.env
 
-test -n "$OPENGENI_OPENAI_API_KEY"
 kubectl -n opengeni create secret generic opengeni-runtime \
-  --from-env-file=.agent/generated/single-node/secrets/runtime.env \
-  --from-literal=OPENGENI_OPENAI_API_KEY="$OPENGENI_OPENAI_API_KEY"
+  --from-env-file=.agent/generated/single-node/secrets/runtime.env
 
 kubectl -n opengeni create secret generic opengeni-migrations \
   --from-env-file=.agent/generated/single-node/secrets/migrations.env
 ```
 
-Use the corresponding model-provider keys instead of
-`OPENGENI_OPENAI_API_KEY` when the deployment selects another configured
-provider. Keep the generated directory as a private recovery artifact or move
-the values into a secret manager; never commit it.
+This bootstrap does not require a model-provider API key. A workspace admin can
+connect a ChatGPT/Codex subscription from workspace settings after the
+application starts. If the deployment instead uses API-billed models, add the
+selected provider's credential to `opengeni-runtime` separately. Keep the
+generated directory as a private recovery artifact or move the values into a
+secret manager; never commit it. The generated environments encryption key must
+remain stable across upgrades because it protects persisted subscription and
+workspace credentials.
 
 Bootstrap a new machine in two phases. First install only the persistent
 dependencies and wait until they are healthy:
@@ -341,8 +361,11 @@ bun run deployment:connected-machine-load -- \
 
 The command runs a harmless marker command, warms every supplied session route,
 then applies a concurrency staircase. It reports request throughput, p50/p95/p99
-latency, and typed failure counts. Pass multiple `--session-id` values to spread
-the test over several machine-backed sessions. Use
+latency, and typed failure counts. Before the first write, it reads one supplied
+session to discover the target's `X-OpenGeni-Api-Contract` revision and sends
+that revision on every terminal probe; older targets that do not advertise a
+contract remain supported. Pass multiple `--session-id` values to spread the
+test over several machine-backed sessions. Use
 `--deployment-access-key` or `--product-token` only when the deployment enables
 that boundary; neither credential is printed.
 
@@ -353,6 +376,17 @@ memory, or useful development-task throughput. Use
 run a smaller representative set of real development tasks before choosing an
 active-turn concurrency target. A large number of durable idle sessions is not
 equivalent to the same number of simultaneously executing turns.
+
+The density profile uses a scripted model and an in-process first-party MCP
+endpoint, so it exercises turn setup without a model-provider key or the
+deployment's user-facing access mode. It creates a run-scoped account and
+workspace, removes both before exit, and prints one
+`OPENGENI_DENSITY_RESULT=...` record for automation.
+
+Direct file, Git, and synchronous terminal APIs follow a machine-targeted
+session's active pointer from the first request. They use API → NATS → enrolled
+agent request/reply and do not need a preceding model turn, a turn worker, or a
+cloud-sandbox lease.
 
 For Azure Blob-backed deployments, no object host rewrite should be needed because upload/download URLs are public Azure Blob SAS URLs:
 
@@ -1175,7 +1209,7 @@ OpenGeni emits Prometheus-native metrics. Scrape `/metrics` directly; do not rou
 
 Service endpoints:
 
-- API: `GET /metrics` and `GET /healthz` on `OPENGENI_API_PORT` (default `8000`); `GET /readyz` checks Postgres, NATS, and Temporal with bounded timeouts.
+- API: `GET /metrics` and `GET /healthz` on `OPENGENI_API_PORT` (default `8000`); `GET /traffic-readyz` checks Postgres for traffic routing, while `GET /readyz` reports Postgres, NATS, and Temporal with bounded timeouts.
 - Worker: `GET /metrics`, `GET /healthz`, and `GET /readyz` on `OPENGENI_WORKER_HTTP_PORT` (default `8001`); readiness requires lifecycle state `ready` plus healthy Postgres, NATS, and Temporal checks. A draining worker stays live but becomes unready before polling stops.
 - Relay: `GET /metrics` and `GET /healthz` on the relay port when the relay is enabled.
 
@@ -1184,7 +1218,7 @@ Useful settings:
 - `OPENGENI_OBSERVABILITY_STRUCTURED_LOGS=true` for JSON logs.
 - `OPENGENI_OBSERVABILITY_METRICS_ENABLED=true` to expose process and domain metrics.
 - `OPENGENI_WORKER_HTTP_PORT=8001` for the worker metrics/health listener.
-- `OPENGENI_AUTH_ALLOW_HEALTH=true` allows both `/healthz` and `/readyz` through the deployment-key gate.
+- `OPENGENI_AUTH_ALLOW_HEALTH=true` allows `/healthz`, `/traffic-readyz`, and `/readyz` through the deployment-key gate.
 - `OPENGENI_AUTH_ALLOW_METRICS=true` allows API `/metrics` through the deployment-key gate for an internal scraper path.
 - `OPENGENI_DISABLE_OPENAI_TRACING=true` disables OpenAI Agents SDK tracing; tracing also defaults off when no OTLP endpoint is configured.
 - `OPENGENI_OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318` to export spans to an OpenTelemetry Collector.

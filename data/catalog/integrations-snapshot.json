@@ -3,8 +3,8 @@
   "source": "integrations.sh",
   "cleanedAt": "2026-07-25T06:53:44.741Z",
   "cleaning": {
-    "inputRows": 883,
-    "outputRows": 619,
+    "inputRows": 884,
+    "outputRows": 620,
     "skippedRows": 264,
     "quarantinedRows": 0,
     "duplicateDomainNameRows": 0,
@@ -13,9 +13,9 @@
     "controlCharacterFields": 0
   },
   "probe": {
-    "kept": 619,
+    "kept": 620,
     "dropped": 125,
-    "real": 619,
+    "real": 620,
     "unverified": 121,
     "googleapisDropped": 0
   },
@@ -7837,6 +7837,35 @@
       "tier": "community",
       "provenance": "discovered",
       "logoSourceUrl": "https://integrations.sh/logo/mixmax.com",
+      "probe": {
+        "status": "real",
+        "reason": "auth_challenge",
+        "httpStatus": 401
+      }
+    },
+    {
+      "domain": "mobbin.com",
+      "name": "Mobbin",
+      "description": "Search Mobbin’s library for real-world product screens, flows, and UI/UX references. Requires a paid Mobbin plan (Pro, Team, or Enterprise). Provider-managed usage credits apply.",
+      "mcpUrl": "https://api.mobbin.com/mcp",
+      "transport": "streamable-http",
+      "authKind": "oauth2",
+      "scopesHint": ["openid"],
+      "credentialFacts": [],
+      "tier": "verified",
+      "provenance": "official:mcp-registry:com.mobbin/mobbin@1.0.1",
+      "logoSourceUrl": null,
+      "homepageUrl": "https://mobbin.com/mcp",
+      "installUrl": "https://docs.mobbin.com/mcp/clients/overview",
+      "documentationUrl": "https://docs.mobbin.com/mcp/introduction",
+      "registryName": "com.mobbin/mobbin",
+      "registryVersion": "1.0.1",
+      "registryStatus": "active",
+      "registryIsLatest": true,
+      "registryPublishedAt": "2026-06-03T10:01:47.928592Z",
+      "repositorySource": "github",
+      "repositoryUrl": "https://github.com/mobbin/mobbin-mcp-server",
+      "sourceCommit": "bbee2a6be34d251c580ba80bb8b407c87587aba7",
       "probe": {
         "status": "real",
         "reason": "auth_challenge",

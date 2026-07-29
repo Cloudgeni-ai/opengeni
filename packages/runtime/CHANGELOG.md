@@ -1,5 +1,30 @@
 # @opengeni/runtime
 
+## 0.13.13
+
+### Patch Changes
+
+- f92af07: Remove Bun-global dependencies from the worker turn path and Docker network attachment so embedded workers run identically in Node and Bun.
+
+## 0.13.12
+
+### Patch Changes
+
+- ffd246c: Keep workspace-capture Git status, diffs, and untracked files below provider retained-output limits, and publish an explicit degraded revision instead of an authoritative empty diff when repository reads fail.
+- Updated dependencies [ffd246c]
+  - @opengeni/contracts@0.20.1
+  - @opengeni/config@0.7.8
+
+## 0.13.11
+
+### Patch Changes
+
+- Updated dependencies [06a5801]
+- Updated dependencies [9326255]
+- Updated dependencies [5511c24]
+  - @opengeni/contracts@0.20.0
+  - @opengeni/config@0.7.7
+
 ## 0.13.10
 
 ### Patch Changes

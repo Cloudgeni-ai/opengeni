@@ -24,7 +24,8 @@
                              Point at a local mock (http://localhost/...) to test offline.
   OPENGENI_AGENT_VERSION     Pin a version (default "latest").
   OPENGENI_INSTALL_DIR       Install dir (default %LOCALAPPDATA%\OpenGeni\bin).
-  OPENGENI_ENROLL_TOKEN      Non-interactive enroll token (CI/automation).
+  OPENGENI_ENROLL_TOKEN      Non-interactive fresh-enrollment token
+                             (CI/automation); replaces an existing enrollment.
   OPENGENI_NO_RUN            "1" => do not start a foreground run; just print the command.
   OPENGENI_API_URL           Control-plane API base URL for enrollment.
 
@@ -219,7 +220,9 @@ function Complete-Install($bin) {
   $enrollToken = [Environment]::GetEnvironmentVariable('OPENGENI_ENROLL_TOKEN')
   if (-not [string]::IsNullOrEmpty($enrollToken)) {
     Log "non-interactive enroll (OPENGENI_ENROLL_TOKEN set)"
-    & $bin enroll --token $enrollToken --non-interactive
+    # Supplying a token explicitly requests this enrollment. Never silently
+    # retain credentials for a previous control plane.
+    & $bin enroll --token $enrollToken --non-interactive --force
     Log "enrolled. Start the agent (foreground) with:  $bin run"
     return
   }

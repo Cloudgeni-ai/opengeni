@@ -146,7 +146,7 @@ affected surface changes and during scheduled readiness reviews.
 | --- | --- |
 | Capture cold path | A completed file-changing turn commits a capture; a fresh browser with no live box paints the correct tree, Changes summary, diff, and touched-file content from that capture. |
 | Capture absence | A session with no capture shows an honest loading/fallback state and warms only when live data is required; it never renders an authoritative empty tree. |
-| Degraded capture | Repository-discovery failure or timeout publishes the typed degraded revision and prefers live data; the previous capture is not presented as current. |
+| Degraded capture | Repository-discovery failure/timeout or any discovered repository status/diff read failure publishes a typed degraded revision and prefers live data; the previous capture is not presented as current and partial/empty repository data is never presented as authoritative. |
 | Capture URL expiry | Expired signed manifest/content URLs are refreshed or surfaced as actionable retry states; no infinite spinner or stale content. |
 | Files tree | Expand/collapse, keyboard navigation, selection, scrolling, path breadcrumbs, refresh, truncation disclosure, and empty directories remain correct. |
 | File metadata | Binary, deleted, renamed, executable, symlink, truncated, too-large, and modified badges never survive after the authoritative state clears them. |

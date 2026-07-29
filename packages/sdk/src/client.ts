@@ -50,6 +50,7 @@ import type {
   CreateCapabilityCatalogItemRequest,
   CreateCheckoutRequest,
   CreateCheckoutResponse,
+  ConnectOpenGeniSlackBotRequest,
   CreateConnectionRequest,
   CreateDocumentBaseRequest,
   CreateFileUploadRequest,
@@ -2716,6 +2717,19 @@ export class OpenGeniClient {
     const response = await this.requestJson<ConnectionResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/connections`,
+      request,
+    );
+    return response.connection;
+  }
+
+  /** Validate and store/reinstall the workspace-shared OpenGeni Slack bot credential. */
+  async connectOpenGeniSlackBot(
+    workspaceId: string,
+    request: ConnectOpenGeniSlackBotRequest,
+  ): Promise<ConnectionMetadata> {
+    const response = await this.requestJson<ConnectionResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/connections/slack-bot`,
       request,
     );
     return response.connection;

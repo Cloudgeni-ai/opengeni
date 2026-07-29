@@ -9,6 +9,7 @@ import {
 import {
   CreateSessionRequest,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+  OPENGENI_SLACK_BOT_SESSION_METADATA_KEY,
   SessionSpawnDenial,
   ServiceTurnInitiator,
   ServiceTurnInitiatorContext,
@@ -92,6 +93,7 @@ import { requireSessionAuthorization } from "../session-authorization";
 import { swapActiveSandbox, type FleetContext } from "../sandbox/fleet";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 import { requireVariableSetEncryption, validateVariableSetAttachment } from "./environments";
+import { hasReservedOpenGeniSlackBotSessionMetadata } from "./slack-bot";
 import {
   assertToolRefsSubset,
   availableToolRefs,
@@ -1027,6 +1029,11 @@ export async function createSessionForRequest(
 ): Promise<Session> {
   const { settings, db, bus, workflowClient, objectStorage } = deps;
   const payload = CreateSessionRequest.parse(rawPayload);
+  if (hasReservedOpenGeniSlackBotSessionMetadata(payload.metadata)) {
+    throw new HTTPException(422, {
+      message: `${OPENGENI_SLACK_BOT_SESSION_METADATA_KEY} is reserved for scheduler routing`,
+    });
+  }
   // A committed keyed denial is the idempotent outcome even if mutable
   // resources, policy, authorization, or budget have changed since the first
   // attempt. Replay it before any of those checks, just as a keyed successful
