@@ -145,6 +145,24 @@ export type EmbeddedSessionClientLike = Pick<
   setWorkspaceInferenceState?: OpenGeniClient["setWorkspaceInferenceState"] | undefined;
 };
 
+/** Event-read surface shared by hooks that optionally tail a session. */
+export type EmbeddedSessionEventClientLike = Pick<OpenGeniClient, "getSession" | "streamEvents">;
+
+/** Exact client surface required by {@link useSession}. */
+export type EmbeddedSessionReadClientLike = EmbeddedSessionEventClientLike &
+  Pick<OpenGeniClient, "getSession" | "updateSession">;
+
+/** Exact client surface required by {@link useGoal}. */
+export type EmbeddedGoalClientLike = EmbeddedSessionEventClientLike &
+  Pick<OpenGeniClient, "getGoal" | "updateGoal" | "deleteGoal">;
+
+/** Exact client surface required by {@link useSessionLineage}. */
+export type EmbeddedSessionLineageClientLike = EmbeddedSessionEventClientLike &
+  Pick<OpenGeniClient, "getSessionLineage">;
+
+/** Exact client surface required by {@link useFileAttachments}. */
+export type EmbeddedFileAttachmentClientLike = Pick<OpenGeniClient, "uploadFile">;
+
 /** Session client refinement required only by structured human-input hooks. */
 export type EmbeddedHumanInputSessionClientLike = EmbeddedSessionClientLike &
   Pick<

@@ -1,8 +1,11 @@
 import type { FileAsset, FileResourceRef } from "@opengeni/sdk";
 import { useCallback, useRef, useState } from "react";
-import { useOpenGeni, type ClientOverride } from "../session-context";
+import {
+  useEmbeddedFileAttachments,
+  type EmbeddedFileAttachmentClientOverride,
+} from "../session-context";
 
-export type UseFileAttachmentsOptions = ClientOverride & {
+export type UseFileAttachmentsOptions = EmbeddedFileAttachmentClientOverride & {
   /**
    * Only files matching this predicate are accepted by {@link
    * UseFileAttachmentsResult.addFromPaste} (the clipboard path). Defaults to
@@ -78,7 +81,7 @@ const isImage = (file: File): boolean => file.type.startsWith("image/");
 export function useFileAttachments(
   options: UseFileAttachmentsOptions = {},
 ): UseFileAttachmentsResult {
-  const { client, workspaceId } = useOpenGeni(options);
+  const { client, workspaceId } = useEmbeddedFileAttachments(options);
   const pasteFilter = options.pasteFilter ?? isImage;
   const [attachments, setAttachments] = useState<FileAttachment[]>([]);
   // Keep the source File per attachment id so a failed upload can be retried

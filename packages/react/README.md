@@ -42,7 +42,11 @@ CSS, or their optional editor/terminal peers. Pass `{ client, workspaceId }` to
 each hook when the host intentionally does not mount `OpenGeniProvider`. The
 exported `SessionClientLike` is deliberately narrow: a tenant-safe proxy needs
 only session events, composer draft/send, queue, pause/resume, and approval
-operations. Workspace-level Resume is an optional authority.
+operations. Hooks outside that baseline expose exact refinements rather than
+requiring the full SDK client: `SessionReadClientLike`, `GoalClientLike`,
+`SessionLineageClientLike`, and `FileAttachmentClientLike`. A host can therefore
+implement only the methods used by each hook. Workspace-level Resume is an
+optional authority.
 
 The styled root surface uses Tailwind v4 and the package CSS entries:
 
