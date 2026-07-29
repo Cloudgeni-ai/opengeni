@@ -27,11 +27,7 @@ describe("0135 session realtime connection promotion migration", () => {
         and table_name = 'session_realtime_connections'
         and column_name = 'promotion_mode'`;
     expect(columns.map((column) => ({ ...column }))).toEqual([
-      {
-        name: "promotion_mode",
-        nullable: "NO",
-        defaultValue: "'legacy'::text",
-      },
+      { name: "promotion_mode", nullable: "NO", defaultValue: "'legacy'::text" },
     ]);
 
     const constraints = await shared.admin<{ definition: string }[]>`

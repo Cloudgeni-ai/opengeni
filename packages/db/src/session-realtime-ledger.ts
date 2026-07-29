@@ -1592,10 +1592,7 @@ export async function syncSessionRealtimeLedgerInTransaction(
         eventIds.push(...admission.eventIds);
         delegationTurns += 1;
         delegationWorkflowId = admission.workflowId;
-        await hooks.afterDelegationAdmission?.({
-          entryId: entry.id,
-          turnId: admission.turnId,
-        });
+        await hooks.afterDelegationAdmission?.({ entryId: entry.id, turnId: admission.turnId });
       }
     }
     accepted.push({ entry: mapEntry(entry), replay: false });

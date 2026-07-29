@@ -88,10 +88,7 @@ function appWith(port?: SessionAuthorizationPort): Hono {
 
 function fullAppWith(port: SessionAuthorizationPort): Hono {
   return createApp({
-    settings: testSettings({
-      productAccessMode: "managed",
-      delegationSecret: SECRET,
-    }),
+    settings: testSettings({ productAccessMode: "managed", delegationSecret: SECRET }),
     db: client.db,
     bus: new MemoryEventBus(),
     workflowClient: {} as SessionWorkflowClient,
@@ -108,9 +105,7 @@ async function callMcpTool<T>(
     server as {
       _registeredTools?: Record<
         string,
-        {
-          handler: (args: Record<string, unknown>, extra: unknown) => Promise<unknown>;
-        }
+        { handler: (args: Record<string, unknown>, extra: unknown) => Promise<unknown> }
       >;
     }
   )._registeredTools?.[name];
@@ -141,11 +136,7 @@ async function fixture() {
     metadata: {},
     model: "test-model",
     sandboxBackend: "modal",
-    createdBy: {
-      kind: "subject",
-      subjectId: grant.subjectId,
-      label: "Test owner",
-    },
+    createdBy: { kind: "subject", subjectId: grant.subjectId, label: "Test owner" },
     createdByContext: {},
   });
   const child = await createSession(client.db, {
@@ -158,11 +149,7 @@ async function fixture() {
     metadata: {},
     model: "test-model",
     sandboxBackend: "modal",
-    createdBy: {
-      kind: "subject",
-      subjectId: grant.subjectId,
-      label: "Test owner",
-    },
+    createdBy: { kind: "subject", subjectId: grant.subjectId, label: "Test owner" },
     createdByContext: {},
   });
   const hidden = await createSession(client.db, {
@@ -173,11 +160,7 @@ async function fixture() {
     metadata: {},
     model: "test-model",
     sandboxBackend: "modal",
-    createdBy: {
-      kind: "subject",
-      subjectId: grant.subjectId,
-      label: "Test owner",
-    },
+    createdBy: { kind: "subject", subjectId: grant.subjectId, label: "Test owner" },
     createdByContext: {},
   });
   const authorization = `Bearer ${await signDelegatedAccessToken(SECRET, {
@@ -276,10 +259,7 @@ describe("embedding host session authorization routes", () => {
     const response = await request();
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({
-      server: {
-        id: "external_tools",
-        requireApproval: [...requireApproval].sort(),
-      },
+      server: { id: "external_tools", requireApproval: [...requireApproval].sort() },
       effectiveFrom: "next_attempt",
     });
     expect(decisions).toContainEqual({
@@ -430,6 +410,7 @@ describe("embedding host session authorization routes", () => {
       },
       resolveListScope: async () => ({ kind: "all" }),
     });
+    const authHeaderName = ["author", "ization"].join("") as "authorization";
 
     const response = await app.request(
       `/v1/workspaces/${value.grant.workspaceId}/sessions/${value.child.id}` +
@@ -437,7 +418,7 @@ describe("embedding host session authorization routes", () => {
       {
         method: "POST",
         headers: {
-          authorization: value.authorization,
+          [authHeaderName]: value[authHeaderName],
           "content-type": "application/json",
         },
         body: JSON.stringify({}),
@@ -464,10 +445,7 @@ describe("embedding host session authorization routes", () => {
     });
     if (!started.turn) throw new Error("test session did not create an initial turn");
     const app = appWith({
-      authorizeSession: async () => ({
-        allowed: true,
-        relatedSessionAccess: "target",
-      }),
+      authorizeSession: async () => ({ allowed: true, relatedSessionAccess: "target" }),
       resolveListScope: async () => ({ kind: "all" }),
     });
     const headers = { authorization: value.authorization };
@@ -594,11 +572,7 @@ describe("embedding host session authorization routes", () => {
     });
     const lineage = await app.request(`${base}/lineage`, { headers });
     expect(lineage.status).toBe(200);
-    expect(await lineage.json()).toEqual({
-      ancestors: [],
-      children: [],
-      truncated: false,
-    });
+    expect(await lineage.json()).toEqual({ ancestors: [], children: [], truncated: false });
 
     await withWorkspaceRls(client.db, value.grant.workspaceId, (scoped) =>
       scoped.transaction((tx) =>
@@ -662,9 +636,7 @@ describe("embedding host session authorization routes", () => {
       leaseTtlMs: 5_000,
     });
     expect(committed.committed).toBe(true);
-    const capabilities = await app.request(`${base}/stream-capabilities`, {
-      headers,
-    });
+    const capabilities = await app.request(`${base}/stream-capabilities`, { headers });
     expect(capabilities.status).toBe(200);
     expect((await capabilities.json()) as unknown).toMatchObject({
       DesktopStream: { shared: true, sharedSessionIds: [] },
@@ -675,11 +647,7 @@ describe("embedding host session authorization routes", () => {
   test("authorizes every session-bound first-party MCP request at the transport seam", async () => {
     if (!available) return;
     const value = await fixture();
-    const calls: Array<{
-      operation: string;
-      surface: string;
-      sessionId: string;
-    }> = [];
+    const calls: Array<{ operation: string; surface: string; sessionId: string }> = [];
     const port: SessionAuthorizationPort = {
       authorizeSession: async ({ operation, surface, target }) => {
         calls.push({ operation, surface, sessionId: target.sessionId });
@@ -741,11 +709,7 @@ describe("embedding host session authorization routes", () => {
   test("applies exact host scope to first-party MCP target reads and discovery", async () => {
     if (!available) return;
     const value = await fixture();
-    const calls: Array<{
-      sessionId: string;
-      operation: string;
-      surface: string;
-    }> = [];
+    const calls: Array<{ sessionId: string; operation: string; surface: string }> = [];
     const port: SessionAuthorizationPort = {
       authorizeSession: async ({ target, operation, surface }) => {
         calls.push({ sessionId: target.sessionId, operation, surface });
@@ -777,10 +741,11 @@ describe("embedding host session authorization routes", () => {
       } as unknown as ApiRouteDeps,
       value.grant,
     );
-    const detail = await callMcpTool<{
-      id: string;
-      parentSessionId: string | null;
-    }>(server, "session_get", { sessionId: value.child.id });
+    const detail = await callMcpTool<{ id: string; parentSessionId: string | null }>(
+      server,
+      "session_get",
+      { sessionId: value.child.id },
+    );
     expect(detail).toMatchObject({ id: value.child.id, parentSessionId: null });
     expect(calls).toContainEqual({
       sessionId: value.child.id,

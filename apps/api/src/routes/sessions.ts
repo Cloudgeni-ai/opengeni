@@ -561,9 +561,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }
     const parsed = BeginSessionRealtimeRequest.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
-      throw new HTTPException(400, {
-        message: "invalid session realtime request",
-      });
+      throw new HTTPException(400, { message: "invalid session realtime request" });
     }
     try {
       const result = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
@@ -596,15 +594,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         !z.string().uuid().safeParse(sessionId).success ||
         !z.string().uuid().safeParse(realtimeId).success
       ) {
-        throw new HTTPException(400, {
-          message: "invalid realtime lifecycle id",
-        });
+        throw new HTTPException(400, { message: "invalid realtime lifecycle id" });
       }
       const parsed = RenewSessionRealtimeRequest.safeParse(await c.req.json().catch(() => null));
       if (!parsed.success) {
-        throw new HTTPException(400, {
-          message: "invalid realtime heartbeat request",
-        });
+        throw new HTTPException(400, { message: "invalid realtime heartbeat request" });
       }
       try {
         const result = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
@@ -636,15 +630,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       !z.string().uuid().safeParse(sessionId).success ||
       !z.string().uuid().safeParse(realtimeId).success
     ) {
-      throw new HTTPException(400, {
-        message: "invalid realtime lifecycle id",
-      });
+      throw new HTTPException(400, { message: "invalid realtime lifecycle id" });
     }
     const parsed = EndSessionRealtimeRequest.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
-      throw new HTTPException(400, {
-        message: "invalid realtime end request",
-      });
+      throw new HTTPException(400, { message: "invalid realtime end request" });
     }
     try {
       const result = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
@@ -760,10 +750,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         claim.startupEntries,
       );
       try {
-        const answer = await broker({
-          request: providerRequest,
-          signal: c.req.raw.signal,
-        });
+        const answer = await broker({ request: providerRequest, signal: c.req.raw.signal });
         const completed = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
           scopedDb.transaction(async (tx) =>
             completeSessionRealtimeConnectionInTransaction(tx as unknown as Database, {
@@ -860,17 +847,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         !z.string().uuid().safeParse(realtimeId).success ||
         !z.string().uuid().safeParse(connectionId).success
       ) {
-        throw new HTTPException(400, {
-          message: "invalid realtime connection id",
-        });
+        throw new HTTPException(400, { message: "invalid realtime connection id" });
       }
       const parsed = ActivateCodexRealtimeConnectionRequest.safeParse(
         await c.req.json().catch(() => null),
       );
       if (!parsed.success) {
-        throw new HTTPException(422, {
-          message: "invalid realtime connection activation",
-        });
+        throw new HTTPException(422, { message: "invalid realtime connection activation" });
       }
       try {
         const result = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
@@ -910,9 +893,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         await c.req.json().catch(() => null),
       );
       if (!parsed.success) {
-        throw new HTTPException(422, {
-          message: "invalid realtime ledger sync request",
-        });
+        throw new HTTPException(422, { message: "invalid realtime ledger sync request" });
       }
       try {
         const result = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
