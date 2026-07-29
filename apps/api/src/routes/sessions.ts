@@ -719,6 +719,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           model: "gpt-live-1-boulder-alpha" as const,
           connectionId: claim.connection.id,
           connectionEpoch: claim.connection.connectionEpoch,
+          startupFenceSequence: claim.connection.startupFenceSequence,
           modeVersion: claim.modeVersion,
           replay: true,
         });
@@ -729,6 +730,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         workspaceId,
         sessionId,
         deps.codexFetch,
+        claim.startupEntries,
       );
       try {
         const answer = await broker({ request: providerRequest, signal: c.req.raw.signal });
@@ -749,6 +751,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           ...answer,
           connectionId: completed.connection.id,
           connectionEpoch: completed.connection.connectionEpoch,
+          startupFenceSequence: completed.connection.startupFenceSequence,
           modeVersion: claim.modeVersion,
           replay: false,
         });

@@ -24,6 +24,8 @@ export type StartCodexRealtimeWebrtcOptions = {
   /** Injectable browser seams make complete SDP negotiation deterministic in tests. */
   createPeerConnection?: (() => RTCPeerConnection) | undefined;
   getUserMedia?: ((constraints: MediaStreamConstraints) => Promise<MediaStream>) | undefined;
+  /** Reuse a caller-owned microphone across transparent connection rotations. */
+  media?: MediaStream | undefined;
 };
 
 export type CodexRealtimeWebrtcSession = {
@@ -32,6 +34,7 @@ export type CodexRealtimeWebrtcSession = {
   readonly media: MediaStream;
   readonly connectionId: string;
   readonly connectionEpoch: number;
+  readonly startupFenceSequence: number;
   readonly modeVersion: number;
   /** Idempotently close media, data channel, and peer transport. */
   stop(): void;
@@ -50,6 +53,7 @@ export async function startCodexRealtimeWebrtc(
   const peerConnection = (options.createPeerConnection ?? defaultPeerConnection)();
   const events = peerConnection.createDataChannel("oai-events");
   let media: MediaStream | null = null;
+  let ownsMedia = false;
   let stopped = false;
   const stop = (): void => {
     if (stopped) return;
@@ -59,7 +63,7 @@ export async function startCodexRealtimeWebrtc(
       events.close();
     } finally {
       try {
-        media?.getTracks().forEach((track) => track.stop());
+        if (ownsMedia) media?.getTracks().forEach((track) => track.stop());
       } finally {
         peerConnection.close();
       }
@@ -69,7 +73,12 @@ export async function startCodexRealtimeWebrtc(
 
   try {
     const getUserMedia = options.getUserMedia ?? defaultGetUserMedia;
-    media = await abortableMedia(getUserMedia({ audio: true }), options.signal);
+    if (options.media) {
+      media = options.media;
+    } else {
+      media = await abortableMedia(getUserMedia({ audio: true }), options.signal);
+      ownsMedia = true;
+    }
     throwIfAborted(options.signal);
     const audioTracks = media.getAudioTracks();
     if (audioTracks.length === 0) {
@@ -114,6 +123,7 @@ export async function startCodexRealtimeWebrtc(
       media,
       connectionId: answer.connectionId,
       connectionEpoch: answer.connectionEpoch,
+      startupFenceSequence: answer.startupFenceSequence,
       modeVersion: answer.modeVersion,
       stop,
     };

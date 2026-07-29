@@ -36,6 +36,9 @@
     "build": "bun ../../scripts/build-typescript-package.ts",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
+  "dependencies": {
+    "@opengeni/codex": "workspace:*"
+  },
   "devDependencies": {
     "@opengeni/contracts": "workspace:*",
     "@opengeni/deployment": "workspace:*",

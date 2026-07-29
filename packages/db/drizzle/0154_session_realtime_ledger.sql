@@ -13,9 +13,13 @@ CREATE TABLE "session_realtime_connections" (
   "realtime_id" uuid NOT NULL,
   "operation_id" uuid NOT NULL,
   "connection_epoch" integer NOT NULL,
+  "startup_fence_sequence" integer DEFAULT 0 NOT NULL,
   "state" text DEFAULT 'negotiating' NOT NULL,
   "sdp_answer" text,
   "failure_code" text,
+  "provider_session_id" text,
+  "startup_event_id" text,
+  "startup_acknowledged_at" timestamptz,
   "negotiated_at" timestamptz,
   "closed_at" timestamptz,
   "created_at" timestamptz DEFAULT now() NOT NULL,
@@ -31,12 +35,24 @@ CREATE TABLE "session_realtime_connections" (
     REFERENCES "session_realtime_modes" ("id") ON DELETE CASCADE,
   CONSTRAINT "session_realtime_connections_epoch_check"
     CHECK ("connection_epoch" >= 1),
+  CONSTRAINT "session_realtime_connections_startup_fence_check"
+    CHECK ("startup_fence_sequence" >= 0),
   CONSTRAINT "session_realtime_connections_state_check"
     CHECK ("state" IN ('negotiating', 'active', 'failed', 'closed')),
   CONSTRAINT "session_realtime_connections_sdp_check"
     CHECK ("sdp_answer" IS NULL OR octet_length("sdp_answer") BETWEEN 1 AND 1048576),
   CONSTRAINT "session_realtime_connections_failure_check"
     CHECK ("failure_code" IS NULL OR octet_length("failure_code") BETWEEN 1 AND 128),
+  CONSTRAINT "session_realtime_connections_provider_session_check"
+    CHECK ("provider_session_id" IS NULL OR octet_length("provider_session_id") BETWEEN 1 AND 1024),
+  CONSTRAINT "session_realtime_connections_startup_event_check"
+    CHECK ("startup_event_id" IS NULL OR octet_length("startup_event_id") BETWEEN 1 AND 1024),
+  CONSTRAINT "session_realtime_connections_startup_ack_check"
+    CHECK (
+      ("startup_acknowledged_at" IS NULL AND "provider_session_id" IS NULL AND "startup_event_id" IS NULL)
+      OR
+      ("startup_acknowledged_at" IS NOT NULL AND "provider_session_id" IS NOT NULL)
+    ),
   CONSTRAINT "session_realtime_connections_terminal_check"
     CHECK (
       ("state" = 'negotiating' AND "sdp_answer" IS NULL AND "failure_code" IS NULL AND "negotiated_at" IS NULL AND "closed_at" IS NULL)

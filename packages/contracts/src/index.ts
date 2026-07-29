@@ -4039,6 +4039,7 @@ export const CodexRealtimeWebrtcResponse = z
     model: z.literal("gpt-live-1-boulder-alpha"),
     connectionId: z.string().uuid(),
     connectionEpoch: z.number().int().positive(),
+    startupFenceSequence: z.number().int().nonnegative(),
     modeVersion: z.number().int().positive(),
     replay: z.boolean(),
   })
@@ -4108,7 +4109,13 @@ export const SyncSessionRealtimeLedgerRequest = SessionRealtimeOwnerProof.extend
   connectionEpoch: z.number().int().positive(),
   entries: z.array(SessionRealtimeInboundEntry).max(64).optional(),
   clientAckThroughSequence: z.number().int().nonnegative().nullable().optional(),
-  providerAckThroughSequence: z.number().int().nonnegative().nullable().optional(),
+  providerStarted: z
+    .object({
+      providerSessionId: z.string().min(1).max(1024),
+      providerEventId: z.string().min(1).max(1024).nullable().optional(),
+    })
+    .strict()
+    .optional(),
 }).strict();
 export type SyncSessionRealtimeLedgerRequest = z.infer<typeof SyncSessionRealtimeLedgerRequest>;
 

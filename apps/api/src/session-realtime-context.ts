@@ -9,6 +9,14 @@ export type SessionRealtimeHistoryRow = {
   item: Record<string, unknown>;
 };
 
+export type SessionRealtimeStartupEntry = {
+  sequence: number;
+  kind: "delegation_result" | "session_update" | "error" | string;
+  delegationItemId: string | null;
+  text: string | null;
+  payload: Record<string, unknown>;
+};
+
 const BYTES_PER_ESTIMATED_TOKEN = 4;
 const HISTORY_TRUNCATION_MARKER = "…[earlier content truncated]\n";
 
@@ -23,20 +31,28 @@ const HISTORY_TRUNCATION_MARKER = "…[earlier content truncated]\n";
  */
 export function projectSessionRealtimeInitialItems(
   rows: readonly SessionRealtimeHistoryRow[],
+  startupEntries: readonly SessionRealtimeStartupEntry[] = [],
 ): CodexRealtimeInitialItem[] {
   const messages = [...rows]
     .sort((left, right) => left.position - right.position)
     .map(({ item }) => projectHistoryMessage(item))
     .filter((item): item is CodexRealtimeInitialItem => item !== null);
+  for (const entry of [...startupEntries].sort((left, right) => left.sequence - right.sequence)) {
+    const text = entry.text ?? JSON.stringify(entry.payload);
+    if (!text) continue;
+    const label =
+      entry.kind === "delegation_result" && entry.delegationItemId
+        ? `OpenGeni delegation ${entry.delegationItemId}`
+        : entry.kind === "session_update"
+          ? "OpenGeni session update"
+          : "OpenGeni realtime notice";
+    messages.push({ role: "developer", text: `[${label}] ${text}` });
+  }
   const selected: CodexRealtimeInitialItem[] = [];
   let remainingTokens = CODEX_REALTIME_INITIAL_ITEMS_MAX_TOKENS;
 
   for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (
-      selected.length >= CODEX_REALTIME_INITIAL_ITEMS_MAX_COUNT ||
-      remainingTokens <= 0
-    )
-      break;
+    if (selected.length >= CODEX_REALTIME_INITIAL_ITEMS_MAX_COUNT || remainingTokens <= 0) break;
     const message = messages[index]!;
     const tokens = estimatedTokens(message.text);
     if (tokens <= remainingTokens) {
@@ -48,10 +64,7 @@ export function projectSessionRealtimeInitialItems(
     // its newest UTF-8 tail with an explicit marker. Otherwise stop at the last
     // complete item rather than manufacturing a partial older utterance.
     if (selected.length === 0) {
-      const text = truncateTextTail(
-        message.text,
-        remainingTokens * BYTES_PER_ESTIMATED_TOKEN,
-      );
+      const text = truncateTextTail(message.text, remainingTokens * BYTES_PER_ESTIMATED_TOKEN);
       if (text) selected.push({ ...message, text });
     }
     break;
@@ -60,13 +73,10 @@ export function projectSessionRealtimeInitialItems(
   return selected.reverse();
 }
 
-function projectHistoryMessage(
-  item: Record<string, unknown>,
-): CodexRealtimeInitialItem | null {
+function projectHistoryMessage(item: Record<string, unknown>): CodexRealtimeInitialItem | null {
   if (item.type !== "message") return null;
   const role = item.role;
-  if (role !== "user" && role !== "developer" && role !== "assistant")
-    return null;
+  if (role !== "user" && role !== "developer" && role !== "assistant") return null;
   if (item.status !== undefined && item.status !== "completed") return null;
   const text = messageText(item.content);
   return text ? { role, text } : null;
@@ -80,9 +90,7 @@ function messageText(content: unknown): string {
       if (!part || typeof part !== "object") return [];
       const value = part as Record<string, unknown>;
       if (
-        (value.type === "input_text" ||
-          value.type === "output_text" ||
-          value.type === "text") &&
+        (value.type === "input_text" || value.type === "output_text" || value.type === "text") &&
         typeof value.text === "string"
       ) {
         return [value.text];

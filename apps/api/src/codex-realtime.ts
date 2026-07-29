@@ -18,6 +18,7 @@ import {
   getSessionCodexState,
   listCodexAccountStatuses,
   type Database,
+  type SessionRealtimeLedgerEntry,
 } from "@opengeni/db";
 import { projectSessionRealtimeInitialItems } from "./session-realtime-context";
 
@@ -163,6 +164,7 @@ export function buildSessionCodexRealtimeBroker(
   workspaceId: string,
   sessionId: string,
   fetchImpl: CodexFetch = fetch,
+  startupEntries: readonly SessionRealtimeLedgerEntry[] = [],
 ): (input: Omit<CodexRealtimeBrokerInput, "sessionId">) => Promise<CodexRealtimeProviderAnswer> {
   return async (input) =>
     await brokerSessionCodexRealtime(
@@ -193,6 +195,7 @@ export function buildSessionCodexRealtimeBroker(
         loadInitialItems: async () =>
           projectSessionRealtimeInitialItems(
             await getActiveSessionHistoryItems(db, workspaceId, sessionId),
+            startupEntries,
           ),
         tokenResolver: (credentialId) =>
           buildCodexTokenResolver(db, settings, workspaceId, credentialId),

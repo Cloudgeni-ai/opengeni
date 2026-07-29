@@ -37,6 +37,7 @@ export type CodexRealtimeWebrtcResponse = {
   model: "gpt-live-1-boulder-alpha";
   connectionId: string;
   connectionEpoch: number;
+  startupFenceSequence: number;
   modeVersion: number;
   replay: boolean;
 };
@@ -90,7 +91,9 @@ export type SyncSessionRealtimeLedgerRequest = {
   connectionEpoch: number;
   entries?: SessionRealtimeInboundEntry[] | undefined;
   clientAckThroughSequence?: number | null | undefined;
-  providerAckThroughSequence?: number | null | undefined;
+  providerStarted?:
+    | { providerSessionId: string; providerEventId?: string | null | undefined }
+    | undefined;
 };
 
 export type SyncSessionRealtimeLedgerResponse = {
