@@ -221,7 +221,7 @@ import {
   runCredentialAuthNeededPayloads,
   runCredentialModelNote,
 } from "./run-credentials";
-import { withCodexAppsTool, withFirstPartyTools } from "./goals";
+import { withFirstPartyTools } from "./goals";
 import {
   mergeRigDefaultVariableSetEnvironment,
   resolveWorkspaceAgentInstructions,
@@ -4083,17 +4083,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // whose stored tools predate this). The server registration is then
       // narrowed by the session's exact firstPartyMcpTools selection and
       // authorization. Idempotent: mergeToolRefs dedupes if already present.
-      // Attach codex_apps (the ChatGPT/Codex connectors MCP) when the codex
-      // overlay injected it into runSettings.mcpServers (active subscription +
-      // connector scopes); no-op for every other turn. Its refreshing bearer is
-      // resolved at connect time from the codex ALS (see the withCodex-wrapped
-      // prepareTools call below).
       // Resolve the durable policy at the turn boundary. Workspace-default
-      // sessions may discover newly enabled capability MCPs, while explicit,
-      // inherited-fixed, and legacy sessions remain narrowed to their stored
-      // materialized allow-list. `withCodexAppsTool` below keeps the existing
-      // single Codex lazy router/connector overlay; it is not a second policy
-      // or discovery path.
+      // sessions may discover newly enabled capability MCPs and Codex Apps,
+      // while explicit, inherited-fixed, and legacy sessions remain narrowed
+      // to their stored materialized allow-list.
       const resolvedToolPolicy = resolveSessionToolPolicy({
         ...(session.toolPolicy ? { toolPolicy: session.toolPolicy } : {}),
         sessionTools: session.tools,
@@ -4108,10 +4101,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       defaultNativeToolsAllowed = sessionToolPolicyAllowsDefaultNativeTools(
         resolvedToolPolicy.effectivePolicy,
       );
-      const turnTools = withCodexAppsTool(
-        runSettings,
-        withFirstPartyTools(runSettings, effectivePolicyTools),
-      );
+      const turnTools = withFirstPartyTools(runSettings, effectivePolicyTools);
       // §7.6 connection-credential provider — load (and decrypt) the variable set via the host
       // `sandboxSecrets` provider when bound; unset → today's local decrypt.
       const connectionScope = {

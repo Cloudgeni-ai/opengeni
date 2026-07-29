@@ -15,10 +15,11 @@ import { buildOpenGeniAgent, compactionThresholdTokens } from "@opengeni/runtime
 import { testSettings } from "@opengeni/testing";
 import type { Database } from "@opengeni/db";
 import {
-  settingsWithCodexCredential,
-  withCodexAppsMcpServer,
-  withCodexProvider,
-} from "../src/activities/capabilities";
+  enabledCapabilityMcpToolRefs,
+  resolveSessionToolPolicy,
+  settingsWithCodexAppsMcpServer,
+} from "@opengeni/core";
+import { settingsWithCodexCredential, withCodexProvider } from "../src/activities/capabilities";
 
 describe("withCodexProvider", () => {
   test("appends one codex-subscription provider with namespaced models", () => {
@@ -127,12 +128,11 @@ describe("withCodexProvider", () => {
 });
 
 describe("withCodexAppsMcpServer", () => {
-  // Connector access is gated SERVER-SIDE per ChatGPT account (chatgpt-account-id),
-  // NOT by token scopes — so injection is unconditional for any active credential
-  // and the actual tool set is discovered at runtime.
+  // Registration is deployment-controlled. Session policy controls visibility,
+  // while credentials independently control whether calls authenticate.
   test("appends exactly one codex_apps entry with the right metadata and NO headers", () => {
-    const settings = testSettings({ mcpServers: [] });
-    const result = withCodexAppsMcpServer(settings);
+    const settings = testSettings({ codexConnectedAppsEnabled: true, mcpServers: [] });
+    const result = settingsWithCodexAppsMcpServer(settings);
     const apps = result.mcpServers.filter((s) => s.id === "codex_apps");
     expect(apps).toHaveLength(1);
     const entry = apps[0]!;
@@ -144,22 +144,83 @@ describe("withCodexAppsMcpServer", () => {
   });
 
   test("is idempotent — a second call does not double-inject", () => {
-    const once = withCodexAppsMcpServer(testSettings({ mcpServers: [] }));
-    const twice = withCodexAppsMcpServer(once);
+    const once = settingsWithCodexAppsMcpServer(
+      testSettings({ codexConnectedAppsEnabled: true, mcpServers: [] }),
+    );
+    const twice = settingsWithCodexAppsMcpServer(once);
     expect(twice).toBe(once); // same reference, no change
     expect(twice.mcpServers.filter((s) => s.id === "codex_apps")).toHaveLength(1);
   });
 
   test("preserves pre-existing mcp servers", () => {
     const settings = testSettings({
+      codexConnectedAppsEnabled: true,
       mcpServers: [
         { id: "opengeni", name: "OpenGeni", url: "http://x/mcp", cacheToolsList: false },
       ],
     });
-    const result = withCodexAppsMcpServer(settings);
+    const result = settingsWithCodexAppsMcpServer(settings);
     const ids = result.mcpServers.map((s) => s.id);
     expect(ids).toContain("opengeni");
     expect(ids).toContain("codex_apps");
+  });
+
+  test("is a no-op when connected apps are disabled", () => {
+    const settings = testSettings({ codexConnectedAppsEnabled: false, mcpServers: [] });
+    expect(settingsWithCodexAppsMcpServer(settings)).toBe(settings);
+  });
+
+  test("uses workspace defaults without widening explicit session policies", () => {
+    const settings = testSettings({
+      codexConnectedAppsEnabled: true,
+      mcpServers: [
+        {
+          id: "opengeni",
+          name: "OpenGeni",
+          url: "http://localhost/mcp",
+          cacheToolsList: false,
+        },
+        {
+          id: "host-tools",
+          name: "Host tools",
+          url: "http://localhost/host-tools",
+          cacheToolsList: false,
+        },
+      ],
+    });
+    const runtimeSettings = settingsWithCodexAppsMcpServer(settings);
+    const defaultRefs = enabledCapabilityMcpToolRefs(settings, runtimeSettings);
+    expect(defaultRefs).toEqual([{ kind: "mcp", id: "codex_apps", optional: true }]);
+
+    const availableMcpServerIds = runtimeSettings.mcpServers.map((server) => server.id);
+    const defaultMcpServerIds = defaultRefs.map((tool) => tool.id);
+    const workspaceDefault = resolveSessionToolPolicy({
+      toolPolicy: { mode: "workspace_default", inheritedFromSessionId: null },
+      sessionTools: defaultRefs,
+      availableMcpServerIds,
+      defaultMcpServerIds,
+    });
+    expect(workspaceDefault.toolRefs).toContainEqual({
+      kind: "mcp",
+      id: "codex_apps",
+      optional: true,
+    });
+
+    const explicit = resolveSessionToolPolicy({
+      toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+      sessionTools: [{ kind: "mcp", id: "host-tools" }],
+      availableMcpServerIds,
+      defaultMcpServerIds,
+    });
+    expect(explicit.toolRefs.map((tool) => tool.id)).toEqual(["host-tools", "opengeni"]);
+
+    const explicitApps = resolveSessionToolPolicy({
+      toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+      sessionTools: [{ kind: "mcp", id: "codex_apps" }],
+      availableMcpServerIds,
+      defaultMcpServerIds,
+    });
+    expect(explicitApps.toolRefs.map((tool) => tool.id)).toEqual(["codex_apps", "opengeni"]);
   });
 });
 
@@ -192,7 +253,7 @@ describe("settingsWithCodexCredential", () => {
     expect(result.mcpServers.some((s) => s.id === "codex_apps")).toBe(false);
   });
 
-  test("active credential exposes connected apps only when explicitly enabled", async () => {
+  test("credential resolution does not widen the MCP registry", async () => {
     const settings = testSettings({
       codexSubscriptionEnabled: true,
       codexConnectedAppsEnabled: true,
@@ -208,9 +269,7 @@ describe("settingsWithCodexCredential", () => {
     expect(
       parseModelProvidersJson(result.modelProvidersJson).some((p) => p.id === "codex-subscription"),
     ).toBe(true);
-    // Connector access is account-gated server-side; the explicit deployment
-    // switch controls whether OpenGeni exposes that surface at all.
-    expect(result.mcpServers.some((s) => s.id === "codex_apps")).toBe(true);
+    expect(result.mcpServers.some((s) => s.id === "codex_apps")).toBe(false);
   });
 
   test("inactive credential => nothing new (no codex_apps server)", async () => {

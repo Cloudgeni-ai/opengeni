@@ -12,7 +12,7 @@ page exists so you pick the right one in one read.
 | **Files MCP** (`/mcp/files`) | Nobody — built in | Dedicated download-materialization surface selected through the `files` server ref | Caller's bearer with `files:read` | An agent needs a short-lived download URL for a ready file |
 | **Capability MCP servers** | Workspace admin (capabilities settings) | Workspace-wide; on for every session while enabled | Admin-supplied headers, encrypted, write-only | A third-party tool (e.g. a SaaS MCP) should be available to *all* sessions in a workspace |
 | **Per-session MCP servers** (`mcpServers` on session create) | The embedding host, per session | One session; static headers rotatable on every user turn; host connection refs resolved per request | Encrypted write-only headers or a non-secret opaque `connectionRef` resolved by the standalone/host broker | An embedding host injects its own tool server or binds an existing provider connection without duplicating it |
-| **Codex Apps MCP** | Automatic for Codex-subscription runs | Per turn, only on the ChatGPT/Codex model path | Workspace's Codex tokens | You don't — it rides along with the Codex subscription provider |
+| **Codex Apps MCP** | Deployment enables the registry; workspace-default or explicit session policy selects it | Workspace-default sessions receive it as an optional MCP; explicit/fixed sessions see it only when selected | Workspace's Codex tokens, resolved independently from visibility | A Codex-backed session should use connected ChatGPT apps without silently widening an exact tool allowlist |
 
 First-party OpenGeni MCP memory tools:
 
@@ -37,6 +37,14 @@ File and document resources are independent from this broad-server selection.
 Attaching a resource still materializes it for the session when
 `firstPartyMcpTools` is `[]` or title-only; selecting the dedicated `files` or
 `docs` MCP server is a separate `tools` decision.
+
+Codex Apps follows that same separation. Enabling
+`OPENGENI_CODEX_CONNECTED_APPS_ENABLED` registers `codex_apps` as a selectable
+runtime MCP; it does not bypass the durable session tool policy. Omitted
+session tools use the workspace default and include it as optional. Explicit,
+inherited-fixed, and legacy policies remain exact. A usable Codex credential is
+still required at call time, but authentication never changes which tools the
+model is allowed to see.
 
 Docs MCP also has a `memory_search`, but it is the curated documents surface, not
 the first-party turn tool. It now reads both `active` and `approved` memory records
