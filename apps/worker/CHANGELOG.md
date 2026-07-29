@@ -1,5 +1,21 @@
 # @opengeni/worker-bundle
 
+## 0.12.6
+
+### Patch Changes
+
+- b2e23f3: Resolve Connected Machine Toolspace token files against the machine user's real
+  home directory instead of the selfhosted capability root.
+- Updated dependencies [b2e23f3]
+  - @opengeni/config@0.7.11
+  - @opengeni/runtime@0.14.1
+  - @opengeni/core@0.12.6
+  - @opengeni/db@0.13.5
+  - @opengeni/documents@0.2.42
+  - @opengeni/github@0.3.23
+  - @opengeni/storage@0.2.35
+  - @opengeni/events@0.3.33
+
 ## 0.12.5
 
 ### Patch Changes

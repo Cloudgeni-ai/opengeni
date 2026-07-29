@@ -1,5 +1,14 @@
 # @opengeni/runtime
 
+## 0.14.1
+
+### Patch Changes
+
+- b2e23f3: Resolve Connected Machine Toolspace token files against the machine user's real
+  home directory instead of the selfhosted capability root.
+- Updated dependencies [b2e23f3]
+  - @opengeni/config@0.7.11
+
 ## 0.14.0
 
 ### Minor Changes
