@@ -1,5 +1,11 @@
 # @opengeni/sdk
 
+## 0.26.1
+
+### Patch Changes
+
+- ffd246c: Keep workspace-capture Git status, diffs, and untracked files below provider retained-output limits, and publish an explicit degraded revision instead of an authoritative empty diff when repository reads fail.
+
 ## 0.26.0
 
 ### Minor Changes

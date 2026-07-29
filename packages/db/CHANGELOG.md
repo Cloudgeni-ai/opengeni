@@ -1,5 +1,13 @@
 # @opengeni/db
 
+## 0.13.1
+
+### Patch Changes
+
+- Updated dependencies [ffd246c]
+  - @opengeni/contracts@0.20.1
+  - @opengeni/config@0.7.8
+
 ## 0.13.0
 
 ### Minor Changes
