@@ -106,12 +106,10 @@ describe("ordinary-session realtime context projection", () => {
       },
     ]);
     expect(projected).toHaveLength(1);
-    expect(
-      projected[0]?.text.startsWith("…[earlier content truncated]\n"),
-    ).toBe(true);
-    expect(
-      new TextEncoder().encode(projected[0]!.text).byteLength,
-    ).toBeLessThanOrEqual(CODEX_REALTIME_INITIAL_ITEMS_MAX_TOKENS * 4);
+    expect(projected[0]?.text.startsWith("…[earlier content truncated]\n")).toBe(true);
+    expect(new TextEncoder().encode(projected[0]!.text).byteLength).toBeLessThanOrEqual(
+      CODEX_REALTIME_INITIAL_ITEMS_MAX_TOKENS * 4,
+    );
     expect(projected[0]?.text.endsWith("🙂")).toBe(true);
   });
 });

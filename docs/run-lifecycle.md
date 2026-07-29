@@ -43,7 +43,16 @@ one transaction ledgers the call and creates exactly one ordinary queued turn
 on that same session. The call row links one-to-one to the turn for later
 terminal result/error projection. Invalid calls receive a deterministic outbound
 error instead; transient admission failure rolls the call and turn back together.
-No child session, fork, handoff framework, or after-commit admission loop exists.
+While realtime remains active, the final claim fence admits only that exact
+queued turn after its immutable metadata is re-matched to the call row; every
+other ordinary, recovery, update, goal, or maintenance claim stays fenced.
+Canonical terminal settlement and both exceptional terminal-failure paths
+atomically append exactly one turn-linked `delegation_result` or deterministic
+`error` to the outbound ledger. The browser ACKs client receipt and then the
+exact sequence only after every V3 provider-channel chunk sends. Until that
+provider ACK commits, the same row replays after a request failure, browser
+crash, or connection rotation; stale connection identities cannot ACK it. No
+child session, fork, handoff framework, or after-commit admission loop exists.
 
 Every accepted turn also carries one immutable `TurnInitiator`. Human/API
 Send and Steer capture the authenticated subject that accepted the command;

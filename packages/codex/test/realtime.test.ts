@@ -13,18 +13,12 @@ const auth = {
   isFedramp: true,
   clientVersion: "0.145.0",
 };
-const offer =
-  "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n";
-const answer =
-  "v=0\r\no=- 2 2 IN IP4 127.0.0.1\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n";
+const offer = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n";
+const answer = "v=0\r\no=- 2 2 IN IP4 127.0.0.1\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n";
 
-function providerResponse(
-  body: BodyInit | null = answer,
-  init: ResponseInit = {},
-): Response {
+function providerResponse(body: BodyInit | null = answer, init: ResponseInit = {}): Response {
   const headers = new Headers(init.headers);
-  if (!headers.has("location"))
-    headers.set("location", "/v1/live/rtc_test_call");
+  if (!headers.has("location")) headers.set("location", "/v1/live/rtc_test_call");
   return new Response(body, { ...init, headers });
 }
 
@@ -57,21 +51,15 @@ describe("native Codex subscription realtime call", () => {
       "https://chatgpt.com/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas",
     );
     expect(request.method).toBe("POST");
-    expect(request.headers.get("authorization")).toBe(
-      "Bearer server-only-token",
-    );
+    expect(request.headers.get("authorization")).toBe("Bearer server-only-token");
     expect(request.headers.get("chatgpt-account-id")).toBe("acct_bound");
     expect(request.headers.get("originator")).toBe("codex_cli_rs");
     expect(request.headers.get("user-agent")).toBe("codex_cli_rs/0.145.0");
     expect(request.headers.get("version")).toBe("0.145.0");
     expect(request.headers.get("x-openai-fedramp")).toBe("true");
     expect(request.headers.get("openai-alpha")).toBe("quicksilver=v2");
-    expect(request.headers.get("session-id")).toBe(
-      "11111111-1111-4111-8111-111111111111",
-    );
-    expect(request.headers.get("thread-id")).toBe(
-      "11111111-1111-4111-8111-111111111111",
-    );
+    expect(request.headers.get("session-id")).toBe("11111111-1111-4111-8111-111111111111");
+    expect(request.headers.get("thread-id")).toBe("11111111-1111-4111-8111-111111111111");
     expect(request.headers.get("content-type")).toBe("application/json");
     expect(await request.json()).toEqual({
       sdp: offer,
@@ -84,9 +72,7 @@ describe("native Codex subscription realtime call", () => {
           {
             type: "message",
             role: "developer",
-            content: [
-              { type: "input_text", text: "Use the ordinary session context." },
-            ],
+            content: [{ type: "input_text", text: "Use the ordinary session context." }],
           },
           {
             type: "message",
@@ -221,8 +207,7 @@ describe("native Codex subscription realtime call", () => {
         async () =>
           providerResponse(
             new Uint8Array([
-              0x76, 0x3d, 0x30, 0x0a, 0x6d, 0x3d, 0x61, 0x75, 0x64, 0x69, 0x6f,
-              0xff,
+              0x76, 0x3d, 0x30, 0x0a, 0x6d, 0x3d, 0x61, 0x75, 0x64, 0x69, 0x6f, 0xff,
             ]),
           ),
       ),
@@ -235,35 +220,30 @@ describe("native Codex subscription realtime call", () => {
     [404, "incompatible"],
     [429, "rate_limited"],
     [500, "provider"],
-  ] as const)(
-    "maps provider status %s and discards its body",
-    async (status, code) => {
-      let cancelled = false;
-      const body = new ReadableStream({
-        cancel() {
-          cancelled = true;
-        },
-      });
-      const promise = createCodexRealtimeCall(
-        auth,
-        { sdp: offer, version: "v3", sessionId: "session-safe" },
-        async () => new Response(body, { status }),
-      );
-      await expect(promise).rejects.toMatchObject({
-        code,
-        providerStatus: status,
-      });
-      expect(cancelled).toBe(true);
-      try {
-        await promise;
-      } catch (error) {
-        expect(error).toBeInstanceOf(CodexRealtimeError);
-        expect(String((error as Error).message)).not.toContain(
-          "provider-secret-body",
-        );
-      }
-    },
-  );
+  ] as const)("maps provider status %s and discards its body", async (status, code) => {
+    let cancelled = false;
+    const body = new ReadableStream({
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const promise = createCodexRealtimeCall(
+      auth,
+      { sdp: offer, version: "v3", sessionId: "session-safe" },
+      async () => new Response(body, { status }),
+    );
+    await expect(promise).rejects.toMatchObject({
+      code,
+      providerStatus: status,
+    });
+    expect(cancelled).toBe(true);
+    try {
+      await promise;
+    } catch (error) {
+      expect(error).toBeInstanceOf(CodexRealtimeError);
+      expect(String((error as Error).message)).not.toContain("provider-secret-body");
+    }
+  });
 
   test("forwards cancellation to the one provider request and never falls back", async () => {
     let calls = 0;
@@ -278,11 +258,7 @@ describe("native Codex subscription realtime call", () => {
         return await new Promise<Response>((_resolve, reject) => {
           receivedSignal?.addEventListener(
             "abort",
-            () =>
-              reject(
-                receivedSignal?.reason ??
-                  new DOMException("Aborted", "AbortError"),
-              ),
+            () => reject(receivedSignal?.reason ?? new DOMException("Aborted", "AbortError")),
             { once: true },
           );
         });

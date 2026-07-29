@@ -162,8 +162,7 @@ describe("Codex Frameless Bidi V3 protocol", () => {
     expect(
       chunks.every(
         (chunk) =>
-          new TextEncoder().encode(chunk).byteLength <=
-          CODEX_REALTIME_CONTEXT_APPEND_MAX_BYTES,
+          new TextEncoder().encode(chunk).byteLength <= CODEX_REALTIME_CONTEXT_APPEND_MAX_BYTES,
       ),
     ).toBe(true);
     expect(
@@ -180,9 +179,7 @@ describe("Codex Frameless Bidi V3 protocol", () => {
         content: [{ type: "input_text", text: "result" }],
       },
     ]);
-    expect(
-      encodeCodexRealtimeV3SessionContextAppend({ text: "update" }),
-    ).toEqual([
+    expect(encodeCodexRealtimeV3SessionContextAppend({ text: "update" })).toEqual([
       {
         type: "session.context.append",
         content: [{ type: "input_text", text: "update" }],

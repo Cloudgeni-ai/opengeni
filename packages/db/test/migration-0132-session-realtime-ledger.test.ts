@@ -13,7 +13,7 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-describe("0132 session realtime ledger migration", () => {
+describe("0132/0133 session realtime ledger migrations", () => {
   test("installs both exact FORCE-RLS runtime DML tables", async () => {
     const rows = await shared.admin<
       {
@@ -77,11 +77,25 @@ describe("0132 session realtime ledger migration", () => {
       "session_realtime_connections_one_open_uq",
       "session_realtime_connections_operation_uq",
       "session_realtime_connections_pkey",
+      "session_realtime_entries_delegation_call_uq",
+      "session_realtime_entries_delegation_terminal_uq",
+      "session_realtime_entries_delegation_turn_uq",
       "session_realtime_entries_operation_uq",
       "session_realtime_entries_outbound_pending_idx",
       "session_realtime_entries_pkey",
       "session_realtime_entries_sequence_uq",
       "session_realtime_entries_source_update_uq",
     ]);
+  });
+
+  test("permits one call and one terminal outbound row to share an ordinary turn", async () => {
+    const [constraint] = await shared.admin<{ definition: string }[]>`
+      select pg_get_constraintdef(oid) as definition
+      from pg_constraint
+      where conrelid = 'session_realtime_entries'::regclass
+        and conname = 'session_realtime_entries_turn_check'`;
+    expect(constraint?.definition).toContain("delegation_call");
+    expect(constraint?.definition).toContain("delegation_result");
+    expect(constraint?.definition).toContain("provider_out");
   });
 });

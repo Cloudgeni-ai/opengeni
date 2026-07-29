@@ -4110,6 +4110,7 @@ export const SyncSessionRealtimeLedgerRequest = SessionRealtimeOwnerProof.extend
   connectionEpoch: z.number().int().positive(),
   entries: z.array(SessionRealtimeInboundEntry).max(64).optional(),
   clientAckThroughSequence: z.number().int().nonnegative().nullable().optional(),
+  providerAckSequences: z.array(z.number().int().positive()).max(100).optional(),
   providerStarted: z
     .object({
       providerSessionId: z.string().min(1).max(1024),
