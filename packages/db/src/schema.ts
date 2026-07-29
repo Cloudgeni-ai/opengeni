@@ -4420,3 +4420,4 @@ export const rigChanges = pgTable(
 );
 
 export * from "./workspace-instruction-policies-schema";
+export * from "./preference-registry-schema";

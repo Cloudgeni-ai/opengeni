@@ -65,6 +65,7 @@ import { registerSessionRoutes } from "./routes/sessions";
 import { registerSocialRoutes } from "./routes/social";
 import { registerWorkspaceRoutes } from "./routes/workspaces";
 import { registerWorkspaceInstructionPolicyRoutes } from "./routes/workspace-instruction-policies";
+import { registerPreferenceRegistryRoutes } from "./routes/preference-registry";
 import { projectClientModel } from "./model-catalog";
 
 export type {
@@ -429,6 +430,7 @@ export function createApp(deps: AppDependencies): Hono {
   registerInstallRoutes(app, routeDeps);
   registerWorkspaceRoutes(app, routeDeps);
   registerWorkspaceInstructionPolicyRoutes(app, routeDeps);
+  registerPreferenceRegistryRoutes(app, routeDeps);
   registerSocialRoutes(app, routeDeps);
   registerConnectionRoutes(app, routeDeps);
   registerCapabilityRoutes(app, routeDeps);

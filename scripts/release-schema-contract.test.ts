@@ -145,12 +145,13 @@ describe("release schema contract", () => {
         (migrations.has("0128_github_installation_authority.sql") ? 1 : 0) +
         (migrations.has("0129_retained_process_reconciliation.sql") ? 1 : 0) +
         (migrations.has("0130_workspace_instruction_policies.sql") ? 1 : 0) +
-        (migrations.has("0131_slack_bot_install_and_post_idempotency.sql") ? 1 : 0),
+        (migrations.has("0131_slack_bot_install_and_post_idempotency.sql") ? 1 : 0) +
+        (migrations.has("0132_preference_registry.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "15c744e23c99a1756cecbee69563067e85627ae4186dec16946edc99fbe4affe",
+      "8be58e3e51e93b4fb9a020fc11451d5d69061f3389f0a60eb671b7e91b5e4c8f",
     );
-    expect(contract.latestMigration).toBe("0131_slack_bot_install_and_post_idempotency.sql");
+    expect(contract.latestMigration).toBe("0132_preference_registry.sql");
     expect(migrations.get("0128_github_installation_authority.sql")).toMatchObject({
       sha256: "365793b2a204a70e214adb90298b522acbb6dcfae22a46681a58f41a6938e6f0",
       deploymentMode: "rolling",
@@ -184,7 +185,7 @@ describe("release schema contract", () => {
     expect(
       contract.migrations
         .map((migration) => migration.path)
-        .filter((path) => /^(?:010[3-9]|011[0-9]|012[0-9]|013[01])_/.test(path)),
+        .filter((path) => /^(?:010[3-9]|011[0-9]|012[0-9]|013[0-2])_/.test(path)),
     ).toEqual([
       "0103_host_export_root_session.sql",
       "0104_host_export_root_session_backfill.sql",
@@ -205,6 +206,7 @@ describe("release schema contract", () => {
       "0129_retained_process_reconciliation.sql",
       "0130_workspace_instruction_policies.sql",
       "0131_slack_bot_install_and_post_idempotency.sql",
+      "0132_preference_registry.sql",
     ]);
     expect(new Set(contract.migrations.map((migration) => migration.path)).size).toBe(
       contract.fileCount,
@@ -279,6 +281,10 @@ describe("release schema contract", () => {
     });
     expect(migrations.get("0130_workspace_instruction_policies.sql")).toMatchObject({
       sha256: "12226a4560dc1150ffe2c3549f821d2483cc4d4a09ef74747ed13376404fc7c5",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0132_preference_registry.sql")).toMatchObject({
+      sha256: "e782077a3a670d957ea2b8b0fab156de56775c7afc9a4993a83ea4cd95d31e0d",
       deploymentMode: "rolling",
     });
   });

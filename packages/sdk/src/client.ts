@@ -209,6 +209,22 @@ import type {
   WorkspaceInstructionPolicyListResponse,
   WorkspaceInstructionPolicyRevision,
 } from "./workspace-instruction-policies";
+import type {
+  ActivatePreferenceRegistryRevisionRequest,
+  ChangePreferenceRegistryScopeRequest,
+  CorrectPreferenceRegistryRequest,
+  CreatePreferenceRegistryProposalRequest,
+  DeactivatePreferenceRegistryRequest,
+  PreferenceRegistryDetailResponse,
+  PreferenceRegistryFullContent,
+  PreferenceRegistryListOptions,
+  PreferenceRegistryListResponse,
+  PreferenceRegistryMutationResponse,
+  PreferenceRegistryRecord,
+  PreferenceRegistrySnapshot,
+  RejectPreferenceRegistryProposalRequest,
+  SupersedePreferenceRegistryRequest,
+} from "./preference-registry";
 import {
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
@@ -1713,6 +1729,132 @@ export class OpenGeniClient {
       "POST",
       `/v1/workspaces/${workspaceId}/instruction-policies/rollback`,
       request,
+    );
+  }
+
+  async listPreferenceRegistry(
+    workspaceId: string,
+    options: PreferenceRegistryListOptions = {},
+  ): Promise<PreferenceRegistryListResponse> {
+    const params = new URLSearchParams();
+    if (options.scope) params.set("scope", options.scope);
+    if (options.status) params.set("status", options.status);
+    if (options.limit !== undefined) params.set("limit", String(options.limit));
+    const query = params.toString();
+    return await this.requestJson<PreferenceRegistryListResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/preferences${query ? `?${query}` : ""}`,
+    );
+  }
+
+  async getPreferenceRegistry(
+    workspaceId: string,
+    preferenceId: string,
+  ): Promise<PreferenceRegistryDetailResponse> {
+    return await this.requestJson<PreferenceRegistryDetailResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/preferences/${encodeURIComponent(preferenceId)}`,
+    );
+  }
+
+  async createPreferenceRegistryProposal(
+    workspaceId: string,
+    request: CreatePreferenceRegistryProposalRequest,
+  ): Promise<PreferenceRegistryRecord> {
+    return await this.requestJson<PreferenceRegistryRecord>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/preferences/proposals`,
+      request,
+    );
+  }
+
+  async activatePreferenceRegistryRevision(
+    workspaceId: string,
+    preferenceId: string,
+    request: ActivatePreferenceRegistryRevisionRequest,
+  ): Promise<PreferenceRegistryMutationResponse> {
+    return await this.requestJson<PreferenceRegistryMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/preferences/${encodeURIComponent(preferenceId)}/activate`,
+      request,
+    );
+  }
+
+  async correctPreferenceRegistry(
+    workspaceId: string,
+    preferenceId: string,
+    request: CorrectPreferenceRegistryRequest,
+  ): Promise<PreferenceRegistryMutationResponse> {
+    return await this.requestJson<PreferenceRegistryMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/preferences/${encodeURIComponent(preferenceId)}/correct`,
+      request,
+    );
+  }
+
+  async changePreferenceRegistryScope(
+    workspaceId: string,
+    preferenceId: string,
+    request: ChangePreferenceRegistryScopeRequest,
+  ): Promise<PreferenceRegistryMutationResponse> {
+    return await this.requestJson<PreferenceRegistryMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/preferences/${encodeURIComponent(preferenceId)}/scope`,
+      request,
+    );
+  }
+
+  async deactivatePreferenceRegistry(
+    workspaceId: string,
+    preferenceId: string,
+    request: DeactivatePreferenceRegistryRequest,
+  ): Promise<PreferenceRegistryMutationResponse> {
+    return await this.requestJson<PreferenceRegistryMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/preferences/${encodeURIComponent(preferenceId)}/deactivate`,
+      request,
+    );
+  }
+
+  async supersedePreferenceRegistry(
+    workspaceId: string,
+    preferenceId: string,
+    request: SupersedePreferenceRegistryRequest,
+  ): Promise<PreferenceRegistryMutationResponse> {
+    return await this.requestJson<PreferenceRegistryMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/preferences/${encodeURIComponent(preferenceId)}/supersede`,
+      request,
+    );
+  }
+
+  async rejectPreferenceRegistryProposal(
+    workspaceId: string,
+    preferenceId: string,
+    request: RejectPreferenceRegistryProposalRequest,
+  ): Promise<PreferenceRegistryMutationResponse> {
+    return await this.requestJson<PreferenceRegistryMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/preferences/${encodeURIComponent(preferenceId)}/reject`,
+      request,
+    );
+  }
+
+  async getPreferenceRegistrySummary(workspaceId: string): Promise<PreferenceRegistrySnapshot> {
+    return await this.requestJson<PreferenceRegistrySnapshot>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/preferences/summary`,
+    );
+  }
+
+  async getPreferenceRegistryFullContent(
+    workspaceId: string,
+    retrievalHandle: string,
+  ): Promise<PreferenceRegistryFullContent> {
+    return await this.requestJson<PreferenceRegistryFullContent>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/preferences/full-content`,
+      { retrievalHandle },
     );
   }
 

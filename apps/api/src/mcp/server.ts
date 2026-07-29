@@ -32,6 +32,8 @@ import {
   getSessionGoal,
   getSessionQueueSnapshot,
   getSessionTurn,
+  getOrCreatePreferenceRegistrySnapshot,
+  getPreferenceRegistryFullContent,
   getVariableSet,
   getVariableSetByName,
   areGitHubRepositoriesAllowedForWorkspace,
@@ -55,6 +57,7 @@ import {
   requireFile,
   requireScheduledTask,
   requireSession,
+  resolvePreferenceRegistryAttemptAuthority,
   saveWorkspaceMemory,
   searchWorkspaceMemories,
   serializeEffectiveSessionControl,
@@ -210,6 +213,9 @@ export function buildOpenGeniMcpServer(
   // stays on the normal first-party MCP surface only.
   if (!toolspaceMode && sessionId !== null && options.workspaceMemoryEnabled === true) {
     registerMemoryTools(server, deps, grant, sessionId, json);
+  }
+  if (!toolspaceMode && sessionId !== null && preferenceAttemptClaims(grant) !== null) {
+    registerPreferenceRegistryTools(server, deps, grant, json);
   }
 
   // Fleet tools (M7 bring-your-own-compute): list / attach / swap / run_on /
@@ -1010,6 +1016,67 @@ async function authorizeFirstPartySession(
     operation,
     surface: "first_party_mcp",
   });
+}
+
+function preferenceAttemptClaims(grant: AccessGrant): {
+  sessionId: string;
+  turnId: string;
+  attemptId: string;
+  executionGeneration: number;
+} | null {
+  const metadata = grant.metadata ?? {};
+  if (
+    typeof metadata["sessionId"] !== "string" ||
+    typeof metadata["turnId"] !== "string" ||
+    typeof metadata["attemptId"] !== "string" ||
+    typeof metadata["executionGeneration"] !== "number"
+  ) {
+    return null;
+  }
+  return {
+    sessionId: metadata["sessionId"],
+    turnId: metadata["turnId"],
+    attemptId: metadata["attemptId"],
+    executionGeneration: metadata["executionGeneration"],
+  };
+}
+
+function registerPreferenceRegistryTools(
+  server: McpServer,
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  json: JsonResult,
+): void {
+  const resolve = async () => {
+    const claims = preferenceAttemptClaims(grant);
+    if (!claims) throw new Error("Exact signed preference attempt authority is required.");
+    return await resolvePreferenceRegistryAttemptAuthority(deps.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      ...claims,
+    });
+  };
+
+  server.registerTool(
+    "preference_registry_summary",
+    {
+      description:
+        "List bounded deterministic descriptors for organization, workspace, and immutable initiating-human preferences frozen to this exact attempt. Full content is omitted; retrieve only a relevant returned handle.",
+      inputSchema: {},
+    },
+    async () => json(await getOrCreatePreferenceRegistrySnapshot(deps.db, await resolve())),
+  );
+
+  server.registerTool(
+    "preference_registry_get",
+    {
+      description:
+        "Retrieve full content for one preference in this exact attempt snapshot. Handles from another account, workspace, human, or attempt are rejected.",
+      inputSchema: { retrievalHandle: z4.string().min(1).max(512) },
+    },
+    async ({ retrievalHandle }) =>
+      json(await getPreferenceRegistryFullContent(deps.db, await resolve(), retrievalHandle)),
+  );
 }
 
 const MemoryKindSchema = z4.enum(["preference", "semantic", "procedural", "decision", "episodic"]);
