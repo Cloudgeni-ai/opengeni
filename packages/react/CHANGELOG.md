@@ -1,5 +1,11 @@
 # @opengeni/react
 
+## 0.26.2
+
+### Patch Changes
+
+- f92af07: Give each session-only React hook an exact structural client contract so embedded hosts can use session reads, goals, lineage, file attachments, structured human input, and MCP approval policies without implementing unrelated composer, queue, workspace, or workbench APIs.
+
 ## 0.26.1
 
 ### Patch Changes
