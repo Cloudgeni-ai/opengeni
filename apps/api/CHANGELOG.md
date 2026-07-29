@@ -1,5 +1,11 @@
 # @opengeni/api-router
 
+## 0.12.8
+
+### Patch Changes
+
+- 37bb6f7: Cache validated immutable workspace-capture manifests within strict process-local memory bounds.
+
 ## 0.12.7
 
 ### Patch Changes
