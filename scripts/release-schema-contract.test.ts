@@ -149,7 +149,7 @@ describe("release schema contract", () => {
         (migrations.has("0132_preference_registry.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "8be58e3e51e93b4fb9a020fc11451d5d69061f3389f0a60eb671b7e91b5e4c8f",
+      "c8bf9f6d31825f982aecb4a7e39b642cca2bc5151adb7d3f495ffa9f11c1c246",
     );
     expect(contract.latestMigration).toBe("0132_preference_registry.sql");
     expect(migrations.get("0128_github_installation_authority.sql")).toMatchObject({
@@ -284,7 +284,7 @@ describe("release schema contract", () => {
       deploymentMode: "rolling",
     });
     expect(migrations.get("0132_preference_registry.sql")).toMatchObject({
-      sha256: "e782077a3a670d957ea2b8b0fab156de56775c7afc9a4993a83ea4cd95d31e0d",
+      sha256: "50b1092a1e8c23fdbfae30edcf1c26503f782116ae1281f808aa8b7dd46864bf",
       deploymentMode: "rolling",
     });
   });

@@ -31,7 +31,10 @@ Organization writes require the literal `account:admin` permission. Workspace
 writes require `workspace:admin`. Personal writes derive the target from the
 authenticated human and accept no caller-selected subject. A scope change
 requires authorization for both the old and new scopes and advances a
-compare-and-swap scope version.
+compare-and-swap scope version. Every lifecycle request carries the expected
+scope version. The database locks the visible head first, runs route scope
+authorization while that lock is held, and rejects a stale version before
+creating a revision or event.
 
 Model-facing reads are stricter than ordinary human list/get reads. Summary and
 full-content operations require an exact signed session, turn, attempt, and
@@ -39,6 +42,13 @@ execution generation. The service verifies that active attempt and derives the
 personal subject from the turn's immutable accepted human initiator. A worker,
 service principal, delegated-token subject, or mutable grant subject can never
 substitute its identity. Service-initiated attempts fail closed.
+Authority resolution and snapshot/list/detail/full-content access share one
+transaction. Ordered workspace, session, turn, and attempt locks revalidate the
+exact account, workspace, session pointer, turn pointer, attempt state,
+attempt/turn/request generations, interruption state, and initiating human.
+Attempt replacement therefore either waits for an authorized read to finish or
+causes the stale read to fail; an existing snapshot never revives stale worker
+authority.
 
 ## Immutable revisions and lifecycle
 
@@ -59,8 +69,9 @@ evidence. Mutable heads store the exact active revision number, ID, and hash.
 
 The audited lifecycle supports proposal creation, activation, correction,
 deactivation, rejection, supersession, scope change, and expiry. Activation,
-correction, deactivation, and supersession use active-head compare-and-swap;
-scope changes use scope-version compare-and-swap. Corrections append a new
+correction, deactivation, and supersession use both active-head and scope-version
+compare-and-swap; activation and rejection also require the expected scope
+version, while scope changes lock and compare the existing head. Corrections append a new
 revision and retain the corrected revision. Rejected and superseded records are
 terminal. Expiry is derived at read time: expired heads remain historical truth
 but do not produce descriptors.
@@ -70,6 +81,17 @@ Signed attempt credentials and service initiators are rejected even when their
 permission strings would otherwise be sufficient. Each successful transition
 records the actor, bounded reason, old/new revision or target, related
 preference where applicable, and monotonic event version.
+
+Ordinary runtime SQL cannot update or delete a preference head and cannot
+insert lifecycle events. Two target-schema-local security-definer functions
+own canonical head locking and lifecycle application. They derive authority
+from transaction-local RLS context, lock related heads in UUID order, repeat the
+scope/revision CAS checks, perform only the operation-specific transition, and
+append its complete event atomically. A deferred constraint requires every new
+proposal head to have its exact version-1 creation event before commit.
+Revisions, events, snapshots, heads, and their account/workspace/session/turn/
+attempt parents use restrictive deletion semantics; parent deletion cannot
+erase registry history.
 
 ## Imported material is proposal-only
 
@@ -124,10 +146,11 @@ retrieval contracts without introducing a second editor or content system.
 
 All four tables carry account/workspace visibility keys, use ENABLE + FORCE RLS,
 and are accessed through account/workspace/subject context wrappers. Ordinary
-runtime DML is full CRUD only for the mutable preference head; revisions,
-events, and snapshots receive SELECT + INSERT. Database constraints and
-immutable-history triggers defend revision/hash, target, active-head, and audit
-integrity beneath the service layer.
+runtime DML is SELECT + INSERT for proposal heads and revisions, SELECT + INSERT
+for snapshots, and SELECT-only for events. Head UPDATE/DELETE is available only
+through the narrow lifecycle functions. Database constraints, restrictive
+foreign keys, and immutable-history triggers defend revision/hash, target,
+active-head, snapshot, and audit integrity beneath the service layer.
 
 Canonical implementation:
 

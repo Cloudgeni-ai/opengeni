@@ -152,11 +152,13 @@ export type CreatePreferenceRegistryProposalRequest = {
 export type ActivatePreferenceRegistryRevisionRequest = {
   revisionId: string;
   expectedCurrentRevisionId: string | null;
+  expectedScopeVersion: number;
   reason: string;
 };
 
 export type CorrectPreferenceRegistryRequest = {
   expectedCurrentRevisionId: string;
+  expectedScopeVersion: number;
   title: string;
   description: string;
   content: string;
@@ -169,6 +171,7 @@ export type CorrectPreferenceRegistryRequest = {
 
 export type DeactivatePreferenceRegistryRequest = {
   expectedCurrentRevisionId: string;
+  expectedScopeVersion: number;
   reason: string;
 };
 
@@ -181,10 +184,15 @@ export type ChangePreferenceRegistryScopeRequest = {
 export type SupersedePreferenceRegistryRequest = {
   replacementPreferenceId: string;
   expectedCurrentRevisionId: string;
+  expectedScopeVersion: number;
   reason: string;
 };
 
-export type RejectPreferenceRegistryProposalRequest = { revisionId: string; reason: string };
+export type RejectPreferenceRegistryProposalRequest = {
+  revisionId: string;
+  expectedScopeVersion: number;
+  reason: string;
+};
 export type PreferenceRegistryListOptions = {
   scope?: PreferenceRegistryScope;
   status?: PreferenceRegistryStatus;

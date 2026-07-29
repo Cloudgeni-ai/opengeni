@@ -164,6 +164,7 @@ async function activate(
       body: {
         revisionId: created.revision.id,
         expectedCurrentRevisionId: null,
+        expectedScopeVersion: created.preference.scopeVersion,
         reason: "Reviewed and approved by an authorized human",
       },
     }),
@@ -224,6 +225,44 @@ async function seedAttempt(
     attemptId,
     executionGeneration,
   };
+}
+
+async function replaceAttempt(attempt: Attempt): Promise<Attempt> {
+  const replacementId = crypto.randomUUID();
+  const executionGeneration = attempt.executionGeneration + 1;
+  await shared.admin.begin(async (tx) => {
+    await tx`
+      UPDATE session_turn_attempts
+      SET state = 'closed', outcome = 'superseded', closed_at = now(), updated_at = now()
+      WHERE id = ${attempt.attemptId}`;
+    await tx`
+      INSERT INTO session_turn_attempts (
+        id, account_id, workspace_id, session_id, turn_id, execution_generation,
+        state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id,
+        verified_control_revision, mcp_approval_policies
+      )
+      SELECT
+        ${replacementId}, account_id, workspace_id, session_id, turn_id,
+        ${executionGeneration}, 'running', temporal_workflow_id,
+        ${`replacement-run-${replacementId}`}, ${`replacement-activity-${replacementId}`},
+        verified_control_revision, mcp_approval_policies
+      FROM session_turn_attempts WHERE id = ${attempt.attemptId}`;
+    await tx`
+      UPDATE session_turns
+      SET execution_generation = ${executionGeneration},
+        active_attempt_id = ${replacementId}, updated_at = now()
+      WHERE id = ${attempt.turnId}`;
+  });
+  return { ...attempt, attemptId: replacementId, executionGeneration };
+}
+
+async function mismatchAttemptGeneration(attempt: Attempt): Promise<Attempt> {
+  const mismatchedGeneration = attempt.executionGeneration + 1;
+  await shared.admin`
+    UPDATE session_turn_attempts
+    SET execution_generation = ${mismatchedGeneration}, updated_at = now()
+    WHERE id = ${attempt.attemptId}`;
+  return { ...attempt, executionGeneration: mismatchedGeneration };
 }
 
 function descriptor(snapshot: Json, id: string): Json {
@@ -455,6 +494,7 @@ describe("structured preference registry API and PostgreSQL authority", () => {
       body: {
         revisionId: workspace.revision.id,
         expectedCurrentRevisionId: null,
+        expectedScopeVersion: workspace.preference.scopeVersion,
         reason: "Stale concurrent activation",
       },
     });
@@ -512,6 +552,7 @@ describe("structured preference registry API and PostgreSQL authority", () => {
         permissions: WORKSPACE_ADMIN,
         body: {
           revisionId: rejected.revision.id,
+          expectedScopeVersion: rejected.preference.scopeVersion,
           reason: "Human review rejected the proposal",
         },
       }),
@@ -524,6 +565,7 @@ describe("structured preference registry API and PostgreSQL authority", () => {
       body: {
         revisionId: rejected.revision.id,
         expectedCurrentRevisionId: null,
+        expectedScopeVersion: rejected.preference.scopeVersion,
         reason: "Must remain rejected",
       },
     });
@@ -653,6 +695,7 @@ describe("structured preference registry API and PostgreSQL authority", () => {
       body: {
         revisionId: imported.revision.id,
         expectedCurrentRevisionId: null,
+        expectedScopeVersion: imported.preference.scopeVersion,
         reason: "A service must never activate this proposal",
       },
     });
@@ -664,6 +707,7 @@ describe("structured preference registry API and PostgreSQL authority", () => {
       body: {
         revisionId: imported.revision.id,
         expectedCurrentRevisionId: null,
+        expectedScopeVersion: imported.preference.scopeVersion,
         reason: "An API key is not a direct human reviewer",
       },
     });
@@ -735,6 +779,7 @@ describe("structured preference registry API and PostgreSQL authority", () => {
         permissions: DIRECT_READ,
         body: {
           expectedCurrentRevisionId: personalAlice.revision.id,
+          expectedScopeVersion: personalAlice.preference.scopeVersion,
           title: "Alice corrected response style",
           description: "Corrected after explicit human review",
           content: "Alice corrected full content",
@@ -809,6 +854,7 @@ describe("structured preference registry API and PostgreSQL authority", () => {
         permissions: DIRECT_READ,
         body: {
           expectedCurrentRevisionId: deactivationTarget.revision.id,
+          expectedScopeVersion: deactivationTarget.preference.scopeVersion,
           reason: "Human disabled this preference",
         },
       }),
@@ -888,6 +934,7 @@ describe("structured preference registry API and PostgreSQL authority", () => {
         body: {
           replacementPreferenceId: replacement.preference.id,
           expectedCurrentRevisionId: supersededTarget.revision.id,
+          expectedScopeVersion: supersededTarget.preference.scopeVersion,
           reason: "Replacement reviewed and activated",
         },
       }),
@@ -928,9 +975,13 @@ describe("structured preference registry API and PostgreSQL authority", () => {
       Array<{
         force_count: number;
         preference_update: boolean;
+        preference_delete: boolean;
         revision_update: boolean;
+        event_insert: boolean;
         event_delete: boolean;
         snapshot_update: boolean;
+        lock_execute: boolean;
+        lifecycle_execute: boolean;
       }>
     >`
       SELECT
@@ -943,16 +994,85 @@ describe("structured preference registry API and PostgreSQL authority", () => {
           ) AND relrowsecurity AND relforcerowsecurity
         ) AS force_count,
         has_table_privilege('opengeni_app', 'preference_registry_preferences', 'UPDATE') AS preference_update,
+        has_table_privilege('opengeni_app', 'preference_registry_preferences', 'DELETE') AS preference_delete,
         has_table_privilege('opengeni_app', 'preference_registry_revisions', 'UPDATE') AS revision_update,
+        has_table_privilege('opengeni_app', 'preference_registry_events', 'INSERT') AS event_insert,
         has_table_privilege('opengeni_app', 'preference_registry_events', 'DELETE') AS event_delete,
-        has_table_privilege('opengeni_app', 'preference_registry_snapshots', 'UPDATE') AS snapshot_update`;
+        has_table_privilege('opengeni_app', 'preference_registry_snapshots', 'UPDATE') AS snapshot_update,
+        has_function_privilege(
+          'opengeni_app', 'preference_registry_lock_heads(uuid[])', 'EXECUTE'
+        ) AS lock_execute,
+        has_function_privilege(
+          'opengeni_app',
+          'preference_registry_apply_lifecycle(text,uuid,integer,uuid,uuid,text,uuid,text,text)',
+          'EXECUTE'
+        ) AS lifecycle_execute`;
     expect(posture).toEqual({
       force_count: 4,
-      preference_update: true,
+      preference_update: false,
+      preference_delete: false,
       revision_update: false,
+      event_insert: false,
       event_delete: false,
       snapshot_update: false,
+      lock_execute: true,
+      lifecycle_execute: true,
     });
+
+    await expectDatabaseFailure(
+      withWorkspaceSubjectRls(
+        client.db,
+        alice.workspaceId,
+        alice.subjectId,
+        async (scopedDb) =>
+          await scopedDb.execute(sql`
+            UPDATE preference_registry_preferences
+            SET stable_key = 'forged-key', scope = 'organization',
+              scope_workspace_id = NULL, status = 'rejected', scope_version = 99,
+              superseded_by_preference_id = ${replacement.preference.id}
+            WHERE id = ${personalAlice.preference.id}`),
+      ),
+      /permission denied|lifecycle/i,
+    );
+    await expectDatabaseFailure(
+      shared.admin`
+        UPDATE preference_registry_preferences
+        SET status = 'rejected' WHERE id = ${personalAlice.preference.id}`,
+      /lifecycle function/i,
+    );
+    await expectDatabaseFailure(
+      shared.admin.begin(async (transaction) => {
+        await transaction`
+          SELECT set_config(
+            'opengeni.preference_lifecycle_head_id',
+            ${personalAlice.preference.id},
+            true
+          ), set_config('opengeni.preference_lifecycle_operation', 'scope', true)`;
+        await transaction`
+          UPDATE preference_registry_preferences
+          SET scope = 'organization', scope_workspace_id = NULL,
+            status = 'rejected', scope_version = scope_version + 1,
+            superseded_by_preference_id = ${replacement.preference.id}
+          WHERE id = ${personalAlice.preference.id}`;
+      }),
+      /invalid preference scope transition/i,
+    );
+    await expectDatabaseFailure(
+      shared.admin`
+        DELETE FROM preference_registry_preferences
+        WHERE id = ${personalAlice.preference.id}`,
+      /cannot be deleted|history is immutable|foreign key/i,
+    );
+    await expectDatabaseFailure(
+      shared.admin`
+        INSERT INTO preference_registry_events (
+          account_id, preference_id, type, version, actor_subject_id, reason
+        ) VALUES (
+          ${alice.accountId}, ${personalAlice.preference.id}, 'deactivated', 999,
+          'owner:forgery', 'incomplete forged event'
+        )`,
+      /events_shape|check constraint/i,
+    );
 
     await expectDatabaseFailure(
       withWorkspaceSubjectRls(
@@ -1134,8 +1254,7 @@ describe("structured preference registry API and PostgreSQL authority", () => {
       /descriptor_bytes|check constraint/i,
     );
 
-    await deleteWorkspace(client.db, aliceSecondWorkspace.workspaceId);
-    const [deletedWorkspaceRows] = await shared.admin<
+    const [preservedBeforeDelete] = await shared.admin<
       Array<{
         preferences: number;
         revisions: number;
@@ -1152,11 +1271,360 @@ describe("structured preference registry API and PostgreSQL authority", () => {
           WHERE preference_id = ${workspaceSecond.preference.id}) AS events,
         (SELECT count(*)::integer FROM preference_registry_snapshots
           WHERE workspace_id = ${aliceSecondWorkspace.workspaceId}) AS snapshots`;
-    expect(deletedWorkspaceRows).toEqual({
-      preferences: 0,
-      revisions: 0,
-      events: 0,
+    await expectDatabaseFailure(
+      deleteWorkspace(client.db, aliceSecondWorkspace.workspaceId),
+      /foreign key|still referenced|restrict/i,
+    );
+    const [preservedAfterDelete] = await shared.admin<
+      Array<{
+        preferences: number;
+        revisions: number;
+        events: number;
+        snapshots: number;
+      }>
+    >`
+      SELECT
+        (SELECT count(*)::integer FROM preference_registry_preferences
+          WHERE scope_workspace_id = ${aliceSecondWorkspace.workspaceId}) AS preferences,
+        (SELECT count(*)::integer FROM preference_registry_revisions
+          WHERE preference_id = ${workspaceSecond.preference.id}) AS revisions,
+        (SELECT count(*)::integer FROM preference_registry_events
+          WHERE preference_id = ${workspaceSecond.preference.id}) AS events,
+        (SELECT count(*)::integer FROM preference_registry_snapshots
+          WHERE workspace_id = ${aliceSecondWorkspace.workspaceId}) AS snapshots`;
+    expect(preservedBeforeDelete).toEqual({
+      preferences: 1,
+      revisions: 1,
+      events: 2,
       snapshots: 0,
     });
+    expect(preservedAfterDelete).toEqual(preservedBeforeDelete);
+  }, 180_000);
+
+  test("atomically fences snapshots and full content to the exact current attempt", async () => {
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "preference-attempt-race",
+      accountExternalId: `account-${suffix}`,
+      accountName: "Preference attempt race account",
+      workspaceExternalSource: "preference-attempt-race",
+      workspaceExternalId: `workspace-${suffix}`,
+      workspaceName: "Preference attempt race workspace",
+      subjectId: "user:attempt-owner",
+    });
+    const owner = access.workspaceGrants[0]!;
+    const active = await proposal(
+      owner,
+      { stableKey: "attempt-race", scope: "user", content: "Frozen attempt content" },
+      DIRECT_READ,
+    );
+    await activate(owner, active, DIRECT_READ);
+
+    const original = await seedAttempt(owner, {
+      kind: "subject",
+      subjectId: owner.subjectId,
+    });
+    const snapshot = await json(
+      await request(owner, "/summary", {
+        subjectId: "worker:original",
+        attempt: original,
+      }),
+    );
+    const handle = descriptor(snapshot, active.preference.id).retrievalHandle as string;
+    expect(
+      await json(
+        await request(owner, "/full-content", {
+          method: "POST",
+          subjectId: "worker:original",
+          attempt: original,
+          body: { retrievalHandle: handle },
+        }),
+      ),
+    ).toMatchObject({ content: "Frozen attempt content" });
+
+    const replacement = await replaceAttempt(original);
+    expect(
+      (
+        await request(owner, "/summary", {
+          subjectId: "worker:stale",
+          attempt: original,
+        })
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await request(owner, "/full-content", {
+          method: "POST",
+          subjectId: "worker:stale",
+          attempt: original,
+          body: { retrievalHandle: handle },
+        })
+      ).status,
+    ).toBe(403);
+
+    const replacementSnapshot = await json(
+      await request(owner, "/summary", {
+        subjectId: "worker:replacement",
+        attempt: replacement,
+      }),
+    );
+    expect(replacementSnapshot.attemptId).toBe(replacement.attemptId);
+    expect(replacementSnapshot.executionGeneration).toBe(replacement.executionGeneration);
+    expect(replacementSnapshot.initiatingHumanSubjectId).toBe(owner.subjectId);
+
+    const wrongTurn = await request(owner, "/summary", {
+      subjectId: "worker:wrong-turn",
+      attempt: { ...replacement, turnId: crypto.randomUUID() },
+    });
+    expect(wrongTurn.status).toBe(403);
+
+    const mismatched = await mismatchAttemptGeneration(
+      await seedAttempt(owner, { kind: "subject", subjectId: owner.subjectId }),
+    );
+    expect(
+      (
+        await request(owner, "/summary", {
+          subjectId: "worker:mismatched-attempt-generation",
+          attempt: mismatched,
+        })
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await request(owner, "/summary", {
+          subjectId: "worker:mismatched-request-generation",
+          attempt: { ...mismatched, executionGeneration: mismatched.executionGeneration - 1 },
+        })
+      ).status,
+    ).toBe(403);
+
+    const otherAccess = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "preference-attempt-race-other",
+      accountExternalId: `other-account-${suffix}`,
+      accountName: "Other preference attempt account",
+      workspaceExternalSource: "preference-attempt-race-other",
+      workspaceExternalId: `other-workspace-${suffix}`,
+      workspaceName: "Other preference attempt workspace",
+      subjectId: owner.subjectId,
+    });
+    const other = otherAccess.workspaceGrants[0]!;
+    expect(
+      (
+        await request(other, "/summary", {
+          subjectId: "worker:cross-account",
+          attempt: replacement,
+        })
+      ).status,
+    ).toBe(403);
+
+    const racing = await seedAttempt(owner, {
+      kind: "subject",
+      subjectId: owner.subjectId,
+    });
+    const racingSnapshot = await json(
+      await request(owner, "/summary", {
+        subjectId: "worker:racing",
+        attempt: racing,
+      }),
+    );
+    const racingHandle = descriptor(racingSnapshot, active.preference.id).retrievalHandle as string;
+    const [racingRead, racingReplacement] = await Promise.all([
+      request(owner, "/full-content", {
+        method: "POST",
+        subjectId: "worker:racing",
+        attempt: racing,
+        body: { retrievalHandle: racingHandle },
+      }),
+      replaceAttempt(racing),
+    ]);
+    expect([200, 403]).toContain(racingRead.status);
+    expect(
+      (
+        await request(owner, "/full-content", {
+          method: "POST",
+          subjectId: "worker:racing-after-replacement",
+          attempt: racing,
+          body: { retrievalHandle: racingHandle },
+        })
+      ).status,
+    ).toBe(403);
+    expect(racingReplacement.executionGeneration).toBe(racing.executionGeneration + 1);
+  }, 180_000);
+
+  test("scope-version CAS rejects stale lifecycle mutations after promotion and demotion", async () => {
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "preference-scope-race",
+      accountExternalId: `account-${suffix}`,
+      accountName: "Preference scope race account",
+      workspaceExternalSource: "preference-scope-race",
+      workspaceExternalId: `workspace-${suffix}`,
+      workspaceName: "Preference scope race workspace",
+      subjectId: "user:scope-owner",
+    });
+    const owner = access.workspaceGrants[0]!;
+
+    const activationTarget = await proposal(
+      owner,
+      { stableKey: "stale-activation", scope: "user" },
+      DIRECT_READ,
+    );
+    await json(
+      await request(owner, `/${activationTarget.preference.id}/scope`, {
+        method: "POST",
+        permissions: WORKSPACE_ADMIN,
+        body: {
+          scope: "workspace",
+          expectedScopeVersion: 1,
+          reason: "Promote before activation race",
+        },
+      }),
+    );
+    expect(
+      (
+        await request(owner, `/${activationTarget.preference.id}/activate`, {
+          method: "POST",
+          permissions: WORKSPACE_ADMIN,
+          body: {
+            revisionId: activationTarget.revision.id,
+            expectedCurrentRevisionId: null,
+            expectedScopeVersion: 1,
+            reason: "Stale activation after promotion",
+          },
+        })
+      ).status,
+    ).toBe(409);
+    const activationDetail = await json(await request(owner, `/${activationTarget.preference.id}`));
+    expect(activationDetail.preference).toMatchObject({ status: "proposed", scopeVersion: 2 });
+    expect(activationDetail.revisions).toHaveLength(1);
+    expect(activationDetail.events.map((event: Json) => event.type)).toEqual([
+      "scope_changed",
+      "proposal_created",
+    ]);
+
+    const activeTarget = await proposal(
+      owner,
+      { stableKey: "stale-active-mutations", scope: "workspace" },
+      WORKSPACE_ADMIN,
+    );
+    await activate(owner, activeTarget, WORKSPACE_ADMIN);
+    await json(
+      await request(owner, `/${activeTarget.preference.id}/scope`, {
+        method: "POST",
+        permissions: WORKSPACE_ADMIN,
+        body: {
+          scope: "user",
+          expectedScopeVersion: 1,
+          reason: "Demote before active mutation races",
+        },
+      }),
+    );
+
+    const staleCorrection = await request(owner, `/${activeTarget.preference.id}/correct`, {
+      method: "POST",
+      permissions: DIRECT_READ,
+      body: {
+        expectedCurrentRevisionId: activeTarget.revision.id,
+        expectedScopeVersion: 1,
+        title: "Stale correction",
+        description: "Must not create a revision",
+        content: "Must roll back",
+        reason: "Stale correction after demotion",
+      },
+    });
+    expect(staleCorrection.status).toBe(409);
+    const staleDeactivation = await request(owner, `/${activeTarget.preference.id}/deactivate`, {
+      method: "POST",
+      permissions: DIRECT_READ,
+      body: {
+        expectedCurrentRevisionId: activeTarget.revision.id,
+        expectedScopeVersion: 1,
+        reason: "Stale deactivation after demotion",
+      },
+    });
+    expect(staleDeactivation.status).toBe(409);
+
+    const replacement = await proposal(
+      owner,
+      { stableKey: "scope-race-replacement", scope: "user" },
+      DIRECT_READ,
+    );
+    await activate(owner, replacement, DIRECT_READ);
+    const staleSupersession = await request(owner, `/${activeTarget.preference.id}/supersede`, {
+      method: "POST",
+      permissions: DIRECT_READ,
+      body: {
+        replacementPreferenceId: replacement.preference.id,
+        expectedCurrentRevisionId: activeTarget.revision.id,
+        expectedScopeVersion: 1,
+        reason: "Stale supersession after demotion",
+      },
+    });
+    expect(staleSupersession.status).toBe(409);
+
+    const activeDetail = await json(await request(owner, `/${activeTarget.preference.id}`));
+    expect(activeDetail.preference).toMatchObject({
+      status: "active",
+      scopeVersion: 2,
+      supersededByPreferenceId: null,
+      activeRevision: { id: activeTarget.revision.id },
+    });
+    expect(activeDetail.revisions).toHaveLength(1);
+    expect(activeDetail.events.map((event: Json) => event.type)).toEqual([
+      "scope_changed",
+      "activated",
+      "proposal_created",
+    ]);
+
+    const rejectionTarget = await proposal(
+      owner,
+      { stableKey: "stale-rejection", scope: "user" },
+      DIRECT_READ,
+    );
+    await json(
+      await request(owner, `/${rejectionTarget.preference.id}/scope`, {
+        method: "POST",
+        permissions: WORKSPACE_ADMIN,
+        body: {
+          scope: "workspace",
+          expectedScopeVersion: 1,
+          reason: "Promote before rejection race",
+        },
+      }),
+    );
+    const staleRejection = await request(owner, `/${rejectionTarget.preference.id}/reject`, {
+      method: "POST",
+      permissions: WORKSPACE_ADMIN,
+      body: {
+        revisionId: rejectionTarget.revision.id,
+        expectedScopeVersion: 1,
+        reason: "Stale rejection after promotion",
+      },
+    });
+    expect(staleRejection.status).toBe(409);
+    const rejectionDetail = await json(await request(owner, `/${rejectionTarget.preference.id}`));
+    expect(rejectionDetail.preference).toMatchObject({ status: "proposed", scopeVersion: 2 });
+    expect(rejectionDetail.revisions).toHaveLength(1);
+    expect(rejectionDetail.events.map((event: Json) => event.type)).toEqual([
+      "scope_changed",
+      "proposal_created",
+    ]);
+
+    const unauthorized = await proposal(
+      owner,
+      { stableKey: "locked-scope-authorization", scope: "workspace" },
+      WORKSPACE_ADMIN,
+    );
+    const unauthorizedActivation = await request(owner, `/${unauthorized.preference.id}/activate`, {
+      method: "POST",
+      permissions: DIRECT_READ,
+      body: {
+        revisionId: unauthorized.revision.id,
+        expectedCurrentRevisionId: null,
+        expectedScopeVersion: unauthorized.preference.scopeVersion,
+        reason: "Direct user lacks locked workspace authority",
+      },
+    });
+    expect(unauthorizedActivation.status).toBe(403);
   }, 180_000);
 });

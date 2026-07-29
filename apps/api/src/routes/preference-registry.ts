@@ -27,17 +27,18 @@ import {
   deactivatePreferenceRegistry,
   getOrCreatePreferenceRegistrySnapshot,
   getPreferenceRegistryDetail,
+  getPreferenceRegistryDetailForAttempt,
   getPreferenceRegistryFullContent,
   listPreferenceRegistry,
+  listPreferenceRegistryForAttempt,
   PreferenceRegistryConflictError,
   PreferenceRegistryInitiatorError,
   PreferenceRegistryInvalidOperationError,
   PreferenceRegistryNotFoundError,
   PreferenceRegistryStableKeyConflictError,
   rejectPreferenceRegistryProposal,
-  resolvePreferenceRegistryAttemptAuthority,
   supersedePreferenceRegistry,
-  type PreferenceRegistryAttemptAuthority,
+  type PreferenceRegistryAttemptClaims,
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -66,7 +67,10 @@ function exactAttemptClaims(grant: AccessGrant) {
     typeof values.sessionId !== "string" ||
     typeof values.turnId !== "string" ||
     typeof values.attemptId !== "string" ||
-    typeof values.executionGeneration !== "number"
+    typeof values.executionGeneration !== "number" ||
+    !Number.isSafeInteger(values.executionGeneration) ||
+    values.executionGeneration < 1 ||
+    values.executionGeneration > 2_147_483_647
   ) {
     throw new HTTPException(403, { message: "Incomplete signed preference attempt authority" });
   }
@@ -78,34 +82,18 @@ function exactAttemptClaims(grant: AccessGrant) {
   };
 }
 
-async function attemptAuthority(
-  deps: ApiRouteDeps,
-  grant: AccessGrant,
-): Promise<PreferenceRegistryAttemptAuthority> {
+function requiredAttemptClaims(grant: AccessGrant): PreferenceRegistryAttemptClaims {
   const claims = exactAttemptClaims(grant);
   if (!claims) {
     throw new HTTPException(403, {
       message: "Preference snapshot retrieval requires a signed session, turn, and attempt",
     });
   }
-  try {
-    return await resolvePreferenceRegistryAttemptAuthority(deps.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      ...claims,
-    });
-  } catch (error) {
-    if (error instanceof PreferenceRegistryInitiatorError) {
-      throw new HTTPException(403, { message: error.message });
-    }
-    throw error;
-  }
-}
-
-async function visibleSubject(deps: ApiRouteDeps, grant: AccessGrant): Promise<string> {
-  return exactAttemptClaims(grant)
-    ? (await attemptAuthority(deps, grant)).initiatingHumanSubjectId
-    : grant.subjectId;
+  return {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    ...claims,
+  };
 }
 
 function requireHumanMutation(grant: AccessGrant): void {
@@ -161,6 +149,12 @@ function preferenceError(context: Context, error: unknown): Response {
       422,
     );
   }
+  if (error instanceof PreferenceRegistryInitiatorError) {
+    return context.json(
+      { code: "PREFERENCE_REGISTRY_ATTEMPT_REJECTED", message: error.message },
+      403,
+    );
+  }
   throw error;
 }
 
@@ -183,15 +177,24 @@ export function registerPreferenceRegistryRoutes(app: Hono, deps: ApiRouteDeps):
     });
     if (!query.success)
       throw new HTTPException(422, { message: "Invalid preference registry query" });
-    return context.json(
-      PreferenceRegistryListResponse.parse(
-        await listPreferenceRegistry(deps.db, {
-          workspaceId,
-          subjectId: await visibleSubject(deps, grant),
-          ...query.data,
-        }),
-      ),
-    );
+    try {
+      const claims = exactAttemptClaims(grant);
+      const result = claims
+        ? await listPreferenceRegistryForAttempt(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            ...claims,
+            ...query.data,
+          })
+        : await listPreferenceRegistry(deps.db, {
+            workspaceId,
+            subjectId: grant.subjectId,
+            ...query.data,
+          });
+      return context.json(PreferenceRegistryListResponse.parse(result));
+    } catch (error) {
+      return preferenceError(context, error);
+    }
   });
 
   app.post(`${base}/proposals`, async (context) => {
@@ -219,11 +222,15 @@ export function registerPreferenceRegistryRoutes(app: Hono, deps: ApiRouteDeps):
   app.get(`${base}/summary`, async (context) => {
     const workspaceId = context.req.param("workspaceId");
     const grant = await requireAccessGrant(context, deps, workspaceId, "workspace:read");
-    return context.json(
-      PreferenceRegistrySnapshot.parse(
-        await getOrCreatePreferenceRegistrySnapshot(deps.db, await attemptAuthority(deps, grant)),
-      ),
-    );
+    try {
+      return context.json(
+        PreferenceRegistrySnapshot.parse(
+          await getOrCreatePreferenceRegistrySnapshot(deps.db, requiredAttemptClaims(grant)),
+        ),
+      );
+    } catch (error) {
+      return preferenceError(context, error);
+    }
   });
 
   app.post(`${base}/full-content`, async (context) => {
@@ -235,7 +242,7 @@ export function registerPreferenceRegistryRoutes(app: Hono, deps: ApiRouteDeps):
         PreferenceRegistryFullContent.parse(
           await getPreferenceRegistryFullContent(
             deps.db,
-            await attemptAuthority(deps, grant),
+            requiredAttemptClaims(grant),
             request.retrievalHandle,
           ),
         ),
@@ -249,15 +256,21 @@ export function registerPreferenceRegistryRoutes(app: Hono, deps: ApiRouteDeps):
     const workspaceId = context.req.param("workspaceId");
     const grant = await requireAccessGrant(context, deps, workspaceId, "workspace:read");
     try {
-      return context.json(
-        PreferenceRegistryDetailResponse.parse(
-          await getPreferenceRegistryDetail(deps.db, {
+      const claims = exactAttemptClaims(grant);
+      const id = preferenceId(context);
+      const detail = claims
+        ? await getPreferenceRegistryDetailForAttempt(deps.db, {
+            accountId: grant.accountId,
             workspaceId,
-            subjectId: await visibleSubject(deps, grant),
-            preferenceId: preferenceId(context),
-          }),
-        ),
-      );
+            ...claims,
+            preferenceId: id,
+          })
+        : await getPreferenceRegistryDetail(deps.db, {
+            workspaceId,
+            subjectId: grant.subjectId,
+            preferenceId: id,
+          });
+      return context.json(PreferenceRegistryDetailResponse.parse(detail));
     } catch (error) {
       return preferenceError(context, error);
     }
@@ -269,12 +282,6 @@ export function registerPreferenceRegistryRoutes(app: Hono, deps: ApiRouteDeps):
     const id = preferenceId(context);
     const request = await parseBody(context, ActivatePreferenceRegistryRevisionRequest);
     try {
-      const detail = await getPreferenceRegistryDetail(deps.db, {
-        workspaceId,
-        subjectId: grant.subjectId,
-        preferenceId: id,
-      });
-      requireScopeManage(grant, detail.preference.target.scope);
       return context.json(
         PreferenceRegistryMutationResponse.parse(
           await activatePreferenceRegistryRevision(deps.db, {
@@ -282,6 +289,7 @@ export function registerPreferenceRegistryRoutes(app: Hono, deps: ApiRouteDeps):
             workspaceId,
             actorSubjectId: grant.subjectId,
             preferenceId: id,
+            authorizeScope: (scope) => requireScopeManage(grant, scope),
             ...request,
           }),
         ),
@@ -297,12 +305,6 @@ export function registerPreferenceRegistryRoutes(app: Hono, deps: ApiRouteDeps):
     const id = preferenceId(context);
     const request = await parseBody(context, CorrectPreferenceRegistryRequest);
     try {
-      const detail = await getPreferenceRegistryDetail(deps.db, {
-        workspaceId,
-        subjectId: grant.subjectId,
-        preferenceId: id,
-      });
-      requireScopeManage(grant, detail.preference.target.scope);
       return context.json(
         PreferenceRegistryMutationResponse.parse(
           await correctPreferenceRegistry(deps.db, {
@@ -311,6 +313,7 @@ export function registerPreferenceRegistryRoutes(app: Hono, deps: ApiRouteDeps):
             workspaceId,
             actorSubjectId: grant.subjectId,
             preferenceId: id,
+            authorizeScope: (scope) => requireScopeManage(grant, scope),
           }),
         ),
       );
@@ -325,13 +328,6 @@ export function registerPreferenceRegistryRoutes(app: Hono, deps: ApiRouteDeps):
     const id = preferenceId(context);
     const request = await parseBody(context, ChangePreferenceRegistryScopeRequest);
     try {
-      const detail = await getPreferenceRegistryDetail(deps.db, {
-        workspaceId,
-        subjectId: grant.subjectId,
-        preferenceId: id,
-      });
-      requireScopeManage(grant, detail.preference.target.scope);
-      requireScopeManage(grant, request.scope);
       return context.json(
         PreferenceRegistryMutationResponse.parse(
           await changePreferenceRegistryScope(deps.db, {
@@ -340,6 +336,7 @@ export function registerPreferenceRegistryRoutes(app: Hono, deps: ApiRouteDeps):
             workspaceId,
             actorSubjectId: grant.subjectId,
             preferenceId: id,
+            authorizeScope: (scope) => requireScopeManage(grant, scope),
           }),
         ),
       );
@@ -354,12 +351,6 @@ export function registerPreferenceRegistryRoutes(app: Hono, deps: ApiRouteDeps):
     const id = preferenceId(context);
     const request = await parseBody(context, DeactivatePreferenceRegistryRequest);
     try {
-      const detail = await getPreferenceRegistryDetail(deps.db, {
-        workspaceId,
-        subjectId: grant.subjectId,
-        preferenceId: id,
-      });
-      requireScopeManage(grant, detail.preference.target.scope);
       return context.json(
         PreferenceRegistryMutationResponse.parse(
           await deactivatePreferenceRegistry(deps.db, {
@@ -368,6 +359,7 @@ export function registerPreferenceRegistryRoutes(app: Hono, deps: ApiRouteDeps):
             workspaceId,
             actorSubjectId: grant.subjectId,
             preferenceId: id,
+            authorizeScope: (scope) => requireScopeManage(grant, scope),
           }),
         ),
       );
@@ -382,12 +374,6 @@ export function registerPreferenceRegistryRoutes(app: Hono, deps: ApiRouteDeps):
     const id = preferenceId(context);
     const request = await parseBody(context, SupersedePreferenceRegistryRequest);
     try {
-      const detail = await getPreferenceRegistryDetail(deps.db, {
-        workspaceId,
-        subjectId: grant.subjectId,
-        preferenceId: id,
-      });
-      requireScopeManage(grant, detail.preference.target.scope);
       return context.json(
         PreferenceRegistryMutationResponse.parse(
           await supersedePreferenceRegistry(deps.db, {
@@ -396,6 +382,7 @@ export function registerPreferenceRegistryRoutes(app: Hono, deps: ApiRouteDeps):
             workspaceId,
             actorSubjectId: grant.subjectId,
             preferenceId: id,
+            authorizeScope: (scope) => requireScopeManage(grant, scope),
           }),
         ),
       );
@@ -410,12 +397,6 @@ export function registerPreferenceRegistryRoutes(app: Hono, deps: ApiRouteDeps):
     const id = preferenceId(context);
     const request = await parseBody(context, RejectPreferenceRegistryProposalRequest);
     try {
-      const detail = await getPreferenceRegistryDetail(deps.db, {
-        workspaceId,
-        subjectId: grant.subjectId,
-        preferenceId: id,
-      });
-      requireScopeManage(grant, detail.preference.target.scope);
       return context.json(
         PreferenceRegistryMutationResponse.parse(
           await rejectPreferenceRegistryProposal(deps.db, {
@@ -424,6 +405,7 @@ export function registerPreferenceRegistryRoutes(app: Hono, deps: ApiRouteDeps):
             workspaceId,
             actorSubjectId: grant.subjectId,
             preferenceId: id,
+            authorizeScope: (scope) => requireScopeManage(grant, scope),
           }),
         ),
       );

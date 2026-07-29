@@ -262,6 +262,7 @@ export type CreatePreferenceRegistryProposalRequest = z.infer<
 export const ActivatePreferenceRegistryRevisionRequest = z.object({
   revisionId: z.string().uuid(),
   expectedCurrentRevisionId: z.string().uuid().nullable(),
+  expectedScopeVersion: z.number().int().positive(),
   reason: boundedReason,
 });
 export type ActivatePreferenceRegistryRevisionRequest = z.infer<
@@ -270,6 +271,7 @@ export type ActivatePreferenceRegistryRevisionRequest = z.infer<
 
 export const CorrectPreferenceRegistryRequest = z.object({
   expectedCurrentRevisionId: z.string().uuid(),
+  expectedScopeVersion: z.number().int().positive(),
   ...revisionInput,
   reason: boundedReason,
 });
@@ -277,6 +279,7 @@ export type CorrectPreferenceRegistryRequest = z.infer<typeof CorrectPreferenceR
 
 export const DeactivatePreferenceRegistryRequest = z.object({
   expectedCurrentRevisionId: z.string().uuid(),
+  expectedScopeVersion: z.number().int().positive(),
   reason: boundedReason,
 });
 export type DeactivatePreferenceRegistryRequest = z.infer<
@@ -295,12 +298,14 @@ export type ChangePreferenceRegistryScopeRequest = z.infer<
 export const SupersedePreferenceRegistryRequest = z.object({
   replacementPreferenceId: z.string().uuid(),
   expectedCurrentRevisionId: z.string().uuid(),
+  expectedScopeVersion: z.number().int().positive(),
   reason: boundedReason,
 });
 export type SupersedePreferenceRegistryRequest = z.infer<typeof SupersedePreferenceRegistryRequest>;
 
 export const RejectPreferenceRegistryProposalRequest = z.object({
   revisionId: z.string().uuid(),
+  expectedScopeVersion: z.number().int().positive(),
   reason: boundedReason,
 });
 export type RejectPreferenceRegistryProposalRequest = z.infer<

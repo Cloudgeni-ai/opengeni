@@ -57,7 +57,6 @@ import {
   requireFile,
   requireScheduledTask,
   requireSession,
-  resolvePreferenceRegistryAttemptAuthority,
   saveWorkspaceMemory,
   searchWorkspaceMemories,
   serializeEffectiveSessionControl,
@@ -1029,7 +1028,10 @@ function preferenceAttemptClaims(grant: AccessGrant): {
     typeof metadata["sessionId"] !== "string" ||
     typeof metadata["turnId"] !== "string" ||
     typeof metadata["attemptId"] !== "string" ||
-    typeof metadata["executionGeneration"] !== "number"
+    typeof metadata["executionGeneration"] !== "number" ||
+    !Number.isSafeInteger(metadata["executionGeneration"]) ||
+    metadata["executionGeneration"] < 1 ||
+    metadata["executionGeneration"] > 2_147_483_647
   ) {
     return null;
   }
@@ -1047,14 +1049,14 @@ function registerPreferenceRegistryTools(
   grant: AccessGrant,
   json: JsonResult,
 ): void {
-  const resolve = async () => {
-    const claims = preferenceAttemptClaims(grant);
-    if (!claims) throw new Error("Exact signed preference attempt authority is required.");
-    return await resolvePreferenceRegistryAttemptAuthority(deps.db, {
+  const attemptClaims = () => {
+    const resolved = preferenceAttemptClaims(grant);
+    if (!resolved) throw new Error("Exact signed preference attempt authority is required.");
+    return {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
-      ...claims,
-    });
+      ...resolved,
+    };
   };
 
   server.registerTool(
@@ -1064,7 +1066,7 @@ function registerPreferenceRegistryTools(
         "List bounded deterministic descriptors for organization, workspace, and immutable initiating-human preferences frozen to this exact attempt. Full content is omitted; retrieve only a relevant returned handle.",
       inputSchema: {},
     },
-    async () => json(await getOrCreatePreferenceRegistrySnapshot(deps.db, await resolve())),
+    async () => json(await getOrCreatePreferenceRegistrySnapshot(deps.db, attemptClaims())),
   );
 
   server.registerTool(
@@ -1075,7 +1077,7 @@ function registerPreferenceRegistryTools(
       inputSchema: { retrievalHandle: z4.string().min(1).max(512) },
     },
     async ({ retrievalHandle }) =>
-      json(await getPreferenceRegistryFullContent(deps.db, await resolve(), retrievalHandle)),
+      json(await getPreferenceRegistryFullContent(deps.db, attemptClaims(), retrievalHandle)),
   );
 }
 

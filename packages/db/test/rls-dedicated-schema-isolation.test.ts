@@ -210,8 +210,16 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
       update: false,
       delete: false,
     });
+    expect(
+      posture.tables.find((table) => table.name === "preference_registry_events"),
+    ).toMatchObject({
+      select: true,
+      insert: false,
+      update: false,
+      delete: false,
+    });
     for (const tableName of [
-      "preference_registry_events",
+      "preference_registry_preferences",
       "preference_registry_revisions",
       "preference_registry_snapshots",
       "workspace_instruction_policy_activation_events",
@@ -247,6 +255,22 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
     expect(
       posture.tables.find((table) => table.name === "session_history_items_repair_audit"),
     ).toMatchObject({ select: false, insert: false, update: false, delete: false });
+
+    const [preferenceFunctions] = await admin<
+      Array<{ lock_execute: boolean; lifecycle_execute: boolean }>
+    >`
+      SELECT
+        has_function_privilege(
+          'opengeni_app',
+          ${`${SCHEMA}.preference_registry_lock_heads(uuid[])`},
+          'EXECUTE'
+        ) AS lock_execute,
+        has_function_privilege(
+          'opengeni_app',
+          ${`${SCHEMA}.preference_registry_apply_lifecycle(text,uuid,integer,uuid,uuid,text,uuid,text,text)`},
+          'EXECUTE'
+        ) AS lifecycle_execute`;
+    expect(preferenceFunctions).toEqual({ lock_execute: true, lifecycle_execute: true });
   });
 
   test("the restricted runtime role can perform Better Auth table DML", async () => {

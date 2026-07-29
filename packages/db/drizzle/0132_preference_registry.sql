@@ -9,10 +9,10 @@ CREATE SEQUENCE IF NOT EXISTS "preference_registry_revision_seq" AS bigint;
 
 CREATE TABLE "preference_registry_preferences" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  "account_id" uuid NOT NULL REFERENCES "managed_accounts"("id") ON DELETE CASCADE,
+  "account_id" uuid NOT NULL REFERENCES "managed_accounts"("id") ON DELETE RESTRICT,
   "stable_key" text NOT NULL,
   "scope" text NOT NULL,
-  "scope_workspace_id" uuid REFERENCES "workspaces"("id") ON DELETE CASCADE,
+  "scope_workspace_id" uuid REFERENCES "workspaces"("id") ON DELETE RESTRICT,
   "scope_subject_id" text,
   "status" text NOT NULL DEFAULT 'proposed',
   "scope_version" integer NOT NULL DEFAULT 1,
@@ -75,7 +75,7 @@ CREATE INDEX "preference_registry_preferences_applicable_idx"
 
 CREATE TABLE "preference_registry_revisions" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  "account_id" uuid NOT NULL REFERENCES "managed_accounts"("id") ON DELETE CASCADE,
+  "account_id" uuid NOT NULL REFERENCES "managed_accounts"("id") ON DELETE RESTRICT,
   "preference_id" uuid NOT NULL,
   "revision" bigint NOT NULL DEFAULT nextval('preference_registry_revision_seq'),
   "title" text NOT NULL,
@@ -94,7 +94,7 @@ CREATE TABLE "preference_registry_revisions" (
   "created_at" timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT "preference_registry_revisions_preference_fk"
     FOREIGN KEY ("account_id", "preference_id")
-    REFERENCES "preference_registry_preferences"("account_id", "id") ON DELETE CASCADE,
+    REFERENCES "preference_registry_preferences"("account_id", "id") ON DELETE RESTRICT,
   CONSTRAINT "preference_registry_revisions_revision_chk" CHECK ("revision" > 0),
   CONSTRAINT "preference_registry_revisions_text_chk" CHECK (
     length(btrim("title")) BETWEEN 1 AND 120
@@ -144,7 +144,7 @@ ALTER TABLE "preference_registry_preferences"
 
 CREATE TABLE "preference_registry_events" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  "account_id" uuid NOT NULL REFERENCES "managed_accounts"("id") ON DELETE CASCADE,
+  "account_id" uuid NOT NULL REFERENCES "managed_accounts"("id") ON DELETE RESTRICT,
   "preference_id" uuid NOT NULL,
   "type" text NOT NULL,
   "version" integer NOT NULL,
@@ -162,7 +162,7 @@ CREATE TABLE "preference_registry_events" (
   "created_at" timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT "preference_registry_events_preference_fk"
     FOREIGN KEY ("account_id", "preference_id")
-    REFERENCES "preference_registry_preferences"("account_id", "id") ON DELETE CASCADE,
+    REFERENCES "preference_registry_preferences"("account_id", "id") ON DELETE RESTRICT,
   CONSTRAINT "preference_registry_events_old_revision_fk"
     FOREIGN KEY ("preference_id", "old_revision_id")
     REFERENCES "preference_registry_revisions"("preference_id", "id") ON DELETE RESTRICT,
@@ -183,6 +183,60 @@ CREATE TABLE "preference_registry_events" (
     length(btrim("actor_subject_id")) BETWEEN 1 AND 1024
     AND length(btrim("reason")) BETWEEN 1 AND 4096
   ),
+  CONSTRAINT "preference_registry_events_shape_chk" CHECK (
+    (
+      "type" = 'proposal_created'
+      AND "old_revision_id" IS NULL AND "new_revision_id" IS NOT NULL
+      AND "old_scope" IS NULL AND "old_workspace_id" IS NULL AND "old_subject_id" IS NULL
+      AND "new_scope" IS NOT NULL AND "related_preference_id" IS NULL
+      AND (
+        ("new_scope" = 'organization' AND "new_workspace_id" IS NULL AND "new_subject_id" IS NULL)
+        OR ("new_scope" = 'workspace' AND "new_workspace_id" IS NOT NULL AND "new_subject_id" IS NULL)
+        OR ("new_scope" = 'user' AND "new_workspace_id" IS NULL AND "new_subject_id" IS NOT NULL)
+      )
+    ) OR (
+      "type" IN ('activated', 'corrected')
+      AND "new_revision_id" IS NOT NULL
+      AND "old_scope" IS NULL AND "old_workspace_id" IS NULL AND "old_subject_id" IS NULL
+      AND "new_scope" IS NULL AND "new_workspace_id" IS NULL AND "new_subject_id" IS NULL
+      AND "related_preference_id" IS NULL
+      AND ("type" <> 'corrected' OR "old_revision_id" IS NOT NULL)
+    ) OR (
+      "type" = 'rejected'
+      AND "old_revision_id" IS NULL AND "new_revision_id" IS NOT NULL
+      AND "old_scope" IS NULL AND "old_workspace_id" IS NULL AND "old_subject_id" IS NULL
+      AND "new_scope" IS NULL AND "new_workspace_id" IS NULL AND "new_subject_id" IS NULL
+      AND "related_preference_id" IS NULL
+    ) OR (
+      "type" = 'deactivated'
+      AND "old_revision_id" IS NOT NULL AND "new_revision_id" IS NULL
+      AND "old_scope" IS NULL AND "old_workspace_id" IS NULL AND "old_subject_id" IS NULL
+      AND "new_scope" IS NULL AND "new_workspace_id" IS NULL AND "new_subject_id" IS NULL
+      AND "related_preference_id" IS NULL
+    ) OR (
+      "type" = 'superseded'
+      AND "old_revision_id" IS NOT NULL AND "new_revision_id" IS NULL
+      AND "old_scope" IS NULL AND "old_workspace_id" IS NULL AND "old_subject_id" IS NULL
+      AND "new_scope" IS NULL AND "new_workspace_id" IS NULL AND "new_subject_id" IS NULL
+      AND "related_preference_id" IS NOT NULL
+      AND "related_preference_id" <> "preference_id"
+    ) OR (
+      "type" = 'scope_changed'
+      AND "old_revision_id" IS NULL AND "new_revision_id" IS NULL
+      AND "old_scope" IS NOT NULL AND "new_scope" IS NOT NULL AND "old_scope" <> "new_scope"
+      AND "related_preference_id" IS NULL
+      AND (
+        ("old_scope" = 'organization' AND "old_workspace_id" IS NULL AND "old_subject_id" IS NULL)
+        OR ("old_scope" = 'workspace' AND "old_workspace_id" IS NOT NULL AND "old_subject_id" IS NULL)
+        OR ("old_scope" = 'user' AND "old_workspace_id" IS NULL AND "old_subject_id" IS NOT NULL)
+      )
+      AND (
+        ("new_scope" = 'organization' AND "new_workspace_id" IS NULL AND "new_subject_id" IS NULL)
+        OR ("new_scope" = 'workspace' AND "new_workspace_id" IS NOT NULL AND "new_subject_id" IS NULL)
+        OR ("new_scope" = 'user' AND "new_workspace_id" IS NULL AND "new_subject_id" IS NOT NULL)
+      )
+    )
+  ),
   CONSTRAINT "preference_registry_events_preference_version_uq" UNIQUE ("preference_id", "version")
 );
 
@@ -191,11 +245,11 @@ CREATE INDEX "preference_registry_events_timeline_idx"
 
 CREATE TABLE "preference_registry_snapshots" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  "account_id" uuid NOT NULL REFERENCES "managed_accounts"("id") ON DELETE CASCADE,
-  "workspace_id" uuid NOT NULL REFERENCES "workspaces"("id") ON DELETE CASCADE,
-  "session_id" uuid NOT NULL REFERENCES "sessions"("id") ON DELETE CASCADE,
-  "turn_id" uuid NOT NULL REFERENCES "session_turns"("id") ON DELETE CASCADE,
-  "attempt_id" uuid NOT NULL REFERENCES "session_turn_attempts"("id") ON DELETE CASCADE,
+  "account_id" uuid NOT NULL REFERENCES "managed_accounts"("id") ON DELETE RESTRICT,
+  "workspace_id" uuid NOT NULL REFERENCES "workspaces"("id") ON DELETE RESTRICT,
+  "session_id" uuid NOT NULL REFERENCES "sessions"("id") ON DELETE RESTRICT,
+  "turn_id" uuid NOT NULL REFERENCES "session_turns"("id") ON DELETE RESTRICT,
+  "attempt_id" uuid NOT NULL REFERENCES "session_turn_attempts"("id") ON DELETE RESTRICT,
   "execution_generation" integer NOT NULL,
   "initiating_human_subject_id" text NOT NULL,
   "descriptors" jsonb NOT NULL,
@@ -245,6 +299,134 @@ $$;
 CREATE TRIGGER preference_registry_preferences_validate_head
   BEFORE INSERT OR UPDATE ON "preference_registry_preferences"
   FOR EACH ROW EXECUTE FUNCTION preference_registry_validate_head();
+
+CREATE OR REPLACE FUNCTION preference_registry_guard_head_mutation()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE lifecycle_operation text;
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'preference registry heads cannot be deleted'
+      USING ERRCODE = '55000';
+  END IF;
+  IF current_setting('opengeni.preference_lifecycle_head_id', true)
+      IS DISTINCT FROM NEW.id::text THEN
+    RAISE EXCEPTION 'preference registry heads change only through the lifecycle function'
+      USING ERRCODE = '55000';
+  END IF;
+  lifecycle_operation := current_setting('opengeni.preference_lifecycle_operation', true);
+  IF NEW.id IS DISTINCT FROM OLD.id
+    OR NEW.account_id IS DISTINCT FROM OLD.account_id
+    OR NEW.stable_key IS DISTINCT FROM OLD.stable_key
+    OR NEW.created_by_subject_id IS DISTINCT FROM OLD.created_by_subject_id
+    OR NEW.created_at IS DISTINCT FROM OLD.created_at
+  THEN
+    RAISE EXCEPTION 'preference registry stable identity is immutable'
+      USING ERRCODE = '55000';
+  END IF;
+  IF lifecycle_operation IN ('activate', 'correct') THEN
+    IF NEW.status <> 'active'
+      OR NEW.active_revision_id IS NULL
+      OR NEW.activation_version <> OLD.activation_version + 1
+      OR NEW.scope_version <> OLD.scope_version
+      OR ROW(NEW.scope, NEW.scope_workspace_id, NEW.scope_subject_id)
+        IS DISTINCT FROM ROW(OLD.scope, OLD.scope_workspace_id, OLD.scope_subject_id)
+      OR NEW.superseded_by_preference_id IS DISTINCT FROM OLD.superseded_by_preference_id
+    THEN
+      RAISE EXCEPTION 'invalid preference activation transition'
+        USING ERRCODE = '23514';
+    END IF;
+  ELSIF lifecycle_operation = 'reject' THEN
+    IF OLD.status <> 'proposed' OR NEW.status <> 'rejected'
+      OR NEW.scope_version <> OLD.scope_version
+      OR NEW.activation_version <> OLD.activation_version
+      OR ROW(NEW.scope, NEW.scope_workspace_id, NEW.scope_subject_id)
+        IS DISTINCT FROM ROW(OLD.scope, OLD.scope_workspace_id, OLD.scope_subject_id)
+      OR ROW(NEW.active_revision_id, NEW.active_revision, NEW.active_content_hash)
+        IS DISTINCT FROM ROW(OLD.active_revision_id, OLD.active_revision, OLD.active_content_hash)
+      OR NEW.superseded_by_preference_id IS DISTINCT FROM OLD.superseded_by_preference_id
+    THEN
+      RAISE EXCEPTION 'invalid preference rejection transition'
+        USING ERRCODE = '23514';
+    END IF;
+  ELSIF lifecycle_operation = 'deactivate' THEN
+    IF OLD.status <> 'active' OR NEW.status <> 'inactive'
+      OR OLD.active_revision_id IS NULL OR NEW.active_revision_id IS NOT NULL
+      OR NEW.active_revision IS NOT NULL OR NEW.active_content_hash IS NOT NULL
+      OR NEW.activation_version <> OLD.activation_version + 1
+      OR NEW.scope_version <> OLD.scope_version
+      OR ROW(NEW.scope, NEW.scope_workspace_id, NEW.scope_subject_id)
+        IS DISTINCT FROM ROW(OLD.scope, OLD.scope_workspace_id, OLD.scope_subject_id)
+      OR NEW.superseded_by_preference_id IS DISTINCT FROM OLD.superseded_by_preference_id
+    THEN
+      RAISE EXCEPTION 'invalid preference deactivation transition'
+        USING ERRCODE = '23514';
+    END IF;
+  ELSIF lifecycle_operation = 'scope' THEN
+    IF NEW.status IS DISTINCT FROM OLD.status
+      OR NEW.scope = OLD.scope
+      OR NEW.scope_version <> OLD.scope_version + 1
+      OR NEW.activation_version <> OLD.activation_version
+      OR ROW(NEW.active_revision_id, NEW.active_revision, NEW.active_content_hash)
+        IS DISTINCT FROM ROW(OLD.active_revision_id, OLD.active_revision, OLD.active_content_hash)
+      OR NEW.superseded_by_preference_id IS DISTINCT FROM OLD.superseded_by_preference_id
+    THEN
+      RAISE EXCEPTION 'invalid preference scope transition'
+        USING ERRCODE = '23514';
+    END IF;
+  ELSIF lifecycle_operation = 'supersede' THEN
+    IF OLD.status <> 'active' OR NEW.status <> 'superseded'
+      OR NEW.superseded_by_preference_id IS NULL
+      OR NEW.superseded_by_preference_id = OLD.id
+      OR NEW.scope_version <> OLD.scope_version
+      OR NEW.activation_version <> OLD.activation_version
+      OR ROW(NEW.scope, NEW.scope_workspace_id, NEW.scope_subject_id)
+        IS DISTINCT FROM ROW(OLD.scope, OLD.scope_workspace_id, OLD.scope_subject_id)
+      OR ROW(NEW.active_revision_id, NEW.active_revision, NEW.active_content_hash)
+        IS DISTINCT FROM ROW(OLD.active_revision_id, OLD.active_revision, OLD.active_content_hash)
+    THEN
+      RAISE EXCEPTION 'invalid preference supersession transition'
+        USING ERRCODE = '23514';
+    END IF;
+  ELSE
+    RAISE EXCEPTION 'preference registry lifecycle operation is invalid'
+      USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER preference_registry_preferences_lifecycle_only
+  BEFORE UPDATE OR DELETE ON "preference_registry_preferences"
+  FOR EACH ROW EXECUTE FUNCTION preference_registry_guard_head_mutation();
+
+CREATE OR REPLACE FUNCTION preference_registry_require_proposal_event()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM preference_registry_events event
+    WHERE event.account_id = NEW.account_id
+      AND event.preference_id = NEW.id
+      AND event.type = 'proposal_created'
+      AND event.version = 1
+      AND event.old_revision_id IS NULL
+      AND event.new_revision_id IS NOT NULL
+      AND event.old_scope IS NULL
+      AND event.new_scope = NEW.scope
+      AND event.new_workspace_id IS NOT DISTINCT FROM NEW.scope_workspace_id
+      AND event.new_subject_id IS NOT DISTINCT FROM NEW.scope_subject_id
+  ) THEN
+    RAISE EXCEPTION 'preference proposal requires an exact immutable creation event'
+      USING ERRCODE = '23514';
+  END IF;
+  RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER preference_registry_preferences_require_proposal_event
+  AFTER INSERT ON "preference_registry_preferences"
+  DEFERRABLE INITIALLY DEFERRED
+  FOR EACH ROW EXECUTE FUNCTION preference_registry_require_proposal_event();
 
 CREATE OR REPLACE FUNCTION preference_registry_validate_snapshot()
 RETURNS trigger LANGUAGE plpgsql AS $$
@@ -381,26 +563,6 @@ CREATE TRIGGER preference_registry_snapshots_validate
 CREATE OR REPLACE FUNCTION preference_registry_reject_history_mutation()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-  IF TG_OP = 'DELETE' AND pg_trigger_depth() > 1 THEN
-    -- OLD has a different row type for snapshots versus revision/event rows;
-    -- branch before referencing table-specific fields so PL/pgSQL never plans
-    -- an invalid record-field access. Parent absence plus nested depth is the
-    -- same fail-closed cascade proof used by the OPE-106 history trigger.
-    IF TG_TABLE_NAME = 'preference_registry_snapshots' THEN
-      IF NOT EXISTS (
-        SELECT 1 FROM workspaces workspace WHERE workspace.id = OLD.workspace_id
-      ) THEN
-        RETURN OLD;
-      END IF;
-    ELSE
-      IF NOT EXISTS (
-        SELECT 1 FROM preference_registry_preferences preference
-        WHERE preference.id = OLD.preference_id
-      ) THEN
-        RETURN OLD;
-      END IF;
-    END IF;
-  END IF;
   RAISE EXCEPTION 'preference registry history is immutable' USING ERRCODE = '55000';
 END;
 $$;
@@ -428,6 +590,390 @@ CREATE OR REPLACE FUNCTION opengeni_private.preference_registry_scope_visible(
       OR (row_scope = 'user' AND row_subject_id = opengeni_private.current_subject_id())
     );
 $$;
+
+DO $lock_function$
+DECLARE target_schema text := current_schema();
+BEGIN
+  EXECUTE format($ddl$
+    CREATE OR REPLACE FUNCTION %I.preference_registry_lock_heads(p_preference_ids uuid[])
+    RETURNS TABLE (preference_id uuid)
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = %I, pg_catalog
+    AS $body$
+    DECLARE
+      context_account_id uuid;
+      context_workspace_id uuid;
+      context_subject_id text;
+      requested_count integer;
+      locked_count integer;
+    BEGIN
+      context_account_id := NULLIF(
+        current_setting('opengeni.account_id', true), ''
+      )::uuid;
+      context_workspace_id := NULLIF(
+        current_setting('opengeni.workspace_id', true), ''
+      )::uuid;
+      context_subject_id := NULLIF(
+        current_setting('opengeni.subject_id', true), ''
+      );
+      SELECT count(DISTINCT requested_id) INTO requested_count
+      FROM unnest(p_preference_ids) requested_id;
+      IF context_account_id IS NULL OR context_workspace_id IS NULL
+        OR context_subject_id IS NULL
+        OR requested_count < 1 OR requested_count > 2
+        OR requested_count <> cardinality(p_preference_ids)
+      THEN
+        RAISE EXCEPTION 'preference head lock requires exact transaction-local scope'
+          USING ERRCODE = '42501';
+      END IF;
+      PERFORM 1
+      FROM preference_registry_preferences candidate
+      WHERE candidate.id = ANY(p_preference_ids)
+        AND candidate.account_id = context_account_id
+        AND opengeni_private.preference_registry_scope_visible(
+          candidate.account_id,
+          candidate.scope,
+          candidate.scope_workspace_id,
+          candidate.scope_subject_id
+        )
+      ORDER BY candidate.id
+      FOR UPDATE;
+      GET DIAGNOSTICS locked_count = ROW_COUNT;
+      IF locked_count <> requested_count THEN
+        RAISE EXCEPTION 'preference head was not found in the authorized scope'
+          USING ERRCODE = '42501';
+      END IF;
+      RETURN QUERY
+      SELECT candidate.id
+      FROM preference_registry_preferences candidate
+      WHERE candidate.id = ANY(p_preference_ids)
+      ORDER BY candidate.id;
+    END
+    $body$
+  $ddl$, target_schema, target_schema);
+  EXECUTE format(
+    'REVOKE ALL ON FUNCTION %I.preference_registry_lock_heads(uuid[]) FROM PUBLIC',
+    target_schema
+  );
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
+    EXECUTE format(
+      'GRANT EXECUTE ON FUNCTION %I.preference_registry_lock_heads(uuid[]) TO opengeni_app',
+      target_schema
+    );
+  END IF;
+END $lock_function$;
+
+DO $lifecycle_function$
+DECLARE target_schema text := current_schema();
+BEGIN
+  EXECUTE format($ddl$
+    CREATE OR REPLACE FUNCTION %I.preference_registry_apply_lifecycle(
+      p_operation text,
+      p_preference_id uuid,
+      p_expected_scope_version integer,
+      p_expected_revision_id uuid,
+      p_revision_id uuid,
+      p_new_scope text,
+      p_related_preference_id uuid,
+      p_actor_subject_id text,
+      p_reason text
+    ) RETURNS TABLE (event_id uuid)
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = %I, pg_catalog
+    AS $body$
+    DECLARE
+      preference record;
+      replacement record;
+      revision record;
+      context_account_id uuid;
+      context_workspace_id uuid;
+      context_subject_id text;
+      next_event_version integer;
+      event_type text;
+      old_revision_id uuid;
+      new_revision_id uuid;
+      old_scope text;
+      old_workspace_id uuid;
+      old_subject_id text;
+      new_scope text;
+      new_workspace_id uuid;
+      new_subject_id text;
+      related_preference_id uuid;
+      lifecycle_lock_count integer;
+    BEGIN
+      context_account_id := NULLIF(
+        current_setting('opengeni.account_id', true), ''
+      )::uuid;
+      context_workspace_id := NULLIF(
+        current_setting('opengeni.workspace_id', true), ''
+      )::uuid;
+      context_subject_id := NULLIF(
+        current_setting('opengeni.subject_id', true), ''
+      );
+      IF context_account_id IS NULL OR context_workspace_id IS NULL
+        OR context_subject_id IS NULL
+        OR p_actor_subject_id IS DISTINCT FROM context_subject_id
+      THEN
+        RAISE EXCEPTION 'preference lifecycle requires exact transaction-local actor authority'
+          USING ERRCODE = '42501';
+      END IF;
+      IF length(btrim(p_actor_subject_id)) NOT BETWEEN 1 AND 1024
+        OR length(btrim(p_reason)) NOT BETWEEN 1 AND 4096
+      THEN
+        RAISE EXCEPTION 'preference lifecycle actor and reason are invalid'
+          USING ERRCODE = '22023';
+      END IF;
+
+      IF p_operation = 'supersede' THEN
+        IF p_related_preference_id IS NULL OR p_related_preference_id = p_preference_id THEN
+          RAISE EXCEPTION 'preference supersession requires a distinct replacement'
+            USING ERRCODE = '22023';
+        END IF;
+        PERFORM 1
+        FROM preference_registry_preferences candidate
+        WHERE candidate.id IN (p_preference_id, p_related_preference_id)
+          AND candidate.account_id = context_account_id
+          AND opengeni_private.preference_registry_scope_visible(
+            candidate.account_id,
+            candidate.scope,
+            candidate.scope_workspace_id,
+            candidate.scope_subject_id
+          )
+        ORDER BY candidate.id
+        FOR UPDATE;
+        GET DIAGNOSTICS lifecycle_lock_count = ROW_COUNT;
+        IF lifecycle_lock_count <> 2 THEN
+          RAISE EXCEPTION 'preference supersession heads were not found in the authorized scope'
+            USING ERRCODE = '42501';
+        END IF;
+      ELSE
+        PERFORM 1
+        FROM preference_registry_preferences candidate
+        WHERE candidate.id = p_preference_id
+          AND candidate.account_id = context_account_id
+          AND opengeni_private.preference_registry_scope_visible(
+            candidate.account_id,
+            candidate.scope,
+            candidate.scope_workspace_id,
+            candidate.scope_subject_id
+          )
+        FOR UPDATE;
+        GET DIAGNOSTICS lifecycle_lock_count = ROW_COUNT;
+        IF lifecycle_lock_count <> 1 THEN
+          RAISE EXCEPTION 'preference lifecycle head was not found in the authorized scope'
+            USING ERRCODE = '42501';
+        END IF;
+      END IF;
+
+      SELECT * INTO preference
+      FROM preference_registry_preferences candidate
+      WHERE candidate.id = p_preference_id
+        AND candidate.account_id = context_account_id;
+      IF NOT FOUND OR NOT opengeni_private.preference_registry_scope_visible(
+        preference.account_id,
+        preference.scope,
+        preference.scope_workspace_id,
+        preference.scope_subject_id
+      ) THEN
+        RAISE EXCEPTION 'preference was not found in the authorized scope'
+          USING ERRCODE = '42501';
+      END IF;
+      IF preference.scope_version IS DISTINCT FROM p_expected_scope_version THEN
+        RAISE EXCEPTION 'preference scope version changed'
+          USING ERRCODE = '40001';
+      END IF;
+      IF preference.active_revision_id IS DISTINCT FROM p_expected_revision_id THEN
+        RAISE EXCEPTION 'preference active revision changed'
+          USING ERRCODE = '40001';
+      END IF;
+      PERFORM set_config(
+        'opengeni.preference_lifecycle_head_id', preference.id::text, true
+      );
+      PERFORM set_config(
+        'opengeni.preference_lifecycle_operation', p_operation, true
+      );
+
+      IF p_operation IN ('proposal_created', 'activate', 'correct', 'reject') THEN
+        SELECT * INTO revision
+        FROM preference_registry_revisions candidate
+        WHERE candidate.id = p_revision_id
+          AND candidate.preference_id = preference.id
+          AND candidate.account_id = preference.account_id;
+        IF NOT FOUND THEN
+          RAISE EXCEPTION 'preference lifecycle revision was not found'
+            USING ERRCODE = '23503';
+        END IF;
+      END IF;
+
+      IF p_operation = 'proposal_created' THEN
+        IF preference.status <> 'proposed'
+          OR preference.active_revision_id IS NOT NULL
+          OR EXISTS (
+            SELECT 1 FROM preference_registry_events event
+            WHERE event.preference_id = preference.id
+          )
+        THEN
+          RAISE EXCEPTION 'proposal creation event requires a new inactive proposal'
+            USING ERRCODE = '23514';
+        END IF;
+        event_type := 'proposal_created';
+        new_revision_id := revision.id;
+        new_scope := preference.scope;
+        new_workspace_id := preference.scope_workspace_id;
+        new_subject_id := preference.scope_subject_id;
+      ELSIF p_operation = 'activate' THEN
+        IF preference.status IN ('rejected', 'superseded')
+          OR revision.id IS NOT DISTINCT FROM preference.active_revision_id
+        THEN
+          RAISE EXCEPTION 'preference cannot activate the requested revision'
+            USING ERRCODE = '23514';
+        END IF;
+        UPDATE preference_registry_preferences
+        SET status = 'active',
+          active_revision_id = revision.id,
+          active_revision = revision.revision,
+          active_content_hash = revision.content_hash,
+          activation_version = activation_version + 1,
+          updated_at = clock_timestamp()
+        WHERE id = preference.id;
+        event_type := 'activated';
+        old_revision_id := preference.active_revision_id;
+        new_revision_id := revision.id;
+      ELSIF p_operation = 'correct' THEN
+        IF preference.status IN ('rejected', 'superseded')
+          OR preference.active_revision_id IS NULL
+          OR revision.corrects_revision_id IS DISTINCT FROM preference.active_revision_id
+          OR revision.provenance_source <> 'human'
+        THEN
+          RAISE EXCEPTION 'preference correction does not identify the active immutable revision'
+            USING ERRCODE = '23514';
+        END IF;
+        UPDATE preference_registry_preferences
+        SET status = 'active',
+          active_revision_id = revision.id,
+          active_revision = revision.revision,
+          active_content_hash = revision.content_hash,
+          activation_version = activation_version + 1,
+          updated_at = clock_timestamp()
+        WHERE id = preference.id;
+        event_type := 'corrected';
+        old_revision_id := preference.active_revision_id;
+        new_revision_id := revision.id;
+      ELSIF p_operation = 'reject' THEN
+        IF preference.status <> 'proposed' OR preference.active_revision_id IS NOT NULL THEN
+          RAISE EXCEPTION 'only an inactive proposal can be rejected'
+            USING ERRCODE = '23514';
+        END IF;
+        UPDATE preference_registry_preferences
+        SET status = 'rejected', updated_at = clock_timestamp()
+        WHERE id = preference.id;
+        event_type := 'rejected';
+        new_revision_id := revision.id;
+      ELSIF p_operation = 'deactivate' THEN
+        IF preference.status <> 'active' OR preference.active_revision_id IS NULL THEN
+          RAISE EXCEPTION 'only an active preference can be deactivated'
+            USING ERRCODE = '23514';
+        END IF;
+        UPDATE preference_registry_preferences
+        SET status = 'inactive', active_revision_id = NULL,
+          active_revision = NULL, active_content_hash = NULL,
+          activation_version = activation_version + 1,
+          updated_at = clock_timestamp()
+        WHERE id = preference.id;
+        event_type := 'deactivated';
+        old_revision_id := preference.active_revision_id;
+      ELSIF p_operation = 'scope' THEN
+        IF preference.status IN ('rejected', 'superseded')
+          OR p_new_scope NOT IN ('organization', 'workspace', 'user')
+          OR p_new_scope = preference.scope
+        THEN
+          RAISE EXCEPTION 'preference cannot change to the requested scope'
+            USING ERRCODE = '23514';
+        END IF;
+        old_scope := preference.scope;
+        old_workspace_id := preference.scope_workspace_id;
+        old_subject_id := preference.scope_subject_id;
+        new_scope := p_new_scope;
+        new_workspace_id := CASE WHEN p_new_scope = 'workspace'
+          THEN context_workspace_id ELSE NULL END;
+        new_subject_id := CASE WHEN p_new_scope = 'user'
+          THEN context_subject_id ELSE NULL END;
+        UPDATE preference_registry_preferences
+        SET scope = new_scope,
+          scope_workspace_id = new_workspace_id,
+          scope_subject_id = new_subject_id,
+          scope_version = scope_version + 1,
+          updated_at = clock_timestamp()
+        WHERE id = preference.id;
+        event_type := 'scope_changed';
+      ELSIF p_operation = 'supersede' THEN
+        SELECT * INTO replacement
+        FROM preference_registry_preferences candidate
+        WHERE candidate.id = p_related_preference_id
+          AND candidate.account_id = preference.account_id;
+        IF NOT FOUND
+          OR replacement.status <> 'active'
+          OR replacement.active_revision_id IS NULL
+          OR replacement.scope IS DISTINCT FROM preference.scope
+          OR replacement.scope_workspace_id IS DISTINCT FROM preference.scope_workspace_id
+          OR replacement.scope_subject_id IS DISTINCT FROM preference.scope_subject_id
+          OR NOT opengeni_private.preference_registry_scope_visible(
+            replacement.account_id,
+            replacement.scope,
+            replacement.scope_workspace_id,
+            replacement.scope_subject_id
+          )
+          OR preference.status <> 'active'
+          OR preference.active_revision_id IS NULL
+        THEN
+          RAISE EXCEPTION 'replacement preference is not active in the exact same target'
+            USING ERRCODE = '23514';
+        END IF;
+        UPDATE preference_registry_preferences
+        SET status = 'superseded',
+          superseded_by_preference_id = replacement.id,
+          updated_at = clock_timestamp()
+        WHERE id = preference.id;
+        event_type := 'superseded';
+        old_revision_id := preference.active_revision_id;
+        related_preference_id := replacement.id;
+      ELSE
+        RAISE EXCEPTION 'unsupported preference lifecycle operation'
+          USING ERRCODE = '22023';
+      END IF;
+
+      PERFORM set_config('opengeni.preference_lifecycle_head_id', '', true);
+      PERFORM set_config('opengeni.preference_lifecycle_operation', '', true);
+
+      SELECT COALESCE(max(event.version), 0) + 1 INTO next_event_version
+      FROM preference_registry_events event
+      WHERE event.preference_id = preference.id;
+      INSERT INTO preference_registry_events (
+        account_id, preference_id, type, version,
+        old_revision_id, new_revision_id,
+        old_scope, old_workspace_id, old_subject_id,
+        new_scope, new_workspace_id, new_subject_id,
+        related_preference_id, actor_subject_id, reason
+      ) VALUES (
+        preference.account_id, preference.id, event_type, next_event_version,
+        old_revision_id, new_revision_id,
+        old_scope, old_workspace_id, old_subject_id,
+        new_scope, new_workspace_id, new_subject_id,
+        related_preference_id, p_actor_subject_id, p_reason
+      ) RETURNING id INTO event_id;
+      RETURN NEXT;
+    END
+    $body$
+  $ddl$, target_schema, target_schema);
+  EXECUTE format(
+    'REVOKE ALL ON FUNCTION %I.preference_registry_apply_lifecycle(text, uuid, integer, uuid, uuid, text, uuid, text, text) FROM PUBLIC',
+    target_schema
+  );
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
+    EXECUTE format(
+      'GRANT EXECUTE ON FUNCTION %I.preference_registry_apply_lifecycle(text, uuid, integer, uuid, uuid, text, uuid, text, text) TO opengeni_app',
+      target_schema
+    );
+  END IF;
+END $lifecycle_function$;
 
 ALTER TABLE "preference_registry_preferences" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "preference_registry_preferences" FORCE ROW LEVEL SECURITY;
@@ -497,12 +1043,16 @@ DECLARE target_schema text := current_schema();
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
     EXECUTE format(
-      'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I.preference_registry_preferences TO opengeni_app',
-      target_schema
+      'REVOKE ALL PRIVILEGES ON TABLE %I.preference_registry_preferences, %I.preference_registry_revisions, %I.preference_registry_events, %I.preference_registry_snapshots FROM opengeni_app',
+      target_schema, target_schema, target_schema, target_schema
     );
     EXECUTE format(
-      'GRANT SELECT, INSERT ON TABLE %I.preference_registry_revisions, %I.preference_registry_events, %I.preference_registry_snapshots TO opengeni_app',
+      'GRANT SELECT, INSERT ON TABLE %I.preference_registry_preferences, %I.preference_registry_revisions, %I.preference_registry_snapshots TO opengeni_app',
       target_schema, target_schema, target_schema
+    );
+    EXECUTE format(
+      'GRANT SELECT ON TABLE %I.preference_registry_events TO opengeni_app',
+      target_schema
     );
     EXECUTE format(
       'GRANT USAGE, SELECT ON SEQUENCE %I.preference_registry_revision_seq TO opengeni_app',

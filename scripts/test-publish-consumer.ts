@@ -6,7 +6,7 @@
  * checks cannot catch a broken published exports map, missing CSS declaration,
  * cross-tarball declaration drift, or a client-only global reached during SSR.
  * This gate stages release-shaped tarballs, installs them twice (the second time
- * from the frozen Bun lock), typechecks with tsgo, builds the root and session
+ * from the frozen Bun lock), typechecks with stable TypeScript 7, builds the root and session
  * subpaths through Vite, verifies the packed runtime skill-library subpath, and
  * server-renders populated embedded host surfaces without a DOM. A second
  * consumer installs only the session subpath's required peers.
@@ -201,7 +201,7 @@ try {
     private: true,
     type: "module",
     scripts: {
-      typecheck: "tsgo -p tsconfig.json --noEmit",
+      typecheck: "tsc -p tsconfig.json --noEmit",
       build: "vite build --logLevel warn",
       "build:session": "vite build --config session.vite.config.ts --logLevel warn",
       ssr: "bun ssr.tsx",
@@ -217,7 +217,7 @@ try {
       "@types/node": "^24.10.1",
       "@types/react": reactSource.devDependencies?.["@types/react"],
       "@types/react-dom": reactSource.devDependencies?.["@types/react-dom"],
-      "@typescript/native-preview": rootManifest.devDependencies?.["@typescript/native-preview"],
+      typescript: rootManifest.devDependencies?.typescript,
       "@vitejs/plugin-react": reactSource.devDependencies?.["@vitejs/plugin-react"],
       tailwindcss: reactSource.devDependencies?.tailwindcss,
       vite: reactSource.devDependencies?.vite,
@@ -393,7 +393,7 @@ try {
     private: true,
     type: "module",
     scripts: {
-      typecheck: "tsgo -p tsconfig.json --noEmit",
+      typecheck: "tsc -p tsconfig.json --noEmit",
       build: "vite build --logLevel warn",
     },
     dependencies: {
@@ -406,7 +406,7 @@ try {
       "@types/node": "^24.10.1",
       "@types/react": reactSource.devDependencies?.["@types/react"],
       "@types/react-dom": reactSource.devDependencies?.["@types/react-dom"],
-      "@typescript/native-preview": rootManifest.devDependencies?.["@typescript/native-preview"],
+      typescript: rootManifest.devDependencies?.typescript,
       vite: reactSource.devDependencies?.vite,
     },
     overrides: {

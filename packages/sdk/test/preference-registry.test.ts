@@ -71,10 +71,12 @@ describe("preference registry SDK", () => {
     await client.activatePreferenceRegistryRevision(WORKSPACE_ID, PREFERENCE_ID, {
       revisionId: REVISION_ID,
       expectedCurrentRevisionId: null,
+      expectedScopeVersion: 1,
       reason: "Reviewed by the owner",
     });
     await client.correctPreferenceRegistry(WORKSPACE_ID, PREFERENCE_ID, {
       expectedCurrentRevisionId: REVISION_ID,
+      expectedScopeVersion: 1,
       title: "Response style",
       description: "Prefer compact responses.",
       content: "Use compact answers unless the user asks for detail.",
@@ -87,15 +89,18 @@ describe("preference registry SDK", () => {
     });
     await client.deactivatePreferenceRegistry(WORKSPACE_ID, PREFERENCE_ID, {
       expectedCurrentRevisionId: REVISION_ID,
+      expectedScopeVersion: 1,
       reason: "Temporarily disable",
     });
     await client.supersedePreferenceRegistry(WORKSPACE_ID, PREFERENCE_ID, {
       replacementPreferenceId: REPLACEMENT_ID,
       expectedCurrentRevisionId: REVISION_ID,
+      expectedScopeVersion: 1,
       reason: "Use the replacement",
     });
     await client.rejectPreferenceRegistryProposal(WORKSPACE_ID, PREFERENCE_ID, {
       revisionId: REVISION_ID,
+      expectedScopeVersion: 1,
       reason: "Not authoritative",
     });
     await client.getPreferenceRegistrySummary(WORKSPACE_ID);
@@ -149,6 +154,7 @@ describe("preference registry SDK", () => {
     expect(await requests[3]!.json()).toEqual({
       revisionId: REVISION_ID,
       expectedCurrentRevisionId: null,
+      expectedScopeVersion: 1,
       reason: "Reviewed by the owner",
     });
     expect(await requests[10]!.json()).toEqual({

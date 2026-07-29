@@ -232,10 +232,13 @@ Helm must preserve the same order explicitly.
 The provisioner converges `opengeni_app` to `LOGIN NOSUPERUSER NOBYPASSRLS
 NOCREATEROLE NOCREATEDB NOREPLICATION NOINHERIT`, refuses to guess through any
 role membership or ownership, revokes database/schema creation and all table
-privileges, then grants the exact current-ledger table contract: full CRUD on 84
-ordinary runtime tables, SELECT only on `nested_agent_depth_configuration`,
-SELECT + INSERT on six append-only evidence/revision tables, and no direct table
-DML on the five FORCE-RLS host-export tables.
+privileges, then grants the exact current-ledger table contract: full CRUD on 83
+ordinary runtime tables; SELECT only on `nested_agent_depth_configuration` and
+preference lifecycle events; SELECT + INSERT on six append-only/proposal/revision
+tables; and no direct table DML on the five FORCE-RLS host-export tables.
+Preference head UPDATE/DELETE is available only through target-schema-local
+security-definer lock/lifecycle functions, which migrate-then-provision
+explicitly regrants.
 The runtime assertion connects through the runtime URL and checks, using only
 PostgreSQL catalogs in a repeatable-read/read-only transaction:
 

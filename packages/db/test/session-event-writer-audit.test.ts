@@ -1,7 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
-import ts from "typescript";
+import * as t from "oxc-parser";
+
+type FunctionLikeDeclaration = t.Function | t.ArrowFunctionExpression;
+
+type SourceFile = {
+  program: t.Program;
+  source: string;
+};
 
 type LockContract = "canonical" | "turn_attempt_fence" | "owned_suffix";
 
@@ -12,6 +19,91 @@ type ExpectedWriter = {
 };
 
 const repoRoot = resolve(import.meta.dir, "../../..");
+const parentNodes = new WeakMap<t.Node, t.Node>();
+
+function nodeStart(node: t.Node): number {
+  return node.start;
+}
+
+function lineNumber(source: string, node: t.Node): number {
+  return source.slice(0, nodeStart(node)).split("\n").length;
+}
+
+function isNode(value: unknown): value is t.Node {
+  return (
+    typeof value === "object" && value !== null && "type" in value && typeof value.type === "string"
+  );
+}
+
+function isArrowFunctionExpression(node: t.Node | undefined): node is t.ArrowFunctionExpression {
+  return node?.type === "ArrowFunctionExpression";
+}
+
+function isCallExpression(node: t.Node | undefined): node is t.CallExpression {
+  return node?.type === "CallExpression";
+}
+
+function isFunctionDeclaration(node: t.Node | undefined): node is t.Function {
+  return node?.type === "FunctionDeclaration";
+}
+
+function isFunctionExpression(node: t.Node | undefined): node is t.Function {
+  return node?.type === "FunctionExpression";
+}
+
+function isIdentifier(node: t.Node | undefined): node is Extract<t.Node, { type: "Identifier" }> {
+  return node?.type === "Identifier";
+}
+
+function isMemberExpression(node: t.Node | undefined): node is t.MemberExpression {
+  return node?.type === "MemberExpression";
+}
+
+function isObjectExpression(node: t.Node | undefined): node is t.ObjectExpression {
+  return node?.type === "ObjectExpression";
+}
+
+function isObjectProperty(node: t.Node | undefined): node is t.ObjectProperty {
+  return node?.type === "Property";
+}
+
+function isStringLiteral(node: t.Node | undefined): node is t.StringLiteral {
+  return node?.type === "Literal" && typeof node.value === "string";
+}
+
+function isTaggedTemplateExpression(node: t.Node | undefined): node is t.TaggedTemplateExpression {
+  return node?.type === "TaggedTemplateExpression";
+}
+
+function isVariableDeclarator(node: t.Node | undefined): node is t.VariableDeclarator {
+  return node?.type === "VariableDeclarator";
+}
+
+function forEachChild(node: t.Node, visit: (child: t.Node) => void): void {
+  const record = node as unknown as Record<string, unknown>;
+  for (const key of t.visitorKeys[node.type] ?? []) {
+    const value = record[key];
+    const children = Array.isArray(value) ? value : [value];
+    for (const child of children) {
+      if (!isNode(child)) continue;
+      parentNodes.set(child, node);
+      visit(child);
+    }
+  }
+}
+
+function parseSourceFile(path: string, source: string): SourceFile {
+  const result = t.parseSync(path, source, { sourceType: "unambiguous" });
+  if (result.errors.length > 0) {
+    throw new Error(
+      `Could not parse ${path}: ${result.errors.map((error) => error.message).join("; ")}`,
+    );
+  }
+  return {
+    source,
+    program: result.program,
+  };
+}
 
 const expectedWriters: Record<string, ExpectedWriter> = {
   "packages/db/src/index.ts#armCodexCapacityWait": {
@@ -242,135 +334,139 @@ function productionTypeScriptFiles(): string[] {
 }
 
 function namedTopLevelFunction(
-  node: ts.Node,
-): { name: string; node: ts.FunctionLikeDeclaration } | null {
-  let current: ts.Node | undefined = node;
-  let result: { name: string; node: ts.FunctionLikeDeclaration } | null = null;
+  node: t.Node,
+): { name: string; node: FunctionLikeDeclaration } | null {
+  let current: t.Node | undefined = node;
+  let result: { name: string; node: FunctionLikeDeclaration } | null = null;
   while (current) {
-    if (ts.isFunctionDeclaration(current) && current.name) {
-      result = { name: current.name.text, node: current };
+    if (isFunctionDeclaration(current) && current.id) {
+      result = { name: current.id.name, node: current };
     } else if (
-      (ts.isArrowFunction(current) || ts.isFunctionExpression(current)) &&
-      ts.isVariableDeclaration(current.parent) &&
-      ts.isIdentifier(current.parent.name)
+      (isArrowFunctionExpression(current) || isFunctionExpression(current)) &&
+      isVariableDeclarator(parentNodes.get(current))
     ) {
-      result = { name: current.parent.name.text, node: current };
+      const parent = parentNodes.get(current);
+      if (isVariableDeclarator(parent) && isIdentifier(parent.id)) {
+        result = { name: parent.id.name, node: current };
+      }
     }
-    current = current.parent;
+    current = parentNodes.get(current);
   }
   return result;
 }
 
-function callName(node: ts.CallExpression): string | null {
-  if (ts.isIdentifier(node.expression)) return node.expression.text;
-  if (ts.isPropertyAccessExpression(node.expression)) return node.expression.name.text;
+function callName(node: t.CallExpression): string | null {
+  if (isIdentifier(node.callee)) return node.callee.name;
+  if (isMemberExpression(node.callee) && isIdentifier(node.callee.property)) {
+    return node.callee.property.name;
+  }
   return null;
 }
 
-function insertsSessionEvents(node: ts.CallExpression): boolean {
-  if (!ts.isPropertyAccessExpression(node.expression) || node.expression.name.text !== "insert") {
+function insertsSessionEvents(node: t.CallExpression): boolean {
+  if (!isMemberExpression(node.callee) || callName(node) !== "insert") {
     return false;
   }
   const table = node.arguments[0];
   return Boolean(
     table &&
-    ((ts.isPropertyAccessExpression(table) && table.name.text === "sessionEvents") ||
-      (ts.isIdentifier(table) && table.text === "sessionEvents")),
+    ((isMemberExpression(table) &&
+      isIdentifier(table.property) &&
+      table.property.name === "sessionEvents") ||
+      (isIdentifier(table) && table.name === "sessionEvents")),
   );
 }
 
-function insertsSessionSystemUpdateOutbox(node: ts.CallExpression): boolean {
-  if (!ts.isPropertyAccessExpression(node.expression) || node.expression.name.text !== "insert") {
+function insertsSessionSystemUpdateOutbox(node: t.CallExpression): boolean {
+  if (!isMemberExpression(node.callee) || callName(node) !== "insert") {
     return false;
   }
   const table = node.arguments[0];
   return Boolean(
     table &&
-    ((ts.isPropertyAccessExpression(table) && table.name.text === "sessionSystemUpdateOutbox") ||
-      (ts.isIdentifier(table) && table.text === "sessionSystemUpdateOutbox")),
+    ((isMemberExpression(table) &&
+      isIdentifier(table.property) &&
+      table.property.name === "sessionSystemUpdateOutbox") ||
+      (isIdentifier(table) && table.name === "sessionSystemUpdateOutbox")),
   );
 }
 
-function functionCalls(functionNode: ts.FunctionLikeDeclaration, expectedName: string): boolean {
+function functionCalls(functionNode: FunctionLikeDeclaration, expectedName: string): boolean {
   let found = false;
-  const visit = (node: ts.Node): void => {
-    if (ts.isCallExpression(node) && callName(node) === expectedName) found = true;
-    if (!found) ts.forEachChild(node, visit);
+  const visit = (node: t.Node): void => {
+    if (isCallExpression(node) && callName(node) === expectedName) found = true;
+    if (!found) forEachChild(node, visit);
   };
-  ts.forEachChild(functionNode, visit);
+  forEachChild(functionNode, visit);
   return found;
 }
 
-function callHasProperty(node: ts.CallExpression, propertyName: string): boolean {
+function callHasProperty(node: t.CallExpression, propertyName: string): boolean {
   return node.arguments.some(
     (argument) =>
-      ts.isObjectLiteralExpression(argument) &&
+      isObjectExpression(argument) &&
       argument.properties.some(
         (property) =>
-          ts.isPropertyAssignment(property) &&
-          ((ts.isIdentifier(property.name) && property.name.text === propertyName) ||
-            (ts.isStringLiteral(property.name) && property.name.text === propertyName)),
+          isObjectProperty(property) &&
+          ((isIdentifier(property.key) && property.key.name === propertyName) ||
+            (isStringLiteral(property.key) && property.key.value === propertyName)),
       ),
   );
 }
 
 function callPositionsWithStringProperty(
-  functionNode: ts.FunctionLikeDeclaration,
+  functionNode: FunctionLikeDeclaration,
   expectedName: string,
   propertyName: string,
   propertyValue: string,
 ): number[] {
   const positions: number[] = [];
-  const visit = (node: ts.Node): void => {
+  const visit = (node: t.Node): void => {
     if (
-      ts.isCallExpression(node) &&
+      isCallExpression(node) &&
       callName(node) === expectedName &&
       node.arguments.some(
         (argument) =>
-          ts.isObjectLiteralExpression(argument) &&
+          isObjectExpression(argument) &&
           argument.properties.some(
             (property) =>
-              ts.isPropertyAssignment(property) &&
-              ((ts.isIdentifier(property.name) && property.name.text === propertyName) ||
-                (ts.isStringLiteral(property.name) && property.name.text === propertyName)) &&
-              ts.isStringLiteral(property.initializer) &&
-              property.initializer.text === propertyValue,
+              isObjectProperty(property) &&
+              ((isIdentifier(property.key) && property.key.name === propertyName) ||
+                (isStringLiteral(property.key) && property.key.value === propertyName)) &&
+              isStringLiteral(property.value) &&
+              property.value.value === propertyValue,
           ),
       )
     ) {
-      positions.push(node.getStart());
+      positions.push(nodeStart(node));
     }
-    ts.forEachChild(node, visit);
+    forEachChild(node, visit);
   };
-  ts.forEachChild(functionNode, visit);
+  forEachChild(functionNode, visit);
   return positions.sort((left, right) => left - right);
 }
 
 function callPositionsWithStringArgument(
-  functionNode: ts.FunctionLikeDeclaration,
+  functionNode: FunctionLikeDeclaration,
   expectedName: string,
   argumentIndex: number,
   argumentValue: string,
 ): number[] {
   const positions: number[] = [];
-  const visit = (node: ts.Node): void => {
-    if (ts.isCallExpression(node) && callName(node) === expectedName) {
+  const visit = (node: t.Node): void => {
+    if (isCallExpression(node) && callName(node) === expectedName) {
       const argument = node.arguments[argumentIndex];
-      if (
-        argument !== undefined &&
-        ts.isStringLiteral(argument) &&
-        argument.text === argumentValue
-      ) {
-        positions.push(node.getStart());
+      if (argument !== undefined && isStringLiteral(argument) && argument.value === argumentValue) {
+        positions.push(nodeStart(node));
       }
     }
-    ts.forEachChild(node, visit);
+    forEachChild(node, visit);
   };
-  ts.forEachChild(functionNode, visit);
+  forEachChild(functionNode, visit);
   return positions.sort((left, right) => left - right);
 }
 
-function controlAwarePrefixPositions(functionNode: ts.FunctionLikeDeclaration): number[] {
+function controlAwarePrefixPositions(functionNode: FunctionLikeDeclaration): number[] {
   return [
     ...callPositionsWithStringProperty(
       functionNode,
@@ -390,7 +486,7 @@ function controlAwarePrefixPositions(functionNode: ts.FunctionLikeDeclaration): 
   ].sort((left, right) => left - right);
 }
 
-function genericPrefixPositions(functionNode: ts.FunctionLikeDeclaration): number[] {
+function genericPrefixPositions(functionNode: FunctionLikeDeclaration): number[] {
   return callPositionsWithStringProperty(
     functionNode,
     "lockSessionEventWriteRows",
@@ -399,27 +495,27 @@ function genericPrefixPositions(functionNode: ts.FunctionLikeDeclaration): numbe
   );
 }
 
-function callPositions(functionNode: ts.FunctionLikeDeclaration, expectedName: string): number[] {
+function callPositions(functionNode: FunctionLikeDeclaration, expectedName: string): number[] {
   const positions: number[] = [];
-  const visit = (node: ts.Node): void => {
-    if (ts.isCallExpression(node) && callName(node) === expectedName) {
-      positions.push(node.getStart());
+  const visit = (node: t.Node): void => {
+    if (isCallExpression(node) && callName(node) === expectedName) {
+      positions.push(nodeStart(node));
     }
-    ts.forEachChild(node, visit);
+    forEachChild(node, visit);
   };
-  ts.forEachChild(functionNode, visit);
+  forEachChild(functionNode, visit);
   return positions.sort((left, right) => left - right);
 }
 
-function insertPositions(functionNode: ts.FunctionLikeDeclaration): number[] {
+function insertPositions(functionNode: FunctionLikeDeclaration): number[] {
   const positions: number[] = [];
-  const visit = (node: ts.Node): void => {
-    if (ts.isCallExpression(node) && insertsSessionEvents(node)) {
-      positions.push(node.getStart());
+  const visit = (node: t.Node): void => {
+    if (isCallExpression(node) && insertsSessionEvents(node)) {
+      positions.push(nodeStart(node));
     }
-    ts.forEachChild(node, visit);
+    forEachChild(node, visit);
   };
-  ts.forEachChild(functionNode, visit);
+  forEachChild(functionNode, visit);
   return positions.sort((left, right) => left - right);
 }
 
@@ -427,20 +523,20 @@ describe("session_events writer inventory", () => {
   test("every production insert has an explicit canonical or caller-owned lock contract", () => {
     const writers = new Map<
       string,
-      { count: number; sourceFile: ts.SourceFile; functionNode: ts.FunctionLikeDeclaration }
+      { count: number; sourceFile: SourceFile; functionNode: FunctionLikeDeclaration }
     >();
     const rawSqlWriters: string[] = [];
     const implicitControlLockCalls: string[] = [];
     const functionDefinitions = new Map<
       string,
-      Array<{ sourceFile: ts.SourceFile; functionNode: ts.FunctionLikeDeclaration }>
+      Array<{ sourceFile: SourceFile; functionNode: FunctionLikeDeclaration }>
     >();
     const ownedSuffixCallers = new Map<string, Set<string>>(
       Object.keys(expectedOwnedSuffixCallers).map((name) => [name, new Set()]),
     );
     const outboxWriters = new Map<
       string,
-      { count: number; sourceFile: ts.SourceFile; functionNode: ts.FunctionLikeDeclaration }
+      { count: number; sourceFile: SourceFile; functionNode: FunctionLikeDeclaration }
     >();
     const failedChildOutboxCallers = new Set<string>();
 
@@ -455,14 +551,14 @@ describe("session_events writer inventory", () => {
         continue;
       }
       const file = relative(repoRoot, path).replaceAll("\\", "/");
-      const sourceFile = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true);
-      const visit = (node: ts.Node): void => {
-        if (ts.isFunctionDeclaration(node) && node.name) {
-          const definitions = functionDefinitions.get(node.name.text) ?? [];
+      const sourceFile = parseSourceFile(path, source);
+      const visit = (node: t.Node): void => {
+        if (isFunctionDeclaration(node) && node.id) {
+          const definitions = functionDefinitions.get(node.id.name) ?? [];
           definitions.push({ sourceFile, functionNode: node });
-          functionDefinitions.set(node.name.text, definitions);
+          functionDefinitions.set(node.id.name, definitions);
         }
-        if (ts.isCallExpression(node)) {
+        if (isCallExpression(node)) {
           const enclosing = namedTopLevelFunction(node);
           if (insertsSessionEvents(node)) {
             if (!enclosing) throw new Error(`Unnamed session_events writer in ${file}`);
@@ -487,9 +583,7 @@ describe("session_events writer inventory", () => {
           }
           const called = callName(node);
           if (called === "lockSessionEventWriteRows" && !callHasProperty(node, "controlLock")) {
-            implicitControlLockCalls.push(
-              `${file}:${sourceFile.getLineAndCharacterOfPosition(node.getStart()).line + 1}`,
-            );
+            implicitControlLockCalls.push(`${file}:${lineNumber(sourceFile.source, node)}`);
           }
           if (called && ownedSuffixCallers.has(called) && enclosing) {
             ownedSuffixCallers.get(called)!.add(enclosing.name);
@@ -498,17 +592,15 @@ describe("session_events writer inventory", () => {
             failedChildOutboxCallers.add(enclosing.name);
           }
         }
-        if (ts.isTaggedTemplateExpression(node)) {
-          const sqlText = node.template.getText(sourceFile);
+        if (isTaggedTemplateExpression(node)) {
+          const sqlText = sourceFile.source.slice(nodeStart(node.quasi), node.quasi.end);
           if (/\binsert\s+into\s+(?:[a-z_]+\.)?session_events\b/i.test(sqlText)) {
-            rawSqlWriters.push(
-              `${file}:${sourceFile.getLineAndCharacterOfPosition(node.pos).line + 1}`,
-            );
+            rawSqlWriters.push(`${file}:${lineNumber(sourceFile.source, node)}`);
           }
         }
-        ts.forEachChild(node, visit);
+        forEachChild(node, visit);
       };
-      visit(sourceFile);
+      visit(sourceFile.program);
     }
 
     expect(rawSqlWriters).toEqual([]);
@@ -643,20 +735,15 @@ describe("session_events writer inventory", () => {
   test("generic append and Agent commands keep external effects outside bounded retry", () => {
     const definitionsFor = (relativePath: string) => {
       const path = join(repoRoot, relativePath);
-      const sourceFile = ts.createSourceFile(
-        path,
-        readFileSync(path, "utf8"),
-        ts.ScriptTarget.Latest,
-        true,
-      );
-      const definitions = new Map<string, ts.FunctionDeclaration>();
-      const visit = (node: ts.Node): void => {
-        if (ts.isFunctionDeclaration(node) && node.name) {
-          definitions.set(node.name.text, node);
+      const sourceFile = parseSourceFile(path, readFileSync(path, "utf8"));
+      const definitions = new Map<string, t.Function>();
+      const visit = (node: t.Node): void => {
+        if (isFunctionDeclaration(node) && node.id) {
+          definitions.set(node.id.name, node);
         }
-        ts.forEachChild(node, visit);
+        forEachChild(node, visit);
       };
-      visit(sourceFile);
+      visit(sourceFile.program);
       return definitions;
     };
 
