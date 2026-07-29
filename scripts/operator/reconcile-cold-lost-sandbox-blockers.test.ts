@@ -20,16 +20,12 @@ const archiveRevision = `wa1:1785326400000:${archiveReferenceSha256}`;
 
 describe("cold lost-provider reconciliation CLI", () => {
   test("authorizes only explicit preview or apply modes", () => {
-    expect(
-      reconciliationMode({ OPENGENI_COLD_LOST_LEASE_RECONCILE: "preview" }),
-    ).toBe("preview");
-    expect(
-      reconciliationMode({ OPENGENI_COLD_LOST_LEASE_RECONCILE: "apply" }),
-    ).toBe("apply");
+    expect(reconciliationMode({ OPENGENI_COLD_LOST_LEASE_RECONCILE: "preview" })).toBe("preview");
+    expect(reconciliationMode({ OPENGENI_COLD_LOST_LEASE_RECONCILE: "apply" })).toBe("apply");
     expect(() => reconciliationMode({})).toThrow("=preview");
-    expect(() =>
-      reconciliationMode({ OPENGENI_COLD_LOST_LEASE_RECONCILE: "dry-run" }),
-    ).toThrow("=preview");
+    expect(() => reconciliationMode({ OPENGENI_COLD_LOST_LEASE_RECONCILE: "dry-run" })).toThrow(
+      "=preview",
+    );
   });
 
   test("preview preserves missing critical fences for typed DB blockers", () => {
@@ -72,13 +68,11 @@ describe("cold lost-provider reconciliation CLI", () => {
       OPENGENI_RECOVERY_ARCHIVE_OBJECT_KIND: "modal_filesystem_snapshot",
       OPENGENI_RECOVERY_ARCHIVE_OBJECT_ID: "im-archive",
       OPENGENI_RECOVERY_ARCHIVE_DESCRIPTOR_REFERENCE_BYTES: "252885",
-      OPENGENI_RECOVERY_ARCHIVE_DESCRIPTOR_REFERENCE_SHA256:
-        archiveReferenceSha256,
+      OPENGENI_RECOVERY_ARCHIVE_DESCRIPTOR_REFERENCE_SHA256: archiveReferenceSha256,
       OPENGENI_RECOVERY_ARCHIVE_REFERENCE_BYTES: "252885",
       OPENGENI_RECOVERY_ARCHIVE_REFERENCE_SHA256: archiveReferenceSha256,
       OPENGENI_RECOVERY_ARCHIVE_TREE_FINGERPRINT_ALGORITHM: "sha256",
-      OPENGENI_RECOVERY_ARCHIVE_TREE_FINGERPRINT_SHA256:
-        treeFingerprintSha256,
+      OPENGENI_RECOVERY_ARCHIVE_TREE_FINGERPRINT_SHA256: treeFingerprintSha256,
       OPENGENI_RECOVERY_ARCHIVE_TREE_ENTRY_COUNT: "16",
       OPENGENI_RECOVERY_ARCHIVE_TREE_FILE_COUNT: "14",
       OPENGENI_RECOVERY_ARCHIVE_TOTAL_FILE_BYTES: "250000",
@@ -89,8 +83,7 @@ describe("cold lost-provider reconciliation CLI", () => {
       OPENGENI_RECOVERY_PROVIDER_OBJECT_KIND: "modal_filesystem_snapshot",
       OPENGENI_RECOVERY_PROVIDER_OBJECT_ID: "im-archive",
       OPENGENI_RECOVERY_PROVIDER_OBJECT_STATUS: "exists",
-      OPENGENI_RECOVERY_PROVIDER_OBJECT_OBSERVED_AT:
-        "2026-07-29T12:00:00.000Z",
+      OPENGENI_RECOVERY_PROVIDER_OBJECT_OBSERVED_AT: "2026-07-29T12:00:00.000Z",
     });
     expect(input).toEqual({
       accountId: "account-1",
@@ -195,8 +188,7 @@ describe("cold lost-provider reconciliation CLI", () => {
     ).toThrow("exactly sha256");
     expect(() =>
       providerObjectObservationFromEnv({
-        OPENGENI_RECOVERY_PROVIDER_OBJECT_OBSERVED_AT:
-          "2026-07-29T12:00:00Z",
+        OPENGENI_RECOVERY_PROVIDER_OBJECT_OBSERVED_AT: "2026-07-29T12:00:00Z",
       }),
     ).toThrow("canonical ISO-8601 UTC");
   });
@@ -246,16 +238,9 @@ describe("cold lost-provider reconciliation CLI", () => {
 
     expect(exitCode).toBe(2);
     expect(applyCalls).toBe(0);
-    expect(calls).toEqual([
-      "open-database",
-      "preview",
-      "output",
-      "close-database",
-    ]);
+    expect(calls).toEqual(["open-database", "preview", "output", "close-database"]);
     expect(output).toHaveLength(1);
-    expect(output[0]).toStartWith(
-      "OPENGENI_COLD_LOST_LEASE_RECONCILE_PREVIEW=",
-    );
+    expect(output[0]).toStartWith("OPENGENI_COLD_LOST_LEASE_RECONCILE_PREVIEW=");
     expect(Object.keys(dependencies).sort()).toEqual([
       "apply",
       "openDatabase",

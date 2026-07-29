@@ -38,9 +38,7 @@ const defaultDependencies: ColdLostReconciliationDependencies = {
   output: (line) => console.log(line),
 };
 
-export function reconciliationMode(
-  env: NodeJS.ProcessEnv,
-): ColdLostReconciliationMode {
+export function reconciliationMode(env: NodeJS.ProcessEnv): ColdLostReconciliationMode {
   const value = env.OPENGENI_COLD_LOST_LEASE_RECONCILE?.trim();
   if (value === "preview" || value === "apply") return value;
   throw new Error(
@@ -56,52 +54,20 @@ export function previewInputFromEnv(
     workspaceId: required(env, "OPENGENI_RECOVERY_WORKSPACE_ID"),
     sessionId: required(env, "OPENGENI_RECOVERY_SESSION_ID"),
     sandboxGroupId: required(env, "OPENGENI_RECOVERY_SANDBOX_GROUP_ID"),
-    ...optionalStringField(
-      env,
-      "OPENGENI_RECOVERY_LEASE_ID",
-      "expectedLeaseId",
-    ),
-    ...optionalStringField(
-      env,
-      "OPENGENI_RECOVERY_BACKEND",
-      "expectedBackend",
-    ),
-    ...optionalIntegerField(
-      env,
-      "OPENGENI_RECOVERY_CURRENT_EPOCH",
-      "expectedCurrentEpoch",
-    ),
-    ...optionalIntegerField(
-      env,
-      "OPENGENI_RECOVERY_LOST_EPOCH",
-      "expectedLostEpoch",
-    ),
-    ...optionalStringField(
-      env,
-      "OPENGENI_RECOVERY_LOST_INSTANCE_ID",
-      "expectedLostInstanceId",
-    ),
-    ...optionalIntegerField(
-      env,
-      "OPENGENI_RECOVERY_REFCOUNT",
-      "expectedRefcount",
-    ),
-    ...optionalStringField(
-      env,
-      "OPENGENI_RECOVERY_PROVIDER_BACKEND",
-      "expectedProviderBackend",
-    ),
+    ...optionalStringField(env, "OPENGENI_RECOVERY_LEASE_ID", "expectedLeaseId"),
+    ...optionalStringField(env, "OPENGENI_RECOVERY_BACKEND", "expectedBackend"),
+    ...optionalIntegerField(env, "OPENGENI_RECOVERY_CURRENT_EPOCH", "expectedCurrentEpoch"),
+    ...optionalIntegerField(env, "OPENGENI_RECOVERY_LOST_EPOCH", "expectedLostEpoch"),
+    ...optionalStringField(env, "OPENGENI_RECOVERY_LOST_INSTANCE_ID", "expectedLostInstanceId"),
+    ...optionalIntegerField(env, "OPENGENI_RECOVERY_REFCOUNT", "expectedRefcount"),
+    ...optionalStringField(env, "OPENGENI_RECOVERY_PROVIDER_BACKEND", "expectedProviderBackend"),
     ...optionalRouteKindField(env),
     ...optionalNullableStringField(
       env,
       "OPENGENI_RECOVERY_ROUTE_TARGET_ID",
       "expectedRouteTargetId",
     ),
-    ...optionalIntegerField(
-      env,
-      "OPENGENI_RECOVERY_ROUTE_EPOCH",
-      "expectedRouteEpoch",
-    ),
+    ...optionalIntegerField(env, "OPENGENI_RECOVERY_ROUTE_EPOCH", "expectedRouteEpoch"),
     ...optionalIntegerField(
       env,
       "OPENGENI_RECOVERY_WORKSPACE_GENERATION",
@@ -119,11 +85,7 @@ export function previewInputFromEnv(
       "OPENGENI_RECOVERY_ARCHIVE_GENERATION",
       "expectedArchiveGeneration",
     ),
-    ...optionalBooleanField(
-      env,
-      "OPENGENI_RECOVERY_ARCHIVE_COMPLETE",
-      "expectedArchiveComplete",
-    ),
+    ...optionalBooleanField(env, "OPENGENI_RECOVERY_ARCHIVE_COMPLETE", "expectedArchiveComplete"),
     ...optionalArchiveDescriptorVersionField(env),
     ...optionalArchiveRevisionField(
       env,
@@ -131,11 +93,7 @@ export function previewInputFromEnv(
       "expectedArchiveRevision",
     ),
     ...optionalArchiveObjectKindField(env),
-    ...optionalStringField(
-      env,
-      "OPENGENI_RECOVERY_ARCHIVE_OBJECT_ID",
-      "expectedArchiveObjectId",
-    ),
+    ...optionalStringField(env, "OPENGENI_RECOVERY_ARCHIVE_OBJECT_ID", "expectedArchiveObjectId"),
     ...optionalPositiveIntegerField(
       env,
       "OPENGENI_RECOVERY_ARCHIVE_DESCRIPTOR_REFERENCE_BYTES",
@@ -200,17 +158,13 @@ export function previewInputFromEnv(
 export function providerObjectObservationFromEnv(
   env: NodeJS.ProcessEnv,
 ): ColdLostProviderObjectObservation {
-  const status =
-    optional(env, "OPENGENI_RECOVERY_PROVIDER_OBJECT_STATUS") ?? "unknown";
+  const status = optional(env, "OPENGENI_RECOVERY_PROVIDER_OBJECT_STATUS") ?? "unknown";
   if (status !== "exists" && status !== "missing" && status !== "unknown") {
     throw new Error(
       "OPENGENI_RECOVERY_PROVIDER_OBJECT_STATUS must be exactly exists, missing, or unknown",
     );
   }
-  const objectKind = optional(
-    env,
-    "OPENGENI_RECOVERY_PROVIDER_OBJECT_KIND",
-  );
+  const objectKind = optional(env, "OPENGENI_RECOVERY_PROVIDER_OBJECT_KIND");
   if (
     objectKind !== undefined &&
     objectKind !== "modal_filesystem_snapshot" &&
@@ -220,24 +174,16 @@ export function providerObjectObservationFromEnv(
       "OPENGENI_RECOVERY_PROVIDER_OBJECT_KIND must be exactly modal_filesystem_snapshot or modal_directory_snapshot",
     );
   }
-  const observedAt = optional(
-    env,
-    "OPENGENI_RECOVERY_PROVIDER_OBJECT_OBSERVED_AT",
-  );
+  const observedAt = optional(env, "OPENGENI_RECOVERY_PROVIDER_OBJECT_OBSERVED_AT");
   return {
-    providerBackend:
-      optional(env, "OPENGENI_RECOVERY_PROVIDER_BACKEND") ?? null,
+    providerBackend: optional(env, "OPENGENI_RECOVERY_PROVIDER_BACKEND") ?? null,
     objectKind: objectKind ?? null,
-    objectId:
-      optional(env, "OPENGENI_RECOVERY_PROVIDER_OBJECT_ID") ?? null,
+    objectId: optional(env, "OPENGENI_RECOVERY_PROVIDER_OBJECT_ID") ?? null,
     status,
     observedAt:
       observedAt === undefined
         ? null
-        : canonicalIso(
-            env,
-            "OPENGENI_RECOVERY_PROVIDER_OBJECT_OBSERVED_AT",
-          ),
+        : canonicalIso(env, "OPENGENI_RECOVERY_PROVIDER_OBJECT_OBSERVED_AT"),
   };
 }
 
@@ -252,9 +198,7 @@ export async function main(
   try {
     if (mode === "preview") {
       const preview = await dependencies.preview(client.db, input);
-      dependencies.output(
-        `OPENGENI_COLD_LOST_LEASE_RECONCILE_PREVIEW=${JSON.stringify(preview)}`,
-      );
+      dependencies.output(`OPENGENI_COLD_LOST_LEASE_RECONCILE_PREVIEW=${JSON.stringify(preview)}`);
       return preview.status === "eligible" ? 0 : 2;
     }
 
@@ -282,9 +226,7 @@ export async function main(
             observedPreviewId: result.preview.previewId,
             preview: result.preview,
           };
-    dependencies.output(
-      `OPENGENI_COLD_LOST_LEASE_RECONCILE_RESULT=${JSON.stringify(receipt)}`,
-    );
+    dependencies.output(`OPENGENI_COLD_LOST_LEASE_RECONCILE_RESULT=${JSON.stringify(receipt)}`);
     return result.status === "reconciled" ? 0 : 2;
   } finally {
     await client.close();
@@ -302,72 +244,30 @@ function exactApplyInput(
     sandboxGroupId: input.sandboxGroupId,
     expectedLeaseId: required(env, "OPENGENI_RECOVERY_LEASE_ID"),
     expectedBackend: required(env, "OPENGENI_RECOVERY_BACKEND"),
-    expectedCurrentEpoch: nonnegativeInteger(
-      env,
-      "OPENGENI_RECOVERY_CURRENT_EPOCH",
-    ),
-    expectedLostEpoch: nonnegativeInteger(
-      env,
-      "OPENGENI_RECOVERY_LOST_EPOCH",
-    ),
-    expectedLostInstanceId: required(
-      env,
-      "OPENGENI_RECOVERY_LOST_INSTANCE_ID",
-    ),
+    expectedCurrentEpoch: nonnegativeInteger(env, "OPENGENI_RECOVERY_CURRENT_EPOCH"),
+    expectedLostEpoch: nonnegativeInteger(env, "OPENGENI_RECOVERY_LOST_EPOCH"),
+    expectedLostInstanceId: required(env, "OPENGENI_RECOVERY_LOST_INSTANCE_ID"),
     expectedRefcount: nonnegativeInteger(env, "OPENGENI_RECOVERY_REFCOUNT"),
-    expectedProviderBackend: required(
-      env,
-      "OPENGENI_RECOVERY_PROVIDER_BACKEND",
-    ),
+    expectedProviderBackend: required(env, "OPENGENI_RECOVERY_PROVIDER_BACKEND"),
     expectedRouteKind: routeKind(env, "OPENGENI_RECOVERY_ROUTE_KIND"),
-    expectedRouteTargetId: nullableString(
-      env,
-      "OPENGENI_RECOVERY_ROUTE_TARGET_ID",
-    ),
-    expectedRouteEpoch: nonnegativeInteger(
-      env,
-      "OPENGENI_RECOVERY_ROUTE_EPOCH",
-    ),
-    expectedWorkspaceGeneration: nonnegativeInteger(
-      env,
-      "OPENGENI_RECOVERY_WORKSPACE_GENERATION",
-    ),
-    expectedWorkspaceStatus: workspaceStatus(
-      env,
-      "OPENGENI_RECOVERY_WORKSPACE_STATUS",
-    ),
-    expectedRestoreStatus: restoreStatus(
-      env,
-      "OPENGENI_RECOVERY_RESTORE_STATUS",
-    ),
-    expectedRestoreFailureCode: nullableString(
-      env,
-      "OPENGENI_RECOVERY_RESTORE_FAILURE_CODE",
-    ),
+    expectedRouteTargetId: nullableString(env, "OPENGENI_RECOVERY_ROUTE_TARGET_ID"),
+    expectedRouteEpoch: nonnegativeInteger(env, "OPENGENI_RECOVERY_ROUTE_EPOCH"),
+    expectedWorkspaceGeneration: nonnegativeInteger(env, "OPENGENI_RECOVERY_WORKSPACE_GENERATION"),
+    expectedWorkspaceStatus: workspaceStatus(env, "OPENGENI_RECOVERY_WORKSPACE_STATUS"),
+    expectedRestoreStatus: restoreStatus(env, "OPENGENI_RECOVERY_RESTORE_STATUS"),
+    expectedRestoreFailureCode: nullableString(env, "OPENGENI_RECOVERY_RESTORE_FAILURE_CODE"),
     expectedArchiveGeneration: nullableNonnegativeInteger(
       env,
       "OPENGENI_RECOVERY_ARCHIVE_GENERATION",
     ),
-    expectedArchiveComplete: exactBoolean(
-      env,
-      "OPENGENI_RECOVERY_ARCHIVE_COMPLETE",
-    ),
+    expectedArchiveComplete: exactBoolean(env, "OPENGENI_RECOVERY_ARCHIVE_COMPLETE"),
     expectedArchiveDescriptorVersion: archiveDescriptorVersion(
       env,
       "OPENGENI_RECOVERY_ARCHIVE_DESCRIPTOR_VERSION",
     ),
-    expectedArchiveRevision: archiveRevision(
-      env,
-      "OPENGENI_RECOVERY_ARCHIVE_REVISION",
-    ),
-    expectedArchiveObjectKind: archiveObjectKind(
-      env,
-      "OPENGENI_RECOVERY_ARCHIVE_OBJECT_KIND",
-    ),
-    expectedArchiveObjectId: required(
-      env,
-      "OPENGENI_RECOVERY_ARCHIVE_OBJECT_ID",
-    ),
+    expectedArchiveRevision: archiveRevision(env, "OPENGENI_RECOVERY_ARCHIVE_REVISION"),
+    expectedArchiveObjectKind: archiveObjectKind(env, "OPENGENI_RECOVERY_ARCHIVE_OBJECT_KIND"),
+    expectedArchiveObjectId: required(env, "OPENGENI_RECOVERY_ARCHIVE_OBJECT_ID"),
     expectedDescriptorReferenceBytes: positiveInteger(
       env,
       "OPENGENI_RECOVERY_ARCHIVE_DESCRIPTOR_REFERENCE_BYTES",
@@ -376,38 +276,17 @@ function exactApplyInput(
       env,
       "OPENGENI_RECOVERY_ARCHIVE_DESCRIPTOR_REFERENCE_SHA256",
     ),
-    expectedReferenceBytes: positiveInteger(
-      env,
-      "OPENGENI_RECOVERY_ARCHIVE_REFERENCE_BYTES",
-    ),
-    expectedReferenceSha256: sha256(
-      env,
-      "OPENGENI_RECOVERY_ARCHIVE_REFERENCE_SHA256",
-    ),
+    expectedReferenceBytes: positiveInteger(env, "OPENGENI_RECOVERY_ARCHIVE_REFERENCE_BYTES"),
+    expectedReferenceSha256: sha256(env, "OPENGENI_RECOVERY_ARCHIVE_REFERENCE_SHA256"),
     expectedTreeFingerprintAlgorithm: treeFingerprintAlgorithm(
       env,
       "OPENGENI_RECOVERY_ARCHIVE_TREE_FINGERPRINT_ALGORITHM",
     ),
-    expectedTreeFingerprintSha256: sha256(
-      env,
-      "OPENGENI_RECOVERY_ARCHIVE_TREE_FINGERPRINT_SHA256",
-    ),
-    expectedTreeEntryCount: nonnegativeInteger(
-      env,
-      "OPENGENI_RECOVERY_ARCHIVE_TREE_ENTRY_COUNT",
-    ),
-    expectedTreeFileCount: nonnegativeInteger(
-      env,
-      "OPENGENI_RECOVERY_ARCHIVE_TREE_FILE_COUNT",
-    ),
-    expectedTotalFileBytes: nonnegativeInteger(
-      env,
-      "OPENGENI_RECOVERY_ARCHIVE_TOTAL_FILE_BYTES",
-    ),
-    expectedArchiveCapturedAt: canonicalIso(
-      env,
-      "OPENGENI_RECOVERY_ARCHIVE_CAPTURED_AT",
-    ),
+    expectedTreeFingerprintSha256: sha256(env, "OPENGENI_RECOVERY_ARCHIVE_TREE_FINGERPRINT_SHA256"),
+    expectedTreeEntryCount: nonnegativeInteger(env, "OPENGENI_RECOVERY_ARCHIVE_TREE_ENTRY_COUNT"),
+    expectedTreeFileCount: nonnegativeInteger(env, "OPENGENI_RECOVERY_ARCHIVE_TREE_FILE_COUNT"),
+    expectedTotalFileBytes: nonnegativeInteger(env, "OPENGENI_RECOVERY_ARCHIVE_TOTAL_FILE_BYTES"),
+    expectedArchiveCapturedAt: canonicalIso(env, "OPENGENI_RECOVERY_ARCHIVE_CAPTURED_AT"),
     expectedArchiveVerificationState: archiveVerificationState(
       env,
       "OPENGENI_RECOVERY_ARCHIVE_VERIFICATION_STATE",
@@ -416,10 +295,7 @@ function exactApplyInput(
       env,
       "OPENGENI_RECOVERY_ARCHIVE_VERIFIED_REVISION",
     ),
-    expectedArchiveVerifiedAt: nullableCanonicalIso(
-      env,
-      "OPENGENI_RECOVERY_ARCHIVE_VERIFIED_AT",
-    ),
+    expectedArchiveVerifiedAt: nullableCanonicalIso(env, "OPENGENI_RECOVERY_ARCHIVE_VERIFIED_AT"),
     providerObject: input.providerObject,
     expectedPreviewId: required(env, "OPENGENI_RECOVERY_PREVIEW_ID"),
   };
@@ -450,10 +326,7 @@ function positiveInteger(env: NodeJS.ProcessEnv, name: string): number {
   return value;
 }
 
-function archiveDescriptorVersion(
-  env: NodeJS.ProcessEnv,
-  name: string,
-): 1 {
+function archiveDescriptorVersion(env: NodeJS.ProcessEnv, name: string): 1 {
   if (required(env, name) !== "1") {
     throw new Error(`${name} must be exactly 1`);
   }
@@ -468,10 +341,7 @@ function archiveRevision(env: NodeJS.ProcessEnv, name: string): string {
   return value;
 }
 
-function nullableArchiveRevision(
-  env: NodeJS.ProcessEnv,
-  name: string,
-): string | null {
+function nullableArchiveRevision(env: NodeJS.ProcessEnv, name: string): string | null {
   return required(env, name) === "null" ? null : archiveRevision(env, name);
 }
 
@@ -492,10 +362,7 @@ function canonicalIso(env: NodeJS.ProcessEnv, name: string): string {
   return value;
 }
 
-function nullableCanonicalIso(
-  env: NodeJS.ProcessEnv,
-  name: string,
-): string | null {
+function nullableCanonicalIso(env: NodeJS.ProcessEnv, name: string): string | null {
   return required(env, name) === "null" ? null : canonicalIso(env, name);
 }
 
@@ -504,40 +371,26 @@ function archiveObjectKind(
   name: string,
 ): "modal_filesystem_snapshot" | "modal_directory_snapshot" {
   const value = required(env, name);
-  if (
-    value === "modal_filesystem_snapshot" ||
-    value === "modal_directory_snapshot"
-  ) {
+  if (value === "modal_filesystem_snapshot" || value === "modal_directory_snapshot") {
     return value;
   }
-  throw new Error(
-    `${name} must be exactly modal_filesystem_snapshot or modal_directory_snapshot`,
-  );
+  throw new Error(`${name} must be exactly modal_filesystem_snapshot or modal_directory_snapshot`);
 }
 
-function treeFingerprintAlgorithm(
-  env: NodeJS.ProcessEnv,
-  name: string,
-): "sha256" {
+function treeFingerprintAlgorithm(env: NodeJS.ProcessEnv, name: string): "sha256" {
   if (required(env, name) !== "sha256") {
     throw new Error(`${name} must be exactly sha256`);
   }
   return "sha256";
 }
 
-function archiveVerificationState(
-  env: NodeJS.ProcessEnv,
-  name: string,
-): "verified" | "unverified" {
+function archiveVerificationState(env: NodeJS.ProcessEnv, name: string): "verified" | "unverified" {
   const value = required(env, name);
   if (value === "verified" || value === "unverified") return value;
   throw new Error(`${name} must be exactly verified or unverified`);
 }
 
-function nullableNonnegativeInteger(
-  env: NodeJS.ProcessEnv,
-  name: string,
-): number | null {
+function nullableNonnegativeInteger(env: NodeJS.ProcessEnv, name: string): number | null {
   const value = required(env, name);
   return value === "null" ? null : nonnegativeInteger(env, name);
 }
@@ -554,10 +407,7 @@ function exactBoolean(env: NodeJS.ProcessEnv, name: string): boolean {
   throw new Error(`${name} must be exactly true or false`);
 }
 
-function routeKind(
-  env: NodeJS.ProcessEnv,
-  name: string,
-): "home" | "active" {
+function routeKind(env: NodeJS.ProcessEnv, name: string): "home" | "active" {
   const value = required(env, name);
   if (value === "home" || value === "active") return value;
   throw new Error(`${name} must be exactly home or active`);
@@ -571,10 +421,7 @@ const WORKSPACE_STATUSES = [
   "unrecoverable",
 ] as const satisfies readonly SandboxWorkspaceReadiness[];
 
-function workspaceStatus(
-  env: NodeJS.ProcessEnv,
-  name: string,
-): SandboxWorkspaceReadiness {
+function workspaceStatus(env: NodeJS.ProcessEnv, name: string): SandboxWorkspaceReadiness {
   const value = required(env, name);
   if (WORKSPACE_STATUSES.some((status) => status === value)) {
     return value as SandboxWorkspaceReadiness;
@@ -592,10 +439,7 @@ const RESTORE_STATUSES = [
   "unrecoverable",
 ] as const satisfies readonly SandboxRestoreStatus[];
 
-function restoreStatus(
-  env: NodeJS.ProcessEnv,
-  name: string,
-): SandboxRestoreStatus {
+function restoreStatus(env: NodeJS.ProcessEnv, name: string): SandboxRestoreStatus {
   const value = required(env, name);
   if (RESTORE_STATUSES.some((status) => status === value)) {
     return value as SandboxRestoreStatus;
@@ -698,21 +542,17 @@ function optionalNullableArchiveRevisionField<K extends string>(
       });
 }
 
-function optionalArchiveDescriptorVersionField(
-  env: NodeJS.ProcessEnv,
-): { expectedArchiveDescriptorVersion?: 1 } {
+function optionalArchiveDescriptorVersionField(env: NodeJS.ProcessEnv): {
+  expectedArchiveDescriptorVersion?: 1;
+} {
   const name = "OPENGENI_RECOVERY_ARCHIVE_DESCRIPTOR_VERSION";
   return optional(env, name) === undefined
     ? {}
     : { expectedArchiveDescriptorVersion: archiveDescriptorVersion(env, name) };
 }
 
-function optionalArchiveObjectKindField(
-  env: NodeJS.ProcessEnv,
-): {
-  expectedArchiveObjectKind?:
-    | "modal_filesystem_snapshot"
-    | "modal_directory_snapshot";
+function optionalArchiveObjectKindField(env: NodeJS.ProcessEnv): {
+  expectedArchiveObjectKind?: "modal_filesystem_snapshot" | "modal_directory_snapshot";
 } {
   const name = "OPENGENI_RECOVERY_ARCHIVE_OBJECT_KIND";
   return optional(env, name) === undefined
@@ -720,9 +560,9 @@ function optionalArchiveObjectKindField(
     : { expectedArchiveObjectKind: archiveObjectKind(env, name) };
 }
 
-function optionalTreeFingerprintAlgorithmField(
-  env: NodeJS.ProcessEnv,
-): { expectedTreeFingerprintAlgorithm?: "sha256" } {
+function optionalTreeFingerprintAlgorithmField(env: NodeJS.ProcessEnv): {
+  expectedTreeFingerprintAlgorithm?: "sha256";
+} {
   const name = "OPENGENI_RECOVERY_ARCHIVE_TREE_FINGERPRINT_ALGORITHM";
   return optional(env, name) === undefined
     ? {}
@@ -731,9 +571,9 @@ function optionalTreeFingerprintAlgorithmField(
       };
 }
 
-function optionalArchiveVerificationStateField(
-  env: NodeJS.ProcessEnv,
-): { expectedArchiveVerificationState?: "verified" | "unverified" } {
+function optionalArchiveVerificationStateField(env: NodeJS.ProcessEnv): {
+  expectedArchiveVerificationState?: "verified" | "unverified";
+} {
   const name = "OPENGENI_RECOVERY_ARCHIVE_VERIFICATION_STATE";
   return optional(env, name) === undefined
     ? {}
@@ -764,27 +604,23 @@ function optionalBooleanField<K extends string>(
     : ({ [key]: exactBoolean(env, name) } as { [P in K]: boolean });
 }
 
-function optionalRouteKindField(
-  env: NodeJS.ProcessEnv,
-): { expectedRouteKind?: "home" | "active" } {
+function optionalRouteKindField(env: NodeJS.ProcessEnv): { expectedRouteKind?: "home" | "active" } {
   const name = "OPENGENI_RECOVERY_ROUTE_KIND";
-  return optional(env, name) === undefined
-    ? {}
-    : { expectedRouteKind: routeKind(env, name) };
+  return optional(env, name) === undefined ? {} : { expectedRouteKind: routeKind(env, name) };
 }
 
-function optionalWorkspaceStatusField(
-  env: NodeJS.ProcessEnv,
-): { expectedWorkspaceStatus?: SandboxWorkspaceReadiness } {
+function optionalWorkspaceStatusField(env: NodeJS.ProcessEnv): {
+  expectedWorkspaceStatus?: SandboxWorkspaceReadiness;
+} {
   const name = "OPENGENI_RECOVERY_WORKSPACE_STATUS";
   return optional(env, name) === undefined
     ? {}
     : { expectedWorkspaceStatus: workspaceStatus(env, name) };
 }
 
-function optionalRestoreStatusField(
-  env: NodeJS.ProcessEnv,
-): { expectedRestoreStatus?: SandboxRestoreStatus } {
+function optionalRestoreStatusField(env: NodeJS.ProcessEnv): {
+  expectedRestoreStatus?: SandboxRestoreStatus;
+} {
   const name = "OPENGENI_RECOVERY_RESTORE_STATUS";
   return optional(env, name) === undefined
     ? {}

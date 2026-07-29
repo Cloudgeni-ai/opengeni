@@ -20724,10 +20724,7 @@ export type LostProviderWorkspaceSettlement = {
 
 export type ColdLostProviderObjectObservation = {
   providerBackend: string | null;
-  objectKind:
-    | "modal_filesystem_snapshot"
-    | "modal_directory_snapshot"
-    | null;
+  objectKind: "modal_filesystem_snapshot" | "modal_directory_snapshot" | null;
   objectId: string | null;
   status: "exists" | "missing" | "unknown";
   observedAt: string | null;
@@ -20756,9 +20753,7 @@ export type PreviewColdLostLeaseInstanceBlockersInput = {
   expectedArchiveComplete?: boolean;
   expectedArchiveDescriptorVersion?: 1;
   expectedArchiveRevision?: string;
-  expectedArchiveObjectKind?:
-    | "modal_filesystem_snapshot"
-    | "modal_directory_snapshot";
+  expectedArchiveObjectKind?: "modal_filesystem_snapshot" | "modal_directory_snapshot";
   expectedArchiveObjectId?: string;
   expectedDescriptorReferenceBytes?: number;
   expectedDescriptorReferenceSha256?: string;
@@ -20913,10 +20908,7 @@ export type ColdLostReconciliationPreview = {
     archiveComplete: boolean | null;
     archiveDescriptorVersion: 1 | null;
     archiveRevision: string | null;
-    archiveObjectKind:
-      | "modal_filesystem_snapshot"
-      | "modal_directory_snapshot"
-      | null;
+    archiveObjectKind: "modal_filesystem_snapshot" | "modal_directory_snapshot" | null;
     archiveObjectId: string | null;
     descriptorReferenceBytes: number | null;
     descriptorReferenceSha256: string | null;
@@ -21111,9 +21103,7 @@ type ColdLostSessionRow = {
   active_epoch: number | string;
 };
 
-type ColdLostDatabasePosture = NonNullable<
-  ColdLostReconciliationPreview["database"]
->;
+type ColdLostDatabasePosture = NonNullable<ColdLostReconciliationPreview["database"]>;
 
 type ColdLostSnapshotRows = {
   snapshotAt: string;
@@ -21151,9 +21141,7 @@ function decodeCanonicalBase64(value: unknown): Uint8Array | null {
   return Buffer.from(bytes).toString("base64") === value ? bytes : null;
 }
 
-function modalProviderObject(
-  bytes: Uint8Array | null,
-): {
+function modalProviderObject(bytes: Uint8Array | null): {
   kind: "modal_filesystem_snapshot" | "modal_directory_snapshot";
   id: string;
 } | null {
@@ -21165,10 +21153,7 @@ function modalProviderObject(
       const parsed = JSON.parse(text.slice(prefix.length)) as {
         snapshot_id?: unknown;
       };
-      if (
-        typeof parsed.snapshot_id !== "string" ||
-        parsed.snapshot_id.length === 0
-      ) {
+      if (typeof parsed.snapshot_id !== "string" || parsed.snapshot_id.length === 0) {
         return null;
       }
       return {
@@ -21200,10 +21185,8 @@ function isFreshCanonicalProviderObservationTime(
     Number.isFinite(observedAtMs) &&
     Number.isFinite(snapshotAtMs) &&
     new Date(observedAtMs).toISOString() === observedAt &&
-    observedAtMs >=
-      snapshotAtMs - COLD_LOST_PROVIDER_OBSERVATION_MAX_AGE_MS &&
-    observedAtMs <=
-      snapshotAtMs + COLD_LOST_PROVIDER_OBSERVATION_MAX_FUTURE_MS
+    observedAtMs >= snapshotAtMs - COLD_LOST_PROVIDER_OBSERVATION_MAX_AGE_MS &&
+    observedAtMs <= snapshotAtMs + COLD_LOST_PROVIDER_OBSERVATION_MAX_FUTURE_MS
   );
 }
 
@@ -21234,9 +21217,7 @@ function isExactLostScope(
   );
 }
 
-function archiveSessionState(
-  row: LeaseRow | null,
-): Record<string, unknown> | null {
+function archiveSessionState(row: LeaseRow | null): Record<string, unknown> | null {
   const resume = row?.resume_state;
   if (!resume || typeof resume !== "object") return null;
   const sessionState = resume.sessionState;
@@ -21286,8 +21267,7 @@ async function readColdLostSnapshotRowsTx(
       interruptions: [],
     };
   }
-  const [processes, admissions, ptys, holders, interruptions] =
-    await Promise.all([
+  const [processes, admissions, ptys, holders, interruptions] = await Promise.all([
     tx.execute<ColdLostProcessRow>(sql`
       select id,
         session_id as "sessionId",
@@ -21457,10 +21437,7 @@ function evaluateColdLostSnapshot(
   options: { requireReadOnly: boolean } = { requireReadOnly: true },
 ): ColdLostReconciliationPreview {
   const blockers: ColdLostReconciliationBlockerCode[] = [];
-  const add = (
-    code: ColdLostReconciliationBlockerCode,
-    blocked: boolean,
-  ): void => {
+  const add = (code: ColdLostReconciliationBlockerCode, blocked: boolean): void => {
     if (blocked && !blockers.includes(code)) blockers.push(code);
   };
   if (database) {
@@ -21476,66 +21453,27 @@ function evaluateColdLostSnapshot(
   }
   add("expected_lease_id_missing", input.expectedLeaseId === undefined);
   add("expected_backend_missing", input.expectedBackend === undefined);
-  add(
-    "expected_current_epoch_missing",
-    input.expectedCurrentEpoch === undefined,
-  );
+  add("expected_current_epoch_missing", input.expectedCurrentEpoch === undefined);
   add("expected_lost_epoch_missing", input.expectedLostEpoch === undefined);
-  add(
-    "expected_lost_instance_missing",
-    input.expectedLostInstanceId === undefined,
-  );
+  add("expected_lost_instance_missing", input.expectedLostInstanceId === undefined);
   add("expected_refcount_missing", input.expectedRefcount === undefined);
-  add(
-    "expected_provider_backend_missing",
-    input.expectedProviderBackend === undefined,
-  );
+  add("expected_provider_backend_missing", input.expectedProviderBackend === undefined);
   add("expected_route_kind_missing", input.expectedRouteKind === undefined);
-  add(
-    "expected_route_target_missing",
-    input.expectedRouteTargetId === undefined,
-  );
+  add("expected_route_target_missing", input.expectedRouteTargetId === undefined);
   add("expected_route_epoch_missing", input.expectedRouteEpoch === undefined);
-  add(
-    "expected_workspace_generation_missing",
-    input.expectedWorkspaceGeneration === undefined,
-  );
-  add(
-    "expected_workspace_status_missing",
-    input.expectedWorkspaceStatus === undefined,
-  );
-  add(
-    "expected_restore_status_missing",
-    input.expectedRestoreStatus === undefined,
-  );
-  add(
-    "expected_restore_failure_missing",
-    input.expectedRestoreFailureCode === undefined,
-  );
-  add(
-    "expected_archive_generation_missing",
-    input.expectedArchiveGeneration === undefined,
-  );
-  add(
-    "expected_archive_complete_missing",
-    input.expectedArchiveComplete === undefined,
-  );
+  add("expected_workspace_generation_missing", input.expectedWorkspaceGeneration === undefined);
+  add("expected_workspace_status_missing", input.expectedWorkspaceStatus === undefined);
+  add("expected_restore_status_missing", input.expectedRestoreStatus === undefined);
+  add("expected_restore_failure_missing", input.expectedRestoreFailureCode === undefined);
+  add("expected_archive_generation_missing", input.expectedArchiveGeneration === undefined);
+  add("expected_archive_complete_missing", input.expectedArchiveComplete === undefined);
   add(
     "expected_archive_descriptor_version_missing",
     input.expectedArchiveDescriptorVersion === undefined,
   );
-  add(
-    "expected_archive_revision_missing",
-    input.expectedArchiveRevision === undefined,
-  );
-  add(
-    "expected_archive_object_kind_missing",
-    input.expectedArchiveObjectKind === undefined,
-  );
-  add(
-    "expected_archive_object_id_missing",
-    input.expectedArchiveObjectId === undefined,
-  );
+  add("expected_archive_revision_missing", input.expectedArchiveRevision === undefined);
+  add("expected_archive_object_kind_missing", input.expectedArchiveObjectKind === undefined);
+  add("expected_archive_object_id_missing", input.expectedArchiveObjectId === undefined);
   add(
     "expected_descriptor_reference_bytes_missing",
     input.expectedDescriptorReferenceBytes === undefined,
@@ -21544,14 +21482,8 @@ function evaluateColdLostSnapshot(
     "expected_descriptor_reference_sha256_missing",
     input.expectedDescriptorReferenceSha256 === undefined,
   );
-  add(
-    "expected_reference_bytes_missing",
-    input.expectedReferenceBytes === undefined,
-  );
-  add(
-    "expected_reference_sha256_missing",
-    input.expectedReferenceSha256 === undefined,
-  );
+  add("expected_reference_bytes_missing", input.expectedReferenceBytes === undefined);
+  add("expected_reference_sha256_missing", input.expectedReferenceSha256 === undefined);
   add(
     "expected_tree_fingerprint_algorithm_missing",
     input.expectedTreeFingerprintAlgorithm === undefined,
@@ -21560,22 +21492,10 @@ function evaluateColdLostSnapshot(
     "expected_tree_fingerprint_sha256_missing",
     input.expectedTreeFingerprintSha256 === undefined,
   );
-  add(
-    "expected_tree_entry_count_missing",
-    input.expectedTreeEntryCount === undefined,
-  );
-  add(
-    "expected_tree_file_count_missing",
-    input.expectedTreeFileCount === undefined,
-  );
-  add(
-    "expected_total_file_bytes_missing",
-    input.expectedTotalFileBytes === undefined,
-  );
-  add(
-    "expected_archive_captured_at_missing",
-    input.expectedArchiveCapturedAt === undefined,
-  );
+  add("expected_tree_entry_count_missing", input.expectedTreeEntryCount === undefined);
+  add("expected_tree_file_count_missing", input.expectedTreeFileCount === undefined);
+  add("expected_total_file_bytes_missing", input.expectedTotalFileBytes === undefined);
+  add("expected_archive_captured_at_missing", input.expectedArchiveCapturedAt === undefined);
   add(
     "expected_archive_verification_state_missing",
     input.expectedArchiveVerificationState === undefined,
@@ -21584,10 +21504,7 @@ function evaluateColdLostSnapshot(
     "expected_archive_verified_revision_missing",
     input.expectedArchiveVerifiedRevision === undefined,
   );
-  add(
-    "expected_archive_verified_at_missing",
-    input.expectedArchiveVerifiedAt === undefined,
-  );
+  add("expected_archive_verified_at_missing", input.expectedArchiveVerifiedAt === undefined);
   add(
     "epoch_relation_invalid",
     input.expectedCurrentEpoch !== undefined &&
@@ -21608,15 +21525,11 @@ function evaluateColdLostSnapshot(
   add("lease_not_found", row === null);
   add(
     "lease_id_mismatch",
-    row !== null &&
-      input.expectedLeaseId !== undefined &&
-      row.id !== input.expectedLeaseId,
+    row !== null && input.expectedLeaseId !== undefined && row.id !== input.expectedLeaseId,
   );
   add(
     "lease_backend_mismatch",
-    row !== null &&
-      input.expectedBackend !== undefined &&
-      row.backend !== input.expectedBackend,
+    row !== null && input.expectedBackend !== undefined && row.backend !== input.expectedBackend,
   );
   add(
     "lost_provider_backend_mismatch",
@@ -21660,8 +21573,7 @@ function evaluateColdLostSnapshot(
     "restore_failure_mismatch",
     recovery !== null &&
       input.expectedRestoreFailureCode !== undefined &&
-      (recovery.restore.failureCode ?? null) !==
-        input.expectedRestoreFailureCode,
+      (recovery.restore.failureCode ?? null) !== input.expectedRestoreFailureCode,
   );
   const archiveGeneration = row
     ? row.archive_generation === null
@@ -21723,9 +21635,7 @@ function evaluateColdLostSnapshot(
     ? ("verified" as const)
     : ("unverified" as const);
   const verifiedRevision = recovery?.workspace.verifiedRevision ?? null;
-  const verifiedAt = archiveVerificationMatches
-    ? recovery!.workspace.verifiedAt
-    : null;
+  const verifiedAt = archiveVerificationMatches ? recovery!.workspace.verifiedAt : null;
   add("archive_descriptor_missing", descriptor === null);
   add(
     "archive_generation_incomplete",
@@ -21735,10 +21645,7 @@ function evaluateColdLostSnapshot(
         !archiveComplete),
   );
   add("archive_base64_invalid", row !== null && bytes === null);
-  add(
-    "archive_bytes_mismatch",
-    descriptor !== null && !referenceVerified,
-  );
+  add("archive_bytes_mismatch", descriptor !== null && !referenceVerified);
   add(
     "archive_descriptor_version_mismatch",
     input.expectedArchiveDescriptorVersion !== undefined &&
@@ -21771,8 +21678,7 @@ function evaluateColdLostSnapshot(
   );
   add(
     "archive_reference_bytes_mismatch",
-    input.expectedReferenceBytes !== undefined &&
-      referenceBytes !== input.expectedReferenceBytes,
+    input.expectedReferenceBytes !== undefined && referenceBytes !== input.expectedReferenceBytes,
   );
   add(
     "archive_reference_sha256_mismatch",
@@ -21821,17 +21727,10 @@ function evaluateColdLostSnapshot(
   );
   add(
     "archive_verified_at_mismatch",
-    input.expectedArchiveVerifiedAt !== undefined &&
-      verifiedAt !== input.expectedArchiveVerifiedAt,
+    input.expectedArchiveVerifiedAt !== undefined && verifiedAt !== input.expectedArchiveVerifiedAt,
   );
-  add(
-    "archive_verification_unavailable",
-    descriptor !== null && !archiveVerificationMatches,
-  );
-  add(
-    "archive_provider_object_identity_unavailable",
-    row !== null && archiveObject === null,
-  );
+  add("archive_verification_unavailable", descriptor !== null && !archiveVerificationMatches);
+  add("archive_provider_object_identity_unavailable", row !== null && archiveObject === null);
   add(
     "provider_object_observation_missing",
     input.providerObject.providerBackend === null ||
@@ -21842,36 +21741,21 @@ function evaluateColdLostSnapshot(
     "provider_object_identity_mismatch",
     archiveObject !== null &&
       (input.providerObject.providerBackend !== row?.backend ||
-        input.providerObject.providerBackend !==
-          input.expectedProviderBackend ||
+        input.providerObject.providerBackend !== input.expectedProviderBackend ||
         input.providerObject.objectKind !== archiveObject.kind ||
         input.providerObject.objectId !== archiveObject.id),
   );
   add("provider_object_missing", input.providerObject.status === "missing");
-  add(
-    "provider_object_status_unknown",
-    input.providerObject.status === "unknown",
-  );
+  add("provider_object_status_unknown", input.providerObject.status === "unknown");
   add(
     "provider_object_observation_time_invalid",
-    !isFreshCanonicalProviderObservationTime(
-      input.providerObject.observedAt,
-      rows.snapshotAt,
-    ),
+    !isFreshCanonicalProviderObservationTime(input.providerObject.observedAt, rows.snapshotAt),
   );
 
-  const exactProcesses = rows.processes.filter((process) =>
-    isExactLostScope(process, input),
-  );
-  const exactAdmissions = rows.admissions.filter((admission) =>
-    isExactLostScope(admission, input),
-  );
-  const exactPtys = rows.ptys.filter((pty) =>
-    isExactLostScope(pty, input),
-  );
-  const activeExactProcesses = exactProcesses.filter(
-    (process) => process.state === "active",
-  );
+  const exactProcesses = rows.processes.filter((process) => isExactLostScope(process, input));
+  const exactAdmissions = rows.admissions.filter((admission) => isExactLostScope(admission, input));
+  const exactPtys = rows.ptys.filter((pty) => isExactLostScope(pty, input));
+  const activeExactProcesses = exactProcesses.filter((process) => process.state === "active");
   const activeExactAdmissions = exactAdmissions.filter(
     (admission) => admission.settled_at === null,
   );
@@ -21880,38 +21764,26 @@ function evaluateColdLostSnapshot(
     activeExactProcesses.map((process) => process.holder_id),
   );
   const exactProcessHolders = rows.holders.filter(
-    (holder) =>
-      holder.kind === "process" &&
-      activeExactProcessHolderIds.has(holder.holder_id),
+    (holder) => holder.kind === "process" && activeExactProcessHolderIds.has(holder.holder_id),
   );
   const unmatchedProcesses = rows.processes.filter(
-    (process) =>
-      process.state === "active" &&
-      !isExactLostScope(process, input),
+    (process) => process.state === "active" && !isExactLostScope(process, input),
   );
   const unmatchedAdmissions = rows.admissions.filter(
-    (admission) =>
-      admission.settled_at === null &&
-      !isExactLostScope(admission, input),
+    (admission) => admission.settled_at === null && !isExactLostScope(admission, input),
   );
   const unmatchedPtys = rows.ptys.filter(
-    (pty) =>
-      pty.status === "open" &&
-      !isExactLostScope(pty, input),
+    (pty) => pty.status === "open" && !isExactLostScope(pty, input),
   );
   const unmatchedProcessHolders = rows.holders.filter(
-    (holder) =>
-      holder.kind === "process" &&
-      !activeExactProcessHolderIds.has(holder.holder_id),
+    (holder) => holder.kind === "process" && !activeExactProcessHolderIds.has(holder.holder_id),
   );
   add("unmatched_active_processes", unmatchedProcesses.length > 0);
   add("unmatched_unsettled_admissions", unmatchedAdmissions.length > 0);
   add("unmatched_open_ptys", unmatchedPtys.length > 0);
   add("unmatched_process_holders", unmatchedProcessHolders.length > 0);
 
-  const directHolders = rows.holders.filter(
-    (holder) => holder.kind === "direct",
-  );
+  const directHolders = rows.holders.filter((holder) => holder.kind === "direct");
   const turnHoldersWithUnknownAttempt = rows.holders.filter(
     (holder) => holder.kind === "turn" && holder.attemptId === null,
   );
@@ -21923,14 +21795,8 @@ function evaluateColdLostSnapshot(
   );
   const unsettledInterruptions = rows.interruptions;
   add("active_direct_holders", directHolders.length > 0);
-  add(
-    "turn_holder_attempt_linkage_unknown",
-    turnHoldersWithUnknownAttempt.length > 0,
-  );
-  add(
-    "active_turn_writer_possible",
-    possibleWriterTurnHolders.length > 0,
-  );
+  add("turn_holder_attempt_linkage_unknown", turnHoldersWithUnknownAttempt.length > 0);
+  add("active_turn_writer_possible", possibleWriterTurnHolders.length > 0);
   add("unsettled_interruptions", unsettledInterruptions.length > 0);
 
   const exactIdentity = {
@@ -22023,9 +21889,7 @@ function evaluateColdLostSnapshot(
       providerBackend: input.expectedProviderBackend ?? null,
       routeKind: input.expectedRouteKind ?? null,
       routeTargetId:
-        input.expectedRouteTargetId === undefined
-          ? "missing"
-          : input.expectedRouteTargetId,
+        input.expectedRouteTargetId === undefined ? "missing" : input.expectedRouteTargetId,
       routeEpoch: input.expectedRouteEpoch ?? null,
       workspaceGeneration: input.expectedWorkspaceGeneration ?? null,
       workspaceStatus: input.expectedWorkspaceStatus ?? null,
@@ -22035,39 +21899,29 @@ function evaluateColdLostSnapshot(
           ? "missing"
           : input.expectedRestoreFailureCode,
       archiveGeneration:
-        input.expectedArchiveGeneration === undefined
-          ? "missing"
-          : input.expectedArchiveGeneration,
+        input.expectedArchiveGeneration === undefined ? "missing" : input.expectedArchiveGeneration,
       archiveComplete: input.expectedArchiveComplete ?? null,
-      archiveDescriptorVersion:
-        input.expectedArchiveDescriptorVersion ?? null,
+      archiveDescriptorVersion: input.expectedArchiveDescriptorVersion ?? null,
       archiveRevision: input.expectedArchiveRevision ?? null,
       archiveObjectKind: input.expectedArchiveObjectKind ?? null,
       archiveObjectId: input.expectedArchiveObjectId ?? null,
-      descriptorReferenceBytes:
-        input.expectedDescriptorReferenceBytes ?? null,
-      descriptorReferenceSha256:
-        input.expectedDescriptorReferenceSha256 ?? null,
+      descriptorReferenceBytes: input.expectedDescriptorReferenceBytes ?? null,
+      descriptorReferenceSha256: input.expectedDescriptorReferenceSha256 ?? null,
       referenceBytes: input.expectedReferenceBytes ?? null,
       referenceSha256: input.expectedReferenceSha256 ?? null,
-      treeFingerprintAlgorithm:
-        input.expectedTreeFingerprintAlgorithm ?? null,
-      treeFingerprintSha256:
-        input.expectedTreeFingerprintSha256 ?? null,
+      treeFingerprintAlgorithm: input.expectedTreeFingerprintAlgorithm ?? null,
+      treeFingerprintSha256: input.expectedTreeFingerprintSha256 ?? null,
       treeEntryCount: input.expectedTreeEntryCount ?? null,
       treeFileCount: input.expectedTreeFileCount ?? null,
       totalFileBytes: input.expectedTotalFileBytes ?? null,
       archiveCapturedAt: input.expectedArchiveCapturedAt ?? null,
-      archiveVerificationState:
-        input.expectedArchiveVerificationState ?? null,
+      archiveVerificationState: input.expectedArchiveVerificationState ?? null,
       archiveVerifiedRevision:
         input.expectedArchiveVerifiedRevision === undefined
           ? "missing"
           : input.expectedArchiveVerifiedRevision,
       archiveVerifiedAt:
-        input.expectedArchiveVerifiedAt === undefined
-          ? "missing"
-          : input.expectedArchiveVerifiedAt,
+        input.expectedArchiveVerifiedAt === undefined ? "missing" : input.expectedArchiveVerifiedAt,
     },
     session: session
       ? {
@@ -22104,13 +21958,9 @@ function evaluateColdLostSnapshot(
       referenceSha256,
       referenceVerified,
       object: archiveObject,
-      verificationState: archiveVerificationMatches
-        ? "verified"
-        : "unverified",
+      verificationState: archiveVerificationMatches ? "verified" : "unverified",
       capturedAt: descriptor?.capturedAt ?? null,
-      verifiedAt: archiveVerificationMatches
-        ? recovery!.workspace.verifiedAt
-        : null,
+      verifiedAt: archiveVerificationMatches ? recovery!.workspace.verifiedAt : null,
       providerObservation: input.providerObject,
     },
     inventoryComplete: rows.inventoryComplete,
@@ -22124,12 +21974,8 @@ function evaluateColdLostSnapshot(
     blockerSetHash,
   };
   const previewId = `clrp1:${stableSetHash(previewIdentity)}`;
-  const turnHolders = rows.holders.filter(
-    (holder) => holder.kind === "turn",
-  ).length;
-  const viewerHolders = rows.holders.filter(
-    (holder) => holder.kind === "viewer",
-  ).length;
+  const turnHolders = rows.holders.filter((holder) => holder.kind === "turn").length;
+  const viewerHolders = rows.holders.filter((holder) => holder.kind === "viewer").length;
 
   return {
     version: 1,
@@ -22159,39 +22005,29 @@ function evaluateColdLostSnapshot(
       workspaceStatus: input.expectedWorkspaceStatus ?? null,
       restoreStatus: input.expectedRestoreStatus ?? null,
       restoreFailureCode: input.expectedRestoreFailureCode ?? null,
-      restoreFailureSupplied:
-        input.expectedRestoreFailureCode !== undefined,
+      restoreFailureSupplied: input.expectedRestoreFailureCode !== undefined,
       archiveGeneration: input.expectedArchiveGeneration ?? null,
       archiveGenerationSupplied: input.expectedArchiveGeneration !== undefined,
       archiveComplete: input.expectedArchiveComplete ?? null,
-      archiveDescriptorVersion:
-        input.expectedArchiveDescriptorVersion ?? null,
+      archiveDescriptorVersion: input.expectedArchiveDescriptorVersion ?? null,
       archiveRevision: input.expectedArchiveRevision ?? null,
       archiveObjectKind: input.expectedArchiveObjectKind ?? null,
       archiveObjectId: input.expectedArchiveObjectId ?? null,
-      descriptorReferenceBytes:
-        input.expectedDescriptorReferenceBytes ?? null,
-      descriptorReferenceSha256:
-        input.expectedDescriptorReferenceSha256 ?? null,
+      descriptorReferenceBytes: input.expectedDescriptorReferenceBytes ?? null,
+      descriptorReferenceSha256: input.expectedDescriptorReferenceSha256 ?? null,
       referenceBytes: input.expectedReferenceBytes ?? null,
       referenceSha256: input.expectedReferenceSha256 ?? null,
-      treeFingerprintAlgorithm:
-        input.expectedTreeFingerprintAlgorithm ?? null,
-      treeFingerprintSha256:
-        input.expectedTreeFingerprintSha256 ?? null,
+      treeFingerprintAlgorithm: input.expectedTreeFingerprintAlgorithm ?? null,
+      treeFingerprintSha256: input.expectedTreeFingerprintSha256 ?? null,
       treeEntryCount: input.expectedTreeEntryCount ?? null,
       treeFileCount: input.expectedTreeFileCount ?? null,
       totalFileBytes: input.expectedTotalFileBytes ?? null,
       archiveCapturedAt: input.expectedArchiveCapturedAt ?? null,
-      archiveVerificationState:
-        input.expectedArchiveVerificationState ?? null,
-      archiveVerifiedRevision:
-        input.expectedArchiveVerifiedRevision ?? null,
-      archiveVerifiedRevisionSupplied:
-        input.expectedArchiveVerifiedRevision !== undefined,
+      archiveVerificationState: input.expectedArchiveVerificationState ?? null,
+      archiveVerifiedRevision: input.expectedArchiveVerifiedRevision ?? null,
+      archiveVerifiedRevisionSupplied: input.expectedArchiveVerifiedRevision !== undefined,
       archiveVerifiedAt: input.expectedArchiveVerifiedAt ?? null,
-      archiveVerifiedAtSupplied:
-        input.expectedArchiveVerifiedAt !== undefined,
+      archiveVerifiedAtSupplied: input.expectedArchiveVerifiedAt !== undefined,
     },
     session: session
       ? {
@@ -22240,14 +22076,10 @@ function evaluateColdLostSnapshot(
       fileCount: descriptor?.workspace.fileCount ?? null,
       totalFileBytes: descriptor?.workspace.totalFileBytes ?? null,
       complete: archiveComplete,
-      verificationState: archiveVerificationMatches
-        ? "verified"
-        : "unverified",
+      verificationState: archiveVerificationMatches ? "verified" : "unverified",
       capturedAt: descriptor?.capturedAt ?? null,
       verifiedRevision,
-      verifiedAt: archiveVerificationMatches
-        ? recovery!.workspace.verifiedAt
-        : null,
+      verifiedAt: archiveVerificationMatches ? recovery!.workspace.verifiedAt : null,
       providerObservation: {
         providerBackend: input.providerObject.providerBackend,
         objectKind: input.providerObject.objectKind,
@@ -22291,9 +22123,7 @@ function evaluateColdLostSnapshot(
   };
 }
 
-async function readColdLostDatabasePostureTx(
-  tx: Database,
-): Promise<ColdLostDatabasePosture> {
+async function readColdLostDatabasePostureTx(tx: Database): Promise<ColdLostDatabasePosture> {
   const postureRows = await tx.execute<{
     role: string;
     role_superuser: boolean;
@@ -22326,10 +22156,7 @@ async function readColdLostDatabasePostureTx(
       ), false) as force_rls
   `);
   const posture = postureRows[0];
-  if (!posture)
-    throw new Error(
-      "Cold lost-provider preview could not read database posture",
-    );
+  if (!posture) throw new Error("Cold lost-provider preview could not read database posture");
   return {
     role: posture.role,
     roleSuperuser: posture.role_superuser,
@@ -22732,9 +22559,7 @@ export async function reconcileColdLostLeaseInstanceBlockers(
     expectedArchiveComplete: boolean;
     expectedArchiveDescriptorVersion: 1;
     expectedArchiveRevision: string;
-    expectedArchiveObjectKind:
-      | "modal_filesystem_snapshot"
-      | "modal_directory_snapshot";
+    expectedArchiveObjectKind: "modal_filesystem_snapshot" | "modal_directory_snapshot";
     expectedArchiveObjectId: string;
     expectedDescriptorReferenceBytes: number;
     expectedDescriptorReferenceSha256: string;
@@ -22758,14 +22583,10 @@ export async function reconcileColdLostLeaseInstanceBlockers(
     !Number.isSafeInteger(input.expectedLostEpoch) ||
     input.expectedCurrentEpoch !== input.expectedLostEpoch + 1
   ) {
-    throw new Error(
-      "Cold lost-provider reconciliation requires currentEpoch = lostEpoch + 1",
-    );
+    throw new Error("Cold lost-provider reconciliation requires currentEpoch = lostEpoch + 1");
   }
   if (!/^clrp1:[a-f0-9]{64}$/.test(input.expectedPreviewId)) {
-    throw new Error(
-      "Cold lost-provider reconciliation requires an exact clrp1 preview id",
-    );
+    throw new Error("Cold lost-provider reconciliation requires an exact clrp1 preview id");
   }
   const previewInput: PreviewColdLostLeaseInstanceBlockersInput = {
     accountId: input.accountId,
@@ -22788,29 +22609,22 @@ export async function reconcileColdLostLeaseInstanceBlockers(
     expectedRestoreFailureCode: input.expectedRestoreFailureCode,
     expectedArchiveGeneration: input.expectedArchiveGeneration,
     expectedArchiveComplete: input.expectedArchiveComplete,
-    expectedArchiveDescriptorVersion:
-      input.expectedArchiveDescriptorVersion,
+    expectedArchiveDescriptorVersion: input.expectedArchiveDescriptorVersion,
     expectedArchiveRevision: input.expectedArchiveRevision,
     expectedArchiveObjectKind: input.expectedArchiveObjectKind,
     expectedArchiveObjectId: input.expectedArchiveObjectId,
-    expectedDescriptorReferenceBytes:
-      input.expectedDescriptorReferenceBytes,
-    expectedDescriptorReferenceSha256:
-      input.expectedDescriptorReferenceSha256,
+    expectedDescriptorReferenceBytes: input.expectedDescriptorReferenceBytes,
+    expectedDescriptorReferenceSha256: input.expectedDescriptorReferenceSha256,
     expectedReferenceBytes: input.expectedReferenceBytes,
     expectedReferenceSha256: input.expectedReferenceSha256,
-    expectedTreeFingerprintAlgorithm:
-      input.expectedTreeFingerprintAlgorithm,
-    expectedTreeFingerprintSha256:
-      input.expectedTreeFingerprintSha256,
+    expectedTreeFingerprintAlgorithm: input.expectedTreeFingerprintAlgorithm,
+    expectedTreeFingerprintSha256: input.expectedTreeFingerprintSha256,
     expectedTreeEntryCount: input.expectedTreeEntryCount,
     expectedTreeFileCount: input.expectedTreeFileCount,
     expectedTotalFileBytes: input.expectedTotalFileBytes,
     expectedArchiveCapturedAt: input.expectedArchiveCapturedAt,
-    expectedArchiveVerificationState:
-      input.expectedArchiveVerificationState,
-    expectedArchiveVerifiedRevision:
-      input.expectedArchiveVerifiedRevision,
+    expectedArchiveVerificationState: input.expectedArchiveVerificationState,
+    expectedArchiveVerifiedRevision: input.expectedArchiveVerifiedRevision,
     expectedArchiveVerifiedAt: input.expectedArchiveVerifiedAt,
     providerObject: input.providerObject,
   };
@@ -22822,12 +22636,9 @@ export async function reconcileColdLostLeaseInstanceBlockers(
         const tx = txRaw as unknown as Database;
         const database = await readColdLostDatabasePostureTx(tx);
         const observedRows = await readColdLostSnapshotRowsTx(tx, previewInput);
-        const observedPreview = evaluateColdLostSnapshot(
-          previewInput,
-          observedRows,
-          database,
-          { requireReadOnly: false },
-        );
+        const observedPreview = evaluateColdLostSnapshot(previewInput, observedRows, database, {
+          requireReadOnly: false,
+        });
         if (observedPreview.previewId !== input.expectedPreviewId) {
           return { status: "stale" as const, preview: observedPreview };
         }
@@ -22853,24 +22664,15 @@ export async function reconcileColdLostLeaseInstanceBlockers(
         `);
         const current = currentRows[0];
         if (!current || current.id !== observed.id) {
-          const currentSnapshotRows = await readColdLostSnapshotRowsTx(
-            tx,
-            previewInput,
-          );
+          const currentSnapshotRows = await readColdLostSnapshotRowsTx(tx, previewInput);
           return {
             status: "stale" as const,
-            preview: evaluateColdLostSnapshot(
-              previewInput,
-              currentSnapshotRows,
-              database,
-              { requireReadOnly: false },
-            ),
+            preview: evaluateColdLostSnapshot(previewInput, currentSnapshotRows, database, {
+              requireReadOnly: false,
+            }),
           };
         }
-        const currentSnapshotRows = await readColdLostSnapshotRowsTx(
-          tx,
-          previewInput,
-        );
+        const currentSnapshotRows = await readColdLostSnapshotRowsTx(tx, previewInput);
         const currentPreview = evaluateColdLostSnapshot(
           previewInput,
           currentSnapshotRows,
@@ -22884,16 +22686,12 @@ export async function reconcileColdLostLeaseInstanceBlockers(
           return { status: "blocked" as const, preview: currentPreview };
         }
 
-        const settlement = await settleExactLostProviderWorkspaceBlockersTx(
-          tx,
-          blockerScope,
-        );
+        const settlement = await settleExactLostProviderWorkspaceBlockersTx(tx, blockerScope);
         const refreshedRows = await tx.execute<LeaseRow>(sql`
           select * from sandbox_leases where id = ${current.id}
         `);
         const refreshed = refreshedRows[0];
-        if (!refreshed)
-          throw new Error("Cold sandbox lease vanished during reconciliation");
+        if (!refreshed) throw new Error("Cold sandbox lease vanished during reconciliation");
         return {
           status: "reconciled" as const,
           lease: mapLeaseRow(refreshed),

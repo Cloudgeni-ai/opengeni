@@ -1572,9 +1572,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       .update("distinct-preview-workspace-tree")
       .digest("hex");
     descriptor.workspace.totalFileBytes = descriptor.archiveBytes + 17;
-    const verifiedAt = new Date(
-      Date.parse(descriptor.capturedAt) + 60_000,
-    ).toISOString();
+    const verifiedAt = new Date(Date.parse(descriptor.capturedAt) + 60_000).toISOString();
     const providerObject = {
       providerBackend: "modal",
       objectKind: "modal_filesystem_snapshot" as const,
@@ -1596,14 +1594,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
         sessionState: { providerState: { sandboxId: lostInstanceId } },
       },
     });
-    await insertHolder(
-      ids,
-      leaseId,
-      "turn",
-      attempt.holderId,
-      0,
-      attempt.sessionId,
-    );
+    await insertHolder(ids, leaseId, "turn", attempt.holderId, 0, attempt.sessionId);
     const admission = await advanceWorkspaceGeneration(db, {
       accountId: ids.accountId,
       workspaceId: ids.workspaceId,
@@ -1895,74 +1886,53 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(preview.identities.interruptions).toEqual([]);
     expect(preview.previewId).toMatch(/^clrp1:[a-f0-9]{64}$/);
     expect(descriptor.archiveSha256).not.toBe(descriptor.workspace.sha256);
-    expect(descriptor.archiveBytes).not.toBe(
-      descriptor.workspace.totalFileBytes,
-    );
+    expect(descriptor.archiveBytes).not.toBe(descriptor.workspace.totalFileBytes);
     expect(preview.archive.capturedAt).not.toBe(preview.archive.verifiedAt);
 
-    const unknownProviderPreview = await previewColdLostLeaseInstanceBlockers(
-      db,
-      {
-        ...exactInput,
-        providerObject: { ...providerObject, status: "unknown" },
-      },
-    );
+    const unknownProviderPreview = await previewColdLostLeaseInstanceBlockers(db, {
+      ...exactInput,
+      providerObject: { ...providerObject, status: "unknown" },
+    });
     expect(unknownProviderPreview.status).toBe("blocked");
-    expect(unknownProviderPreview.blockers).toContain(
-      "provider_object_status_unknown",
-    );
+    expect(unknownProviderPreview.blockers).toContain("provider_object_status_unknown");
     expect(unknownProviderPreview.previewId).not.toBe(preview.previewId);
-    const missingProviderPreview = await previewColdLostLeaseInstanceBlockers(
-      db,
-      {
-        ...exactInput,
-        providerObject: { ...providerObject, status: "missing" },
-      },
-    );
+    const missingProviderPreview = await previewColdLostLeaseInstanceBlockers(db, {
+      ...exactInput,
+      providerObject: { ...providerObject, status: "missing" },
+    });
     expect(missingProviderPreview.status).toBe("blocked");
     expect(missingProviderPreview.blockers).toContain("provider_object_missing");
-    const incompleteProviderObservation =
-      await previewColdLostLeaseInstanceBlockers(db, {
-        ...exactInput,
-        providerObject: { ...providerObject, objectId: null },
-      });
+    const incompleteProviderObservation = await previewColdLostLeaseInstanceBlockers(db, {
+      ...exactInput,
+      providerObject: { ...providerObject, objectId: null },
+    });
     expect(incompleteProviderObservation.status).toBe("blocked");
-    expect(incompleteProviderObservation.blockers).toContain(
-      "provider_object_observation_missing",
-    );
+    expect(incompleteProviderObservation.blockers).toContain("provider_object_observation_missing");
 
-    for (const observedAt of [
+    for (const invalidObservedAt of [
       "not-an-iso-timestamp",
       new Date(Date.now() - 10 * 60_000).toISOString(),
       new Date(Date.now() + 2 * 60_000).toISOString(),
     ]) {
-      const invalidObservation = await previewColdLostLeaseInstanceBlockers(
-        db,
-        {
-          ...exactInput,
-          providerObject: { ...providerObject, observedAt },
-        },
-      );
+      const invalidObservation = await previewColdLostLeaseInstanceBlockers(db, {
+        ...exactInput,
+        providerObject: { ...providerObject, observedAt: invalidObservedAt },
+      });
       expect(invalidObservation.status).toBe("blocked");
-      expect(invalidObservation.blockers).toContain(
-        "provider_object_observation_time_invalid",
-      );
+      expect(invalidObservation.blockers).toContain("provider_object_observation_time_invalid");
     }
 
-    const missingDescriptorFence = await previewColdLostLeaseInstanceBlockers(
-      db,
-      { ...exactInput, expectedArchiveRevision: undefined },
-    );
+    const missingDescriptorFence = await previewColdLostLeaseInstanceBlockers(db, {
+      ...exactInput,
+      expectedArchiveRevision: undefined,
+    });
     expect(missingDescriptorFence.status).toBe("blocked");
-    expect(missingDescriptorFence.blockers).toContain(
-      "expected_archive_revision_missing",
-    );
-    const missingVerificationFence =
-      await previewColdLostLeaseInstanceBlockers(db, {
-        ...exactInput,
-        expectedArchiveVerificationState: undefined,
-        expectedArchiveVerifiedAt: undefined,
-      });
+    expect(missingDescriptorFence.blockers).toContain("expected_archive_revision_missing");
+    const missingVerificationFence = await previewColdLostLeaseInstanceBlockers(db, {
+      ...exactInput,
+      expectedArchiveVerificationState: undefined,
+      expectedArchiveVerifiedAt: undefined,
+    });
     expect(missingVerificationFence.status).toBe("blocked");
     expect(missingVerificationFence.blockers).toEqual(
       expect.arrayContaining([
@@ -1976,9 +1946,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       expectedTreeFingerprintSha256: "d".repeat(64),
     });
     expect(treeDriftPreview.status).toBe("blocked");
-    expect(treeDriftPreview.blockers).toContain(
-      "archive_tree_fingerprint_sha256_mismatch",
-    );
+    expect(treeDriftPreview.blockers).toContain("archive_tree_fingerprint_sha256_mismatch");
     const treeDriftApply = await reconcileColdLostLeaseInstanceBlockers(db, {
       ...exactInput,
       expectedTreeFingerprintSha256: "d".repeat(64),
@@ -2122,10 +2090,8 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     });
     expect(applyPreview.status).toBe("eligible");
     expect(applyPreview.previewId).toBe(preview.previewId);
-    const { snapshotAt: _initialSnapshotAt, ...initialReceiptIdentity } =
-      preview;
-    const { snapshotAt: _applySnapshotAt, ...applyReceiptIdentity } =
-      applyPreview;
+    const { snapshotAt: _initialSnapshotAt, ...initialReceiptIdentity } = preview;
+    const { snapshotAt: _applySnapshotAt, ...applyReceiptIdentity } = applyPreview;
     expect(applyReceiptIdentity).toEqual(initialReceiptIdentity);
 
     await admin`
@@ -2137,12 +2103,8 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     });
     expect(drifted.status).toBe("stale");
     if (drifted.status === "stale") {
-      expect(drifted.preview.blockers).toContain(
-        "workspace_generation_mismatch",
-      );
-      expect(drifted.preview.blockers).toContain(
-        "archive_generation_incomplete",
-      );
+      expect(drifted.preview.blockers).toContain("workspace_generation_mismatch");
+      expect(drifted.preview.blockers).toContain("archive_generation_incomplete");
     }
     await admin`
       update sandbox_leases set workspace_generation = 2
@@ -2153,8 +2115,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       expectedPreviewId: applyPreview.previewId,
     });
     expect(reconciled.status).toBe("reconciled");
-    if (reconciled.status !== "reconciled")
-      throw new Error("Expected cold reconciliation");
+    if (reconciled.status !== "reconciled") throw new Error("Expected cold reconciliation");
     expect(reconciled.settlement).toEqual({
       processesLost: 1,
       admissionsRejected: 2,
@@ -2170,9 +2131,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       refcount: 1,
     });
     expect(reconciled.lease.recovery).toEqual(before?.recovery);
-    const rows = await admin<
-      { id: string; outcome: string; state: string | null }[]
-    >`
+    const rows = await admin<{ id: string; outcome: string; state: string | null }[]>`
       select admission.id, admission.provider_outcome as outcome, process.state
       from sandbox_workspace_mutation_admissions admission
       left join sandbox_retained_processes process
