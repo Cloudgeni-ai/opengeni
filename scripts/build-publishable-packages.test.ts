@@ -227,6 +227,44 @@ test("invalidates warm builds for complete nested and non-regular dist entries",
   expect(modeChange.stdout).not.toContain("cached");
 });
 
+test("rejects unattributed watcher notifications even when snapshots look stable", async () => {
+  const root = createFixture();
+  const environment = {
+    OPENGENI_BUILD_VARIANT: "BASE",
+    OPENGENI_BUILD_CACHE_INJECT_UNATTRIBUTED_EVENT: "1",
+  };
+
+  const result = await runBuilder(root, environment);
+  expect(result.code).toBe(1);
+  expect(result.stdout).toContain(
+    "source changed during @opengeni/demo (watch:unattributed-notification)",
+  );
+  expect(result.stderr).toContain(
+    "Build inputs changed during @opengeni/demo build (watch:unattributed-notification)",
+  );
+});
+
+test("tolerates an excluded directory removed between readdir and lstat", async () => {
+  const root = createFixture();
+  const dist = join(root, "packages", "demo", "dist");
+  const pausePath = join(root, "excluded-entry-stat-pause");
+  mkdirSync(dist, { recursive: true });
+  writeFileSync(join(dist, "stale.txt"), "stale\n");
+
+  const builder = startBuilder(root, {
+    OPENGENI_BUILD_VARIANT: "BASE",
+    OPENGENI_BUILD_CACHE_PAUSE_BEFORE_EXCLUDED_ENTRY_STAT: pausePath,
+  });
+  expect(await waitForPath(`${pausePath}.ready`, 5_000)).toBe(true);
+  rmSync(dist, { recursive: true, force: true });
+  writeFileSync(`${pausePath}.release`, "release\n");
+
+  const result = await builder.result;
+  expect(result.code).toBe(0);
+  expect(result.stdout).not.toContain("source changed during @opengeni/demo");
+  expect(readFileSync(outputPath(root), "utf8")).toBe("BASE|A|644\n");
+});
+
 test("serializes concurrent builders and keeps environment keys bound to their bytes", async () => {
   const root = createFixture();
   const gate = join(root, "build-gate");
