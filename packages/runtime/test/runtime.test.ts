@@ -20,6 +20,7 @@ import {
   invalidateServerToolsCache,
 } from "@openai/agents";
 import { Usage } from "@openai/agents-core";
+import { ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import {
   AGENT_INSTRUCTIONS_CORE_PLACEHOLDER,
   DEFAULT_AGENT_INSTRUCTIONS,
@@ -3787,8 +3788,15 @@ describe("runtime event normalization", () => {
       const result = await prepared.mcpServers[0]!.callTool("cap-auth-needed__search_documents", {
         query: "auth",
       });
-      expect(result).toMatchObject({ isError: true });
-      expect(JSON.stringify(result)).toContain("Authentication required");
+      expect(result).toMatchObject({
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: "Authentication required - a connection link was posted to the session.",
+          },
+        ],
+      });
       expect(mcp.calls).toEqual([]);
       expect(authNeeded).toContainEqual(
         expect.objectContaining({
@@ -3803,6 +3811,66 @@ describe("runtime event normalization", () => {
       mcp.close();
     }
   });
+
+  test("never classifies the MCP SDK request-timeout code as connection auth", async () => {
+    let markStarted: (() => void) | null = null;
+    let releaseCall: (() => void) | null = null;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      releaseCall = resolve;
+    });
+    const mcp = startTestMcpServer({
+      beforeToolCall: async () => {
+        markStarted?.();
+        await gate;
+      },
+    });
+    const authNeeded: unknown[] = [];
+    const prepared = await prepareAgentTools(
+      testSettings({
+        mcpServers: [
+          {
+            id: "request-timeout",
+            name: "Request timeout",
+            url: mcp.url,
+            cacheToolsList: false,
+            timeoutMs: 1_000,
+          },
+        ],
+      }),
+      [{ kind: "mcp", id: "request-timeout" }],
+      {
+        onAuthNeeded: (payload) => {
+          authNeeded.push(payload);
+        },
+      },
+    );
+    try {
+      await prepared.mcpServers[0]!.listTools();
+      const pending = prepared.mcpServers[0]!.callTool("request-timeout__search_documents", {
+        query: "wait",
+      });
+      await started;
+      let failure: unknown;
+      try {
+        await pending;
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toBeInstanceOf(Error);
+      expect(failure).toMatchObject({ code: ErrorCode.RequestTimeout });
+      expect((failure as Error).message).toBe(
+        `MCP error ${ErrorCode.RequestTimeout}: Request timed out`,
+      );
+      expect(authNeeded).toEqual([]);
+    } finally {
+      releaseCall?.();
+      await prepared.close();
+      mcp.close();
+    }
+  }, 10_000);
 
   test("skips brokered MCP servers at connect time when auth is missing and emits auth-needed", async () => {
     const authNeeded: unknown[] = [];

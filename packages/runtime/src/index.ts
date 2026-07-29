@@ -2993,9 +2993,12 @@ function parseWwwAuthenticate(header: string | null): {
 // content, erasing the failure. A JSON-RPC error survives the shim as a thrown
 // McpError, which PrefixedMcpServer.callTool converts back into an MCP-shaped
 // `{ isError: true }` output for the model.
-const MCP_AUTH_NEEDED_ERROR_CODE = -32001;
-const MCP_AUTH_NEEDED_MESSAGE =
-  "Authentication required - a connection link was posted to the session.";
+const MCP_AUTH_NEEDED_ERROR = {
+  // OpenGeni application-defined JSON-RPC code. Keep this positive so it cannot
+  // collide with MCP SDK transport errors such as RequestTimeout (-32001).
+  code: 40_101,
+  message: "Authentication required - a connection link was posted to the session.",
+} as const;
 
 function mcpToolAuthNeededResponse(id: string | number | null | undefined): Response {
   return new Response(
@@ -3003,8 +3006,8 @@ function mcpToolAuthNeededResponse(id: string | number | null | undefined): Resp
       jsonrpc: "2.0",
       id: id ?? null,
       error: {
-        code: MCP_AUTH_NEEDED_ERROR_CODE,
-        message: MCP_AUTH_NEEDED_MESSAGE,
+        code: MCP_AUTH_NEEDED_ERROR.code,
+        message: MCP_AUTH_NEEDED_ERROR.message,
       },
     }),
     {
@@ -3019,7 +3022,11 @@ function isAuthNeededMcpError(error: unknown): boolean {
     return false;
   }
   const code = (error as { code?: unknown }).code;
-  return code === MCP_AUTH_NEEDED_ERROR_CODE || error.message.includes(MCP_AUTH_NEEDED_MESSAGE);
+  return (
+    code === MCP_AUTH_NEEDED_ERROR.code &&
+    (error.message === MCP_AUTH_NEEDED_ERROR.message ||
+      error.message === `MCP error ${MCP_AUTH_NEEDED_ERROR.code}: ${MCP_AUTH_NEEDED_ERROR.message}`)
+  );
 }
 
 // Model-facing text for a best-effort server whose tool call failed for a
@@ -3469,7 +3476,7 @@ class PrefixedMcpServer implements MCPServer {
       if (isAuthNeededMcpError(error)) {
         return {
           isError: true,
-          content: [{ type: "text", text: MCP_AUTH_NEEDED_MESSAGE }],
+          content: [{ type: "text", text: MCP_AUTH_NEEDED_ERROR.message }],
         };
       }
       // Best-effort INVOCATION isolation (sibling to the listTools guard). When

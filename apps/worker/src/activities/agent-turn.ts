@@ -762,7 +762,7 @@ export function classifyContextWindowOverflowError(
  * next-loop transport work can reject the stream iterator after a prior tool
  * output was already published. That is transient external backpressure, not a
  * terminal session error. Match MCP-qualified timeout text only: an unrelated
- * sandbox/model timeout and MCP's `-32001 Authentication required` signal must
+ * sandbox/model timeout and MCP's application-defined Authentication required signal must
  * retain their existing semantics.
  */
 export function classifyMcpTransportTimeoutError(
