@@ -31172,6 +31172,132 @@ export async function markSessionAttemptQuiesced(
   });
 }
 
+export type ReconcileSessionAttemptQuiescenceResult =
+  | { action: "quiesced"; events: SessionEvent[] }
+  | { action: "pending"; events: [] }
+  | { action: "stale"; events: [] };
+
+/**
+ * Recover the quiescence receipt when the original activity disappeared after
+ * its attempt was durably interrupted. This is proof-based, not time-based:
+ * the closed attempt cannot admit another workspace writer, and every writer it
+ * did admit (including retained-process child writes) must carry a physical
+ * settlement before the ordinary receipt transaction is allowed to run.
+ */
+export async function reconcileSessionAttemptQuiescence(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    attemptId: string;
+    temporalWorkflowId: string;
+  },
+): Promise<ReconcileSessionAttemptQuiescenceResult> {
+  const eligibility = await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb.execute<{
+        account_id: string;
+        state: string;
+        quiesced_at: Date | string | null;
+        temporal_workflow_id: string;
+        interruption_settled: boolean;
+        interruption_pending: boolean;
+        writer_pending: boolean;
+      }>(sql`
+        select
+          attempt.account_id,
+          attempt.state,
+          attempt.quiesced_at,
+          attempt.temporal_workflow_id,
+          exists (
+            select 1
+            from session_attempt_interruptions interruption
+            where interruption.workspace_id = attempt.workspace_id
+              and interruption.session_id = attempt.session_id
+              and interruption.attempt_id = attempt.id
+              and interruption.state in ('settled', 'rejected_stale')
+          ) as interruption_settled,
+          exists (
+            select 1
+            from session_attempt_interruptions interruption
+            where interruption.workspace_id = attempt.workspace_id
+              and interruption.session_id = attempt.session_id
+              and interruption.attempt_id = attempt.id
+              and interruption.state in ('pending', 'delivered', 'acknowledged')
+          ) as interruption_pending,
+          (
+            exists (
+              select 1
+              from sandbox_workspace_mutation_admissions admission
+              where admission.account_id = attempt.account_id
+                and admission.workspace_id = attempt.workspace_id
+                and admission.session_id = attempt.session_id
+                and admission.settled_at is null
+                and (
+                  admission.attempt_id = attempt.id
+                  or (
+                    admission.actor_kind = 'process'
+                    and exists (
+                      select 1
+                      from sandbox_retained_processes process
+                      where process.account_id = attempt.account_id
+                        and process.workspace_id = attempt.workspace_id
+                        and process.session_id = attempt.session_id
+                        and process.id = admission.actor_id
+                        and process.owner_attempt_id = attempt.id
+                    )
+                  )
+                )
+            )
+            or exists (
+              select 1
+              from sandbox_retained_processes process
+              where process.account_id = attempt.account_id
+                and process.workspace_id = attempt.workspace_id
+                and process.session_id = attempt.session_id
+                and process.owner_attempt_id = attempt.id
+                and process.state = 'active'
+            )
+          ) as writer_pending
+        from session_turn_attempts attempt
+        where attempt.account_id = ${input.accountId}
+          and attempt.workspace_id = ${input.workspaceId}
+          and attempt.session_id = ${input.sessionId}
+          and attempt.id = ${input.attemptId}
+        limit 1
+      `);
+      return rows[0] ?? null;
+    },
+  );
+  if (
+    !eligibility ||
+    eligibility.account_id !== input.accountId ||
+    eligibility.temporal_workflow_id !== input.temporalWorkflowId ||
+    eligibility.state !== "closed" ||
+    !eligibility.interruption_settled ||
+    eligibility.interruption_pending
+  ) {
+    return { action: "stale", events: [] };
+  }
+  if (eligibility.quiesced_at) {
+    return { action: "quiesced", events: [] };
+  }
+  if (eligibility.writer_pending) {
+    return { action: "pending", events: [] };
+  }
+  const events = await markSessionAttemptQuiesced(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    attemptId: input.attemptId,
+    temporalWorkflowId: input.temporalWorkflowId,
+  });
+  return { action: "quiesced", events };
+}
+
 /**
  * Settle every durable interruption cause for one exact first-class attempt.
  * Steer wins the logical-turn fate when causes coexist; effective control after
@@ -34376,12 +34502,13 @@ export async function claimPendingSessionWorkflowWakes(
 
 /**
  * Acknowledge an immediate post-commit signal only after it cannot strand an
- * accepted Agent Steer. Temporal accepting a signal is transport evidence, not
- * proof that a closing workflow observed Postgres or admitted its pending
- * direction. While active control still has an actionable Agent Steer, retain
- * the revision so the bounded outbox dispatcher retries signalWithStart. The
- * attempt-fenced claim consumes the update once; a real Pause is the typed
- * blocker and may acknowledge this revision because Resume commits a new one.
+ * accepted direction or an interrupted attempt awaiting writer-set proof.
+ * Temporal accepting a signal is transport evidence, not proof that a closing
+ * workflow observed Postgres. While active control still has an actionable
+ * Agent Steer or pending quiescence, retain the revision so the bounded outbox
+ * dispatcher retries signalWithStart. The attempt-fenced claim consumes an
+ * Agent Steer once; a real Pause is the typed blocker and may acknowledge this
+ * revision because Resume commits a new one.
  *
  * An older sender may advance only its own revision; it cannot clear a claim or
  * failure state belonging to a newer revision. The control -> workspace ->
@@ -34390,7 +34517,10 @@ export async function claimPendingSessionWorkflowWakes(
  */
 export type SessionWorkflowWakeDeliveryResult =
   | { action: "acknowledged" }
-  | { action: "pending_admission"; blocker: "pending_agent_steer" };
+  | {
+      action: "pending_admission";
+      blocker: "pending_agent_steer" | "pending_quiescence";
+    };
 
 export async function markSessionWorkflowWakeDelivered(
   db: Database,
@@ -34429,6 +34559,35 @@ export async function markSessionWorkflowWakeDelivered(
             .limit(1);
           if (pendingAgentSteer) {
             return { action: "pending_admission", blocker: "pending_agent_steer" } as const;
+          }
+          const [pendingQuiescence] = await tx
+            .select({ id: schema.sessionTurnAttempts.id })
+            .from(schema.sessionTurnAttempts)
+            .innerJoin(
+              schema.sessionAttemptInterruptions,
+              and(
+                eq(
+                  schema.sessionAttemptInterruptions.workspaceId,
+                  schema.sessionTurnAttempts.workspaceId,
+                ),
+                eq(
+                  schema.sessionAttemptInterruptions.sessionId,
+                  schema.sessionTurnAttempts.sessionId,
+                ),
+                eq(schema.sessionAttemptInterruptions.attemptId, schema.sessionTurnAttempts.id),
+              ),
+            )
+            .where(
+              and(
+                eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
+                eq(schema.sessionTurnAttempts.sessionId, input.sessionId),
+                isNull(schema.sessionTurnAttempts.quiescedAt),
+                inArray(schema.sessionAttemptInterruptions.state, ["settled", "rejected_stale"]),
+              ),
+            )
+            .limit(1);
+          if (pendingQuiescence) {
+            return { action: "pending_admission", blocker: "pending_quiescence" } as const;
           }
         }
         const [row] = await tx

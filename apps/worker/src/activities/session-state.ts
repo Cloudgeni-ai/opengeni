@@ -2,6 +2,7 @@ import {
   settleSessionAttemptInterruptions,
   applySessionTurnSettlement,
   recoverSessionDispatch,
+  reconcileSessionAttemptQuiescence,
   peekSessionWork as peekSessionWorkDb,
   countQueuedTurns,
   getSessionEvent,
@@ -23,6 +24,8 @@ import type {
   SettleSessionInterruptionsInput,
   MarkSessionIdleInput,
   PersistSessionAttemptQuiescenceInput,
+  ReconcileSessionAttemptQuiescenceInput,
+  ReconcileSessionAttemptQuiescenceResult,
   RecoverDispatchInput,
   RecoverDispatchResult,
 } from "./types";
@@ -31,6 +34,7 @@ export type SessionStateActivityOverrides = Partial<{
   settleSessionAttemptInterruptions: typeof settleSessionAttemptInterruptions;
   applySessionTurnSettlement: typeof applySessionTurnSettlement;
   recoverSessionDispatch: typeof recoverSessionDispatch;
+  reconcileSessionAttemptQuiescence: typeof reconcileSessionAttemptQuiescence;
   peekSessionWork: typeof peekSessionWorkDb;
   countQueuedTurns: typeof countQueuedTurns;
   getSessionEvent: typeof getSessionEvent;
@@ -60,6 +64,8 @@ export function createSessionStateActivities(
   const applySessionTurnSettlementFn =
     overrides.applySessionTurnSettlement ?? applySessionTurnSettlement;
   const recoverSessionDispatchFn = overrides.recoverSessionDispatch ?? recoverSessionDispatch;
+  const reconcileSessionAttemptQuiescenceFn =
+    overrides.reconcileSessionAttemptQuiescence ?? reconcileSessionAttemptQuiescence;
   const peekSessionWorkFn = overrides.peekSessionWork ?? peekSessionWorkDb;
   const countQueuedTurnsFn = overrides.countQueuedTurns ?? countQueuedTurns;
   const getSessionEventFn = overrides.getSessionEvent ?? getSessionEvent;
@@ -186,6 +192,28 @@ export function createSessionStateActivities(
     }
   }
 
+  async function reconcileSessionAttemptQuiescenceActivity(
+    input: ReconcileSessionAttemptQuiescenceInput,
+  ): Promise<ReconcileSessionAttemptQuiescenceResult> {
+    const { db, bus } = await services();
+    const result = await reconcileSessionAttemptQuiescenceFn(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      attemptId: input.attemptId,
+      temporalWorkflowId: input.workflowId,
+    });
+    if (result.events.length > 0) {
+      await publishDurableSessionEventsFn(
+        bus,
+        input.workspaceId,
+        input.sessionId,
+        result.events,
+      ).catch(() => undefined);
+    }
+    return { action: result.action };
+  }
+
   /**
    * Recover the same current inference when its worker dies without completing
    * a graceful checkpoint (heartbeat timeout, SIGKILL, OOM, or node loss).
@@ -278,6 +306,7 @@ export function createSessionStateActivities(
     failSessionAttempt,
     settleSessionInterruptions,
     persistSessionAttemptQuiescence,
+    reconcileSessionAttemptQuiescence: reconcileSessionAttemptQuiescenceActivity,
     recoverDispatch,
     peekSessionWork,
     expireSessionHumanInput,

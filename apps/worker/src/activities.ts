@@ -37,6 +37,8 @@ export type {
   RecoverDispatchInput,
   RecoverDispatchResult,
   PersistSessionAttemptQuiescenceInput,
+  ReconcileSessionAttemptQuiescenceInput,
+  ReconcileSessionAttemptQuiescenceResult,
   RunAgentTurnInput,
   RunAgentTurnResult,
   SessionAttemptQuiescenceProof,
@@ -161,6 +163,8 @@ export const failSessionAttempt = defaultControlActivities.failSessionAttempt;
 export const settleSessionInterruptions = defaultControlActivities.settleSessionInterruptions;
 export const persistSessionAttemptQuiescence =
   defaultControlActivities.persistSessionAttemptQuiescence;
+export const reconcileSessionAttemptQuiescence =
+  defaultControlActivities.reconcileSessionAttemptQuiescence;
 export const recoverDispatch = defaultControlActivities.recoverDispatch;
 export const peekSessionWork = defaultControlActivities.peekSessionWork;
 export const expireSessionHumanInput = defaultControlActivities.expireSessionHumanInput;

@@ -309,4 +309,55 @@ describe("session-state interrupt settlement", () => {
     expect(quiescenceReceipts).toHaveLength(1);
     expect(fanoutErrors).toHaveLength(1);
   });
+
+  test("publishes a writer-set quiescence recovery and returns its exact state", async () => {
+    publishedEvents.length = 0;
+    const reconcileCalls: unknown[] = [];
+    const activities = createSessionStateActivities(
+      async () =>
+        ({
+          db: fakeDb,
+          bus: { publish: async () => undefined },
+          settings: {},
+          observability: {},
+          wakeSessionWorkflow: null,
+        }) as any,
+      {
+        reconcileSessionAttemptQuiescence: mock(async (_db, input) => {
+          reconcileCalls.push(input);
+          return {
+            action: "quiesced" as const,
+            events: [{ type: "session.queue.changed", payload: { operation: "attempt_quiesced" } }],
+          } as any;
+        }),
+        publishDurableSessionEvents: mock(
+          async (_bus, _workspaceId, _sessionId, events: typeof publishedEvents) => {
+            publishedEvents.push(...events);
+          },
+        ),
+      },
+    );
+
+    expect(
+      await activities.reconcileSessionAttemptQuiescence({
+        accountId: "account-1",
+        workspaceId: "workspace-1",
+        sessionId: "session-1",
+        attemptId: "attempt-1",
+        workflowId: "session-session-1",
+      }),
+    ).toEqual({ action: "quiesced" });
+    expect(reconcileCalls).toEqual([
+      {
+        accountId: "account-1",
+        workspaceId: "workspace-1",
+        sessionId: "session-1",
+        attemptId: "attempt-1",
+        temporalWorkflowId: "session-session-1",
+      },
+    ]);
+    expect(publishedEvents).toEqual([
+      { type: "session.queue.changed", payload: { operation: "attempt_quiesced" } },
+    ]);
+  });
 });

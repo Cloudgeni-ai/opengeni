@@ -10,10 +10,12 @@ import {
   createConnection,
   createDb,
   createScheduledTask,
+  deleteScheduledTask,
   getSession,
   listScheduledTaskRuns,
   listSessionEvents,
   revokeConnection,
+  recordUsageEvent,
   updateScheduledTask,
   type DbClient,
 } from "@opengeni/db";
@@ -99,13 +101,14 @@ async function personalSlackConnection(
   });
 }
 
-function activities() {
+function activities(settings: Parameters<typeof testSettings>[0] = {}) {
   return createScheduledTaskActivities(
     async () =>
       ({
         settings: testSettings({
           databaseUrl: shared!.appUrl,
           sandboxBackend: "none",
+          ...settings,
         }),
         db: client.db,
         bus: new MemoryEventBus(),
@@ -262,5 +265,67 @@ describe("scheduled OpenGeni Slack bot routing", () => {
 
     const runs = await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10);
     expect(runs.map((run) => run.status).sort()).toEqual(["dispatched", "failed"]);
+  });
+
+  test("completes an already-fired workflow after its task was deleted", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const connection = await botConnection(workspace);
+    const task = await taskFixture(workspace, connection.id, "new_session_per_run");
+    await deleteScheduledTask(client.db, workspace.workspaceId, task.id);
+
+    expect(
+      await activities().dispatchScheduledTaskRun({
+        workspaceId: workspace.workspaceId,
+        taskId: task.id,
+        triggerType: "scheduled",
+      }),
+    ).toEqual({ action: "deleted" });
+  });
+
+  test("manual dispatch reuses the API charge identity without an idempotency conflict", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const connection = await botConnection(workspace);
+    const task = await taskFixture(workspace, connection.id, "new_session_per_run");
+    const idempotencyKey = `manual-trigger-${crypto.randomUUID()}`;
+    const initiator = { kind: "subject" as const, subjectId: "subject-a" };
+    await recordUsageEvent(client.db, {
+      ...workspace,
+      eventType: "agent_run.created",
+      quantity: 1,
+      unit: "run",
+      sourceResourceType: "scheduled_task",
+      sourceResourceId: task.id,
+      initiator,
+      idempotencyKey,
+    });
+
+    const result = await activities().dispatchScheduledTaskRun({
+      workspaceId: workspace.workspaceId,
+      taskId: task.id,
+      triggerType: "manual",
+      agentRunUsageIdempotencyKey: idempotencyKey,
+      initiator,
+    });
+    expect(result.action).toBe("start");
+  });
+
+  test("settles a permanently blocked schedule occurrence instead of retrying forever", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const connection = await botConnection(workspace);
+    const task = await taskFixture(workspace, connection.id, "new_session_per_run");
+
+    expect(
+      await activities({
+        billingMode: "stripe",
+        usageLimitsMode: "managed",
+      }).dispatchScheduledTaskRun({
+        workspaceId: workspace.workspaceId,
+        taskId: task.id,
+        triggerType: "scheduled",
+      }),
+    ).toEqual({ action: "blocked", reason: "insufficient_credits" });
   });
 });
