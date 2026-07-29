@@ -36,6 +36,7 @@ import {
   TerminalSessionBanner,
   UserMessageBody,
 } from "@/components/session/banners";
+import { sessionCodexRealtimeSynchronousLock } from "@/components/session/codex-realtime-policy";
 import { useRail } from "@/components/rail/rail-context";
 import { SubagentTree } from "@/components/session/subagents";
 import { SessionWorkspace } from "@/components/session/sandbox-workspace";
@@ -66,6 +67,12 @@ import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
 const LazySessionInspector = lazy(() =>
   import("@/components/session/inspector").then(({ SessionInspector }) => ({
     default: SessionInspector,
+  })),
+);
+
+const LazyCodexRealtimeControl = lazy(() =>
+  import("@/components/session/codex-realtime-control").then(({ SessionCodexRealtimeControl }) => ({
+    default: SessionCodexRealtimeControl,
   })),
 );
 
@@ -569,6 +576,22 @@ function SessionChatPane(props: {
         | "neutral",
     };
   }, [props.agentNodes]);
+  const codexConnected = modelCatalog.models.some(
+    (candidate) =>
+      candidate.provider === "codex-subscription" &&
+      candidate.credentialReadiness.status === "ready",
+  );
+  const synchronousRealtimeLock = useMemo(
+    () =>
+      sessionCodexRealtimeSynchronousLock(
+        props.events,
+        props.session.workspaceId,
+        props.session.id,
+      ),
+    [props.events, props.session.id, props.session.workspaceId],
+  );
+  const [controllerRealtimeLock, setControllerRealtimeLock] = useState(false);
+  const ordinaryControlsLocked = synchronousRealtimeLock || controllerRealtimeLock;
   // Per-approval decision state: an in-flight decision disables both buttons for
   // that approval and shows progress; a settled one can never double-submit even
   // if the strip lingers for a beat before the status flips.
@@ -1020,14 +1043,30 @@ function SessionChatPane(props: {
         </div>
       ) : null}
 
+      {!terminal ? (
+        <Suspense fallback={null}>
+          <LazyCodexRealtimeControl
+            client={context.client}
+            workspaceId={props.session.workspaceId}
+            sessionId={props.session.id}
+            sessionStatus={props.session.status}
+            effectiveControl={props.queue.effectiveControl ?? props.session.effectiveControl}
+            events={props.events}
+            eventsReady={!props.initialLoading}
+            codexConnected={codexConnected}
+            onControlsLockedChange={setControllerRealtimeLock}
+          />
+        </Suspense>
+      ) : null}
+
       {/* Compact session chrome above the composer — incoming, queue, goal,
           and agents as one dock. Hides entirely when there are no signals. */}
       <div className="mx-auto mb-2 w-full max-w-3xl shrink-0 px-4 sm:px-6">
         <SessionChrome
           queue={props.queue}
-          composer={terminal ? undefined : composer}
+          composer={terminal || ordinaryControlsLocked ? undefined : composer}
           goal={props.goal}
-          readOnly={terminal}
+          readOnly={terminal || ordinaryControlsLocked}
           agentsSignal={agentsSignal}
           agentsPanel={
             props.agentNodes.length > 0 ? (
@@ -1051,7 +1090,7 @@ function SessionChatPane(props: {
               sessionHref: (sessionId) =>
                 `/workspaces/${props.session.workspaceId}/sessions/${sessionId}`,
             }}
-            disabled={terminal}
+            disabled={terminal || ordinaryControlsLocked}
             commandContext={commandContext}
             onClearView={props.onClearView}
             fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
@@ -1074,7 +1113,7 @@ function SessionChatPane(props: {
                   model={model}
                   effort={reasoningEffort}
                   latencyMode={latencyMode}
-                  disabled={composer.sending}
+                  disabled={composer.sending || ordinaryControlsLocked}
                   loading={modelCatalog.loading || composer.draftLoading}
                   error={modelCatalog.error}
                   sessionKey={props.session.id}
@@ -1099,7 +1138,11 @@ function SessionChatPane(props: {
                   firstPartyTools={firstPartySessionToolOptions}
                   selection={durableToolSelection}
                   disabled={
-                    composer.sending || terminal || durableToolsSaving || !durableToolsHydrated
+                    composer.sending ||
+                    terminal ||
+                    durableToolsSaving ||
+                    !durableToolsHydrated ||
+                    ordinaryControlsLocked
                   }
                   saving={durableToolsSaving}
                   onChange={(next) => void saveDurableToolPolicy(next)}

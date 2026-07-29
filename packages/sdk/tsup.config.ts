@@ -12,7 +12,7 @@ import { defineConfig } from "tsup";
 // of esbuild silently inlining the server package and erasing the specifier the
 // guard greps for), so the guard catches the leak instead of shipping it.
 export default defineConfig({
-  entry: ["src/index.ts", "src/core.ts"],
+  entry: ["src/index.ts", "src/core.ts", "src/codex-realtime-controller.ts"],
   format: ["esm"],
   target: "es2022",
   dts: true,

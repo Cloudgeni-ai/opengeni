@@ -25,6 +25,10 @@
     "./core": {
       "types": "./src/core.ts",
       "default": "./src/core.ts"
+    },
+    "./codex-realtime-controller": {
+      "types": "./src/codex-realtime-controller.ts",
+      "default": "./src/codex-realtime-controller.ts"
     }
   },
   "publishConfig": {

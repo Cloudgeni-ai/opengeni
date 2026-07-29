@@ -26,6 +26,8 @@ export type StartCodexRealtimeWebrtcOptions = {
   getUserMedia?: ((constraints: MediaStreamConstraints) => Promise<MediaStream>) | undefined;
   /** Reuse a caller-owned microphone across transparent connection rotations. */
   media?: MediaStream | undefined;
+  /** Caller-owned audio element for the provider's remote WebRTC track. */
+  remoteAudio?: HTMLAudioElement | undefined;
 };
 
 export type CodexRealtimeWebrtcSession = {
@@ -55,16 +57,31 @@ export async function startCodexRealtimeWebrtc(
   let media: MediaStream | null = null;
   let ownsMedia = false;
   let stopped = false;
+  const onRemoteTrack = (event: RTCTrackEvent): void => {
+    const remoteAudio = options.remoteAudio;
+    if (!remoteAudio || event.track.kind !== "audio") return;
+    const stream = event.streams[0];
+    if (!stream) return;
+    remoteAudio.autoplay = true;
+    remoteAudio.srcObject = stream;
+    void remoteAudio.play().catch(() => undefined);
+  };
+  if (options.remoteAudio) peerConnection.addEventListener("track", onRemoteTrack);
   const stop = (): void => {
     if (stopped) return;
     stopped = true;
     options.signal?.removeEventListener("abort", stop);
+    if (options.remoteAudio) peerConnection.removeEventListener("track", onRemoteTrack);
     try {
       events.close();
     } finally {
       try {
         if (ownsMedia) media?.getTracks().forEach((track) => track.stop());
       } finally {
+        if (options.remoteAudio) {
+          options.remoteAudio.pause();
+          options.remoteAudio.srcObject = null;
+        }
         peerConnection.close();
       }
     }
