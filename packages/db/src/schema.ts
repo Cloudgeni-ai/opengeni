@@ -1920,14 +1920,15 @@ export const sessionSystemUpdates = pgTable(
     summary: text("summary").notNull(),
     payload: jsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
     lineage: jsonb("lineage").$type<Record<string, unknown>>().notNull().default({}),
-    // pending: eligible to start/attach to an inference; deferred: preserved
-    // after a failed internal-only inference but dormant until a real prompt or
-    // a genuinely new pending update arrives; delivered/cancelled/failed are
-    // terminal for that delivery attempt.
+    // pending is visible queue truth; delivered means its exact model-memory
+    // batch was durably claimed. Terminal cancellation/supersession is explicit.
     state: text("state").notNull().default("pending"),
     deliveredTurnId: uuid("delivered_turn_id").references(() => sessionTurns.id, {
       onDelete: "set null",
     }),
+    // Migration owns the forward FK to session_history_items, declared later.
+    // Every member of one claimed batch points at the exact model-memory row.
+    deliveredHistoryItemId: uuid("delivered_history_item_id"),
     deliveredAt: timestamp("delivered_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -1942,7 +1943,7 @@ export const sessionSystemUpdates = pgTable(
     ),
     stateValid: check(
       "system_updates_state_check",
-      sql`${table.state} in ('pending', 'deferred', 'delivered', 'cancelled', 'superseded', 'failed')`,
+      sql`${table.state} in ('pending', 'delivered', 'cancelled', 'superseded', 'failed')`,
     ),
     dedupe: uniqueIndex("session_system_updates_dedupe_uq").on(
       table.workspaceId,
@@ -1954,6 +1955,17 @@ export const sessionSystemUpdates = pgTable(
       table.sessionId,
       table.state,
       table.createdAt,
+    ),
+    onePendingSteer: uniqueIndex("session_system_updates_one_pending_steer_idx")
+      .on(table.workspaceId, table.sessionId)
+      .where(sql`${table.kind} = 'agent_steer_instruction' and ${table.state} = 'pending'`),
+    deliveryHistoryValid: check(
+      "session_system_updates_delivery_history_check",
+      sql`(
+        (${table.state} = 'delivered' and ${table.deliveredHistoryItemId} is not null)
+        or
+        (${table.state} <> 'delivered' and ${table.deliveredHistoryItemId} is null)
+      )`,
     ),
   }),
 );

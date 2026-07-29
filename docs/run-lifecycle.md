@@ -11,9 +11,11 @@ over this doc; the canonical sources are `apps/worker/src/workflows/session.ts`,
 A **turn** is one logical unit of agent work inside a session: a waiting
 human/API prompt, an approval or structured-input response, or one coalesced
 internal-update batch is processed until the agent reaches a natural stopping
-point. The visible queue contains only waiting human/API prompts; goals,
-schedules, child results, and lifecycle notices are typed internal updates, not
-queue rows. Codex capacity recovery preserves the current logical turn directly
+point. Human/API prompts remain the only reorderable prompt rows. The same
+compact queue surface also projects canonical pending machine inputs, attached
+to the prompt they will join or grouped as standalone incoming updates. Goals,
+schedules, child results, and lifecycle notices never impersonate human
+messages. Codex capacity recovery preserves the current logical turn directly
 and is neither a queue row nor an internal update. One execution attempt runs as
 one non-retryable Temporal `runAgentTurn` activity. Inside the activity the
 OpenAI Agents SDK loop makes as many model calls and tool calls as the work
@@ -48,7 +50,9 @@ ownership aligned after an explicit per-turn switch and excludes turns rejected
 during admission, whose `started_at` claim timestamp alone is not proof that
 their policy ran. Spawned-child terminal results enter the parent's bounded
 typed internal-update batch without injecting a synthetic `user.message` or a
-human queue row.
+human queue row. Claim persists the exact deterministic batch in
+`session_history_items` before inference and links every member to that row.
+Recovery reuses it; later reconciliation never filters it from model memory.
 
 Immediately after claim, the exact owning attempt installs or reads the
 logical turn's accepted execution policy before credit admission, credential
@@ -146,12 +150,13 @@ A no-shrink result publishes a clear recovery message and leaves the session
 `idle`, so zero-progress churn cannot loop. Exhausted, empty-summary, or
 otherwise failed compaction identifies compaction summarization or the provider
 failure, never installs a mechanical summary, and preserves active history. A
-failed same-turn recovery atomically settles the exact turn, defers ordinary
-internal updates, terminalizes a delivered goal-continuation receipt, and ends
-that workflow run. Without a newer actionable work wake, the workflow cannot
-synthesize another goal continuation from unchanged history. Ordinary machine
-updates remain pending; a later human/API prompt, Steer, or explicitly requested
-Compact may create newer truth and make one new attempt.
+failed same-turn recovery atomically settles the exact turn and ends that
+workflow run. Every input already visible to the model remains delivered in
+durable history; it is never requeued or terminalized. Newly arriving machine
+updates remain pending. Without a newer actionable work wake, the workflow
+cannot synthesize another goal continuation from unchanged history. A later
+human/API prompt, Steer, explicitly requested Compact, or genuinely new machine
+input may create newer truth and make one new attempt.
 
 Resolved model context metadata is authoritative on every model-facing path.
 For the Codex subscription catalog this means a 272,000-token raw window, a

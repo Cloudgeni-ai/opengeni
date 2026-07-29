@@ -855,16 +855,20 @@ describe("standalone context compaction execution", () => {
       status: "failed",
     });
     expect((await getSession(client.db, grant.workspaceId!, session.id))?.status).toBe("idle");
-    expect(
-      JSON.stringify(
-        (await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)).map(
-          (row) => row.item,
-        ),
-      ),
-    ).toBe(historyBefore);
+    const historyAfter = await getActiveSessionHistoryItems(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+    );
+    expect(JSON.stringify(historyAfter.slice(0, originalItems.length).map((row) => row.item))).toBe(
+      historyBefore,
+    );
+    expect(historyAfter.at(-1)?.item).toMatchObject({ type: "message", role: "system" });
+    expect(String(historyAfter.at(-1)?.item.content)).toContain(ordinary.update.id);
+    expect(String(historyAfter.at(-1)?.item.content)).toContain(goalContinuation.update.id);
     expect(
       await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, session.id),
-    ).toMatchObject([{ id: ordinary.update.id, state: "deferred", deliveredTurnId: null }]);
+    ).toEqual([]);
     const storedUpdates = await withWorkspaceRls(
       client.db,
       grant.workspaceId!,
@@ -879,7 +883,7 @@ describe("standalone context compaction execution", () => {
     const storedGoalContinuation = storedUpdates.find(
       (update) => update.id === goalContinuation.update.id,
     );
-    expect(storedGoalContinuation?.state).toBe("failed");
+    expect(storedGoalContinuation?.state).toBe("delivered");
     expect(
       (await getSessionQueueSnapshot(client.db, grant.workspaceId!, session.id))?.items,
     ).toEqual([]);
@@ -916,7 +920,7 @@ describe("standalone context compaction execution", () => {
       (await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, session.id)).map(
         (update) => update.id,
       ),
-    ).toEqual(expect.arrayContaining([ordinary.update.id, newUpdate.update.id]));
+    ).toEqual([newUpdate.update.id]);
 
     await withWorkspaceSubjectRls(
       client.db,
@@ -963,7 +967,7 @@ describe("standalone context compaction execution", () => {
           retryClaim.turn.id,
         )
       ).map((update) => update.id),
-    ).toEqual(expect.arrayContaining([ordinary.update.id, newUpdate.update.id]));
+    ).toEqual([newUpdate.update.id]);
   });
 
   test("consumes an operator request without replacing history when its summary is not smaller", async () => {

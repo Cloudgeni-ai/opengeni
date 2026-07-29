@@ -207,51 +207,48 @@ export function SessionAncestryBreadcrumb({
   loading?: boolean;
   error?: Error | null;
 }): ReactNode {
-  const state = error ? "unavailable" : loading ? "loading" : "ready";
-  if (state !== "ready" && parentSessionId) {
+  if (parentSessionId && (loading || error)) {
+    const state = error ? "unavailable" : "loading";
     return (
       <nav
         aria-label="Session ancestry"
-        data-session-ancestry-state={state}
         className="flex min-w-0 items-center text-2xs text-fg-muted"
       >
-        <ParentBackLink workspaceId={workspaceId} parentSessionId={parentSessionId} state={state} />
+        <Link
+          to="/workspaces/$workspaceId/sessions/$sessionId"
+          params={{ workspaceId, sessionId: parentSessionId }}
+          aria-label={`Back to parent session; ancestry ${state}`}
+          className="inline-flex min-w-0 max-w-full items-center gap-1 outline-none transition-colors hover:text-fg focus-visible:text-fg"
+        >
+          <ChevronRightIcon className="size-3 shrink-0 rotate-180" />
+          <span className={error ? "truncate text-status-failed" : "truncate"}>
+            Back · Parent {state}
+          </span>
+        </Link>
       </nav>
     );
   }
   if (error) {
-    return (
-      <span data-session-ancestry-state="unavailable" className="text-2xs text-status-failed">
-        Session ancestry unavailable
-      </span>
-    );
+    return <span className="text-2xs text-status-failed">Session ancestry unavailable</span>;
   }
   if (ancestors.length === 0) {
     return null;
   }
   const parent = ancestors.at(-1)!;
+  const parentLabel = lineageLabel(parent);
   const middle = ancestors.slice(1, -1);
   return (
-    <nav
-      aria-label="Session ancestry"
-      data-session-ancestry-state="ready"
-      className="flex min-w-0 items-center text-2xs text-fg-muted"
-    >
+    <nav aria-label="Session ancestry" className="flex min-w-0 items-center text-2xs text-fg-muted">
       <Link
         to="/workspaces/$workspaceId/sessions/$sessionId"
         params={{ workspaceId, sessionId: parent.id }}
-        title={`Back to ${lineageLabel(parent)}`}
-        aria-label={`Back to ${lineageLabel(parent)}`}
-        data-session-header-back
+        aria-label={`Back to ${parentLabel}`}
         className="inline-flex min-w-0 max-w-full items-center gap-1 outline-none transition-colors hover:text-fg focus-visible:text-fg sm:hidden"
       >
         <ChevronRightIcon className="size-3 shrink-0 rotate-180" />
-        <span className="shrink-0 font-medium text-fg">Back</span>
-        <span aria-hidden="true" className="shrink-0 text-fg-subtle">
-          ·
-        </span>
+        <span className="shrink-0 font-medium text-fg">Back ·</span>
         <bdi dir="auto" className="min-w-0 truncate">
-          {lineageLabel(parent)}
+          {parentLabel}
         </bdi>
       </Link>
       <div className="hidden min-w-0 items-center sm:flex">
@@ -275,11 +272,10 @@ export function SessionAncestryBreadcrumb({
                     <Link
                       to="/workspaces/$workspaceId/sessions/$sessionId"
                       params={{ workspaceId, sessionId: session.id }}
+                      dir="auto"
                       className="min-w-0"
                     >
-                      <bdi dir="auto" className="truncate">
-                        {lineageLabel(session)}
-                      </bdi>
+                      {lineageLabel(session)}
                     </Link>
                   </DropdownMenuItem>
                 ))}
@@ -305,45 +301,16 @@ function BreadcrumbLink({
   workspaceId: string;
   session: SessionSummary;
 }) {
+  const label = lineageLabel(session);
   return (
     <Link
       to="/workspaces/$workspaceId/sessions/$sessionId"
       params={{ workspaceId, sessionId: session.id }}
-      title={lineageLabel(session)}
+      title={label}
+      dir="auto"
       className="max-w-40 truncate outline-none transition-colors hover:text-fg focus-visible:text-fg"
     >
-      <bdi dir="auto">{lineageLabel(session)}</bdi>
-    </Link>
-  );
-}
-
-function ParentBackLink({
-  workspaceId,
-  parentSessionId,
-  state,
-}: {
-  workspaceId: string;
-  parentSessionId: string;
-  state: "loading" | "unavailable";
-}) {
-  const detail = state === "loading" ? "Parent loading" : "Parent unavailable";
-  return (
-    <Link
-      to="/workspaces/$workspaceId/sessions/$sessionId"
-      params={{ workspaceId, sessionId: parentSessionId }}
-      aria-label={`Back to parent session; ancestry ${state}`}
-      title={`${detail} · Back to parent session`}
-      data-session-header-back
-      className="inline-flex min-w-0 max-w-full items-center gap-1 outline-none transition-colors hover:text-fg focus-visible:text-fg"
-    >
-      <ChevronRightIcon className="size-3 shrink-0 rotate-180" />
-      <span className="shrink-0 font-medium text-fg">Back</span>
-      <span aria-hidden="true" className="shrink-0 text-fg-subtle">
-        ·
-      </span>
-      <span className={state === "unavailable" ? "truncate text-status-failed" : "truncate"}>
-        {detail}
-      </span>
+      {label}
     </Link>
   );
 }

@@ -3686,21 +3686,6 @@ export const ComposerDraft = z.object({
 });
 export type ComposerDraft = z.infer<typeof ComposerDraft>;
 
-export const SessionQueueSnapshot = z.object({
-  version: z.number().int().nonnegative(),
-  effectiveControl: EffectiveSessionControl,
-  /**
-   * True while the latest attempt is interrupted but has not durably proved
-   * quiescence: no more inference, user-visible output, or workspace-persistence
-   * authority. Temporal cancellation/terminalization is not that proof. This is
-   * distinct from ordinary capacity queueing, remains accurate with an empty
-   * visible queue, and is independent of Steer-row metadata or withdrawal.
-   */
-  stoppingPreviousAttempt: z.boolean(),
-  items: z.array(SessionTurn),
-});
-export type SessionQueueSnapshot = z.infer<typeof SessionQueueSnapshot>;
-
 export const MoveSessionQueueItemRequest = z.object({
   clientEventId: SessionOperationKey,
   expectedQueueVersion: z.number().int().nonnegative(),
@@ -4052,7 +4037,6 @@ export type SessionSystemUpdatePayload = z.infer<typeof SessionSystemUpdatePaylo
 
 export const SessionSystemUpdateState = z.enum([
   "pending",
-  "deferred",
   "delivered",
   "cancelled",
   "superseded",
@@ -4072,10 +4056,103 @@ export const SessionSystemUpdate = z.object({
   lineage: z.record(z.string(), z.unknown()),
   state: SessionSystemUpdateState,
   deliveredTurnId: z.string().uuid().nullable(),
+  /**
+   * The exact durable model-memory row containing the coalesced batch that
+   * delivered this update. Null until claim; every member of one batch shares
+   * the same id.
+   */
+  deliveredHistoryItemId: z.string().uuid().nullable(),
   deliveredAt: z.string().nullable(),
   createdAt: z.string(),
 });
 export type SessionSystemUpdate = z.infer<typeof SessionSystemUpdate>;
+
+/**
+ * Bounded queue projection of a canonical pending machine input. Full payload,
+ * lineage, and dedupe data remain in canonical storage and never inflate the
+ * hot queue response.
+ */
+export const SessionPendingInputPreview = SessionSystemUpdate.pick({
+  id: true,
+  sessionId: true,
+  kind: true,
+  classification: true,
+  sourceId: true,
+  summary: true,
+  createdAt: true,
+});
+export type SessionPendingInputPreview = z.infer<typeof SessionPendingInputPreview>;
+
+export const SessionQueueSnapshot = z.object({
+  version: z.number().int().nonnegative(),
+  effectiveControl: EffectiveSessionControl,
+  /**
+   * True while the latest attempt is interrupted but has not durably proved
+   * quiescence: no more inference, user-visible output, or workspace-persistence
+   * authority. Temporal cancellation/terminalization is not that proof. This is
+   * distinct from ordinary capacity queueing, remains accurate with an empty
+   * visible queue, and is independent of Steer-row metadata or withdrawal.
+   */
+  stoppingPreviousAttempt: z.boolean(),
+  items: z.array(SessionTurn),
+  /** Canonical bounded previews; never reconstructed from session events. */
+  pendingInputs: z.array(SessionPendingInputPreview),
+  /**
+   * Exact members of the next bounded machine-input batch that will join an
+   * already-waiting human/API prompt. Null means the next machine-input claim
+   * is standalone. This is a projection of canonical rows, not queue state.
+   */
+  pendingInputAttachment: z
+    .object({
+      turnId: z.string().uuid(),
+      inputIds: z.array(z.string().uuid()).min(1),
+    })
+    .nullable(),
+});
+export type SessionQueueSnapshot = z.infer<typeof SessionQueueSnapshot>;
+
+/**
+ * Deterministic, protocol-safe model representation of one claimed machine
+ * input batch. This exact string is persisted before inference and replayed on
+ * every later turn; callers must not synthesize an equivalent transient copy.
+ */
+export function renderSessionSystemUpdateBatch(
+  updates: ReadonlyArray<
+    Pick<
+      SessionSystemUpdate,
+      "id" | "kind" | "classification" | "sourceId" | "summary" | "payload" | "lineage"
+    >
+  >,
+): string {
+  if (updates.length === 0) {
+    throw new TypeError("A durable machine-input batch requires at least one update");
+  }
+  return [
+    "[OpenGeni internal updates]",
+    "These platform updates were delivered together for this inference. They are not human prompts.",
+    JSON.stringify({
+      updates: updates.map((update) => ({
+        id: update.id,
+        kind: update.kind,
+        classification: update.classification,
+        sourceId: update.sourceId,
+        summary: update.summary,
+        payload: update.payload,
+        lineage: update.lineage,
+      })),
+    }),
+  ].join("\n");
+}
+
+export function sessionSystemUpdateBatchHistoryItem(
+  updates: Parameters<typeof renderSessionSystemUpdateBatch>[0],
+): { type: "message"; role: "system"; content: string } {
+  return {
+    type: "message",
+    role: "system",
+    content: renderSessionSystemUpdateBatch(updates),
+  };
+}
 
 export const VariableSetVariableName = z
   .string()
@@ -5345,6 +5422,9 @@ export const SessionEventType = z.enum([
   "goal.continuation",
   "system.update.pending",
   "system.update.delivered",
+  "system.update.superseded",
+  "system.update.cancelled",
+  "system.update.settled",
   "session.control.paused",
   "session.control.resumed",
   "session.control.steer_requested",
@@ -5545,6 +5625,9 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "goal.continuation",
     "system.update.pending",
     "system.update.delivered",
+    "system.update.superseded",
+    "system.update.cancelled",
+    "system.update.settled",
     "session.control.paused",
     "session.control.resumed",
     "session.control.steer_requested",

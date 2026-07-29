@@ -299,7 +299,6 @@ export {
   MAX_COMPACTION_THRESHOLD_RATIO,
   SUMMARY_BUFFER_TOKENS,
   SUMMARY_PREFIX,
-  isEphemeralInternalContext,
   USER_MESSAGE_TRUNCATION_MARKER,
 } from "./context-compaction";
 export type {

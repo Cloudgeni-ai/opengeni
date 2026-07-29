@@ -218,7 +218,7 @@ export type GoalItem = {
 export type NoticeItem = {
   kind: "notice";
   id: string;
-  tone: "waiting" | "cancelled" | "failed";
+  tone: "waiting" | "cancelled" | "failed" | "input";
   text: string;
   /** Optional evidence kept inspectable without overwhelming the main rail. */
   details?: { label: string; value: unknown };

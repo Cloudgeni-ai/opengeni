@@ -148,6 +148,7 @@ function serializeItem(item: TimelineItem): Record<string, unknown> {
         occurredAt: item.occurredAt,
         tone: item.tone,
         text: item.text,
+        details: stableValue(item.details),
       };
     case "auth-needed":
       return {

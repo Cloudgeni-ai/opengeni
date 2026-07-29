@@ -114,6 +114,7 @@ import {
   RigChange as RigChangeContract,
   SessionGoal as SessionGoalContract,
   SessionSystemUpdatePayload,
+  sessionSystemUpdateBatchHistoryItem,
   HostEventExport as HostEventExportContract,
   HostEventExportBatch as HostEventExportBatchContract,
   HostExportConsumerId,
@@ -28988,7 +28989,7 @@ export async function materializeGoalContinuation(
               eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
               eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
               eq(schema.sessionSystemUpdates.kind, "agent_steer_instruction"),
-              inArray(schema.sessionSystemUpdates.state, ["pending", "deferred"]),
+              eq(schema.sessionSystemUpdates.state, "pending"),
             ),
           )
           .limit(1);
@@ -29151,6 +29152,7 @@ export async function materializeGoalContinuation(
           })
           .onConflictDoNothing({ target: schema.usageEvents.idempotencyKey });
 
+        const eventPreview = internalUpdateEventMember(update);
         const insertedEvents = await tx
           .insert(schema.sessionEvents)
           .values([
@@ -29161,11 +29163,13 @@ export async function materializeGoalContinuation(
               sequence: session.lastSequence + 1,
               type: "system.update.pending",
               payload: sanitizeEventPayload({
-                updateId: update.id,
-                kind: update.kind,
-                classification: update.classification,
-                sourceId: update.sourceId,
-                summary: update.summary,
+                updateId: eventPreview.id,
+                kind: eventPreview.kind,
+                classification: eventPreview.classification,
+                sourceId: eventPreview.sourceId,
+                sourceIdTruncated: eventPreview.sourceIdTruncated,
+                summary: eventPreview.summary,
+                summaryTruncated: eventPreview.summaryTruncated,
               }),
               occurredAt: now,
             },
@@ -29666,6 +29670,79 @@ export type SessionWorkTrigger = { kind: "next" } | { kind: "approval"; triggerE
 export const MAX_INTERNAL_UPDATE_BYTES = 64 * 1024;
 export const MAX_INTERNAL_UPDATE_BATCH_MEMBERS = 100;
 export const MAX_INTERNAL_UPDATE_BATCH_BYTES = 256 * 1024;
+const MAX_INTERNAL_UPDATE_EVENT_SUMMARY_BYTES = 512;
+const MAX_INTERNAL_UPDATE_EVENT_SOURCE_BYTES = 256;
+
+type BoundedSystemUpdate = Pick<
+  typeof schema.sessionSystemUpdates.$inferSelect,
+  "id" | "kind" | "classification" | "sourceId" | "summary" | "payload" | "lineage"
+>;
+
+function boundedInternalUpdateEventText(
+  value: string,
+  maxBytes: number,
+): {
+  text: string;
+  truncated: boolean;
+} {
+  if (Buffer.byteLength(value) <= maxBytes) return { text: value, truncated: false };
+  const suffix = "…";
+  const bodyBudget = maxBytes - Buffer.byteLength(suffix);
+  const bytes = Buffer.from(value);
+  let text = bytes.subarray(0, bodyBudget).toString("utf8");
+  if (text.endsWith("\uFFFD")) text = text.slice(0, -1);
+  return { text: `${text}${suffix}`, truncated: true };
+}
+
+function internalUpdateEventMember(update: BoundedSystemUpdate) {
+  const summary = boundedInternalUpdateEventText(
+    update.summary,
+    MAX_INTERNAL_UPDATE_EVENT_SUMMARY_BYTES,
+  );
+  const source = boundedInternalUpdateEventText(
+    update.sourceId,
+    MAX_INTERNAL_UPDATE_EVENT_SOURCE_BYTES,
+  );
+  return {
+    id: update.id,
+    kind: update.kind,
+    classification: update.classification,
+    sourceId: source.text,
+    sourceIdTruncated: source.truncated,
+    summary: summary.text,
+    summaryTruncated: summary.truncated,
+  };
+}
+
+function selectBoundedSystemUpdateBatch<T extends BoundedSystemUpdate>(updates: readonly T[]): T[] {
+  const selected: T[] = [];
+  let selectedBytes = 0;
+  for (const update of updates) {
+    const updateBytes = Buffer.byteLength(
+      JSON.stringify({
+        id: update.id,
+        kind: update.kind,
+        classification: update.classification,
+        sourceId: update.sourceId,
+        summary: update.summary,
+        payload: update.payload,
+        lineage: update.lineage,
+      }),
+    );
+    if (
+      selected.length >= MAX_INTERNAL_UPDATE_BATCH_MEMBERS ||
+      // One individually large canonical input must still make progress. The
+      // model/context boundary may reject it explicitly, but the queue cannot
+      // wedge forever merely because the coalescing target is smaller.
+      (selected.length > 0 && selectedBytes + updateBytes > MAX_INTERNAL_UPDATE_BATCH_BYTES)
+    ) {
+      break;
+    }
+    selected.push(update);
+    selectedBytes += updateBytes;
+  }
+  return selected;
+}
 
 export type ClaimSessionWorkForAttemptInput = {
   sessionId: string;
@@ -29711,7 +29788,10 @@ export async function claimSessionWorkForAttempt(
           count: number;
           lastSequence: number;
           triggerEventId: string | null;
+          historyItemId: string | null;
+          historyItem: Record<string, unknown> | null;
           updates: Array<typeof schema.sessionSystemUpdates.$inferSelect>;
+          events: Array<typeof schema.sessionEvents.$inferInsert>;
           event: typeof schema.sessionEvents.$inferInsert | null;
         }> => {
           const [agentSteer] = await tx
@@ -29721,7 +29801,7 @@ export async function claimSessionWorkForAttempt(
               and(
                 eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
                 eq(schema.sessionSystemUpdates.sessionId, sessionId),
-                inArray(schema.sessionSystemUpdates.state, ["pending", "deferred"]),
+                eq(schema.sessionSystemUpdates.state, "pending"),
                 eq(schema.sessionSystemUpdates.kind, "agent_steer_instruction"),
               ),
             )
@@ -29731,20 +29811,6 @@ export async function claimSessionWorkForAttempt(
             )
             .limit(1)
             .for("update");
-          if (agentSteer) {
-            await tx
-              .update(schema.sessionSystemUpdates)
-              .set({ state: "superseded" })
-              .where(
-                and(
-                  eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
-                  eq(schema.sessionSystemUpdates.sessionId, sessionId),
-                  eq(schema.sessionSystemUpdates.kind, "agent_steer_instruction"),
-                  inArray(schema.sessionSystemUpdates.state, ["pending", "deferred"]),
-                  ne(schema.sessionSystemUpdates.id, agentSteer.id),
-                ),
-              );
-          }
           const ordinary = await tx
             .select()
             .from(schema.sessionSystemUpdates)
@@ -29752,7 +29818,7 @@ export async function claimSessionWorkForAttempt(
               and(
                 eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
                 eq(schema.sessionSystemUpdates.sessionId, sessionId),
-                inArray(schema.sessionSystemUpdates.state, ["pending", "deferred"]),
+                eq(schema.sessionSystemUpdates.state, "pending"),
                 ne(schema.sessionSystemUpdates.kind, "agent_steer_instruction"),
               ),
             )
@@ -29768,12 +29834,15 @@ export async function claimSessionWorkForAttempt(
               count: 0,
               lastSequence: nextSequence - 1,
               triggerEventId: null,
+              historyItemId: null,
+              historyItem: null,
               updates: [],
+              events: [],
               event: null,
             };
           }
-          const deliverable: typeof updates = [];
-          let deliveredBytes = 0;
+          const validUpdates: typeof updates = [];
+          const cancelledUpdateIds: string[] = [];
           for (const update of updates) {
             const payload = update.payload;
             if (payload.type === "goal_continuation") {
@@ -29802,43 +29871,66 @@ export async function claimSessionWorkForAttempt(
                   .update(schema.sessionSystemUpdates)
                   .set({ state: "cancelled" })
                   .where(eq(schema.sessionSystemUpdates.id, update.id));
+                cancelledUpdateIds.push(update.id);
                 continue;
               }
             }
-            const updateBytes = Buffer.byteLength(
-              JSON.stringify({
-                id: update.id,
-                kind: update.kind,
-                classification: update.classification,
-                sourceId: update.sourceId,
-                summary: update.summary,
-                payload: update.payload,
-                lineage: update.lineage,
-              }),
-            );
-            if (
-              deliverable.length >= MAX_INTERNAL_UPDATE_BATCH_MEMBERS ||
-              deliveredBytes + updateBytes > MAX_INTERNAL_UPDATE_BATCH_BYTES
-            ) {
-              break;
-            }
-            deliverable.push(update);
-            deliveredBytes += updateBytes;
+            validUpdates.push(update);
           }
+          const deliverable = selectBoundedSystemUpdateBatch(validUpdates);
           if (deliverable.length === 0) {
+            const cancellationEvent =
+              cancelledUpdateIds.length > 0
+                ? {
+                    accountId,
+                    workspaceId,
+                    sessionId,
+                    // No receiving turn exists when every candidate was
+                    // cancelled before a model batch could be persisted.
+                    turnId: null,
+                    turnGeneration: null,
+                    turnAttemptId: null,
+                    turnAssociation: null,
+                    sequence: nextSequence,
+                    type: "system.update.cancelled" as const,
+                    payload: sanitizeEventPayload({
+                      updateIds: cancelledUpdateIds,
+                      count: cancelledUpdateIds.length,
+                      reason: "stale_goal_continuation",
+                    }),
+                    occurredAt,
+                  }
+                : null;
             return {
               count: 0,
-              lastSequence: nextSequence - 1,
+              lastSequence: cancellationEvent ? nextSequence : nextSequence - 1,
               triggerEventId: null,
+              historyItemId: null,
+              historyItem: null,
               updates: [],
+              events: cancellationEvent ? [cancellationEvent] : [],
               event: null,
             };
           }
+          // Inclusion gives the newest Steer first refusal on the bounded
+          // batch. Model ordering is deliberately the opposite: ordinary
+          // updates establish context, then the authoritative replacement
+          // direction is last so it cannot be overridden by an older goal or
+          // lifecycle notice.
+          const modelOrdered = [
+            ...deliverable.filter((update) => update.kind !== "agent_steer_instruction"),
+            ...deliverable.filter((update) => update.kind === "agent_steer_instruction"),
+          ];
+          const historyItemId = crypto.randomUUID();
+          const historyItem = sessionSystemUpdateBatchHistoryItem(
+            modelOrdered.map((update) => mapSessionSystemUpdate(update)),
+          ) as Record<string, unknown>;
           await tx
             .update(schema.sessionSystemUpdates)
             .set({
               state: "delivered",
               deliveredTurnId: turnId,
+              deliveredHistoryItemId: historyItemId,
               deliveredAt: occurredAt,
             })
             .where(
@@ -29852,6 +29944,27 @@ export async function claimSessionWorkForAttempt(
               ),
             );
           const eventId = triggerEventId ?? crypto.randomUUID();
+          let sequence = nextSequence - 1;
+          const events: Array<typeof schema.sessionEvents.$inferInsert> = [];
+          if (cancelledUpdateIds.length > 0) {
+            events.push({
+              accountId,
+              workspaceId,
+              sessionId,
+              turnId,
+              turnGeneration,
+              turnAttemptId: input.attemptId,
+              turnAssociation: "current",
+              sequence: ++sequence,
+              type: "system.update.cancelled",
+              payload: sanitizeEventPayload({
+                updateIds: cancelledUpdateIds,
+                count: cancelledUpdateIds.length,
+                reason: "stale_goal_continuation",
+              }),
+              occurredAt,
+            });
+          }
           const event: typeof schema.sessionEvents.$inferInsert = {
             id: eventId,
             accountId,
@@ -29861,22 +29974,62 @@ export async function claimSessionWorkForAttempt(
             turnGeneration,
             turnAttemptId: input.attemptId,
             turnAssociation: "current",
-            sequence: nextSequence,
+            sequence: ++sequence,
             type: "system.update.delivered",
             payload: sanitizeEventPayload({
               updateIds: deliverable.map((update) => update.id),
+              historyItemId,
               count: deliverable.length,
               classifications: [...new Set(deliverable.map((update) => update.classification))],
+              members: modelOrdered.map(internalUpdateEventMember),
             }),
             occurredAt,
           };
+          events.push(event);
           return {
             count: deliverable.length,
-            lastSequence: nextSequence,
+            lastSequence: sequence,
             triggerEventId: eventId,
+            historyItemId,
+            historyItem,
             updates: deliverable,
+            events,
             event,
           };
+        };
+
+        const persistDeliveredUpdateBatch = async (
+          delivered: Awaited<ReturnType<typeof deliverPendingUpdates>>,
+          accountId: string,
+          turnId: string,
+        ): Promise<void> => {
+          if (!delivered.historyItemId || !delivered.historyItem) {
+            if (delivered.count !== 0) {
+              throw new Error("Delivered machine-input batch has no model-memory item");
+            }
+            return;
+          }
+          const [{ position } = { position: 0 }] = await tx
+            .select({
+              position: sql<number>`coalesce(max(${schema.sessionHistoryItems.position}), -1) + 1`,
+            })
+            .from(schema.sessionHistoryItems)
+            .where(
+              and(
+                eq(schema.sessionHistoryItems.workspaceId, workspaceId),
+                eq(schema.sessionHistoryItems.sessionId, sessionId),
+              ),
+            );
+          await tx.insert(schema.sessionHistoryItems).values({
+            id: delivered.historyItemId,
+            accountId,
+            workspaceId,
+            sessionId,
+            turnId,
+            position: Number(position),
+            item: sanitizeModelPayload(delivered.historyItem),
+            producerCodexCredentialId: null,
+          });
         };
 
         // Capacity settlement and resume use session -> turn after their
@@ -30214,7 +30367,7 @@ export async function claimSessionWorkForAttempt(
               eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
               eq(schema.sessionSystemUpdates.sessionId, sessionId),
               eq(schema.sessionSystemUpdates.kind, "agent_steer_instruction"),
-              inArray(schema.sessionSystemUpdates.state, ["pending", "deferred"]),
+              eq(schema.sessionSystemUpdates.state, "pending"),
             ),
           )
           .orderBy(
@@ -30451,6 +30604,22 @@ export async function claimSessionWorkForAttempt(
             triggerEventId,
           );
           if (delivered.count === 0) {
+            if (delivered.events.length > 0) {
+              await tx.insert(schema.sessionEvents).values(delivered.events);
+              await tx
+                .update(schema.sessions)
+                .set({
+                  status: "idle",
+                  lastSequence: delivered.lastSequence,
+                  updatedAt: now,
+                })
+                .where(
+                  and(
+                    eq(schema.sessions.workspaceId, workspaceId),
+                    eq(schema.sessions.id, sessionId),
+                  ),
+                );
+            }
             return { action: "unclaimed", reason: "no-work" };
           }
           const goalUpdate = delivered.updates.find(
@@ -30637,9 +30806,10 @@ export async function claimSessionWorkForAttempt(
             })
             .returning();
           if (!internalTurn) throw new Error("Failed to create internal update inference");
+          await persistDeliveredUpdateBatch(delivered, session.accountId, internalTurn.id);
           await registerAttempt(internalTurn);
           if (!delivered.event) throw new Error("Delivered update batch has no durable event");
-          await tx.insert(schema.sessionEvents).values(delivered.event);
+          await tx.insert(schema.sessionEvents).values(delivered.events);
           if (goalUpdate && typeof goalUpdate.payload.goalId === "string") {
             await tx
               .update(schema.sessionGoals)
@@ -30756,8 +30926,9 @@ export async function claimSessionWorkForAttempt(
           session.lastSequence + 1,
           now,
         );
-        if (delivered.event) {
-          await tx.insert(schema.sessionEvents).values(delivered.event);
+        await persistDeliveredUpdateBatch(delivered, session.accountId, row.id);
+        if (delivered.events.length > 0) {
+          await tx.insert(schema.sessionEvents).values(delivered.events);
         }
         await tx
           .update(schema.sessions)
@@ -31171,13 +31342,6 @@ export async function settleSessionAttemptInterruptions(
         outcome,
         closedAt: now,
       });
-      await requeueInterruptedSessionSystemUpdatesForTurnTx(
-        tx as unknown as Database,
-        workspaceId,
-        sessionId,
-        turn.id,
-      );
-
       const eventValues: Array<typeof schema.sessionEvents.$inferInsert> = steer
         ? [
             {
@@ -32462,10 +32626,45 @@ export async function applySessionTurnSettlement(
           },
         }),
       );
+      const settledMachineInputs = ["completed", "failed", "cancelled", "superseded"].includes(
+        input.turnStatus,
+      )
+        ? await tx
+            .select({
+              id: schema.sessionSystemUpdates.id,
+              historyItemId: schema.sessionSystemUpdates.deliveredHistoryItemId,
+            })
+            .from(schema.sessionSystemUpdates)
+            .where(
+              and(
+                eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
+                eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+                eq(schema.sessionSystemUpdates.deliveredTurnId, input.turnId),
+                eq(schema.sessionSystemUpdates.state, "delivered"),
+              ),
+            )
+            .orderBy(
+              asc(schema.sessionSystemUpdates.createdAt),
+              asc(schema.sessionSystemUpdates.id),
+            )
+        : [];
+      const machineInputSettlementEvent: AppendEventInput | null =
+        settledMachineInputs.length > 0
+          ? {
+              type: "system.update.settled",
+              payload: {
+                updateIds: settledMachineInputs.map((update) => update.id),
+                count: settledMachineInputs.length,
+                historyItemId: settledMachineInputs[0]!.historyItemId,
+                outcome: input.turnStatus,
+              },
+            }
+          : null;
       const settlementEvents = [
         ...(recordingEvent ? [recordingEvent] : []),
         ...(compactionRequestEvent ? [compactionRequestEvent] : []),
         ...terminalHumanInputEvents,
+        ...(machineInputSettlementEvent ? [machineInputSettlementEvent] : []),
         ...input.events,
       ];
       const values = settlementEvents.map((event) => {
@@ -32546,21 +32745,6 @@ export async function applySessionTurnSettlement(
           workspaceId,
           session,
           turn,
-        );
-      }
-      if (input.turnStatus === "failed") {
-        await deferFailedSessionSystemUpdatesForTurnTx(
-          tx as unknown as Database,
-          workspaceId,
-          input.sessionId,
-          input.turnId,
-        );
-      } else if (["cancelled", "superseded"].includes(input.turnStatus)) {
-        await requeueInterruptedSessionSystemUpdatesForTurnTx(
-          tx as unknown as Database,
-          workspaceId,
-          input.sessionId,
-          input.turnId,
         );
       }
       await tx
@@ -32846,14 +33030,6 @@ export async function settleCodexCredentialLeaseLoss(
               eq(schema.sessions.activeTurnId, input.turnId),
             ),
           );
-        if (!input.checkpointDurable) {
-          await deferFailedSessionSystemUpdatesForTurnTx(
-            tx as unknown as Database,
-            input.workspaceId,
-            input.sessionId,
-            input.turnId,
-          );
-        }
         await tx.execute(sql`
           delete from codex_credential_leases
           where account_id = ${input.accountId}
@@ -33797,11 +33973,34 @@ export async function getSessionQueueSnapshot(
         ),
       )
       .orderBy(asc(schema.sessionTurns.position), asc(schema.sessionTurns.createdAt));
+    const pendingInputs = await scopedDb
+      .select()
+      .from(schema.sessionSystemUpdates)
+      .where(
+        and(
+          eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
+          eq(schema.sessionSystemUpdates.sessionId, sessionId),
+          eq(schema.sessionSystemUpdates.state, "pending"),
+        ),
+      )
+      .orderBy(
+        sql`case when ${schema.sessionSystemUpdates.kind} = 'agent_steer_instruction' then 0 else 1 end`,
+        asc(schema.sessionSystemUpdates.createdAt),
+        asc(schema.sessionSystemUpdates.id),
+      );
     const latestInterruption = await latestSessionAttemptInterruption(
       scopedDb,
       workspaceId,
       sessionId,
     );
+    const items = rows.map(mapSessionTurn);
+    const nextInputBatch = selectBoundedSystemUpdateBatch(pendingInputs);
+    const hasPendingAgentSteer = pendingInputs.some(
+      (update) => update.kind === "agent_steer_instruction",
+    );
+    const attachmentTurn = hasPendingAgentSteer
+      ? items.find((turn) => turn.metadata.delivery === "steer")
+      : items[0];
     return {
       version: session.queueVersion,
       effectiveControl: serializeEffectiveSessionControl(effectiveControl),
@@ -33809,7 +34008,26 @@ export async function getSessionQueueSnapshot(
         latestInterruption !== null &&
         latestInterruption.interruptionState !== "rejected_stale" &&
         latestInterruption.quiescedAt === null,
-      items: rows.map(mapSessionTurn),
+      items,
+      pendingInputs: pendingInputs.map((update) => {
+        const canonical = mapSessionSystemUpdate(update);
+        return {
+          id: canonical.id,
+          sessionId: canonical.sessionId,
+          kind: canonical.kind,
+          classification: canonical.classification,
+          sourceId: boundedInternalUpdateEventText(canonical.sourceId, 256).text,
+          summary: boundedInternalUpdateEventText(canonical.summary, 512).text,
+          createdAt: canonical.createdAt,
+        };
+      }),
+      pendingInputAttachment:
+        attachmentTurn && nextInputBatch.length > 0
+          ? {
+              turnId: attachmentTurn.id,
+              inputIds: nextInputBatch.map((update) => update.id),
+            }
+          : null,
     };
   });
 }
@@ -34446,55 +34664,6 @@ export async function addSessionSystemUpdate(
   return await addSessionSystemUpdateWithSourceMutation(db, input, async () => undefined);
 }
 
-async function requeueInterruptedSessionSystemUpdatesForTurnTx(
-  tx: Database,
-  workspaceId: string,
-  sessionId: string,
-  turnId: string,
-): Promise<void> {
-  await tx
-    .update(schema.sessionSystemUpdates)
-    .set({ state: "pending", deliveredTurnId: null, deliveredAt: null })
-    .where(
-      and(
-        eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
-        eq(schema.sessionSystemUpdates.sessionId, sessionId),
-        eq(schema.sessionSystemUpdates.deliveredTurnId, turnId),
-        eq(schema.sessionSystemUpdates.state, "delivered"),
-      ),
-    );
-}
-
-/**
- * A failed internal-only inference must not manufacture another inference by
- * making its inputs immediately runnable again. Preserve ordinary internal
- * updates as deferred input for the next real prompt/new update. Goal
- * continuation notices are derivable from the durable goal and become terminal
- * so the goal evaluator can pause or synthesize the next valid continuation.
- */
-async function deferFailedSessionSystemUpdatesForTurnTx(
-  tx: Database,
-  workspaceId: string,
-  sessionId: string,
-  turnId: string,
-): Promise<void> {
-  await tx
-    .update(schema.sessionSystemUpdates)
-    .set({
-      state: sql`case when ${schema.sessionSystemUpdates.payload} ->> 'type' = 'goal_continuation' then 'failed' else 'deferred' end`,
-      deliveredTurnId: null,
-      deliveredAt: null,
-    })
-    .where(
-      and(
-        eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
-        eq(schema.sessionSystemUpdates.sessionId, sessionId),
-        eq(schema.sessionSystemUpdates.deliveredTurnId, turnId),
-        eq(schema.sessionSystemUpdates.state, "delivered"),
-      ),
-    );
-}
-
 /**
  * Persist one internal update without fabricating a user prompt or queue row.
  * Dedupe and any producer/outbox mutation commit in the same transaction.
@@ -34596,6 +34765,7 @@ export async function addSessionSystemUpdateWithSourceMutation(
         }
 
         const now = new Date();
+        const eventPreview = internalUpdateEventMember(inserted);
         const [event] = await tx
           .insert(schema.sessionEvents)
           .values({
@@ -34605,11 +34775,13 @@ export async function addSessionSystemUpdateWithSourceMutation(
             sequence: session.lastSequence + 1,
             type: "system.update.pending",
             payload: sanitizeEventPayload({
-              updateId: inserted.id,
-              kind: input.kind,
-              classification: input.classification,
-              sourceId: input.sourceId,
-              summary: input.summary,
+              updateId: eventPreview.id,
+              kind: eventPreview.kind,
+              classification: eventPreview.classification,
+              sourceId: eventPreview.sourceId,
+              sourceIdTruncated: eventPreview.sourceIdTruncated,
+              summary: eventPreview.summary,
+              summaryTruncated: eventPreview.summaryTruncated,
             }),
             occurredAt: now,
           })
@@ -34660,7 +34832,7 @@ export async function listOutstandingSessionSystemUpdates(
         and(
           eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
           eq(schema.sessionSystemUpdates.sessionId, sessionId),
-          inArray(schema.sessionSystemUpdates.state, ["pending", "deferred"]),
+          eq(schema.sessionSystemUpdates.state, "pending"),
         ),
       )
       .orderBy(asc(schema.sessionSystemUpdates.createdAt), asc(schema.sessionSystemUpdates.id));
@@ -34716,6 +34888,7 @@ function mapSessionSystemUpdate(
     lineage: row.lineage,
     state: row.state as SessionSystemUpdateState,
     deliveredTurnId: row.deliveredTurnId,
+    deliveredHistoryItemId: row.deliveredHistoryItemId,
     deliveredAt: row.deliveredAt?.toISOString() ?? null,
     createdAt: row.createdAt.toISOString(),
   };

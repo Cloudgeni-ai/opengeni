@@ -481,6 +481,8 @@ export class MockOpenGeniClient implements SessionClientLike {
       effectiveControl: this.effectiveControl(sessionId),
       stoppingPreviousAttempt: false,
       items: this.sessionTurns(sessionId).filter((turn) => turn.status === "queued"),
+      pendingInputs: [],
+      pendingInputAttachment: null,
     };
   }
 

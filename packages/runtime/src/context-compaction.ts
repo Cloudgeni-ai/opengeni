@@ -100,11 +100,6 @@ export function isCompactionSummary(item: unknown): boolean {
   );
 }
 
-/** Platform-authored system context exists for one inference and is never persisted. */
-export function isEphemeralInternalContext(item: unknown): boolean {
-  return itemType(item) === "message" && itemRole(item) === "system";
-}
-
 /**
  * Conservative tokenizer-independent text estimate used for every local input
  * budget. Preserve the stable ASCII `chars / 4` heuristic, but never discount

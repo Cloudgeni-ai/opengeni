@@ -69,16 +69,9 @@ export function SessionHeader({
     // bar was the light-theme fix — a near-white header on a near-white canvas
     // needs its own surface + a crisp divider to look intentional (and it lifts
     // the dark bar a touch above the canvas too).
-    <header
-      data-session-header
-      data-sessionpin-session-header
-      className="flex min-h-14 min-w-0 shrink-0 flex-wrap items-center gap-x-1.5 gap-y-1 border-b border-border bg-surface/80 pb-1.5 pl-[max(0.5rem,env(safe-area-inset-left))] pr-[max(0.5rem,env(safe-area-inset-right))] pt-[max(0.375rem,env(safe-area-inset-top))] backdrop-blur supports-[backdrop-filter]:bg-surface/65 sm:gap-x-3 sm:pl-[max(1.25rem,env(safe-area-inset-left))] sm:pr-[max(1.25rem,env(safe-area-inset-right))]"
-    >
+    <header className="flex min-h-14 min-w-0 shrink-0 flex-wrap items-center gap-1 border-b border-border bg-surface/80 pb-1 pl-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-left))] pr-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-right))] pt-[max(0.375rem,env(safe-area-inset-top))] backdrop-blur supports-[backdrop-filter]:bg-surface/65">
       {leading}
-      <div
-        data-session-header-identity
-        className="flex min-w-20 basis-48 flex-1 flex-col justify-center gap-0.5"
-      >
+      <div className="flex min-w-20 flex-[1_1_5rem] flex-col justify-center gap-0.5">
         {/* Child sessions link back to the manager that spawned them. */}
         <div className="min-w-0">
           <SessionAncestryBreadcrumb
@@ -106,10 +99,7 @@ export function SessionHeader({
           {codexSlot}
         </div>
       </div>
-      <div
-        data-session-header-actions
-        className="ml-auto flex min-w-0 max-w-full flex-wrap items-center justify-end gap-1 sm:gap-2"
-      >
+      <div className="ml-auto flex min-w-0 max-w-full flex-wrap items-center justify-end gap-1 sm:gap-2">
         <SessionPinButton session={session} onPin={onPin} />
         <div className="hidden items-center gap-2 md:flex">
           <ConnectionPill state={connectionState} />
@@ -276,7 +266,6 @@ function SessionTitleEditor(props: {
         maxLength={SESSION_TITLE_MAX_LENGTH}
         aria-label="Session title"
         dir="auto"
-        data-session-header-title
         className="-mx-1.5 w-full truncate rounded-md bg-surface-2/70 px-1.5 text-[15px] font-semibold leading-6 tracking-[-0.01em] outline-none ring-1 ring-border-strong focus:outline-none focus-visible:outline-none"
         style={{ outline: "none" }}
       />
@@ -290,10 +279,9 @@ function SessionTitleEditor(props: {
         onClick={rename.startEditing}
         title={`${display} · click to rename`}
         dir="auto"
-        data-session-header-title
         className="min-w-0 shrink truncate rounded-sm text-left text-[15px] font-semibold leading-6 tracking-[-0.01em] text-fg hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/40"
       >
-        <bdi>{display}</bdi>
+        {display}
       </button>
       {/* The pencil earns its pixels only when relevant: hidden at rest,
           revealed on hover/focus, always present on coarse pointers where

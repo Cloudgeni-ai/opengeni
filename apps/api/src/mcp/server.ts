@@ -1914,7 +1914,7 @@ function registerWorkspaceOrchestrationTools(
       "session_send_message",
       {
         description:
-          "Send information to another session. From an OpenGeni worker this becomes a coalescible internal update, never a visible prompt-queue row; pending updates are delivered together on the target's next inference. A sessionless operator call appends one visible prompt.",
+          "Send information to another session. From an OpenGeni worker this becomes a canonical coalescible machine input: it appears in the target's compact incoming queue group, is durably added to model history when claimed, and remains visible in the timeline. A sessionless operator call appends one human/API prompt.",
         inputSchema: {
           sessionId: z4.string().uuid(),
           text: z4.string().min(1),
@@ -2099,7 +2099,7 @@ function registerWorkspaceOrchestrationTools(
         "session_steer",
         {
           description:
-            "Atomically replace another session's current direction and resume it. The instruction is an internal update, never a human queue row.",
+            "Atomically replace another session's current direction and resume it. The Agent Steer is a typed machine input shown in the target queue/timeline and durably retained in model history; it never impersonates a human prompt.",
           inputSchema: {
             sessionId: z4.string().uuid(),
             instruction: z4.string().min(1),

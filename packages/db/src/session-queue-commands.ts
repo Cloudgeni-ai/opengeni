@@ -279,17 +279,6 @@ export async function supersedeSessionCurrentDirectionInTransaction(
       updatedAt: now,
     })
     .where(eq(schema.sessionTurns.id, current.id));
-  await db
-    .update(schema.sessionSystemUpdates)
-    .set({ state: "pending", deliveredTurnId: null, deliveredAt: null })
-    .where(
-      and(
-        eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
-        eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
-        eq(schema.sessionSystemUpdates.deliveredTurnId, current.id),
-        eq(schema.sessionSystemUpdates.state, "delivered"),
-      ),
-    );
   if (current.status === "waiting_capacity") {
     await db
       .update(schema.codexCapacityWaiters)
@@ -1927,7 +1916,7 @@ export async function steerAgentSessionInTransaction(
     controlRevision: resumed.revision,
     lastSequence: session.lastSequence,
   });
-  await db
+  const supersededUpdates = await db
     .update(schema.sessionSystemUpdates)
     .set({ state: "superseded" })
     .where(
@@ -1935,9 +1924,10 @@ export async function steerAgentSessionInTransaction(
         eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
         eq(schema.sessionSystemUpdates.sessionId, input.targetSessionId),
         eq(schema.sessionSystemUpdates.kind, "agent_steer_instruction"),
-        inArray(schema.sessionSystemUpdates.state, ["pending", "deferred"]),
+        eq(schema.sessionSystemUpdates.state, "pending"),
       ),
-    );
+    )
+    .returning({ id: schema.sessionSystemUpdates.id });
   const now = new Date();
   const [update] = await db
     .insert(schema.sessionSystemUpdates)
@@ -1999,6 +1989,24 @@ export async function steerAgentSessionInTransaction(
       },
       occurredAt: now,
     },
+    ...(supersededUpdates.length > 0
+      ? [
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.targetSessionId,
+            sequence: ++sequence,
+            type: "system.update.superseded" as const,
+            payload: {
+              updateIds: supersededUpdates.map((entry) => entry.id),
+              count: supersededUpdates.length,
+              replacementUpdateId: update.id,
+              reason: "newer_agent_steer",
+            },
+            occurredAt: now,
+          },
+        ]
+      : []),
     {
       accountId: input.accountId,
       workspaceId: input.workspaceId,

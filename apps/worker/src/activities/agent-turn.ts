@@ -82,7 +82,6 @@ import {
   normalizeModelCallUsage,
   normalizeSdkEvent,
   sanitizeHistoryItemsForModel,
-  isEphemeralInternalContext,
   appendPersistentSessionSettings,
   appendSessionInstructions,
   appendWorkspaceMemory,
@@ -1301,16 +1300,26 @@ export function historyRowsToAppend(
   nextWatermark: number;
   nextPosition: number;
 } {
-  const sanitized = sanitizeHistoryItemsForModel(rawHistory, toolOutputTruncationTokens)
-    .filter((item) => !isEphemeralInternalContext(item))
-    .map((item) => redactValue(item) as Record<string, unknown>);
+  const sanitized = sanitizeHistoryItemsForModel(rawHistory, toolOutputTruncationTokens).map(
+    (item) => redactValue(item) as Record<string, unknown>,
+  );
   if (sanitized.length <= persistedHistoryCount) {
     return { rows: [], nextWatermark: persistedHistoryCount, nextPosition };
   }
-  const rows = sanitized.slice(persistedHistoryCount).map((item, offset) => ({
-    position: nextPosition + offset,
-    item: item as Record<string, unknown>,
-  }));
+  // Canonical model-facing inputs (including machine-input batches) are
+  // persisted before inference and therefore live inside the prefix represented
+  // by persistedHistoryCount. System messages synthesized only for this
+  // attempt—recovery diagnostics, credential notices, attachment materialization
+  // notes—must not accidentally become conversation memory during reconciliation.
+  // Advance the in-memory watermark past them, but only allocate durable
+  // positions to actual model/tool output.
+  const rows = sanitized
+    .slice(persistedHistoryCount)
+    .filter((item) => !(item.type === "message" && item.role === "system"))
+    .map((item, offset) => ({
+      position: nextPosition + offset,
+      item: item as Record<string, unknown>,
+    }));
   return {
     rows,
     nextWatermark: sanitized.length,
