@@ -44,11 +44,30 @@ const activeMemoryText =
 const unbrokenMemoryText = `Overflow sentinel ${"unbrokenresponsiveknowledge".repeat(18)}`;
 const proposedMemoryText =
   "Proposed memory awaiting a human decision with approve and reject controls.";
-const workingMemoryTexts = Array.from(
-  { length: 18 },
-  (_, index) =>
-    `Working set memory ${String(index + 1).padStart(2, "0")}: this deliberately long durable record remains reachable through the shared page scroll owner. ` +
-    "Responsive keyboard-operable content should wrap without widening the viewport. ".repeat(2),
+const workingMemoryTopics = [
+  "alpha river mapping",
+  "bravo basalt inventory",
+  "charlie cedar pruning",
+  "delta desert navigation",
+  "echo ember inspection",
+  "foxtrot frost monitoring",
+  "golf garden irrigation",
+  "hotel harbor scheduling",
+  "india island surveying",
+  "juliet jasmine propagation",
+  "kilo kitchen provisioning",
+  "lima lunar observation",
+  "mike meadow restoration",
+  "november night calibration",
+  "oscar orchard rotation",
+  "papa prairie sampling",
+  "quebec quartz cataloging",
+  "romeo railway maintenance",
+] as const;
+const workingMemoryTexts = workingMemoryTopics.map(
+  (topic, index) =>
+    `Working set memory ${String(index + 1).padStart(2, "0")}: ${topic} is a distinct durable record that remains reachable through the shared page scroll owner. ` +
+    `Fixture marker WORKING_MEMORY_${String(index + 1).padStart(2, "0")}_${topic.replaceAll(" ", "_")} proves the keyboard-operable content wraps without widening the viewport.`,
 );
 // The API returns memories newest-first, so the first created record is the
 // bottom-most working-set card in the rendered list.
@@ -225,6 +244,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
               await workspaceNav.getByRole("link", { name: "Memory", exact: true }).waitFor();
             }
             if (surface === "variable-sets") {
+              await ensureVariableSetExpanded(page);
               await expectContentPageScrollAndFocus(
                 page,
                 page.getByRole("button", { name: `Rotate variable ${lastVariableName}` }),
@@ -351,7 +371,9 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
       page,
       page.getByRole("button", { name: `Rotate variable ${lastVariableName}` }),
     );
-    expect(await page.getByLabel("Value is write-only").textContent()).toContain("••••••");
+    const writeOnlyValues = page.getByLabel("Value is write-only");
+    expect(await writeOnlyValues.count()).toBe(longVariableNames.length);
+    expect(await writeOnlyValues.first().textContent()).toContain("••••••");
     expect(
       await page.evaluate(
         (sentinel) =>
@@ -582,9 +604,7 @@ async function openSurface(
   await page.getByRole("heading", { level: 1, name: heading, exact: true }).waitFor();
   if (surface === "variable-sets") {
     await page.getByText(longVariableSetName, { exact: true }).waitFor();
-    const manage = page.getByRole("button", { name: /^Show variables for / });
-    await manage.click();
-    await page.getByText(longVariableName, { exact: true }).waitFor();
+    await ensureVariableSetExpanded(page);
   } else if (surface === "documents") {
     await page.getByText(longBaseName, { exact: true }).waitFor();
     await page.getByText("No documents yet", { exact: true }).waitFor();
@@ -601,6 +621,16 @@ async function openSurface(
       })
       .waitFor();
   }
+}
+
+async function ensureVariableSetExpanded(page: Page): Promise<void> {
+  const expanded = page.getByRole("button", {
+    name: `Hide variables for ${longVariableSetName}`,
+  });
+  if ((await expanded.count()) === 0) {
+    await page.getByRole("button", { name: `Show variables for ${longVariableSetName}` }).click();
+  }
+  await page.getByText(longVariableName, { exact: true }).waitFor();
 }
 
 async function setTheme(page: Page, theme: "light" | "dark"): Promise<void> {
@@ -674,6 +704,11 @@ async function expectContentPageScrollAndFocus(page: Page, target: Locator): Pro
     contentBox!.y + contentBox!.height / 2,
   );
   await page.mouse.wheel(0, Math.max(240, contentBox!.height));
+  await waitFor(async () => (await contentPage.evaluate((element) => element.scrollTop)) > 0, {
+    timeoutMs: 2_000,
+    intervalMs: 50,
+    describe: () => "content page wheel scroll",
+  });
   expect(await contentPage.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
   await contentPage.evaluate((element) => {
     element.scrollTop = 0;
