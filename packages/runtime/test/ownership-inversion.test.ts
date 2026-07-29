@@ -603,6 +603,8 @@ describe("owned-path beforeAgentStart hooks — the provided-session blind spot"
         execCalls.push(args);
         return { exitCode: 0, stdout: "", stderr: "" };
       },
+      listDir: async () => [],
+      readFile: async () => "",
       pathExists: async () => false,
       materializeEntry: async () => undefined,
     };
