@@ -610,7 +610,7 @@ describe("session realtime ledger", () => {
     );
   });
 
-  test("persists finalized transcripts once in ordinary session continuity", async () => {
+  test("keeps finalized transcripts in the realtime ledger until one-time text projection", async () => {
     const value = await fixture();
     const first = await claimInitial(value);
     await complete(value, first.claimed.connection);
@@ -642,16 +642,113 @@ describe("session realtime ledger", () => {
       syncSessionRealtimeLedgerInTransaction(tx, input),
     );
     expect(replay.accepted.map((item) => item.replay)).toEqual([true, true]);
+    expect(added.accepted.map((item) => item.entry.historyItemId)).toEqual([null, null]);
 
     const history = await getActiveSessionHistoryItems(
       client.db,
       value.owner.workspaceId,
       value.owner.sessionId,
     );
-    expect(history.slice(-2).map(({ item }) => item)).toEqual([
-      { type: "message", role: "user", content: "finalized human voice" },
-      { type: "message", role: "assistant", content: "finalized assistant voice" },
-    ]);
+    expect(history.some(({ item }) => JSON.stringify(item).includes("finalized human voice"))).toBe(
+      false,
+    );
+    expect(
+      history.some(({ item }) => JSON.stringify(item).includes("finalized assistant voice")),
+    ).toBe(false);
+  });
+
+  test("rejects changed immutable input and outbound collisions on every operation replay", async () => {
+    const value = await fixture();
+    const first = await claimInitial(value);
+    await complete(value, first.claimed.connection);
+    const operationId = crypto.randomUUID();
+    const exact = {
+      ...ownerProof(value),
+      connectionId: first.claimed.connection.id,
+      connectionEpoch: 1,
+      entries: [
+        {
+          operationId,
+          kind: "user_transcript" as const,
+          role: "user" as const,
+          providerEventId: "immutable-transcript-1",
+          text: "immutable finalized transcript",
+          payload: { nested: { z: 1, a: 2 } },
+        },
+      ],
+    };
+    await transaction(value.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(tx, exact),
+    );
+    await expect(
+      transaction(value.owner.workspaceId, (tx) =>
+        syncSessionRealtimeLedgerInTransaction(tx, {
+          ...exact,
+          entries: [{ ...exact.entries[0]!, text: "changed transcript" }],
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "REALTIME_ENTRY_CHANGED" });
+    await expect(
+      transaction(value.owner.workspaceId, (tx) =>
+        syncSessionRealtimeLedgerInTransaction(tx, {
+          ...exact,
+          entries: [{ ...exact.entries[0]!, providerEventId: "immutable-transcript-2" }],
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "REALTIME_ENTRY_CHANGED" });
+    await expect(
+      transaction(value.owner.workspaceId, (tx) =>
+        syncSessionRealtimeLedgerInTransaction(tx, {
+          ...exact,
+          entries: [{ ...exact.entries[0]!, payload: { nested: { a: 3, z: 1 } } }],
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "REALTIME_ENTRY_CHANGED" });
+    await expect(
+      transaction(value.owner.workspaceId, (tx) =>
+        syncSessionRealtimeLedgerInTransaction(tx, {
+          ...exact,
+          entries: [
+            {
+              operationId,
+              kind: "error",
+              providerEventId: "immutable-transcript-1",
+              text: "immutable finalized transcript",
+              payload: { nested: { z: 1, a: 2 } },
+            },
+          ],
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "REALTIME_ENTRY_CHANGED" });
+
+    const outboundOperationId = crypto.randomUUID();
+    await transaction(value.owner.workspaceId, (tx) =>
+      appendSessionRealtimeOutboundInTransaction(tx, {
+        workspaceId: value.owner.workspaceId,
+        sessionId: value.owner.sessionId,
+        realtimeId: value.started.mode.id,
+        operationId: outboundOperationId,
+        connectionEpoch: 1,
+        kind: "error",
+        text: "outbound-only operation",
+      }),
+    );
+    await expect(
+      transaction(value.owner.workspaceId, (tx) =>
+        syncSessionRealtimeLedgerInTransaction(tx, {
+          ...ownerProof(value),
+          connectionId: first.claimed.connection.id,
+          connectionEpoch: 1,
+          entries: [
+            {
+              operationId: outboundOperationId,
+              kind: "error",
+              text: "outbound-only operation",
+            },
+          ],
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "REALTIME_ENTRY_CHANGED" });
   });
 
   test("replays an unacknowledged ordinary update across rotation and preserves it for normal mode", async () => {
@@ -727,6 +824,78 @@ describe("session realtime ledger", () => {
         value.owner.sessionId,
       ),
     ).toHaveLength(1);
+  });
+
+  test("paginates more than 100 cross-session updates before filtering represented rows", async () => {
+    const value = await fixture();
+    const first = await claimInitial(value);
+    await complete(value, first.claimed.connection);
+    const updateIds = Array.from({ length: 135 }, () => crypto.randomUUID());
+    const createdAt = new Date();
+    await transaction(value.owner.workspaceId, async (tx) => {
+      await tx.insert(schema.sessionSystemUpdates).values(
+        updateIds.map((id, index) => ({
+          id,
+          accountId: value.grant.accountId,
+          workspaceId: value.owner.workspaceId,
+          sessionId: value.owner.sessionId,
+          kind: "agent_message",
+          classification: "info",
+          sourceId: `pagination-source-${index}`,
+          dedupeKey: `pagination-update-${id}`,
+          summary: `pagination update ${index}`,
+          payload: { type: "agent_message", text: `pagination update ${index}` },
+          createdAt,
+        })),
+      );
+    });
+
+    const firstPage = await transaction(value.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(tx, {
+        ...ownerProof(value),
+        connectionId: first.claimed.connection.id,
+        connectionEpoch: 1,
+      }),
+    );
+    expect(firstPage.outbound).toHaveLength(100);
+    const firstPageIds = new Set(firstPage.outbound.map((entry) => entry.sourceUpdateId));
+    expect(firstPageIds.size).toBe(100);
+
+    const secondPage = await transaction(value.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(tx, {
+        ...ownerProof(value),
+        connectionId: first.claimed.connection.id,
+        connectionEpoch: 1,
+        clientAckThroughSequence: Math.max(...firstPage.outbound.map((entry) => entry.sequence)),
+      }),
+    );
+    expect(secondPage.outbound).toHaveLength(100);
+    const newlyDelivered = secondPage.outbound.filter(
+      (entry) => !firstPageIds.has(entry.sourceUpdateId),
+    );
+    expect(newlyDelivered).toHaveLength(35);
+    expect(
+      secondPage.outbound.slice(0, 35).every((entry) => !firstPageIds.has(entry.sourceUpdateId)),
+    ).toBe(true);
+    const secondPageIds = new Set(newlyDelivered.map((entry) => entry.sourceUpdateId));
+    expect(secondPageIds.size).toBe(35);
+    expect([...secondPageIds].some((id) => firstPageIds.has(id))).toBe(false);
+
+    const represented = await transaction(value.owner.workspaceId, (tx) =>
+      tx
+        .select({ sourceUpdateId: schema.sessionRealtimeEntries.sourceUpdateId })
+        .from(schema.sessionRealtimeEntries)
+        .where(
+          and(
+            eq(schema.sessionRealtimeEntries.realtimeId, value.started.mode.id),
+            eq(schema.sessionRealtimeEntries.kind, "session_update"),
+          ),
+        )
+        .orderBy(asc(schema.sessionRealtimeEntries.sequence)),
+    );
+    expect(represented).toHaveLength(135);
+    expect(new Set(represented.map(({ sourceUpdateId }) => sourceUpdateId)).size).toBe(135);
+    expect(new Set([...firstPageIds, ...secondPageIds])).toEqual(new Set(updateIds));
   });
 
   test("orders a delegation result for provider delivery and closes the active epoch on exit", async () => {
