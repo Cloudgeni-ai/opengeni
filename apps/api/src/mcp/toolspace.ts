@@ -844,8 +844,17 @@ export function connectionBrokerFetch(
   if (!connectionRef) {
     return baseFetch;
   }
-  const resolveCredential = input.deps.connectionCredentials?.mcpCredentials
-    ? buildHostConnectionTokenResolver(input.deps.connectionCredentials.mcpCredentials, {
+  const credentialSubjectId =
+    input.turn.initiator.kind === "subject" ? input.turn.initiator.subjectId : undefined;
+  if (connectionRef.subjectScope === "subject" && !credentialSubjectId) {
+    throw new Error(
+      `subject-owned connection for MCP server ${input.config.id} requires a human turn initiator`,
+    );
+  }
+  const hostCredentialPort = input.deps.connectionCredentials?.mcpCredentials;
+  const resolverSubjectId = hostCredentialPort ? input.grant.subjectId : credentialSubjectId;
+  const resolveCredential = hostCredentialPort
+    ? buildHostConnectionTokenResolver(hostCredentialPort, {
         accountId: input.grant.accountId,
         workspaceId: input.grant.workspaceId,
         sessionId: input.sessionId,
@@ -868,7 +877,7 @@ export function connectionBrokerFetch(
       destinationUrl,
       forceRefresh: false,
       ...(request.toolName ? { toolName: request.toolName } : {}),
-      subjectId: input.grant.subjectId,
+      ...(resolverSubjectId ? { subjectId: resolverSubjectId } : {}),
     });
     if (first.status === "auth_needed") {
       return await authNeededFetchResponse(input, request, first);
@@ -886,7 +895,7 @@ export function connectionBrokerFetch(
         destinationUrl,
         forceRefresh: true,
         ...(request.toolName ? { toolName: request.toolName } : {}),
-        subjectId: input.grant.subjectId,
+        ...(resolverSubjectId ? { subjectId: resolverSubjectId } : {}),
       });
       if (refreshed.status === "auth_needed") {
         return await authNeededFetchResponse(input, request, refreshed);

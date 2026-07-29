@@ -408,11 +408,14 @@ export type CreateConnectionRequest = {
   metadata?: Record<string, unknown> | undefined;
 };
 
-export type ConnectOpenGeniSlackBotRequest = {
-  /** Write-only Slack bot token. It is never returned by the API. */
-  token: string;
+export type OpenGeniSlackBotInstallRequest = {
   /** Existing OpenGeni Slack bot connection to reinstall in place. */
   connectionId?: string | undefined;
+};
+
+export type OpenGeniSlackBotInstallStart = {
+  authorizationUrl: string;
+  expiresAt: string;
 };
 
 export type UpdateConnectionRequest = {
@@ -3313,9 +3316,10 @@ export type CapabilityCatalogItem = {
   enabledReason: string | null;
   /** The connection backing this enabled installation, or null when none is involved. */
   connectionRef: {
-    connectionId: string;
+    connectionId?: string | undefined;
     providerDomain: string;
     kind: string;
+    subjectScope?: "subject" | "workspace" | undefined;
   } | null;
   metadata: Record<string, unknown>;
   createdAt?: string | undefined;

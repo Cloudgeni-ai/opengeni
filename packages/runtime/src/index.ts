@@ -2373,6 +2373,9 @@ export type PrepareToolsOptions = {
   executionGeneration?: number;
   subjectId?: string;
   subjectLabel?: string;
+  // Immutable human authority used only for subject-owned connection lookup.
+  // This is intentionally separate from the worker's first-party MCP identity.
+  credentialSubjectId?: string;
   // Overrides the fixed first-party MCP permission set for this session's
   // delegated token (manager-style sessions). The caller is responsible for
   // having validated the set against the session creator's grant.
@@ -2465,6 +2468,14 @@ export async function prepareAgentTools(
     return { mcpServers: [], close: async () => {}, codexConnectorNamespaces };
   }
   const registry = new Map(settings.mcpServers.map((server) => [server.id, server]));
+  const subjectOwnedTool = tools.find(
+    (tool) => registry.get(tool.id)?.connectionRef?.subjectScope === "subject",
+  );
+  if (subjectOwnedTool && !options.credentialSubjectId) {
+    throw new Error(
+      `subject-owned connection for MCP server ${subjectOwnedTool.id} requires a human turn initiator`,
+    );
+  }
   const aggregateToolBudget = new McpAggregateToolListBudget();
   // npm Undici's dispatcher transport can hang indefinitely under Bun even
   // after an AbortSignal fires. Bun's native fetch is the supported runtime
@@ -2738,7 +2749,7 @@ async function resolveConnectionForRequest(
     destinationUrl,
     forceRefresh,
     ...(toolName ? { toolName } : {}),
-    ...(options.subjectId ? { subjectId: options.subjectId } : {}),
+    ...(options.credentialSubjectId ? { subjectId: options.credentialSubjectId } : {}),
   };
   try {
     return await options.resolveCredential(request);

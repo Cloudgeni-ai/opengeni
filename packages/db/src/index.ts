@@ -4772,6 +4772,23 @@ function connectionSubjectVisibility(subjectId?: string | null): SQL {
     : isNull(schema.connections.subjectId);
 }
 
+function connectionExactSubject(subjectId?: string | null): SQL {
+  return subjectId
+    ? eq(schema.connections.subjectId, subjectId)
+    : isNull(schema.connections.subjectId);
+}
+
+async function withConnectionSubjectRls<T>(
+  db: Database,
+  workspaceId: string,
+  subjectId: string | null | undefined,
+  fn: (db: Database) => Promise<T>,
+): Promise<T> {
+  return subjectId
+    ? await withWorkspaceSubjectRls(db, workspaceId, subjectId, fn)
+    : await withWorkspaceRls(db, workspaceId, fn);
+}
+
 export async function createConnection(
   db: Database,
   input: CreateConnectionInput,
@@ -4780,6 +4797,9 @@ export async function createConnection(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
+      if (input.subjectId) {
+        await setSubjectRlsContext(scopedDb, input.subjectId);
+      }
       const [row] = await scopedDb
         .insert(schema.connections)
         .values({
@@ -4812,7 +4832,7 @@ export async function listConnectionsMetadata(
   workspaceId: string,
   subjectId?: string | null,
 ): Promise<ConnectionMetadataWithVerification[]> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+  return await withConnectionSubjectRls(db, workspaceId, subjectId, async (scopedDb) => {
     const rows = await scopedDb
       .select(connectionMetadataColumns)
       .from(schema.connections)
@@ -4833,7 +4853,7 @@ export async function getConnectionMetadata(
   connectionId: string,
   subjectId?: string | null,
 ): Promise<ConnectionMetadataWithVerification | null> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+  return await withConnectionSubjectRls(db, workspaceId, subjectId, async (scopedDb) => {
     const [row] = await scopedDb
       .select(connectionMetadataColumns)
       .from(schema.connections)
@@ -4853,49 +4873,54 @@ export async function updateConnection(
   db: Database,
   input: UpdateConnectionInput,
 ): Promise<ConnectionMetadataWithVerification | null> {
-  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
-    const set = {
-      updatedAt: new Date(),
-      ...(input.providerDomain !== undefined ? { providerDomain: input.providerDomain } : {}),
-      ...(input.subjectId !== undefined ? { subjectId: input.subjectId } : {}),
-      ...(input.kind !== undefined ? { kind: input.kind } : {}),
-      ...(input.status !== undefined ? { status: input.status } : {}),
-      ...(input.credentialEncrypted !== undefined
-        ? {
-            credentialEncrypted: input.credentialEncrypted,
-            version: sql`${schema.connections.version} + 1`,
-            lastError: null,
-          }
-        : {}),
-      ...(input.grantedScopes !== undefined ? { grantedScopes: input.grantedScopes } : {}),
-      ...(input.expiresAt !== undefined ? { expiresAt: input.expiresAt } : {}),
-      ...(input.verifiedInstallAt !== undefined
-        ? { verifiedInstallAt: input.verifiedInstallAt }
-        : {}),
-      ...(input.verifiedInstallVersion !== undefined
-        ? { verifiedInstallVersion: input.verifiedInstallVersion }
-        : {}),
-      ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
-      ...(input.updatedBySubjectId !== undefined
-        ? { updatedBySubjectId: input.updatedBySubjectId }
-        : {}),
-    };
-    const [row] = await scopedDb
-      .update(schema.connections)
-      .set(set)
-      .where(
-        and(
-          eq(schema.connections.workspaceId, input.workspaceId),
-          eq(schema.connections.id, input.connectionId),
-          connectionSubjectVisibility(input.visibleToSubjectId),
-          ...(input.expectedVersion !== undefined
-            ? [eq(schema.connections.version, input.expectedVersion)]
-            : []),
-        ),
-      )
-      .returning(connectionMetadataColumns);
-    return row ? mapConnectionMetadata(row) : null;
-  });
+  return await withConnectionSubjectRls(
+    db,
+    input.workspaceId,
+    input.visibleToSubjectId,
+    async (scopedDb) => {
+      const set = {
+        updatedAt: new Date(),
+        ...(input.providerDomain !== undefined ? { providerDomain: input.providerDomain } : {}),
+        ...(input.subjectId !== undefined ? { subjectId: input.subjectId } : {}),
+        ...(input.kind !== undefined ? { kind: input.kind } : {}),
+        ...(input.status !== undefined ? { status: input.status } : {}),
+        ...(input.credentialEncrypted !== undefined
+          ? {
+              credentialEncrypted: input.credentialEncrypted,
+              version: sql`${schema.connections.version} + 1`,
+              lastError: null,
+            }
+          : {}),
+        ...(input.grantedScopes !== undefined ? { grantedScopes: input.grantedScopes } : {}),
+        ...(input.expiresAt !== undefined ? { expiresAt: input.expiresAt } : {}),
+        ...(input.verifiedInstallAt !== undefined
+          ? { verifiedInstallAt: input.verifiedInstallAt }
+          : {}),
+        ...(input.verifiedInstallVersion !== undefined
+          ? { verifiedInstallVersion: input.verifiedInstallVersion }
+          : {}),
+        ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+        ...(input.updatedBySubjectId !== undefined
+          ? { updatedBySubjectId: input.updatedBySubjectId }
+          : {}),
+      };
+      const [row] = await scopedDb
+        .update(schema.connections)
+        .set(set)
+        .where(
+          and(
+            eq(schema.connections.workspaceId, input.workspaceId),
+            eq(schema.connections.id, input.connectionId),
+            connectionSubjectVisibility(input.visibleToSubjectId),
+            ...(input.expectedVersion !== undefined
+              ? [eq(schema.connections.version, input.expectedVersion)]
+              : []),
+          ),
+        )
+        .returning(connectionMetadataColumns);
+      return row ? mapConnectionMetadata(row) : null;
+    },
+  );
 }
 
 export async function revokeConnection(
@@ -4904,7 +4929,7 @@ export async function revokeConnection(
   connectionId: string,
   updatedBySubjectId?: string | null,
 ): Promise<ConnectionMetadataWithVerification | null> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+  return await withConnectionSubjectRls(db, workspaceId, updatedBySubjectId, async (scopedDb) => {
     const [row] = await scopedDb
       .update(schema.connections)
       .set({
@@ -5215,6 +5240,9 @@ export async function loadConnectionCredentialForBroker(
     allowSubjectOwned?: boolean;
   },
 ): Promise<ConnectionCredentialForBroker | null> {
+  if (input.allowSubjectOwned && !input.subjectId) {
+    return null;
+  }
   const key = environmentsEncryptionKeyBytes(settings);
   if (!key) {
     throw new Error(
@@ -5222,7 +5250,7 @@ export async function loadConnectionCredentialForBroker(
     );
   }
   const subjectPredicate = input.allowSubjectOwned
-    ? connectionSubjectVisibility(input.subjectId)
+    ? connectionExactSubject(input.subjectId)
     : isNull(schema.connections.subjectId);
   const conditions: SQL[] = [
     eq(schema.connections.workspaceId, input.workspaceId),
@@ -5236,49 +5264,54 @@ export async function loadConnectionCredentialForBroker(
       conditions.push(eq(schema.connections.kind, input.kind));
     }
   }
-  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
-    // Prefer active rows: a revoke bumps updatedAt, so recency alone would let a
-    // freshly revoked connection shadow an active replacement for the provider.
-    const [row] = await scopedDb
-      .select()
-      .from(schema.connections)
-      .where(and(...conditions))
-      .orderBy(
-        desc(sql`(${schema.connections.status} = 'active')`),
-        desc(schema.connections.updatedAt),
-      )
-      .limit(1);
-    if (!row) {
-      return null;
-    }
-    let credential: unknown;
-    try {
-      credential = JSON.parse(decryptEnvironmentValue(key, row.credentialEncrypted));
-    } catch (error) {
-      throw new Error(
-        `connection credential could not be decrypted for ${row.id}: ${error instanceof Error ? error.message : String(error)}`,
-        { cause: error },
-      );
-    }
-    if (!credential || typeof credential !== "object" || Array.isArray(credential)) {
-      throw new Error(`connection credential bundle for ${row.id} is not a JSON object`);
-    }
-    return {
-      id: row.id,
-      accountId: row.accountId,
-      workspaceId: row.workspaceId,
-      subjectId: row.subjectId,
-      providerDomain: row.providerDomain,
-      kind: row.kind as ConnectionKind,
-      status: row.status as ConnectionStatus,
-      credential: credential as Record<string, unknown>,
-      grantedScopes: row.grantedScopes,
-      expiresAt: row.expiresAt,
-      lastRefreshAt: row.lastRefreshAt,
-      version: row.version,
-      metadata: row.metadata,
-    };
-  });
+  return await withConnectionSubjectRls(
+    db,
+    input.workspaceId,
+    input.allowSubjectOwned ? input.subjectId : null,
+    async (scopedDb) => {
+      // Prefer active rows: a revoke bumps updatedAt, so recency alone would let a
+      // freshly revoked connection shadow an active replacement for the provider.
+      const [row] = await scopedDb
+        .select()
+        .from(schema.connections)
+        .where(and(...conditions))
+        .orderBy(
+          desc(sql`(${schema.connections.status} = 'active')`),
+          desc(schema.connections.updatedAt),
+        )
+        .limit(1);
+      if (!row) {
+        return null;
+      }
+      let credential: unknown;
+      try {
+        credential = JSON.parse(decryptEnvironmentValue(key, row.credentialEncrypted));
+      } catch (error) {
+        throw new Error(
+          `connection credential could not be decrypted for ${row.id}: ${error instanceof Error ? error.message : String(error)}`,
+          { cause: error },
+        );
+      }
+      if (!credential || typeof credential !== "object" || Array.isArray(credential)) {
+        throw new Error(`connection credential bundle for ${row.id} is not a JSON object`);
+      }
+      return {
+        id: row.id,
+        accountId: row.accountId,
+        workspaceId: row.workspaceId,
+        subjectId: row.subjectId,
+        providerDomain: row.providerDomain,
+        kind: row.kind as ConnectionKind,
+        status: row.status as ConnectionStatus,
+        credential: credential as Record<string, unknown>,
+        grantedScopes: row.grantedScopes,
+        expiresAt: row.expiresAt,
+        lastRefreshAt: row.lastRefreshAt,
+        version: row.version,
+        metadata: row.metadata,
+      };
+    },
+  );
 }
 
 export async function recordConnectionTokenRefresh(
@@ -5291,35 +5324,42 @@ export async function recordConnectionTokenRefresh(
     expiresAt: Date | null;
     grantedScopes?: string[];
     lastRefreshAt: Date;
+    subjectId?: string | null;
   },
 ): Promise<boolean> {
-  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
-    const set = {
-      credentialEncrypted: input.credentialEncrypted,
-      expiresAt: input.expiresAt,
-      lastRefreshAt: input.lastRefreshAt,
-      status: "active",
-      lastError: null,
-      version: sql`${schema.connections.version} + 1`,
-      updatedAt: new Date(),
-      ...(input.grantedScopes !== undefined ? { grantedScopes: input.grantedScopes } : {}),
-    };
-    const updated = await scopedDb
-      .update(schema.connections)
-      .set(set)
-      .where(
-        and(
-          eq(schema.connections.id, input.id),
-          eq(schema.connections.workspaceId, input.workspaceId),
-          eq(schema.connections.version, input.version),
-          // A refresh may only ever renew a live credential; revoked/errored rows
-          // stay dead even if a status change somewhere forgot to bump version.
-          eq(schema.connections.status, "active"),
-        ),
-      )
-      .returning({ id: schema.connections.id });
-    return updated.length > 0;
-  });
+  return await withConnectionSubjectRls(
+    db,
+    input.workspaceId,
+    input.subjectId,
+    async (scopedDb) => {
+      const set = {
+        credentialEncrypted: input.credentialEncrypted,
+        expiresAt: input.expiresAt,
+        lastRefreshAt: input.lastRefreshAt,
+        status: "active",
+        lastError: null,
+        version: sql`${schema.connections.version} + 1`,
+        updatedAt: new Date(),
+        ...(input.grantedScopes !== undefined ? { grantedScopes: input.grantedScopes } : {}),
+      };
+      const updated = await scopedDb
+        .update(schema.connections)
+        .set(set)
+        .where(
+          and(
+            eq(schema.connections.id, input.id),
+            eq(schema.connections.workspaceId, input.workspaceId),
+            eq(schema.connections.version, input.version),
+            connectionExactSubject(input.subjectId),
+            // A refresh may only ever renew a live credential; revoked/errored rows
+            // stay dead even if a status change somewhere forgot to bump version.
+            eq(schema.connections.status, "active"),
+          ),
+        )
+        .returning({ id: schema.connections.id });
+      return updated.length > 0;
+    },
+  );
 }
 
 export async function setConnectionStatus(
@@ -5327,9 +5367,9 @@ export async function setConnectionStatus(
   workspaceId: string,
   status: ConnectionStatus,
   lastError: string | null,
-  guard: { id: string; version: number },
+  guard: { id: string; version: number; subjectId?: string | null },
 ): Promise<boolean> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+  return await withConnectionSubjectRls(db, workspaceId, guard.subjectId, async (scopedDb) => {
     const updated = await scopedDb
       .update(schema.connections)
       .set({
@@ -5347,6 +5387,7 @@ export async function setConnectionStatus(
           eq(schema.connections.workspaceId, workspaceId),
           eq(schema.connections.id, guard.id),
           eq(schema.connections.version, guard.version),
+          connectionExactSubject(guard.subjectId),
         ),
       )
       .returning({ id: schema.connections.id });
@@ -5358,8 +5399,9 @@ export async function recordConnectionUsed(
   db: Database,
   workspaceId: string,
   connectionId: string,
+  subjectId?: string | null,
 ): Promise<void> {
-  await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+  await withConnectionSubjectRls(db, workspaceId, subjectId, async (scopedDb) => {
     await scopedDb
       .update(schema.connections)
       .set({
@@ -5370,6 +5412,7 @@ export async function recordConnectionUsed(
         and(
           eq(schema.connections.workspaceId, workspaceId),
           eq(schema.connections.id, connectionId),
+          connectionExactSubject(subjectId),
         ),
       );
   });
