@@ -23,7 +23,7 @@ import {
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const ownerHeaders = { "x-opengeni-subject": "session-header-owner" };
-const screenshotPhase = process.env.OPE56_SCREENSHOT_PHASE === "before" ? "before" : "after";
+const screenshotPhase = process.env.SESSION_HEADER_SCREENSHOT_PHASE === "before" ? "before" : "after";
 const workflowClient: SessionWorkflowClient = {
   signalUserMessage: async () => undefined,
   wakeSessionWorkflow: async () => undefined,
@@ -234,7 +234,7 @@ describe("responsive production session header", () => {
           .waitFor();
 
         await page.screenshot({
-          path: `/tmp/ope56-${screenshotPhase}-${matrixCase.name}.png`,
+          path: `/tmp/session-header-${screenshotPhase}-${matrixCase.name}.png`,
           fullPage: true,
           animations: "disabled",
         });
@@ -304,7 +304,7 @@ describe("responsive production session header", () => {
         await assertHeaderKeyboardOrder(page);
         await expectNoAxeViolations(page, ["[data-session-header]"]);
         await page.screenshot({
-          path: `/tmp/ope56-${screenshotPhase}-phone-320-${state}.png`,
+          path: `/tmp/session-header-${screenshotPhase}-phone-320-${state}.png`,
           fullPage: true,
           animations: "disabled",
         });
@@ -338,7 +338,7 @@ describe("responsive production session header", () => {
       expect(metrics.offscreenControls).toEqual([]);
       expect(metrics.headerOverflow).toBe(false);
       await page.screenshot({
-        path: `/tmp/ope56-${screenshotPhase}-phone-safe-area.png`,
+        path: `/tmp/session-header-${screenshotPhase}-phone-safe-area.png`,
         fullPage: true,
         animations: "disabled",
       });
