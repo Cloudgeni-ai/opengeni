@@ -379,8 +379,7 @@ describe("QueueSurface", () => {
     await flush();
     expect(mounted.container.textContent).toContain("1 incoming update");
     const toggle = mounted.container.querySelector<HTMLButtonElement>("button[aria-expanded]");
-    toggle?.click();
-    await flush();
+    await click(toggle);
     expect(mounted.container.querySelector("section")).not.toBeNull();
     expect(mounted.container.textContent).toContain(
       "The verification worker found a cache discontinuity.",
