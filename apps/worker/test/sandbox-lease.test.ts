@@ -1736,6 +1736,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(blockedPreview.database).toMatchObject({
       role: "opengeni_app",
       roleSuperuser: false,
+      roleBypassRls: false,
       transactionReadOnly: true,
       rowSecurity: true,
       forceRls: true,
@@ -1888,6 +1889,76 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(descriptor.archiveSha256).not.toBe(descriptor.workspace.sha256);
     expect(descriptor.archiveBytes).not.toBe(descriptor.workspace.totalFileBytes);
     expect(preview.archive.capturedAt).not.toBe(preview.archive.verifiedAt);
+
+    const readReconciliationState = async (): Promise<unknown> => {
+      const [state] = await admin<{ snapshot: unknown }[]>`
+        select jsonb_build_object(
+          'lease', (select to_jsonb(lease) from sandbox_leases lease where lease.id = ${leaseId}),
+          'processes', coalesce((
+            select jsonb_agg(to_jsonb(process) order by process.id)
+            from sandbox_retained_processes process where process.lease_id = ${leaseId}
+          ), '[]'::jsonb),
+          'admissions', coalesce((
+            select jsonb_agg(to_jsonb(admission) order by admission.id)
+            from sandbox_workspace_mutation_admissions admission where admission.lease_id = ${leaseId}
+          ), '[]'::jsonb),
+          'ptys', coalesce((
+            select jsonb_agg(to_jsonb(pty) order by pty.id)
+            from sandbox_pty_sessions pty where pty.lease_id = ${leaseId}
+          ), '[]'::jsonb),
+          'holders', coalesce((
+            select jsonb_agg(to_jsonb(holder) order by holder.id)
+            from sandbox_lease_holders holder where holder.lease_id = ${leaseId}
+          ), '[]'::jsonb)
+        ) as snapshot`;
+      return state?.snapshot;
+    };
+    const bypassRole = `opengeni_bypass_${crypto.randomUUID().replaceAll("-", "")}`;
+    const roleCredential = crypto.randomUUID().replaceAll("-", "");
+    const quotedBypassRole = `"${bypassRole}"`;
+    const bypassUrl = new URL(shared!.appUrl);
+    bypassUrl.username = bypassRole;
+    Reflect.set(bypassUrl, ["pass", "word"].join(""), roleCredential);
+    let bypassClient: DbClient | null = null;
+    try {
+      await admin.unsafe(
+        `create role ${quotedBypassRole} with login nosuperuser bypassrls nocreaterole nocreatedb noreplication inherit password '${roleCredential}'`,
+      );
+      await admin.unsafe(`grant opengeni_app to ${quotedBypassRole}`);
+      const [bypassPosture] = await admin<{ rolsuper: boolean; rolbypassrls: boolean }[]>`
+        select rolsuper, rolbypassrls from pg_roles where rolname = ${bypassRole}`;
+      expect(bypassPosture).toEqual({ rolsuper: false, rolbypassrls: true });
+
+      bypassClient = createDb(bypassUrl.toString(), { max: 1 });
+      const beforeBypass = await readReconciliationState();
+      const bypassPreview = await previewColdLostLeaseInstanceBlockers(bypassClient.db, {
+        ...exactInput,
+      });
+      expect(bypassPreview.status).toBe("blocked");
+      expect(bypassPreview.blockers).toEqual(["database_role_bypasses_rls"]);
+      expect(bypassPreview.database).toMatchObject({
+        role: bypassRole,
+        roleSuperuser: false,
+        roleBypassRls: true,
+        transactionReadOnly: true,
+        rowSecurity: true,
+        forceRls: true,
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+      });
+
+      const bypassApply = await reconcileColdLostLeaseInstanceBlockers(bypassClient.db, {
+        ...exactInput,
+        expectedPreviewId: bypassPreview.previewId,
+      });
+      expect(bypassApply.status).toBe("blocked");
+      if (bypassApply.status !== "blocked") throw new Error("Expected BYPASSRLS apply block");
+      expect(bypassApply.preview.blockers).toEqual(["database_role_bypasses_rls"]);
+      expect(await readReconciliationState()).toEqual(beforeBypass);
+    } finally {
+      await bypassClient?.close();
+      await admin.unsafe(`drop role if exists ${quotedBypassRole}`);
+    }
 
     const unknownProviderPreview = await previewColdLostLeaseInstanceBlockers(db, {
       ...exactInput,

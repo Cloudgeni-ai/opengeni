@@ -20775,6 +20775,7 @@ export type ColdLostReconciliationBlockerCode =
   | "database_transaction_not_read_only"
   | "database_row_security_disabled"
   | "database_role_is_superuser"
+  | "database_role_bypasses_rls"
   | "database_force_rls_unverified"
   | "expected_lease_id_missing"
   | "expected_backend_missing"
@@ -20874,6 +20875,7 @@ export type ColdLostReconciliationPreview = {
   database: {
     role: string;
     roleSuperuser: boolean;
+    roleBypassRls: boolean;
     transactionReadOnly: boolean;
     rowSecurity: boolean;
     forceRls: boolean;
@@ -21447,6 +21449,7 @@ function evaluateColdLostSnapshot(
     );
     add("database_row_security_disabled", !database.rowSecurity);
     add("database_role_is_superuser", database.roleSuperuser);
+    add("database_role_bypasses_rls", database.roleBypassRls);
     add("database_force_rls_unverified", !database.forceRls);
   } else {
     add("database_force_rls_unverified", true);
@@ -22127,6 +22130,7 @@ async function readColdLostDatabasePostureTx(tx: Database): Promise<ColdLostData
   const postureRows = await tx.execute<{
     role: string;
     role_superuser: boolean;
+    role_bypass_rls: boolean;
     transaction_read_only: string;
     row_security: string;
     account_id: string;
@@ -22135,6 +22139,7 @@ async function readColdLostDatabasePostureTx(tx: Database): Promise<ColdLostData
   }>(sql`
     select current_user as role,
       coalesce((select rolsuper from pg_roles where rolname = current_user), true) as role_superuser,
+      coalesce((select rolbypassrls from pg_roles where rolname = current_user), true) as role_bypass_rls,
       current_setting('transaction_read_only') as transaction_read_only,
       current_setting('row_security') as row_security,
       current_setting('opengeni.account_id', true) as account_id,
@@ -22160,6 +22165,7 @@ async function readColdLostDatabasePostureTx(tx: Database): Promise<ColdLostData
   return {
     role: posture.role,
     roleSuperuser: posture.role_superuser,
+    roleBypassRls: posture.role_bypass_rls,
     transactionReadOnly: posture.transaction_read_only === "on",
     rowSecurity: posture.row_security === "on",
     forceRls: posture.force_rls,
