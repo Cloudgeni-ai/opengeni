@@ -21,6 +21,7 @@ import {
   type Permission,
   type ResourceRef,
   type SessionAuthorizationOperation,
+  type SessionAuthorizationSurface,
   type Session,
   UpdateScheduledTaskRequest,
 } from "@opengeni/contracts";
@@ -1566,6 +1567,7 @@ function registerRigTools(
 function exactAgentCommandContext(
   grant: AccessGrant,
   callerSessionId: string,
+  authorizationSurface?: SessionAuthorizationSurface,
 ): AgentSessionCommandContext {
   const turnId = grant.metadata?.["turnId"];
   const attemptId = grant.metadata?.["attemptId"];
@@ -1587,6 +1589,7 @@ function exactAgentCommandContext(
     callerTurnId: turnId,
     callerAttemptId: attemptId,
     callerExecutionGeneration: executionGeneration,
+    ...(authorizationSurface ? { authorizationSurface } : {}),
   };
 }
 
@@ -1976,16 +1979,10 @@ function registerWorkspaceOrchestrationTools(
         },
       },
       async ({ sessionId, idempotencyKey, reason }) => {
-        const authorization = await authorizeFirstPartySession(
-          deps,
-          grant,
-          sessionId,
-          "session.control",
-        );
         if (callerSessionId !== null) {
           const controlled = await controlAgentSessionWorkstream(
             deps,
-            exactAgentCommandContext(grant, callerSessionId),
+            exactAgentCommandContext(grant, callerSessionId, "first_party_mcp"),
             {
               targetSessionId: sessionId,
               action: "pause",
@@ -1998,7 +1995,7 @@ function registerWorkspaceOrchestrationTools(
             effectiveControl: projectEffectiveControlForRelatedAccess(
               serializeEffectiveSessionControl(controlled.control),
               sessionId,
-              authorization?.relatedSessionAccess ?? "root",
+              controlled.authorization?.relatedSessionAccess ?? "root",
             ),
             interruptionCount: controlled.interruptionCount,
             replay: controlled.replay,
@@ -2011,6 +2008,7 @@ function registerWorkspaceOrchestrationTools(
             workspaceId: grant.workspaceId,
             sessionId,
             subjectId: grant.subjectId,
+            authorizationSurface: "first_party_mcp",
           },
           {
             action: "pause",
@@ -2018,14 +2016,7 @@ function registerWorkspaceOrchestrationTools(
             ...(reason ? { reason } : {}),
           },
         );
-        return json({
-          ...controlled,
-          effectiveControl: projectEffectiveControlForRelatedAccess(
-            controlled.effectiveControl,
-            sessionId,
-            authorization?.relatedSessionAccess ?? "root",
-          ),
-        });
+        return json(controlled);
       },
     );
 
@@ -2041,16 +2032,10 @@ function registerWorkspaceOrchestrationTools(
         },
       },
       async ({ sessionId, idempotencyKey, reason }) => {
-        const authorization = await authorizeFirstPartySession(
-          deps,
-          grant,
-          sessionId,
-          "session.control",
-        );
         if (callerSessionId !== null) {
           const controlled = await controlAgentSessionWorkstream(
             deps,
-            exactAgentCommandContext(grant, callerSessionId),
+            exactAgentCommandContext(grant, callerSessionId, "first_party_mcp"),
             {
               targetSessionId: sessionId,
               action: "resume",
@@ -2063,7 +2048,7 @@ function registerWorkspaceOrchestrationTools(
             effectiveControl: projectEffectiveControlForRelatedAccess(
               serializeEffectiveSessionControl(controlled.control),
               sessionId,
-              authorization?.relatedSessionAccess ?? "root",
+              controlled.authorization?.relatedSessionAccess ?? "root",
             ),
             interruptionCount: controlled.interruptionCount,
             replay: controlled.replay,
@@ -2076,6 +2061,7 @@ function registerWorkspaceOrchestrationTools(
             workspaceId: grant.workspaceId,
             sessionId,
             subjectId: grant.subjectId,
+            authorizationSurface: "first_party_mcp",
           },
           {
             action: "resume",
@@ -2083,14 +2069,7 @@ function registerWorkspaceOrchestrationTools(
             ...(reason ? { reason } : {}),
           },
         );
-        return json({
-          ...controlled,
-          effectiveControl: projectEffectiveControlForRelatedAccess(
-            controlled.effectiveControl,
-            sessionId,
-            authorization?.relatedSessionAccess ?? "root",
-          ),
-        });
+        return json(controlled);
       },
     );
 
@@ -2107,10 +2086,9 @@ function registerWorkspaceOrchestrationTools(
           },
         },
         async ({ sessionId, instruction, idempotencyKey }) => {
-          await authorizeFirstPartySession(deps, grant, sessionId, "session.steer");
           const result = await steerAgentSession(
             deps,
-            exactAgentCommandContext(grant, callerSessionId),
+            exactAgentCommandContext(grant, callerSessionId, "first_party_mcp"),
             { targetSessionId: sessionId, instruction, idempotencyKey },
           );
           return json({
