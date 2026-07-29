@@ -1588,6 +1588,7 @@ export class MockOpenGeniClient implements SessionClientLike {
       rigId: null,
       rigVersionId: null,
       firstPartyMcpPermissions: null,
+      firstPartyMcpTools: null,
       mcpServers: [],
       parentSessionId: sessionId === WORKER_SESSION_ID ? MANAGER_SESSION_ID : null,
       rootSessionId: sessionId === WORKER_SESSION_ID ? MANAGER_SESSION_ID : sessionId,

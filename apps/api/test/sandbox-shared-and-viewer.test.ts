@@ -135,7 +135,9 @@ function grant(accountId: string, workspaceId: string, fromSessionId?: string): 
     workspaceId,
     subjectId: "subject",
     permissions: ["sessions:create", "sessions:read"],
-    ...(fromSessionId ? { metadata: { sessionId: fromSessionId } } : {}),
+    ...(fromSessionId
+      ? { metadata: { sessionId: fromSessionId, firstPartyMcpTools: ["session_create"] } }
+      : {}),
   };
 }
 

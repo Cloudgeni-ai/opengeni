@@ -297,6 +297,7 @@ import {
 } from "@opengeni/runtime";
 import {
   CAPABILITY_DESCRIPTORS,
+  DEFAULT_FIRST_PARTY_MCP_TOOLS,
   evaluateWorkspaceModelPolicy,
   readTurnExecutionPolicyV1,
   type ResourceRef,
@@ -4070,8 +4071,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const turnResources = mergeResourceRefs(session.resources, turn.resources);
       // Attach the first-party MCP server to EVERY turn, regardless of how/when
       // the session was created (API, scheduled task, or a pre-existing session
-      // whose stored tools predate this) — so set_session_title and the rest are
-      // always reachable. Idempotent: mergeToolRefs dedupes if already present.
+      // whose stored tools predate this). The server registration is then
+      // narrowed by the session's exact firstPartyMcpTools selection and
+      // authorization. Idempotent: mergeToolRefs dedupes if already present.
       // Attach codex_apps (the ChatGPT/Codex connectors MCP) when the codex
       // overlay injected it into runSettings.mcpServers (active subscription +
       // connector scopes); no-op for every other turn. Its refreshing bearer is
@@ -5003,6 +5005,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             ...(session.firstPartyMcpPermissions?.length
               ? { firstPartyPermissions: session.firstPartyMcpPermissions }
               : {}),
+            firstPartyTools: session.firstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
           }),
         ),
         cancellationSignal,

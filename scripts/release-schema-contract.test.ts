@@ -147,12 +147,13 @@ describe("release schema contract", () => {
         (migrations.has("0130_workspace_instruction_policies.sql") ? 1 : 0) +
         (migrations.has("0131_slack_bot_install_and_post_idempotency.sql") ? 1 : 0) +
         (migrations.has("0132_connection_subject_isolation.sql") ? 1 : 0) +
-        (migrations.has("0133_session_skills.sql") ? 1 : 0),
+        (migrations.has("0133_session_skills.sql") ? 1 : 0) +
+        (migrations.has("0134_session_first_party_mcp_tools.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "9ed22b7eb35efd6eb8d1e683bd8334660531b6ff7e133e0cfc995969cb4bc960",
+      "d776a7fe24446d9830c7b0cbfaca58ec4003aa5450403c3a5a96fc6a97ff2ad5",
     );
-    expect(contract.latestMigration).toBe("0133_session_skills.sql");
+    expect(contract.latestMigration).toBe("0134_session_first_party_mcp_tools.sql");
     expect(migrations.get("0128_github_installation_authority.sql")).toMatchObject({
       sha256: "365793b2a204a70e214adb90298b522acbb6dcfae22a46681a58f41a6938e6f0",
       deploymentMode: "rolling",
@@ -194,7 +195,7 @@ describe("release schema contract", () => {
     expect(
       contract.migrations
         .map((migration) => migration.path)
-        .filter((path) => /^(?:010[3-9]|011[0-9]|012[0-9]|013[0-3])_/.test(path)),
+        .filter((path) => /^(?:010[3-9]|011[0-9]|012[0-9]|013[0-4])_/.test(path)),
     ).toEqual([
       "0103_host_export_root_session.sql",
       "0104_host_export_root_session_backfill.sql",
@@ -217,6 +218,7 @@ describe("release schema contract", () => {
       "0131_slack_bot_install_and_post_idempotency.sql",
       "0132_connection_subject_isolation.sql",
       "0133_session_skills.sql",
+      "0134_session_first_party_mcp_tools.sql",
     ]);
     expect(new Set(contract.migrations.map((migration) => migration.path)).size).toBe(
       contract.fileCount,
@@ -291,6 +293,10 @@ describe("release schema contract", () => {
     });
     expect(migrations.get("0130_workspace_instruction_policies.sql")).toMatchObject({
       sha256: "12226a4560dc1150ffe2c3549f821d2483cc4d4a09ef74747ed13376404fc7c5",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0134_session_first_party_mcp_tools.sql")).toMatchObject({
+      sha256: "7255a5dfea703b00e01aeab6d003728e60ad7ff78c87af2dc61bd8dda456391e",
       deploymentMode: "rolling",
     });
   });

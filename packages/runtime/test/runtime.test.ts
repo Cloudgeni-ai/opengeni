@@ -3331,6 +3331,48 @@ describe("runtime event normalization", () => {
     }
   });
 
+  test("signs an explicit empty first-party tool selection without default widening", async () => {
+    const seenSelections: unknown[] = [];
+    const mcp = startTestMcpServer({
+      validateAuthorization: async (authorization) => {
+        if (!authorization?.startsWith("Bearer ")) return false;
+        const payload = await verifyDelegatedAccessToken(
+          "test-delegation-secret",
+          authorization.slice("Bearer ".length),
+        );
+        if (!payload) return false;
+        seenSelections.push(payload.firstPartyMcpTools);
+        return true;
+      },
+    });
+    const prepared = await prepareAgentTools(
+      testSettings({
+        mcpServers: [
+          {
+            id: "opengeni",
+            name: "OpenGeni",
+            url: `${mcp.url}?ws={workspaceId}`,
+            cacheToolsList: false,
+          },
+        ],
+      }),
+      [{ kind: "mcp", id: "opengeni" }],
+      {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        firstPartyTools: [],
+      },
+    );
+    try {
+      await prepared.mcpServers[0]!.listTools();
+      expect(seenSelections.length).toBeGreaterThan(0);
+      expect(seenSelections.every((selection) => JSON.stringify(selection) === "[]")).toBe(true);
+    } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
   test("a genuinely-broken first-party bearer still fails loud (no masking, no retry loop)", async () => {
     // The dynamic refresh must NOT mask a real breakage: if the endpoint rejects
     // every bearer (e.g. a server-side secret mismatch), the required first-party

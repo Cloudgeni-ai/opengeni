@@ -27,9 +27,20 @@ import { HTTPException } from "hono/http-exception";
 import { requireAccessGrant } from "@opengeni/core";
 import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
+import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import { buildFilesMcpServer } from "../mcp/files";
 
 export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, objectStorage } = deps;
+
+  app.all("/v1/workspaces/:workspaceId/mcp/files", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "files:read");
+    const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
+    const server = buildFilesMcpServer(deps, grant);
+    await server.connect(transport);
+    return await transport.handleRequest(c.req.raw);
+  });
 
   app.post("/v1/workspaces/:workspaceId/files/uploads", async (c) => {
     const workspaceId = c.req.param("workspaceId");

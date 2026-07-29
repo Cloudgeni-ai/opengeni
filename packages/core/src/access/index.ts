@@ -236,6 +236,9 @@ async function delegatedAccessContext(
         metadata: {
           delegated: true,
           ...(payload.sessionId ? { sessionId: payload.sessionId } : {}),
+          ...(payload.firstPartyMcpTools !== undefined
+            ? { firstPartyMcpTools: payload.firstPartyMcpTools }
+            : {}),
           // Caller identity: the turn that minted this token. Tools classify the
           // CALLER from this instead of re-reading the live active pointer.
           ...(payload.turnId ? { turnId: payload.turnId } : {}),

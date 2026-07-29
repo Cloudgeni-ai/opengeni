@@ -15,6 +15,7 @@ import {
   approvalIdentifier,
   CAPABILITY_DESCRIPTORS,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+  DEFAULT_FIRST_PARTY_MCP_TOOLS,
   assertUniqueResourceMountPaths,
   gitCredentialBindingIdForRepository,
   gitCredentialProviderForRepository,
@@ -33,6 +34,7 @@ import {
   type HumanInputResponse,
   type McpServerConnectionRef,
   type Permission,
+  type FirstPartyMcpToolName,
   type ReasoningEffort,
   type ResourceRef,
   type SessionEventType,
@@ -2408,6 +2410,9 @@ export type PrepareToolsOptions = {
   // delegated token (manager-style sessions). The caller is responsible for
   // having validated the set against the session creator's grant.
   firstPartyPermissions?: Permission[];
+  // Exact model-visible catalog selection for the broad first-party server.
+  // Permissions are signed separately and remain the authorization boundary.
+  firstPartyTools?: FirstPartyMcpToolName[];
   resolveCredential?: (
     input: ResolveConnectionCredentialInput,
   ) => Promise<ResolveConnectionCredentialResult>;
@@ -3164,6 +3169,7 @@ async function signFirstPartyDelegatedBearer(
     subjectId: options.subjectId ?? "worker:first-party-mcp",
     ...(options.subjectLabel ? { subjectLabel: options.subjectLabel } : {}),
     permissions: options.firstPartyPermissions ?? [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS],
+    firstPartyMcpTools: options.firstPartyTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
     ...(options.sessionId ? { sessionId: options.sessionId } : {}),
     ...(options.turnId ? { turnId: options.turnId } : {}),
     ...(options.attemptId ? { attemptId: options.attemptId } : {}),

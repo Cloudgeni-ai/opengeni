@@ -705,6 +705,10 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
     label: "/v1/workspaces/:workspaceId/mcp/docs",
   },
   {
+    pattern: /^\/v1\/workspaces\/[^/]+\/mcp\/files$/,
+    label: "/v1/workspaces/:workspaceId/mcp/files",
+  },
+  {
     pattern: /^\/v1\/workspaces\/[^/]+\/default-rig$/,
     label: "/v1/workspaces/:workspaceId/default-rig",
   },

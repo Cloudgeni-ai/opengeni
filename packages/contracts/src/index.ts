@@ -626,6 +626,81 @@ export const DEFAULT_FIRST_PARTY_MCP_PERMISSIONS = [
   "github:use",
 ] as const satisfies readonly Permission[];
 
+/**
+ * Exact public catalog for tools served by the broad first-party `opengeni`
+ * MCP server. Adding a registration does not make it model-visible: the name
+ * must be admitted here and selected by the session policy.
+ *
+ * `files_get_download_url` intentionally is not in this catalog. It belongs to
+ * the dedicated `files` MCP server.
+ */
+export const FIRST_PARTY_MCP_TOOL_NAMES = [
+  "set_session_title",
+  "goal_set",
+  "goal_update",
+  "goal_complete",
+  "goal_pause",
+  "memory_search",
+  "memory_save",
+  "memory_correct",
+  "sandboxes_list",
+  "sandbox_attach",
+  "sandbox_swap",
+  "run_on",
+  "sandbox_provision",
+  "rig_list",
+  "rig_get",
+  "rig_propose_change",
+  "rig_verify",
+  "rig_promote",
+  "sessions_list",
+  "session_get",
+  "session_events",
+  "session_create",
+  "session_send_message",
+  "session_pause",
+  "session_resume",
+  "session_steer",
+  "set_other_session_title",
+  "variable_set_list",
+  "environment_list",
+  "variable_set_set_variable",
+  "environment_set_variable",
+  "github_connect_link",
+  "github_token",
+  "github_repositories_list",
+  "social_connections_list",
+  "social_posts_recent",
+  "social_daily_analysis_context",
+  "scheduled_tasks_list",
+  "scheduled_tasks_get",
+  "scheduled_tasks_create",
+  "scheduled_tasks_update",
+  "scheduled_tasks_pause",
+  "scheduled_tasks_resume",
+  "scheduled_tasks_trigger",
+  "scheduled_tasks_delete",
+  "scheduled_task_runs_list",
+  "slack_bot_list_channels",
+  "slack_bot_channel_history",
+  "slack_bot_list_users",
+  "slack_bot_post_message",
+] as const;
+export const FirstPartyMcpToolName = z.enum(FIRST_PARTY_MCP_TOOL_NAMES);
+export type FirstPartyMcpToolName = z.infer<typeof FirstPartyMcpToolName>;
+
+/**
+ * Ordinary sessions get only the small self-management surface. Authorization
+ * permissions remain an independent, additional boundary.
+ */
+export const DEFAULT_FIRST_PARTY_MCP_TOOLS = [
+  "set_session_title",
+  "goal_set",
+  "goal_update",
+  "goal_complete",
+  "goal_pause",
+] as const satisfies readonly FirstPartyMcpToolName[];
+
 export function prefixedMcpToolName(registryId: string, toolName: string): string {
   return `${registryId}__${toolName}`;
 }
@@ -1139,6 +1214,9 @@ export const DelegatedAccessTokenPayload = z
     // Worker-asserted session scope for first-party MCP calls (HMAC-signed, not
     // agent-controlled); enables session-scoped tools such as goal management.
     sessionId: z.string().uuid().optional(),
+    // Model-visible first-party tool selection for a worker-bound session.
+    // This is visibility only; permissions remain the authorization boundary.
+    firstPartyMcpTools: z.array(FirstPartyMcpToolName).optional(),
     // The turn making the call (the caller's identity), HMAC-signed by the worker
     // at turn setup. Lets a tool classify WHO is calling from the token itself,
     // instead of racily re-reading the session's live active_turn_id — e.g. the
@@ -5092,6 +5170,9 @@ export const Session = z.object({
   // Non-default first-party MCP token permissions (manager-style sessions);
   // null means the fixed worker default set.
   firstPartyMcpPermissions: z.array(Permission).nullable(),
+  // null means the fixed minimal worker-visible default. An explicit array,
+  // including [], is the exact model-visible first-party selection.
+  firstPartyMcpTools: z.array(FirstPartyMcpToolName).nullable().default(null),
   // Per-session third-party MCP servers, metadata only. Credential values are
   // write-only and never appear here.
   mcpServers: z.array(SessionMcpServerMetadata).default([]),
@@ -7377,6 +7458,10 @@ export const CreateSessionRequest = withVariableSetIdAlias({
   // A goal-bearing session whose explicit/effective set omits goals:manage is
   // rejected; creation never silently expands a child beyond that set.
   firstPartyMcpPermissions: z.array(Permission).optional(),
+  // Exact model-visible selection from the broad first-party OpenGeni MCP
+  // catalog. Omit for the minimal default; [] intentionally exposes none.
+  // This does not grant authority: every registered tool is permission-gated.
+  firstPartyMcpTools: z.array(FirstPartyMcpToolName).optional(),
   // Third-party MCP servers attached only to this session. For an agent-created
   // child, omission snapshots its trusted immediate parent's server definitions,
   // policies, connection refs, and encrypted credentials. Explicit arrays,
