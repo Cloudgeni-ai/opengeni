@@ -1080,6 +1080,101 @@ describe("API component integration", () => {
     expect(deniedOtherAccountBilling.status).toBe(403);
   });
 
+  test("local access preserves valid worker delegation and falls back for ordinary requests", async () => {
+    const delegationSecret = "test-local-delegation-secret";
+    const settings = testSettings({
+      databaseUrl: services.databaseUrl,
+      productAccessMode: "local",
+      delegationSecret,
+    });
+    const app = createApp({
+      settings,
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const delegatedWorkspace = await bootstrapWorkspace(dbClient.db, {
+      accountExternalSource: "test:local-delegation",
+      accountExternalId: crypto.randomUUID(),
+      accountName: "Local delegation test",
+      workspaceExternalSource: "test:local-delegation",
+      workspaceExternalId: crypto.randomUUID(),
+      workspaceName: "Local delegation workspace",
+      subjectId: `test:local-delegation:${crypto.randomUUID()}`,
+    });
+    const sessionId = crypto.randomUUID();
+    const token = await signDelegatedAccessToken(delegationSecret, {
+      accountId: delegatedWorkspace.defaultAccountId!,
+      workspaceId: delegatedWorkspace.defaultWorkspaceId!,
+      subjectId: "test:local-delegated-worker",
+      permissions: ["workspace:read"],
+      sessionId,
+      exp: Math.floor(Date.now() / 1000) + 60,
+    });
+
+    const delegatedResponse = await app.request("/v1/access/me", {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(delegatedResponse.status).toBe(200);
+    const delegated = (await delegatedResponse.json()) as AccessContext;
+    expect(delegated).toMatchObject({
+      mode: "local",
+      subjectId: "test:local-delegated-worker",
+      defaultAccountId: delegatedWorkspace.defaultAccountId,
+      defaultWorkspaceId: delegatedWorkspace.defaultWorkspaceId,
+    });
+    expect(delegated.workspaceGrants).toEqual([
+      expect.objectContaining({
+        permissions: ["workspace:read"],
+        metadata: expect.objectContaining({ delegated: true, sessionId }),
+      }),
+    ]);
+
+    const fallbackResponse = await app.request("/v1/access/me", {
+      headers: { authorization: "Bearer invalid-token" },
+    });
+    expect(fallbackResponse.status).toBe(200);
+    const fallback = (await fallbackResponse.json()) as AccessContext;
+    expect(fallback.mode).toBe("local");
+    expect(fallback.subjectId).toBe("dev");
+    expect(fallback.workspaceGrants[0]?.metadata).toBeUndefined();
+
+    const server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch: app.fetch,
+    });
+    let prepared: Awaited<ReturnType<typeof prepareAgentTools>> | null = null;
+    try {
+      prepared = await prepareAgentTools(
+        {
+          ...settings,
+          mcpServers: [
+            {
+              id: "opengeni",
+              name: "OpenGeni",
+              url: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
+              timeoutMs: undefined,
+              cacheToolsList: false,
+            },
+          ],
+        },
+        [{ kind: "mcp", id: "opengeni" }],
+        {
+          accountId: delegatedWorkspace.defaultAccountId!,
+          workspaceId: delegatedWorkspace.defaultWorkspaceId!,
+          sessionId,
+        },
+      );
+      const toolNames = (await prepared.mcpServers[0]!.listTools()).map((tool) => tool.name);
+      expect(toolNames).toContain("opengeni__set_session_title");
+      expect(toolNames).toContain("opengeni__goal_set");
+    } finally {
+      await prepared?.close().catch(() => undefined);
+      server.stop(true);
+    }
+  });
+
   test("managed session cookie still authenticates when an invalid bearer header is present", async () => {
     const userId = `managed-user-${crypto.randomUUID()}`;
     const email = `managed-cookie-${crypto.randomUUID()}@example.com`;

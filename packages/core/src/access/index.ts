@@ -86,6 +86,10 @@ export function hasPermission(permissions: Permission[], permission: Permission)
 
 async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<AccessContext | null> {
   if (deps.settings.productAccessMode === "local") {
+    const delegated = await delegatedAccessContext(c, deps, "local");
+    if (delegated) {
+      return delegated;
+    }
     return await bootstrapWorkspace(deps.db, {
       accountExternalSource: "opengeni:local",
       accountExternalId: "default",
@@ -198,7 +202,7 @@ async function apiKeyAccessContext(
 async function delegatedAccessContext(
   c: Context,
   deps: AccessDeps,
-  mode: "configured" | "managed",
+  mode: "local" | "configured" | "managed",
   token = bearerToken(c),
 ): Promise<AccessContext | null> {
   if (!token || !deps.settings.delegationSecret) {
