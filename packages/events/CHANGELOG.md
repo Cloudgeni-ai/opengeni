@@ -1,5 +1,12 @@
 # @opengeni/events
 
+## 0.3.30
+
+### Patch Changes
+
+- Updated dependencies [8b8545e]
+  - @opengeni/db@0.13.2
+
 ## 0.3.29
 
 ### Patch Changes
