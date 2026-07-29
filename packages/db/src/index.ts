@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type {
   AccessContext,
   AccessGrant,
@@ -20721,6 +20722,1646 @@ export type LostProviderWorkspaceSettlement = {
   processHoldersDeleted: number;
 };
 
+export type ColdLostProviderObjectObservation = {
+  providerBackend: string | null;
+  objectKind:
+    | "modal_filesystem_snapshot"
+    | "modal_directory_snapshot"
+    | null;
+  objectId: string | null;
+  status: "exists" | "missing" | "unknown";
+  observedAt: string | null;
+};
+
+export type PreviewColdLostLeaseInstanceBlockersInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  sandboxGroupId: string;
+  expectedLeaseId?: string;
+  expectedBackend?: string;
+  expectedCurrentEpoch?: number;
+  expectedLostEpoch?: number;
+  expectedLostInstanceId?: string;
+  expectedRefcount?: number;
+  expectedProviderBackend?: string;
+  expectedRouteKind?: "home" | "active";
+  expectedRouteTargetId?: string | null;
+  expectedRouteEpoch?: number;
+  expectedWorkspaceGeneration?: number;
+  expectedWorkspaceStatus?: SandboxWorkspaceReadiness;
+  expectedRestoreStatus?: SandboxRestoreStatus;
+  expectedRestoreFailureCode?: string | null;
+  expectedArchiveGeneration?: number | null;
+  expectedArchiveComplete?: boolean;
+  expectedArchiveDescriptorVersion?: 1;
+  expectedArchiveRevision?: string;
+  expectedArchiveObjectKind?:
+    | "modal_filesystem_snapshot"
+    | "modal_directory_snapshot";
+  expectedArchiveObjectId?: string;
+  expectedDescriptorReferenceBytes?: number;
+  expectedDescriptorReferenceSha256?: string;
+  expectedReferenceBytes?: number;
+  expectedReferenceSha256?: string;
+  expectedTreeFingerprintAlgorithm?: "sha256";
+  expectedTreeFingerprintSha256?: string;
+  expectedTreeEntryCount?: number;
+  expectedTreeFileCount?: number;
+  expectedTotalFileBytes?: number;
+  expectedArchiveCapturedAt?: string;
+  expectedArchiveVerificationState?: "verified" | "unverified";
+  expectedArchiveVerifiedRevision?: string | null;
+  expectedArchiveVerifiedAt?: string | null;
+  providerObject: ColdLostProviderObjectObservation;
+};
+
+export type ColdLostReconciliationBlockerCode =
+  | "database_transaction_not_read_only"
+  | "database_row_security_disabled"
+  | "database_role_is_superuser"
+  | "database_force_rls_unverified"
+  | "expected_lease_id_missing"
+  | "expected_backend_missing"
+  | "expected_current_epoch_missing"
+  | "expected_lost_epoch_missing"
+  | "expected_lost_instance_missing"
+  | "expected_refcount_missing"
+  | "expected_provider_backend_missing"
+  | "expected_route_kind_missing"
+  | "expected_route_target_missing"
+  | "expected_route_epoch_missing"
+  | "expected_workspace_generation_missing"
+  | "expected_workspace_status_missing"
+  | "expected_restore_status_missing"
+  | "expected_restore_failure_missing"
+  | "expected_archive_generation_missing"
+  | "expected_archive_complete_missing"
+  | "expected_archive_descriptor_version_missing"
+  | "expected_archive_revision_missing"
+  | "expected_archive_object_kind_missing"
+  | "expected_archive_object_id_missing"
+  | "expected_descriptor_reference_bytes_missing"
+  | "expected_descriptor_reference_sha256_missing"
+  | "expected_reference_bytes_missing"
+  | "expected_reference_sha256_missing"
+  | "expected_tree_fingerprint_algorithm_missing"
+  | "expected_tree_fingerprint_sha256_missing"
+  | "expected_tree_entry_count_missing"
+  | "expected_tree_file_count_missing"
+  | "expected_total_file_bytes_missing"
+  | "expected_archive_captured_at_missing"
+  | "expected_archive_verification_state_missing"
+  | "expected_archive_verified_revision_missing"
+  | "expected_archive_verified_at_missing"
+  | "epoch_relation_invalid"
+  | "session_not_found"
+  | "session_group_mismatch"
+  | "lease_not_found"
+  | "lease_id_mismatch"
+  | "lease_backend_mismatch"
+  | "lost_provider_backend_mismatch"
+  | "lease_not_cold"
+  | "lease_instance_present"
+  | "current_epoch_mismatch"
+  | "refcount_mismatch"
+  | "workspace_generation_mismatch"
+  | "workspace_status_mismatch"
+  | "restore_status_mismatch"
+  | "restore_failure_mismatch"
+  | "archive_generation_mismatch"
+  | "archive_completeness_mismatch"
+  | "lost_provider_recovery_unverified"
+  | "archive_descriptor_missing"
+  | "archive_generation_incomplete"
+  | "archive_base64_invalid"
+  | "archive_bytes_mismatch"
+  | "archive_descriptor_version_mismatch"
+  | "archive_revision_mismatch"
+  | "archive_object_kind_mismatch"
+  | "archive_object_id_mismatch"
+  | "archive_descriptor_reference_bytes_mismatch"
+  | "archive_descriptor_reference_sha256_mismatch"
+  | "archive_reference_bytes_mismatch"
+  | "archive_reference_sha256_mismatch"
+  | "archive_tree_fingerprint_algorithm_mismatch"
+  | "archive_tree_fingerprint_sha256_mismatch"
+  | "archive_tree_entry_count_mismatch"
+  | "archive_tree_file_count_mismatch"
+  | "archive_total_file_bytes_mismatch"
+  | "archive_captured_at_mismatch"
+  | "archive_verification_state_mismatch"
+  | "archive_verified_revision_mismatch"
+  | "archive_verified_at_mismatch"
+  | "archive_verification_unavailable"
+  | "archive_provider_object_identity_unavailable"
+  | "provider_object_observation_missing"
+  | "provider_object_identity_mismatch"
+  | "provider_object_missing"
+  | "provider_object_status_unknown"
+  | "provider_object_observation_time_invalid"
+  | "exact_route_mismatch"
+  | "unmatched_active_processes"
+  | "unmatched_unsettled_admissions"
+  | "unmatched_open_ptys"
+  | "unmatched_process_holders"
+  | "active_direct_holders"
+  | "active_turn_writer_possible"
+  | "turn_holder_attempt_linkage_unknown"
+  | "unsettled_interruptions"
+  | "blocker_inventory_incomplete";
+
+export type ColdLostReconciliationPreview = {
+  version: 1;
+  status: "eligible" | "blocked";
+  previewId: string;
+  snapshotAt: string;
+  database: {
+    role: string;
+    roleSuperuser: boolean;
+    transactionReadOnly: boolean;
+    rowSecurity: boolean;
+    forceRls: boolean;
+    accountId: string;
+    workspaceId: string;
+  } | null;
+  locator: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    sandboxGroupId: string;
+  };
+  expected: {
+    leaseId: string | null;
+    backend: string | null;
+    currentEpoch: number | null;
+    lostEpoch: number | null;
+    lostInstanceId: string | null;
+    refcount: number | null;
+    providerBackend: string | null;
+    routeKind: "home" | "active" | null;
+    routeTargetId: string | null;
+    routeTargetSupplied: boolean;
+    routeEpoch: number | null;
+    workspaceGeneration: number | null;
+    workspaceStatus: SandboxWorkspaceReadiness | null;
+    restoreStatus: SandboxRestoreStatus | null;
+    restoreFailureCode: string | null;
+    restoreFailureSupplied: boolean;
+    archiveGeneration: number | null;
+    archiveGenerationSupplied: boolean;
+    archiveComplete: boolean | null;
+    archiveDescriptorVersion: 1 | null;
+    archiveRevision: string | null;
+    archiveObjectKind:
+      | "modal_filesystem_snapshot"
+      | "modal_directory_snapshot"
+      | null;
+    archiveObjectId: string | null;
+    descriptorReferenceBytes: number | null;
+    descriptorReferenceSha256: string | null;
+    referenceBytes: number | null;
+    referenceSha256: string | null;
+    treeFingerprintAlgorithm: "sha256" | null;
+    treeFingerprintSha256: string | null;
+    treeEntryCount: number | null;
+    treeFileCount: number | null;
+    totalFileBytes: number | null;
+    archiveCapturedAt: string | null;
+    archiveVerificationState: "verified" | "unverified" | null;
+    archiveVerifiedRevision: string | null;
+    archiveVerifiedRevisionSupplied: boolean;
+    archiveVerifiedAt: string | null;
+    archiveVerifiedAtSupplied: boolean;
+  };
+  session: {
+    id: string;
+    status: string;
+    sandboxGroupId: string;
+    activeSandboxId: string | null;
+    activeEpoch: number;
+  } | null;
+  lease: {
+    id: string;
+    liveness: SandboxLeaseLiveness;
+    instanceId: string | null;
+    backend: string;
+    leaseEpoch: number;
+    workspaceGeneration: number;
+    archiveGeneration: number | null;
+    archiveComplete: boolean;
+    refcount: number;
+    turnHolders: number;
+    viewerHolders: number;
+    recoveryProviderStatus: SandboxProviderExistence;
+    recoveryProviderInstanceId: string | null;
+    workspaceStatus: SandboxWorkspaceReadiness;
+    restoreStatus: SandboxRestoreStatus;
+    restoreFailureCode: string | null;
+  } | null;
+  archive: {
+    status: SandboxArchiveAvailability;
+    descriptorVersion: 1 | null;
+    revision: string | null;
+    generation: number | null;
+    objectKind: "modal_filesystem_snapshot" | "modal_directory_snapshot" | null;
+    objectId: string | null;
+    descriptorReferenceBytes: number | null;
+    descriptorReferenceSha256: string | null;
+    referenceBytes: number | null;
+    referenceSha256: string | null;
+    referenceVerified: boolean;
+    treeFingerprintAlgorithm: "sha256" | null;
+    treeFingerprintSha256: string | null;
+    entryCount: number | null;
+    fileCount: number | null;
+    totalFileBytes: number | null;
+    complete: boolean;
+    verificationState: "verified" | "unverified";
+    capturedAt: string | null;
+    verifiedRevision: string | null;
+    verifiedAt: string | null;
+    providerObservation: {
+      providerBackend: string | null;
+      objectKind: "modal_filesystem_snapshot" | "modal_directory_snapshot" | null;
+      objectId: string | null;
+      status: "exists" | "missing" | "unknown";
+      observedAt: string | null;
+    };
+  };
+  active: {
+    exactProcesses: number;
+    exactAdmissions: number;
+    exactPtys: number;
+    exactProcessHolders: number;
+    unmatchedProcesses: number;
+    unmatchedAdmissions: number;
+    unmatchedPtys: number;
+    unmatchedProcessHolders: number;
+    directHolders: number;
+    possibleWriterTurnHolders: number;
+    unknownTurnHolderLinks: number;
+    unsettledInterruptions: number;
+    turnHolders: number;
+    viewerHolders: number;
+    inventoryComplete: boolean;
+  };
+  identities: {
+    processes: ColdLostProcessRow[];
+    admissions: ColdLostAdmissionRow[];
+    ptys: ColdLostPtyRow[];
+    holders: ColdLostHolderRow[];
+    interruptions: ColdLostInterruptionRow[];
+  };
+  settlement: LostProviderWorkspaceSettlement;
+  blockerSetHash: string;
+  blockers: ColdLostReconciliationBlockerCode[];
+};
+
+type ColdLostProcessRow = {
+  id: string;
+  sessionId: string;
+  parentAdmissionId: string;
+  holder_id: string;
+  ownerActorKind: string;
+  ownerActorId: string;
+  ownerTurnId: string | null;
+  ownerAttemptId: string | null;
+  ownerExecutionGeneration: number | null;
+  lease_epoch: number | string;
+  providerBackend: string;
+  provider_instance_id: string;
+  routeKind: "home" | "active";
+  routeTargetId: string | null;
+  routeEpoch: number;
+  providerSessionId: number;
+  state: string;
+};
+
+type ColdLostAdmissionRow = {
+  id: string;
+  sessionId: string;
+  actorKind: string;
+  actorId: string;
+  turnId: string | null;
+  attemptId: string | null;
+  executionGeneration: number | null;
+  holderKind: string;
+  holderId: string;
+  lease_epoch: number | string;
+  providerBackend: string;
+  provider_instance_id: string;
+  routeKind: "home" | "active";
+  routeTargetId: string | null;
+  routeEpoch: number;
+  workspaceGeneration: number;
+  operation: string;
+  providerOutcome: string | null;
+  settled_at: Date | string | null;
+};
+
+type ColdLostPtyRow = {
+  id: string;
+  sessionId: string;
+  retainedProcessId: string | null;
+  openAdmissionId: string | null;
+  execSessionId: number | null;
+  lease_epoch: number | string;
+  providerBackend: string | null;
+  provider_instance_id: string | null;
+  routeKind: "home" | "active" | null;
+  routeTargetId: string | null;
+  routeEpoch: number | null;
+  status: string;
+};
+
+type ColdLostHolderRow = {
+  id: string;
+  kind: string;
+  holder_id: string;
+  subjectId: string | null;
+  turnId: string | null;
+  attemptId: string | null;
+  attemptExecutionGeneration: number | null;
+  attemptState: string | null;
+  attemptOutcome: string | null;
+  attemptQuiescedAt: string | null;
+};
+
+type ColdLostInterruptionRow = {
+  id: string;
+  sessionId: string;
+  operationId: string;
+  attemptId: string;
+  turnId: string;
+  attemptExecutionGeneration: number;
+  attemptState: string;
+  attemptOutcome: string | null;
+  attemptQuiescedAt: string | null;
+  kind: string;
+  state: string;
+  requestedAt: string;
+};
+
+type ColdLostSessionRow = {
+  id: string;
+  status: string;
+  sandbox_group_id: string;
+  active_sandbox_id: string | null;
+  active_epoch: number | string;
+};
+
+type ColdLostDatabasePosture = NonNullable<
+  ColdLostReconciliationPreview["database"]
+>;
+
+type ColdLostSnapshotRows = {
+  snapshotAt: string;
+  inventoryComplete: boolean;
+  session: ColdLostSessionRow | null;
+  lease: LeaseRow | null;
+  processes: ColdLostProcessRow[];
+  admissions: ColdLostAdmissionRow[];
+  ptys: ColdLostPtyRow[];
+  holders: ColdLostHolderRow[];
+  interruptions: ColdLostInterruptionRow[];
+};
+
+const MODAL_ARCHIVE_PREFIXES = [
+  "MODAL_SANDBOX_FS_SNAPSHOT_V1\n",
+  "MODAL_SANDBOX_DIR_SNAPSHOT_V1\n",
+] as const;
+const COLD_LOST_PROVIDER_OBSERVATION_MAX_AGE_MS = 5 * 60 * 1_000;
+const COLD_LOST_PROVIDER_OBSERVATION_MAX_FUTURE_MS = 60 * 1_000;
+
+function sha256String(value: string | Uint8Array): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function decodeCanonicalBase64(value: unknown): Uint8Array | null {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length % 4 !== 0 ||
+    !/^[A-Za-z0-9+/]+={0,2}$/.test(value)
+  ) {
+    return null;
+  }
+  const bytes = Uint8Array.from(Buffer.from(value, "base64"));
+  return Buffer.from(bytes).toString("base64") === value ? bytes : null;
+}
+
+function modalProviderObject(
+  bytes: Uint8Array | null,
+): {
+  kind: "modal_filesystem_snapshot" | "modal_directory_snapshot";
+  id: string;
+} | null {
+  if (!bytes) return null;
+  const text = new TextDecoder().decode(bytes);
+  for (const prefix of MODAL_ARCHIVE_PREFIXES) {
+    if (!text.startsWith(prefix)) continue;
+    try {
+      const parsed = JSON.parse(text.slice(prefix.length)) as {
+        snapshot_id?: unknown;
+      };
+      if (
+        typeof parsed.snapshot_id !== "string" ||
+        parsed.snapshot_id.length === 0
+      ) {
+        return null;
+      }
+      return {
+        kind:
+          prefix === MODAL_ARCHIVE_PREFIXES[0]
+            ? "modal_filesystem_snapshot"
+            : "modal_directory_snapshot",
+        id: parsed.snapshot_id,
+      };
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function stableSetHash(value: unknown): string {
+  return sha256String(JSON.stringify(value));
+}
+
+function isFreshCanonicalProviderObservationTime(
+  observedAt: string | null,
+  snapshotAt: string,
+): boolean {
+  if (observedAt === null) return false;
+  const observedAtMs = Date.parse(observedAt);
+  const snapshotAtMs = Date.parse(snapshotAt);
+  return (
+    Number.isFinite(observedAtMs) &&
+    Number.isFinite(snapshotAtMs) &&
+    new Date(observedAtMs).toISOString() === observedAt &&
+    observedAtMs >=
+      snapshotAtMs - COLD_LOST_PROVIDER_OBSERVATION_MAX_AGE_MS &&
+    observedAtMs <=
+      snapshotAtMs + COLD_LOST_PROVIDER_OBSERVATION_MAX_FUTURE_MS
+  );
+}
+
+function isExactLostScope(
+  row: {
+    lease_epoch: number | string;
+    providerBackend: string | null;
+    provider_instance_id: string | null;
+    routeKind: "home" | "active" | null;
+    routeTargetId: string | null;
+    routeEpoch: number | null;
+  },
+  input: PreviewColdLostLeaseInstanceBlockersInput,
+): boolean {
+  return (
+    input.expectedLostEpoch !== undefined &&
+    input.expectedLostInstanceId !== undefined &&
+    input.expectedProviderBackend !== undefined &&
+    input.expectedRouteKind !== undefined &&
+    input.expectedRouteTargetId !== undefined &&
+    input.expectedRouteEpoch !== undefined &&
+    Number(row.lease_epoch) === input.expectedLostEpoch &&
+    row.providerBackend === input.expectedProviderBackend &&
+    row.provider_instance_id === input.expectedLostInstanceId &&
+    row.routeKind === input.expectedRouteKind &&
+    row.routeTargetId === input.expectedRouteTargetId &&
+    row.routeEpoch === input.expectedRouteEpoch
+  );
+}
+
+function archiveSessionState(
+  row: LeaseRow | null,
+): Record<string, unknown> | null {
+  const resume = row?.resume_state;
+  if (!resume || typeof resume !== "object") return null;
+  const sessionState = resume.sessionState;
+  return sessionState && typeof sessionState === "object"
+    ? (sessionState as Record<string, unknown>)
+    : null;
+}
+
+async function readColdLostSnapshotRowsTx(
+  tx: Database,
+  input: PreviewColdLostLeaseInstanceBlockersInput,
+): Promise<ColdLostSnapshotRows> {
+  const timestampRows = await tx.execute<{ snapshot_at: Date | string }>(sql`
+    select transaction_timestamp() as snapshot_at
+  `);
+  const [sessionRows, leaseRows] = await Promise.all([
+    tx.execute<ColdLostSessionRow>(sql`
+      select id, status, sandbox_group_id, active_sandbox_id, active_epoch
+      from sessions
+      where account_id = ${input.accountId}
+        and workspace_id = ${input.workspaceId}
+        and id = ${input.sessionId}
+    `),
+    tx.execute<LeaseRow>(sql`
+      select * from sandbox_leases
+      where account_id = ${input.accountId}
+        and workspace_id = ${input.workspaceId}
+        and sandbox_group_id = ${input.sandboxGroupId}
+    `),
+  ]);
+  const session = sessionRows[0] ?? null;
+  const lease = leaseRows[0] ?? null;
+  if (!lease) {
+    const snapshotAt = timestampRows[0]?.snapshot_at;
+    return {
+      snapshotAt:
+        snapshotAt instanceof Date
+          ? snapshotAt.toISOString()
+          : new Date(snapshotAt ?? Date.now()).toISOString(),
+      inventoryComplete: false,
+      session,
+      lease: null,
+      processes: [],
+      admissions: [],
+      ptys: [],
+      holders: [],
+      interruptions: [],
+    };
+  }
+  const [processes, admissions, ptys, holders, interruptions] =
+    await Promise.all([
+    tx.execute<ColdLostProcessRow>(sql`
+      select id,
+        session_id as "sessionId",
+        parent_admission_id as "parentAdmissionId",
+        holder_id,
+        owner_actor_kind as "ownerActorKind",
+        owner_actor_id as "ownerActorId",
+        owner_turn_id as "ownerTurnId",
+        owner_attempt_id as "ownerAttemptId",
+        owner_execution_generation as "ownerExecutionGeneration",
+        lease_epoch,
+        provider_backend as "providerBackend",
+        provider_instance_id,
+        route_kind as "routeKind",
+        route_target_id as "routeTargetId",
+        route_epoch as "routeEpoch",
+        provider_session_id as "providerSessionId",
+        state
+      from sandbox_retained_processes
+      where account_id = ${input.accountId}
+        and workspace_id = ${input.workspaceId}
+        and lease_id = ${lease.id}
+        and sandbox_group_id = ${input.sandboxGroupId}
+        and (state = 'active' or (
+          lease_epoch = ${input.expectedLostEpoch ?? -1}
+          and provider_backend = ${input.expectedProviderBackend ?? ""}
+          and provider_instance_id = ${input.expectedLostInstanceId ?? ""}
+          and route_kind = ${input.expectedRouteKind ?? "home"}
+          and route_target_id is not distinct from ${input.expectedRouteTargetId ?? null}
+          and route_epoch = ${input.expectedRouteEpoch ?? -1}
+        ))
+      order by id
+    `),
+    tx.execute<ColdLostAdmissionRow>(sql`
+      select id,
+        session_id as "sessionId",
+        actor_kind as "actorKind",
+        actor_id as "actorId",
+        turn_id as "turnId",
+        attempt_id as "attemptId",
+        execution_generation as "executionGeneration",
+        holder_kind as "holderKind",
+        holder_id as "holderId",
+        lease_epoch,
+        provider_backend as "providerBackend",
+        provider_instance_id,
+        route_kind as "routeKind",
+        route_target_id as "routeTargetId",
+        route_epoch as "routeEpoch",
+        workspace_generation as "workspaceGeneration",
+        operation,
+        provider_outcome as "providerOutcome",
+        settled_at
+      from sandbox_workspace_mutation_admissions
+      where account_id = ${input.accountId}
+        and workspace_id = ${input.workspaceId}
+        and lease_id = ${lease.id}
+        and sandbox_group_id = ${input.sandboxGroupId}
+        and (settled_at is null or (
+          lease_epoch = ${input.expectedLostEpoch ?? -1}
+          and provider_backend = ${input.expectedProviderBackend ?? ""}
+          and provider_instance_id = ${input.expectedLostInstanceId ?? ""}
+          and route_kind = ${input.expectedRouteKind ?? "home"}
+          and route_target_id is not distinct from ${input.expectedRouteTargetId ?? null}
+          and route_epoch = ${input.expectedRouteEpoch ?? -1}
+        ))
+      order by id
+    `),
+    tx.execute<ColdLostPtyRow>(sql`
+      select id,
+        session_id as "sessionId",
+        retained_process_id as "retainedProcessId",
+        open_admission_id as "openAdmissionId",
+        exec_session_id as "execSessionId",
+        lease_epoch,
+        provider_backend as "providerBackend",
+        provider_instance_id,
+        route_kind as "routeKind",
+        route_target_id as "routeTargetId",
+        route_epoch as "routeEpoch",
+        status
+      from sandbox_pty_sessions
+      where account_id = ${input.accountId}
+        and workspace_id = ${input.workspaceId}
+        and lease_id = ${lease.id}
+        and sandbox_group_id = ${input.sandboxGroupId}
+        and (status = 'open' or (
+          lease_epoch = ${input.expectedLostEpoch ?? -1}
+          and provider_backend = ${input.expectedProviderBackend ?? ""}
+          and provider_instance_id = ${input.expectedLostInstanceId ?? ""}
+          and route_kind = ${input.expectedRouteKind ?? "home"}
+          and route_target_id is not distinct from ${input.expectedRouteTargetId ?? null}
+          and route_epoch = ${input.expectedRouteEpoch ?? -1}
+        ))
+      order by id
+    `),
+    tx.execute<ColdLostHolderRow>(sql`
+      select holder.id,
+        holder.kind,
+        holder.holder_id,
+        holder.subject_id as "subjectId",
+        attempt.turn_id as "turnId",
+        attempt.id as "attemptId",
+        attempt.execution_generation as "attemptExecutionGeneration",
+        attempt.state as "attemptState",
+        attempt.outcome as "attemptOutcome",
+        attempt.quiesced_at as "attemptQuiescedAt"
+      from sandbox_lease_holders holder
+      left join session_turn_attempts attempt
+        on holder.kind = 'turn'
+       and holder.holder_id = ('turn-attempt:' || attempt.id::text)
+       and attempt.account_id = holder.account_id
+       and attempt.workspace_id = holder.workspace_id
+      where holder.account_id = ${input.accountId}
+        and holder.workspace_id = ${input.workspaceId}
+        and holder.lease_id = ${lease.id}
+      order by holder.kind, holder.holder_id
+    `),
+    tx.execute<ColdLostInterruptionRow>(sql`
+      select interruption.id,
+        interruption.session_id as "sessionId",
+        interruption.operation_id as "operationId",
+        interruption.attempt_id as "attemptId",
+        attempt.turn_id as "turnId",
+        attempt.execution_generation as "attemptExecutionGeneration",
+        attempt.state as "attemptState",
+        attempt.outcome as "attemptOutcome",
+        attempt.quiesced_at as "attemptQuiescedAt",
+        interruption.kind,
+        interruption.state,
+        interruption.requested_at as "requestedAt"
+      from session_attempt_interruptions interruption
+      join sessions session
+        on session.workspace_id = interruption.workspace_id
+       and session.id = interruption.session_id
+       and session.sandbox_group_id = ${input.sandboxGroupId}
+      join session_turn_attempts attempt
+        on attempt.workspace_id = interruption.workspace_id
+       and attempt.id = interruption.attempt_id
+      where interruption.account_id = ${input.accountId}
+        and interruption.workspace_id = ${input.workspaceId}
+        and interruption.state in ('pending', 'delivered', 'acknowledged')
+      order by interruption.id
+    `),
+  ]);
+  const snapshotAt = timestampRows[0]?.snapshot_at;
+  return {
+    snapshotAt:
+      snapshotAt instanceof Date
+        ? snapshotAt.toISOString()
+        : new Date(snapshotAt ?? Date.now()).toISOString(),
+    inventoryComplete: true,
+    session,
+    lease,
+    processes,
+    admissions,
+    ptys,
+    holders,
+    interruptions,
+  };
+}
+
+function evaluateColdLostSnapshot(
+  input: PreviewColdLostLeaseInstanceBlockersInput,
+  rows: ColdLostSnapshotRows,
+  database: ColdLostDatabasePosture | null,
+  options: { requireReadOnly: boolean } = { requireReadOnly: true },
+): ColdLostReconciliationPreview {
+  const blockers: ColdLostReconciliationBlockerCode[] = [];
+  const add = (
+    code: ColdLostReconciliationBlockerCode,
+    blocked: boolean,
+  ): void => {
+    if (blocked && !blockers.includes(code)) blockers.push(code);
+  };
+  if (database) {
+    add(
+      "database_transaction_not_read_only",
+      options.requireReadOnly && !database.transactionReadOnly,
+    );
+    add("database_row_security_disabled", !database.rowSecurity);
+    add("database_role_is_superuser", database.roleSuperuser);
+    add("database_force_rls_unverified", !database.forceRls);
+  } else {
+    add("database_force_rls_unverified", true);
+  }
+  add("expected_lease_id_missing", input.expectedLeaseId === undefined);
+  add("expected_backend_missing", input.expectedBackend === undefined);
+  add(
+    "expected_current_epoch_missing",
+    input.expectedCurrentEpoch === undefined,
+  );
+  add("expected_lost_epoch_missing", input.expectedLostEpoch === undefined);
+  add(
+    "expected_lost_instance_missing",
+    input.expectedLostInstanceId === undefined,
+  );
+  add("expected_refcount_missing", input.expectedRefcount === undefined);
+  add(
+    "expected_provider_backend_missing",
+    input.expectedProviderBackend === undefined,
+  );
+  add("expected_route_kind_missing", input.expectedRouteKind === undefined);
+  add(
+    "expected_route_target_missing",
+    input.expectedRouteTargetId === undefined,
+  );
+  add("expected_route_epoch_missing", input.expectedRouteEpoch === undefined);
+  add(
+    "expected_workspace_generation_missing",
+    input.expectedWorkspaceGeneration === undefined,
+  );
+  add(
+    "expected_workspace_status_missing",
+    input.expectedWorkspaceStatus === undefined,
+  );
+  add(
+    "expected_restore_status_missing",
+    input.expectedRestoreStatus === undefined,
+  );
+  add(
+    "expected_restore_failure_missing",
+    input.expectedRestoreFailureCode === undefined,
+  );
+  add(
+    "expected_archive_generation_missing",
+    input.expectedArchiveGeneration === undefined,
+  );
+  add(
+    "expected_archive_complete_missing",
+    input.expectedArchiveComplete === undefined,
+  );
+  add(
+    "expected_archive_descriptor_version_missing",
+    input.expectedArchiveDescriptorVersion === undefined,
+  );
+  add(
+    "expected_archive_revision_missing",
+    input.expectedArchiveRevision === undefined,
+  );
+  add(
+    "expected_archive_object_kind_missing",
+    input.expectedArchiveObjectKind === undefined,
+  );
+  add(
+    "expected_archive_object_id_missing",
+    input.expectedArchiveObjectId === undefined,
+  );
+  add(
+    "expected_descriptor_reference_bytes_missing",
+    input.expectedDescriptorReferenceBytes === undefined,
+  );
+  add(
+    "expected_descriptor_reference_sha256_missing",
+    input.expectedDescriptorReferenceSha256 === undefined,
+  );
+  add(
+    "expected_reference_bytes_missing",
+    input.expectedReferenceBytes === undefined,
+  );
+  add(
+    "expected_reference_sha256_missing",
+    input.expectedReferenceSha256 === undefined,
+  );
+  add(
+    "expected_tree_fingerprint_algorithm_missing",
+    input.expectedTreeFingerprintAlgorithm === undefined,
+  );
+  add(
+    "expected_tree_fingerprint_sha256_missing",
+    input.expectedTreeFingerprintSha256 === undefined,
+  );
+  add(
+    "expected_tree_entry_count_missing",
+    input.expectedTreeEntryCount === undefined,
+  );
+  add(
+    "expected_tree_file_count_missing",
+    input.expectedTreeFileCount === undefined,
+  );
+  add(
+    "expected_total_file_bytes_missing",
+    input.expectedTotalFileBytes === undefined,
+  );
+  add(
+    "expected_archive_captured_at_missing",
+    input.expectedArchiveCapturedAt === undefined,
+  );
+  add(
+    "expected_archive_verification_state_missing",
+    input.expectedArchiveVerificationState === undefined,
+  );
+  add(
+    "expected_archive_verified_revision_missing",
+    input.expectedArchiveVerifiedRevision === undefined,
+  );
+  add(
+    "expected_archive_verified_at_missing",
+    input.expectedArchiveVerifiedAt === undefined,
+  );
+  add(
+    "epoch_relation_invalid",
+    input.expectedCurrentEpoch !== undefined &&
+      input.expectedLostEpoch !== undefined &&
+      input.expectedCurrentEpoch !== input.expectedLostEpoch + 1,
+  );
+
+  const session = rows.session;
+  add("blocker_inventory_incomplete", !rows.inventoryComplete);
+  add("session_not_found", session === null);
+  add(
+    "session_group_mismatch",
+    session !== null && session.sandbox_group_id !== input.sandboxGroupId,
+  );
+  const row = rows.lease;
+  const lease = row ? mapLeaseRow(row) : null;
+  const recovery = row ? recoveryStateFromLeaseRow(row) : null;
+  add("lease_not_found", row === null);
+  add(
+    "lease_id_mismatch",
+    row !== null &&
+      input.expectedLeaseId !== undefined &&
+      row.id !== input.expectedLeaseId,
+  );
+  add(
+    "lease_backend_mismatch",
+    row !== null &&
+      input.expectedBackend !== undefined &&
+      row.backend !== input.expectedBackend,
+  );
+  add(
+    "lost_provider_backend_mismatch",
+    row !== null &&
+      input.expectedProviderBackend !== undefined &&
+      row.backend !== input.expectedProviderBackend,
+  );
+  add("lease_not_cold", row !== null && row.liveness !== "cold");
+  add("lease_instance_present", row !== null && row.instance_id !== null);
+  add(
+    "current_epoch_mismatch",
+    row !== null &&
+      input.expectedCurrentEpoch !== undefined &&
+      Number(row.lease_epoch) !== input.expectedCurrentEpoch,
+  );
+  add(
+    "refcount_mismatch",
+    row !== null &&
+      input.expectedRefcount !== undefined &&
+      Number(row.refcount) !== input.expectedRefcount,
+  );
+  add(
+    "workspace_generation_mismatch",
+    row !== null &&
+      input.expectedWorkspaceGeneration !== undefined &&
+      Number(row.workspace_generation) !== input.expectedWorkspaceGeneration,
+  );
+  add(
+    "workspace_status_mismatch",
+    recovery !== null &&
+      input.expectedWorkspaceStatus !== undefined &&
+      recovery.workspace.status !== input.expectedWorkspaceStatus,
+  );
+  add(
+    "restore_status_mismatch",
+    recovery !== null &&
+      input.expectedRestoreStatus !== undefined &&
+      recovery.restore.status !== input.expectedRestoreStatus,
+  );
+  add(
+    "restore_failure_mismatch",
+    recovery !== null &&
+      input.expectedRestoreFailureCode !== undefined &&
+      (recovery.restore.failureCode ?? null) !==
+        input.expectedRestoreFailureCode,
+  );
+  const archiveGeneration = row
+    ? row.archive_generation === null
+      ? null
+      : Number(row.archive_generation)
+    : null;
+  add(
+    "archive_generation_mismatch",
+    row !== null &&
+      input.expectedArchiveGeneration !== undefined &&
+      archiveGeneration !== input.expectedArchiveGeneration,
+  );
+  const archiveComplete = row ? hasCompleteWorkspaceArchive(row) : false;
+  add(
+    "archive_completeness_mismatch",
+    row !== null &&
+      input.expectedArchiveComplete !== undefined &&
+      archiveComplete !== input.expectedArchiveComplete,
+  );
+  add(
+    "lost_provider_recovery_unverified",
+    row !== null &&
+      (recovery?.provider.status !== "missing" ||
+        input.expectedLostInstanceId === undefined ||
+        recovery.provider.instanceId !== input.expectedLostInstanceId),
+  );
+  add(
+    "exact_route_mismatch",
+    (input.expectedRouteKind === "home" &&
+      input.expectedRouteTargetId !== undefined &&
+      input.expectedRouteEpoch !== undefined &&
+      (input.expectedRouteTargetId !== null || input.expectedRouteEpoch !== 0)) ||
+      (input.expectedRouteKind === "active" &&
+        session !== null &&
+        input.expectedRouteTargetId !== undefined &&
+        input.expectedRouteEpoch !== undefined &&
+        (session.active_sandbox_id !== input.expectedRouteTargetId ||
+          Number(session.active_epoch) !== input.expectedRouteEpoch)),
+  );
+
+  const descriptor = recovery?.archive.current ?? null;
+  const sessionState = archiveSessionState(row);
+  const base64 = sessionState?.workspaceArchive;
+  const bytes = decodeCanonicalBase64(base64);
+  const referenceBytes = bytes?.length ?? null;
+  const referenceSha256 = bytes ? sha256String(bytes) : null;
+  const referenceVerified =
+    descriptor !== null &&
+    referenceBytes === descriptor.archiveBytes &&
+    referenceSha256 === descriptor.archiveSha256;
+  const archiveObject = modalProviderObject(bytes);
+  const archiveVerificationMatches =
+    descriptor !== null &&
+    recovery?.workspace.status === "ready" &&
+    recovery.workspace.verifiedRevision === descriptor.revision &&
+    recovery.workspace.verifiedAt !== null &&
+    Number.isFinite(Date.parse(recovery.workspace.verifiedAt));
+  const archiveVerificationState = archiveVerificationMatches
+    ? ("verified" as const)
+    : ("unverified" as const);
+  const verifiedRevision = recovery?.workspace.verifiedRevision ?? null;
+  const verifiedAt = archiveVerificationMatches
+    ? recovery!.workspace.verifiedAt
+    : null;
+  add("archive_descriptor_missing", descriptor === null);
+  add(
+    "archive_generation_incomplete",
+    row !== null &&
+      (archiveGeneration === null ||
+        archiveGeneration !== Number(row.workspace_generation) ||
+        !archiveComplete),
+  );
+  add("archive_base64_invalid", row !== null && bytes === null);
+  add(
+    "archive_bytes_mismatch",
+    descriptor !== null && !referenceVerified,
+  );
+  add(
+    "archive_descriptor_version_mismatch",
+    input.expectedArchiveDescriptorVersion !== undefined &&
+      descriptor?.version !== input.expectedArchiveDescriptorVersion,
+  );
+  add(
+    "archive_revision_mismatch",
+    input.expectedArchiveRevision !== undefined &&
+      descriptor?.revision !== input.expectedArchiveRevision,
+  );
+  add(
+    "archive_object_kind_mismatch",
+    input.expectedArchiveObjectKind !== undefined &&
+      archiveObject?.kind !== input.expectedArchiveObjectKind,
+  );
+  add(
+    "archive_object_id_mismatch",
+    input.expectedArchiveObjectId !== undefined &&
+      archiveObject?.id !== input.expectedArchiveObjectId,
+  );
+  add(
+    "archive_descriptor_reference_bytes_mismatch",
+    input.expectedDescriptorReferenceBytes !== undefined &&
+      descriptor?.archiveBytes !== input.expectedDescriptorReferenceBytes,
+  );
+  add(
+    "archive_descriptor_reference_sha256_mismatch",
+    input.expectedDescriptorReferenceSha256 !== undefined &&
+      descriptor?.archiveSha256 !== input.expectedDescriptorReferenceSha256,
+  );
+  add(
+    "archive_reference_bytes_mismatch",
+    input.expectedReferenceBytes !== undefined &&
+      referenceBytes !== input.expectedReferenceBytes,
+  );
+  add(
+    "archive_reference_sha256_mismatch",
+    input.expectedReferenceSha256 !== undefined &&
+      referenceSha256 !== input.expectedReferenceSha256,
+  );
+  add(
+    "archive_tree_fingerprint_algorithm_mismatch",
+    input.expectedTreeFingerprintAlgorithm !== undefined &&
+      descriptor?.workspace.algorithm !== input.expectedTreeFingerprintAlgorithm,
+  );
+  add(
+    "archive_tree_fingerprint_sha256_mismatch",
+    input.expectedTreeFingerprintSha256 !== undefined &&
+      descriptor?.workspace.sha256 !== input.expectedTreeFingerprintSha256,
+  );
+  add(
+    "archive_tree_entry_count_mismatch",
+    input.expectedTreeEntryCount !== undefined &&
+      descriptor?.workspace.entryCount !== input.expectedTreeEntryCount,
+  );
+  add(
+    "archive_tree_file_count_mismatch",
+    input.expectedTreeFileCount !== undefined &&
+      descriptor?.workspace.fileCount !== input.expectedTreeFileCount,
+  );
+  add(
+    "archive_total_file_bytes_mismatch",
+    input.expectedTotalFileBytes !== undefined &&
+      descriptor?.workspace.totalFileBytes !== input.expectedTotalFileBytes,
+  );
+  add(
+    "archive_captured_at_mismatch",
+    input.expectedArchiveCapturedAt !== undefined &&
+      descriptor?.capturedAt !== input.expectedArchiveCapturedAt,
+  );
+  add(
+    "archive_verification_state_mismatch",
+    input.expectedArchiveVerificationState !== undefined &&
+      archiveVerificationState !== input.expectedArchiveVerificationState,
+  );
+  add(
+    "archive_verified_revision_mismatch",
+    input.expectedArchiveVerifiedRevision !== undefined &&
+      verifiedRevision !== input.expectedArchiveVerifiedRevision,
+  );
+  add(
+    "archive_verified_at_mismatch",
+    input.expectedArchiveVerifiedAt !== undefined &&
+      verifiedAt !== input.expectedArchiveVerifiedAt,
+  );
+  add(
+    "archive_verification_unavailable",
+    descriptor !== null && !archiveVerificationMatches,
+  );
+  add(
+    "archive_provider_object_identity_unavailable",
+    row !== null && archiveObject === null,
+  );
+  add(
+    "provider_object_observation_missing",
+    input.providerObject.providerBackend === null ||
+      input.providerObject.objectKind === null ||
+      input.providerObject.objectId === null,
+  );
+  add(
+    "provider_object_identity_mismatch",
+    archiveObject !== null &&
+      (input.providerObject.providerBackend !== row?.backend ||
+        input.providerObject.providerBackend !==
+          input.expectedProviderBackend ||
+        input.providerObject.objectKind !== archiveObject.kind ||
+        input.providerObject.objectId !== archiveObject.id),
+  );
+  add("provider_object_missing", input.providerObject.status === "missing");
+  add(
+    "provider_object_status_unknown",
+    input.providerObject.status === "unknown",
+  );
+  add(
+    "provider_object_observation_time_invalid",
+    !isFreshCanonicalProviderObservationTime(
+      input.providerObject.observedAt,
+      rows.snapshotAt,
+    ),
+  );
+
+  const exactProcesses = rows.processes.filter((process) =>
+    isExactLostScope(process, input),
+  );
+  const exactAdmissions = rows.admissions.filter((admission) =>
+    isExactLostScope(admission, input),
+  );
+  const exactPtys = rows.ptys.filter((pty) =>
+    isExactLostScope(pty, input),
+  );
+  const activeExactProcesses = exactProcesses.filter(
+    (process) => process.state === "active",
+  );
+  const activeExactAdmissions = exactAdmissions.filter(
+    (admission) => admission.settled_at === null,
+  );
+  const activeExactPtys = exactPtys.filter((pty) => pty.status === "open");
+  const activeExactProcessHolderIds = new Set(
+    activeExactProcesses.map((process) => process.holder_id),
+  );
+  const exactProcessHolders = rows.holders.filter(
+    (holder) =>
+      holder.kind === "process" &&
+      activeExactProcessHolderIds.has(holder.holder_id),
+  );
+  const unmatchedProcesses = rows.processes.filter(
+    (process) =>
+      process.state === "active" &&
+      !isExactLostScope(process, input),
+  );
+  const unmatchedAdmissions = rows.admissions.filter(
+    (admission) =>
+      admission.settled_at === null &&
+      !isExactLostScope(admission, input),
+  );
+  const unmatchedPtys = rows.ptys.filter(
+    (pty) =>
+      pty.status === "open" &&
+      !isExactLostScope(pty, input),
+  );
+  const unmatchedProcessHolders = rows.holders.filter(
+    (holder) =>
+      holder.kind === "process" &&
+      !activeExactProcessHolderIds.has(holder.holder_id),
+  );
+  add("unmatched_active_processes", unmatchedProcesses.length > 0);
+  add("unmatched_unsettled_admissions", unmatchedAdmissions.length > 0);
+  add("unmatched_open_ptys", unmatchedPtys.length > 0);
+  add("unmatched_process_holders", unmatchedProcessHolders.length > 0);
+
+  const directHolders = rows.holders.filter(
+    (holder) => holder.kind === "direct",
+  );
+  const turnHoldersWithUnknownAttempt = rows.holders.filter(
+    (holder) => holder.kind === "turn" && holder.attemptId === null,
+  );
+  const possibleWriterTurnHolders = rows.holders.filter(
+    (holder) =>
+      holder.kind === "turn" &&
+      (holder.attemptState === "claimed" || holder.attemptState === "running") &&
+      holder.attemptQuiescedAt === null,
+  );
+  const unsettledInterruptions = rows.interruptions;
+  add("active_direct_holders", directHolders.length > 0);
+  add(
+    "turn_holder_attempt_linkage_unknown",
+    turnHoldersWithUnknownAttempt.length > 0,
+  );
+  add(
+    "active_turn_writer_possible",
+    possibleWriterTurnHolders.length > 0,
+  );
+  add("unsettled_interruptions", unsettledInterruptions.length > 0);
+
+  const exactIdentity = {
+    processes: exactProcesses.map((process) => ({
+      id: process.id,
+      sessionId: process.sessionId,
+      parentAdmissionId: process.parentAdmissionId,
+      holderId: process.holder_id,
+      ownerActorKind: process.ownerActorKind,
+      ownerActorId: process.ownerActorId,
+      ownerTurnId: process.ownerTurnId,
+      ownerAttemptId: process.ownerAttemptId,
+      ownerExecutionGeneration: process.ownerExecutionGeneration,
+      leaseEpoch: Number(process.lease_epoch),
+      providerBackend: process.providerBackend,
+      providerInstanceId: process.provider_instance_id,
+      routeKind: process.routeKind,
+      routeTargetId: process.routeTargetId,
+      routeEpoch: process.routeEpoch,
+      providerSessionId: process.providerSessionId,
+    })),
+    admissions: exactAdmissions.map((admission) => ({
+      id: admission.id,
+      sessionId: admission.sessionId,
+      actorKind: admission.actorKind,
+      actorId: admission.actorId,
+      turnId: admission.turnId,
+      attemptId: admission.attemptId,
+      executionGeneration: admission.executionGeneration,
+      holderKind: admission.holderKind,
+      holderId: admission.holderId,
+      leaseEpoch: Number(admission.lease_epoch),
+      providerBackend: admission.providerBackend,
+      providerInstanceId: admission.provider_instance_id,
+      routeKind: admission.routeKind,
+      routeTargetId: admission.routeTargetId,
+      routeEpoch: admission.routeEpoch,
+      workspaceGeneration: admission.workspaceGeneration,
+      operation: admission.operation,
+    })),
+    ptys: exactPtys.map((pty) => ({
+      id: pty.id,
+      sessionId: pty.sessionId,
+      retainedProcessId: pty.retainedProcessId,
+      openAdmissionId: pty.openAdmissionId,
+      execSessionId: pty.execSessionId,
+      leaseEpoch: Number(pty.lease_epoch),
+      providerBackend: pty.providerBackend,
+      providerInstanceId: pty.provider_instance_id,
+      routeKind: pty.routeKind,
+      routeTargetId: pty.routeTargetId,
+      routeEpoch: pty.routeEpoch,
+    })),
+  };
+  const unmatchedIdentity = {
+    processes: unmatchedProcesses,
+    admissions: unmatchedAdmissions,
+    ptys: unmatchedPtys,
+    processHolders: unmatchedProcessHolders,
+    directHolders,
+    possibleWriterTurnHolders,
+    unknownTurnHolderLinks: turnHoldersWithUnknownAttempt,
+    interruptions: unsettledInterruptions,
+  };
+  const blockerSetHash = stableSetHash({
+    exactIdentity,
+    exactCounts: {
+      processes: exactProcesses.length,
+      admissions: exactAdmissions.length,
+      ptys: exactPtys.length,
+      processHolders: exactProcessHolders.length,
+    },
+    unmatchedIdentity,
+  });
+  const previewIdentity = {
+    version: 1,
+    locator: {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      sandboxGroupId: input.sandboxGroupId,
+    },
+    expected: {
+      leaseId: input.expectedLeaseId ?? null,
+      backend: input.expectedBackend ?? null,
+      currentEpoch: input.expectedCurrentEpoch ?? null,
+      lostEpoch: input.expectedLostEpoch ?? null,
+      lostInstanceId: input.expectedLostInstanceId ?? null,
+      refcount: input.expectedRefcount ?? null,
+      providerBackend: input.expectedProviderBackend ?? null,
+      routeKind: input.expectedRouteKind ?? null,
+      routeTargetId:
+        input.expectedRouteTargetId === undefined
+          ? "missing"
+          : input.expectedRouteTargetId,
+      routeEpoch: input.expectedRouteEpoch ?? null,
+      workspaceGeneration: input.expectedWorkspaceGeneration ?? null,
+      workspaceStatus: input.expectedWorkspaceStatus ?? null,
+      restoreStatus: input.expectedRestoreStatus ?? null,
+      restoreFailureCode:
+        input.expectedRestoreFailureCode === undefined
+          ? "missing"
+          : input.expectedRestoreFailureCode,
+      archiveGeneration:
+        input.expectedArchiveGeneration === undefined
+          ? "missing"
+          : input.expectedArchiveGeneration,
+      archiveComplete: input.expectedArchiveComplete ?? null,
+      archiveDescriptorVersion:
+        input.expectedArchiveDescriptorVersion ?? null,
+      archiveRevision: input.expectedArchiveRevision ?? null,
+      archiveObjectKind: input.expectedArchiveObjectKind ?? null,
+      archiveObjectId: input.expectedArchiveObjectId ?? null,
+      descriptorReferenceBytes:
+        input.expectedDescriptorReferenceBytes ?? null,
+      descriptorReferenceSha256:
+        input.expectedDescriptorReferenceSha256 ?? null,
+      referenceBytes: input.expectedReferenceBytes ?? null,
+      referenceSha256: input.expectedReferenceSha256 ?? null,
+      treeFingerprintAlgorithm:
+        input.expectedTreeFingerprintAlgorithm ?? null,
+      treeFingerprintSha256:
+        input.expectedTreeFingerprintSha256 ?? null,
+      treeEntryCount: input.expectedTreeEntryCount ?? null,
+      treeFileCount: input.expectedTreeFileCount ?? null,
+      totalFileBytes: input.expectedTotalFileBytes ?? null,
+      archiveCapturedAt: input.expectedArchiveCapturedAt ?? null,
+      archiveVerificationState:
+        input.expectedArchiveVerificationState ?? null,
+      archiveVerifiedRevision:
+        input.expectedArchiveVerifiedRevision === undefined
+          ? "missing"
+          : input.expectedArchiveVerifiedRevision,
+      archiveVerifiedAt:
+        input.expectedArchiveVerifiedAt === undefined
+          ? "missing"
+          : input.expectedArchiveVerifiedAt,
+    },
+    session: session
+      ? {
+          id: session.id,
+          status: session.status,
+          sandboxGroupId: session.sandbox_group_id,
+          activeSandboxId: session.active_sandbox_id,
+          activeEpoch: Number(session.active_epoch),
+        }
+      : null,
+    lease: row
+      ? {
+          id: row.id,
+          liveness: row.liveness,
+          instanceId: row.instance_id,
+          backend: row.backend,
+          leaseEpoch: Number(row.lease_epoch),
+          refcount: Number(row.refcount),
+          turnHolders: Number(row.turn_holders),
+          viewerHolders: Number(row.viewer_holders),
+          workspaceGeneration: Number(row.workspace_generation),
+          archiveGeneration,
+          archiveComplete,
+          recoveryProviderStatus: recovery!.provider.status,
+          recoveryProviderInstanceId: recovery!.provider.instanceId,
+          workspaceStatus: recovery!.workspace.status,
+          restoreStatus: recovery!.restore.status,
+          restoreFailureCode: recovery!.restore.failureCode ?? null,
+        }
+      : null,
+    archive: {
+      descriptor,
+      referenceBytes,
+      referenceSha256,
+      referenceVerified,
+      object: archiveObject,
+      verificationState: archiveVerificationMatches
+        ? "verified"
+        : "unverified",
+      capturedAt: descriptor?.capturedAt ?? null,
+      verifiedAt: archiveVerificationMatches
+        ? recovery!.workspace.verifiedAt
+        : null,
+      providerObservation: input.providerObject,
+    },
+    inventoryComplete: rows.inventoryComplete,
+    identities: {
+      processes: rows.processes,
+      admissions: rows.admissions,
+      ptys: rows.ptys,
+      holders: rows.holders,
+      interruptions: rows.interruptions,
+    },
+    blockerSetHash,
+  };
+  const previewId = `clrp1:${stableSetHash(previewIdentity)}`;
+  const turnHolders = rows.holders.filter(
+    (holder) => holder.kind === "turn",
+  ).length;
+  const viewerHolders = rows.holders.filter(
+    (holder) => holder.kind === "viewer",
+  ).length;
+
+  return {
+    version: 1,
+    status: blockers.length === 0 ? "eligible" : "blocked",
+    previewId,
+    snapshotAt: rows.snapshotAt,
+    database,
+    locator: {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      sandboxGroupId: input.sandboxGroupId,
+    },
+    expected: {
+      leaseId: input.expectedLeaseId ?? null,
+      backend: input.expectedBackend ?? null,
+      currentEpoch: input.expectedCurrentEpoch ?? null,
+      lostEpoch: input.expectedLostEpoch ?? null,
+      lostInstanceId: input.expectedLostInstanceId ?? null,
+      refcount: input.expectedRefcount ?? null,
+      providerBackend: input.expectedProviderBackend ?? null,
+      routeKind: input.expectedRouteKind ?? null,
+      routeTargetId: input.expectedRouteTargetId ?? null,
+      routeTargetSupplied: input.expectedRouteTargetId !== undefined,
+      routeEpoch: input.expectedRouteEpoch ?? null,
+      workspaceGeneration: input.expectedWorkspaceGeneration ?? null,
+      workspaceStatus: input.expectedWorkspaceStatus ?? null,
+      restoreStatus: input.expectedRestoreStatus ?? null,
+      restoreFailureCode: input.expectedRestoreFailureCode ?? null,
+      restoreFailureSupplied:
+        input.expectedRestoreFailureCode !== undefined,
+      archiveGeneration: input.expectedArchiveGeneration ?? null,
+      archiveGenerationSupplied: input.expectedArchiveGeneration !== undefined,
+      archiveComplete: input.expectedArchiveComplete ?? null,
+      archiveDescriptorVersion:
+        input.expectedArchiveDescriptorVersion ?? null,
+      archiveRevision: input.expectedArchiveRevision ?? null,
+      archiveObjectKind: input.expectedArchiveObjectKind ?? null,
+      archiveObjectId: input.expectedArchiveObjectId ?? null,
+      descriptorReferenceBytes:
+        input.expectedDescriptorReferenceBytes ?? null,
+      descriptorReferenceSha256:
+        input.expectedDescriptorReferenceSha256 ?? null,
+      referenceBytes: input.expectedReferenceBytes ?? null,
+      referenceSha256: input.expectedReferenceSha256 ?? null,
+      treeFingerprintAlgorithm:
+        input.expectedTreeFingerprintAlgorithm ?? null,
+      treeFingerprintSha256:
+        input.expectedTreeFingerprintSha256 ?? null,
+      treeEntryCount: input.expectedTreeEntryCount ?? null,
+      treeFileCount: input.expectedTreeFileCount ?? null,
+      totalFileBytes: input.expectedTotalFileBytes ?? null,
+      archiveCapturedAt: input.expectedArchiveCapturedAt ?? null,
+      archiveVerificationState:
+        input.expectedArchiveVerificationState ?? null,
+      archiveVerifiedRevision:
+        input.expectedArchiveVerifiedRevision ?? null,
+      archiveVerifiedRevisionSupplied:
+        input.expectedArchiveVerifiedRevision !== undefined,
+      archiveVerifiedAt: input.expectedArchiveVerifiedAt ?? null,
+      archiveVerifiedAtSupplied:
+        input.expectedArchiveVerifiedAt !== undefined,
+    },
+    session: session
+      ? {
+          id: session.id,
+          status: session.status,
+          sandboxGroupId: session.sandbox_group_id,
+          activeSandboxId: session.active_sandbox_id,
+          activeEpoch: Number(session.active_epoch),
+        }
+      : null,
+    lease: lease
+      ? {
+          id: lease.id,
+          liveness: lease.liveness,
+          instanceId: lease.instanceId,
+          backend: lease.backend,
+          leaseEpoch: lease.leaseEpoch,
+          workspaceGeneration: lease.workspaceGeneration,
+          archiveGeneration: lease.archiveGeneration,
+          archiveComplete: lease.archiveComplete,
+          refcount: lease.refcount,
+          turnHolders: lease.turnHolders,
+          viewerHolders: lease.viewerHolders,
+          recoveryProviderStatus: lease.recovery.provider.status,
+          recoveryProviderInstanceId: lease.recovery.provider.instanceId,
+          workspaceStatus: lease.recovery.workspace.status,
+          restoreStatus: lease.recovery.restore.status,
+          restoreFailureCode: lease.recovery.restore.failureCode ?? null,
+        }
+      : null,
+    archive: {
+      status: recovery?.archive.status ?? "none",
+      descriptorVersion: descriptor?.version ?? null,
+      revision: descriptor?.revision ?? null,
+      generation: archiveGeneration,
+      objectKind: archiveObject?.kind ?? null,
+      objectId: archiveObject?.id ?? null,
+      descriptorReferenceBytes: descriptor?.archiveBytes ?? null,
+      descriptorReferenceSha256: descriptor?.archiveSha256 ?? null,
+      referenceBytes,
+      referenceSha256,
+      referenceVerified,
+      treeFingerprintAlgorithm: descriptor?.workspace.algorithm ?? null,
+      treeFingerprintSha256: descriptor?.workspace.sha256 ?? null,
+      entryCount: descriptor?.workspace.entryCount ?? null,
+      fileCount: descriptor?.workspace.fileCount ?? null,
+      totalFileBytes: descriptor?.workspace.totalFileBytes ?? null,
+      complete: archiveComplete,
+      verificationState: archiveVerificationMatches
+        ? "verified"
+        : "unverified",
+      capturedAt: descriptor?.capturedAt ?? null,
+      verifiedRevision,
+      verifiedAt: archiveVerificationMatches
+        ? recovery!.workspace.verifiedAt
+        : null,
+      providerObservation: {
+        providerBackend: input.providerObject.providerBackend,
+        objectKind: input.providerObject.objectKind,
+        objectId: input.providerObject.objectId,
+        status: input.providerObject.status,
+        observedAt: input.providerObject.observedAt,
+      },
+    },
+    active: {
+      exactProcesses: activeExactProcesses.length,
+      exactAdmissions: activeExactAdmissions.length,
+      exactPtys: activeExactPtys.length,
+      exactProcessHolders: exactProcessHolders.length,
+      unmatchedProcesses: unmatchedProcesses.length,
+      unmatchedAdmissions: unmatchedAdmissions.length,
+      unmatchedPtys: unmatchedPtys.length,
+      unmatchedProcessHolders: unmatchedProcessHolders.length,
+      directHolders: directHolders.length,
+      possibleWriterTurnHolders: possibleWriterTurnHolders.length,
+      unknownTurnHolderLinks: turnHoldersWithUnknownAttempt.length,
+      unsettledInterruptions: unsettledInterruptions.length,
+      turnHolders,
+      viewerHolders,
+      inventoryComplete: rows.inventoryComplete,
+    },
+    identities: {
+      processes: rows.processes,
+      admissions: rows.admissions,
+      ptys: rows.ptys,
+      holders: rows.holders,
+      interruptions: rows.interruptions,
+    },
+    settlement: {
+      processesLost: activeExactProcesses.length,
+      admissionsRejected: activeExactAdmissions.length,
+      ptysClosed: activeExactPtys.length,
+      processHoldersDeleted: exactProcessHolders.length,
+    },
+    blockerSetHash,
+    blockers,
+  };
+}
+
+async function readColdLostDatabasePostureTx(
+  tx: Database,
+): Promise<ColdLostDatabasePosture> {
+  const postureRows = await tx.execute<{
+    role: string;
+    role_superuser: boolean;
+    transaction_read_only: string;
+    row_security: string;
+    account_id: string;
+    workspace_id: string;
+    force_rls: boolean;
+  }>(sql`
+    select current_user as role,
+      coalesce((select rolsuper from pg_roles where rolname = current_user), true) as role_superuser,
+      current_setting('transaction_read_only') as transaction_read_only,
+      current_setting('row_security') as row_security,
+      current_setting('opengeni.account_id', true) as account_id,
+      current_setting('opengeni.workspace_id', true) as workspace_id,
+      coalesce((
+        select bool_and(c.relrowsecurity and c.relforcerowsecurity)
+        from pg_class c
+        where c.oid = any(array[
+          'sessions'::regclass,
+          'session_turns'::regclass,
+          'session_turn_attempts'::regclass,
+          'session_attempt_interruptions'::regclass,
+          'sandbox_leases'::regclass,
+          'sandbox_lease_holders'::regclass,
+          'sandbox_retained_processes'::regclass,
+          'sandbox_workspace_mutation_admissions'::regclass,
+          'sandbox_pty_sessions'::regclass
+        ])
+      ), false) as force_rls
+  `);
+  const posture = postureRows[0];
+  if (!posture)
+    throw new Error(
+      "Cold lost-provider preview could not read database posture",
+    );
+  return {
+    role: posture.role,
+    roleSuperuser: posture.role_superuser,
+    transactionReadOnly: posture.transaction_read_only === "on",
+    rowSecurity: posture.row_security === "on",
+    forceRls: posture.force_rls,
+    accountId: posture.account_id,
+    workspaceId: posture.workspace_id,
+  };
+}
+
+/**
+ * Build the official structurally non-mutating recovery preview. The transaction
+ * is repeatable-read/read-only, RLS context is verified on the same backend, and
+ * no row lock, provider operation, or state transition is performed.
+ */
+export async function previewColdLostLeaseInstanceBlockers(
+  db: Database,
+  input: PreviewColdLostLeaseInstanceBlockersInput,
+): Promise<ColdLostReconciliationPreview> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const posture = await readColdLostDatabasePostureTx(scopedDb);
+      const rows = await readColdLostSnapshotRowsTx(scopedDb, input);
+      return evaluateColdLostSnapshot(input, rows, posture);
+    },
+    { isolationLevel: "repeatable read", accessMode: "read only" },
+  );
+}
+
 export type MarkWarmLeaseInstanceLostResult =
   | {
       status: "marked";
@@ -21055,7 +22696,8 @@ export type ReconcileColdLostLeaseInstanceBlockersResult =
       lease: LeaseSnapshot;
       settlement: LostProviderWorkspaceSettlement;
     }
-  | { status: "stale"; lease: LeaseSnapshot | null };
+  | { status: "blocked"; preview: ColdLostReconciliationPreview }
+  | { status: "stale"; preview: ColdLostReconciliationPreview };
 
 /**
  * Settle blockers left by a provider-loss transition that predates exact loss
@@ -21070,13 +22712,45 @@ export async function reconcileColdLostLeaseInstanceBlockers(
   input: {
     accountId: string;
     workspaceId: string;
+    sessionId: string;
     sandboxGroupId: string;
+    expectedLeaseId: string;
+    expectedBackend: string;
     expectedCurrentEpoch: number;
     expectedLostEpoch: number;
     expectedLostInstanceId: string;
+    expectedRefcount: number;
+    expectedProviderBackend: string;
+    expectedRouteKind: "home" | "active";
+    expectedRouteTargetId: string | null;
+    expectedRouteEpoch: number;
     expectedWorkspaceGeneration: number;
+    expectedWorkspaceStatus: SandboxWorkspaceReadiness;
+    expectedRestoreStatus: SandboxRestoreStatus;
+    expectedRestoreFailureCode: string | null;
     expectedArchiveGeneration: number | null;
     expectedArchiveComplete: boolean;
+    expectedArchiveDescriptorVersion: 1;
+    expectedArchiveRevision: string;
+    expectedArchiveObjectKind:
+      | "modal_filesystem_snapshot"
+      | "modal_directory_snapshot";
+    expectedArchiveObjectId: string;
+    expectedDescriptorReferenceBytes: number;
+    expectedDescriptorReferenceSha256: string;
+    expectedReferenceBytes: number;
+    expectedReferenceSha256: string;
+    expectedTreeFingerprintAlgorithm: "sha256";
+    expectedTreeFingerprintSha256: string;
+    expectedTreeEntryCount: number;
+    expectedTreeFileCount: number;
+    expectedTotalFileBytes: number;
+    expectedArchiveCapturedAt: string;
+    expectedArchiveVerificationState: "verified" | "unverified";
+    expectedArchiveVerifiedRevision: string | null;
+    expectedArchiveVerifiedAt: string | null;
+    providerObject: ColdLostProviderObjectObservation;
+    expectedPreviewId: string;
   },
 ): Promise<ReconcileColdLostLeaseInstanceBlockersResult> {
   if (
@@ -21084,38 +22758,83 @@ export async function reconcileColdLostLeaseInstanceBlockers(
     !Number.isSafeInteger(input.expectedLostEpoch) ||
     input.expectedCurrentEpoch !== input.expectedLostEpoch + 1
   ) {
-    throw new Error("Cold lost-provider reconciliation requires currentEpoch = lostEpoch + 1");
+    throw new Error(
+      "Cold lost-provider reconciliation requires currentEpoch = lostEpoch + 1",
+    );
   }
+  if (!/^clrp1:[a-f0-9]{64}$/.test(input.expectedPreviewId)) {
+    throw new Error(
+      "Cold lost-provider reconciliation requires an exact clrp1 preview id",
+    );
+  }
+  const previewInput: PreviewColdLostLeaseInstanceBlockersInput = {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    sandboxGroupId: input.sandboxGroupId,
+    expectedLeaseId: input.expectedLeaseId,
+    expectedBackend: input.expectedBackend,
+    expectedCurrentEpoch: input.expectedCurrentEpoch,
+    expectedLostEpoch: input.expectedLostEpoch,
+    expectedLostInstanceId: input.expectedLostInstanceId,
+    expectedRefcount: input.expectedRefcount,
+    expectedProviderBackend: input.expectedProviderBackend,
+    expectedRouteKind: input.expectedRouteKind,
+    expectedRouteTargetId: input.expectedRouteTargetId,
+    expectedRouteEpoch: input.expectedRouteEpoch,
+    expectedWorkspaceGeneration: input.expectedWorkspaceGeneration,
+    expectedWorkspaceStatus: input.expectedWorkspaceStatus,
+    expectedRestoreStatus: input.expectedRestoreStatus,
+    expectedRestoreFailureCode: input.expectedRestoreFailureCode,
+    expectedArchiveGeneration: input.expectedArchiveGeneration,
+    expectedArchiveComplete: input.expectedArchiveComplete,
+    expectedArchiveDescriptorVersion:
+      input.expectedArchiveDescriptorVersion,
+    expectedArchiveRevision: input.expectedArchiveRevision,
+    expectedArchiveObjectKind: input.expectedArchiveObjectKind,
+    expectedArchiveObjectId: input.expectedArchiveObjectId,
+    expectedDescriptorReferenceBytes:
+      input.expectedDescriptorReferenceBytes,
+    expectedDescriptorReferenceSha256:
+      input.expectedDescriptorReferenceSha256,
+    expectedReferenceBytes: input.expectedReferenceBytes,
+    expectedReferenceSha256: input.expectedReferenceSha256,
+    expectedTreeFingerprintAlgorithm:
+      input.expectedTreeFingerprintAlgorithm,
+    expectedTreeFingerprintSha256:
+      input.expectedTreeFingerprintSha256,
+    expectedTreeEntryCount: input.expectedTreeEntryCount,
+    expectedTreeFileCount: input.expectedTreeFileCount,
+    expectedTotalFileBytes: input.expectedTotalFileBytes,
+    expectedArchiveCapturedAt: input.expectedArchiveCapturedAt,
+    expectedArchiveVerificationState:
+      input.expectedArchiveVerificationState,
+    expectedArchiveVerifiedRevision:
+      input.expectedArchiveVerifiedRevision,
+    expectedArchiveVerifiedAt: input.expectedArchiveVerifiedAt,
+    providerObject: input.providerObject,
+  };
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
-        const observedRows = await tx.execute<LeaseRow>(sql`
-          select * from sandbox_leases
-          where workspace_id = ${input.workspaceId}
-            and sandbox_group_id = ${input.sandboxGroupId}
-        `);
-        const observed = observedRows[0];
-        const observedRecovery = observed ? recoveryStateFromLeaseRow(observed) : null;
-        if (
-          !observed ||
-          observed.liveness !== "cold" ||
-          observed.instance_id !== null ||
-          Number(observed.lease_epoch) !== input.expectedCurrentEpoch ||
-          Number(observed.workspace_generation) !== input.expectedWorkspaceGeneration ||
-          (observed.archive_generation === null ? null : Number(observed.archive_generation)) !==
-            input.expectedArchiveGeneration ||
-          hasCompleteWorkspaceArchive(observed) !== input.expectedArchiveComplete ||
-          observedRecovery?.provider.status !== "missing" ||
-          observedRecovery.provider.instanceId !== input.expectedLostInstanceId
-        ) {
-          return {
-            status: "stale" as const,
-            lease: observed ? mapLeaseRow(observed) : null,
-          };
+        const database = await readColdLostDatabasePostureTx(tx);
+        const observedRows = await readColdLostSnapshotRowsTx(tx, previewInput);
+        const observedPreview = evaluateColdLostSnapshot(
+          previewInput,
+          observedRows,
+          database,
+          { requireReadOnly: false },
+        );
+        if (observedPreview.previewId !== input.expectedPreviewId) {
+          return { status: "stale" as const, preview: observedPreview };
         }
+        if (observedPreview.status !== "eligible") {
+          return { status: "blocked" as const, preview: observedPreview };
+        }
+        const observed = observedRows.lease!;
 
         const blockerScope = {
           accountId: input.accountId,
@@ -21133,32 +22852,48 @@ export async function reconcileColdLostLeaseInstanceBlockers(
           for update
         `);
         const current = currentRows[0];
-        const recovery = current ? recoveryStateFromLeaseRow(current) : null;
-        if (
-          !current ||
-          current.id !== observed.id ||
-          current.liveness !== "cold" ||
-          current.instance_id !== null ||
-          Number(current.lease_epoch) !== input.expectedCurrentEpoch ||
-          Number(current.workspace_generation) !== input.expectedWorkspaceGeneration ||
-          (current.archive_generation === null ? null : Number(current.archive_generation)) !==
-            input.expectedArchiveGeneration ||
-          hasCompleteWorkspaceArchive(current) !== input.expectedArchiveComplete ||
-          recovery?.provider.status !== "missing" ||
-          recovery.provider.instanceId !== input.expectedLostInstanceId
-        ) {
+        if (!current || current.id !== observed.id) {
+          const currentSnapshotRows = await readColdLostSnapshotRowsTx(
+            tx,
+            previewInput,
+          );
           return {
             status: "stale" as const,
-            lease: current ? mapLeaseRow(current) : null,
+            preview: evaluateColdLostSnapshot(
+              previewInput,
+              currentSnapshotRows,
+              database,
+              { requireReadOnly: false },
+            ),
           };
         }
+        const currentSnapshotRows = await readColdLostSnapshotRowsTx(
+          tx,
+          previewInput,
+        );
+        const currentPreview = evaluateColdLostSnapshot(
+          previewInput,
+          currentSnapshotRows,
+          database,
+          { requireReadOnly: false },
+        );
+        if (currentPreview.previewId !== input.expectedPreviewId) {
+          return { status: "stale" as const, preview: currentPreview };
+        }
+        if (currentPreview.status !== "eligible") {
+          return { status: "blocked" as const, preview: currentPreview };
+        }
 
-        const settlement = await settleExactLostProviderWorkspaceBlockersTx(tx, blockerScope);
+        const settlement = await settleExactLostProviderWorkspaceBlockersTx(
+          tx,
+          blockerScope,
+        );
         const refreshedRows = await tx.execute<LeaseRow>(sql`
           select * from sandbox_leases where id = ${current.id}
         `);
         const refreshed = refreshedRows[0];
-        if (!refreshed) throw new Error("Cold sandbox lease vanished during reconciliation");
+        if (!refreshed)
+          throw new Error("Cold sandbox lease vanished during reconciliation");
         return {
           status: "reconciled" as const,
           lease: mapLeaseRow(refreshed),
