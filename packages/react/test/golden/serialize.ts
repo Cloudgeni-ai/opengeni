@@ -26,14 +26,6 @@ function serializeItem(item: TimelineItem): Record<string, unknown> {
         resources: stableValue(item.resources),
         tools: stableValue(item.tools),
       };
-    case "machine-input-batch":
-      return {
-        kind: item.kind,
-        id: item.id,
-        turnId: item.turnId,
-        occurredAt: item.occurredAt,
-        inputs: stableValue(item.inputs),
-      };
     case "agent-message":
     case "reasoning":
       return {
@@ -156,6 +148,7 @@ function serializeItem(item: TimelineItem): Record<string, unknown> {
         occurredAt: item.occurredAt,
         tone: item.tone,
         text: item.text,
+        details: stableValue(item.details),
       };
     case "auth-needed":
       return {

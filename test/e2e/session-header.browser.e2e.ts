@@ -228,11 +228,9 @@ describe("responsive production session header", () => {
         const page = await context.newPage();
         await page.goto(sessionUrl(fixture));
         await setTheme(page, matrixCase.theme);
-        const header = page.locator("[data-session-header], [data-sessionpin-session-header]");
+        const header = page.locator("header");
         await header.waitFor();
-        await page
-          .locator('nav[aria-label="Session ancestry"][data-session-ancestry-state="ready"]')
-          .waitFor();
+        await page.getByRole("navigation", { name: "Session ancestry" }).waitFor();
 
         await page.screenshot({
           path: `/tmp/session-header-${screenshotPhase}-${matrixCase.name}.png`,
@@ -260,7 +258,7 @@ describe("responsive production session header", () => {
           expect(await ancestry.getByRole("link").count()).toBe(1);
         }
         await assertHeaderKeyboardOrder(page);
-        await expectNoAxeViolations(page, ["[data-session-header]"]);
+        await expectNoAxeViolations(page, ["header"]);
         expect(pageErrors.get(context)).toEqual([]);
       } finally {
         await context.close();
@@ -294,7 +292,7 @@ describe("responsive production session header", () => {
           });
         }
         await page.goto(sessionUrl(fixture));
-        const header = page.locator("[data-session-header], [data-sessionpin-session-header]");
+        const header = page.locator("header");
         await header.waitFor();
         const breadcrumb = page.getByRole("navigation", { name: "Session ancestry" });
         await breadcrumb.waitFor();
@@ -303,7 +301,7 @@ describe("responsive production session header", () => {
         expect(await back.getAttribute("href")).toContain(fixture.parentSessionId);
         await assertLocatorInsideViewport(back);
         await assertHeaderKeyboardOrder(page);
-        await expectNoAxeViolations(page, ["[data-session-header]"]);
+        await expectNoAxeViolations(page, ["header"]);
         await page.screenshot({
           path: `/tmp/session-header-${screenshotPhase}-phone-320-${state}.png`,
           fullPage: true,
@@ -330,7 +328,7 @@ describe("responsive production session header", () => {
         insets: { top: 24, left: 12, bottom: 0, right: 16 },
       });
       await page.goto(sessionUrl(fixture));
-      const header = page.locator("[data-session-header], [data-sessionpin-session-header]");
+      const header = page.locator("header");
       await header.waitFor();
       const metrics = await sessionHeaderMetrics(page);
       expect(metrics.paddingTop).toBeGreaterThanOrEqual(24);
@@ -416,17 +414,14 @@ async function sessionHeaderMetrics(page: Page): Promise<SessionHeaderMetrics> {
       if (!element) throw new Error(`missing ${selector}`);
       return element;
     };
-    const header = required("[data-session-header], [data-sessionpin-session-header]");
-    const identity = required(
-      "[data-session-header-identity], [data-sessionpin-session-header] > div.flex-1",
-    );
+    const header = required("header");
     const title = required(
-      "[data-session-header-title], [data-sessionpin-session-header] button[title$='click to rename']",
+      "header [aria-label='Session title'], header button[title$='click to rename']",
     );
+    const identity = [...header.children].find((element) => element.contains(title));
+    if (!(identity instanceof HTMLElement)) throw new Error("missing session identity region");
     const back = [
-      ...document.querySelectorAll<HTMLElement>(
-        "[data-session-header-back], nav[aria-label='Session ancestry'] a[href]",
-      ),
+      ...document.querySelectorAll<HTMLElement>("nav[aria-label='Session ancestry'] a[href]"),
     ].find((element) => element.getBoundingClientRect().width > 0);
     if (!back) throw new Error("missing visible session ancestry control");
     const headerRect = header.getBoundingClientRect();
@@ -473,14 +468,16 @@ async function expectBreadcrumbState(
   breadcrumb: ReturnType<Page["getByRole"]>,
   state: "loading" | "unavailable",
 ): Promise<void> {
-  expect(await breadcrumb.getAttribute("data-session-ancestry-state")).toBe(state);
+  expect(await breadcrumb.getByRole("link").getAttribute("aria-label")).toContain(
+    `ancestry ${state}`,
+  );
 }
 
 async function assertHeaderKeyboardOrder(page: Page): Promise<void> {
   const controls = [
     page.getByRole("button", { name: "Open navigation" }),
     page.getByRole("navigation", { name: "Session ancestry" }).getByRole("link").first(),
-    page.locator("[data-session-header-title]"),
+    page.locator("header [aria-label='Session title'], header button[title$='click to rename']"),
     page.getByRole("button", { name: /^(Pin|Unpin) session$/ }),
     page.getByRole("button", { name: /Open workstream controls$/ }),
     page.getByRole("button", { name: /session panel$/ }),

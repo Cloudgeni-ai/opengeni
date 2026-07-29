@@ -11,7 +11,6 @@ import type {
   ActivityItem,
   AuthNeededItem,
   GoalItem,
-  MachineInputBatchItem,
   MemoryItem,
   SandboxItem,
   SessionStatusItem,
@@ -109,14 +108,14 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
             goalText: childCompletion.goalText,
             evidence: childCompletion.evidence,
             pausedReason: childCompletion.pausedReason,
-            text: typeof payload.text === "string" ? payload.text : "",
+            text: stringValue(payload.text),
           });
           break;
         }
         items.push({
           kind: "user-message",
           id: event.id,
-          text: typeof payload.text === "string" ? payload.text : "",
+          text: stringValue(payload.text),
           resources: resourceRefs(payload.resources),
           tools: toolRefs(payload.tools),
           occurredAt: event.occurredAt,
@@ -129,17 +128,18 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         if (inputs.length === 0) break;
         closeStreamingTail();
         items.push({
-          kind: "machine-input-batch",
+          kind: "notice",
           id: event.id,
-          turnId,
-          inputs,
+          tone: "input",
+          text: "Input batch",
+          details: { label: "Inputs", value: inputs },
           occurredAt: event.occurredAt,
         });
         break;
       }
 
       case "agent.message.delta": {
-        const text = typeof payload.text === "string" ? payload.text : "";
+        const text = stringValue(payload.text);
         if (!text) {
           break;
         }
@@ -161,7 +161,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
       }
 
       case "agent.message.completed": {
-        const text = typeof payload.text === "string" ? payload.text : "";
+        const text = stringValue(payload.text);
         // Reconcile the most recent same-turn agent message — even when
         // activity (tool calls, reasoning) landed after its deltas — so the
         // completed text never duplicates the streamed one.
@@ -469,7 +469,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           kind: "auth-needed",
           id: event.id,
           turnId,
-          providerDomain: typeof payload.providerDomain === "string" ? payload.providerDomain : "",
+          providerDomain: stringValue(payload.providerDomain),
           connectionId: typeof payload.connectionId === "string" ? payload.connectionId : null,
           reason: authNeededReason(payload.reason),
           scopes: stringList(payload.scopes),
@@ -986,7 +986,8 @@ function isTurnBoundary(group: TimelineGroup | undefined): boolean {
   return (
     group?.kind === "turn" ||
     (group?.kind === "item" &&
-      (group.item.kind === "user-message" || group.item.kind === "machine-input-batch"))
+      (group.item.kind === "user-message" ||
+        (group.item.kind === "notice" && group.item.tone === "input")))
   );
 }
 
@@ -1048,27 +1049,28 @@ function asRecord(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" ? (value as Record<string, unknown>) : {};
 }
 
-function machineInputMembers(value: unknown): MachineInputBatchItem["inputs"] {
-  if (!Array.isArray(value)) return [];
-  const inputs: MachineInputBatchItem["inputs"] = [];
-  for (const candidate of value) {
-    const member = asRecord(candidate);
-    if (
-      typeof member.id !== "string" ||
-      typeof member.kind !== "string" ||
-      typeof member.sourceId !== "string"
-    ) {
-      continue;
-    }
-    inputs.push({
-      id: member.id,
-      kind: member.kind,
-      classification: typeof member.classification === "string" ? member.classification : "info",
-      sourceId: member.sourceId,
-      summary: typeof member.summary === "string" ? member.summary : "",
-    });
-  }
-  return inputs;
+function stringValue(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function machineInputMembers(value: unknown) {
+  return Array.isArray(value)
+    ? value.flatMap((candidate) => {
+        const member = asRecord(candidate);
+        return typeof member.id === "string" &&
+          typeof member.kind === "string" &&
+          typeof member.sourceId === "string"
+          ? [
+              {
+                id: member.id,
+                kind: member.kind.replace("_terminal", "").replaceAll("_", " "),
+                sourceId: member.sourceId,
+                summary: stringValue(member.summary),
+              },
+            ]
+          : [];
+      })
+    : [];
 }
 
 const SESSION_STATUSES: readonly SessionStatus[] = [
@@ -1243,8 +1245,8 @@ function memoryItem(
     id,
     turnId,
     variant: type === "memory.corrected" ? "corrected" : "saved",
-    memoryKind: typeof payload.kind === "string" ? payload.kind : "",
-    preview: typeof payload.preview === "string" ? payload.preview : "",
+    memoryKind: stringValue(payload.kind),
+    preview: stringValue(payload.preview),
     ...(payload.deduped === true ? { deduped: true } : {}),
     ...(replacementPreview ? { replacementPreview } : {}),
     ...(action ? { action } : {}),
@@ -1287,7 +1289,7 @@ function reasoningText(payload: unknown): string {
   return content
     .map((part) => {
       const text = asRecord(part).text;
-      return typeof text === "string" ? text : "";
+      return stringValue(text);
     })
     .join("");
 }

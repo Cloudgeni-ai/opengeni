@@ -13,11 +13,11 @@ let blank: BlankTestDatabase | null = null;
 let available = true;
 
 beforeAll(async () => {
-  blank = await acquireBlankTestDatabase("migration-0132");
+  blank = await acquireBlankTestDatabase("migration-0135");
   if (!blank) {
     if (requireRealDatabase) {
       throw new Error(
-        "[migration-0132] OPENGENI_REQUIRE_REAL_DB=1 but the real PostgreSQL harness is unavailable",
+        "[migration-0135] OPENGENI_REQUIRE_REAL_DB=1 but the real PostgreSQL harness is unavailable",
       );
     }
     available = false;
@@ -48,10 +48,10 @@ describe("migration 0135 (durable machine-input batches)", () => {
       }
 
       const [account] = await sql<{ id: string }[]>`
-        insert into managed_accounts (name) values ('migration-0132-account') returning id`;
+        insert into managed_accounts (name) values ('migration-0134-account') returning id`;
       const [workspace] = await sql<{ id: string }[]>`
         insert into workspaces (account_id, name)
-        values (${account!.id}, 'migration-0132-workspace') returning id`;
+        values (${account!.id}, 'migration-0134-workspace') returning id`;
       await sql`
         insert into workspace_inference_controls (workspace_id, account_id)
         values (${workspace!.id}, ${account!.id})`;

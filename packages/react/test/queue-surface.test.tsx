@@ -247,7 +247,7 @@ describe("QueueSurface", () => {
     expect(loadCount()).toBe(1);
     expect(fallback?.getAttribute("role")).toBe("status");
     expect(fallback?.getAttribute("aria-live")).toBe("polite");
-    expect(fallback?.textContent).toContain("Loading 2 queued prompts…");
+    expect(fallback?.textContent).toContain("Loading inputs…");
     expect(
       fallback?.firstElementChild?.firstElementChild?.classList.contains(
         "pointer-coarse:min-h-[44px]",
@@ -275,7 +275,7 @@ describe("QueueSurface", () => {
     expect(status?.textContent).toBe(
       "Stopping previous attempt… Queued work is saved and starts automatically.",
     );
-    expect(mounted.container.textContent).not.toContain("Loading 0 queued prompts…");
+    expect(mounted.container.textContent).not.toContain("Loading inputs…");
     expect(mounted.container.querySelector('[data-testid="queue-surface-loading"]')).toBeNull();
     expect(mounted.container.querySelector("button[aria-expanded]")).toBeNull();
     expect(loadCount()).toBe(0);
@@ -303,7 +303,7 @@ describe("QueueSurface", () => {
     expect(
       mounted.container.querySelector('[data-testid="queue-error-message"]')?.textContent,
     ).toBe(failure.message);
-    expect(mounted.container.textContent).not.toContain("Loading 0 queued prompts…");
+    expect(mounted.container.textContent).not.toContain("Loading inputs…");
     expect(mounted.container.querySelector('[data-testid="queue-surface-loading"]')).toBeNull();
     expect(loadCount()).toBe(0);
 
@@ -333,7 +333,7 @@ describe("QueueSurface", () => {
     expect(mounted.container.querySelector('[role="alert"]')).not.toBeNull();
     expect(message?.textContent).toBe(mutationFailure.message);
     expect(message?.textContent).not.toContain(queueFailure.message);
-    expect(mounted.container.textContent).not.toContain("Loading 0 queued prompts…");
+    expect(mounted.container.textContent).not.toContain("Loading inputs…");
     expect(mounted.container.querySelector('[data-testid="queue-surface-loading"]')).toBeNull();
     expect(loadCount()).toBe(0);
   });
@@ -379,11 +379,8 @@ describe("QueueSurface", () => {
     await flush();
     expect(mounted.container.textContent).toContain("1 incoming update");
     const toggle = mounted.container.querySelector<HTMLButtonElement>("button[aria-expanded]");
-    toggle?.click();
-    await flush();
-    expect(
-      mounted.container.querySelector('[data-testid="pending-machine-inputs"]'),
-    ).not.toBeNull();
+    await click(toggle);
+    expect(mounted.container.querySelector("section")).not.toBeNull();
     expect(mounted.container.textContent).toContain(
       "The verification worker found a cache discontinuity.",
     );
@@ -411,8 +408,8 @@ describe("QueueSurface", () => {
     const second = mounted.container.querySelector(
       '[data-queue-turn-id="22222222-2222-4222-8222-222222222222"]',
     );
-    expect(first?.querySelector('[data-testid="pending-machine-inputs"]')).toBeNull();
-    expect(second?.querySelector('[data-testid="pending-machine-inputs"]')).not.toBeNull();
+    expect(first?.querySelector("section")).toBeNull();
+    expect(second?.querySelector("section")).not.toBeNull();
     expect(second?.textContent).toContain("1 update will join this prompt");
   });
 
