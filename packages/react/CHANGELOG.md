@@ -1,5 +1,13 @@
 # @opengeni/react
 
+## 0.28.2
+
+### Patch Changes
+
+- c1dcccc: Publish the current client surfaces from one exact reviewed source revision.
+- Updated dependencies [c1dcccc]
+  - @opengeni/sdk@0.28.2
+
 ## 0.28.1
 
 ### Patch Changes
