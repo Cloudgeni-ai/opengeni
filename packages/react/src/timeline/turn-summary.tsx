@@ -364,15 +364,12 @@ const BUILT_IN_TURN_SUMMARY_FACETS: readonly TurnSummaryFacet[] = Object.freeze(
 function resolveTurnSummaryFacets(
   configuration: TurnSummaryFacetConfiguration | undefined,
 ): readonly TurnSummaryFacet[] {
-  const requested =
-    configuration && "replace" in configuration
-      ? configuration.replace
-      : [
-          ...BUILT_IN_TURN_SUMMARY_FACETS.filter(
-            (facet) => !configuration?.remove?.includes(facet.id as BuiltInTurnSummaryFacetId),
-          ),
-          ...(configuration?.add ?? []),
-        ];
+  const requested: readonly TurnSummaryFacet[] = configuration?.replace ?? [
+    ...BUILT_IN_TURN_SUMMARY_FACETS.filter(
+      (facet) => !configuration?.remove?.includes(facet.id as BuiltInTurnSummaryFacetId),
+    ),
+    ...(configuration?.add ?? []),
+  ];
   const seen = new Set<string>();
   return requested.filter((facet) => {
     if (!facet.id || seen.has(facet.id)) {
