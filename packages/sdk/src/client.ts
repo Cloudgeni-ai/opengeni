@@ -35,6 +35,9 @@ import type {
   AddDocumentRequest,
   CreateKnowledgeDropRequest,
   MoveDocumentRequest,
+  KnowledgeBankResponse,
+  UpdateWorkspaceCharterRequest,
+  WorkspaceCharterVersionsResponse,
   ClientConfig,
   WorkspaceModelCatalogResponse,
   ClientSessionEventInput,
@@ -2324,6 +2327,45 @@ export class OpenGeniClient {
       "POST",
       `/v1/workspaces/${workspaceId}/documents/${documentId}/move`,
       request,
+    );
+  }
+
+  /** The workspace's knowledge bank: latest charter, live knowledge map, sweep state. */
+  async getKnowledgeBank(workspaceId: string): Promise<KnowledgeBankResponse> {
+    return await this.requestJson<KnowledgeBankResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/knowledge-bank`,
+    );
+  }
+
+  async getKnowledgeBankVersions(
+    workspaceId: string,
+    limit?: number,
+  ): Promise<WorkspaceCharterVersionsResponse> {
+    const query = limit !== undefined ? `?limit=${limit}` : "";
+    return await this.requestJson<WorkspaceCharterVersionsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/knowledge-bank/versions${query}`,
+    );
+  }
+
+  /** Human charter edit (appends a new version) and/or lock toggle. */
+  async updateKnowledgeBank(
+    workspaceId: string,
+    request: UpdateWorkspaceCharterRequest,
+  ): Promise<KnowledgeBankResponse> {
+    return await this.requestJson<KnowledgeBankResponse>(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/knowledge-bank`,
+      request,
+    );
+  }
+
+  /** Re-synthesize the charter from current knowledge, inline. */
+  async refreshKnowledgeBank(workspaceId: string): Promise<KnowledgeBankResponse> {
+    return await this.requestJson<KnowledgeBankResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/knowledge-bank/refresh`,
     );
   }
 

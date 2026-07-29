@@ -14,6 +14,7 @@
 //   /workspaces/:id/schedules                → scheduled tasks + run history
 //   /workspaces/:id/documents                → document bases + search
 //   /workspaces/:id/memory                   → durable workspace memory
+//   /workspaces/:id/knowledge                → knowledge bank (charter + map + gaps)
 //   /workspaces/:id/settings                 → workspace settings (name, API keys, danger zone)
 //   /workspaces/:id/organization             → organization settings (billing, usage, plan, members)
 //   /workspaces/:id/account                  → legacy redirect to /organization
@@ -41,6 +42,7 @@ const LazyCapabilitiesRoute = lazyRouteComponent(
 const LazyDeviceRoute = lazyRouteComponent(() => import("@/routes/device"), "DeviceRoute");
 const LazyDocumentsRoute = lazyRouteComponent(() => import("@/routes/documents"), "DocumentsRoute");
 const LazyMemoryRoute = lazyRouteComponent(() => import("@/routes/memory"), "MemoryRoute");
+const LazyKnowledgeRoute = lazyRouteComponent(() => import("@/routes/knowledge"), "KnowledgeRoute");
 const LazyVariableSetsRoute = lazyRouteComponent(
   () => import("@/routes/variable-sets"),
   "VariableSetsRoute",
@@ -220,6 +222,11 @@ const workspaceMemoryRoute = createRoute({
     typeof search.memory === "string" ? { memory: search.memory } : {},
   component: Memory,
 });
+const workspaceKnowledgeRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "knowledge",
+  component: Knowledge,
+});
 const workspaceSettingsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "settings",
@@ -268,6 +275,7 @@ const routeTree = rootRoute.addChildren([
     workspaceSchedulesRoute,
     workspaceDocumentsRoute,
     workspaceMemoryRoute,
+    workspaceKnowledgeRoute,
     workspaceSettingsRoute,
     workspaceOrganizationRoute,
     workspaceAccountRoute,
@@ -395,6 +403,11 @@ function Memory() {
   const { workspaceId } = workspaceMemoryRoute.useParams();
   const { memory } = workspaceMemoryRoute.useSearch();
   return <LazyMemoryRoute workspaceId={workspaceId} focusMemoryId={memory} />;
+}
+
+function Knowledge() {
+  const { workspaceId } = workspaceKnowledgeRoute.useParams();
+  return <LazyKnowledgeRoute workspaceId={workspaceId} />;
 }
 
 function WorkspaceSettings() {

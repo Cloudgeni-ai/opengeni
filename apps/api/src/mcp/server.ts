@@ -63,6 +63,10 @@ import {
   updateScheduledTask,
   updateSessionGoalWithEvent,
   upsertSessionGoalWithEvent,
+  aggregateKnowledgeMap,
+  getKnowledgeBankState,
+  getLatestWorkspaceCharter,
+  saveWorkspaceCharterVersion,
   RigChangeAlreadyVerifyingError,
   RigChangeTransitionError,
 } from "@opengeni/db";
@@ -155,6 +159,7 @@ export type McpServerOptions = {
   requestOrigin?: string | null;
   toolspace?: ToolspaceMcpSurface | null;
   workspaceMemoryEnabled?: boolean | undefined;
+  knowledgeBankEnabled?: boolean | undefined;
 };
 
 export function buildOpenGeniMcpServer(
@@ -210,6 +215,11 @@ export function buildOpenGeniMcpServer(
   // stays on the normal first-party MCP surface only.
   if (!toolspaceMode && sessionId !== null && options.workspaceMemoryEnabled === true) {
     registerMemoryTools(server, deps, grant, sessionId, json);
+  }
+  // Knowledge-bank tools follow the memory-tool gating exactly: first-party
+  // surface only, signed sessionId, per-workspace setting.
+  if (!toolspaceMode && sessionId !== null && options.knowledgeBankEnabled === true) {
+    registerKnowledgeBankTools(server, deps, grant, sessionId, json);
   }
 
   // Fleet tools (M7 bring-your-own-compute): list / attach / swap / run_on /
@@ -1135,6 +1145,84 @@ function registerMemoryTools(
         },
       ]);
       return json(result);
+    },
+  );
+}
+
+function registerKnowledgeBankTools(
+  server: McpServer,
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  sessionId: string,
+  json: JsonResult,
+): void {
+  server.registerTool(
+    "knowledge_bank_get",
+    {
+      description:
+        "Read the workspace's knowledge bank: its charter (purpose + current goals), the live knowledge map (bases, topics, memory counts), and known knowledge gaps. Consult it when deciding what this workspace is for or where knowledge lives.",
+      inputSchema: {},
+    },
+    async () => {
+      const [charter, map] = await Promise.all([
+        getLatestWorkspaceCharter(deps.db, grant.workspaceId),
+        aggregateKnowledgeMap(deps.db, grant.workspaceId),
+      ]);
+      return json({ charter, map });
+    },
+  );
+
+  server.registerTool(
+    "charter_propose_update",
+    {
+      description:
+        "Propose an update to the workspace charter (its purpose and/or current goals) when the evidence shows reality has moved on. Appends a new charter version with agent provenance; a human-locked bank rejects the proposal. Include a one-sentence changelog explaining what changed.",
+      inputSchema: {
+        purpose: z4.string().min(1).max(2000).optional(),
+        goals: z4.array(z4.string().min(1).max(300)).max(12).optional(),
+        changelog: z4.string().min(1).max(500),
+      },
+    },
+    async ({ purpose, goals, changelog }) => {
+      if (purpose === undefined && goals === undefined) {
+        return json({ ok: false, error: "provide purpose and/or goals" });
+      }
+      const state = await getKnowledgeBankState(deps.db, grant.workspaceId);
+      if (state?.locked) {
+        return json({
+          ok: false,
+          error: "the knowledge bank is human-locked; ask a human to unlock it",
+        });
+      }
+      const current = await getLatestWorkspaceCharter(deps.db, grant.workspaceId);
+      const nextPurpose = purpose ?? current?.purpose;
+      if (!nextPurpose) {
+        return json({ ok: false, error: "a first charter version needs a purpose" });
+      }
+      const charter = await saveWorkspaceCharterVersion(deps.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        purpose: nextPurpose,
+        goals: goals ?? current?.goals ?? [],
+        overview: current?.overview ?? null,
+        baseNotes: current?.baseNotes ?? [],
+        gaps: current?.gaps ?? [],
+        changelog,
+        updatedBy: "agent",
+        model: null,
+      });
+      await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [
+        {
+          type: "knowledge_bank.updated",
+          payload: {
+            charterVersion: charter.version,
+            changelog: charter.changelog,
+            purposeChanged: purpose !== undefined,
+            goalsChanged: goals !== undefined,
+          },
+        },
+      ]);
+      return json({ ok: true, charter });
     },
   );
 }

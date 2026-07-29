@@ -11,6 +11,7 @@ import {
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
   OPENGENI_CORRELATION_HEADER,
+  resolveWorkspaceKnowledgeBankEnabled,
   resolveWorkspaceMemoryEnabled,
   type AccessGrant,
   type ErrorCode,
@@ -51,6 +52,7 @@ import { registerCodexRoutes } from "./routes/codex";
 import { registerConnectionRoutes } from "./routes/connections";
 import { registerDocumentRoutes } from "./routes/documents";
 import { registerEnrollmentRoutes } from "./routes/enrollments";
+import { registerKnowledgeBankRoutes } from "./routes/knowledge-bank";
 import { registerMachineRoutes } from "./routes/machines";
 import { registerEnvironmentRoutes } from "./routes/environments";
 import { registerFileRoutes } from "./routes/files";
@@ -405,6 +407,7 @@ export function createApp(deps: AppDependencies): Hono {
     }
     const workspace = await getWorkspace(routeDeps.db, workspaceId);
     const workspaceMemoryEnabled = resolveWorkspaceMemoryEnabled(workspace?.settings);
+    const knowledgeBankEnabled = resolveWorkspaceKnowledgeBankEnabled(workspace?.settings);
     const transport = new WebStandardStreamableHTTPServerTransport({
       enableJsonResponse: true,
     });
@@ -412,6 +415,7 @@ export function createApp(deps: AppDependencies): Hono {
       requestOrigin: new URL(c.req.url).origin,
       toolspace,
       workspaceMemoryEnabled,
+      knowledgeBankEnabled,
     });
     try {
       await mcp.connect(transport);
@@ -425,6 +429,7 @@ export function createApp(deps: AppDependencies): Hono {
   registerApiKeyRoutes(app, routeDeps);
   registerBillingRoutes(app, routeDeps);
   registerDocumentRoutes(app, routeDeps);
+  registerKnowledgeBankRoutes(app, routeDeps);
   registerGitHubRoutes(app, routeDeps);
   registerInstallRoutes(app, routeDeps);
   registerWorkspaceRoutes(app, routeDeps);

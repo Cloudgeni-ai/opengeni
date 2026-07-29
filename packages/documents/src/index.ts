@@ -12,7 +12,13 @@ import type {
   FileAsset,
   KnowledgeSourceKind,
 } from "@opengeni/contracts";
-import { requireFile, withRlsContext, withWorkspaceRls, type Database } from "@opengeni/db";
+import {
+  markKnowledgeBankDirtyScoped,
+  requireFile,
+  withRlsContext,
+  withWorkspaceRls,
+  type Database,
+} from "@opengeni/db";
 import * as schema from "@opengeni/db/schema";
 import type { ObjectStorage } from "@opengeni/storage";
 import { LiteParse } from "@llamaindex/liteparse";
@@ -1099,6 +1105,14 @@ export async function indexDocumentNow(
     viewerSubjectId: document.createdBy,
   });
   if (!updated) throw new Error(`Document disappeared after indexing: ${documentId}`);
+  // Newly indexed knowledge — nudge the knowledge-bank sweep. Best-effort:
+  // a dirty-mark failure must never fail a completed indexing run.
+  if (updated.status === "ready") {
+    await markKnowledgeBankDirtyScoped(db, {
+      accountId: document.accountId,
+      workspaceId,
+    }).catch(() => undefined);
+  }
   return updated;
 }
 
@@ -1849,3 +1863,5 @@ function normalizeDocumentCurationStatus(value: string): DocumentCurationStatus 
       return "none";
   }
 }
+
+export * from "./knowledge-bank";

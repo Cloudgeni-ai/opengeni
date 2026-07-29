@@ -15,6 +15,7 @@ export {
 } from "./workflows/scheduled-tasks";
 export { sandboxReaperWorkflow } from "./workflows/sandbox-reaper";
 export { fileUploadReaperWorkflow } from "./workflows/file-upload-reaper";
+export { knowledgeBankSweepWorkflow } from "./workflows/knowledge-bank-sweep";
 export { sessionWorkflowWakeDispatcherWorkflow } from "./workflows/workflow-wake";
 export {
   rigVerificationWorkflow,

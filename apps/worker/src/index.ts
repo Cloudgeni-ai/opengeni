@@ -86,6 +86,7 @@ export {
 // of replica count.
 const SANDBOX_REAPER_SCHEDULE_ID = "opengeni-sandbox-lease-reaper";
 export const FILE_UPLOAD_REAPER_SCHEDULE_ID = "opengeni-file-upload-reaper";
+export const KNOWLEDGE_BANK_SWEEP_SCHEDULE_ID = "opengeni-knowledge-bank-sweep";
 export const FILE_UPLOAD_REAPER_PERIOD_MS = 15 * 60 * 1_000;
 export type OpenGeniWorkerRole = "control" | "turn";
 
@@ -430,6 +431,51 @@ export async function registerFileUploadReaperSchedule(
 }
 
 /**
+ * Register the periodic knowledge-bank sweep: dirty workspaces (new documents,
+ * new memories, explicit refresh) get their charter re-synthesized. Interval is
+ * OPENGENI_KNOWLEDGE_BANK_SWEEP_INTERVAL_MS; a `none` provider makes the sweep
+ * a cheap no-op per workspace.
+ */
+export async function registerKnowledgeBankSweepSchedule(
+  settings: Settings,
+  observability: Observability,
+): Promise<{ registered: boolean; close: () => Promise<void> }> {
+  const connection = await Connection.connect(temporalConnectionOptions(settings));
+  const temporal = new TemporalClient({ connection, namespace: settings.temporalNamespace });
+  try {
+    await temporal.schedule.create({
+      scheduleId: KNOWLEDGE_BANK_SWEEP_SCHEDULE_ID,
+      spec: { intervals: [{ every: settings.knowledgeBankSweepIntervalMs }] },
+      action: {
+        type: "startWorkflow",
+        workflowType: "knowledgeBankSweepWorkflow",
+        taskQueue: settings.temporalTaskQueue,
+        args: [],
+      },
+      policies: {
+        overlap: ScheduleOverlapPolicy.SKIP,
+        catchupWindow: "1m",
+        pauseOnFailure: false,
+      },
+    });
+    observability.info("Registered the global knowledge-bank sweep Schedule", {
+      scheduleId: KNOWLEDGE_BANK_SWEEP_SCHEDULE_ID,
+      sweepIntervalMs: settings.knowledgeBankSweepIntervalMs,
+    });
+    return { registered: true, close: async () => connection.close() };
+  } catch (error) {
+    if (error instanceof ScheduleAlreadyRunning) {
+      observability.info("Global knowledge-bank sweep Schedule already registered", {
+        scheduleId: KNOWLEDGE_BANK_SWEEP_SCHEDULE_ID,
+      });
+      return { registered: false, close: async () => connection.close() };
+    }
+    await connection.close().catch(() => undefined);
+    throw error;
+  }
+}
+
+/**
  * Register the one repair cadence for committed workflow-wake revisions. The
  * activity only reads the transactional outbox and sends revision-scoped
  * signals; it is independent of sandbox ownership and child-agent features.
@@ -587,6 +633,13 @@ export async function createOpenGeniWorkerService(
         await retryStartupDependency(
           "Temporal schedule (session-workflow wake dispatcher)",
           () => registerSessionWorkflowWakeDispatcherSchedule(settings, observability),
+          { ...retryOptions, onRetry },
+        ),
+      );
+      schedules.push(
+        await retryStartupDependency(
+          "Temporal schedule (knowledge-bank sweep)",
+          () => registerKnowledgeBankSweepSchedule(settings, observability),
           { ...retryOptions, onRetry },
         ),
       );

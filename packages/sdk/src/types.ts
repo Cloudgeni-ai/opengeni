@@ -765,6 +765,7 @@ export const SESSION_EVENT_TYPES = [
   "turn.event.rejected_late",
   "memory.saved",
   "memory.corrected",
+  "knowledge_bank.updated",
   // Channel-B desktop pixel-plane signals (mirror of contracts SessionEventType;
   // the contract-parity test asserts sorted equality).
   "stream.url.rotated",
@@ -2962,6 +2963,69 @@ export type CreateKnowledgeDropRequest = {
 
 export type MoveDocumentRequest = {
   targetBaseId?: string | undefined;
+};
+
+export type WorkspaceCharterBaseNote = {
+  baseId: string | null;
+  name: string;
+  blurb: string;
+};
+
+export type WorkspaceCharter = {
+  id: string;
+  workspaceId: string;
+  version: number;
+  purpose: string;
+  goals: string[];
+  overview: string | null;
+  baseNotes: WorkspaceCharterBaseNote[];
+  gaps: string[];
+  changelog: string | null;
+  updatedBy: string;
+  model: string | null;
+  createdAt: string;
+};
+
+export type KnowledgeBankState = {
+  dirtyAt: string | null;
+  lastSweptAt: string | null;
+  lastError: string | null;
+  locked: boolean;
+};
+
+export type KnowledgeMapBase = {
+  id: string;
+  name: string;
+  description: string | null;
+  documentCount: number;
+  readyCount: number;
+  topics: string[];
+  lastDocumentAt: string | null;
+};
+
+export type KnowledgeMap = {
+  bases: KnowledgeMapBase[];
+  totalDocuments: number;
+  totalReadyDocuments: number;
+  totalMemories: number;
+  memoriesByKind: Record<string, number>;
+  topics: Array<{ topic: string; count: number }>;
+};
+
+export type KnowledgeBankResponse = {
+  charter: WorkspaceCharter | null;
+  map: KnowledgeMap;
+  state: KnowledgeBankState | null;
+};
+
+export type WorkspaceCharterVersionsResponse = {
+  versions: WorkspaceCharter[];
+};
+
+export type UpdateWorkspaceCharterRequest = {
+  purpose?: string | undefined;
+  goals?: string[] | undefined;
+  locked?: boolean | undefined;
 };
 
 export type DocumentSearchRequest = {

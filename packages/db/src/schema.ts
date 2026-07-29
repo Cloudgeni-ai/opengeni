@@ -1437,6 +1437,69 @@ export const knowledgeMemories = pgTable(
   }),
 );
 
+// Knowledge bank: append-only charter version history (migration 0132). Every
+// update — agent sweep, agent MCP proposal, or human edit — inserts the next
+// version; provenance lives in updated_by/model.
+export const workspaceCharters = pgTable(
+  "workspace_charters",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    version: integer("version").notNull(),
+    purpose: text("purpose").notNull(),
+    goals: jsonb("goals").$type<string[]>().notNull().default([]),
+    overview: text("overview"),
+    baseNotes: jsonb("base_notes")
+      .$type<Array<{ baseId: string | null; name: string; blurb: string }>>()
+      .notNull()
+      .default([]),
+    gaps: jsonb("gaps").$type<string[]>().notNull().default([]),
+    changelog: text("changelog"),
+    updatedBy: text("updated_by").notNull(),
+    model: text("model"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "workspace_charters_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceVersion: uniqueIndex("workspace_charters_workspace_version_uq").on(
+      table.workspaceId,
+      table.version,
+    ),
+    versionValid: check("workspace_charters_version_check", sql`${table.version} >= 1`),
+    updatedByValid: check(
+      "workspace_charters_updated_by_check",
+      sql`length(btrim(${table.updatedBy})) > 0`,
+    ),
+  }),
+);
+
+// Per-workspace knowledge-bank sweep state: the dirty marker the background
+// sweep consumes, the human lock, and sweep bookkeeping (migration 0132).
+export const knowledgeBankState = pgTable(
+  "knowledge_bank_state",
+  {
+    workspaceId: uuid("workspace_id").primaryKey(),
+    accountId: uuid("account_id").notNull(),
+    dirtyAt: timestamp("dirty_at", { withTimezone: true }),
+    lastSweptAt: timestamp("last_swept_at", { withTimezone: true }),
+    lastError: text("last_error"),
+    locked: boolean("locked").notNull().default(false),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "knowledge_bank_state_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+  }),
+);
+
 export const sessionTurns = pgTable(
   "session_turns",
   {

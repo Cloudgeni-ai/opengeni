@@ -5618,6 +5618,107 @@ describe("API component integration", () => {
     expect(enabled.settings.someFutureKey).toBe("keep-me");
   });
 
+  test("knowledge bank: refresh synthesizes a charter, humans edit + lock, versions accrue", async () => {
+    const app = createApp({
+      settings: objectStorageSettings(services.databaseUrl, services.objectStorageEndpoint!),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const workspaceId = await defaultWorkspaceId(app);
+
+    // Seed knowledge: one text drop (indexed + heuristically curated inline).
+    const dropResponse = await app.request(workspacePath(workspaceId, "/knowledge/drops"), {
+      method: "POST",
+      body: JSON.stringify({
+        text: "Vendor Renewal Playbook\n\nHow we renegotiate vendor contracts before renewal deadlines.",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(dropResponse.status).toBe(201);
+
+    // Refresh writes charter v1 (heuristic synthesizer in test settings) and
+    // clears sweep state.
+    const refreshResponse = await app.request(
+      workspacePath(workspaceId, "/knowledge-bank/refresh"),
+      {
+        method: "POST",
+      },
+    );
+    expect(refreshResponse.status).toBe(200);
+    const refreshed = (await refreshResponse.json()) as {
+      charter: {
+        version: number;
+        purpose: string;
+        overview: string | null;
+        updatedBy: string;
+        model: string | null;
+        baseNotes: Array<{ name: string }>;
+      } | null;
+      map: { totalReadyDocuments: number; bases: Array<{ name: string }> };
+      state: { dirtyAt: string | null; lastSweptAt: string | null; locked: boolean } | null;
+    };
+    expect(refreshed.charter?.version).toBe(1);
+    expect(refreshed.charter?.model).toBe("heuristic");
+    expect(refreshed.charter?.updatedBy).toBe("dev");
+    expect(refreshed.charter?.overview).toContain("indexed document");
+    expect(refreshed.map.totalReadyDocuments).toBeGreaterThan(0);
+    expect(refreshed.state?.dirtyAt).toBeNull();
+    expect(refreshed.state?.lastSweptAt).not.toBeNull();
+
+    // GET returns the same latest charter.
+    const bank = (await (
+      await app.request(workspacePath(workspaceId, "/knowledge-bank"))
+    ).json()) as { charter: { version: number } | null };
+    expect(bank.charter?.version).toBe(1);
+
+    // Human edit appends v2 with the edited purpose + goals.
+    const patchResponse = await app.request(workspacePath(workspaceId, "/knowledge-bank"), {
+      method: "PATCH",
+      body: JSON.stringify({
+        purpose: "Run vendor management end to end.",
+        goals: ["Track vendor renewals", "Prepare SOC2 compliance evidence"],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(patchResponse.status).toBe(200);
+    const patched = (await patchResponse.json()) as {
+      charter: { version: number; purpose: string; goals: string[]; model: string | null };
+    };
+    expect(patched.charter.version).toBe(2);
+    expect(patched.charter.purpose).toBe("Run vendor management end to end.");
+    expect(patched.charter.goals).toHaveLength(2);
+    expect(patched.charter.model).toBeNull();
+
+    // A re-synthesis preserves the human purpose/goals (heuristic contract) and
+    // reports the goal the topic set does not cover as a gap.
+    const resynthesized = (await (
+      await app.request(workspacePath(workspaceId, "/knowledge-bank/refresh"), { method: "POST" })
+    ).json()) as { charter: { version: number; purpose: string; gaps: string[] } };
+    expect(resynthesized.charter.version).toBe(3);
+    expect(resynthesized.charter.purpose).toBe("Run vendor management end to end.");
+    expect(resynthesized.charter.gaps.some((gap) => gap.includes("SOC2"))).toBe(true);
+
+    // Lock: machine refresh is refused with 409; the charter stays at v3.
+    const lockResponse = await app.request(workspacePath(workspaceId, "/knowledge-bank"), {
+      method: "PATCH",
+      body: JSON.stringify({ locked: true }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(lockResponse.status).toBe(200);
+    expect(((await lockResponse.json()) as { state: { locked: boolean } }).state.locked).toBe(true);
+    const lockedRefresh = await app.request(workspacePath(workspaceId, "/knowledge-bank/refresh"), {
+      method: "POST",
+    });
+    expect(lockedRefresh.status).toBe(409);
+
+    // Version history is newest-first and complete.
+    const versions = (await (
+      await app.request(workspacePath(workspaceId, "/knowledge-bank/versions?limit=10"))
+    ).json()) as { versions: Array<{ version: number }> };
+    expect(versions.versions.map((entry) => entry.version)).toEqual([3, 2, 1]);
+  });
+
   test("drops raw text into the Default base, auto-curates it, and enforces visibility + agent access", async () => {
     const app = createApp({
       settings: objectStorageSettings(services.databaseUrl, services.objectStorageEndpoint!),

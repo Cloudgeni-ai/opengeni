@@ -976,6 +976,7 @@ export type WorkspaceTranscriptionPolicy = z.infer<typeof WorkspaceTranscription
 export const WorkspaceSettingsSchema = z
   .object({
     memoryEnabled: z.boolean().optional(),
+    knowledgeBankEnabled: z.boolean().optional(),
     transcription: WorkspaceTranscriptionPolicy.optional(),
     // null clears the workspace override and falls back to the persisted
     // deployment policy. The database boundary validates the same range.
@@ -990,12 +991,21 @@ export function resolveWorkspaceMemoryEnabled(settings: unknown): boolean {
   return parsed.success ? parsed.data.memoryEnabled === true : false;
 }
 
+// Resolve the effective knowledgeBankEnabled flag (default off). Gates only the
+// AGENT surfaces — charter injection and the knowledge-bank MCP tools; the
+// human REST/UI bank stays available regardless, like workspace memory.
+export function resolveWorkspaceKnowledgeBankEnabled(settings: unknown): boolean {
+  const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
+  return parsed.success ? parsed.data.knowledgeBankEnabled === true : false;
+}
+
 // PATCH body for workspace settings: a partial top-level patch that merges into
 // the stored bag. Nested transcription policy updates are therefore full
 // replacements; passthrough carries forward-compatible unknown keys.
 export const UpdateWorkspaceSettingsRequest = z
   .object({
     memoryEnabled: z.boolean().optional(),
+    knowledgeBankEnabled: z.boolean().optional(),
     transcription: WorkspaceTranscriptionPolicy.optional(),
     maxNestedAgentDepth: NestedAgentDepthValue.nullable().optional(),
   })
@@ -2662,6 +2672,91 @@ export const MoveDocumentRequest = z.object({
   targetBaseId: z.string().uuid().optional(),
 });
 export type MoveDocumentRequest = z.infer<typeof MoveDocumentRequest>;
+
+// ---------------------------------------------------------------------------
+// Knowledge bank: the workspace's living self-model — a versioned charter
+// (purpose + goals) plus an AI-maintained knowledge-map narrative (overview,
+// per-base blurbs, gaps). Charter history is append-only; updated_by/model
+// carry provenance ("sweep" | "agent" | a human grant subject id).
+
+export const WorkspaceCharterBaseNote = z.object({
+  baseId: z.string().uuid().nullable(),
+  name: z.string(),
+  blurb: z.string(),
+});
+export type WorkspaceCharterBaseNote = z.infer<typeof WorkspaceCharterBaseNote>;
+
+export const WorkspaceCharter = z.object({
+  id: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  version: z.number().int().positive(),
+  purpose: z.string(),
+  goals: z.array(z.string()),
+  overview: z.string().nullable(),
+  baseNotes: z.array(WorkspaceCharterBaseNote),
+  gaps: z.array(z.string()),
+  changelog: z.string().nullable(),
+  updatedBy: z.string(),
+  model: z.string().nullable(),
+  createdAt: z.string(),
+});
+export type WorkspaceCharter = z.infer<typeof WorkspaceCharter>;
+
+export const KnowledgeBankState = z.object({
+  dirtyAt: z.string().nullable(),
+  lastSweptAt: z.string().nullable(),
+  lastError: z.string().nullable(),
+  locked: z.boolean(),
+});
+export type KnowledgeBankState = z.infer<typeof KnowledgeBankState>;
+
+// Structural knowledge map, derived live from bases/documents/memories — the
+// honest (non-LLM) layer of the bank.
+export const KnowledgeMapBase = z.object({
+  id: z.string().uuid(),
+  name: z.string(),
+  description: z.string().nullable(),
+  documentCount: z.number().int().nonnegative(),
+  readyCount: z.number().int().nonnegative(),
+  topics: z.array(z.string()),
+  lastDocumentAt: z.string().nullable(),
+});
+export type KnowledgeMapBase = z.infer<typeof KnowledgeMapBase>;
+
+export const KnowledgeMap = z.object({
+  bases: z.array(KnowledgeMapBase),
+  totalDocuments: z.number().int().nonnegative(),
+  totalReadyDocuments: z.number().int().nonnegative(),
+  totalMemories: z.number().int().nonnegative(),
+  memoriesByKind: z.record(z.string(), z.number().int().nonnegative()),
+  topics: z.array(z.object({ topic: z.string(), count: z.number().int().positive() })),
+});
+export type KnowledgeMap = z.infer<typeof KnowledgeMap>;
+
+export const KnowledgeBankResponse = z.object({
+  charter: WorkspaceCharter.nullable(),
+  map: KnowledgeMap,
+  state: KnowledgeBankState.nullable(),
+});
+export type KnowledgeBankResponse = z.infer<typeof KnowledgeBankResponse>;
+
+export const WorkspaceCharterVersionsResponse = z.object({
+  versions: z.array(WorkspaceCharter),
+});
+export type WorkspaceCharterVersionsResponse = z.infer<typeof WorkspaceCharterVersionsResponse>;
+
+// Human charter edit: saves a NEW version carrying the narrative fields of the
+// latest one forward; may also toggle the machine-overwrite lock.
+export const UpdateWorkspaceCharterRequest = z
+  .object({
+    purpose: z.string().min(1).max(2000).optional(),
+    goals: z.array(z.string().min(1).max(300)).max(12).optional(),
+    locked: z.boolean().optional(),
+  })
+  .refine((value) => Object.keys(value).length > 0, {
+    message: "provide at least one of purpose, goals, or locked",
+  });
+export type UpdateWorkspaceCharterRequest = z.infer<typeof UpdateWorkspaceCharterRequest>;
 
 export const DocumentSearchRequest = z.object({
   query: z.string().min(1),
@@ -5240,6 +5335,9 @@ export const SessionEventType = z.enum([
   "turn.event.rejected_late",
   "memory.saved",
   "memory.corrected",
+  // An agent proposed a charter update through the knowledge-bank MCP tools.
+  // Informational (no semantic classification), like the memory events.
+  "knowledge_bank.updated",
   // Channel-B desktop pixel-plane signals (07-channel-b §1.2). The pixel socket
   // carries opaque RFB and cannot carry a control message the client can act on,
   // so these ride the durable, sequenced, gap-filled Channel-A SSE spine.

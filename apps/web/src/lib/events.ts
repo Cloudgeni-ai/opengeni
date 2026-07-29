@@ -280,6 +280,7 @@ export function eventLabel(type: string): string {
     "goal.continuation": "Goal continuation",
     "memory.saved": "Memory saved",
     "memory.corrected": "Memory corrected",
+    "knowledge_bank.updated": "Charter updated",
   };
   return labels[type] ?? humanizeEventType(type);
 }

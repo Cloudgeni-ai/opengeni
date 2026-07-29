@@ -160,6 +160,7 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { decryptEnvironmentValue } from "./environment-crypto";
 import { sanitizeEventPayload, sanitizeModelPayload } from "./event-payload-sanitizer";
+import { markKnowledgeBankDirty } from "./knowledge-bank";
 import { seedNewSessionDraftInTransaction } from "./new-session-drafts";
 import {
   runIdempotentPersistenceTransaction,
@@ -215,6 +216,7 @@ export * from "./session-control";
 export * from "./session-queue-commands";
 export * from "./new-session-drafts";
 export * from "./workspace-instruction-policies";
+export * from "./knowledge-bank";
 export { interruptedToolCallResult } from "./session-tool-call-settlement";
 export { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
 export {
@@ -6382,6 +6384,12 @@ export async function saveWorkspaceMemory(
         .returning();
       superseded = old ? mapKnowledgeMemory(old) : null;
     }
+
+    // A new memory is new workspace knowledge — nudge the knowledge-bank sweep.
+    await markKnowledgeBankDirty(scopedDb, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+    });
 
     return {
       memory: mapKnowledgeMemory(inserted),

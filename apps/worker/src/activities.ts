@@ -9,6 +9,7 @@ import { createRunAgentTurnActivity } from "./activities/agent-turn";
 import { createCodexCapacityActivities } from "./activities/codex-capacity";
 import { createDocumentActivities } from "./activities/documents";
 import { createFileUploadReaperActivities } from "./activities/file-upload-reaper";
+import { createKnowledgeBankActivities } from "./activities/knowledge-bank";
 import { createGoalActivities } from "./activities/goals";
 import { createSandboxLeaseActivities } from "./activities/sandbox-lease";
 import { createScheduledTaskActivities } from "./activities/scheduled-tasks";
@@ -131,6 +132,7 @@ function controlActivities(services: () => Promise<ActivityServices>) {
     ...createCodexCapacityActivities(services),
     ...createRigVerificationActivities(services),
     ...createFileUploadReaperActivities(services),
+    ...createKnowledgeBankActivities(services),
     ...createWorkflowWakeActivities(services),
     // P1.3: the SOLE liveness/GC/cost-stop driver. Only reapSandboxLeases — no
     // *ForViewer activities, no ownerHeartbeat, no resolveOwnerTaskQueue.
@@ -172,6 +174,7 @@ export const getCodexCapacityWait = defaultControlActivities.getCodexCapacityWai
 export const reconcileCodexCapacityWait = defaultControlActivities.reconcileCodexCapacityWait;
 export const reapSandboxLeases = defaultControlActivities.reapSandboxLeases;
 export const reapExpiredFileUploads = defaultControlActivities.reapExpiredFileUploads;
+export const sweepKnowledgeBanks = defaultControlActivities.sweepKnowledgeBanks;
 export const dispatchSessionWorkflowWakes = defaultControlActivities.dispatchSessionWorkflowWakes;
 export const verifyRigChange = defaultControlActivities.verifyRigChange;
 export const verifyRigVersion = defaultControlActivities.verifyRigVersion;

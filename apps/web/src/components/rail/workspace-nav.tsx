@@ -8,6 +8,7 @@ import {
   BrainCircuitIcon,
   CalendarClockIcon,
   FileSearchIcon,
+  LandmarkIcon,
   LaptopIcon,
   PlugIcon,
   ServerCogIcon,
@@ -28,6 +29,7 @@ type NavTarget =
   | "/workspaces/$workspaceId/schedules"
   | "/workspaces/$workspaceId/documents"
   | "/workspaces/$workspaceId/memory"
+  | "/workspaces/$workspaceId/knowledge"
   | "/workspaces/$workspaceId/settings";
 
 const CONFIG_ITEMS: Array<{ to: NavTarget; icon: LucideIcon; label: string; description: string }> =
@@ -73,6 +75,12 @@ const CONFIG_ITEMS: Array<{ to: NavTarget; icon: LucideIcon; label: string; desc
       icon: BrainCircuitIcon,
       label: "Memory",
       description: "Durable facts agents carry across sessions",
+    },
+    {
+      to: "/workspaces/$workspaceId/knowledge",
+      icon: LandmarkIcon,
+      label: "Knowledge",
+      description: "The workspace's charter, map, and gaps",
     },
   ];
 

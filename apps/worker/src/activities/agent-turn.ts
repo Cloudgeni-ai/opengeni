@@ -36,6 +36,7 @@ import {
   recordCodexAccountConnectors,
   quarantineCodexCredentialForLease,
   setActiveCodexCredential,
+  resolveWorkspaceKnowledgeBankBlock,
   resolveWorkspaceMemoryBlock,
   setCodexCredentialExhaustedWithWakeTargets,
   withCodexCapacityMutation,
@@ -85,6 +86,7 @@ import {
   isEphemeralInternalContext,
   appendPersistentSessionSettings,
   appendSessionInstructions,
+  appendKnowledgeBank,
   appendWorkspaceMemory,
   composeAgentInstructions,
   summarizeForCompaction,
@@ -3685,6 +3687,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         input.workspaceId,
       );
       const workspaceMemory = await resolveWorkspaceMemoryBlock(db, input.workspaceId);
+      const knowledgeBank = await resolveWorkspaceKnowledgeBankBlock(db, input.workspaceId);
       const baseRunSettings = {
         // IMAGE PRECEDENCE (M3): rig > pack > deployment. settingsWithRigImage runs
         // OUTERMOST so a rig-pinned image overrides both the pack image and the
@@ -3942,10 +3945,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         const compactionInstructions = appendPersistentSessionSettings(
           appendSessionInstructions(
             appendWorkspaceMemory(
-              composeAgentInstructions(
-                workspaceAgentInstructions ?? modelRunSettings.agentInstructionsTemplate,
-                undefined,
-                rigVersion && rigName ? { name: rigName, version: rigVersion.version } : undefined,
+              appendKnowledgeBank(
+                composeAgentInstructions(
+                  workspaceAgentInstructions ?? modelRunSettings.agentInstructionsTemplate,
+                  undefined,
+                  rigVersion && rigName
+                    ? { name: rigName, version: rigVersion.version }
+                    : undefined,
+                ),
+                knowledgeBank ?? undefined,
               ),
               workspaceMemory ?? undefined,
             ),
@@ -5157,6 +5165,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           : {}),
         ...(workspaceAgentInstructions ? { instructionsTemplate: workspaceAgentInstructions } : {}),
         ...(workspaceMemory ? { workspaceMemory } : {}),
+        ...(knowledgeBank ? { knowledgeBank } : {}),
         // Per-session persona tier (session > workspace > deployment default).
         // Composed system-level AFTER the workspace persona so it refines it for
         // this one session; absent ⇒ byte-identical to today's composition.

@@ -1361,6 +1361,10 @@ export type BuildAgentOptions = {
   // Composed after the workspace persona/CORE/toolspace substrate and before
   // per-session instructions. Omitted/blank ⇒ byte-identical instructions.
   workspaceMemory?: string;
+  // Knowledge-bank charter digest (purpose + goals + gaps), resolved by the
+  // worker per turn. Composed immediately BEFORE the workspace-memory block so
+  // purpose precedes facts. Omitted/blank ⇒ byte-identical instructions.
+  knowledgeBank?: string;
   workspaceEnvironment?: WorkspaceEnvironmentContext;
   // M3 rig runtime binding (all absent ⇒ a rig-less turn, byte-for-byte today).
   //  - `rig`: renders the non-bypassable rig doctrine block in the CORE.
@@ -1611,6 +1615,12 @@ export function appendWorkspaceMemory(composed: string, workspaceMemory?: string
   return trimmed ? `${composed} ${trimmed}` : composed;
 }
 
+/** Knowledge-bank charter digest; same append contract as appendWorkspaceMemory. */
+export function appendKnowledgeBank(composed: string, knowledgeBank?: string): string {
+  const trimmed = knowledgeBank?.trim();
+  return trimmed ? `${composed} ${trimmed}` : composed;
+}
+
 /**
  * Appends the generic programmatic-tool-calling (toolspace) directive to the
  * composed workspace + CORE instructions, joined by " ". This is GENERIC
@@ -1816,12 +1826,15 @@ export function buildOpenGeniAgent(
     //      they now receive the token too) — appendToolspaceInstructions,
     //   3. + managed-sandbox Git binding discovery, ONLY when one provider has
     //      multiple credential bindings,
-    //   4. + workspace memory working set, ONLY when the workspace setting is on
+    //   4. + the knowledge-bank charter digest (purpose/goals/gaps), ONLY when
+    //      the workspace setting is on and the worker resolved a nonblank
+    //      block — appendKnowledgeBank (purpose precedes facts),
+    //   5. + workspace memory working set, ONLY when the workspace setting is on
     //      and the worker resolved a nonblank block — appendWorkspaceMemory,
-    //   5. + the per-session persona instructions (session-specific, so it
+    //   6. + the per-session persona instructions (session-specific, so it
     //      refines both the workspace persona and the substrate note),
-    //   6. + host context for this exact turn, when supplied,
-    //   7. + durable session-setting state (title present + child notification
+    //   7. + host context for this exact turn, when supplied,
+    //   8. + durable session-setting state (title present + child notification
     //      mode), when supplied by the worker,
     // The genesis title directive is deliberately NOT part of this persistent
     // string. runAgentStream injects it into the first model call only.
@@ -1829,17 +1842,20 @@ export function buildOpenGeniAgent(
       appendTurnInstructions(
         appendSessionInstructions(
           appendWorkspaceMemory(
-            appendGitCredentialBindingInstructions(
-              appendToolspaceInstructions(
-                composeAgentInstructions(
-                  options.instructionsTemplate ?? settings.agentInstructionsTemplate,
-                  options.workspaceEnvironment,
-                  options.rig,
+            appendKnowledgeBank(
+              appendGitCredentialBindingInstructions(
+                appendToolspaceInstructions(
+                  composeAgentInstructions(
+                    options.instructionsTemplate ?? settings.agentInstructionsTemplate,
+                    options.workspaceEnvironment,
+                    options.rig,
+                  ),
+                  settings.toolspaceEnabled && Boolean(options.toolspaceTokenSeed),
                 ),
-                settings.toolspaceEnabled && Boolean(options.toolspaceTokenSeed),
+                options.gitCredentialBindings,
+                options.activeSandboxBackend,
               ),
-              options.gitCredentialBindings,
-              options.activeSandboxBackend,
+              options.knowledgeBank,
             ),
             options.workspaceMemory,
           ),

@@ -749,6 +749,10 @@ describe("OpenGeniClient documents", () => {
       agentAccess: false,
     });
     await client.moveDocument(WORKSPACE_ID, DOCUMENT_ID);
+    await client.getKnowledgeBank(WORKSPACE_ID);
+    await client.getKnowledgeBankVersions(WORKSPACE_ID, 5);
+    await client.updateKnowledgeBank(WORKSPACE_ID, { purpose: "Ship the platform", locked: true });
+    await client.refreshKnowledgeBank(WORKSPACE_ID);
     expect(search.results).toEqual([]);
     expect(knowledgeSearch.results).toEqual([]);
     expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
@@ -767,8 +771,14 @@ describe("OpenGeniClient documents", () => {
         `PATCH /v1/workspaces/${WORKSPACE_ID}/knowledge/memories/${DOCUMENT_ID}`,
         `POST /v1/workspaces/${WORKSPACE_ID}/knowledge/drops`,
         `POST /v1/workspaces/${WORKSPACE_ID}/documents/${DOCUMENT_ID}/move`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/knowledge-bank`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/knowledge-bank/versions`,
+        `PATCH /v1/workspaces/${WORKSPACE_ID}/knowledge-bank`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/knowledge-bank/refresh`,
       ],
     );
+    expect(new URL(requests[15]!.url).searchParams.get("limit")).toBe("5");
+    expect(JSON.parse(requests[16]!.body!)).toEqual({ purpose: "Ship the platform", locked: true });
     expect(JSON.parse(requests[6]!.body!)).toEqual({ query: "rollback steps", limit: 3 });
     expect(JSON.parse(requests[7]!.body!)).toEqual({
       query: "decision",
