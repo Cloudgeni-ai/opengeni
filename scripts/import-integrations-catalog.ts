@@ -195,8 +195,8 @@ const officialCatalogContractsByMcpUrl = new Map<
       // unlicensed vendor asset.
       logoSourceUrl: null,
       homepageUrl: "https://mobbin.com/mcp",
-      installUrl: "https://docs.mobbin.com/mcp",
-      documentationUrl: "https://docs.mobbin.com/mcp",
+      installUrl: "https://docs.mobbin.com/mcp/clients/overview",
+      documentationUrl: "https://docs.mobbin.com/mcp/introduction",
       registryName: "com.mobbin/mobbin",
       registryVersion: "1.0.1",
       registryStatus: "active",

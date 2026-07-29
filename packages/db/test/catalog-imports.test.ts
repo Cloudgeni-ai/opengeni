@@ -89,7 +89,7 @@ describe("catalog import persistence", () => {
         "Search Mobbin’s library for real-world product screens, flows, and UI/UX references. Requires a paid Mobbin plan (Pro, Team, or Enterprise). Provider-managed usage credits apply.",
       homepageUrl: "https://mobbin.com/mcp",
       endpointUrl: "https://api.mobbin.com/mcp",
-      installUrl: "https://docs.mobbin.com/mcp",
+      installUrl: "https://docs.mobbin.com/mcp/clients/overview",
       authModel: "credential_ref",
       providerDomain: "mobbin.com",
       authKind: "oauth2",
@@ -102,6 +102,7 @@ describe("catalog import persistence", () => {
       metadata: {
         scopesHint: ["openid"],
         logoSource: "generic_monogram",
+        documentationUrl: "https://docs.mobbin.com/mcp/introduction",
         officialMcpRegistry: {
           name: "com.mobbin/mobbin",
           version: "1.0.1",

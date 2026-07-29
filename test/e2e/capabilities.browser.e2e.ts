@@ -257,7 +257,13 @@ describe("capabilities browser e2e", () => {
         page.getByRole("dialog"),
         "Search Mobbin’s library for real-world product screens, flows, and UI/UX references. Requires a paid Mobbin plan (Pro, Team, or Enterprise). Provider-managed usage credits apply.",
       );
-      await expectText(page.getByRole("dialog"), "docs.mobbin.com");
+      const setupLink = page
+        .getByRole("dialog")
+        .getByRole("link", { name: "docs.mobbin.com", exact: true });
+      await expectVisible(setupLink);
+      expect(await setupLink.getAttribute("href")).toBe(
+        "https://docs.mobbin.com/mcp/clients/overview",
+      );
       await expectVisible(page.getByRole("dialog").getByRole("button", { name: "Connect Mobbin" }));
       await assertAccessibleAndBounded(page, '[role="dialog"]');
       await page.screenshot({
@@ -599,7 +605,7 @@ function mobbinCapability(mode: MobbinUiState["mode"]) {
     tags: ["mcp", "integration", "verified", "oauth2"],
     homepageUrl: "https://mobbin.com/mcp",
     endpointUrl: "https://api.mobbin.com/mcp",
-    installUrl: "https://docs.mobbin.com/mcp",
+    installUrl: "https://docs.mobbin.com/mcp/clients/overview",
     authModel: "credential_ref",
     providerDomain: "mobbin.com",
     surfaceType: "mcp",
@@ -631,7 +637,7 @@ function mobbinCapability(mode: MobbinUiState["mode"]) {
       providerDomain: "mobbin.com",
       scopesHint: ["openid"],
       logoSource: "generic_monogram",
-      documentationUrl: "https://docs.mobbin.com/mcp",
+      documentationUrl: "https://docs.mobbin.com/mcp/introduction",
       officialMcpRegistry: {
         name: "com.mobbin/mobbin",
         version: "1.0.1",
