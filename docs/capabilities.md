@@ -28,6 +28,12 @@ separately blocked. Follow the activation and rollback sequence in
 
 MCP tool refs are strict by default. A bare `{ "kind": "mcp", "id": "docs" }` must name a server configured for this deployment, and a runtime connect/list failure fails the turn. A client or pack can mark a ref `{ "kind": "mcp", "id": "context7", "optional": true }` to make it portable: if the deployment does not configure that server the ref is skipped during validation, and if the server is configured but unavailable at runtime it is skipped for that turn with a warning.
 
+The deployment-provided `codex_apps` registry follows the same durable policy
+when connected apps are enabled. Workspace-default sessions receive it as an
+optional MCP. Explicit and inherited fixed policies include it only when
+selected. Codex authentication is resolved separately and never widens the
+model-visible tool policy.
+
 ### Credential headers
 
 MCP servers that require request headers (for example an `Authorization` bearer token) are enabled by passing the headers in the enable request:

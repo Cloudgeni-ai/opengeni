@@ -13,6 +13,12 @@ import {
   type McpServerConnectionRef,
 } from "@opengeni/contracts";
 import {
+  CODEX_APPS_MCP_SERVER_ID,
+  CODEX_APPS_MCP_SERVER_NAME,
+  CODEX_APPS_MCP_URL,
+  CODEX_APPS_STARTUP_TIMEOUT_MS,
+} from "@opengeni/codex";
+import {
   decryptVariableSetValue,
   decryptedCapabilityHeaders,
   disableCapabilityInstallation,
@@ -711,7 +717,36 @@ export async function settingsWithEnabledCapabilityMcpServers(
   settings: Settings,
 ): Promise<Settings> {
   const enabled = await listEnabledMcpCapabilityServers(db, workspaceId);
-  return settingsWithMcpCapabilityServers(settings, enabled);
+  return settingsWithCodexAppsMcpServer(settingsWithMcpCapabilityServers(settings, enabled));
+}
+
+/**
+ * Register Codex Apps as an optional runtime MCP when the deployment enables
+ * it. Registration only makes the server selectable; the session tool policy
+ * decides whether the model sees it, and Codex credential resolution
+ * independently decides whether calls can authenticate.
+ */
+export function settingsWithCodexAppsMcpServer(settings: Settings): Settings {
+  if (
+    !settings.codexConnectedAppsEnabled ||
+    settings.mcpServers.some((server) => server.id === CODEX_APPS_MCP_SERVER_ID)
+  ) {
+    return settings;
+  }
+  return {
+    ...settings,
+    mcpServers: [
+      ...settings.mcpServers,
+      {
+        id: CODEX_APPS_MCP_SERVER_ID,
+        name: CODEX_APPS_MCP_SERVER_NAME,
+        url: CODEX_APPS_MCP_URL,
+        timeoutMs: CODEX_APPS_STARTUP_TIMEOUT_MS,
+        // Availability is credential-specific, so discover on every run.
+        cacheToolsList: false,
+      },
+    ],
+  };
 }
 
 export function settingsWithMcpCapabilityServers(
