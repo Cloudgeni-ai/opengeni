@@ -3,6 +3,7 @@ import {
   configuredAllowedModels,
   configuredAllowedReasoningEfforts,
   configuredModels,
+  withCodexCatalogProvider,
 } from "@opengeni/config";
 import {
   ClientConfig,
@@ -322,18 +323,21 @@ export function createApp(deps: AppDependencies): Hono {
 
   app.get("/v1/config/client", (c) => {
     c.header("cache-control", "no-store");
+    const catalogSettings = deps.settings.codexSubscriptionEnabled
+      ? withCodexCatalogProvider(deps.settings)
+      : deps.settings;
     return c.json(
       ClientConfig.parse({
         deploymentRevision: deps.settings.deploymentRevision,
         apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
         ...(deps.settings.serverVersion ? { serverVersion: deps.settings.serverVersion } : {}),
-        defaultModel: canonicalizeConfiguredModelId(deps.settings, deps.settings.openaiModel),
-        allowedModels: configuredAllowedModels(deps.settings),
+        defaultModel: canonicalizeConfiguredModelId(catalogSettings, catalogSettings.openaiModel),
+        allowedModels: configuredAllowedModels(catalogSettings),
         // Provider-grouped model list for the picker. configuredModels() carries the
         // union of the built-in allow-list and every registry provider's models, in
         // selection order (default model first); project each to the client-safe
         // ClientModel shape (ConfiguredModel.providerId → ClientModel.provider).
-        models: configuredModels(deps.settings).map(projectClientModel),
+        models: configuredModels(catalogSettings).map(projectClientModel),
         defaultReasoningEffort: deps.settings.openaiReasoningEffort,
         allowedReasoningEfforts: configuredAllowedReasoningEfforts(deps.settings),
         mcpServers: deps.settings.mcpServers.map((server) => ({

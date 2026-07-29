@@ -1253,6 +1253,23 @@ describe("GET /v1/config/client", () => {
     expect(defaultModel).toMatchObject({ provider: "openai", api: "responses" });
   });
 
+  test("supports a Codex subscription model as the client default", async () => {
+    const settings = testSettings({
+      codexSubscriptionEnabled: true,
+      openaiModel: "codex/gpt-5.6-sol",
+      openaiAllowedModels: "codex/gpt-5.6-sol",
+    });
+    const config = await fetchClientConfig(settings);
+
+    expect(config.defaultModel).toBe("codex/gpt-5.6-sol");
+    expect(config.allowedModels).toContain("codex/gpt-5.6-sol");
+    expect(config.models.find((model) => model.id === config.defaultModel)).toMatchObject({
+      provider: "codex-subscription",
+      credentialSource: { kind: "connected_subscription", provider: "codex" },
+      billing: { upstreamPayer: "connected_subscription", metering: "external" },
+    });
+  });
+
   test("includes a registry model when OPENGENI_MODEL_PROVIDERS_JSON is set", async () => {
     const settings = testSettings({
       modelProvidersJson: JSON.stringify([
