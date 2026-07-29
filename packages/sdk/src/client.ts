@@ -209,6 +209,7 @@ import type {
   WorkspaceInstructionPolicyListResponse,
   WorkspaceInstructionPolicyRevision,
 } from "./workspace-instruction-policies";
+import type { WorkspaceStateResponse } from "./workspace-state";
 import {
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
@@ -1620,6 +1621,14 @@ export class OpenGeniClient {
 
   async getWorkspace(workspaceId: string): Promise<Workspace> {
     return await this.requestJson<Workspace>("GET", `/v1/workspaces/${workspaceId}`);
+  }
+
+  /** Read-time, secret-safe inventory of policy heads and visible workspace knowledge. */
+  async getWorkspaceState(workspaceId: string): Promise<WorkspaceStateResponse> {
+    return await this.requestJson<WorkspaceStateResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/workspace-state`,
+    );
   }
 
   async updateWorkspace(workspaceId: string, request: UpdateWorkspaceRequest): Promise<Workspace> {

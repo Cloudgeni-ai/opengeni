@@ -76,6 +76,14 @@ export type {
   WorkspaceInstructionPolicyScope,
   WorkspaceInstructionPolicyTarget,
 } from "./workspace-instruction-policies";
+export type {
+  WorkspaceStateDocumentStatusCounts,
+  WorkspaceStateGapCode,
+  WorkspaceStateMemoryKindCounts,
+  WorkspaceStateMemoryStatusCounts,
+  WorkspaceStateResponse,
+  WorkspaceStateSourceKindCounts,
+} from "./workspace-state";
 export {
   DEFAULT_WORKSPACE_TRANSCRIPTION_POLICY,
   authorizeTranscriptionAdapter,
