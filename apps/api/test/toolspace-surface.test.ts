@@ -382,13 +382,13 @@ describe("prepareToolspaceMcpSurface", () => {
       },
     );
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    const client = new Client({ name: "empty-toolspace-test", version: "1" });
+    const mcpClient = new Client({ name: "empty-toolspace-test", version: "1" });
     await server.connect(serverTransport);
-    await client.connect(clientTransport);
+    await mcpClient.connect(clientTransport);
     try {
-      expect((await client.listTools()).tools).toEqual([]);
+      expect((await mcpClient.listTools()).tools).toEqual([]);
     } finally {
-      await Promise.all([client.close(), server.close()]);
+      await Promise.all([mcpClient.close(), server.close()]);
     }
   });
 
