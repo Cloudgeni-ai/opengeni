@@ -203,6 +203,49 @@ export type CaptureWorkspaceRevisionInput = {
   keepLatest?: number;
 };
 
+type CaptureRepositoryReadResult =
+  | {
+      complete: true;
+      status: Awaited<ReturnType<SandboxChannelAService["gitStatus"]>>;
+      diff: Awaited<ReturnType<SandboxChannelAService["gitDiff"]>>;
+    }
+  | { complete: false; degradedReason: "repository_read_unavailable" };
+
+/** One discovered repository is all-or-nothing capture authority. A provider
+ * transport failure must never be represented as an authoritative empty diff. */
+export async function readCaptureRepository(
+  svc: Pick<SandboxChannelAService, "gitStatus" | "gitDiff">,
+  root: string,
+): Promise<CaptureRepositoryReadResult> {
+  let status: Awaited<ReturnType<SandboxChannelAService["gitStatus"]>>;
+  try {
+    status = await svc.gitStatus({ path: root });
+  } catch (error) {
+    const boxExiting = classifyCaptureEntryError(error);
+    if (boxExiting) throw boxExiting;
+    return { complete: false, degradedReason: "repository_read_unavailable" };
+  }
+  if (!status.isRepo) {
+    return { complete: false, degradedReason: "repository_read_unavailable" };
+  }
+  try {
+    const diff = await svc.gitDiff({
+      path: root,
+      staged: false,
+      includeUntracked: true,
+      fromRef: "HEAD",
+      pathspec: [],
+      contextLines: 3,
+      maxBytesPerFile: PER_FILE_DIFF_GUARD_BYTES,
+    });
+    return { complete: true, status, diff };
+  } catch (error) {
+    const boxExiting = classifyCaptureEntryError(error);
+    if (boxExiting) throw boxExiting;
+    return { complete: false, degradedReason: "repository_read_unavailable" };
+  }
+}
+
 let loggedStorageNullOnce = false;
 
 /**
@@ -338,46 +381,15 @@ async function runCapture(
     );
   }
   if (!discovery.complete) {
-    const capturedAt = new Date();
     const reason = captureDegradedReason(discovery.degradedReason);
-    const stats = {
-      degradedReason: reason,
-      discoveredRepoCount: discovery.repos.length,
-      durationMs: Date.now() - startedAt,
-    };
-    const inserted = await insertFailedWorkspaceCapture(input.db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
-      turnId: input.turnId,
-      attemptId: input.attemptId,
-      sandboxGroupId: input.sandboxGroupId,
-      expectedEpoch: input.leaseEpoch,
+    await persistDegradedCapture(
+      input,
+      startedAt,
+      signal,
       revision,
-      stats,
-      capturedAt,
-    });
-    throwIfCaptureAborted(signal);
-    if (!inserted) {
-      observability.incrementCounter({
-        name: "opengeni_workspace_capture_total",
-        labels: { result: "superseded" },
-      });
-      return;
-    }
-    observability.warn("workspace capture degraded — repository discovery incomplete", {
-      "opengeni.session_id": input.sessionId,
-      "opengeni.turn_id": input.turnId ?? "",
-      "workspace_capture.degraded_reason": reason,
-      "workspace_capture.discovered_repo_count": discovery.repos.length,
-    });
-    observability.incrementCounter({
-      name: "opengeni_workspace_capture_total",
-      labels: { result: "degraded_repository_discovery" },
-    });
-    if (input.publish) {
-      await input.publish(inserted.events).catch(() => undefined);
-    }
+      reason,
+      discovery.repos.length,
+    );
     return;
   }
   const repoRoots = discovery.repos;
@@ -389,41 +401,24 @@ async function runCapture(
 
   for (const root of repoRoots) {
     throwIfCaptureAborted(signal);
-    // Per-repo resilience: a box death aborts the whole capture (BoxExitingError
-    // propagates); any other single-repo failure (a repo that vanished, a
-    // transient git error) SKIPS that repo and the capture continues with the
-    // rest. One flaky repo must never kill the capture.
-    let status: Awaited<ReturnType<typeof svc.gitStatus>>;
-    try {
-      status = await svc.gitStatus({ path: root });
-      throwIfCaptureAborted(signal);
-    } catch (error) {
-      const boxExiting = classifyCaptureEntryError(error);
-      if (boxExiting) throw boxExiting;
-      continue;
+    // Repository discovery defines the authoritative set. Once a root is in
+    // that set, status/diff failure must degrade the entire revision rather than
+    // publish a partial or false-empty change surface. Box death still aborts
+    // through the outer best-effort boundary.
+    const repository = await readCaptureRepository(svc, root);
+    throwIfCaptureAborted(signal);
+    if (!repository.complete) {
+      await persistDegradedCapture(
+        input,
+        startedAt,
+        signal,
+        revision,
+        repository.degradedReason,
+        repoRoots.length,
+      );
+      return;
     }
-    if (!status.isRepo) continue;
-    // `git diff HEAD`: combined staged+unstaged tracked changes vs HEAD (the
-    // review diff). Untracked files are absent here but present in status.files
-    // and captured as after-images. A repo with no commits yields an empty diff
-    // (git diff HEAD errors → empty numstat) and everything reads as untracked.
-    let diff: Awaited<ReturnType<typeof svc.gitDiff>>;
-    try {
-      diff = await svc.gitDiff({
-        path: root,
-        staged: false,
-        includeUntracked: true,
-        fromRef: "HEAD",
-        pathspec: [],
-        contextLines: 3,
-        maxBytesPerFile: PER_FILE_DIFF_GUARD_BYTES,
-      });
-      throwIfCaptureAborted(signal);
-    } catch (error) {
-      const boxExiting = classifyCaptureEntryError(error);
-      if (boxExiting) throw boxExiting;
-      diff = { files: [], revision: 0 };
-    }
+    const { status, diff } = repository;
     // Drop residue churn from the review diff too. On a desktop box the seed's
     // `git add -A` in $HOME commits ~/.config/xfce4/* into HEAD, so `git diff HEAD`
     // lists the continuously-rewritten desktop dotfiles as changed — noise the
@@ -848,6 +843,63 @@ function captureDegradedReason(
     case "command_failed":
     default:
       return "repository_discovery_command_failed";
+  }
+}
+
+async function persistDegradedCapture(
+  input: CaptureWorkspaceRevisionInput,
+  startedAt: number,
+  signal: AbortSignal,
+  revision: number,
+  reason: WorkspaceCaptureDegradedReason,
+  discoveredRepoCount: number,
+): Promise<void> {
+  const capturedAt = new Date();
+  const stats = {
+    degradedReason: reason,
+    discoveredRepoCount,
+    durationMs: Date.now() - startedAt,
+  };
+  const inserted = await insertFailedWorkspaceCapture(input.db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    turnId: input.turnId,
+    attemptId: input.attemptId,
+    sandboxGroupId: input.sandboxGroupId,
+    expectedEpoch: input.leaseEpoch,
+    revision,
+    stats,
+    capturedAt,
+  });
+  throwIfCaptureAborted(signal);
+  if (!inserted) {
+    input.observability.incrementCounter({
+      name: "opengeni_workspace_capture_total",
+      labels: { result: "superseded" },
+    });
+    return;
+  }
+  const discoveryFailure = reason.startsWith("repository_discovery_");
+  input.observability.warn(
+    discoveryFailure
+      ? "workspace capture degraded — repository discovery incomplete"
+      : "workspace capture degraded — repository read incomplete",
+    {
+      "opengeni.session_id": input.sessionId,
+      "opengeni.turn_id": input.turnId ?? "",
+      "workspace_capture.degraded_reason": reason,
+      "workspace_capture.discovered_repo_count": discoveredRepoCount,
+    },
+  );
+  input.observability.incrementCounter({
+    name: "opengeni_workspace_capture_total",
+    labels: {
+      result: discoveryFailure ? "degraded_repository_discovery" : "degraded_repository_read",
+    },
+  });
+  if (input.publish) {
+    await input.publish(inserted.events).catch(() => undefined);
   }
 }
 

@@ -29,6 +29,7 @@ import {
   KEEP_LATEST_REVISIONS,
   PER_FILE_CONTENT_GUARD_BYTES,
   PER_FILE_DIFF_GUARD_BYTES,
+  readCaptureRepository,
   RESIDUE_DIRS,
   WHOLE_CAPTURE_GUARD_BYTES,
 } from "../src/activities/workspace-capture";
@@ -166,6 +167,62 @@ describe("workspace-capture — box-exit vs vanished-file classification (S2)", 
     const e = new BoxExitingError("container exiting");
     expect(e).toBeInstanceOf(Error);
     expect(e.name).toBe("BoxExitingError");
+  });
+});
+
+describe("workspace-capture — repository read authority", () => {
+  const status = {
+    isRepo: true as const,
+    head: "main",
+    detached: false,
+    upstream: null,
+    ahead: 0,
+    behind: 0,
+    files: [],
+    revision: 0,
+  };
+
+  test("a diff transport failure degrades instead of becoming an authoritative empty diff", async () => {
+    const result = await readCaptureRepository(
+      {
+        gitStatus: async () => status,
+        gitDiff: async () => {
+          throw new Error("provider retained-output prefix was truncated");
+        },
+      },
+      "api",
+    );
+
+    expect(result).toEqual({
+      complete: false,
+      degradedReason: "repository_read_unavailable",
+    });
+    expect(result).not.toHaveProperty("diff");
+  });
+
+  test("a successful repository read keeps the exact structured diff", async () => {
+    const diff = {
+      files: [
+        {
+          path: "server.ts",
+          oldPath: null,
+          status: "modified" as const,
+          isBinary: false,
+          isImage: false,
+          additions: 1,
+          deletions: 1,
+          hunks: [],
+          truncated: false,
+        },
+      ],
+      revision: 0,
+    };
+    const result = await readCaptureRepository(
+      { gitStatus: async () => status, gitDiff: async () => diff },
+      "api",
+    );
+
+    expect(result).toEqual({ complete: true, status, diff });
   });
 });
 
@@ -381,6 +438,15 @@ describe("workspace-capture — manifest & event serialization", () => {
         capturedAt: new Date().toISOString(),
         leaseEpoch: 8,
         reason: "repository_discovery_result_limit_exceeded",
+      }),
+    ).not.toThrow();
+    expect(() =>
+      WorkspaceRevisionDegradedPayload.parse({
+        revision: 5,
+        turnId: "t3",
+        capturedAt: new Date().toISOString(),
+        leaseEpoch: 8,
+        reason: "repository_read_unavailable",
       }),
     ).not.toThrow();
   });

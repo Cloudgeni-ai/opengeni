@@ -1366,7 +1366,8 @@ export type WorkspaceCaptureRepo = {
 export type WorkspaceCaptureDegradedReason =
   | "repository_discovery_command_failed"
   | "repository_discovery_timed_out"
-  | "repository_discovery_result_limit_exceeded";
+  | "repository_discovery_result_limit_exceeded"
+  | "repository_read_unavailable";
 export type WorkspaceCaptureStats = {
   repoCount: number;
   fileCount: number;
