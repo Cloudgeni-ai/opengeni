@@ -9,6 +9,7 @@ import {
 import {
   CreateSessionRequest,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+  DEFAULT_FIRST_PARTY_MCP_TOOLS,
   OPENGENI_SLACK_BOT_SESSION_METADATA_KEY,
   SessionSpawnDenial,
   ServiceTurnInitiator,
@@ -19,10 +20,12 @@ import {
   type AccessGrant,
   type CreateSessionResponse,
   type GoalSpec,
+  type FirstPartyMcpToolName,
   type Permission,
   type ReasoningEffort,
   type ResourceRef,
   type Session,
+  type SessionSkill,
   type SessionEvent,
   SessionMcpApprovalPolicy,
   type SessionMcpCredentialUpdateInput,
@@ -124,6 +127,21 @@ export class SessionSpawnDeniedError extends Error {
     this.name = "SessionSpawnDeniedError";
     this.denial = denial;
   }
+}
+
+/**
+ * Resolve per-session first-party tool visibility without consulting
+ * authorization. Top-level omission uses the minimal runtime default (stored
+ * as null); child omission snapshots the parent's exact effective selection.
+ * Explicit [] is authoritative and must never widen.
+ */
+export function resolveFirstPartyMcpToolsForCreate(
+  requested: FirstPartyMcpToolName[] | undefined,
+  parentStored: FirstPartyMcpToolName[] | null | undefined,
+): FirstPartyMcpToolName[] | null {
+  if (requested !== undefined) return [...requested];
+  if (parentStored === undefined) return null;
+  return [...(parentStored ?? DEFAULT_FIRST_PARTY_MCP_TOOLS)];
 }
 
 function sessionSpawnDeniedMessage(denial: SessionSpawnDenial): string {
@@ -491,6 +509,7 @@ export async function createAndStartSession(input: {
   initialMessage: string;
   turnInstructions?: string | null;
   resources: ResourceRef[];
+  skills?: SessionSkill[];
   tools: ToolRef[];
   // Public admission always supplies provenance; optional keeps internal
   // callers that predate durable tool-policy provenance source-compatible
@@ -520,6 +539,9 @@ export async function createAndStartSession(input: {
   instructions?: string | null;
   // Validated against the creating grant before this is called.
   firstPartyMcpPermissions?: Permission[] | null;
+  // Model-visible first-party tool names. Authorization remains controlled by
+  // firstPartyMcpPermissions and the target resource checks.
+  firstPartyMcpTools?: FirstPartyMcpToolName[] | null;
   // Encrypted DB rows plus matching safe metadata for create-time per-session
   // MCP servers. Metadata is the only shape emitted in events/responses.
   mcpServers?: CreateSessionMcpServerInput[];
@@ -578,6 +600,7 @@ export async function createAndStartSession(input: {
       initialMessage: input.initialMessage,
       initialTurnInstructions: input.turnInstructions ?? null,
       resources: input.resources,
+      skills: input.skills ?? [],
       tools: input.tools,
       ...(input.toolPolicy ? { toolPolicy: input.toolPolicy } : {}),
       metadata: sessionMetadata,
@@ -590,6 +613,7 @@ export async function createAndStartSession(input: {
       rigId: input.rigId ?? null,
       rigVersionId: input.rigVersionId ?? null,
       firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
+      firstPartyMcpTools: input.firstPartyMcpTools ?? null,
       instructions: input.instructions ?? null,
       parentSessionId: input.parentSessionId ?? null,
       createIdempotencyKey: input.createIdempotencyKey,
@@ -621,6 +645,7 @@ export async function createAndStartSession(input: {
       initialMessage: input.initialMessage,
       initialTurnInstructions: input.turnInstructions ?? null,
       resources: input.resources,
+      skills: input.skills ?? [],
       tools: input.tools,
       ...(input.toolPolicy ? { toolPolicy: input.toolPolicy } : {}),
       metadata: sessionMetadata,
@@ -633,6 +658,7 @@ export async function createAndStartSession(input: {
       rigId: input.rigId ?? null,
       rigVersionId: input.rigVersionId ?? null,
       firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
+      firstPartyMcpTools: input.firstPartyMcpTools ?? null,
       instructions: input.instructions ?? null,
       parentSessionId: input.parentSessionId ?? null,
       sandboxGroupId: input.sandboxGroupId ?? null,
@@ -1090,6 +1116,9 @@ export async function createSessionForRequest(
       ? payload.resources
       : (parentSession?.resources ?? payload.resources),
   );
+  const skills = hasOwnProperty(rawPayload, "skills")
+    ? payload.skills
+    : (parentSession?.skills ?? payload.skills);
   const toolsProvided = hasOwnProperty(rawPayload, "tools");
   const requestedTools = validateToolRefs(
     toolsProvided ? payload.tools : (parentSession?.tools ?? payload.tools),
@@ -1135,12 +1164,10 @@ export async function createSessionForRequest(
     );
     toolPolicy = { mode: "workspace_default", inheritedFromSessionId: null };
   }
-  // The first-party MCP server is attached to EVERY session. It hosts the
-  // session's own metadata tool (set_session_title) + goal tools, and — only
-  // when the grant carries the permission — the orchestration/variableSet/
-  // github tools. Capability is gated per-tool by permission, never by whether
-  // the server is attached, so a bare chat still gets titling while the
-  // dangerous tools stay off by default.
+  // The first-party MCP server is attached to EVERY session. Registration is
+  // independently intersected with the exact model-visible selection and the
+  // tool's permission/target authorization predicate, so attachment alone
+  // exposes nothing.
   const tools = withFirstPartyTools(selectedTools, runtimeSettings);
   await validateGitHubRepositorySelection(db, workspaceId, resources);
   if (resources.some((resource) => resource.kind === "file") && !objectStorage) {
@@ -1268,6 +1295,24 @@ export async function createSessionForRequest(
       message:
         "goal-bearing sessions require goals:manage in the resulting first-party MCP permission set",
     });
+  }
+  // Tool visibility is independent from permission authority. A child that
+  // omits the field inherits the parent's exact effective selection; a
+  // top-level omission resolves to the fixed minimal default at execution.
+  const firstPartyMcpTools = resolveFirstPartyMcpToolsForCreate(
+    payload.firstPartyMcpTools,
+    parentSession ? parentSession.firstPartyMcpTools : undefined,
+  );
+  if (payload.goal) {
+    const effectiveTools = firstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS];
+    const missingGoalTools = ["goal_update", "goal_complete", "goal_pause"].filter(
+      (name) => !effectiveTools.includes(name as FirstPartyMcpToolName),
+    );
+    if (missingGoalTools.length > 0) {
+      throw new HTTPException(422, {
+        message: `goal-bearing sessions require first-party MCP tools: ${missingGoalTools.join(", ")}`,
+      });
+    }
   }
   // Parent linkage: a worker is linked to its manager ONLY from the
   // worker-signed sessionId claim on the creating grant — the manager
@@ -1501,6 +1546,7 @@ export async function createSessionForRequest(
       initialMessage: payload.initialMessage,
       turnInstructions: payload.turnInstructions ?? null,
       resources,
+      skills,
       tools,
       toolPolicy,
       ...(payload.clientEventId ? { clientEventId: payload.clientEventId } : {}),
@@ -1533,6 +1579,7 @@ export async function createSessionForRequest(
       // time. Not surfaced as an event.
       instructions: payload.instructions ?? null,
       firstPartyMcpPermissions,
+      firstPartyMcpTools,
       mcpServers: sessionMcpServers.dbServers,
       sessionMcpServers: sessionMcpServers.metadata,
       parentSessionId,

@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 
-const migration = "0132_durable_machine_input_batches.sql";
+const migration = "0135_durable_machine_input_batches.sql";
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
@@ -28,7 +28,7 @@ afterAll(async () => {
   await blank?.release();
 });
 
-describe("migration 0132 (durable machine-input batches)", () => {
+describe("migration 0135 (durable machine-input batches)", () => {
   test("backfills delivered batches at their causal position and removes deferred state", async () => {
     if (!available || !blank) return;
     const sql = postgres(blank.databaseUrl, { max: 1 });

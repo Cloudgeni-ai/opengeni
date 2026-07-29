@@ -1,6 +1,6 @@
 import type { Session, SessionEvent } from "@opengeni/sdk";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useOpenGeni, type ClientOverride } from "../session-context";
+import { useEmbeddedSessionRead, type EmbeddedSessionReadClientOverride } from "../session-context";
 import {
   useMutationRunner,
   usePolledValue,
@@ -8,7 +8,7 @@ import {
   type SessionEventFeedOptions,
 } from "./internal";
 
-export type UseSessionOptions = ClientOverride &
+export type UseSessionOptions = EmbeddedSessionReadClientOverride &
   SessionEventFeedOptions & {
     /** Re-fetch on an interval (ms). Off by default — pair with `useSessionEvents` for live status. */
     pollIntervalMs?: number | undefined;
@@ -38,7 +38,7 @@ export function useSession(
   options: UseSessionOptions = {},
 ): UseSessionResult {
   const { client, workspaceId, workspaceControlEvent, registerSessionReconciler } =
-    useOpenGeni(options);
+    useEmbeddedSessionRead(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
   const [override, setOverride] = useState<Session | null>(null);
   const { run, mutating, mutationError, clearMutationError } = useMutationRunner();

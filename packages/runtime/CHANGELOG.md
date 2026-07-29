@@ -1,5 +1,32 @@
 # @opengeni/runtime
 
+## 0.14.0
+
+### Minor Changes
+
+- 519d93c: Add validated inline per-session skills and discover skills directly from already-materialized repository resources.
+
+### Patch Changes
+
+- Updated dependencies [519d93c]
+  - @opengeni/contracts@0.21.0
+  - @opengeni/config@0.7.10
+
+## 0.13.14
+
+### Patch Changes
+
+- 110bb77: Enforce exact-subject ownership for personal OAuth capabilities and add secure direct OAuth installation for the separate workspace OpenGeni Slack bot.
+- Updated dependencies [110bb77]
+  - @opengeni/config@0.7.9
+  - @opengeni/contracts@0.20.2
+
+## 0.13.13
+
+### Patch Changes
+
+- f92af07: Remove Bun-global dependencies from the worker turn path and Docker network attachment so embedded workers run identically in Node and Bun.
+
 ## 0.13.12
 
 ### Patch Changes

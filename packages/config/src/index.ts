@@ -265,6 +265,8 @@ const SettingsSchema = z.object({
   integrationsStateSecret: z.string().optional(),
   integrationsAllowPrivateNetworkTargets: EnvBoolean.default(false),
   integrationsOauthClientsJson: z.string().default("{}"),
+  slackClientId: z.string().optional(),
+  slackClientSecret: z.string().optional(),
   // Undefined is meaningful: the migration boundary persists the product
   // default of 3 when no deployment override is supplied.
   maxNestedAgentDepth: z.coerce.number().int().nonnegative().max(MAX_NESTED_AGENT_DEPTH).optional(),
@@ -1369,6 +1371,8 @@ export function getSettings(): Settings {
       "OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS",
     ),
     integrationsOauthClientsJson: optional("OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON"),
+    slackClientId: optional("OPENGENI_SLACK_CLIENT_ID"),
+    slackClientSecret: optional("OPENGENI_SLACK_CLIENT_SECRET"),
     maxNestedAgentDepth: optional("OPENGENI_MAX_NESTED_AGENT_DEPTH"),
     goalMaxAutoContinuations: optional("OPENGENI_GOAL_MAX_AUTO_CONTINUATIONS"),
     goalNoProgressLimit: optional("OPENGENI_GOAL_NO_PROGRESS_LIMIT"),
@@ -2783,9 +2787,14 @@ export function stableSandboxEnvironmentForRun(
   };
   // Backend-aware HOME: a provisioned box (docker + every cloud provider) runs the
   // agent under the descriptor's workspaceRoot. `local` runs in-process as the host
-  // unix user (keep its real $HOME); `none` has no box.
+  // unix user (keep its real $HOME); `selfhosted` runs on a user's machine and must
+  // likewise preserve that machine's real HOME; `none` has no box.
   const descriptor = CAPABILITY_DESCRIPTORS[settings.sandboxBackend];
-  if (settings.sandboxBackend !== "none" && settings.sandboxBackend !== "local") {
+  if (
+    settings.sandboxBackend !== "none" &&
+    settings.sandboxBackend !== "local" &&
+    settings.sandboxBackend !== "selfhosted"
+  ) {
     environment.HOME ??= descriptor.workspaceRoot;
   }
   // TOKEN-BROKER (B1): the STABLE credential FILE PATHS and CLI wrapper PATH for
@@ -2806,7 +2815,15 @@ export function stableSandboxEnvironmentForRun(
     environment.PATH = prependPathEntry(environment.PATH, environment.OPENGENI_GIT_CLI_WRAPPER_DIR);
   }
   if (settings.toolspaceEnabled) {
-    environment.OPENGENI_TOOLSPACE_TOKEN_FILE ??= `${environment.HOME ?? descriptor.workspaceRoot}/.opengeni/toolspace-token`;
+    // Connected Machines do not share one control-plane-known home path. Keep a
+    // stable shell-resolved pointer in the manifest; runtime expands this trusted
+    // marker against the machine's own HOME for seed, renewal, and every command.
+    // Never derive it from the selfhosted descriptor root (`/`), which would try
+    // to write `/.opengeni` as an ordinary machine user.
+    environment.OPENGENI_TOOLSPACE_TOKEN_FILE ??=
+      settings.sandboxBackend === "selfhosted"
+        ? "$HOME/.opengeni/toolspace-token"
+        : `${environment.HOME ?? descriptor.workspaceRoot}/.opengeni/toolspace-token`;
     if (settings.ogtoolPackageSpec) {
       environment.OPENGENI_OGTOOL_PACKAGE_SPEC ??= settings.ogtoolPackageSpec;
     }
@@ -3226,6 +3243,7 @@ function positiveInt(value: unknown): number {
 function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
   const existing = settings.mcpServers.filter((server) => server.id !== "opengeni");
   const firstPartyMcpUrl = firstPartyMcpServerUrl(settings);
+  const firstPartyFilesMcpUrl = firstPartyFilesMcpServerUrl(firstPartyMcpUrl);
   const firstPartyDocsMcpUrl = firstPartyDocumentsMcpServerUrl(firstPartyMcpUrl);
   const hasFiles = existing.some((server) => server.id === "files");
   const hasDocs = existing.some((server) => server.id === "docs");
@@ -3253,7 +3271,7 @@ function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
           {
             id: "files",
             name: "Files",
-            url: firstPartyMcpUrl,
+            url: firstPartyFilesMcpUrl,
             allowedTools: ["files_get_download_url"],
             cacheToolsList: true,
           },
@@ -3329,6 +3347,10 @@ function firstPartyDocumentsMcpServerUrl(mcpUrl: string): string {
   return `${mcpUrl.replace(/\/+$/, "")}/docs`;
 }
 
+function firstPartyFilesMcpServerUrl(mcpUrl: string): string {
+  return `${mcpUrl.replace(/\/+$/, "")}/files`;
+}
+
 function validateSettings(settings: Settings): void {
   temporalConnectionOptions(settings);
   if (settings.toolspaceEnabled && !settings.delegationSecret) {
@@ -3378,6 +3400,31 @@ function validateSettings(settings: Settings): void {
     if (!settings.integrationsStateSecret && !["local", "test"].includes(settings.environment)) {
       throw new Error(
         "OPENGENI_INTEGRATIONS_STATE_SECRET is required when OPENGENI_INTEGRATIONS_ENABLED=true outside local/test",
+      );
+    }
+  }
+  if (Boolean(settings.slackClientId) !== Boolean(settings.slackClientSecret)) {
+    throw new Error(
+      "OPENGENI_SLACK_CLIENT_ID and OPENGENI_SLACK_CLIENT_SECRET must be configured together",
+    );
+  }
+  if (settings.slackClientId) {
+    if (!settings.publicBaseUrl) {
+      throw new Error(
+        "OPENGENI_PUBLIC_BASE_URL is required when the OpenGeni Slack app is configured",
+      );
+    }
+    if (
+      !settings.publicBaseUrl.startsWith("https://") &&
+      !["local", "test"].includes(settings.environment)
+    ) {
+      throw new Error(
+        "OPENGENI_PUBLIC_BASE_URL must use https when the OpenGeni Slack app is configured outside local/test",
+      );
+    }
+    if (!settings.integrationsStateSecret) {
+      throw new Error(
+        "OPENGENI_INTEGRATIONS_STATE_SECRET is required when the OpenGeni Slack app is configured",
       );
     }
   }

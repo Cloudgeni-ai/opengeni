@@ -24,6 +24,8 @@ export {
 export type { ProxySessionEventStreamOptions, SseReStreamOptions } from "./proxy";
 export { parseSseStream } from "./sse";
 export type { SseMessage } from "./sse";
+export { normalizeMcpOutput } from "./mcp-output";
+export type { NormalizedMcpOutput } from "./mcp-output";
 // Desktop (noVNC) transport contract — pure, zero-dep (the RFB import lives in
 // @opengeni/react). URL assembler + connection state machine + rotation fence.
 export { desktopSocketUrl, nextDesktopState, applyUrlRotation } from "./desktop";
@@ -191,7 +193,8 @@ export type {
   CreateApiKeyRequest,
   CreateApiKeyResponse,
   CreateCapabilityCatalogItemRequest,
-  ConnectOpenGeniSlackBotRequest,
+  OpenGeniSlackBotInstallRequest,
+  OpenGeniSlackBotInstallStart,
   CreateConnectionRequest,
   CreateCheckoutRequest,
   CreateCheckoutResponse,

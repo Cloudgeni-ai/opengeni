@@ -165,6 +165,13 @@ base (`OPENGENI_MCP_URL`) the machine enrolled against — the same URL every re
 backend uses — never a loopback or cluster-internal address the machine could not
 reach.
 
+The Connected Machine manifest uses the trusted shell-relative pointer
+`$HOME/.opengeni/toolspace-token`. Runtime derives the per-session sibling while
+retaining that prefix, then expands it in the machine's shell for seed, renewal,
+and every session command. The control plane must not set `HOME` from the
+selfhosted capability descriptor: that descriptor's `/` means “the whole
+machine is addressable,” not “the agent user's home is `/`.”
+
 When the flag is off, behavior is byte-identical to the current tree: no
 permission is minted, no file path appears, no URL appears, and no toolspace
 surface is added.

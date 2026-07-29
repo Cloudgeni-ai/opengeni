@@ -29,6 +29,8 @@ import type { Observability } from "@opengeni/observability";
 import type { AccessGrant, McpCredentialsRequest, SessionTurn } from "@opengeni/contracts";
 import type { McpServerConfig } from "@opengeni/config";
 import type { ApiRouteDeps } from "@opengeni/core";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import {
   createDb,
   createSession,
@@ -48,6 +50,7 @@ import {
   toolspaceCanProxyServerId,
   type ToolspaceMcpSurface,
 } from "../src/mcp/toolspace";
+import { buildOpenGeniMcpServer } from "../src/mcp/server";
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -298,6 +301,7 @@ describe("connectionBrokerFetch response lifecycle", () => {
           return responseWithTrackedBody(403, "initial-403");
       }
     };
+    const credentialRequests: McpCredentialsRequest[] = [];
     const connectionRef = {
       provider: "test-provider",
       providerDomain: "example.com",
@@ -305,16 +309,19 @@ describe("connectionBrokerFetch response lifecycle", () => {
     } as const;
     const deps = {
       connectionCredentials: {
-        mcpCredentials: async (request: McpCredentialsRequest) => ({
-          status: "ok" as const,
-          accountId: request.accountId,
-          workspaceId: request.workspaceId,
-          sessionId: request.sessionId,
-          headers: { Authorization: `Bearer ${request.forceRefresh ? "refresh" : "first"}` },
-          connectionId: "connection-1",
-          provider: "test-provider",
-          providerDomain: "example.com",
-        }),
+        mcpCredentials: async (request: McpCredentialsRequest) => {
+          credentialRequests.push(request);
+          return {
+            status: "ok" as const,
+            accountId: request.accountId,
+            workspaceId: request.workspaceId,
+            sessionId: request.sessionId,
+            headers: { Authorization: `Bearer ${request.forceRefresh ? "refresh" : "first"}` },
+            connectionId: "connection-1",
+            provider: "test-provider",
+            providerDomain: "example.com",
+          };
+        },
       },
     } as unknown as ApiRouteDeps;
     const broker = connectionBrokerFetch(baseFetch, {
@@ -355,11 +362,83 @@ describe("connectionBrokerFetch response lifecycle", () => {
     const insufficient = await broker("https://example.com/mcp", { method: "GET" });
     expect(insufficient.status).toBe(401);
     expect(fetchCount).toBe(5);
+    expect(credentialRequests.length).toBeGreaterThan(1);
+    expect(credentialRequests.every((request) => request.callerSubjectId === "sandbox:test")).toBe(
+      true,
+    );
     expect(canceled).toEqual(["initial-401", "initial-401-again", "retry-401", "initial-403"]);
   });
 });
 
 describe("prepareToolspaceMcpSurface", () => {
+  test("service turns cannot reach subject-owned resolvers or upstream transport", () => {
+    let fetchCalls = 0;
+    const baseFetch = async () => {
+      fetchCalls += 1;
+      return new Response("unexpected");
+    };
+    expect(() =>
+      connectionBrokerFetch(baseFetch, {
+        deps: { settings: testSettings() } as ApiRouteDeps,
+        grant: {
+          accountId: "account-1",
+          workspaceId: "workspace-1",
+          subjectId: "sandbox:scheduled",
+          permissions: ["toolspace:call"],
+        } as AccessGrant,
+        config: {
+          id: "personal-slack",
+          url: "https://mcp.slack.com/mcp",
+          cacheToolsList: false,
+          connectionRef: {
+            providerDomain: "slack.com",
+            kind: "oauth2",
+            subjectScope: "subject",
+          },
+        } as McpServerConfig,
+        sessionId: "session-1",
+        rootSessionId: "session-1",
+        turn: {
+          id: "turn-1",
+          activeAttemptId: "attempt-1",
+          executionGeneration: 1,
+          initiator: { kind: "service", subjectId: "scheduler" },
+          initiatorContext: {},
+        } as SessionTurn,
+      }),
+    ).toThrow("requires a human turn initiator");
+    expect(fetchCalls).toBe(0);
+  });
+
+  test("an empty Toolspace surface returns a valid empty tools/list", async () => {
+    if (!available) return;
+    const server = buildOpenGeniMcpServer(
+      makeDeps(200),
+      grantFor({
+        accountId: crypto.randomUUID(),
+        workspaceId: crypto.randomUUID(),
+        sessionId: crypto.randomUUID(),
+      }),
+      {
+        toolspace: {
+          sessionId: crypto.randomUUID(),
+          subjectId: "sandbox:empty",
+          tools: [],
+          close: async () => {},
+        },
+      },
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const mcpClient = new Client({ name: "empty-toolspace-test", version: "1" });
+    await server.connect(serverTransport);
+    await mcpClient.connect(clientTransport);
+    try {
+      expect((await mcpClient.listTools()).tools).toEqual([]);
+    } finally {
+      await Promise.all([mcpClient.close(), server.close()]);
+    }
+  });
+
   test("uses the host MCP credential port with the active turn's frozen initiator", async () => {
     if (!available) return;
     const server = startTestMcpServer({ requiredAuthorization: "Bearer cloud-connection" });

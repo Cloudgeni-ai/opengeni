@@ -626,6 +626,81 @@ export const DEFAULT_FIRST_PARTY_MCP_PERMISSIONS = [
   "github:use",
 ] as const satisfies readonly Permission[];
 
+/**
+ * Exact public catalog for tools served by the broad first-party `opengeni`
+ * MCP server. Adding a registration does not make it model-visible: the name
+ * must be admitted here and selected by the session policy.
+ *
+ * `files_get_download_url` intentionally is not in this catalog. It belongs to
+ * the dedicated `files` MCP server.
+ */
+export const FIRST_PARTY_MCP_TOOL_NAMES = [
+  "set_session_title",
+  "goal_set",
+  "goal_update",
+  "goal_complete",
+  "goal_pause",
+  "memory_search",
+  "memory_save",
+  "memory_correct",
+  "sandboxes_list",
+  "sandbox_attach",
+  "sandbox_swap",
+  "run_on",
+  "sandbox_provision",
+  "rig_list",
+  "rig_get",
+  "rig_propose_change",
+  "rig_verify",
+  "rig_promote",
+  "sessions_list",
+  "session_get",
+  "session_events",
+  "session_create",
+  "session_send_message",
+  "session_pause",
+  "session_resume",
+  "session_steer",
+  "set_other_session_title",
+  "variable_set_list",
+  "environment_list",
+  "variable_set_set_variable",
+  "environment_set_variable",
+  "github_connect_link",
+  "github_token",
+  "github_repositories_list",
+  "social_connections_list",
+  "social_posts_recent",
+  "social_daily_analysis_context",
+  "scheduled_tasks_list",
+  "scheduled_tasks_get",
+  "scheduled_tasks_create",
+  "scheduled_tasks_update",
+  "scheduled_tasks_pause",
+  "scheduled_tasks_resume",
+  "scheduled_tasks_trigger",
+  "scheduled_tasks_delete",
+  "scheduled_task_runs_list",
+  "slack_bot_list_channels",
+  "slack_bot_channel_history",
+  "slack_bot_list_users",
+  "slack_bot_post_message",
+] as const;
+export const FirstPartyMcpToolName = z.enum(FIRST_PARTY_MCP_TOOL_NAMES);
+export type FirstPartyMcpToolName = z.infer<typeof FirstPartyMcpToolName>;
+
+/**
+ * Ordinary sessions get only the small self-management surface. Authorization
+ * permissions remain an independent, additional boundary.
+ */
+export const DEFAULT_FIRST_PARTY_MCP_TOOLS = [
+  "set_session_title",
+  "goal_set",
+  "goal_update",
+  "goal_complete",
+  "goal_pause",
+] as const satisfies readonly FirstPartyMcpToolName[];
+
 export function prefixedMcpToolName(registryId: string, toolName: string): string {
   return `${registryId}__${toolName}`;
 }
@@ -1139,6 +1214,9 @@ export const DelegatedAccessTokenPayload = z
     // Worker-asserted session scope for first-party MCP calls (HMAC-signed, not
     // agent-controlled); enables session-scoped tools such as goal management.
     sessionId: z.string().uuid().optional(),
+    // Model-visible first-party tool selection for a worker-bound session.
+    // This is visibility only; permissions remain the authorization boundary.
+    firstPartyMcpTools: z.array(FirstPartyMcpToolName).optional(),
     // The turn making the call (the caller's identity), HMAC-signed by the worker
     // at turn setup. Lets a tool classify WHO is calling from the token itself,
     // instead of racily re-reading the session's live active_turn_id — e.g. the
@@ -4541,6 +4619,41 @@ export const CapabilityPackSkill = z
   });
 export type CapabilityPackSkill = z.infer<typeof CapabilityPackSkill>;
 
+// Inline skill content fixed onto one session at creation. It intentionally
+// uses the exact same validated directory shape as a pack skill, but has a
+// different semantic owner and lifecycle. Session readers can inspect it; it
+// is configuration, never a secret store.
+export const SessionSkill = CapabilityPackSkill;
+export type SessionSkill = z.infer<typeof SessionSkill>;
+
+export const SessionSkills = z
+  .array(SessionSkill)
+  .max(32)
+  .transform((skills, ctx) => {
+    const selected = new Map<string, { fingerprint: string; skill: SessionSkill }>();
+    for (const skill of skills) {
+      const key = skill.name.toLowerCase();
+      const fingerprint = JSON.stringify({
+        description: skill.description ?? null,
+        files: [...skill.files]
+          .sort((left, right) => left.path.localeCompare(right.path))
+          .map(({ path, content }) => ({ path, content })),
+      });
+      const existing = selected.get(key);
+      if (!existing) {
+        selected.set(key, { fingerprint, skill });
+        continue;
+      }
+      if (existing.fingerprint !== fingerprint) {
+        ctx.addIssue({
+          code: "custom",
+          message: `conflicting session skill definitions: ${skill.name}`,
+        });
+      }
+    }
+    return [...selected.values()].map(({ skill }) => skill);
+  });
+
 function isSafePackSkillRelativePath(path: string): boolean {
   if (path.startsWith("/") || path.includes("\\")) {
     return false;
@@ -4804,15 +4917,16 @@ export const CreateConnectionRequest = z.object({
 });
 export type CreateConnectionRequest = z.infer<typeof CreateConnectionRequest>;
 
-/**
- * Write-only Slack bot installation input. `token` is accepted only by the
- * dedicated validated endpoint and is never represented in a response schema.
- */
-export const ConnectOpenGeniSlackBotRequest = z.object({
-  token: z.string().trim().startsWith("xoxb-").max(8192),
+export const OpenGeniSlackBotInstallRequest = z.object({
   connectionId: z.string().uuid().optional(),
 });
-export type ConnectOpenGeniSlackBotRequest = z.infer<typeof ConnectOpenGeniSlackBotRequest>;
+export type OpenGeniSlackBotInstallRequest = z.infer<typeof OpenGeniSlackBotInstallRequest>;
+
+export const OpenGeniSlackBotInstallStart = z.object({
+  authorizationUrl: z.string().url(),
+  expiresAt: z.string().datetime({ offset: true }),
+});
+export type OpenGeniSlackBotInstallStart = z.infer<typeof OpenGeniSlackBotInstallStart>;
 
 export const UpdateConnectionRequest = z.object({
   providerDomain: z.string().min(1).optional(),
@@ -4964,15 +5078,15 @@ export const CapabilityCatalogItem = z.object({
   runtime: CapabilityRuntime.default({ available: false, notes: null }),
   enabled: z.boolean().default(false),
   enabledReason: z.string().nullable().default(null),
-  // The connection backing this enabled installation, when the enable-time
-  // connectionRef resolved to one (null for header/credential-free items —
-  // that means "no connection involved", not "broken"). Lets the UI match
-  // connection health by id instead of guessing from providerDomain alone.
+  // The non-secret connection binding stored with an enabled installation.
+  // Workspace refs retain an exact row id. Subject refs deliberately omit it:
+  // each caller resolves their own visible row by provider/kind at runtime.
   connectionRef: z
     .object({
-      connectionId: z.string().min(1),
+      connectionId: z.string().min(1).optional(),
       providerDomain: z.string().min(1),
       kind: z.string().min(1),
+      subjectScope: z.enum(["workspace", "subject"]).optional(),
     })
     .nullable()
     .default(null),
@@ -5088,6 +5202,7 @@ export const Session = z.object({
   // null when the session carried none.
   instructions: z.string().nullable(),
   resources: z.array(ResourceRef),
+  skills: SessionSkills.default([]),
   tools: z.array(ToolRef),
   // Origin of the persisted tool allow-list. Optional for rolling client
   // compatibility; current servers emit it and legacy rows map to `legacy`.
@@ -5132,6 +5247,9 @@ export const Session = z.object({
   // Non-default first-party MCP token permissions (manager-style sessions);
   // null means the fixed worker default set.
   firstPartyMcpPermissions: z.array(Permission).nullable(),
+  // null means the fixed minimal worker-visible default. An explicit array,
+  // including [], is the exact model-visible first-party selection.
+  firstPartyMcpTools: z.array(FirstPartyMcpToolName).nullable().default(null),
   // Per-session third-party MCP servers, metadata only. Credential values are
   // write-only and never appear here.
   mcpServers: z.array(SessionMcpServerMetadata).default([]),
@@ -7368,6 +7486,9 @@ export const CreateSessionRequest = withVariableSetIdAlias({
   // authoritative. Top-level omission remains []. Presence is resolved from
   // the raw request because this Zod default erases absent-vs-empty.
   resources: z.array(ResourceRef).default([]),
+  // Inline skills are fixed onto the session. Child omission inherits the
+  // trusted parent's selection; an explicit array, including [], wins.
+  skills: SessionSkills.default([]),
   // The same child omission rule applies to selected MCP tool refs. Top-level
   // omission still applies workspace-default capability MCP tools; explicit []
   // suppresses those defaults (the first-party OpenGeni server remains added).
@@ -7420,6 +7541,10 @@ export const CreateSessionRequest = withVariableSetIdAlias({
   // A goal-bearing session whose explicit/effective set omits goals:manage is
   // rejected; creation never silently expands a child beyond that set.
   firstPartyMcpPermissions: z.array(Permission).optional(),
+  // Exact model-visible selection from the broad first-party OpenGeni MCP
+  // catalog. Omit for the minimal default; [] intentionally exposes none.
+  // This does not grant authority: every registered tool is permission-gated.
+  firstPartyMcpTools: z.array(FirstPartyMcpToolName).optional(),
   // Third-party MCP servers attached only to this session. For an agent-created
   // child, omission snapshots its trusted immediate parent's server definitions,
   // policies, connection refs, and encrypted credentials. Explicit arrays,
