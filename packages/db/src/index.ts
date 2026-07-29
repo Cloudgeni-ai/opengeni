@@ -29588,6 +29588,12 @@ export async function claimSessionWorkForAttempt(
             and(
               eq(schema.sessionAttemptInterruptions.workspaceId, workspaceId),
               eq(schema.sessionAttemptInterruptions.sessionId, sessionId),
+              inArray(schema.sessionAttemptInterruptions.state, [
+                "pending",
+                "delivered",
+                "acknowledged",
+                "settled",
+              ]),
               isNull(schema.sessionTurnAttempts.quiescedAt),
             ),
           )
@@ -29879,20 +29885,27 @@ export async function claimSessionWorkForAttempt(
           )
           .limit(1)
           .for("update");
-        const rows = pendingAgentSteer
-          ? []
-          : await rawRows<{
-              id: string;
-              trigger_event_id: string;
-              metadata: Record<string, unknown>;
-            }>(
-              tx as unknown as Database,
-              sql`select id, trigger_event_id, metadata from session_turns
+        // A human/API Steer is the newest explicit replacement direction. It
+        // must claim next even when an older Agent Steer is pending; the
+        // internal instruction is delivered as context on that same human turn
+        // instead of manufacturing another system inference ahead of it.
+        // Ordinary queued sends retain the established Agent-Steer priority.
+        const rows = await rawRows<{
+          id: string;
+          trigger_event_id: string;
+          metadata: Record<string, unknown>;
+        }>(
+          tx as unknown as Database,
+          sql`select id, trigger_event_id, metadata from session_turns
               where workspace_id = ${workspaceId} and session_id = ${sessionId}
                 and status = 'queued' and source in ('user', 'api')
+                and (
+                  ${Boolean(pendingAgentSteer)} = false
+                  or metadata->>'delivery' = 'steer'
+                )
               order by position asc, created_at asc, id asc
               limit 1`,
-            );
+        );
         const queuedTurnPreview = rows[0];
         const queuedLocks = queuedTurnPreview
           ? await lockSessionEventWriteRows(tx as unknown as Database, {
@@ -33455,7 +33468,9 @@ export async function getSessionQueueSnapshot(
       version: session.queueVersion,
       effectiveControl: serializeEffectiveSessionControl(effectiveControl),
       stoppingPreviousAttempt:
-        latestInterruption !== null && latestInterruption.quiescedAt === null,
+        latestInterruption !== null &&
+        latestInterruption.interruptionState !== "rejected_stale" &&
+        latestInterruption.quiescedAt === null,
       items: rows.map(mapSessionTurn),
     };
   });
