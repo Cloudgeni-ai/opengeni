@@ -1,5 +1,11 @@
 # @opengeni/db
 
+## 0.13.2
+
+### Patch Changes
+
+- 8b8545e: Keep every account-scoped workspace grant in bootstrapped access contexts so newly created workspaces remain available after an access refresh.
+
 ## 0.13.1
 
 ### Patch Changes
