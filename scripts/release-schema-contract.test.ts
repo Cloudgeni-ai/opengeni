@@ -147,12 +147,17 @@ describe("release schema contract", () => {
         (migrations.has("0130_workspace_instruction_policies.sql") ? 1 : 0) +
         (migrations.has("0131_session_realtime_mode.sql") ? 1 : 0) +
         (migrations.has("0132_session_realtime_ledger.sql") ? 1 : 0) +
-        (migrations.has("0133_session_realtime_delegation_terminal.sql") ? 1 : 0),
+        (migrations.has("0133_session_realtime_delegation_terminal.sql") ? 1 : 0) +
+        (migrations.has("0134_session_realtime_context_projection.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "4d5a30141eafb926f57680af89b2bda7981e40a8b3ed0a6246f8d0ebcb949df3",
+      "fef09f129fd39abdb7fc8a89a258ea8cf0401652b8af24aa086de6452bce0dd2",
     );
-    expect(contract.latestMigration).toBe("0133_session_realtime_delegation_terminal.sql");
+    expect(contract.latestMigration).toBe("0134_session_realtime_context_projection.sql");
+    expect(migrations.get("0134_session_realtime_context_projection.sql")).toMatchObject({
+      sha256: "941de03f488e4645c9a0bb1c5db10fd90aba6f9a1cca1e28df48638a491049a4",
+      deploymentMode: "rolling",
+    });
     expect(migrations.get("0133_session_realtime_delegation_terminal.sql")).toMatchObject({
       sha256: "ac30398eb763f231df5411572f7cbb3b984557ca0f038b70973495cae83eb048",
       deploymentMode: "rolling",
@@ -213,6 +218,7 @@ describe("release schema contract", () => {
       "0131_session_realtime_mode.sql",
       "0132_session_realtime_ledger.sql",
       "0133_session_realtime_delegation_terminal.sql",
+      "0134_session_realtime_context_projection.sql",
     ]);
     expect(new Set(contract.migrations.map((migration) => migration.path)).size).toBe(
       contract.fileCount,

@@ -295,6 +295,24 @@ flowchart LR
 
 An ordinary session may temporarily enter **connected-Codex GPT-Live realtime mode** without creating or forking another session. Admission and every ordinary workflow claim serialize on the same canonical PostgreSQL session lock: admitted ordinary/recovery/maintenance work makes realtime start reject, while an active realtime owner makes those claims remain pending until end or lease expiry. Human composer/queue/Send/Steer mutations are fenced only for that session; durable cross-session agent updates are still accepted but do not wake competing normal inference. `session_realtime_modes` stores the authenticated browser-owner hash, versioned lease, connection epoch, and lifecycle facts; it never stores provider credentials or audio. The browser's WebRTC negotiation must present the exact active owner/version, which the API consumes transactionally before sending only SDP/configuration through the connected-Codex broker. Canonical: `packages/db/src/session-realtime.ts`, `packages/db/src/session-queue-commands.ts`, `apps/api/src/routes/sessions.ts`, `apps/worker/src/workflows/session.ts`, and `packages/sdk/src/codex-realtime.ts`.
 
+When one or more realtime modes have ended, their durable ledger becomes normal
+model continuity only in the first eligible ordinary queued human/API text
+claim. Under the same session-lock transaction, the claim selects every ended
+unprojected mode by `(ended_at,id)`, orders whole ledger rows by mode then
+`(sequence,id)`, inserts one exact-turn `session_realtime_context_projections`
+row, and marks all source modes with that projection. Rendering is deterministic
+and limited to 65,536 UTF-8 bytes: newest whole entries win when necessary,
+selected entries remain chronological, and durable counts expose omissions.
+An ended mode with no finalized rows is still consumed by a projection whose
+`context` is `NULL`; no ended modes create no projection. The worker reads this
+model-only system context strictly by `(workspace,session,turn)`, including on
+same-turn recovery; it is never appended to `session_history_items`, and later
+turns cannot replay it. Active or delayed provider-delegated turns consume
+neither continuity nor pending cross-session updates. Canonical:
+`packages/db/src/session-realtime-context.ts`, `packages/db/src/index.ts`,
+`packages/db/drizzle/0134_session_realtime_context_projection.sql`, and
+`apps/worker/src/activities/run-input.ts`.
+
 Native provider delegation remains in that same session. Exact owner, connection
 epoch, and provider-start proof gate one transaction that accepts the provider
 call ledger row and creates one ordinary queued `session_turns` row plus its

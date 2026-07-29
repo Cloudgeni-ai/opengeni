@@ -35,6 +35,23 @@ lost. The lifecycle and claim fence are canonical in
 `packages/db/src/session-realtime.ts`, `packages/db/src/index.ts`, and
 `apps/worker/src/workflows/session.ts`.
 
+After end, completed realtime ledger history crosses into ordinary inference
+only inside the first eligible queued human/API text claim transaction. That
+transaction deterministically locks all ended unprojected modes in
+`(ended_at,id)` order, renders their `(mode,sequence,id)`-ordered durable rows
+into one exact-turn model-only projection, and marks every source mode consumed.
+The projection is bounded to 65,536 UTF-8 bytes without slicing entries: newest
+whole entries win under pressure, included entries remain chronological, and
+source/included/omitted counts remain durable. An ended mode with no finalized
+rows is explicitly consumed by a projection with `context = NULL`; with no
+ended mode, no projection is created. Claim rollback removes the projection and
+markers together. Worker-death recovery reads the same row by exact turn id;
+later turns cannot replay it because it never enters `session_history_items`.
+Provider-delegated turns, including a call claimed only after mode end, consume
+neither this continuity nor pending cross-session updates. Canonical:
+`packages/db/src/session-realtime-context.ts`, the ordinary queued branch of
+`claimSessionWorkForAttempt`, and `apps/worker/src/activities/run-input.ts`.
+
 A provider `delegation.created` is the deliberate exception to realtime being
 turn-free: after exact owner, active connection epoch, and provider-start proof,
 one transaction ledgers the call and creates exactly one ordinary queued turn

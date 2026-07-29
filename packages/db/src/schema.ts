@@ -898,6 +898,11 @@ export const sessionRealtimeModes = pgTable(
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
     endedAt: timestamp("ended_at", { withTimezone: true }),
     endReason: text("end_reason"),
+    // The rolling migration owns this forward reference. Ended modes are
+    // consumed only when an eligible ordinary queued turn atomically binds all
+    // pending realtime history to one immutable projection row.
+    contextProjectionId: uuid("context_projection_id"),
+    contextProjectedAt: timestamp("context_projected_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -1717,6 +1722,63 @@ export const sessionTurns = pgTable(
     oneCurrentInference: uniqueIndex("session_turns_one_current_inference_uq")
       .on(table.workspaceId, table.sessionId)
       .where(sql`${table.status} in ('running','requires_action','recovering','waiting_capacity')`),
+  }),
+);
+
+// One bounded model-only projection of completed realtime ledger history,
+// bound to the exact ordinary text turn that consumed its source modes. This
+// is not conversation history: runtime reads it by turn id and filters its
+// system message from persistence, so later turns cannot replay it.
+export const sessionRealtimeContextProjections = pgTable(
+  "session_realtime_context_projections",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    turnId: uuid("turn_id").notNull(),
+    context: text("context"),
+    sourceModeCount: integer("source_mode_count").notNull(),
+    sourceEntryCount: integer("source_entry_count").notNull(),
+    includedEntryCount: integer("included_entry_count").notNull(),
+    omittedEntryCount: integer("omitted_entry_count").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "session_realtime_context_projections_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceSession: foreignKey({
+      name: "session_realtime_context_projections_workspace_session_fk",
+      columns: [table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("cascade"),
+    workspaceTurn: foreignKey({
+      name: "session_realtime_context_projections_workspace_turn_fk",
+      columns: [table.workspaceId, table.turnId],
+      foreignColumns: [sessionTurns.workspaceId, sessionTurns.id],
+    }).onDelete("cascade"),
+    turn: uniqueIndex("session_realtime_context_projections_turn_uq").on(
+      table.workspaceId,
+      table.sessionId,
+      table.turnId,
+    ),
+    contextValid: check(
+      "session_realtime_context_projections_context_check",
+      sql`${table.context} is null or octet_length(${table.context}) between 1 and 65536`,
+    ),
+    countsValid: check(
+      "session_realtime_context_projections_counts_check",
+      sql`${table.sourceModeCount} >= 1
+        and ${table.sourceEntryCount} >= 0
+        and ${table.includedEntryCount} >= 0
+        and ${table.omittedEntryCount} >= 0
+        and ${table.includedEntryCount} + ${table.omittedEntryCount} = ${table.sourceEntryCount}
+        and ((${table.sourceEntryCount} = 0 and ${table.context} is null)
+          or (${table.sourceEntryCount} > 0 and ${table.context} is not null))`,
+    ),
   }),
 );
 

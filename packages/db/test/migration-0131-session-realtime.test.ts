@@ -58,6 +58,7 @@ describe("0131 session realtime mode migration", () => {
       "session_realtime_modes_active_lease_idx",
       "session_realtime_modes_one_active_uq",
       "session_realtime_modes_operation_uq",
+      "session_realtime_modes_pending_context_idx",
       "session_realtime_modes_pkey",
     ]);
     expect(

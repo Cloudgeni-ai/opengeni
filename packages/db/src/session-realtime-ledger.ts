@@ -290,6 +290,13 @@ function realtimeDelegationMetadata(metadata: Record<string, unknown>): {
   };
 }
 
+/** True only for an exact provider-call-linked ordinary turn shape. */
+export function isSessionRealtimeDelegationTurnMetadata(
+  metadata: Record<string, unknown>,
+): boolean {
+  return realtimeDelegationMetadata(metadata) !== null;
+}
+
 /**
  * Under the canonical session lock, admit only the first queued ordinary turn
  * whose immutable metadata still matches its accepted provider call row. This
