@@ -132,6 +132,18 @@ function slackCredentialRejected(error: unknown): error is SlackBotProviderError
   return error instanceof SlackBotProviderError && SLACK_CREDENTIAL_REJECTION_CODES.has(error.code);
 }
 
+export type SlackBotCredentialVerificationFailureReason = "scope_mismatch" | "identity_mismatch";
+
+export class SlackBotCredentialVerificationError extends HTTPException {
+  constructor(
+    readonly failureReason: SlackBotCredentialVerificationFailureReason,
+    message: string,
+  ) {
+    super(422, { message });
+    this.name = "SlackBotCredentialVerificationError";
+  }
+}
+
 /**
  * Validates a write-only xoxb credential before it can enter encrypted storage.
  * Slack does not expose the app's display_information name to this scope set;
@@ -157,14 +169,18 @@ export async function verifyOpenGeniSlackBotCredential(
   });
   const user = slackRecord(userResponse.payload.user);
   if (!user || user.is_bot !== true || user.deleted === true) {
-    throw new HTTPException(422, { message: "Slack credential must identify an active bot user" });
+    throw new SlackBotCredentialVerificationError(
+      "identity_mismatch",
+      "Slack credential must identify an active bot user",
+    );
   }
   const profile = slackRecord(user.profile);
   const displayName = slackString(profile?.display_name) || slackString(profile?.real_name);
   if (displayName !== "OpenGeni") {
-    throw new HTTPException(422, {
-      message: 'Slack bot display name must be exactly "OpenGeni"',
-    });
+    throw new SlackBotCredentialVerificationError(
+      "identity_mismatch",
+      'Slack bot display name must be exactly "OpenGeni"',
+    );
   }
 
   return {
@@ -634,15 +650,19 @@ function assertExactOpenGeniSlackBotScopes(grantedScopes: string[]): void {
       ...(forbidden.length ? [`forbidden: ${forbidden.join(", ")}`] : []),
       ...(unsupported.length ? [`unsupported: ${unsupported.join(", ")}`] : []),
     ];
-    throw new HTTPException(422, {
-      message: `Slack bot scopes must exactly match the OpenGeni manifest (${facts.join("; ")})`,
-    });
+    throw new SlackBotCredentialVerificationError(
+      "scope_mismatch",
+      `Slack bot scopes must exactly match the OpenGeni manifest (${facts.join("; ")})`,
+    );
   }
 }
 
 function parseGrantedScopes(header: string | null): string[] {
   if (!header) {
-    throw new HTTPException(422, { message: "Slack did not report granted bot scopes" });
+    throw new SlackBotCredentialVerificationError(
+      "scope_mismatch",
+      "Slack did not report granted bot scopes",
+    );
   }
   return [
     ...new Set(

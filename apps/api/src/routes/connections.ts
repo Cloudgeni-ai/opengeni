@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   ConnectionResponse,
   CreateConnectionRequest,
@@ -20,13 +21,19 @@ import {
 import {
   consumeIntegrationOAuthStateNonce,
   createConnection,
+  createConnectionWithSlackBotSuccessAudit,
   encryptEnvironmentValue,
   getConnectionMetadata,
   getWorkspaceGrant,
   listConnectionsMetadata,
-  recordAuditEvent,
+  recordSlackBotInstallCallbackFailure,
   revokeConnection,
+  revokeConnectionWithSlackBotSuccessAudit,
+  SlackBotLifecycleSuccessAuditError,
   updateConnection,
+  updateConnectionWithSlackBotSuccessAudit,
+  type SlackBotInstallCallbackFailureReason,
+  type SlackBotInstallCallbackFailureStage,
 } from "@opengeni/db";
 import type { ApiRouteDeps } from "@opengeni/core";
 import type { Hono } from "hono";
@@ -39,6 +46,7 @@ import {
 import { canonicalProviderDomain } from "../integrations/provider-domain";
 import {
   exchangeOpenGeniSlackAuthorizationCode,
+  SlackBotCredentialVerificationError,
   verifyOpenGeniSlackBotCredential,
 } from "../integrations/slack-bot";
 import {
@@ -145,9 +153,11 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/integrations/slack/callback", async (c) => {
     const baseUrl = integrationBaseUrl(settings.publicBaseUrl, c.req.url);
     let state: OpenGeniSlackInstallState | null = null;
+    let stage: SlackBotInstallCallbackFailureStage = "permission_check";
     try {
       state = readOpenGeniSlackInstallState(c.req.query("state"), settings);
       await requireSlackInstallCallbackGrant(db, state);
+      stage = "nonce_consume";
       const consumed = await consumeIntegrationOAuthStateNonce(db, {
         accountId: state.accountId,
         workspaceId: state.workspaceId,
@@ -157,18 +167,28 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         now: new Date(),
       });
       if (!consumed) {
-        throw new HTTPException(400, { message: "Slack installation state has already been used" });
-      }
-      const slackError = c.req.query("error");
-      if (slackError) {
-        return c.redirect(
-          slackInstallReturnUrl(baseUrl, state.returnPath, "error", slackError),
-          302,
+        throw new SlackInstallCallbackError(
+          400,
+          "state_replayed",
+          "Slack installation state has already been used",
         );
       }
+      if (c.req.query("error")) {
+        stage = "provider_denial";
+        throw new SlackInstallCallbackError(
+          400,
+          "provider_denied",
+          "Slack installation authorization was denied",
+        );
+      }
+      stage = "code_exchange";
       const code = c.req.query("code");
       if (!code) {
-        throw new HTTPException(400, { message: "Slack installation callback is missing code" });
+        throw new SlackInstallCallbackError(
+          400,
+          "missing_code",
+          "Slack installation callback is missing code",
+        );
       }
       const slack = requireOpenGeniSlackOAuthSettings(settings);
       const redirectUri = `${baseUrl}/v1/integrations/slack/callback`;
@@ -181,8 +201,11 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         },
         deps.slackFetch ?? fetch,
       );
+      stage = "credential_verification";
       const verified = await verifyOpenGeniSlackBotCredential(token, deps.slackFetch ?? fetch);
+      stage = "permission_recheck";
       await requireSlackInstallCallbackGrant(db, state);
+      stage = "persistence";
       const connection = await persistOpenGeniSlackBotConnection({
         deps,
         state,
@@ -194,6 +217,24 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         302,
       );
     } catch (error) {
+      if (state) {
+        const failure = slackInstallCallbackFailure(stage, error);
+        try {
+          await recordSlackBotInstallCallbackFailure(db, {
+            accountId: state.accountId,
+            workspaceId: state.workspaceId,
+            subjectId: state.subjectId,
+            callbackDigest: createHash("sha256").update(state.nonce).digest("hex"),
+            installMode: state.connectionId ? "reinstall" : "connect",
+            ...failure,
+          });
+        } catch {
+          return c.redirect(
+            slackInstallReturnUrl(baseUrl, state.returnPath, "error", "installation_failed"),
+            302,
+          );
+        }
+      }
       const reason = slackInstallErrorReason(error);
       return c.redirect(
         slackInstallReturnUrl(baseUrl, state?.returnPath ?? "/integrations", "error", reason),
@@ -288,33 +329,26 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.delete("/v1/workspaces/:workspaceId/connections/:connectionId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
+    const connectionId = c.req.param("connectionId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
-    const connection = await revokeConnection(
-      db,
-      workspaceId,
-      c.req.param("connectionId"),
-      grant.subjectId,
-    );
-    if (!connection) {
+    const existing = await getConnectionMetadata(db, workspaceId, connectionId, grant.subjectId);
+    if (!existing) {
       throw new HTTPException(404, { message: "connection not found" });
     }
-    if (isOpenGeniSlackBotConnection(connection)) {
-      const metadata = openGeniSlackBotMetadata(connection.metadata)!;
-      await recordAuditEvent(db, {
-        accountId: grant.accountId,
-        workspaceId,
-        subjectId: grant.subjectId,
-        action: "slack_bot.disconnected",
-        targetType: "connection",
-        targetId: connection.id,
-        metadata: {
+    const connection = isOpenGeniSlackBotConnection(existing)
+      ? await revokeConnectionWithSlackBotSuccessAudit(db, {
+          accountId: grant.accountId,
+          workspaceId,
+          subjectId: grant.subjectId,
+          connectionId,
+          expectedVersion: existing.version,
           credentialRole: OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
           credentialLabel: OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
-          connectionId: connection.id,
-          slackTeamId: metadata.slackTeamId,
-          outcome: "succeeded",
-        },
-      });
+          slackTeamId: openGeniSlackBotMetadata(existing.metadata)!.slackTeamId,
+        })
+      : await revokeConnection(db, workspaceId, connectionId, grant.subjectId);
+    if (!connection) {
+      throw new HTTPException(409, { message: "connection changed during disconnect; try again" });
     }
     return c.json(ConnectionResponse.parse({ connection }));
   });
@@ -390,87 +424,105 @@ async function persistOpenGeniSlackBotConnection(input: {
       )
     : null;
   if (input.state.connectionId && !existing) {
-    throw new HTTPException(404, { message: "connection not found" });
+    throw new SlackInstallCallbackError(
+      404,
+      "connection_conflict",
+      "connection not found",
+      "principal_validation",
+    );
   }
   if (existing && !isOpenGeniSlackBotConnection(existing)) {
-    throw new HTTPException(422, {
-      message: "connectionId is not an OpenGeni Slack bot connection",
-    });
+    throw new SlackInstallCallbackError(
+      422,
+      "connection_conflict",
+      "connectionId is not an OpenGeni Slack bot connection",
+      "principal_validation",
+    );
   }
   if (existing?.version !== input.state.connectionVersion) {
-    throw new HTTPException(409, {
-      message: "Slack bot connection changed during reinstall; start again",
-    });
+    throw new SlackInstallCallbackError(
+      409,
+      "connection_conflict",
+      "Slack bot connection changed during reinstall; start again",
+      "principal_validation",
+    );
   }
   const existingMetadata = existing ? openGeniSlackBotMetadata(existing.metadata) : null;
   if (existingMetadata && existingMetadata.slackTeamId !== input.verified.metadata.slackTeamId) {
-    throw new HTTPException(409, {
-      message: "a Slack bot connection can only be reinstalled for its original Slack workspace",
-    });
+    throw new SlackInstallCallbackError(
+      409,
+      "principal_mismatch",
+      "a Slack bot connection can only be reinstalled for its original Slack workspace",
+      "principal_validation",
+    );
   }
   if (
     existingMetadata &&
     (existingMetadata.botId !== input.verified.metadata.botId ||
       existingMetadata.botUserId !== input.verified.metadata.botUserId)
   ) {
-    throw new HTTPException(409, {
-      message:
-        "a different Slack bot requires a new connection and explicit scheduled-task rebinding",
-    });
+    throw new SlackInstallCallbackError(
+      409,
+      "principal_mismatch",
+      "a different Slack bot requires a new connection and explicit scheduled-task rebinding",
+      "principal_validation",
+    );
   }
   const verifiedInstallAt = new Date(input.verified.metadata.verifiedAt);
-  const connection = existing
-    ? await updateConnection(db, {
-        workspaceId: input.state.workspaceId,
-        connectionId: existing.id,
-        visibleToSubjectId: input.state.subjectId,
-        expectedVersion: existing.version,
-        subjectId: null,
-        providerDomain: "slack.com",
-        kind: "app_install",
-        status: "active",
-        credentialEncrypted,
-        grantedScopes: input.verified.grantedScopes,
-        expiresAt: null,
-        verifiedInstallAt,
-        verifiedInstallVersion: existing.version + 1,
-        metadata: input.verified.metadata,
-        updatedBySubjectId: input.state.subjectId,
-      })
-    : await createConnection(db, {
-        accountId: input.state.accountId,
-        workspaceId: input.state.workspaceId,
-        subjectId: null,
-        providerDomain: "slack.com",
-        kind: "app_install",
-        credentialEncrypted,
-        grantedScopes: input.verified.grantedScopes,
-        expiresAt: null,
-        verifiedInstallAt,
-        verifiedInstallVersion: 1,
-        metadata: input.verified.metadata,
-        createdBySubjectId: input.state.subjectId,
-      });
-  if (!connection) {
-    throw new HTTPException(409, {
-      message: "Slack bot connection changed during reinstall; start again",
-    });
-  }
-  await recordAuditEvent(db, {
+  const lifecycleAudit = {
     accountId: input.state.accountId,
     workspaceId: input.state.workspaceId,
     subjectId: input.state.subjectId,
-    action: existing ? "slack_bot.reinstalled" : "slack_bot.connected",
-    targetType: "connection",
-    targetId: connection.id,
-    metadata: {
-      credentialRole: OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
-      credentialLabel: OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
-      connectionId: connection.id,
-      slackTeamId: input.verified.metadata.slackTeamId,
-      outcome: "succeeded",
-    },
-  });
+    credentialRole: OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
+    credentialLabel: OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
+    slackTeamId: input.verified.metadata.slackTeamId,
+  };
+  const connection = existing
+    ? await updateConnectionWithSlackBotSuccessAudit(db, {
+        ...lifecycleAudit,
+        connection: {
+          workspaceId: input.state.workspaceId,
+          connectionId: existing.id,
+          visibleToSubjectId: input.state.subjectId,
+          expectedVersion: existing.version,
+          subjectId: null,
+          providerDomain: "slack.com",
+          kind: "app_install",
+          status: "active",
+          credentialEncrypted,
+          grantedScopes: input.verified.grantedScopes,
+          expiresAt: null,
+          verifiedInstallAt,
+          verifiedInstallVersion: existing.version + 1,
+          metadata: input.verified.metadata,
+          updatedBySubjectId: input.state.subjectId,
+        },
+      })
+    : await createConnectionWithSlackBotSuccessAudit(db, {
+        ...lifecycleAudit,
+        connection: {
+          accountId: input.state.accountId,
+          workspaceId: input.state.workspaceId,
+          subjectId: null,
+          providerDomain: "slack.com",
+          kind: "app_install",
+          credentialEncrypted,
+          grantedScopes: input.verified.grantedScopes,
+          expiresAt: null,
+          verifiedInstallAt,
+          verifiedInstallVersion: 1,
+          metadata: input.verified.metadata,
+          createdBySubjectId: input.state.subjectId,
+        },
+      });
+  if (!connection) {
+    throw new SlackInstallCallbackError(
+      409,
+      "connection_conflict",
+      "Slack bot connection changed during reinstall; start again",
+      "principal_validation",
+    );
+  }
   return connection;
 }
 
@@ -560,7 +612,47 @@ function slackInstallReturnUrl(
   return url.toString();
 }
 
+class SlackInstallCallbackError extends HTTPException {
+  constructor(
+    status: 400 | 403 | 404 | 409 | 422,
+    readonly failureReason: SlackBotInstallCallbackFailureReason,
+    message: string,
+    readonly failureStage?: SlackBotInstallCallbackFailureStage,
+  ) {
+    super(status, { message });
+    this.name = "SlackInstallCallbackError";
+  }
+}
+
+function slackInstallCallbackFailure(
+  stage: SlackBotInstallCallbackFailureStage,
+  error: unknown,
+): {
+  stage: SlackBotInstallCallbackFailureStage;
+  reason: SlackBotInstallCallbackFailureReason;
+} {
+  if (error instanceof SlackInstallCallbackError) {
+    return { stage: error.failureStage ?? stage, reason: error.failureReason };
+  }
+  if (error instanceof SlackBotCredentialVerificationError) {
+    return { stage: "credential_verification", reason: error.failureReason };
+  }
+  if (error instanceof SlackBotLifecycleSuccessAuditError) {
+    return { stage: "persistence", reason: "success_audit_failed" };
+  }
+  if (stage === "code_exchange") {
+    return { stage, reason: "exchange_failed" };
+  }
+  if (stage === "credential_verification") {
+    return { stage, reason: "credential_verification_failed" };
+  }
+  return { stage, reason: "persistence_failed" };
+}
+
 function slackInstallErrorReason(error: unknown): string {
+  if (error instanceof SlackInstallCallbackError && error.failureReason === "provider_denied") {
+    return "provider_denied";
+  }
   if (error instanceof HTTPException) {
     return `http_${error.status}`;
   }
@@ -577,9 +669,11 @@ async function requireSlackInstallCallbackGrant(
     grant.accountId !== state.accountId ||
     !hasPermission(grant.permissions, "connections:write")
   ) {
-    throw new HTTPException(403, {
-      message: "Slack installation subject no longer has permission for this workspace",
-    });
+    throw new SlackInstallCallbackError(
+      403,
+      "permission_lost",
+      "Slack installation subject no longer has permission for this workspace",
+    );
   }
 }
 
