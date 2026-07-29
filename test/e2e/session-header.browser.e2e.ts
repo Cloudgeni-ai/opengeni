@@ -23,7 +23,8 @@ import {
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const ownerHeaders = { "x-opengeni-subject": "session-header-owner" };
-const screenshotPhase = process.env.SESSION_HEADER_SCREENSHOT_PHASE === "before" ? "before" : "after";
+const screenshotPhase =
+  process.env.SESSION_HEADER_SCREENSHOT_PHASE === "before" ? "before" : "after";
 const workflowClient: SessionWorkflowClient = {
   signalUserMessage: async () => undefined,
   wakeSessionWorkflow: async () => undefined,
