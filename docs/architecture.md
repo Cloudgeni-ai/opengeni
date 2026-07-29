@@ -295,6 +295,34 @@ flowchart LR
 
 An ordinary session may temporarily enter **connected-Codex GPT-Live realtime mode** without creating or forking another session. Admission and every ordinary workflow claim serialize on the same canonical PostgreSQL session lock: admitted ordinary/recovery/maintenance work makes realtime start reject, while an active realtime owner makes those claims remain pending until end or lease expiry. Human composer/queue/Send/Steer and model/reasoning/tool mutations are fenced only for that session; its queue stays visible read-only and its mounted draft is preserved. Durable cross-session agent updates are still accepted but do not wake competing normal inference. `session_realtime_modes` stores the authenticated browser-owner hash, versioned lease, connection epoch, and lifecycle facts; it never stores provider credentials or audio. The browser's WebRTC negotiation must present the exact active owner/version, which the API consumes transactionally before sending only SDP/configuration through the connected-Codex broker. The SDK browser controller composes begin, microphone/remote-audio WebRTC, the pinned V3 durable bridge, heartbeat/version updates, periodic outbound replay, and end. Session-scoped browser owner proof replays the same begin operation after reload; a durable active lifecycle without matching proof renders as lost-owner until end/expiry rather than creating another mode. Canonical: `packages/db/src/session-realtime.ts`, `packages/db/src/session-queue-commands.ts`, `apps/api/src/routes/sessions.ts`, `apps/worker/src/workflows/session.ts`, `packages/sdk/src/codex-realtime.ts`, `packages/sdk/src/codex-realtime-controller.ts`, `apps/web/src/components/session/codex-realtime-control.tsx`, and `apps/web/src/routes/session.tsx`.
 
+Provider-call lifetime is independent of that logical mode. One active
+`session_realtime_connections` row may coexist with one preparing
+(`negotiating` or `ready`) replacement. The browser reuses a healthy microphone,
+negotiates on OpenGeni's configured conservative proactive-rotation interval or after peer failure, and confirms
+the replacement only after its `oai-events` channel is open. Transactional
+promotion advances the connection epoch and retires the previous connection
+without changing the realtime id, owner, durable ledger, or ordinary-session
+admission mode. Generation fences make callbacks from old or aborted peers
+inert; replay and ACK remain exact-connection fenced. Failed replacement
+preparation preserves the still-healthy active peer, while dead-peer recovery
+uses bounded backoff and terminal conflicts fence all further retries. The
+browser-activation request marker enables this two-phase path; omission keeps
+legacy clients immediately activated only for rolling compatibility.
+
+Browser media truth is explicit. Healthy microphone streams are reusable;
+permission denial, missing devices, acquisition failure, and ended tracks are
+typed separately, and recovery reacquires input before reporting it healthy.
+Remote audio never disables microphone input or adds a client-side turn-taking
+gate. An autoplay rejection leaves the same connection running in an announced
+audible-output-blocked state, with an accessible gesture retry that only calls
+play again. Stop and lost-owner reconciliation release tracks, peers, audio
+elements, and timers, including pending rotation. Fixed-code diagnostics expose
+microphone, autoplay, negotiation, rotation, reconnect, lost-owner, and terminal
+stop classes without credentials, SDP, audio, or transcript bodies. The
+promotion schema is canonical in
+`packages/db/drizzle/0135_session_realtime_connection_promotion.sql` and
+`packages/db/src/session-realtime-ledger.ts`.
+
 When one or more realtime modes have ended, their durable ledger becomes normal
 model continuity only in the first eligible ordinary queued human/API text
 claim. Under the same session-lock transaction, the claim selects every ended

@@ -35,7 +35,6 @@ import {
   TerminalSessionBanner,
   UserMessageBody,
 } from "@/components/session/banners";
-import { ComposerAgentsPill } from "@/components/session/composer-agents-pill";
 import { sessionCodexRealtimeSynchronousLock } from "@/components/session/codex-realtime-policy";
 import { useRail } from "@/components/rail/rail-context";
 import { GoalSurface } from "@/components/session/goal-surface";
@@ -66,6 +65,12 @@ const LazySessionInspector = lazy(() =>
 const LazyCodexRealtimeControl = lazy(() =>
   import("@/components/session/codex-realtime-control").then(({ SessionCodexRealtimeControl }) => ({
     default: SessionCodexRealtimeControl,
+  })),
+);
+
+const LazyComposerAgentsPill = lazy(() =>
+  import("@/components/session/composer-agents-pill").then(({ ComposerAgentsPill }) => ({
+    default: ComposerAgentsPill,
   })),
 );
 
@@ -951,7 +956,14 @@ function SessionChatPane(props: {
         />
       ) : null}
       <GoalSurface session={props.session} goal={props.goal} />
-      <ComposerAgentsPill workspaceId={props.session.workspaceId} nodes={props.agentNodes} />
+      {props.agentNodes.length > 0 ? (
+        <Suspense fallback={null}>
+          <LazyComposerAgentsPill
+            workspaceId={props.session.workspaceId}
+            nodes={props.agentNodes}
+          />
+        </Suspense>
+      ) : null}
 
       <div className="shrink-0 px-4 pb-4 pt-1 sm:px-6">
         <div className="mx-auto w-full max-w-3xl">

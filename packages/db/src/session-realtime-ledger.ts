@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { ReasoningEffort } from "@opengeni/contracts";
+import { ReasoningEffort, type SessionRealtimeMode } from "@opengeni/contracts";
 import { and, asc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 
 import { sanitizeEventPayload, sanitizeModelPayload } from "./event-payload-sanitizer";
@@ -21,7 +21,12 @@ export const SESSION_REALTIME_LEDGER_MAX_PAYLOAD_BYTES = 131_072;
 export const SESSION_REALTIME_LEDGER_MAX_OUTBOUND = 100;
 export const SESSION_REALTIME_STARTUP_MAX_ENTRIES = 100;
 
-export type SessionRealtimeConnectionState = "negotiating" | "active" | "failed" | "closed";
+export type SessionRealtimeConnectionState =
+  | "negotiating"
+  | "ready"
+  | "active"
+  | "failed"
+  | "closed";
 
 export type SessionRealtimeConnection = {
   id: string;
@@ -67,6 +72,19 @@ export type CompleteSessionRealtimeConnectionInput = {
 
 export type CompleteSessionRealtimeConnectionResult = {
   connection: SessionRealtimeConnection;
+  replay: boolean;
+};
+
+export type ActivateSessionRealtimeConnectionInput = AssertSessionRealtimeOwnerInput & {
+  operationId: string;
+  connectionId: string;
+  connectionEpoch: number;
+  expectedConnectionEpoch: number;
+};
+
+export type ActivateSessionRealtimeConnectionResult = {
+  connection: SessionRealtimeConnection;
+  mode: SessionRealtimeMode;
   replay: boolean;
 };
 
@@ -459,9 +477,6 @@ export async function claimSessionRealtimeConnectionInTransaction(
       expectedVersion: input.expectedVersion + 1,
     });
   }
-  const targetEpoch = input.rotate
-    ? input.expectedConnectionEpoch + 1
-    : input.expectedConnectionEpoch;
   const [existing] = await db
     .select()
     .from(schema.sessionRealtimeConnections)
@@ -473,7 +488,10 @@ export async function claimSessionRealtimeConnectionInTransaction(
     )
     .limit(1);
   if (existing) {
-    if (existing.connectionEpoch !== targetEpoch) {
+    if (
+      (input.rotate && existing.connectionEpoch <= input.expectedConnectionEpoch) ||
+      (!input.rotate && existing.connectionEpoch !== input.expectedConnectionEpoch)
+    ) {
       throw new SessionRealtimeConflictError(
         "REALTIME_CONNECTION_CHANGED",
         "Realtime connection operation was already used with different input",
@@ -494,56 +512,34 @@ export async function claimSessionRealtimeConnectionInTransaction(
     );
   }
 
-  const [open] = await db
+  const connections = await db
     .select()
     .from(schema.sessionRealtimeConnections)
-    .where(
-      and(
-        eq(schema.sessionRealtimeConnections.realtimeId, input.realtimeId),
-        inArray(schema.sessionRealtimeConnections.state, ["negotiating", "active"]),
-      ),
-    )
-    .for("update")
-    .limit(1);
+    .where(eq(schema.sessionRealtimeConnections.realtimeId, input.realtimeId))
+    .for("update");
   const now = input.now ?? new Date();
-  let modeVersion = mode.version;
-  if (!input.rotate && open) {
+  const active = connections.find((connection) => connection.state === "active");
+  const preparing = connections.find(
+    (connection) => connection.state === "negotiating" || connection.state === "ready",
+  );
+  if (!input.rotate && (active || preparing)) {
     throw new SessionRealtimeConflictError(
       "REALTIME_CONNECTION_ACTIVE",
       "Realtime mode already has an open provider connection",
     );
   }
-  if (input.rotate) {
-    if (open) {
-      await db
-        .update(schema.sessionRealtimeConnections)
-        .set({ state: "closed", closedAt: now, updatedAt: now })
-        .where(eq(schema.sessionRealtimeConnections.id, open.id));
-    }
-    const [rotated] = await db
-      .update(schema.sessionRealtimeModes)
-      .set({
-        connectionEpoch: targetEpoch,
-        version: mode.version + 1,
-        updatedAt: now,
-      })
-      .where(
-        and(
-          eq(schema.sessionRealtimeModes.id, input.realtimeId),
-          eq(schema.sessionRealtimeModes.state, "active"),
-          eq(schema.sessionRealtimeModes.version, mode.version),
-          eq(schema.sessionRealtimeModes.connectionEpoch, input.expectedConnectionEpoch),
-        ),
-      )
-      .returning({ version: schema.sessionRealtimeModes.version });
-    if (!rotated) {
-      throw new SessionRealtimeConflictError(
-        "REALTIME_CONNECTION_CHANGED",
-        "Realtime connection changed while rotating",
-      );
-    }
-    modeVersion = rotated.version;
+  if (input.rotate && preparing) {
+    await db
+      .update(schema.sessionRealtimeConnections)
+      .set({ state: "closed", closedAt: now, updatedAt: now })
+      .where(eq(schema.sessionRealtimeConnections.id, preparing.id));
   }
+
+  const highestEpoch = connections.reduce(
+    (maximum, connection) => Math.max(maximum, connection.connectionEpoch),
+    input.expectedConnectionEpoch,
+  );
+  const targetEpoch = input.rotate ? highestEpoch + 1 : input.expectedConnectionEpoch;
 
   const [modeRow] = await db
     .select({ accountId: schema.sessionRealtimeModes.accountId })
@@ -585,7 +581,7 @@ export async function claimSessionRealtimeConnectionInTransaction(
   return {
     connection: mapConnection(connection),
     startupEntries: startupEntries.map(mapEntry),
-    modeVersion,
+    modeVersion: mode.version,
     replay: false,
   };
 }
@@ -641,7 +637,7 @@ async function lockConnectionFinalizationMode(
       "Realtime mode is no longer active",
     );
   }
-  if (mode.connectionEpoch !== input.connectionEpoch) {
+  if (mode.connectionEpoch > input.connectionEpoch) {
     throw new SessionRealtimeConflictError(
       "REALTIME_CONNECTION_CHANGED",
       "Realtime connection epoch changed before negotiation completed",
@@ -686,7 +682,7 @@ export async function completeSessionRealtimeConnectionInTransaction(
       "Realtime connection claim changed",
     );
   }
-  if (connection.state === "active") {
+  if (connection.state === "ready" || connection.state === "active") {
     if (connection.sdpAnswer !== input.sdpAnswer) {
       throw new SessionRealtimeConflictError(
         "REALTIME_CONNECTION_STATE_CHANGED",
@@ -705,7 +701,7 @@ export async function completeSessionRealtimeConnectionInTransaction(
   const [completed] = await db
     .update(schema.sessionRealtimeConnections)
     .set({
-      state: "active",
+      state: "ready",
       sdpAnswer: input.sdpAnswer,
       negotiatedAt: now,
       updatedAt: now,
@@ -724,6 +720,144 @@ export async function completeSessionRealtimeConnectionInTransaction(
     );
   }
   return { connection: mapConnection(completed), replay: false };
+}
+
+export async function activateSessionRealtimeConnectionInTransaction(
+  db: Database,
+  input: ActivateSessionRealtimeConnectionInput,
+): Promise<ActivateSessionRealtimeConnectionResult> {
+  assertConnectionEpoch(input.connectionEpoch);
+  assertConnectionEpoch(input.expectedConnectionEpoch);
+  let mode;
+  try {
+    mode = await assertSessionRealtimeOwnerInTransaction(db, input);
+  } catch (error) {
+    if (
+      !(error instanceof SessionRealtimeConflictError) ||
+      error.code !== "REALTIME_VERSION_CHANGED"
+    ) {
+      throw error;
+    }
+    mode = await assertSessionRealtimeOwnerInTransaction(db, {
+      ...input,
+      expectedVersion: input.expectedVersion + 1,
+    });
+  }
+
+  const [connection] = await db
+    .select()
+    .from(schema.sessionRealtimeConnections)
+    .where(
+      and(
+        eq(schema.sessionRealtimeConnections.workspaceId, input.workspaceId),
+        eq(schema.sessionRealtimeConnections.sessionId, input.sessionId),
+        eq(schema.sessionRealtimeConnections.realtimeId, input.realtimeId),
+        eq(schema.sessionRealtimeConnections.id, input.connectionId),
+      ),
+    )
+    .for("update")
+    .limit(1);
+  if (!connection) {
+    throw new SessionRealtimeConflictError(
+      "REALTIME_CONNECTION_NOT_FOUND",
+      "Realtime connection claim not found",
+    );
+  }
+  if (
+    connection.operationId !== input.operationId ||
+    connection.connectionEpoch !== input.connectionEpoch
+  ) {
+    throw new SessionRealtimeConflictError(
+      "REALTIME_CONNECTION_CHANGED",
+      "Realtime connection claim changed",
+    );
+  }
+  if (connection.state === "active") {
+    if (mode.connectionEpoch !== connection.connectionEpoch) {
+      throw new SessionRealtimeConflictError(
+        "REALTIME_CONNECTION_CHANGED",
+        "Realtime connection is no longer current",
+      );
+    }
+    return {
+      connection: mapConnection(connection),
+      mode,
+      replay: true,
+    };
+  }
+  if (
+    connection.state !== "ready" ||
+    mode.connectionEpoch !== input.expectedConnectionEpoch ||
+    connection.connectionEpoch < mode.connectionEpoch
+  ) {
+    throw new SessionRealtimeConflictError(
+      "REALTIME_CONNECTION_CHANGED",
+      "Realtime replacement is no longer ready for activation",
+    );
+  }
+
+  const now = input.now ?? new Date();
+  await db
+    .update(schema.sessionRealtimeConnections)
+    .set({ state: "closed", closedAt: now, updatedAt: now })
+    .where(
+      and(
+        eq(schema.sessionRealtimeConnections.realtimeId, input.realtimeId),
+        eq(schema.sessionRealtimeConnections.state, "active"),
+      ),
+    );
+  const [activated] = await db
+    .update(schema.sessionRealtimeConnections)
+    .set({ state: "active", updatedAt: now })
+    .where(
+      and(
+        eq(schema.sessionRealtimeConnections.id, connection.id),
+        eq(schema.sessionRealtimeConnections.state, "ready"),
+      ),
+    )
+    .returning();
+  if (!activated) {
+    throw new SessionRealtimeConflictError(
+      "REALTIME_CONNECTION_STATE_CHANGED",
+      "Realtime replacement changed while activating",
+    );
+  }
+
+  let modeVersion = mode.version;
+  if (mode.connectionEpoch !== connection.connectionEpoch) {
+    const [promoted] = await db
+      .update(schema.sessionRealtimeModes)
+      .set({
+        connectionEpoch: connection.connectionEpoch,
+        version: mode.version + 1,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(schema.sessionRealtimeModes.id, input.realtimeId),
+          eq(schema.sessionRealtimeModes.state, "active"),
+          eq(schema.sessionRealtimeModes.version, mode.version),
+          eq(schema.sessionRealtimeModes.connectionEpoch, input.expectedConnectionEpoch),
+        ),
+      )
+      .returning({ version: schema.sessionRealtimeModes.version });
+    if (!promoted) {
+      throw new SessionRealtimeConflictError(
+        "REALTIME_CONNECTION_CHANGED",
+        "Realtime connection changed while activating replacement",
+      );
+    }
+    modeVersion = promoted.version;
+  }
+  return {
+    connection: mapConnection(activated),
+    mode: {
+      ...mode,
+      version: modeVersion,
+      connectionEpoch: connection.connectionEpoch,
+    },
+    replay: false,
+  };
 }
 
 export async function failSessionRealtimeConnectionInTransaction(

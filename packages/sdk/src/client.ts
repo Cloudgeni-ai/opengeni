@@ -14,6 +14,7 @@ import {
 } from "./workspace-control-stream";
 import type {
   AccessContext,
+  ActivateCodexRealtimeConnectionRequest,
   AddWorkspaceMemberRequest,
   ApiKey,
   BillingEntitlementsResponse,
@@ -495,6 +496,24 @@ export class OpenGeniClient {
     return await this.requestJson<CodexRealtimeWebrtcResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/realtime/webrtc`,
+      request,
+      {},
+      { signal: options.signal },
+    );
+  }
+
+  /** Promote a negotiated connection only after its browser data channel is ready. */
+  async activateCodexRealtimeConnection(
+    workspaceId: string,
+    sessionId: string,
+    realtimeId: string,
+    connectionId: string,
+    request: ActivateCodexRealtimeConnectionRequest,
+    options: { signal?: AbortSignal | undefined } = {},
+  ): Promise<SessionRealtimeMutationResponse> {
+    return await this.requestJson<SessionRealtimeMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/realtime/${realtimeId}/connections/${connectionId}/activate`,
       request,
       {},
       { signal: options.signal },

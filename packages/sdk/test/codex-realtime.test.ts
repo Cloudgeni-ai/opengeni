@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { OpenGeniClient } from "../src/client";
-import { startCodexRealtimeWebrtc } from "../src/codex-realtime";
+import { CodexRealtimeMicrophoneError, startCodexRealtimeWebrtc } from "../src/codex-realtime";
 import type { CodexRealtimeWebrtcResponse } from "../src/types";
 import { SESSION_ID, WORKSPACE_ID } from "./helpers";
 
@@ -28,43 +28,116 @@ const negotiated: CodexRealtimeWebrtcResponse = {
 
 function browserFixture() {
   const calls: string[] = [];
-  const track = { stop: () => calls.push("track.stop") };
+  let trackReadyState: MediaStreamTrackState = "live";
+  const track = new EventTarget() as MediaStreamTrack;
+  Object.defineProperties(track, {
+    kind: { value: "audio" },
+    enabled: { value: true, writable: true },
+    readyState: { get: () => trackReadyState },
+    stop: {
+      value: () => {
+        calls.push("track.stop");
+        trackReadyState = "ended";
+      },
+    },
+  });
   const media = {
     getAudioTracks: () => [track],
     getTracks: () => [track],
   } as unknown as MediaStream;
-  const events = {
-    label: "oai-events",
-    close: () => calls.push("events.close"),
-  } as unknown as RTCDataChannel;
+  const events = new EventTarget() as RTCDataChannel;
+  Object.defineProperties(events, {
+    label: { value: "oai-events" },
+    readyState: { value: "open" },
+    close: { value: () => calls.push("events.close") },
+  });
   let localDescription: RTCSessionDescription | null = null;
-  const peer = {
-    get localDescription() {
-      return localDescription;
+  const peer = new EventTarget() as RTCPeerConnection;
+  let connectionState: RTCPeerConnectionState = "connected";
+  let iceConnectionState: RTCIceConnectionState = "connected";
+  Object.defineProperties(peer, {
+    localDescription: { get: () => localDescription },
+    connectionState: { get: () => connectionState },
+    iceConnectionState: { get: () => iceConnectionState },
+    createDataChannel: {
+      value: (label: string) => {
+        calls.push(`data:${label}`);
+        return events;
+      },
     },
-    createDataChannel: (label: string) => {
-      calls.push(`data:${label}`);
-      return events;
+    addTrack: {
+      value: () => {
+        calls.push("addTrack");
+        return {} as RTCRtpSender;
+      },
     },
-    addTrack: () => {
-      calls.push("addTrack");
-      return {} as RTCRtpSender;
+    createOffer: {
+      value: async () => {
+        calls.push("createOffer");
+        return { type: "offer" as const, sdp: offer };
+      },
     },
-    createOffer: async () => {
-      calls.push("createOffer");
-      return { type: "offer" as const, sdp: offer };
+    setLocalDescription: {
+      value: async (description: RTCSessionDescriptionInit) => {
+        calls.push("setLocalDescription");
+        localDescription = description as RTCSessionDescription;
+      },
     },
-    setLocalDescription: async (description: RTCSessionDescriptionInit) => {
-      calls.push("setLocalDescription");
-      localDescription = description as RTCSessionDescription;
+    setRemoteDescription: {
+      value: async (description: RTCSessionDescriptionInit) => {
+        calls.push(`setRemoteDescription:${description.type}`);
+        expect(description.sdp).toBe(answer);
+      },
     },
-    setRemoteDescription: async (description: RTCSessionDescriptionInit) => {
-      calls.push(`setRemoteDescription:${description.type}`);
-      expect(description.sdp).toBe(answer);
+    close: { value: () => calls.push("peer.close") },
+  });
+  const remoteTrack = { kind: "audio" };
+  const remoteMedia = { getTracks: () => [remoteTrack] } as unknown as MediaStream;
+  let rejectPlay = false;
+  const remoteAudio = {
+    autoplay: false,
+    srcObject: null,
+    play: async () => {
+      calls.push("audio.play");
+      if (rejectPlay) throw new DOMException("gesture required", "NotAllowedError");
     },
-    close: () => calls.push("peer.close"),
-  } as unknown as RTCPeerConnection;
-  return { calls, track, media, events, peer };
+    pause: () => calls.push("audio.pause"),
+  } as unknown as HTMLAudioElement;
+  return {
+    calls,
+    track,
+    media,
+    events,
+    peer,
+    remoteAudio,
+    remoteMedia,
+    rejectNextPlay: () => {
+      rejectPlay = true;
+    },
+    allowPlay: () => {
+      rejectPlay = false;
+    },
+    dispatchRemoteTrack: () => {
+      const event = new Event("track") as RTCTrackEvent;
+      Object.defineProperties(event, {
+        track: { value: remoteTrack },
+        streams: { value: [remoteMedia] },
+      });
+      peer.dispatchEvent(event);
+    },
+    endMicrophone: () => {
+      trackReadyState = "ended";
+      track.dispatchEvent(new Event("ended"));
+    },
+    setConnectionState: (
+      next: RTCPeerConnectionState,
+      ice: RTCIceConnectionState = next === "connected" ? "connected" : "disconnected",
+    ) => {
+      connectionState = next;
+      iceConnectionState = ice;
+      peer.dispatchEvent(new Event("connectionstatechange"));
+    },
+  };
 }
 
 describe("Codex realtime browser negotiation", () => {
@@ -84,6 +157,7 @@ describe("Codex realtime browser negotiation", () => {
         capturedSignal = options.signal;
         expect(request).toEqual({
           ...lifecycleProof,
+          browserActivation: "required",
           sdp: offer,
           version: "v3",
           instructions: "Current session context",
@@ -171,6 +245,99 @@ describe("Codex realtime browser negotiation", () => {
       }),
     ).rejects.toThrow("incompatible Codex realtime answer");
     expect(fixture.calls.slice(-3)).toEqual(["events.close", "track.stop", "peer.close"]);
+  });
+
+  for (const [name, code] of [
+    ["NotAllowedError", "permission_denied"],
+    ["NotFoundError", "device_not_found"],
+    ["NotReadableError", "device_unavailable"],
+    ["UnknownError", "acquisition_failed"],
+  ] as const) {
+    test(`maps ${name} microphone acquisition failures without browser details`, async () => {
+      const fixture = browserFixture();
+      let negotiationCalls = 0;
+      try {
+        await startCodexRealtimeWebrtc({
+          ...lifecycleProof,
+          createPeerConnection: () => fixture.peer,
+          getUserMedia: async () => {
+            throw new DOMException("untrusted browser detail", name);
+          },
+          negotiate: async () => {
+            negotiationCalls += 1;
+            return negotiated;
+          },
+        });
+        throw new Error("Expected microphone acquisition to fail");
+      } catch (error) {
+        expect(error).toBeInstanceOf(CodexRealtimeMicrophoneError);
+        expect((error as CodexRealtimeMicrophoneError).code).toBe(code);
+        expect((error as Error).message).not.toContain("untrusted browser detail");
+      }
+      expect(negotiationCalls).toBe(0);
+      expect(fixture.calls).toEqual(expect.arrayContaining(["events.close", "peer.close"]));
+    });
+  }
+
+  test("reports an ended borrowed microphone and never negotiates it", async () => {
+    const fixture = browserFixture();
+    fixture.endMicrophone();
+    let negotiationCalls = 0;
+    await expect(
+      startCodexRealtimeWebrtc({
+        ...lifecycleProof,
+        media: fixture.media,
+        createPeerConnection: () => fixture.peer,
+        negotiate: async () => {
+          negotiationCalls += 1;
+          return negotiated;
+        },
+      }),
+    ).rejects.toMatchObject({ code: "track_ended" });
+    expect(negotiationCalls).toBe(0);
+    expect(fixture.calls).not.toContain("track.stop");
+  });
+
+  test("keeps microphone input enabled during remote playback and retries blocked autoplay", async () => {
+    const fixture = browserFixture();
+    fixture.rejectNextPlay();
+    const audibleStates: string[] = [];
+    let microphoneEnded = 0;
+    let negotiationCalls = 0;
+    const session = await startCodexRealtimeWebrtc({
+      ...lifecycleProof,
+      media: fixture.media,
+      remoteAudio: fixture.remoteAudio,
+      createPeerConnection: () => fixture.peer,
+      onAudibleOutputState: (state) => audibleStates.push(state),
+      onMicrophoneEnded: () => {
+        microphoneEnded += 1;
+      },
+      negotiate: async () => {
+        negotiationCalls += 1;
+        return negotiated;
+      },
+    });
+    fixture.dispatchRemoteTrack();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(audibleStates).toEqual(["pending", "blocked"]);
+    expect(fixture.track.enabled).toBe(true);
+    expect(session.microphoneHealthy()).toBe(true);
+    fixture.allowPlay();
+    expect(await session.retryAudibleOutput()).toBe(true);
+    expect(audibleStates).toEqual(["pending", "blocked", "pending", "audible"]);
+    expect(negotiationCalls).toBe(1);
+    expect(fixture.remoteAudio.srcObject).toBe(fixture.remoteMedia);
+
+    fixture.endMicrophone();
+    expect(microphoneEnded).toBe(1);
+    expect(session.microphoneHealthy()).toBe(false);
+    session.stop();
+    fixture.endMicrophone();
+    fixture.setConnectionState("failed");
+    expect(microphoneEnded).toBe(1);
+    expect(fixture.remoteAudio.srcObject).toBeNull();
   });
 });
 

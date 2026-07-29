@@ -224,6 +224,30 @@ active lifecycle without matching proof is shown as another/lost browser owner
 rather than silently creating a mode. This conversation path is not composer
 speech-to-text and does not change the workspace transcription policy seam.
 
+One logical realtime mode can span multiple finite provider calls. The
+controller proactively rotates on OpenGeni's configured conservative rotation interval and
+recovers a failed/disconnected peer with bounded backoff. It reuses a healthy
+microphone stream and prepares one replacement while the previous connection
+remains active. The server records the answer as `ready`; only an open browser
+data channel can activate it, transactionally advance the connection epoch, and
+retire the old row. The realtime id, authenticated owner, durable V3 ledger,
+startup replay, and provider-delivery ACK contract do not reset. Generation
+fences reject old peer callbacks, stale ACKs, duplicate failures, late answers,
+and stop-during-rotation races. A failed replacement leaves a healthy old peer
+usable; a terminal lifecycle/409 result fences reconnect. During rolling
+compatibility only, a client that omits the browser-activation marker follows
+the prior immediate-activation path.
+
+Media status does not infer success from negotiation alone. Deterministic,
+redacted errors distinguish denied microphone permission, absent devices,
+acquisition failure, and ended tracks; device recovery reacquires media before
+claiming input is healthy. Remote playback does not mute or gate microphone
+input, preserving provider-native full-duplex interruption. If browser autoplay
+blocks `audio.play()`, audible output is explicitly blocked while the existing
+connection continues; an accessible user-gesture retry resumes that audio
+element without starting another epoch or provider call. Stop releases owned
+tracks, peers, data channels, audio elements, and retry/rotation timers.
+
 ### Native web search follows the durable session tool policy
 
 Provider-native `web_search` is part of the workspace-default capability set,

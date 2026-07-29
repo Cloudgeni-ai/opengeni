@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   AcknowledgeStreamRequest as ContractAcknowledgeStreamRequest,
+  ActivateCodexRealtimeConnectionRequest as ContractActivateCodexRealtimeConnectionRequest,
   AcknowledgeStreamResponse as ContractAcknowledgeStreamResponse,
   AddWorkspaceMemberRequest as ContractAddWorkspaceMemberRequest,
   AttachViewerRequest as ContractAttachViewerRequest,
@@ -86,6 +87,7 @@ import {
 } from "../src/types";
 import type {
   AcknowledgeStreamRequest,
+  ActivateCodexRealtimeConnectionRequest,
   AcknowledgeStreamResponse,
   AddWorkspaceMemberRequest,
   AttachViewerRequest,
@@ -189,6 +191,9 @@ describe("SDK / contracts parity", () => {
     const acceptRequest = (
       value: CodexRealtimeWebrtcRequest,
     ): z.input<typeof ContractCodexRealtimeWebrtcRequest> => value;
+    const acceptActivation = (
+      value: ActivateCodexRealtimeConnectionRequest,
+    ): z.input<typeof ContractActivateCodexRealtimeConnectionRequest> => value;
     const acceptBegin = (
       value: BeginSessionRealtimeRequest,
     ): z.input<typeof ContractBeginSessionRealtimeRequest> => value;
@@ -213,6 +218,7 @@ describe("SDK / contracts parity", () => {
       [
         acceptResponse,
         acceptRequest,
+        acceptActivation,
         acceptBegin,
         acceptRenew,
         acceptEnd,

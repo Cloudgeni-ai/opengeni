@@ -9,7 +9,7 @@ describe("session control surface architecture", () => {
     const route = await source("routes/session.tsx");
     expect(route.match(/<QueueSurface\b/g)).toHaveLength(1);
     expect(route.indexOf("<QueueSurface")).toBeLessThan(route.indexOf("<GoalSurface"));
-    expect(route.indexOf("<GoalSurface")).toBeLessThan(route.indexOf("<ComposerAgentsPill"));
+    expect(route.indexOf("<GoalSurface")).toBeLessThan(route.indexOf("<LazyComposerAgentsPill"));
   });
 
   test("has no second Agents home in the header or dock", async () => {

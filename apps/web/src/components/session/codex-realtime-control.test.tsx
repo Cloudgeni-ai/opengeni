@@ -26,7 +26,28 @@ const idle: CodexRealtimeControllerSnapshot = {
   realtimeId: null,
   mode: null,
   bridge: null,
+  microphone: "inactive",
+  audibleOutput: "inactive",
+  connectionGeneration: 0,
+  reconnectAttempt: 0,
+  diagnostic: null,
   error: null,
+};
+
+const activeMode: NonNullable<CodexRealtimeControllerSnapshot["mode"]> = {
+  id: "33333333-3333-4333-8333-333333333333",
+  sessionId: "22222222-2222-4222-8222-222222222222",
+  operationId: "44444444-4444-4444-8444-444444444444",
+  browserInstanceId: "55555555-5555-4555-8555-555555555555",
+  model: "gpt-live-1-boulder-alpha",
+  state: "active",
+  version: 1,
+  connectionEpoch: 1,
+  leaseExpiresAt: "2026-07-29T07:00:30.000Z",
+  lastHeartbeatAt: "2026-07-29T07:00:00.000Z",
+  startedAt: "2026-07-29T07:00:00.000Z",
+  endedAt: null,
+  endReason: null,
 };
 
 const effectiveControl: EffectiveSessionControl = {
@@ -224,6 +245,12 @@ describe("ordinary session Codex realtime control", () => {
           onStop={async () => {
             calls.push("stop");
           }}
+          onRetry={async () => {
+            calls.push("retry");
+          }}
+          onRetryAudibleOutput={async () => {
+            calls.push("audio");
+          }}
         />,
       );
     });
@@ -241,7 +268,12 @@ describe("ordinary session Codex realtime control", () => {
     await act(async () => {
       root.render(
         <CodexRealtimeControl
-          snapshot={{ ...idle, status: "active", realtimeId: "redacted-realtime-id" }}
+          snapshot={{
+            ...idle,
+            status: "active",
+            realtimeId: "redacted-realtime-id",
+            mode: activeMode,
+          }}
           canStart={false}
           codexConnected={true}
           audioRef={createRef<HTMLAudioElement>()}
@@ -250,6 +282,12 @@ describe("ordinary session Codex realtime control", () => {
           }}
           onStop={async () => {
             calls.push("stop");
+          }}
+          onRetry={async () => {
+            calls.push("retry");
+          }}
+          onRetryAudibleOutput={async () => {
+            calls.push("audio");
           }}
         />,
       );
@@ -261,5 +299,57 @@ describe("ordinary session Codex realtime control", () => {
     expect(stop?.disabled).toBe(false);
     await act(async () => stop?.click());
     expect(calls).toEqual(["start", "stop"]);
+  });
+
+  test("exposes an autoplay-blocked retry without starting another realtime call", async () => {
+    const calls: string[] = [];
+    await act(async () => {
+      root.render(
+        <CodexRealtimeControl
+          snapshot={{
+            ...idle,
+            status: "active",
+            realtimeId: activeMode.id,
+            mode: activeMode,
+            audibleOutput: "blocked",
+            connectionGeneration: 7,
+            diagnostic: {
+              kind: "autoplay_blocked",
+              message: "Browser blocked audible realtime output",
+              recoverable: true,
+              connectionGeneration: 7,
+              attempt: 0,
+            },
+          }}
+          canStart={false}
+          codexConnected={true}
+          audioRef={createRef<HTMLAudioElement>()}
+          onStart={async () => {
+            calls.push("start");
+          }}
+          onStop={async () => {
+            calls.push("stop");
+          }}
+          onRetry={async () => {
+            calls.push("retry");
+          }}
+          onRetryAudibleOutput={async () => {
+            calls.push("audio");
+          }}
+        />,
+      );
+    });
+
+    expect(container.querySelector('[role="status"]')?.textContent).toContain(
+      "Audio output blocked",
+    );
+    const resume = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Resume audio",
+    );
+    expect(resume?.textContent).toContain("Resume audio");
+    await act(async () => resume?.click());
+    expect(calls).toEqual(["audio"]);
+    expect(container.querySelector('button[aria-label="Start Codex realtime"]')).toBeNull();
+    expect(container.querySelector('button[aria-label="Stop Codex realtime"]')).not.toBeNull();
   });
 });
