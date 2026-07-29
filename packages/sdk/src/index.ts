@@ -30,6 +30,25 @@ export type {
   CodexRealtimeWebrtcSession,
   StartCodexRealtimeWebrtcOptions,
 } from "./codex-realtime";
+export {
+  CODEX_REALTIME_CONTEXT_APPEND_MAX_BYTES,
+  contextAppendChunks,
+  createCodexRealtimeV3Bridge,
+  encodeCodexRealtimeV3DelegationContextAppend,
+  encodeCodexRealtimeV3SessionContextAppend,
+  parseCodexRealtimeV3Event,
+} from "./codex-realtime-v3";
+export type {
+  CodexRealtimeV3Bridge,
+  CodexRealtimeV3BridgeOptions,
+  CodexRealtimeV3BridgeSnapshot,
+  CodexRealtimeV3ContextAppendChannel,
+  CodexRealtimeV3DelegationContextAppend,
+  CodexRealtimeV3Event,
+  CodexRealtimeV3ParseFailure,
+  CodexRealtimeV3ParseResult,
+  CodexRealtimeV3SessionContextAppend,
+} from "./codex-realtime-v3";
 // Desktop (noVNC) transport contract — pure, zero-dep (the RFB import lives in
 // @opengeni/react). URL assembler + connection state machine + rotation fence.
 export { desktopSocketUrl, nextDesktopState, applyUrlRotation } from "./desktop";

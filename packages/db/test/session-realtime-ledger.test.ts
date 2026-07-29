@@ -204,6 +204,82 @@ describe("session realtime ledger", () => {
     });
   });
 
+  test("accepts durable provider startup proof exactly once for the captured rotation fence", async () => {
+    const value = await fixture();
+    const first = await claimInitial(value);
+    await complete(value, first.claimed.connection);
+    const outbound = await transaction(value.owner.workspaceId, (tx) =>
+      appendSessionRealtimeOutboundInTransaction(tx, {
+        workspaceId: value.owner.workspaceId,
+        sessionId: value.owner.sessionId,
+        realtimeId: value.started.mode.id,
+        operationId: crypto.randomUUID(),
+        connectionEpoch: 1,
+        kind: "delegation_result",
+        delegationItemId: "delegation-startup-1",
+        text: "durable result before rotation",
+      }),
+    );
+    const rotated = await transaction(value.owner.workspaceId, (tx) =>
+      claimSessionRealtimeConnectionInTransaction(tx, {
+        ...ownerProof(value),
+        operationId: crypto.randomUUID(),
+        expectedConnectionEpoch: 1,
+        rotate: true,
+      }),
+    );
+    expect(rotated.connection.startupFenceSequence).toBe(outbound.entry.sequence);
+    expect(rotated.startupEntries.map((entry) => entry.id)).toEqual([outbound.entry.id]);
+    await complete(value, rotated.connection);
+
+    const proof = {
+      providerSessionId: "provider-session-startup-1",
+      providerEventId: "provider-event-startup-1",
+    };
+    const syncInput = {
+      ...ownerProof(value, rotated.modeVersion),
+      connectionId: rotated.connection.id,
+      connectionEpoch: rotated.connection.connectionEpoch,
+      providerStarted: proof,
+    };
+    await transaction(value.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(tx, syncInput),
+    );
+    await transaction(value.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(tx, syncInput),
+    );
+
+    const persisted = await transaction(value.owner.workspaceId, async (tx) => {
+      const [connection] = await tx
+        .select()
+        .from(schema.sessionRealtimeConnections)
+        .where(eq(schema.sessionRealtimeConnections.id, rotated.connection.id))
+        .limit(1);
+      const [entry] = await tx
+        .select()
+        .from(schema.sessionRealtimeEntries)
+        .where(eq(schema.sessionRealtimeEntries.id, outbound.entry.id))
+        .limit(1);
+      return { connection, entry };
+    });
+    expect(persisted.connection).toMatchObject({
+      providerSessionId: proof.providerSessionId,
+      startupEventId: proof.providerEventId,
+    });
+    expect(persisted.connection?.startupAcknowledgedAt).toBeInstanceOf(Date);
+    expect(persisted.entry?.providerAckedAt).toBeInstanceOf(Date);
+
+    await expectConflict(
+      transaction(value.owner.workspaceId, (tx) =>
+        syncSessionRealtimeLedgerInTransaction(tx, {
+          ...syncInput,
+          providerStarted: { ...proof, providerSessionId: "provider-session-other" },
+        }),
+      ),
+      "REALTIME_CONNECTION_STATE_CHANGED",
+    );
+  });
+
   test("persists finalized transcripts once in ordinary session continuity", async () => {
     const value = await fixture();
     const first = await claimInitial(value);
@@ -307,7 +383,10 @@ describe("session realtime ledger", () => {
         ...ownerProof(value, rotated.modeVersion),
         connectionId: rotated.connection.id,
         connectionEpoch: 2,
-        providerAckThroughSequence: update!.sequence,
+        providerStarted: {
+          providerSessionId: "provider-session-replay",
+          providerEventId: "provider-event-replay",
+        },
       }),
     );
     expect(acknowledged.outbound.map((entry) => entry.id)).not.toContain(update!.id);

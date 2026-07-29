@@ -14,6 +14,7 @@ export const SESSION_REALTIME_LEDGER_MAX_BATCH = 64;
 export const SESSION_REALTIME_LEDGER_MAX_TEXT_BYTES = 131_072;
 export const SESSION_REALTIME_LEDGER_MAX_PAYLOAD_BYTES = 131_072;
 export const SESSION_REALTIME_LEDGER_MAX_OUTBOUND = 100;
+export const SESSION_REALTIME_STARTUP_MAX_ENTRIES = 100;
 
 export type SessionRealtimeConnectionState = "negotiating" | "active" | "failed" | "closed";
 
@@ -22,9 +23,13 @@ export type SessionRealtimeConnection = {
   realtimeId: string;
   operationId: string;
   connectionEpoch: number;
+  startupFenceSequence: number;
   state: SessionRealtimeConnectionState;
   sdpAnswer: string | null;
   failureCode: string | null;
+  providerSessionId: string | null;
+  startupEventId: string | null;
+  startupAcknowledgedAt: string | null;
   negotiatedAt: string | null;
   closedAt: string | null;
   createdAt: string;
@@ -39,6 +44,7 @@ export type ClaimSessionRealtimeConnectionInput = AssertSessionRealtimeOwnerInpu
 
 export type ClaimSessionRealtimeConnectionResult = {
   connection: SessionRealtimeConnection;
+  startupEntries: SessionRealtimeLedgerEntry[];
   modeVersion: number;
   replay: boolean;
 };
@@ -118,7 +124,9 @@ export type SyncSessionRealtimeLedgerInput = AssertSessionRealtimeOwnerInput & {
   connectionEpoch: number;
   entries?: SessionRealtimeInboundEntryInput[] | undefined;
   clientAckThroughSequence?: number | null | undefined;
-  providerAckThroughSequence?: number | null | undefined;
+  providerStarted?:
+    | { providerSessionId: string; providerEventId?: string | null | undefined }
+    | undefined;
 };
 
 export type SyncSessionRealtimeLedgerResult = {
@@ -153,9 +161,13 @@ function mapConnection(row: ConnectionRow): SessionRealtimeConnection {
     realtimeId: row.realtimeId,
     operationId: row.operationId,
     connectionEpoch: row.connectionEpoch,
+    startupFenceSequence: row.startupFenceSequence,
     state: row.state as SessionRealtimeConnectionState,
     sdpAnswer: row.sdpAnswer,
     failureCode: row.failureCode,
+    providerSessionId: row.providerSessionId,
+    startupEventId: row.startupEventId,
+    startupAcknowledgedAt: row.startupAcknowledgedAt?.toISOString() ?? null,
     negotiatedAt: row.negotiatedAt?.toISOString() ?? null,
     closedAt: row.closedAt?.toISOString() ?? null,
     createdAt: row.createdAt.toISOString(),
@@ -280,6 +292,7 @@ export async function claimSessionRealtimeConnectionInTransaction(
     }
     return {
       connection: mapConnection(existing),
+      startupEntries: await startupEntriesForConnection(db, existing),
       modeVersion: mode.version,
       replay: true,
     };
@@ -350,6 +363,20 @@ export async function claimSessionRealtimeConnectionInTransaction(
     .limit(1);
   if (!modeRow) throw new Error("Realtime mode disappeared while claiming connection");
 
+  const startupEntries = await db
+    .select()
+    .from(schema.sessionRealtimeEntries)
+    .where(
+      and(
+        eq(schema.sessionRealtimeEntries.realtimeId, input.realtimeId),
+        eq(schema.sessionRealtimeEntries.direction, "provider_out"),
+        isNull(schema.sessionRealtimeEntries.providerAckedAt),
+      ),
+    )
+    .orderBy(asc(schema.sessionRealtimeEntries.sequence))
+    .limit(SESSION_REALTIME_STARTUP_MAX_ENTRIES);
+  const startupFenceSequence = startupEntries.at(-1)?.sequence ?? 0;
+
   const [connection] = await db
     .insert(schema.sessionRealtimeConnections)
     .values({
@@ -359,13 +386,39 @@ export async function claimSessionRealtimeConnectionInTransaction(
       realtimeId: input.realtimeId,
       operationId: input.operationId,
       connectionEpoch: targetEpoch,
+      startupFenceSequence,
       state: "negotiating",
       createdAt: now,
       updatedAt: now,
     })
     .returning();
   if (!connection) throw new Error("Failed to claim realtime connection");
-  return { connection: mapConnection(connection), modeVersion, replay: false };
+  return {
+    connection: mapConnection(connection),
+    startupEntries: startupEntries.map(mapEntry),
+    modeVersion,
+    replay: false,
+  };
+}
+
+async function startupEntriesForConnection(
+  db: Database,
+  connection: ConnectionRow,
+): Promise<SessionRealtimeLedgerEntry[]> {
+  if (connection.startupFenceSequence === 0) return [];
+  const rows = await db
+    .select()
+    .from(schema.sessionRealtimeEntries)
+    .where(
+      and(
+        eq(schema.sessionRealtimeEntries.realtimeId, connection.realtimeId),
+        eq(schema.sessionRealtimeEntries.direction, "provider_out"),
+        sql`${schema.sessionRealtimeEntries.sequence} <= ${connection.startupFenceSequence}`,
+      ),
+    )
+    .orderBy(asc(schema.sessionRealtimeEntries.sequence))
+    .limit(SESSION_REALTIME_STARTUP_MAX_ENTRIES);
+  return rows.map(mapEntry);
 }
 
 async function lockConnectionFinalizationMode(
@@ -814,7 +867,6 @@ export async function syncSessionRealtimeLedgerInTransaction(
   await materializeRealtimeUpdates(db, input, modeRow.accountId, () => nextSequence++, now);
   const maximum = nextSequence - 1;
   const clientAck = assertAck(input.clientAckThroughSequence, maximum);
-  const providerAck = assertAck(input.providerAckThroughSequence, maximum);
   if (clientAck !== null && clientAck > 0) {
     await db
       .update(schema.sessionRealtimeEntries)
@@ -828,7 +880,48 @@ export async function syncSessionRealtimeLedgerInTransaction(
         ),
       );
   }
-  if (providerAck !== null && providerAck > 0) {
+  if (input.providerStarted) {
+    assertBoundedString(
+      input.providerStarted.providerSessionId,
+      1024,
+      "Realtime provider session id",
+    );
+    assertBoundedString(input.providerStarted.providerEventId, 1024, "Realtime startup event id");
+    if (connection.startupAcknowledgedAt) {
+      if (
+        connection.providerSessionId !== input.providerStarted.providerSessionId ||
+        connection.startupEventId !== (input.providerStarted.providerEventId ?? null)
+      ) {
+        throw new SessionRealtimeConflictError(
+          "REALTIME_CONNECTION_STATE_CHANGED",
+          "Realtime provider startup was already acknowledged with different proof",
+        );
+      }
+    } else {
+      const [acknowledged] = await db
+        .update(schema.sessionRealtimeConnections)
+        .set({
+          providerSessionId: input.providerStarted.providerSessionId,
+          startupEventId: input.providerStarted.providerEventId ?? null,
+          startupAcknowledgedAt: now,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(schema.sessionRealtimeConnections.id, connection.id),
+            isNull(schema.sessionRealtimeConnections.startupAcknowledgedAt),
+          ),
+        )
+        .returning({ id: schema.sessionRealtimeConnections.id });
+      if (!acknowledged) {
+        throw new SessionRealtimeConflictError(
+          "REALTIME_CONNECTION_STATE_CHANGED",
+          "Realtime provider startup changed while acknowledging it",
+        );
+      }
+    }
+  }
+  if (input.providerStarted && connection.startupFenceSequence > 0) {
     await db
       .update(schema.sessionRealtimeEntries)
       .set({ providerAckedAt: now, updatedAt: now })
@@ -837,7 +930,7 @@ export async function syncSessionRealtimeLedgerInTransaction(
           eq(schema.sessionRealtimeEntries.realtimeId, input.realtimeId),
           eq(schema.sessionRealtimeEntries.direction, "provider_out"),
           isNull(schema.sessionRealtimeEntries.providerAckedAt),
-          sql`${schema.sessionRealtimeEntries.sequence} <= ${providerAck}`,
+          sql`${schema.sessionRealtimeEntries.sequence} <= ${connection.startupFenceSequence}`,
         ),
       );
   }

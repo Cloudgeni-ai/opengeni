@@ -32,6 +32,9 @@
     "build": "tsup && bun ../../scripts/emit-package-declarations.ts",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
+  "dependencies": {
+    "@opengeni/codex": "workspace:*"
+  },
   "devDependencies": {
     "@opengeni/contracts": "workspace:*",
     "@opengeni/deployment": "workspace:*",

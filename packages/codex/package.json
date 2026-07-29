@@ -25,6 +25,10 @@
     "./constants": {
       "types": "./src/constants.ts",
       "default": "./src/constants.ts"
+    },
+    "./realtime-v3": {
+      "types": "./src/realtime-v3.ts",
+      "default": "./src/realtime-v3.ts"
     }
   },
   "publishConfig": {

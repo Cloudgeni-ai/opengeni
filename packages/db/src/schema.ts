@@ -973,9 +973,13 @@ export const sessionRealtimeConnections = pgTable(
       .references(() => sessionRealtimeModes.id, { onDelete: "cascade" }),
     operationId: uuid("operation_id").notNull(),
     connectionEpoch: integer("connection_epoch").notNull(),
+    startupFenceSequence: integer("startup_fence_sequence").notNull().default(0),
     state: text("state").notNull().default("negotiating"),
     sdpAnswer: text("sdp_answer"),
     failureCode: text("failure_code"),
+    providerSessionId: text("provider_session_id"),
+    startupEventId: text("startup_event_id"),
+    startupAcknowledgedAt: timestamp("startup_acknowledged_at", { withTimezone: true }),
     negotiatedAt: timestamp("negotiated_at", { withTimezone: true }),
     closedAt: timestamp("closed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -1007,6 +1011,10 @@ export const sessionRealtimeConnections = pgTable(
       "session_realtime_connections_epoch_check",
       sql`${table.connectionEpoch} >= 1`,
     ),
+    startupFenceValid: check(
+      "session_realtime_connections_startup_fence_check",
+      sql`${table.startupFenceSequence} >= 0`,
+    ),
     stateValid: check(
       "session_realtime_connections_state_check",
       sql`${table.state} in ('negotiating', 'active', 'failed', 'closed')`,
@@ -1018,6 +1026,19 @@ export const sessionRealtimeConnections = pgTable(
     failureValid: check(
       "session_realtime_connections_failure_check",
       sql`${table.failureCode} is null or octet_length(${table.failureCode}) between 1 and 128`,
+    ),
+    providerSessionValid: check(
+      "session_realtime_connections_provider_session_check",
+      sql`${table.providerSessionId} is null or octet_length(${table.providerSessionId}) between 1 and 1024`,
+    ),
+    startupEventValid: check(
+      "session_realtime_connections_startup_event_check",
+      sql`${table.startupEventId} is null or octet_length(${table.startupEventId}) between 1 and 1024`,
+    ),
+    startupAckValid: check(
+      "session_realtime_connections_startup_ack_check",
+      sql`(${table.startupAcknowledgedAt} is null and ${table.providerSessionId} is null and ${table.startupEventId} is null)
+        or (${table.startupAcknowledgedAt} is not null and ${table.providerSessionId} is not null)`,
     ),
     terminalValid: check(
       "session_realtime_connections_terminal_check",

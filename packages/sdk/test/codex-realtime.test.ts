@@ -21,6 +21,7 @@ const negotiated: CodexRealtimeWebrtcResponse = {
   model: "gpt-live-1-boulder-alpha",
   connectionId: "55555555-5555-4555-8555-555555555555",
   connectionEpoch: 1,
+  startupFenceSequence: 0,
   modeVersion: 1,
   replay: false,
 };
@@ -99,6 +100,7 @@ describe("Codex realtime browser negotiation", () => {
     expect(session.media).toBe(fixture.media);
     expect(session.connectionId).toBe(negotiated.connectionId);
     expect(session.connectionEpoch).toBe(1);
+    expect(session.startupFenceSequence).toBe(0);
     expect(session.modeVersion).toBe(1);
     expect(fixture.calls).toEqual([
       "data:oai-events",
@@ -139,6 +141,23 @@ describe("Codex realtime browser negotiation", () => {
     abort.abort(new DOMException("Stopped", "AbortError"));
     await expect(pending).rejects.toHaveProperty("name", "AbortError");
     expect(fixture.calls.slice(-3)).toEqual(["events.close", "track.stop", "peer.close"]);
+  });
+
+  test("borrows caller-owned microphone media across connection rotation", async () => {
+    const fixture = browserFixture();
+    const session = await startCodexRealtimeWebrtc({
+      ...lifecycleProof,
+      media: fixture.media,
+      createPeerConnection: () => fixture.peer,
+      getUserMedia: async () => {
+        throw new Error("borrowed media must skip getUserMedia");
+      },
+      negotiate: async () => negotiated,
+    });
+    session.stop();
+    expect(fixture.calls).toContain("events.close");
+    expect(fixture.calls).toContain("peer.close");
+    expect(fixture.calls).not.toContain("track.stop");
   });
 
   test("an incompatible server version fails closed and cleans up", async () => {

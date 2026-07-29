@@ -19,6 +19,7 @@
       "@opengeni/contracts": ["./packages/contracts/src/index.ts"],
       "@opengeni/agent-proto": ["./packages/agent-proto/src/index.ts"],
       "@opengeni/codex": ["./packages/codex/src/index.ts"],
+      "@opengeni/codex/realtime-v3": ["./packages/codex/src/realtime-v3.ts"],
       "@opengeni/config": ["./packages/config/src/index.ts"],
       "@opengeni/core": ["./packages/core/src/index.ts"],
       "@opengeni/db": ["./packages/db/src/index.ts"],
