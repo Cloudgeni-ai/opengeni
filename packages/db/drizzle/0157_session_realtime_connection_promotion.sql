@@ -6,15 +6,26 @@
 SET lock_timeout = '5s';
 SET statement_timeout = '10min';
 
-DROP INDEX "session_realtime_connections_one_open_uq";
+ALTER TABLE "session_realtime_connections"
+  ADD COLUMN "promotion_mode" text DEFAULT 'legacy' NOT NULL,
+  ADD CONSTRAINT "session_realtime_connections_promotion_mode_check"
+    CHECK ("promotion_mode" IN ('legacy', 'staged'));
 
 CREATE UNIQUE INDEX "session_realtime_connections_one_active_uq"
   ON "session_realtime_connections" ("realtime_id")
-  WHERE "state" = 'active';
+  WHERE (
+    ("promotion_mode" = 'legacy' AND "state" IN ('negotiating', 'ready', 'active'))
+    OR
+    ("promotion_mode" = 'staged' AND "state" = 'active')
+  );
 
 CREATE UNIQUE INDEX "session_realtime_connections_one_preparing_uq"
   ON "session_realtime_connections" ("realtime_id")
-  WHERE "state" IN ('negotiating', 'ready');
+  WHERE (
+    ("promotion_mode" = 'legacy' AND "state" IN ('negotiating', 'ready', 'active'))
+    OR
+    ("promotion_mode" = 'staged' AND "state" IN ('negotiating', 'ready'))
+  );
 
 ALTER TABLE "session_realtime_connections"
   DROP CONSTRAINT "session_realtime_connections_state_check",
@@ -35,6 +46,8 @@ ALTER TABLE "session_realtime_connections"
       OR
       ("state" = 'closed' AND "closed_at" IS NOT NULL)
     );
+
+DROP INDEX "session_realtime_connections_one_open_uq";
 
 RESET statement_timeout;
 RESET lock_timeout;

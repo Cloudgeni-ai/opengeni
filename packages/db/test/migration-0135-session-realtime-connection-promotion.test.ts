@@ -14,7 +14,37 @@ afterAll(async () => {
 }, 60_000);
 
 describe("0135 session realtime connection promotion migration", () => {
-  test("permits one active connection beside one negotiating or ready replacement", async () => {
+  test("defaults old writers to legacy promotion with a constrained schema marker", async () => {
+    const columns = await shared.admin<
+      Array<{ name: string; nullable: string; defaultValue: string | null }>
+    >`
+      select
+        column_name as name,
+        is_nullable as nullable,
+        column_default as "defaultValue"
+      from information_schema.columns
+      where table_schema = current_schema()
+        and table_name = 'session_realtime_connections'
+        and column_name = 'promotion_mode'`;
+    expect(columns.map((column) => ({ ...column }))).toEqual([
+      {
+        name: "promotion_mode",
+        nullable: "NO",
+        defaultValue: "'legacy'::text",
+      },
+    ]);
+
+    const constraints = await shared.admin<{ definition: string }[]>`
+      select pg_get_constraintdef(oid) as definition
+      from pg_constraint
+      where conrelid = 'session_realtime_connections'::regclass
+        and conname = 'session_realtime_connections_promotion_mode_check'`;
+    expect(constraints).toHaveLength(1);
+    expect(constraints[0]?.definition).toContain("'legacy'::text");
+    expect(constraints[0]?.definition).toContain("'staged'::text");
+  });
+
+  test("permits staged active plus preparing while every legacy open row remains exclusive", async () => {
     const indexes = await shared.admin<{ indexName: string; definition: string }[]>`
       select indexname as "indexName", indexdef as definition
       from pg_indexes
@@ -31,10 +61,15 @@ describe("0135 session realtime connection promotion migration", () => {
       "session_realtime_connections_one_active_uq",
       "session_realtime_connections_one_preparing_uq",
     ]);
-    expect(indexes[0]?.definition).toContain("WHERE (state = 'active'::text)");
+    for (const index of indexes) {
+      expect(index.definition).toContain("promotion_mode = 'legacy'::text");
+      expect(index.definition).toContain("promotion_mode = 'staged'::text");
+      expect(index.definition).toContain("'negotiating'::text");
+      expect(index.definition).toContain("'ready'::text");
+      expect(index.definition).toContain("'active'::text");
+    }
+    expect(indexes[0]?.definition).toContain("(state = 'active'::text)");
     expect(indexes[1]?.definition).toContain("state = ANY");
-    expect(indexes[1]?.definition).toContain("'negotiating'::text");
-    expect(indexes[1]?.definition).toContain("'ready'::text");
   });
 
   test("requires a negotiated answer for ready and active rows", async () => {

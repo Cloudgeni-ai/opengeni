@@ -1542,8 +1542,12 @@ export const sessionRealtimeModes = pgTable(
     state: text("state").notNull().default("active"),
     version: integer("version").notNull().default(1),
     connectionEpoch: integer("connection_epoch").notNull().default(1),
-    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }).notNull(),
-    lastHeartbeatAt: timestamp("last_heartbeat_at", { withTimezone: true }).notNull(),
+    leaseExpiresAt: timestamp("lease_expires_at", {
+      withTimezone: true,
+    }).notNull(),
+    lastHeartbeatAt: timestamp("last_heartbeat_at", {
+      withTimezone: true,
+    }).notNull(),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
     endedAt: timestamp("ended_at", { withTimezone: true }),
     endReason: text("end_reason"),
@@ -1551,7 +1555,9 @@ export const sessionRealtimeModes = pgTable(
     // consumed only when an eligible ordinary queued turn atomically binds all
     // pending realtime history to one immutable projection row.
     contextProjectionId: uuid("context_projection_id"),
-    contextProjectedAt: timestamp("context_projected_at", { withTimezone: true }),
+    contextProjectedAt: timestamp("context_projected_at", {
+      withTimezone: true,
+    }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -1628,12 +1634,15 @@ export const sessionRealtimeConnections = pgTable(
     operationId: uuid("operation_id").notNull(),
     connectionEpoch: integer("connection_epoch").notNull(),
     startupFenceSequence: integer("startup_fence_sequence").notNull().default(0),
+    promotionMode: text("promotion_mode").notNull().default("legacy"),
     state: text("state").notNull().default("negotiating"),
     sdpAnswer: text("sdp_answer"),
     failureCode: text("failure_code"),
     providerSessionId: text("provider_session_id"),
     startupEventId: text("startup_event_id"),
-    startupAcknowledgedAt: timestamp("startup_acknowledged_at", { withTimezone: true }),
+    startupAcknowledgedAt: timestamp("startup_acknowledged_at", {
+      withTimezone: true,
+    }),
     negotiatedAt: timestamp("negotiated_at", { withTimezone: true }),
     closedAt: timestamp("closed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -1660,10 +1669,16 @@ export const sessionRealtimeConnections = pgTable(
     ),
     oneActive: uniqueIndex("session_realtime_connections_one_active_uq")
       .on(table.realtimeId)
-      .where(sql`${table.state} = 'active'`),
+      .where(
+        sql`(${table.promotionMode} = 'legacy' and ${table.state} in ('negotiating', 'ready', 'active'))
+          or (${table.promotionMode} = 'staged' and ${table.state} = 'active')`,
+      ),
     onePreparing: uniqueIndex("session_realtime_connections_one_preparing_uq")
       .on(table.realtimeId)
-      .where(sql`${table.state} in ('negotiating', 'ready')`),
+      .where(
+        sql`(${table.promotionMode} = 'legacy' and ${table.state} in ('negotiating', 'ready', 'active'))
+          or (${table.promotionMode} = 'staged' and ${table.state} in ('negotiating', 'ready'))`,
+      ),
     epochValid: check(
       "session_realtime_connections_epoch_check",
       sql`${table.connectionEpoch} >= 1`,
@@ -1671,6 +1686,10 @@ export const sessionRealtimeConnections = pgTable(
     startupFenceValid: check(
       "session_realtime_connections_startup_fence_check",
       sql`${table.startupFenceSequence} >= 0`,
+    ),
+    promotionModeValid: check(
+      "session_realtime_connections_promotion_mode_check",
+      sql`${table.promotionMode} in ('legacy', 'staged')`,
     ),
     stateValid: check(
       "session_realtime_connections_state_check",

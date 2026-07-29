@@ -102,13 +102,14 @@ function ownerProof(value: Fixture, expectedVersion = value.started.mode.version
   };
 }
 
-async function claimInitial(value: Fixture) {
+async function claimInitial(value: Fixture, promotionMode: "legacy" | "staged" = "staged") {
   const operationId = crypto.randomUUID();
   const input = {
     ...ownerProof(value),
     operationId,
     expectedConnectionEpoch: 1,
     rotate: false,
+    promotionMode,
   };
   const claimed = await transaction(value.owner.workspaceId, (tx) =>
     claimSessionRealtimeConnectionInTransaction(tx, input),
@@ -244,7 +245,10 @@ describe("session realtime ledger", () => {
     const replay = await transaction(value.owner.workspaceId, (tx) =>
       failSessionRealtimeConnectionInTransaction(tx, input),
     );
-    expect(replay).toMatchObject({ replay: true, connection: { id: failed.connection.id } });
+    expect(replay).toMatchObject({
+      replay: true,
+      connection: { id: failed.connection.id },
+    });
     await expectConflict(complete(value, first.claimed.connection), "REALTIME_CONNECTION_CHANGED");
   });
 
@@ -254,7 +258,10 @@ describe("session realtime ledger", () => {
     const replay = await transaction(value.owner.workspaceId, (tx) =>
       claimSessionRealtimeConnectionInTransaction(tx, first.input),
     );
-    expect(replay).toMatchObject({ replay: true, connection: { id: first.claimed.connection.id } });
+    expect(replay).toMatchObject({
+      replay: true,
+      connection: { id: first.claimed.connection.id },
+    });
     await complete(value, first.claimed.connection);
 
     const rotationInput = {
@@ -262,6 +269,7 @@ describe("session realtime ledger", () => {
       operationId: crypto.randomUUID(),
       expectedConnectionEpoch: 1,
       rotate: true,
+      promotionMode: "staged" as const,
     };
     const rotated = await transaction(value.owner.workspaceId, (tx) =>
       claimSessionRealtimeConnectionInTransaction(tx, rotationInput),
@@ -280,7 +288,10 @@ describe("session realtime ledger", () => {
     );
     expect(beforePromotion.outbound).toEqual([]);
     const active = await complete(value, rotated.connection, "v=0\r\na=answer:rotated\r\n");
-    expect(active.connection).toMatchObject({ state: "active", connectionEpoch: 2 });
+    expect(active.connection).toMatchObject({
+      state: "active",
+      connectionEpoch: 2,
+    });
     expect(active.mode).toMatchObject({ version: 2, connectionEpoch: 2 });
     await expectConflict(
       transaction(value.owner.workspaceId, (tx) =>
@@ -300,6 +311,185 @@ describe("session realtime ledger", () => {
       modeVersion: 2,
       connection: { id: rotated.connection.id, state: "active" },
     });
+  });
+
+  test("preserves sole-parent legacy rotation and direct negotiating-to-active completion", async () => {
+    const value = await fixture();
+    const first = await claimInitial(value, "legacy");
+    expect(first.claimed).toMatchObject({
+      modeVersion: 1,
+      connection: {
+        connectionEpoch: 1,
+        promotionMode: "legacy",
+        state: "negotiating",
+      },
+    });
+    const firstCompleted = await transaction(value.owner.workspaceId, (tx) =>
+      completeSessionRealtimeConnectionInTransaction(tx, {
+        workspaceId: value.owner.workspaceId,
+        sessionId: value.owner.sessionId,
+        realtimeId: value.started.mode.id,
+        connectionId: first.claimed.connection.id,
+        operationId: first.claimed.connection.operationId,
+        connectionEpoch: first.claimed.connection.connectionEpoch,
+        sdpAnswer: "v=0\r\na=answer:legacy-initial\r\n",
+      }),
+    );
+    expect(firstCompleted.connection).toMatchObject({
+      state: "active",
+      promotionMode: "legacy",
+    });
+
+    const rotationInput = {
+      ...ownerProof(value),
+      operationId: crypto.randomUUID(),
+      expectedConnectionEpoch: 1,
+      rotate: true,
+      promotionMode: "legacy" as const,
+    };
+    const rotated = await transaction(value.owner.workspaceId, (tx) =>
+      claimSessionRealtimeConnectionInTransaction(tx, rotationInput),
+    );
+    expect(rotated).toMatchObject({
+      modeVersion: 2,
+      connection: {
+        connectionEpoch: 2,
+        promotionMode: "legacy",
+        state: "negotiating",
+      },
+    });
+    const rotatedCompleted = await transaction(value.owner.workspaceId, (tx) =>
+      completeSessionRealtimeConnectionInTransaction(tx, {
+        workspaceId: value.owner.workspaceId,
+        sessionId: value.owner.sessionId,
+        realtimeId: value.started.mode.id,
+        connectionId: rotated.connection.id,
+        operationId: rotated.connection.operationId,
+        connectionEpoch: rotated.connection.connectionEpoch,
+        sdpAnswer: "v=0\r\na=answer:legacy-rotated\r\n",
+      }),
+    );
+    expect(rotatedCompleted.connection).toMatchObject({ state: "active" });
+
+    const activationReplay = await transaction(value.owner.workspaceId, (tx) =>
+      activateSessionRealtimeConnectionInTransaction(tx, {
+        ...ownerProof(value),
+        connectionId: rotated.connection.id,
+        operationId: rotated.connection.operationId,
+        connectionEpoch: rotated.connection.connectionEpoch,
+        expectedConnectionEpoch: 1,
+      }),
+    );
+    expect(activationReplay).toMatchObject({
+      replay: true,
+      mode: { version: 2, connectionEpoch: 2 },
+      connection: { state: "active" },
+    });
+    const claimReplay = await transaction(value.owner.workspaceId, (tx) =>
+      claimSessionRealtimeConnectionInTransaction(tx, rotationInput),
+    );
+    expect(claimReplay).toMatchObject({
+      replay: true,
+      modeVersion: 2,
+      connection: { id: rotated.connection.id, state: "active" },
+    });
+  });
+
+  test("rejects operation replay when the requested promotion mode changes", async () => {
+    const value = await fixture();
+    const first = await claimInitial(value);
+    await expectConflict(
+      transaction(value.owner.workspaceId, (tx) =>
+        claimSessionRealtimeConnectionInTransaction(tx, {
+          ...first.input,
+          promotionMode: "legacy",
+        }),
+      ),
+      "REALTIME_CONNECTION_CHANGED",
+    );
+  });
+
+  test("keeps staged active and ready generations intact when a sole-parent writer races", async () => {
+    const value = await fixture();
+    const first = await claimInitial(value);
+    await complete(value, first.claimed.connection);
+    const replacement = await transaction(value.owner.workspaceId, (tx) =>
+      claimSessionRealtimeConnectionInTransaction(tx, {
+        ...ownerProof(value),
+        operationId: crypto.randomUUID(),
+        expectedConnectionEpoch: 1,
+        rotate: true,
+        promotionMode: "staged",
+      }),
+    );
+    await transaction(value.owner.workspaceId, (tx) =>
+      completeSessionRealtimeConnectionInTransaction(tx, {
+        workspaceId: value.owner.workspaceId,
+        sessionId: value.owner.sessionId,
+        realtimeId: value.started.mode.id,
+        connectionId: replacement.connection.id,
+        operationId: replacement.connection.operationId,
+        connectionEpoch: replacement.connection.connectionEpoch,
+        sdpAnswer: "v=0\r\na=answer:staged-ready\r\n",
+      }),
+    );
+
+    const legacyOperationId = crypto.randomUUID();
+    await expect(
+      shared.admin.begin(async (transactionSql) => {
+        const [open] = await transactionSql<{ id: string }[]>`
+          select id
+          from session_realtime_connections
+          where realtime_id = ${value.started.mode.id}
+            and state in ('negotiating', 'active')
+          for update
+          limit 1`;
+        if (!open) throw new Error("sole-parent writer found no open connection");
+        await transactionSql`
+          update session_realtime_connections
+          set state = 'closed', closed_at = now(), updated_at = now()
+          where id = ${open.id}`;
+        await transactionSql`
+          update session_realtime_modes
+          set connection_epoch = 2, version = version + 1, updated_at = now()
+          where id = ${value.started.mode.id}
+            and connection_epoch = 1`;
+        await transactionSql`
+          insert into session_realtime_connections (
+            account_id, workspace_id, session_id, realtime_id,
+            operation_id, connection_epoch, state
+          ) values (
+            ${value.grant.accountId}, ${value.owner.workspaceId}, ${value.owner.sessionId},
+            ${value.started.mode.id}, ${legacyOperationId}, 2, 'negotiating'
+          )`;
+      }),
+    ).rejects.toMatchObject({ code: "23505" });
+
+    const rows = await transaction(value.owner.workspaceId, (tx) =>
+      tx
+        .select({
+          connectionEpoch: schema.sessionRealtimeConnections.connectionEpoch,
+          promotionMode: schema.sessionRealtimeConnections.promotionMode,
+          state: schema.sessionRealtimeConnections.state,
+        })
+        .from(schema.sessionRealtimeConnections)
+        .where(eq(schema.sessionRealtimeConnections.realtimeId, value.started.mode.id))
+        .orderBy(asc(schema.sessionRealtimeConnections.connectionEpoch)),
+    );
+    expect(rows).toEqual([
+      { connectionEpoch: 1, promotionMode: "staged", state: "active" },
+      { connectionEpoch: 2, promotionMode: "staged", state: "ready" },
+    ]);
+    const [mode] = await transaction(value.owner.workspaceId, (tx) =>
+      tx
+        .select({
+          connectionEpoch: schema.sessionRealtimeModes.connectionEpoch,
+          version: schema.sessionRealtimeModes.version,
+        })
+        .from(schema.sessionRealtimeModes)
+        .where(eq(schema.sessionRealtimeModes.id, value.started.mode.id)),
+    );
+    expect(mode).toEqual({ connectionEpoch: 1, version: 1 });
   });
 
   test("failed replacement negotiation preserves the active connection and mode epoch", async () => {
@@ -416,13 +606,19 @@ describe("session realtime ledger", () => {
     const acknowledgedClaimReplay = await transaction(value.owner.workspaceId, (tx) =>
       claimSessionRealtimeConnectionInTransaction(tx, rotationInput),
     );
-    expect(acknowledgedClaimReplay).toMatchObject({ replay: true, startupEntries: [] });
+    expect(acknowledgedClaimReplay).toMatchObject({
+      replay: true,
+      startupEntries: [],
+    });
 
     await expectConflict(
       transaction(value.owner.workspaceId, (tx) =>
         syncSessionRealtimeLedgerInTransaction(tx, {
           ...syncInput,
-          providerStarted: { ...proof, providerSessionId: "provider-session-other" },
+          providerStarted: {
+            ...proof,
+            providerSessionId: "provider-session-other",
+          },
         }),
       ),
       "REALTIME_CONNECTION_STATE_CHANGED",
@@ -469,7 +665,11 @@ describe("session realtime ledger", () => {
     );
     expect(history.slice(-2).map(({ item }) => item)).toEqual([
       { type: "message", role: "user", content: "finalized human voice" },
-      { type: "message", role: "assistant", content: "finalized assistant voice" },
+      {
+        type: "message",
+        role: "assistant",
+        content: "finalized assistant voice",
+      },
     ]);
   });
 
@@ -487,7 +687,11 @@ describe("session realtime ledger", () => {
       sourceId: "another-session",
       dedupeKey: `voice-update-${operationId}`,
       summary: "durable update during voice",
-      payload: { type: "agent_message", text: "durable update during voice", operationId },
+      payload: {
+        type: "agent_message",
+        text: "durable update during voice",
+        operationId,
+      },
     });
     if (!("update" in added)) throw new Error("Realtime update was not accepted");
 
@@ -499,7 +703,10 @@ describe("session realtime ledger", () => {
       }),
     );
     const update = firstSync.outbound.find((entry) => entry.kind === "session_update");
-    expect(update).toMatchObject({ sourceUpdateId: added.update.id, text: added.update.summary });
+    expect(update).toMatchObject({
+      sourceUpdateId: added.update.id,
+      text: added.update.summary,
+    });
     const clientAcked = await transaction(value.owner.workspaceId, (tx) =>
       syncSessionRealtimeLedgerInTransaction(tx, {
         ...ownerProof(value),
@@ -565,7 +772,10 @@ describe("session realtime ledger", () => {
             kind: "delegation_call",
             providerEventId: "delegation-created-1",
             delegationItemId,
-            payload: { name: "session_send_message", arguments: { sessionId: "target" } },
+            payload: {
+              name: "session_send_message",
+              arguments: { sessionId: "target" },
+            },
           },
         ],
       }),
@@ -713,7 +923,13 @@ describe("session realtime ledger", () => {
         .select({ children: sql<number>`count(*)` })
         .from(schema.sessions)
         .where(eq(schema.sessions.parentSessionId, value.session.id));
-      return { turns, calls, session, count: Number(count), children: Number(children) };
+      return {
+        turns,
+        calls,
+        session,
+        count: Number(count),
+        children: Number(children),
+      };
     });
     expect(persisted.turns).toHaveLength(1);
     expect(persisted.turns[0]).toMatchObject({
@@ -764,7 +980,12 @@ describe("session realtime ledger", () => {
       turnStatus: "completed",
       sessionStatus: "idle",
       activeTurnId: null,
-      events: [{ type: "turn.completed", payload: { output: "duplicate notification" } }],
+      events: [
+        {
+          type: "turn.completed",
+          payload: { output: "duplicate notification" },
+        },
+      ],
     });
     expect(duplicate.action).toBe("stale");
 
@@ -809,7 +1030,10 @@ describe("session realtime ledger", () => {
       }),
     );
     expect(crashRetry.outbound.filter((entry) => entry.turnId === execution.turn.id)).toEqual([
-      expect.objectContaining({ id: terminalRows[0]!.id, sequence: terminalRows[0]!.sequence }),
+      expect.objectContaining({
+        id: terminalRows[0]!.id,
+        sequence: terminalRows[0]!.sequence,
+      }),
     ]);
     await expectConflict(
       transaction(value.owner.workspaceId, (tx) =>
@@ -854,8 +1078,14 @@ describe("session realtime ledger", () => {
       sessionStatus: "idle" as const,
       activeTurnId: null,
       events: [
-        { type: "turn.completed" as const, payload: { output: "retry-safe output" } },
-        { type: "session.status.changed" as const, payload: { status: "idle" } },
+        {
+          type: "turn.completed" as const,
+          payload: { output: "retry-safe output" },
+        },
+        {
+          type: "session.status.changed" as const,
+          payload: { status: "idle" },
+        },
       ],
     };
     await expect(
@@ -916,7 +1146,12 @@ describe("session realtime ledger", () => {
       turnStatus: "completed",
       sessionStatus: "idle",
       activeTurnId: null,
-      events: [{ type: "turn.completed", payload: { output: "rotate this exact result" } }],
+      events: [
+        {
+          type: "turn.completed",
+          payload: { output: "rotate this exact result" },
+        },
+      ],
     });
     const [terminal] = await transaction(value.owner.workspaceId, (tx) =>
       tx
@@ -1056,7 +1291,11 @@ describe("session realtime ledger", () => {
     await transaction(value.owner.workspaceId, (tx) =>
       tx
         .update(schema.sessionTurns)
-        .set({ metadata: { realtimeDelegation: { realtimeId: value.started.mode.id } } })
+        .set({
+          metadata: {
+            realtimeDelegation: { realtimeId: value.started.mode.id },
+          },
+        })
         .where(eq(schema.sessionTurns.id, turnId)),
     );
     const claim = await claimSessionWorkForAttempt(client.db, value.owner.workspaceId, {
@@ -1148,15 +1387,24 @@ describe("session realtime ledger", () => {
     const failedReplay = await transaction(value.owner.workspaceId, (tx) =>
       syncSessionRealtimeLedgerInTransaction(tx, invalid),
     );
-    expect(failed.accepted[0]).toMatchObject({ replay: false, entry: { turnId: null } });
+    expect(failed.accepted[0]).toMatchObject({
+      replay: false,
+      entry: { turnId: null },
+    });
     expect(failed.outbound).toContainEqual(
       expect.objectContaining({
         kind: "error",
         turnId: null,
-        payload: { code: "invalid_delegation_call", callOperationId: operationId },
+        payload: {
+          code: "invalid_delegation_call",
+          callOperationId: operationId,
+        },
       }),
     );
-    expect(failedReplay.accepted[0]).toMatchObject({ replay: true, entry: { turnId: null } });
+    expect(failedReplay.accepted[0]).toMatchObject({
+      replay: true,
+      entry: { turnId: null },
+    });
     const invalidState = await transaction(value.owner.workspaceId, async (tx) => {
       const turns = await tx
         .select({ id: schema.sessionTurns.id })

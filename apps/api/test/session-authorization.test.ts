@@ -15,6 +15,11 @@ const cases: Array<[string, string, SessionAuthorizationOperation]> = [
   ["POST", "/realtime/webrtc", "session.realtime.start"],
   ["POST", "/realtime", "session.realtime.start"],
   ["PATCH", "/realtime/33333333-3333-4333-8333-333333333333/heartbeat", "session.realtime.control"],
+  [
+    "POST",
+    "/realtime/33333333-3333-4333-8333-333333333333/connections/44444444-4444-4444-8444-444444444444/activate",
+    "session.realtime.control",
+  ],
   ["DELETE", "/realtime/33333333-3333-4333-8333-333333333333", "session.realtime.control"],
   ["GET", "/goal", "session.goal.read"],
   ["PATCH", "/goal", "session.goal.write"],
