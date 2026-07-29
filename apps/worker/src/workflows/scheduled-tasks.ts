@@ -1,4 +1,4 @@
-import { workflowInfo } from "@temporalio/workflow";
+import { patched, workflowInfo } from "@temporalio/workflow";
 import type { TurnInitiator } from "@opengeni/contracts";
 import { scheduledTaskActivity } from "./activities";
 
@@ -28,7 +28,11 @@ export async function scheduledTaskFireWorkflow(
   // Old malformed manual histories must terminate rather than retrying a usage
   // conflict forever. All current producers are statically required to provide
   // the exact charging identity.
-  if (input.triggerType === "manual" && (!input.agentRunUsageIdempotencyKey || !input.initiator)) {
+  if (
+    patched("scheduled-task-manual-initiator-v1") &&
+    input.triggerType === "manual" &&
+    (!input.agentRunUsageIdempotencyKey || !input.initiator)
+  ) {
     return;
   }
   const base = {

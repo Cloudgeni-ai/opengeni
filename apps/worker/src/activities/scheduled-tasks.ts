@@ -50,6 +50,12 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
       input: DispatchScheduledTaskRunInput,
     ): Promise<DispatchScheduledTaskRunResult> => {
       const { settings, db, bus, wakeSessionWorkflow } = await services();
+      // Histories created before the manual-initiator workflow patch already
+      // contain this activity command. Reject their incomplete wire input here
+      // so replay consumes the recorded command and the retry loop settles.
+      if (input.triggerType === "manual" && !input.initiator) {
+        return { action: "blocked", reason: "malformed_manual_trigger" };
+      }
       const task = await getScheduledTask(db, input.workspaceId, input.taskId);
       // Deleting a schedule is authoritative. A fire workflow that was already
       // created may still start afterward; completing it as a no-op prevents an

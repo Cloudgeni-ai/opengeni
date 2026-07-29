@@ -283,6 +283,18 @@ describe("scheduled OpenGeni Slack bot routing", () => {
     ).toEqual({ action: "deleted" });
   });
 
+  test("settles a replayed malformed manual trigger before usage or task lookup", async () => {
+    if (!available) return;
+    expect(
+      await activities().dispatchScheduledTaskRun({
+        workspaceId: crypto.randomUUID(),
+        taskId: crypto.randomUUID(),
+        triggerType: "manual",
+        agentRunUsageIdempotencyKey: "historical-missing-initiator",
+      } as never),
+    ).toEqual({ action: "blocked", reason: "malformed_manual_trigger" });
+  });
+
   test("manual dispatch reuses the API charge identity without an idempotency conflict", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
