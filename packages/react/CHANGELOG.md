@@ -1,5 +1,13 @@
 # @opengeni/react
 
+## 0.27.0
+
+### Patch Changes
+
+- 519d93c: Add validated inline per-session skills and discover skills directly from already-materialized repository resources.
+- Updated dependencies [519d93c]
+  - @opengeni/sdk@0.27.0
+
 ## 0.26.3
 
 ### Patch Changes

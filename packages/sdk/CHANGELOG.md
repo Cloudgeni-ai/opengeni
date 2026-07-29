@@ -1,5 +1,11 @@
 # @opengeni/sdk
 
+## 0.27.0
+
+### Minor Changes
+
+- 519d93c: Add validated inline per-session skills and discover skills directly from already-materialized repository resources.
+
 ## 0.26.3
 
 ### Patch Changes
