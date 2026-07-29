@@ -1,12 +1,12 @@
 import { CheckIcon, ChevronRightIcon, CircleSlashIcon, TriangleAlertIcon } from "lucide-react";
-import { useState } from "react";
+import { Component, useMemo, useState, type ReactNode } from "react";
 import { Collapsible } from "radix-ui";
 import { cn } from "../lib/cn";
 import { useForcedDefaultOpen } from "./disclosure-context";
 import { useEntranceAnimation } from "./entrance";
 import { applyPatchOps, isApplyPatch, mediaPreviewFact, screenshotDataUrl } from "./parsers";
 import { rawTypeOf } from "./registry";
-import type { ActivityItem, TurnOutcome } from "./types";
+import type { ActivityItem, ToolCallItem, TurnOutcome } from "./types";
 export type { TurnOutcome } from "./types";
 
 /* ----------------------------------------------------------------------------
@@ -20,6 +20,67 @@ export type { TurnOutcome } from "./types";
    This keeps the timeline calm: a finished turn is a single line until the
    reader chooses to look inside it.
    -------------------------------------------------------------------------- */
+
+export const BUILT_IN_TURN_SUMMARY_FACET_IDS = [
+  "steps",
+  "files",
+  "commands",
+  "screenshots",
+  "memories",
+  "duration",
+] as const;
+
+export type BuiltInTurnSummaryFacetId = (typeof BUILT_IN_TURN_SUMMARY_FACET_IDS)[number];
+
+export type TurnSummaryContext = Readonly<{
+  /** Every normalized activity item folded into this summary. */
+  items: readonly ActivityItem[];
+  /** Tool calls from `items`, retained in timeline order for convenient aggregation. */
+  toolCalls: readonly ToolCallItem[];
+  /** The settled turn verdict, or absent for a neutral/incomplete cluster. */
+  outcome: TurnOutcome | undefined;
+  /** The bounded failure reason rendered by the enclosing summary, when present. */
+  failureText: string | undefined;
+  /** Total turn duration when the enclosing group has both valid timestamps. */
+  durationMs: number | undefined;
+  /** False when any projected activity is still running or streaming. */
+  settled: boolean;
+}>;
+
+export type TurnSummaryFacetResult = Readonly<{
+  icon?: ReactNode;
+  content: ReactNode;
+  ariaLabel?: string;
+  title?: string;
+}>;
+
+export type TurnSummaryFacet = Readonly<{
+  /** Stable identity used for removal and deterministic de-duplication. */
+  id: string;
+  /** Return null when this facet has nothing useful to show. */
+  summarize(context: TurnSummaryContext): TurnSummaryFacetResult | null;
+}>;
+
+type ModifyTurnSummaryFacets = Readonly<{
+  /** Appended after the remaining built-ins, in supplied order. */
+  add?: readonly TurnSummaryFacet[];
+  /** Built-ins to omit before custom facets are appended. */
+  remove?: readonly BuiltInTurnSummaryFacetId[];
+  replace?: never;
+}>;
+
+type ReplaceTurnSummaryFacets = Readonly<{
+  /** The complete ordered facet list. Mutually exclusive with add/remove. */
+  replace: readonly TurnSummaryFacet[];
+  add?: never;
+  remove?: never;
+}>;
+
+export type TurnSummaryFacetConfiguration = ModifyTurnSummaryFacets | ReplaceTurnSummaryFacets;
+
+export type TurnSummaryOptions = Readonly<{
+  facets?: TurnSummaryFacetConfiguration;
+}>;
 
 export type TurnSummaryProps = {
   /** The activity items in the turn (used only to compute the facet counts). */
@@ -43,8 +104,10 @@ export type TurnSummaryProps = {
    * of nodes, never a stack of boxes-in-boxes. The top-level fold stays a chip.
    */
   bare?: boolean | undefined;
+  /** Per-instance facet customization. Omit to preserve the built-in summary exactly. */
+  facets?: TurnSummaryFacetConfiguration | undefined;
   /** The rendered activity rail revealed on expand. */
-  children: React.ReactNode;
+  children: ReactNode;
 };
 
 export function TurnSummary({
@@ -54,6 +117,7 @@ export function TurnSummary({
   durationMs,
   defaultOpen,
   bare,
+  facets: facetConfiguration,
   children,
 }: TurnSummaryProps) {
   // An explicit `defaultOpen` always wins; otherwise an ancestor may seed it
@@ -61,7 +125,28 @@ export function TurnSummary({
   const forcedDefaultOpen = useForcedDefaultOpen();
   const [open, setOpen] = useState(defaultOpen ?? forcedDefaultOpen ?? false);
   const enter = useEntranceAnimation();
-  const facets = summarizeTurn(items, durationMs);
+  const context = useMemo(
+    () => createTurnSummaryContext(items, outcome, failureText, durationMs),
+    [items, outcome, failureText, durationMs],
+  );
+  const facetDefinitions = useMemo(
+    () => resolveTurnSummaryFacets(facetConfiguration),
+    [facetConfiguration],
+  );
+  const facets = useMemo(
+    () =>
+      facetDefinitions.flatMap((facet) => {
+        try {
+          const result = facet.summarize(context);
+          return result && hasFacetContent(result.content) ? [{ facet, result }] : [];
+        } catch {
+          // A host extension is presentation-only. It must never take down the
+          // durable timeline or hide the remaining built-in evidence.
+          return [];
+        }
+      }),
+    [context, facetDefinitions],
+  );
 
   return (
     <Collapsible.Root
@@ -117,7 +202,21 @@ export function TurnSummary({
           )}
         </span>
         <span className={cn("min-w-0 flex-1 truncate", bare ? "text-og-sm" : "text-og-fg-muted")}>
-          {facets}
+          {facets.map(({ facet, result }, index) => (
+            <FacetRenderBoundary key={facet.id}>
+              <>
+                {index > 0 ? " · " : null}
+                <span aria-label={result.ariaLabel} title={result.title}>
+                  {result.icon ? (
+                    <span aria-hidden className="mr-1 inline-flex align-[-0.125em]">
+                      {result.icon}
+                    </span>
+                  ) : null}
+                  {result.content}
+                </span>
+              </>
+            </FacetRenderBoundary>
+          ))}
           {outcome === "failed" && failureText ? (
             <span className="text-og-status-failed"> · {failureText}</span>
           ) : null}
@@ -150,63 +249,154 @@ export function TurnSummary({
   );
 }
 
-/** Compose the facet summary line ("14 steps · 3 files · 2 commands · 1 screenshot · 4m"). */
-function summarizeTurn(items: ActivityItem[], durationMs?: number): string {
-  let files = 0;
-  let commands = 0;
-  let screenshots = 0;
-  let memoriesSaved = 0;
-  let memoriesUpdated = 0;
-  for (const item of items) {
-    if (item.kind === "memory") {
-      // A memory write is a first-class facet — the "wrote 1 memory" signal the
-      // fold should make prominent — counted saved vs updated separately.
-      if (item.variant === "corrected") {
-        memoriesUpdated += 1;
-      } else {
-        memoriesSaved += 1;
+function createTurnSummaryContext(
+  items: ActivityItem[],
+  outcome: TurnOutcome | undefined,
+  failureText: string | undefined,
+  durationMs: number | undefined,
+): TurnSummaryContext {
+  const itemSnapshot = Object.freeze([...items]);
+  const toolCalls = Object.freeze(
+    itemSnapshot.filter((item): item is ToolCallItem => item.kind === "tool-call"),
+  );
+  const settled = itemSnapshot.every((item) => {
+    if (item.kind === "reasoning") {
+      return !item.streaming;
+    }
+    if (item.kind === "tool-call" || item.kind === "worker" || item.kind === "sandbox") {
+      return item.status !== "running";
+    }
+    return true;
+  });
+  return Object.freeze({
+    items: itemSnapshot,
+    toolCalls,
+    outcome,
+    failureText,
+    durationMs,
+    settled,
+  });
+}
+
+const BUILT_IN_TURN_SUMMARY_FACETS: readonly TurnSummaryFacet[] = Object.freeze([
+  {
+    id: "steps",
+    summarize: ({ items }) => ({
+      content: `${items.length} ${items.length === 1 ? "step" : "steps"}`,
+    }),
+  },
+  {
+    id: "files",
+    summarize: ({ toolCalls }) => {
+      let files = 0;
+      for (const item of toolCalls) {
+        if (isApplyPatch(item)) {
+          files += applyPatchOps(item.raw).length;
+        }
       }
-      continue;
-    }
-    if (item.kind !== "tool-call") {
-      continue;
-    }
-    // `item` is narrowed to ToolCallItem by the guard above — no cast needed.
-    if (isApplyPatch(item)) {
-      files += applyPatchOps(item.raw).length;
-    } else if (item.name === "exec_command") {
-      commands += 1;
-    } else if (
-      rawTypeOf(item) === "computer_call" ||
-      item.name === "computer_call" ||
-      item.name === "computer_screenshot"
-    ) {
-      if (screenshotDataUrl(item.output) !== null || mediaPreviewFact(item.output) !== null) {
-        screenshots += 1;
+      return files ? { content: `${files} ${files === 1 ? "file" : "files"} edited` } : null;
+    },
+  },
+  {
+    id: "commands",
+    summarize: ({ toolCalls }) => {
+      const commands = toolCalls.filter((item) => item.name === "exec_command").length;
+      return commands
+        ? { content: `${commands} ${commands === 1 ? "command" : "commands"}` }
+        : null;
+    },
+  },
+  {
+    id: "screenshots",
+    summarize: ({ toolCalls }) => {
+      let screenshots = 0;
+      for (const item of toolCalls) {
+        if (
+          (rawTypeOf(item) === "computer_call" ||
+            item.name === "computer_call" ||
+            item.name === "computer_screenshot") &&
+          (screenshotDataUrl(item.output) !== null || mediaPreviewFact(item.output) !== null)
+        ) {
+          screenshots += 1;
+        }
       }
+      return screenshots
+        ? {
+            content: `${screenshots} ${screenshots === 1 ? "screenshot" : "screenshots"}`,
+          }
+        : null;
+    },
+  },
+  {
+    id: "memories",
+    summarize: ({ items }) => {
+      let saved = 0;
+      let updated = 0;
+      for (const item of items) {
+        if (item.kind !== "memory") {
+          continue;
+        }
+        if (item.variant === "corrected") {
+          updated += 1;
+        } else {
+          saved += 1;
+        }
+      }
+      const parts: string[] = [];
+      if (saved) {
+        parts.push(`${saved} ${saved === 1 ? "memory" : "memories"} saved`);
+      }
+      if (updated) {
+        parts.push(`${updated} ${updated === 1 ? "memory" : "memories"} updated`);
+      }
+      return parts.length > 0 ? { content: parts.join(" · ") } : null;
+    },
+  },
+  {
+    id: "duration",
+    summarize: ({ durationMs }) => {
+      const duration = formatDurationFacet(durationMs);
+      return duration ? { content: duration } : null;
+    },
+  },
+]);
+
+function resolveTurnSummaryFacets(
+  configuration: TurnSummaryFacetConfiguration | undefined,
+): readonly TurnSummaryFacet[] {
+  const requested =
+    configuration && "replace" in configuration
+      ? configuration.replace
+      : [
+          ...BUILT_IN_TURN_SUMMARY_FACETS.filter(
+            (facet) => !configuration?.remove?.includes(facet.id as BuiltInTurnSummaryFacetId),
+          ),
+          ...(configuration?.add ?? []),
+        ];
+  const seen = new Set<string>();
+  return requested.filter((facet) => {
+    if (!facet.id || seen.has(facet.id)) {
+      return false;
     }
+    seen.add(facet.id);
+    return true;
+  });
+}
+
+function hasFacetContent(content: ReactNode): boolean {
+  return content !== null && content !== undefined && content !== false && content !== "";
+}
+
+class FacetRenderBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+
+  static getDerivedStateFromError(): { failed: boolean } {
+    return { failed: true };
   }
-  const parts = [`${items.length} ${items.length === 1 ? "step" : "steps"}`];
-  if (files) {
-    parts.push(`${files} ${files === 1 ? "file" : "files"} edited`);
+
+  render(): ReactNode {
+    return this.state.failed ? null : this.props.children;
   }
-  if (commands) {
-    parts.push(`${commands} ${commands === 1 ? "command" : "commands"}`);
-  }
-  if (screenshots) {
-    parts.push(`${screenshots} ${screenshots === 1 ? "screenshot" : "screenshots"}`);
-  }
-  if (memoriesSaved) {
-    parts.push(`${memoriesSaved} ${memoriesSaved === 1 ? "memory" : "memories"} saved`);
-  }
-  if (memoriesUpdated) {
-    parts.push(`${memoriesUpdated} ${memoriesUpdated === 1 ? "memory" : "memories"} updated`);
-  }
-  const duration = formatDurationFacet(durationMs);
-  if (duration) {
-    parts.push(duration);
-  }
-  return parts.join(" · ");
 }
 
 function formatDurationFacet(durationMs: number | undefined): string | null {
