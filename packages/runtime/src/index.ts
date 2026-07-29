@@ -177,6 +177,7 @@ import {
   type RunCredentialSessionReady,
 } from "./sandbox";
 import { runWithToolCallCorrelation } from "./sandbox/op-correlation";
+import { shellToolspacePath } from "./sandbox/toolspace-token";
 import {
   createTurnToolCancellationController,
   TurnSandboxCommandCancelledError,
@@ -6812,10 +6813,10 @@ export function toolspaceTokenSeedCommand(
     '  seed_umask="$(umask)"',
     "  umask 077",
     options.tokenFile
-      ? `  token_file=${shellQuote(options.tokenFile)}`
+      ? `  token_file=${shellToolspacePath(options.tokenFile)}`
       : '  token_file="${OPENGENI_TOOLSPACE_TOKEN_FILE:-$HOME/.opengeni/toolspace-token}"',
     options.legacyTokenFile
-      ? `  legacy_token_file=${shellQuote(options.legacyTokenFile)}`
+      ? `  legacy_token_file=${shellToolspacePath(options.legacyTokenFile)}`
       : '  legacy_token_file=""',
     '  mkdir -p "$(dirname "$token_file")"',
     '  printf \'%s\' "$OPENGENI_TOOLSPACE_TOKEN_SEED" > "$token_file.tmp.$$"',

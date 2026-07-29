@@ -774,11 +774,27 @@ describe("sandbox preparation profiles", () => {
     const settings = withEnv({ OPENGENI_SANDBOX_BACKEND: "selfhosted" }, () => getSettings());
     const env = stableSandboxEnvironmentForRun(settings, {}, { workspaceId: "ws-1" });
 
-    expect(env).toEqual({ HOME: "/" });
+    expect(env).toEqual({});
     expect(env.OPENGENI_GIT_CREDENTIALS_DIR).toBeUndefined();
     expect(env.OPENGENI_GIT_TOKEN_FILE).toBeUndefined();
     expect(env.OPENGENI_GIT_CLI_WRAPPER_DIR).toBeUndefined();
     expect(env.PATH).toBeUndefined();
+  });
+
+  test("preserves machine HOME and uses a shell-resolved Toolspace pointer for selfhosted", () => {
+    const settings = withEnv(
+      {
+        OPENGENI_SANDBOX_BACKEND: "selfhosted",
+        OPENGENI_TOOLSPACE_ENABLED: "true",
+        OPENGENI_DELEGATION_SECRET: "delegation-secret",
+      },
+      () => getSettings(),
+    );
+    const env = stableSandboxEnvironmentForRun(settings, {}, { workspaceId: "ws-1" });
+
+    expect(env.HOME).toBeUndefined();
+    expect(env.OPENGENI_TOOLSPACE_TOKEN_FILE).toBe("$HOME/.opengeni/toolspace-token");
+    expect(env.OPENGENI_TOOLSPACE_URL).toBe("http://127.0.0.1:8000/v1/workspaces/ws-1/mcp");
   });
 
   test("requires a delegation secret when toolspace is enabled", () => {

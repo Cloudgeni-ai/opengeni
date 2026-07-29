@@ -2787,9 +2787,14 @@ export function stableSandboxEnvironmentForRun(
   };
   // Backend-aware HOME: a provisioned box (docker + every cloud provider) runs the
   // agent under the descriptor's workspaceRoot. `local` runs in-process as the host
-  // unix user (keep its real $HOME); `none` has no box.
+  // unix user (keep its real $HOME); `selfhosted` runs on a user's machine and must
+  // likewise preserve that machine's real HOME; `none` has no box.
   const descriptor = CAPABILITY_DESCRIPTORS[settings.sandboxBackend];
-  if (settings.sandboxBackend !== "none" && settings.sandboxBackend !== "local") {
+  if (
+    settings.sandboxBackend !== "none" &&
+    settings.sandboxBackend !== "local" &&
+    settings.sandboxBackend !== "selfhosted"
+  ) {
     environment.HOME ??= descriptor.workspaceRoot;
   }
   // TOKEN-BROKER (B1): the STABLE credential FILE PATHS and CLI wrapper PATH for
@@ -2810,7 +2815,15 @@ export function stableSandboxEnvironmentForRun(
     environment.PATH = prependPathEntry(environment.PATH, environment.OPENGENI_GIT_CLI_WRAPPER_DIR);
   }
   if (settings.toolspaceEnabled) {
-    environment.OPENGENI_TOOLSPACE_TOKEN_FILE ??= `${environment.HOME ?? descriptor.workspaceRoot}/.opengeni/toolspace-token`;
+    // Connected Machines do not share one control-plane-known home path. Keep a
+    // stable shell-resolved pointer in the manifest; runtime expands this trusted
+    // marker against the machine's own HOME for seed, renewal, and every command.
+    // Never derive it from the selfhosted descriptor root (`/`), which would try
+    // to write `/.opengeni` as an ordinary machine user.
+    environment.OPENGENI_TOOLSPACE_TOKEN_FILE ??=
+      settings.sandboxBackend === "selfhosted"
+        ? "$HOME/.opengeni/toolspace-token"
+        : `${environment.HOME ?? descriptor.workspaceRoot}/.opengeni/toolspace-token`;
     if (settings.ogtoolPackageSpec) {
       environment.OPENGENI_OGTOOL_PACKAGE_SPEC ??= settings.ogtoolPackageSpec;
     }
