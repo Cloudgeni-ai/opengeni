@@ -141,6 +141,97 @@ describe("integrations.sh catalog import normalization", () => {
     });
   });
 
+  test("pins Mobbin to its reviewed official Registry and OAuth contract", () => {
+    const normalized = normalizeCatalogSnapshot({
+      generatedAt: "2026-07-28T00:00:00.000Z",
+      importRows: [
+        row({
+          domain: "mobbin.com",
+          name: "unreviewed name",
+          description: "unreviewed description",
+          mcpUrl: "https://api.mobbin.com/mcp",
+          authKind: "none",
+          scopesHint: ["profile", "email"],
+          tier: "community",
+          provenance: "discovered",
+          logoSourceUrl: "https://unreviewed.example/logo.png",
+          homepageUrl: "https://unreviewed.example",
+          installUrl: "https://unreviewed.example/setup",
+          registryName: "unreviewed/name",
+          registryVersion: "0.0.0",
+          registryStatus: "inactive",
+          registryIsLatest: false,
+          repositoryUrl: "https://unreviewed.example/repository",
+          sourceCommit: "unreviewed",
+          probe: { status: "real", reason: "auth_challenge", httpStatus: 401 },
+        }),
+      ],
+    });
+
+    expect(normalized.rows).toHaveLength(1);
+    expect(normalized.rows[0]).toMatchObject({
+      domain: "mobbin.com",
+      name: "Mobbin",
+      description:
+        "Search Mobbin’s library for real-world product screens, flows, and UI/UX references. Requires a paid Mobbin plan (Pro, Team, or Enterprise). Provider-managed usage credits apply.",
+      mcpUrl: "https://api.mobbin.com/mcp",
+      transport: "streamable-http",
+      authKind: "oauth2",
+      scopesHint: ["openid"],
+      credentialFacts: [],
+      tier: "verified",
+      provenance: "official:mcp-registry:com.mobbin/mobbin@1.0.1",
+      logoSourceUrl: null,
+      homepageUrl: "https://mobbin.com/mcp",
+      installUrl: "https://docs.mobbin.com/mcp/clients/overview",
+      documentationUrl: "https://docs.mobbin.com/mcp/introduction",
+      registryName: "com.mobbin/mobbin",
+      registryVersion: "1.0.1",
+      registryStatus: "active",
+      registryIsLatest: true,
+      registryPublishedAt: "2026-06-03T10:01:47.928592Z",
+      repositorySource: "github",
+      repositoryUrl: "https://github.com/mobbin/mobbin-mcp-server",
+      sourceCommit: "bbee2a6be34d251c580ba80bb8b407c87587aba7",
+      probe: { status: "real", reason: "auth_challenge", httpStatus: 401 },
+    });
+
+    expect(
+      catalogRowToDbInput(normalized.rows[0]!, {
+        importBatchId: "00000000-0000-4000-8000-000000000120",
+      }),
+    ).toMatchObject({
+      providerDomain: "mobbin.com",
+      name: "Mobbin",
+      description:
+        "Search Mobbin’s library for real-world product screens, flows, and UI/UX references. Requires a paid Mobbin plan (Pro, Team, or Enterprise). Provider-managed usage credits apply.",
+      mcpUrl: "https://api.mobbin.com/mcp",
+      authKind: "oauth2",
+      scopesHint: ["openid"],
+      homepageUrl: "https://mobbin.com/mcp",
+      installUrl: "https://docs.mobbin.com/mcp/clients/overview",
+      logoAssetPath: null,
+      metadata: {
+        logoSource: "generic_monogram",
+        originalLogoUrl: null,
+        documentationUrl: "https://docs.mobbin.com/mcp/introduction",
+        officialMcpRegistry: {
+          name: "com.mobbin/mobbin",
+          version: "1.0.1",
+          status: "active",
+          isLatest: true,
+          publishedAt: "2026-06-03T10:01:47.928592Z",
+          repository: {
+            source: "github",
+            url: "https://github.com/mobbin/mobbin-mcp-server",
+          },
+        },
+        sourceCommit: "bbee2a6be34d251c580ba80bb8b407c87587aba7",
+        mcpProbe: { status: "real", reason: "auth_challenge", httpStatus: 401 },
+      },
+    });
+  });
+
   test("does not let an unverified duplicate surface shadow a verified row", () => {
     const normalized = normalizeCatalogSnapshot({
       generatedAt: "2026-07-03T00:00:00.000Z",
@@ -539,6 +630,35 @@ describe("integrations.sh catalog import normalization", () => {
 });
 
 describe("integrations.sh logo storage", () => {
+  test("uses the generic monogram without a fetch when no licensed logo source is published", async () => {
+    let fetches = 0;
+    const result = await storeLogoForRow(
+      row({
+        domain: "generic.example",
+        mcpUrl: "https://generic.example/mcp",
+        logoSourceUrl: null,
+      }),
+      {
+        storage: {
+          async putObject() {
+            throw new Error("should not store");
+          },
+        },
+        fetchImpl: async () => {
+          fetches += 1;
+          throw new Error("should not fetch");
+        },
+      },
+    );
+
+    expect(result).toEqual({
+      ok: false,
+      sourceUrl: null,
+      reason: "logo_source_not_published",
+    });
+    expect(fetches).toBe(0);
+  });
+
   test("stores a valid image response under a self-hosted object key", async () => {
     const stored: Array<{
       key: string;
@@ -778,7 +898,26 @@ function row(
     credentialFacts: overrides.credentialFacts ?? [],
     tier: overrides.tier ?? "community",
     provenance: overrides.provenance ?? "discovered",
-    logoSourceUrl: overrides.logoSourceUrl ?? `https://integrations.sh/logo/${overrides.domain}`,
+    logoSourceUrl:
+      overrides.logoSourceUrl !== undefined
+        ? overrides.logoSourceUrl
+        : `https://integrations.sh/logo/${overrides.domain}`,
+    ...(overrides.description ? { description: overrides.description } : {}),
+    ...(overrides.homepageUrl ? { homepageUrl: overrides.homepageUrl } : {}),
+    ...(overrides.installUrl ? { installUrl: overrides.installUrl } : {}),
+    ...(overrides.documentationUrl ? { documentationUrl: overrides.documentationUrl } : {}),
+    ...(overrides.registryName ? { registryName: overrides.registryName } : {}),
+    ...(overrides.registryVersion ? { registryVersion: overrides.registryVersion } : {}),
+    ...(overrides.registryStatus ? { registryStatus: overrides.registryStatus } : {}),
+    ...(overrides.registryIsLatest !== undefined
+      ? { registryIsLatest: overrides.registryIsLatest }
+      : {}),
+    ...(overrides.registryPublishedAt
+      ? { registryPublishedAt: overrides.registryPublishedAt }
+      : {}),
+    ...(overrides.repositorySource ? { repositorySource: overrides.repositorySource } : {}),
+    ...(overrides.repositoryUrl ? { repositoryUrl: overrides.repositoryUrl } : {}),
+    ...(overrides.sourceCommit ? { sourceCommit: overrides.sourceCommit } : {}),
     ...(overrides.probe ? { probe: overrides.probe } : {}),
     ...(overrides.authContract ? { authContract: overrides.authContract } : {}),
   };

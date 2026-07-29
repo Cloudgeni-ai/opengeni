@@ -3328,6 +3328,7 @@ export type RegistryCapabilityCatalogItemInput = {
   importBatchId: string;
   scopesHint?: string[];
   homepageUrl?: string | null;
+  installUrl?: string | null;
   tags?: string[];
   metadata?: Record<string, unknown>;
 };
@@ -4196,7 +4197,7 @@ export async function upsertRegistryCapabilityCatalogItem(
     tags: input.tags ?? ["mcp", "integration", input.tier],
     homepageUrl: input.homepageUrl ?? `https://${input.providerDomain}`,
     endpointUrl: input.mcpUrl,
-    installUrl: input.homepageUrl ?? `https://${input.providerDomain}`,
+    installUrl: input.installUrl ?? input.homepageUrl ?? `https://${input.providerDomain}`,
     authModel: input.authKind === "none" ? null : "credential_ref",
     providerDomain: input.providerDomain,
     surfaceType: "mcp",
