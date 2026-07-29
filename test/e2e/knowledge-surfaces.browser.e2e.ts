@@ -630,7 +630,12 @@ async function ensureVariableSetExpanded(page: Page): Promise<void> {
   if ((await expanded.count()) === 0) {
     await page.getByRole("button", { name: `Show variables for ${longVariableSetName}` }).click();
   }
+  await expanded.waitFor();
+  expect(await expanded.getAttribute("aria-expanded")).toBe("true");
   await page.getByText(longVariableName, { exact: true }).waitFor();
+  expect(
+    await page.getByRole("button", { name: `Rotate variable ${lastVariableName}` }).count(),
+  ).toBe(1);
 }
 
 async function setTheme(page: Page, theme: "light" | "dark"): Promise<void> {
