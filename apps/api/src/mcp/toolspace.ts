@@ -367,7 +367,13 @@ async function resolveToolListing(input: {
       sessionId,
       rootSessionId,
       turn: activeTurn,
-    }).catch(() => null);
+    }).catch((error) => {
+      deps.observability?.warn("toolspace upstream connection failed", {
+        serverId,
+        ...toolspaceErrorAttributes(error),
+      });
+      return null;
+    });
     if (!connection) {
       aggregateBudget.replace(serverId, []);
       return;
@@ -375,7 +381,13 @@ async function resolveToolListing(input: {
     try {
       const listed = await connection.client
         .listTools(undefined, toolspaceRequestOptions(config))
-        .catch(() => ({ tools: [] }));
+        .catch((error) => {
+          deps.observability?.warn("toolspace upstream tool list failed", {
+            serverId,
+            ...toolspaceErrorAttributes(error),
+          });
+          return { tools: [] };
+        });
       let boundedTools: readonly McpTool[];
       try {
         boundedTools = assertMcpToolListWithinBounds(listed.tools as McpTool[]) as McpTool[];
@@ -494,7 +506,18 @@ async function connectToolspaceServer(input: {
   rootSessionId: string;
   turn: SessionTurn;
 }): Promise<ConnectedToolspaceServer> {
-  const guardedFetch = guardedMcpFetch(input.deps.settings, undiciFetch);
+  // npm Undici's dispatcher transport is not reliable under Bun. The worker's
+  // model-visible MCP path already uses Bun's native fetch while retaining the
+  // same pre-request destination-policy check; Toolspace must do the same or an
+  // embedded Bun API can expose a server to the model while silently dropping
+  // that exact server from `ogtool list`.
+  const useBunNativeFetch = !!process.versions.bun;
+  const mcpFetchImpl: FetchLike = useBunNativeFetch
+    ? globalThis.fetch.bind(globalThis)
+    : undiciFetch;
+  const guardedFetch = guardedMcpFetch(input.deps.settings, mcpFetchImpl, {
+    ...(useBunNativeFetch ? { pinResolvedDestination: false } : {}),
+  });
   const baseFetch: FetchLike = input.config.connectionRef
     ? connectionBrokerFetch(guardedFetch, input)
     : guardedFetch;
@@ -730,6 +753,24 @@ function toolspaceAuditSummary(value: unknown): {
   };
 }
 
+function toolspaceErrorAttributes(error: unknown): {
+  errorClass: string;
+  errorCode?: string;
+  errorMessage?: string;
+} {
+  if (!(error instanceof Error)) {
+    return { errorClass: typeof error };
+  }
+  const code = (error as Error & { code?: unknown }).code;
+  return {
+    errorClass: error.name,
+    ...(typeof code === "string" ? { errorCode: code } : {}),
+    ...(error.message
+      ? { errorMessage: error.message.replaceAll(/[\r\n]+/gu, " ").slice(0, 512) }
+      : {}),
+  };
+}
+
 type ToolspaceReservation =
   | { status: "ok"; turn: SessionTurn }
   | { status: "no_active_turn" }
@@ -844,8 +885,17 @@ export function connectionBrokerFetch(
   if (!connectionRef) {
     return baseFetch;
   }
-  const resolveCredential = input.deps.connectionCredentials?.mcpCredentials
-    ? buildHostConnectionTokenResolver(input.deps.connectionCredentials.mcpCredentials, {
+  const credentialSubjectId =
+    input.turn.initiator.kind === "subject" ? input.turn.initiator.subjectId : undefined;
+  if (connectionRef.subjectScope === "subject" && !credentialSubjectId) {
+    throw new Error(
+      `subject-owned connection for MCP server ${input.config.id} requires a human turn initiator`,
+    );
+  }
+  const hostCredentialPort = input.deps.connectionCredentials?.mcpCredentials;
+  const resolverSubjectId = hostCredentialPort ? input.grant.subjectId : credentialSubjectId;
+  const resolveCredential = hostCredentialPort
+    ? buildHostConnectionTokenResolver(hostCredentialPort, {
         accountId: input.grant.accountId,
         workspaceId: input.grant.workspaceId,
         sessionId: input.sessionId,
@@ -868,7 +918,7 @@ export function connectionBrokerFetch(
       destinationUrl,
       forceRefresh: false,
       ...(request.toolName ? { toolName: request.toolName } : {}),
-      subjectId: input.grant.subjectId,
+      ...(resolverSubjectId ? { subjectId: resolverSubjectId } : {}),
     });
     if (first.status === "auth_needed") {
       return await authNeededFetchResponse(input, request, first);
@@ -886,7 +936,7 @@ export function connectionBrokerFetch(
         destinationUrl,
         forceRefresh: true,
         ...(request.toolName ? { toolName: request.toolName } : {}),
-        subjectId: input.grant.subjectId,
+        ...(resolverSubjectId ? { subjectId: resolverSubjectId } : {}),
       });
       if (refreshed.status === "auth_needed") {
         return await authNeededFetchResponse(input, request, refreshed);

@@ -27,7 +27,6 @@ export type MachineInputBatchItem = {
   inputs: Array<{
     id: string;
     kind: string;
-    classification: string;
     sourceId: string;
     summary: string;
   }>;

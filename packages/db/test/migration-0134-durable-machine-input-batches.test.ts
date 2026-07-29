@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 
-const migration = "0132_durable_machine_input_batches.sql";
+const migration = "0134_durable_machine_input_batches.sql";
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
@@ -13,11 +13,11 @@ let blank: BlankTestDatabase | null = null;
 let available = true;
 
 beforeAll(async () => {
-  blank = await acquireBlankTestDatabase("migration-0132");
+  blank = await acquireBlankTestDatabase("migration-0134");
   if (!blank) {
     if (requireRealDatabase) {
       throw new Error(
-        "[migration-0132] OPENGENI_REQUIRE_REAL_DB=1 but the real PostgreSQL harness is unavailable",
+        "[migration-0134] OPENGENI_REQUIRE_REAL_DB=1 but the real PostgreSQL harness is unavailable",
       );
     }
     available = false;
@@ -28,7 +28,7 @@ afterAll(async () => {
   await blank?.release();
 });
 
-describe("migration 0132 (durable machine-input batches)", () => {
+describe("migration 0134 (durable machine-input batches)", () => {
   test("backfills delivered batches at their causal position and removes deferred state", async () => {
     if (!available || !blank) return;
     const sql = postgres(blank.databaseUrl, { max: 1 });
@@ -48,10 +48,10 @@ describe("migration 0132 (durable machine-input batches)", () => {
       }
 
       const [account] = await sql<{ id: string }[]>`
-        insert into managed_accounts (name) values ('migration-0132-account') returning id`;
+        insert into managed_accounts (name) values ('migration-0134-account') returning id`;
       const [workspace] = await sql<{ id: string }[]>`
         insert into workspaces (account_id, name)
-        values (${account!.id}, 'migration-0132-workspace') returning id`;
+        values (${account!.id}, 'migration-0134-workspace') returning id`;
       await sql`
         insert into workspace_inference_controls (workspace_id, account_id)
         values (${workspace!.id}, ${account!.id})`;

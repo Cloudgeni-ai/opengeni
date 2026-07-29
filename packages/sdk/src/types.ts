@@ -408,11 +408,14 @@ export type CreateConnectionRequest = {
   metadata?: Record<string, unknown> | undefined;
 };
 
-export type ConnectOpenGeniSlackBotRequest = {
-  /** Write-only Slack bot token. It is never returned by the API. */
-  token: string;
+export type OpenGeniSlackBotInstallRequest = {
   /** Existing OpenGeni Slack bot connection to reinstall in place. */
   connectionId?: string | undefined;
+};
+
+export type OpenGeniSlackBotInstallStart = {
+  authorizationUrl: string;
+  expiresAt: string;
 };
 
 export type UpdateConnectionRequest = {
@@ -491,6 +494,7 @@ export type Session = {
   // the session carried none. Org-visible metadata, never a timeline event.
   instructions: string | null;
   resources: ResourceRef[];
+  skills: SessionSkill[];
   tools: ToolRef[];
   toolPolicy?: SessionToolPolicy | undefined;
   toolPolicyVersion?: number | undefined;
@@ -1563,6 +1567,8 @@ export type CreateSessionRequest = {
   // user-visible timeline. Trimmed, non-empty, max 32768 chars.
   instructions?: string | undefined;
   resources?: ResourceRef[] | undefined;
+  /** Inline skills fixed onto this session; omitted children inherit them. */
+  skills?: SessionSkill[] | undefined;
   tools?: ToolRef[] | undefined;
   metadata?: Record<string, unknown> | undefined;
   model?: string | undefined;
@@ -3140,6 +3146,8 @@ export type CapabilityPackSkill = {
   files: CapabilityPackSkillFile[];
 };
 
+export type SessionSkill = CapabilityPackSkill;
+
 export type CapabilityPackVariableSetSpec = {
   description: string;
   requiredVariables: string[];
@@ -3328,9 +3336,10 @@ export type CapabilityCatalogItem = {
   enabledReason: string | null;
   /** The connection backing this enabled installation, or null when none is involved. */
   connectionRef: {
-    connectionId: string;
+    connectionId?: string | undefined;
     providerDomain: string;
     kind: string;
+    subjectScope?: "subject" | "workspace" | undefined;
   } | null;
   metadata: Record<string, unknown>;
   createdAt?: string | undefined;

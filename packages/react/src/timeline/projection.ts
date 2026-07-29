@@ -1063,7 +1063,6 @@ function machineInputMembers(value: unknown): MachineInputBatchItem["inputs"] {
     inputs.push({
       id: member.id,
       kind: member.kind,
-      classification: typeof member.classification === "string" ? member.classification : "info",
       sourceId: member.sourceId,
       summary: typeof member.summary === "string" ? member.summary : "",
     });

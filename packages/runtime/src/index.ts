@@ -187,6 +187,7 @@ import {
 } from "./sandbox/turn-tool-cancellation";
 import { computerUse, type ComputerToolMode } from "./sandbox-computer";
 import type { RuntimeMetricsHooks } from "./metrics";
+import { workspaceSkills, type WorkspaceSkillSearchPath } from "./workspace-skills";
 
 // The Agents SDK's debug namespaces can otherwise serialize complete model
 // inputs/outputs and tool arguments/results. These getters read process.env on
@@ -1259,7 +1260,7 @@ export type ToolspaceTokenWriterSession = SandboxSessionLike;
 export type EffectiveSkillSelection = Readonly<{
   id: string;
   name: string;
-  source: "bundled" | "library" | "pack";
+  source: "bundled" | "library" | "pack" | "session";
   version: string | null;
   contentSha256: string | null;
   reason: string;
@@ -1429,6 +1430,9 @@ export type BuildAgentOptions = {
   // skills in the sandbox skill index (mounted under .agents/) so
   // skills/<name> references resolve like any other indexed skill.
   packSkills?: PackSkill[];
+  // Inline skills fixed onto this session at creation. They use the SDK's lazy
+  // skill source and are materialized only when the model loads one.
+  sessionSkills?: PackSkill[];
   // Explicitly selected, immutable curated-library skill content. These are
   // separate from packSkills so repository-local/pack compatibility does not
   // turn a curated entry into a mutable override.
@@ -1459,7 +1463,7 @@ export type PackSkillFile = {
 
 export type PackSkill = {
   name: string;
-  description?: string | null;
+  description?: string | null | undefined;
   files: PackSkillFile[];
 };
 
@@ -1902,6 +1906,8 @@ export function buildOpenGeniAgent(
       ...(options.skillLibrarySkills?.length
         ? { skillLibrarySkills: options.skillLibrarySkills }
         : {}),
+      ...(options.sessionSkills?.length ? { sessionSkills: options.sessionSkills } : {}),
+      ...repositoryWorkspaceSkillPathsOption(resources),
       ...(options.structuredToolTransport !== undefined
         ? { structuredToolTransport: options.structuredToolTransport }
         : {}),
@@ -1924,6 +1930,7 @@ export function buildOpenGeniAgent(
         options.skillLibrarySelections ?? [],
         options.skillLibrarySkills ?? [],
         options.packSkills ?? [],
+        options.sessionSkills ?? [],
       ).map((selection) => Object.freeze(selection)),
     ),
   );
@@ -2239,6 +2246,8 @@ export function buildAgentCapabilities(
   packSkills: PackSkill[],
   options: {
     skillLibrarySkills?: PackSkill[];
+    sessionSkills?: PackSkill[];
+    workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];
     structuredToolTransport?: boolean;
     // EXPLICIT computer-use transport (see BuildAgentOptions.computerToolMode). When
     // present, computerUse() is handed the mode directly and its tools() obeys it
@@ -2275,11 +2284,29 @@ export function buildAgentCapabilities(
     filesystemCapability,
     shell({ ...(toolCancellation ? {} : { configureTools: withExecOpCorrelation }) }),
   ];
+  const sessionSkills = sessionSkillsForMaterialization(
+    packSkills,
+    options.skillLibrarySkills ?? [],
+    options.sessionSkills ?? [],
+  );
   caps.push(
     skills({
-      lazyFrom: lazySkillSourceWithPackSkills(packSkills, options.skillLibrarySkills ?? []),
+      lazyFrom: lazySkillSourceWithPackSkills(
+        [...packSkills, ...sessionSkills],
+        options.skillLibrarySkills ?? [],
+      ),
     }),
   );
+  if (options.workspaceSkillPaths?.length) {
+    caps.push(
+      workspaceSkills(options.workspaceSkillPaths, [
+        ...bundledSkillDirNames(bundledSkillsDir()),
+        ...(options.skillLibrarySkills ?? []).map((skill) => skill.name),
+        ...packSkills.map((skill) => skill.name),
+        ...sessionSkills.map((skill) => skill.name),
+      ]),
+    );
+  }
   // P4.3 computer-use: the agent drives the SAME :0 humans watch (xdotool/XTEST +
   // scrot), but only when the desktop tier is ON, computer-use is enabled, and the
   // backend is one whose image carries the X stack (descriptorgate — honest about
@@ -2372,6 +2399,9 @@ export type PrepareToolsOptions = {
   executionGeneration?: number;
   subjectId?: string;
   subjectLabel?: string;
+  // Immutable human authority used only for subject-owned connection lookup.
+  // This is intentionally separate from the worker's first-party MCP identity.
+  credentialSubjectId?: string;
   // Overrides the fixed first-party MCP permission set for this session's
   // delegated token (manager-style sessions). The caller is responsible for
   // having validated the set against the session creator's grant.
@@ -2464,6 +2494,14 @@ export async function prepareAgentTools(
     return { mcpServers: [], close: async () => {}, codexConnectorNamespaces };
   }
   const registry = new Map(settings.mcpServers.map((server) => [server.id, server]));
+  const subjectOwnedTool = tools.find(
+    (tool) => registry.get(tool.id)?.connectionRef?.subjectScope === "subject",
+  );
+  if (subjectOwnedTool && !options.credentialSubjectId) {
+    throw new Error(
+      `subject-owned connection for MCP server ${subjectOwnedTool.id} requires a human turn initiator`,
+    );
+  }
   const aggregateToolBudget = new McpAggregateToolListBudget();
   // npm Undici's dispatcher transport can hang indefinitely under Bun even
   // after an AbortSignal fires. Bun's native fetch is the supported runtime
@@ -2737,7 +2775,7 @@ async function resolveConnectionForRequest(
     destinationUrl,
     forceRefresh,
     ...(toolName ? { toolName } : {}),
-    ...(options.subjectId ? { subjectId: options.subjectId } : {}),
+    ...(options.credentialSubjectId ? { subjectId: options.credentialSubjectId } : {}),
   };
   try {
     return await options.resolveCredential(request);
@@ -5277,6 +5315,32 @@ export function buildManifest(
   });
 }
 
+export function repositoryWorkspaceSkillPathsOption(resources: readonly ResourceRef[]): {
+  workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];
+} {
+  const repositories = resources.filter(
+    (resource): resource is Extract<ResourceRef, { kind: "repository" }> =>
+      resource.kind === "repository",
+  );
+  if (repositories.length === 0) return {};
+
+  const paths = new Map<string, WorkspaceSkillSearchPath>();
+  const add = (path: string, source: string): void => {
+    if (!paths.has(path)) paths.set(path, { path, source });
+  };
+  // A Connected Machine maps /workspace to its configured working directory,
+  // which may itself be the selected repository. Managed sandboxes normally use
+  // the repository mount paths below. Checking both keeps the rule portable.
+  add(".agents/skills", "workspace .agents/skills");
+  add(".claude/skills", "workspace .claude/skills");
+  for (const repository of repositories) {
+    const mountPath = resourceMountPath(repository);
+    add(`${mountPath}/.agents/skills`, `${mountPath}/.agents/skills`);
+    add(`${mountPath}/.claude/skills`, `${mountPath}/.claude/skills`);
+  }
+  return { workspaceSkillPaths: [...paths.values()] };
+}
+
 function sandboxDownloadDirectory(download: SandboxFileDownload, mountPath: string): any {
   if (download.mountPath !== mountPath) {
     throw new Error(
@@ -7330,6 +7394,7 @@ function effectiveSkillSelections(
   librarySelections: readonly EffectiveSkillSelection[],
   librarySkills: readonly PackSkill[],
   packSkills: readonly PackSkill[],
+  sessionSkills: readonly PackSkill[],
 ): readonly EffectiveSkillSelection[] {
   const defaultSelections = bundledSkillDirNames(bundledSkillsDir()).map((name) => ({
     id: `bundled:${name}`,
@@ -7341,6 +7406,12 @@ function effectiveSkillSelections(
   }));
   const libraryNameKeys = new Set(librarySkills.map((skill) => skill.name.toLowerCase()));
   const packNameKeys = new Set(packSkills.map((skill) => skill.name.toLowerCase()));
+  const effectiveSessionSkills = sessionSkillsForMaterialization(
+    packSkills,
+    librarySkills,
+    sessionSkills,
+  );
+  const sessionNameKeys = new Set(effectiveSessionSkills.map((skill) => skill.name.toLowerCase()));
   const selected = librarySelections.filter((selection) =>
     libraryNameKeys.has(selection.name.toLowerCase()),
   );
@@ -7348,9 +7419,14 @@ function effectiveSkillSelections(
     ...defaultSelections.filter(
       (selection) =>
         !libraryNameKeys.has(selection.name.toLowerCase()) &&
-        !packNameKeys.has(selection.name.toLowerCase()),
+        !packNameKeys.has(selection.name.toLowerCase()) &&
+        !sessionNameKeys.has(selection.name.toLowerCase()),
     ),
-    ...selected.filter((selection) => !packNameKeys.has(selection.name.toLowerCase())),
+    ...selected.filter(
+      (selection) =>
+        !packNameKeys.has(selection.name.toLowerCase()) &&
+        !sessionNameKeys.has(selection.name.toLowerCase()),
+    ),
     ...packSkills.map((skill) => ({
       id: `pack:${skill.name}`,
       name: skill.name,
@@ -7359,7 +7435,54 @@ function effectiveSkillSelections(
       contentSha256: null,
       reason: "enabled capability pack",
     })),
+    ...effectiveSessionSkills.map((skill) => ({
+      id: `session:${skill.name}`,
+      name: skill.name,
+      source: "session" as const,
+      version: null,
+      contentSha256: null,
+      reason: "attached to session",
+    })),
   ];
+}
+
+function sessionSkillsForMaterialization(
+  packSkills: readonly PackSkill[],
+  librarySkills: readonly PackSkill[],
+  sessionSkills: readonly PackSkill[],
+): PackSkill[] {
+  const configured = new Map<string, PackSkill>();
+  for (const skill of [...librarySkills, ...packSkills]) {
+    configured.set(skill.name.toLowerCase(), skill);
+  }
+  const bundledNames = new Set(
+    bundledSkillDirNames(bundledSkillsDir()).map((name) => name.toLowerCase()),
+  );
+  const selected = new Map<string, PackSkill>();
+  for (const skill of sessionSkills) {
+    assertSafePackSkillName(skill.name);
+    const key = skill.name.toLowerCase();
+    if (bundledNames.has(key)) {
+      throw new Error(`Session skill "${skill.name}" conflicts with a bundled skill`);
+    }
+    const existing = selected.get(key) ?? configured.get(key);
+    if (existing) {
+      if (skillFingerprint(existing) !== skillFingerprint(skill)) {
+        throw new Error(`Conflicting skill definitions for "${skill.name}"`);
+      }
+      continue;
+    }
+    selected.set(key, skill);
+  }
+  return [...selected.values()];
+}
+
+function skillFingerprint(skill: PackSkill): string {
+  return JSON.stringify(
+    [...skill.files]
+      .sort((left, right) => left.path.localeCompare(right.path))
+      .map(({ path, content }) => ({ path, content })),
+  );
 }
 
 function removeSkillChildByNameKey(children: Record<string, Entry>, nameKey: string): void {

@@ -53,7 +53,7 @@ requirement and a prompt-cache cost requirement: deleting the batch on the next
 call would shift the prefix and force the provider to ingest the conversation
 again.
 
-Migration `0132_durable_machine_input_batches.sql` performs the one-way cutover.
+Migration `0134_durable_machine_input_batches.sql` performs the one-way cutover.
 It reconstructs model history for delivered legacy rows, returns old deferred
 rows to canonical pending state, collapses duplicate pending Agent Steers to the
 newest direction, and installs the delivery/history and single-pending-Steer

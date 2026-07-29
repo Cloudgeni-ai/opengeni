@@ -102,14 +102,12 @@ describe("durable machine-input timeline", () => {
     );
     await flush();
     expect(r.container.textContent).toContain("2 incoming updates");
-    const disclosure = r.container.querySelector<HTMLDetailsElement>(
-      '[data-testid="timeline-machine-input-batch"]',
-    );
+    const disclosure = r.container.querySelector<HTMLDetailsElement>("details");
     disclosure!.open = true;
     await flush();
     expect(r.container.textContent).toContain("verification-agent");
     expect(r.container.textContent).toContain("Cache verification completed.");
-    expect(r.container.textContent).toContain("Child result");
+    expect(r.container.textContent).toContain("child result");
     await r.unmount();
   });
 });

@@ -22,6 +22,7 @@ import {
   getSession,
   recordAuditEvent,
   releaseSlackBotPostOperationClaim,
+  setConnectionStatus,
   type Database,
 } from "@opengeni/db";
 import { readResponseJsonBounded, type FetchLike } from "@opengeni/network";
@@ -42,6 +43,55 @@ export type VerifiedOpenGeniSlackBot = {
   grantedScopes: string[];
   metadata: OpenGeniSlackBotConnectionMetadata;
 };
+
+export async function exchangeOpenGeniSlackAuthorizationCode(
+  input: {
+    code: string;
+    clientId: string;
+    clientSecret: string;
+    redirectUri: string;
+  },
+  fetchImpl: FetchLike = fetch,
+): Promise<string> {
+  const body = new URLSearchParams({
+    code: input.code,
+    client_id: input.clientId,
+    client_secret: input.clientSecret,
+    redirect_uri: input.redirectUri,
+  });
+  let response: Response;
+  try {
+    response = await fetchImpl(`${SLACK_API_BASE}oauth.v2.access`, {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: body.toString(),
+      redirect: "error",
+      signal: AbortSignal.timeout(SLACK_TIMEOUT_MS),
+    });
+  } catch {
+    throw new HTTPException(502, { message: "Slack installation token exchange failed" });
+  }
+  if (!response.ok) {
+    throw new HTTPException(502, { message: "Slack installation token exchange failed" });
+  }
+  const payload = await readResponseJsonBounded<unknown>(
+    response,
+    SLACK_RESPONSE_MAX_BYTES,
+    "Slack OAuth response",
+  );
+  const record = slackRecord(payload);
+  if (!record || record.ok !== true) {
+    throw new SlackBotProviderError(slackString(record?.error) || "oauth_exchange_failed");
+  }
+  const accessToken = slackString(record.access_token);
+  if (!accessToken?.startsWith("xoxb-")) {
+    throw new HTTPException(502, { message: "Slack installation did not return a bot token" });
+  }
+  return accessToken;
+}
 
 export type SlackBotReceipt = {
   credentialRole: typeof OPENGENI_SLACK_BOT_CREDENTIAL_ROLE;
@@ -70,6 +120,30 @@ export class SlackBotProviderError extends Error {
   }
 }
 
+const SLACK_CREDENTIAL_REJECTION_CODES = new Set([
+  "account_inactive",
+  "invalid_auth",
+  "not_authed",
+  "token_expired",
+  "token_revoked",
+]);
+
+function slackCredentialRejected(error: unknown): error is SlackBotProviderError {
+  return error instanceof SlackBotProviderError && SLACK_CREDENTIAL_REJECTION_CODES.has(error.code);
+}
+
+export type SlackBotCredentialVerificationFailureReason = "scope_mismatch" | "identity_mismatch";
+
+export class SlackBotCredentialVerificationError extends HTTPException {
+  constructor(
+    readonly failureReason: SlackBotCredentialVerificationFailureReason,
+    message: string,
+  ) {
+    super(422, { message });
+    this.name = "SlackBotCredentialVerificationError";
+  }
+}
+
 /**
  * Validates a write-only xoxb credential before it can enter encrypted storage.
  * Slack does not expose the app's display_information name to this scope set;
@@ -95,14 +169,18 @@ export async function verifyOpenGeniSlackBotCredential(
   });
   const user = slackRecord(userResponse.payload.user);
   if (!user || user.is_bot !== true || user.deleted === true) {
-    throw new HTTPException(422, { message: "Slack credential must identify an active bot user" });
+    throw new SlackBotCredentialVerificationError(
+      "identity_mismatch",
+      "Slack credential must identify an active bot user",
+    );
   }
   const profile = slackRecord(user.profile);
   const displayName = slackString(profile?.display_name) || slackString(profile?.real_name);
   if (displayName !== "OpenGeni") {
-    throw new HTTPException(422, {
-      message: 'Slack bot display name must be exactly "OpenGeni"',
-    });
+    throw new SlackBotCredentialVerificationError(
+      "identity_mismatch",
+      'Slack bot display name must be exactly "OpenGeni"',
+    );
   }
 
   return {
@@ -355,7 +433,18 @@ export class OpenGeniSlackBotClient {
     method: string,
     params: Record<string, string>,
   ): Promise<SlackPayload> {
-    return (await slackApiFetchWithHeaders(this.fetchImpl, method, headers, params)).payload;
+    try {
+      return (await slackApiFetchWithHeaders(this.fetchImpl, method, headers, params)).payload;
+    } catch (error) {
+      if (slackCredentialRejected(error)) {
+        await setConnectionStatus(this.db, this.context.workspaceId, "needs_reauth", error.code, {
+          id: this.connection.id,
+          version: this.connection.version,
+          subjectId: null,
+        }).catch(() => false);
+      }
+      throw error;
+    }
   }
 
   private async withAudit<T extends Record<string, unknown>>(
@@ -561,15 +650,19 @@ function assertExactOpenGeniSlackBotScopes(grantedScopes: string[]): void {
       ...(forbidden.length ? [`forbidden: ${forbidden.join(", ")}`] : []),
       ...(unsupported.length ? [`unsupported: ${unsupported.join(", ")}`] : []),
     ];
-    throw new HTTPException(422, {
-      message: `Slack bot scopes must exactly match the OpenGeni manifest (${facts.join("; ")})`,
-    });
+    throw new SlackBotCredentialVerificationError(
+      "scope_mismatch",
+      `Slack bot scopes must exactly match the OpenGeni manifest (${facts.join("; ")})`,
+    );
   }
 }
 
 function parseGrantedScopes(header: string | null): string[] {
   if (!header) {
-    throw new HTTPException(422, { message: "Slack did not report granted bot scopes" });
+    throw new SlackBotCredentialVerificationError(
+      "scope_mismatch",
+      "Slack did not report granted bot scopes",
+    );
   }
   return [
     ...new Set(

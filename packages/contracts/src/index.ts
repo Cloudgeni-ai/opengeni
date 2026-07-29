@@ -4541,6 +4541,41 @@ export const CapabilityPackSkill = z
   });
 export type CapabilityPackSkill = z.infer<typeof CapabilityPackSkill>;
 
+// Inline skill content fixed onto one session at creation. It intentionally
+// uses the exact same validated directory shape as a pack skill, but has a
+// different semantic owner and lifecycle. Session readers can inspect it; it
+// is configuration, never a secret store.
+export const SessionSkill = CapabilityPackSkill;
+export type SessionSkill = z.infer<typeof SessionSkill>;
+
+export const SessionSkills = z
+  .array(SessionSkill)
+  .max(32)
+  .transform((skills, ctx) => {
+    const selected = new Map<string, { fingerprint: string; skill: SessionSkill }>();
+    for (const skill of skills) {
+      const key = skill.name.toLowerCase();
+      const fingerprint = JSON.stringify({
+        description: skill.description ?? null,
+        files: [...skill.files]
+          .sort((left, right) => left.path.localeCompare(right.path))
+          .map(({ path, content }) => ({ path, content })),
+      });
+      const existing = selected.get(key);
+      if (!existing) {
+        selected.set(key, { fingerprint, skill });
+        continue;
+      }
+      if (existing.fingerprint !== fingerprint) {
+        ctx.addIssue({
+          code: "custom",
+          message: `conflicting session skill definitions: ${skill.name}`,
+        });
+      }
+    }
+    return [...selected.values()].map(({ skill }) => skill);
+  });
+
 function isSafePackSkillRelativePath(path: string): boolean {
   if (path.startsWith("/") || path.includes("\\")) {
     return false;
@@ -4804,15 +4839,16 @@ export const CreateConnectionRequest = z.object({
 });
 export type CreateConnectionRequest = z.infer<typeof CreateConnectionRequest>;
 
-/**
- * Write-only Slack bot installation input. `token` is accepted only by the
- * dedicated validated endpoint and is never represented in a response schema.
- */
-export const ConnectOpenGeniSlackBotRequest = z.object({
-  token: z.string().trim().startsWith("xoxb-").max(8192),
+export const OpenGeniSlackBotInstallRequest = z.object({
   connectionId: z.string().uuid().optional(),
 });
-export type ConnectOpenGeniSlackBotRequest = z.infer<typeof ConnectOpenGeniSlackBotRequest>;
+export type OpenGeniSlackBotInstallRequest = z.infer<typeof OpenGeniSlackBotInstallRequest>;
+
+export const OpenGeniSlackBotInstallStart = z.object({
+  authorizationUrl: z.string().url(),
+  expiresAt: z.string().datetime({ offset: true }),
+});
+export type OpenGeniSlackBotInstallStart = z.infer<typeof OpenGeniSlackBotInstallStart>;
 
 export const UpdateConnectionRequest = z.object({
   providerDomain: z.string().min(1).optional(),
@@ -4964,15 +5000,15 @@ export const CapabilityCatalogItem = z.object({
   runtime: CapabilityRuntime.default({ available: false, notes: null }),
   enabled: z.boolean().default(false),
   enabledReason: z.string().nullable().default(null),
-  // The connection backing this enabled installation, when the enable-time
-  // connectionRef resolved to one (null for header/credential-free items —
-  // that means "no connection involved", not "broken"). Lets the UI match
-  // connection health by id instead of guessing from providerDomain alone.
+  // The non-secret connection binding stored with an enabled installation.
+  // Workspace refs retain an exact row id. Subject refs deliberately omit it:
+  // each caller resolves their own visible row by provider/kind at runtime.
   connectionRef: z
     .object({
-      connectionId: z.string().min(1),
+      connectionId: z.string().min(1).optional(),
       providerDomain: z.string().min(1),
       kind: z.string().min(1),
+      subjectScope: z.enum(["workspace", "subject"]).optional(),
     })
     .nullable()
     .default(null),
@@ -5088,6 +5124,7 @@ export const Session = z.object({
   // null when the session carried none.
   instructions: z.string().nullable(),
   resources: z.array(ResourceRef),
+  skills: SessionSkills.default([]),
   tools: z.array(ToolRef),
   // Origin of the persisted tool allow-list. Optional for rolling client
   // compatibility; current servers emit it and legacy rows map to `legacy`.
@@ -7368,6 +7405,9 @@ export const CreateSessionRequest = withVariableSetIdAlias({
   // authoritative. Top-level omission remains []. Presence is resolved from
   // the raw request because this Zod default erases absent-vs-empty.
   resources: z.array(ResourceRef).default([]),
+  // Inline skills are fixed onto the session. Child omission inherits the
+  // trusted parent's selection; an explicit array, including [], wins.
+  skills: SessionSkills.default([]),
   // The same child omission rule applies to selected MCP tool refs. Top-level
   // omission still applies workspace-default capability MCP tools; explicit []
   // suppresses those defaults (the first-party OpenGeni server remains added).

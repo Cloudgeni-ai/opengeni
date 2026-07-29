@@ -381,9 +381,7 @@ describe("QueueSurface", () => {
     const toggle = mounted.container.querySelector<HTMLButtonElement>("button[aria-expanded]");
     toggle?.click();
     await flush();
-    expect(
-      mounted.container.querySelector('[data-testid="pending-machine-inputs"]'),
-    ).not.toBeNull();
+    expect(mounted.container.querySelector("section")).not.toBeNull();
     expect(mounted.container.textContent).toContain(
       "The verification worker found a cache discontinuity.",
     );
@@ -411,8 +409,8 @@ describe("QueueSurface", () => {
     const second = mounted.container.querySelector(
       '[data-queue-turn-id="22222222-2222-4222-8222-222222222222"]',
     );
-    expect(first?.querySelector('[data-testid="pending-machine-inputs"]')).toBeNull();
-    expect(second?.querySelector('[data-testid="pending-machine-inputs"]')).not.toBeNull();
+    expect(first?.querySelector("section")).toBeNull();
+    expect(second?.querySelector("section")).not.toBeNull();
     expect(second?.textContent).toContain("1 update will join this prompt");
   });
 

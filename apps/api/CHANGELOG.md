@@ -1,5 +1,40 @@
 # @opengeni/api-router
 
+## 0.12.4
+
+### Patch Changes
+
+- 110bb77: Enforce exact-subject ownership for personal OAuth capabilities and add secure direct OAuth installation for the separate workspace OpenGeni Slack bot.
+- Updated dependencies [110bb77]
+  - @opengeni/config@0.7.9
+  - @opengeni/contracts@0.20.2
+  - @opengeni/core@0.12.4
+  - @opengeni/db@0.13.3
+  - @opengeni/runtime@0.13.14
+  - @opengeni/documents@0.2.40
+  - @opengeni/github@0.3.21
+  - @opengeni/storage@0.2.33
+  - @opengeni/events@0.3.31
+
+## 0.12.3
+
+### Patch Changes
+
+- Updated dependencies [8b8545e]
+  - @opengeni/db@0.13.2
+  - @opengeni/core@0.12.3
+  - @opengeni/documents@0.2.39
+  - @opengeni/events@0.3.30
+
+## 0.12.2
+
+### Patch Changes
+
+- f92af07: Keep Toolspace MCP networking portable under Bun and return a valid empty `tools/list` result when no programmatic tools are currently available.
+- Updated dependencies [f92af07]
+  - @opengeni/runtime@0.13.13
+  - @opengeni/core@0.12.2
+
 ## 0.12.1
 
 ### Patch Changes

@@ -87,17 +87,10 @@ export function QueueSurface({
   const count = queue.queue.length;
   const pendingInputCount = queue.pendingInputs.length;
   const totalCount = count + pendingInputCount;
-  const attachedInputIds = useMemo(
-    () => new Set(queue.pendingInputAttachment?.inputIds ?? []),
-    [queue.pendingInputAttachment],
-  );
-  const attachedInputs = useMemo(
-    () => queue.pendingInputs.filter((input) => attachedInputIds.has(input.id)),
-    [attachedInputIds, queue.pendingInputs],
-  );
-  const standaloneInputs = useMemo(
-    () => queue.pendingInputs.filter((input) => !attachedInputIds.has(input.id)),
-    [attachedInputIds, queue.pendingInputs],
+  const attachedInputIds = queue.pendingInputAttachment?.inputIds ?? [];
+  const attachedInputs = queue.pendingInputs.filter((input) => attachedInputIds.includes(input.id));
+  const standaloneInputs = queue.pendingInputs.filter(
+    (input) => !attachedInputIds.includes(input.id),
   );
   const canEditInComposer = queueComposerCheckoutEnabled(composer, readOnly);
   const collapsedPreview = useMemo(
@@ -440,13 +433,7 @@ function PendingMachineInputs({
   attached?: boolean;
 }) {
   return (
-    <section
-      className={`${attached ? "mt-2 rounded-md border border-border bg-surface-2/30" : "border-t border-border bg-surface-2/30"}`}
-      aria-label={
-        attached ? "Machine inputs attached to this queued prompt" : "Pending machine inputs"
-      }
-      data-testid="pending-machine-inputs"
-    >
+    <section className="border-t border-border bg-surface-2">
       <div className="px-3 py-1.5 text-[10px] font-medium uppercase tracking-wide text-fg-subtle">
         {attached
           ? `${inputs.length} update${inputs.length === 1 ? "" : "s"} will join this prompt`
@@ -455,21 +442,15 @@ function PendingMachineInputs({
       <ol className="divide-y divide-border">
         {inputs.map((input) => {
           const preview = queuePromptPreview(input.summary, QUEUE_ROW_PREVIEW_CHARACTERS);
+          const label = input.kind.replace("_terminal", "").replaceAll("_", " ");
           return (
             <li key={input.id} className="flex min-w-0 gap-2 px-3 py-2">
-              <span
-                className="mt-0.5 shrink-0 rounded border border-border bg-surface px-1.5 py-0.5 text-[10px] font-medium text-fg-muted"
-                title={machineInputKindLabel(input.kind)}
-              >
-                {machineInputKindBadge(input.kind)}
+              <span className="mt-0.5 shrink-0 rounded border border-border bg-surface px-1.5 py-0.5 text-[10px] font-medium capitalize text-fg-muted">
+                {label}
               </span>
               <div className="min-w-0 flex-1">
                 <div className="flex min-w-0 items-center gap-1.5 text-[10px] text-fg-subtle">
-                  <span>{machineInputKindLabel(input.kind)}</span>
-                  <span aria-hidden="true">·</span>
-                  <span className="truncate" title={input.sourceId}>
-                    {input.sourceId}
-                  </span>
+                  <span className="truncate">{input.sourceId}</span>
                 </div>
                 <p
                   className="mt-0.5 line-clamp-3 break-words whitespace-pre-wrap text-xs leading-5 text-fg"
@@ -485,36 +466,6 @@ function PendingMachineInputs({
       </ol>
     </section>
   );
-}
-
-function machineInputKindBadge(kind: SessionPendingInputPreview["kind"]): string {
-  switch (kind) {
-    case "agent_message":
-      return "Agent";
-    case "agent_steer_instruction":
-      return "Steer";
-    case "child_terminal_result":
-      return "Child";
-    case "scheduled_occurrence":
-      return "Schedule";
-    case "goal_continuation":
-      return "Goal";
-  }
-}
-
-function machineInputKindLabel(kind: SessionPendingInputPreview["kind"]): string {
-  switch (kind) {
-    case "agent_message":
-      return "Agent message";
-    case "agent_steer_instruction":
-      return "Agent steer";
-    case "child_terminal_result":
-      return "Child result";
-    case "scheduled_occurrence":
-      return "Scheduled update";
-    case "goal_continuation":
-      return "Goal continuation";
-  }
 }
 
 const QUEUE_ROW_PREVIEW_CHARACTERS = 360;

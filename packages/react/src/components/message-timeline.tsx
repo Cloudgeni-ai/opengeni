@@ -852,67 +852,26 @@ export function TimelineRow({
 }
 
 function MachineInputBatchRow({ item }: { item: MachineInputBatchItem }) {
-  const agentMessages = item.inputs.filter(
-    (input) => input.kind === "agent_message" || input.kind === "agent_steer_instruction",
-  ).length;
   return (
-    <details
-      className="group rounded-og-md border border-og-border bg-og-surface-2/45 px-3 py-2"
-      data-testid="timeline-machine-input-batch"
-    >
-      <summary className="flex cursor-pointer list-none items-center gap-2 text-og-sm text-og-fg-muted marker:hidden">
-        <BotIcon aria-hidden="true" className="size-4 shrink-0" />
-        <span className="font-medium text-og-fg">
-          {item.inputs.length} incoming update{item.inputs.length === 1 ? "" : "s"}
-        </span>
-        {agentMessages > 0 ? (
-          <span className="text-og-xs">
-            · {agentMessages} from agent{agentMessages === 1 ? "" : "s"}
-          </span>
-        ) : null}
-        <ChevronRightIcon
-          aria-hidden="true"
-          className="ml-auto size-3.5 transition-transform group-open:rotate-90"
-        />
+    <details className="rounded-og-md border border-og-border bg-og-surface-2 px-3 py-2">
+      <summary className="cursor-pointer text-og-sm font-medium text-og-fg">
+        {item.inputs.length} incoming update{item.inputs.length === 1 ? "" : "s"}
       </summary>
-      <ol className="mt-2 divide-y divide-og-border border-t border-og-border">
+      <ol className="mt-2 divide-y divide-border border-t border-og-border">
         {item.inputs.map((input) => (
           <li key={input.id} className="py-2">
-            <div className="flex min-w-0 items-center gap-1.5 text-og-xs text-og-fg-muted">
-              <span className="rounded border border-og-border px-1.5 py-0.5 font-medium">
-                {machineTimelineKindLabel(input.kind)}
-              </span>
-              <span className="truncate" title={input.sourceId}>
-                {input.sourceId}
-              </span>
-            </div>
-            {input.summary ? (
-              <div className="mt-1 text-og-sm text-og-fg">
-                <Markdown>{input.summary}</Markdown>
-              </div>
-            ) : null}
+            <p className="truncate text-og-xs text-og-fg-muted">
+              <strong className="capitalize">
+                {input.kind.replace("_terminal", "").replaceAll("_", " ")}
+              </strong>{" "}
+              · {input.sourceId}
+            </p>
+            {input.summary ? <p className="mt-1 text-og-sm text-og-fg">{input.summary}</p> : null}
           </li>
         ))}
       </ol>
     </details>
   );
-}
-
-function machineTimelineKindLabel(kind: string): string {
-  switch (kind) {
-    case "agent_message":
-      return "Agent message";
-    case "agent_steer_instruction":
-      return "Agent steer";
-    case "child_terminal_result":
-      return "Child result";
-    case "scheduled_occurrence":
-      return "Scheduled";
-    case "goal_continuation":
-      return "Goal";
-    default:
-      return "Update";
-  }
 }
 
 function UserMessageRow({
