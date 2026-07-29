@@ -543,6 +543,7 @@ export function httpStatusForError(error: unknown): number {
 
 export function errorCodeForStatus(status: number): ErrorCode {
   if (status === 401) return "unauthenticated";
+  if (status === 402) return "payment_required";
   if (status === 403) return "forbidden";
   if (status === 404) return "not_found";
   if (status === 409) return "conflict";

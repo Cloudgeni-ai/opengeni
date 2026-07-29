@@ -1,3 +1,5 @@
+import { OpenGeniApiError } from "@opengeni/sdk";
+
 /** Compact relative time: "now", "42s", "7m", "3h", "2d", then a date. */
 export function formatRelativeTime(iso: string, now: Date = new Date()): string {
   const then = new Date(iso).getTime();
@@ -92,6 +94,22 @@ export function tryParseJson(text: string): unknown {
  */
 export const CREDIT_EXHAUSTION_MESSAGE =
   "Out of OpenGeni credits — this workspace's balance is empty. Add credits to continue; the conversation is preserved.";
+
+/**
+ * Actionable composer copy for an edge rejection before a turn is accepted.
+ * Unlike an in-flight credit exhaustion, this path has not consumed the
+ * actor-private draft or any finalized attachment.
+ */
+export const COMPOSER_PAYMENT_REQUIRED_MESSAGE =
+  "This turn requires OpenGeni managed credits, but the account balance is empty. Add credits or choose a connected Codex subscription model, then retry. Your draft and attachments are preserved.";
+
+export function composerSubmissionErrorMessage(error: Error): string {
+  return error instanceof OpenGeniApiError &&
+    error.status === 402 &&
+    error.code === "payment_required"
+    ? COMPOSER_PAYMENT_REQUIRED_MESSAGE
+    : error.message;
+}
 
 /**
  * Does this failure/completion payload (or raw error string) mean the

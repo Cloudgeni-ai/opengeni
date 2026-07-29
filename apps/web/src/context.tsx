@@ -3,7 +3,7 @@
 // state (model choice, repo selection, tool toggles). Everything below the
 // workspace shell consumes this through `useAppContext`.
 import { OpenGeniApiError, type OpenGeniClient } from "@opengeni/sdk";
-import type { SessionEventsConnectionState } from "@opengeni/react";
+import { composerSubmissionErrorMessage, type SessionEventsConnectionState } from "@opengeni/react";
 import { Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import { TanStackRouterDevtools } from "@tanstack/react-router-devtools";
 import { CheckIcon, Loader2Icon, LockIcon, RefreshCwIcon, UserIcon } from "lucide-react";
@@ -776,7 +776,7 @@ export function RootRouteComponent() {
       // Keep the attempt on failure. An exact retry dedups against a create that
       // may have landed server-side; an edited request acquires a fresh key.
       toast.error("Failed to start session", {
-        description: error instanceof Error ? error.message : String(error),
+        description: error instanceof Error ? composerSubmissionErrorMessage(error) : String(error),
       });
       return null;
     } finally {

@@ -4,11 +4,13 @@
    that blocks BOTH the button and Enter while files are unresolved.
    -------------------------------------------------------------------------- */
 import { afterEach, describe, expect, test } from "bun:test";
+import { OpenGeniApiError } from "@opengeni/sdk";
 import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { ChatComposer } from "../src/components/chat-composer";
 import type { ComposerState } from "../src/hooks/use-composer";
 import type { FileAttachment, UseFileAttachmentsResult } from "../src/hooks/use-file-attachments";
+import { COMPOSER_PAYMENT_REQUIRED_MESSAGE } from "../src/lib/format";
 import { registerDom } from "./render-hook";
 
 registerDom();
@@ -165,6 +167,35 @@ describe("ChatComposer attachments", () => {
       (b) => b.getAttribute("aria-label") === "Remove screenshot.png",
     );
     expect(remove).toBeTruthy();
+  });
+
+  test("a managed-credit rejection is actionable and keeps the ready attachment visible", async () => {
+    const error = new OpenGeniApiError(
+      402,
+      JSON.stringify({
+        error: {
+          status: 402,
+          code: "payment_required",
+          message: "insufficient OpenGeni credits",
+          retryable: false,
+        },
+      }),
+      { mutation: true },
+    );
+    const container = await mount(
+      <ChatComposer
+        composer={makeComposer({ error })}
+        attachments={makeAttachments({
+          attachments: [readyChip("preserved.png")],
+          readyResources: [{ kind: "file", fileId: "preserved-file" }],
+        })}
+      />,
+    );
+
+    expect(container.textContent ?? "").toContain(COMPOSER_PAYMENT_REQUIRED_MESSAGE);
+    expect(container.textContent ?? "").toContain("preserved.png");
+    expect(container.querySelector('[aria-label="Remove preserved.png"]')).not.toBeNull();
+    expect(sendButton(container)?.disabled).toBe(false);
   });
 
   test("while uploading, the send button is disabled and Enter does not call send", async () => {

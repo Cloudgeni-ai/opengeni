@@ -458,6 +458,7 @@ describe("API helpers", () => {
     expect(httpStatusForError(new McpPayloadTooLargeError("MCP tool list", 5, 4))).toBe(413);
     expect(httpStatusForError(new Error("boom"))).toBe(500);
     expect(errorCodeForStatus(401)).toBe("unauthenticated");
+    expect(errorCodeForStatus(402)).toBe("payment_required");
     expect(errorCodeForStatus(409)).toBe("conflict");
     expect(errorCodeForStatus(503)).toBe("upstream_unavailable");
   });

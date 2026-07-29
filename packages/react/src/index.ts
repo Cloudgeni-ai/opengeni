@@ -49,6 +49,7 @@ export {
   FILE_ONLY_MESSAGE_TEXT,
 } from "./hooks/use-composer";
 export type { ComposerSendExtras, ComposerState, UseComposerOptions } from "./hooks/use-composer";
+export { COMPOSER_PAYMENT_REQUIRED_MESSAGE, composerSubmissionErrorMessage } from "./lib/format";
 export {
   INITIAL_TRANSCRIPTION_CONTROL_STATE,
   appendFinalTranscript,
