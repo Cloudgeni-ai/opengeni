@@ -16289,13 +16289,16 @@ type LineageIdRow = {
   parentSessionId: string | null;
   depth: number;
   path: string[];
+  cycle: boolean;
 };
 
 /**
  * Read the full lineage slice around a session. Every recursive step carries
  * workspace_id as a hard predicate; a foreign parent/child id is invisible even
- * before RLS is considered. Ancestors are capped at 10 and returned root-first.
- * Descendants are capped at depth 5 and 200 total rows, returned as a nested tree.
+ * before RLS is considered. Up to 63 ancestors are returned root-first; an
+ * invalid, cyclic, foreign, or deeper chain fails closed instead of presenting
+ * a partial path as if it were rooted. Descendants are capped at depth 5 and
+ * 200 total rows, returned as a nested tree.
  */
 export async function getSessionLineage(
   db: Database,
@@ -16317,25 +16320,39 @@ export async function getSessionLineage(
       return null;
     }
 
-    const ancestorRows = (await scopedDb.execute(sql<LineageIdRow>`
-      with recursive ancestors(id, parent_session_id, depth, path) as (
-        select ${schema.sessions.id}, ${schema.sessions.parentSessionId}, 0, array[${schema.sessions.id}]
+    const ancestorLineageRows = (await scopedDb.execute(sql<LineageIdRow>`
+      with recursive ancestors(id, parent_session_id, depth, path, cycle) as (
+        select ${schema.sessions.id}, ${schema.sessions.parentSessionId}, 0, array[${schema.sessions.id}], false
         from ${schema.sessions}
         where ${schema.sessions.workspaceId} = ${workspaceId}
           and ${schema.sessions.id} = ${sessionId}
         union all
-        select parent.id, parent.parent_session_id, ancestors.depth + 1, ancestors.path || parent.id
+        select
+          parent.id,
+          parent.parent_session_id,
+          ancestors.depth + 1,
+          ancestors.path || parent.id,
+          parent.id = any(ancestors.path)
         from ${schema.sessions} parent
         join ancestors on ancestors.parent_session_id = parent.id
         where parent.workspace_id = ${workspaceId}
-          and ancestors.depth < 10
-          and not parent.id = any(ancestors.path)
+          and not ancestors.cycle
+          and ancestors.depth < 64
       )
-      select id, parent_session_id as "parentSessionId", depth, path
+      select id, parent_session_id as "parentSessionId", depth, path, cycle
       from ancestors
-      where depth > 0
       order by depth desc
     `)) as LineageIdRow[];
+    const frontier = ancestorLineageRows[0];
+    if (
+      !frontier ||
+      frontier.cycle ||
+      frontier.parentSessionId !== null ||
+      Number(frontier.depth) >= 64
+    ) {
+      throw new Error(`session lineage for ${sessionId} has no valid workspace root`);
+    }
+    const ancestorRows = ancestorLineageRows.filter((row) => row.depth > 0);
 
     const childRows = (await scopedDb.execute(sql<LineageIdRow>`
       with recursive descendants(id, parent_session_id, depth, path) as (
@@ -16351,7 +16368,7 @@ export async function getSessionLineage(
           and descendants.depth < 5
           and not child.id = any(descendants.path)
       )
-      select id, parent_session_id as "parentSessionId", depth, path
+      select id, parent_session_id as "parentSessionId", depth, path, false as cycle
       from descendants
       order by path
       limit ${descendantLimit + 1}
