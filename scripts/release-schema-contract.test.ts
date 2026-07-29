@@ -152,7 +152,7 @@ describe("release schema contract", () => {
         (migrations.has("0135_durable_machine_input_batches.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "f5c90efae4e1d618b534ab43ea07688d227d0c82fdd10aa7aef4a630e417d337",
+      "495f69d6d8cb46e94b632161b4a6721e491a764fb869e511b1c9f1183666b036",
     );
     expect(contract.latestMigration).toBe("0135_durable_machine_input_batches.sql");
     expect(migrations.get("0128_github_installation_authority.sql")).toMatchObject({
@@ -172,7 +172,7 @@ describe("release schema contract", () => {
       deploymentMode: "rolling",
     });
     expect(migrations.get("0135_durable_machine_input_batches.sql")).toMatchObject({
-      sha256: "1af5da88274443738378d543432a000ba0603f74771c45cfa479fc974e3b6e8f",
+      sha256: "c2d642594077a74956fd2eaa64fee8fafcd748ad432d2c9c6f4450019970617c",
       deploymentMode: "maintenance",
     });
     expect(migrations.get("0122_codex_capacity_same_turn.sql")).toMatchObject({

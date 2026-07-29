@@ -163,7 +163,8 @@ gap_ranked AS (
         workspace_id,
         session_id,
         preserve_active,
-        (user_position IS NULL AND turn_first_position IS NULL),
+        user_position,
+        turn_first_position,
         previous_active_position,
         next_active_position
       ORDER BY turn_position, turn_created_at, turn_order_id
@@ -173,7 +174,8 @@ gap_ranked AS (
         workspace_id,
         session_id,
         preserve_active,
-        (user_position IS NULL AND turn_first_position IS NULL),
+        user_position,
+        turn_first_position,
         previous_active_position,
         next_active_position
     ) AS gap_count
@@ -185,33 +187,44 @@ positioned AS (
     CASE
       WHEN NOT preserve_active THEN audit_tail_position + turn_ordinal
       WHEN user_position IS NOT NULL THEN
-        (
-          user_position + coalesce(
+        user_position
+          + (
+            coalesce(
             (
               SELECT min(history.position)
               FROM "session_history_items" history
               WHERE history.workspace_id = gap_ranked.workspace_id
                 AND history.session_id = gap_ranked.session_id
-                AND history.active
                 AND history.position > user_position
             ),
             user_position + 1
           )
-        ) / 2
+            - user_position
+          ) * gap_ordinal / (gap_count + 1)
       WHEN turn_first_position IS NOT NULL THEN
-        (
-          turn_first_position + coalesce(
+        coalesce(
             (
               SELECT max(history.position)
               FROM "session_history_items" history
               WHERE history.workspace_id = gap_ranked.workspace_id
                 AND history.session_id = gap_ranked.session_id
-                AND history.active
                 AND history.position < turn_first_position
             ),
             turn_first_position - 2
           )
-        ) / 2
+          + (
+            turn_first_position
+            - coalesce(
+              (
+                SELECT max(history.position)
+                FROM "session_history_items" history
+                WHERE history.workspace_id = gap_ranked.workspace_id
+                  AND history.session_id = gap_ranked.session_id
+                  AND history.position < turn_first_position
+              ),
+              turn_first_position - 2
+            )
+          ) * gap_ordinal / (gap_count + 1)
       WHEN previous_active_position IS NOT NULL AND next_active_position IS NOT NULL THEN
         previous_active_position
           + (next_active_position - previous_active_position) * gap_ordinal / (gap_count + 1)
@@ -222,6 +235,55 @@ positioned AS (
       ELSE active_tail_position + gap_ordinal
     END AS history_position
   FROM gap_ranked
+),
+existing_gaps AS (
+  SELECT
+    positioned.*,
+    coalesce(
+      (
+        SELECT max(history.position)
+        FROM "session_history_items" history
+        WHERE history.workspace_id = positioned.workspace_id
+          AND history.session_id = positioned.session_id
+          AND history.position < positioned.history_position
+      ),
+      positioned.history_position - 1
+    ) AS existing_gap_left,
+    coalesce(
+      (
+        SELECT min(history.position)
+        FROM "session_history_items" history
+        WHERE history.workspace_id = positioned.workspace_id
+          AND history.session_id = positioned.session_id
+          AND history.position > positioned.history_position
+      ),
+      positioned.history_position + 1
+    ) AS existing_gap_right
+  FROM positioned
+),
+final_positioned AS (
+  SELECT
+    existing_gaps.*,
+    existing_gap_left
+      + (existing_gap_right - existing_gap_left)
+        * row_number() OVER (
+          PARTITION BY
+            workspace_id,
+            session_id,
+            existing_gap_left,
+            existing_gap_right
+          ORDER BY history_position, turn_position, turn_created_at, turn_order_id
+        )
+        / (
+          count(*) OVER (
+            PARTITION BY
+              workspace_id,
+              session_id,
+              existing_gap_left,
+              existing_gap_right
+          ) + 1
+        ) AS final_history_position
+  FROM existing_gaps
 ),
 inserted AS (
   INSERT INTO "session_history_items" (
@@ -242,12 +304,12 @@ inserted AS (
     workspace_id,
     session_id,
     turn_id,
-    history_position,
+    final_history_position,
     item,
     preserve_active,
     NULL,
     coalesce(delivered_at, now())
-  FROM positioned
+  FROM final_positioned
   RETURNING id, workspace_id, session_id, turn_id
 )
 UPDATE "session_system_updates" updates
