@@ -2902,7 +2902,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           producerSeq,
         });
         if (immediate) {
-          await Bun.sleep(0);
+          await new Promise<void>((resolve) => setTimeout(resolve, 0));
         }
         return appended;
       };

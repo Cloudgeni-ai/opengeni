@@ -367,7 +367,13 @@ async function resolveToolListing(input: {
       sessionId,
       rootSessionId,
       turn: activeTurn,
-    }).catch(() => null);
+    }).catch((error) => {
+      deps.observability?.warn("toolspace upstream connection failed", {
+        serverId,
+        ...toolspaceErrorAttributes(error),
+      });
+      return null;
+    });
     if (!connection) {
       aggregateBudget.replace(serverId, []);
       return;
@@ -375,7 +381,13 @@ async function resolveToolListing(input: {
     try {
       const listed = await connection.client
         .listTools(undefined, toolspaceRequestOptions(config))
-        .catch(() => ({ tools: [] }));
+        .catch((error) => {
+          deps.observability?.warn("toolspace upstream tool list failed", {
+            serverId,
+            ...toolspaceErrorAttributes(error),
+          });
+          return { tools: [] };
+        });
       let boundedTools: readonly McpTool[];
       try {
         boundedTools = assertMcpToolListWithinBounds(listed.tools as McpTool[]) as McpTool[];
@@ -494,7 +506,18 @@ async function connectToolspaceServer(input: {
   rootSessionId: string;
   turn: SessionTurn;
 }): Promise<ConnectedToolspaceServer> {
-  const guardedFetch = guardedMcpFetch(input.deps.settings, undiciFetch);
+  // npm Undici's dispatcher transport is not reliable under Bun. The worker's
+  // model-visible MCP path already uses Bun's native fetch while retaining the
+  // same pre-request destination-policy check; Toolspace must do the same or an
+  // embedded Bun API can expose a server to the model while silently dropping
+  // that exact server from `ogtool list`.
+  const useBunNativeFetch = !!process.versions.bun;
+  const mcpFetchImpl: FetchLike = useBunNativeFetch
+    ? globalThis.fetch.bind(globalThis)
+    : undiciFetch;
+  const guardedFetch = guardedMcpFetch(input.deps.settings, mcpFetchImpl, {
+    ...(useBunNativeFetch ? { pinResolvedDestination: false } : {}),
+  });
   const baseFetch: FetchLike = input.config.connectionRef
     ? connectionBrokerFetch(guardedFetch, input)
     : guardedFetch;
@@ -727,6 +750,24 @@ function toolspaceAuditSummary(value: unknown): {
     redacted: true,
     sizeBytes: Buffer.byteLength(serialized),
     sha256: createHash("sha256").update(serialized).digest("hex"),
+  };
+}
+
+function toolspaceErrorAttributes(error: unknown): {
+  errorClass: string;
+  errorCode?: string;
+  errorMessage?: string;
+} {
+  if (!(error instanceof Error)) {
+    return { errorClass: typeof error };
+  }
+  const code = (error as Error & { code?: unknown }).code;
+  return {
+    errorClass: error.name,
+    ...(typeof code === "string" ? { errorCode: code } : {}),
+    ...(error.message
+      ? { errorMessage: error.message.replaceAll(/[\r\n]+/gu, " ").slice(0, 512) }
+      : {}),
   };
 }
 
