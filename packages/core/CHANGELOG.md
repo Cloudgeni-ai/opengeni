@@ -1,5 +1,21 @@
 # @opengeni/core
 
+## 0.12.6
+
+### Patch Changes
+
+- dfc3235: Separate first-party MCP authorization from exact per-session tool visibility, add fail-closed registration policy, and isolate file download URLs on the files MCP surface.
+- Updated dependencies [29ad09b]
+- Updated dependencies [b2e23f3]
+- Updated dependencies [dfc3235]
+  - @opengeni/contracts@0.22.0
+  - @opengeni/db@0.14.0
+  - @opengeni/runtime@0.14.1
+  - @opengeni/config@0.7.11
+  - @opengeni/documents@0.2.42
+  - @opengeni/events@0.3.33
+  - @opengeni/storage@0.2.35
+
 ## 0.12.5
 
 ### Patch Changes
