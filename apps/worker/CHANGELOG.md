@@ -1,5 +1,14 @@
 # @opengeni/worker-bundle
 
+## 0.12.7
+
+### Patch Changes
+
+- f2eebc8: Route Codex Apps through the durable per-session MCP tool policy so exact
+  allowlists cannot be widened by a runtime credential overlay.
+- Updated dependencies [f2eebc8]
+  - @opengeni/core@0.12.7
+
 ## 0.12.6
 
 ### Patch Changes
