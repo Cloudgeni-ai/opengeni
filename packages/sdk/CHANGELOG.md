@@ -1,5 +1,19 @@
 # @opengeni/sdk
 
+## 0.28.0
+
+### Minor Changes
+
+- 29ad09b: Persist typed machine inputs into canonical model history at turn claim, expose
+  authoritative pending-input queue projections and lifecycle events, render
+  delivered batches in the timeline, and preserve append-only prompt-cache
+  prefixes across tools, later turns, recovery, and explicit compaction.
+
+### Patch Changes
+
+- 8eaa377: Expose transport-tolerant MCP output normalization from the SDK and reuse it in the React timeline parser.
+- dfc3235: Separate first-party MCP authorization from exact per-session tool visibility, add fail-closed registration policy, and isolate file download URLs on the files MCP surface.
+
 ## 0.27.0
 
 ### Minor Changes

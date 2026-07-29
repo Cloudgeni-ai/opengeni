@@ -1,5 +1,16 @@
 # @opengeni/config
 
+## 0.7.11
+
+### Patch Changes
+
+- b2e23f3: Resolve Connected Machine Toolspace token files against the machine user's real
+  home directory instead of the selfhosted capability root.
+- dfc3235: Separate first-party MCP authorization from exact per-session tool visibility, add fail-closed registration policy, and isolate file download URLs on the files MCP surface.
+- Updated dependencies [29ad09b]
+- Updated dependencies [dfc3235]
+  - @opengeni/contracts@0.22.0
+
 ## 0.7.10
 
 ### Patch Changes
