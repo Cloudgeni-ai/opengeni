@@ -1,5 +1,22 @@
 # @opengeni/api-router
 
+## 0.12.5
+
+### Patch Changes
+
+- 519d93c: Add validated inline per-session skills and discover skills directly from already-materialized repository resources.
+- Updated dependencies [519d93c]
+- Updated dependencies [7b962a6]
+  - @opengeni/contracts@0.21.0
+  - @opengeni/runtime@0.14.0
+  - @opengeni/config@0.7.10
+  - @opengeni/core@0.12.5
+  - @opengeni/db@0.13.4
+  - @opengeni/documents@0.2.41
+  - @opengeni/events@0.3.32
+  - @opengeni/github@0.3.22
+  - @opengeni/storage@0.2.34
+
 ## 0.12.4
 
 ### Patch Changes
