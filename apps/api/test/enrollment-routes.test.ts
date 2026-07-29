@@ -89,6 +89,7 @@ async function bearer(
     subjectId: "user-m5",
     subjectLabel: "M5 User",
     permissions,
+    principalKind: "human_session",
     exp: Math.floor(Date.now() / 1000) + 3600,
   });
 }

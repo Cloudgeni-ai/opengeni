@@ -76,19 +76,26 @@ revision and retain the corrected revision. Rejected and superseded records are
 terminal. Expiry is derived at read time: expired heads remain historical truth
 but do not produce descriptors.
 
-All activation and scope mutations require a direct human-authorized request.
-Signed attempt credentials and service initiators are rejected even when their
-permission strings would otherwise be sufficient. Each successful transition
+All governance mutations require a positively identified `human_session`
+principal. Delegated bearer principal kind is a mandatory immutable HMAC-signed
+claim; agent-attempt, service, API-key, configured-key, and missing principal
+kinds fail closed even when their permission strings would otherwise be
+sufficient. The verified kind is propagated into the database transaction and
+rechecked by the lifecycle function. Each successful transition
 records the actor, bounded reason, old/new revision or target, related
 preference where applicable, and monotonic event version.
 
-Ordinary runtime SQL cannot update or delete a preference head and cannot
-insert lifecycle events. Two target-schema-local security-definer functions
-own canonical head locking and lifecycle application. They derive authority
+Ordinary runtime SQL cannot update or delete a preference head, insert
+lifecycle events, or insert snapshots. Three target-schema-local
+security-definer functions own canonical head locking, lifecycle application,
+and snapshot creation. They derive authority
 from transaction-local RLS context, lock related heads in UUID order, repeat the
 scope/revision CAS checks, perform only the operation-specific transition, and
 append its complete event atomically. A deferred constraint requires every new
 proposal head to have its exact version-1 creation event before commit.
+Supersession locks both heads and rejects a replacement whose active immutable
+revision is expired at transaction time, leaving the source and event history
+unchanged.
 Revisions, events, snapshots, heads, and their account/workspace/session/turn/
 attempt parents use restrictive deletion semantics; parent deletion cannot
 erase registry history.
@@ -119,6 +126,10 @@ Descriptor snapshots are deterministic and bounded to 64 entries and 16 KiB of
 canonical UTF-8 JSON. Ordering is organization, workspace, user; precedence
 rank descending within a tier; then stable key and preference ID by code-point
 order. If either bound is reached, the snapshot records `truncated=true`.
+The narrow snapshot function locks exact attempt authority, derives the
+initiating human, complete descriptor array, hash, truncation flag, and
+transaction timestamp, and validates an existing immutable race winner. The
+caller cannot supply any of those canonical fields.
 
 The retrieval handle binds the exact preference, immutable revision, and
 content hash. Full-content retrieval succeeds only when the exact handle exists
@@ -134,6 +145,9 @@ Human governance routes are below
 `workspace:read` and expose only organization, current-workspace, and current
 personal rows. Proposal and lifecycle operations apply the scope authorization
 rules above.
+Derived active/expired predicates execute in the joined SQL query before
+deterministic ordering and `LIMIT`, so bounded status pages cannot be emptied by
+expired rows that sort earlier.
 
 The summary and full-content routes require exact attempt authority. The same
 restriction applies to the first-party MCP tools
@@ -146,9 +160,9 @@ retrieval contracts without introducing a second editor or content system.
 
 All four tables carry account/workspace visibility keys, use ENABLE + FORCE RLS,
 and are accessed through account/workspace/subject context wrappers. Ordinary
-runtime DML is SELECT + INSERT for proposal heads and revisions, SELECT + INSERT
-for snapshots, and SELECT-only for events. Head UPDATE/DELETE is available only
-through the narrow lifecycle functions. Database constraints, restrictive
+runtime DML is SELECT + INSERT for proposal heads and revisions and SELECT-only
+for events and snapshots. Snapshot INSERT and head UPDATE/DELETE are available
+only through their narrow security-definer functions. Database constraints, restrictive
 foreign keys, and immutable-history triggers defend revision/hash, target,
 active-head, snapshot, and audit integrity beneath the service layer.
 

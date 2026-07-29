@@ -591,6 +591,272 @@ CREATE OR REPLACE FUNCTION opengeni_private.preference_registry_scope_visible(
     );
 $$;
 
+DO $snapshot_function$
+DECLARE target_schema text := current_schema();
+BEGIN
+  EXECUTE format($ddl$
+    CREATE OR REPLACE FUNCTION %I.preference_registry_get_or_create_snapshot(
+      p_account_id uuid,
+      p_workspace_id uuid,
+      p_session_id uuid,
+      p_turn_id uuid,
+      p_attempt_id uuid,
+      p_execution_generation integer
+    ) RETURNS SETOF %I.preference_registry_snapshots
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = %I, pg_catalog
+    AS $body$
+    DECLARE
+      context_account_id uuid;
+      context_workspace_id uuid;
+      authority_subject_id text;
+      snapshot_time timestamptz := transaction_timestamp();
+      winner_id uuid;
+      canonical_descriptor jsonb;
+      canonical_descriptors jsonb := '[]'::jsonb;
+      candidate_descriptors jsonb;
+      canonical_hash text;
+      canonical_truncated boolean := false;
+    BEGIN
+      context_account_id := NULLIF(
+        current_setting('opengeni.account_id', true), ''
+      )::uuid;
+      context_workspace_id := NULLIF(
+        current_setting('opengeni.workspace_id', true), ''
+      )::uuid;
+      IF context_account_id IS DISTINCT FROM p_account_id
+        OR context_workspace_id IS DISTINCT FROM p_workspace_id
+        OR p_execution_generation < 1
+      THEN
+        RAISE EXCEPTION 'preference snapshot requires exact transaction-local tenant authority'
+          USING ERRCODE = '42501';
+      END IF;
+
+      SELECT turn.initiator_subject_id INTO authority_subject_id
+      FROM workspaces workspace
+      JOIN sessions session
+        ON session.account_id = workspace.account_id
+        AND session.workspace_id = workspace.id
+      JOIN session_turns turn
+        ON turn.account_id = session.account_id
+        AND turn.workspace_id = session.workspace_id
+        AND turn.session_id = session.id
+      JOIN session_turn_attempts attempt
+        ON attempt.account_id = turn.account_id
+        AND attempt.workspace_id = turn.workspace_id
+        AND attempt.session_id = turn.session_id
+        AND attempt.turn_id = turn.id
+      WHERE workspace.id = p_workspace_id
+        AND workspace.account_id = p_account_id
+        AND session.id = p_session_id
+        AND session.active_turn_id = p_turn_id
+        AND turn.id = p_turn_id
+        AND turn.active_attempt_id = p_attempt_id
+        AND turn.execution_generation = p_execution_generation
+        AND turn.status IN ('running', 'requires_action', 'recovering', 'waiting_capacity')
+        AND turn.initiator_kind = 'subject'
+        AND length(btrim(turn.initiator_subject_id)) BETWEEN 1 AND 1024
+        AND attempt.id = p_attempt_id
+        AND attempt.execution_generation = p_execution_generation
+        AND attempt.state IN ('claimed', 'running')
+        AND NOT EXISTS (
+          SELECT 1
+          FROM session_attempt_interruptions interruption
+          WHERE interruption.workspace_id = attempt.workspace_id
+            AND interruption.attempt_id = attempt.id
+            AND interruption.state IN ('pending', 'delivered', 'acknowledged')
+        )
+      FOR KEY SHARE OF workspace
+      FOR SHARE OF session, turn
+      FOR UPDATE OF attempt;
+      IF authority_subject_id IS NULL THEN
+        RAISE EXCEPTION 'preference snapshot requires the exact current human attempt'
+          USING ERRCODE = '42501';
+      END IF;
+      PERFORM set_config('opengeni.subject_id', authority_subject_id, true);
+      IF NULLIF(current_setting('opengeni.subject_id', true), '')
+        IS DISTINCT FROM authority_subject_id
+      THEN
+        RAISE EXCEPTION 'preference snapshot human authority was not applied'
+          USING ERRCODE = '42501';
+      END IF;
+
+      SELECT snapshot.id INTO winner_id
+      FROM preference_registry_snapshots snapshot
+      WHERE snapshot.account_id = p_account_id
+        AND snapshot.workspace_id = p_workspace_id
+        AND snapshot.session_id = p_session_id
+        AND snapshot.turn_id = p_turn_id
+        AND snapshot.attempt_id = p_attempt_id
+        AND snapshot.execution_generation = p_execution_generation
+        AND snapshot.initiating_human_subject_id = authority_subject_id
+      FOR SHARE;
+      IF winner_id IS NOT NULL THEN
+        IF EXISTS (
+          SELECT 1
+          FROM preference_registry_snapshots snapshot
+          WHERE snapshot.id = winner_id
+            AND (
+              snapshot.created_at > transaction_timestamp()
+              OR jsonb_typeof(snapshot.descriptors) <> 'array'
+              OR jsonb_array_length(snapshot.descriptors) > 64
+              OR octet_length(convert_to(snapshot.descriptors::text, 'UTF8')) > 16384
+              OR snapshot.descriptor_hash IS DISTINCT FROM encode(
+                sha256(convert_to(snapshot.descriptors::text, 'UTF8')), 'hex'
+              )
+              OR (
+                SELECT count(*) <> count(DISTINCT descriptor->>'id')
+                FROM jsonb_array_elements(snapshot.descriptors) descriptor
+              )
+            )
+        ) THEN
+          RAISE EXCEPTION 'existing preference snapshot winner failed canonical integrity checks'
+            USING ERRCODE = '23514';
+        END IF;
+        RETURN QUERY
+        SELECT snapshot.*
+        FROM preference_registry_snapshots snapshot
+        WHERE snapshot.id = winner_id;
+        RETURN;
+      END IF;
+
+      FOR canonical_descriptor IN
+        SELECT jsonb_build_object(
+          'id', preference.id::text,
+          'stableKey', preference.stable_key,
+          'title', revision.title,
+          'description', revision.description,
+          'scope', preference.scope,
+          'activeVersion', preference.activation_version,
+          'revisionId', revision.id::text,
+          'contentHash', revision.content_hash,
+          'precedence', jsonb_build_object(
+            'tier', preference.scope,
+            'rank', revision.precedence_rank,
+            'conflictStrategy', revision.conflict_strategy,
+            'conflictsWith', revision.conflicts_with
+          ),
+          'provenance', jsonb_build_object(
+            'source', revision.provenance_source,
+            'sourceIdHash', CASE
+              WHEN revision.provenance_source_id IS NULL THEN NULL
+              ELSE encode(
+                sha256(convert_to(revision.provenance_source_id, 'UTF8')),
+                'hex'
+              )
+            END,
+            'trust', revision.trust
+          ),
+          'expiresAt', CASE
+            WHEN revision.expires_at IS NULL THEN NULL
+            ELSE to_char(
+              revision.expires_at AT TIME ZONE 'UTC',
+              'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'
+            )
+          END,
+          'retrievalHandle',
+            'preference://' || preference.id::text || '/revisions/' || revision.id::text ||
+            '?sha256=' || revision.content_hash
+        )
+        FROM preference_registry_preferences preference
+        JOIN preference_registry_revisions revision
+          ON revision.account_id = preference.account_id
+          AND revision.preference_id = preference.id
+          AND revision.id = preference.active_revision_id
+        WHERE preference.account_id = p_account_id
+          AND preference.status = 'active'
+          AND (revision.expires_at IS NULL OR revision.expires_at > snapshot_time)
+          AND opengeni_private.preference_registry_scope_visible(
+            preference.account_id,
+            preference.scope,
+            preference.scope_workspace_id,
+            preference.scope_subject_id
+          )
+        ORDER BY CASE preference.scope
+            WHEN 'organization' THEN 0
+            WHEN 'workspace' THEN 1
+            WHEN 'user' THEN 2
+            ELSE 3
+          END,
+          revision.precedence_rank DESC,
+          preference.stable_key,
+          preference.id
+        FOR SHARE OF preference
+      LOOP
+        IF jsonb_array_length(canonical_descriptors) >= 64 THEN
+          canonical_truncated := true;
+          EXIT;
+        END IF;
+        candidate_descriptors := canonical_descriptors || jsonb_build_array(canonical_descriptor);
+        IF octet_length(convert_to(candidate_descriptors::text, 'UTF8')) > 16384 THEN
+          canonical_truncated := true;
+          EXIT;
+        END IF;
+        canonical_descriptors := candidate_descriptors;
+      END LOOP;
+      canonical_hash := encode(
+        sha256(convert_to(canonical_descriptors::text, 'UTF8')), 'hex'
+      );
+
+      INSERT INTO preference_registry_snapshots (
+        account_id, workspace_id, session_id, turn_id, attempt_id,
+        execution_generation, initiating_human_subject_id,
+        descriptors, descriptor_hash, truncated, created_at
+      ) VALUES (
+        p_account_id, p_workspace_id, p_session_id, p_turn_id, p_attempt_id,
+        p_execution_generation, authority_subject_id,
+        canonical_descriptors, canonical_hash, canonical_truncated, snapshot_time
+      )
+      ON CONFLICT (account_id, workspace_id, attempt_id) DO NOTHING
+      RETURNING id INTO winner_id;
+      IF winner_id IS NULL THEN
+        SELECT snapshot.id INTO winner_id
+        FROM preference_registry_snapshots snapshot
+        WHERE snapshot.account_id = p_account_id
+          AND snapshot.workspace_id = p_workspace_id
+          AND snapshot.session_id = p_session_id
+          AND snapshot.turn_id = p_turn_id
+          AND snapshot.attempt_id = p_attempt_id
+          AND snapshot.execution_generation = p_execution_generation
+          AND snapshot.initiating_human_subject_id = authority_subject_id
+        FOR SHARE;
+      END IF;
+      IF winner_id IS NULL THEN
+        RAISE EXCEPTION 'preference snapshot winner conflicts with exact attempt authority'
+          USING ERRCODE = '40001';
+      END IF;
+      IF EXISTS (
+        SELECT 1
+        FROM preference_registry_snapshots snapshot
+        WHERE snapshot.id = winner_id
+          AND (
+            snapshot.descriptors IS DISTINCT FROM canonical_descriptors
+            OR snapshot.descriptor_hash IS DISTINCT FROM canonical_hash
+            OR snapshot.truncated IS DISTINCT FROM canonical_truncated
+            OR snapshot.created_at IS DISTINCT FROM snapshot_time
+          )
+      ) THEN
+        RAISE EXCEPTION 'preference snapshot winner is not the canonical locked snapshot'
+          USING ERRCODE = '40001';
+      END IF;
+      RETURN QUERY
+      SELECT snapshot.*
+      FROM preference_registry_snapshots snapshot
+      WHERE snapshot.id = winner_id;
+    END
+    $body$
+  $ddl$, target_schema, target_schema, target_schema);
+  EXECUTE format(
+    'REVOKE ALL ON FUNCTION %I.preference_registry_get_or_create_snapshot(uuid, uuid, uuid, uuid, uuid, integer) FROM PUBLIC',
+    target_schema
+  );
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
+    EXECUTE format(
+      'GRANT EXECUTE ON FUNCTION %I.preference_registry_get_or_create_snapshot(uuid, uuid, uuid, uuid, uuid, integer) TO opengeni_app',
+      target_schema
+    );
+  END IF;
+END $snapshot_function$;
+
 DO $lock_function$
 DECLARE target_schema text := current_schema();
 BEGIN
@@ -682,10 +948,12 @@ BEGIN
     DECLARE
       preference record;
       replacement record;
+      replacement_revision record;
       revision record;
       context_account_id uuid;
       context_workspace_id uuid;
       context_subject_id text;
+      context_principal_kind text;
       next_event_version integer;
       event_type text;
       old_revision_id uuid;
@@ -708,8 +976,12 @@ BEGIN
       context_subject_id := NULLIF(
         current_setting('opengeni.subject_id', true), ''
       );
+      context_principal_kind := NULLIF(
+        current_setting('opengeni.principal_kind', true), ''
+      );
       IF context_account_id IS NULL OR context_workspace_id IS NULL
         OR context_subject_id IS NULL
+        OR context_principal_kind IS DISTINCT FROM 'human_session'
         OR p_actor_subject_id IS DISTINCT FROM context_subject_id
       THEN
         RAISE EXCEPTION 'preference lifecycle requires exact transaction-local actor authority'
@@ -927,6 +1199,16 @@ BEGIN
           RAISE EXCEPTION 'replacement preference is not active in the exact same target'
             USING ERRCODE = '23514';
         END IF;
+        SELECT * INTO replacement_revision
+        FROM preference_registry_revisions candidate
+        WHERE candidate.id = replacement.active_revision_id
+          AND candidate.preference_id = replacement.id
+          AND candidate.account_id = replacement.account_id
+          AND (candidate.expires_at IS NULL OR candidate.expires_at > transaction_timestamp());
+        IF NOT FOUND THEN
+          RAISE EXCEPTION 'replacement preference active revision is expired'
+            USING ERRCODE = '23514';
+        END IF;
         UPDATE preference_registry_preferences
         SET status = 'superseded',
           superseded_by_preference_id = replacement.id,
@@ -1047,12 +1329,12 @@ BEGIN
       target_schema, target_schema, target_schema, target_schema
     );
     EXECUTE format(
-      'GRANT SELECT, INSERT ON TABLE %I.preference_registry_preferences, %I.preference_registry_revisions, %I.preference_registry_snapshots TO opengeni_app',
-      target_schema, target_schema, target_schema
+      'GRANT SELECT, INSERT ON TABLE %I.preference_registry_preferences, %I.preference_registry_revisions TO opengeni_app',
+      target_schema, target_schema
     );
     EXECUTE format(
-      'GRANT SELECT ON TABLE %I.preference_registry_events TO opengeni_app',
-      target_schema
+      'GRANT SELECT ON TABLE %I.preference_registry_events, %I.preference_registry_snapshots TO opengeni_app',
+      target_schema, target_schema
     );
     EXECUTE format(
       'GRANT USAGE, SELECT ON SEQUENCE %I.preference_registry_revision_seq TO opengeni_app',

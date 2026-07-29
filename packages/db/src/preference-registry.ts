@@ -20,7 +20,7 @@ import {
   type PreferenceRegistryStatus,
   type PreferenceRegistryTrust,
 } from "@opengeni/contracts";
-import { and, asc, desc, eq, inArray, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNull, lte, or, sql, type SQL } from "drizzle-orm";
 import type { Database } from "./index";
 import { setSubjectRlsContext, withWorkspaceRls, withWorkspaceSubjectRls } from "./index";
 import { nestedPostgresSqlState, safeDatabaseErrorFacts } from "./persistence-errors";
@@ -29,7 +29,6 @@ import * as schema from "./schema";
 type PreferenceRow = typeof schema.preferenceRegistryPreferences.$inferSelect;
 type RevisionRow = typeof schema.preferenceRegistryRevisions.$inferSelect;
 type EventRow = typeof schema.preferenceRegistryEvents.$inferSelect;
-type SnapshotRow = typeof schema.preferenceRegistrySnapshots.$inferSelect;
 
 const importedSources = new Set<PreferenceRegistryProvenanceSource>([
   "knowledge_proposal",
@@ -288,6 +287,39 @@ function targetColumns(target: PreferenceRegistryScopeTarget) {
   };
 }
 
+async function withPreferenceRegistryGovernanceRls<T>(
+  db: Database,
+  input: {
+    workspaceId: string;
+    actorSubjectId: string;
+    principalKind: string | undefined;
+  },
+  fn: (db: Database) => Promise<T>,
+): Promise<T> {
+  if (input.principalKind !== "human_session") {
+    throw new PreferenceRegistryInitiatorError(
+      "Preference governance requires an authenticated human session principal",
+    );
+  }
+  return await withWorkspaceSubjectRls(
+    db,
+    input.workspaceId,
+    input.actorSubjectId,
+    async (scopedDb) => {
+      const rows = (await scopedDb.execute(sql`
+        SELECT set_config('opengeni.principal_kind', ${input.principalKind}, true)
+          AS principal_kind
+      `)) as unknown as Array<{ principal_kind: string }>;
+      if (rows[0]?.principal_kind !== "human_session") {
+        throw new PreferenceRegistryInitiatorError(
+          "Preference governance principal kind was not applied to the transaction",
+        );
+      }
+      return await fn(scopedDb);
+    },
+  );
+}
+
 function requireExpectedScopeVersion(row: PreferenceRow, expectedScopeVersion: number): void {
   if (row.scopeVersion !== expectedScopeVersion) {
     throw new PreferenceRegistryConflictError(
@@ -413,44 +445,40 @@ export async function createPreferenceRegistryProposal(
     accountId: string;
     workspaceId: string;
     actorSubjectId: string;
+    principalKind: string | undefined;
   },
 ) {
   const target = targetFor(input.scope, input.workspaceId, input.actorSubjectId);
   try {
-    return await withWorkspaceSubjectRls(
-      db,
-      input.workspaceId,
-      input.actorSubjectId,
-      async (scopedDb) => {
-        const [preference] = await scopedDb
-          .insert(schema.preferenceRegistryPreferences)
-          .values({
-            accountId: input.accountId,
-            stableKey: input.stableKey,
-            ...targetColumns(target),
-            createdBySubjectId: input.actorSubjectId,
-          })
-          .returning();
-        if (!preference) throw new Error("Preference proposal was not created");
-        const revision = await insertRevision(scopedDb, {
-          ...input,
-          preferenceId: preference.id,
-          correctsRevisionId: null,
-        });
-        await lifecycleEvent(scopedDb, {
-          operation: "proposal_created",
-          preferenceId: preference.id,
-          expectedScopeVersion: preference.scopeVersion,
-          expectedRevisionId: null,
-          revisionId: revision.id,
-          actorSubjectId: input.actorSubjectId,
-          reason: importedSources.has(input.provenanceSource)
-            ? "Imported source proposal; inactive pending authorized human review"
-            : "Human-created preference proposal; inactive pending activation",
-        });
-        return recordFromRows(preference, null);
-      },
-    );
+    return await withPreferenceRegistryGovernanceRls(db, input, async (scopedDb) => {
+      const [preference] = await scopedDb
+        .insert(schema.preferenceRegistryPreferences)
+        .values({
+          accountId: input.accountId,
+          stableKey: input.stableKey,
+          ...targetColumns(target),
+          createdBySubjectId: input.actorSubjectId,
+        })
+        .returning();
+      if (!preference) throw new Error("Preference proposal was not created");
+      const revision = await insertRevision(scopedDb, {
+        ...input,
+        preferenceId: preference.id,
+        correctsRevisionId: null,
+      });
+      await lifecycleEvent(scopedDb, {
+        operation: "proposal_created",
+        preferenceId: preference.id,
+        expectedScopeVersion: preference.scopeVersion,
+        expectedRevisionId: null,
+        revisionId: revision.id,
+        actorSubjectId: input.actorSubjectId,
+        reason: importedSources.has(input.provenanceSource)
+          ? "Imported source proposal; inactive pending authorized human review"
+          : "Human-created preference proposal; inactive pending activation",
+      });
+      return recordFromRows(preference, null);
+    });
   } catch (error) {
     if (isStableKeyConflict(error)) {
       throw new PreferenceRegistryStableKeyConflictError(
@@ -461,19 +489,6 @@ export async function createPreferenceRegistryProposal(
   }
 }
 
-async function activeRevisionRows(
-  db: Database,
-  rows: PreferenceRow[],
-): Promise<Map<string, RevisionRow>> {
-  const ids = rows.flatMap((row) => (row.activeRevisionId ? [row.activeRevisionId] : []));
-  if (ids.length === 0) return new Map();
-  const revisions = await db
-    .select()
-    .from(schema.preferenceRegistryRevisions)
-    .where(inArray(schema.preferenceRegistryRevisions.id, ids));
-  return new Map(revisions.map((revision) => [revision.id, revision]));
-}
-
 type PreferenceRegistryListInput = {
   scope?: PreferenceRegistryScope | undefined;
   status?: PreferenceRegistryStatus | undefined;
@@ -481,29 +496,53 @@ type PreferenceRegistryListInput = {
 };
 
 async function listPreferenceRegistryScoped(db: Database, input: PreferenceRegistryListInput) {
+  const now = new Date();
   const conditions: SQL[] = [];
   if (input.scope) conditions.push(eq(schema.preferenceRegistryPreferences.scope, input.scope));
-  if (input.status && input.status !== "expired") {
+  if (input.status === "active") {
+    conditions.push(
+      eq(schema.preferenceRegistryPreferences.status, "active"),
+      or(
+        isNull(schema.preferenceRegistryRevisions.expiresAt),
+        gt(schema.preferenceRegistryRevisions.expiresAt, now),
+      )!,
+    );
+  } else if (input.status === "expired") {
+    conditions.push(
+      eq(schema.preferenceRegistryPreferences.status, "active"),
+      lte(schema.preferenceRegistryRevisions.expiresAt, now),
+    );
+  } else if (input.status) {
     conditions.push(eq(schema.preferenceRegistryPreferences.status, input.status));
   }
   const rows = await db
-    .select()
+    .select({
+      preference: schema.preferenceRegistryPreferences,
+      revision: schema.preferenceRegistryRevisions,
+    })
     .from(schema.preferenceRegistryPreferences)
+    .leftJoin(
+      schema.preferenceRegistryRevisions,
+      and(
+        eq(
+          schema.preferenceRegistryRevisions.id,
+          schema.preferenceRegistryPreferences.activeRevisionId,
+        ),
+        eq(
+          schema.preferenceRegistryRevisions.accountId,
+          schema.preferenceRegistryPreferences.accountId,
+        ),
+      ),
+    )
     .where(conditions.length ? and(...conditions) : undefined)
     .orderBy(
       asc(schema.preferenceRegistryPreferences.stableKey),
       asc(schema.preferenceRegistryPreferences.id),
     )
     .limit(input.limit);
-  const revisions = await activeRevisionRows(db, rows);
-  const preferences = rows
-    .map((row) =>
-      recordFromRows(
-        row,
-        row.activeRevisionId ? (revisions.get(row.activeRevisionId) ?? null) : null,
-      ),
-    )
-    .filter((record) => !input.status || record.status === input.status);
+  const preferences = rows.map(({ preference, revision }) =>
+    recordFromRows(preference, revision, now),
+  );
   return PreferenceRegistryListResponse.parse({ preferences });
 }
 
@@ -583,6 +622,7 @@ export async function activatePreferenceRegistryRevision(
     accountId: string;
     workspaceId: string;
     actorSubjectId: string;
+    principalKind: string | undefined;
     preferenceId: string;
     revisionId: string;
     expectedCurrentRevisionId: string | null;
@@ -592,53 +632,46 @@ export async function activatePreferenceRegistryRevision(
     eventType?: "activated" | "corrected";
   },
 ) {
-  return await withWorkspaceSubjectRls(
-    db,
-    input.workspaceId,
-    input.actorSubjectId,
-    async (scopedDb) => {
-      const preference = await lockedPreference(scopedDb, input.preferenceId);
-      input.authorizeScope(preference.scope as PreferenceRegistryScope);
-      requireExpectedScopeVersion(preference, input.expectedScopeVersion);
-      if (preference.activeRevisionId !== input.expectedCurrentRevisionId) {
-        throw new PreferenceRegistryConflictError(
-          "The active preference revision changed in another request",
-          preference.activeRevisionId,
-          preference.scopeVersion,
-        );
-      }
-      if (preference.status === "superseded") {
-        throw new PreferenceRegistryInvalidOperationError(
-          "A superseded preference cannot be activated",
-        );
-      }
-      if (preference.status === "rejected") {
-        throw new PreferenceRegistryInvalidOperationError(
-          "A rejected preference proposal cannot be activated",
-        );
-      }
-      const revision = await revisionForPreference(scopedDb, preference.id, input.revisionId);
-      if (revision.id === preference.activeRevisionId) {
-        throw new PreferenceRegistryInvalidOperationError(
-          "The requested revision is already active",
-        );
-      }
-      const event = await lifecycleEvent(scopedDb, {
-        operation: input.eventType === "corrected" ? "correct" : "activate",
-        preferenceId: preference.id,
-        expectedScopeVersion: input.expectedScopeVersion,
-        expectedRevisionId: input.expectedCurrentRevisionId,
-        revisionId: revision.id,
-        actorSubjectId: input.actorSubjectId,
-        reason: input.reason,
-      });
-      const updated = await preferenceAfterMutation(scopedDb, preference.id);
-      return {
-        preference: recordFromRows(updated, revision),
-        event: eventFromRow(event),
-      };
-    },
-  );
+  return await withPreferenceRegistryGovernanceRls(db, input, async (scopedDb) => {
+    const preference = await lockedPreference(scopedDb, input.preferenceId);
+    input.authorizeScope(preference.scope as PreferenceRegistryScope);
+    requireExpectedScopeVersion(preference, input.expectedScopeVersion);
+    if (preference.activeRevisionId !== input.expectedCurrentRevisionId) {
+      throw new PreferenceRegistryConflictError(
+        "The active preference revision changed in another request",
+        preference.activeRevisionId,
+        preference.scopeVersion,
+      );
+    }
+    if (preference.status === "superseded") {
+      throw new PreferenceRegistryInvalidOperationError(
+        "A superseded preference cannot be activated",
+      );
+    }
+    if (preference.status === "rejected") {
+      throw new PreferenceRegistryInvalidOperationError(
+        "A rejected preference proposal cannot be activated",
+      );
+    }
+    const revision = await revisionForPreference(scopedDb, preference.id, input.revisionId);
+    if (revision.id === preference.activeRevisionId) {
+      throw new PreferenceRegistryInvalidOperationError("The requested revision is already active");
+    }
+    const event = await lifecycleEvent(scopedDb, {
+      operation: input.eventType === "corrected" ? "correct" : "activate",
+      preferenceId: preference.id,
+      expectedScopeVersion: input.expectedScopeVersion,
+      expectedRevisionId: input.expectedCurrentRevisionId,
+      revisionId: revision.id,
+      actorSubjectId: input.actorSubjectId,
+      reason: input.reason,
+    });
+    const updated = await preferenceAfterMutation(scopedDb, preference.id);
+    return {
+      preference: recordFromRows(updated, revision),
+      event: eventFromRow(event),
+    };
+  });
 }
 
 export async function correctPreferenceRegistry(
@@ -647,6 +680,7 @@ export async function correctPreferenceRegistry(
     accountId: string;
     workspaceId: string;
     actorSubjectId: string;
+    principalKind: string | undefined;
     preferenceId: string;
     expectedCurrentRevisionId: string;
     expectedScopeVersion: number;
@@ -661,51 +695,46 @@ export async function correctPreferenceRegistry(
     reason: string;
   },
 ) {
-  return await withWorkspaceSubjectRls(
-    db,
-    input.workspaceId,
-    input.actorSubjectId,
-    async (scopedDb) => {
-      const preference = await lockedPreference(scopedDb, input.preferenceId);
-      input.authorizeScope(preference.scope as PreferenceRegistryScope);
-      requireExpectedScopeVersion(preference, input.expectedScopeVersion);
-      if (preference.status === "superseded" || preference.status === "rejected") {
-        throw new PreferenceRegistryInvalidOperationError(
-          "A rejected or superseded preference cannot be corrected",
-        );
-      }
-      if (preference.activeRevisionId !== input.expectedCurrentRevisionId) {
-        throw new PreferenceRegistryConflictError(
-          "The active preference revision changed before correction",
-          preference.activeRevisionId,
-          preference.scopeVersion,
-        );
-      }
-      const oldRevision = await revisionForPreference(
-        scopedDb,
-        preference.id,
-        input.expectedCurrentRevisionId,
+  return await withPreferenceRegistryGovernanceRls(db, input, async (scopedDb) => {
+    const preference = await lockedPreference(scopedDb, input.preferenceId);
+    input.authorizeScope(preference.scope as PreferenceRegistryScope);
+    requireExpectedScopeVersion(preference, input.expectedScopeVersion);
+    if (preference.status === "superseded" || preference.status === "rejected") {
+      throw new PreferenceRegistryInvalidOperationError(
+        "A rejected or superseded preference cannot be corrected",
       );
-      const revision = await insertRevision(scopedDb, {
-        ...input,
-        scope: preference.scope as PreferenceRegistryScope,
-        provenanceSource: "human",
-        provenanceSourceId: `correction:${oldRevision.id}`,
-        correctsRevisionId: oldRevision.id,
-      });
-      const event = await lifecycleEvent(scopedDb, {
-        operation: "correct",
-        preferenceId: preference.id,
-        expectedScopeVersion: input.expectedScopeVersion,
-        expectedRevisionId: oldRevision.id,
-        revisionId: revision.id,
-        actorSubjectId: input.actorSubjectId,
-        reason: input.reason,
-      });
-      const updated = await preferenceAfterMutation(scopedDb, preference.id);
-      return { preference: recordFromRows(updated, revision), event: eventFromRow(event) };
-    },
-  );
+    }
+    if (preference.activeRevisionId !== input.expectedCurrentRevisionId) {
+      throw new PreferenceRegistryConflictError(
+        "The active preference revision changed before correction",
+        preference.activeRevisionId,
+        preference.scopeVersion,
+      );
+    }
+    const oldRevision = await revisionForPreference(
+      scopedDb,
+      preference.id,
+      input.expectedCurrentRevisionId,
+    );
+    const revision = await insertRevision(scopedDb, {
+      ...input,
+      scope: preference.scope as PreferenceRegistryScope,
+      provenanceSource: "human",
+      provenanceSourceId: `correction:${oldRevision.id}`,
+      correctsRevisionId: oldRevision.id,
+    });
+    const event = await lifecycleEvent(scopedDb, {
+      operation: "correct",
+      preferenceId: preference.id,
+      expectedScopeVersion: input.expectedScopeVersion,
+      expectedRevisionId: oldRevision.id,
+      revisionId: revision.id,
+      actorSubjectId: input.actorSubjectId,
+      reason: input.reason,
+    });
+    const updated = await preferenceAfterMutation(scopedDb, preference.id);
+    return { preference: recordFromRows(updated, revision), event: eventFromRow(event) };
+  });
 }
 
 export async function changePreferenceRegistryScope(
@@ -714,6 +743,7 @@ export async function changePreferenceRegistryScope(
     accountId: string;
     workspaceId: string;
     actorSubjectId: string;
+    principalKind: string | undefined;
     preferenceId: string;
     scope: PreferenceRegistryScope;
     expectedScopeVersion: number;
@@ -722,53 +752,48 @@ export async function changePreferenceRegistryScope(
   },
 ) {
   try {
-    return await withWorkspaceSubjectRls(
-      db,
-      input.workspaceId,
-      input.actorSubjectId,
-      async (scopedDb) => {
-        const preference = await lockedPreference(scopedDb, input.preferenceId);
-        input.authorizeScope(preference.scope as PreferenceRegistryScope);
-        input.authorizeScope(input.scope);
-        requireExpectedScopeVersion(preference, input.expectedScopeVersion);
-        if (preference.status === "superseded" || preference.status === "rejected") {
-          throw new PreferenceRegistryInvalidOperationError(
-            "A rejected or superseded preference cannot change scope",
-          );
-        }
-        if (preference.scope === input.scope) {
-          throw new PreferenceRegistryInvalidOperationError(
-            "Preference already uses the requested scope",
-          );
-        }
-        const oldTarget = targetFromRow(preference);
-        const nextTarget = targetFor(input.scope, input.workspaceId, input.actorSubjectId);
-        const event = await lifecycleEvent(scopedDb, {
-          operation: "scope",
-          preferenceId: preference.id,
-          expectedScopeVersion: input.expectedScopeVersion,
-          expectedRevisionId: preference.activeRevisionId,
-          newScope: input.scope,
-          actorSubjectId: input.actorSubjectId,
-          reason: input.reason,
-        });
-        const updated = await preferenceAfterMutation(scopedDb, preference.id);
-        const active = updated.activeRevisionId
-          ? await revisionForPreference(scopedDb, updated.id, updated.activeRevisionId)
-          : null;
-        if (
-          event.oldScope !== oldTarget.scope ||
-          event.oldWorkspaceId !== oldTarget.workspaceId ||
-          event.oldSubjectId !== oldTarget.subjectId ||
-          event.newScope !== nextTarget.scope ||
-          event.newWorkspaceId !== nextTarget.workspaceId ||
-          event.newSubjectId !== nextTarget.subjectId
-        ) {
-          throw new Error("Preference scope event did not preserve the locked transition");
-        }
-        return { preference: recordFromRows(updated, active), event: eventFromRow(event) };
-      },
-    );
+    return await withPreferenceRegistryGovernanceRls(db, input, async (scopedDb) => {
+      const preference = await lockedPreference(scopedDb, input.preferenceId);
+      input.authorizeScope(preference.scope as PreferenceRegistryScope);
+      input.authorizeScope(input.scope);
+      requireExpectedScopeVersion(preference, input.expectedScopeVersion);
+      if (preference.status === "superseded" || preference.status === "rejected") {
+        throw new PreferenceRegistryInvalidOperationError(
+          "A rejected or superseded preference cannot change scope",
+        );
+      }
+      if (preference.scope === input.scope) {
+        throw new PreferenceRegistryInvalidOperationError(
+          "Preference already uses the requested scope",
+        );
+      }
+      const oldTarget = targetFromRow(preference);
+      const nextTarget = targetFor(input.scope, input.workspaceId, input.actorSubjectId);
+      const event = await lifecycleEvent(scopedDb, {
+        operation: "scope",
+        preferenceId: preference.id,
+        expectedScopeVersion: input.expectedScopeVersion,
+        expectedRevisionId: preference.activeRevisionId,
+        newScope: input.scope,
+        actorSubjectId: input.actorSubjectId,
+        reason: input.reason,
+      });
+      const updated = await preferenceAfterMutation(scopedDb, preference.id);
+      const active = updated.activeRevisionId
+        ? await revisionForPreference(scopedDb, updated.id, updated.activeRevisionId)
+        : null;
+      if (
+        event.oldScope !== oldTarget.scope ||
+        event.oldWorkspaceId !== oldTarget.workspaceId ||
+        event.oldSubjectId !== oldTarget.subjectId ||
+        event.newScope !== nextTarget.scope ||
+        event.newWorkspaceId !== nextTarget.workspaceId ||
+        event.newSubjectId !== nextTarget.subjectId
+      ) {
+        throw new Error("Preference scope event did not preserve the locked transition");
+      }
+      return { preference: recordFromRows(updated, active), event: eventFromRow(event) };
+    });
   } catch (error) {
     if (isStableKeyConflict(error)) {
       throw new PreferenceRegistryStableKeyConflictError(
@@ -785,6 +810,7 @@ export async function deactivatePreferenceRegistry(
     accountId: string;
     workspaceId: string;
     actorSubjectId: string;
+    principalKind: string | undefined;
     preferenceId: string;
     expectedCurrentRevisionId: string;
     expectedScopeVersion: number;
@@ -792,41 +818,36 @@ export async function deactivatePreferenceRegistry(
     reason: string;
   },
 ) {
-  return await withWorkspaceSubjectRls(
-    db,
-    input.workspaceId,
-    input.actorSubjectId,
-    async (scopedDb) => {
-      const preference = await lockedPreference(scopedDb, input.preferenceId);
-      input.authorizeScope(preference.scope as PreferenceRegistryScope);
-      requireExpectedScopeVersion(preference, input.expectedScopeVersion);
-      if (
-        preference.status !== "active" ||
-        preference.activeRevisionId !== input.expectedCurrentRevisionId
-      ) {
-        throw new PreferenceRegistryConflictError(
-          "The active preference revision changed before deactivation",
-          preference.activeRevisionId,
-          preference.scopeVersion,
-        );
-      }
-      const revision = await revisionForPreference(
-        scopedDb,
-        preference.id,
-        input.expectedCurrentRevisionId,
+  return await withPreferenceRegistryGovernanceRls(db, input, async (scopedDb) => {
+    const preference = await lockedPreference(scopedDb, input.preferenceId);
+    input.authorizeScope(preference.scope as PreferenceRegistryScope);
+    requireExpectedScopeVersion(preference, input.expectedScopeVersion);
+    if (
+      preference.status !== "active" ||
+      preference.activeRevisionId !== input.expectedCurrentRevisionId
+    ) {
+      throw new PreferenceRegistryConflictError(
+        "The active preference revision changed before deactivation",
+        preference.activeRevisionId,
+        preference.scopeVersion,
       );
-      const event = await lifecycleEvent(scopedDb, {
-        operation: "deactivate",
-        preferenceId: preference.id,
-        expectedScopeVersion: input.expectedScopeVersion,
-        expectedRevisionId: revision.id,
-        actorSubjectId: input.actorSubjectId,
-        reason: input.reason,
-      });
-      const updated = await preferenceAfterMutation(scopedDb, preference.id);
-      return { preference: recordFromRows(updated, null), event: eventFromRow(event) };
-    },
-  );
+    }
+    const revision = await revisionForPreference(
+      scopedDb,
+      preference.id,
+      input.expectedCurrentRevisionId,
+    );
+    const event = await lifecycleEvent(scopedDb, {
+      operation: "deactivate",
+      preferenceId: preference.id,
+      expectedScopeVersion: input.expectedScopeVersion,
+      expectedRevisionId: revision.id,
+      actorSubjectId: input.actorSubjectId,
+      reason: input.reason,
+    });
+    const updated = await preferenceAfterMutation(scopedDb, preference.id);
+    return { preference: recordFromRows(updated, null), event: eventFromRow(event) };
+  });
 }
 
 export async function supersedePreferenceRegistry(
@@ -835,6 +856,7 @@ export async function supersedePreferenceRegistry(
     accountId: string;
     workspaceId: string;
     actorSubjectId: string;
+    principalKind: string | undefined;
     preferenceId: string;
     replacementPreferenceId: string;
     expectedCurrentRevisionId: string;
@@ -843,60 +865,74 @@ export async function supersedePreferenceRegistry(
     reason: string;
   },
 ) {
-  return await withWorkspaceSubjectRls(
-    db,
-    input.workspaceId,
-    input.actorSubjectId,
-    async (scopedDb) => {
-      if (input.preferenceId === input.replacementPreferenceId) {
-        throw new PreferenceRegistryInvalidOperationError("A preference cannot supersede itself");
-      }
-      const locked = await lockedPreferences(scopedDb, [
-        input.preferenceId,
-        input.replacementPreferenceId,
-      ]);
-      const preference = locked.find((row) => row.id === input.preferenceId)!;
-      const replacement = locked.find((row) => row.id === input.replacementPreferenceId)!;
-      input.authorizeScope(preference.scope as PreferenceRegistryScope);
-      requireExpectedScopeVersion(preference, input.expectedScopeVersion);
-      if (preference.activeRevisionId !== input.expectedCurrentRevisionId) {
-        throw new PreferenceRegistryConflictError(
-          "The active preference revision changed before supersession",
-          preference.activeRevisionId,
-          preference.scopeVersion,
-        );
-      }
-      if (preference.status !== "active") {
-        throw new PreferenceRegistryInvalidOperationError(
-          "Only an active preference can be superseded",
-        );
-      }
-      if (replacement.status !== "active" || !replacement.activeRevisionId) {
-        throw new PreferenceRegistryInvalidOperationError("Replacement preference must be active");
-      }
-      if (preference.scope !== replacement.scope) {
-        throw new PreferenceRegistryInvalidOperationError(
-          "Supersession requires the same scope tier",
-        );
-      }
-      const event = await lifecycleEvent(scopedDb, {
-        operation: "supersede",
-        preferenceId: preference.id,
-        expectedScopeVersion: input.expectedScopeVersion,
-        expectedRevisionId: preference.activeRevisionId,
-        relatedPreferenceId: replacement.id,
-        actorSubjectId: input.actorSubjectId,
-        reason: input.reason,
-      });
-      const updated = await preferenceAfterMutation(scopedDb, preference.id);
-      const revision = await revisionForPreference(
-        scopedDb,
-        preference.id,
-        preference.activeRevisionId!,
+  return await withPreferenceRegistryGovernanceRls(db, input, async (scopedDb) => {
+    if (input.preferenceId === input.replacementPreferenceId) {
+      throw new PreferenceRegistryInvalidOperationError("A preference cannot supersede itself");
+    }
+    const locked = await lockedPreferences(scopedDb, [
+      input.preferenceId,
+      input.replacementPreferenceId,
+    ]);
+    const preference = locked.find((row) => row.id === input.preferenceId)!;
+    const replacement = locked.find((row) => row.id === input.replacementPreferenceId)!;
+    input.authorizeScope(preference.scope as PreferenceRegistryScope);
+    requireExpectedScopeVersion(preference, input.expectedScopeVersion);
+    if (preference.activeRevisionId !== input.expectedCurrentRevisionId) {
+      throw new PreferenceRegistryConflictError(
+        "The active preference revision changed before supersession",
+        preference.activeRevisionId,
+        preference.scopeVersion,
       );
-      return { preference: recordFromRows(updated, revision), event: eventFromRow(event) };
-    },
-  );
+    }
+    if (preference.status !== "active") {
+      throw new PreferenceRegistryInvalidOperationError(
+        "Only an active preference can be superseded",
+      );
+    }
+    if (replacement.status !== "active" || !replacement.activeRevisionId) {
+      throw new PreferenceRegistryInvalidOperationError("Replacement preference must be active");
+    }
+    const [replacementRevision] = await scopedDb
+      .select()
+      .from(schema.preferenceRegistryRevisions)
+      .where(
+        and(
+          eq(schema.preferenceRegistryRevisions.id, replacement.activeRevisionId),
+          eq(schema.preferenceRegistryRevisions.preferenceId, replacement.id),
+          or(
+            isNull(schema.preferenceRegistryRevisions.expiresAt),
+            gt(schema.preferenceRegistryRevisions.expiresAt, sql`transaction_timestamp()`),
+          ),
+        ),
+      )
+      .limit(1);
+    if (!replacementRevision) {
+      throw new PreferenceRegistryInvalidOperationError(
+        "Replacement preference must have an unexpired active revision",
+      );
+    }
+    if (preference.scope !== replacement.scope) {
+      throw new PreferenceRegistryInvalidOperationError(
+        "Supersession requires the same scope tier",
+      );
+    }
+    const event = await lifecycleEvent(scopedDb, {
+      operation: "supersede",
+      preferenceId: preference.id,
+      expectedScopeVersion: input.expectedScopeVersion,
+      expectedRevisionId: preference.activeRevisionId,
+      relatedPreferenceId: replacement.id,
+      actorSubjectId: input.actorSubjectId,
+      reason: input.reason,
+    });
+    const updated = await preferenceAfterMutation(scopedDb, preference.id);
+    const revision = await revisionForPreference(
+      scopedDb,
+      preference.id,
+      preference.activeRevisionId!,
+    );
+    return { preference: recordFromRows(updated, revision), event: eventFromRow(event) };
+  });
 }
 
 export async function rejectPreferenceRegistryProposal(
@@ -905,6 +941,7 @@ export async function rejectPreferenceRegistryProposal(
     accountId: string;
     workspaceId: string;
     actorSubjectId: string;
+    principalKind: string | undefined;
     preferenceId: string;
     revisionId: string;
     expectedScopeVersion: number;
@@ -912,33 +949,28 @@ export async function rejectPreferenceRegistryProposal(
     reason: string;
   },
 ) {
-  return await withWorkspaceSubjectRls(
-    db,
-    input.workspaceId,
-    input.actorSubjectId,
-    async (scopedDb) => {
-      const preference = await lockedPreference(scopedDb, input.preferenceId);
-      input.authorizeScope(preference.scope as PreferenceRegistryScope);
-      requireExpectedScopeVersion(preference, input.expectedScopeVersion);
-      if (preference.activeRevisionId !== null || preference.status !== "proposed") {
-        throw new PreferenceRegistryInvalidOperationError(
-          "Only an inactive proposal can be rejected",
-        );
-      }
-      await revisionForPreference(scopedDb, preference.id, input.revisionId);
-      const event = await lifecycleEvent(scopedDb, {
-        operation: "reject",
-        preferenceId: preference.id,
-        expectedScopeVersion: input.expectedScopeVersion,
-        expectedRevisionId: null,
-        revisionId: input.revisionId,
-        actorSubjectId: input.actorSubjectId,
-        reason: input.reason,
-      });
-      const updated = await preferenceAfterMutation(scopedDb, preference.id);
-      return { preference: recordFromRows(updated, null), event: eventFromRow(event) };
-    },
-  );
+  return await withPreferenceRegistryGovernanceRls(db, input, async (scopedDb) => {
+    const preference = await lockedPreference(scopedDb, input.preferenceId);
+    input.authorizeScope(preference.scope as PreferenceRegistryScope);
+    requireExpectedScopeVersion(preference, input.expectedScopeVersion);
+    if (preference.activeRevisionId !== null || preference.status !== "proposed") {
+      throw new PreferenceRegistryInvalidOperationError(
+        "Only an inactive proposal can be rejected",
+      );
+    }
+    await revisionForPreference(scopedDb, preference.id, input.revisionId);
+    const event = await lifecycleEvent(scopedDb, {
+      operation: "reject",
+      preferenceId: preference.id,
+      expectedScopeVersion: input.expectedScopeVersion,
+      expectedRevisionId: null,
+      revisionId: input.revisionId,
+      actorSubjectId: input.actorSubjectId,
+      reason: input.reason,
+    });
+    const updated = await preferenceAfterMutation(scopedDb, preference.id);
+    return { preference: recordFromRows(updated, null), event: eventFromRow(event) };
+  });
 }
 
 async function withPreferenceRegistryAttemptAuthority<T>(
@@ -1022,36 +1054,6 @@ async function withPreferenceRegistryAttemptAuthority<T>(
   });
 }
 
-function retrievalHandle(preferenceId: string, revision: RevisionRow): string {
-  return `preference://${preferenceId}/revisions/${revision.id}?sha256=${revision.contentHash}`;
-}
-
-function descriptorFor(preference: PreferenceRow, revision: RevisionRow) {
-  return PreferenceRegistryDescriptor.parse({
-    id: preference.id,
-    stableKey: preference.stableKey,
-    title: revision.title,
-    description: revision.description,
-    scope: preference.scope,
-    activeVersion: preference.activationVersion,
-    revisionId: revision.id,
-    contentHash: revision.contentHash,
-    precedence: {
-      tier: preference.scope,
-      rank: revision.precedenceRank,
-      conflictStrategy: revision.conflictStrategy,
-      conflictsWith: revision.conflictsWith,
-    },
-    provenance: {
-      source: revision.provenanceSource,
-      sourceIdHash: revision.provenanceSourceId ? contentHash(revision.provenanceSourceId) : null,
-      trust: revision.trust,
-    },
-    expiresAt: revision.expiresAt ? iso(revision.expiresAt) : null,
-    retrievalHandle: retrievalHandle(preference.id, revision),
-  });
-}
-
 export function boundPreferenceRegistryDescriptors(
   descriptors: readonly PreferenceRegistryDescriptor[],
 ): { descriptors: PreferenceRegistryDescriptor[]; truncated: boolean } {
@@ -1103,113 +1105,65 @@ function postgresJsonbSpacingBytes(value: unknown): number {
   return 0;
 }
 
-function snapshotFromRow(row: SnapshotRow) {
-  return PreferenceRegistrySnapshot.parse({
-    id: row.id,
-    workspaceId: row.workspaceId,
-    sessionId: row.sessionId,
-    turnId: row.turnId,
-    attemptId: row.attemptId,
-    executionGeneration: row.executionGeneration,
-    initiatingHumanSubjectId: row.initiatingHumanSubjectId,
-    descriptorHash: row.descriptorHash,
-    descriptors: row.descriptors,
-    truncated: row.truncated,
-    createdAt: iso(row.createdAt),
-  });
-}
-
-async function applicableDescriptors(db: Database) {
-  const now = new Date();
-  const rows = await db
-    .select({
-      preference: schema.preferenceRegistryPreferences,
-      revision: schema.preferenceRegistryRevisions,
-    })
-    .from(schema.preferenceRegistryPreferences)
-    .innerJoin(
-      schema.preferenceRegistryRevisions,
-      eq(
-        schema.preferenceRegistryRevisions.id,
-        schema.preferenceRegistryPreferences.activeRevisionId,
-      ),
-    )
-    .where(eq(schema.preferenceRegistryPreferences.status, "active"));
-  return boundPreferenceRegistryDescriptors(
-    rows
-      .filter(({ revision }) => revision.expiresAt === null || revision.expiresAt > now)
-      .map(({ preference, revision }) => descriptorFor(preference, revision)),
-  );
-}
-
 export async function getOrCreatePreferenceRegistrySnapshot(
   db: Database,
   claims: PreferenceRegistryAttemptClaims,
 ) {
-  return await withPreferenceRegistryAttemptAuthority(db, claims, async (scopedDb, authority) => {
-    const [existing] = await scopedDb
-      .select()
-      .from(schema.preferenceRegistrySnapshots)
-      .where(
-        and(
-          eq(schema.preferenceRegistrySnapshots.accountId, authority.accountId),
-          eq(schema.preferenceRegistrySnapshots.workspaceId, authority.workspaceId),
-          eq(schema.preferenceRegistrySnapshots.sessionId, authority.sessionId),
-          eq(schema.preferenceRegistrySnapshots.turnId, authority.turnId),
-          eq(schema.preferenceRegistrySnapshots.attemptId, authority.attemptId),
-          eq(schema.preferenceRegistrySnapshots.executionGeneration, authority.executionGeneration),
-          eq(
-            schema.preferenceRegistrySnapshots.initiatingHumanSubjectId,
-            authority.initiatingHumanSubjectId,
-          ),
-        ),
-      )
-      .limit(1);
-    if (existing) return snapshotFromRow(existing);
-    const bounded = await applicableDescriptors(scopedDb);
-    const descriptorJson = JSON.stringify(bounded.descriptors);
-    const [created] = await scopedDb
-      .insert(schema.preferenceRegistrySnapshots)
-      .values({
-        accountId: authority.accountId,
-        workspaceId: authority.workspaceId,
-        sessionId: authority.sessionId,
-        turnId: authority.turnId,
-        attemptId: authority.attemptId,
-        executionGeneration: authority.executionGeneration,
-        initiatingHumanSubjectId: authority.initiatingHumanSubjectId,
-        descriptors: bounded.descriptors,
-        descriptorHash: sql`encode(sha256(convert_to(${descriptorJson}::jsonb::text, 'UTF8')), 'hex')`,
-        truncated: bounded.truncated,
-      })
-      .onConflictDoNothing()
-      .returning();
-    if (created) return snapshotFromRow(created);
-    const [winner] = await scopedDb
-      .select()
-      .from(schema.preferenceRegistrySnapshots)
-      .where(
-        and(
-          eq(schema.preferenceRegistrySnapshots.accountId, authority.accountId),
-          eq(schema.preferenceRegistrySnapshots.workspaceId, authority.workspaceId),
-          eq(schema.preferenceRegistrySnapshots.sessionId, authority.sessionId),
-          eq(schema.preferenceRegistrySnapshots.turnId, authority.turnId),
-          eq(schema.preferenceRegistrySnapshots.attemptId, authority.attemptId),
-          eq(schema.preferenceRegistrySnapshots.executionGeneration, authority.executionGeneration),
-          eq(
-            schema.preferenceRegistrySnapshots.initiatingHumanSubjectId,
-            authority.initiatingHumanSubjectId,
-          ),
-        ),
-      )
-      .limit(1);
-    if (!winner) {
+  try {
+    return await withWorkspaceRls(db, claims.workspaceId, async (scopedDb) => {
+      const rows = (await scopedDb.execute(sql`
+        SELECT
+          snapshot.id,
+          snapshot.workspace_id AS "workspaceId",
+          snapshot.session_id AS "sessionId",
+          snapshot.turn_id AS "turnId",
+          snapshot.attempt_id AS "attemptId",
+          snapshot.execution_generation AS "executionGeneration",
+          snapshot.initiating_human_subject_id AS "initiatingHumanSubjectId",
+          snapshot.descriptor_hash AS "descriptorHash",
+          snapshot.descriptors,
+          snapshot.truncated,
+          snapshot.created_at AS "createdAt"
+        FROM preference_registry_get_or_create_snapshot(
+          ${claims.accountId}::uuid,
+          ${claims.workspaceId}::uuid,
+          ${claims.sessionId}::uuid,
+          ${claims.turnId}::uuid,
+          ${claims.attemptId}::uuid,
+          ${claims.executionGeneration}
+        ) snapshot
+      `)) as unknown as Array<{
+        id: string;
+        workspaceId: string;
+        sessionId: string;
+        turnId: string;
+        attemptId: string;
+        executionGeneration: number;
+        initiatingHumanSubjectId: string;
+        descriptorHash: string;
+        descriptors: unknown;
+        truncated: boolean;
+        createdAt: Date | string;
+      }>;
+      const snapshot = rows[0];
+      if (!snapshot) {
+        throw new PreferenceRegistryInitiatorError(
+          "Preference snapshot authority conflicts with the accepted human attempt",
+        );
+      }
+      return PreferenceRegistrySnapshot.parse({
+        ...snapshot,
+        createdAt: iso(snapshot.createdAt),
+      });
+    });
+  } catch (error) {
+    if (["40001", "42501"].includes(nestedPostgresSqlState(error) ?? "")) {
       throw new PreferenceRegistryInitiatorError(
-        "Preference snapshot authority conflicts with the accepted human attempt",
+        "Preference snapshot requires the exact current attempt, generation, and immutable human initiator",
       );
     }
-    return snapshotFromRow(winner);
-  });
+    throw error;
+  }
 }
 
 export async function getPreferenceRegistryFullContent(

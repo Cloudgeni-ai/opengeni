@@ -99,6 +99,7 @@ describe("delegated service initiator API", () => {
       permissions: ["sessions:create", "sessions:read", "sessions:control"],
       serviceInitiator,
       serviceInitiatorContext,
+      principalKind: "service",
       exp: Math.floor(Date.now() / 1_000) + 3_600,
     });
     const headers = {
@@ -220,6 +221,7 @@ describe("delegated service initiator API", () => {
       subjectId: authorizationSubject,
       permissions: ["sessions:read"],
       serviceInitiator,
+      principalKind: "service",
       exp: Math.floor(Date.now() / 1_000) + 3_600,
     });
     const denied = await app.request(`http://x/v1/workspaces/${grant.workspaceId}/sessions`, {

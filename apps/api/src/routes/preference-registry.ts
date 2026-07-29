@@ -98,6 +98,7 @@ function requiredAttemptClaims(grant: AccessGrant): PreferenceRegistryAttemptCla
 
 function requireHumanMutation(grant: AccessGrant): void {
   if (
+    grant.principalKind !== "human_session" ||
     exactAttemptClaims(grant) !== null ||
     grant.serviceInitiator ||
     grant.subjectId.startsWith("api_key:")
@@ -210,6 +211,7 @@ export function registerPreferenceRegistryRoutes(app: Hono, deps: ApiRouteDeps):
             accountId: grant.accountId,
             workspaceId,
             actorSubjectId: grant.subjectId,
+            principalKind: grant.principalKind,
           }),
         ),
         201,
@@ -288,6 +290,7 @@ export function registerPreferenceRegistryRoutes(app: Hono, deps: ApiRouteDeps):
             accountId: grant.accountId,
             workspaceId,
             actorSubjectId: grant.subjectId,
+            principalKind: grant.principalKind,
             preferenceId: id,
             authorizeScope: (scope) => requireScopeManage(grant, scope),
             ...request,
@@ -312,6 +315,7 @@ export function registerPreferenceRegistryRoutes(app: Hono, deps: ApiRouteDeps):
             accountId: grant.accountId,
             workspaceId,
             actorSubjectId: grant.subjectId,
+            principalKind: grant.principalKind,
             preferenceId: id,
             authorizeScope: (scope) => requireScopeManage(grant, scope),
           }),
@@ -335,6 +339,7 @@ export function registerPreferenceRegistryRoutes(app: Hono, deps: ApiRouteDeps):
             accountId: grant.accountId,
             workspaceId,
             actorSubjectId: grant.subjectId,
+            principalKind: grant.principalKind,
             preferenceId: id,
             authorizeScope: (scope) => requireScopeManage(grant, scope),
           }),
@@ -358,6 +363,7 @@ export function registerPreferenceRegistryRoutes(app: Hono, deps: ApiRouteDeps):
             accountId: grant.accountId,
             workspaceId,
             actorSubjectId: grant.subjectId,
+            principalKind: grant.principalKind,
             preferenceId: id,
             authorizeScope: (scope) => requireScopeManage(grant, scope),
           }),
@@ -381,6 +387,7 @@ export function registerPreferenceRegistryRoutes(app: Hono, deps: ApiRouteDeps):
             accountId: grant.accountId,
             workspaceId,
             actorSubjectId: grant.subjectId,
+            principalKind: grant.principalKind,
             preferenceId: id,
             authorizeScope: (scope) => requireScopeManage(grant, scope),
           }),
@@ -404,6 +411,7 @@ export function registerPreferenceRegistryRoutes(app: Hono, deps: ApiRouteDeps):
             accountId: grant.accountId,
             workspaceId,
             actorSubjectId: grant.subjectId,
+            principalKind: grant.principalKind,
             preferenceId: id,
             authorizeScope: (scope) => requireScopeManage(grant, scope),
           }),

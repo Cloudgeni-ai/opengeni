@@ -187,6 +187,7 @@ async function apiKeyAccessContext(
             subjectId,
             subjectLabel: apiKey.name,
             permissions: apiKey.permissions,
+            principalKind: "api_key",
           },
         ]
       : [],
@@ -227,6 +228,7 @@ async function delegatedAccessContext(
         subjectId: payload.subjectId,
         ...(payload.subjectLabel ? { subjectLabel: payload.subjectLabel } : {}),
         permissions: payload.permissions,
+        principalKind: payload.principalKind,
         // sessionId is worker-asserted (HMAC-signed token claim), not agent
         // controlled; it scopes session-bound MCP tools such as goal management.
         metadata: {

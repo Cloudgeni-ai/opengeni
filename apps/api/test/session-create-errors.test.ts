@@ -16,6 +16,7 @@ async function bearer() {
     workspaceId,
     subjectId: "session-create-error-tester",
     permissions: ["sessions:create", "sessions:read"],
+    principalKind: "human_session",
     exp: Math.floor(Date.now() / 1000) + 3_600,
   })}`;
 }

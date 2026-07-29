@@ -2054,6 +2054,13 @@ export type ClientConfig = {
 
 export type AccountRole = "owner" | "admin" | "member";
 
+export type AccessPrincipalKind =
+  | "human_session"
+  | "agent_attempt"
+  | "service"
+  | "api_key"
+  | "configured_key";
+
 export type AccountGrant = {
   accountId: string;
   subjectId: string;
@@ -2069,6 +2076,7 @@ export type AccessGrant = {
   subjectId: string;
   subjectLabel?: string | undefined;
   permissions: Permission[];
+  principalKind?: AccessPrincipalKind | undefined;
   metadata?: Record<string, unknown> | undefined;
   serviceInitiator?: ServiceTurnInitiator | undefined;
   serviceInitiatorContext?: ServiceTurnInitiatorContext | undefined;

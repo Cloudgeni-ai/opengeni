@@ -674,6 +674,7 @@ async function workspaceFixture(
     workspaceId,
     subjectId: access.subjectId,
     permissions: [...allAccountPermissions, ...allWorkspacePermissions],
+    principalKind: "human_session",
     exp: Math.floor(Date.now() / 1_000) + 120,
   });
   return {

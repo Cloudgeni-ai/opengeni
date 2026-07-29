@@ -79,6 +79,7 @@ type RequestOptions = {
   permissions?: Permission[];
   subjectId?: string;
   serviceInitiator?: { kind: "service"; subjectId: string; label: string };
+  principalKind?: "human_session" | "agent_attempt" | "service";
   attempt?: Attempt;
   executionGeneration?: number;
 };
@@ -102,6 +103,9 @@ async function request(
           executionGeneration: options.executionGeneration ?? options.attempt.executionGeneration,
         }
       : {}),
+    principalKind:
+      options.principalKind ??
+      (options.attempt ? "agent_attempt" : options.serviceInitiator ? "service" : "human_session"),
     exp: Math.floor(Date.now() / 1_000) + 3_600,
   });
   const headers: Record<string, string> = { authorization: `Bearer ${token}` };
@@ -712,6 +716,23 @@ describe("structured preference registry API and PostgreSQL authority", () => {
       },
     });
     expect(apiKeyActivation.status).toBe(403);
+    const markerFreeServiceActivation = await request(
+      alice,
+      `/${imported.preference.id}/activate`,
+      {
+        method: "POST",
+        permissions: WORKSPACE_ADMIN,
+        subjectId: "delegated:marker-free-machine",
+        principalKind: "service",
+        body: {
+          revisionId: imported.revision.id,
+          expectedCurrentRevisionId: null,
+          expectedScopeVersion: imported.preference.scopeVersion,
+          reason: "Absent legacy machine markers must never imply human governance",
+        },
+      },
+    );
+    expect(markerFreeServiceActivation.status).toBe(403);
     const importedHumanActivation = await activate(alice, imported, WORKSPACE_ADMIN);
     expect(importedHumanActivation.preference).toMatchObject({
       status: "active",
@@ -979,7 +1000,9 @@ describe("structured preference registry API and PostgreSQL authority", () => {
         revision_update: boolean;
         event_insert: boolean;
         event_delete: boolean;
+        snapshot_insert: boolean;
         snapshot_update: boolean;
+        snapshot_function_execute: boolean;
         lock_execute: boolean;
         lifecycle_execute: boolean;
       }>
@@ -998,7 +1021,13 @@ describe("structured preference registry API and PostgreSQL authority", () => {
         has_table_privilege('opengeni_app', 'preference_registry_revisions', 'UPDATE') AS revision_update,
         has_table_privilege('opengeni_app', 'preference_registry_events', 'INSERT') AS event_insert,
         has_table_privilege('opengeni_app', 'preference_registry_events', 'DELETE') AS event_delete,
+        has_table_privilege('opengeni_app', 'preference_registry_snapshots', 'INSERT') AS snapshot_insert,
         has_table_privilege('opengeni_app', 'preference_registry_snapshots', 'UPDATE') AS snapshot_update,
+        has_function_privilege(
+          'opengeni_app',
+          'preference_registry_get_or_create_snapshot(uuid,uuid,uuid,uuid,uuid,integer)',
+          'EXECUTE'
+        ) AS snapshot_function_execute,
         has_function_privilege(
           'opengeni_app', 'preference_registry_lock_heads(uuid[])', 'EXECUTE'
         ) AS lock_execute,
@@ -1014,7 +1043,9 @@ describe("structured preference registry API and PostgreSQL authority", () => {
       revision_update: false,
       event_insert: false,
       event_delete: false,
+      snapshot_insert: false,
       snapshot_update: false,
+      snapshot_function_execute: true,
       lock_execute: true,
       lifecycle_execute: true,
     });
@@ -1170,7 +1201,7 @@ describe("structured preference registry API and PostgreSQL authority", () => {
               encode(sha256(convert_to(payload.descriptors::text, 'UTF8')), 'hex')
             FROM payload`),
       ),
-      /non-visible or inexact descriptor/i,
+      /permission denied/i,
     );
 
     const tamperedDescriptorJson = JSON.stringify([
@@ -1199,7 +1230,7 @@ describe("structured preference registry API and PostgreSQL authority", () => {
               encode(sha256(convert_to(payload.descriptors::text, 'UTF8')), 'hex')
             FROM payload`),
       ),
-      /non-visible or inexact descriptor/i,
+      /permission denied/i,
     );
 
     const oversizedAttempt = await seedAttempt(alice, {
@@ -1251,7 +1282,7 @@ describe("structured preference registry API and PostgreSQL authority", () => {
               encode(sha256(convert_to(payload.descriptors::text, 'UTF8')), 'hex')
             FROM payload`),
       ),
-      /descriptor_bytes|check constraint/i,
+      /permission denied/i,
     );
 
     const [preservedBeforeDelete] = await shared.admin<
@@ -1416,6 +1447,33 @@ describe("structured preference registry API and PostgreSQL authority", () => {
         })
       ).status,
     ).toBe(403);
+
+    const snapshotRace = await seedAttempt(owner, {
+      kind: "subject",
+      subjectId: owner.subjectId,
+    });
+    const [snapshotRaceResponseA, snapshotRaceResponseB] = await Promise.all([
+      request(owner, "/summary", {
+        subjectId: "worker:snapshot-race-a",
+        attempt: snapshotRace,
+      }),
+      request(owner, "/summary", {
+        subjectId: "worker:snapshot-race-b",
+        attempt: snapshotRace,
+      }),
+    ]);
+    const [snapshotRaceA, snapshotRaceB] = await Promise.all([
+      json(snapshotRaceResponseA),
+      json(snapshotRaceResponseB),
+    ]);
+    expect(snapshotRaceB).toEqual(snapshotRaceA);
+    const [snapshotRaceCount] = await shared.admin<Array<{ count: number }>>`
+      SELECT count(*)::integer AS count
+      FROM preference_registry_snapshots
+      WHERE account_id = ${owner.accountId}
+        AND workspace_id = ${owner.workspaceId}
+        AND attempt_id = ${snapshotRace.attemptId}`;
+    expect(snapshotRaceCount?.count).toBe(1);
 
     const racing = await seedAttempt(owner, {
       kind: "subject",
@@ -1626,5 +1684,89 @@ describe("structured preference registry API and PostgreSQL authority", () => {
       },
     });
     expect(unauthorizedActivation.status).toBe(403);
+  }, 180_000);
+
+  test("filters derived expiry before LIMIT and rejects expired supersession atomically", async () => {
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "preference-expiry-boundary",
+      accountExternalId: `account-${suffix}`,
+      accountName: "Preference expiry boundary account",
+      workspaceExternalSource: "preference-expiry-boundary",
+      workspaceExternalId: `workspace-${suffix}`,
+      workspaceName: "Preference expiry boundary workspace",
+      subjectId: "user:expiry-owner",
+    });
+    const owner = access.workspaceGrants[0]!;
+    const expiredReplacement = await proposal(
+      owner,
+      {
+        stableKey: "aaa-expired-replacement",
+        scope: "user",
+        expiresAt: new Date(Date.now() - 60_000).toISOString(),
+      },
+      DIRECT_READ,
+    );
+    await activate(owner, expiredReplacement, DIRECT_READ);
+    const activeSource = await proposal(
+      owner,
+      { stableKey: "zzz-active-source", scope: "user" },
+      DIRECT_READ,
+    );
+    await activate(owner, activeSource, DIRECT_READ);
+
+    const activePage = await json(await request(owner, "?status=active&limit=1"));
+    expect(activePage.preferences.map((preference: Json) => preference.id)).toEqual([
+      activeSource.preference.id,
+    ]);
+    const expiredPage = await json(await request(owner, "?status=expired&limit=1"));
+    expect(expiredPage.preferences.map((preference: Json) => preference.id)).toEqual([
+      expiredReplacement.preference.id,
+    ]);
+
+    const rejected = await request(owner, `/${activeSource.preference.id}/supersede`, {
+      method: "POST",
+      permissions: DIRECT_READ,
+      body: {
+        replacementPreferenceId: expiredReplacement.preference.id,
+        expectedCurrentRevisionId: activeSource.revision.id,
+        expectedScopeVersion: activeSource.preference.scopeVersion,
+        reason: "Expired replacement must not terminally supersede the source",
+      },
+    });
+    expect(rejected.status).toBe(422);
+
+    await expectDatabaseFailure(
+      withWorkspaceSubjectRls(client.db, owner.workspaceId, owner.subjectId, async (scopedDb) => {
+        await scopedDb.execute(
+          sql`SELECT set_config('opengeni.principal_kind', 'human_session', true)`,
+        );
+        return await scopedDb.execute(sql`
+            SELECT event_id
+            FROM preference_registry_apply_lifecycle(
+              'supersede',
+              ${activeSource.preference.id}::uuid,
+              ${activeSource.preference.scopeVersion},
+              ${activeSource.revision.id}::uuid,
+              NULL::uuid,
+              NULL::text,
+              ${expiredReplacement.preference.id}::uuid,
+              ${owner.subjectId},
+              'Direct lifecycle expiry defense'
+            )`);
+      }),
+      /expired/i,
+    );
+
+    const sourceDetail = await json(await request(owner, `/${activeSource.preference.id}`));
+    expect(sourceDetail.preference).toMatchObject({
+      status: "active",
+      supersededByPreferenceId: null,
+      activeRevision: { id: activeSource.revision.id },
+    });
+    expect(sourceDetail.events.map((event: Json) => event.type)).toEqual([
+      "activated",
+      "proposal_created",
+    ]);
   }, 180_000);
 });

@@ -1089,6 +1089,16 @@ export const ServiceTurnInitiatorContext = TurnInitiatorContext.superRefine((val
 });
 export type ServiceTurnInitiatorContext = z.infer<typeof ServiceTurnInitiatorContext>;
 
+export const DelegatedAccessPrincipalKind = z.enum(["human_session", "agent_attempt", "service"]);
+export type DelegatedAccessPrincipalKind = z.infer<typeof DelegatedAccessPrincipalKind>;
+
+export const AccessPrincipalKind = z.enum([
+  ...DelegatedAccessPrincipalKind.options,
+  "api_key",
+  "configured_key",
+]);
+export type AccessPrincipalKind = z.infer<typeof AccessPrincipalKind>;
+
 export const AccountGrant = z.object({
   accountId: z.string().uuid(),
   subjectId: z.string().min(1),
@@ -1105,6 +1115,9 @@ export const AccessGrant = z.object({
   subjectId: z.string().min(1),
   subjectLabel: z.string().optional(),
   permissions: z.array(Permission),
+  // Trusted principal provenance. Delegated grants copy this from the signed
+  // token claim; managed/local grants derive it from their authenticated path.
+  principalKind: AccessPrincipalKind.optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
   // Optional trusted causal principal for a command submitted by an embedding
   // host. Authorization still uses subjectId + permissions above.
@@ -1131,6 +1144,10 @@ export const DelegatedAccessTokenPayload = z
     subjectId: z.string().min(1),
     subjectLabel: z.string().optional(),
     permissions: z.array(Permission).min(1),
+    // Required and covered by the token HMAC. Authorization must positively
+    // select a principal kind instead of inferring "human" from absent machine
+    // markers.
+    principalKind: DelegatedAccessPrincipalKind,
     // Trusted embedding hosts can sign a causal service principal separately
     // from the grant subject that authorizes the request. The claim is consumed
     // only when a command creates a new session/turn.
@@ -1152,6 +1169,53 @@ export const DelegatedAccessTokenPayload = z
     exp: z.number().int().positive(),
   })
   .superRefine((payload, ctx) => {
+    const exactAttemptClaims = [
+      payload.sessionId,
+      payload.turnId,
+      payload.attemptId,
+      payload.executionGeneration,
+    ];
+    const exactAttemptClaimCount = exactAttemptClaims.filter((value) => value !== undefined).length;
+    if (
+      payload.principalKind === "human_session" &&
+      (exactAttemptClaimCount !== 0 || payload.serviceInitiator !== undefined)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["principalKind"],
+        message: "human_session principal cannot carry machine authority claims",
+      });
+    }
+    if (
+      payload.principalKind === "agent_attempt" &&
+      (exactAttemptClaimCount !== exactAttemptClaims.length ||
+        payload.serviceInitiator !== undefined)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["principalKind"],
+        message: "agent_attempt principal requires one exact signed attempt authority",
+      });
+    }
+    if (
+      payload.principalKind === "service" &&
+      (payload.turnId !== undefined ||
+        payload.attemptId !== undefined ||
+        payload.executionGeneration !== undefined)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["principalKind"],
+        message: "service principal cannot carry exact agent-attempt authority",
+      });
+    }
+    if (payload.serviceInitiator && payload.principalKind !== "service") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["principalKind"],
+        message: "serviceInitiator requires a service principal",
+      });
+    }
     if (payload.serviceInitiatorContext && !payload.serviceInitiator) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,

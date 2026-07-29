@@ -208,13 +208,13 @@ export const RUNTIME_FULL_DML_TABLES = [
 export const RUNTIME_READ_ONLY_TABLES = [
   "nested_agent_depth_configuration",
   "preference_registry_events",
+  "preference_registry_snapshots",
 ] as const;
 
 /** Append-only evidence/revision tables are insertable and queryable, never mutable. */
 export const RUNTIME_READ_INSERT_TABLES = [
   "preference_registry_preferences",
   "preference_registry_revisions",
-  "preference_registry_snapshots",
   "session_spawn_denials",
   "workspace_instruction_policy_activation_events",
   "workspace_instruction_policy_revisions",

@@ -81,6 +81,7 @@ async function authorization(subjectId = grant.subjectId): Promise<string> {
     workspaceId: grant.workspaceId,
     subjectId,
     permissions: ["workspace:read", "workspace:admin"],
+    principalKind: "human_session",
     exp: Math.floor(Date.now() / 1000) + 3600,
   })}`;
 }
