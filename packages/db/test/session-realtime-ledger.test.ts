@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
-import { asc, eq } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 
 import {
   addSessionSystemUpdate,
@@ -126,6 +126,46 @@ async function complete(
       sdpAnswer,
     }),
   );
+}
+
+async function proveProviderStarted(
+  value: Fixture,
+  connection: { id: string; connectionEpoch: number },
+  expectedVersion = value.started.mode.version,
+) {
+  return await transaction(value.owner.workspaceId, (tx) =>
+    syncSessionRealtimeLedgerInTransaction(tx, {
+      ...ownerProof(value, expectedVersion),
+      connectionId: connection.id,
+      connectionEpoch: connection.connectionEpoch,
+      providerStarted: {
+        providerSessionId: `provider-session-${connection.connectionEpoch}`,
+        providerEventId: `provider-started-${connection.connectionEpoch}`,
+      },
+    }),
+  );
+}
+
+function delegationSyncInput(
+  value: Fixture,
+  connection: { id: string; connectionEpoch: number },
+  operationId = crypto.randomUUID(),
+) {
+  return {
+    ...ownerProof(value),
+    connectionId: connection.id,
+    connectionEpoch: connection.connectionEpoch,
+    entries: [
+      {
+        operationId,
+        kind: "delegation_call" as const,
+        providerEventId: `delegation-created-${operationId}`,
+        delegationItemId: `delegation-item-${operationId}`,
+        text: "Complete one ordinary delegated task on this same session",
+        payload: { offsetMs: 125 },
+      },
+    ],
+  };
 }
 
 async function expectConflict(
@@ -403,6 +443,7 @@ describe("session realtime ledger", () => {
     const value = await fixture();
     const first = await claimInitial(value);
     await complete(value, first.claimed.connection);
+    await proveProviderStarted(value, first.claimed.connection);
     const delegationItemId = "delegation-item-1";
     const call = await transaction(value.owner.workspaceId, (tx) =>
       syncSessionRealtimeLedgerInTransaction(tx, {
@@ -449,5 +490,266 @@ describe("session realtime ledger", () => {
         .orderBy(asc(schema.sessionRealtimeConnections.connectionEpoch)),
     );
     expect(rows).toEqual([{ state: "closed" }]);
+  });
+
+  test("atomically admits one idempotent ordinary turn on the same session without changing hierarchy", async () => {
+    const value = await fixture();
+    const first = await claimInitial(value);
+    await complete(value, first.claimed.connection);
+    await proveProviderStarted(value, first.claimed.connection);
+    const before = await transaction(value.owner.workspaceId, async (tx) => {
+      const [session] = await tx
+        .select({
+          id: schema.sessions.id,
+          parentSessionId: schema.sessions.parentSessionId,
+          rootSessionId: schema.sessions.rootSessionId,
+          nestedAgentDepth: schema.sessions.nestedAgentDepth,
+          sandboxGroupId: schema.sessions.sandboxGroupId,
+        })
+        .from(schema.sessions)
+        .where(eq(schema.sessions.id, value.session.id));
+      const [{ count } = { count: 0 }] = await tx
+        .select({ count: sql<number>`count(*)` })
+        .from(schema.sessions)
+        .where(eq(schema.sessions.workspaceId, value.owner.workspaceId));
+      return { session, count: Number(count) };
+    });
+    const input = delegationSyncInput(value, first.claimed.connection);
+    const admitted = await transaction(value.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(tx, input),
+    );
+    const replay = await transaction(value.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(tx, input),
+    );
+    const providerReplayInput = {
+      ...input,
+      entries: [{ ...input.entries[0]!, operationId: crypto.randomUUID() }],
+    };
+    const providerReplay = await transaction(value.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(tx, providerReplayInput),
+    );
+    expect(admitted.accepted).toHaveLength(1);
+    expect(admitted.accepted[0]).toMatchObject({ replay: false });
+    expect(admitted.accepted[0]!.entry.turnId).toBeString();
+    expect(admitted.eventIds).toHaveLength(2);
+    expect(admitted.workflowWakeRevision).toBeGreaterThan(0);
+    expect(replay.accepted[0]).toMatchObject({
+      replay: true,
+      entry: { turnId: admitted.accepted[0]!.entry.turnId },
+    });
+    expect(replay.eventIds).toEqual([]);
+    expect(replay.workflowWakeRevision).toBeNull();
+    expect(providerReplay.accepted[0]).toMatchObject({
+      replay: true,
+      entry: {
+        operationId: input.entries[0]!.operationId,
+        turnId: admitted.accepted[0]!.entry.turnId,
+      },
+    });
+
+    const persisted = await transaction(value.owner.workspaceId, async (tx) => {
+      const turns = await tx
+        .select()
+        .from(schema.sessionTurns)
+        .where(
+          and(
+            eq(schema.sessionTurns.sessionId, value.session.id),
+            eq(schema.sessionTurns.id, admitted.accepted[0]!.entry.turnId!),
+          ),
+        );
+      const calls = await tx
+        .select()
+        .from(schema.sessionRealtimeEntries)
+        .where(
+          and(
+            eq(schema.sessionRealtimeEntries.realtimeId, value.started.mode.id),
+            eq(schema.sessionRealtimeEntries.operationId, input.entries[0]!.operationId),
+          ),
+        );
+      const [session] = await tx
+        .select({
+          id: schema.sessions.id,
+          parentSessionId: schema.sessions.parentSessionId,
+          rootSessionId: schema.sessions.rootSessionId,
+          nestedAgentDepth: schema.sessions.nestedAgentDepth,
+          sandboxGroupId: schema.sessions.sandboxGroupId,
+        })
+        .from(schema.sessions)
+        .where(eq(schema.sessions.id, value.session.id));
+      const [{ count } = { count: 0 }] = await tx
+        .select({ count: sql<number>`count(*)` })
+        .from(schema.sessions)
+        .where(eq(schema.sessions.workspaceId, value.owner.workspaceId));
+      const [{ children } = { children: 0 }] = await tx
+        .select({ children: sql<number>`count(*)` })
+        .from(schema.sessions)
+        .where(eq(schema.sessions.parentSessionId, value.session.id));
+      return { turns, calls, session, count: Number(count), children: Number(children) };
+    });
+    expect(persisted.turns).toHaveLength(1);
+    expect(persisted.turns[0]).toMatchObject({
+      sessionId: value.session.id,
+      source: "api",
+      status: "queued",
+      prompt: input.entries[0]!.text,
+      initiatorKind: "subject",
+      initiatorSubjectId: value.owner.ownerSubjectId,
+    });
+    expect(persisted.calls).toHaveLength(1);
+    expect(persisted.calls[0]!.turnId).toBe(persisted.turns[0]!.id);
+    expect(persisted.count).toBe(before.count);
+    expect(persisted.children).toBe(0);
+    expect(persisted.session).toEqual(before.session);
+  });
+
+  test("rolls back call and turn on an injected transient failure, then exact retry succeeds", async () => {
+    const value = await fixture();
+    const first = await claimInitial(value);
+    await complete(value, first.claimed.connection);
+    await proveProviderStarted(value, first.claimed.connection);
+    const input = delegationSyncInput(value, first.claimed.connection);
+    await expect(
+      transaction(value.owner.workspaceId, (tx) =>
+        syncSessionRealtimeLedgerInTransaction(tx, input, {
+          afterDelegationAdmission: () => {
+            throw new Error("injected transient admission failure");
+          },
+        }),
+      ),
+    ).rejects.toThrow("injected transient admission failure");
+    const rolledBack = await transaction(value.owner.workspaceId, async (tx) => {
+      const calls = await tx
+        .select({ id: schema.sessionRealtimeEntries.id })
+        .from(schema.sessionRealtimeEntries)
+        .where(eq(schema.sessionRealtimeEntries.operationId, input.entries[0]!.operationId));
+      const turns = await tx
+        .select({ id: schema.sessionTurns.id })
+        .from(schema.sessionTurns)
+        .where(eq(schema.sessionTurns.prompt, input.entries[0]!.text));
+      return { calls, turns };
+    });
+    expect(rolledBack).toEqual({ calls: [], turns: [] });
+
+    const retried = await transaction(value.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(tx, input),
+    );
+    expect(retried.accepted[0]).toMatchObject({ replay: false });
+    expect(retried.accepted[0]!.entry.turnId).toBeString();
+  });
+
+  test("rejects unproved or stale provider admission and deterministically ledgers an invalid call", async () => {
+    const value = await fixture();
+    const first = await claimInitial(value);
+    await complete(value, first.claimed.connection);
+    const unproved = delegationSyncInput(value, first.claimed.connection);
+    await expectConflict(
+      transaction(value.owner.workspaceId, (tx) =>
+        syncSessionRealtimeLedgerInTransaction(tx, unproved),
+      ),
+      "REALTIME_PROVIDER_NOT_STARTED",
+    );
+    await proveProviderStarted(value, first.claimed.connection);
+    const stale = {
+      ...delegationSyncInput(value, first.claimed.connection),
+      connectionEpoch: first.claimed.connection.connectionEpoch + 1,
+    };
+    await expectConflict(
+      transaction(value.owner.workspaceId, (tx) =>
+        syncSessionRealtimeLedgerInTransaction(tx, stale),
+      ),
+      "REALTIME_CONNECTION_CHANGED",
+    );
+
+    const operationId = crypto.randomUUID();
+    const invalid = {
+      ...ownerProof(value),
+      connectionId: first.claimed.connection.id,
+      connectionEpoch: first.claimed.connection.connectionEpoch,
+      entries: [
+        {
+          operationId,
+          kind: "delegation_call" as const,
+          providerEventId: "delegation-invalid-1",
+          text: "",
+        },
+      ],
+    };
+    const failed = await transaction(value.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(tx, invalid),
+    );
+    const failedReplay = await transaction(value.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(tx, invalid),
+    );
+    expect(failed.accepted[0]).toMatchObject({ replay: false, entry: { turnId: null } });
+    expect(failed.outbound).toContainEqual(
+      expect.objectContaining({
+        kind: "error",
+        turnId: null,
+        payload: { code: "invalid_delegation_call", callOperationId: operationId },
+      }),
+    );
+    expect(failedReplay.accepted[0]).toMatchObject({ replay: true, entry: { turnId: null } });
+    const invalidState = await transaction(value.owner.workspaceId, async (tx) => {
+      const turns = await tx
+        .select({ id: schema.sessionTurns.id })
+        .from(schema.sessionTurns)
+        .where(eq(schema.sessionTurns.prompt, ""));
+      const errors = await tx
+        .select({ id: schema.sessionRealtimeEntries.id })
+        .from(schema.sessionRealtimeEntries)
+        .where(
+          and(
+            eq(schema.sessionRealtimeEntries.realtimeId, value.started.mode.id),
+            eq(schema.sessionRealtimeEntries.kind, "error"),
+          ),
+        );
+      return { turns, errors };
+    });
+    expect(invalidState.turns).toHaveLength(0);
+    expect(invalidState.errors).toHaveLength(1);
+  });
+
+  test("keeps delegation admission isolated by session identity and workspace RLS", async () => {
+    const value = await fixture();
+    const first = await claimInitial(value);
+    await complete(value, first.claimed.connection);
+    await proveProviderStarted(value, first.claimed.connection);
+    const otherSession = await createSession(client.db, {
+      accountId: value.grant.accountId,
+      workspaceId: value.owner.workspaceId,
+      initialMessage: "isolated peer session",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const wrongSession = {
+      ...delegationSyncInput(value, first.claimed.connection),
+      sessionId: otherSession.id,
+    };
+    await expectConflict(
+      transaction(value.owner.workspaceId, (tx) =>
+        syncSessionRealtimeLedgerInTransaction(tx, wrongSession),
+      ),
+      "REALTIME_NOT_FOUND",
+    );
+
+    const foreign = await fixture();
+    await expectConflict(
+      transaction(foreign.owner.workspaceId, (tx) =>
+        syncSessionRealtimeLedgerInTransaction(
+          tx,
+          delegationSyncInput(value, first.claimed.connection),
+        ),
+      ),
+      "REALTIME_NOT_FOUND",
+    );
+    const peerTurns = await transaction(value.owner.workspaceId, (tx) =>
+      tx
+        .select({ id: schema.sessionTurns.id })
+        .from(schema.sessionTurns)
+        .where(eq(schema.sessionTurns.sessionId, otherSession.id)),
+    );
+    expect(peerTurns).toEqual([]);
   });
 });

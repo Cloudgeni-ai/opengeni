@@ -89,6 +89,7 @@ CREATE TABLE "session_realtime_entries" (
   "delegation_item_id" text,
   "source_update_id" uuid,
   "history_item_id" uuid,
+  "turn_id" uuid,
   "text" text,
   "payload" jsonb DEFAULT '{}'::jsonb NOT NULL,
   "client_acked_at" timestamptz,
@@ -110,6 +111,9 @@ CREATE TABLE "session_realtime_entries" (
   CONSTRAINT "session_realtime_entries_history_item_fk"
     FOREIGN KEY ("history_item_id")
     REFERENCES "session_history_items" ("id") ON DELETE SET NULL,
+  CONSTRAINT "session_realtime_entries_turn_fk"
+    FOREIGN KEY ("turn_id")
+    REFERENCES "session_turns" ("id") ON DELETE SET NULL,
   CONSTRAINT "session_realtime_entries_epoch_check"
     CHECK ("connection_epoch" >= 1),
   CONSTRAINT "session_realtime_entries_sequence_check"
@@ -136,6 +140,8 @@ CREATE TABLE "session_realtime_entries" (
     CHECK ("text" IS NULL OR octet_length("text") <= 131072),
   CONSTRAINT "session_realtime_entries_payload_check"
     CHECK (octet_length("payload"::text) <= 131072),
+  CONSTRAINT "session_realtime_entries_turn_check"
+    CHECK ("turn_id" IS NULL OR "kind" = 'delegation_call'),
   CONSTRAINT "session_realtime_entries_transcript_check"
     CHECK (
       ("kind" = 'user_transcript' AND "role" = 'user' AND "text" IS NOT NULL)
@@ -153,6 +159,12 @@ CREATE UNIQUE INDEX "session_realtime_entries_sequence_uq"
 CREATE UNIQUE INDEX "session_realtime_entries_source_update_uq"
   ON "session_realtime_entries" ("realtime_id", "source_update_id")
   WHERE "source_update_id" IS NOT NULL;
+CREATE UNIQUE INDEX "session_realtime_entries_delegation_turn_uq"
+  ON "session_realtime_entries" ("turn_id")
+  WHERE "turn_id" IS NOT NULL;
+CREATE UNIQUE INDEX "session_realtime_entries_delegation_call_uq"
+  ON "session_realtime_entries" ("realtime_id", "delegation_item_id")
+  WHERE "kind" = 'delegation_call' AND "delegation_item_id" IS NOT NULL;
 CREATE INDEX "session_realtime_entries_outbound_pending_idx"
   ON "session_realtime_entries" ("realtime_id", "sequence")
   WHERE "direction" = 'provider_out'

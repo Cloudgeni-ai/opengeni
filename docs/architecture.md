@@ -306,6 +306,14 @@ flowchart LR
 6. **Stream back.** Events were durably appended then live-published; the client's SSE connection delivers them exactly-once, in-order, gap-free.
 7. **Continue or idle.** Terminal settlement of the last turn atomically advances an active goal's Postgres wake revision and the session workflow-wake outbox. With no authoritative human/Steer work, approval, recovery, capacity wait, or closed admission gate, `maybeContinueGoal` atomically materializes that revision as one typed internal update, event pair, usage fact, observed revision, and another workflow wake; the next eligible internal-update inference consumes it with other machine updates. Stable revision dedupe prevents a lost commit response from creating a second logical continuation. Temporal signals/runs are replaceable nudges, so delayed outbox repair, worker death, and `continueAsNew` cannot strand the obligation. Otherwise the workflow idles out. Goal continuations inherit model + reasoning + latency mode from the newest turn that durably emitted `turn.started` (fallback: session default), so preflight-rejected turns cannot silently change provider or billing owner. Child terminal results enter the same bounded typed internal-update batch.
 
+Native provider delegation remains in that same session. Exact owner, connection
+epoch, and provider-start proof gate one transaction that accepts the provider
+call ledger row and creates one ordinary queued `session_turns` row plus its
+canonical events and durable workflow wake. The call's one-to-one `turn_id` is
+the terminal result/error projection seam. Invalid calls ledger one deterministic
+outbound error; a transient failure commits neither call nor turn. There is no
+child/fork session or after-commit admission worker.
+
 ---
 
 ## 5. The runtime spine — session → turn → run
