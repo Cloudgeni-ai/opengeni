@@ -451,8 +451,51 @@ describe("contracts", () => {
   test("accepts create session defaults", () => {
     const payload = CreateSessionRequest.parse({ initialMessage: "inspect repo" });
     expect(payload.resources).toEqual([]);
+    expect(payload.skills).toEqual([]);
     expect(payload.tools).toEqual([]);
     expect(payload.metadata).toEqual({});
+  });
+
+  test("accepts validated inline session skills", () => {
+    const parsed = CreateSessionRequest.parse({
+      initialMessage: "prepare release",
+      skills: [
+        {
+          name: "release",
+          files: [
+            {
+              path: "SKILL.md",
+              content: "---\nname: release\ndescription: Prepare a release.\n---\n",
+            },
+          ],
+        },
+        {
+          name: "RELEASE",
+          files: [
+            {
+              path: "SKILL.md",
+              content: "---\nname: release\ndescription: Prepare a release.\n---\n",
+            },
+          ],
+        },
+      ],
+    });
+    expect(parsed.skills).toHaveLength(1);
+    expect(() =>
+      CreateSessionRequest.parse({
+        initialMessage: "prepare release",
+        skills: [{ name: "release", files: [{ path: "../SKILL.md", content: "bad" }] }],
+      }),
+    ).toThrow();
+    expect(() =>
+      CreateSessionRequest.parse({
+        initialMessage: "prepare release",
+        skills: [
+          { name: "release", files: [{ path: "SKILL.md", content: "# One\n" }] },
+          { name: "RELEASE", files: [{ path: "SKILL.md", content: "# Two\n" }] },
+        ],
+      }),
+    ).toThrow("conflicting session skill definitions");
   });
 
   test("accepts only a UUID as a caller-preallocated session id", () => {

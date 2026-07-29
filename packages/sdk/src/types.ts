@@ -494,6 +494,7 @@ export type Session = {
   // the session carried none. Org-visible metadata, never a timeline event.
   instructions: string | null;
   resources: ResourceRef[];
+  skills: SessionSkill[];
   tools: ToolRef[];
   toolPolicy?: SessionToolPolicy | undefined;
   toolPolicyVersion?: number | undefined;
@@ -1563,6 +1564,8 @@ export type CreateSessionRequest = {
   // user-visible timeline. Trimmed, non-empty, max 32768 chars.
   instructions?: string | undefined;
   resources?: ResourceRef[] | undefined;
+  /** Inline skills fixed onto this session; omitted children inherit them. */
+  skills?: SessionSkill[] | undefined;
   tools?: ToolRef[] | undefined;
   metadata?: Record<string, unknown> | undefined;
   model?: string | undefined;
@@ -3127,6 +3130,8 @@ export type CapabilityPackSkill = {
   description?: string | undefined;
   files: CapabilityPackSkillFile[];
 };
+
+export type SessionSkill = CapabilityPackSkill;
 
 export type CapabilityPackVariableSetSpec = {
   description: string;

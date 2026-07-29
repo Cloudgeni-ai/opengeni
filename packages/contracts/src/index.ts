@@ -4464,6 +4464,41 @@ export const CapabilityPackSkill = z
   });
 export type CapabilityPackSkill = z.infer<typeof CapabilityPackSkill>;
 
+// Inline skill content fixed onto one session at creation. It intentionally
+// uses the exact same validated directory shape as a pack skill, but has a
+// different semantic owner and lifecycle. Session readers can inspect it; it
+// is configuration, never a secret store.
+export const SessionSkill = CapabilityPackSkill;
+export type SessionSkill = z.infer<typeof SessionSkill>;
+
+export const SessionSkills = z
+  .array(SessionSkill)
+  .max(32)
+  .transform((skills, ctx) => {
+    const selected = new Map<string, { fingerprint: string; skill: SessionSkill }>();
+    for (const skill of skills) {
+      const key = skill.name.toLowerCase();
+      const fingerprint = JSON.stringify({
+        description: skill.description ?? null,
+        files: [...skill.files]
+          .sort((left, right) => left.path.localeCompare(right.path))
+          .map(({ path, content }) => ({ path, content })),
+      });
+      const existing = selected.get(key);
+      if (!existing) {
+        selected.set(key, { fingerprint, skill });
+        continue;
+      }
+      if (existing.fingerprint !== fingerprint) {
+        ctx.addIssue({
+          code: "custom",
+          message: `conflicting session skill definitions: ${skill.name}`,
+        });
+      }
+    }
+    return [...selected.values()].map(({ skill }) => skill);
+  });
+
 function isSafePackSkillRelativePath(path: string): boolean {
   if (path.startsWith("/") || path.includes("\\")) {
     return false;
@@ -5012,6 +5047,7 @@ export const Session = z.object({
   // null when the session carried none.
   instructions: z.string().nullable(),
   resources: z.array(ResourceRef),
+  skills: SessionSkills.default([]),
   tools: z.array(ToolRef),
   // Origin of the persisted tool allow-list. Optional for rolling client
   // compatibility; current servers emit it and legacy rows map to `legacy`.
@@ -7286,6 +7322,9 @@ export const CreateSessionRequest = withVariableSetIdAlias({
   // authoritative. Top-level omission remains []. Presence is resolved from
   // the raw request because this Zod default erases absent-vs-empty.
   resources: z.array(ResourceRef).default([]),
+  // Inline skills are fixed onto the session. Child omission inherits the
+  // trusted parent's selection; an explicit array, including [], wins.
+  skills: SessionSkills.default([]),
   // The same child omission rule applies to selected MCP tool refs. Top-level
   // omission still applies workspace-default capability MCP tools; explicit []
   // suppresses those defaults (the first-party OpenGeni server remains added).
