@@ -230,8 +230,13 @@ import {
 } from "./session-realtime";
 import {
   findClaimableSessionRealtimeDelegationTurnInTransaction,
+  isSessionRealtimeDelegationTurnMetadata,
   projectSessionRealtimeDelegationTerminalInTransaction,
 } from "./session-realtime-ledger";
+import {
+  projectSessionRealtimeContextForTurnInTransaction,
+  type SessionRealtimeContextProjection,
+} from "./session-realtime-context";
 import * as schema from "./schema";
 import {
   AGENT_VISIBLE_MEMORY_STATUSES,
@@ -254,6 +259,7 @@ export { sql as dbSql } from "drizzle-orm";
 export * from "./session-control";
 export * from "./session-queue-commands";
 export * from "./session-realtime";
+export * from "./session-realtime-context";
 export * from "./session-realtime-ledger";
 export * from "./new-session-drafts";
 export * from "./workspace-instruction-policies";
@@ -21409,6 +21415,50 @@ export async function getActiveSessionHistoryItems(
 }
 
 /**
+ * Read only the completed realtime-history projection bound to this exact turn.
+ * It is model-only ephemeral context, not active session history; a later turn
+ * id therefore cannot replay an earlier mode's projection.
+ */
+export async function getSessionRealtimeContextProjectionForTurn(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  turnId: string,
+): Promise<SessionRealtimeContextProjection | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select()
+      .from(schema.sessionRealtimeContextProjections)
+      .where(
+        and(
+          eq(schema.sessionRealtimeContextProjections.workspaceId, workspaceId),
+          eq(schema.sessionRealtimeContextProjections.sessionId, sessionId),
+          eq(schema.sessionRealtimeContextProjections.turnId, turnId),
+        ),
+      )
+      .limit(2);
+    if (rows.length > 1) {
+      throw new Error(`Turn ${turnId} has multiple realtime context projections`);
+    }
+    const row = rows[0];
+    return row
+      ? {
+          id: row.id,
+          workspaceId: row.workspaceId,
+          sessionId: row.sessionId,
+          turnId: row.turnId,
+          context: row.context,
+          sourceModeCount: row.sourceModeCount,
+          sourceEntryCount: row.sourceEntryCount,
+          includedEntryCount: row.includedEntryCount,
+          omittedEntryCount: row.omittedEntryCount,
+          createdAt: row.createdAt.toISOString(),
+        }
+      : null;
+  });
+}
+
+/**
  * Count of ACTIVE (live, model-facing) history rows for a session. This is the
  * length of the history the next turn is seeded from — the dual-write slice
  * index — which after a compaction is far smaller than the total persisted-row
@@ -36711,6 +36761,13 @@ export type ClaimSessionWorkForAttemptResult =
       reason: "gate-closed" | "no-work" | "stale-approval" | "control-pending" | "realtime-active";
     };
 
+export type ClaimSessionWorkForAttemptHooks = {
+  /** Test-only failure injection after source modes and projection are bound. */
+  afterRealtimeContextProjection?:
+    | ((projection: SessionRealtimeContextProjection) => void | Promise<void>)
+    | undefined;
+};
+
 /**
  * Claim and register one inference attempt after a turn worker has accepted the
  * Temporal activity. This is the only transition into `running`: queue choice,
@@ -36721,6 +36778,7 @@ export async function claimSessionWorkForAttempt(
   db: Database,
   workspaceId: string,
   input: ClaimSessionWorkForAttemptInput,
+  hooks: ClaimSessionWorkForAttemptHooks = {},
 ): Promise<ClaimSessionWorkForAttemptResult> {
   const { sessionId, workflowId } = input;
   return await withWorkspaceRls(
@@ -38079,11 +38137,29 @@ export async function claimSessionWorkForAttempt(
           }),
           producerCodexCredentialId: null,
         });
+        // A provider-delegated turn remains part of realtime work even if it
+        // reaches the queue after the mode ended. It must not consume voice
+        // continuity intended for the next ordinary human/API text turn.
+        const providerDelegatedTurn = isSessionRealtimeDelegationTurnMetadata(row.metadata);
+        const realtimeContextProjection =
+          !realtimeFence.active && !providerDelegatedTurn
+            ? await projectSessionRealtimeContextForTurnInTransaction(tx as unknown as Database, {
+                accountId: session.accountId,
+                workspaceId,
+                sessionId,
+                turnId: row.id,
+                now,
+              })
+            : null;
+        if (realtimeContextProjection) {
+          await hooks.afterRealtimeContextProjection?.(realtimeContextProjection);
+        }
         // Cross-session updates are already projected through
         // delegation.context.append while realtime is active. Keep them
         // pending for normal mode instead of consuming them as hidden context
         // on the provider-delegated ordinary turn.
-        const delivered = realtimeFence.active
+        const delivered =
+          realtimeFence.active || providerDelegatedTurn
           ? {
               count: 0,
               lastSequence: session.lastSequence,

@@ -2,6 +2,7 @@ import type { FileAsset, ResourceRef } from "@opengeni/contracts";
 import { createHash } from "node:crypto";
 import {
   getActiveSessionHistoryItems,
+  getSessionRealtimeContextProjectionForTurn,
   getLatestRunState,
   getHumanInputResumeForEvent,
   getSandboxSessionEnvelope,
@@ -321,12 +322,15 @@ export async function turnInput(
   if (!trigger) {
     throw new Error("Missing trigger event");
   }
-  const updates = await listSessionSystemUpdatesForTurn(
-    db,
-    trigger.workspaceId,
-    trigger.sessionId,
-    options.turnId,
-  );
+  const [updates, realtimeContextProjection] = await Promise.all([
+    listSessionSystemUpdatesForTurn(db, trigger.workspaceId, trigger.sessionId, options.turnId),
+    getSessionRealtimeContextProjectionForTurn(
+      db,
+      trigger.workspaceId,
+      trigger.sessionId,
+      options.turnId,
+    ),
+  ]);
   if (updates.length > 0) {
     const historyItemIds = new Set(
       updates.map((update) => update.deliveredHistoryItemId).filter(Boolean),
@@ -342,6 +346,7 @@ export async function turnInput(
           "Continue the same inference from durable conversation and sandbox state. A previous execution stopped before it could finish. Do not repeat completed side effects; inspect actual state when uncertain.",
         ].join("\n")
       : undefined,
+    realtimeContextProjection?.context ?? undefined,
     options.unavailableSandboxFilesNote,
     options.runCredentialsNote,
   );

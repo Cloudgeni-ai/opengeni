@@ -306,6 +306,24 @@ flowchart LR
 6. **Stream back.** Events were durably appended then live-published; the client's SSE connection delivers them exactly-once, in-order, gap-free.
 7. **Continue or idle.** Terminal settlement of the last turn atomically advances an active goal's Postgres wake revision and the session workflow-wake outbox. With no authoritative human/Steer work, approval, recovery, capacity wait, or closed admission gate, `maybeContinueGoal` atomically materializes that revision as one typed internal update, event pair, usage fact, observed revision, and another workflow wake; the next eligible internal-update inference consumes it with other machine updates. Stable revision dedupe prevents a lost commit response from creating a second logical continuation. Temporal signals/runs are replaceable nudges, so delayed outbox repair, worker death, and `continueAsNew` cannot strand the obligation. Otherwise the workflow idles out. Goal continuations inherit model + reasoning + latency mode from the newest turn that durably emitted `turn.started` (fallback: session default), so preflight-rejected turns cannot silently change provider or billing owner. Child terminal results enter the same bounded typed internal-update batch.
 
+When one or more realtime modes have ended, their durable ledger becomes normal
+model continuity only in the first eligible ordinary queued human/API text
+claim. Under the same session-lock transaction, the claim selects every ended
+unprojected mode by `(ended_at,id)`, orders whole ledger rows by mode then
+`(sequence,id)`, inserts one exact-turn `session_realtime_context_projections`
+row, and marks all source modes with that projection. Rendering is deterministic
+and limited to 65,536 UTF-8 bytes: newest whole entries win when necessary,
+selected entries remain chronological, and durable counts expose omissions.
+An ended mode with no finalized rows is still consumed by a projection whose
+`context` is `NULL`; no ended modes create no projection. The worker reads this
+model-only system context strictly by `(workspace,session,turn)`, including on
+same-turn recovery; it is never appended to `session_history_items`, and later
+turns cannot replay it. Active or delayed provider-delegated turns consume
+neither continuity nor pending cross-session updates. Canonical:
+`packages/db/src/session-realtime-context.ts`, `packages/db/src/index.ts`,
+`packages/db/drizzle/0134_session_realtime_context_projection.sql`, and
+`apps/worker/src/activities/run-input.ts`.
+
 Native provider delegation remains in that same session. Exact owner, connection
 epoch, and provider-start proof gate one transaction that accepts the provider
 call ledger row and creates one ordinary queued `session_turns` row plus its
