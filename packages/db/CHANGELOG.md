@@ -1,5 +1,14 @@
 # @opengeni/db
 
+## 0.13.3
+
+### Patch Changes
+
+- 110bb77: Enforce exact-subject ownership for personal OAuth capabilities and add secure direct OAuth installation for the separate workspace OpenGeni Slack bot.
+- Updated dependencies [110bb77]
+  - @opengeni/config@0.7.9
+  - @opengeni/contracts@0.20.2
+
 ## 0.13.2
 
 ### Patch Changes
