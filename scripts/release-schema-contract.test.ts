@@ -146,12 +146,13 @@ describe("release schema contract", () => {
         (migrations.has("0129_retained_process_reconciliation.sql") ? 1 : 0) +
         (migrations.has("0130_workspace_instruction_policies.sql") ? 1 : 0) +
         (migrations.has("0131_slack_bot_install_and_post_idempotency.sql") ? 1 : 0) +
-        (migrations.has("0132_connection_subject_isolation.sql") ? 1 : 0),
+        (migrations.has("0132_connection_subject_isolation.sql") ? 1 : 0) +
+        (migrations.has("0133_session_skills.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "c384c11bebd5c534ac71520c04d5d6f7a47f481b2e9c19627d7f8c45c564e0ba",
+      "9ed22b7eb35efd6eb8d1e683bd8334660531b6ff7e133e0cfc995969cb4bc960",
     );
-    expect(contract.latestMigration).toBe("0132_connection_subject_isolation.sql");
+    expect(contract.latestMigration).toBe("0133_session_skills.sql");
     expect(migrations.get("0128_github_installation_authority.sql")).toMatchObject({
       sha256: "365793b2a204a70e214adb90298b522acbb6dcfae22a46681a58f41a6938e6f0",
       deploymentMode: "rolling",
@@ -163,6 +164,10 @@ describe("release schema contract", () => {
     expect(migrations.get("0132_connection_subject_isolation.sql")).toMatchObject({
       sha256: "c52786e8732b49d223db2bb1c9789455304ad2b8750fdb46f261fd1da04dab44",
       deploymentMode: "maintenance",
+    });
+    expect(migrations.get("0133_session_skills.sql")).toMatchObject({
+      sha256: "f0aac6c242a4dbad8d6d717d09f15b295855030cf0a8979151f6928ea7ea6ff6",
+      deploymentMode: "rolling",
     });
     expect(migrations.get("0122_codex_capacity_same_turn.sql")).toMatchObject({
       sha256: "84e97abff7394d9fcca110012d9ceaede9ae683280a8a4a7335bcf9ec5d52d4e",
@@ -189,7 +194,7 @@ describe("release schema contract", () => {
     expect(
       contract.migrations
         .map((migration) => migration.path)
-        .filter((path) => /^(?:010[3-9]|011[0-9]|012[0-9]|013[0-2])_/.test(path)),
+        .filter((path) => /^(?:010[3-9]|011[0-9]|012[0-9]|013[0-3])_/.test(path)),
     ).toEqual([
       "0103_host_export_root_session.sql",
       "0104_host_export_root_session_backfill.sql",
@@ -211,6 +216,7 @@ describe("release schema contract", () => {
       "0130_workspace_instruction_policies.sql",
       "0131_slack_bot_install_and_post_idempotency.sql",
       "0132_connection_subject_isolation.sql",
+      "0133_session_skills.sql",
     ]);
     expect(new Set(contract.migrations.map((migration) => migration.path)).size).toBe(
       contract.fileCount,

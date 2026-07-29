@@ -776,6 +776,7 @@ export const sessions = pgTable(
     // as a timeline event.
     instructions: text("instructions"),
     resources: jsonb("resources").$type<unknown[]>().notNull().default([]),
+    skills: jsonb("skills").$type<unknown[]>().notNull().default([]),
     tools: jsonb("tools").$type<unknown[]>().notNull().default([]),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
     // Frozen creator fact. This is used for creation attribution and for the

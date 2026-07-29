@@ -1786,6 +1786,7 @@ function session(patch: Partial<Session> = {}): Session {
     titleSource: null,
     instructions: null,
     resources: [],
+    skills: [],
     tools: [],
     metadata: {},
     createdBy: { kind: "subject", subjectId: "user:test" },

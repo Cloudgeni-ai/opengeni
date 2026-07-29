@@ -59,6 +59,7 @@ import type {
   SessionHumanInputRequest,
   LineageNode,
   SessionMcpApprovalPolicy,
+  SessionSkill,
   SessionMcpServerMetadata,
   SessionStatus,
   SessionToolPolicy,
@@ -13874,6 +13875,7 @@ export type SessionCreateInput = {
   initialMessage: string;
   initialTurnInstructions?: string | null;
   resources: ResourceRef[];
+  skills?: SessionSkill[];
   tools?: ToolRef[];
   toolPolicy?: SessionToolPolicy | null;
   metadata: Record<string, unknown>;
@@ -14273,6 +14275,7 @@ async function createSessionInTransaction(
       initialMessage: input.initialMessage,
       initialTurnInstructions: input.initialTurnInstructions ?? null,
       resources: input.resources,
+      skills: input.skills ?? [],
       tools: input.tools ?? [],
       toolPolicy: input.toolPolicy ?? null,
       metadata: input.metadata,
@@ -35540,6 +35543,7 @@ function mapSession(
     titleSource: (row.titleSource as "user" | "agent" | null) ?? null,
     instructions: row.instructions ?? null,
     resources: row.resources as ResourceRef[],
+    skills: (row.skills as SessionSkill[]) ?? [],
     tools: row.tools as ToolRef[],
     toolPolicy: (row.toolPolicy as SessionToolPolicy | null) ?? {
       mode: "legacy",

@@ -23,6 +23,7 @@ import {
   type ReasoningEffort,
   type ResourceRef,
   type Session,
+  type SessionSkill,
   type SessionEvent,
   SessionMcpApprovalPolicy,
   type SessionMcpCredentialUpdateInput,
@@ -491,6 +492,7 @@ export async function createAndStartSession(input: {
   initialMessage: string;
   turnInstructions?: string | null;
   resources: ResourceRef[];
+  skills?: SessionSkill[];
   tools: ToolRef[];
   // Public admission always supplies provenance; optional keeps internal
   // callers that predate durable tool-policy provenance source-compatible
@@ -578,6 +580,7 @@ export async function createAndStartSession(input: {
       initialMessage: input.initialMessage,
       initialTurnInstructions: input.turnInstructions ?? null,
       resources: input.resources,
+      skills: input.skills ?? [],
       tools: input.tools,
       ...(input.toolPolicy ? { toolPolicy: input.toolPolicy } : {}),
       metadata: sessionMetadata,
@@ -621,6 +624,7 @@ export async function createAndStartSession(input: {
       initialMessage: input.initialMessage,
       initialTurnInstructions: input.turnInstructions ?? null,
       resources: input.resources,
+      skills: input.skills ?? [],
       tools: input.tools,
       ...(input.toolPolicy ? { toolPolicy: input.toolPolicy } : {}),
       metadata: sessionMetadata,
@@ -1090,6 +1094,9 @@ export async function createSessionForRequest(
       ? payload.resources
       : (parentSession?.resources ?? payload.resources),
   );
+  const skills = hasOwnProperty(rawPayload, "skills")
+    ? payload.skills
+    : (parentSession?.skills ?? payload.skills);
   const toolsProvided = hasOwnProperty(rawPayload, "tools");
   const requestedTools = validateToolRefs(
     toolsProvided ? payload.tools : (parentSession?.tools ?? payload.tools),
@@ -1501,6 +1508,7 @@ export async function createSessionForRequest(
       initialMessage: payload.initialMessage,
       turnInstructions: payload.turnInstructions ?? null,
       resources,
+      skills,
       tools,
       toolPolicy,
       ...(payload.clientEventId ? { clientEventId: payload.clientEventId } : {}),
