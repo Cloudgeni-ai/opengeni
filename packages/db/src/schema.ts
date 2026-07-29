@@ -1658,9 +1658,12 @@ export const sessionRealtimeConnections = pgTable(
       table.realtimeId,
       table.connectionEpoch,
     ),
-    oneOpen: uniqueIndex("session_realtime_connections_one_open_uq")
+    oneActive: uniqueIndex("session_realtime_connections_one_active_uq")
       .on(table.realtimeId)
-      .where(sql`${table.state} in ('negotiating', 'active')`),
+      .where(sql`${table.state} = 'active'`),
+    onePreparing: uniqueIndex("session_realtime_connections_one_preparing_uq")
+      .on(table.realtimeId)
+      .where(sql`${table.state} in ('negotiating', 'ready')`),
     epochValid: check(
       "session_realtime_connections_epoch_check",
       sql`${table.connectionEpoch} >= 1`,
@@ -1671,7 +1674,7 @@ export const sessionRealtimeConnections = pgTable(
     ),
     stateValid: check(
       "session_realtime_connections_state_check",
-      sql`${table.state} in ('negotiating', 'active', 'failed', 'closed')`,
+      sql`${table.state} in ('negotiating', 'ready', 'active', 'failed', 'closed')`,
     ),
     sdpValid: check(
       "session_realtime_connections_sdp_check",
@@ -1697,6 +1700,7 @@ export const sessionRealtimeConnections = pgTable(
     terminalValid: check(
       "session_realtime_connections_terminal_check",
       sql`(${table.state} = 'negotiating' and ${table.sdpAnswer} is null and ${table.failureCode} is null and ${table.negotiatedAt} is null and ${table.closedAt} is null)
+        or (${table.state} = 'ready' and ${table.sdpAnswer} is not null and ${table.failureCode} is null and ${table.negotiatedAt} is not null and ${table.closedAt} is null)
         or (${table.state} = 'active' and ${table.sdpAnswer} is not null and ${table.failureCode} is null and ${table.negotiatedAt} is not null and ${table.closedAt} is null)
         or (${table.state} = 'failed' and ${table.sdpAnswer} is null and ${table.failureCode} is not null and ${table.closedAt} is not null)
         or (${table.state} = 'closed' and ${table.closedAt} is not null)`,

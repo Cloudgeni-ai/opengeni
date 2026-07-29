@@ -76,6 +76,12 @@ const LazyCodexRealtimeControl = lazy(() =>
   })),
 );
 
+const LazyComposerAgentsPill = lazy(() =>
+  import("@/components/session/composer-agents-pill").then(({ ComposerAgentsPill }) => ({
+    default: ComposerAgentsPill,
+  })),
+);
+
 export function SessionRoute({
   workspaceId,
   sessionId,

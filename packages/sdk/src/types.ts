@@ -25,6 +25,7 @@ export type CodexRealtimeWebrtcRequest = {
   expectedVersion: number;
   expectedConnectionEpoch: number;
   rotate: boolean;
+  browserActivation?: "required" | undefined;
   sdp: string;
   version: CodexRealtimeWebrtcVersion;
   instructions?: string | undefined;
@@ -40,6 +41,15 @@ export type CodexRealtimeWebrtcResponse = {
   startupFenceSequence: number;
   modeVersion: number;
   replay: boolean;
+};
+
+export type ActivateCodexRealtimeConnectionRequest = {
+  operationId: string;
+  browserInstanceId: string;
+  ownerKey: string;
+  connectionEpoch: number;
+  expectedVersion: number;
+  expectedConnectionEpoch: number;
 };
 
 export type SessionRealtimeLedgerDirection = "provider_in" | "provider_out";

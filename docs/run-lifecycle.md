@@ -52,6 +52,35 @@ there is no status API or newly invented logical mode. Canonical:
 `apps/web/src/components/session/codex-realtime-control.tsx`, and
 `apps/web/src/routes/session.tsx`.
 
+Finite provider calls are hidden behind connection generations, not new
+realtime modes. On OpenGeni's configured conservative proactive-rotation interval, or after a dead or
+disconnected peer, the controller reuses a healthy microphone stream and
+negotiates one replacement beside the active connection. PostgreSQL permits
+exactly one `active` connection and one `negotiating`/`ready` replacement for a
+mode. The browser activates the replacement only after its data channel opens;
+that transaction advances the connection epoch, retires the old row, and keeps
+the same realtime id, owner, lifecycle, and durable V3 ledger. During rolling
+deployment, clients that omit the new browser-activation marker retain the old
+immediate-activation behavior; hardened clients always require the two-phase
+proof. Startup replay and provider ACKs remain bound to the promoted connection,
+and browser generation fences make late answers, duplicate callbacks, and old
+peer events inert. Failed preparation leaves the old healthy peer active;
+recovery uses bounded backoff and terminal conflicts permanently stop its retry
+loop. Stop, reload without owner proof, and concurrent timer/network failure
+all abort pending negotiation and release peers, timers, media, and playback.
+
+Microphone and audible output are separate truthful states. Permission denial,
+missing device, acquisition failure, and an ended track have deterministic
+non-secret codes; a lost track is reacquired before recovery can claim input is
+healthy. Remote playback never disables or serializes microphone input, so
+native full-duplex GPT-Live barge-in remains provider-controlled. If browser
+autoplay rejects `audio.play()`, the existing connection remains live but the UI
+announces audible output as blocked and offers a user-gesture retry; retrying
+playback neither begins another mode nor negotiates another provider call.
+Diagnostics distinguish permission, device, autoplay, negotiation, rotation,
+reconnect, lost-owner, and terminal-stop transitions without SDP, credentials,
+audio, or transcript bodies.
+
 After end, completed realtime ledger history crosses into ordinary inference
 only inside the first eligible queued human/API text claim transaction. That
 transaction deterministically locks all ended unprojected modes in

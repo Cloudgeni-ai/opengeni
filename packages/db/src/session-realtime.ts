@@ -278,7 +278,7 @@ async function endWithEvent(
     .where(
       and(
         eq(schema.sessionRealtimeConnections.realtimeId, row.id),
-        inArray(schema.sessionRealtimeConnections.state, ["negotiating", "active"]),
+        inArray(schema.sessionRealtimeConnections.state, ["negotiating", "ready", "active"]),
       ),
     );
   const event = await appendRealtimeLifecycleEvent(

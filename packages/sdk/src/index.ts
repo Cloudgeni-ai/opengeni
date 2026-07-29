@@ -27,8 +27,17 @@ export { parseSseStream } from "./sse";
 export type { SseMessage } from "./sse";
 export { normalizeMcpOutput } from "./mcp-output";
 export type { NormalizedMcpOutput } from "./mcp-output";
-export { startCodexRealtimeWebrtc } from "./codex-realtime";
+export {
+  CodexRealtimeMicrophoneError,
+  acquireCodexRealtimeMicrophone,
+  codexRealtimeMicrophoneHealthy,
+  startCodexRealtimeWebrtc,
+} from "./codex-realtime";
 export type {
+  AcquireCodexRealtimeMicrophoneOptions,
+  CodexRealtimeAudibleOutputState,
+  CodexRealtimeConnectionHealth,
+  CodexRealtimeMicrophoneErrorCode,
   CodexRealtimeNegotiator,
   CodexRealtimeWebrtcSession,
   StartCodexRealtimeWebrtcOptions,
@@ -56,8 +65,11 @@ export { createCodexRealtimeController } from "./codex-realtime-controller";
 export type {
   CodexRealtimeController,
   CodexRealtimeControllerClient,
+  CodexRealtimeDiagnostic,
+  CodexRealtimeDiagnosticKind,
   CodexRealtimeControllerSnapshot,
   CodexRealtimeControllerStatus,
+  CodexRealtimeMicrophoneState,
   CodexRealtimeOwnerStorage,
   CreateCodexRealtimeControllerOptions,
 } from "./codex-realtime-controller";
@@ -205,6 +217,7 @@ export {
 } from "./types";
 export type {
   AccessContext,
+  ActivateCodexRealtimeConnectionRequest,
   AccessGrant,
   AccountGrant,
   AccountRole,

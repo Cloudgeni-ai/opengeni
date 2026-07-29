@@ -3,6 +3,7 @@ import {
   createCodexRealtimeController,
   projectSessionRealtimeLifecycle,
 } from "../src/codex-realtime-controller";
+import { OpenGeniApiError } from "../src/errors";
 import type {
   CodexRealtimeWebrtcRequest,
   CodexRealtimeWebrtcResponse,
@@ -128,6 +129,176 @@ function noIntervals() {
   };
 }
 
+function timerFixture() {
+  let nextId = 1;
+  const intervals = new Map<number, { callback: () => void; delay: number }>();
+  const timeouts = new Map<number, { callback: () => void; delay: number }>();
+  return {
+    setInterval: (callback: () => void, delay: number) => {
+      const id = nextId++;
+      intervals.set(id, { callback, delay });
+      return id;
+    },
+    clearInterval: (handle: unknown) => intervals.delete(Number(handle)),
+    setTimeout: (callback: () => void, delay: number) => {
+      const id = nextId++;
+      timeouts.set(id, { callback, delay });
+      return id;
+    },
+    clearTimeout: (handle: unknown) => timeouts.delete(Number(handle)),
+    runTimeout(delay: number) {
+      const match = [...timeouts].find(([, timer]) => timer.delay === delay);
+      if (!match) throw new Error(`No timeout scheduled for ${delay}ms`);
+      const [id, timer] = match;
+      timeouts.delete(id);
+      timer.callback();
+    },
+    runInterval(delay: number) {
+      const match = [...intervals].find(([, timer]) => timer.delay === delay);
+      if (!match) throw new Error(`No interval scheduled for ${delay}ms`);
+      match[1].callback();
+    },
+    timeoutDelays: () => [...timeouts.values()].map((timer) => timer.delay).sort((a, b) => a - b),
+    intervalDelays: () => [...intervals.values()].map((timer) => timer.delay).sort((a, b) => a - b),
+  };
+}
+
+function rotatingBrowserFixture() {
+  const calls: string[] = [];
+  const peers: Array<{
+    peer: RTCPeerConnection;
+    events: RTCDataChannel;
+    sent: string[];
+    setState(state: RTCPeerConnectionState, ice?: RTCIceConnectionState): void;
+    dispatchRemoteTrack(): void;
+  }> = [];
+  const tracks: MediaStreamTrack[] = [];
+  const endTracks: Array<() => void> = [];
+  const media: MediaStream[] = [];
+  let getUserMediaCalls = 0;
+  let rejectPlay = false;
+  const remoteAudio = {
+    autoplay: false,
+    srcObject: null,
+    play: async () => {
+      calls.push("audio.play");
+      if (rejectPlay) throw new DOMException("gesture required", "NotAllowedError");
+    },
+    pause: () => calls.push("audio.pause"),
+  } as unknown as HTMLAudioElement;
+
+  const getUserMedia = async (): Promise<MediaStream> => {
+    getUserMediaCalls += 1;
+    let readyState: MediaStreamTrackState = "live";
+    const track = new EventTarget() as MediaStreamTrack;
+    Object.defineProperties(track, {
+      kind: { value: "audio" },
+      enabled: { value: true, writable: true },
+      readyState: { get: () => readyState },
+      stop: {
+        value: () => {
+          calls.push(`track.${tracks.indexOf(track)}.stop`);
+          readyState = "ended";
+        },
+      },
+    });
+    const stream = {
+      getAudioTracks: () => [track],
+      getTracks: () => [track],
+    } as unknown as MediaStream;
+    tracks.push(track);
+    endTracks.push(() => {
+      if (readyState === "ended") return;
+      readyState = "ended";
+      track.dispatchEvent(new Event("ended"));
+    });
+    media.push(stream);
+    return stream;
+  };
+
+  const createPeerConnection = (): RTCPeerConnection => {
+    const index = peers.length;
+    const sent: string[] = [];
+    let localDescription: RTCSessionDescription | null = null;
+    let connectionState: RTCPeerConnectionState = "connected";
+    let iceConnectionState: RTCIceConnectionState = "connected";
+    const events = new EventTarget() as RTCDataChannel;
+    Object.defineProperties(events, {
+      label: { value: "oai-events" },
+      readyState: { value: "open" },
+      send: { value: (payload: string) => sent.push(payload) },
+      close: { value: () => calls.push(`events.${index}.close`) },
+    });
+    const remoteTrack = { kind: "audio" };
+    const remoteMedia = { getTracks: () => [remoteTrack] } as unknown as MediaStream;
+    const peer = new EventTarget() as RTCPeerConnection;
+    Object.defineProperties(peer, {
+      localDescription: { get: () => localDescription },
+      connectionState: { get: () => connectionState },
+      iceConnectionState: { get: () => iceConnectionState },
+      createDataChannel: { value: () => events },
+      addTrack: { value: () => (calls.push(`peer.${index}.addTrack`), {} as RTCRtpSender) },
+      createOffer: { value: async () => ({ type: "offer" as const, sdp: OFFER }) },
+      setLocalDescription: {
+        value: async (description: RTCSessionDescriptionInit) => {
+          localDescription = description as RTCSessionDescription;
+        },
+      },
+      setRemoteDescription: { value: async () => undefined },
+      close: { value: () => calls.push(`peer.${index}.close`) },
+    });
+    peers.push({
+      peer,
+      events,
+      sent,
+      setState: (state, ice = state === "failed" ? "failed" : "connected") => {
+        connectionState = state;
+        iceConnectionState = ice;
+        peer.dispatchEvent(new Event("connectionstatechange"));
+      },
+      dispatchRemoteTrack: () => {
+        const event = new Event("track") as RTCTrackEvent;
+        Object.defineProperties(event, {
+          track: { value: remoteTrack },
+          streams: { value: [remoteMedia] },
+        });
+        peer.dispatchEvent(event);
+      },
+    });
+    return peer;
+  };
+
+  return {
+    calls,
+    peers,
+    tracks,
+    media,
+    remoteAudio,
+    getUserMedia,
+    createPeerConnection,
+    getUserMediaCalls: () => getUserMediaCalls,
+    rejectPlay: () => {
+      rejectPlay = true;
+    },
+    allowPlay: () => {
+      rejectPlay = false;
+    },
+    endTrack(index: number) {
+      const endTrack = endTracks[index];
+      if (!endTrack) throw new Error("Missing microphone track");
+      endTrack();
+    },
+  };
+}
+
+async function eventually(assertion: () => boolean, message: string): Promise<void> {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    if (assertion()) return;
+    await Promise.resolve();
+  }
+  throw new Error(message);
+}
+
 describe("Codex realtime browser controller", () => {
   test("drives normal -> realtime -> normal with real WebRTC/V3 bridge semantics", async () => {
     const browser = browserFixture();
@@ -168,6 +339,23 @@ describe("Codex realtime browser controller", () => {
             replay: false,
           };
           return response;
+        },
+        activateCodexRealtimeConnection: async (
+          _workspaceId,
+          _sessionId,
+          _realtimeId,
+          connectionId,
+          request,
+        ) => {
+          expect(connectionId).toBe(CONNECTION_ID);
+          expect(request.operationId).toBe(negotiations.at(-1)!.operationId);
+          const rotated = request.connectionEpoch !== current.connectionEpoch;
+          current = mode({
+            ...current,
+            version: current.version + (rotated ? 1 : 0),
+            connectionEpoch: request.connectionEpoch,
+          });
+          return { mode: current, replay: false };
         },
         heartbeatSessionRealtime: async (_workspaceId, _sessionId, _realtimeId, request) => {
           expect(request.expectedVersion).toBe(current.version);
@@ -418,6 +606,9 @@ describe("Codex realtime browser controller", () => {
         negotiateCodexRealtimeWebrtc: async () => {
           throw new Error("must not negotiate without same-browser owner proof");
         },
+        activateCodexRealtimeConnection: async () => {
+          throw new Error("must not activate without same-browser owner proof");
+        },
         heartbeatSessionRealtime: async () => ({ mode: mode(), replay: true }),
         syncSessionRealtimeLedger: async () => ({ accepted: [], outbound: [] }),
         endSessionRealtime: async () => ({ mode: mode({ state: "ended" }), replay: true }),
@@ -496,7 +687,25 @@ describe("Codex realtime browser controller", () => {
             connectionId: CONNECTION_ID,
             connectionEpoch: 3,
             startupFenceSequence: 0,
-            modeVersion: 5,
+            modeVersion: 4,
+            replay: false,
+          };
+        },
+        activateCodexRealtimeConnection: async (
+          _workspaceId,
+          _sessionId,
+          _realtimeId,
+          connectionId,
+          request,
+        ) => {
+          expect(connectionId).toBe(CONNECTION_ID);
+          expect(request).toMatchObject({
+            expectedVersion: 4,
+            expectedConnectionEpoch: 2,
+            connectionEpoch: 3,
+          });
+          return {
+            mode: mode({ operationId, browserInstanceId, version: 5, connectionEpoch: 3 }),
             replay: false,
           };
         },
@@ -541,5 +750,579 @@ describe("Codex realtime browser controller", () => {
     });
     controller.close();
     expect(storage.values.has(key)).toBe(true);
+  });
+
+  test("rotates at OpenGeni's proactive-rotation interval, reuses media, and retires the old generation only after activation", async () => {
+    const browser = rotatingBrowserFixture();
+    const timers = timerFixture();
+    const storage = storageFixture();
+    const negotiations: CodexRealtimeWebrtcRequest[] = [];
+    const activations: Array<{ connectionId: string; request: { connectionEpoch: number } }> = [];
+    let pendingUpdate = false;
+    let current = mode();
+    let releaseSecondActivation!: () => void;
+    const secondActivation = new Promise<void>((resolve) => {
+      releaseSecondActivation = resolve;
+    });
+    let uuid = 0;
+    const controller = createCodexRealtimeController({
+      workspaceId: WORKSPACE_ID,
+      sessionId: SESSION_ID,
+      storage,
+      remoteAudio: browser.remoteAudio,
+      randomUUID: () => `00000000-0000-4000-8000-${String(++uuid).padStart(12, "0")}`,
+      createPeerConnection: browser.createPeerConnection,
+      getUserMedia: browser.getUserMedia,
+      connectionRotationIntervalMs: 900,
+      reconnectBackoffMs: [10, 20],
+      ...timers,
+      client: {
+        beginSessionRealtime: async (_workspaceId, _sessionId, request) => {
+          current = mode({
+            operationId: request.operationId,
+            browserInstanceId: request.browserInstanceId,
+          });
+          return { mode: current, replay: false };
+        },
+        negotiateCodexRealtimeWebrtc: async (_workspaceId, _sessionId, request) => {
+          negotiations.push(request);
+          const connectionEpoch = request.rotate
+            ? current.connectionEpoch + 1
+            : current.connectionEpoch;
+          return {
+            sdp: ANSWER,
+            version: "v3",
+            model: "gpt-live-1-boulder-alpha",
+            connectionId: `10000000-0000-4000-8000-${String(negotiations.length).padStart(12, "0")}`,
+            connectionEpoch,
+            startupFenceSequence: 0,
+            modeVersion: current.version,
+            replay: false,
+          };
+        },
+        activateCodexRealtimeConnection: async (
+          _workspaceId,
+          _sessionId,
+          _realtimeId,
+          connectionId,
+          request,
+        ) => {
+          activations.push({ connectionId, request });
+          if (activations.length === 2) await secondActivation;
+          const rotated = request.connectionEpoch !== current.connectionEpoch;
+          current = mode({
+            ...current,
+            version: current.version + (rotated ? 1 : 0),
+            connectionEpoch: request.connectionEpoch,
+          });
+          return { mode: current, replay: false };
+        },
+        heartbeatSessionRealtime: async () => ({ mode: current, replay: false }),
+        syncSessionRealtimeLedger: async () => {
+          if (!pendingUpdate) return { accepted: [], outbound: [] };
+          pendingUpdate = false;
+          return {
+            accepted: [],
+            outbound: [
+              {
+                id: "12000000-0000-4000-8000-000000000001",
+                realtimeId: REALTIME_ID,
+                operationId: "12000000-0000-4000-8000-000000000002",
+                connectionEpoch: 1,
+                sequence: 1,
+                direction: "provider_out",
+                kind: "session_update",
+                role: null,
+                providerEventId: null,
+                delegationItemId: null,
+                sourceUpdateId: "12000000-0000-4000-8000-000000000003",
+                historyItemId: null,
+                turnId: null,
+                text: "Update delivered while the replacement is pending",
+                payload: {},
+                clientAckedAt: null,
+                providerAckedAt: null,
+                createdAt: "2026-07-29T07:00:00.000Z",
+                updatedAt: "2026-07-29T07:00:00.000Z",
+              },
+            ],
+          };
+        },
+        endSessionRealtime: async () => ({
+          mode: mode({
+            ...current,
+            state: "ended",
+            version: current.version + 1,
+            endedAt: "2026-07-29T07:01:00.000Z",
+            endReason: "user_stop",
+          }),
+          replay: false,
+        }),
+      },
+    });
+
+    await controller.start();
+    expect(controller.snapshot()).toMatchObject({ status: "active", connectionGeneration: 1 });
+    expect(browser.getUserMediaCalls()).toBe(1);
+    expect(timers.timeoutDelays()).toContain(900);
+    browser.rejectPlay();
+    browser.peers[0]!.dispatchRemoteTrack();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(controller.snapshot().audibleOutput).toBe("blocked");
+    browser.allowPlay();
+    expect(await controller.retryAudibleOutput()).toBe(true);
+    expect(controller.snapshot().audibleOutput).toBe("audible");
+    expect(negotiations).toHaveLength(1);
+    expect(browser.tracks[0]?.enabled).toBe(true);
+
+    timers.runTimeout(900);
+    timers.runTimeout(0);
+    await eventually(() => activations.length === 2, "rotation did not reach browser activation");
+    expect(controller.snapshot()).toMatchObject({ status: "recovering", connectionGeneration: 2 });
+    expect(browser.calls).not.toContain("peer.0.close");
+    expect(browser.getUserMediaCalls()).toBe(1);
+    expect(negotiations[1]).toMatchObject({ rotate: true, expectedConnectionEpoch: 1 });
+    pendingUpdate = true;
+    timers.runInterval(1_000);
+    await eventually(
+      () => browser.peers[0]!.sent.length > 0,
+      "old active connection did not receive an update during rotation",
+    );
+    expect(JSON.parse(browser.peers[0]!.sent[0]!)).toMatchObject({
+      type: "session.context.append",
+    });
+    expect(browser.peers[1]!.sent).toEqual([]);
+
+    releaseSecondActivation();
+    await eventually(
+      () =>
+        controller.snapshot().status === "active" &&
+        controller.snapshot().connectionGeneration === 2,
+      "rotation did not promote the replacement",
+    );
+    expect(controller.snapshot().mode).toMatchObject({ version: 2, connectionEpoch: 2 });
+    expect(browser.calls).toContain("peer.0.close");
+    expect(browser.calls).not.toContain("track.0.stop");
+
+    const callsBeforeStaleFailure = negotiations.length;
+    browser.peers[0]!.setState("failed");
+    await Promise.resolve();
+    expect(negotiations).toHaveLength(callsBeforeStaleFailure);
+    expect(controller.snapshot()).toMatchObject({ status: "active", connectionGeneration: 2 });
+
+    await controller.stop();
+    expect(controller.snapshot().status).toBe("idle");
+    expect(browser.calls.filter((call) => call === "track.0.stop")).toHaveLength(1);
+    expect(browser.calls).toEqual(expect.arrayContaining(["peer.1.close", "events.1.close"]));
+  });
+
+  test("coalesces duplicate peer failures and retries with capped backoff until one replacement succeeds", async () => {
+    const browser = rotatingBrowserFixture();
+    const timers = timerFixture();
+    let current = mode();
+    let negotiationCalls = 0;
+    let activationCalls = 0;
+    let uuid = 100;
+    const controller = createCodexRealtimeController({
+      workspaceId: WORKSPACE_ID,
+      sessionId: SESSION_ID,
+      storage: storageFixture(),
+      remoteAudio: browser.remoteAudio,
+      randomUUID: () => `20000000-0000-4000-8000-${String(++uuid).padStart(12, "0")}`,
+      createPeerConnection: browser.createPeerConnection,
+      getUserMedia: browser.getUserMedia,
+      connectionRotationIntervalMs: 900,
+      reconnectBackoffMs: [10, 20],
+      ...timers,
+      client: {
+        beginSessionRealtime: async (_workspaceId, _sessionId, request) => {
+          current = mode({
+            operationId: request.operationId,
+            browserInstanceId: request.browserInstanceId,
+          });
+          return { mode: current, replay: false };
+        },
+        negotiateCodexRealtimeWebrtc: async (_workspaceId, _sessionId, request) => {
+          negotiationCalls += 1;
+          if (negotiationCalls === 2) {
+            throw new OpenGeniApiError(
+              502,
+              JSON.stringify({
+                error: { message: "temporary negotiation failure", retryable: true },
+              }),
+            );
+          }
+          return {
+            sdp: ANSWER,
+            version: "v3",
+            model: "gpt-live-1-boulder-alpha",
+            connectionId: `30000000-0000-4000-8000-${String(negotiationCalls).padStart(12, "0")}`,
+            connectionEpoch: request.rotate ? current.connectionEpoch + 1 : current.connectionEpoch,
+            startupFenceSequence: 0,
+            modeVersion: current.version,
+            replay: false,
+          };
+        },
+        activateCodexRealtimeConnection: async (
+          _workspaceId,
+          _sessionId,
+          _realtimeId,
+          _connectionId,
+          request,
+        ) => {
+          activationCalls += 1;
+          const rotated = request.connectionEpoch !== current.connectionEpoch;
+          current = mode({
+            ...current,
+            version: current.version + (rotated ? 1 : 0),
+            connectionEpoch: request.connectionEpoch,
+          });
+          return { mode: current, replay: false };
+        },
+        heartbeatSessionRealtime: async () => ({ mode: current, replay: false }),
+        syncSessionRealtimeLedger: async () => ({ accepted: [], outbound: [] }),
+        endSessionRealtime: async () => ({
+          mode: mode({
+            ...current,
+            state: "ended",
+            endedAt: "2026-07-29T07:01:00.000Z",
+            endReason: "user_stop",
+          }),
+          replay: false,
+        }),
+      },
+    });
+
+    await controller.start();
+    browser.peers[0]!.setState("failed");
+    browser.peers[0]!.setState("failed");
+    expect(timers.timeoutDelays().filter((delay) => delay === 10)).toHaveLength(1);
+    timers.runTimeout(10);
+    await eventually(() => negotiationCalls === 2, "first reconnect was not attempted");
+    await eventually(() => timers.timeoutDelays().includes(20), "bounded retry was not scheduled");
+    expect(browser.calls).not.toContain("peer.0.close");
+    expect(controller.snapshot()).toMatchObject({ status: "recovering", reconnectAttempt: 1 });
+
+    timers.runTimeout(20);
+    await eventually(
+      () =>
+        controller.snapshot().status === "active" &&
+        controller.snapshot().connectionGeneration === 3,
+      "second reconnect did not recover",
+    );
+    expect(negotiationCalls).toBe(3);
+    expect(activationCalls).toBe(2);
+    expect(browser.getUserMediaCalls()).toBe(1);
+    expect(browser.calls).toContain("peer.0.close");
+    expect(controller.snapshot()).toMatchObject({
+      reconnectAttempt: 0,
+      mode: { connectionEpoch: 2 },
+    });
+    await controller.stop();
+  });
+
+  test("reacquires a lost microphone and retains the old generation until replacement activation", async () => {
+    const browser = rotatingBrowserFixture();
+    const timers = timerFixture();
+    let current = mode();
+    let negotiationCalls = 0;
+    let activationCalls = 0;
+    let releaseReplacement!: () => void;
+    const replacementReady = new Promise<void>((resolve) => {
+      releaseReplacement = resolve;
+    });
+    let uuid = 300;
+    const controller = createCodexRealtimeController({
+      workspaceId: WORKSPACE_ID,
+      sessionId: SESSION_ID,
+      storage: storageFixture(),
+      remoteAudio: browser.remoteAudio,
+      randomUUID: () => `60000000-0000-4000-8000-${String(++uuid).padStart(12, "0")}`,
+      createPeerConnection: browser.createPeerConnection,
+      getUserMedia: browser.getUserMedia,
+      connectionRotationIntervalMs: 900,
+      reconnectBackoffMs: [10],
+      ...timers,
+      client: {
+        beginSessionRealtime: async (_workspaceId, _sessionId, request) => {
+          current = mode({
+            ...current,
+            operationId: request.operationId,
+            browserInstanceId: request.browserInstanceId,
+          });
+          return { mode: current, replay: false };
+        },
+        negotiateCodexRealtimeWebrtc: async (_workspaceId, _sessionId, request) => {
+          negotiationCalls += 1;
+          return {
+            sdp: ANSWER,
+            version: "v3",
+            model: "gpt-live-1-boulder-alpha",
+            connectionId: `61000000-0000-4000-8000-${String(negotiationCalls).padStart(12, "0")}`,
+            connectionEpoch: request.rotate ? current.connectionEpoch + 1 : current.connectionEpoch,
+            startupFenceSequence: 0,
+            modeVersion: current.version,
+            replay: false,
+          };
+        },
+        activateCodexRealtimeConnection: async (
+          _workspaceId,
+          _sessionId,
+          _realtimeId,
+          _connectionId,
+          request,
+        ) => {
+          activationCalls += 1;
+          if (activationCalls === 2) await replacementReady;
+          const rotated = request.connectionEpoch !== current.connectionEpoch;
+          current = mode({
+            ...current,
+            version: current.version + (rotated ? 1 : 0),
+            connectionEpoch: request.connectionEpoch,
+          });
+          return { mode: current, replay: false };
+        },
+        heartbeatSessionRealtime: async () => ({ mode: current, replay: false }),
+        syncSessionRealtimeLedger: async () => ({ accepted: [], outbound: [] }),
+        endSessionRealtime: async () => ({
+          mode: mode({
+            ...current,
+            state: "ended",
+            version: current.version + 1,
+            endedAt: "2026-07-29T07:01:00.000Z",
+            endReason: "user_stop",
+          }),
+          replay: false,
+        }),
+      },
+    });
+
+    await controller.start();
+    browser.endTrack(0);
+    expect(controller.snapshot()).toMatchObject({
+      status: "recovering",
+      microphone: "track_ended",
+      diagnostic: { kind: "device_failure", recoverable: true },
+    });
+    expect(timers.timeoutDelays()).toContain(0);
+    timers.runTimeout(0);
+    await eventually(() => activationCalls === 2, "device recovery did not reach activation");
+    expect(browser.getUserMediaCalls()).toBe(2);
+    expect(browser.calls).not.toContain("peer.0.close");
+    expect(browser.calls.filter((call) => call === "track.0.stop")).toHaveLength(1);
+
+    releaseReplacement();
+    await eventually(
+      () =>
+        controller.snapshot().status === "active" &&
+        controller.snapshot().connectionGeneration === 2,
+      "device recovery did not promote the healthy microphone",
+    );
+    expect(controller.snapshot()).toMatchObject({
+      microphone: "active",
+      mode: { version: 2, connectionEpoch: 2 },
+    });
+    expect(browser.calls).toContain("peer.0.close");
+    await controller.stop();
+    expect(browser.calls.filter((call) => call === "track.0.stop")).toHaveLength(1);
+    expect(browser.calls.filter((call) => call === "track.1.stop")).toHaveLength(1);
+  });
+
+  test("a terminal 409 fences duplicate callbacks and leaves the owned mode stoppable", async () => {
+    const browser = rotatingBrowserFixture();
+    const timers = timerFixture();
+    let current = mode();
+    let negotiationCalls = 0;
+    let uuid = 400;
+    const controller = createCodexRealtimeController({
+      workspaceId: WORKSPACE_ID,
+      sessionId: SESSION_ID,
+      storage: storageFixture(),
+      remoteAudio: browser.remoteAudio,
+      randomUUID: () => `70000000-0000-4000-8000-${String(++uuid).padStart(12, "0")}`,
+      createPeerConnection: browser.createPeerConnection,
+      getUserMedia: browser.getUserMedia,
+      connectionRotationIntervalMs: 900,
+      reconnectBackoffMs: [10],
+      ...timers,
+      client: {
+        beginSessionRealtime: async (_workspaceId, _sessionId, request) => {
+          current = mode({
+            ...current,
+            operationId: request.operationId,
+            browserInstanceId: request.browserInstanceId,
+          });
+          return { mode: current, replay: false };
+        },
+        negotiateCodexRealtimeWebrtc: async (_workspaceId, _sessionId, request) => {
+          negotiationCalls += 1;
+          if (negotiationCalls === 2) {
+            throw new OpenGeniApiError(
+              409,
+              JSON.stringify({
+                error: {
+                  code: "REALTIME_CONNECTION_TERMINAL",
+                  message: "Realtime connection cannot be replaced",
+                  retryable: false,
+                },
+              }),
+            );
+          }
+          return {
+            sdp: ANSWER,
+            version: "v3",
+            model: "gpt-live-1-boulder-alpha",
+            connectionId: "71000000-0000-4000-8000-000000000001",
+            connectionEpoch: request.expectedConnectionEpoch,
+            startupFenceSequence: 0,
+            modeVersion: current.version,
+            replay: false,
+          };
+        },
+        activateCodexRealtimeConnection: async () => ({ mode: current, replay: false }),
+        heartbeatSessionRealtime: async () => ({ mode: current, replay: false }),
+        syncSessionRealtimeLedger: async () => ({ accepted: [], outbound: [] }),
+        endSessionRealtime: async () => {
+          current = mode({
+            ...current,
+            state: "ended",
+            version: current.version + 1,
+            endedAt: "2026-07-29T07:01:00.000Z",
+            endReason: "user_stop",
+          });
+          return { mode: current, replay: false };
+        },
+      },
+    });
+
+    await controller.start();
+    browser.peers[0]!.setState("failed");
+    timers.runTimeout(10);
+    await eventually(
+      () => controller.snapshot().status === "error",
+      "terminal 409 was not exposed",
+    );
+    expect(controller.snapshot()).toMatchObject({
+      mode: { state: "active", connectionEpoch: 1 },
+      diagnostic: { kind: "negotiation_failure", recoverable: false },
+    });
+    expect(browser.calls).not.toContain("peer.0.close");
+    expect(timers.timeoutDelays()).toEqual([]);
+
+    browser.peers[0]!.setState("failed");
+    await Promise.resolve();
+    expect(negotiationCalls).toBe(2);
+    expect(timers.timeoutDelays()).toEqual([]);
+    await expect(controller.retry()).rejects.toThrow("recovery is terminal");
+    await controller.observeLifecycle({
+      state: "active",
+      realtimeId: current.id,
+      operationId: current.operationId,
+      version: current.version,
+      connectionEpoch: current.connectionEpoch,
+      leaseExpiresAt: current.leaseExpiresAt,
+    });
+    expect(negotiationCalls).toBe(2);
+
+    await controller.stop();
+    expect(controller.snapshot().status).toBe("idle");
+    expect(browser.calls).toEqual(
+      expect.arrayContaining(["peer.0.close", "track.0.stop", "events.0.close"]),
+    );
+  });
+
+  test("stop during replacement negotiation fences a late answer and leaves no reconnect timers", async () => {
+    const browser = rotatingBrowserFixture();
+    const timers = timerFixture();
+    let current = mode();
+    let negotiationCalls = 0;
+    let activationCalls = 0;
+    let releaseLateAnswer!: (answer: CodexRealtimeWebrtcResponse) => void;
+    const lateAnswer = new Promise<CodexRealtimeWebrtcResponse>((resolve) => {
+      releaseLateAnswer = resolve;
+    });
+    let uuid = 200;
+    const controller = createCodexRealtimeController({
+      workspaceId: WORKSPACE_ID,
+      sessionId: SESSION_ID,
+      storage: storageFixture(),
+      remoteAudio: browser.remoteAudio,
+      randomUUID: () => `40000000-0000-4000-8000-${String(++uuid).padStart(12, "0")}`,
+      createPeerConnection: browser.createPeerConnection,
+      getUserMedia: browser.getUserMedia,
+      connectionRotationIntervalMs: 900,
+      reconnectBackoffMs: [10],
+      ...timers,
+      client: {
+        beginSessionRealtime: async (_workspaceId, _sessionId, request) => {
+          current = mode({
+            operationId: request.operationId,
+            browserInstanceId: request.browserInstanceId,
+          });
+          return { mode: current, replay: false };
+        },
+        negotiateCodexRealtimeWebrtc: async (_workspaceId, _sessionId, request) => {
+          negotiationCalls += 1;
+          if (negotiationCalls === 2) return await lateAnswer;
+          return {
+            sdp: ANSWER,
+            version: "v3",
+            model: "gpt-live-1-boulder-alpha",
+            connectionId: "50000000-0000-4000-8000-000000000001",
+            connectionEpoch: request.expectedConnectionEpoch,
+            startupFenceSequence: 0,
+            modeVersion: current.version,
+            replay: false,
+          };
+        },
+        activateCodexRealtimeConnection: async (
+          _workspaceId,
+          _sessionId,
+          _realtimeId,
+          _connectionId,
+          request,
+        ) => {
+          activationCalls += 1;
+          current = mode({ ...current, connectionEpoch: request.connectionEpoch });
+          return { mode: current, replay: false };
+        },
+        heartbeatSessionRealtime: async () => ({ mode: current, replay: false }),
+        syncSessionRealtimeLedger: async () => ({ accepted: [], outbound: [] }),
+        endSessionRealtime: async () => ({
+          mode: mode({
+            ...current,
+            state: "ended",
+            version: current.version + 1,
+            endedAt: "2026-07-29T07:01:00.000Z",
+            endReason: "user_stop",
+          }),
+          replay: false,
+        }),
+      },
+    });
+
+    await controller.start();
+    timers.runTimeout(900);
+    timers.runTimeout(0);
+    await eventually(() => negotiationCalls === 2, "replacement negotiation did not start");
+    const stopping = controller.stop();
+    releaseLateAnswer({
+      sdp: ANSWER,
+      version: "v3",
+      model: "gpt-live-1-boulder-alpha",
+      connectionId: "50000000-0000-4000-8000-000000000002",
+      connectionEpoch: 2,
+      startupFenceSequence: 0,
+      modeVersion: current.version,
+      replay: false,
+    });
+    await stopping;
+    expect(activationCalls).toBe(1);
+    expect(controller.snapshot().status).toBe("idle");
+    expect(timers.timeoutDelays()).toEqual([]);
+    expect(browser.calls).toEqual(
+      expect.arrayContaining(["peer.0.close", "peer.1.close", "track.0.stop"]),
+    );
   });
 });

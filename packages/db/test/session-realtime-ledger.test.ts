@@ -4,6 +4,7 @@ import { and, asc, eq, sql } from "drizzle-orm";
 
 import {
   addSessionSystemUpdate,
+  activateSessionRealtimeConnectionInTransaction,
   appendSessionRealtimeOutboundInTransaction,
   applySessionTurnSettlement,
   beginSessionRealtimeInTransaction,
@@ -120,7 +121,7 @@ async function complete(
   connection: { id: string; operationId: string; connectionEpoch: number },
   sdpAnswer = "v=0\r\na=answer:durable\r\n",
 ) {
-  return await transaction(value.owner.workspaceId, (tx) =>
+  await transaction(value.owner.workspaceId, (tx) =>
     completeSessionRealtimeConnectionInTransaction(tx, {
       workspaceId: value.owner.workspaceId,
       sessionId: value.owner.sessionId,
@@ -129,6 +130,15 @@ async function complete(
       operationId: connection.operationId,
       connectionEpoch: connection.connectionEpoch,
       sdpAnswer,
+    }),
+  );
+  return await transaction(value.owner.workspaceId, (tx) =>
+    activateSessionRealtimeConnectionInTransaction(tx, {
+      ...ownerProof(value),
+      connectionId: connection.id,
+      operationId: connection.operationId,
+      connectionEpoch: connection.connectionEpoch,
+      expectedConnectionEpoch: value.started.mode.connectionEpoch,
     }),
   );
 }
@@ -238,7 +248,7 @@ describe("session realtime ledger", () => {
     await expectConflict(complete(value, first.claimed.connection), "REALTIME_CONNECTION_CHANGED");
   });
 
-  test("idempotently negotiates epoch one and fences its answer after a rotation", async () => {
+  test("stages a rotation beside epoch one and fences it only after browser activation", async () => {
     const value = await fixture();
     const first = await claimInitial(value);
     const replay = await transaction(value.owner.workspaceId, (tx) =>
@@ -258,12 +268,30 @@ describe("session realtime ledger", () => {
     );
     expect(rotated).toMatchObject({
       replay: false,
-      modeVersion: 2,
+      modeVersion: 1,
       connection: { connectionEpoch: 2, state: "negotiating" },
     });
-    await expectConflict(complete(value, first.claimed.connection), "REALTIME_CONNECTION_CHANGED");
+    const beforePromotion = await transaction(value.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(tx, {
+        ...ownerProof(value),
+        connectionId: first.claimed.connection.id,
+        connectionEpoch: first.claimed.connection.connectionEpoch,
+      }),
+    );
+    expect(beforePromotion.outbound).toEqual([]);
     const active = await complete(value, rotated.connection, "v=0\r\na=answer:rotated\r\n");
     expect(active.connection).toMatchObject({ state: "active", connectionEpoch: 2 });
+    expect(active.mode).toMatchObject({ version: 2, connectionEpoch: 2 });
+    await expectConflict(
+      transaction(value.owner.workspaceId, (tx) =>
+        syncSessionRealtimeLedgerInTransaction(tx, {
+          ...ownerProof(value, active.mode.version),
+          connectionId: first.claimed.connection.id,
+          connectionEpoch: first.claimed.connection.connectionEpoch,
+        }),
+      ),
+      "REALTIME_CONNECTION_CHANGED",
+    );
     const rotatedReplay = await transaction(value.owner.workspaceId, (tx) =>
       claimSessionRealtimeConnectionInTransaction(tx, rotationInput),
     );
@@ -271,6 +299,51 @@ describe("session realtime ledger", () => {
       replay: true,
       modeVersion: 2,
       connection: { id: rotated.connection.id, state: "active" },
+    });
+  });
+
+  test("failed replacement negotiation preserves the active connection and mode epoch", async () => {
+    const value = await fixture();
+    const first = await claimInitial(value);
+    await complete(value, first.claimed.connection);
+    const rotated = await transaction(value.owner.workspaceId, (tx) =>
+      claimSessionRealtimeConnectionInTransaction(tx, {
+        ...ownerProof(value),
+        operationId: crypto.randomUUID(),
+        expectedConnectionEpoch: 1,
+        rotate: true,
+      }),
+    );
+    await transaction(value.owner.workspaceId, (tx) =>
+      failSessionRealtimeConnectionInTransaction(tx, {
+        workspaceId: value.owner.workspaceId,
+        sessionId: value.owner.sessionId,
+        realtimeId: value.started.mode.id,
+        connectionId: rotated.connection.id,
+        operationId: rotated.connection.operationId,
+        connectionEpoch: rotated.connection.connectionEpoch,
+        failureCode: "network_error",
+      }),
+    );
+    const stillActive = await transaction(value.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(tx, {
+        ...ownerProof(value),
+        connectionId: first.claimed.connection.id,
+        connectionEpoch: first.claimed.connection.connectionEpoch,
+      }),
+    );
+    expect(stillActive.outbound).toEqual([]);
+    const retried = await transaction(value.owner.workspaceId, (tx) =>
+      claimSessionRealtimeConnectionInTransaction(tx, {
+        ...ownerProof(value),
+        operationId: crypto.randomUUID(),
+        expectedConnectionEpoch: 1,
+        rotate: true,
+      }),
+    );
+    expect(retried).toMatchObject({
+      modeVersion: 1,
+      connection: { state: "negotiating", connectionEpoch: 3 },
     });
   });
 
@@ -301,14 +374,14 @@ describe("session realtime ledger", () => {
     );
     expect(rotated.connection.startupFenceSequence).toBe(outbound.entry.sequence);
     expect(rotated.startupEntries.map((entry) => entry.id)).toEqual([outbound.entry.id]);
-    await complete(value, rotated.connection);
+    const active = await complete(value, rotated.connection);
 
     const proof = {
       providerSessionId: "provider-session-startup-1",
       providerEventId: "provider-event-startup-1",
     };
     const syncInput = {
-      ...ownerProof(value, rotated.modeVersion),
+      ...ownerProof(value, active.mode.version),
       connectionId: rotated.connection.id,
       connectionEpoch: rotated.connection.connectionEpoch,
       providerStarted: proof,
@@ -445,10 +518,10 @@ describe("session realtime ledger", () => {
         rotate: true,
       }),
     );
-    await complete(value, rotated.connection, "v=0\r\na=answer:replay\r\n");
+    const active = await complete(value, rotated.connection, "v=0\r\na=answer:replay\r\n");
     const replayed = await transaction(value.owner.workspaceId, (tx) =>
       syncSessionRealtimeLedgerInTransaction(tx, {
-        ...ownerProof(value, rotated.modeVersion),
+        ...ownerProof(value, active.mode.version),
         connectionId: rotated.connection.id,
         connectionEpoch: 2,
       }),
@@ -456,7 +529,7 @@ describe("session realtime ledger", () => {
     expect(replayed.outbound.map((entry) => entry.id)).toContain(update!.id);
     const acknowledged = await transaction(value.owner.workspaceId, (tx) =>
       syncSessionRealtimeLedgerInTransaction(tx, {
-        ...ownerProof(value, rotated.modeVersion),
+        ...ownerProof(value, active.mode.version),
         connectionId: rotated.connection.id,
         connectionEpoch: 2,
         providerStarted: {
@@ -512,6 +585,26 @@ describe("session realtime ledger", () => {
     );
     expect(result.entry.sequence).toBeGreaterThan(call.accepted[0]!.entry.sequence);
 
+    const replacement = await transaction(value.owner.workspaceId, (tx) =>
+      claimSessionRealtimeConnectionInTransaction(tx, {
+        ...ownerProof(value),
+        operationId: crypto.randomUUID(),
+        expectedConnectionEpoch: first.claimed.connection.connectionEpoch,
+        rotate: true,
+      }),
+    );
+    await transaction(value.owner.workspaceId, (tx) =>
+      completeSessionRealtimeConnectionInTransaction(tx, {
+        workspaceId: value.owner.workspaceId,
+        sessionId: value.owner.sessionId,
+        realtimeId: value.started.mode.id,
+        connectionId: replacement.connection.id,
+        operationId: replacement.connection.operationId,
+        connectionEpoch: replacement.connection.connectionEpoch,
+        sdpAnswer: "v=0\r\na=answer:ready-at-stop\r\n",
+      }),
+    );
+
     await transaction(value.owner.workspaceId, (tx) =>
       endSessionRealtimeInTransaction(tx, {
         ...ownerProof(value),
@@ -525,7 +618,7 @@ describe("session realtime ledger", () => {
         .where(eq(schema.sessionRealtimeConnections.realtimeId, value.started.mode.id))
         .orderBy(asc(schema.sessionRealtimeConnections.connectionEpoch)),
     );
-    expect(rows).toEqual([{ state: "closed" }]);
+    expect(rows).toEqual([{ state: "closed" }, { state: "closed" }]);
   });
 
   test("atomically admits one idempotent ordinary turn on the same session without changing hierarchy", async () => {
@@ -849,11 +942,15 @@ describe("session realtime ledger", () => {
     expect(rotated.startupEntries).toEqual([
       expect.objectContaining({ id: terminal.id, sequence: terminal.sequence }),
     ]);
-    await complete(value, rotated.connection, "v=0\r\na=answer:terminal-rotation\r\n");
+    const active = await complete(
+      value,
+      rotated.connection,
+      "v=0\r\na=answer:terminal-rotation\r\n",
+    );
     await expectConflict(
       transaction(value.owner.workspaceId, (tx) =>
         syncSessionRealtimeLedgerInTransaction(tx, {
-          ...ownerProof(value, rotated.modeVersion),
+          ...ownerProof(value, active.mode.version),
           connectionId: first.claimed.connection.id,
           connectionEpoch: first.claimed.connection.connectionEpoch,
           clientAckThroughSequence: terminal.sequence,
@@ -862,7 +959,7 @@ describe("session realtime ledger", () => {
       ),
       "REALTIME_CONNECTION_CHANGED",
     );
-    const started = await proveProviderStarted(value, rotated.connection, rotated.modeVersion);
+    const started = await proveProviderStarted(value, rotated.connection, active.mode.version);
     expect(started.outbound.map((entry) => entry.id)).not.toContain(terminal.id);
     const [acknowledged] = await transaction(value.owner.workspaceId, (tx) =>
       tx

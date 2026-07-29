@@ -74,7 +74,8 @@ describe("0132/0133 session realtime ledger migrations", () => {
       order by tablename, indexname`;
     expect(indexes.map((row) => row.indexName)).toEqual([
       "session_realtime_connections_epoch_uq",
-      "session_realtime_connections_one_open_uq",
+      "session_realtime_connections_one_active_uq",
+      "session_realtime_connections_one_preparing_uq",
       "session_realtime_connections_operation_uq",
       "session_realtime_connections_pkey",
       "session_realtime_entries_delegation_call_uq",

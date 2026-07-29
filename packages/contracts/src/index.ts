@@ -4019,6 +4019,7 @@ export const CodexRealtimeWebrtcRequest = SessionRealtimeOwnerProof.extend({
   expectedVersion: z.number().int().positive(),
   expectedConnectionEpoch: z.number().int().positive(),
   rotate: z.boolean(),
+  browserActivation: z.literal("required").optional(),
   sdp: z
     .string()
     .min(1)
@@ -4045,6 +4046,16 @@ export const CodexRealtimeWebrtcResponse = z
   })
   .strict();
 export type CodexRealtimeWebrtcResponse = z.infer<typeof CodexRealtimeWebrtcResponse>;
+
+export const ActivateCodexRealtimeConnectionRequest = SessionRealtimeOwnerProof.extend({
+  operationId: z.string().uuid(),
+  connectionEpoch: z.number().int().positive(),
+  expectedVersion: z.number().int().positive(),
+  expectedConnectionEpoch: z.number().int().positive(),
+}).strict();
+export type ActivateCodexRealtimeConnectionRequest = z.infer<
+  typeof ActivateCodexRealtimeConnectionRequest
+>;
 
 export const SessionRealtimeLedgerDirection = z.enum(["provider_in", "provider_out"]);
 export type SessionRealtimeLedgerDirection = z.infer<typeof SessionRealtimeLedgerDirection>;

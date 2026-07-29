@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 import {
+  activateSessionRealtimeConnectionInTransaction,
   bootstrapWorkspace,
   claimSessionRealtimeConnectionInTransaction,
   completeSessionRealtimeConnectionInTransaction,
@@ -397,6 +398,7 @@ describe("session realtime lifecycle HTTP routes (real PostgreSQL)", () => {
       expectedVersion: started.mode.version,
       expectedConnectionEpoch: 1,
       rotate: false,
+      browserActivation: "required",
       sdp: "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n",
       version: "v3",
     };
@@ -434,6 +436,107 @@ describe("session realtime lifecycle HTTP routes (real PostgreSQL)", () => {
       replay: true,
     });
     expect(providerCalls).toBe(callsBefore + 1);
+
+    const activated = await app.request(
+      `${base}/${started.mode.id}/connections/${answer.connectionId}/activate`,
+      {
+        method: "POST",
+        headers: value.headers,
+        body: JSON.stringify({
+          browserInstanceId: proof.browserInstanceId,
+          ownerKey: proof.ownerKey,
+          operationId: request.operationId,
+          expectedVersion: started.mode.version,
+          expectedConnectionEpoch: 1,
+          connectionEpoch: answer.connectionEpoch,
+        }),
+      },
+    );
+    expect(activated.status).toBe(200);
+    expect(await activated.json()).toMatchObject({
+      mode: { version: started.mode.version, connectionEpoch: 1 },
+      replay: false,
+    });
+  });
+
+  test("keeps omission-compatible clients on immediate idempotent activation during rollout", async () => {
+    const value = await fixture();
+    const base = `http://x/v1/workspaces/${value.workspaceId}/sessions/${value.sessionId}/realtime`;
+    const proof = {
+      operationId: crypto.randomUUID(),
+      browserInstanceId: `browser-${crypto.randomUUID()}`,
+      ownerKey: `owner-key-${crypto.randomUUID()}-${crypto.randomUUID()}`,
+      model: "gpt-live-1-boulder-alpha",
+    };
+    const startedResponse = await app.request(base, {
+      method: "POST",
+      headers: value.headers,
+      body: JSON.stringify(proof),
+    });
+    const started = (await startedResponse.json()) as { mode: { id: string; version: number } };
+    const firstRequest = {
+      realtimeId: started.mode.id,
+      operationId: crypto.randomUUID(),
+      browserInstanceId: proof.browserInstanceId,
+      ownerKey: proof.ownerKey,
+      expectedVersion: started.mode.version,
+      expectedConnectionEpoch: 1,
+      rotate: false,
+      sdp: "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n",
+      version: "v3",
+    };
+    const callsBefore = providerCalls;
+    const initialResponse = await app.request(`${base}/webrtc`, {
+      method: "POST",
+      headers: value.headers,
+      body: JSON.stringify(firstRequest),
+    });
+    expect(initialResponse.status).toBe(200);
+    const initial = (await initialResponse.json()) as {
+      connectionEpoch: number;
+      modeVersion: number;
+    };
+    expect(initial).toMatchObject({ connectionEpoch: 1, modeVersion: started.mode.version });
+
+    const rotationRequest = {
+      ...firstRequest,
+      operationId: crypto.randomUUID(),
+      expectedVersion: initial.modeVersion,
+      expectedConnectionEpoch: initial.connectionEpoch,
+      rotate: true,
+    };
+    const rotatedResponse = await app.request(`${base}/webrtc`, {
+      method: "POST",
+      headers: value.headers,
+      body: JSON.stringify(rotationRequest),
+    });
+    expect(rotatedResponse.status).toBe(200);
+    const rotated = (await rotatedResponse.json()) as {
+      connectionId: string;
+      connectionEpoch: number;
+      modeVersion: number;
+      replay: boolean;
+    };
+    expect(rotated).toMatchObject({
+      connectionEpoch: 2,
+      modeVersion: initial.modeVersion + 1,
+      replay: false,
+    });
+    expect(providerCalls).toBe(callsBefore + 2);
+
+    const replay = await app.request(`${base}/webrtc`, {
+      method: "POST",
+      headers: value.headers,
+      body: JSON.stringify(rotationRequest),
+    });
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({
+      connectionId: rotated.connectionId,
+      connectionEpoch: rotated.connectionEpoch,
+      modeVersion: rotated.modeVersion,
+      replay: true,
+    });
+    expect(providerCalls).toBe(callsBefore + 2);
   });
 
   test("syncs finalized V3 ledger entries through the active epoch", async () => {
@@ -478,6 +581,23 @@ describe("session realtime lifecycle HTTP routes (real PostgreSQL)", () => {
           operationId: connectionOperationId,
           connectionEpoch: 1,
           sdpAnswer: "v=0\r\na=answer:api-test\r\n",
+        }),
+      ),
+    );
+    await withWorkspaceRls(client.db, value.workspaceId, (scopedDb) =>
+      scopedDb.transaction((tx) =>
+        activateSessionRealtimeConnectionInTransaction(tx as unknown as Database, {
+          workspaceId: value.workspaceId,
+          sessionId: value.sessionId,
+          realtimeId: started.mode.id,
+          connectionId: claimed.connection.id,
+          operationId: connectionOperationId,
+          ownerSubjectId: value.subjectId,
+          browserInstanceId: proof.browserInstanceId,
+          ownerKey: proof.ownerKey,
+          expectedVersion: started.mode.version,
+          expectedConnectionEpoch: 1,
+          connectionEpoch: 1,
         }),
       ),
     );

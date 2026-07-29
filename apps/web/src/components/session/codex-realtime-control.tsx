@@ -68,6 +68,11 @@ export function useSessionCodexRealtime(options: {
     realtimeId: null,
     mode: null,
     bridge: null,
+    microphone: "inactive",
+    audibleOutput: "inactive",
+    connectionGeneration: 0,
+    reconnectAttempt: 0,
+    diagnostic: null,
     error: null,
   }));
   const lifecycle = useMemo(
@@ -106,6 +111,18 @@ export function useSessionCodexRealtime(options: {
           realtimeId: null,
           mode: null,
           bridge: null,
+          microphone: "inactive",
+          audibleOutput: "inactive",
+          connectionGeneration: 0,
+          reconnectAttempt: 0,
+          diagnostic: {
+            kind: "negotiation_failure",
+            message:
+              error instanceof Error ? error.message : "Codex realtime controller failed to load",
+            recoverable: false,
+            connectionGeneration: 0,
+            attempt: 0,
+          },
           error:
             error instanceof Error ? error.message : "Codex realtime controller failed to load",
         });
@@ -129,6 +146,12 @@ export function useSessionCodexRealtime(options: {
   const stop = useCallback(async () => {
     await controllerRef.current?.stop();
   }, []);
+  const retry = useCallback(async () => {
+    await controllerRef.current?.retry();
+  }, []);
+  const retryAudibleOutput = useCallback(async () => {
+    await controllerRef.current?.retryAudibleOutput();
+  }, []);
   const canStart =
     controllerRef.current !== null &&
     ["idle", "error"].includes(snapshot.status) &&
@@ -148,6 +171,8 @@ export function useSessionCodexRealtime(options: {
     audioRef,
     start,
     stop,
+    retry,
+    retryAudibleOutput,
     policy: realtimeSessionSurfacePolicy(snapshot, lifecycleActive),
   };
 }
@@ -201,6 +226,8 @@ export function SessionCodexRealtimeControl(props: {
       audioRef={realtime.audioRef}
       onStart={start}
       onStop={realtime.stop}
+      onRetry={realtime.retry}
+      onRetryAudibleOutput={realtime.retryAudibleOutput}
     />
   );
 }
@@ -212,12 +239,23 @@ export function CodexRealtimeControl(props: {
   audioRef: RefObject<HTMLAudioElement | null>;
   onStart: () => Promise<void>;
   onStop: () => Promise<void>;
+  onRetry: () => Promise<void>;
+  onRetryAudibleOutput: () => Promise<void>;
 }) {
   const status = statusContent(props.snapshot, props.codexConnected);
   const modeOwned = props.snapshot.mode?.state === "active";
-  const showStop =
-    props.snapshot.status === "active" ||
-    (modeOwned && ["recovering", "stopping"].includes(props.snapshot.status));
+  const showStop = modeOwned && props.snapshot.status !== "lost_owner";
+  const showRetry =
+    modeOwned &&
+    props.snapshot.status !== "stopping" &&
+    props.snapshot.status !== "active" &&
+    props.snapshot.diagnostic?.recoverable === true;
+  const recoveryAction =
+    props.snapshot.audibleOutput === "blocked"
+      ? { label: "Resume audio", run: props.onRetryAudibleOutput }
+      : showRetry
+        ? { label: "Retry", run: props.onRetry }
+        : null;
   const starting = props.snapshot.status === "starting";
 
   return (
@@ -244,15 +282,26 @@ export function CodexRealtimeControl(props: {
           <p className="truncate text-xs text-fg-muted">{status.detail}</p>
         </div>
         {showStop ? (
-          <button
-            type="button"
-            className={`${controlButtonClass} bg-secondary text-secondary-foreground hover:bg-secondary/80`}
-            aria-label="Stop Codex realtime"
-            disabled={props.snapshot.status === "stopping"}
-            onClick={() => void props.onStop().catch(() => undefined)}
-          >
-            {props.snapshot.status === "stopping" ? "Stopping" : "Stop"}
-          </button>
+          <>
+            {recoveryAction ? (
+              <button
+                type="button"
+                className={`${controlButtonClass} bg-primary text-primary-foreground hover:bg-primary/90`}
+                onClick={() => void recoveryAction.run().catch(() => undefined)}
+              >
+                {recoveryAction.label}
+              </button>
+            ) : null}
+            <button
+              type="button"
+              className={`${controlButtonClass} bg-secondary text-secondary-foreground hover:bg-secondary/80`}
+              aria-label="Stop Codex realtime"
+              disabled={props.snapshot.status === "stopping"}
+              onClick={() => void props.onStop().catch(() => undefined)}
+            >
+              {props.snapshot.status === "stopping" ? "Stopping" : "Stop"}
+            </button>
+          </>
         ) : props.snapshot.status !== "lost_owner" ? (
           <button
             type="button"
@@ -278,6 +327,13 @@ function statusContent(
   snapshot: CodexRealtimeControllerSnapshot,
   codexConnected: boolean,
 ): { label: string; detail: string; busy: boolean } {
+  if (snapshot.audibleOutput === "blocked") {
+    return {
+      label: "Audio output blocked",
+      detail: "Use Resume audio to hear the existing realtime connection",
+      busy: false,
+    };
+  }
   switch (snapshot.status) {
     case "starting":
       return { label: "Starting realtime…", detail: "Connecting microphone and audio", busy: true };

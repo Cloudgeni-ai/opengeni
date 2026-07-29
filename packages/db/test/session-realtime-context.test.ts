@@ -6,6 +6,7 @@ import {
   addSessionSystemUpdate,
   applySessionTurnSettlement,
   beginSessionRealtimeInTransaction,
+  activateSessionRealtimeConnectionInTransaction,
   bootstrapWorkspace,
   claimSessionRealtimeConnectionInTransaction,
   claimSessionWorkForAttempt,
@@ -167,6 +168,22 @@ async function completedMode(
       now: new Date(baseMs + 2),
     }),
   );
+  await transaction(value.workspaceId, (tx) =>
+    activateSessionRealtimeConnectionInTransaction(tx, {
+      workspaceId: value.workspaceId,
+      sessionId: owner.sessionId,
+      realtimeId: started.mode.id,
+      ownerSubjectId: owner.ownerSubjectId,
+      browserInstanceId: owner.browserInstanceId,
+      ownerKey: owner.ownerKey,
+      expectedVersion: started.mode.version,
+      expectedConnectionEpoch: 1,
+      connectionId: firstClaim.connection.id,
+      operationId: firstClaim.connection.operationId,
+      connectionEpoch: 1,
+      now: new Date(baseMs + 2),
+    }),
+  );
   if ((options.firstEntries?.length ?? 0) > 0) {
     await transaction(value.workspaceId, (tx) =>
       syncSessionRealtimeLedgerInTransaction(tx, {
@@ -203,7 +220,6 @@ async function completedMode(
         now: new Date(baseMs + 4),
       }),
     );
-    finalVersion = rotated.modeVersion;
     finalConnection = rotated.connection;
     await transaction(value.workspaceId, (tx) =>
       completeSessionRealtimeConnectionInTransaction(tx, {
@@ -217,6 +233,23 @@ async function completedMode(
         now: new Date(baseMs + 5),
       }),
     );
+    const activated = await transaction(value.workspaceId, (tx) =>
+      activateSessionRealtimeConnectionInTransaction(tx, {
+        workspaceId: value.workspaceId,
+        sessionId: owner.sessionId,
+        realtimeId: started.mode.id,
+        ownerSubjectId: owner.ownerSubjectId,
+        browserInstanceId: owner.browserInstanceId,
+        ownerKey: owner.ownerKey,
+        expectedVersion: started.mode.version,
+        expectedConnectionEpoch: 1,
+        connectionId: rotated.connection.id,
+        operationId: rotated.connection.operationId,
+        connectionEpoch: rotated.connection.connectionEpoch,
+        now: new Date(baseMs + 5),
+      }),
+    );
+    finalVersion = activated.mode.version;
     if (options.rotatedEntries.length > 0) {
       await transaction(value.workspaceId, (tx) =>
         syncSessionRealtimeLedgerInTransaction(tx, {
@@ -593,6 +626,21 @@ describe("session realtime context projection", () => {
         operationId: connection.connection.operationId,
         connectionEpoch: 1,
         sdpAnswer: "v=0\r\na=answer:delegation\r\n",
+      }),
+    );
+    await transaction(value.workspaceId, (tx) =>
+      activateSessionRealtimeConnectionInTransaction(tx, {
+        workspaceId: value.workspaceId,
+        sessionId: value.session.id,
+        realtimeId: started.mode.id,
+        ownerSubjectId: owner.ownerSubjectId,
+        browserInstanceId: owner.browserInstanceId,
+        ownerKey: owner.ownerKey,
+        expectedVersion: started.mode.version,
+        expectedConnectionEpoch: 1,
+        connectionId: connection.connection.id,
+        operationId: connection.connection.operationId,
+        connectionEpoch: 1,
       }),
     );
     await transaction(value.workspaceId, (tx) =>

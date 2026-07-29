@@ -1,5 +1,6 @@
 import {
   AcknowledgeStreamRequest,
+  ActivateCodexRealtimeConnectionRequest,
   AttachViewerRequest,
   BeginSessionRealtimeRequest,
   ClearSessionContextRequest,
@@ -104,6 +105,7 @@ import {
   updatePtySessionActivity,
   QueueCommandConflictError,
   beginSessionRealtimeInTransaction,
+  activateSessionRealtimeConnectionInTransaction,
   claimSessionRealtimeConnectionInTransaction,
   completeSessionRealtimeConnectionInTransaction,
   endSessionRealtimeInTransaction,
@@ -688,6 +690,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         expectedVersion,
         expectedConnectionEpoch,
         rotate,
+        browserActivation,
         ...providerRequest
       } = parsed.data;
       const claim = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
@@ -707,12 +710,35 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         ),
       );
       if (claim.replay) {
-        if (claim.connection.state !== "active" || !claim.connection.sdpAnswer) {
+        if (
+          (claim.connection.state !== "ready" && claim.connection.state !== "active") ||
+          !claim.connection.sdpAnswer
+        ) {
           throw new SessionRealtimeConflictError(
             "REALTIME_CONNECTION_STATE_CHANGED",
             "Realtime connection operation cannot be replayed; rotate with a new operation",
           );
         }
+        const legacyActivation =
+          browserActivation !== "required" && claim.connection.state === "ready"
+            ? await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+                scopedDb.transaction(async (tx) =>
+                  activateSessionRealtimeConnectionInTransaction(tx as unknown as Database, {
+                    workspaceId,
+                    sessionId,
+                    realtimeId,
+                    connectionId: claim.connection.id,
+                    operationId,
+                    ownerSubjectId: grant.subjectId,
+                    browserInstanceId,
+                    ownerKey,
+                    expectedVersion,
+                    expectedConnectionEpoch,
+                    connectionEpoch: claim.connection.connectionEpoch,
+                  }),
+                ),
+              )
+            : null;
         return c.json({
           sdp: claim.connection.sdpAnswer,
           version: "v3" as const,
@@ -720,7 +746,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           connectionId: claim.connection.id,
           connectionEpoch: claim.connection.connectionEpoch,
           startupFenceSequence: claim.connection.startupFenceSequence,
-          modeVersion: claim.modeVersion,
+          modeVersion: legacyActivation?.mode.version ?? claim.modeVersion,
           replay: true,
         });
       }
@@ -747,12 +773,32 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             }),
           ),
         );
+        const legacyActivation =
+          browserActivation !== "required"
+            ? await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+                scopedDb.transaction(async (tx) =>
+                  activateSessionRealtimeConnectionInTransaction(tx as unknown as Database, {
+                    workspaceId,
+                    sessionId,
+                    realtimeId,
+                    connectionId: completed.connection.id,
+                    operationId,
+                    ownerSubjectId: grant.subjectId,
+                    browserInstanceId,
+                    ownerKey,
+                    expectedVersion,
+                    expectedConnectionEpoch,
+                    connectionEpoch: completed.connection.connectionEpoch,
+                  }),
+                ),
+              )
+            : null;
         return c.json({
           ...answer,
           connectionId: completed.connection.id,
           connectionEpoch: completed.connection.connectionEpoch,
           startupFenceSequence: completed.connection.startupFenceSequence,
-          modeVersion: claim.modeVersion,
+          modeVersion: legacyActivation?.mode.version ?? claim.modeVersion,
           replay: false,
         });
       } catch (error) {
@@ -796,6 +842,48 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       );
     }
   });
+
+  app.post(
+    "/v1/workspaces/:workspaceId/sessions/:sessionId/realtime/:realtimeId/connections/:connectionId/activate",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const sessionId = c.req.param("sessionId");
+      const realtimeId = c.req.param("realtimeId");
+      const connectionId = c.req.param("connectionId");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+      if (
+        !z.string().uuid().safeParse(sessionId).success ||
+        !z.string().uuid().safeParse(realtimeId).success ||
+        !z.string().uuid().safeParse(connectionId).success
+      ) {
+        throw new HTTPException(400, { message: "invalid realtime connection id" });
+      }
+      const parsed = ActivateCodexRealtimeConnectionRequest.safeParse(
+        await c.req.json().catch(() => null),
+      );
+      if (!parsed.success) {
+        throw new HTTPException(422, { message: "invalid realtime connection activation" });
+      }
+      try {
+        const result = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+          scopedDb.transaction(async (tx) =>
+            activateSessionRealtimeConnectionInTransaction(tx as unknown as Database, {
+              workspaceId,
+              sessionId,
+              realtimeId,
+              connectionId,
+              ownerSubjectId: grant.subjectId,
+              ...parsed.data,
+            }),
+          ),
+        );
+        c.header("cache-control", "private, no-store");
+        return c.json({ mode: result.mode, replay: result.replay });
+      } catch (error) {
+        throw sessionRealtimeHttpError(error);
+      }
+    },
+  );
 
   app.post(
     "/v1/workspaces/:workspaceId/sessions/:sessionId/realtime/:realtimeId/sync",
