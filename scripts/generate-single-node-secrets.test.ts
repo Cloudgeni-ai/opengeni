@@ -31,6 +31,9 @@ describe("single-node secret bootstrap", () => {
       ]);
 
       expect(runtime.OPENGENI_DATABASE_URL).toContain("postgres://opengeni_app:");
+      expect(
+        Buffer.from(runtime.OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY ?? "", "base64"),
+      ).toHaveLength(32);
       expect(migrations.OPENGENI_MIGRATIONS_DATABASE_URL).toContain("postgres://opengeni:");
       expect(migrations.OPENGENI_MIGRATIONS_DATABASE_URL).toContain(
         encodeURIComponent(postgres.POSTGRES_PASSWORD ?? ""),

@@ -115,7 +115,7 @@ Create the four Secrets before installation:
 - `opengeni-postgres`: the Postgres owner `POSTGRES_PASSWORD`;
 - `opengeni-minio`: `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD`;
 - `opengeni-runtime`: the restricted `opengeni_app`
-  `OPENGENI_DATABASE_URL`, object-storage credentials, model-provider
+  `OPENGENI_DATABASE_URL`, the environments encryption key, object-storage
   credentials, and Connected Machine signing/NATS/relay secrets;
 - `opengeni-migrations`: the owner
   `OPENGENI_MIGRATIONS_DATABASE_URL`,
@@ -138,19 +138,21 @@ kubectl -n opengeni create secret generic opengeni-postgres \
 kubectl -n opengeni create secret generic opengeni-minio \
   --from-env-file=.agent/generated/single-node/secrets/minio.env
 
-test -n "$OPENGENI_OPENAI_API_KEY"
 kubectl -n opengeni create secret generic opengeni-runtime \
-  --from-env-file=.agent/generated/single-node/secrets/runtime.env \
-  --from-literal=OPENGENI_OPENAI_API_KEY="$OPENGENI_OPENAI_API_KEY"
+  --from-env-file=.agent/generated/single-node/secrets/runtime.env
 
 kubectl -n opengeni create secret generic opengeni-migrations \
   --from-env-file=.agent/generated/single-node/secrets/migrations.env
 ```
 
-Use the corresponding model-provider keys instead of
-`OPENGENI_OPENAI_API_KEY` when the deployment selects another configured
-provider. Keep the generated directory as a private recovery artifact or move
-the values into a secret manager; never commit it.
+This bootstrap does not require a model-provider API key. A workspace admin can
+connect a ChatGPT/Codex subscription from workspace settings after the
+application starts. If the deployment instead uses API-billed models, add the
+selected provider's credential to `opengeni-runtime` separately. Keep the
+generated directory as a private recovery artifact or move the values into a
+secret manager; never commit it. The generated environments encryption key must
+remain stable across upgrades because it protects persisted subscription and
+workspace credentials.
 
 Bootstrap a new machine in two phases. First install only the persistent
 dependencies and wait until they are healthy:
