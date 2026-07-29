@@ -754,6 +754,9 @@ export const SESSION_EVENT_TYPES = [
   "goal.continuation",
   "system.update.pending",
   "system.update.delivered",
+  "system.update.superseded",
+  "system.update.cancelled",
+  "system.update.settled",
   "session.control.paused",
   "session.control.resumed",
   "session.control.steer_requested",
@@ -2365,7 +2368,19 @@ export type SessionQueueSnapshot = {
   /** The latest interrupted attempt has not yet durably proved physical quiescence. */
   stoppingPreviousAttempt: boolean;
   items: SessionTurn[];
+  /** Canonical pending machine inputs. Events only invalidate this snapshot. */
+  pendingInputs: SessionPendingInputPreview[];
+  /** Exact next bounded input batch that will join an already-waiting prompt. */
+  pendingInputAttachment: {
+    turnId: string;
+    inputIds: string[];
+  } | null;
 };
+
+export type SessionPendingInputPreview = Pick<
+  SessionSystemUpdate,
+  "id" | "sessionId" | "kind" | "classification" | "sourceId" | "summary" | "createdAt"
+>;
 
 export type SystemUpdateClassification = "success" | "failure" | "action_required" | "info";
 
@@ -2378,7 +2393,6 @@ export type SessionSystemUpdateKind =
 
 export type SessionSystemUpdateState =
   | "pending"
-  | "deferred"
   | "delivered"
   | "cancelled"
   | "superseded"
@@ -2396,6 +2410,7 @@ export type SessionSystemUpdate = {
   lineage: Record<string, unknown>;
   state: SessionSystemUpdateState;
   deliveredTurnId: string | null;
+  deliveredHistoryItemId: string | null;
   deliveredAt: string | null;
   createdAt: string;
 };

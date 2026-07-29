@@ -89,6 +89,8 @@ function queueSnapshot(
     },
     stoppingPreviousAttempt: false,
     items,
+    pendingInputs: [],
+    pendingInputAttachment: null,
     ...overrides,
   };
 }

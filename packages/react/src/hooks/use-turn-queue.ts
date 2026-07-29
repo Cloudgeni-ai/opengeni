@@ -4,6 +4,7 @@ import type {
   SessionEvent,
   SessionQueueMutationResponse,
   SessionQueueSnapshot,
+  SessionPendingInputPreview,
   SessionTurn,
 } from "@opengeni/sdk";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -20,6 +21,7 @@ export function isTurnQueueEvent(event: Pick<SessionEvent, "type">): boolean {
     event.type.startsWith("turn.") ||
     event.type.startsWith("session.queue.") ||
     event.type.startsWith("session.control.") ||
+    event.type.startsWith("system.update.") ||
     event.type.startsWith("workspace.inference.")
   );
 }
@@ -47,6 +49,10 @@ export type UseTurnQueueResult = {
   snapshot: SessionQueueSnapshot | null;
   /** Human/API prompts exactly in server execution order. Never client-sorted. */
   queue: SessionTurn[];
+  /** Canonical pending machine inputs. Events only trigger an authoritative refresh. */
+  pendingInputs: SessionPendingInputPreview[];
+  /** Exact pending members projected to join an already-waiting prompt. */
+  pendingInputAttachment: SessionQueueSnapshot["pendingInputAttachment"];
   effectiveControl: EffectiveSessionControl | null;
   /** The latest interrupted attempt has not yet durably proved physical quiescence. */
   stoppingPreviousAttempt: boolean;
@@ -324,6 +330,8 @@ export function useTurnQueue(
   return {
     snapshot: visibleSnapshot,
     queue: visibleSnapshot?.items ?? [],
+    pendingInputs: visibleSnapshot?.pendingInputs ?? [],
+    pendingInputAttachment: visibleSnapshot?.pendingInputAttachment ?? null,
     effectiveControl: visibleSnapshot?.effectiveControl ?? null,
     stoppingPreviousAttempt: visibleSnapshot?.stoppingPreviousAttempt ?? false,
     loading: identityMatches ? loading : enabled,

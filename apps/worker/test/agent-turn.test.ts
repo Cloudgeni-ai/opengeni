@@ -680,6 +680,34 @@ describe("conversation-truth reconcile (orphaned tool output guard)", () => {
     expect(result.rows.map((row) => row.position)).toEqual([1, 2]);
     expect(result.nextPosition).toBe(3);
   });
+
+  test("keeps a pre-persisted machine batch while excluding attempt-local system notices", () => {
+    const durableMachineBatch = {
+      type: "message",
+      role: "system",
+      content: [{ type: "input_text", text: "Durable machine input batch" }],
+    };
+    const attemptLocalNotice = {
+      type: "message",
+      role: "system",
+      content: [{ type: "input_text", text: "Recovery diagnostic for this attempt only" }],
+    };
+    const assistant = {
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: "Handled the durable input." }],
+    };
+
+    const result = historyRowsToAppend(
+      [durableMachineBatch, attemptLocalNotice, assistant],
+      /* persistedHistoryCount */ 1,
+      /* nextPosition */ 1,
+    );
+
+    expect(result.rows).toEqual([{ position: 1, item: assistant }]);
+    expect(result.nextWatermark).toBe(3);
+    expect(result.nextPosition).toBe(2);
+  });
 });
 
 describe("reconcile seed watermark (issue-61 skew: raw vs sanitized active count)", () => {

@@ -321,6 +321,7 @@ export type {
   SessionCommandReceipt,
   SteerSessionQueueItemRequest,
   WorkspaceInferenceControlResponse,
+  SessionPendingInputPreview,
   SessionSystemUpdate,
   SessionSystemUpdateKind,
   SessionSystemUpdateState,

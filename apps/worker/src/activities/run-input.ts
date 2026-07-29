@@ -1,4 +1,4 @@
-import type { FileAsset, ResourceRef, SessionSystemUpdate } from "@opengeni/contracts";
+import type { FileAsset, ResourceRef } from "@opengeni/contracts";
 import { createHash } from "node:crypto";
 import {
   getActiveSessionHistoryItems,
@@ -313,7 +313,14 @@ export async function turnInput(
     trigger.sessionId,
     options.turnId,
   );
-  const updateContext = systemUpdateContext(updates);
+  if (updates.length > 0) {
+    const historyItemIds = new Set(
+      updates.map((update) => update.deliveredHistoryItemId).filter(Boolean),
+    );
+    if (historyItemIds.size !== 1 || updates.some((update) => !update.deliveredHistoryItemId)) {
+      throw new Error("Delivered internal updates have no single durable model-memory batch");
+    }
+  }
   const internalContext = joinInternalContext(
     options.recovering
       ? [
@@ -321,7 +328,6 @@ export async function turnInput(
           "Continue the same inference from durable conversation and sandbox state. A previous execution stopped before it could finish. Do not repeat completed side effects; inspect actual state when uncertain.",
         ].join("\n")
       : undefined,
-    updateContext,
     options.unavailableSandboxFilesNote,
     options.runCredentialsNote,
   );
@@ -355,7 +361,9 @@ export async function turnInput(
     );
   }
   if (trigger.type === "system.update.delivered") {
-    if (!internalContext) throw new Error("Internal update inference has no delivered updates");
+    if (updates.length === 0) {
+      throw new Error("Internal update inference has no delivered updates");
+    }
     return await messageInput(db, runtime, agent, trigger, undefined, internalContext, current);
   }
   if (trigger.type === "user.approvalDecision") {
@@ -416,26 +424,7 @@ function joinInternalContext(...parts: Array<string | undefined>): string | unde
   return content.length > 0 ? content.join("\n\n") : undefined;
 }
 
-function systemUpdateContext(updates: SessionSystemUpdate[]): string | undefined {
-  if (updates.length === 0) return undefined;
-  return [
-    "[OpenGeni internal updates]",
-    "These platform updates were delivered together for this inference. They are not human prompts.",
-    JSON.stringify({
-      updates: updates.map((update) => ({
-        id: update.id,
-        kind: update.kind,
-        classification: update.classification,
-        sourceId: update.sourceId,
-        summary: update.summary,
-        payload: update.payload,
-        lineage: update.lineage,
-      })),
-    }),
-  ].join("\n");
-}
-
-/** Build one inference from canonical history plus optional ephemeral system context. */
+/** Build one inference from canonical history plus attempt-local operational context. */
 async function messageInput(
   db: Database,
   runtime: OpenGeniRuntime,

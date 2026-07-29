@@ -20,6 +20,20 @@ export type UserMessageItem = {
   occurredAt: string;
 };
 
+export type MachineInputBatchItem = {
+  kind: "machine-input-batch";
+  id: string;
+  turnId: string | null;
+  inputs: Array<{
+    id: string;
+    kind: string;
+    classification: string;
+    sourceId: string;
+    summary: string;
+  }>;
+  occurredAt: string;
+};
+
 export type AgentMessageItem = {
   kind: "agent-message";
   id: string;
@@ -269,6 +283,7 @@ export type TurnEndItem = {
 
 export type TimelineItem =
   | UserMessageItem
+  | MachineInputBatchItem
   | AgentMessageItem
   | ReasoningItem
   | ToolCallItem

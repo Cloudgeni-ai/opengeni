@@ -25,7 +25,11 @@ import {
   DEFAULT_AGENT_INSTRUCTIONS,
   getSettings,
 } from "@opengeni/config";
-import { CLEARED_RUN_STATE_BLOB, verifyDelegatedAccessToken } from "@opengeni/contracts";
+import {
+  CLEARED_RUN_STATE_BLOB,
+  sessionSystemUpdateBatchHistoryItem,
+  verifyDelegatedAccessToken,
+} from "@opengeni/contracts";
 import {
   applyMissingManifestEntries,
   pinProvidedSessionManifestEnvironment,
@@ -1330,6 +1334,49 @@ describe("runtime event normalization", () => {
       },
     );
     expect(prepared.input).toEqual(historyItems);
+  });
+
+  test("keeps a durable machine-input batch as an exact prefix on later model requests", async () => {
+    const batch = sessionSystemUpdateBatchHistoryItem([
+      {
+        id: "11111111-1111-4111-8111-111111111111",
+        kind: "agent_message",
+        classification: "info",
+        sourceId: "verification-agent",
+        summary: "Keep this direction across tool calls.",
+        payload: {
+          type: "agent_message",
+          text: "Keep this direction across tool calls.",
+          operationId: "22222222-2222-4222-8222-222222222222",
+        },
+        lineage: { callerSessionId: "verification-agent" },
+      },
+    ]);
+    const firstHistory = [
+      { type: "message", role: "user", content: "Original request" },
+      batch,
+    ] as any;
+    const first = await prepareRunInput(
+      buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []),
+      { kind: "message", historyItems: firstHistory },
+    );
+    const secondHistory = [
+      ...firstHistory,
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "Working." }] },
+      { type: "function_call", callId: "call-1", name: "inspect", arguments: "{}" },
+      { type: "function_call_result", callId: "call-1", output: "done" },
+    ] as any;
+    const second = await prepareRunInput(
+      buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []),
+      { kind: "message", historyItems: secondHistory },
+    );
+
+    expect(Array.isArray(first.input)).toBe(true);
+    expect(Array.isArray(second.input)).toBe(true);
+    expect((second.input as unknown[]).slice(0, (first.input as unknown[]).length)).toEqual(
+      first.input,
+    );
+    expect(JSON.stringify(second.input)).toContain("Keep this direction across tool calls.");
   });
 
   test("delivers platform recovery context as ephemeral system input", async () => {

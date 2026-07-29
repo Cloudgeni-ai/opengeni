@@ -71,6 +71,8 @@ function queue(overrides: Partial<UseTurnQueueResult> = {}): UseTurnQueueResult 
   return {
     snapshot: null,
     queue: items,
+    pendingInputs: [],
+    pendingInputAttachment: null,
     effectiveControl: null,
     stoppingPreviousAttempt: false,
     loading: false,
@@ -86,6 +88,18 @@ function queue(overrides: Partial<UseTurnQueueResult> = {}): UseTurnQueueResult 
     mutationError: null,
     clearMutationError: () => {},
     ...overrides,
+  };
+}
+
+function pendingAgentInput(): UseTurnQueueResult["pendingInputs"][number] {
+  return {
+    id: "33333333-3333-4333-8333-333333333333",
+    sessionId: "44444444-4444-4444-8444-444444444444",
+    kind: "agent_message",
+    classification: "info",
+    sourceId: "55555555-5555-4555-8555-555555555555",
+    summary: "The verification worker found a cache discontinuity.",
+    createdAt: new Date().toISOString(),
   };
 }
 
@@ -350,6 +364,56 @@ describe("QueueSurface", () => {
       "delete:11111111-1111-4111-8111-111111111111",
     ]);
     expect(mounted.container.textContent).toContain("Queued prompt deleted.");
+  });
+
+  test("renders canonical pending machine inputs in the sole queue surface", async () => {
+    mounted = await renderComponent(
+      <QueueSurface
+        queue={queue({
+          queue: [],
+          pendingInputs: [pendingAgentInput()],
+        })}
+        composer={composer()}
+      />,
+    );
+    await flush();
+    expect(mounted.container.textContent).toContain("1 incoming update");
+    const toggle = mounted.container.querySelector<HTMLButtonElement>("button[aria-expanded]");
+    toggle?.click();
+    await flush();
+    expect(
+      mounted.container.querySelector('[data-testid="pending-machine-inputs"]'),
+    ).not.toBeNull();
+    expect(mounted.container.textContent).toContain(
+      "The verification worker found a cache discontinuity.",
+    );
+  });
+
+  test("attaches only server-projected machine inputs to their receiving prompt", async () => {
+    const input = pendingAgentInput();
+    mounted = await renderLoadedQueueSurface(
+      <QueueSurface
+        queue={queue({
+          pendingInputs: [input],
+          pendingInputAttachment: {
+            turnId: "22222222-2222-4222-8222-222222222222",
+            inputIds: [input.id],
+          },
+        })}
+        composer={composer()}
+      />,
+    );
+
+    await click(mounted.container.querySelector('button[aria-expanded="false"]'));
+    const first = mounted.container.querySelector(
+      '[data-queue-turn-id="11111111-1111-4111-8111-111111111111"]',
+    );
+    const second = mounted.container.querySelector(
+      '[data-queue-turn-id="22222222-2222-4222-8222-222222222222"]',
+    );
+    expect(first?.querySelector('[data-testid="pending-machine-inputs"]')).toBeNull();
+    expect(second?.querySelector('[data-testid="pending-machine-inputs"]')).not.toBeNull();
+    expect(second?.textContent).toContain("1 update will join this prompt");
   });
 
   test("renders the same authoritative queue without mutation affordances for read-only consumers", async () => {

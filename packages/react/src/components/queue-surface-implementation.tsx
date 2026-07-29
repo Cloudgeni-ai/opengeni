@@ -16,7 +16,7 @@ import {
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import type { SessionTurn } from "@opengeni/sdk";
+import type { SessionPendingInputPreview, SessionTurn } from "@opengeni/sdk";
 import {
   ArrowDownToLineIcon,
   ArrowUpToLineIcon,
@@ -43,7 +43,7 @@ import type { QueueMutationKind, UseTurnQueueResult } from "../hooks/use-turn-qu
 import { requestQueueDraftEdit } from "./queue-draft-policy";
 import { QueueErrorAlert, QueueStoppingStatus } from "./queue-surface-state";
 
-/** The sole human prompt queue: compact above Goal, Agents, and composer. */
+/** The sole pending-input surface: compact above Goal, Agents, and composer. */
 type QueueSurfaceCommonProps = {
   /** Focus the composer owned by this queue after checkout/removal. */
   onRequestComposerFocus?: (() => void) | undefined;
@@ -85,10 +85,28 @@ export function QueueSurface({
     projectedIndex: number;
   } | null>(null);
   const count = queue.queue.length;
+  const pendingInputCount = queue.pendingInputs.length;
+  const totalCount = count + pendingInputCount;
+  const attachedInputIds = useMemo(
+    () => new Set(queue.pendingInputAttachment?.inputIds ?? []),
+    [queue.pendingInputAttachment],
+  );
+  const attachedInputs = useMemo(
+    () => queue.pendingInputs.filter((input) => attachedInputIds.has(input.id)),
+    [attachedInputIds, queue.pendingInputs],
+  );
+  const standaloneInputs = useMemo(
+    () => queue.pendingInputs.filter((input) => !attachedInputIds.has(input.id)),
+    [attachedInputIds, queue.pendingInputs],
+  );
   const canEditInComposer = queueComposerCheckoutEnabled(composer, readOnly);
   const collapsedPreview = useMemo(
-    () => queuePromptPreview(queue.queue[0]?.prompt ?? "", QUEUE_COLLAPSED_PREVIEW_CHARACTERS),
-    [queue.queue],
+    () =>
+      queuePromptPreview(
+        queue.queue[0]?.prompt ?? queue.pendingInputs[0]?.summary ?? "",
+        QUEUE_COLLAPSED_PREVIEW_CHARACTERS,
+      ),
+    [queue.pendingInputs, queue.queue],
   );
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
 
@@ -227,7 +245,7 @@ export function QueueSurface({
     [canEditInComposer, composer, edit],
   );
 
-  if (count === 0 && !queue.stoppingPreviousAttempt && !queue.error && !queue.mutationError)
+  if (totalCount === 0 && !queue.stoppingPreviousAttempt && !queue.error && !queue.mutationError)
     return null;
 
   return (
@@ -242,23 +260,31 @@ export function QueueSurface({
           type="button"
           className="flex w-full min-w-0 flex-wrap items-center gap-2 px-3 py-2 text-left outline-none transition-colors hover:bg-surface-2/60 focus-visible:bg-surface-2/60 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/40 pointer-coarse:min-h-[44px]"
           onClick={() => setOpen((value) => !value)}
-          aria-description={!open && count > 0 ? collapsedPreview.summary : undefined}
+          aria-description={!open && totalCount > 0 ? collapsedPreview.summary : undefined}
           aria-expanded={open}
-          aria-label={`${count} queued prompt${count === 1 ? "" : "s"}${readOnly ? " Read-only" : ""}`}
+          aria-label={`${count} queued prompt${count === 1 ? "" : "s"}${
+            pendingInputCount > 0
+              ? ` and ${pendingInputCount} pending machine input${pendingInputCount === 1 ? "" : "s"}`
+              : ""
+          }${readOnly ? " Read-only" : ""}`}
         >
           <ChevronDownIcon
             aria-hidden="true"
             className={`size-3.5 shrink-0 text-fg-subtle transition-transform ${open ? "rotate-180" : ""}`}
           />
           <span className="text-xs font-medium text-fg">
-            {count} queued prompt{count === 1 ? "" : "s"}
+            {count > 0 ? `${count} queued prompt${count === 1 ? "" : "s"}` : null}
+            {count > 0 && pendingInputCount > 0 ? " · " : null}
+            {pendingInputCount > 0
+              ? `${pendingInputCount} incoming update${pendingInputCount === 1 ? "" : "s"}`
+              : null}
           </span>
           {readOnly ? (
             <span className="shrink-0 rounded border border-border px-1.5 py-0.5 text-2xs text-fg-subtle">
               Read-only
             </span>
           ) : null}
-          {!open && count > 0 ? (
+          {!open && totalCount > 0 ? (
             <span
               aria-hidden="true"
               className={`max-w-full truncate text-fg-muted ${
@@ -275,6 +301,10 @@ export function QueueSurface({
           {queue.loading ? <Loader2Icon className="ml-auto size-3.5 animate-spin" /> : null}
         </button>
 
+        {open && standaloneInputs.length > 0 ? (
+          <PendingMachineInputs inputs={standaloneInputs} />
+        ) : null}
+
         {open && count > 0 && readOnly ? (
           <ol
             className="max-h-[min(30rem,60dvh)] divide-y divide-border overflow-y-auto overscroll-contain border-t border-border"
@@ -286,6 +316,9 @@ export function QueueSurface({
                 key={turn.id}
                 turn={turn}
                 index={index}
+                attachedInputs={
+                  turn.id === queue.pendingInputAttachment?.turnId ? attachedInputs : []
+                }
                 onDisclosureChange={(expanded) =>
                   setAnnouncement(
                     `Full content for queued prompt ${index + 1} ${expanded ? "shown" : "hidden"}.`,
@@ -320,6 +353,9 @@ export function QueueSurface({
                     turn={turn}
                     index={index}
                     count={count}
+                    attachedInputs={
+                      turn.id === queue.pendingInputAttachment?.turnId ? attachedInputs : []
+                    }
                     pending={queue.mutationFor(turn.id)}
                     confirmingReplace={replaceDraftFor === turn.id}
                     keyboardDragging={keyboardDrag?.turnId === turn.id}
@@ -394,6 +430,91 @@ export function QueueSurface({
       </p>
     </div>
   );
+}
+
+function PendingMachineInputs({
+  inputs,
+  attached = false,
+}: {
+  inputs: SessionPendingInputPreview[];
+  attached?: boolean;
+}) {
+  return (
+    <section
+      className={`${attached ? "mt-2 rounded-md border border-border bg-surface-2/30" : "border-t border-border bg-surface-2/30"}`}
+      aria-label={
+        attached ? "Machine inputs attached to this queued prompt" : "Pending machine inputs"
+      }
+      data-testid="pending-machine-inputs"
+    >
+      <div className="px-3 py-1.5 text-[10px] font-medium uppercase tracking-wide text-fg-subtle">
+        {attached
+          ? `${inputs.length} update${inputs.length === 1 ? "" : "s"} will join this prompt`
+          : "Incoming updates waiting to run"}
+      </div>
+      <ol className="divide-y divide-border">
+        {inputs.map((input) => {
+          const preview = queuePromptPreview(input.summary, QUEUE_ROW_PREVIEW_CHARACTERS);
+          return (
+            <li key={input.id} className="flex min-w-0 gap-2 px-3 py-2">
+              <span
+                className="mt-0.5 shrink-0 rounded border border-border bg-surface px-1.5 py-0.5 text-[10px] font-medium text-fg-muted"
+                title={machineInputKindLabel(input.kind)}
+              >
+                {machineInputKindBadge(input.kind)}
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="flex min-w-0 items-center gap-1.5 text-[10px] text-fg-subtle">
+                  <span>{machineInputKindLabel(input.kind)}</span>
+                  <span aria-hidden="true">·</span>
+                  <span className="truncate" title={input.sourceId}>
+                    {input.sourceId}
+                  </span>
+                </div>
+                <p
+                  className="mt-0.5 line-clamp-3 break-words whitespace-pre-wrap text-xs leading-5 text-fg"
+                  dir="auto"
+                  title={preview.summary}
+                >
+                  {preview.summary}
+                </p>
+              </div>
+            </li>
+          );
+        })}
+      </ol>
+    </section>
+  );
+}
+
+function machineInputKindBadge(kind: SessionPendingInputPreview["kind"]): string {
+  switch (kind) {
+    case "agent_message":
+      return "Agent";
+    case "agent_steer_instruction":
+      return "Steer";
+    case "child_terminal_result":
+      return "Child";
+    case "scheduled_occurrence":
+      return "Schedule";
+    case "goal_continuation":
+      return "Goal";
+  }
+}
+
+function machineInputKindLabel(kind: SessionPendingInputPreview["kind"]): string {
+  switch (kind) {
+    case "agent_message":
+      return "Agent message";
+    case "agent_steer_instruction":
+      return "Agent steer";
+    case "child_terminal_result":
+      return "Child result";
+    case "scheduled_occurrence":
+      return "Scheduled update";
+    case "goal_continuation":
+      return "Goal continuation";
+  }
 }
 
 const QUEUE_ROW_PREVIEW_CHARACTERS = 360;
@@ -769,10 +890,12 @@ function QueuePrompt({
 function ReadOnlyQueueRow({
   turn,
   index,
+  attachedInputs,
   onDisclosureChange,
 }: {
   turn: SessionTurn;
   index: number;
+  attachedInputs: SessionPendingInputPreview[];
   onDisclosureChange: (expanded: boolean) => void;
 }) {
   return (
@@ -780,6 +903,9 @@ function ReadOnlyQueueRow({
       <span className="mt-1 shrink-0 font-mono text-2xs text-fg-subtle">{index + 1}</span>
       <div className="min-w-0 flex-1">
         <QueuePrompt prompt={turn.prompt} index={index} onDisclosureChange={onDisclosureChange} />
+        {attachedInputs.length > 0 ? (
+          <PendingMachineInputs inputs={attachedInputs} attached />
+        ) : null}
         <div className="mt-1 flex min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap text-2xs text-fg-subtle">
           {turn.resources.length > 0 ? (
             <span className="shrink-0">
@@ -803,6 +929,7 @@ function SortableQueueRow({
   turn,
   index,
   count,
+  attachedInputs,
   pending,
   confirmingReplace,
   keyboardDragging,
@@ -818,6 +945,7 @@ function SortableQueueRow({
   turn: SessionTurn;
   index: number;
   count: number;
+  attachedInputs: SessionPendingInputPreview[];
   pending: QueueMutationKind | null;
   confirmingReplace: boolean;
   keyboardDragging: boolean;
@@ -864,6 +992,9 @@ function SortableQueueRow({
         </span>
         <div className="col-span-full row-start-2 min-w-0 sm:col-span-1 sm:col-start-3 sm:row-start-1">
           <QueuePrompt prompt={turn.prompt} index={index} onDisclosureChange={onDisclosureChange} />
+          {attachedInputs.length > 0 ? (
+            <PendingMachineInputs inputs={attachedInputs} attached />
+          ) : null}
           <div className="mt-1 flex min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap text-2xs text-fg-subtle">
             {turn.resources.length > 0 ? (
               <span className="shrink-0">

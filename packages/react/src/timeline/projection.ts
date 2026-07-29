@@ -11,6 +11,7 @@ import type {
   ActivityItem,
   AuthNeededItem,
   GoalItem,
+  MachineInputBatchItem,
   MemoryItem,
   SandboxItem,
   SessionStatusItem,
@@ -118,6 +119,20 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           text: typeof payload.text === "string" ? payload.text : "",
           resources: resourceRefs(payload.resources),
           tools: toolRefs(payload.tools),
+          occurredAt: event.occurredAt,
+        });
+        break;
+      }
+
+      case "system.update.delivered": {
+        const inputs = machineInputMembers(payload.members);
+        if (inputs.length === 0) break;
+        closeStreamingTail();
+        items.push({
+          kind: "machine-input-batch",
+          id: event.id,
+          turnId,
+          inputs,
           occurredAt: event.occurredAt,
         });
         break;
@@ -968,7 +983,11 @@ function foldSettledTurn(groups: TimelineGroup[], turnEnd: TurnEndItem): void {
 }
 
 function isTurnBoundary(group: TimelineGroup | undefined): boolean {
-  return group?.kind === "turn" || (group?.kind === "item" && group.item.kind === "user-message");
+  return (
+    group?.kind === "turn" ||
+    (group?.kind === "item" &&
+      (group.item.kind === "user-message" || group.item.kind === "machine-input-batch"))
+  );
 }
 
 function belongsToDifferentTurn(group: TimelineGroup | undefined, turnId: string | null): boolean {
@@ -1027,6 +1046,29 @@ function groupStartedAt(group: TimelineGroup | undefined): string | undefined {
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" ? (value as Record<string, unknown>) : {};
+}
+
+function machineInputMembers(value: unknown): MachineInputBatchItem["inputs"] {
+  if (!Array.isArray(value)) return [];
+  const inputs: MachineInputBatchItem["inputs"] = [];
+  for (const candidate of value) {
+    const member = asRecord(candidate);
+    if (
+      typeof member.id !== "string" ||
+      typeof member.kind !== "string" ||
+      typeof member.sourceId !== "string"
+    ) {
+      continue;
+    }
+    inputs.push({
+      id: member.id,
+      kind: member.kind,
+      classification: typeof member.classification === "string" ? member.classification : "info",
+      sourceId: member.sourceId,
+      summary: typeof member.summary === "string" ? member.summary : "",
+    });
+  }
+  return inputs;
 }
 
 const SESSION_STATUSES: readonly SessionStatus[] = [

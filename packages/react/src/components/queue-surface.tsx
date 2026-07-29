@@ -11,7 +11,7 @@ const loadQueueSurface = () => import("./queue-surface-implementation");
 type QueueSurfaceModule = { QueueSurface: ComponentType<QueueSurfaceProps> };
 type QueueSurfaceLoader = () => Promise<QueueSurfaceModule>;
 
-/** The sole human prompt queue: compact above Goal, Agents, and composer. */
+/** The sole pending-input surface: compact above Goal, Agents, and composer. */
 export const QueueSurface = createQueueSurface(loadQueueSurface);
 
 /** @internal Deterministic Suspense seam for the QueueSurface regression suite. */
@@ -26,20 +26,40 @@ function createQueueSurface(loadImplementation: QueueSurfaceLoader) {
 
   return function QueueSurfaceBoundary(props: QueueSurfaceProps) {
     const { queue } = props;
-    if (queue.queue.length === 0) {
+    const count = queue.queue.length + queue.pendingInputs.length;
+    if (count === 0) {
       if (!queue.stoppingPreviousAttempt && !queue.error && !queue.mutationError) return null;
       return <EmptyQueueStateSurface queue={queue} />;
     }
 
     return (
-      <Suspense fallback={<QueueSurfaceFallback count={queue.queue.length} />}>
+      <Suspense
+        fallback={
+          <QueueSurfaceFallback
+            promptCount={queue.queue.length}
+            machineInputCount={queue.pendingInputs.length}
+          />
+        }
+      >
         <LazyQueueSurface {...props} />
       </Suspense>
     );
   };
 }
 
-function QueueSurfaceFallback({ count }: { count: number }) {
+function QueueSurfaceFallback({
+  promptCount,
+  machineInputCount,
+}: {
+  promptCount: number;
+  machineInputCount: number;
+}) {
+  const label =
+    machineInputCount === 0
+      ? `${promptCount} queued prompt${promptCount === 1 ? "" : "s"}`
+      : `${promptCount + machineInputCount} pending input${
+          promptCount + machineInputCount === 1 ? "" : "s"
+        }`;
   return (
     <div
       aria-live="polite"
@@ -53,7 +73,7 @@ function QueueSurfaceFallback({ count }: { count: number }) {
             aria-hidden="true"
             className="size-3.5 shrink-0 animate-spin motion-reduce:animate-none"
           />
-          Loading {count} queued prompt{count === 1 ? "" : "s"}…
+          Loading {label}…
         </div>
       </div>
     </div>
