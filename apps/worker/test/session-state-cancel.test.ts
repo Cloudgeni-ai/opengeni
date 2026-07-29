@@ -321,8 +321,15 @@ describe("session-state interrupt settlement", () => {
           settings: {},
           observability: {},
           wakeSessionWorkflow: null,
+          inspectSessionAttemptActivity: async () => "settled",
         }) as any,
       {
+        getSessionAttemptActivityRef: mock(async () => ({
+          workflowId: "session-session-1",
+          workflowRunId: "run-1",
+          activityId: "activity-1",
+          quiesced: false,
+        })),
         reconcileSessionAttemptQuiescence: mock(async (_db, input) => {
           reconcileCalls.push(input);
           return {
@@ -354,10 +361,51 @@ describe("session-state interrupt settlement", () => {
         sessionId: "session-1",
         attemptId: "attempt-1",
         temporalWorkflowId: "session-session-1",
+        temporalWorkflowRunId: "run-1",
+        temporalActivityId: "activity-1",
+        activitySettled: true,
       },
     ]);
     expect(publishedEvents).toEqual([
       { type: "session.queue.changed", payload: { operation: "attempt_quiesced" } },
     ]);
+  });
+
+  test("keeps admission closed while the exact Temporal activity lease is live", async () => {
+    let reconciled = false;
+    const activities = createSessionStateActivities(
+      async () =>
+        ({
+          db: fakeDb,
+          bus: { publish: async () => undefined },
+          settings: {},
+          observability: {},
+          wakeSessionWorkflow: null,
+          inspectSessionAttemptActivity: async () => "pending",
+        }) as any,
+      {
+        getSessionAttemptActivityRef: mock(async () => ({
+          workflowId: "session-session-1",
+          workflowRunId: "run-live",
+          activityId: "activity-live",
+          quiesced: false,
+        })),
+        reconcileSessionAttemptQuiescence: mock(async () => {
+          reconciled = true;
+          return { action: "quiesced", events: [] };
+        }),
+      },
+    );
+
+    expect(
+      await activities.reconcileSessionAttemptQuiescence({
+        accountId: "account-1",
+        workspaceId: "workspace-1",
+        sessionId: "session-1",
+        attemptId: "attempt-1",
+        workflowId: "session-session-1",
+      }),
+    ).toEqual({ action: "pending" });
+    expect(reconciled).toBe(false);
   });
 });

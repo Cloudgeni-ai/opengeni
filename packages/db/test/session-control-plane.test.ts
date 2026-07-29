@@ -3317,12 +3317,14 @@ describe("clean session control plane", () => {
     await send(grant, session.id, "run the predecessor");
     const attemptId = crypto.randomUUID();
     const workflowId = `session-${session.id}`;
+    const workflowRunId = crypto.randomUUID();
+    const dispatchId = `dispatch-${crypto.randomUUID()}`;
     const predecessor = await claimTestSessionWork(
       client.db,
       grant.workspaceId!,
       session.id,
       workflowId,
-      { attemptId },
+      { attemptId, workflowRunId, dispatchId },
     );
     expect(predecessor).not.toBeNull();
     const steered = await send(grant, session.id, "replace the vanished worker", "steer");
@@ -3343,6 +3345,9 @@ describe("clean session control plane", () => {
       sessionId: session.id,
       attemptId,
       temporalWorkflowId: workflowId,
+      temporalWorkflowRunId: workflowRunId,
+      temporalActivityId: dispatchId,
+      activitySettled: true,
     });
     expect(recovered).toMatchObject({
       action: "quiesced",
@@ -3362,6 +3367,9 @@ describe("clean session control plane", () => {
         sessionId: session.id,
         attemptId,
         temporalWorkflowId: workflowId,
+        temporalWorkflowRunId: workflowRunId,
+        temporalActivityId: dispatchId,
+        activitySettled: true,
       }),
     ).toEqual({ action: "quiesced", events: [] });
   });
