@@ -17,6 +17,7 @@ import {
   type Browser,
   type BrowserContext,
   type BrowserContextOptions,
+  type Locator,
   type Page,
   type Route,
 } from "playwright";
@@ -24,7 +25,14 @@ import {
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const ownerHeaders = { "x-opengeni-subject": "knowledge-surfaces-owner" };
 const secretSentinel = "KNOWLEDGE-SECRET-MUST-NEVER-RENDER-7d9d5d";
-const longVariableName = `KNOWLEDGE_${"RESPONSIVE_INSPECTABLE_VARIABLE_".repeat(5)}`.slice(0, 128);
+const longVariableNames = Array.from({ length: 18 }, (_, index) =>
+  `KNOWLEDGE_KEY_${String(index + 1).padStart(2, "0")}_${"RESPONSIVE_INSPECTABLE_VARIABLE_".repeat(4)}`.slice(
+    0,
+    128,
+  ),
+);
+const longVariableName = longVariableNames[0]!;
+const lastVariableName = longVariableNames[longVariableNames.length - 1]!;
 const longVariableSetName =
   `Responsive production variable set ${"with long context ".repeat(6)}`.slice(0, 120);
 const longBaseName = `Long document base ${"inspectable-title-".repeat(7)}`;
@@ -36,6 +44,15 @@ const activeMemoryText =
 const unbrokenMemoryText = `Overflow sentinel ${"unbrokenresponsiveknowledge".repeat(18)}`;
 const proposedMemoryText =
   "Proposed memory awaiting a human decision with approve and reject controls.";
+const workingMemoryTexts = Array.from(
+  { length: 18 },
+  (_, index) =>
+    `Working set memory ${String(index + 1).padStart(2, "0")}: this deliberately long durable record remains reachable through the shared page scroll owner. ` +
+    "Responsive keyboard-operable content should wrap without widening the viewport. ".repeat(2),
+);
+// The API returns memories newest-first, so the first created record is the
+// bottom-most working-set card in the rendered list.
+const tailWorkingMemoryText = workingMemoryTexts[0]!;
 
 const workflowClient: SessionWorkflowClient = {
   signalUserMessage: async () => undefined,
@@ -188,7 +205,9 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
         const page = await context.newPage();
         for (const theme of ["light", "dark"] as const) {
           for (const surface of ["variable-sets", "documents", "memory"] as const) {
-            await openSurface(page, webBaseUrl, workspaceId, fixtures, surface);
+            await openSurface(page, webBaseUrl, workspaceId, fixtures, surface, {
+              focusMemory: false,
+            });
             await setTheme(page, theme);
             expect(await page.locator("main").count()).toBe(1);
             await expectNoPageOverflow(page);
@@ -204,6 +223,19 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
             if (matrixCase.label === "desktop") {
               const workspaceNav = page.getByRole("navigation", { name: "Workspace" });
               await workspaceNav.getByRole("link", { name: "Memory", exact: true }).waitFor();
+            }
+            if (surface === "variable-sets") {
+              await expectContentPageScrollAndFocus(
+                page,
+                page.getByRole("button", { name: `Rotate variable ${lastVariableName}` }),
+              );
+            } else if (surface === "memory") {
+              await expectContentPageScrollAndFocus(
+                page,
+                page
+                  .locator(`[data-memory-id="${fixtures.tailMemoryId}"]`)
+                  .getByRole("button", { name: "Memory actions" }),
+              );
             }
             if (surface === matrixCase.screenshotSurface) {
               await resetSurfaceCaptureViewport(page);
@@ -315,6 +347,10 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     });
     expect(await expandedManage.getAttribute("aria-expanded")).toBe("true");
     await page.getByText(longVariableName, { exact: true }).waitFor();
+    await expectContentPageScrollAndFocus(
+      page,
+      page.getByRole("button", { name: `Rotate variable ${lastVariableName}` }),
+    );
     expect(await page.getByLabel("Value is write-only").textContent()).toContain("••••••");
     expect(
       await page.evaluate(
@@ -337,12 +373,22 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     await memoryText.waitFor();
     expect(await memoryText.evaluate((element) => document.activeElement === element)).toBe(true);
     await page.getByRole("button", { name: "Cancel", exact: true }).click();
+    await openSurface(page, webBaseUrl, workspaceId, fixtures, "memory", {
+      focusMemory: false,
+    });
+    await expectContentPageScrollAndFocus(
+      page,
+      page
+        .locator(`[data-memory-id="${fixtures.tailMemoryId}"]`)
+        .getByRole("button", { name: "Memory actions" }),
+    );
     await expectNoPageOverflow(page);
   }
 });
 
 type SeededFixtures = {
   proposedMemoryId: string;
+  tailMemoryId: string;
 };
 
 type Surface = "variable-sets" | "documents" | "memory";
@@ -446,7 +492,10 @@ async function seedKnowledgeSurfaces(
           name: fixture.longVariableSetName,
           description:
             "A deliberately long description that remains fully inspectable on compact viewports without widening the page.",
-          variables: [{ name: fixture.longVariableName, value: fixture.secretSentinel }],
+          variables: fixture.longVariableNames.map((name) => ({
+            name,
+            value: fixture.secretSentinel,
+          })),
         }),
       });
       for (const name of [fixture.longBaseName, "Empty document base"]) {
@@ -455,11 +504,20 @@ async function seedKnowledgeSurfaces(
           body: JSON.stringify({ name }),
         });
       }
-      for (const text of [fixture.activeMemoryText, fixture.unbrokenMemoryText]) {
-        await request(`/v1/workspaces/${targetWorkspaceId}/knowledge/memories`, {
-          method: "POST",
-          body: JSON.stringify({ status: "active", kind: "semantic", text, confidence: 0.9 }),
-        });
+      const memoryIds: string[] = [];
+      for (const text of [
+        ...fixture.workingMemoryTexts,
+        fixture.activeMemoryText,
+        fixture.unbrokenMemoryText,
+      ]) {
+        const created = await request<{ id: string }>(
+          `/v1/workspaces/${targetWorkspaceId}/knowledge/memories`,
+          {
+            method: "POST",
+            body: JSON.stringify({ status: "active", kind: "semantic", text, confidence: 0.9 }),
+          },
+        );
+        memoryIds.push(created.id);
       }
       const proposed = await request<{ id: string }>(
         `/v1/workspaces/${targetWorkspaceId}/knowledge/memories`,
@@ -473,19 +531,20 @@ async function seedKnowledgeSurfaces(
           }),
         },
       );
-      return { proposedMemoryId: proposed.id };
+      return { proposedMemoryId: proposed.id, tailMemoryId: memoryIds[0]! };
     },
     {
       apiBaseUrl,
       workspaceId,
       fixture: {
         secretSentinel,
-        longVariableName,
+        longVariableNames,
         longVariableSetName,
         longBaseName,
         activeMemoryText,
         unbrokenMemoryText,
         proposedMemoryText,
+        workingMemoryTexts,
       },
     },
   );
@@ -507,8 +566,13 @@ async function openSurface(
   workspaceId: string,
   fixtures: SeededFixtures,
   surface: Surface,
+  options: { focusMemory?: boolean } = {},
 ): Promise<void> {
-  await page.goto(surfaceUrl(baseUrl, workspaceId, surface, fixtures));
+  const url =
+    surface === "memory" && options.focusMemory === false
+      ? `${baseUrl}/workspaces/${workspaceId}/memory`
+      : surfaceUrl(baseUrl, workspaceId, surface, fixtures);
+  await page.goto(url);
   const heading =
     surface === "variable-sets"
       ? "Variable sets"
@@ -531,7 +595,11 @@ async function openSurface(
     await search.getByRole("textbox", { name: "ACL tags", exact: true }).waitFor();
     expect(await page.getByRole("heading", { name: "Working set" }).count()).toBe(0);
   } else {
-    await page.getByText(proposedMemoryText, { exact: true }).waitFor();
+    await page
+      .getByText(options.focusMemory === false ? tailWorkingMemoryText : proposedMemoryText, {
+        exact: true,
+      })
+      .waitFor();
   }
 }
 
@@ -574,6 +642,62 @@ async function resetSurfaceCaptureViewport(page: Page): Promise<void> {
   expect(heading).not.toBeNull();
   expect(heading!.y).toBeGreaterThanOrEqual(0);
   expect(heading!.y + heading!.height).toBeLessThanOrEqual(await page.evaluate(() => innerHeight));
+}
+
+async function expectContentPageScrollAndFocus(page: Page, target: Locator): Promise<void> {
+  const contentPage = page.locator("[data-slot='content-page']");
+  await target.waitFor();
+  const initial = await contentPage.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return {
+      clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight,
+      overflowX: style.overflowX,
+      overflowY: style.overflowY,
+      overscrollBehaviorY: style.overscrollBehaviorY,
+      touchAction: style.touchAction,
+    };
+  });
+  expect(initial.scrollHeight).toBeGreaterThan(initial.clientHeight);
+  expect(initial.overflowX).toBe("hidden");
+  expect(initial.overflowY).toBe("auto");
+  expect(initial.overscrollBehaviorY).toBe("contain");
+  expect(initial.touchAction).not.toBe("none");
+
+  await contentPage.evaluate((element) => {
+    element.scrollTop = 0;
+  });
+  const contentBox = await contentPage.boundingBox();
+  expect(contentBox).not.toBeNull();
+  await page.mouse.move(
+    contentBox!.x + contentBox!.width / 2,
+    contentBox!.y + contentBox!.height / 2,
+  );
+  await page.mouse.wheel(0, Math.max(240, contentBox!.height));
+  expect(await contentPage.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+  await contentPage.evaluate((element) => {
+    element.scrollTop = 0;
+  });
+  await target.focus();
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+
+  const focused = await target.evaluate((element) => {
+    const owner = element.closest<HTMLElement>("[data-slot='content-page']");
+    if (!owner) {
+      return null;
+    }
+    const ownerRect = owner.getBoundingClientRect();
+    const targetRect = element.getBoundingClientRect();
+    return {
+      active: document.activeElement === element,
+      scrollTop: owner.scrollTop,
+      visible: targetRect.top >= ownerRect.top && targetRect.bottom <= ownerRect.bottom,
+    };
+  });
+  expect(focused).not.toBeNull();
+  expect(focused!.active).toBe(true);
+  expect(focused!.scrollTop).toBeGreaterThan(0);
+  expect(focused!.visible).toBe(true);
 }
 
 async function expectNoPageOverflow(page: Page): Promise<void> {
