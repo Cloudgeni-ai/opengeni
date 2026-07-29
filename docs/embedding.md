@@ -716,6 +716,37 @@ Do not replace this with an in-memory bus in an embedded deployment. In-memory f
 
 For embedded UIs that page historical timelines, prefer `GET .../events?compact=1` (or SDK `listEvents(..., { compact: true })`) for windowed replay. It coalesces consecutive delta fragments in the page while preserving first-member `sequence`; use `payload.coalescedUntil` as the resume cursor for the live SSE stream. Streaming/gap backfill should keep using raw sequence replay.
 
+## Host-owned product UI
+
+Embedding does not require the host to copy its product model into OpenGeni.
+The host may keep its own session header, repository/integration picker,
+sharing controls, linked entities, billing presentation, and domain-specific
+tabs while composing OpenGeni's session hooks and workbench surfaces below
+them.
+
+`@opengeni/react/session` is the headless composition boundary. Its baseline
+`SessionClientLike` covers session events, composer, queue, control, and
+approvals. Hooks outside that baseline export exact structural refinements:
+`SessionReadClientLike`, `GoalClientLike`, `SessionLineageClientLike`, and
+`FileAttachmentClientLike`. A host proxy therefore implements only the methods
+used by the mounted hooks; it does not stub workspace administration, billing,
+rig, connected-machine, or unrelated workbench APIs.
+
+Repository selection is also host-composable. `CreateSessionRequest.resources`
+accepts the canonical provider-qualified `ResourceRef[]`, including several
+providers, repositories, and credential bindings in one session. The stock web
+picker is currently GitHub-oriented, but that is a stock-client limitation—not
+an engine, API, or embedding restriction. Embedded hosts can retain their own
+provider catalog and picker and submit the canonical resources once at launch.
+OpenGeni then owns their runtime materialization and credential routing; the host
+does not maintain a synchronized repository model.
+
+The styled workbench is independently filterable. Hosts can mount Changes,
+Files, and Terminal while omitting Desktop, or render a completely custom
+timeline/composer from the session-only hooks and pure projection. Product
+metadata should remain in host slots/components rather than being added to
+OpenGeni contracts solely for one embedding.
+
 ## Trust model
 
 The embed boundary has a deliberate split of authority. Getting this wrong in
