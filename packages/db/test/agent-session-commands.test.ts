@@ -827,4 +827,75 @@ describe("attempt-fenced Agent session commands", () => {
     if (humanClaim.action !== "claimed") throw new Error("Human queue did not resume");
     expect(humanClaim.turn.id).toBe(queued.turnId);
   });
+
+  test("a human Steer claims ahead of an older pending Agent Steer and carries it as context", async () => {
+    const grant = await fixture();
+    const caller = await activeAgent(grant);
+    const target = await makeSession(grant);
+    await submit(grant, target.id, "currently running");
+    const targetAttemptId = crypto.randomUUID();
+    const targetClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: target.id,
+      workflowId: `session-${target.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: targetAttemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (targetClaim.action !== "claimed") throw new Error("Target was not claimed");
+
+    const agentSteer = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db.transaction((tx) =>
+        steerAgentSessionInTransaction(tx as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          targetSessionId: target.id,
+          actor: caller.actor,
+          operationKey: crypto.randomUUID(),
+          instruction: "inspect the older agent direction",
+        }),
+      ),
+    );
+    const humanSteer = await submit(grant, target.id, "the human replacement direction", "steer");
+
+    await settleSessionAttemptInterruptions(
+      client.db,
+      grant.workspaceId!,
+      target.id,
+      targetAttemptId,
+    );
+    await markSessionAttemptQuiesced(client.db, {
+      workspaceId: grant.workspaceId!,
+      sessionId: target.id,
+      attemptId: targetAttemptId,
+      temporalWorkflowId: `session-${target.id}`,
+    });
+
+    const replacement = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: target.id,
+      workflowId: `session-${target.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (replacement.action !== "claimed") throw new Error("Human Steer was not claimed");
+    expect(replacement.turn.id).toBe(humanSteer.turnId);
+    expect(replacement.turn.source).toBe("user");
+    expect(
+      await listSessionSystemUpdatesForTurn(
+        client.db,
+        grant.workspaceId!,
+        target.id,
+        replacement.turn.id,
+      ),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: agentSteer.updateId,
+          kind: "agent_steer_instruction",
+        }),
+      ]),
+    );
+  });
 });
