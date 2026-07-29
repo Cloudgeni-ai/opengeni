@@ -433,36 +433,22 @@ function PendingMachineInputs({
   attached?: boolean;
 }) {
   return (
-    <section className="border-t border-border bg-surface-2">
-      <div className="px-3 py-1.5 text-[10px] font-medium uppercase tracking-wide text-fg-subtle">
+    <section className="border-t border-border px-3 py-2">
+      <p className="text-2xs font-medium text-fg-subtle">
         {attached
           ? `${inputs.length} update${inputs.length === 1 ? "" : "s"} will join this prompt`
           : "Incoming updates waiting to run"}
-      </div>
-      <ol className="divide-y divide-border">
-        {inputs.map((input) => {
-          const preview = queuePromptPreview(input.summary, QUEUE_ROW_PREVIEW_CHARACTERS);
-          const label = input.kind.replace("_terminal", "").replaceAll("_", " ");
-          return (
-            <li key={input.id} className="flex min-w-0 gap-2 px-3 py-2">
-              <span className="mt-0.5 shrink-0 rounded border border-border bg-surface px-1.5 py-0.5 text-[10px] font-medium capitalize text-fg-muted">
-                {label}
-              </span>
-              <div className="min-w-0 flex-1">
-                <div className="flex min-w-0 items-center gap-1.5 text-[10px] text-fg-subtle">
-                  <span className="truncate">{input.sourceId}</span>
-                </div>
-                <p
-                  className="mt-0.5 line-clamp-3 break-words whitespace-pre-wrap text-xs leading-5 text-fg"
-                  dir="auto"
-                  title={preview.summary}
-                >
-                  {preview.summary}
-                </p>
-              </div>
-            </li>
-          );
-        })}
+      </p>
+      <ol className="mt-1 space-y-1">
+        {inputs.map((input) => (
+          <li key={input.id} className="line-clamp-3 break-words text-xs text-fg" dir="auto">
+            <strong className="capitalize text-fg-muted">
+              {input.kind.replace("_terminal", "").replaceAll("_", " ")}
+            </strong>{" "}
+            · {input.sourceId}
+            {input.summary ? ` — ${input.summary}` : ""}
+          </li>
+        ))}
       </ol>
     </section>
   );
@@ -807,7 +793,7 @@ function QueuePrompt({
         aria-controls={fullContentId}
         aria-expanded={expanded}
         aria-label={`${expanded ? "Hide" : "Show"} full content for queued prompt ${index + 1}`}
-        className="mt-1 inline-flex min-h-7 min-w-0 max-w-full items-center gap-1 whitespace-normal rounded-md text-left text-2xs font-medium text-fg-muted outline-none transition-colors hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/40 pointer-coarse:min-h-[44px]"
+        className="mt-1 inline-flex min-h-7 min-w-0 max-w-full items-center gap-1 whitespace-normal rounded-md text-left text-2xs font-medium text-fg outline-none focus-visible:ring-2 focus-visible:ring-ring/40 pointer-coarse:min-h-[44px]"
         data-testid={`queue-prompt-disclosure-${index + 1}`}
         onClick={() => {
           const next = !expanded;
@@ -968,7 +954,7 @@ function SortableQueueRow({
             onClick={onSteer}
             aria-label={`Steer queued prompt ${index + 1}`}
             title="Make this the next direction"
-            className="inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded-md px-2 text-xs font-medium outline-none transition-colors hover:bg-surface-2 focus-visible:ring-2 focus-visible:ring-ring/40 disabled:pointer-events-none disabled:opacity-50 pointer-coarse:min-h-[44px] pointer-coarse:min-w-[44px]"
+            className="inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded-md px-2 text-xs font-medium text-fg outline-none transition-[background-color] hover:bg-surface-2 focus-visible:ring-2 focus-visible:ring-ring/40 disabled:pointer-events-none disabled:opacity-50 pointer-coarse:min-h-[44px] pointer-coarse:min-w-[44px]"
           >
             {pending === "steer" ? (
               <Loader2Icon className="size-3.5 animate-spin" />

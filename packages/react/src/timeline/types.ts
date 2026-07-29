@@ -20,19 +20,6 @@ export type UserMessageItem = {
   occurredAt: string;
 };
 
-export type MachineInputBatchItem = {
-  kind: "machine-input-batch";
-  id: string;
-  turnId: string | null;
-  inputs: Array<{
-    id: string;
-    kind: string;
-    sourceId: string;
-    summary: string;
-  }>;
-  occurredAt: string;
-};
-
 export type AgentMessageItem = {
   kind: "agent-message";
   id: string;
@@ -231,7 +218,7 @@ export type GoalItem = {
 export type NoticeItem = {
   kind: "notice";
   id: string;
-  tone: "waiting" | "cancelled" | "failed";
+  tone: "waiting" | "cancelled" | "failed" | "input";
   text: string;
   /** Optional evidence kept inspectable without overwhelming the main rail. */
   details?: { label: string; value: unknown };
@@ -282,7 +269,6 @@ export type TurnEndItem = {
 
 export type TimelineItem =
   | UserMessageItem
-  | MachineInputBatchItem
   | AgentMessageItem
   | ReasoningItem
   | ToolCallItem

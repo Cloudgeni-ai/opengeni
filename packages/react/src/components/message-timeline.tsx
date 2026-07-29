@@ -42,7 +42,6 @@ import {
   type AgentMessageItem,
   type AuthNeededItem,
   type GoalItem,
-  type MachineInputBatchItem,
   type NoticeItem,
   type TimelineGroup,
   type TimelineItem,
@@ -826,8 +825,6 @@ export function TimelineRow({
   switch (item.kind) {
     case "user-message":
       return <UserMessageRow item={item} renderMessageText={renderMessageText} />;
-    case "machine-input-batch":
-      return <MachineInputBatchRow item={item} />;
     case "agent-message":
       return <AgentMessageRow item={item} renderMessageText={renderMessageText} />;
     case "worker-completion":
@@ -849,29 +846,6 @@ export function TimelineRow({
     default:
       return null;
   }
-}
-
-function MachineInputBatchRow({ item }: { item: MachineInputBatchItem }) {
-  return (
-    <details className="rounded-og-md border border-og-border bg-og-surface-2 px-3 py-2">
-      <summary className="cursor-pointer text-og-sm font-medium text-og-fg">
-        {item.inputs.length} incoming update{item.inputs.length === 1 ? "" : "s"}
-      </summary>
-      <ol className="mt-2 divide-y divide-border border-t border-og-border">
-        {item.inputs.map((input) => (
-          <li key={input.id} className="py-2">
-            <p className="truncate text-og-xs text-og-fg-muted">
-              <strong className="capitalize">
-                {input.kind.replace("_terminal", "").replaceAll("_", " ")}
-              </strong>{" "}
-              · {input.sourceId}
-            </p>
-            {input.summary ? <p className="mt-1 text-og-sm text-og-fg">{input.summary}</p> : null}
-          </li>
-        ))}
-      </ol>
-    </details>
-  );
 }
 
 function UserMessageRow({

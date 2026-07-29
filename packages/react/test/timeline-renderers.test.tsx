@@ -101,7 +101,7 @@ describe("durable machine-input timeline", () => {
       />,
     );
     await flush();
-    expect(r.container.textContent).toContain("2 incoming updates");
+    expect(r.container.textContent).toContain("Input batch");
     const disclosure = r.container.querySelector<HTMLDetailsElement>("details");
     disclosure!.open = true;
     await flush();

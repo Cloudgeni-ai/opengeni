@@ -40,7 +40,6 @@ export type {
   SessionStatusItem,
   TimelineGroup,
   TimelineItem,
-  MachineInputBatchItem,
   TurnEndItem,
   ToolCallItem,
   UserMessageItem,

@@ -26,40 +26,20 @@ function createQueueSurface(loadImplementation: QueueSurfaceLoader) {
 
   return function QueueSurfaceBoundary(props: QueueSurfaceProps) {
     const { queue } = props;
-    const count = queue.queue.length + queue.pendingInputs.length;
-    if (count === 0) {
+    if (queue.queue.length + queue.pendingInputs.length === 0) {
       if (!queue.stoppingPreviousAttempt && !queue.error && !queue.mutationError) return null;
       return <EmptyQueueStateSurface queue={queue} />;
     }
 
     return (
-      <Suspense
-        fallback={
-          <QueueSurfaceFallback
-            promptCount={queue.queue.length}
-            machineInputCount={queue.pendingInputs.length}
-          />
-        }
-      >
+      <Suspense fallback={<QueueSurfaceFallback />}>
         <LazyQueueSurface {...props} />
       </Suspense>
     );
   };
 }
 
-function QueueSurfaceFallback({
-  promptCount,
-  machineInputCount,
-}: {
-  promptCount: number;
-  machineInputCount: number;
-}) {
-  const label =
-    machineInputCount === 0
-      ? `${promptCount} queued prompt${promptCount === 1 ? "" : "s"}`
-      : `${promptCount + machineInputCount} pending input${
-          promptCount + machineInputCount === 1 ? "" : "s"
-        }`;
+function QueueSurfaceFallback() {
   return (
     <div
       aria-live="polite"
@@ -73,7 +53,7 @@ function QueueSurfaceFallback({
             aria-hidden="true"
             className="size-3.5 shrink-0 animate-spin motion-reduce:animate-none"
           />
-          Loading {label}…
+          Loading inputs…
         </div>
       </div>
     </div>
