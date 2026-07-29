@@ -375,6 +375,12 @@ run a smaller representative set of real development tasks before choosing an
 active-turn concurrency target. A large number of durable idle sessions is not
 equivalent to the same number of simultaneously executing turns.
 
+The density profile uses a scripted model and an in-process first-party MCP
+endpoint, so it exercises turn setup without a model-provider key or the
+deployment's user-facing access mode. It creates a run-scoped account and
+workspace, removes both before exit, and prints one
+`OPENGENI_DENSITY_RESULT=...` record for automation.
+
 Direct file, Git, and synchronous terminal APIs follow a machine-targeted
 session's active pointer from the first request. They use API → NATS → enrolled
 agent request/reply and do not need a preceding model turn, a turn worker, or a
