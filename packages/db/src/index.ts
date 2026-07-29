@@ -1338,6 +1338,24 @@ export async function bootstrapWorkspace(
         })
         .where(eq(schema.workspaceMemberships.id, membership.id));
     }
+    // Access refreshes must retain workspaces created or granted after the
+    // default workspace. Restore account-scoped RLS before listing them.
+    await setRlsContext(tx as unknown as Database, {
+      accountId: workspace.accountId,
+      workspaceId: null,
+    });
+    const memberships = await tx
+      .select({
+        membership: schema.workspaceMemberships,
+        workspace: schema.workspaces,
+      })
+      .from(schema.workspaceMemberships)
+      .innerJoin(
+        schema.workspaces,
+        eq(schema.workspaceMemberships.workspaceId, schema.workspaces.id),
+      )
+      .where(eq(schema.workspaceMemberships.subjectId, input.subjectId))
+      .orderBy(desc(schema.workspaces.createdAt));
     return {
       mode: input.accountExternalSource === "opengeni:local" ? "local" : "configured",
       subjectId: input.subjectId,
@@ -1351,15 +1369,13 @@ export async function bootstrapWorkspace(
           permissions: input.accountPermissions ?? allAccountPermissions,
         },
       ],
-      workspaceGrants: [
-        {
-          workspaceId: workspace.id,
-          accountId: account.id,
-          subjectId: input.subjectId,
-          ...(input.subjectLabel ? { subjectLabel: input.subjectLabel } : {}),
-          permissions: workspacePermissions,
-        },
-      ],
+      workspaceGrants: memberships.map((row) => ({
+        workspaceId: row.workspace.id,
+        accountId: row.workspace.accountId,
+        subjectId: input.subjectId,
+        ...(input.subjectLabel ? { subjectLabel: input.subjectLabel } : {}),
+        permissions: row.membership.permissions as Permission[],
+      })),
       defaultAccountId: account.id,
       defaultWorkspaceId: workspace.id,
     };
