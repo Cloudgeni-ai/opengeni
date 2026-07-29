@@ -298,6 +298,38 @@ per-tool renderers, and the rendering primitives (`ActivityDisclosure`,
 `ScreenshotFigure`, `TermBlock`, `LightboxProvider`, …) compose custom rows with
 the same semantics.
 
+Collapsed turn summaries can also be customized per `MessageTimeline` instance.
+Omit `turnSummary` to keep the built-in facets unchanged, use `add`/`remove` for
+small modifications, or `replace` for a complete ordered summary:
+
+```tsx
+import type { TurnSummaryFacet } from "@opengeni/react";
+
+const updatedRecordsFacet: TurnSummaryFacet = {
+  id: "updated-records",
+  summarize: ({ toolCalls }) => {
+    const count = toolCalls.filter((call) => call.name === "records.update").length;
+    return count > 0 ? { content: `${count} records updated` } : null;
+  },
+};
+
+<MessageTimeline
+  items={timeline}
+  turnSummary={{
+    facets: {
+      remove: ["memories"],
+      add: [updatedRecordsFacet],
+    },
+  }}
+/>;
+```
+
+Custom facets receive an immutable normalized activity snapshot, including
+ordered tool arguments, outputs, status, and timing. Added facets follow the
+remaining built-ins in supplied order. Duplicate IDs keep their first
+definition; remove a built-in before adding a custom facet with the same ID.
+`replace` is type-exclusive with `add` and `remove`.
+
 ## Sandbox surfacing
 
 An opt-in workbench that surfaces a session's live sandbox — files, terminal,

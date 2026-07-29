@@ -30,6 +30,28 @@ for await (const event of client.streamEvents(workspaceId, session.id)) {
 }
 ```
 
+## MCP tool output normalization
+
+MCP transports and event stores can represent the same tool result as a direct
+object, JSON text, a text content block, or nested `result`,
+`structuredContent`, and `content` envelopes. Use the shared zero-dependency
+normalizer when an embedding host needs one stable interpretation:
+
+```ts
+import { normalizeMcpOutput } from "@opengeni/sdk";
+
+const normalized = normalizeMcpOutput(toolOutput);
+
+normalized.value; // canonical machine-readable value
+normalized.text; // presentation text
+normalized.isError; // preserved across recognized nested envelopes
+normalized.raw; // original evidence
+```
+
+Malformed text and unknown objects pass through without throwing. Envelope
+recognition is deliberately conservative: an ordinary domain object is not
+unwrapped merely because it has a field named `result`.
+
 ## Error handling
 
 Non-2xx responses throw `OpenGeniApiError` with stable transport metadata:

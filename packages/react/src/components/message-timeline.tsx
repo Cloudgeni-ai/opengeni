@@ -46,6 +46,7 @@ import {
   type TimelineGroup,
   type TimelineItem,
   type ToolRegistry,
+  type TurnSummaryOptions,
   type UserMessageItem,
   type WorkerCompletionItem,
   TurnSummary,
@@ -97,6 +98,8 @@ export type MessageTimelineProps = {
    * `createDefaultToolRegistry({ entries })` to add custom tool renderers.
    */
   toolRegistry?: ToolRegistry | undefined;
+  /** Customize collapsed turn facets for this timeline instance. */
+  turnSummary?: TurnSummaryOptions | undefined;
   /** Follow new events when pinned to the bottom. Defaults to true. */
   autoFollow?: boolean | undefined;
   /** Older durable history exists above the current window (see useSessionEvents). */
@@ -127,6 +130,7 @@ export function MessageTimeline({
   onReconnect,
   resolveProviderLogo,
   toolRegistry = defaultToolRegistry,
+  turnSummary,
   autoFollow = true,
   hasOlder = false,
   loadingOlder = false,
@@ -414,6 +418,7 @@ export function MessageTimeline({
                     onReconnect={onReconnect}
                     resolveProviderLogo={resolveProviderLogo}
                     toolRegistry={toolRegistry}
+                    turnSummary={turnSummary}
                     foldLiveCluster={isAgentProgress(groups[index + 1]?.group)}
                   />
                 </div>
@@ -621,6 +626,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
   onReconnect,
   resolveProviderLogo,
   toolRegistry,
+  turnSummary,
   insideTurn = false,
   foldLiveCluster = false,
 }: {
@@ -633,6 +639,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
   onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
   resolveProviderLogo?: ((providerDomain: string) => string | null | undefined) | undefined;
   toolRegistry: ToolRegistry;
+  turnSummary?: TurnSummaryOptions | undefined;
   /** A completed cluster of a still-RUNNING turn (not the live tail) folds
       behind a neutral chip — the one place activity without an outcome still
       folds, bounding the DOM of days-long autonomous turns. */
@@ -651,6 +658,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
           failureText={insideTurn ? undefined : group.failureText}
           defaultOpen={!insideTurn && group.outcome === "failed" ? true : undefined}
           bare={insideTurn}
+          facets={turnSummary?.facets}
         >
           <ActivityRail
             items={group.items}
@@ -683,6 +691,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
           onReconnect={onReconnect}
           resolveProviderLogo={resolveProviderLogo}
           toolRegistry={toolRegistry}
+          turnSummary={turnSummary}
           insideTurn
         />
       ));
@@ -697,6 +706,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
           durationMs={durationBetween(group.startedAt, group.endedAt)}
           defaultOpen={!insideTurn && group.outcome === "failed" ? true : undefined}
           bare={insideTurn}
+          facets={turnSummary?.facets}
         >
           {insideTurn ? (
             // A nested turn is already on an ancestor rail — its body just stacks
