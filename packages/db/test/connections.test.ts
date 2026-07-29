@@ -24,6 +24,7 @@ import {
   listConnectionsMetadata,
   loadConnectionCredentialForBroker,
   recordConnectionTokenRefresh,
+  recordConnectionUsed,
   refreshOAuthConnectionCredential,
   revokeConnection,
   setConnectionStatus,
@@ -266,6 +267,112 @@ describe("connections table and helpers", () => {
       allowSubjectOwned: true,
     });
     expect(allowed?.credential).toEqual({ headers: { authorization: "Bearer subject-a" } });
+  });
+
+  test("provider lookup selects the exact subject even when shared and other-subject rows are newer", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const alice = await createConnection(db, {
+      ...ws,
+      subjectId: "subject-alice",
+      providerDomain: "slack.com",
+      kind: "oauth2",
+      credentialEncrypted: enc({ headers: { authorization: "Bearer alice" } }),
+    });
+    const bob = await createConnection(db, {
+      ...ws,
+      subjectId: "subject-bob",
+      providerDomain: "slack.com",
+      kind: "oauth2",
+      credentialEncrypted: enc({ headers: { authorization: "Bearer bob" } }),
+    });
+    await createConnection(db, {
+      ...ws,
+      subjectId: null,
+      providerDomain: "slack.com",
+      kind: "oauth2",
+      credentialEncrypted: enc({ headers: { authorization: "Bearer shared" } }),
+    });
+
+    const aliceLoaded = await loadConnectionCredentialForBroker(db, settings, {
+      workspaceId: ws.workspaceId,
+      providerDomain: "slack.com",
+      kind: "oauth2",
+      subjectId: "subject-alice",
+      allowSubjectOwned: true,
+    });
+    const bobLoaded = await loadConnectionCredentialForBroker(db, settings, {
+      workspaceId: ws.workspaceId,
+      providerDomain: "slack.com",
+      kind: "oauth2",
+      subjectId: "subject-bob",
+      allowSubjectOwned: true,
+    });
+    expect(aliceLoaded?.id).toBe(alice.id);
+    expect(aliceLoaded?.credential).toEqual({ headers: { authorization: "Bearer alice" } });
+    expect(bobLoaded?.id).toBe(bob.id);
+    expect(bobLoaded?.credential).toEqual({ headers: { authorization: "Bearer bob" } });
+    expect(
+      await loadConnectionCredentialForBroker(db, settings, {
+        workspaceId: ws.workspaceId,
+        providerDomain: "slack.com",
+        kind: "oauth2",
+        allowSubjectOwned: true,
+      }),
+    ).toBeNull();
+  });
+
+  test("refresh, status, and usage writes retain the exact connection subject", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const alice = await createConnection(db, {
+      ...ws,
+      subjectId: "subject-alice",
+      providerDomain: "slack.com",
+      kind: "oauth2",
+      credentialEncrypted: enc({
+        access_token: "access-alice",
+        refresh_token: "refresh-alice",
+        token_type: "Bearer",
+      }),
+    });
+
+    expect(
+      await recordConnectionTokenRefresh(db, {
+        id: alice.id,
+        version: alice.version,
+        workspaceId: ws.workspaceId,
+        subjectId: "subject-bob",
+        credentialEncrypted: enc({ access_token: "access-wrong", token_type: "Bearer" }),
+        expiresAt: null,
+        lastRefreshAt: new Date(),
+      }),
+    ).toBe(false);
+    expect(
+      await setConnectionStatus(db, ws.workspaceId, "needs_reauth", "wrong-subject", {
+        id: alice.id,
+        version: alice.version,
+        subjectId: "subject-bob",
+      }),
+    ).toBe(false);
+    await recordConnectionUsed(db, ws.workspaceId, alice.id, "subject-bob");
+    const untouched = await getConnectionMetadata(db, ws.workspaceId, alice.id, "subject-alice");
+    expect(untouched).toMatchObject({ status: "active", version: alice.version, lastUsedAt: null });
+
+    await recordConnectionUsed(db, ws.workspaceId, alice.id, "subject-alice");
+    expect(
+      (await getConnectionMetadata(db, ws.workspaceId, alice.id, "subject-alice"))?.lastUsedAt,
+    ).not.toBeNull();
+    expect(
+      await setConnectionStatus(db, ws.workspaceId, "needs_reauth", "expired", {
+        id: alice.id,
+        version: alice.version,
+        subjectId: "subject-alice",
+      }),
+    ).toBe(true);
+    expect(
+      await getConnectionMetadata(db, ws.workspaceId, alice.id, "subject-alice"),
+    ).toMatchObject({ status: "needs_reauth", lastError: "expired", subjectId: "subject-alice" });
   });
 
   test("token refresh and status updates are compare-and-set on id plus version", async () => {
@@ -768,8 +875,58 @@ describe("buildConnectionTokenResolver", () => {
     expect(counts.recordUsed).toBe(1);
     expect(counts.loadInputs[0]).toMatchObject({
       allowSubjectOwned: false,
-      subjectId: "subject-a",
+      providerDomain: "api.example.com",
+      kind: "api_key",
     });
+    expect(counts.loadInputs[0]).not.toHaveProperty("subjectId");
+  });
+
+  test("subject refs require a concrete owner and reject a faulty cross-subject loader", async () => {
+    const { deps, counts } = resolverDeps();
+    deps.loadCredential = async (_db, _settings, input) => {
+      counts.load += 1;
+      counts.loadInputs.push(input);
+      return brokerCredential({
+        id: "conn-bob",
+        subjectId: "subject-bob",
+        providerDomain: "slack.com",
+        kind: "oauth2",
+      });
+    };
+    const resolver = buildConnectionTokenResolver({} as Database, settings, deps);
+    const noSubject = await resolver({
+      workspaceId: "ws_1",
+      serverId: "slack",
+      destinationUrl: "https://slack.com/mcp",
+      connectionRef: {
+        providerDomain: "slack.com",
+        kind: "oauth2",
+        subjectScope: "subject",
+      },
+    });
+    expect(noSubject).toMatchObject({ status: "auth_needed", reason: "missing_connection" });
+    expect(counts.load).toBe(0);
+
+    const wrongOwner = await resolver({
+      workspaceId: "ws_1",
+      subjectId: "subject-alice",
+      serverId: "slack",
+      destinationUrl: "https://slack.com/mcp",
+      connectionRef: {
+        providerDomain: "slack.com",
+        kind: "oauth2",
+        subjectScope: "subject",
+      },
+    });
+    expect(wrongOwner).toMatchObject({ status: "auth_needed", reason: "missing_connection" });
+    expect(counts.load).toBe(1);
+    expect(counts.loadInputs[0]).toMatchObject({
+      allowSubjectOwned: true,
+      subjectId: "subject-alice",
+      providerDomain: "slack.com",
+      kind: "oauth2",
+    });
+    expect(counts.recordUsed).toBe(0);
   });
 
   test("returns auth_needed for missing scopes without exposing credential material", async () => {

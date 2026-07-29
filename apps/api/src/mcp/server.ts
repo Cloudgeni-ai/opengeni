@@ -1,5 +1,7 @@
 import {
   CreateScheduledTaskRequest,
+  DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  FIRST_PARTY_MCP_TOOL_NAMES,
   defaultRepositoryMountPath,
   SESSION_EVENT_RAW_DELTA_TYPES,
   SessionEventLatestClass,
@@ -15,6 +17,7 @@ import {
   VariableSetVariableName,
   type AccessGrant,
   type GitHubRepository,
+  type FirstPartyMcpToolName,
   type Permission,
   type ResourceRef,
   type SessionAuthorizationOperation,
@@ -52,7 +55,6 @@ import {
   MEMORY_CORRECT_TOOL_DESCRIPTION,
   MEMORY_SAVE_TOOL_DESCRIPTION,
   MEMORY_SEARCH_TOOL_DESCRIPTION,
-  requireFile,
   requireScheduledTask,
   requireSession,
   saveWorkspaceMemory,
@@ -73,7 +75,13 @@ import {
   GitHubAppConfigurationError,
   githubAppMissingSettings,
 } from "@opengeni/github";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import {
+  McpServer,
+  type RegisteredTool,
+  type ToolCallback,
+} from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { AnySchema, ZodRawShapeCompat } from "@modelcontextprotocol/sdk/server/zod-compat.js";
+import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import * as z4 from "zod/v4";
 import {
   hasPermission,
@@ -157,15 +165,153 @@ export type McpServerOptions = {
   workspaceMemoryEnabled?: boolean | undefined;
 };
 
+type FirstPartyToolAuthorization = {
+  sessionRequired?: true;
+  allOf?: readonly Permission[];
+  anyOf?: readonly Permission[];
+};
+
+/**
+ * Authorization is deliberately complete and separate from visibility. The
+ * `satisfies Record` check makes every catalog addition choose an explicit
+ * registration predicate before it can compile.
+ */
+const FIRST_PARTY_TOOL_AUTHORIZATION = {
+  set_session_title: { sessionRequired: true, allOf: ["sessions:control"] },
+  goal_set: { sessionRequired: true, allOf: ["goals:manage"] },
+  goal_update: { sessionRequired: true, allOf: ["goals:manage"] },
+  goal_complete: { sessionRequired: true, allOf: ["goals:manage"] },
+  goal_pause: { sessionRequired: true, allOf: ["goals:manage"] },
+  memory_search: { sessionRequired: true, allOf: ["documents:search"] },
+  memory_save: { sessionRequired: true, allOf: ["documents:search"] },
+  memory_correct: { sessionRequired: true, allOf: ["documents:search"] },
+  sandboxes_list: { sessionRequired: true, allOf: ["sessions:read"] },
+  sandbox_attach: { sessionRequired: true, allOf: ["sessions:control"] },
+  sandbox_swap: { sessionRequired: true, allOf: ["sessions:control"] },
+  run_on: { sessionRequired: true, allOf: ["sessions:control"] },
+  sandbox_provision: { sessionRequired: true, allOf: ["sessions:control"] },
+  rig_list: { allOf: ["rigs:use"] },
+  rig_get: { allOf: ["rigs:use"] },
+  rig_propose_change: { allOf: ["rigs:use"] },
+  rig_verify: { allOf: ["rigs:use"] },
+  rig_promote: { allOf: ["rigs:manage"] },
+  sessions_list: { allOf: ["sessions:read"] },
+  session_get: { allOf: ["sessions:read"] },
+  session_events: { allOf: ["sessions:read"] },
+  session_create: { allOf: ["sessions:create"] },
+  session_send_message: { allOf: ["sessions:control"] },
+  session_pause: { allOf: ["sessions:control"] },
+  session_resume: { allOf: ["sessions:control"] },
+  session_steer: { sessionRequired: true, allOf: ["sessions:control"] },
+  set_other_session_title: { allOf: ["sessions:control"] },
+  variable_set_list: { allOf: ["variable-sets:use"] },
+  environment_list: { allOf: ["variable-sets:use"] },
+  variable_set_set_variable: { allOf: ["variable-sets:manage"] },
+  environment_set_variable: { allOf: ["variable-sets:manage"] },
+  github_connect_link: { allOf: ["github:use"] },
+  github_token: { sessionRequired: true, allOf: ["github:use"] },
+  github_repositories_list: { allOf: ["github:use"] },
+  social_connections_list: { allOf: ["connections:read"] },
+  social_posts_recent: { allOf: ["connections:read"] },
+  social_daily_analysis_context: { allOf: ["connections:read"] },
+  scheduled_tasks_list: { anyOf: ["scheduled_tasks:manage", "scheduled_tasks:run"] },
+  scheduled_tasks_get: { anyOf: ["scheduled_tasks:manage", "scheduled_tasks:run"] },
+  scheduled_tasks_create: { allOf: ["scheduled_tasks:manage"] },
+  scheduled_tasks_update: { allOf: ["scheduled_tasks:manage"] },
+  scheduled_tasks_pause: { allOf: ["scheduled_tasks:manage"] },
+  scheduled_tasks_resume: { allOf: ["scheduled_tasks:manage"] },
+  scheduled_tasks_trigger: { allOf: ["scheduled_tasks:run"] },
+  scheduled_tasks_delete: { allOf: ["scheduled_tasks:manage"] },
+  scheduled_task_runs_list: { anyOf: ["scheduled_tasks:manage", "scheduled_tasks:run"] },
+  slack_bot_list_channels: { allOf: ["connections:read"] },
+  slack_bot_channel_history: { allOf: ["connections:read"] },
+  slack_bot_list_users: { allOf: ["connections:read"] },
+  slack_bot_post_message: { allOf: ["connections:read"] },
+} satisfies Record<FirstPartyMcpToolName, FirstPartyToolAuthorization>;
+
+const FIRST_PARTY_MCP_TOOL_NAME_SET = new Set<string>(FIRST_PARTY_MCP_TOOL_NAMES);
+
+class PolicyMcpServer extends McpServer {
+  private registeredToolCount = 0;
+
+  constructor(
+    private readonly grant: AccessGrant,
+    private readonly sessionId: string | null,
+    private readonly selectedTools: ReadonlySet<FirstPartyMcpToolName> | null,
+    private readonly allowUncatalogued: boolean,
+  ) {
+    super({ name: "opengeni", version: "1.0.0" });
+  }
+
+  override registerTool<
+    OutputArgs extends ZodRawShapeCompat | AnySchema,
+    InputArgs extends undefined | ZodRawShapeCompat | AnySchema = undefined,
+  >(
+    name: string,
+    config: {
+      title?: string;
+      description?: string;
+      inputSchema?: InputArgs;
+      outputSchema?: OutputArgs;
+      annotations?: ToolAnnotations;
+      _meta?: Record<string, unknown>;
+    },
+    cb: ToolCallback<InputArgs>,
+  ): RegisteredTool {
+    const catalogued = FIRST_PARTY_MCP_TOOL_NAME_SET.has(name);
+    let admitted = this.allowUncatalogued && !catalogued;
+    if (catalogued) {
+      const toolName = name as FirstPartyMcpToolName;
+      const policy: FirstPartyToolAuthorization = FIRST_PARTY_TOOL_AUTHORIZATION[toolName];
+      const authorized =
+        (!policy.sessionRequired || this.sessionId !== null) &&
+        (policy.allOf?.every((permission) => hasPermission(this.grant.permissions, permission)) ??
+          true) &&
+        (policy.anyOf?.some((permission) => hasPermission(this.grant.permissions, permission)) ??
+          true);
+      const selected = this.selectedTools === null || this.selectedTools.has(toolName);
+      admitted = authorized && selected;
+    }
+    if (!admitted) {
+      return {
+        ...(config.title ? { title: config.title } : {}),
+        ...(config.description ? { description: config.description } : {}),
+        ...(config.annotations ? { annotations: config.annotations } : {}),
+        ...(config._meta ? { _meta: config._meta } : {}),
+        handler: cb as RegisteredTool["handler"],
+        enabled: false,
+        enable() {},
+        disable() {},
+        update() {},
+        remove() {},
+      };
+    }
+    this.registeredToolCount += 1;
+    return super.registerTool(name, config, cb);
+  }
+
+  ensureToolsListHandler(): void {
+    if (this.registeredToolCount > 0) return;
+    super
+      .registerTool(
+        "__opengeni_empty_first_party_surface__",
+        {
+          description: "Internal disabled placeholder for an empty first-party surface.",
+          inputSchema: z4.object({}),
+        },
+        async () => ({
+          content: [{ type: "text" as const, text: '{"unavailable":true}' }],
+        }),
+      )
+      .disable();
+  }
+}
+
 export function buildOpenGeniMcpServer(
   deps: ApiRouteDeps,
   grant: AccessGrant,
   options: McpServerOptions = {},
 ): McpServer {
-  const server = new McpServer({
-    name: "opengeni",
-    version: "1.0.0",
-  });
   const json = (value: unknown) => ({
     content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
   });
@@ -178,6 +324,14 @@ export function buildOpenGeniMcpServer(
     typeof grant.metadata?.["sessionId"] === "string"
       ? (grant.metadata["sessionId"] as string)
       : null;
+  const selectedTools =
+    sessionId !== null && !toolspaceMode
+      ? new Set(
+          (grant.metadata?.["firstPartyMcpTools"] as FirstPartyMcpToolName[] | undefined) ??
+            DEFAULT_FIRST_PARTY_MCP_TOOLS,
+        )
+      : null;
+  const server = new PolicyMcpServer(grant, sessionId, selectedTools, toolspaceMode);
   // set_session_title names the agent's OWN session — pure session metadata,
   // not a goal operation — so it is available on every session, gated only on
   // the signed sessionId (NOT goals:manage, and NOT on a goal existing).
@@ -246,45 +400,6 @@ export function buildOpenGeniMcpServer(
     if (sessionId !== null) {
       registerGitHubTokenTool(server, deps, grant, sessionId, json);
     }
-  }
-
-  if (!toolspaceMode || can("files:read")) {
-    server.registerTool(
-      "files_get_download_url",
-      {
-        description: "Create a short-lived download URL for a ready file asset.",
-        inputSchema: { fileId: z4.string().uuid() },
-      },
-      async ({ fileId }) => {
-        if (!deps.objectStorage) {
-          throw new Error("object storage is not configured");
-        }
-        const file = await requireFile(deps.db, grant.workspaceId, fileId);
-        if (file.status !== "ready") {
-          throw new Error(`file is ${file.status}`);
-        }
-        const signed = await deps.objectStorage.createGetUrl({
-          key: file.objectKey,
-        });
-        return json({
-          file: {
-            id: file.id,
-            filename: file.filename,
-            safeFilename: file.safeFilename,
-            contentType: file.contentType,
-            sizeBytes: file.sizeBytes,
-            sha256: file.sha256,
-            status: file.status,
-            createdAt: file.createdAt,
-            updatedAt: file.updatedAt,
-          },
-          downloadUrl: {
-            url: signed.url,
-            expiresAt: signed.expiresAt.toISOString(),
-          },
-        });
-      },
-    );
   }
 
   if (!toolspaceMode || can("github:use")) {
@@ -653,6 +768,7 @@ export function buildOpenGeniMcpServer(
   }
 
   registerToolspaceProxyTools(server, options.toolspace ?? null);
+  server.ensureToolsListHandler();
 
   return server;
 }
@@ -1733,6 +1849,12 @@ function registerWorkspaceOrchestrationTools(
             .optional()
             .describe(
               "Optional first-party capability set for the child. Omit to inherit this session's effective permissions. An explicit set may only narrow capabilities held by this session. A goal-bearing child requires goals:manage in the resulting set; creation fails rather than adding it implicitly.",
+            ),
+          firstPartyMcpTools: z4
+            .array(z4.enum(FIRST_PARTY_MCP_TOOL_NAMES))
+            .optional()
+            .describe(
+              "Exact model-visible first-party tool selection for the child. Omit to inherit this session's effective selection. This does not grant permissions.",
             ),
           // Shared-sandbox placement (addendum 05 §D). OMIT (default) to SHARE the
           // creator's box — one filesystem/repo/desktop, N independent conversations;

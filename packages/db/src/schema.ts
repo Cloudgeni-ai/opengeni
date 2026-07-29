@@ -1,4 +1,8 @@
-import type { McpServerConnectionRef, SessionMcpApprovalPolicy } from "@opengeni/contracts";
+import type {
+  FirstPartyMcpToolName,
+  McpServerConnectionRef,
+  SessionMcpApprovalPolicy,
+} from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import type { SessionToolPolicy } from "@opengeni/contracts";
 import type { HumanInputQuestion, HumanInputResponse } from "@opengeni/contracts";
@@ -776,6 +780,7 @@ export const sessions = pgTable(
     // as a timeline event.
     instructions: text("instructions"),
     resources: jsonb("resources").$type<unknown[]>().notNull().default([]),
+    skills: jsonb("skills").$type<unknown[]>().notNull().default([]),
     tools: jsonb("tools").$type<unknown[]>().notNull().default([]),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
     // Frozen creator fact. This is used for creation attribution and for the
@@ -837,6 +842,9 @@ export const sessions = pgTable(
     // Non-default first-party MCP token permissions (manager-style sessions);
     // null means the fixed worker default set in @opengeni/runtime.
     firstPartyMcpPermissions: jsonb("first_party_mcp_permissions").$type<string[]>(),
+    // Exact model-visible first-party tool selection. NULL resolves to the
+    // fixed minimal default; [] intentionally selects no broad-server tools.
+    firstPartyMcpTools: jsonb("first_party_mcp_tools").$type<FirstPartyMcpToolName[]>(),
     // Durable tool-policy origin. NULL is retained for pre-migration rows;
     // mapSession exposes those rows as `legacy` instead of guessing omitted vs
     // explicit [].

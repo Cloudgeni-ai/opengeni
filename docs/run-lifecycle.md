@@ -275,6 +275,16 @@ event, model-history write, run-state write, compaction transition, tool receipt
 and terminal settlement must match that attempt. A typed schedule-to-start
 timeout is the only no-attempt recovery case because its activity never ran.
 
+Session creation persists skill selection but never starts a sandbox. At turn
+execution, bundled, curated, pack, and inline session skills remain SDK-lazy:
+only a selected skill directory is materialized when `load_skill` is called.
+If repository resources are attached, ordinary repository setup first makes
+their existing checkout available; runtime then indexes canonical
+`.agents/skills` and compatible `.claude/skills` directories through the bound
+sandbox session before the first model call. This performs no second clone,
+copy, or manifest materialization. With no repository resource, that workspace
+discovery capability is absent and cannot force provisioning.
+
 One model response's parallel tool calls are tracked as an in-memory settlement
 batch while its stream is active; batch identity is not durable schema. A
 completed response can reconcile and clear its exact call IDs even if an older

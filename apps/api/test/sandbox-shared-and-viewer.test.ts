@@ -135,7 +135,9 @@ function grant(accountId: string, workspaceId: string, fromSessionId?: string): 
     workspaceId,
     subjectId: "subject",
     permissions: ["sessions:create", "sessions:read"],
-    ...(fromSessionId ? { metadata: { sessionId: fromSessionId } } : {}),
+    ...(fromSessionId
+      ? { metadata: { sessionId: fromSessionId, firstPartyMcpTools: ["session_create"] } }
+      : {}),
   };
 }
 
@@ -259,6 +261,12 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
           access: "read",
         },
       ],
+      skills: [
+        {
+          name: "release",
+          files: [{ path: "SKILL.md", content: "# Release\n" }],
+        },
+      ],
       mcpServers: [
         {
           id: "provider-github",
@@ -297,6 +305,7 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
 
     expect(child.parentSessionId).toBe(parent.id);
     expect(child.resources).toEqual(parent.resources);
+    expect(child.skills).toEqual(parent.skills);
     expect(child.tools).toEqual(parent.tools);
     expect([...child.mcpServers].sort((a, b) => a.id.localeCompare(b.id))).toEqual([
       {
@@ -426,6 +435,12 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
         ],
         mcpServers: [{ id: "provider-azure", url: "https://mcp.example.test/azure" }],
         tools: [{ kind: "mcp", id: "provider-azure" }],
+        skills: [
+          {
+            name: "release",
+            files: [{ path: "SKILL.md", content: "# Release\n" }],
+          },
+        ],
       },
     );
 
@@ -438,12 +453,13 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
     expect(withoutRepositories.resources).toEqual([]);
     expect(withoutRepositories.mcpServers).toEqual(parent.mcpServers);
     expect(withoutRepositories.tools).toEqual(parent.tools);
+    expect(withoutRepositories.skills).toEqual(parent.skills);
 
     const withoutSelectedTools = await createSessionForRequest(
       deps(bus),
       grant(accountId, workspaceId, parent.id),
       workspaceId,
-      { initialMessage: "no selected provider tools", tools: [] },
+      { initialMessage: "no selected provider tools or skills", tools: [], skills: [] },
     );
     expect(withoutSelectedTools.resources).toEqual(parent.resources);
     expect(withoutSelectedTools.mcpServers).toEqual(parent.mcpServers);
@@ -451,6 +467,7 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
       kind: "mcp",
       id: "provider-azure",
     });
+    expect(withoutSelectedTools.skills).toEqual([]);
   }, 60_000);
 
   test("a child still needs mcp_servers:attach to replace inheritance with a new endpoint", async () => {

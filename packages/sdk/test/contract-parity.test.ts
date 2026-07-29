@@ -93,6 +93,7 @@ import type {
   AttachViewerRequest,
   BeginSessionRealtimeRequest,
   CreateKnowledgeMemoryRequest,
+  FirstPartyMcpToolName,
   KnowledgeMemory,
   KnowledgeMemoryStatus,
   UpdateKnowledgeMemoryRequest,
@@ -228,6 +229,19 @@ describe("SDK / contracts parity", () => {
         acceptSyncResponse,
       ].every((fn) => typeof fn === "function"),
     ).toBe(true);
+  });
+
+  test("first-party MCP tool-name union matches the contracts enum", () => {
+    type ContractFirstPartyMcpToolName = z.infer<
+      typeof import("@opengeni/contracts").FirstPartyMcpToolName
+    >;
+    const sdkAcceptsContract = (value: ContractFirstPartyMcpToolName): FirstPartyMcpToolName =>
+      value;
+    const contractAcceptsSdk = (value: FirstPartyMcpToolName): ContractFirstPartyMcpToolName =>
+      value;
+    expect([sdkAcceptsContract, contractAcceptsSdk].every((fn) => typeof fn === "function")).toBe(
+      true,
+    );
   });
 
   test("sandbox backend enum is 3-way parity across contracts / sdk / deployment", () => {
@@ -674,6 +688,7 @@ describe("SDK / contracts parity", () => {
       sandboxBackend: "none",
       reasoningEffort: "low",
       goal: { text: "Keep deploys green" },
+      firstPartyMcpTools: ["set_session_title"],
     };
     expect(ContractCreateSessionRequest.safeParse(request).success).toBe(true);
   });

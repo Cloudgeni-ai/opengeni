@@ -188,8 +188,12 @@ that claim plus the `goals:manage` permission. A top-level session with no
 first-party permission override uses the worker default. A child inherits its
 creator's exact effective permissions, and an explicit set may only narrow
 them; goal-bearing creation is rejected when that resulting set omits
-`goals:manage` rather than silently broadening the child. Goal-bearing sessions,
-turns, and scheduled dispatches force-merge the `opengeni` tool ref so these
+`goals:manage` rather than silently broadening the child. Goal-bearing sessions
+also require the goal lifecycle names in the separate effective
+`firstPartyMcpTools` selection. The minimal default includes them; an explicit
+or inherited selection that omits them is rejected rather than widened.
+Goal-bearing sessions, turns, and scheduled dispatches force-merge the
+`opengeni` tool ref so these
 reachable even when the session was created with an empty tool list. The
 worker also signs the exact turn, attempt, and execution generation used to
 authorize a first application of `goal_update`; a replacement attempt may

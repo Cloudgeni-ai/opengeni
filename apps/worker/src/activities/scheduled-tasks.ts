@@ -159,8 +159,8 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
         const reasoningEffort = task.agentConfig.reasoningEffort ?? settings.openaiReasoningEffort;
         const sandboxBackend = task.agentConfig.sandboxBackend ?? settings.sandboxBackend;
         const goalSpec = task.agentConfig.goal ?? null;
-        // Every dispatch carries the first-party MCP server (set_session_title,
-        // goal tools, and the permission-gated tools), matching the API path.
+        // Every dispatch carries the first-party MCP server; runtime visibility
+        // still follows the session's exact selection and authorization.
         const taskTools = withFirstPartyTools(settings, task.agentConfig.tools);
         if (task.runMode === "new_session_per_run" || !task.reusableSessionId) {
           // The FK on scheduled_tasks.variable_set_id is ON DELETE RESTRICT, so

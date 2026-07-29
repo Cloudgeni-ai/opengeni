@@ -298,6 +298,7 @@ import {
 } from "@opengeni/runtime";
 import {
   CAPABILITY_DESCRIPTORS,
+  DEFAULT_FIRST_PARTY_MCP_TOOLS,
   evaluateWorkspaceModelPolicy,
   readTurnExecutionPolicyV1,
   type ResourceRef,
@@ -306,6 +307,7 @@ import {
   type SessionStatus,
   type SessionTurn,
   type TurnExecutionPolicyV1,
+  type TurnInitiator,
 } from "@opengeni/contracts";
 import { createHash, randomUUID } from "node:crypto";
 
@@ -314,6 +316,13 @@ import { createHash, randomUUID } from "node:crypto";
 // throttling is minute-granular; anything shorter mostly burns continuation
 // budget against the same window.
 export const PROVIDER_BACKPRESSURE_DELAY_MS = 60_000;
+
+/** Personal connection authority follows the immutable human turn initiator, never the worker. */
+export function credentialSubjectIdForTurnInitiator(
+  initiator: Pick<TurnInitiator, "kind" | "subjectId">,
+): string | undefined {
+  return initiator.kind === "subject" ? initiator.subjectId : undefined;
+}
 
 export function turnExecutionPolicyBillingIdentity(policy: TurnExecutionPolicyV1): {
   externallyBilled: boolean;
@@ -4066,8 +4075,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const turnResources = mergeResourceRefs(session.resources, turn.resources);
       // Attach the first-party MCP server to EVERY turn, regardless of how/when
       // the session was created (API, scheduled task, or a pre-existing session
-      // whose stored tools predate this) — so set_session_title and the rest are
-      // always reachable. Idempotent: mergeToolRefs dedupes if already present.
+      // whose stored tools predate this). The server registration is then
+      // narrowed by the session's exact firstPartyMcpTools selection and
+      // authorization. Idempotent: mergeToolRefs dedupes if already present.
       // Attach codex_apps (the ChatGPT/Codex connectors MCP) when the codex
       // overlay injected it into runSettings.mcpServers (active subscription +
       // connector scopes); no-op for every other turn. Its refreshing bearer is
@@ -4974,6 +4984,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         }
         return result;
       };
+      const credentialSubjectId = credentialSubjectIdForTurnInitiator(turn.initiator);
       preparedTools = await waitForTurnOperation(
         withCodex(() =>
           runtime.prepareTools(runSettings, turnTools, {
@@ -4988,6 +4999,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             executionGeneration,
             subjectId: "worker:first-party-mcp",
             subjectLabel: "OpenGeni worker",
+            ...(credentialSubjectId ? { credentialSubjectId } : {}),
             resolveCredential,
             onAuthNeeded: async (payload) => {
               await publish!([{ type: "tool.auth_needed", payload }], true);
@@ -4997,6 +5009,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             ...(session.firstPartyMcpPermissions?.length
               ? { firstPartyPermissions: session.firstPartyMcpPermissions }
               : {}),
+            firstPartyTools: session.firstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
           }),
         ),
         cancellationSignal,
@@ -5153,6 +5166,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           await maybeStartOnTurnRecording(resolvedSandbox, activeSandboxBackend);
         },
         ...(packRuntime.skills.length > 0 ? { packSkills: packRuntime.skills } : {}),
+        ...(session.skills.length > 0 ? { sessionSkills: session.skills } : {}),
         ...(skillLibraryRuntime.skillLibrarySkills.length > 0
           ? {
               skillLibrarySkills: skillLibraryRuntime.skillLibrarySkills,
