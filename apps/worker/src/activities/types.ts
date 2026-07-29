@@ -257,7 +257,11 @@ export type DispatchScheduledTaskRunResult =
   | { action: "deleted" }
   | {
       action: "blocked";
-      reason: "insufficient_credits" | "monthly_model_cost_limit" | "monthly_agent_run_limit";
+      reason:
+        | "insufficient_credits"
+        | "monthly_model_cost_limit"
+        | "monthly_agent_run_limit"
+        | "malformed_manual_trigger";
     }
   | {
       action: "start" | "signal";
