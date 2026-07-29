@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { ReasoningEffort, type SessionRealtimeMode } from "@opengeni/contracts";
 import { and, asc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 
-import { sanitizeEventPayload, sanitizeModelPayload } from "./event-payload-sanitizer";
+import { sanitizeEventPayload } from "./event-payload-sanitizer";
 import type { Database } from "./index";
 import * as schema from "./schema";
 import {
@@ -1005,25 +1005,6 @@ async function nextLedgerSequence(db: Database, realtimeId: string): Promise<num
   return Number(row?.next ?? 1);
 }
 
-async function nextHistoryPosition(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-): Promise<number> {
-  const [row] = await db
-    .select({
-      next: sql<number>`coalesce(max(${schema.sessionHistoryItems.position}), -1) + 1`,
-    })
-    .from(schema.sessionHistoryItems)
-    .where(
-      and(
-        eq(schema.sessionHistoryItems.workspaceId, workspaceId),
-        eq(schema.sessionHistoryItems.sessionId, sessionId),
-      ),
-    );
-  return Number(row?.next ?? 0);
-}
-
 async function validateActiveConnection(
   db: Database,
   input: {
@@ -1080,17 +1061,34 @@ function delegationCallFailure(
   return null;
 }
 
-function delegationReplayMatches(
+function canonicalJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalJsonValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+        .map(([key, entry]) => [key, canonicalJsonValue(entry)]),
+    );
+  }
+  return value;
+}
+
+function inboundReplayMatches(
   row: EntryRow,
   input: SessionRealtimeInboundEntryInput,
+  role: "user" | "assistant" | null,
+  text: string | null,
   payload: Record<string, unknown>,
 ): boolean {
   return (
-    row.kind === "delegation_call" &&
+    row.direction === "provider_in" &&
+    row.kind === input.kind &&
+    row.role === role &&
     row.providerEventId === (input.providerEventId ?? null) &&
     row.delegationItemId === (input.delegationItemId ?? null) &&
-    row.text === (input.text ?? null) &&
-    JSON.stringify(row.payload) === JSON.stringify(payload)
+    row.sourceUpdateId === null &&
+    row.text === text &&
+    JSON.stringify(canonicalJsonValue(row.payload)) === JSON.stringify(canonicalJsonValue(payload))
   );
 }
 
@@ -1301,39 +1299,31 @@ async function materializeRealtimeUpdates(
   allocateSequence: () => number,
   now: Date,
 ): Promise<void> {
-  const updates = await db
-    .select()
+  const rows = await db
+    .select({ update: schema.sessionSystemUpdates })
     .from(schema.sessionSystemUpdates)
+    .leftJoin(
+      schema.sessionRealtimeEntries,
+      and(
+        eq(schema.sessionRealtimeEntries.realtimeId, input.realtimeId),
+        eq(schema.sessionRealtimeEntries.sourceUpdateId, schema.sessionSystemUpdates.id),
+      ),
+    )
     .where(
       and(
         eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
         eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
         inArray(schema.sessionSystemUpdates.state, ["pending", "deferred"]),
         inArray(schema.sessionSystemUpdates.kind, ["agent_message", "child_terminal_result"]),
+        isNull(schema.sessionRealtimeEntries.id),
       ),
     )
     .orderBy(asc(schema.sessionSystemUpdates.createdAt), asc(schema.sessionSystemUpdates.id))
     .limit(SESSION_REALTIME_LEDGER_MAX_OUTBOUND);
+  const updates = rows.map(({ update }) => update);
   if (updates.length === 0) return;
-  const existing = await db
-    .select({ sourceUpdateId: schema.sessionRealtimeEntries.sourceUpdateId })
-    .from(schema.sessionRealtimeEntries)
-    .where(
-      and(
-        eq(schema.sessionRealtimeEntries.realtimeId, input.realtimeId),
-        inArray(
-          schema.sessionRealtimeEntries.sourceUpdateId,
-          updates.map((update) => update.id),
-        ),
-      ),
-    );
-  const existingIds = new Set(
-    existing.flatMap(({ sourceUpdateId }) => (sourceUpdateId ? [sourceUpdateId] : [])),
-  );
-  const missing = updates.filter((update) => !existingIds.has(update.id));
-  if (missing.length === 0) return;
   await db.insert(schema.sessionRealtimeEntries).values(
-    missing.map((update) => ({
+    updates.map((update) => ({
       accountId,
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
@@ -1424,7 +1414,6 @@ export async function syncSessionRealtimeLedgerInTransaction(
   if (!modeRow) throw new Error("Realtime mode disappeared while syncing ledger");
 
   let nextSequence = await nextLedgerSequence(db, input.realtimeId);
-  let historyPosition = await nextHistoryPosition(db, input.workspaceId, input.sessionId);
   let providerStartupAcknowledged = connection.startupAcknowledgedAt !== null;
   const eventIds: string[] = [];
   let delegationTurns = 0;
@@ -1481,6 +1470,15 @@ export async function syncSessionRealtimeLedgerInTransaction(
       );
     }
     const payload = boundedPayload(incoming.payload);
+    const role = expectedRole(incoming);
+    const text = incoming.text ?? null;
+    assertBoundedString(text, SESSION_REALTIME_LEDGER_MAX_TEXT_BYTES, "Realtime text");
+    if (
+      (incoming.kind === "user_transcript" || incoming.kind === "assistant_transcript") &&
+      !text
+    ) {
+      throw new Error("Finalized realtime transcript text is required");
+    }
     const [existing] = await db
       .select()
       .from(schema.sessionRealtimeEntries)
@@ -1500,43 +1498,16 @@ export async function syncSessionRealtimeLedgerInTransaction(
       )
       .limit(1);
     if (existing) {
-      if (
-        incoming.kind === "delegation_call" &&
-        !delegationReplayMatches(existing, incoming, payload)
-      ) {
+      if (!inboundReplayMatches(existing, incoming, role, text, payload)) {
         throw new SessionRealtimeConflictError(
-          "REALTIME_DELEGATION_CHANGED",
-          "Realtime delegation operation was already used with different input",
+          incoming.kind === "delegation_call"
+            ? "REALTIME_DELEGATION_CHANGED"
+            : "REALTIME_ENTRY_CHANGED",
+          "Realtime ledger operation was already used with different input",
         );
       }
       accepted.push({ entry: mapEntry(existing), replay: true });
       continue;
-    }
-    const role = expectedRole(incoming);
-    const text = incoming.text ?? null;
-    assertBoundedString(text, SESSION_REALTIME_LEDGER_MAX_TEXT_BYTES, "Realtime text");
-    if (
-      (incoming.kind === "user_transcript" || incoming.kind === "assistant_transcript") &&
-      !text
-    ) {
-      throw new Error("Finalized realtime transcript text is required");
-    }
-    let historyItemId: string | null = null;
-    if (incoming.kind === "user_transcript" || incoming.kind === "assistant_transcript") {
-      const [history] = await db
-        .insert(schema.sessionHistoryItems)
-        .values({
-          accountId: modeRow.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          position: historyPosition++,
-          item: sanitizeModelPayload({ type: "message", role, content: text }),
-          producerCodexCredentialId: null,
-          createdAt: now,
-        })
-        .returning({ id: schema.sessionHistoryItems.id });
-      if (!history) throw new Error("Failed to append finalized realtime transcript");
-      historyItemId = history.id;
     }
     let [entry] = await db
       .insert(schema.sessionRealtimeEntries)
@@ -1553,7 +1524,7 @@ export async function syncSessionRealtimeLedgerInTransaction(
         role,
         providerEventId: incoming.providerEventId ?? null,
         delegationItemId: incoming.delegationItemId ?? null,
-        historyItemId,
+        historyItemId: null,
         text,
         payload,
         createdAt: now,
@@ -1687,7 +1658,10 @@ export async function syncSessionRealtimeLedgerInTransaction(
         isNull(schema.sessionRealtimeEntries.providerAckedAt),
       ),
     )
-    .orderBy(asc(schema.sessionRealtimeEntries.sequence))
+    .orderBy(
+      sql`case when ${schema.sessionRealtimeEntries.clientAckedAt} is null then 0 else 1 end`,
+      asc(schema.sessionRealtimeEntries.sequence),
+    )
     .limit(SESSION_REALTIME_LEDGER_MAX_OUTBOUND);
   const workflowWakeRevision =
     delegationTurns > 0

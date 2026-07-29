@@ -504,6 +504,91 @@ describe("session realtime context projection", () => {
     expect(projections).toHaveLength(1);
   });
 
+  test("atomically binds continuity and normal updates to one concurrent first text claim", async () => {
+    const value = await fixture("concurrent-first-text");
+    await completedMode(value, {
+      firstEntries: [ledgerEntry("user_transcript", "concurrent voice transcript")],
+    });
+    const updateId = crypto.randomUUID();
+    const update = await addSessionSystemUpdate(client.db, {
+      accountId: value.accountId,
+      workspaceId: value.workspaceId,
+      sessionId: value.session.id,
+      kind: "agent_message",
+      classification: "info",
+      sourceId: `concurrent-source-${updateId}`,
+      dedupeKey: `concurrent-update-${updateId}`,
+      summary: "concurrent normal update",
+      payload: {
+        type: "agent_message",
+        text: "concurrent normal update",
+        operationId: updateId,
+      },
+    });
+    if (!update.added) throw new Error("Concurrent update was not inserted");
+    const prompt = await submitPrompt(value, "first concurrent text turn");
+    const leftInput = claimInput(value.session.id);
+    const rightInput = claimInput(value.session.id);
+    const [left, right] = await Promise.all([
+      claimSessionWorkForAttempt(client.db, value.workspaceId, leftInput),
+      claimSessionWorkForAttempt(client.db, value.workspaceId, rightInput),
+    ]);
+    const claims = [
+      { result: left, input: leftInput },
+      { result: right, input: rightInput },
+    ];
+    const winners = claims.filter(({ result }) => result.action === "claimed");
+    const losers = claims.filter(({ result }) => result.action === "unclaimed");
+    expect(winners).toHaveLength(1);
+    expect(losers).toHaveLength(1);
+    const winner = winners[0]!;
+    if (winner.result.action !== "claimed") throw new Error("Concurrent claim winner is missing");
+    expect(winner.result.turn.id).toBe(prompt.turnId);
+
+    const projection = await getSessionRealtimeContextProjectionForTurn(
+      client.db,
+      value.workspaceId,
+      value.session.id,
+      prompt.turnId,
+    );
+    expect(contextEvents(projection?.context ?? null).map((entry) => entry.kind)).toEqual([
+      "user_transcript",
+    ]);
+    expect(contextEvents(projection?.context ?? null).map((entry) => entry.text)).toEqual([
+      "concurrent voice transcript",
+    ]);
+    const delivered = await listSessionSystemUpdatesForTurn(
+      client.db,
+      value.workspaceId,
+      value.session.id,
+      prompt.turnId,
+    );
+    expect(delivered.map(({ id }) => id)).toEqual([update.update.id]);
+    const history = await transaction(value.workspaceId, (tx) =>
+      tx
+        .select({ item: schema.sessionHistoryItems.item })
+        .from(schema.sessionHistoryItems)
+        .where(eq(schema.sessionHistoryItems.sessionId, value.session.id)),
+    );
+    expect(
+      history.some(({ item }) => JSON.stringify(item).includes("concurrent voice transcript")),
+    ).toBe(false);
+
+    await expect(
+      claimSessionWorkForAttempt(client.db, value.workspaceId, winner.input),
+    ).resolves.toMatchObject({ action: "claimed", turn: { id: prompt.turnId } });
+    await expect(
+      claimSessionWorkForAttempt(client.db, value.workspaceId, losers[0]!.input),
+    ).resolves.toMatchObject({ action: "unclaimed", reason: "no-work" });
+    const projections = await transaction(value.workspaceId, (tx) =>
+      tx
+        .select({ id: schema.sessionRealtimeContextProjections.id })
+        .from(schema.sessionRealtimeContextProjections)
+        .where(eq(schema.sessionRealtimeContextProjections.sessionId, value.session.id)),
+    );
+    expect(projections).toHaveLength(1);
+  });
+
   test("rolls claim projection and consumption back together, and explicitly consumes empty history", async () => {
     const rollback = await fixture("rollback");
     const completed = await completedMode(rollback, {
@@ -843,7 +928,6 @@ describe("session realtime context projection", () => {
     expect(contextEvents(projection?.context ?? null).map((entry) => entry.kind)).toEqual([
       "user_transcript",
       "delegation_call",
-      "session_update",
       "delegation_result",
       "delegation_call",
       "delegation_result",

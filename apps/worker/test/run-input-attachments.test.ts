@@ -451,7 +451,30 @@ describe("turnInput attachment projection", () => {
     ].join("\n");
     const storedUser = user("continue after voice");
     const modelInputs: unknown[] = [];
-    const listUpdates = spyOn(opengeniDb, "listSessionSystemUpdatesForTurn").mockResolvedValue([]);
+    const updateId = "00000000-0000-4000-8000-000000000066";
+    const deliveredUpdate = {
+      id: updateId,
+      sessionId,
+      kind: "agent_message" as const,
+      classification: "info" as const,
+      sourceId: "realtime-peer-session",
+      dedupeKey: "realtime-peer-update",
+      summary: "ordinary update summary",
+      payload: {
+        type: "agent_message" as const,
+        text: "ordinary update payload",
+        operationId: "00000000-0000-4000-8000-000000000067",
+      },
+      lineage: {},
+      state: "delivered" as const,
+      deliveredTurnId: projectedTurnId,
+      deliveredAt: "2026-07-29T00:00:00.000Z",
+      createdAt: "2026-07-29T00:00:00.000Z",
+    };
+    const listUpdates = spyOn(opengeniDb, "listSessionSystemUpdatesForTurn").mockImplementation(
+      async (_db, _workspaceId, _sessionId, turnId) =>
+        turnId === projectedTurnId ? [deliveredUpdate] : [],
+    );
     const getRealtimeContext = spyOn(
       opengeniDb,
       "getSessionRealtimeContextProjectionForTurn",
@@ -512,18 +535,13 @@ describe("turnInput attachment projection", () => {
 
       const recoveryInput = modelInputs[0] as Array<Record<string, unknown>>;
       expect(recoveryInput[0]).toEqual(storedUser);
-      expect(recoveryInput[1]).toEqual({
-        type: "message",
-        role: "system",
-        content: [
-          "[OpenGeni inference recovery]",
-          "Continue the same inference from durable conversation and sandbox state. A previous execution stopped before it could finish. Do not repeat completed side effects; inspect actual state when uncertain.",
-          "",
-          projectionContext,
-        ].join("\n"),
-      });
+      expect(recoveryInput[1]).toMatchObject({ type: "message", role: "system" });
       const recoverySystemContent = (recoveryInput[1] as { content: string }).content;
+      expect(recoverySystemContent).toContain("[OpenGeni inference recovery]");
+      expect(recoverySystemContent).toContain("[OpenGeni internal updates]");
       expect(recoverySystemContent.split(projectionContext)).toHaveLength(2);
+      expect(recoverySystemContent.split(`"id":"${updateId}"`)).toHaveLength(2);
+      expect(projectionContext).not.toContain(updateId);
       expect(modelInputs[1]).toEqual([storedUser]);
       expect(getRealtimeContext.mock.calls.map((call) => call[3])).toEqual([
         projectedTurnId,

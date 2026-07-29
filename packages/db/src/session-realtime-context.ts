@@ -1,4 +1,4 @@
-import { and, asc, eq, isNull } from "drizzle-orm";
+import { and, asc, eq, isNull, ne } from "drizzle-orm";
 
 import type { Database } from "./index";
 import * as schema from "./schema";
@@ -223,6 +223,10 @@ export async function projectSessionRealtimeContextForTurnInTransaction(
         eq(schema.sessionRealtimeEntries.accountId, input.accountId),
         eq(schema.sessionRealtimeEntries.workspaceId, input.workspaceId),
         eq(schema.sessionRealtimeEntries.sessionId, input.sessionId),
+        // Cross-session updates retain their canonical normal-mode delivery
+        // through session_system_updates. Projecting the realtime mirror as
+        // well would expose the same durable update twice to this turn.
+        ne(schema.sessionRealtimeEntries.kind, "session_update"),
       ),
     )
     .orderBy(

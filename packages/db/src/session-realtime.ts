@@ -39,6 +39,7 @@ export type SessionRealtimeConflictCode =
   | "REALTIME_CONNECTION_STATE_CHANGED"
   | "REALTIME_PROVIDER_NOT_STARTED"
   | "REALTIME_DELEGATION_CHANGED"
+  | "REALTIME_ENTRY_CHANGED"
   | "REALTIME_ACK_INVALID";
 
 export class SessionRealtimeConflictError extends Error {
