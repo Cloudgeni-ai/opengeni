@@ -9,7 +9,7 @@ import {
 } from "@opengeni/db";
 import * as schema from "@opengeni/db/schema";
 import { createProductionAgentRuntime } from "@opengeni/runtime";
-import { MemoryEventBus, ScriptedModel } from "@opengeni/testing";
+import { MemoryEventBus, ScriptedModel, startTestMcpServer } from "@opengeni/testing";
 import { eq } from "drizzle-orm";
 import { createTurnActivities } from "../../apps/worker/src/activities";
 
@@ -29,6 +29,13 @@ const profileInitiator = {
 };
 
 const productionSettings = getSettings();
+// The profile creates an isolated workspace that is intentionally absent from
+// the running deployment's user-facing access mode. Keep first-party MCP setup
+// in the measured turn, but terminate it locally so local/configured/managed
+// deployments all exercise the same density workload without borrowing a
+// production principal or access secret.
+const densityMcp = startTestMcpServer();
+const densityMcpUrl = `${densityMcp.url}?workspace={workspaceId}`;
 const settings: Settings = {
   ...productionSettings,
   environment: `${productionSettings.environment}-density-profile`,
@@ -58,6 +65,15 @@ const settings: Settings = {
   workspaceCaptureEnabled: false,
   integrationsEnabled: false,
   toolspaceEnabled: false,
+  opengeniMcpUrl: densityMcpUrl,
+  mcpServers: [
+    {
+      id: "opengeni",
+      name: "OpenGeni density profile",
+      url: densityMcpUrl,
+      cacheToolsList: false,
+    },
+  ],
 };
 
 const searchPath = dbSearchPath(settings);
@@ -78,6 +94,7 @@ const activities = createTurnActivities({
 let workspaceId: string | null = null;
 let accountId: string | null = null;
 let runs: Array<Promise<unknown>> = [];
+let runFailure: unknown = null;
 
 try {
   const access = await bootstrapWorkspace(dbClient.db, {
@@ -210,6 +227,8 @@ try {
   };
   console.log(`OPENGENI_DENSITY_RESULT=${JSON.stringify(result)}`);
   if (!result.thresholds.hardLimitMet) process.exitCode = 2;
+} catch (error) {
+  runFailure = error;
 } finally {
   model.release();
   await Promise.allSettled(runs);
@@ -229,7 +248,14 @@ try {
     process.exitCode = 1;
   }
   await dbClient.close();
+  densityMcp.close();
 }
+
+if (runFailure) throw runFailure;
+// MCP clients retain keep-alive sockets after a successful run. All durable
+// cleanup and DB shutdown have completed above, so terminate this one-shot
+// operator process explicitly instead of idling until those sockets expire.
+process.exit(process.exitCode ?? 0);
 
 async function seedHistory(input: {
   accountId: string;
