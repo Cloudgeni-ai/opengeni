@@ -1,5 +1,14 @@
 # @opengeni/api-router
 
+## 0.12.2
+
+### Patch Changes
+
+- f92af07: Keep Toolspace MCP networking portable under Bun and return a valid empty `tools/list` result when no programmatic tools are currently available.
+- Updated dependencies [f92af07]
+  - @opengeni/runtime@0.13.13
+  - @opengeni/core@0.12.2
+
 ## 0.12.1
 
 ### Patch Changes

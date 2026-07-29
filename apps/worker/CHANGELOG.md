@@ -1,5 +1,14 @@
 # @opengeni/worker-bundle
 
+## 0.12.2
+
+### Patch Changes
+
+- f92af07: Remove Bun-global dependencies from the worker turn path and Docker network attachment so embedded workers run identically in Node and Bun.
+- Updated dependencies [f92af07]
+  - @opengeni/runtime@0.13.13
+  - @opengeni/core@0.12.2
+
 ## 0.12.1
 
 ### Patch Changes
