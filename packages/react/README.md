@@ -44,9 +44,11 @@ exported `SessionClientLike` is deliberately narrow: a tenant-safe proxy needs
 only session events, composer draft/send, queue, pause/resume, and approval
 operations. Hooks outside that baseline expose exact refinements rather than
 requiring the full SDK client: `SessionReadClientLike`, `GoalClientLike`,
-`SessionLineageClientLike`, and `FileAttachmentClientLike`. A host can therefore
-implement only the methods used by each hook. Workspace-level Resume is an
-optional authority.
+`SessionLineageClientLike`, `FileAttachmentClientLike`,
+`HumanInputSessionClientLike`, and `SessionMcpApprovalPolicyClientLike`. A host
+can therefore implement only the methods used by each hook. A shared event feed
+also avoids requiring a client-owned event stream at runtime. Workspace-level
+Resume is an optional authority.
 
 The styled root surface uses Tailwind v4 and the package CSS entries:
 
@@ -81,9 +83,12 @@ import {
 const client = new OpenGeniClient({ baseUrl: "/api/opengeni" }); // proxy through your API
 
 function OpsChannel({ sessionId }: { sessionId: string }) {
-  const { timeline, sessionStatus, hasOlder, loadingOlder, loadOlder } = useSessionEvents(sessionId);
+  const { timeline, sessionStatus, hasOlder, loadingOlder, loadOlder } =
+    useSessionEvents(sessionId);
   const queue = useTurnQueue(sessionId);
-  const composer = useComposer(sessionId, { effectiveControl: queue.effectiveControl });
+  const composer = useComposer(sessionId, {
+    effectiveControl: queue.effectiveControl,
+  });
   return (
     <div className="flex h-full flex-col">
       {sessionStatus ? <SessionStatus status={sessionStatus} /> : null}
@@ -96,7 +101,10 @@ function OpsChannel({ sessionId }: { sessionId: string }) {
         className="min-h-0 flex-1"
       />
       <QueueSurface queue={queue} composer={composer} />
-      <ChatComposer composer={composer} effectiveControl={queue.effectiveControl} />
+      <ChatComposer
+        composer={composer}
+        effectiveControl={queue.effectiveControl}
+      />
     </div>
   );
 }

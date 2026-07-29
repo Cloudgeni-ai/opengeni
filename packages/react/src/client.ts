@@ -163,13 +163,10 @@ export type EmbeddedSessionLineageClientLike = EmbeddedSessionEventClientLike &
 /** Exact client surface required by {@link useFileAttachments}. */
 export type EmbeddedFileAttachmentClientLike = Pick<OpenGeniClient, "uploadFile">;
 
-/** Session client refinement required only by structured human-input hooks. */
-export type EmbeddedHumanInputSessionClientLike = EmbeddedSessionClientLike &
-  Pick<
-    OpenGeniClient,
-    "listHumanInputRequests" | "getHumanInputRequest" | "submitHumanInputResponse"
-  >;
+/** Exact client surface required by structured human-input hooks. */
+export type EmbeddedHumanInputSessionClientLike = EmbeddedSessionEventClientLike &
+  Pick<OpenGeniClient, "listHumanInputRequests" | "submitHumanInputResponse">;
 
-/** Session client refinement required only by MCP approval-policy hooks. */
-export type EmbeddedSessionMcpApprovalPolicyClientLike = EmbeddedSessionClientLike &
+/** Exact client surface required by MCP approval-policy hooks. */
+export type EmbeddedSessionMcpApprovalPolicyClientLike = EmbeddedSessionEventClientLike &
   Pick<OpenGeniClient, "updateSessionMcpApprovalPolicy">;

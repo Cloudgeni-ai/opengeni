@@ -114,9 +114,9 @@ export const sessionClient = {
 } satisfies SessionClientLike;
 
 export const humanInputSessionClient = {
-  ...sessionClient,
+  getSession: unused,
+  streamEvents: unused,
   listHumanInputRequests: unused,
-  getHumanInputRequest: unused,
   submitHumanInputResponse: unused,
 } satisfies HumanInputSessionClientLike;
 
@@ -148,7 +148,7 @@ export const fileAttachmentClient = {
 } satisfies FileAttachmentClientLike;
 
 export const sessionMcpApprovalPolicyClient = {
-  ...sessionClient,
+  ...eventClient,
   updateSessionMcpApprovalPolicy: unused,
 } satisfies SessionMcpApprovalPolicyClientLike;
 
