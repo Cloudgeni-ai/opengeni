@@ -146,14 +146,19 @@ describe("release schema contract", () => {
         (migrations.has("0129_retained_process_reconciliation.sql") ? 1 : 0) +
         (migrations.has("0130_workspace_instruction_policies.sql") ? 1 : 0) +
         (migrations.has("0131_session_realtime_mode.sql") ? 1 : 0) +
-        (migrations.has("0132_session_realtime_ledger.sql") ? 1 : 0),
+        (migrations.has("0132_session_realtime_ledger.sql") ? 1 : 0) +
+        (migrations.has("0133_session_realtime_delegation_terminal.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "5e5bf44b3a27a68467ccaaf3f0abd61fcd176092286e1eeed587b5953b0612b3",
+      "4d5a30141eafb926f57680af89b2bda7981e40a8b3ed0a6246f8d0ebcb949df3",
     );
-    expect(contract.latestMigration).toBe("0132_session_realtime_ledger.sql");
+    expect(contract.latestMigration).toBe("0133_session_realtime_delegation_terminal.sql");
+    expect(migrations.get("0133_session_realtime_delegation_terminal.sql")).toMatchObject({
+      sha256: "ac30398eb763f231df5411572f7cbb3b984557ca0f038b70973495cae83eb048",
+      deploymentMode: "rolling",
+    });
     expect(migrations.get("0132_session_realtime_ledger.sql")).toMatchObject({
-      sha256: "4b7f4e214455187f3c425f75ba69f005dc1db392c85adf357548e064ce6e8ff2",
+      sha256: "d44a7a8c4f86ce9ff7c28d5962b69f18bc66a6eb282260272244e46b1f1364d0",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0128_github_installation_authority.sql")).toMatchObject({
@@ -207,6 +212,7 @@ describe("release schema contract", () => {
       "0130_workspace_instruction_policies.sql",
       "0131_session_realtime_mode.sql",
       "0132_session_realtime_ledger.sql",
+      "0133_session_realtime_delegation_terminal.sql",
     ]);
     expect(new Set(contract.migrations.map((migration) => migration.path)).size).toBe(
       contract.fileCount,

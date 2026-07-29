@@ -37,7 +37,7 @@ function outbound(): SessionRealtimeLedgerEntry {
 }
 
 describe("Codex realtime V3 bridge", () => {
-  test("durably reports provider startup, emits exact V3 delegation context, and ACKs only sent rows", async () => {
+  test("durably reports provider startup and ACKs only fully sent provider rows", async () => {
     const sent: string[] = [];
     const events = new EventTarget() as RTCDataChannel;
     Object.defineProperties(events, {
@@ -83,7 +83,100 @@ describe("Codex realtime V3 bridge", () => {
       content: [{ type: "input_text", text: "completed on the same session" }],
     });
     expect(requests[1]).toMatchObject({ clientAckThroughSequence: 7 });
+    expect(requests[1]).toMatchObject({ providerAckSequences: [7] });
     expect(bridge.snapshot()).toMatchObject({ providerStarted: true, pendingInbound: 0 });
+    bridge.close();
+  });
+
+  test("retries a lost ACK without resending on the same live bridge", async () => {
+    const sent: string[] = [];
+    const events = new EventTarget() as RTCDataChannel;
+    Object.defineProperties(events, {
+      readyState: { value: "open" },
+      send: { value: (value: string) => sent.push(value) },
+    });
+    const requests: SyncSessionRealtimeLedgerRequest[] = [];
+    let failedAck = false;
+    const bridge = createCodexRealtimeV3Bridge({
+      events,
+      connectionId: "44444444-4444-4444-8444-444444444444",
+      connectionEpoch: 1,
+      startupFenceSequence: 0,
+      modeVersion: 1,
+      owner,
+      sync: async (request) => {
+        requests.push(request);
+        if (request.providerAckSequences && !failedAck) {
+          failedAck = true;
+          throw new Error("ACK response lost after provider send");
+        }
+        return { accepted: [], outbound: requests.length === 1 ? [outbound()] : [] };
+      },
+    });
+
+    await expect(bridge.flush()).rejects.toThrow("ACK response lost after provider send");
+    expect(sent).toHaveLength(1);
+    expect(bridge.snapshot()).toMatchObject({
+      clientAckThroughSequence: 7,
+      providerAckSequences: [7],
+    });
+    await bridge.flush();
+    expect(sent).toHaveLength(1);
+    expect(requests.at(-1)).toMatchObject({
+      clientAckThroughSequence: 7,
+      providerAckSequences: [7],
+    });
+    expect(bridge.snapshot()).toMatchObject({
+      clientAckThroughSequence: null,
+      providerAckSequences: [],
+    });
+    bridge.close();
+  });
+
+  test("does not provider-ACK an entry when one encoded chunk fails to send", async () => {
+    const sent: string[] = [];
+    let sends = 0;
+    let failSecondChunk = true;
+    const events = new EventTarget() as RTCDataChannel;
+    Object.defineProperties(events, {
+      readyState: { value: "open" },
+      send: {
+        value: (value: string) => {
+          sends += 1;
+          if (failSecondChunk && sends === 2) {
+            failSecondChunk = false;
+            throw new Error("provider channel rejected chunk");
+          }
+          sent.push(value);
+        },
+      },
+    });
+    const long = { ...outbound(), text: "x".repeat(900) };
+    const requests: SyncSessionRealtimeLedgerRequest[] = [];
+    const bridge = createCodexRealtimeV3Bridge({
+      events,
+      connectionId: "44444444-4444-4444-8444-444444444444",
+      connectionEpoch: 1,
+      startupFenceSequence: 0,
+      modeVersion: 1,
+      owner,
+      sync: async (request) => {
+        requests.push(request);
+        return {
+          accepted: [],
+          outbound: request.providerAckSequences ? [] : [long],
+        };
+      },
+    });
+
+    await expect(bridge.flush()).rejects.toThrow("provider channel rejected chunk");
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).not.toHaveProperty("providerAckSequences");
+    expect(bridge.snapshot().providerAckSequences).toEqual([]);
+
+    await bridge.flush();
+    expect(requests.at(-1)).toMatchObject({ providerAckSequences: [7] });
+    expect(sent.length).toBeGreaterThan(1);
     bridge.close();
   });
 

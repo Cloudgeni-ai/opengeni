@@ -92,6 +92,7 @@ export type SyncSessionRealtimeLedgerRequest = {
   connectionEpoch: number;
   entries?: SessionRealtimeInboundEntry[] | undefined;
   clientAckThroughSequence?: number | null | undefined;
+  providerAckSequences?: number[] | undefined;
   providerStarted?:
     | { providerSessionId: string; providerEventId?: string | null | undefined }
     | undefined;

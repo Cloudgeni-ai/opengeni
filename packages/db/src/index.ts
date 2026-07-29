@@ -197,6 +197,10 @@ import {
   peekActiveSessionRealtime,
   sessionRealtimeIsActiveInTransaction,
 } from "./session-realtime";
+import {
+  findClaimableSessionRealtimeDelegationTurnInTransaction,
+  projectSessionRealtimeDelegationTerminalInTransaction,
+} from "./session-realtime-ledger";
 import * as schema from "./schema";
 import {
   AGENT_VISIBLE_MEMORY_STATUSES,
@@ -29255,7 +29259,20 @@ export async function claimSessionWorkForAttempt(
           session,
         );
         session = realtimeFence.session;
-        if (realtimeFence.active) {
+        const realtimeDelegationTurnId = realtimeFence.active
+          ? session.activeTurnId === null
+            ? await findClaimableSessionRealtimeDelegationTurnInTransaction(
+                tx as unknown as Database,
+                {
+                  accountId: session.accountId,
+                  workspaceId,
+                  sessionId,
+                  realtimeId: realtimeFence.active.id,
+                },
+              )
+            : null
+          : null;
+        if (realtimeFence.active && realtimeDelegationTurnId === null) {
           return { action: "unclaimed", reason: "realtime-active" };
         }
         if (effectiveControl.state !== "active") {
@@ -29614,6 +29631,9 @@ export async function claimSessionWorkForAttempt(
             }
           : undefined;
         const id = queuedTurn?.id;
+        if (realtimeFence.active && id !== realtimeDelegationTurnId) {
+          return { action: "unclaimed", reason: "realtime-active" };
+        }
         if (!id) {
           // Manual compaction is a first-class maintenance execution, never
           // prompt queue work. A waiting human/API prompt stays ahead because
@@ -30093,13 +30113,25 @@ export async function claimSessionWorkForAttempt(
           }),
           producerCodexCredentialId: null,
         });
-        const delivered = await deliverPendingUpdates(
-          session.accountId,
-          row.id,
-          row.executionGeneration,
-          session.lastSequence + 1,
-          now,
-        );
+        // Cross-session updates are already projected through
+        // delegation.context.append while realtime is active. Keep them
+        // pending for normal mode instead of consuming them as hidden context
+        // on the provider-delegated ordinary turn.
+        const delivered = realtimeFence.active
+          ? {
+              count: 0,
+              lastSequence: session.lastSequence,
+              triggerEventId: null,
+              updates: [] as Array<typeof schema.sessionSystemUpdates.$inferSelect>,
+              event: null,
+            }
+          : await deliverPendingUpdates(
+              session.accountId,
+              row.id,
+              row.executionGeneration,
+              session.lastSequence + 1,
+              now,
+            );
         if (delivered.event) {
           await tx.insert(schema.sessionEvents).values(delivered.event);
         }
@@ -31442,6 +31474,13 @@ export type ApplySessionTurnSettlementResult =
       activeTurnId: string | null;
     };
 
+export type ApplySessionTurnSettlementHooks = {
+  /** Test-only failure injection after terminal projection but before commit. */
+  afterRealtimeDelegationProjection?:
+    | ((projection: { entryId: string; turnId: string }) => void | Promise<void>)
+    | undefined;
+};
+
 function attemptOutcomeForTurnStatus(status: SessionTurnStatus): SessionTurnAttemptOutcome | null {
   switch (status) {
     case "completed":
@@ -31455,6 +31494,40 @@ function attemptOutcomeForTurnStatus(status: SessionTurnStatus): SessionTurnAtte
   }
 }
 
+type TerminalSessionTurnStatus = "completed" | "failed" | "cancelled" | "superseded";
+type TerminalSessionTurnEventType =
+  | "turn.completed"
+  | "turn.failed"
+  | "turn.cancelled"
+  | "turn.superseded";
+
+function terminalSessionTurnEventType(
+  status: TerminalSessionTurnStatus,
+): TerminalSessionTurnEventType {
+  switch (status) {
+    case "completed":
+      return "turn.completed";
+    case "failed":
+      return "turn.failed";
+    case "cancelled":
+      return "turn.cancelled";
+    case "superseded":
+      return "turn.superseded";
+  }
+}
+
+function isTerminalSessionTurnStatus(
+  status: SessionTurnStatus,
+): status is TerminalSessionTurnStatus {
+  return ["completed", "failed", "cancelled", "superseded"].includes(status);
+}
+
+function sessionEventPayloadRecord(payload: unknown): Record<string, unknown> {
+  return payload && typeof payload === "object" && !Array.isArray(payload)
+    ? (payload as Record<string, unknown>)
+    : {};
+}
+
 /**
  * Atomically append terminal/requires-action truth, update the exact turn, and
  * transition the owning session. A superseded dispatch or closed control gate
@@ -31465,6 +31538,7 @@ export async function applySessionTurnSettlement(
   db: Database,
   workspaceId: string,
   input: ApplySessionTurnSettlementInput,
+  hooks: ApplySessionTurnSettlementHooks = {},
 ): Promise<ApplySessionTurnSettlementResult> {
   const fromStatuses = input.fromStatuses ?? ["running", "requires_action"];
   const eventTypes = [
@@ -31858,11 +31932,37 @@ export async function applySessionTurnSettlement(
       });
       const inserted =
         values.length > 0 ? await tx.insert(schema.sessionEvents).values(values).returning() : [];
-      const terminal =
-        input.turnStatus === "completed" ||
-        input.turnStatus === "cancelled" ||
-        input.turnStatus === "failed" ||
-        input.turnStatus === "superseded";
+      const terminal = isTerminalSessionTurnStatus(input.turnStatus);
+      if (isTerminalSessionTurnStatus(input.turnStatus)) {
+        const terminalType = terminalSessionTurnEventType(input.turnStatus);
+        const persistedTerminal = inserted.find((event) => event.type === terminalType);
+        const projection = await projectSessionRealtimeDelegationTerminalInTransaction(
+          tx as unknown as Database,
+          {
+            accountId: session.accountId,
+            workspaceId,
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            turnStatus: input.turnStatus,
+            terminalEvent: {
+              type: terminalType,
+              payload: persistedTerminal
+                ? sessionEventPayloadRecord(persistedTerminal.payload)
+                : {
+                    code: "delegation_terminal_event_missing",
+                    error: `Delegated turn reached ${input.turnStatus} without its canonical terminal event.`,
+                  },
+            },
+            now,
+          },
+        );
+        if (projection) {
+          await hooks.afterRealtimeDelegationProjection?.({
+            entryId: projection.entry.id,
+            turnId: input.turnId,
+          });
+        }
+      }
       if (input.turnStatus === "running") {
         // Approval resume re-enters the same logical turn after a new fenced
         // dispatch has advanced its trigger. It is an authorized inference
@@ -32165,6 +32265,20 @@ export async function settleCodexCredentialLeaseLoss(
         const settlementEvent = inserted[0];
         if (!settlementEvent) {
           throw new Error("Codex lease-loss settlement did not persist its checkpoint event");
+        }
+        if (!input.checkpointDurable) {
+          await projectSessionRealtimeDelegationTerminalInTransaction(tx as unknown as Database, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            turnStatus: "failed",
+            terminalEvent: {
+              type: "turn.failed",
+              payload: sessionEventPayloadRecord(settlementEvent.payload),
+            },
+            now,
+          });
         }
 
         await tx
@@ -32817,6 +32931,22 @@ export async function recoverSessionDispatch(
             },
           ])
           .returning();
+        const failedEvent = inserted.find((event) => event.type === "turn.failed");
+        if (!failedEvent) {
+          throw new Error("Worker-death exhaustion did not persist its terminal event");
+        }
+        await projectSessionRealtimeDelegationTerminalInTransaction(tx as unknown as Database, {
+          accountId: session.accountId,
+          workspaceId,
+          sessionId: input.sessionId,
+          turnId: turn.id,
+          turnStatus: "failed",
+          terminalEvent: {
+            type: "turn.failed",
+            payload: sessionEventPayloadRecord(failedEvent.payload),
+          },
+          now,
+        });
         await tx
           .update(schema.sessionTurns)
           .set({

@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { ReasoningEffort } from "@opengeni/contracts";
 import { and, asc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 
@@ -128,6 +130,7 @@ export type SyncSessionRealtimeLedgerInput = AssertSessionRealtimeOwnerInput & {
   connectionEpoch: number;
   entries?: SessionRealtimeInboundEntryInput[] | undefined;
   clientAckThroughSequence?: number | null | undefined;
+  providerAckSequences?: number[] | undefined;
   providerStarted?:
     | { providerSessionId: string; providerEventId?: string | null | undefined }
     | undefined;
@@ -164,6 +167,24 @@ export type AppendSessionRealtimeOutboundResult = {
   entry: SessionRealtimeLedgerEntry;
   replay: boolean;
 };
+
+export type ProjectSessionRealtimeDelegationTerminalInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  turnStatus: "completed" | "failed" | "cancelled" | "superseded";
+  terminalEvent: {
+    type: "turn.completed" | "turn.failed" | "turn.cancelled" | "turn.superseded";
+    payload: Record<string, unknown>;
+  };
+  now?: Date;
+};
+
+export type ProjectSessionRealtimeDelegationTerminalResult = {
+  entry: SessionRealtimeLedgerEntry;
+  replay: boolean;
+} | null;
 
 type ConnectionRow = typeof schema.sessionRealtimeConnections.$inferSelect;
 type EntryRow = typeof schema.sessionRealtimeEntries.$inferSelect;
@@ -239,6 +260,153 @@ function boundedPayload(input: Record<string, unknown> | undefined): Record<stri
     throw new Error("Realtime payload exceeds the durable ledger limit");
   }
   return payload;
+}
+
+function realtimeDelegationMetadata(metadata: Record<string, unknown>): {
+  realtimeId: string;
+  connectionEpoch: number;
+  delegationItemId: string;
+  ledgerEntryId: string;
+} | null {
+  const value = metadata.realtimeDelegation;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const delegation = value as Record<string, unknown>;
+  if (
+    typeof delegation.realtimeId !== "string" ||
+    typeof delegation.connectionEpoch !== "number" ||
+    !Number.isSafeInteger(delegation.connectionEpoch) ||
+    delegation.connectionEpoch < 1 ||
+    typeof delegation.delegationItemId !== "string" ||
+    delegation.delegationItemId.length === 0 ||
+    typeof delegation.ledgerEntryId !== "string"
+  ) {
+    return null;
+  }
+  return {
+    realtimeId: delegation.realtimeId,
+    connectionEpoch: delegation.connectionEpoch,
+    delegationItemId: delegation.delegationItemId,
+    ledgerEntryId: delegation.ledgerEntryId,
+  };
+}
+
+/**
+ * Under the canonical session lock, admit only the first queued ordinary turn
+ * whose immutable metadata still matches its accepted provider call row. This
+ * is the sole exception to the ordinary-work realtime claim fence.
+ */
+export async function findClaimableSessionRealtimeDelegationTurnInTransaction(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    realtimeId: string;
+  },
+): Promise<string | null> {
+  const [turn] = await db
+    .select({
+      id: schema.sessionTurns.id,
+      metadata: schema.sessionTurns.metadata,
+    })
+    .from(schema.sessionTurns)
+    .where(
+      and(
+        eq(schema.sessionTurns.accountId, input.accountId),
+        eq(schema.sessionTurns.workspaceId, input.workspaceId),
+        eq(schema.sessionTurns.sessionId, input.sessionId),
+        eq(schema.sessionTurns.status, "queued"),
+        eq(schema.sessionTurns.source, "api"),
+      ),
+    )
+    .orderBy(
+      asc(schema.sessionTurns.position),
+      asc(schema.sessionTurns.createdAt),
+      asc(schema.sessionTurns.id),
+    )
+    .limit(1);
+  if (!turn) return null;
+  const delegation = realtimeDelegationMetadata(turn.metadata);
+  if (!delegation || delegation.realtimeId !== input.realtimeId) return null;
+  const [call] = await db
+    .select({ id: schema.sessionRealtimeEntries.id })
+    .from(schema.sessionRealtimeEntries)
+    .where(
+      and(
+        eq(schema.sessionRealtimeEntries.id, delegation.ledgerEntryId),
+        eq(schema.sessionRealtimeEntries.accountId, input.accountId),
+        eq(schema.sessionRealtimeEntries.workspaceId, input.workspaceId),
+        eq(schema.sessionRealtimeEntries.sessionId, input.sessionId),
+        eq(schema.sessionRealtimeEntries.realtimeId, input.realtimeId),
+        eq(schema.sessionRealtimeEntries.connectionEpoch, delegation.connectionEpoch),
+        eq(schema.sessionRealtimeEntries.direction, "provider_in"),
+        eq(schema.sessionRealtimeEntries.kind, "delegation_call"),
+        eq(schema.sessionRealtimeEntries.delegationItemId, delegation.delegationItemId),
+        eq(schema.sessionRealtimeEntries.turnId, turn.id),
+      ),
+    )
+    .limit(1);
+  return call ? turn.id : null;
+}
+
+function deterministicTerminalOperationId(turnId: string): string {
+  const bytes = createHash("sha256")
+    .update(`opengeni:session-realtime-delegation-terminal:${turnId}`, "utf8")
+    .digest()
+    .subarray(0, 16);
+  bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x50;
+  bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function terminalProjection(input: ProjectSessionRealtimeDelegationTerminalInput): {
+  kind: "delegation_result" | "error";
+  text: string;
+  payload: Record<string, unknown>;
+} {
+  const expectedType = `turn.${input.turnStatus}`;
+  if (input.terminalEvent.type !== expectedType) {
+    throw new Error(
+      `Realtime delegation terminal event ${input.terminalEvent.type} does not match ${input.turnStatus}`,
+    );
+  }
+  const terminal = boundedPayload(input.terminalEvent.payload);
+  if (input.turnStatus === "completed") {
+    const output =
+      typeof terminal.output === "string" ? terminal.output : "Delegated turn completed.";
+    assertBoundedString(output, SESSION_REALTIME_LEDGER_MAX_TEXT_BYTES, "Delegation result");
+    return {
+      kind: "delegation_result",
+      text: output,
+      payload: boundedPayload({
+        status: input.turnStatus,
+        turnId: input.turnId,
+        terminalEventType: input.terminalEvent.type,
+        terminal,
+      }),
+    };
+  }
+  const code =
+    typeof terminal.code === "string" && terminal.code.length > 0
+      ? terminal.code
+      : `delegation_turn_${input.turnStatus}`;
+  const message =
+    typeof terminal.error === "string" && terminal.error.length > 0
+      ? terminal.error
+      : `Delegated turn ${input.turnStatus}.`;
+  assertBoundedString(message, SESSION_REALTIME_LEDGER_MAX_TEXT_BYTES, "Delegation error");
+  return {
+    kind: "error",
+    text: message,
+    payload: boundedPayload({
+      code,
+      status: input.turnStatus,
+      turnId: input.turnId,
+      terminalEventType: input.terminalEvent.type,
+      terminal,
+    }),
+  };
 }
 
 function expectedRole(input: SessionRealtimeInboundEntryInput): "user" | "assistant" | null {
@@ -427,6 +595,7 @@ async function startupEntriesForConnection(
       and(
         eq(schema.sessionRealtimeEntries.realtimeId, connection.realtimeId),
         eq(schema.sessionRealtimeEntries.direction, "provider_out"),
+        isNull(schema.sessionRealtimeEntries.providerAckedAt),
         sql`${schema.sessionRealtimeEntries.sequence} <= ${connection.startupFenceSequence}`,
       ),
     )
@@ -1004,6 +1173,27 @@ function assertAck(value: number | null | undefined, maximum: number): number | 
   return value;
 }
 
+function assertProviderAckSequences(values: number[] | undefined, maximum: number): number[] {
+  if (!values || values.length === 0) return [];
+  if (values.length > SESSION_REALTIME_LEDGER_MAX_OUTBOUND) {
+    throw new SessionRealtimeConflictError(
+      "REALTIME_ACK_INVALID",
+      "Realtime provider acknowledgment batch exceeds the server limit",
+    );
+  }
+  const unique = [...new Set(values)].sort((left, right) => left - right);
+  if (
+    unique.length !== values.length ||
+    unique.some((value) => !Number.isSafeInteger(value) || value < 1 || value > maximum)
+  ) {
+    throw new SessionRealtimeConflictError(
+      "REALTIME_ACK_INVALID",
+      "Realtime provider acknowledgment is outside the durable ledger",
+    );
+  }
+  return unique;
+}
+
 export async function syncSessionRealtimeLedgerInTransaction(
   db: Database,
   input: SyncSessionRealtimeLedgerInput,
@@ -1219,6 +1409,8 @@ export async function syncSessionRealtimeLedgerInTransaction(
       .set({ clientAckedAt: now, updatedAt: now })
       .where(
         and(
+          eq(schema.sessionRealtimeEntries.workspaceId, input.workspaceId),
+          eq(schema.sessionRealtimeEntries.sessionId, input.sessionId),
           eq(schema.sessionRealtimeEntries.realtimeId, input.realtimeId),
           eq(schema.sessionRealtimeEntries.direction, "provider_out"),
           isNull(schema.sessionRealtimeEntries.clientAckedAt),
@@ -1226,12 +1418,58 @@ export async function syncSessionRealtimeLedgerInTransaction(
         ),
       );
   }
-  if (input.providerStarted && connection.startupFenceSequence > 0) {
+  const providerAckSequences = assertProviderAckSequences(input.providerAckSequences, maximum);
+  if (providerAckSequences.length > 0) {
+    const ackable = await db
+      .select({
+        id: schema.sessionRealtimeEntries.id,
+        sequence: schema.sessionRealtimeEntries.sequence,
+      })
+      .from(schema.sessionRealtimeEntries)
+      .where(
+        and(
+          eq(schema.sessionRealtimeEntries.workspaceId, input.workspaceId),
+          eq(schema.sessionRealtimeEntries.sessionId, input.sessionId),
+          eq(schema.sessionRealtimeEntries.realtimeId, input.realtimeId),
+          eq(schema.sessionRealtimeEntries.direction, "provider_out"),
+          inArray(schema.sessionRealtimeEntries.sequence, providerAckSequences),
+          sql`${schema.sessionRealtimeEntries.clientAckedAt} is not null`,
+        ),
+      )
+      .for("update");
+    if (
+      ackable.length !== providerAckSequences.length ||
+      ackable.some((entry) => !providerAckSequences.includes(entry.sequence))
+    ) {
+      throw new SessionRealtimeConflictError(
+        "REALTIME_ACK_INVALID",
+        "Realtime provider acknowledgment does not match client-received outbound entries",
+      );
+    }
     await db
       .update(schema.sessionRealtimeEntries)
       .set({ providerAckedAt: now, updatedAt: now })
       .where(
         and(
+          eq(schema.sessionRealtimeEntries.workspaceId, input.workspaceId),
+          eq(schema.sessionRealtimeEntries.sessionId, input.sessionId),
+          eq(schema.sessionRealtimeEntries.realtimeId, input.realtimeId),
+          inArray(
+            schema.sessionRealtimeEntries.id,
+            ackable.map((entry) => entry.id),
+          ),
+          isNull(schema.sessionRealtimeEntries.providerAckedAt),
+        ),
+      );
+  }
+  if (input.providerStarted && connection.startupFenceSequence > 0) {
+    await db
+      .update(schema.sessionRealtimeEntries)
+      .set({ clientAckedAt: now, providerAckedAt: now, updatedAt: now })
+      .where(
+        and(
+          eq(schema.sessionRealtimeEntries.workspaceId, input.workspaceId),
+          eq(schema.sessionRealtimeEntries.sessionId, input.sessionId),
           eq(schema.sessionRealtimeEntries.realtimeId, input.realtimeId),
           eq(schema.sessionRealtimeEntries.direction, "provider_out"),
           isNull(schema.sessionRealtimeEntries.providerAckedAt),
@@ -1244,9 +1482,11 @@ export async function syncSessionRealtimeLedgerInTransaction(
     .from(schema.sessionRealtimeEntries)
     .where(
       and(
+        eq(schema.sessionRealtimeEntries.workspaceId, input.workspaceId),
+        eq(schema.sessionRealtimeEntries.sessionId, input.sessionId),
         eq(schema.sessionRealtimeEntries.realtimeId, input.realtimeId),
         eq(schema.sessionRealtimeEntries.direction, "provider_out"),
-        sql`(${schema.sessionRealtimeEntries.clientAckedAt} is null or ${schema.sessionRealtimeEntries.providerAckedAt} is null)`,
+        isNull(schema.sessionRealtimeEntries.providerAckedAt),
       ),
     )
     .orderBy(asc(schema.sessionRealtimeEntries.sequence))
@@ -1355,5 +1595,118 @@ export async function appendSessionRealtimeOutboundInTransaction(
     })
     .returning();
   if (!entry) throw new Error("Failed to append realtime outbound entry");
+  return { entry: mapEntry(entry), replay: false };
+}
+
+/**
+ * Project the authoritative terminal event of an accepted same-session
+ * delegation into exactly one outbound ledger row. The caller already owns the
+ * canonical session/turn settlement locks; this helper deliberately does not
+ * require the original provider connection (or even the mode) to remain
+ * active. A later valid rotation may therefore replay the same durable row,
+ * while the immutable realtime id prevents projection into another mode.
+ */
+export async function projectSessionRealtimeDelegationTerminalInTransaction(
+  db: Database,
+  input: ProjectSessionRealtimeDelegationTerminalInput,
+): Promise<ProjectSessionRealtimeDelegationTerminalResult> {
+  const calls = await db
+    .select()
+    .from(schema.sessionRealtimeEntries)
+    .where(
+      and(
+        eq(schema.sessionRealtimeEntries.accountId, input.accountId),
+        eq(schema.sessionRealtimeEntries.workspaceId, input.workspaceId),
+        eq(schema.sessionRealtimeEntries.sessionId, input.sessionId),
+        eq(schema.sessionRealtimeEntries.turnId, input.turnId),
+        eq(schema.sessionRealtimeEntries.direction, "provider_in"),
+        eq(schema.sessionRealtimeEntries.kind, "delegation_call"),
+      ),
+    )
+    .for("update")
+    .limit(2);
+  if (calls.length === 0) return null;
+  if (calls.length !== 1) {
+    throw new Error(`Delegation turn ${input.turnId} has multiple accepted realtime calls`);
+  }
+  const call = calls[0]!;
+  if (!call.delegationItemId) {
+    throw new Error(`Delegation turn ${input.turnId} has no provider item identity`);
+  }
+  const [mode] = await db
+    .select({
+      id: schema.sessionRealtimeModes.id,
+      connectionEpoch: schema.sessionRealtimeModes.connectionEpoch,
+    })
+    .from(schema.sessionRealtimeModes)
+    .where(
+      and(
+        eq(schema.sessionRealtimeModes.id, call.realtimeId),
+        eq(schema.sessionRealtimeModes.accountId, input.accountId),
+        eq(schema.sessionRealtimeModes.workspaceId, input.workspaceId),
+        eq(schema.sessionRealtimeModes.sessionId, input.sessionId),
+      ),
+    )
+    .limit(1);
+  if (!mode) {
+    throw new Error(`Delegation turn ${input.turnId} lost its realtime mode ownership`);
+  }
+
+  const projected = terminalProjection(input);
+  const operationId = deterministicTerminalOperationId(input.turnId);
+  const [existing] = await db
+    .select()
+    .from(schema.sessionRealtimeEntries)
+    .where(
+      and(
+        eq(schema.sessionRealtimeEntries.workspaceId, input.workspaceId),
+        eq(schema.sessionRealtimeEntries.sessionId, input.sessionId),
+        eq(schema.sessionRealtimeEntries.turnId, input.turnId),
+        eq(schema.sessionRealtimeEntries.direction, "provider_out"),
+        inArray(schema.sessionRealtimeEntries.kind, ["delegation_result", "error"]),
+      ),
+    )
+    .limit(1);
+  if (existing) {
+    if (
+      existing.accountId !== input.accountId ||
+      existing.realtimeId !== call.realtimeId ||
+      existing.operationId !== operationId ||
+      existing.kind !== projected.kind ||
+      existing.delegationItemId !== call.delegationItemId
+    ) {
+      throw new Error(`Delegation turn ${input.turnId} has conflicting terminal projection`);
+    }
+    return { entry: mapEntry(existing), replay: true };
+  }
+
+  const now = input.now ?? new Date();
+  const nextSequence = await nextLedgerSequence(db, call.realtimeId);
+  const payload = boundedPayload({
+    ...projected.payload,
+    callOperationId: call.operationId,
+    callLedgerEntryId: call.id,
+  });
+  const [entry] = await db
+    .insert(schema.sessionRealtimeEntries)
+    .values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      realtimeId: call.realtimeId,
+      operationId,
+      connectionEpoch: mode.connectionEpoch,
+      sequence: Number(nextSequence),
+      direction: "provider_out",
+      kind: projected.kind,
+      delegationItemId: call.delegationItemId,
+      turnId: input.turnId,
+      text: projected.text,
+      payload,
+      createdAt: now,
+      updatedAt: now,
+    })
+    .returning();
+  if (!entry) throw new Error("Failed to project realtime delegation terminal result");
   return { entry: mapEntry(entry), replay: false };
 }

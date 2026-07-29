@@ -55,13 +55,13 @@ export type CodexRealtimeV3Event =
 
 export type CodexRealtimeV3ParseFailure = {
   ok: false;
-  reason:
-    "invalid_json" | "missing_type" | "unsupported_type" | "invalid_shape";
+  reason: "invalid_json" | "missing_type" | "unsupported_type" | "invalid_shape";
   eventType: string | null;
 };
 
 export type CodexRealtimeV3ParseResult =
-  { ok: true; event: CodexRealtimeV3Event } | CodexRealtimeV3ParseFailure;
+  | { ok: true; event: CodexRealtimeV3Event }
+  | CodexRealtimeV3ParseFailure;
 
 export type CodexRealtimeV3ContextAppendChannel = "speakable" | "commentary";
 
@@ -78,9 +78,7 @@ export type CodexRealtimeV3SessionContextAppend = {
   content: Array<{ type: "input_text"; text: string }>;
 };
 
-export function parseCodexRealtimeV3Event(
-  payload: string,
-): CodexRealtimeV3ParseResult {
+export function parseCodexRealtimeV3Event(payload: string): CodexRealtimeV3ParseResult {
   let value: unknown;
   try {
     value = JSON.parse(payload);
@@ -90,8 +88,7 @@ export function parseCodexRealtimeV3Event(
   const event = record(value);
   const type = stringField(event, "type");
   if (!type) return failure("missing_type", null);
-  const providerEventId =
-    stringField(event, "event_id") ?? stringField(event, "id") ?? null;
+  const providerEventId = stringField(event, "event_id") ?? stringField(event, "id") ?? null;
 
   if (type === "session.started" || type === "session.updated") {
     const session = record(event.session);
@@ -143,11 +140,7 @@ export function parseCodexRealtimeV3Event(
     const turnId = stringField(turn, "id");
     const role = stringField(turn, "role");
     const transcript = stringField(turn, "transcript");
-    if (
-      !turnId ||
-      (role !== "user" && role !== "assistant") ||
-      transcript === undefined
-    ) {
+    if (!turnId || (role !== "user" && role !== "assistant") || transcript === undefined) {
       return failure("invalid_shape", type);
     }
     return {
@@ -222,17 +215,13 @@ export function encodeCodexRealtimeV3SessionContextAppend(input: {
 }
 
 export function contextAppendChunks(text: string): string[] {
-  if (utf8ByteLength(text) <= CODEX_REALTIME_CONTEXT_APPEND_MAX_BYTES)
-    return [text];
+  if (utf8ByteLength(text) <= CODEX_REALTIME_CONTEXT_APPEND_MAX_BYTES) return [text];
   const chunks: string[] = [];
   let chunk = "";
   let bytes = 0;
   for (const character of text) {
     const characterBytes = utf8ByteLength(character);
-    if (
-      bytes + characterBytes > CODEX_REALTIME_CONTEXT_APPEND_MAX_BYTES &&
-      chunk
-    ) {
+    if (bytes + characterBytes > CODEX_REALTIME_CONTEXT_APPEND_MAX_BYTES && chunk) {
       chunks.push(chunk);
       chunk = "";
       bytes = 0;
@@ -261,19 +250,11 @@ function record(value: unknown): Record<string, unknown> {
     : {};
 }
 
-function stringField(
-  value: Record<string, unknown>,
-  key: string,
-): string | undefined {
+function stringField(value: Record<string, unknown>, key: string): string | undefined {
   return typeof value[key] === "string" ? value[key] : undefined;
 }
 
-function finiteNumberField(
-  value: Record<string, unknown>,
-  key: string,
-): number | null {
+function finiteNumberField(value: Record<string, unknown>, key: string): number | null {
   const candidate = value[key];
-  return typeof candidate === "number" && Number.isFinite(candidate)
-    ? candidate
-    : null;
+  return typeof candidate === "number" && Number.isFinite(candidate) ? candidate : null;
 }

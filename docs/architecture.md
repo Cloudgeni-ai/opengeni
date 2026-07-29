@@ -299,8 +299,13 @@ Native provider delegation remains in that same session. Exact owner, connection
 epoch, and provider-start proof gate one transaction that accepts the provider
 call ledger row and creates one ordinary queued `session_turns` row plus its
 canonical events and durable workflow wake. The call's one-to-one `turn_id` is
-the terminal result/error projection seam. Invalid calls ledger one deterministic
-outbound error; a transient failure commits neither call nor turn. There is no
+the terminal result/error projection seam. The active-mode claim fence admits
+only that exact call-linked turn. Terminal settlement atomically creates one
+linked outbound `delegation_result` or deterministic `error`; a partial or lost
+provider-delivery ACK leaves that same row replayable across browser restart or
+connection rotation, while exact owner/session/connection/epoch proof fences
+delivery and ACK. Invalid calls ledger one deterministic outbound error; a
+transient admission failure commits neither call nor turn. There is no
 child/fork session or after-commit admission worker.
 
 ---

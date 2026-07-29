@@ -1073,9 +1073,10 @@ export const sessionRealtimeEntries = pgTable(
     sourceUpdateId: uuid("source_update_id"),
     historyItemId: uuid("history_item_id"),
     // The rolling migration owns this ON DELETE SET NULL foreign key because
-    // sessionTurns is declared later in this schema module. A non-null value is
-    // the durable, one-to-one terminal-projection seam for an accepted provider
-    // delegation call; it never denotes a child/fork session.
+    // sessionTurns is declared later in this schema module. A non-null value
+    // links the accepted provider call and its one terminal outbound
+    // result/error to the same ordinary turn. It never denotes a child/fork
+    // session.
     turnId: uuid("turn_id"),
     text: text("text"),
     payload: jsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
@@ -1108,15 +1109,18 @@ export const sessionRealtimeEntries = pgTable(
       .where(sql`${table.sourceUpdateId} is not null`),
     delegationTurn: uniqueIndex("session_realtime_entries_delegation_turn_uq")
       .on(table.turnId)
-      .where(sql`${table.turnId} is not null`),
+      .where(sql`${table.kind} = 'delegation_call' and ${table.turnId} is not null`),
+    delegationTerminal: uniqueIndex("session_realtime_entries_delegation_terminal_uq")
+      .on(table.turnId)
+      .where(
+        sql`${table.direction} = 'provider_out' and ${table.kind} in ('delegation_result', 'error') and ${table.turnId} is not null`,
+      ),
     delegationCall: uniqueIndex("session_realtime_entries_delegation_call_uq")
       .on(table.realtimeId, table.delegationItemId)
       .where(sql`${table.kind} = 'delegation_call' and ${table.delegationItemId} is not null`),
     outboundPending: index("session_realtime_entries_outbound_pending_idx")
       .on(table.realtimeId, table.sequence)
-      .where(
-        sql`${table.direction} = 'provider_out' and (${table.clientAckedAt} is null or ${table.providerAckedAt} is null)`,
-      ),
+      .where(sql`${table.direction} = 'provider_out' and ${table.providerAckedAt} is null`),
     epochValid: check("session_realtime_entries_epoch_check", sql`${table.connectionEpoch} >= 1`),
     sequenceValid: check("session_realtime_entries_sequence_check", sql`${table.sequence} >= 1`),
     directionValid: check(
@@ -1149,7 +1153,9 @@ export const sessionRealtimeEntries = pgTable(
     ),
     turnValid: check(
       "session_realtime_entries_turn_check",
-      sql`${table.turnId} is null or ${table.kind} = 'delegation_call'`,
+      sql`${table.turnId} is null
+        or (${table.kind} = 'delegation_call' and ${table.direction} = 'provider_in')
+        or (${table.kind} in ('delegation_result', 'error') and ${table.direction} = 'provider_out')`,
     ),
     transcriptValid: check(
       "session_realtime_entries_transcript_check",

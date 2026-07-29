@@ -24,8 +24,7 @@ const response = {
 const BEARER_DEFAULT = ["fixture", "bearer", "default"].join("-");
 const BEARER_STALE = ["fixture", "bearer", "stale"].join("-");
 const BEARER_FRESH = ["fixture", "bearer", "fresh"].join("-");
-const ACCESS_TOKEN_FIELD: keyof Omit<CodexAuthHeaders, "clientVersion"> =
-  "accessToken";
+const ACCESS_TOKEN_FIELD: keyof Omit<CodexAuthHeaders, "clientVersion"> = "accessToken";
 
 function tokenSnapshot(
   value = BEARER_DEFAULT,
@@ -69,8 +68,7 @@ describe("session Codex realtime broker", () => {
         tokenResolver: (credentialId) => {
           selected = credentialId;
           return {
-            getToken: async () =>
-              tokenSnapshot(BEARER_DEFAULT, "account-bound", true),
+            getToken: async () => tokenSnapshot(BEARER_DEFAULT, "account-bound", true),
             refresh: async () => {
               throw new Error("refresh must not run");
             },
@@ -200,11 +198,7 @@ describe("session Codex realtime broker", () => {
         }),
         createCall: async () => {
           calls += 1;
-          throw new CodexRealtimeError(
-            "authentication",
-            "provider body must not escape",
-            401,
-          );
+          throw new CodexRealtimeError("authentication", "provider body must not escape", 401);
         },
       }),
       { sessionId: "session-one", request },

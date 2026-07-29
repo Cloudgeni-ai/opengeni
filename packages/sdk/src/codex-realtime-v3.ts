@@ -3,14 +3,7 @@ import {
   encodeCodexRealtimeV3SessionContextAppend,
   parseCodexRealtimeV3Event,
 } from "@opengeni/codex/realtime-v3";
-import type {
-  CodexRealtimeV3ContextAppendChannel,
-  CodexRealtimeV3DelegationContextAppend,
-  CodexRealtimeV3Event,
-  CodexRealtimeV3ParseFailure,
-  CodexRealtimeV3ParseResult,
-  CodexRealtimeV3SessionContextAppend,
-} from "@opengeni/codex/realtime-v3";
+import type { CodexRealtimeV3Event } from "@opengeni/codex/realtime-v3";
 import type {
   SessionRealtimeInboundEntry,
   SessionRealtimeLedgerEntry,
@@ -44,6 +37,7 @@ export type CodexRealtimeV3BridgeSnapshot = {
   lastError: string | null;
   pendingInbound: number;
   clientAckThroughSequence: number | null;
+  providerAckSequences: number[];
   providerStarted: boolean;
 };
 
@@ -81,6 +75,7 @@ export function createCodexRealtimeV3Bridge(
     | undefined;
   let providerStartedAccepted = false;
   let clientAckThroughSequence: number | null = null;
+  const providerAckSequences = new Set<number>();
   let pendingInbound: SessionRealtimeInboundEntry[] = [];
   let flushing: Promise<void> | null = null;
   const sentSequences = new Set<number>();
@@ -96,6 +91,7 @@ export function createCodexRealtimeV3Bridge(
     lastError,
     pendingInbound: pendingInbound.length,
     clientAckThroughSequence,
+    providerAckSequences: [...providerAckSequences].sort((left, right) => left - right),
     providerStarted: providerStartedAccepted,
   });
   const publish = (): void => options.onSnapshot?.(snapshot());
@@ -104,36 +100,63 @@ export function createCodexRealtimeV3Bridge(
     if (closed) return;
     if (flushing) return await flushing;
     flushing = (async () => {
-      do {
+      while (true) {
         const entries = pendingInbound;
         pendingInbound = [];
         const startup = providerStartedAccepted ? undefined : providerStarted;
-        const acknowledged = clientAckThroughSequence;
-        clientAckThroughSequence = null;
-        const result = await options.sync({
-          ...options.owner,
-          connectionId: options.connectionId,
-          connectionEpoch: options.connectionEpoch,
-          ...(entries.length === 0 ? {} : { entries }),
-          ...(startup ? { providerStarted: startup } : {}),
-          ...(acknowledged === null ? {} : { clientAckThroughSequence: acknowledged }),
-        });
+        const acknowledgedByClient = clientAckThroughSequence;
+        const acknowledgedByProvider = [...providerAckSequences].sort(
+          (left, right) => left - right,
+        );
+        let result: SyncSessionRealtimeLedgerResponse;
+        try {
+          result = await options.sync({
+            ...options.owner,
+            connectionId: options.connectionId,
+            connectionEpoch: options.connectionEpoch,
+            ...(entries.length === 0 ? {} : { entries }),
+            ...(startup ? { providerStarted: startup } : {}),
+            ...(acknowledgedByClient === null
+              ? {}
+              : { clientAckThroughSequence: acknowledgedByClient }),
+            ...(acknowledgedByProvider.length === 0
+              ? {}
+              : { providerAckSequences: acknowledgedByProvider }),
+          });
+        } catch (error) {
+          pendingInbound = [...entries, ...pendingInbound];
+          throw error;
+        }
         if (startup) providerStartedAccepted = true;
-        let highestSent: number | null = null;
+        if (
+          acknowledgedByClient !== null &&
+          clientAckThroughSequence !== null &&
+          clientAckThroughSequence <= acknowledgedByClient
+        ) {
+          clientAckThroughSequence = null;
+        }
+        for (const sequence of acknowledgedByProvider) {
+          providerAckSequences.delete(sequence);
+          sentSequences.delete(sequence);
+        }
         for (const entry of result.outbound) {
+          clientAckThroughSequence = Math.max(clientAckThroughSequence ?? 0, entry.sequence);
           if (sentSequences.has(entry.sequence)) continue;
           sendOutbound(options.events, entry);
           sentSequences.add(entry.sequence);
-          highestSent = Math.max(highestSent ?? 0, entry.sequence);
+          providerAckSequences.add(entry.sequence);
         }
-        if (highestSent !== null) clientAckThroughSequence = highestSent;
         publish();
-      } while (
-        !closed &&
-        (pendingInbound.length > 0 ||
-          (!providerStartedAccepted && providerStarted !== undefined) ||
-          clientAckThroughSequence !== null)
-      );
+        if (
+          closed ||
+          (pendingInbound.length === 0 &&
+            (providerStartedAccepted || providerStarted === undefined) &&
+            clientAckThroughSequence === null &&
+            providerAckSequences.size === 0)
+        ) {
+          break;
+        }
+      }
     })();
     try {
       await flushing;
