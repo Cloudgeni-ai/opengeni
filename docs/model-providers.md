@@ -217,8 +217,10 @@ them together. `createCodexRealtimeController` composes the same ordinary
 session's begin/heartbeat/end lifecycle with that transport and the pinned V3
 bridge. Finalized transcripts and proven delegation/error events flow through
 the durable server ledger; streaming audio deltas never do. Outbound session
-updates and delegation results replay until every provider-channel chunk sends
-and its exact sequence is ACKed. A session-scoped owner record in browser
+updates and delegation results receive an OpenGeni client-delivery ACK, but the
+pinned provider protocol exposes no context-append receipt. Provider sends are
+therefore at-least-once and the same durable row may replay after an ambiguous
+send, browser restart, or connection rotation. A session-scoped owner record in browser
 session storage permits replay of the same begin operation after reload; an
 active lifecycle without matching proof is shown as another/lost browser owner
 rather than silently creating a mode. This conversation path is not composer
@@ -231,8 +233,8 @@ microphone stream and prepares one replacement while the previous connection
 remains active. The server records the answer as `ready`; only an open browser
 data channel can activate it, transactionally advance the connection epoch, and
 retire the old row. The realtime id, authenticated owner, durable V3 ledger,
-startup replay, and provider-delivery ACK contract do not reset. Generation
-fences reject old peer callbacks, stale ACKs, duplicate failures, late answers,
+startup replay, and client-delivery ACK contract do not reset. Generation
+fences reject old peer callbacks, stale client ACKs, duplicate failures, late answers,
 and stop-during-rotation races. A failed replacement leaves a healthy old peer
 usable; a terminal lifecycle/409 result fences reconnect. During rolling
 compatibility only, a client that omits the browser-activation marker follows

@@ -1,5 +1,15 @@
-import { createCodexRealtimeV3Bridge } from "./codex-realtime-v3";
-import type { CodexRealtimeV3Bridge, CodexRealtimeV3BridgeSnapshot } from "./codex-realtime-v3";
+import {
+  CODEX_REALTIME_V3_MAX_EVENT_BYTES,
+  CODEX_REALTIME_V3_PENDING_MAX_BYTES,
+  CODEX_REALTIME_V3_PENDING_MAX_ENTRIES,
+  createCodexRealtimeV3Bridge,
+  parseCodexRealtimeV3Event,
+} from "./codex-realtime-v3";
+import type {
+  CodexRealtimeV3Bridge,
+  CodexRealtimeV3BridgeFatal,
+  CodexRealtimeV3BridgeSnapshot,
+} from "./codex-realtime-v3";
 import type { SessionRealtimeLifecycleProjection } from "./codex-realtime-lifecycle";
 import {
   acquireCodexRealtimeMicrophone,
@@ -32,6 +42,7 @@ export type { SessionRealtimeLifecycleProjection } from "./codex-realtime-lifecy
 
 const HEARTBEAT_INTERVAL_MS = 10_000;
 const OUTBOUND_SYNC_INTERVAL_MS = 1_000;
+export const CODEX_REALTIME_NEGOTIATION_TIMEOUT_MS = 20_000;
 // OpenGeni policy: rotate conservatively without asserting an upstream lifetime.
 const DEFAULT_CONNECTION_ROTATION_INTERVAL_MS = 15 * 60_000;
 const DEFAULT_RECONNECT_BACKOFF_MS = [250, 1_000, 2_000, 5_000] as const;
@@ -138,6 +149,7 @@ export type CreateCodexRealtimeControllerOptions = {
   clearInterval?: ((handle: unknown) => void) | undefined;
   setTimeout?: ((callback: () => void, delayMs: number) => unknown) | undefined;
   clearTimeout?: ((handle: unknown) => void) | undefined;
+  negotiationTimeoutMs?: number | undefined;
   connectionRotationIntervalMs?: number | undefined;
   reconnectBackoffMs?: readonly number[] | undefined;
 };
@@ -200,6 +212,10 @@ export function createCodexRealtimeController(
     options.connectionRotationIntervalMs ?? DEFAULT_CONNECTION_ROTATION_INTERVAL_MS,
     "connection rotation interval",
   );
+  const negotiationTimeout = positiveDuration(
+    options.negotiationTimeoutMs ?? CODEX_REALTIME_NEGOTIATION_TIMEOUT_MS,
+    "negotiation timeout",
+  );
   const reconnectBackoff = validateReconnectBackoff(
     options.reconnectBackoffMs ?? DEFAULT_RECONNECT_BACKOFF_MS,
   );
@@ -225,6 +241,7 @@ export function createCodexRealtimeController(
   let syncTimer: unknown = null;
   let rotationTimer: unknown = null;
   let reconnectTimer: unknown = null;
+  let negotiationTimer: unknown = null;
   let closed = false;
   let stopping = false;
   let generation = 0;
@@ -265,19 +282,28 @@ export function createCodexRealtimeController(
     if (syncTimer !== null) unscheduleInterval(syncTimer);
     if (rotationTimer !== null) unscheduleTimeout(rotationTimer);
     if (reconnectTimer !== null) unscheduleTimeout(reconnectTimer);
+    if (negotiationTimer !== null) unscheduleTimeout(negotiationTimer);
     heartbeatTimer = null;
     syncTimer = null;
     rotationTimer = null;
     reconnectTimer = null;
+    negotiationTimer = null;
   };
 
   const stopNegotiationTimers = (): void => {
     if (heartbeatTimer !== null) unscheduleInterval(heartbeatTimer);
     if (rotationTimer !== null) unscheduleTimeout(rotationTimer);
     if (reconnectTimer !== null) unscheduleTimeout(reconnectTimer);
+    if (negotiationTimer !== null) unscheduleTimeout(negotiationTimer);
     heartbeatTimer = null;
     rotationTimer = null;
     reconnectTimer = null;
+    negotiationTimer = null;
+  };
+
+  const clearNegotiationTimer = (): void => {
+    if (negotiationTimer !== null) unscheduleTimeout(negotiationTimer);
+    negotiationTimer = null;
   };
 
   const releaseMicrophone = (): void => {
@@ -535,6 +561,26 @@ export function createCodexRealtimeController(
     scheduleRecovery(cause === "rotation" ? "reconnect" : cause, replaceMicrophone);
   };
 
+  const onBridgeFatal = (
+    targetGeneration: number,
+    failedBridge: CodexRealtimeV3Bridge,
+    fatal: CodexRealtimeV3BridgeFatal,
+  ): void => {
+    const current = active;
+    if (closed || stopping || !current || current.generation !== targetGeneration) return;
+    active = null;
+    failedBridge.close();
+    current.transport.stop();
+    publish({
+      status: "recovering",
+      bridge: failedBridge.snapshot(),
+      audibleOutput: "inactive",
+      diagnostic: diagnostic("negotiation_failure", fatal.message, true, targetGeneration),
+      error: fatal.message,
+    });
+    scheduleRecovery("reconnect", false, true);
+  };
+
   const onConnectionHealth = (
     targetGeneration: number,
     health: CodexRealtimeConnectionHealth,
@@ -587,6 +633,17 @@ export function createCodexRealtimeController(
       transitionEnded();
       return;
     }
+    if (rotate) {
+      // Refresh the 30-second lease immediately before freezing mode-version
+      // changes for a negotiation that is itself bounded to 20 seconds.
+      await heartbeat();
+      const renewedMode = state.mode;
+      if (!renewedMode || renewedMode.state !== "active") return;
+      if (closed || stopping || owner !== record) {
+        throw new DOMException("Realtime connection generation was retired", "AbortError");
+      }
+      currentMode = renewedMode;
+    }
     // Freeze lease-version changes while this exact negotiation/activation
     // proof is in flight, but keep flushing the old active bridge so durable
     // updates are not suppressed while its replacement is prepared.
@@ -595,6 +652,20 @@ export function createCodexRealtimeController(
     pendingGeneration = targetGeneration;
     const abort = new AbortController();
     pendingAbort = abort;
+    const earlyEvents = createCodexRealtimeEarlyEventBuffer({
+      onFatal: (error) => {
+        if (pendingGeneration === targetGeneration && !abort.signal.aborted) abort.abort(error);
+      },
+    });
+    negotiationTimer = scheduleTimeout(() => {
+      if (pendingGeneration === targetGeneration && !abort.signal.aborted) {
+        abort.abort(
+          new CodexRealtimeGenerationError(
+            "Codex realtime negotiation did not open within 20 seconds",
+          ),
+        );
+      }
+    }, negotiationTimeout);
     publish({
       status: rotate ? "recovering" : "starting",
       realtimeId: currentMode.id,
@@ -630,6 +701,7 @@ export function createCodexRealtimeController(
         activateRemoteAudio: false,
         createPeerConnection: options.createPeerConnection,
         getUserMedia: options.getUserMedia,
+        onEventsCreated: earlyEvents.attach,
         onAudibleOutputState: (next) => onAudibleOutput(targetGeneration, next),
         onMicrophoneEnded: () => onMicrophoneEnded(targetGeneration),
         onConnectionHealth: (health) => onConnectionHealth(targetGeneration, health),
@@ -642,18 +714,14 @@ export function createCodexRealtimeController(
           ),
       });
     } catch (error) {
+      clearNegotiationTimer();
+      earlyEvents.close();
       if (pendingGeneration === targetGeneration) {
         pendingGeneration = null;
         pendingAbort = null;
       }
       throw error;
     }
-    let buffering = true;
-    const bufferedPayloads: string[] = [];
-    const bufferMessage = (message: MessageEvent): void => {
-      if (buffering && typeof message.data === "string") bufferedPayloads.push(message.data);
-    };
-    connected.events.addEventListener("message", bufferMessage);
     try {
       await waitForDataChannelOpen(connected.events, abort.signal);
       if (
@@ -689,6 +757,9 @@ export function createCodexRealtimeController(
         { signal: abort.signal },
       );
       if (activated.mode.state !== "active") {
+        clearNegotiationTimer();
+        earlyEvents.close();
+        connected.stop();
         transitionEnded();
         return;
       }
@@ -709,8 +780,10 @@ export function createCodexRealtimeController(
         }
         throw abort.signal.reason ?? new DOMException("Aborted", "AbortError");
       }
+      clearNegotiationTimer();
       const previous = active;
-      const bridge = createCodexRealtimeV3Bridge({
+      let bridge!: CodexRealtimeV3Bridge;
+      bridge = createCodexRealtimeV3Bridge({
         events: connected.events,
         connectionId: connected.connectionId,
         connectionEpoch: connected.connectionEpoch,
@@ -721,12 +794,14 @@ export function createCodexRealtimeController(
           ownerKey: record.ownerKey,
           expectedVersion: activated.mode.version,
         },
+        listen: false,
         sync: async (request) =>
           await syncForGeneration(targetGeneration, activated.mode.id, request),
         randomUUID,
         onSnapshot: (nextBridge) => {
           if (active?.generation === targetGeneration) publish({ bridge: nextBridge });
         },
+        onFatal: (fatal) => onBridgeFatal(targetGeneration, bridge, fatal),
       });
       active = { generation: targetGeneration, transport: connected, bridge };
       recoveryTerminal = false;
@@ -757,13 +832,17 @@ export function createCodexRealtimeController(
       connected.activateRemoteAudio();
       previous?.bridge.close();
       previous?.transport.stop();
-      buffering = false;
-      connected.events.removeEventListener("message", bufferMessage);
-      for (const payload of bufferedPayloads) await bridge.ingest(payload);
+      earlyEvents.handoff(bridge);
+      if (active?.generation !== targetGeneration) {
+        throw new CodexRealtimeGenerationError(
+          bridge.snapshot().fatal?.message ??
+            "Codex realtime connection generation was retired during activation",
+        );
+      }
       startTimers();
     } catch (error) {
-      buffering = false;
-      connected.events.removeEventListener("message", bufferMessage);
+      clearNegotiationTimer();
+      earlyEvents.close();
       connected.stop();
       if (pendingGeneration === targetGeneration) {
         pendingGeneration = null;
@@ -999,7 +1078,10 @@ export function createCodexRealtimeController(
       });
       stopTimers();
       pendingAbort?.abort(new DOMException("Realtime stopped", "AbortError"));
-      await connectionTask?.catch(() => undefined);
+      pendingGeneration = null;
+      const retiredTask = connectionTask;
+      connectionTask = null;
+      void retiredTask?.catch(() => undefined);
       closeBrowserResources();
       let current = state.mode;
       try {
@@ -1061,6 +1143,91 @@ export function createCodexRealtimeController(
   return controller;
 }
 
+type CodexRealtimeEarlyEventBuffer = {
+  attach(events: RTCDataChannel): void;
+  handoff(bridge: CodexRealtimeV3Bridge): void;
+  close(): void;
+};
+
+function createCodexRealtimeEarlyEventBuffer(input: {
+  onFatal(error: Error): void;
+}): CodexRealtimeEarlyEventBuffer {
+  let events: RTCDataChannel | null = null;
+  let buffered: string[] = [];
+  let bufferedBytes = 0;
+  let fatal = false;
+
+  const detach = (): void => {
+    events?.removeEventListener("message", onMessage);
+    events = null;
+  };
+  const fail = (): void => {
+    if (fatal) return;
+    fatal = true;
+    detach();
+    buffered = [];
+    bufferedBytes = 0;
+    input.onFatal(
+      new CodexRealtimeGenerationError(
+        "Codex realtime activation event buffer exceeded its hard limit",
+      ),
+    );
+  };
+  const onMessage = (message: MessageEvent): void => {
+    if (fatal || typeof message.data !== "string") return;
+    const parsed = parseCodexRealtimeV3Event(message.data);
+    // Invalid and oversized provider input is quarantined before it can occupy
+    // activation memory. Audio deltas are ephemeral browser playback only.
+    if (!parsed.ok || parsed.event.type === "output_audio.delta") return;
+    const bytes = new TextEncoder().encode(message.data).byteLength;
+    if (
+      bytes > CODEX_REALTIME_V3_MAX_EVENT_BYTES ||
+      buffered.length + 1 > CODEX_REALTIME_V3_PENDING_MAX_ENTRIES ||
+      bufferedBytes + bytes > CODEX_REALTIME_V3_PENDING_MAX_BYTES
+    ) {
+      fail();
+      return;
+    }
+    buffered.push(message.data);
+    bufferedBytes += bytes;
+  };
+
+  return {
+    attach: (channel) => {
+      if (fatal || events === channel) return;
+      if (events) throw new Error("Codex realtime activation buffer is already attached");
+      events = channel;
+      events.addEventListener("message", onMessage);
+    },
+    handoff: (bridge) => {
+      if (fatal) {
+        bridge.close();
+        return;
+      }
+      // JavaScript event dispatch cannot interleave between these synchronous
+      // operations. Reentrant arrivals append to the same array and are picked
+      // up by the loop before the early listener is removed; the direct bridge
+      // listener is enabled only after that removal, so there is no duplicate.
+      for (let index = 0; index < buffered.length; index += 1) {
+        void bridge.ingest(buffered[index]!).catch(() => undefined);
+      }
+      buffered = [];
+      bufferedBytes = 0;
+      detach();
+      bridge.listen();
+    },
+    close: () => {
+      detach();
+      buffered = [];
+      bufferedBytes = 0;
+    },
+  };
+}
+
+class CodexRealtimeGenerationError extends Error {
+  readonly name = "CodexRealtimeGenerationError";
+}
+
 function ownerStorageKey(workspaceId: string, sessionId: string): string {
   return `opengeni:codex-realtime-owner:${workspaceId}:${sessionId}`;
 }
@@ -1103,6 +1270,9 @@ function defaultRandomUUID(): string {
 }
 
 function waitForDataChannelOpen(events: RTCDataChannel, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) {
+    return Promise.reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+  }
   if (events.readyState === "open") return Promise.resolve();
   if (events.readyState === "closing" || events.readyState === "closed") {
     return Promise.reject(new Error("Codex realtime data channel closed before opening"));
@@ -1134,6 +1304,9 @@ function waitForDataChannelOpen(events: RTCDataChannel, signal: AbortSignal): Pr
     events.addEventListener("close", onClose, { once: true });
     events.addEventListener("error", onError, { once: true });
     signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+    else if (events.readyState === "open") onOpen();
+    else if (events.readyState === "closing" || events.readyState === "closed") onClose();
   });
 }
 

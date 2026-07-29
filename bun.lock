@@ -464,10 +464,8 @@
     "packages/sdk": {
       "name": "@opengeni/sdk",
       "version": "0.25.5",
-      "dependencies": {
-        "@opengeni/codex": "workspace:*",
-      },
       "devDependencies": {
+        "@opengeni/codex": "workspace:*",
         "@opengeni/contracts": "workspace:*",
         "@opengeni/deployment": "workspace:*",
         "tsup": "^8.5.0",

@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
   CODEX_REALTIME_CONTEXT_APPEND_MAX_BYTES,
+  CODEX_REALTIME_V3_MAX_EVENT_BYTES,
+  CODEX_REALTIME_V3_MAX_IDENTIFIER_BYTES,
+  CODEX_REALTIME_V3_MAX_TEXT_BYTES,
   contextAppendChunks,
   encodeCodexRealtimeV3DelegationContextAppend,
   encodeCodexRealtimeV3SessionContextAppend,
@@ -153,6 +156,68 @@ describe("Codex Frameless Bidi V3 protocol", () => {
         message: "provider rejected append",
       },
     });
+  });
+
+  test("bounds raw events, identifiers, and text by exact UTF-8 bytes", () => {
+    expect(parseCodexRealtimeV3Event("x".repeat(CODEX_REALTIME_V3_MAX_EVENT_BYTES + 1))).toEqual({
+      ok: false,
+      reason: "oversized_event",
+      eventType: null,
+    });
+    expect(
+      parseCodexRealtimeV3Event(
+        JSON.stringify({
+          type: "input_transcript.added",
+          event_id: "🙂".repeat(Math.floor(CODEX_REALTIME_V3_MAX_IDENTIFIER_BYTES / 4) + 1),
+          item: { text: "valid" },
+        }),
+      ),
+    ).toEqual({
+      ok: false,
+      reason: "oversized_field",
+      eventType: "input_transcript.added",
+    });
+    expect(
+      parseCodexRealtimeV3Event(
+        JSON.stringify({
+          type: "turn.done",
+          turn: {
+            id: "turn-1",
+            role: "assistant",
+            transcript: "🙂".repeat(Math.floor(CODEX_REALTIME_V3_MAX_TEXT_BYTES / 4) + 1),
+          },
+        }),
+      ),
+    ).toMatchObject({ ok: false, reason: "oversized_field", eventType: "turn.done" });
+    expect(
+      parseCodexRealtimeV3Event(
+        JSON.stringify({
+          type: "delegation.created",
+          item: {
+            id: "delegation-1",
+            type: "delegation",
+            target: "client",
+            content: [
+              { type: "input_text", text: "a".repeat(70_000) },
+              { type: "input_text", text: "b".repeat(70_000) },
+            ],
+          },
+        }),
+      ),
+    ).toMatchObject({
+      ok: false,
+      reason: "oversized_field",
+      eventType: "delegation.created",
+    });
+    expect(
+      parseCodexRealtimeV3Event(
+        JSON.stringify({
+          type: "input_transcript.added",
+          event_id: "e".repeat(CODEX_REALTIME_V3_MAX_IDENTIFIER_BYTES),
+          item: { text: "t".repeat(CODEX_REALTIME_V3_MAX_TEXT_BYTES) },
+        }),
+      ),
+    ).toMatchObject({ ok: true });
   });
 
   test("encodes exact V3 context appends in UTF-8-safe 500-byte chunks", () => {

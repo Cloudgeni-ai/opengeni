@@ -50,6 +50,8 @@ export type StartCodexRealtimeWebrtcOptions = {
   /** Injectable browser seams make complete SDP negotiation deterministic in tests. */
   createPeerConnection?: (() => RTCPeerConnection) | undefined;
   getUserMedia?: ((constraints: MediaStreamConstraints) => Promise<MediaStream>) | undefined;
+  /** Called synchronously immediately after `oai-events` is created. */
+  onEventsCreated?: ((events: RTCDataChannel) => void) | undefined;
   /** Reuse a caller-owned microphone across transparent connection rotations. */
   media?: MediaStream | undefined;
   /** Caller-owned audio element for the provider's remote WebRTC track. */
@@ -90,6 +92,16 @@ export async function startCodexRealtimeWebrtc(
   throwIfAborted(options.signal);
   const peerConnection = (options.createPeerConnection ?? defaultPeerConnection)();
   const events = peerConnection.createDataChannel("oai-events");
+  try {
+    options.onEventsCreated?.(events);
+  } catch (error) {
+    try {
+      events.close();
+    } finally {
+      peerConnection.close();
+    }
+    throw error;
+  }
   let media: MediaStream | null = null;
   let ownsMedia = false;
   let stopped = false;

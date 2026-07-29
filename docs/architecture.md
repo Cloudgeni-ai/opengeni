@@ -348,10 +348,12 @@ call ledger row and creates one ordinary queued `session_turns` row plus its
 canonical events and durable workflow wake. The call's one-to-one `turn_id` is
 the terminal result/error projection seam. The active-mode claim fence admits
 only that exact call-linked turn. Terminal settlement atomically creates one
-linked outbound `delegation_result` or deterministic `error`; a partial or lost
-provider-delivery ACK leaves that same row replayable across browser restart or
-connection rotation, while exact owner/session/connection/epoch proof fences
-delivery and ACK. Invalid calls ledger one deterministic outbound error; a
+linked outbound `delegation_result` or deterministic `error`. The browser
+durably ACKs delivery from OpenGeni, but pinned V3 has no provider receipt for a
+context append, so provider send remains at-least-once and the same durable row
+may replay after an ambiguous send, browser restart, or connection rotation.
+Exact owner/session/connection/epoch proof fences delivery and the client ACK.
+Invalid calls ledger one deterministic outbound error; a
 transient admission failure commits neither call nor turn. There is no
 child/fork session or after-commit admission worker.
 

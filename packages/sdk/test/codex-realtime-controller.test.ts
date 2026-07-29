@@ -3,6 +3,7 @@ import {
   createCodexRealtimeController,
   projectSessionRealtimeLifecycle,
 } from "../src/codex-realtime-controller";
+import { CODEX_REALTIME_V3_PENDING_MAX_BYTES } from "../src/codex-realtime-v3";
 import { OpenGeniApiError } from "../src/errors";
 import type {
   CodexRealtimeWebrtcRequest,
@@ -51,7 +52,12 @@ function uuidSource() {
   return () => values.shift() ?? "99999999-9999-4999-8999-999999999999";
 }
 
-function browserFixture() {
+function browserFixture(
+  options: {
+    onSetRemoteDescription?: (() => void) | undefined;
+    initialEventsReadyState?: RTCDataChannelState | undefined;
+  } = {},
+) {
   const calls: string[] = [];
   const sent: string[] = [];
   const track = { kind: "audio", stop: () => calls.push("track.stop") };
@@ -61,12 +67,18 @@ function browserFixture() {
     getTracks: () => [track],
   } as unknown as MediaStream;
   const remoteMedia = { getTracks: () => [remoteTrack] } as unknown as MediaStream;
+  let eventsReadyState = options.initialEventsReadyState ?? "open";
   const events = new EventTarget() as RTCDataChannel;
   Object.defineProperties(events, {
     label: { value: "oai-events" },
-    readyState: { value: "open" },
+    readyState: { get: () => eventsReadyState },
     send: { value: (value: string) => sent.push(value) },
-    close: { value: () => calls.push("events.close") },
+    close: {
+      value: () => {
+        eventsReadyState = "closed";
+        calls.push("events.close");
+      },
+    },
   });
   let localDescription: RTCSessionDescription | null = null;
   const peer = new EventTarget() as RTCPeerConnection;
@@ -87,7 +99,9 @@ function browserFixture() {
     },
     setRemoteDescription: {
       value: async (description: RTCSessionDescriptionInit) => {
+        calls.push(`setRemoteDescription:${description.type}`);
         expect(description).toEqual({ type: "answer", sdp: ANSWER });
+        options.onSetRemoteDescription?.();
       },
     },
     close: { value: () => calls.push("peer.close") },
@@ -109,7 +123,20 @@ function browserFixture() {
     });
     peer.dispatchEvent(event);
   };
-  return { calls, sent, media, events, peer, remoteAudio, remoteMedia, dispatchRemoteTrack };
+  return {
+    calls,
+    sent,
+    media,
+    events,
+    peer,
+    remoteAudio,
+    remoteMedia,
+    dispatchRemoteTrack,
+    openEvents: () => {
+      eventsReadyState = "open";
+      events.dispatchEvent(new Event("open"));
+    },
+  };
 }
 
 function storageFixture(initial: Record<string, string> = {}) {
@@ -299,6 +326,10 @@ async function eventually(assertion: () => boolean, message: string): Promise<vo
   throw new Error(message);
 }
 
+function dispatchProviderMessage(events: RTCDataChannel, payload: string): void {
+  events.dispatchEvent(new MessageEvent("message", { data: payload }));
+}
+
 describe("Codex realtime browser controller", () => {
   test("drives normal -> realtime -> normal with real WebRTC/V3 bridge semantics", async () => {
     const browser = browserFixture();
@@ -449,8 +480,8 @@ describe("Codex realtime browser controller", () => {
     });
     expect(syncRequests.at(-1)).toMatchObject({
       clientAckThroughSequence: 9,
-      providerAckSequences: [9],
     });
+    expect(syncRequests.at(-1)?.providerAckSequences).toBeUndefined();
 
     const beforeAudioDelta = syncRequests.length;
     await controller.ingestProviderEvent(
@@ -542,8 +573,8 @@ describe("Codex realtime browser controller", () => {
     });
     expect(syncRequests.at(-1)).toMatchObject({
       clientAckThroughSequence: 10,
-      providerAckSequences: [10],
     });
+    expect(syncRequests.at(-1)?.providerAckSequences).toBeUndefined();
 
     await controller.ingestProviderEvent(
       JSON.stringify({
@@ -700,17 +731,17 @@ describe("Codex realtime browser controller", () => {
         ) => {
           expect(connectionId).toBe(CONNECTION_ID);
           expect(request).toMatchObject({
-            expectedVersion: 4,
+            expectedVersion: 5,
             expectedConnectionEpoch: 2,
             connectionEpoch: 3,
           });
           return {
-            mode: mode({ operationId, browserInstanceId, version: 5, connectionEpoch: 3 }),
+            mode: mode({ operationId, browserInstanceId, version: 6, connectionEpoch: 3 }),
             replay: false,
           };
         },
         heartbeatSessionRealtime: async () => ({
-          mode: mode({ operationId, browserInstanceId, version: 6, connectionEpoch: 3 }),
+          mode: mode({ operationId, browserInstanceId, version: 5, connectionEpoch: 2 }),
           replay: false,
         }),
         syncSessionRealtimeLedger: async () => ({ accepted: [], outbound: [] }),
@@ -737,7 +768,7 @@ describe("Codex realtime browser controller", () => {
     expect(negotiations).toEqual([
       expect.objectContaining({
         rotate: true,
-        expectedVersion: 4,
+        expectedVersion: 5,
         expectedConnectionEpoch: 2,
         browserInstanceId,
         ownerKey,
@@ -746,7 +777,7 @@ describe("Codex realtime browser controller", () => {
     expect(controller.snapshot()).toMatchObject({
       status: "active",
       realtimeId: REALTIME_ID,
-      mode: { version: 5, connectionEpoch: 3 },
+      mode: { version: 6, connectionEpoch: 3 },
     });
     controller.close();
     expect(storage.values.has(key)).toBe(true);
@@ -1324,5 +1355,374 @@ describe("Codex realtime browser controller", () => {
     expect(browser.calls).toEqual(
       expect.arrayContaining(["peer.0.close", "peer.1.close", "track.0.stop"]),
     );
+  });
+
+  test("persists an event emitted synchronously by setRemoteDescription exactly once", async () => {
+    const payload = JSON.stringify({
+      type: "input_transcript.added",
+      event_id: "early-transcript-1",
+      item: { id: "early-item-1", text: "captured before transport return" },
+    });
+    let browser!: ReturnType<typeof browserFixture>;
+    browser = browserFixture({
+      onSetRemoteDescription: () => dispatchProviderMessage(browser.events, payload),
+    });
+    const requests: SyncSessionRealtimeLedgerRequest[] = [];
+    let current = mode();
+    const controller = createCodexRealtimeController({
+      workspaceId: WORKSPACE_ID,
+      sessionId: SESSION_ID,
+      storage: storageFixture(),
+      randomUUID: uuidSource(),
+      createPeerConnection: () => browser.peer,
+      getUserMedia: async () => browser.media,
+      ...noIntervals(),
+      client: {
+        beginSessionRealtime: async (_workspaceId, _sessionId, request) => {
+          current = mode({
+            operationId: request.operationId,
+            browserInstanceId: request.browserInstanceId,
+          });
+          return { mode: current, replay: false };
+        },
+        heartbeatSessionRealtime: async () => ({ mode: current, replay: false }),
+        negotiateCodexRealtimeWebrtc: async () => ({
+          sdp: ANSWER,
+          version: "v3",
+          model: "gpt-live-1-boulder-alpha",
+          connectionId: CONNECTION_ID,
+          connectionEpoch: 1,
+          startupFenceSequence: 0,
+          modeVersion: current.version,
+          replay: false,
+        }),
+        activateCodexRealtimeConnection: async () => ({ mode: current, replay: false }),
+        syncSessionRealtimeLedger: async (_workspaceId, _sessionId, _realtimeId, request) => {
+          requests.push(request);
+          return { accepted: [], outbound: [] };
+        },
+        endSessionRealtime: async () => ({
+          mode: mode({ ...current, state: "ended", endReason: "user_stop" }),
+          replay: false,
+        }),
+      },
+    });
+
+    await controller.start();
+    await controller.flush();
+
+    expect(requests.flatMap((request) => request.entries ?? [])).toEqual([
+      expect.objectContaining({
+        kind: "user_transcript",
+        providerEventId: "early-transcript-1",
+        text: "captured before transport return",
+      }),
+    ]);
+    await controller.stop();
+  });
+
+  test("aborts a data channel that misses the 20-second open deadline and fences late open", async () => {
+    const browser = browserFixture({ initialEventsReadyState: "connecting" });
+    const timers = timerFixture();
+    let current = mode();
+    let activationCalls = 0;
+    const controller = createCodexRealtimeController({
+      workspaceId: WORKSPACE_ID,
+      sessionId: SESSION_ID,
+      storage: storageFixture(),
+      randomUUID: uuidSource(),
+      createPeerConnection: () => browser.peer,
+      getUserMedia: async () => browser.media,
+      reconnectBackoffMs: [10],
+      ...timers,
+      client: {
+        beginSessionRealtime: async (_workspaceId, _sessionId, request) => {
+          current = mode({
+            operationId: request.operationId,
+            browserInstanceId: request.browserInstanceId,
+          });
+          return { mode: current, replay: false };
+        },
+        heartbeatSessionRealtime: async () => ({ mode: current, replay: false }),
+        negotiateCodexRealtimeWebrtc: async () => ({
+          sdp: ANSWER,
+          version: "v3",
+          model: "gpt-live-1-boulder-alpha",
+          connectionId: CONNECTION_ID,
+          connectionEpoch: 1,
+          startupFenceSequence: 0,
+          modeVersion: current.version,
+          replay: false,
+        }),
+        activateCodexRealtimeConnection: async () => {
+          activationCalls += 1;
+          return { mode: current, replay: false };
+        },
+        syncSessionRealtimeLedger: async () => ({ accepted: [], outbound: [] }),
+        endSessionRealtime: async () => ({
+          mode: mode({ ...current, state: "ended", endReason: "user_stop" }),
+          replay: false,
+        }),
+      },
+    });
+
+    const starting = controller.start();
+    await eventually(
+      () => timers.timeoutDelays().includes(20_000),
+      "negotiation deadline was not installed",
+    );
+    await eventually(
+      () => browser.calls.includes("setRemoteDescription:answer"),
+      "data channel did not reach the open wait",
+    );
+    timers.runTimeout(20_000);
+    await expect(starting).rejects.toThrow("did not open within 20 seconds");
+    browser.openEvents();
+    await Promise.resolve();
+
+    expect(activationCalls).toBe(0);
+    expect(controller.snapshot()).toMatchObject({
+      status: "recovering",
+      diagnostic: { kind: "reconnect", recoverable: true },
+    });
+    expect(browser.calls).toEqual(expect.arrayContaining(["events.close", "peer.close"]));
+    await controller.stop();
+    expect(timers.timeoutDelays()).toEqual([]);
+  });
+
+  test("turns early activation FIFO overflow into one fenced recovery without persistence", async () => {
+    let browser!: ReturnType<typeof browserFixture>;
+    browser = browserFixture({
+      onSetRemoteDescription: () => {
+        for (let index = 0; index < 257; index += 1) {
+          dispatchProviderMessage(
+            browser.events,
+            JSON.stringify({
+              type: "input_transcript.added",
+              event_id: `early-${index}`,
+              item: { id: `item-${index}`, text: `early-${index}` },
+            }),
+          );
+        }
+      },
+    });
+    const timers = timerFixture();
+    const requests: SyncSessionRealtimeLedgerRequest[] = [];
+    let current = mode();
+    let activationCalls = 0;
+    const controller = createCodexRealtimeController({
+      workspaceId: WORKSPACE_ID,
+      sessionId: SESSION_ID,
+      storage: storageFixture(),
+      randomUUID: uuidSource(),
+      createPeerConnection: () => browser.peer,
+      getUserMedia: async () => browser.media,
+      reconnectBackoffMs: [10],
+      ...timers,
+      client: {
+        beginSessionRealtime: async (_workspaceId, _sessionId, request) => {
+          current = mode({
+            operationId: request.operationId,
+            browserInstanceId: request.browserInstanceId,
+          });
+          return { mode: current, replay: false };
+        },
+        heartbeatSessionRealtime: async () => ({ mode: current, replay: false }),
+        negotiateCodexRealtimeWebrtc: async () => ({
+          sdp: ANSWER,
+          version: "v3",
+          model: "gpt-live-1-boulder-alpha",
+          connectionId: CONNECTION_ID,
+          connectionEpoch: 1,
+          startupFenceSequence: 0,
+          modeVersion: current.version,
+          replay: false,
+        }),
+        activateCodexRealtimeConnection: async () => {
+          activationCalls += 1;
+          return { mode: current, replay: false };
+        },
+        syncSessionRealtimeLedger: async (_workspaceId, _sessionId, _realtimeId, request) => {
+          requests.push(request);
+          return { accepted: [], outbound: [] };
+        },
+        endSessionRealtime: async () => ({
+          mode: mode({ ...current, state: "ended", endReason: "user_stop" }),
+          replay: false,
+        }),
+      },
+    });
+
+    await expect(controller.start()).rejects.toThrow(
+      "activation event buffer exceeded its hard limit",
+    );
+
+    expect(activationCalls).toBe(0);
+    expect(requests).toEqual([]);
+    expect(controller.snapshot()).toMatchObject({
+      status: "recovering",
+      diagnostic: { kind: "reconnect", recoverable: true },
+    });
+    await controller.stop();
+  });
+
+  test("fences bridge metadata overflow during early handoff and schedules recovery", async () => {
+    const encoder = new TextEncoder();
+    const emptyPayloads = Array.from({ length: 128 }, (_, index) =>
+      JSON.stringify({
+        type: "input_transcript.added",
+        event_id: `handoff-${index}`,
+        item: { id: `item-${index}`, text: "" },
+      }),
+    );
+    const emptyBytes = emptyPayloads.reduce(
+      (total, payload) => total + encoder.encode(payload).byteLength,
+      0,
+    );
+    const textBudget = CODEX_REALTIME_V3_PENDING_MAX_BYTES - emptyBytes;
+    const textBytes = Math.floor(textBudget / emptyPayloads.length);
+    const remainder = textBudget % emptyPayloads.length;
+    const payloads = emptyPayloads.map((_payload, index) =>
+      JSON.stringify({
+        type: "input_transcript.added",
+        event_id: `handoff-${index}`,
+        item: {
+          id: `item-${index}`,
+          text: "x".repeat(textBytes + (index < remainder ? 1 : 0)),
+        },
+      }),
+    );
+    expect(payloads.reduce((total, payload) => total + encoder.encode(payload).byteLength, 0)).toBe(
+      CODEX_REALTIME_V3_PENDING_MAX_BYTES,
+    );
+
+    let browser!: ReturnType<typeof browserFixture>;
+    browser = browserFixture({
+      onSetRemoteDescription: () => {
+        for (const payload of payloads) dispatchProviderMessage(browser.events, payload);
+      },
+    });
+    const timers = timerFixture();
+    const requests: SyncSessionRealtimeLedgerRequest[] = [];
+    let uuid = 0;
+    let current = mode();
+    const controller = createCodexRealtimeController({
+      workspaceId: WORKSPACE_ID,
+      sessionId: SESSION_ID,
+      storage: storageFixture(),
+      randomUUID: () => `61000000-0000-4000-8000-${String(++uuid).padStart(12, "0")}`,
+      createPeerConnection: () => browser.peer,
+      getUserMedia: async () => browser.media,
+      reconnectBackoffMs: [10],
+      ...timers,
+      client: {
+        beginSessionRealtime: async (_workspaceId, _sessionId, request) => {
+          current = mode({
+            operationId: request.operationId,
+            browserInstanceId: request.browserInstanceId,
+          });
+          return { mode: current, replay: false };
+        },
+        heartbeatSessionRealtime: async () => ({ mode: current, replay: false }),
+        negotiateCodexRealtimeWebrtc: async () => ({
+          sdp: ANSWER,
+          version: "v3",
+          model: "gpt-live-1-boulder-alpha",
+          connectionId: CONNECTION_ID,
+          connectionEpoch: 1,
+          startupFenceSequence: 0,
+          modeVersion: current.version,
+          replay: false,
+        }),
+        activateCodexRealtimeConnection: async () => ({ mode: current, replay: false }),
+        syncSessionRealtimeLedger: async (_workspaceId, _sessionId, _realtimeId, request) => {
+          requests.push(request);
+          return { accepted: [], outbound: [] };
+        },
+        endSessionRealtime: async () => ({
+          mode: mode({ ...current, state: "ended", endReason: "user_stop" }),
+          replay: false,
+        }),
+      },
+    });
+
+    await expect(controller.start()).rejects.toThrow(
+      "durable event buffer exceeded its hard limit",
+    );
+    expect(requests).toEqual([]);
+    expect(controller.snapshot()).toMatchObject({
+      status: "recovering",
+      diagnostic: { kind: "reconnect", recoverable: true },
+    });
+    expect(timers.timeoutDelays()).toEqual([10]);
+    await controller.stop();
+  });
+
+  test("closes an active bridge generation on hard pending overflow without a durable row", async () => {
+    const browser = browserFixture();
+    const timers = timerFixture();
+    const requests: SyncSessionRealtimeLedgerRequest[] = [];
+    let uuid = 0;
+    let current = mode();
+    const controller = createCodexRealtimeController({
+      workspaceId: WORKSPACE_ID,
+      sessionId: SESSION_ID,
+      storage: storageFixture(),
+      randomUUID: () => `60000000-0000-4000-8000-${String(++uuid).padStart(12, "0")}`,
+      createPeerConnection: () => browser.peer,
+      getUserMedia: async () => browser.media,
+      reconnectBackoffMs: [10],
+      ...timers,
+      client: {
+        beginSessionRealtime: async (_workspaceId, _sessionId, request) => {
+          current = mode({
+            operationId: request.operationId,
+            browserInstanceId: request.browserInstanceId,
+          });
+          return { mode: current, replay: false };
+        },
+        heartbeatSessionRealtime: async () => ({ mode: current, replay: false }),
+        negotiateCodexRealtimeWebrtc: async () => ({
+          sdp: ANSWER,
+          version: "v3",
+          model: "gpt-live-1-boulder-alpha",
+          connectionId: CONNECTION_ID,
+          connectionEpoch: 1,
+          startupFenceSequence: 0,
+          modeVersion: current.version,
+          replay: false,
+        }),
+        activateCodexRealtimeConnection: async () => ({ mode: current, replay: false }),
+        syncSessionRealtimeLedger: async (_workspaceId, _sessionId, _realtimeId, request) => {
+          requests.push(request);
+          return { accepted: [], outbound: [] };
+        },
+        endSessionRealtime: async () => ({
+          mode: mode({ ...current, state: "ended", endReason: "user_stop" }),
+          replay: false,
+        }),
+      },
+    });
+
+    await controller.start();
+    for (let index = 0; index < 257; index += 1) {
+      dispatchProviderMessage(
+        browser.events,
+        JSON.stringify({
+          type: "input_transcript.added",
+          event_id: `active-${index}`,
+          item: { id: `item-${index}`, text: `active-${index}` },
+        }),
+      );
+    }
+    await Promise.resolve();
+
+    expect(requests).toEqual([]);
+    expect(controller.snapshot()).toMatchObject({
+      status: "recovering",
+      bridge: { fatal: { code: "pending_overflow" }, pendingInbound: 256 },
+    });
+    expect(browser.calls).toEqual(expect.arrayContaining(["events.close", "peer.close"]));
+    await controller.stop();
   });
 });
