@@ -62,12 +62,19 @@ that transaction advances the connection epoch, retires the old row, and keeps
 the same realtime id, owner, lifecycle, and durable V3 ledger. During rolling
 deployment, clients that omit the new browser-activation marker retain the old
 immediate-activation behavior; hardened clients always require the two-phase
-proof. Startup replay and provider ACKs remain bound to the promoted connection,
+proof. Startup replay and OpenGeni client-delivery ACKs remain bound to the promoted connection,
 and browser generation fences make late answers, duplicate callbacks, and old
 peer events inert. Failed preparation leaves the old healthy peer active;
 recovery uses bounded backoff and terminal conflicts permanently stop its retry
 loop. Stop, reload without owner proof, and concurrent timer/network failure
 all abort pending negotiation and release peers, timers, media, and playback.
+The browser installs a raw listener synchronously when `oai-events` is created,
+before any asynchronous negotiation. Its activation FIFO excludes audio deltas,
+rejects malformed or over-1-MiB events, and is hard-bounded to 256 entries and
+16 MiB; crossing either bound aborts that generation instead of dropping and
+continuing. Negotiation plus channel-open has one abortable 20-second deadline
+under the 30-second mode lease. Activation drains the early FIFO and swaps to
+the direct bridge listener synchronously, with no await gap or duplicate.
 
 Microphone and audible output are separate truthful states. Permission denial,
 missing device, acquisition failure, and an ended track have deterministic
@@ -109,11 +116,14 @@ queued turn after its immutable metadata is re-matched to the call row; every
 other ordinary, recovery, update, goal, or maintenance claim stays fenced.
 Canonical terminal settlement and both exceptional terminal-failure paths
 atomically append exactly one turn-linked `delegation_result` or deterministic
-`error` to the outbound ledger. The browser ACKs client receipt and then the
-exact sequence only after every V3 provider-channel chunk sends. Until that
-provider ACK commits, the same row replays after a request failure, browser
-crash, or connection rotation; stale connection identities cannot ACK it. No
-child session, fork, handoff framework, or after-commit admission loop exists.
+`error` to the outbound ledger. The browser durably ACKs receipt of the row from
+OpenGeni. Pinned V3 exposes no provider receipt for `delegation.context.append`
+or `session.context.append`, so provider sends remain at-least-once: a live
+bridge suppresses repeat sends only within that generation after a full local
+send, while a browser crash or connection rotation replays the same durable row
+and may repeat an ambiguous provider append. Stale connection identities cannot
+advance even the client-delivery ACK. No child session, fork, handoff framework,
+or after-commit admission loop exists.
 
 Every accepted turn also carries one immutable `TurnInitiator`. Human/API
 Send and Steer capture the authenticated subject that accepted the command;

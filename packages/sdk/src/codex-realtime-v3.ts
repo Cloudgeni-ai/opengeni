@@ -2,8 +2,8 @@ import {
   encodeCodexRealtimeV3DelegationContextAppend,
   encodeCodexRealtimeV3SessionContextAppend,
   parseCodexRealtimeV3Event,
-} from "@opengeni/codex/realtime-v3";
-import type { CodexRealtimeV3Event } from "@opengeni/codex/realtime-v3";
+} from "./codex-realtime-v3-wire";
+import type { CodexRealtimeV3Event } from "./codex-realtime-v3-wire";
 import type {
   SessionRealtimeInboundEntry,
   SessionRealtimeLedgerEntry,
@@ -13,11 +13,14 @@ import type {
 
 export {
   CODEX_REALTIME_CONTEXT_APPEND_MAX_BYTES,
+  CODEX_REALTIME_V3_MAX_EVENT_BYTES,
+  CODEX_REALTIME_V3_MAX_IDENTIFIER_BYTES,
+  CODEX_REALTIME_V3_MAX_TEXT_BYTES,
   contextAppendChunks,
   encodeCodexRealtimeV3DelegationContextAppend,
   encodeCodexRealtimeV3SessionContextAppend,
   parseCodexRealtimeV3Event,
-} from "@opengeni/codex/realtime-v3";
+} from "./codex-realtime-v3-wire";
 export type {
   CodexRealtimeV3ContextAppendChannel,
   CodexRealtimeV3DelegationContextAppend,
@@ -25,7 +28,16 @@ export type {
   CodexRealtimeV3ParseFailure,
   CodexRealtimeV3ParseResult,
   CodexRealtimeV3SessionContextAppend,
-} from "@opengeni/codex/realtime-v3";
+} from "./codex-realtime-v3-wire";
+
+export const CODEX_REALTIME_V3_SYNC_MAX_ENTRIES = 64;
+export const CODEX_REALTIME_V3_PENDING_MAX_ENTRIES = 256;
+export const CODEX_REALTIME_V3_PENDING_MAX_BYTES = 16 * 1024 * 1024;
+
+export type CodexRealtimeV3BridgeFatal = {
+  code: "pending_overflow";
+  message: string;
+};
 
 export type CodexRealtimeV3BridgeSnapshot = {
   connectionId: string;
@@ -36,9 +48,12 @@ export type CodexRealtimeV3BridgeSnapshot = {
   activeDelegationId: string | null;
   lastError: string | null;
   pendingInbound: number;
+  pendingInboundBytes: number;
   clientAckThroughSequence: number | null;
+  /** Pinned V3 exposes no provider receipt, so this list is always empty. */
   providerAckSequences: number[];
   providerStarted: boolean;
+  fatal: CodexRealtimeV3BridgeFatal | null;
 };
 
 export type CodexRealtimeV3BridgeOptions = {
@@ -53,31 +68,46 @@ export type CodexRealtimeV3BridgeOptions = {
   >;
   sync(request: SyncSessionRealtimeLedgerRequest): Promise<SyncSessionRealtimeLedgerResponse>;
   randomUUID?: (() => string) | undefined;
+  /** The controller installs its activation FIFO first, then enables this listener synchronously. */
+  listen?: boolean | undefined;
   onSnapshot?: ((snapshot: CodexRealtimeV3BridgeSnapshot) => void) | undefined;
+  onFatal?: ((fatal: CodexRealtimeV3BridgeFatal) => void) | undefined;
 };
 
 export type CodexRealtimeV3Bridge = {
   snapshot(): CodexRealtimeV3BridgeSnapshot;
   ingest(payload: string): Promise<void>;
   flush(): Promise<void>;
+  listen(): void;
   close(): void;
+};
+
+type PendingInbound = {
+  entry: SessionRealtimeInboundEntry;
+  bytes: number;
 };
 
 export function createCodexRealtimeV3Bridge(
   options: CodexRealtimeV3BridgeOptions,
 ): CodexRealtimeV3Bridge {
   let closed = false;
+  let listening = false;
   let speaking = false;
   let activeDelegationId: string | null = null;
   let lastError: string | null = null;
+  let fatal: CodexRealtimeV3BridgeFatal | null = null;
   let providerStarted:
     | { providerSessionId: string; providerEventId?: string | null | undefined }
     | undefined;
   let providerStartedAccepted = false;
   let clientAckThroughSequence: number | null = null;
-  const providerAckSequences = new Set<number>();
-  let pendingInbound: SessionRealtimeInboundEntry[] = [];
+  let pendingInbound: PendingInbound[] = [];
+  let pendingInboundCount = 0;
+  let pendingInboundBytes = 0;
   let flushing: Promise<void> | null = null;
+  let flushRequestedWhileRunning = false;
+  let forceSync = false;
+  const clientReceivedSequences = new Set<number>();
   const sentSequences = new Set<number>();
   const randomUUID = options.randomUUID ?? defaultRandomUUID;
 
@@ -89,107 +119,166 @@ export function createCodexRealtimeV3Bridge(
     speaking,
     activeDelegationId,
     lastError,
-    pendingInbound: pendingInbound.length,
+    pendingInbound: pendingInboundCount,
+    pendingInboundBytes,
     clientAckThroughSequence,
-    providerAckSequences: [...providerAckSequences].sort((left, right) => left - right),
+    providerAckSequences: [],
     providerStarted: providerStartedAccepted,
+    fatal,
   });
   const publish = (): void => options.onSnapshot?.(snapshot());
 
-  const flush = async (): Promise<void> => {
-    if (closed) return;
-    if (flushing) return await flushing;
-    flushing = (async () => {
-      while (true) {
-        const entries = pendingInbound;
-        pendingInbound = [];
-        const startup = providerStartedAccepted ? undefined : providerStarted;
-        const acknowledgedByClient = clientAckThroughSequence;
-        const acknowledgedByProvider = [...providerAckSequences].sort(
-          (left, right) => left - right,
-        );
-        let result: SyncSessionRealtimeLedgerResponse;
-        try {
-          result = await options.sync({
-            ...options.owner,
-            connectionId: options.connectionId,
-            connectionEpoch: options.connectionEpoch,
-            ...(entries.length === 0 ? {} : { entries }),
-            ...(startup ? { providerStarted: startup } : {}),
-            ...(acknowledgedByClient === null
-              ? {}
-              : { clientAckThroughSequence: acknowledgedByClient }),
-            ...(acknowledgedByProvider.length === 0
-              ? {}
-              : { providerAckSequences: acknowledgedByProvider }),
-          });
-        } catch (error) {
-          pendingInbound = [...entries, ...pendingInbound];
-          throw error;
-        }
-        if (startup) providerStartedAccepted = true;
-        if (
-          acknowledgedByClient !== null &&
-          clientAckThroughSequence !== null &&
-          clientAckThroughSequence <= acknowledgedByClient
-        ) {
-          clientAckThroughSequence = null;
-        }
-        for (const sequence of acknowledgedByProvider) {
-          providerAckSequences.delete(sequence);
-          sentSequences.delete(sequence);
-        }
-        for (const entry of result.outbound) {
-          clientAckThroughSequence = Math.max(clientAckThroughSequence ?? 0, entry.sequence);
-          if (sentSequences.has(entry.sequence)) continue;
-          sendOutbound(options.events, entry);
-          sentSequences.add(entry.sequence);
-          providerAckSequences.add(entry.sequence);
-        }
-        publish();
-        if (
-          closed ||
-          (pendingInbound.length === 0 &&
-            (providerStartedAccepted || providerStarted === undefined) &&
-            clientAckThroughSequence === null &&
-            providerAckSequences.size === 0)
-        ) {
-          break;
-        }
-      }
-    })();
+  const triggerFatal = (message: string): void => {
+    if (closed || fatal) return;
+    fatal = { code: "pending_overflow", message };
+    lastError = message;
+    publish();
     try {
-      await flushing;
-    } catch (error) {
-      lastError = safeError(error);
-      publish();
-      throw error;
-    } finally {
-      flushing = null;
+      options.onFatal?.({ ...fatal });
+    } catch {
+      // A consumer callback cannot turn a controlled bridge failure into an
+      // unhandled provider-message exception.
     }
   };
 
-  const ingest = async (payload: string): Promise<void> => {
-    if (closed) return;
+  const enqueue = (entry: SessionRealtimeInboundEntry): boolean => {
+    if (closed || fatal) return false;
+    const bytes = utf8ByteLength(JSON.stringify(entry));
+    if (
+      pendingInboundCount + 1 > CODEX_REALTIME_V3_PENDING_MAX_ENTRIES ||
+      pendingInboundBytes + bytes > CODEX_REALTIME_V3_PENDING_MAX_BYTES
+    ) {
+      triggerFatal("Codex realtime durable event buffer exceeded its hard limit");
+      return false;
+    }
+    pendingInbound.push({ entry, bytes });
+    pendingInboundCount += 1;
+    pendingInboundBytes += bytes;
+    return true;
+  };
+
+  const hasWork = (): boolean =>
+    pendingInbound.length > 0 ||
+    (!providerStartedAccepted && providerStarted !== undefined) ||
+    clientAckThroughSequence !== null ||
+    forceSync;
+
+  const runFlush = async (): Promise<void> => {
+    while (true) {
+      if (closed || fatal) break;
+      const batch = pendingInbound.splice(0, CODEX_REALTIME_V3_SYNC_MAX_ENTRIES);
+      const startup = providerStartedAccepted ? undefined : providerStarted;
+      const acknowledgedByClient = clientAckThroughSequence;
+      const poll = forceSync;
+      forceSync = false;
+      flushRequestedWhileRunning = false;
+      if (batch.length === 0 && !startup && acknowledgedByClient === null && !poll) break;
+
+      let result: SyncSessionRealtimeLedgerResponse;
+      try {
+        result = await options.sync({
+          ...options.owner,
+          connectionId: options.connectionId,
+          connectionEpoch: options.connectionEpoch,
+          ...(batch.length === 0 ? {} : { entries: batch.map(({ entry }) => entry) }),
+          ...(startup ? { providerStarted: startup } : {}),
+          ...(acknowledgedByClient === null
+            ? {}
+            : { clientAckThroughSequence: acknowledgedByClient }),
+        });
+      } catch (error) {
+        // Entries that were in flight retain their accounting and return ahead
+        // of every arrival accepted while the request was pending.
+        pendingInbound = [...batch, ...pendingInbound];
+        throw error;
+      }
+
+      for (const item of batch) {
+        pendingInboundCount -= 1;
+        pendingInboundBytes -= item.bytes;
+      }
+      if (startup && providerStarted === startup) providerStartedAccepted = true;
+      if (
+        acknowledgedByClient !== null &&
+        clientAckThroughSequence !== null &&
+        clientAckThroughSequence <= acknowledgedByClient
+      ) {
+        clientAckThroughSequence = null;
+      }
+      if (closed || fatal) break;
+
+      for (const entry of result.outbound) {
+        // This is OpenGeni's durable browser-delivery acknowledgment. The
+        // provider send below remains at-least-once because pinned V3 exposes
+        // no provider receipt and providerAckSequences is never populated.
+        if (entry.clientAckedAt === null && !clientReceivedSequences.has(entry.sequence)) {
+          clientReceivedSequences.add(entry.sequence);
+          clientAckThroughSequence = Math.max(clientAckThroughSequence ?? 0, entry.sequence);
+        }
+        if (sentSequences.has(entry.sequence)) continue;
+        sendOutbound(options.events, entry);
+        sentSequences.add(entry.sequence);
+      }
+      publish();
+    }
+  };
+
+  const requestFlush = (poll: boolean): Promise<void> => {
+    if (closed || fatal) return Promise.resolve();
+    if (poll) forceSync = true;
+    if (flushing) {
+      flushRequestedWhileRunning = true;
+      return flushing;
+    }
+    const task = Promise.resolve()
+      .then(runFlush)
+      .catch((error: unknown) => {
+        lastError = safeError(error);
+        publish();
+        throw error;
+      });
+    flushing = task;
+    void task.then(
+      () => {
+        if (flushing !== task) return;
+        flushing = null;
+        if (!closed && !fatal && (flushRequestedWhileRunning || hasWork())) {
+          flushRequestedWhileRunning = false;
+          void requestFlush(false).catch(() => undefined);
+        }
+      },
+      () => {
+        if (flushing === task) flushing = null;
+      },
+    );
+    return task;
+  };
+
+  const ingest = (payload: string): Promise<void> => {
+    if (closed || fatal) return Promise.resolve();
     const parsed = parseCodexRealtimeV3Event(payload);
     if (!parsed.ok) {
       lastError = `Rejected Codex realtime V3 event: ${parsed.reason}`;
       publish();
-      return;
+      return Promise.resolve();
     }
     const event = parsed.event;
+    let durable = false;
     if (event.type === "session.started") {
-      providerStarted = {
-        providerSessionId: event.sessionId,
-        providerEventId: event.providerEventId,
-      };
+      if (!providerStartedAccepted && providerStarted === undefined) {
+        providerStarted = {
+          providerSessionId: event.sessionId,
+          providerEventId: event.providerEventId,
+        };
+        durable = true;
+      }
     } else if (event.type === "input_transcript.added") {
-      pendingInbound.push(inbound(randomUUID, "user_transcript", event));
+      durable = enqueue(inbound(randomUUID, "user_transcript", event));
     } else if (event.type === "output_transcript.added") {
-      pendingInbound.push(inbound(randomUUID, "assistant_transcript", event));
+      durable = enqueue(inbound(randomUUID, "assistant_transcript", event));
     } else if (event.type === "delegation.created") {
       activeDelegationId = event.delegationItemId;
-      pendingInbound.push({
+      durable = enqueue({
         operationId: randomUUID(),
         kind: "delegation_call",
         providerEventId: event.providerEventId,
@@ -203,7 +292,7 @@ export function createCodexRealtimeV3Bridge(
       speaking = false;
     } else if (event.type === "error") {
       lastError = event.message;
-      pendingInbound.push({
+      durable = enqueue({
         operationId: randomUUID(),
         kind: "error",
         providerEventId: event.providerEventId,
@@ -211,23 +300,30 @@ export function createCodexRealtimeV3Bridge(
       });
     }
     publish();
-    await flush();
+    return durable ? requestFlush(false) : Promise.resolve();
   };
 
   const onMessage = (message: MessageEvent): void => {
     if (typeof message.data !== "string") return;
     void ingest(message.data).catch(() => undefined);
   };
-  options.events.addEventListener("message", onMessage);
+  const listen = (): void => {
+    if (closed || listening) return;
+    listening = true;
+    options.events.addEventListener("message", onMessage);
+  };
+  if (options.listen !== false) listen();
   publish();
   return {
     snapshot,
     ingest,
-    flush,
+    flush: () => requestFlush(true),
+    listen,
     close: () => {
       if (closed) return;
       closed = true;
-      options.events.removeEventListener("message", onMessage);
+      if (listening) options.events.removeEventListener("message", onMessage);
+      listening = false;
     },
   };
 }
@@ -260,6 +356,10 @@ function sendOutbound(events: RTCDataChannel, entry: SessionRealtimeLedgerEntry)
         })
       : encodeCodexRealtimeV3SessionContextAppend({ text, channel: "commentary" });
   for (const message of messages) events.send(JSON.stringify(message));
+}
+
+function utf8ByteLength(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
 }
 
 function defaultRandomUUID(): string {

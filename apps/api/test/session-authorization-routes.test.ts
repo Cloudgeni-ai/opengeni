@@ -416,15 +416,13 @@ describe("embedding host session authorization routes", () => {
       },
       resolveListScope: async () => ({ kind: "all" }),
     });
-    const authHeaderName = ["author", "ization"].join("") as "authorization";
-
     const response = await app.request(
       `/v1/workspaces/${value.grant.workspaceId}/sessions/${value.child.id}` +
         `/realtime/${crypto.randomUUID()}/connections/${crypto.randomUUID()}/activate`,
       {
         method: "POST",
         headers: {
-          [authHeaderName]: value[authHeaderName],
+          authorization: value.authorization,
           "content-type": "application/json",
         },
         body: JSON.stringify({}),

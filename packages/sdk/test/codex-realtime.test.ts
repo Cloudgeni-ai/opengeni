@@ -188,6 +188,38 @@ describe("Codex realtime browser negotiation", () => {
     expect(fixture.calls.slice(-3)).toEqual(["events.close", "track.stop", "peer.close"]);
   });
 
+  test("exposes oai-events synchronously before any asynchronous negotiation work", async () => {
+    const fixture = browserFixture();
+    let resolveMedia!: (media: MediaStream) => void;
+    const pendingMedia = new Promise<MediaStream>((resolve) => {
+      resolveMedia = resolve;
+    });
+    const pending = startCodexRealtimeWebrtc({
+      ...lifecycleProof,
+      createPeerConnection: () => fixture.peer,
+      getUserMedia: async () => await pendingMedia,
+      onEventsCreated: (events) => {
+        expect(events).toBe(fixture.events);
+        expect(fixture.calls).toEqual(["data:oai-events"]);
+        fixture.calls.push("events.created");
+      },
+      negotiate: async () => negotiated,
+    });
+
+    expect(fixture.calls).toEqual(["data:oai-events", "events.created"]);
+    resolveMedia(fixture.media);
+    const session = await pending;
+    expect(fixture.calls).toEqual([
+      "data:oai-events",
+      "events.created",
+      "addTrack",
+      "createOffer",
+      "setLocalDescription",
+      "setRemoteDescription:answer",
+    ]);
+    session.stop();
+  });
+
   test("cancellation aborts negotiation and closes every browser resource", async () => {
     const fixture = browserFixture();
     const abort = new AbortController();

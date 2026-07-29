@@ -40,10 +40,9 @@
     "build": "bun ../../scripts/build-typescript-package.ts",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
-  "dependencies": {
-    "@opengeni/codex": "workspace:*"
-  },
+  "dependencies": {},
   "devDependencies": {
+    "@opengeni/codex": "workspace:*",
     "@opengeni/contracts": "workspace:*",
     "@opengeni/deployment": "workspace:*",
     "tsup": "^8.5.0",
