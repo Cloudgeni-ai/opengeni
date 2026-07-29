@@ -1,5 +1,11 @@
 # @opengeni/sdk
 
+## 0.28.1
+
+### Patch Changes
+
+- 2ec6494: Publish the current client surfaces from one exact reviewed source revision.
+
 ## 0.28.0
 
 ### Minor Changes
