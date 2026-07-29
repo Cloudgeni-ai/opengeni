@@ -1,5 +1,14 @@
 # @opengeni/runtime
 
+## 0.13.12
+
+### Patch Changes
+
+- ffd246c: Keep workspace-capture Git status, diffs, and untracked files below provider retained-output limits, and publish an explicit degraded revision instead of an authoritative empty diff when repository reads fail.
+- Updated dependencies [ffd246c]
+  - @opengeni/contracts@0.20.1
+  - @opengeni/config@0.7.8
+
 ## 0.13.11
 
 ### Patch Changes
