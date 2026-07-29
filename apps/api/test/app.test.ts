@@ -1117,6 +1117,28 @@ describe("catalog connectionRef exposure", () => {
     expect(listed.connectionRef).toEqual(ref);
   });
 
+  test("a subject binding lists only its generic provider/kind selector", () => {
+    const listed = applyCapabilityEnablement(
+      secureMcp(),
+      installation({
+        connectionRef: {
+          connectionId: "private-connection-must-not-leak",
+          providerDomain: "slack.com",
+          kind: "oauth2",
+          subjectScope: "subject",
+        },
+      }),
+      new Set(),
+    );
+    expect(listed.enabled).toBe(true);
+    expect(listed.connectionRef).toEqual({
+      providerDomain: "slack.com",
+      kind: "oauth2",
+      subjectScope: "subject",
+    });
+    expect(JSON.stringify(listed)).not.toContain("private-connection-must-not-leak");
+  });
+
   test("an item enabled with credential headers (no connection) lists connectionRef null", () => {
     const listed = applyCapabilityEnablement(
       secureMcp(),

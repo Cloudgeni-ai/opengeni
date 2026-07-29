@@ -3,7 +3,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { parseIntegrationsOauthClientsJson, type Settings } from "@opengeni/config";
 import { OAuthStartResponse, type OAuthStartRequest } from "@opengeni/contracts";
-import { requireEnvironmentEncryption } from "@opengeni/core";
+import { hasPermission, requireEnvironmentEncryption } from "@opengeni/core";
 import type { Observability } from "@opengeni/observability";
 import {
   consumeIntegrationOAuthStateNonce,
@@ -11,6 +11,7 @@ import {
   decryptEnvironmentValue,
   encryptEnvironmentValue,
   getConnectionMetadata,
+  getWorkspaceGrant,
   listConnectionsMetadata,
   loadIntegrationOAuthClient,
   normalizeBearerScheme,
@@ -33,6 +34,8 @@ import { HTTPException } from "hono/http-exception";
 import { canonicalProviderDomain } from "./provider-domain";
 
 export const oauthStateTtlMs = 10 * 60 * 1000;
+export const OFFICIAL_SLACK_MCP_URL = "https://mcp.slack.com/mcp";
+const SLACK_OAUTH_ORIGIN = "https://slack.com";
 export { OAUTH_MAX_RESPONSE_BYTES } from "@opengeni/network";
 
 type OAuthClientDeps = {
@@ -139,9 +142,12 @@ export async function startMcpOAuth(
 ): Promise<OAuthStartResponse> {
   const { db, settings } = deps;
   const mcpUrl = canonicalMcpResource(context.payload.mcpUrl ?? context.payload.resource);
-  const providerDomain = canonicalProviderDomain(
-    context.payload.providerDomain ?? new URL(mcpUrl).hostname,
-  );
+  const officialSlackResource = mcpUrl === OFFICIAL_SLACK_MCP_URL;
+  const providerDomain = officialSlackResource
+    ? "slack.com"
+    : canonicalProviderDomain(context.payload.providerDomain ?? new URL(mcpUrl).hostname);
+  const personalSlack = officialSlackResource || providerDomain === "slack.com";
+  assertPersonalSlackOAuthStart(settings, context.payload, mcpUrl, personalSlack);
   const returnPath = safeReturnPath(context.payload.returnPath ?? "/integrations");
   const baseUrl = integrationBaseUrl(settings.publicBaseUrl, context.requestUrl);
   const redirectUri = `${baseUrl}/v1/integrations/oauth/callback`;
@@ -157,6 +163,9 @@ export async function startMcpOAuth(
   }
 
   const discovery = await discoverMcpOAuth(mcpUrl, settings);
+  if (personalSlack && !isLocalTestEnvironment(settings.environment)) {
+    assertSlackAuthorizationServer(discovery.as);
+  }
   const resource = discovery.prm.resource ? canonicalOAuthResource(discovery.prm.resource) : mcpUrl;
   const verifier = randomPkceVerifier();
   const authorizeScopes = chooseAuthorizeScopes(
@@ -230,6 +239,7 @@ export async function completeMcpOAuthCallback(
   }
   try {
     state = readOAuthState(input.state, settings);
+    await requireOAuthCallbackGrant(db, state);
     if (!input.code) {
       return {
         redirectTo: callbackReturnPath(state.returnPath, "error", { reason: "missing_code" }),
@@ -287,6 +297,7 @@ export async function completeMcpOAuthCallback(
       ...(verification.tools ? { mcpTools: verification.tools } : {}),
     };
     const credentialEncrypted = encryptEnvironmentValue(key, JSON.stringify(credential));
+    await requireOAuthCallbackGrant(db, state);
     const connection = await runCallbackStage("persist", "persist_failed", () =>
       state.connectionId
         ? updateConnection(db, {
@@ -294,6 +305,7 @@ export async function completeMcpOAuthCallback(
             connectionId: state.connectionId,
             visibleToSubjectId: state.subjectId,
             expectedVersion: state.connectionVersion,
+            subjectId: state.subjectId,
             providerDomain: state.providerDomain,
             kind: "oauth2",
             status: "active",
@@ -306,7 +318,7 @@ export async function completeMcpOAuthCallback(
         : createConnection(db, {
             accountId: state.accountId,
             workspaceId: state.workspaceId,
-            subjectId: null,
+            subjectId: state.subjectId,
             providerDomain: state.providerDomain,
             kind: "oauth2",
             credentialEncrypted,
@@ -354,6 +366,56 @@ export function requireIntegrationsStateSecret(settings: Settings): string {
     });
   }
   return secret;
+}
+
+async function requireOAuthCallbackGrant(db: Database, state: OAuthStatePayload): Promise<void> {
+  const grant = await getWorkspaceGrant(db, state.subjectId, state.workspaceId);
+  if (
+    !grant ||
+    grant.accountId !== state.accountId ||
+    !hasPermission(grant.permissions, "connections:write")
+  ) {
+    throw new HTTPException(403, {
+      message: "OAuth subject no longer has permission to write this workspace connection",
+    });
+  }
+}
+
+function assertPersonalSlackOAuthStart(
+  settings: Settings,
+  payload: OAuthStartRequest,
+  mcpUrl: string,
+  personalSlack: boolean,
+): void {
+  if (!personalSlack) return;
+  if (payload.oauthClient) {
+    throw new HTTPException(422, {
+      message: "Slack OAuth client credentials are deployment-managed",
+    });
+  }
+  if (payload.providerDomain && canonicalProviderDomain(payload.providerDomain) !== "slack.com") {
+    throw new HTTPException(422, { message: "Slack provider identity does not match slack.com" });
+  }
+  if (!isLocalTestEnvironment(settings.environment) && mcpUrl !== OFFICIAL_SLACK_MCP_URL) {
+    throw new HTTPException(422, {
+      message: `personal Slack OAuth must use ${OFFICIAL_SLACK_MCP_URL}`,
+    });
+  }
+  if (!settings.slackClientId?.trim() || !settings.slackClientSecret?.trim()) {
+    throw new HTTPException(503, {
+      message:
+        "personal Slack OAuth requires OPENGENI_SLACK_CLIENT_ID and OPENGENI_SLACK_CLIENT_SECRET",
+    });
+  }
+}
+
+export function assertSlackAuthorizationServer(as: AuthorizationServerMetadata): void {
+  const urls = [as.issuer, as.authorizationServer, as.authorizationEndpoint, as.tokenEndpoint];
+  if (urls.some((value) => new URL(value).origin !== SLACK_OAUTH_ORIGIN)) {
+    throw new HTTPException(422, {
+      message: "Slack MCP authorization metadata did not remain bound to slack.com",
+    });
+  }
 }
 
 async function discoverMcpOAuth(
@@ -656,6 +718,18 @@ function operatorClientEntryFor(
   settings: Settings,
   candidates: string[],
 ): ReturnType<typeof parseIntegrationsOauthClientsJson>[string] | null {
+  const normalizedCandidates = new Set(candidates.map(normalizedIssuerKey));
+  if (
+    normalizedCandidates.has(SLACK_OAUTH_ORIGIN) &&
+    settings.slackClientId?.trim() &&
+    settings.slackClientSecret?.trim()
+  ) {
+    return {
+      clientId: settings.slackClientId.trim(),
+      clientSecret: settings.slackClientSecret.trim(),
+      tokenEndpointAuthMethod: "client_secret_post",
+    };
+  }
   const configured = parseIntegrationsOauthClientsJson(settings.integrationsOauthClientsJson);
   const exactKeys = uniqueStrings(
     candidates.flatMap((candidate) => [candidate, normalizedIssuerKey(candidate)]),
@@ -666,7 +740,6 @@ function operatorClientEntryFor(
       return entry;
     }
   }
-  const normalizedCandidates = new Set(candidates.map(normalizedIssuerKey));
   for (const [key, entry] of Object.entries(configured)) {
     if (normalizedCandidates.has(normalizedIssuerKey(key))) {
       return entry;
@@ -743,13 +816,23 @@ async function existingOAuthConnectionForStart(
   },
 ) {
   if (input.connectionId) {
-    return await getConnectionMetadata(db, input.workspaceId, input.connectionId, input.subjectId);
+    const connection = await getConnectionMetadata(
+      db,
+      input.workspaceId,
+      input.connectionId,
+      input.subjectId,
+    );
+    return connection?.subjectId === input.subjectId &&
+      connection.kind === "oauth2" &&
+      connection.providerDomain === input.providerDomain
+      ? connection
+      : null;
   }
   const visible = await listConnectionsMetadata(db, input.workspaceId, input.subjectId);
   return (
     visible.find(
       (connection) =>
-        connection.subjectId === null &&
+        connection.subjectId === input.subjectId &&
         connection.kind === "oauth2" &&
         connection.status === "active" &&
         connection.providerDomain === input.providerDomain,
@@ -836,6 +919,9 @@ function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
   };
   const connectionId = stringValue(payload.connectionId);
   const connectionVersion = numberValue(payload.connectionVersion);
+  if (Boolean(connectionId) !== Boolean(connectionVersion)) {
+    throw new HTTPException(400, { message: "invalid OAuth reconnect state" });
+  }
   return {
     ...parsed,
     ...(connectionId ? { connectionId } : {}),

@@ -3362,6 +3362,38 @@ describe("runtime event normalization", () => {
     }
   });
 
+  test("rejects subject-owned MCP use without a human initiator before resolver or transport", async () => {
+    let resolverCalls = 0;
+    await expect(
+      prepareAgentTools(
+        testSettings({
+          mcpServers: [
+            {
+              id: "personal-slack",
+              name: "Personal Slack",
+              url: "https://mcp.slack.com/mcp",
+              connectionRef: {
+                providerDomain: "slack.com",
+                kind: "oauth2",
+                subjectScope: "subject",
+              },
+              cacheToolsList: false,
+            },
+          ],
+        }),
+        [{ kind: "mcp", id: "personal-slack" }],
+        {
+          workspaceId: "22222222-2222-4222-8222-222222222222",
+          resolveCredential: async () => {
+            resolverCalls += 1;
+            throw new Error("resolver must not run for a service turn");
+          },
+        },
+      ),
+    ).rejects.toThrow("requires a human turn initiator");
+    expect(resolverCalls).toBe(0);
+  });
+
   test("sends configured credential headers to third-party MCP servers", async () => {
     const mcp = startTestMcpServer({
       requiredHeaders: { "x-api-key": "capability-credential" },

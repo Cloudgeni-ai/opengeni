@@ -34,6 +34,7 @@ import {
   assertPhysicalToolQuiescenceForCancellation,
   assertSessionAttemptQuiescenceRecoveryDurable,
   classifyContextWindowOverflowError,
+  credentialSubjectIdForTurnInitiator,
   classifyMcpTransportTimeoutError,
   codexCredentialLeaseDeadlineExpired,
   computerToolModeForTurn,
@@ -129,6 +130,17 @@ function citedAssistantMessage() {
     ],
   };
 }
+
+describe("turn credential subject authority", () => {
+  test("passes only a frozen human initiator to personal connection resolution", () => {
+    expect(
+      credentialSubjectIdForTurnInitiator({ kind: "subject", subjectId: "subject-alice" }),
+    ).toBe("subject-alice");
+    expect(
+      credentialSubjectIdForTurnInitiator({ kind: "service", subjectId: "scheduler" }),
+    ).toBeUndefined();
+  });
+});
 
 describe("structured human-input identity", () => {
   test("is stable for one logical tool call and distinct across calls or turns", () => {

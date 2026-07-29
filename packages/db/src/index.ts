@@ -4788,6 +4788,52 @@ function connectionSubjectVisibility(subjectId?: string | null): SQL {
     : isNull(schema.connections.subjectId);
 }
 
+function connectionExactSubject(subjectId?: string | null): SQL {
+  return subjectId
+    ? eq(schema.connections.subjectId, subjectId)
+    : isNull(schema.connections.subjectId);
+}
+
+async function withConnectionSubjectRls<T>(
+  db: Database,
+  workspaceId: string,
+  subjectId: string | null | undefined,
+  fn: (db: Database) => Promise<T>,
+): Promise<T> {
+  return subjectId
+    ? await withWorkspaceSubjectRls(db, workspaceId, subjectId, fn)
+    : await withWorkspaceRls(db, workspaceId, fn);
+}
+
+async function createConnectionInScope(
+  db: Database,
+  input: CreateConnectionInput,
+): Promise<ConnectionMetadataWithVerification> {
+  const [row] = await db
+    .insert(schema.connections)
+    .values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      subjectId: input.subjectId ?? null,
+      providerDomain: input.providerDomain,
+      kind: input.kind,
+      status: input.status ?? "active",
+      credentialEncrypted: input.credentialEncrypted,
+      grantedScopes: input.grantedScopes ?? [],
+      expiresAt: input.expiresAt ?? null,
+      verifiedInstallAt: input.verifiedInstallAt ?? null,
+      verifiedInstallVersion: input.verifiedInstallVersion ?? null,
+      metadata: input.metadata ?? {},
+      createdBySubjectId: input.createdBySubjectId ?? null,
+      updatedBySubjectId: input.updatedBySubjectId ?? input.createdBySubjectId ?? null,
+    })
+    .returning(connectionMetadataColumns);
+  if (!row) {
+    throw new Error("Failed to create connection");
+  }
+  return mapConnectionMetadata(row);
+}
+
 export async function createConnection(
   db: Database,
   input: CreateConnectionInput,
@@ -4796,29 +4842,10 @@ export async function createConnection(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
-      const [row] = await scopedDb
-        .insert(schema.connections)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          subjectId: input.subjectId ?? null,
-          providerDomain: input.providerDomain,
-          kind: input.kind,
-          status: input.status ?? "active",
-          credentialEncrypted: input.credentialEncrypted,
-          grantedScopes: input.grantedScopes ?? [],
-          expiresAt: input.expiresAt ?? null,
-          verifiedInstallAt: input.verifiedInstallAt ?? null,
-          verifiedInstallVersion: input.verifiedInstallVersion ?? null,
-          metadata: input.metadata ?? {},
-          createdBySubjectId: input.createdBySubjectId ?? null,
-          updatedBySubjectId: input.updatedBySubjectId ?? input.createdBySubjectId ?? null,
-        })
-        .returning(connectionMetadataColumns);
-      if (!row) {
-        throw new Error("Failed to create connection");
+      if (input.subjectId) {
+        await setSubjectRlsContext(scopedDb, input.subjectId);
       }
-      return mapConnectionMetadata(row);
+      return await createConnectionInScope(scopedDb, input);
     },
   );
 }
@@ -4828,7 +4855,7 @@ export async function listConnectionsMetadata(
   workspaceId: string,
   subjectId?: string | null,
 ): Promise<ConnectionMetadataWithVerification[]> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+  return await withConnectionSubjectRls(db, workspaceId, subjectId, async (scopedDb) => {
     const rows = await scopedDb
       .select(connectionMetadataColumns)
       .from(schema.connections)
@@ -4849,7 +4876,7 @@ export async function getConnectionMetadata(
   connectionId: string,
   subjectId?: string | null,
 ): Promise<ConnectionMetadataWithVerification | null> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+  return await withConnectionSubjectRls(db, workspaceId, subjectId, async (scopedDb) => {
     const [row] = await scopedDb
       .select(connectionMetadataColumns)
       .from(schema.connections)
@@ -4865,53 +4892,102 @@ export async function getConnectionMetadata(
   });
 }
 
+async function updateConnectionInScope(
+  db: Database,
+  input: UpdateConnectionInput,
+): Promise<ConnectionMetadataWithVerification | null> {
+  const set = {
+    updatedAt: new Date(),
+    ...(input.providerDomain !== undefined ? { providerDomain: input.providerDomain } : {}),
+    ...(input.subjectId !== undefined ? { subjectId: input.subjectId } : {}),
+    ...(input.kind !== undefined ? { kind: input.kind } : {}),
+    ...(input.status !== undefined ? { status: input.status } : {}),
+    ...(input.credentialEncrypted !== undefined
+      ? {
+          credentialEncrypted: input.credentialEncrypted,
+          version: sql`${schema.connections.version} + 1`,
+          lastError: null,
+        }
+      : {}),
+    ...(input.grantedScopes !== undefined ? { grantedScopes: input.grantedScopes } : {}),
+    ...(input.expiresAt !== undefined ? { expiresAt: input.expiresAt } : {}),
+    ...(input.verifiedInstallAt !== undefined
+      ? { verifiedInstallAt: input.verifiedInstallAt }
+      : {}),
+    ...(input.verifiedInstallVersion !== undefined
+      ? { verifiedInstallVersion: input.verifiedInstallVersion }
+      : {}),
+    ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+    ...(input.updatedBySubjectId !== undefined
+      ? { updatedBySubjectId: input.updatedBySubjectId }
+      : {}),
+  };
+  const [row] = await db
+    .update(schema.connections)
+    .set(set)
+    .where(
+      and(
+        eq(schema.connections.workspaceId, input.workspaceId),
+        eq(schema.connections.id, input.connectionId),
+        connectionSubjectVisibility(input.visibleToSubjectId),
+        ...(input.expectedVersion !== undefined
+          ? [eq(schema.connections.version, input.expectedVersion)]
+          : []),
+      ),
+    )
+    .returning(connectionMetadataColumns);
+  return row ? mapConnectionMetadata(row) : null;
+}
+
 export async function updateConnection(
   db: Database,
   input: UpdateConnectionInput,
 ): Promise<ConnectionMetadataWithVerification | null> {
-  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
-    const set = {
+  return await withConnectionSubjectRls(
+    db,
+    input.workspaceId,
+    input.visibleToSubjectId,
+    async (scopedDb) => await updateConnectionInScope(scopedDb, input),
+  );
+}
+
+async function revokeConnectionInScope(
+  db: Database,
+  workspaceId: string,
+  connectionId: string,
+  updatedBySubjectId?: string | null,
+  expectedVersion?: number,
+): Promise<ConnectionMetadataWithVerification | null> {
+  const [row] = await db
+    .update(schema.connections)
+    .set({
+      status: "revoked",
+      // The version bump invalidates any in-flight refresh's (id, version) CAS,
+      // so a racing refresh cannot commit and flip the row back to active.
+      version: sql`${schema.connections.version} + 1`,
+      // Status-only revocation does not replace the verified credential or bot
+      // identity. Carry the marker to the same new CAS version so the dedicated
+      // reinstall path can still recognize (but not use) the inactive row.
+      verifiedInstallVersion: sql`case
+        when ${schema.connections.verifiedInstallAt} is null then null
+        else ${schema.connections.version} + 1
+      end`,
+      updatedBySubjectId: updatedBySubjectId ?? null,
       updatedAt: new Date(),
-      ...(input.providerDomain !== undefined ? { providerDomain: input.providerDomain } : {}),
-      ...(input.subjectId !== undefined ? { subjectId: input.subjectId } : {}),
-      ...(input.kind !== undefined ? { kind: input.kind } : {}),
-      ...(input.status !== undefined ? { status: input.status } : {}),
-      ...(input.credentialEncrypted !== undefined
-        ? {
-            credentialEncrypted: input.credentialEncrypted,
-            version: sql`${schema.connections.version} + 1`,
-            lastError: null,
-          }
-        : {}),
-      ...(input.grantedScopes !== undefined ? { grantedScopes: input.grantedScopes } : {}),
-      ...(input.expiresAt !== undefined ? { expiresAt: input.expiresAt } : {}),
-      ...(input.verifiedInstallAt !== undefined
-        ? { verifiedInstallAt: input.verifiedInstallAt }
-        : {}),
-      ...(input.verifiedInstallVersion !== undefined
-        ? { verifiedInstallVersion: input.verifiedInstallVersion }
-        : {}),
-      ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
-      ...(input.updatedBySubjectId !== undefined
-        ? { updatedBySubjectId: input.updatedBySubjectId }
-        : {}),
-    };
-    const [row] = await scopedDb
-      .update(schema.connections)
-      .set(set)
-      .where(
-        and(
-          eq(schema.connections.workspaceId, input.workspaceId),
-          eq(schema.connections.id, input.connectionId),
-          connectionSubjectVisibility(input.visibleToSubjectId),
-          ...(input.expectedVersion !== undefined
-            ? [eq(schema.connections.version, input.expectedVersion)]
-            : []),
-        ),
-      )
-      .returning(connectionMetadataColumns);
-    return row ? mapConnectionMetadata(row) : null;
-  });
+    })
+    .where(
+      and(
+        eq(schema.connections.workspaceId, workspaceId),
+        eq(schema.connections.id, connectionId),
+        // Same visibility rule as get/update: shared rows plus the caller's own
+        // subject rows. Cross-subject revocation (admin janitorial) arrives with
+        // the subject-connections UX in I5, deliberately not before.
+        connectionSubjectVisibility(updatedBySubjectId),
+        ...(expectedVersion !== undefined ? [eq(schema.connections.version, expectedVersion)] : []),
+      ),
+    )
+    .returning(connectionMetadataColumns);
+  return row ? mapConnectionMetadata(row) : null;
 }
 
 export async function revokeConnection(
@@ -4920,37 +4996,242 @@ export async function revokeConnection(
   connectionId: string,
   updatedBySubjectId?: string | null,
 ): Promise<ConnectionMetadataWithVerification | null> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .update(schema.connections)
-      .set({
-        status: "revoked",
-        // The version bump invalidates any in-flight refresh's (id, version) CAS,
-        // so a racing refresh cannot commit and flip the row back to active.
-        version: sql`${schema.connections.version} + 1`,
-        // Status-only revocation does not replace the verified credential or bot
-        // identity. Carry the marker to the same new CAS version so the dedicated
-        // reinstall path can still recognize (but not use) the inactive row.
-        verifiedInstallVersion: sql`case
-          when ${schema.connections.verifiedInstallAt} is null then null
-          else ${schema.connections.version} + 1
-        end`,
-        updatedBySubjectId: updatedBySubjectId ?? null,
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(schema.connections.workspaceId, workspaceId),
-          eq(schema.connections.id, connectionId),
-          // Same visibility rule as get/update: shared rows plus the caller's own
-          // subject rows. Cross-subject revocation (admin janitorial) arrives with
-          // the subject-connections UX in I5, deliberately not before.
-          connectionSubjectVisibility(updatedBySubjectId),
-        ),
-      )
-      .returning(connectionMetadataColumns);
-    return row ? mapConnectionMetadata(row) : null;
+  return await withConnectionSubjectRls(
+    db,
+    workspaceId,
+    updatedBySubjectId,
+    async (scopedDb) =>
+      await revokeConnectionInScope(scopedDb, workspaceId, connectionId, updatedBySubjectId),
+  );
+}
+
+export class SlackBotLifecycleSuccessAuditError extends Error {
+  constructor() {
+    super("OpenGeni Slack bot lifecycle success audit failed");
+    this.name = "SlackBotLifecycleSuccessAuditError";
+  }
+}
+
+type SlackBotLifecycleSuccessAuditInput = {
+  accountId: string;
+  workspaceId: string;
+  subjectId: string;
+  credentialRole: string;
+  credentialLabel: string;
+  slackTeamId: string;
+};
+
+async function insertSlackBotLifecycleSuccessAuditInScope(
+  db: Database,
+  input: SlackBotLifecycleSuccessAuditInput & {
+    action: "slack_bot.connected" | "slack_bot.reinstalled" | "slack_bot.disconnected";
+    connectionId: string;
+  },
+): Promise<void> {
+  try {
+    await db.insert(schema.auditEvents).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      subjectId: input.subjectId,
+      action: input.action,
+      targetType: "connection",
+      targetId: input.connectionId,
+      metadata: {
+        credentialRole: input.credentialRole,
+        credentialLabel: input.credentialLabel,
+        connectionId: input.connectionId,
+        slackTeamId: input.slackTeamId,
+        outcome: "succeeded",
+      },
+    });
+  } catch {
+    // Do not leak a provider/database payload through the callback. Throwing from
+    // the RLS transaction is what rolls the paired connection mutation back.
+    throw new SlackBotLifecycleSuccessAuditError();
+  }
+}
+
+async function assertWorkspaceAccountPairInScope(
+  db: Database,
+  accountId: string,
+  workspaceId: string,
+): Promise<void> {
+  const [workspace] = await db
+    .select({ id: schema.workspaces.id })
+    .from(schema.workspaces)
+    .where(and(eq(schema.workspaces.id, workspaceId), eq(schema.workspaces.accountId, accountId)))
+    .limit(1);
+  if (!workspace) {
+    throw new Error("Workspace does not belong to the expected account");
+  }
+}
+
+async function withSlackBotLifecycleRls<T>(
+  db: Database,
+  input: Pick<SlackBotLifecycleSuccessAuditInput, "accountId" | "workspaceId" | "subjectId">,
+  fn: (db: Database) => Promise<T>,
+): Promise<T> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, input.subjectId);
+      await assertWorkspaceAccountPairInScope(scopedDb, input.accountId, input.workspaceId);
+      return await fn(scopedDb);
+    },
+  );
+}
+
+export async function createConnectionWithSlackBotSuccessAudit(
+  db: Database,
+  input: SlackBotLifecycleSuccessAuditInput & { connection: CreateConnectionInput },
+): Promise<ConnectionMetadataWithVerification> {
+  if (
+    input.connection.accountId !== input.accountId ||
+    input.connection.workspaceId !== input.workspaceId
+  ) {
+    throw new Error("Slack bot connection and lifecycle audit tenant must match");
+  }
+  return await withSlackBotLifecycleRls(db, input, async (scopedDb) => {
+    const connection = await createConnectionInScope(scopedDb, input.connection);
+    await insertSlackBotLifecycleSuccessAuditInScope(scopedDb, {
+      ...input,
+      action: "slack_bot.connected",
+      connectionId: connection.id,
+    });
+    return connection;
   });
+}
+
+export async function updateConnectionWithSlackBotSuccessAudit(
+  db: Database,
+  input: SlackBotLifecycleSuccessAuditInput & { connection: UpdateConnectionInput },
+): Promise<ConnectionMetadataWithVerification | null> {
+  if (input.connection.workspaceId !== input.workspaceId) {
+    throw new Error("Slack bot connection and lifecycle audit workspace must match");
+  }
+  return await withSlackBotLifecycleRls(db, input, async (scopedDb) => {
+    const connection = await updateConnectionInScope(scopedDb, input.connection);
+    if (!connection) return null;
+    if (connection.accountId !== input.accountId) {
+      throw new Error("Slack bot connection and lifecycle audit account must match");
+    }
+    await insertSlackBotLifecycleSuccessAuditInScope(scopedDb, {
+      ...input,
+      action: "slack_bot.reinstalled",
+      connectionId: connection.id,
+    });
+    return connection;
+  });
+}
+
+export async function revokeConnectionWithSlackBotSuccessAudit(
+  db: Database,
+  input: SlackBotLifecycleSuccessAuditInput & {
+    connectionId: string;
+    expectedVersion: number;
+  },
+): Promise<ConnectionMetadataWithVerification | null> {
+  return await withSlackBotLifecycleRls(db, input, async (scopedDb) => {
+    const connection = await revokeConnectionInScope(
+      scopedDb,
+      input.workspaceId,
+      input.connectionId,
+      input.subjectId,
+      input.expectedVersion,
+    );
+    if (!connection) return null;
+    if (connection.accountId !== input.accountId) {
+      throw new Error("Slack bot connection and lifecycle audit account must match");
+    }
+    await insertSlackBotLifecycleSuccessAuditInScope(scopedDb, {
+      ...input,
+      action: "slack_bot.disconnected",
+      connectionId: connection.id,
+    });
+    return connection;
+  });
+}
+
+export type SlackBotInstallCallbackFailureStage =
+  | "permission_check"
+  | "nonce_consume"
+  | "provider_denial"
+  | "code_exchange"
+  | "credential_verification"
+  | "permission_recheck"
+  | "principal_validation"
+  | "persistence";
+
+export type SlackBotInstallCallbackFailureReason =
+  | "permission_lost"
+  | "state_replayed"
+  | "provider_denied"
+  | "missing_code"
+  | "exchange_failed"
+  | "scope_mismatch"
+  | "identity_mismatch"
+  | "credential_verification_failed"
+  | "connection_conflict"
+  | "principal_mismatch"
+  | "persistence_failed"
+  | "success_audit_failed";
+
+export async function recordSlackBotInstallCallbackFailure(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+    callbackDigest: string;
+    installMode: "connect" | "reinstall";
+    stage: SlackBotInstallCallbackFailureStage;
+    reason: SlackBotInstallCallbackFailureReason;
+  },
+): Promise<boolean> {
+  if (!/^[a-f0-9]{64}$/.test(input.callbackDigest)) {
+    throw new Error("Slack callback digest must be a lowercase SHA-256 value");
+  }
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, input.subjectId);
+      await assertWorkspaceAccountPairInScope(scopedDb, input.accountId, input.workspaceId);
+      await scopedDb.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`slack-callback-failure:${input.workspaceId}:${input.callbackDigest}`}, 0))`,
+      );
+      const [existing] = await scopedDb
+        .select({ id: schema.auditEvents.id })
+        .from(schema.auditEvents)
+        .where(
+          and(
+            eq(schema.auditEvents.accountId, input.accountId),
+            eq(schema.auditEvents.workspaceId, input.workspaceId),
+            eq(schema.auditEvents.action, "slack_bot.install.callback.failed"),
+            eq(schema.auditEvents.targetType, "slack_oauth_callback"),
+            eq(schema.auditEvents.targetId, input.callbackDigest),
+          ),
+        )
+        .limit(1);
+      if (existing) return false;
+      await scopedDb.insert(schema.auditEvents).values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId,
+        action: "slack_bot.install.callback.failed",
+        targetType: "slack_oauth_callback",
+        targetId: input.callbackDigest,
+        metadata: {
+          outcome: "failed",
+          installMode: input.installMode,
+          stage: input.stage,
+          reason: input.reason,
+        },
+      });
+      return true;
+    },
+  );
 }
 
 export type ClaimSlackBotPostOperationResult =
@@ -5231,6 +5512,9 @@ export async function loadConnectionCredentialForBroker(
     allowSubjectOwned?: boolean;
   },
 ): Promise<ConnectionCredentialForBroker | null> {
+  if (input.allowSubjectOwned && !input.subjectId) {
+    return null;
+  }
   const key = environmentsEncryptionKeyBytes(settings);
   if (!key) {
     throw new Error(
@@ -5238,7 +5522,7 @@ export async function loadConnectionCredentialForBroker(
     );
   }
   const subjectPredicate = input.allowSubjectOwned
-    ? connectionSubjectVisibility(input.subjectId)
+    ? connectionExactSubject(input.subjectId)
     : isNull(schema.connections.subjectId);
   const conditions: SQL[] = [
     eq(schema.connections.workspaceId, input.workspaceId),
@@ -5252,49 +5536,54 @@ export async function loadConnectionCredentialForBroker(
       conditions.push(eq(schema.connections.kind, input.kind));
     }
   }
-  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
-    // Prefer active rows: a revoke bumps updatedAt, so recency alone would let a
-    // freshly revoked connection shadow an active replacement for the provider.
-    const [row] = await scopedDb
-      .select()
-      .from(schema.connections)
-      .where(and(...conditions))
-      .orderBy(
-        desc(sql`(${schema.connections.status} = 'active')`),
-        desc(schema.connections.updatedAt),
-      )
-      .limit(1);
-    if (!row) {
-      return null;
-    }
-    let credential: unknown;
-    try {
-      credential = JSON.parse(decryptEnvironmentValue(key, row.credentialEncrypted));
-    } catch (error) {
-      throw new Error(
-        `connection credential could not be decrypted for ${row.id}: ${error instanceof Error ? error.message : String(error)}`,
-        { cause: error },
-      );
-    }
-    if (!credential || typeof credential !== "object" || Array.isArray(credential)) {
-      throw new Error(`connection credential bundle for ${row.id} is not a JSON object`);
-    }
-    return {
-      id: row.id,
-      accountId: row.accountId,
-      workspaceId: row.workspaceId,
-      subjectId: row.subjectId,
-      providerDomain: row.providerDomain,
-      kind: row.kind as ConnectionKind,
-      status: row.status as ConnectionStatus,
-      credential: credential as Record<string, unknown>,
-      grantedScopes: row.grantedScopes,
-      expiresAt: row.expiresAt,
-      lastRefreshAt: row.lastRefreshAt,
-      version: row.version,
-      metadata: row.metadata,
-    };
-  });
+  return await withConnectionSubjectRls(
+    db,
+    input.workspaceId,
+    input.allowSubjectOwned ? input.subjectId : null,
+    async (scopedDb) => {
+      // Prefer active rows: a revoke bumps updatedAt, so recency alone would let a
+      // freshly revoked connection shadow an active replacement for the provider.
+      const [row] = await scopedDb
+        .select()
+        .from(schema.connections)
+        .where(and(...conditions))
+        .orderBy(
+          desc(sql`(${schema.connections.status} = 'active')`),
+          desc(schema.connections.updatedAt),
+        )
+        .limit(1);
+      if (!row) {
+        return null;
+      }
+      let credential: unknown;
+      try {
+        credential = JSON.parse(decryptEnvironmentValue(key, row.credentialEncrypted));
+      } catch (error) {
+        throw new Error(
+          `connection credential could not be decrypted for ${row.id}: ${error instanceof Error ? error.message : String(error)}`,
+          { cause: error },
+        );
+      }
+      if (!credential || typeof credential !== "object" || Array.isArray(credential)) {
+        throw new Error(`connection credential bundle for ${row.id} is not a JSON object`);
+      }
+      return {
+        id: row.id,
+        accountId: row.accountId,
+        workspaceId: row.workspaceId,
+        subjectId: row.subjectId,
+        providerDomain: row.providerDomain,
+        kind: row.kind as ConnectionKind,
+        status: row.status as ConnectionStatus,
+        credential: credential as Record<string, unknown>,
+        grantedScopes: row.grantedScopes,
+        expiresAt: row.expiresAt,
+        lastRefreshAt: row.lastRefreshAt,
+        version: row.version,
+        metadata: row.metadata,
+      };
+    },
+  );
 }
 
 export async function recordConnectionTokenRefresh(
@@ -5307,35 +5596,42 @@ export async function recordConnectionTokenRefresh(
     expiresAt: Date | null;
     grantedScopes?: string[];
     lastRefreshAt: Date;
+    subjectId?: string | null;
   },
 ): Promise<boolean> {
-  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
-    const set = {
-      credentialEncrypted: input.credentialEncrypted,
-      expiresAt: input.expiresAt,
-      lastRefreshAt: input.lastRefreshAt,
-      status: "active",
-      lastError: null,
-      version: sql`${schema.connections.version} + 1`,
-      updatedAt: new Date(),
-      ...(input.grantedScopes !== undefined ? { grantedScopes: input.grantedScopes } : {}),
-    };
-    const updated = await scopedDb
-      .update(schema.connections)
-      .set(set)
-      .where(
-        and(
-          eq(schema.connections.id, input.id),
-          eq(schema.connections.workspaceId, input.workspaceId),
-          eq(schema.connections.version, input.version),
-          // A refresh may only ever renew a live credential; revoked/errored rows
-          // stay dead even if a status change somewhere forgot to bump version.
-          eq(schema.connections.status, "active"),
-        ),
-      )
-      .returning({ id: schema.connections.id });
-    return updated.length > 0;
-  });
+  return await withConnectionSubjectRls(
+    db,
+    input.workspaceId,
+    input.subjectId,
+    async (scopedDb) => {
+      const set = {
+        credentialEncrypted: input.credentialEncrypted,
+        expiresAt: input.expiresAt,
+        lastRefreshAt: input.lastRefreshAt,
+        status: "active",
+        lastError: null,
+        version: sql`${schema.connections.version} + 1`,
+        updatedAt: new Date(),
+        ...(input.grantedScopes !== undefined ? { grantedScopes: input.grantedScopes } : {}),
+      };
+      const updated = await scopedDb
+        .update(schema.connections)
+        .set(set)
+        .where(
+          and(
+            eq(schema.connections.id, input.id),
+            eq(schema.connections.workspaceId, input.workspaceId),
+            eq(schema.connections.version, input.version),
+            connectionExactSubject(input.subjectId),
+            // A refresh may only ever renew a live credential; revoked/errored rows
+            // stay dead even if a status change somewhere forgot to bump version.
+            eq(schema.connections.status, "active"),
+          ),
+        )
+        .returning({ id: schema.connections.id });
+      return updated.length > 0;
+    },
+  );
 }
 
 export async function setConnectionStatus(
@@ -5343,9 +5639,9 @@ export async function setConnectionStatus(
   workspaceId: string,
   status: ConnectionStatus,
   lastError: string | null,
-  guard: { id: string; version: number },
+  guard: { id: string; version: number; subjectId?: string | null },
 ): Promise<boolean> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+  return await withConnectionSubjectRls(db, workspaceId, guard.subjectId, async (scopedDb) => {
     const updated = await scopedDb
       .update(schema.connections)
       .set({
@@ -5363,6 +5659,7 @@ export async function setConnectionStatus(
           eq(schema.connections.workspaceId, workspaceId),
           eq(schema.connections.id, guard.id),
           eq(schema.connections.version, guard.version),
+          connectionExactSubject(guard.subjectId),
         ),
       )
       .returning({ id: schema.connections.id });
@@ -5374,8 +5671,9 @@ export async function recordConnectionUsed(
   db: Database,
   workspaceId: string,
   connectionId: string,
+  subjectId?: string | null,
 ): Promise<void> {
-  await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+  await withConnectionSubjectRls(db, workspaceId, subjectId, async (scopedDb) => {
     await scopedDb
       .update(schema.connections)
       .set({
@@ -5386,6 +5684,7 @@ export async function recordConnectionUsed(
         and(
           eq(schema.connections.workspaceId, workspaceId),
           eq(schema.connections.id, connectionId),
+          connectionExactSubject(subjectId),
         ),
       );
   });

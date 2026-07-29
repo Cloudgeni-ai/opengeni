@@ -7,9 +7,8 @@ import {
 import type { ConnectionMetadata } from "@/types";
 import {
   activeOpenGeniSlackBotConnections,
-  isDifferentSlackBotPrincipalError,
   openGeniSlackBotConnectionLabel,
-  openGeniSlackBotConnectInput,
+  openGeniSlackBotInstallInput,
   openGeniSlackBotUiMetadata,
   preferredOpenGeniSlackBotConnection,
 } from "./slack-bot";
@@ -107,26 +106,8 @@ describe("OpenGeni Slack bot UI connection filtering", () => {
       `Test workspace · OpenGeni · ${connectionId}`,
     );
 
-    expect(openGeniSlackBotConnectInput("xoxb-fixture", existing, false)).toEqual({
-      token: "xoxb-fixture",
-      connectionId,
-    });
-    expect(openGeniSlackBotConnectInput("xoxb-fixture", existing, true)).toEqual({
-      token: "xoxb-fixture",
-    });
-    expect(openGeniSlackBotConnectInput("xoxb-fixture", null, false)).toEqual({
-      token: "xoxb-fixture",
-    });
-  });
-
-  test("recognizes only the server's immutable-principal recovery error", () => {
-    expect(
-      isDifferentSlackBotPrincipalError(
-        new Error(
-          "OpenGeni API 409: a different Slack bot requires a new connection and explicit scheduled-task rebinding",
-        ),
-      ),
-    ).toBe(true);
-    expect(isDifferentSlackBotPrincipalError(new Error("connection changed; retry"))).toBe(false);
+    expect(openGeniSlackBotInstallInput(existing, false)).toEqual({ connectionId });
+    expect(openGeniSlackBotInstallInput(existing, true)).toEqual({});
+    expect(openGeniSlackBotInstallInput(null, false)).toEqual({});
   });
 });

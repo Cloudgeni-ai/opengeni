@@ -356,11 +356,10 @@ export type ConnectionHealth =
   | { state: "attention"; connection: ConnectionMetadata | null };
 
 /**
- * Health of an enabled item, resolved BY the installation's connection id (not
- * by domain). `loaded` is whether the connections list actually loaded: no ref →
- * nothing to worry about; ref present but connections did NOT load → unverified
- * (stay neutral, never alarm); loaded and the row is gone or inactive → needs
- * attention (the row may be null if it was deleted); loaded and active → connected.
+ * Health of an enabled item. Workspace bindings resolve by their exact id;
+ * subject bindings intentionally store no id and resolve only among the current
+ * caller's visible personal rows by provider and kind. `loaded` distinguishes a
+ * failed connection-list read from a genuinely missing or inactive row.
  *
  * The `loaded` gate matters because listConnections needs a distinct
  * `connections:read` scope: a grant with catalog access but not that sctracking-403s,
@@ -373,9 +372,18 @@ export function connectionHealth(
   loaded: boolean,
 ): ConnectionHealth {
   const ref = installedConnectionRef(item);
-  if (!ref?.connectionId) return { state: "none" };
+  if (!ref) return { state: "none" };
   if (!loaded) return { state: "unverified" };
-  const connection = connections.find((candidate) => candidate.id === ref.connectionId) ?? null;
+  const connection =
+    ref.subjectScope === "subject"
+      ? (connections.find(
+          (candidate) =>
+            candidate.subjectId !== null &&
+            normalizeProviderDomain(candidate.providerDomain) ===
+              normalizeProviderDomain(ref.providerDomain) &&
+            candidate.kind === ref.kind,
+        ) ?? null)
+      : (connections.find((candidate) => candidate.id === ref.connectionId) ?? null);
   if (!connection || connection.status !== "active") return { state: "attention", connection };
   return { state: "connected", connection };
 }
@@ -496,11 +504,21 @@ export function oauthResumeAction(
 ): OAuthResumeAction {
   if (!item) return "missing";
   if (!connectionId) return "no_connection";
-  // An enabled item whose stored ref points at the returned connection was
-  // refreshed in place. A different id (or no stored ref) means the row was
-  // recreated, so re-enable to repoint the installation.
+  // Subject-owned installations are generic by design: whether OAuth refreshed
+  // or recreated the caller's row, the existing provider/kind binding remains
+  // valid and must never be rewritten with a private UUID.
+  if (item.enabled && item.connectionRef?.subjectScope === "subject") return "reconnect";
   if (item.enabled && item.connectionRef?.connectionId === connectionId) return "reconnect";
   return "enable";
+}
+
+/** Generic per-subject OAuth binding; never persist the returned personal row id. */
+export function subjectOAuthConnectionRef(providerDomain: string): {
+  providerDomain: string;
+  kind: "oauth2";
+  subjectScope: "subject";
+} {
+  return { providerDomain, kind: "oauth2", subjectScope: "subject" };
 }
 
 /** First one or two initials for the logo monogram fallback. */
