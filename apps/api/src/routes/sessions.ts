@@ -167,12 +167,17 @@ import {
 } from "@opengeni/core";
 import { assertSessionExists, boundedLimit } from "../http/common";
 import { sseSessionStream } from "../http/sse";
-import { serveWorkspaceCapture, serveWorkspaceCaptureFile } from "./workspace-capture";
+import {
+  serveWorkspaceCapture,
+  serveWorkspaceCaptureFile,
+  WorkspaceCaptureManifestCache,
+} from "./workspace-capture";
 
 type SessionRouteDeps = ApiRouteDeps & Pick<ViewerServices, "establishSandboxSession">;
 
 export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   const { settings, db, bus, workflowClient, objectStorage } = deps;
+  const workspaceCaptureManifestCache = new WorkspaceCaptureManifestCache();
   const ptyIdentity = (pty: SandboxOpenPtySessionRow): SandboxPtyProcessIdentity => ({
     leaseId: pty.leaseId,
     sandboxGroupId: pty.sandboxGroupId,
@@ -2129,7 +2134,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       return c.json({ available: false });
     }
     const row = await latestWorkspaceCapture(db, workspaceId, sessionId);
-    return c.json(await serveWorkspaceCapture(row, objectStorage));
+    return c.json(await serveWorkspaceCapture(row, objectStorage, workspaceCaptureManifestCache));
   });
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/workspace/capture/file", async (c) => {
