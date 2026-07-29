@@ -1,5 +1,26 @@
 # @opengeni/react
 
+## 0.27.0
+
+### Patch Changes
+
+- 519d93c: Add validated inline per-session skills and discover skills directly from already-materialized repository resources.
+- Updated dependencies [519d93c]
+  - @opengeni/sdk@0.27.0
+
+## 0.26.3
+
+### Patch Changes
+
+- Updated dependencies [110bb77]
+  - @opengeni/sdk@0.26.3
+
+## 0.26.2
+
+### Patch Changes
+
+- f92af07: Give each session-only React hook an exact structural client contract so embedded hosts can use session reads, goals, lineage, file attachments, structured human input, and MCP approval policies without implementing unrelated composer, queue, workspace, or workbench APIs.
+
 ## 0.26.1
 
 ### Patch Changes

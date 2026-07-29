@@ -1,6 +1,6 @@
 import { OpenGeniApiError, type SessionEvent, type SessionGoal } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useOpenGeni, type ClientOverride } from "../session-context";
+import { useEmbeddedGoal, type EmbeddedGoalClientOverride } from "../session-context";
 import {
   useDebouncedCallback,
   useMutationRunner,
@@ -30,7 +30,7 @@ export function isGoalRefreshEvent(event: Pick<SessionEvent, "type">): boolean {
   );
 }
 
-export type UseGoalOptions = ClientOverride &
+export type UseGoalOptions = EmbeddedGoalClientOverride &
   SessionEventFeedOptions & {
     /** Optional safety-net polling (ms). Off by default — event refreshes drive updates. */
     pollIntervalMs?: number | undefined;
@@ -71,7 +71,7 @@ export function useGoal(
   sessionId: string | null | undefined,
   options: UseGoalOptions = {},
 ): UseGoalResult {
-  const { client, workspaceId } = useOpenGeni(options);
+  const { client, workspaceId } = useEmbeddedGoal(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
   const sharedEvents = options.events;
   const sharedFeed = sharedEvents !== undefined;

@@ -1,5 +1,17 @@
 # @opengeni/contracts
 
+## 0.21.0
+
+### Minor Changes
+
+- 519d93c: Add validated inline per-session skills and discover skills directly from already-materialized repository resources.
+
+## 0.20.2
+
+### Patch Changes
+
+- 110bb77: Enforce exact-subject ownership for personal OAuth capabilities and add secure direct OAuth installation for the separate workspace OpenGeni Slack bot.
+
 ## 0.20.1
 
 ### Patch Changes

@@ -84,6 +84,21 @@ async function botConnection(workspace: Awaited<ReturnType<typeof workspaceFixtu
   });
 }
 
+async function personalSlackConnection(
+  workspace: Awaited<ReturnType<typeof workspaceFixture>>,
+  subjectId = "subject-a",
+) {
+  return await createConnection(client.db, {
+    ...workspace,
+    subjectId,
+    providerDomain: "slack.com",
+    kind: "oauth2",
+    credentialEncrypted: "fixture-personal-slack",
+    metadata: { mcpUrl: "https://mcp.slack.com/mcp" },
+    createdBySubjectId: subjectId,
+  });
+}
+
 function activities() {
   return createScheduledTaskActivities(
     async () =>
@@ -171,6 +186,51 @@ describe("scheduled OpenGeni Slack bot routing", () => {
     expect(await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10)).toHaveLength(
       1,
     );
+  });
+
+  test("rejects personal and cross-workspace connection IDs for scheduled shared-bot routing", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const personal = await personalSlackConnection(workspace);
+    const personalTask = await taskFixture(workspace, personal.id, "new_session_per_run");
+    const worker = activities();
+    await expect(
+      worker.dispatchScheduledTaskRun({
+        workspaceId: workspace.workspaceId,
+        taskId: personalTask.id,
+        triggerType: "scheduled",
+      }),
+    ).rejects.toThrow("OpenGeni Slack bot connection");
+
+    const otherWorkspace = await workspaceFixture();
+    const otherBot = await botConnection(otherWorkspace);
+    const crossWorkspaceTask = await taskFixture(workspace, otherBot.id, "new_session_per_run");
+    await expect(
+      worker.dispatchScheduledTaskRun({
+        workspaceId: workspace.workspaceId,
+        taskId: crossWorkspaceTask.id,
+        triggerType: "scheduled",
+      }),
+    ).rejects.toThrow("OpenGeni Slack bot connection");
+  });
+
+  test("a new bot installation never silently rebinds an existing scheduled task", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const original = await botConnection(workspace);
+    const task = await taskFixture(workspace, original.id, "new_session_per_run");
+    const separate = await botConnection(workspace);
+    expect(separate.id).not.toBe(original.id);
+
+    const dispatched = await activities().dispatchScheduledTaskRun({
+      workspaceId: workspace.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+    });
+    expect(dispatched.action).toBe("start");
+    const session = await getSession(client.db, workspace.workspaceId, dispatched.sessionId);
+    expect(session?.metadata[OPENGENI_SLACK_BOT_SESSION_METADATA_KEY]).toBe(original.id);
+    expect(session?.metadata[OPENGENI_SLACK_BOT_SESSION_METADATA_KEY]).not.toBe(separate.id);
   });
 
   test("fails a reusable run when the durable task and session bindings diverge", async () => {

@@ -305,6 +305,7 @@ import {
   type SessionStatus,
   type SessionTurn,
   type TurnExecutionPolicyV1,
+  type TurnInitiator,
 } from "@opengeni/contracts";
 import { createHash, randomUUID } from "node:crypto";
 
@@ -313,6 +314,13 @@ import { createHash, randomUUID } from "node:crypto";
 // throttling is minute-granular; anything shorter mostly burns continuation
 // budget against the same window.
 export const PROVIDER_BACKPRESSURE_DELAY_MS = 60_000;
+
+/** Personal connection authority follows the immutable human turn initiator, never the worker. */
+export function credentialSubjectIdForTurnInitiator(
+  initiator: Pick<TurnInitiator, "kind" | "subjectId">,
+): string | undefined {
+  return initiator.kind === "subject" ? initiator.subjectId : undefined;
+}
 
 export function turnExecutionPolicyBillingIdentity(policy: TurnExecutionPolicyV1): {
   externallyBilled: boolean;
@@ -2902,7 +2910,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           producerSeq,
         });
         if (immediate) {
-          await Bun.sleep(0);
+          await new Promise<void>((resolve) => setTimeout(resolve, 0));
         }
         return appended;
       };
@@ -4970,6 +4978,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         }
         return result;
       };
+      const credentialSubjectId = credentialSubjectIdForTurnInitiator(turn.initiator);
       preparedTools = await waitForTurnOperation(
         withCodex(() =>
           runtime.prepareTools(runSettings, turnTools, {
@@ -4984,6 +4993,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             executionGeneration,
             subjectId: "worker:first-party-mcp",
             subjectLabel: "OpenGeni worker",
+            ...(credentialSubjectId ? { credentialSubjectId } : {}),
             resolveCredential,
             onAuthNeeded: async (payload) => {
               await publish!([{ type: "tool.auth_needed", payload }], true);
@@ -5149,6 +5159,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           await maybeStartOnTurnRecording(resolvedSandbox, activeSandboxBackend);
         },
         ...(packRuntime.skills.length > 0 ? { packSkills: packRuntime.skills } : {}),
+        ...(session.skills.length > 0 ? { sessionSkills: session.skills } : {}),
         ...(skillLibraryRuntime.skillLibrarySkills.length > 0
           ? {
               skillLibrarySkills: skillLibraryRuntime.skillLibrarySkills,

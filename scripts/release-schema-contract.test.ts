@@ -145,18 +145,28 @@ describe("release schema contract", () => {
         (migrations.has("0128_github_installation_authority.sql") ? 1 : 0) +
         (migrations.has("0129_retained_process_reconciliation.sql") ? 1 : 0) +
         (migrations.has("0130_workspace_instruction_policies.sql") ? 1 : 0) +
-        (migrations.has("0131_slack_bot_install_and_post_idempotency.sql") ? 1 : 0),
+        (migrations.has("0131_slack_bot_install_and_post_idempotency.sql") ? 1 : 0) +
+        (migrations.has("0132_connection_subject_isolation.sql") ? 1 : 0) +
+        (migrations.has("0133_session_skills.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "15c744e23c99a1756cecbee69563067e85627ae4186dec16946edc99fbe4affe",
+      "9ed22b7eb35efd6eb8d1e683bd8334660531b6ff7e133e0cfc995969cb4bc960",
     );
-    expect(contract.latestMigration).toBe("0131_slack_bot_install_and_post_idempotency.sql");
+    expect(contract.latestMigration).toBe("0133_session_skills.sql");
     expect(migrations.get("0128_github_installation_authority.sql")).toMatchObject({
       sha256: "365793b2a204a70e214adb90298b522acbb6dcfae22a46681a58f41a6938e6f0",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0131_slack_bot_install_and_post_idempotency.sql")).toMatchObject({
       sha256: "b9516f61a23ecd363536f159bd772426a0da52eedfb8195a7b22f7be6a131bf2",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0132_connection_subject_isolation.sql")).toMatchObject({
+      sha256: "c52786e8732b49d223db2bb1c9789455304ad2b8750fdb46f261fd1da04dab44",
+      deploymentMode: "maintenance",
+    });
+    expect(migrations.get("0133_session_skills.sql")).toMatchObject({
+      sha256: "f0aac6c242a4dbad8d6d717d09f15b295855030cf0a8979151f6928ea7ea6ff6",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0122_codex_capacity_same_turn.sql")).toMatchObject({
@@ -184,7 +194,7 @@ describe("release schema contract", () => {
     expect(
       contract.migrations
         .map((migration) => migration.path)
-        .filter((path) => /^(?:010[3-9]|011[0-9]|012[0-9]|013[01])_/.test(path)),
+        .filter((path) => /^(?:010[3-9]|011[0-9]|012[0-9]|013[0-3])_/.test(path)),
     ).toEqual([
       "0103_host_export_root_session.sql",
       "0104_host_export_root_session_backfill.sql",
@@ -205,6 +215,8 @@ describe("release schema contract", () => {
       "0129_retained_process_reconciliation.sql",
       "0130_workspace_instruction_policies.sql",
       "0131_slack_bot_install_and_post_idempotency.sql",
+      "0132_connection_subject_isolation.sql",
+      "0133_session_skills.sql",
     ]);
     expect(new Set(contract.migrations.map((migration) => migration.path)).size).toBe(
       contract.fileCount,

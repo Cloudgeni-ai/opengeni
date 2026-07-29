@@ -174,6 +174,45 @@ describe("session lineage", () => {
     expect(rootLineage?.truncated).toBe(false);
   }, 60_000);
 
+  test("getSessionLineage returns deep ancestry in full and fails closed at its safety frontier", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const root = await createSession(db, {
+      accountId,
+      workspaceId,
+      initialMessage: "deep root",
+      resources: [],
+      metadata: {},
+      model: "gpt",
+      sandboxBackend: "none",
+      maxNestedAgentDepthOverride: 64,
+      allowNestedAgentDepthIncrease: true,
+    });
+    const chain = [root];
+    for (let depth = 1; depth <= 64; depth += 1) {
+      chain.push(
+        await createSession(db, {
+          accountId,
+          workspaceId,
+          initialMessage: `deep child ${depth}`,
+          resources: [],
+          metadata: {},
+          model: "gpt",
+          sandboxBackend: "none",
+          parentSessionId: chain.at(-1)!.id,
+        }),
+      );
+    }
+
+    const depth33 = await getSessionLineage(db, workspaceId, chain[33]!.id);
+    expect(depth33?.ancestors.map((session) => session.id)).toEqual(
+      chain.slice(0, 33).map((session) => session.id),
+    );
+    await expect(getSessionLineage(db, workspaceId, chain[64]!.id)).rejects.toThrow(
+      "has no valid workspace root",
+    );
+  }, 120_000);
+
   test("getSessionLineage caps descendants and reports truncation", async () => {
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();

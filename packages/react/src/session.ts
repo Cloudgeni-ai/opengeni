@@ -5,13 +5,21 @@
 // rendering their own product UI.
 
 export type {
+  EmbeddedFileAttachmentClientLike as FileAttachmentClientLike,
+  EmbeddedGoalClientLike as GoalClientLike,
   EmbeddedHumanInputSessionClientLike as HumanInputSessionClientLike,
+  EmbeddedSessionLineageClientLike as SessionLineageClientLike,
   EmbeddedSessionMcpApprovalPolicyClientLike as SessionMcpApprovalPolicyClientLike,
+  EmbeddedSessionReadClientLike as SessionReadClientLike,
   EmbeddedSessionClientLike as SessionClientLike,
 } from "./client";
 export type {
+  EmbeddedFileAttachmentClientOverride as FileAttachmentClientOverride,
+  EmbeddedGoalClientOverride as GoalClientOverride,
   EmbeddedHumanInputClientOverride as HumanInputClientOverride,
+  EmbeddedSessionLineageClientOverride as SessionLineageClientOverride,
   EmbeddedSessionMcpApprovalPolicyClientOverride as SessionMcpApprovalPolicyClientOverride,
+  EmbeddedSessionReadClientOverride as SessionReadClientOverride,
   EmbeddedSessionClientOverride as ClientOverride,
 } from "./session-context";
 

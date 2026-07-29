@@ -27,6 +27,7 @@ import {
   getVariableSet,
   listCapabilityCatalogItems,
   listCapabilityInstallations,
+  listConnectionsMetadata,
   listEnabledMcpCapabilityServers,
   listPackInstallations,
   mcpServerIdForCapability,
@@ -424,14 +425,10 @@ async function validateMcpCapabilityConnectionRef(
   item: CapabilityCatalogItem,
   ref: McpServerConnectionRef,
 ): Promise<McpServerConnectionRef> {
-  if (ref.subjectScope === "subject") {
-    throw new HTTPException(422, {
-      message: "subject-owned connection refs are not supported for agent runtime use yet",
-    });
-  }
+  const subjectScope = ref.subjectScope ?? "workspace";
   const normalized: McpServerConnectionRef = {
     providerDomain: ref.providerDomain.trim(),
-    subjectScope: "workspace",
+    subjectScope,
     ...(ref.connectionId ? { connectionId: ref.connectionId } : {}),
     ...(ref.provider ? { provider: ref.provider.trim() } : {}),
     ...(ref.kind ? { kind: ref.kind } : {}),
@@ -450,23 +447,41 @@ async function validateMcpCapabilityConnectionRef(
         "MCP capabilities need a remote streamable HTTP endpoint before they can use a connectionRef",
     });
   }
-  if (!normalized.connectionId) {
-    return normalized;
+
+  let connection = normalized.connectionId
+    ? await getConnectionMetadata(
+        input.db,
+        input.workspaceId,
+        normalized.connectionId,
+        input.grant.subjectId,
+      )
+    : null;
+  if (!connection && subjectScope === "subject" && !normalized.connectionId) {
+    const visible = await listConnectionsMetadata(
+      input.db,
+      input.workspaceId,
+      input.grant.subjectId,
+    );
+    connection =
+      visible.find(
+        (candidate) =>
+          candidate.subjectId === input.grant.subjectId &&
+          candidate.providerDomain === normalized.providerDomain &&
+          (!normalized.kind || candidate.kind === normalized.kind) &&
+          candidate.status === "active",
+      ) ?? null;
   }
-  const connection = await getConnectionMetadata(
-    input.db,
-    input.workspaceId,
-    normalized.connectionId,
-    input.grant.subjectId,
-  );
   if (!connection) {
     throw new HTTPException(422, {
-      message: "connectionRef.connectionId does not reference a visible connection",
+      message: "connectionRef does not reference a visible active connection",
     });
   }
-  if (connection.subjectId !== null) {
+  if (
+    (subjectScope === "subject" && connection.subjectId !== input.grant.subjectId) ||
+    (subjectScope === "workspace" && connection.subjectId !== null)
+  ) {
     throw new HTTPException(422, {
-      message: "agent runtime connection refs must reference workspace-shared connections in I1",
+      message: `connectionRef does not reference a ${subjectScope}-owned connection`,
     });
   }
   if (connection.status !== "active") {
@@ -483,6 +498,11 @@ async function validateMcpCapabilityConnectionRef(
     throw new HTTPException(422, {
       message: "connectionRef.kind does not match the referenced connection",
     });
+  }
+  if (subjectScope === "subject") {
+    const genericSubjectRef = { ...normalized, kind: connection.kind };
+    delete genericSubjectRef.connectionId;
+    return genericSubjectRef;
   }
   return normalized;
 }
@@ -1157,12 +1177,16 @@ function installationConnectionRef(
   if (!ref || typeof ref !== "object") {
     return null;
   }
-  const { connectionId, providerDomain, kind } = ref as Record<string, unknown>;
-  if (
-    typeof connectionId !== "string" ||
-    typeof providerDomain !== "string" ||
-    typeof kind !== "string"
-  ) {
+  const { connectionId, providerDomain, kind, subjectScope } = ref as Record<string, unknown>;
+  if (typeof providerDomain !== "string" || typeof kind !== "string") {
+    return null;
+  }
+  if (subjectScope === "subject") {
+    // Never project a personal connection UUID through workspace-visible
+    // capability configuration, including legacy rows that still contain one.
+    return { providerDomain, kind, subjectScope: "subject" };
+  }
+  if (typeof connectionId !== "string") {
     return null;
   }
   return { connectionId, providerDomain, kind };

@@ -8,8 +8,13 @@
 //   @source "../node_modules/@opengeni/react/src";
 
 export type {
+  EmbeddedFileAttachmentClientLike,
+  EmbeddedGoalClientLike,
   EmbeddedHumanInputSessionClientLike,
+  EmbeddedSessionEventClientLike,
+  EmbeddedSessionLineageClientLike,
   EmbeddedSessionMcpApprovalPolicyClientLike,
+  EmbeddedSessionReadClientLike,
   EmbeddedSessionClientLike,
   SessionClientLike,
 } from "./client";
