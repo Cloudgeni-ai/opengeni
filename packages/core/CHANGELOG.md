@@ -1,5 +1,11 @@
 # @opengeni/core
 
+## 0.12.5
+
+### Patch Changes
+
+- 7b962a6: Honor valid delegated worker access in local mode so signed session and turn metadata, along with narrowed permissions, reach first-party MCP tools.
+
 ## 0.12.4
 
 ### Patch Changes
