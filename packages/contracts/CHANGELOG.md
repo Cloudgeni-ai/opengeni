@@ -1,5 +1,11 @@
 # @opengeni/contracts
 
+## 0.21.0
+
+### Minor Changes
+
+- 519d93c: Add validated inline per-session skills and discover skills directly from already-materialized repository resources.
+
 ## 0.20.2
 
 ### Patch Changes

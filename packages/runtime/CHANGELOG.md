@@ -1,5 +1,17 @@
 # @opengeni/runtime
 
+## 0.14.0
+
+### Minor Changes
+
+- 519d93c: Add validated inline per-session skills and discover skills directly from already-materialized repository resources.
+
+### Patch Changes
+
+- Updated dependencies [519d93c]
+  - @opengeni/contracts@0.21.0
+  - @opengeni/config@0.7.10
+
 ## 0.13.14
 
 ### Patch Changes
