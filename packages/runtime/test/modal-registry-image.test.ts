@@ -15,6 +15,7 @@ const SECRET_NAME = "acr-credentials-gecko";
 function fakeModal() {
   const fakeImage = { imageId: "im-fake", objectId: "im-fake" };
   const fromRegistry = mock((_tag: string, _secret: unknown) => fakeImage);
+  const clientOptions: unknown[] = [];
   // The Secret is resolved via the AUTHENTICATED client (client.secrets.fromName),
   // never the static modal.Secret.fromName (which uses getDefaultClient).
   const secretFromName = mock(async (_name: string, _params?: unknown) => ({
@@ -25,9 +26,13 @@ function fakeModal() {
       ModalClient: class {
         images = { fromRegistry };
         secrets = { fromName: secretFromName };
+
+        constructor(options: unknown) {
+          clientOptions.push(options);
+        }
       },
     }) as unknown as Awaited<ReturnType<ModalModuleLoader>>;
-  return { loadModal, fromRegistry, secretFromName, fakeImage };
+  return { loadModal, fromRegistry, secretFromName, clientOptions, fakeImage };
 }
 
 afterEach(() => {
@@ -65,10 +70,18 @@ describe("resolveModalImageSelector", () => {
       modalImageRegistrySecret: SECRET_NAME,
       modalEnvironment: "main",
     });
-    const { loadModal, fromRegistry, secretFromName, fakeImage } = fakeModal();
+    const { loadModal, fromRegistry, secretFromName, clientOptions, fakeImage } = fakeModal();
 
     await ensureModalRegistryImage(settings, loadModal);
 
+    expect(clientOptions).toEqual([
+      {
+        tokenId: settings.modalTokenId,
+        tokenSecret: settings.modalTokenSecret,
+        environment: "main",
+      },
+    ]);
+    expect(clientOptions[0]).not.toHaveProperty("timeoutMs");
     expect(secretFromName).toHaveBeenCalledTimes(1);
     expect(secretFromName.mock.calls[0]?.[0]).toBe(SECRET_NAME);
     expect(secretFromName.mock.calls[0]?.[1]).toEqual({ environment: "main" });

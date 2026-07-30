@@ -127,7 +127,7 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
       // A persistArchive call must precede the terminate (delete) call.
       expect(deleteCalls).toHaveLength(0);
       persistedArchives.push(archiveBase64);
-      return { wrote: true, priorArchiveForGc: null };
+      return { wrote: true };
     };
 
     // Pre-fix this threw the Modal UserError; post-fix it resolves cleanly.
@@ -195,7 +195,7 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
       async (archiveBase64) => {
         expect(archiveBase64).not.toBeNull();
         persistedArchives.push(archiveBase64!);
-        return { wrote: true, priorArchiveForGc: null };
+        return { wrote: true };
       },
       (() => closeOnlyClient) as never,
     );
@@ -246,7 +246,7 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
     const persistCalls: Array<string | null> = [];
     const persistArchive = async (archiveBase64: string | null) => {
       persistCalls.push(archiveBase64);
-      return { wrote: true as const, priorArchiveForGc: null };
+      return { wrote: true as const };
     };
 
     // A fully-populated selfhosted lease envelope: resumeState present, backend
@@ -328,10 +328,7 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
     };
     const settings = testSettings({ sandboxBackend: "modal", sandboxOwnershipEnabled: true });
 
-    const persistArchive = async () => ({
-      wrote: true as const,
-      priorArchiveForGc: null,
-    });
+    const persistArchive = async () => ({ wrote: true as const });
 
     // The snapshot failure must propagate (so the caller skips + leaves the lease
     // draining); the box is NEVER terminated with un-captured files. The failing
@@ -374,7 +371,7 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
       observability,
       async (...args) => {
         persistCalls.push(args);
-        return { wrote: true, priorArchiveForGc: null };
+        return { wrote: true };
       },
       (() => notFoundClient) as never,
     );
@@ -412,7 +409,7 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
           resumeState,
         } as never,
         observability,
-        async () => ({ wrote: true, priorArchiveForGc: null }),
+        async () => ({ wrote: true }),
         (() => terminateFailureClient) as never,
       ),
     ).rejects.toThrow(/provider transport reset during terminate/);

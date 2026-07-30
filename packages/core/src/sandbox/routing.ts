@@ -33,6 +33,7 @@ import {
   makeActiveBackendResolver,
   NatsControlRpc,
   RoutingSandboxSession,
+  resolveModalCheckpointProviderBindingForSession,
   type ControlRpc,
   type EstablishedSandboxSession,
   type NatsRequestConnection,
@@ -43,6 +44,13 @@ import {
   type RoutingRetainedProcessTerminalProof,
   type SelfhostedRelayConfig,
 } from "@opengeni/runtime/sandbox";
+
+type PersistableMutationAdmission = {
+  admission: SandboxWorkspaceMutationAdmission;
+  providerBinding: Awaited<
+    ReturnType<typeof resolveModalCheckpointProviderBindingForSession>
+  > | null;
+};
 
 export type ChannelARoutingServices = {
   db: Database;
@@ -151,7 +159,7 @@ export function wrapChannelABoxWithRouting(
       }: {
         op: string;
         backend: ResolvedActiveBackend;
-      }): Promise<SandboxWorkspaceMutationAdmission | null> => {
+      }): Promise<PersistableMutationAdmission | null> => {
         // Connected Machines and other non-persistable targets intentionally do
         // not dirty or advance the cloud-home archive generation.
         if (
@@ -164,7 +172,11 @@ export function wrapChannelABoxWithRouting(
         if (backend.activeEpoch === undefined) {
           throw new Error("API-direct workspace mutation resolved without an active route epoch");
         }
-        return await advanceWorkspaceGenerationForDirectRequest(db, {
+        const providerBinding =
+          homeLease.backend === "modal"
+            ? await resolveModalCheckpointProviderBindingForSession(settings, backend.session)
+            : null;
+        const admission = await advanceWorkspaceGenerationForDirectRequest(db, {
           accountId: ids.accountId,
           workspaceId: ids.workspaceId,
           sessionId: ids.sessionId,
@@ -177,6 +189,7 @@ export function wrapChannelABoxWithRouting(
           routeEpoch: backend.activeEpoch,
           operation: op,
         });
+        return { admission, providerBinding };
       }
     : undefined;
   const afterMutation = homeLease
@@ -198,16 +211,22 @@ export function wrapChannelABoxWithRouting(
         if (
           !admission ||
           typeof admission !== "object" ||
-          typeof (admission as Partial<SandboxWorkspaceMutationAdmission>).id !== "string" ||
-          typeof (admission as Partial<SandboxWorkspaceMutationAdmission>).workspaceGeneration !==
-            "number" ||
           backend.leaseEpoch === undefined ||
           backend.providerInstanceId === undefined ||
           backend.activeEpoch === undefined
         ) {
           throw new Error("API-direct workspace mutation settlement lacked its exact admission");
         }
-        const exactAdmission = admission as SandboxWorkspaceMutationAdmission;
+        const boundAdmission = admission as Partial<PersistableMutationAdmission>;
+        const exactAdmission = boundAdmission.admission;
+        if (
+          !exactAdmission ||
+          typeof exactAdmission.id !== "string" ||
+          typeof exactAdmission.workspaceGeneration !== "number" ||
+          !("providerBinding" in boundAdmission)
+        ) {
+          throw new Error("API-direct workspace mutation settlement lacked its bound admission");
+        }
         if (outcome === "resolved" && retainedProcess) {
           await retainWorkspaceMutationProcess(db, {
             accountId: ids.accountId,
@@ -218,6 +237,7 @@ export function wrapChannelABoxWithRouting(
             admissionId: exactAdmission.id,
             admittedWorkspaceGeneration: exactAdmission.workspaceGeneration,
             operation: op,
+            providerBinding: boundAdmission.providerBinding ?? null,
             owner: {
               kind: "direct",
               requestId: ids.directRequest.requestId,

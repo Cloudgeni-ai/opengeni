@@ -1,6 +1,6 @@
 # Dependency Upgrade Log
 
-**Date:** 2026-07-14  
+**Date:** 2026-07-14 (updated 2026-07-30)
 **Project:** OpenGeni  
 **Language:** TypeScript  
 **Manifests:** `package.json`, `packages/runtime/package.json`,
@@ -26,16 +26,23 @@ does not ship advisories hidden behind older dependency trees.
 - Upstream source: `openai/openai-agents-js` tag `v0.13.3`, commit
   `7833c50d6bb9ca1d63a43c84b330c46d024b1cfd`.
 
-### Modal JS: 0.7.4 → 0.7.6
+### Modal JS: 0.7.4 → 0.9.0
 
-- Pinned to the newest release in the Agents JS 0.13.3 declared peer range
-  (`modal@^0.7.6`). Modal 0.9.0 was tested and rejected: it typechecked but did
-  not change the real-service scheduling wait and would violate the adapter's
-  supported dependency contract.
-- Debug evidence showed the apparent resume hang was a pending
-  `SandboxGetTaskId`, before command-router initialization. The account had 129
-  active sandboxes at the time, so the new diagnostic box was created but had
-  not received compute capacity.
+- Pinned Modal 0.9.0 globally so the Agents Extensions adapter and OpenGeni's
+  direct lifecycle operators cannot resolve different SDK implementations.
+- Modal 0.8 changed native snapshot calls to options objects and changed both
+  snapshot kinds to a 30-day default Image lifetime. OpenGeni's adapter
+  translates the still-positional Agents Extensions 0.13.3 call, passes the
+  configured timeout through the new API, and explicitly sends `ttlMs: null`.
+  The provider-bound checkpoint artifact ledger—not an implicit provider
+  expiry—owns safe deletion after an Image is no longer current or previous.
+- The bridge verifies the active SDK reports exactly 0.9.0 and fails closed on
+  an incompatible adapter/session shape. It rebinds after filesystem restore,
+  which replaces the provider sandbox inside the long-lived session.
+- Upstream source: `modal-labs/modal-client` tag `js/v0.9.0`, commit
+  `77d609d2fabac3829df7e82cb57b120a383d0512`.
+- Earlier scheduling evidence remains distinct: a pending `SandboxGetTaskId`
+  was provider capacity pressure, not fixed by this API upgrade.
 
 ### OpenAI Node: 6.36.0 → 6.47.0
 
@@ -69,6 +76,13 @@ The root override map binds the dependency graph to patched stable releases of
   tests skipped, 0 failed)
 - [x] Dependency audit (0 vulnerabilities)
 - [ ] Production Codex-subscription canary and post-cutover continuity proof
+
+The zero-advisory result above is the 2026-07-14 release receipt. On
+2026-07-30, `bun audit` reported 17 advisories in pre-existing unrelated
+dependency paths (`better-auth`, `sharp`, `axios`, `postcss`, `fast-uri`,
+`@hono/node-server`, and `body-parser`); Modal 0.9.0 introduced none. Those
+updates require their own compatibility review and are not silently bundled
+into the sandbox protocol cutover.
 
 ## Commands
 

@@ -46,6 +46,25 @@ export {
   type RetainedOutputResolvedRange,
 } from "./retained-output";
 
+export {
+  NATIVE_SNAPSHOT_PREFIXES,
+  WORKSPACE_ARCHIVE_DESCRIPTOR_VERSION,
+  backendForNativeSnapshotProvider,
+  decodeNativeSnapshotRef,
+  parseWorkspaceArchiveDescriptor,
+  type NativeSnapshotDescriptor,
+  type NativeSnapshotProvider,
+  type NativeSnapshotRef,
+  type TarWorkspaceArchiveDescriptor,
+  type WorkspaceArchiveDescriptor,
+  type WorkspaceTreeFingerprint,
+} from "./sandbox-snapshots";
+
+export {
+  canonicalModalCheckpointProviderBinding,
+  type ModalCheckpointProviderBinding,
+} from "./checkpoint-provider-bindings";
+
 export const SessionStatus = z.enum([
   "queued",
   "running",
