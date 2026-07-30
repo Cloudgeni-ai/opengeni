@@ -21,6 +21,10 @@ the next attempt reads that selection. Follow-up Send and Steer requests do not
 carry a private one-turn tool list. OpenGeni's web picker hides its internal
 `opengeni` carrier and the default-on `files` server from the visible count.
 The public API remains exact: an explicit session policy may omit `files`.
+Provider-native web search remains available independently of this MCP policy.
+Its search, open-page, and find-in-page response items settle from their own
+provider status and render before the answer they informed; they do not wait for
+a separate function-tool output event.
 
 MCP tool refs are strict by default. A bare `{ "kind": "mcp", "id": "docs" }` must name a server configured for this deployment, and a runtime connect/list failure fails the turn. A client or pack can mark a ref `{ "kind": "mcp", "id": "context7", "optional": true }` to make it portable: if the deployment does not configure that server the ref is skipped during validation, and if the server is configured but unavailable at runtime it is skipped for that turn with a warning.
 
