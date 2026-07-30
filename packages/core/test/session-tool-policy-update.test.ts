@@ -1,5 +1,11 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import type { AccessGrant, SessionToolPolicy, ToolRef } from "@opengeni/contracts";
+import {
+  FIRST_PARTY_MCP_TOOL_NAMES,
+  type AccessGrant,
+  type SessionToolPolicy,
+  type ToolRef,
+  type UpdateSessionToolPolicyRequest,
+} from "@opengeni/contracts";
 import {
   MemoryEventBus,
   acquireSharedTestDatabase,
@@ -110,6 +116,15 @@ function deps(db: Database, bus: MemoryEventBus, settingsOverride = settings) {
   return { db, bus, settings: settingsOverride };
 }
 
+function explicitTools(tools: ToolRef[], expectedVersion: number): UpdateSessionToolPolicyRequest {
+  return {
+    mode: "explicit",
+    tools,
+    firstPartyMcpTools: [...FIRST_PARTY_MCP_TOOL_NAMES],
+    expectedVersion,
+  };
+}
+
 describe("durable session tool-policy updates", () => {
   test("persists the policy/version, publishes a bounded audit event, and treats a repeat as a no-op", async () => {
     if (!available) return;
@@ -121,7 +136,7 @@ describe("durable session tool-policy updates", () => {
       deps(firstDb, bus),
       grant(owner.workspaceId, owner.accountId),
       created.id,
-      { tools: [OPENGENI, DOCS], expectedVersion: 1 },
+      explicitTools([OPENGENI, DOCS], 1),
     );
 
     expect(updated.tools).toEqual([OPENGENI, DOCS]);
@@ -152,7 +167,7 @@ describe("durable session tool-policy updates", () => {
       deps(firstDb, bus),
       grant(owner.workspaceId, owner.accountId),
       created.id,
-      { tools: [OPENGENI, DOCS], expectedVersion: 2 },
+      explicitTools([OPENGENI, DOCS], 2),
     );
     expect(repeated.toolPolicyVersion).toBe(2);
     expect(bus.published).toHaveLength(1);
@@ -172,10 +187,7 @@ describe("durable session tool-policy updates", () => {
         deps(firstDb, new MemoryEventBus()),
         grant(owner.workspaceId, owner.accountId),
         created.id,
-        {
-          tools: [{ kind: "mcp", id: "not-configured", optional: true }],
-          expectedVersion: 1,
-        },
+        explicitTools([{ kind: "mcp", id: "not-configured", optional: true }], 1),
       ),
     ).rejects.toMatchObject({ status: 422 });
   }, 180_000);
@@ -193,7 +205,7 @@ describe("durable session tool-policy updates", () => {
       deps(firstDb, bus),
       grant(owner.workspaceId, owner.accountId),
       created.id,
-      { tools: [OPENGENI, DOCS], expectedVersion: 1 },
+      explicitTools([OPENGENI, DOCS], 1),
     );
 
     const payload = bus.published[0]![0]!.payload as {
@@ -223,7 +235,7 @@ describe("durable session tool-policy updates", () => {
       deps(firstDb, bus),
       grant(owner.workspaceId, owner.accountId),
       created.id,
-      { tools: [OPENGENI, DOCS], expectedVersion: 1 },
+      explicitTools([OPENGENI, DOCS], 1),
     );
 
     const payload = bus.published[0]![0]!.payload as {
@@ -335,7 +347,7 @@ describe("durable session tool-policy updates", () => {
       deps(firstDb, bus),
       grant(owner.workspaceId, owner.accountId),
       child.id,
-      { tools: [OPENGENI, DOCS], expectedVersion: 1 },
+      explicitTools([OPENGENI, DOCS], 1),
     );
 
     const payload = bus.published[0]![0]!.payload as {
@@ -378,7 +390,7 @@ describe("durable session tool-policy updates", () => {
       deps(firstDb, bus, largeSettings),
       grant(owner.workspaceId, owner.accountId),
       created.id,
-      { tools: requestedTools, expectedVersion: 1 },
+      explicitTools(requestedTools, 1),
     );
 
     const payload = bus.published[0]![0]!.payload as {
@@ -407,7 +419,7 @@ describe("durable session tool-policy updates", () => {
         deps(firstDb, bus),
         grant(owner.workspaceId, owner.accountId),
         child.id,
-        { tools: [OPENGENI, DOCS], expectedVersion: 1 },
+        explicitTools([OPENGENI, DOCS], 1),
       ),
     ).rejects.toMatchObject({ status: 403 });
     expect((await getSession(firstDb, owner.workspaceId, child.id))?.toolPolicyVersion).toBe(1);
@@ -416,13 +428,13 @@ describe("durable session tool-policy updates", () => {
       deps(firstDb, bus),
       grant(owner.workspaceId, owner.accountId),
       parent.id,
-      { tools: [OPENGENI, DOCS], expectedVersion: 1 },
+      explicitTools([OPENGENI, DOCS], 1),
     );
     const widenedWithinParent = await updateSessionToolPolicy(
       deps(firstDb, bus),
       grant(owner.workspaceId, owner.accountId),
       child.id,
-      { tools: [OPENGENI, DOCS], expectedVersion: 1 },
+      explicitTools([OPENGENI, DOCS], 1),
     );
     expect(widenedWithinParent.tools).toEqual([OPENGENI, DOCS]);
     expect(widenedWithinParent.toolPolicy?.inheritedFromSessionId).toBe(parent.id);
@@ -439,13 +451,13 @@ describe("durable session tool-policy updates", () => {
         deps(firstDb, bus),
         grant(owner.workspaceId, owner.accountId),
         raceParent.id,
-        { tools: [OPENGENI, DOCS], expectedVersion: 1 },
+        explicitTools([OPENGENI, DOCS], 1),
       ),
       updateSessionToolPolicy(
         deps(secondDb, bus),
         grant(owner.workspaceId, owner.accountId),
         raceChild.id,
-        { tools: [OPENGENI], expectedVersion: 1 },
+        explicitTools([OPENGENI], 1),
       ),
     ]);
     expect(parentUpdate.toolPolicyVersion).toBe(2);
@@ -461,14 +473,18 @@ describe("durable session tool-policy updates", () => {
     const access = grant(owner.workspaceId, owner.accountId);
 
     const results = await Promise.allSettled([
-      updateSessionToolPolicy(deps(firstDb, firstBus), access, created.id, {
-        tools: [OPENGENI, DOCS],
-        expectedVersion: 1,
-      }),
-      updateSessionToolPolicy(deps(secondDb, secondBus), access, created.id, {
-        tools: [OPENGENI, FILES],
-        expectedVersion: 1,
-      }),
+      updateSessionToolPolicy(
+        deps(firstDb, firstBus),
+        access,
+        created.id,
+        explicitTools([OPENGENI, DOCS], 1),
+      ),
+      updateSessionToolPolicy(
+        deps(secondDb, secondBus),
+        access,
+        created.id,
+        explicitTools([OPENGENI, FILES], 1),
+      ),
     ]);
 
     expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
@@ -501,7 +517,7 @@ describe("durable session tool-policy updates", () => {
         deps(firstDb, new MemoryEventBus()),
         grant(firstOwner.workspaceId, firstOwner.accountId),
         foreign.id,
-        { tools: [OPENGENI, DOCS], expectedVersion: 1 },
+        explicitTools([OPENGENI, DOCS], 1),
       ),
     ).rejects.toThrow(`Session not found: ${foreign.id}`);
   }, 180_000);
