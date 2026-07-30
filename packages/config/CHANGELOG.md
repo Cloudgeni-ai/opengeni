@@ -1,5 +1,13 @@
 # @opengeni/config
 
+## 0.7.13
+
+### Patch Changes
+
+- 36451c6: Support an explicit shared workspace base directory for containerized Docker workers.
+- Updated dependencies [33dc88f]
+  - @opengeni/contracts@0.23.0
+
 ## 0.7.12
 
 ### Patch Changes

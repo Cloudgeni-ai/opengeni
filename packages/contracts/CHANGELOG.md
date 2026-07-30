@@ -1,5 +1,12 @@
 # @opengeni/contracts
 
+## 0.23.0
+
+### Minor Changes
+
+- 33dc88f: Restore managed GitHub App installation with OAuth-first existing-installation
+  discovery, exact owner revalidation, and hosted/operator setup-mode separation.
+
 ## 0.22.1
 
 ### Patch Changes
