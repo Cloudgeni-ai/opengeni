@@ -61,10 +61,77 @@ import {
   preferredOpenGeniSlackBotConnection,
 } from "@/lib/slack-bot";
 import { cn } from "@/lib/utils";
-import type { CapabilityCatalogItem, CapabilityPack, ConnectionMetadata } from "@/types";
+import type {
+  AccessContext,
+  CapabilityCatalogItem,
+  CapabilityPack,
+  ConnectionMetadata,
+} from "@/types";
 
 const PAGE_SIZE = 48;
 const FILTERS: CapabilityFilter[] = ["all", "pack", "mcp", "api", "skill", "plugin"];
+
+export function canInstallOpenGeniSlackBot(
+  accessContext: AccessContext | null,
+  workspaceId: string,
+): boolean {
+  const grant = accessContext?.workspaceGrants.find(
+    (candidate) => candidate.workspaceId === workspaceId,
+  );
+  return Boolean(
+    grant &&
+    (grant.permissions.includes("connections:write") ||
+      grant.permissions.includes("workspace:admin")),
+  );
+}
+
+export function SlackBotInstallControls({
+  canInstall,
+  hasConnection,
+  busy,
+  onInstall,
+}: {
+  canInstall: boolean;
+  hasConnection: boolean;
+  busy: boolean;
+  onInstall: (createNewConnection: boolean) => void;
+}) {
+  if (!canInstall) return null;
+
+  return (
+    <div className="mt-4 flex flex-wrap items-center gap-2">
+      <button
+        type="button"
+        aria-busy={busy}
+        aria-label={hasConnection ? "Reinstall OpenGeni in Slack" : "Install OpenGeni in Slack"}
+        data-opengeni-slack-install
+        className="relative inline-flex h-10 w-[139px] items-center justify-center overflow-hidden rounded-md outline-none ring-focus transition-opacity focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-bg disabled:cursor-not-allowed disabled:opacity-60"
+        disabled={busy}
+        onClick={() => onInstall(false)}
+      >
+        <img
+          src="https://platform.slack-edge.com/img/add_to_slack.png"
+          srcSet="https://platform.slack-edge.com/img/add_to_slack@2x.png 2x"
+          alt=""
+          aria-hidden="true"
+          width={139}
+          height={40}
+          className="h-10 w-[139px]"
+        />
+        {busy ? (
+          <span className="absolute inset-0 grid place-items-center bg-bg/75" aria-hidden="true">
+            <Loader2Icon className="animate-spin" />
+          </span>
+        ) : null}
+      </button>
+      {hasConnection ? (
+        <Button type="button" variant="outline" disabled={busy} onClick={() => onInstall(true)}>
+          Install another Slack workspace/bot
+        </Button>
+      ) : null}
+    </div>
+  );
+}
 
 export function CapabilitiesRoute({
   workspaceId,
@@ -132,6 +199,7 @@ export function CapabilitiesRoute({
   const slackBotMetadata = slackBotConnection
     ? openGeniSlackBotUiMetadata(slackBotConnection)
     : null;
+  const canInstallSlackBot = canInstallOpenGeniSlackBot(context.accessContext, workspaceId);
 
   const showPacks = filter === "all" || filter === "pack";
   const showCatalog = filter !== "pack";
@@ -841,47 +909,12 @@ export function CapabilitiesRoute({
               </Button>
             ) : null}
           </div>
-          <div className="mt-4 flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              aria-busy={slackBotBusy}
-              aria-label={
-                slackBotConnection ? "Reinstall OpenGeni in Slack" : "Install OpenGeni in Slack"
-              }
-              data-opengeni-slack-install
-              className="relative inline-flex h-10 w-[139px] items-center justify-center overflow-hidden rounded-md outline-none ring-focus transition-opacity focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-bg disabled:cursor-not-allowed disabled:opacity-60"
-              disabled={slackBotBusy}
-              onClick={() => void installSlackBot(false)}
-            >
-              <img
-                src="https://platform.slack-edge.com/img/add_to_slack.png"
-                srcSet="https://platform.slack-edge.com/img/add_to_slack@2x.png 2x"
-                alt=""
-                aria-hidden="true"
-                width={139}
-                height={40}
-                className="h-10 w-[139px]"
-              />
-              {slackBotBusy ? (
-                <span
-                  className="absolute inset-0 grid place-items-center bg-bg/75"
-                  aria-hidden="true"
-                >
-                  <Loader2Icon className="animate-spin" />
-                </span>
-              ) : null}
-            </button>
-            {slackBotConnection ? (
-              <Button
-                type="button"
-                variant="outline"
-                disabled={slackBotBusy}
-                onClick={() => void installSlackBot(true)}
-              >
-                Install another Slack workspace/bot
-              </Button>
-            ) : null}
-          </div>
+          <SlackBotInstallControls
+            canInstall={canInstallSlackBot}
+            hasConnection={Boolean(slackBotConnection)}
+            busy={slackBotBusy}
+            onInstall={(createNewConnection) => void installSlackBot(createNewConnection)}
+          />
           {slackBotConnection ? (
             <p className="mt-2 text-2xs text-fg-subtle">
               A new installation creates a separate connection. Existing scheduled tasks stay bound
