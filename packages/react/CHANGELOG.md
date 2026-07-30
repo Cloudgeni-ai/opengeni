@@ -1,5 +1,17 @@
 # @opengeni/react
 
+## 0.28.3
+
+### Patch Changes
+
+- 1c4018e: Replace one-turn tool overrides with one durable session tool policy, expose
+  OpenGeni-native tools in the same selection, default available tools on, and
+  render delivered machine inputs as compact typed timeline updates instead of
+  raw protocol JSON.
+- Updated dependencies [28c678d]
+- Updated dependencies [1c4018e]
+  - @opengeni/sdk@0.28.3
+
 ## 0.28.2
 
 ### Patch Changes
