@@ -17,7 +17,12 @@ import {
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
 import { provisionRoles } from "@opengeni/db/provision-roles";
-import { addDocumentToBase, createDocumentBase, listDocumentBases } from "@opengeni/documents";
+import {
+  addDocumentToBase,
+  createDocumentBase,
+  getDocumentInventory,
+  listDocumentBases,
+} from "@opengeni/documents";
 import {
   acquireSharedTestDatabase,
   testSettings,
@@ -258,6 +263,15 @@ describe("workspace state API authorization", () => {
       visibility: "workspace",
       createdBy: grant.subjectId,
     });
+    const normalizedEmptyOnly = await addDocumentToBase(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      baseId: targetBase.id,
+      fileId: await readyFile("normalized-empty-only-topics"),
+      title: "normalized empty only topics",
+      visibility: "workspace",
+      createdBy: grant.subjectId,
+    });
     const hiddenPrivate = await addDocumentToBase(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -276,10 +290,30 @@ describe("workspace state API authorization", () => {
     `;
     await shared.admin`
       update documents
+      set status = 'ready', topics = ${shared.admin.json([
+        "\u00a0",
+        "\u2007",
+        "\u202f",
+        "\u3000",
+        "\t\r\n",
+      ])}::jsonb, updated_at = now()
+      where id = ${normalizedEmptyOnly.id}
+    `;
+    await shared.admin`
+      update documents
       set status = 'ready', topics = ${shared.admin.json(["private-hidden"])}::jsonb,
           updated_at = now()
       where id = ${hiddenPrivate.id}
     `;
+
+    const malformedInventory = await getDocumentInventory(client.db, grant.workspaceId, {
+      baseLimit: WORKSPACE_STATE_MAX_BASES,
+      topicLimit: 20,
+      topicMaxChars: 120,
+      access: { viewerSubjectId: grant.subjectId },
+    });
+    expect(malformedInventory.topics).toEqual([]);
+    expect(malformedInventory.statusCounts.ready).toBe(3);
 
     const malformedResponse = await request(["workspace:read", "documents:search"]);
     expect(malformedResponse.status).toBe(200);
@@ -289,11 +323,11 @@ describe("workspace state API authorization", () => {
       throw new Error("expected inventory");
     }
     expect(malformedBody.knowledge.topics).toEqual([]);
-    expect(malformedBody.knowledge.documentStatusCounts.ready).toBe(2);
+    expect(malformedBody.knowledge.documentStatusCounts.ready).toBe(3);
     expect(malformedBody.knowledge.gaps).toContainEqual({
       code: "missing_topic_coverage",
       severity: "info",
-      relatedCount: 2,
+      relatedCount: 3,
     });
 
     const distinctVisible = await addDocumentToBase(client.db, {
@@ -401,7 +435,7 @@ describe("workspace state API authorization", () => {
       { name: "Incident Response", documentCount: 1 },
       { name: "valid", documentCount: 1 },
     ]);
-    expect(mixedBody.knowledge.documentStatusCounts.ready).toBe(4);
+    expect(mixedBody.knowledge.documentStatusCounts.ready).toBe(5);
     expect(mixedBody.knowledge.gaps.map((gap) => gap.code)).not.toContain("missing_topic_coverage");
     const topicLabels = JSON.stringify(mixedBody.knowledge.topics);
     expect(topicLabels).not.toContain("private-hidden");

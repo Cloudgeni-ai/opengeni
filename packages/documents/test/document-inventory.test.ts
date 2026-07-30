@@ -38,7 +38,12 @@ describe("document inventory bounds", () => {
     expect(inventorySource).toContain("jsonb_array_elements(${schema.documents.topics})");
     expect(inventorySource).toContain("jsonb_typeof(topic.value) = 'string'");
     expect(inventorySource).toContain("topic.value #>> '{}'");
-    expect(inventorySource).toContain("normalize(${topicStringValue}, NFKC)");
+    expect(inventorySource).toContain(
+      "btrim(regexp_replace(normalize(${topicStringValue}, NFKC), '[[:space:]]+', ' ', 'g'))",
+    );
+    expect(inventorySource).toContain("left(${topicNormalizedName}, ${topicMaxChars})");
+    expect(inventorySource).toContain("nullif(${topicNormalizedName}, '') is not null");
+    expect(inventorySource).not.toContain("nullif(btrim(${topicStringValue}), '') is not null");
     expect(inventorySource).toContain("count(distinct ${schema.documents.id})::int");
     expect(inventorySource).not.toContain("jsonb_array_elements_text");
   });
