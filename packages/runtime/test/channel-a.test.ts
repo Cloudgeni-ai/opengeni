@@ -152,6 +152,68 @@ function makeModalLikeExecOnlySession(
   };
 }
 
+function makeStockMacCommandSurface(root: string): { bin: string; log: string } {
+  const bin = join(root, "stock-macos-bin");
+  const log = join(root, "stock-macos-commands.log");
+  mkdirSync(bin);
+  const realStat = Bun.which("stat");
+  const realReadlink = Bun.which("readlink");
+  const realShasum = Bun.which("shasum");
+  if (!realStat || !realReadlink || !realShasum) {
+    throw new Error("stock-macOS simulation requires host stat, readlink, and shasum");
+  }
+  const writeCommand = (name: string, body: string): void => {
+    const path = join(bin, name);
+    writeFileSync(path, `#!/bin/bash\nset -eu\n${body}\n`);
+    chmodSync(path, 0o755);
+  };
+  writeCommand(
+    "sha256sum",
+    ["printf 'sha256sum\\n' >> \"$OPENGENI_STOCK_MAC_LOG\"", "exit 127"].join("\n"),
+  );
+  writeCommand(
+    "shasum",
+    [
+      "printf 'shasum\\n' >> \"$OPENGENI_STOCK_MAC_LOG\"",
+      `exec ${JSON.stringify(realShasum)} "$@"`,
+    ].join("\n"),
+  );
+  writeCommand(
+    "readlink",
+    [
+      'printf \'readlink %s\\n\' "$*" >> "$OPENGENI_STOCK_MAC_LOG"',
+      'if [ "${1:-}" = "-f" ]; then exit 1; fi',
+      `exec ${JSON.stringify(realReadlink)} "$@"`,
+    ].join("\n"),
+  );
+  writeCommand(
+    "stat",
+    [
+      'printf \'stat %s\\n\' "$*" >> "$OPENGENI_STOCK_MAC_LOG"',
+      'if [ "${1:-}" = "-Lc" ] || [ "${1:-}" = "-c" ]; then exit 1; fi',
+      'if [ "${1:-}" != "-f" ] || [ "$#" -ne 3 ]; then exit 64; fi',
+      'case "$2" in',
+      `  %d:%i) exec ${JSON.stringify(realStat)} -L -c '%d:%i' "$3" ;;`,
+      `  %z) exec ${JSON.stringify(realStat)} -L -c '%s' "$3" ;;`,
+      `  %Lp) exec ${JSON.stringify(realStat)} -L -c '%a' "$3" ;;`,
+      "  *) exit 64 ;;",
+      "esac",
+    ].join("\n"),
+  );
+  writeCommand(
+    "lsof",
+    [
+      'printf \'lsof %s\\n\' "$*" >> "$OPENGENI_STOCK_MAC_LOG"',
+      "pid= fd=",
+      'while [ "$#" -gt 0 ]; do case "$1" in -p) pid="$2"; shift 2 ;; -d) fd="$2"; shift 2 ;; *) shift ;; esac; done',
+      '[ -n "$pid" ] && [ -n "$fd" ] || exit 64',
+      `opened=$(${JSON.stringify(realReadlink)} -f "/proc/$pid/fd/$fd") || exit 1`,
+      'printf \'p%s\\0f%s\\0n%s\\0\\n\' "$pid" "$fd" "$opened"',
+    ].join("\n"),
+  );
+  return { bin, log };
+}
+
 describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
   test("write then read-back round-trips text", async () => {
     const { session } = await makeBox();
@@ -1295,6 +1357,71 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
     expect(outputs.join("\n")).not.toContain(secretContent.trim());
   });
 
+  test("stock macOS/BSD command surface preserves bounded descriptor confinement", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-channel-a-stock-macos-"));
+    temporaryRoots.push(root);
+    const outside = join(tmpdir(), `opengeni-channel-a-stock-secret-${crypto.randomUUID()}.txt`);
+    temporaryRoots.push(outside);
+    const victim = join(root, "victim.txt");
+    const safeContent = "safe payload\n";
+    const secretContent = "leak target!\n";
+    expect(Buffer.byteLength(safeContent)).toBe(Buffer.byteLength(secretContent));
+    writeFileSync(outside, secretContent);
+    runFixtureCommand(root, "git init -q");
+
+    const surface = makeStockMacCommandSurface(root);
+    const swaps = join(root, "swap-count");
+    writeFileSync(
+      join(surface.bin, "cat"),
+      [
+        "#!/bin/bash",
+        'rm -f -- "$OPENGENI_SWAP_VICTIM"',
+        'ln -s -- "$OPENGENI_SWAP_OUTSIDE" "$OPENGENI_SWAP_VICTIM"',
+        'printf x >> "$OPENGENI_SWAP_COUNT"',
+        'exec /bin/cat "$@"',
+        "",
+      ].join("\n"),
+    );
+    chmodSync(join(surface.bin, "cat"), 0o755);
+
+    const macLike = makeModalLikeExecOnlySession(root, {
+      pathPrefix: surface.bin,
+      env: {
+        OPENGENI_STOCK_MAC_LOG: surface.log,
+        OPENGENI_SWAP_VICTIM: victim,
+        OPENGENI_SWAP_OUTSIDE: outside,
+        OPENGENI_SWAP_COUNT: swaps,
+      },
+      beforeExec: () => {
+        rmSync(victim, { force: true });
+        writeFileSync(victim, safeContent);
+      },
+    });
+    const svc = new SandboxChannelAService({
+      session: macLike.session,
+      workspaceRoot: root,
+    });
+
+    const diff = await svc.gitDiff({
+      path: "",
+      staged: false,
+      includeUntracked: true,
+      fromRef: "HEAD",
+      pathspec: ["victim.txt"],
+      contextLines: 3,
+      maxBytesPerFile: 1024,
+    });
+
+    const commands = await Bun.file(surface.log).text();
+    expect(commands).toContain("sha256sum");
+    expect(commands).toContain("shasum");
+    expect(commands).toContain("lsof");
+    expect(commands).toContain("stat -f %d:%i");
+    expect((await Bun.file(swaps).text()).length).toBeGreaterThan(0);
+    expect(diff.files[0]?.hunks[0]?.lines.map((line) => line.text)).toEqual(["safe payload"]);
+    expect(JSON.stringify(diff)).not.toContain(secretContent.trim());
+  });
+
   test("a partial regular-file frame fails unavailable instead of authorizing an empty diff", async () => {
     const root = mkdtempSync(join(tmpdir(), "opengeni-channel-a-regular-frame-"));
     temporaryRoots.push(root);
@@ -1341,7 +1468,7 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
     let corrupted = false;
     modalLike.session.execCommand = async (args) => {
       const output = await execCommand(args);
-      if (!corrupted && args.cmd.includes("readlink -z") && output.includes("GIT_CHUNK_V1")) {
+      if (!corrupted && args.cmd.includes("readlink -n") && output.includes("GIT_CHUNK_V1")) {
         corrupted = true;
         return output.replace("__OPENGENI_GIT_CHUNK_V1__", "__OPENGENI_GIT_CHUNK_V0__");
       }
