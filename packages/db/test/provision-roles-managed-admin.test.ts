@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import postgres from "postgres";
 import { provisionRoles } from "../src/provision-roles";
 
-const PORT = 61445;
+const PORT = 61446;
 const CONTAINER = `ogverify-pg-managed-role-${PORT}`;
 const SUPERUSER_PASSWORD = "superpw";
 const ADMIN_ROLE = "managed_admin";
