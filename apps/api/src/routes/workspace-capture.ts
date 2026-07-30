@@ -46,6 +46,7 @@ type LoadedManifest = {
 
 type ManifestCacheEntry = LoadedManifest & {
   identity: string;
+  inlineResponse?: Extract<GetWorkspaceCaptureResponse, { available: true }>;
 };
 
 /**
@@ -71,6 +72,29 @@ export class WorkspaceCaptureManifestCache {
     this.#entries.delete(key);
     this.#entries.set(key, entry);
     return entry;
+  }
+
+  getInlineResponse(
+    row: WorkspaceCaptureRow,
+  ): Extract<GetWorkspaceCaptureResponse, { available: true }> | null {
+    const key = row.manifestKey;
+    if (!key) return null;
+    const entry = this.#entries.get(key);
+    if (!entry || entry.identity !== manifestIdentity(row) || !entry.inlineResponse) return null;
+    this.#entries.delete(key);
+    this.#entries.set(key, entry);
+    return entry.inlineResponse;
+  }
+
+  setInlineResponse(
+    row: WorkspaceCaptureRow,
+    response: Extract<GetWorkspaceCaptureResponse, { available: true }>,
+  ): void {
+    const key = row.manifestKey;
+    if (!key) return;
+    const entry = this.#entries.get(key);
+    if (!entry || entry.identity !== manifestIdentity(row)) return;
+    entry.inlineResponse = response;
   }
 
   set(row: WorkspaceCaptureRow, loaded: LoadedManifest): void {
@@ -217,6 +241,8 @@ export async function serveWorkspaceCapture(
     });
   }
   if (row.state !== "available" || !row.manifestKey) return { available: false };
+  const cachedResponse = cache?.getInlineResponse(row);
+  if (cachedResponse) return cachedResponse;
   // Validate every manifest before serving it, including the rare >2MB signed
   // path. Previously that branch signed arbitrary bytes merely because they
   // exceeded the inline cap, allowing a poison/mis-keyed blob to bypass both the
@@ -233,11 +259,16 @@ export async function serveWorkspaceCapture(
     stats: loaded.stats,
   };
   if (loaded.byteLength <= CAPTURE_INLINE_MANIFEST_MAX_BYTES) {
-    return GetWorkspaceCaptureResponse.parse({
+    const response = GetWorkspaceCaptureResponse.parse({
       ...meta,
       manifest: loaded.manifest,
       manifestUrl: null,
     });
+    if (!response.available) {
+      throw new Error("validated inline capture response lost its available discriminator");
+    }
+    cache?.setInlineResponse(row, response);
+    return response;
   }
   const signed = await storage.createGetUrl({
     key: row.manifestKey,

@@ -321,8 +321,10 @@ describe("serveWorkspaceCapture (manifest response)", () => {
     const cache = new WorkspaceCaptureManifestCache();
     const row = makeRow();
 
-    expect((await serveWorkspaceCapture(row, storage, cache)).available).toBe(true);
-    expect((await serveWorkspaceCapture(row, storage, cache)).available).toBe(true);
+    const first = await serveWorkspaceCapture(row, storage, cache);
+    const second = await serveWorkspaceCapture(row, storage, cache);
+    expect(first.available).toBe(true);
+    expect(second).toBe(first);
     expect(storage.reads).toEqual([MANIFEST_KEY]);
   });
 
