@@ -511,11 +511,18 @@ BEGIN
     SET search_path = pg_catalog
     AS $function$
     BEGIN
-      IF p_limit < 1 OR p_limit > 500 THEN
+      IF p_claim_id IS NULL THEN
+        RAISE EXCEPTION 'checkpoint artifact claim id is required'
+          USING ERRCODE = '22023';
+      END IF;
+      IF p_limit IS NULL OR p_limit < 1 OR p_limit > 500 THEN
         RAISE EXCEPTION 'checkpoint artifact claim limit must be between 1 and 500'
           USING ERRCODE = '22023';
       END IF;
-      IF p_claim_ttl_ms < 1000 OR p_claim_ttl_ms > 3600000 THEN
+      IF p_claim_ttl_ms IS NULL
+        OR p_claim_ttl_ms < 1000
+        OR p_claim_ttl_ms > 3600000
+      THEN
         RAISE EXCEPTION 'checkpoint artifact claim TTL must be between 1s and 1h'
           USING ERRCODE = '22023';
       END IF;
@@ -603,7 +610,18 @@ BEGIN
     AS $function$
     DECLARE changed integer;
     BEGIN
-      IF p_retry_after_ms < 0 OR p_retry_after_ms > 86400000 THEN
+      IF p_id IS NULL OR p_claim_id IS NULL THEN
+        RAISE EXCEPTION 'checkpoint artifact and claim ids are required'
+          USING ERRCODE = '22023';
+      END IF;
+      IF p_deleted IS NULL THEN
+        RAISE EXCEPTION 'checkpoint artifact deletion outcome is required'
+          USING ERRCODE = '22023';
+      END IF;
+      IF p_retry_after_ms IS NULL
+        OR p_retry_after_ms < 0
+        OR p_retry_after_ms > 86400000
+      THEN
         RAISE EXCEPTION 'checkpoint artifact retry delay must be between 0 and 24h'
           USING ERRCODE = '22023';
       END IF;
@@ -645,11 +663,14 @@ BEGIN
     AS $function$
     DECLARE pruned integer;
     BEGIN
-      IF p_retention_ms < 86400000 OR p_retention_ms > 31536000000 THEN
+      IF p_retention_ms IS NULL
+        OR p_retention_ms < 86400000
+        OR p_retention_ms > 31536000000
+      THEN
         RAISE EXCEPTION 'checkpoint tombstone retention must be between 1 and 365 days'
           USING ERRCODE = '22023';
       END IF;
-      IF p_limit < 1 OR p_limit > 1000 THEN
+      IF p_limit IS NULL OR p_limit < 1 OR p_limit > 1000 THEN
         RAISE EXCEPTION 'checkpoint tombstone prune limit must be between 1 and 1000'
           USING ERRCODE = '22023';
       END IF;
@@ -704,40 +725,48 @@ BEGIN
       archive_base64 text,
       descriptor jsonb
     )
-    LANGUAGE sql
+    LANGUAGE plpgsql
     SECURITY DEFINER
     SET search_path = pg_catalog
     AS $function$
-      SELECT lease.account_id, lease.workspace_id, lease.sandbox_group_id, lease.id,
-        lease.lease_epoch, lease.instance_id,
-        lease.workspace_generation, candidate.slot, candidate.archive_base64,
-        candidate.descriptor
-      FROM %1$I.sandbox_leases lease
-      CROSS JOIN LATERAL (
-        VALUES
-          (
-            'current'::text,
-            lease.resume_state #>> '{sessionState,workspaceArchive}',
-            lease.resume_state #> '{sessionState,workspaceArchiveMeta}',
-            lease.current_checkpoint_artifact_id
-          ),
-          (
-            'previous'::text,
-            lease.resume_state #>> '{sessionState,workspaceArchivePrev}',
-            lease.resume_state #> '{sessionState,workspaceArchivePrevMeta}',
-            lease.previous_checkpoint_artifact_id
-          )
-      ) candidate(slot, archive_base64, descriptor, artifact_id)
-      WHERE candidate.artifact_id IS NULL
-        AND lease.backend = 'modal'
-        AND lease.liveness IN ('warming', 'warm', 'draining')
-        AND lease.instance_id IS NOT NULL
-        AND coalesce(candidate.archive_base64, '') <> ''
-        AND candidate.descriptor ->> 'version' = '2'
-        AND candidate.descriptor ->> 'provider'
-          IN ('modal_snapshot_filesystem', 'modal_snapshot_directory')
-      ORDER BY lease.updated_at, lease.id, candidate.slot
-      LIMIT greatest(0, least(p_limit, 500));
+    BEGIN
+      IF p_limit IS NULL OR p_limit < 1 OR p_limit > 500 THEN
+        RAISE EXCEPTION 'legacy checkpoint slot limit must be between 1 and 500'
+          USING ERRCODE = '22023';
+      END IF;
+
+      RETURN QUERY
+        SELECT lease.account_id, lease.workspace_id, lease.sandbox_group_id, lease.id,
+          lease.lease_epoch, lease.instance_id,
+          lease.workspace_generation, candidate.slot, candidate.archive_base64,
+          candidate.descriptor
+        FROM %1$I.sandbox_leases lease
+        CROSS JOIN LATERAL (
+          VALUES
+            (
+              'current'::text,
+              lease.resume_state #>> '{sessionState,workspaceArchive}',
+              lease.resume_state #> '{sessionState,workspaceArchiveMeta}',
+              lease.current_checkpoint_artifact_id
+            ),
+            (
+              'previous'::text,
+              lease.resume_state #>> '{sessionState,workspaceArchivePrev}',
+              lease.resume_state #> '{sessionState,workspaceArchivePrevMeta}',
+              lease.previous_checkpoint_artifact_id
+            )
+        ) candidate(slot, archive_base64, descriptor, artifact_id)
+        WHERE candidate.artifact_id IS NULL
+          AND lease.backend = 'modal'
+          AND lease.liveness IN ('warming', 'warm', 'draining')
+          AND lease.instance_id IS NOT NULL
+          AND coalesce(candidate.archive_base64, '') <> ''
+          AND candidate.descriptor ->> 'version' = '2'
+          AND candidate.descriptor ->> 'provider'
+            IN ('modal_snapshot_filesystem', 'modal_snapshot_directory')
+        ORDER BY lease.updated_at, lease.id, candidate.slot
+        LIMIT p_limit;
+    END;
     $function$;
   $create$, data_schema);
 
@@ -761,11 +790,11 @@ BEGIN
       requested integer;
       requested_ids uuid[];
     BEGIN
-      IF p_lead_ms < 0 OR p_lead_ms > 86400000 THEN
+      IF p_lead_ms IS NULL OR p_lead_ms < 0 OR p_lead_ms > 86400000 THEN
         RAISE EXCEPTION 'sandbox rotation lead must be between 0 and 24h'
           USING ERRCODE = '22023';
       END IF;
-      IF p_limit < 1 OR p_limit > 500 THEN
+      IF p_limit IS NULL OR p_limit < 1 OR p_limit > 500 THEN
         RAISE EXCEPTION 'sandbox rotation batch limit must be between 1 and 500'
           USING ERRCODE = '22023';
       END IF;

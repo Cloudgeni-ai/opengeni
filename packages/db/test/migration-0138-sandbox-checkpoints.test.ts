@@ -227,6 +227,48 @@ describe("migration 0138 (checkpoint artifacts and finite provider deadlines)", 
         appExecutable: 7,
       });
 
+      const invalidOperatorCalls = [
+        `select * from opengeni_private.claim_sandbox_checkpoint_artifacts(
+          null, 1, 60000
+        )`,
+        `select * from opengeni_private.claim_sandbox_checkpoint_artifacts(
+          gen_random_uuid(), null, 60000
+        )`,
+        `select * from opengeni_private.claim_sandbox_checkpoint_artifacts(
+          gen_random_uuid(), 1, null
+        )`,
+        `select opengeni_private.settle_sandbox_checkpoint_artifact(
+          null, gen_random_uuid(), true, null, 1000
+        )`,
+        `select opengeni_private.settle_sandbox_checkpoint_artifact(
+          gen_random_uuid(), null, true, null, 1000
+        )`,
+        `select opengeni_private.settle_sandbox_checkpoint_artifact(
+          gen_random_uuid(), gen_random_uuid(), null, null, 1000
+        )`,
+        `select opengeni_private.settle_sandbox_checkpoint_artifact(
+          gen_random_uuid(), gen_random_uuid(), true, null, null
+        )`,
+        `select opengeni_private.prune_deleted_sandbox_checkpoint_artifacts(
+          null, 1
+        )`,
+        `select opengeni_private.prune_deleted_sandbox_checkpoint_artifacts(
+          86400000, null
+        )`,
+        `select * from opengeni_private.list_legacy_modal_checkpoint_slots(null)`,
+        `select opengeni_private.request_due_sandbox_rotations(null, 1)`,
+        `select opengeni_private.request_due_sandbox_rotations(0, null)`,
+      ];
+      for (const query of invalidOperatorCalls) {
+        let invalidArgument: unknown;
+        try {
+          await sql.unsafe(query);
+        } catch (error) {
+          invalidArgument = error;
+        }
+        expect((invalidArgument as { code?: string } | undefined)?.code).toBe("22023");
+      }
+
       const bindingKey = JSON.stringify({
         version: 1,
         serverUrl: "https://modal.test",
