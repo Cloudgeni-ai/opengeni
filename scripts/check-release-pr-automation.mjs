@@ -722,7 +722,7 @@ function releaseHeadRecoveryContext(env, suppliedInputs) {
     RELEASE_AUTOMATION_CONTRACT.sealWorkflowPath,
     "workflow_dispatch",
   );
-  requiredEnvironment(env, ["GITHUB_RUN_ID"]);
+  requiredEnvironment(env, ["GITHUB_RUN_ATTEMPT", "GITHUB_RUN_ID"]);
   const values = suppliedInputs ?? {
     prNumber: env.RELEASE_HEAD_PR_NUMBER,
     baseSha: env.RELEASE_HEAD_BASE_SHA,
@@ -736,6 +736,7 @@ function releaseHeadRecoveryContext(env, suppliedInputs) {
     headSha: assertSha(values.headSha, "release-head SHA"),
     sourceSha: assertSha(values.sourceSha, "release-head merged source SHA"),
     workflowRunId: assertPositiveInteger(env.GITHUB_RUN_ID, "seal workflow run ID"),
+    workflowRunAttempt: assertPositiveInteger(env.GITHUB_RUN_ATTEMPT, "seal workflow run attempt"),
   };
   invariant(context.headSha !== context.baseSha, "release head SHA equals its base SHA");
   invariant(
@@ -889,7 +890,7 @@ export async function recoverReleaseHeadEvidence(options = {}) {
   await upsertCheckRun(
     api,
     checkContext,
-    "source-admission",
+    "source-admission-recovery",
     {
       status: "in_progress",
       title: "Recovering exact historical source admission",
@@ -902,7 +903,7 @@ export async function recoverReleaseHeadEvidence(options = {}) {
   await upsertCheckRun(
     api,
     checkContext,
-    "source-admission",
+    "source-admission-recovery",
     {
       status: "completed",
       conclusion: "success",
@@ -913,7 +914,7 @@ export async function recoverReleaseHeadEvidence(options = {}) {
     },
     now,
   );
-  const sourceAdmissionIdentity = checkIdentity("source-admission", checkContext);
+  const sourceAdmissionIdentity = checkIdentity("source-admission-recovery", checkContext);
   const sourceAdmission = assertSuccessfulCheckRun(
     await findCheckRun(api, checkContext, sourceAdmissionIdentity),
     RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
@@ -1078,11 +1079,14 @@ export async function sealReleaseHeadEvidence(options = {}) {
 
 function checkIdentity(kind, context) {
   invariant(
-    kind === "source-admission" || kind === "automation-ci" || kind === "release-head-retention",
+    kind === "source-admission" ||
+      kind === "source-admission-recovery" ||
+      kind === "automation-ci" ||
+      kind === "release-head-retention",
     "check kind is invalid",
   );
   const name =
-    kind === "source-admission"
+    kind === "source-admission" || kind === "source-admission-recovery"
       ? RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission
       : kind === "automation-ci"
         ? RELEASE_AUTOMATION_CONTRACT.checks.automationCi
@@ -1093,6 +1097,35 @@ function checkIdentity(kind, context) {
           record(context.releaseHeadRelease, "release head immutable release check identity"),
         )}`
       : "";
+  if (kind === "source-admission-recovery") {
+    const workflowRunId = assertPositiveInteger(
+      context.workflowRunId,
+      "source-admission recovery workflow run ID",
+    );
+    const workflowRunAttempt = assertPositiveInteger(
+      context.workflowRunAttempt,
+      "source-admission recovery workflow run attempt",
+    );
+    return {
+      name,
+      exclusive: false,
+      externalId:
+        `opengeni:release-automation:source-admission-recovery:v2:` +
+        `pr:${context.prNumber}:head:${context.headSha}:` +
+        `run:${workflowRunId}:attempt:${workflowRunAttempt}`,
+      migrationExternalIds: [
+        `opengeni:release-automation:source-admission:v1:` +
+          `pr:${context.prNumber}:head:${context.headSha}`,
+      ],
+      migrationExternalIdPatterns: [
+        new RegExp(
+          `^opengeni:release-automation:source-admission-recovery:v2:` +
+            `pr:${context.prNumber}:head:${context.headSha}:` +
+            `run:[1-9][0-9]*:attempt:[1-9][0-9]*$`,
+        ),
+      ],
+    };
+  }
   return {
     name,
     exclusive: kind === "release-head-retention",
@@ -1104,6 +1137,11 @@ function checkIdentity(kind, context) {
 
 async function findCheckRun(api, context, identity) {
   const matches = [];
+  const acceptedExternalIds = new Set([
+    identity.externalId,
+    ...(identity.migrationExternalIds ?? []),
+  ]);
+  const acceptedExternalIdPatterns = identity.migrationExternalIdPatterns ?? [];
   for (let page = 1; page <= maximumPages; page += 1) {
     const response = record(
       await api.get(
@@ -1116,7 +1154,11 @@ async function findCheckRun(api, context, identity) {
     );
     invariant(Array.isArray(response.check_runs), "check-run records are missing");
     for (const check of response.check_runs) {
-      if (check?.external_id !== identity.externalId) {
+      const externalId = check?.external_id;
+      if (
+        !acceptedExternalIds.has(externalId) &&
+        !acceptedExternalIdPatterns.some((pattern) => pattern.test(externalId ?? ""))
+      ) {
         if (!identity.exclusive) continue;
         invariant(
           check?.head_sha === context.headSha,
@@ -1345,10 +1387,17 @@ async function verifyDurableSourceAdmission({
   const matching = checks.filter(
     (check) => check?.name === RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
   );
-  const canonicalExternalId = `opengeni:release-automation:source-admission:v1:pr:${pullNumber}:head:${headSha}`;
-  const canonical = matching.filter((check) => check?.external_id === canonicalExternalId);
+  const canonicalPrefix =
+    `opengeni:release-automation:source-admission-recovery:v2:` +
+    `pr:${pullNumber}:head:${headSha}:run:`;
+  const canonicalPattern = new RegExp(`^${canonicalPrefix}([1-9][0-9]*):attempt:([1-9][0-9]*)$`);
+  const canonical = matching.filter((check) => canonicalPattern.test(check?.external_id ?? ""));
   invariant(canonical.length <= 1, "canonical recovered source-admission check is not unique");
   if (canonical.length === 1) {
+    const canonicalExternalId = assertString(
+      canonical[0]?.external_id,
+      "canonical recovered source-admission external ID",
+    );
     return assertSuccessfulCheckRun(
       canonical[0],
       RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
