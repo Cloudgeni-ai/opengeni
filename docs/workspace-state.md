@@ -24,7 +24,7 @@ Workspace State projects existing sources; it owns none of them:
   in Memory (`knowledge_memories`); historical rows with
   `knowledge_memories.kind = preference` are legacy, non-authoritative
   observations only;
-- the OPE-122 structured preference registry (`preference_registry_preferences`
+- the dedicated structured preference registry (`preference_registry_preferences`
   plus its immutable revisions and lifecycle events) is the sole active
   preference authority, as documented in
   [`preference-registry.md`](preference-registry.md);
