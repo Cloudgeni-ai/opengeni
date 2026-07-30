@@ -1345,6 +1345,17 @@ async function verifyDurableSourceAdmission({
   const matching = checks.filter(
     (check) => check?.name === RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
   );
+  const canonicalExternalId = `opengeni:release-automation:source-admission:v1:pr:${pullNumber}:head:${headSha}`;
+  const canonical = matching.filter((check) => check?.external_id === canonicalExternalId);
+  invariant(canonical.length <= 1, "canonical recovered source-admission check is not unique");
+  if (canonical.length === 1) {
+    return assertSuccessfulCheckRun(
+      canonical[0],
+      RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+      headSha,
+      canonicalExternalId,
+    );
+  }
   if (matching.length > 0) {
     return assertSuccessfulCheck(
       checks,

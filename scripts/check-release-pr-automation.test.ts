@@ -1967,6 +1967,67 @@ describe("release approval provenance", () => {
     ).toHaveLength(2);
   });
 
+  test("prefers one canonical recovered admission over duplicate draft-to-ready originals", async () => {
+    const original = (id: number) => ({
+      id,
+      name: RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+      head_sha: headSha,
+      status: "completed",
+      conclusion: "success",
+      external_id: `ordinary-${id}`,
+      app: RELEASE_AUTOMATION_CONTRACT.githubActionsApp,
+    });
+    const fixture = approvalFixture({
+      headChecks: [
+        original(101),
+        original(102),
+        {
+          ...original(103),
+          external_id: `opengeni:release-automation:source-admission:v1:pr:${pullNumber}:head:${headSha}`,
+        },
+      ],
+    });
+
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: fixture.fetchImpl,
+        logger: { log() {} },
+      }),
+    ).resolves.toMatchObject({
+      sourceAdmission: {
+        name: RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+        appSlug: RELEASE_AUTOMATION_CONTRACT.githubActionsApp.slug,
+        appId: RELEASE_AUTOMATION_CONTRACT.githubActionsApp.id,
+      },
+    });
+  });
+
+  test("rejects duplicate canonical recovered admissions", async () => {
+    const externalId = `opengeni:release-automation:source-admission:v1:pr:${pullNumber}:head:${headSha}`;
+    const canonical = {
+      name: RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+      head_sha: headSha,
+      status: "completed",
+      conclusion: "success",
+      external_id: externalId,
+      app: RELEASE_AUTOMATION_CONTRACT.githubActionsApp,
+    };
+    const fixture = approvalFixture({
+      headChecks: [
+        { ...canonical, id: 201 },
+        { ...canonical, id: 202 },
+      ],
+    });
+
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: fixture.fetchImpl,
+      }),
+    ).rejects.toThrow("canonical recovered source-admission check is not unique");
+  });
+
   test("accepts reviewer login movement while preserving stable provider identity", async () => {
     const reviewer = {
       ...RELEASE_AUTOMATION_CONTRACT.releaseApprover,
