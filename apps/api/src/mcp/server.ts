@@ -226,7 +226,11 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   scheduled_task_runs_list: { anyOf: ["scheduled_tasks:manage", "scheduled_tasks:run"] },
   slack_bot_list_channels: { allOf: ["connections:read"] },
   slack_bot_channel_history: { allOf: ["connections:read"] },
+  slack_bot_thread_replies: { allOf: ["connections:read"] },
   slack_bot_list_users: { allOf: ["connections:read"] },
+  slack_bot_list_files: { allOf: ["connections:read"] },
+  slack_bot_file_info: { allOf: ["connections:read"] },
+  slack_bot_file_content: { allOf: ["connections:read"] },
   slack_bot_post_message: { allOf: ["connections:read"] },
 } satisfies Record<FirstPartyMcpToolName, FirstPartyToolAuthorization>;
 
@@ -839,6 +843,32 @@ function registerSlackBotTools(
   );
 
   server.registerTool(
+    "slack_bot_thread_replies",
+    {
+      description:
+        "Read a Slack thread as the workspace-shared OpenGeni bot. Pass the channel ID and the parent message timestamp returned by channel history. The result includes the parent followed by its replies.",
+      inputSchema: {
+        connectionId: z4.string().uuid().optional(),
+        channelId: z4.string().min(1).max(64),
+        threadTimestamp: z4.string().min(1).max(64),
+        cursor: z4.string().max(1024).optional(),
+        limit: z4.number().int().min(1).max(100).optional(),
+      },
+    },
+    async ({ connectionId, channelId, threadTimestamp, cursor, limit }) =>
+      json(
+        await (
+          await clientFor(connectionId)
+        ).threadReplies({
+          channelId,
+          threadTimestamp,
+          ...(cursor ? { cursor } : {}),
+          ...(limit !== undefined ? { limit } : {}),
+        }),
+      ),
+  );
+
+  server.registerTool(
     "slack_bot_list_users",
     {
       description: "List Slack workspace users through the workspace-shared OpenGeni bot.",
@@ -860,19 +890,94 @@ function registerSlackBotTools(
   );
 
   server.registerTool(
+    "slack_bot_list_files",
+    {
+      description:
+        "List Slack files and canvases shared with a channel where the workspace-shared OpenGeni bot is already a member.",
+      inputSchema: {
+        connectionId: z4.string().uuid().optional(),
+        channelId: z4.string().min(1).max(64),
+        cursor: z4.string().max(1024).optional(),
+        limit: z4.number().int().min(1).max(200).optional(),
+      },
+    },
+    async ({ connectionId, channelId, cursor, limit }) =>
+      json(
+        await (
+          await clientFor(connectionId)
+        ).listFiles({
+          channelId,
+          ...(cursor ? { cursor } : {}),
+          ...(limit !== undefined ? { limit } : {}),
+        }),
+      ),
+  );
+
+  server.registerTool(
+    "slack_bot_file_info",
+    {
+      description:
+        "Read safe metadata for a Slack file or canvas shared with a channel where the workspace-shared OpenGeni bot is already a member. For an embedded huddle transcript, also pass the shared canvas file ID as parentFileId so OpenGeni can verify the indirect share.",
+      inputSchema: {
+        connectionId: z4.string().uuid().optional(),
+        channelId: z4.string().min(1).max(64),
+        fileId: z4.string().min(1).max(64),
+        parentFileId: z4.string().min(1).max(64).optional(),
+      },
+    },
+    async ({ connectionId, channelId, fileId, parentFileId }) =>
+      json(
+        await (
+          await clientFor(connectionId)
+        ).fileInfo({
+          channelId,
+          fileId,
+          ...(parentFileId ? { parentFileId } : {}),
+        }),
+      ),
+  );
+
+  server.registerTool(
+    "slack_bot_file_content",
+    {
+      description:
+        "Read a bounded page of UTF-8 text from a Slack file or canvas shared with a channel where the workspace-shared OpenGeni bot is already a member. For an embedded huddle transcript, also pass the shared canvas file ID as parentFileId so OpenGeni can verify the channel-to-canvas-to-transcript chain. Slack may still restrict a huddle transcript body to participants; that returns huddle_transcript_requires_participant_access. Private Slack URLs and credentials are never returned. Continue with nextOffset when truncated is true.",
+      inputSchema: {
+        connectionId: z4.string().uuid().optional(),
+        channelId: z4.string().min(1).max(64),
+        fileId: z4.string().min(1).max(64),
+        parentFileId: z4.string().min(1).max(64).optional(),
+        offset: z4.number().int().min(0).max(4_000_000).optional(),
+      },
+    },
+    async ({ connectionId, channelId, fileId, parentFileId, offset }) =>
+      json(
+        await (
+          await clientFor(connectionId)
+        ).fileContent({
+          channelId,
+          fileId,
+          ...(parentFileId ? { parentFileId } : {}),
+          ...(offset !== undefined ? { offset } : {}),
+        }),
+      ),
+  );
+
+  server.registerTool(
     "slack_bot_post_message",
     {
       description:
-        "Post as the workspace-shared OpenGeni bot. Pass channelId for a channel where the bot is already a member, or userId to open/post a DM; pass exactly one. Generate one operationId UUID per intended message and reuse that same UUID on every retry.",
+        "Post as the workspace-shared OpenGeni bot. Pass channelId for a channel where the bot is already a member, or userId to open/post a DM; pass exactly one. To reply in a thread, also pass its parent message timestamp as threadTimestamp. Generate one operationId UUID per intended message and reuse that same UUID on every retry.",
       inputSchema: {
         connectionId: z4.string().uuid().optional(),
         operationId: z4.string().uuid(),
         channelId: z4.string().min(1).max(64).optional(),
         userId: z4.string().min(1).max(64).optional(),
+        threadTimestamp: z4.string().min(1).max(64).optional(),
         text: z4.string().min(1).max(40_000),
       },
     },
-    async ({ connectionId, operationId, channelId, userId, text }) => {
+    async ({ connectionId, operationId, channelId, userId, threadTimestamp, text }) => {
       if (Boolean(channelId) === Boolean(userId)) {
         throw new Error("exactly one of channelId or userId is required");
       }
@@ -883,6 +988,7 @@ function registerSlackBotTools(
           operationId,
           ...(channelId ? { channelId } : {}),
           ...(userId ? { userId } : {}),
+          ...(threadTimestamp ? { threadTimestamp } : {}),
           text,
         }),
       );

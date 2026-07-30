@@ -108,7 +108,10 @@ function fixtureBotToken(): string {
 type SlackCall = {
   method: string;
   channel: string | null;
+  fileId: string | null;
   clientMessageId: string | null;
+  parentTimestamp: string | null;
+  threadTimestamp: string | null;
   hasText: boolean;
   query: string;
 };
@@ -121,6 +124,7 @@ function fakeSlack(
     botUserId?: string;
     botId?: string;
     loseFirstPostResponse?: boolean;
+    transcriptRequiresUserSession?: boolean;
   } = {},
 ) {
   const calls: SlackCall[] = [];
@@ -133,7 +137,10 @@ function fakeSlack(
     calls.push({
       method,
       channel: params.get("channel"),
+      fileId: params.get("file"),
       clientMessageId: params.get("client_msg_id"),
+      parentTimestamp: params.get("ts"),
+      threadTimestamp: params.get("thread_ts"),
       hasText: params.has("text"),
       query: url.search,
     });
@@ -141,6 +148,27 @@ function fakeSlack(
       method === "auth.test"
         ? { "x-oauth-scopes": (options.scopes ?? OPENGENI_SLACK_BOT_REQUIRED_SCOPES).join(",") }
         : undefined;
+    if (url.hostname === "files.slack.com") {
+      if (url.pathname.includes("huddle-transcript") && options.transcriptRequiresUserSession) {
+        return new Response(null, {
+          status: 302,
+          headers: {
+            location:
+              "https://fixture.slack.com/?redir=%2Ffiles-pri%2FT_OPEN_GENI-FTRANSCRIPT%2Fdownload%2Fhuddle-transcript",
+          },
+        });
+      }
+      return url.pathname.includes("huddle-transcript")
+        ? new Response("00:00 Test Member: A bounded transcript fixture.", {
+            headers: {
+              "content-type": "application/vnd.slack-huddle-transcript; charset=utf-8",
+            },
+          })
+        : new Response(
+            '<div class="quip-canvas-content"><h1>Meeting notes</h1><p class="embedded-file">File ID: sf:FTRANSCRIPT</p></div>',
+            { headers: { "content-type": "text/html; charset=utf-8" } },
+          );
+    }
     if (method === "oauth.v2.access") {
       return Response.json({ ok: true, access_token: fixtureBotToken() });
     }
@@ -192,7 +220,44 @@ function fakeSlack(
     if (method === "conversations.history") {
       return Response.json({
         ok: true,
-        messages: [{ ts: "1.000", user: "U_MEMBER", text: "bounded history" }],
+        messages: [
+          {
+            ts: "1.000",
+            user: "U_MEMBER",
+            text: "bounded history",
+            thread_ts: "1.000",
+            reply_count: 1,
+            files: [
+              {
+                id: "F_CANVAS",
+                name: "meeting-notes",
+                title: "Meeting notes",
+                mode: "canvas",
+                filetype: "quip",
+                mimetype: "application/vnd.slack-docs",
+                size: 1234,
+                channels: ["C_MEMBER"],
+                canvas_metadata: { originating_huddle_id: "H_FIXTURE" },
+                huddle_transcript_file_id: "FTRANSCRIPT",
+              },
+            ],
+          },
+        ],
+        response_metadata: { next_cursor: "" },
+      });
+    }
+    if (method === "conversations.replies") {
+      return Response.json({
+        ok: true,
+        messages: [
+          { ts: "1.000", user: "U_MEMBER", text: "bounded history", thread_ts: "1.000" },
+          {
+            ts: "1.001",
+            user: "U_REPLY",
+            text: "bounded thread reply",
+            thread_ts: "1.000",
+          },
+        ],
         response_metadata: { next_cursor: "" },
       });
     }
@@ -209,6 +274,51 @@ function fakeSlack(
           },
         ],
         response_metadata: { next_cursor: "" },
+      });
+    }
+    if (method === "files.list") {
+      return Response.json({
+        ok: true,
+        files: [
+          {
+            id: "F_CANVAS",
+            name: "meeting-notes",
+            title: "Meeting notes",
+            mode: "canvas",
+            filetype: "quip",
+            mimetype: "application/vnd.slack-docs",
+            size: 1234,
+            channels: ["C_MEMBER"],
+            canvas_metadata: { originating_huddle_id: "H_FIXTURE" },
+            huddle_transcript_file_id: "FTRANSCRIPT",
+          },
+        ],
+        response_metadata: { next_cursor: "" },
+      });
+    }
+    if (method === "files.info") {
+      const fileId = params.get("file") ?? "F_CANVAS";
+      const transcript = fileId === "FTRANSCRIPT";
+      return Response.json({
+        ok: true,
+        file: {
+          id: fileId,
+          name: transcript ? "huddle-transcript" : "meeting-notes",
+          title: transcript ? "Huddle transcript" : "Meeting notes",
+          mode: transcript ? "huddle_transcript" : "canvas",
+          filetype: transcript ? "huddle_transcript" : "quip",
+          mimetype: transcript
+            ? "application/vnd.slack-huddle-transcript"
+            : "application/vnd.slack-docs",
+          size: transcript ? 4567 : 1234,
+          channels: transcript ? [] : [fileId === "F_OTHER" ? "G_PRIVATE" : "C_MEMBER"],
+          groups: transcript ? ["C_CANVAS"] : [],
+          canvas_metadata: transcript ? undefined : { originating_huddle_id: "H_FIXTURE" },
+          huddle_transcript_file_id: transcript ? undefined : "FTRANSCRIPT",
+          url_private_download: transcript
+            ? "https://files.slack.com/files-pri/T_OPEN_GENI-FTRANSCRIPT/download/huddle-transcript"
+            : "https://files.slack.com/files-pri/T_OPEN_GENI-F_CANVAS/download/meeting-notes.html",
+        },
       });
     }
     if (method === "conversations.open") {
@@ -1359,9 +1469,12 @@ describe("OpenGeni Slack bot connection", () => {
         requestedConnectionId: personal.id,
       }),
     ).rejects.toThrow("OpenGeni Slack bot connection");
-    await expect(
-      resolveSlackBotConnectionForTool({ db: client.db, grant, sessionId: null }),
-    ).rejects.toThrow("connectionId is required");
+    const automaticallyResolved = await resolveSlackBotConnectionForTool({
+      db: client.db,
+      grant,
+      sessionId: null,
+    });
+    expect(automaticallyResolved.connection.id).toBe(connection!.id);
 
     const forgedSession = await createSession(client.db, {
       accountId: workspace.accountId,
@@ -1406,8 +1519,120 @@ describe("OpenGeni Slack bot connection", () => {
     expect(slack.calls.filter((call) => call.method === "conversations.history")).toHaveLength(0);
     const history = await bot.channelHistory({ channelId: "C_MEMBER" });
     expect(history.messages).toEqual([
-      expect.objectContaining({ timestamp: "1.000", text: "bounded history" }),
+      expect.objectContaining({
+        timestamp: "1.000",
+        threadTimestamp: "1.000",
+        text: "bounded history",
+        files: [
+          {
+            id: "F_CANVAS",
+            name: "meeting-notes",
+            title: "Meeting notes",
+            mode: "canvas",
+            filetype: "quip",
+            mimetype: "application/vnd.slack-docs",
+            size: 1234,
+            originatingHuddleId: "H_FIXTURE",
+            huddleTranscriptFileId: "FTRANSCRIPT",
+          },
+        ],
+      }),
     ]);
+    await expect(
+      bot.threadReplies({ channelId: "G_PRIVATE", threadTimestamp: "1.000" }),
+    ).rejects.toThrow("not_in_channel");
+    expect(slack.calls.filter((call) => call.method === "conversations.replies")).toHaveLength(0);
+    const thread = await bot.threadReplies({
+      channelId: "C_MEMBER",
+      threadTimestamp: "1.000",
+    });
+    expect(thread).toMatchObject({
+      threadTimestamp: "1.000",
+      messages: [
+        { timestamp: "1.000", threadTimestamp: "1.000", text: "bounded history" },
+        { timestamp: "1.001", threadTimestamp: "1.000", text: "bounded thread reply" },
+      ],
+      nextCursor: null,
+    });
+    expect(slack.calls.find((call) => call.method === "conversations.replies")).toMatchObject({
+      channel: "C_MEMBER",
+      parentTimestamp: "1.000",
+    });
+    await expect(bot.listFiles({ channelId: "G_PRIVATE" })).rejects.toThrow("not_in_channel");
+    expect(slack.calls.filter((call) => call.method === "files.list")).toHaveLength(0);
+    const files = await bot.listFiles({ channelId: "C_MEMBER" });
+    expect(files).toMatchObject({
+      files: [
+        {
+          id: "F_CANVAS",
+          title: "Meeting notes",
+          mode: "canvas",
+          originatingHuddleId: "H_FIXTURE",
+          huddleTranscriptFileId: "FTRANSCRIPT",
+        },
+      ],
+      nextCursor: null,
+    });
+    await expect(bot.fileInfo({ channelId: "C_MEMBER", fileId: "F_OTHER" })).rejects.toThrow(
+      "file_not_found",
+    );
+    const file = await bot.fileInfo({ channelId: "C_MEMBER", fileId: "F_CANVAS" });
+    expect(file).toMatchObject({
+      channel: { id: "C_MEMBER", isMember: true },
+      file: {
+        id: "F_CANVAS",
+        title: "Meeting notes",
+        mode: "canvas",
+        originatingHuddleId: "H_FIXTURE",
+        huddleTranscriptFileId: "FTRANSCRIPT",
+      },
+    });
+    expect(
+      slack.calls.find((call) => call.method === "files.info" && call.fileId === "F_CANVAS"),
+    ).toBeDefined();
+    const content = await bot.fileContent({ channelId: "C_MEMBER", fileId: "F_CANVAS" });
+    expect(content).toMatchObject({
+      file: { id: "F_CANVAS", title: "Meeting notes", mode: "canvas" },
+      contentType: "text/html",
+      offset: 0,
+      content:
+        '<div class="quip-canvas-content"><h1>Meeting notes</h1><p class="embedded-file">File ID: sf:FTRANSCRIPT</p></div>',
+      nextOffset: null,
+      truncated: false,
+    });
+    expect(JSON.stringify(content)).not.toContain("files.slack.com");
+    await expect(bot.fileContent({ channelId: "C_MEMBER", fileId: "FTRANSCRIPT" })).rejects.toThrow(
+      "file_not_found",
+    );
+    const transcript = await bot.fileContent({
+      channelId: "C_MEMBER",
+      fileId: "FTRANSCRIPT",
+      parentFileId: "F_CANVAS",
+    });
+    expect(transcript).toMatchObject({
+      file: {
+        id: "FTRANSCRIPT",
+        title: "Huddle transcript",
+        mode: "huddle_transcript",
+      },
+      contentType: "application/vnd.slack-huddle-transcript",
+      content: "00:00 Test Member: A bounded transcript fixture.",
+      nextOffset: null,
+      truncated: false,
+    });
+    const participantOnlySlack = fakeSlack({ transcriptRequiresUserSession: true });
+    const participantOnlyBot = createOpenGeniSlackBotClient(
+      { db: client.db, settings, slackFetch: participantOnlySlack.fetch },
+      resolved,
+    );
+    await expect(
+      participantOnlyBot.fileContent({
+        channelId: "C_MEMBER",
+        fileId: "FTRANSCRIPT",
+        parentFileId: "F_CANVAS",
+      }),
+    ).rejects.toThrow("huddle_transcript_requires_participant_access");
+    expect(participantOnlySlack.calls.some((call) => call.query.includes("redir="))).toBe(false);
     const operationId = crypto.randomUUID();
     const posted = await bot.postMessage({
       operationId,
@@ -1420,6 +1645,32 @@ describe("OpenGeni Slack bot connection", () => {
       clientMessageId: operationId,
       query: "",
     });
+    const threadedOperationId = crypto.randomUUID();
+    const threadedPost = await bot.postMessage({
+      operationId: threadedOperationId,
+      channelId: "C_MEMBER",
+      threadTimestamp: "1.000",
+      text: "private threaded fixture text",
+    });
+    expect(threadedPost).toMatchObject({ channelId: "C_MEMBER", timestamp: "3.000" });
+    expect(slack.calls.find((call) => call.clientMessageId === threadedOperationId)).toMatchObject({
+      channel: "C_MEMBER",
+      threadTimestamp: "1.000",
+    });
+    await expect(
+      bot.postMessage({
+        operationId: threadedOperationId,
+        channelId: "C_MEMBER",
+        threadTimestamp: "9.000",
+        text: "private threaded fixture text",
+      }),
+    ).rejects.toThrow("different Slack post request");
+    expect(
+      slack.calls.filter(
+        (call) =>
+          call.method === "chat.postMessage" && call.clientMessageId === threadedOperationId,
+      ),
+    ).toHaveLength(1);
 
     const audits = await shared!.admin<
       Array<{ action: string; metadata: Record<string, unknown> }>
@@ -1433,11 +1684,22 @@ describe("OpenGeni Slack bot connection", () => {
       expect.arrayContaining([
         "slack_bot.channels.list",
         "slack_bot.channel_history.read",
+        "slack_bot.thread_replies.read",
+        "slack_bot.files.list",
+        "slack_bot.file.info",
+        "slack_bot.file.content.read",
         "slack_bot.message.post",
       ]),
     );
     expect(JSON.stringify(audits)).not.toContain("private fixture text");
+    expect(JSON.stringify(audits)).not.toContain("private threaded fixture text");
     expect(JSON.stringify(audits)).not.toContain(fixtureBotToken());
+
+    const second = await connectBot(workspace, fakeSlack().fetch);
+    expect(second.response.status).toBe(302);
+    await expect(
+      resolveSlackBotConnectionForTool({ db: client.db, grant, sessionId: null }),
+    ).rejects.toThrow("multiple active OpenGeni Slack bot connections");
   });
 
   test("converges response-loss retries and completed replays through one client_msg_id", async () => {

@@ -10,6 +10,7 @@ import {
   type OpenGeniSlackBotConnectionMetadata,
 } from "@opengeni/contracts";
 import {
+  isOpenGeniSlackBotConnection,
   isTrustedScheduledSlackBotSession,
   openGeniSlackBotMetadata,
   requireOpenGeniSlackBotConnection,
@@ -20,20 +21,29 @@ import {
   claimSlackBotPostOperation,
   completeSlackBotPostOperation,
   getSession,
+  listConnectionsMetadata,
   recordAuditEvent,
   releaseSlackBotPostOperationClaim,
   setConnectionStatus,
   type Database,
 } from "@opengeni/db";
-import { readResponseJsonBounded, type FetchLike } from "@opengeni/network";
+import {
+  readResponseBodyBounded,
+  readResponseJsonBounded,
+  type FetchLike,
+} from "@opengeni/network";
 import { HTTPException } from "hono/http-exception";
 
 const SLACK_API_BASE = "https://slack.com/api/";
 const SLACK_RESPONSE_MAX_BYTES = 2 * 1024 * 1024;
+const SLACK_FILE_RESPONSE_MAX_BYTES = 4 * 1024 * 1024;
+const SLACK_FILE_CONTENT_PAGE_CHARS = 50_000;
 const SLACK_TIMEOUT_MS = 10_000;
 const MAX_CHANNEL_PAGE = 200;
 const MAX_HISTORY_PAGE = 100;
+const MAX_THREAD_PAGE = 100;
 const MAX_USER_PAGE = 200;
+const MAX_FILE_PAGE = 200;
 const MAX_PROJECTED_TEXT = 4_000;
 const SLACK_POST_CLAIM_LEASE_MS = 30_000;
 
@@ -103,7 +113,15 @@ export type SlackBotReceipt = {
   clientMessageId?: string;
 };
 
-type SlackBotOperation = "channels.list" | "channel_history.read" | "users.list" | "message.post";
+type SlackBotOperation =
+  | "channels.list"
+  | "channel_history.read"
+  | "thread_replies.read"
+  | "users.list"
+  | "files.list"
+  | "file.info"
+  | "file.content.read"
+  | "message.post";
 
 type SlackBotContext = {
   accountId: string;
@@ -225,12 +243,25 @@ export async function resolveSlackBotConnectionForTool(input: {
   ) {
     throw new Error("this scheduled session is bound to a different OpenGeni Slack bot connection");
   }
-  const connectionId = boundConnectionId ?? input.requestedConnectionId;
-  if (!connectionId) {
-    throw new Error("connectionId is required outside a Slack-bot-bound scheduled session");
-  }
   if (!boundConnectionId && !input.grant.permissions.includes("connections:read")) {
     throw new Error("connections:read is required to select an OpenGeni Slack bot connection");
+  }
+  let connectionId = boundConnectionId ?? input.requestedConnectionId;
+  if (!connectionId) {
+    const activeConnections = (
+      await listConnectionsMetadata(input.db, input.grant.workspaceId, null)
+    ).filter(
+      (connection) => connection.status === "active" && isOpenGeniSlackBotConnection(connection),
+    );
+    if (activeConnections.length === 0) {
+      throw new Error("no active OpenGeni Slack bot connection is installed in this workspace");
+    }
+    if (activeConnections.length > 1) {
+      throw new Error(
+        "connectionId is required because this workspace has multiple active OpenGeni Slack bot connections",
+      );
+    }
+    connectionId = activeConnections[0]!.id;
   }
   const connection = await requireOpenGeniSlackBotConnection(
     input.db,
@@ -304,6 +335,29 @@ export class OpenGeniSlackBotClient {
     });
   }
 
+  async threadReplies(input: {
+    channelId: string;
+    threadTimestamp: string;
+    limit?: number;
+    cursor?: string;
+  }) {
+    return await this.withAudit("thread_replies.read", async (headers) => {
+      const info = await this.requireMemberChannel(headers, input.channelId);
+      const payload = await this.call(headers, "conversations.replies", {
+        channel: input.channelId,
+        ts: input.threadTimestamp,
+        limit: String(boundedInt(input.limit, MAX_THREAD_PAGE, 50)),
+        ...(input.cursor ? { cursor: input.cursor } : {}),
+      });
+      return {
+        channel: info,
+        threadTimestamp: input.threadTimestamp,
+        messages: slackArray(payload.messages).map(projectMessage),
+        nextCursor: responseCursor(payload),
+      };
+    });
+  }
+
   async listUsers(input: { limit?: number; cursor?: string } = {}) {
     return await this.withAudit("users.list", async (headers) => {
       const payload = await this.call(headers, "users.list", {
@@ -319,10 +373,75 @@ export class OpenGeniSlackBotClient {
     });
   }
 
+  async listFiles(input: { channelId: string; limit?: number; cursor?: string }) {
+    return await this.withAudit("files.list", async (headers) => {
+      const info = await this.requireMemberChannel(headers, input.channelId);
+      const payload = await this.call(headers, "files.list", {
+        channel: input.channelId,
+        limit: String(boundedInt(input.limit, MAX_FILE_PAGE, 100)),
+        ...(input.cursor ? { cursor: input.cursor } : {}),
+      });
+      return {
+        channel: info,
+        files: slackArray(payload.files)
+          .map(projectFile)
+          .filter((file): file is NonNullable<typeof file> => file !== null),
+        nextCursor: responseCursor(payload),
+      };
+    });
+  }
+
+  async fileInfo(input: { channelId: string; fileId: string; parentFileId?: string }) {
+    return await this.withAudit("file.info", async (headers) => {
+      const info = await this.requireMemberChannel(headers, input.channelId);
+      const { file } = await this.requireFileForChannel(headers, "file.info", input);
+      return { channel: info, file };
+    });
+  }
+
+  async fileContent(input: {
+    channelId: string;
+    fileId: string;
+    parentFileId?: string;
+    offset?: number;
+  }) {
+    return await this.withAudit("file.content.read", async (headers) => {
+      const info = await this.requireMemberChannel(headers, input.channelId);
+      const { fileRecord, file } = await this.requireFileForChannel(
+        headers,
+        "file.content.read",
+        input,
+      );
+      const { contentType, content } = await this.readPrivateFileText(
+        fileRecord,
+        "file.content.read",
+      );
+      const offset =
+        typeof input.offset === "number" && Number.isInteger(input.offset) && input.offset >= 0
+          ? input.offset
+          : 0;
+      if (offset > content.length) {
+        throw new SlackBotProviderError("invalid_file_offset");
+      }
+      const page = content.slice(offset, offset + SLACK_FILE_CONTENT_PAGE_CHARS);
+      const nextOffset = offset + page.length < content.length ? offset + page.length : null;
+      return {
+        channel: info,
+        file,
+        contentType,
+        offset,
+        content: page,
+        nextOffset,
+        truncated: nextOffset !== null,
+      };
+    });
+  }
+
   async postMessage(input: {
     operationId: string;
     channelId?: string;
     userId?: string;
+    threadTimestamp?: string;
     text: string;
   }) {
     const operation = "message.post" as const;
@@ -347,6 +466,7 @@ export class OpenGeniSlackBotClient {
         operationId: input.operationId,
         targetKind,
         targetId,
+        ...(input.threadTimestamp ? { threadTimestamp: input.threadTimestamp } : {}),
         text: input.text,
       });
       const claim = await claimSlackBotPostOperation(this.db, {
@@ -378,6 +498,7 @@ export class OpenGeniSlackBotClient {
         channel: channelId,
         text: input.text,
         client_msg_id: input.operationId,
+        ...(input.threadTimestamp ? { thread_ts: input.threadTimestamp } : {}),
       });
       const slackChannelId = requiredSlackString(posted.channel, "channel");
       const slackMessageTimestamp = requiredSlackString(posted.ts, "ts");
@@ -428,6 +549,80 @@ export class OpenGeniSlackBotClient {
     return projected;
   }
 
+  private async requireFileForChannel(
+    headers: Record<string, string>,
+    operation: "file.info" | "file.content.read",
+    input: { channelId: string; fileId: string; parentFileId?: string },
+  ) {
+    const payload = await this.call(headers, "files.info", { file: input.fileId });
+    const fileRecord = slackRecord(payload.file);
+    const file = projectFile(fileRecord);
+    if (!fileRecord || !file) {
+      throw new SlackBotProviderError("file_not_found");
+    }
+    if (fileIsSharedToChannel(fileRecord, input.channelId)) {
+      return { fileRecord, file };
+    }
+    if (!input.parentFileId || input.parentFileId === input.fileId) {
+      throw new SlackBotProviderError("file_not_found");
+    }
+    const parentPayload = await this.call(headers, "files.info", {
+      file: input.parentFileId,
+    });
+    const parentRecord = slackRecord(parentPayload.file);
+    if (!parentRecord || !fileIsSharedToChannel(parentRecord, input.channelId)) {
+      throw new SlackBotProviderError("file_not_found");
+    }
+    if (parentReferencesSlackFile(parentRecord, input.fileId)) {
+      return { fileRecord, file };
+    }
+    const parent = await this.readPrivateFileText(parentRecord, operation);
+    if (!embeddedSlackFileIds(parent.content).has(input.fileId)) {
+      throw new SlackBotProviderError("file_not_found");
+    }
+    return { fileRecord, file };
+  }
+
+  private async readPrivateFileText(
+    fileRecord: Record<string, unknown>,
+    operation: "file.info" | "file.content.read",
+  ): Promise<{ contentType: string; content: string }> {
+    const downloadUrl = privateSlackFileUrl(fileRecord);
+    if (!downloadUrl) {
+      throw new SlackBotProviderError("file_content_unavailable");
+    }
+    let response: Response;
+    try {
+      response = await this.fetchPrivateFile(downloadUrl, operation);
+    } catch (error) {
+      if (
+        error instanceof SlackBotProviderError &&
+        error.code === "file_requires_user_access" &&
+        slackString(fileRecord.mode) === "huddle_transcript"
+      ) {
+        throw new SlackBotProviderError("huddle_transcript_requires_participant_access");
+      }
+      throw error;
+    }
+    const contentType = normalizedContentType(response.headers.get("content-type"));
+    if (!isSupportedSlackTextContentType(contentType)) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new SlackBotProviderError("unsupported_file_type");
+    }
+    try {
+      const content = new TextDecoder("utf-8", { fatal: true }).decode(
+        await readResponseBodyBounded(
+          response,
+          SLACK_FILE_RESPONSE_MAX_BYTES,
+          "Slack file content",
+        ),
+      );
+      return { contentType, content };
+    } catch {
+      throw new SlackBotProviderError("invalid_file_content");
+    }
+  }
+
   private async call(
     headers: Record<string, string>,
     method: string,
@@ -463,6 +658,16 @@ export class OpenGeniSlackBotClient {
   }
 
   private async headersFor(operation: SlackBotOperation): Promise<Record<string, string>> {
+    return await this.headersForDestination(
+      operation,
+      `${SLACK_API_BASE}${slackMethodForOperation(operation)}`,
+    );
+  }
+
+  private async headersForDestination(
+    operation: SlackBotOperation,
+    destinationUrl: string,
+  ): Promise<Record<string, string>> {
     const result = await this.resolveCredential({
       workspaceId: this.context.workspaceId,
       serverId: "opengeni-slack-bot",
@@ -474,12 +679,62 @@ export class OpenGeniSlackBotClient {
         scopes: [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES],
         subjectScope: "workspace",
       },
-      destinationUrl: `${SLACK_API_BASE}${slackMethodForOperation(operation)}`,
+      destinationUrl,
     });
     if (result.status !== "ok" || result.connectionId !== this.connection.id) {
       throw new Error("OpenGeni Slack bot connection needs to be reinstalled");
     }
     return result.headers;
+  }
+
+  private async fetchPrivateFile(
+    url: URL,
+    operation: "file.info" | "file.content.read",
+  ): Promise<Response> {
+    const response = await this.fetchPrivateFileOnce(url, operation);
+    if (response.status < 300 || response.status >= 400) {
+      return response;
+    }
+    const location = response.headers.get("location");
+    await response.body?.cancel().catch(() => undefined);
+    if (!location) throw new SlackBotProviderError(`http_${response.status}`);
+    let redirected: URL;
+    try {
+      redirected = new URL(location, url);
+      assertPrivateSlackFileUrl(redirected);
+    } catch {
+      throw new SlackBotProviderError("invalid_file_redirect");
+    }
+    if (isSlackInteractiveFileRedirect(redirected)) {
+      throw new SlackBotProviderError("file_requires_user_access");
+    }
+    return await this.fetchPrivateFileOnce(redirected, operation);
+  }
+
+  private async fetchPrivateFileOnce(
+    url: URL,
+    operation: "file.info" | "file.content.read",
+  ): Promise<Response> {
+    const headers = await this.headersForDestination(operation, url.toString());
+    let response: Response;
+    try {
+      response = await this.fetchImpl(url, {
+        method: "GET",
+        headers: {
+          ...headers,
+          accept: "text/*, application/json, application/xml, application/xhtml+xml",
+        },
+        redirect: "manual",
+        signal: AbortSignal.timeout(SLACK_TIMEOUT_MS),
+      });
+    } catch {
+      throw new SlackBotProviderError("transport_error");
+    }
+    if (!response.ok && (response.status < 300 || response.status >= 400)) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new SlackBotProviderError(`http_${response.status}`);
+    }
+    return response;
   }
 
   private receipt(operation: SlackBotOperation, operationId?: string): SlackBotReceipt {
@@ -514,6 +769,7 @@ export class OpenGeniSlackBotClient {
     operationId: string;
     targetKind: "channel" | "user";
     targetId: string;
+    threadTimestamp?: string;
     text: string;
   }): string {
     const key = environmentsEncryptionKeyBytes(this.settings);
@@ -525,6 +781,7 @@ export class OpenGeniSlackBotClient {
           connectionId: this.connection.id,
           targetKind: input.targetKind,
           targetId: input.targetId,
+          threadTimestamp: input.threadTimestamp ?? null,
           text: input.text,
         }),
       )
@@ -701,7 +958,105 @@ function projectMessage(value: unknown) {
     botId: boundedSlackString(message.bot_id, 64),
     threadTimestamp: boundedSlackString(message.thread_ts, 64),
     text: boundedSlackString(message.text, MAX_PROJECTED_TEXT),
+    files: slackArray(message.files)
+      .map(projectFile)
+      .filter((file): file is NonNullable<typeof file> => file !== null),
   };
+}
+
+function projectFile(value: unknown) {
+  const file = slackRecord(value);
+  const id = slackString(file?.id);
+  if (!file || !id) return null;
+  const canvasMetadata = slackRecord(file.canvas_metadata);
+  return {
+    id,
+    name: boundedSlackString(file.name, 512),
+    title: boundedSlackString(file.title, 512),
+    mimetype: boundedSlackString(file.mimetype, 256),
+    filetype: boundedSlackString(file.filetype, 128),
+    mode: boundedSlackString(file.mode, 64),
+    size:
+      typeof file.size === "number" && Number.isSafeInteger(file.size) && file.size >= 0
+        ? file.size
+        : null,
+    originatingHuddleId: boundedSlackString(canvasMetadata?.originating_huddle_id, 64),
+    huddleTranscriptFileId: boundedSlackString(file.huddle_transcript_file_id, 64),
+  };
+}
+
+function parentReferencesSlackFile(
+  parentFile: Record<string, unknown>,
+  childFileId: string,
+): boolean {
+  if (slackString(parentFile.huddle_transcript_file_id) === childFileId) {
+    return true;
+  }
+  return slackArray(parentFile.embedded_file_ids).some(
+    (candidate) => slackString(candidate) === childFileId,
+  );
+}
+
+function fileIsSharedToChannel(file: Record<string, unknown>, channelId: string): boolean {
+  if (
+    [file.channels, file.groups, file.ims].some((value) =>
+      slackArray(value).some((candidate) => slackString(candidate) === channelId),
+    )
+  ) {
+    return true;
+  }
+  const shares = slackRecord(file.shares);
+  return ["public", "private"].some((visibility) => {
+    const byChannel = slackRecord(shares?.[visibility]);
+    return Boolean(byChannel && Object.hasOwn(byChannel, channelId));
+  });
+}
+
+function privateSlackFileUrl(file: Record<string, unknown>): URL | null {
+  const raw = slackString(file.url_private_download) || slackString(file.url_private);
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    assertPrivateSlackFileUrl(url);
+    return url;
+  } catch {
+    throw new SlackBotProviderError("invalid_file_url");
+  }
+}
+
+function assertPrivateSlackFileUrl(url: URL): void {
+  const hostname = url.hostname.toLowerCase();
+  if (url.protocol !== "https:" || (hostname !== "slack.com" && !hostname.endsWith(".slack.com"))) {
+    throw new Error("Slack file URL must use HTTPS on slack.com");
+  }
+  if (url.username || url.password) {
+    throw new Error("Slack file URL must not contain credentials");
+  }
+}
+
+function isSlackInteractiveFileRedirect(url: URL): boolean {
+  return url.pathname === "/" && url.searchParams.has("redir");
+}
+
+function normalizedContentType(value: string | null): string {
+  return (value ?? "application/octet-stream").split(";", 1)[0]!.trim().toLowerCase();
+}
+
+function isSupportedSlackTextContentType(value: string): boolean {
+  return (
+    value.startsWith("text/") ||
+    value === "application/json" ||
+    value === "application/xml" ||
+    value === "application/xhtml+xml" ||
+    value === "application/vnd.slack-docs" ||
+    value === "application/vnd.slack-huddle-transcript"
+  );
+}
+
+function embeddedSlackFileIds(content: string): Set<string> {
+  return new Set(
+    [...content.matchAll(/\bFile ID:\s*sf:([A-Z][A-Z0-9]{4,63})\b/g)].map((match) => match[1]!),
+  );
 }
 
 function projectUser(value: unknown) {
@@ -729,8 +1084,15 @@ function slackMethodForOperation(operation: SlackBotOperation): string {
       return "conversations.list";
     case "channel_history.read":
       return "conversations.history";
+    case "thread_replies.read":
+      return "conversations.replies";
     case "users.list":
       return "users.list";
+    case "files.list":
+      return "files.list";
+    case "file.info":
+    case "file.content.read":
+      return "files.info";
     case "message.post":
       return "chat.postMessage";
   }

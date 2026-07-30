@@ -84,13 +84,13 @@ describe("OpenGeni Slack bot install controls", () => {
     try {
       expect(rendered.container.querySelector("[data-opengeni-slack-install]")).toBeNull();
       expect(rendered.container.querySelectorAll("button")).toHaveLength(0);
-      expect(rendered.container.textContent).not.toContain("Install another Slack workspace/bot");
+      expect(rendered.container.textContent).not.toContain("Install in another workspace");
     } finally {
       await rendered.unmount();
     }
   });
 
-  test("keeps install and reinstall actions available to authorized users", async () => {
+  test("shows the Slack install badge only before installation", async () => {
     const initial = await renderControls();
 
     try {
@@ -107,13 +107,13 @@ describe("OpenGeni Slack bot install controls", () => {
     const connected = await renderControls({ hasConnection: true });
 
     try {
-      const reinstall = connected.container.querySelector<HTMLButtonElement>(
-        'button[aria-label="Reinstall OpenGeni in Slack"]',
-      );
+      const buttons = [...connected.container.querySelectorAll<HTMLButtonElement>("button")];
+      const reinstall = buttons.find((button) => button.textContent?.trim() === "Reinstall");
       const installAnother = [
         ...connected.container.querySelectorAll<HTMLButtonElement>("button"),
-      ].find((button) => button.textContent?.trim() === "Install another Slack workspace/bot");
-      expect(reinstall).not.toBeNull();
+      ].find((button) => button.textContent?.trim() === "Install in another workspace");
+      expect(connected.container.querySelector("[data-opengeni-slack-install]")).toBeNull();
+      expect(reinstall).not.toBeUndefined();
       expect(installAnother).not.toBeUndefined();
 
       await act(async () => reinstall!.click());

@@ -7,6 +7,8 @@
 // disable/unregister surface, restyled flat.
 import { usePacks, useVariableSets } from "@opengeni/react";
 import {
+  CheckCircle2Icon,
+  ChevronDownIcon,
   GlobeIcon,
   Loader2Icon,
   PlugIcon,
@@ -98,12 +100,26 @@ export function SlackBotInstallControls({
 }) {
   if (!canInstall) return null;
 
+  if (hasConnection) {
+    return (
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <Button type="button" variant="outline" disabled={busy} onClick={() => onInstall(false)}>
+          {busy ? <Loader2Icon className="animate-spin" /> : null}
+          Reinstall
+        </Button>
+        <Button type="button" variant="ghost" disabled={busy} onClick={() => onInstall(true)}>
+          Install in another workspace
+        </Button>
+      </div>
+    );
+  }
+
   return (
-    <div className="mt-4 flex flex-wrap items-center gap-2">
+    <div className="mt-4">
       <button
         type="button"
         aria-busy={busy}
-        aria-label={hasConnection ? "Reinstall OpenGeni in Slack" : "Install OpenGeni in Slack"}
+        aria-label="Install OpenGeni in Slack"
         data-opengeni-slack-install
         className="relative inline-flex h-10 w-[139px] items-center justify-center overflow-hidden rounded-md outline-none ring-focus transition-opacity focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-bg disabled:cursor-not-allowed disabled:opacity-60"
         disabled={busy}
@@ -124,11 +140,6 @@ export function SlackBotInstallControls({
           </span>
         ) : null}
       </button>
-      {hasConnection ? (
-        <Button type="button" variant="outline" disabled={busy} onClick={() => onInstall(true)}>
-          Install another Slack workspace/bot
-        </Button>
-      ) : null}
     </div>
   );
 }
@@ -865,62 +876,95 @@ export function CapabilitiesRoute({
                 </span>
                 <div>
                   <h2 id="slack-bot-heading" className="text-sm font-semibold text-fg">
-                    OpenGeni Slack bot
+                    OpenGeni for Slack
                   </h2>
-                  <p className="text-2xs text-fg-subtle">Workspace-shared bot identity</p>
+                  <p className="text-2xs text-fg-subtle">
+                    Let agents read and send Slack messages.
+                  </p>
                 </div>
               </div>
-              <p className="mt-3 max-w-3xl text-xs text-fg-muted">
-                Install <strong>OpenGeni</strong> in your Slack workspace. Slack will show the
-                permissions before approval, then return you here automatically. The workspace bot
-                token is exchanged server-side, encrypted, and never shown in the browser.
-              </p>
-              <p className="mt-2 max-w-3xl text-2xs text-fg-subtle">
-                Required bot scopes: chat:write, im:write, channels:read, channels:history,
-                groups:read, groups:history, users:read. This workspace-shared app is separate from
-                personal Slack OAuth connections.
-              </p>
-              {slackBotConnection && slackBotMetadata ? (
-                <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
-                  <span className="rounded-full border border-border px-2 py-1 text-fg-muted">
-                    {slackBotMetadata.slackTeamName}
-                  </span>
-                  <span className="rounded-full border border-border px-2 py-1 text-fg-muted">
-                    {slackBotConnection.status === "active" ? "Connected" : "Needs reinstall"}
-                  </span>
-                  <span className="font-mono text-2xs text-fg-subtle">{slackBotConnection.id}</span>
-                  {slackBotConnections.length > 1 ? (
-                    <span className="text-2xs text-fg-subtle">
-                      {slackBotConnections.length} explicit Slack bot connections
-                    </span>
+            </div>
+          </div>
+
+          {slackBotConnection && slackBotMetadata ? (
+            <>
+              <div className="mt-4 flex items-start gap-3 rounded-lg border border-brand/20 bg-brand/5 p-3">
+                <CheckCircle2Icon className="mt-0.5 size-5 shrink-0 text-brand" />
+                <div>
+                  <p className="text-sm font-semibold text-fg">
+                    {slackBotConnection.status === "active"
+                      ? `Installed in ${slackBotMetadata.slackTeamName}`
+                      : `Reinstall needed for ${slackBotMetadata.slackTeamName}`}
+                  </p>
+                  <p className="mt-0.5 text-xs text-fg-muted">
+                    {slackBotConnection.status === "active"
+                      ? "OpenGeni is ready to use in this Slack workspace."
+                      : "Reconnect OpenGeni to restore Slack access."}
+                  </p>
+                </div>
+              </div>
+
+              <details className="group mt-3 border-t border-border/70 pt-3">
+                <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 text-2xs text-fg-subtle transition-colors hover:text-fg-muted">
+                  <ChevronDownIcon className="size-3 shrink-0 transition-transform group-open:rotate-180" />
+                  <span>Permissions and connection details</span>
+                </summary>
+                <div className="mt-3 rounded-md bg-bg/50 p-3">
+                  <p className="text-2xs font-medium text-fg-muted">Required bot scopes</p>
+                  <p className="mt-1 break-words font-mono text-2xs leading-relaxed text-fg-subtle">
+                    chat:write, im:write, channels:read, channels:history, groups:read,
+                    groups:history, users:read, files:read, canvases:read
+                  </p>
+                  <p className="mt-2 text-2xs text-fg-subtle">
+                    Connection ID: <span className="font-mono">{slackBotConnection.id}</span>
+                    {slackBotConnections.length > 1
+                      ? ` · ${slackBotConnections.length} Slack installations`
+                      : ""}
+                  </p>
+                  <SlackBotInstallControls
+                    canInstall={canInstallSlackBot}
+                    hasConnection
+                    busy={slackBotBusy}
+                    onInstall={(createNewConnection) => void installSlackBot(createNewConnection)}
+                  />
+                  {slackBotConnection.status === "active" ? (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="mt-1"
+                      disabled={slackBotBusy}
+                      onClick={() => void disconnectSlackBot()}
+                    >
+                      Disconnect
+                    </Button>
                   ) : null}
                 </div>
-              ) : null}
-            </div>
-            {slackBotConnection?.status === "active" ? (
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                disabled={slackBotBusy}
-                onClick={() => void disconnectSlackBot()}
-              >
-                Disconnect
-              </Button>
-            ) : null}
-          </div>
-          <SlackBotInstallControls
-            canInstall={canInstallSlackBot}
-            hasConnection={Boolean(slackBotConnection)}
-            busy={slackBotBusy}
-            onInstall={(createNewConnection) => void installSlackBot(createNewConnection)}
-          />
-          {slackBotConnection ? (
-            <p className="mt-2 text-2xs text-fg-subtle">
-              A new installation creates a separate connection. Existing scheduled tasks stay bound
-              to their current Slack workspace/bot until explicitly changed.
-            </p>
-          ) : null}
+              </details>
+            </>
+          ) : (
+            <>
+              <p className="mt-4 max-w-2xl text-xs text-fg-muted">
+                Install OpenGeni in a Slack workspace to get started.
+              </p>
+              <SlackBotInstallControls
+                canInstall={canInstallSlackBot}
+                hasConnection={false}
+                busy={slackBotBusy}
+                onInstall={(createNewConnection) => void installSlackBot(createNewConnection)}
+              />
+              <details className="group mt-3">
+                <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 text-2xs text-fg-subtle transition-colors hover:text-fg-muted">
+                  <ChevronDownIcon className="size-3 shrink-0 transition-transform group-open:rotate-180" />
+                  <span>Permissions requested</span>
+                </summary>
+                <p className="mt-2 max-w-3xl break-words font-mono text-2xs leading-relaxed text-fg-subtle">
+                  chat:write, im:write, channels:read, channels:history, groups:read,
+                  groups:history, users:read, files:read, canvases:read
+                </p>
+              </details>
+            </>
+          )}
         </section>
 
         {/* Primary search — front and center. */}
