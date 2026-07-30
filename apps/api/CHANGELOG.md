@@ -1,5 +1,50 @@
 # @opengeni/api-router
 
+## 0.12.15
+
+### Patch Changes
+
+- Updated dependencies [2aca964]
+  - @opengeni/db@0.14.6
+  - @opengeni/core@0.13.2
+  - @opengeni/documents@0.2.48
+  - @opengeni/events@0.3.39
+
+## 0.12.14
+
+### Patch Changes
+
+- ad0bdc3: Surface managed-credit admission rejections with actionable composer recovery guidance while preserving drafts and attachments, and canonicalize default attachment mounts across established-session draft admission and replay.
+- Updated dependencies [ad0bdc3]
+  - @opengeni/contracts@0.23.1
+  - @opengeni/db@0.14.5
+  - @opengeni/config@0.7.14
+  - @opengeni/core@0.13.1
+  - @opengeni/documents@0.2.47
+  - @opengeni/events@0.3.38
+  - @opengeni/github@0.4.1
+  - @opengeni/runtime@0.14.5
+  - @opengeni/storage@0.2.38
+
+## 0.12.13
+
+### Patch Changes
+
+- 39b1b84: Keep MCP request timeouts distinct from recoverable connection authentication errors.
+- bcb50cf: Thread the configured Connected Machine control and exec deadlines through
+  `run_on`, and return truthful typed timeout/deadline command receipts without
+  replaying ambiguous execution.
+- Updated dependencies [ea38a4c]
+- Updated dependencies [39b1b84]
+- Updated dependencies [1973d2a]
+- Updated dependencies [bcb50cf]
+- Updated dependencies [8478e60]
+  - @opengeni/db@0.14.4
+  - @opengeni/runtime@0.14.4
+  - @opengeni/core@0.13.0
+  - @opengeni/documents@0.2.46
+  - @opengeni/events@0.3.37
+
 ## 0.12.12
 
 ### Patch Changes

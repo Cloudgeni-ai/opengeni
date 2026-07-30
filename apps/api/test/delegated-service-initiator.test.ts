@@ -149,7 +149,6 @@ describe("delegated service initiator API", () => {
           payload: {
             text: "Run the follow-up check",
             resources: [],
-            tools: [],
           },
         }),
       },
@@ -181,7 +180,6 @@ describe("delegated service initiator API", () => {
     const steerBody = JSON.stringify({
       text: "Replace queued work with the urgent service instruction",
       resources: [],
-      tools: [],
       clientEventId: steerClientEventId,
     });
     const steerResponse = await app.request(

@@ -185,9 +185,12 @@ describe("embedded dedicated-schema isolation", () => {
       const [session] = await sql<{ id: string }[]>`
         WITH ids AS (SELECT gen_random_uuid() AS id)
         INSERT INTO opengeni.sessions (
-          id, account_id, workspace_id, initial_message, model, sandbox_backend, sandbox_group_id
+          id, account_id, workspace_id, initial_message, model, sandbox_backend,
+          sandbox_group_id, tool_policy
         )
-        SELECT id, ${account!.id}, ${workspace!.id}, 'hello', 'gpt-4.1', 'none', id FROM ids
+        SELECT id, ${account!.id}, ${workspace!.id}, 'hello', 'gpt-4.1', 'none', id,
+          jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
+        FROM ids
         RETURNING id`;
       await sql.unsafe(`
         CREATE TABLE opengeni.default_privilege_probe (

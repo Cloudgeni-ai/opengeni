@@ -5,6 +5,11 @@ import {
   RUNTIME_READ_INSERT_TABLES,
   RUNTIME_READ_ONLY_TABLES,
 } from "./runtime-posture";
+import {
+  classifyRoleRelationships,
+  roleRelationshipsCatalogQuery,
+  type RoleRelationshipCatalogRow,
+} from "./role-relationships";
 
 export type ProvisionResult = {
   appRole: string | null;
@@ -106,10 +111,12 @@ export async function provisionRoles(
           "OPENGENI_APP_DATABASE_PASSWORD (or appPassword) is required for rlsStrategy 'force'",
         );
       }
-      // Ownership and role-graph edges cannot be safely guessed away. Refuse to
-      // mutate an existing role until an operator has explicitly transferred
-      // objects/removed memberships; role attributes and direct grants, however,
-      // are deterministic and are converged below on every run.
+      // Ownership and privilege-bearing role-graph edges cannot be safely
+      // guessed away. Refuse to mutate an existing role until an operator has
+      // explicitly transferred objects/removed those memberships; role
+      // attributes and direct grants, however, are deterministic and are
+      // converged below on every run. PostgreSQL 16+'s exact non-runtime-bearing
+      // creator-management edge is classified separately.
       await assertAppRoleSafeToNormalize(sql, appRole);
       await ensureRestrictedAppLoginRole(sql, appRole, appPassword);
       provisionedAppRole = appRole;
@@ -190,9 +197,20 @@ BEGIN
       ${literal(role)},
       ${literal(password)}
     );
-  ELSE
+  ELSIF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = current_user AND rolsuper) THEN
     EXECUTE format(
       'ALTER ROLE %I WITH LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION NOINHERIT PASSWORD %L',
+      ${literal(role)},
+      ${literal(password)}
+    );
+  ELSE
+    -- PostgreSQL requires elevated attributes merely to name SUPERUSER,
+    -- BYPASSRLS, REPLICATION, or CREATEDB in ALTER ROLE, even when setting them
+    -- false. The preflight has already proved those protected attributes are
+    -- false, so a managed CREATEROLE administrator converges only the
+    -- attributes it may change.
+    EXECUTE format(
+      'ALTER ROLE %I WITH LOGIN NOCREATEROLE NOINHERIT PASSWORD %L',
       ${literal(role)},
       ${literal(password)}
     );
@@ -214,25 +232,47 @@ async function assertAppRoleSafeToNormalize(sql: postgres.Sql, role: string): Pr
     return;
   }
 
-  const memberships = await sql<{ relationship: string }[]>`
-    select ('inherits:' || parent.rolname)::text as relationship
-    from pg_auth_members membership
-    join pg_roles member on member.oid = membership.member
-    join pg_roles parent on parent.oid = membership.roleid
-    where member.rolname = ${role}
-    union all
-    select ('member:' || member.rolname)::text as relationship
-    from pg_auth_members membership
-    join pg_roles member on member.oid = membership.member
-    join pg_roles parent on parent.oid = membership.roleid
-    where parent.rolname = ${role}
-    order by relationship
+  const [roleAttributes] = await sql<
+    {
+      administrator_superuser: boolean;
+      app_superuser: boolean;
+      app_bypass_rls: boolean;
+      app_create_database: boolean;
+      app_replication: boolean;
+    }[]
+  >`
+    select
+      administrator.rolsuper as administrator_superuser,
+      app.rolsuper as app_superuser,
+      app.rolbypassrls as app_bypass_rls,
+      app.rolcreatedb as app_create_database,
+      app.rolreplication as app_replication
+    from pg_roles app
+    join pg_roles administrator on administrator.rolname = current_user
+    where app.rolname = ${role}
   `;
-  if (memberships.length > 0) {
+  if (roleAttributes && !roleAttributes.administrator_superuser) {
+    const protectedAttributes = [
+      roleAttributes.app_superuser ? "SUPERUSER" : null,
+      roleAttributes.app_bypass_rls ? "BYPASSRLS" : null,
+      roleAttributes.app_create_database ? "CREATEDB" : null,
+      roleAttributes.app_replication ? "REPLICATION" : null,
+    ].filter((attribute): attribute is string => attribute !== null);
+    if (protectedAttributes.length > 0) {
+      throw new Error(
+        `Refusing to normalize app role ${role}: a non-superuser administrator cannot clear protected attributes (${protectedAttributes.join(", ")})`,
+      );
+    }
+  }
+
+  const relationshipRows = await sql.unsafe<RoleRelationshipCatalogRow[]>(
+    roleRelationshipsCatalogQuery("$1"),
+    [role],
+  );
+  const { unsafeRelationships } = classifyRoleRelationships(relationshipRows);
+  if (unsafeRelationships.length > 0) {
     throw new Error(
-      `Refusing to normalize app role ${role}: remove role relationships first (${memberships
-        .map((row) => row.relationship)
-        .join(", ")})`,
+      `Refusing to normalize app role ${role}: remove privilege-bearing role relationships first (${unsafeRelationships.join(", ")})`,
     );
   }
 

@@ -103,6 +103,26 @@ describe("contracts", () => {
     });
   });
 
+  test("accepts a typed payment admission rejection", () => {
+    expect(
+      ErrorEnvelope.parse({
+        error: {
+          status: 402,
+          code: "payment_required",
+          message: "insufficient OpenGeni credits",
+          retryable: false,
+        },
+      }),
+    ).toEqual({
+      error: {
+        status: 402,
+        code: "payment_required",
+        message: "insufficient OpenGeni credits",
+        retryable: false,
+      },
+    });
+  });
+
   test("distinguishes a lost PTY provider process from an owner departure", () => {
     const ptyId = "11111111-1111-4111-8111-111111111111";
     expect(TerminalPtyExitedPayload.parse({ ptyId, exitCode: null, reason: "lost" })).toEqual({

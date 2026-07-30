@@ -69,6 +69,21 @@ function gatewayError(status = 502): OpenGeniApiError {
   });
 }
 
+function paymentRequiredError(): OpenGeniApiError {
+  return new OpenGeniApiError(
+    402,
+    JSON.stringify({
+      error: {
+        status: 402,
+        code: "payment_required",
+        message: "insufficient OpenGeni credits",
+        retryable: false,
+      },
+    }),
+    { mutation: true },
+  );
+}
+
 function queueSnapshot(
   items: SessionTurn[],
   overrides: Partial<SessionQueueSnapshot> = {},
@@ -2035,6 +2050,92 @@ describe("useComposer durable draft and control binding", () => {
     expect(hook.result.current.error?.message.length).toBeLessThan(160);
     await hook.unmount();
   });
+
+  for (const delivery of ["send", "steer"] as const) {
+    test(`${delivery} preserves its draft and file after a definite payment rejection, then retries once with Codex`, async () => {
+      const resource = {
+        kind: "file" as const,
+        fileId: "55555555-5555-4555-8555-555555555555",
+      };
+      let serverDraft: ComposerDraft = {
+        revision: 7,
+        text: "read the exact attached bytes",
+        resources: [resource],
+        model: "gpt-5.6-sol",
+        reasoningEffort: "xhigh",
+        sourceTurnId: null,
+        sourceTurnVersion: null,
+        updatedAt: new Date().toISOString(),
+      };
+      const attempts: SendMessageInput[] = [];
+      let accepted = 0;
+      const deliver = async (input: string | SendMessageInput) => {
+        const typed = typeof input === "string" ? { text: input } : input;
+        attempts.push(typed);
+        if (attempts.length === 1) throw paymentRequiredError();
+        accepted += 1;
+        return makeEvent(1, "user.message");
+      };
+      const client = fakeClient({
+        getComposerDraft: async () => serverDraft,
+        saveComposerDraft: async (_workspaceId, _sessionId, request) => {
+          serverDraft = {
+            ...serverDraft,
+            ...request,
+            revision: request.expectedRevision + 1,
+            updatedAt: new Date().toISOString(),
+          };
+          return serverDraft;
+        },
+        sendMessage: async (_workspaceId, _sessionId, input) => await deliver(input),
+        steerMessage: async (_workspaceId, _sessionId, input) => ({
+          accepted: await deliver(input),
+          turn: fakeTurn(),
+        }),
+      });
+      const hook = await renderHook(
+        (model: string) =>
+          useComposer(SESSION_ID, {
+            client,
+            workspaceId: WORKSPACE_ID,
+            sendExtras: { model, reasoningEffort: "xhigh" },
+          }),
+        "gpt-5.6-sol" as string,
+      );
+      await flush();
+
+      await flushing(async () => expect(await hook.result.current[delivery]()).toBe(false));
+      expect(hook.result.current.error).toMatchObject({
+        status: 402,
+        code: "payment_required",
+        retryable: false,
+        outcomeUnknown: false,
+      });
+      expect(hook.result.current.value).toBe(serverDraft.text);
+      expect(hook.result.current.restoredResources).toEqual([resource]);
+      expect(attempts).toHaveLength(1);
+      expect(attempts[0]).toMatchObject({
+        text: "read the exact attached bytes",
+        resources: [resource],
+        model: "gpt-5.6-sol",
+      });
+
+      await hook.rerender("codex/gpt-5.6-sol");
+      await flushing(async () => expect(await hook.result.current[delivery]()).toBe(true));
+
+      expect(attempts).toHaveLength(2);
+      expect(attempts[1]).toMatchObject({
+        text: "read the exact attached bytes",
+        resources: [resource],
+        model: "codex/gpt-5.6-sol",
+      });
+      expect(attempts[1]!.clientEventId).not.toBe(attempts[0]!.clientEventId);
+      expect(accepted).toBe(1);
+      expect(hook.result.current.value).toBe("");
+      expect(hook.result.current.restoredResources).toEqual([]);
+      await hook.unmount();
+    });
+  }
 
   for (const delivery of ["send", "steer"] as const) {
     test(`${delivery} retries an outcome-unknown gateway failure with one idempotency key`, async () => {

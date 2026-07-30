@@ -521,10 +521,11 @@ async function seedScope(admin: postgres.Sql, label: string, schema?: string): P
   await admin`
     insert into sessions (
       id, account_id, workspace_id, initial_message, model,
-      sandbox_backend, sandbox_group_id
+      sandbox_backend, sandbox_group_id, tool_policy
     ) values (
       ${sessionId}, ${account!.id}, ${workspace!.id}, 'migration test',
-      'scripted-model', 'modal', ${sessionId}
+      'scripted-model', 'modal', ${sessionId},
+      jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
     )`;
   return { accountId: account!.id, workspaceId: workspace!.id, sessionId };
 }

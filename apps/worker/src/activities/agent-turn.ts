@@ -300,6 +300,7 @@ import {
   type SessionEventType,
   type SessionStatus,
   type SessionTurn,
+  type ToolAuthNeededPayload,
   type TurnExecutionPolicyV1,
   type TurnInitiator,
 } from "@opengeni/contracts";
@@ -316,6 +317,50 @@ export function credentialSubjectIdForTurnInitiator(
   initiator: Pick<TurnInitiator, "kind" | "subjectId">,
 ): string | undefined {
   return initiator.kind === "subject" ? initiator.subjectId : undefined;
+}
+
+/**
+ * Direct authenticated-human work is the persisted human source with subject
+ * authority and no inherited agent or legacy provenance. Use this complete
+ * immutable turn authority instead of inferring causality from a
+ * `user.message` event shape or the root initiator alone.
+ */
+export function isDirectHumanTurnInitiation(
+  turn: Pick<SessionTurn, "source" | "initiator" | "initiatorContext">,
+): boolean {
+  if (turn.source !== "user" || turn.initiator.kind !== "subject") {
+    return false;
+  }
+  return !["via", "viaTruncated", "provenanceError", "backfill"].some((key) =>
+    Object.prototype.hasOwnProperty.call(turn.initiatorContext, key),
+  );
+}
+
+/**
+ * A disconnected personal Slack server is prepared best-effort before the model
+ * runs. Its initialize/tools-list credential miss is setup state, not evidence
+ * that an unrelated turn wants Slack. Keep concrete tool-call failures
+ * actionable, but gate setup-time Slack prompts to a human message that names
+ * Slack explicitly. Other providers retain the existing generic behavior.
+ */
+export function shouldPublishToolAuthNeededForTurn(
+  payload: Pick<ToolAuthNeededPayload, "providerDomain" | "toolName">,
+  trigger: Pick<SessionEvent, "type" | "payload">,
+  turn: Pick<SessionTurn, "source" | "initiator" | "initiatorContext">,
+): boolean {
+  if (typeof payload.toolName === "string" && payload.toolName.trim().length > 0) {
+    return true;
+  }
+  const providerDomain = payload.providerDomain.trim().toLowerCase();
+  const isSlack = providerDomain === "slack.com" || providerDomain.endsWith(".slack.com");
+  if (!isSlack) {
+    return true;
+  }
+  if (!isDirectHumanTurnInitiation(turn) || trigger.type !== "user.message") {
+    return false;
+  }
+  const text = (trigger.payload as { text?: unknown }).text;
+  return typeof text === "string" && /\bslack\b/i.test(text);
 }
 
 export function turnExecutionPolicyBillingIdentity(policy: TurnExecutionPolicyV1): {
@@ -4980,6 +5025,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             ...(credentialSubjectId ? { credentialSubjectId } : {}),
             resolveCredential,
             onAuthNeeded: async (payload) => {
+              if (!shouldPublishToolAuthNeededForTurn(payload, trigger, turn)) {
+                return;
+              }
               await publish!([{ type: "tool.auth_needed", payload }], true);
             },
             // Manager-style sessions carry a creation-validated permission set

@@ -231,18 +231,30 @@ Helm must preserve the same order explicitly.
 
 The provisioner converges `opengeni_app` to `LOGIN NOSUPERUSER NOBYPASSRLS
 NOCREATEROLE NOCREATEDB NOREPLICATION NOINHERIT`, refuses to guess through any
-role membership or ownership, revokes database/schema creation and all table
-privileges, then grants the exact current-ledger table contract: full CRUD on 83
-ordinary runtime tables; SELECT only on `nested_agent_depth_configuration` and
-preference lifecycle events; SELECT + INSERT on six append-only/proposal/revision
-tables; and no direct table DML on the five FORCE-RLS host-export tables.
-Preference head UPDATE/DELETE is available only through target-schema-local
-security-definer lock/lifecycle functions, which migrate-then-provision
-explicitly regrants.
+privilege-bearing role membership or ownership, revokes database/schema creation
+and all table privileges, then grants the exact current-ledger table contract:
+full CRUD on 83 ordinary runtime tables; SELECT only on
+`nested_agent_depth_configuration`, preference lifecycle events, and preference
+snapshots; SELECT + INSERT on five append-only/proposal/revision tables; and no
+direct table DML on the five FORCE-RLS host-export tables. Preference head
+UPDATE/DELETE is available only through target-schema-local SECURITY DEFINER
+lock/lifecycle functions, which migrate-then-provision explicitly regrants.
+PostgreSQL 16+ automatically records an ADMIN-only reverse membership when a
+non-superuser `CREATEROLE` principal creates the app role. Provisioning and
+posture checks accept only that exact creator-management edge when `SET=false`,
+`INHERIT=false`, and the grantor is a superuser. It cannot inherit the app
+role's privileges or activate them with `SET ROLE`; every outbound edge,
+privilege-bearing reverse edge, uncertain grantor, and PostgreSQL 15 edge is
+still rejected.
+When the provisioning principal is not a superuser, OpenGeni first proves
+`SUPERUSER`, `BYPASSRLS`, `CREATEDB`, and `REPLICATION` are already false, then
+converges only the role attributes PostgreSQL permits a `CREATEROLE`
+administrator to alter. An unsafe protected attribute fails with an explicit
+operator action instead of being left for runtime startup to discover.
 The runtime assertion connects through the runtime URL and checks, using only
 PostgreSQL catalogs in a repeatable-read/read-only transaction:
 
-- exact current/session role, attributes, zero role-graph edges, and
+- exact current/session role, attributes, zero privilege-bearing role-graph edges, and
   `row_security=on`;
 - no database/schema/relation/private-routine ownership and no database/schema
   CREATE;

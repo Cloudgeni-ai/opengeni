@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { Session, SessionTurn } from "@opengeni/contracts";
+import { DEFAULT_FIRST_PARTY_MCP_TOOLS, Session, SessionTurn } from "@opengeni/contracts";
 
 // Pure (no-postgres) spec for the 0018 read-side shape: the contract Session
 // carries sandboxOs (enum, default linux) + sandboxGroupId (uuid), and
@@ -45,7 +45,9 @@ function baseSession() {
     activeEpoch: 0,
     environmentId: null,
     firstPartyMcpPermissions: null,
-    firstPartyMcpTools: null,
+    firstPartyMcpTools: [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+    toolPolicy: { mode: "explicit" as const, inheritedFromSessionId: null },
+    toolPolicyVersion: 1,
     parentSessionId: null,
     createIdempotencyKey: null,
     temporalWorkflowId: null,

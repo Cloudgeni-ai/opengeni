@@ -2,14 +2,18 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
 import { Client, Connection, ScheduleOverlapPolicy } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
+import { environmentsEncryptionKeyBytes } from "@opengeni/config";
 import {
   allAccountPermissions,
   allWorkspacePermissions,
-  applyCreditLedgerEntry,
   bootstrapWorkspace,
   completeFileUpload,
   createDb,
   dbSql,
+  encryptEnvironmentValue,
+  ensureCodexRotationSettings,
+  setActiveCodexCredential,
+  upsertCodexSubscriptionCredential,
   type DbClient,
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
@@ -195,37 +199,204 @@ describe("file upload crash, concurrency, RLS, and object cleanup", () => {
     expect(repairs.map((response) => response.status)).toEqual([200, 200, 200]);
     expect(await usageCount(crashed.fileId)).toBe(1);
 
-    // Storage staging remains separate from inference admission. A zero-credit
-    // turn fails, then the funded retry reuses the SAME durable file id.
+    // Storage staging remains separate from inference admission. Persist the
+    // exact actor-private composer state before proving that a managed-model
+    // 402 mutates neither it nor the finalized file/session/turn rows.
+    const draftPayload = {
+      text: "inspect the preserved image",
+      resources: [{ kind: "file" as const, fileId: crashed.fileId }],
+      tools: [],
+      toolsProvided: false,
+      model: "gpt-5.6-sol",
+      reasoningEffort: "xhigh",
+      options: {},
+    };
+    const savedDraftResponse = await app.request(
+      workspacePath(fixture.workspaceId, "/new-session-draft"),
+      {
+        method: "PUT",
+        headers: { "content-type": "application/json", ...fixture.headers },
+        body: JSON.stringify({ expectedRevision: 0, ...draftPayload }),
+      },
+    );
+    expect(savedDraftResponse.status).toBe(200);
+    const savedDraft = (await savedDraftResponse.json()) as typeof draftPayload & {
+      revision: number;
+      updatedAt: string;
+    };
+    expect(savedDraft).toMatchObject({ revision: 1, ...draftPayload });
+    const readyFileResponse = await app.request(
+      workspacePath(fixture.workspaceId, `/files/${crashed.fileId}`),
+      { headers: fixture.headers },
+    );
+    expect(readyFileResponse.status).toBe(200);
+    const readyFile = await readyFileResponse.json();
+    expect((await storage.getObjectBytes(crashed.objectKey))?.bytes).toEqual(image);
+
     const blocked = await app.request(workspacePath(fixture.workspaceId, "/sessions"), {
       method: "POST",
       headers: { "content-type": "application/json", ...fixture.headers },
       body: JSON.stringify({
-        initialMessage: "inspect the preserved image",
-        resources: [{ kind: "file", fileId: crashed.fileId }],
+        initialMessage: draftPayload.text,
+        resources: draftPayload.resources,
+        model: draftPayload.model,
+        reasoningEffort: draftPayload.reasoningEffort,
+        clientEventId: crypto.randomUUID(),
+        idempotencyKey: crypto.randomUUID(),
+        expectedNewSessionDraftRevision: savedDraft.revision,
       }),
     });
     expect(blocked.status).toBe(402);
-    await applyCreditLedgerEntry(appDb.db, {
-      accountId: fixture.accountId,
-      type: "credit_topup",
-      amountMicros: 1_000_000,
-      sourceType: "test",
-      sourceId: `fileupload:${crashed.fileId}`,
-      idempotencyKey: `fileupload-credit:${crashed.fileId}`,
+    expect((await blocked.json()) as { error: unknown }).toMatchObject({
+      error: {
+        status: 402,
+        code: "payment_required",
+        message: "insufficient OpenGeni credits",
+        retryable: false,
+      },
     });
+    expect(await admissionCounts()).toEqual({
+      sessions: 0,
+      turns: 0,
+      user_messages: 0,
+      agent_run_usage: 0,
+    });
+    const preservedDraftResponse = await app.request(
+      workspacePath(fixture.workspaceId, "/new-session-draft"),
+      { headers: fixture.headers },
+    );
+    expect(preservedDraftResponse.status).toBe(200);
+    expect(await preservedDraftResponse.json()).toEqual(savedDraft);
+    const preservedFileResponse = await app.request(
+      workspacePath(fixture.workspaceId, `/files/${crashed.fileId}`),
+      { headers: fixture.headers },
+    );
+    expect(preservedFileResponse.status).toBe(200);
+    expect(await preservedFileResponse.json()).toEqual(readyFile);
+    expect((await storage.getObjectBytes(crashed.objectKey))?.bytes).toEqual(image);
+
+    // Choosing the explicit connected-subscription deployment updates only the
+    // draft's model. The same durable attachment then admits with zero managed
+    // credits and creates exactly one session/message/turn.
+    const encryptionKey = environmentsEncryptionKeyBytes(fixture.settings)!;
+    const credential = await upsertCodexSubscriptionCredential(appDb.db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      credentialEncrypted: encryptEnvironmentValue(
+        encryptionKey,
+        JSON.stringify({
+          access_token: "synthetic-access-token",
+          refresh_token: "synthetic-refresh-token",
+          id_token: "synthetic-id-token",
+        }),
+      ),
+      chatgptAccountId: `synthetic:${crashed.fileId}`,
+      scopes: null,
+      planType: "pro",
+      isFedramp: false,
+      expiresAt: new Date(Date.now() + 60_000),
+      lastRefreshAt: new Date(),
+    });
+    await ensureCodexRotationSettings(appDb.db, fixture.accountId, fixture.workspaceId);
+    expect(await setActiveCodexCredential(appDb.db, fixture.workspaceId, credential.id)).toBe(true);
+    const codexDraftResponse = await app.request(
+      workspacePath(fixture.workspaceId, "/new-session-draft"),
+      {
+        method: "PUT",
+        headers: { "content-type": "application/json", ...fixture.headers },
+        body: JSON.stringify({
+          expectedRevision: savedDraft.revision,
+          ...draftPayload,
+          model: "codex/gpt-5.6-sol",
+        }),
+      },
+    );
+    expect(codexDraftResponse.status).toBe(200);
+    const codexDraft = (await codexDraftResponse.json()) as typeof savedDraft;
+    expect(codexDraft).toMatchObject({
+      revision: savedDraft.revision + 1,
+      text: draftPayload.text,
+      resources: draftPayload.resources,
+      model: "codex/gpt-5.6-sol",
+    });
+    const retryIdempotencyKey = crypto.randomUUID();
     const retried = await app.request(workspacePath(fixture.workspaceId, "/sessions"), {
       method: "POST",
       headers: { "content-type": "application/json", ...fixture.headers },
       body: JSON.stringify({
-        initialMessage: "inspect the preserved image",
-        resources: [{ kind: "file", fileId: crashed.fileId }],
+        initialMessage: draftPayload.text,
+        resources: draftPayload.resources,
+        model: codexDraft.model,
+        reasoningEffort: codexDraft.reasoningEffort,
+        clientEventId: crypto.randomUUID(),
+        idempotencyKey: retryIdempotencyKey,
+        expectedNewSessionDraftRevision: codexDraft.revision,
       }),
     });
     expect(retried.status).toBe(202);
-    expect((await retried.json()) as { resources: unknown[] }).toMatchObject({
+    const created = (await retried.json()) as {
+      id: string;
+      model: string;
+      resources: unknown[];
+    };
+    expect(created).toMatchObject({
+      model: "codex/gpt-5.6-sol",
       resources: [{ kind: "file", fileId: crashed.fileId }],
     });
+    expect(await admissionCounts()).toEqual({
+      sessions: 1,
+      turns: 1,
+      user_messages: 1,
+      agent_run_usage: 1,
+    });
+    const acceptedRows = await admin<
+      Array<{ session_resources: unknown; turn_resources: unknown; turn_model: string }>
+    >`
+      select S.resources as session_resources,
+             T.resources as turn_resources,
+             T.model as turn_model
+      from sessions S
+      join session_turns T on T.workspace_id = S.workspace_id and T.session_id = S.id
+      where S.workspace_id = ${fixture.workspaceId} and S.id = ${created.id}
+    `;
+    expect(acceptedRows).toMatchObject([
+      {
+        session_resources: draftPayload.resources,
+        turn_resources: draftPayload.resources,
+        turn_model: "codex/gpt-5.6-sol",
+      },
+    ]);
+    expect((await storage.getObjectBytes(crashed.objectKey))?.bytes).toEqual(image);
+    const seededDraftResponse = await app.request(
+      workspacePath(fixture.workspaceId, "/new-session-draft"),
+      { headers: fixture.headers },
+    );
+    expect(seededDraftResponse.status).toBe(200);
+    expect(await seededDraftResponse.json()).toMatchObject({
+      revision: codexDraft.revision + 1,
+      text: "",
+      resources: [],
+      model: "codex/gpt-5.6-sol",
+      reasoningEffort: "xhigh",
+    });
+
+    async function admissionCounts() {
+      const [row] = await admin<
+        Array<{
+          sessions: number;
+          turns: number;
+          user_messages: number;
+          agent_run_usage: number;
+        }>
+      >`
+        select
+          (select count(*)::int from sessions where workspace_id = ${fixture.workspaceId}) as sessions,
+          (select count(*)::int from session_turns where workspace_id = ${fixture.workspaceId}) as turns,
+          (select count(*)::int from session_events where workspace_id = ${fixture.workspaceId} and type = 'user.message') as user_messages,
+          (select count(*)::int from usage_events where workspace_id = ${fixture.workspaceId} and event_type = 'agent_run.created') as agent_run_usage
+      `;
+      return row!;
+    }
 
     async function usageCount(fileId: string): Promise<number> {
       const rows = await admin<Array<{ count: number }>>`
@@ -690,6 +861,8 @@ function uploadSettings(databaseUrl: string, endpoint: string) {
     databaseUrl,
     productAccessMode: "managed",
     usageLimitsMode: "managed",
+    codexSubscriptionEnabled: true,
+    environmentsEncryptionKey: Buffer.alloc(32, 82).toString("base64"),
     delegationSecret: DELEGATION_SECRET,
     betterAuthSecret: "fileupload-better-auth-secret-at-least-32-bytes",
     publicBaseUrl: "http://127.0.0.1:3000",

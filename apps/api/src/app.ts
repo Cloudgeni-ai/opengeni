@@ -496,6 +496,13 @@ async function requireMcpAccessGrant(
   if (isToolspaceGrant(deps.settings, grant)) {
     return grant;
   }
+  // A worker-signed session-bound grant is allowed to reach the transport
+  // without inheriting broad workspace read access. The exact session
+  // authorization seam runs immediately after this gate, and tool registration
+  // still exposes only capabilities permitted by the delegated grant.
+  if (grant.metadata?.delegated === true && typeof grant.metadata.sessionId === "string") {
+    return grant;
+  }
   requirePermission(grant, "workspace:read");
   return grant;
 }
@@ -545,6 +552,7 @@ export function httpStatusForError(error: unknown): number {
 
 export function errorCodeForStatus(status: number): ErrorCode {
   if (status === 401) return "unauthenticated";
+  if (status === 402) return "payment_required";
   if (status === 403) return "forbidden";
   if (status === 404) return "not_found";
   if (status === 409) return "conflict";

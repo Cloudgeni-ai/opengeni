@@ -67,7 +67,7 @@ function registeredToolNames(server: unknown): string[] {
 }
 
 describe("first-party MCP tool visibility policy", () => {
-  test("omission selects the complete default catalog when authorization allows it", () => {
+  test("omission selects the complete default catalog when the grant authorizes every tool", () => {
     const server = buildOpenGeniMcpServer(deps(), grant([...Permission.options]), {
       workspaceMemoryEnabled: true,
     });

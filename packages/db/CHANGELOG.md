@@ -1,5 +1,26 @@
 # @opengeni/db
 
+## 0.14.6
+
+### Patch Changes
+
+- 2aca964: Allow PostgreSQL 16+ managed-service role provisioning to retain the exact non-runtime-bearing creator-management grant while continuing to reject every privilege-bearing role relationship.
+
+## 0.14.5
+
+### Patch Changes
+
+- ad0bdc3: Surface managed-credit admission rejections with actionable composer recovery guidance while preserving drafts and attachments, and canonicalize default attachment mounts across established-session draft admission and replay.
+- Updated dependencies [ad0bdc3]
+  - @opengeni/contracts@0.23.1
+  - @opengeni/config@0.7.14
+
+## 0.14.4
+
+### Patch Changes
+
+- ea38a4c: Make cold sandbox recovery fail closed for database roles that bypass row-level security, preserving recovery safety before blocker settlement.
+
 ## 0.14.3
 
 ### Patch Changes
