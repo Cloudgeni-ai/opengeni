@@ -39,6 +39,38 @@ spec:
             severity: warning
           annotations:
             summary: OpenGeni reaper terminated provider-side orphan sandboxes
+        - alert: OpenGeniSandboxRotationOverdue
+          expr: opengeni_sandbox_rotation_backlog{kind="overdue"} > 0
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: OpenGeni has a sandbox past its provider deadline
+            description: A finite-lifetime sandbox has remained past its precomputed provider deadline for 10m. Check turn, direct-operation, and retained-process blockers, checkpoint capture, reaper health, and Modal API errors before the provider kills it.
+        - alert: OpenGeniSandboxCheckpointDeletionFailed
+          expr: opengeni_sandbox_checkpoint_artifacts{state="delete_failed"} > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni cannot garbage-collect a provider checkpoint
+            description: A provider-bound checkpoint deletion has failed for 15m. Credential/workspace rotation is a common intentional fence; inspect the artifact binding and deletion error instead of deleting under ambient credentials.
+        - alert: OpenGeniRetainedProcessTerminalOwnerBacklog
+          expr: sum(opengeni_retained_processes_terminal_owner_backlog) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni has retained sandbox processes whose logical owners are terminal
+            description: A completed/failed/cancelled owner still has a physical sandbox process after 15m. Inspect provider-binding, probe, and settlement outcomes; age alone is never exit proof.
+        - alert: OpenGeniSandboxDrainExpired
+          expr: sum(opengeni_sandbox_leases_expired_draining{age_bucket=~"5m_to_15m|gt_15m"}) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni has a sandbox stuck in draining
+            description: A refcount-zero sandbox has exceeded its drain deadline. Check archive capture, provider termination, checkpoint publication, and reaper errors.
         - alert: OpenGeniCodexCredentialPoolEmpty
           expr: increase(opengeni_codex_pool_low_total{depth="zero"}[5m]) > 0
           for: 1m

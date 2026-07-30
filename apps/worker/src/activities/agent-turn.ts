@@ -56,10 +56,12 @@ import {
   setSessionLastInputTokensForTurnAttempt,
   sumUsageQuantity,
   heartbeatLeaseHolder,
+  readLease,
   accrueWarmSeconds,
   getMaterializedSandboxFileResources,
   markSandboxFileResourcesMaterialized,
   areGitHubRepositoriesAllowedForWorkspace,
+  SandboxLeaseRecoveryBlockedError,
   SandboxLeaseSupersededError,
   SandboxImageConflictError,
   isSessionEventPersistenceError,
@@ -1764,6 +1766,19 @@ export class TurnOperationCancelledError extends Error {
   }
 }
 
+export class SandboxDeadlineRotationError extends Error {
+  readonly name = "SandboxDeadlineRotationError";
+
+  constructor(
+    readonly sandboxGroupId: string,
+    readonly leaseEpoch: number,
+  ) {
+    super(
+      `Sandbox ${sandboxGroupId} reached its provider rotation boundary at lease epoch ${leaseEpoch}`,
+    );
+  }
+}
+
 /**
  * Normalize a preparation/provisioning cancellation race back to the Temporal
  * cancellation that owns the activity. Several provider APIs expose no portable
@@ -1839,7 +1854,10 @@ function sleep(ms: number): Promise<void> {
 }
 
 export function isLazySandboxProvisionRetryable(error: unknown): boolean {
-  if (error instanceof SandboxImageConflictError) {
+  if (
+    error instanceof SandboxImageConflictError ||
+    error instanceof SandboxLeaseRecoveryBlockedError
+  ) {
     return false;
   }
   if (error instanceof WorkspaceArchiveIntegrityError) {
@@ -1852,6 +1870,20 @@ export function isLazySandboxProvisionRetryable(error: unknown): boolean {
   return /(?:capacity|create|creation|provider|sandbox).*(?:timeout|timed out)|(?:timeout|timed out).*(?:capacity|create|creation|provider|sandbox)|ECONNRESET|ETIMEDOUT|EAI_AGAIN|temporar/i.test(
     message,
   );
+}
+
+/**
+ * Deadline recovery cannot re-admit the same turn until the global reaper has
+ * observed the released holder, captured the final archive, terminated the old
+ * provider box, and committed the lease cold. Give that full sequence one
+ * snapshot budget plus two schedule periods. This is workflow-visible pacing,
+ * not an in-memory sleep, so Pause/Steer/new user intent can still wake the
+ * durable session immediately.
+ */
+export function sandboxDeadlineRotationRecoveryDelayMs(
+  settings: Pick<Settings, "sandboxLeaseReaperPeriodMs" | "sandboxSnapshotTimeoutMs">,
+): number {
+  return settings.sandboxSnapshotTimeoutMs + settings.sandboxLeaseReaperPeriodMs * 2;
 }
 
 export function createTurnSandboxProvisioner<T>(
@@ -1916,7 +1948,15 @@ export function createTurnSandboxProvisioner<T>(
             throw error;
           }
         })().catch((error) => {
-          memo = null;
+          // A terminal lease/archive/configuration result cannot change within
+          // this frozen turn. Keep its rejected promise memoized so later model
+          // tool calls observe the same typed result without re-entering
+          // provisioning, emitting another failure event, or creating another
+          // provider attempt. Only a retryable failure releases the single-flight
+          // for a later operation to re-read the lease/provider state.
+          if (isLazySandboxProvisionRetryable(error)) {
+            memo = null;
+          }
           throw error;
         });
       }
@@ -2056,6 +2096,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     } = await services();
     const activityContext = currentActivityContext();
     const cancellationSignal = activityContext?.cancellationSignal;
+    // Temporal cancellation is not the only way an activity loses ownership:
+    // a database attempt fence or workflow abandonment can finalize the logical
+    // turn while the SDK cancellation signal remains open. Bind sandbox
+    // provisioning to both lifetimes so an uninterruptible, late provider
+    // promise cannot resurrect a holder after this activity has finalized.
+    const sandboxResumeController = new AbortController();
+    const sandboxResumeSignal = cancellationSignal
+      ? AbortSignal.any([cancellationSignal, sandboxResumeController.signal])
+      : sandboxResumeController.signal;
+    const sandboxRotationController = new AbortController();
+    const runtimeCancellationSignal = cancellationSignal
+      ? AbortSignal.any([cancellationSignal, sandboxRotationController.signal])
+      : sandboxRotationController.signal;
     let cancellationRequestedAt: number | null = cancellationSignal?.aborted
       ? performance.now()
       : null;
@@ -2356,6 +2409,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // runs it refreshes expires_at epoch-fenced so a legit multi-day turn is
     // never TTL-reaped. Cleared in finally. Only set when the flag resolved a box.
     let leaseHeartbeatTimer: ReturnType<typeof setInterval> | undefined;
+    const stopLeaseHeartbeat = (): void => {
+      if (!leaseHeartbeatTimer) return;
+      clearInterval(leaseHeartbeatTimer);
+      leaseHeartbeatTimer = undefined;
+    };
+    let rotationInFlight: Promise<void> | null = null;
     // credential-renewal policy: the worker, not the model, owns renewal of run-scoped Git
     // credentials for a multi-day turn. The controller is attached only after
     // the initial seed reached a real cloud box and is drained before capture.
@@ -2526,7 +2585,81 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           holderId: heartbeatHolderId,
           leaseTtlMs: settings.sandboxLeaseTtlMs,
           expectedEpoch: heartbeatEpoch,
-        }).catch(() => undefined);
+        })
+          .then(async (alive) => {
+            if (alive || rotationInFlight || sandboxRotationController.signal.aborted) return;
+            const rotatingLease = await readLease(db, input.workspaceId, heartbeatGroupId).catch(
+              () => null,
+            );
+            if (
+              !rotatingLease ||
+              rotatingLease.leaseEpoch !== heartbeatEpoch ||
+              rotatingLease.instanceId !== sandbox.established.instanceId ||
+              rotatingLease.rotationRequestedAt === null
+            ) {
+              // The holder was reaped, the exact attempt closed, the epoch was
+              // superseded, or the lease began draining. Do not leave a dead
+              // interval issuing DB writes and snapshot probes forever.
+              stopLeaseHeartbeat();
+              return;
+            }
+            rotationInFlight = (async () => {
+              // Rotation admission already fenced all new workspace mutations.
+              // Wait for an earlier periodic capture, then produce the exact
+              // generation-complete checkpoint that licenses aborting this run.
+              if (snapshotInFlight) {
+                await waitForWarmSnapshot(
+                  snapshotInFlight,
+                  settings.sandboxSnapshotTimeoutMs,
+                  cancellationSignal,
+                );
+              }
+              const snapshotSession = setupBoxSession;
+              const snapshotTurnId = turnId;
+              if (snapshotSession && snapshotTurnId) {
+                await maybePersistWarmWorkspaceSnapshot(
+                  { db, settings },
+                  {
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: input.sessionId,
+                    turnId: snapshotTurnId,
+                    attemptId: input.attemptId,
+                    sandboxGroupId: heartbeatGroupId,
+                  },
+                  snapshotSession,
+                  heartbeatEpoch,
+                  cancellationSignal,
+                  true,
+                );
+              }
+              const checkpointed = await readLease(db, input.workspaceId, heartbeatGroupId);
+              if (
+                checkpointed?.leaseEpoch === heartbeatEpoch &&
+                checkpointed.rotationRequestedAt !== null &&
+                checkpointed.archiveComplete &&
+                !cancellationSignal?.aborted
+              ) {
+                sandboxRotationController.abort(
+                  new SandboxDeadlineRotationError(heartbeatGroupId, heartbeatEpoch),
+                );
+              }
+            })()
+              .catch((error) => {
+                observability.warn("sandbox deadline rotation checkpoint failed; retrying", {
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  sandboxGroupId: heartbeatGroupId,
+                  leaseEpoch: heartbeatEpoch,
+                  error: error instanceof Error ? error.message : String(error),
+                });
+              })
+              .finally(() => {
+                rotationInFlight = null;
+              });
+            await rotationInFlight;
+          })
+          .catch(() => undefined);
         void accrueWarmSeconds(db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
@@ -3818,12 +3951,22 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               },
             ]
           : !resolvedModel && fallbackProviderApiKey
-            ? [{ name: "MODEL_PROVIDER_API_KEY", value: fallbackProviderApiKey }]
+            ? [
+                {
+                  name: "MODEL_PROVIDER_API_KEY",
+                  value: fallbackProviderApiKey,
+                },
+              ]
             : []),
         ...Object.entries(selectedProvider?.defaultHeaders ?? {}).flatMap(([name, value]) =>
           publicProviderHeaders.has(name.toLowerCase())
             ? []
-            : [{ name: `MODEL_PROVIDER_HEADER_${name.toUpperCase()}`, value }],
+            : [
+                {
+                  name: `MODEL_PROVIDER_HEADER_${name.toUpperCase()}`,
+                  value,
+                },
+              ],
         ),
         ...Object.entries(selectedProvider?.defaultQuery ?? {}).flatMap(([name, value]) =>
           publicProviderQueries.has(name.toLowerCase())
@@ -4874,6 +5017,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               {
                 db,
                 settings,
+                cancellationSignal: sandboxResumeSignal,
                 sandboxMetrics: runtimeMetricsHooksForObservability(observability),
                 onSandboxLost: publishSandboxLost,
               },
@@ -4910,7 +5054,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               "turn",
               managedOwnership!.holderId,
             ),
-            cancellationSignal,
+            sandboxResumeSignal,
             async (lateSandbox) => await lateSandbox.release(),
           );
           setupBoxSession = resolvedSandbox.established.session;
@@ -5267,6 +5411,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               {
                 db,
                 settings,
+                cancellationSignal: sandboxResumeSignal,
                 sandboxMetrics: runtimeMetricsHooksForObservability(observability),
                 onSandboxLost: publishSandboxLost,
               },
@@ -5314,10 +5459,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     },
                     ...(lazyGitTokens ? { gitTokenSeedsOverride: lazyGitTokens } : {}),
                     ...(lazyGitCredentials?.bindings
-                      ? { gitCredentialBindingsOverride: lazyGitCredentials.bindings }
+                      ? {
+                          gitCredentialBindingsOverride: lazyGitCredentials.bindings,
+                        }
                       : {}),
                     ...(lazyToolspaceToken
-                      ? { toolspaceTokenSeedOverride: lazyToolspaceToken.token }
+                      ? {
+                          toolspaceTokenSeedOverride: lazyToolspaceToken.token,
+                        }
                       : {}),
                     ...(toolCancellationFenceRef.current
                       ? {
@@ -5350,7 +5499,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             return provisioned;
           },
           {
-            ...(activityContext ? { signal: activityContext.cancellationSignal } : {}),
+            signal: sandboxResumeSignal,
             onStarted: async () => {
               await publish?.(
                 [
@@ -5377,7 +5526,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 ],
                 true,
               );
-              throwIfTurnOperationCancelled(activityContext?.cancellationSignal);
+              throwIfTurnOperationCancelled(sandboxResumeSignal);
               startLeaseHeartbeat(provisioned, activeSandboxBackend ?? groupBoxBackend);
               setupBoxSession = provisioned.established.session;
               resolvedSandbox = provisioned;
@@ -5783,7 +5932,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             );
           }
           return await runtime.runStream(agent, runInput!, modelRunSettings, {
-            ...(activityContext ? { signal: activityContext.cancellationSignal } : {}),
+            signal: runtimeCancellationSignal,
             sandboxEnvironment,
             onRuntimeEvent: async (event) => {
               await renewCodexLease("runtime_event");
@@ -6177,7 +6326,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               events: [
                 ...requestEvents,
                 ...(approvals.length > 0
-                  ? [{ type: "session.requiresAction" as const, payload: { approvals } }]
+                  ? [
+                      {
+                        type: "session.requiresAction" as const,
+                        payload: { approvals },
+                      },
+                    ]
                   : []),
                 {
                   type: "session.status.changed",
@@ -6397,12 +6551,26 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // so its next attempt reattaches under the current epoch.
       if (error instanceof SandboxLeaseSupersededError && recoveryTurnId) {
         try {
+          const fencedLease = await readLease(db, input.workspaceId, error.sandboxGroupId).catch(
+            () => null,
+          );
+          const deadlineRotationPending = fencedLease?.rotationRequestedAt != null;
           const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
             sessionId: input.sessionId,
             turnId: recoveryTurnId,
             triggerEventId: triggerEventId!,
             attemptId: input.attemptId,
-            reason: "sandbox_lease_superseded",
+            reason: deadlineRotationPending
+              ? "sandbox_deadline_rotation"
+              : "sandbox_lease_superseded",
+            ...(deadlineRotationPending
+              ? {
+                  detail: {
+                    sandboxGroupId: error.sandboxGroupId,
+                    leaseEpoch: error.leaseEpoch,
+                  },
+                }
+              : {}),
           });
           if (recovery.action === "stale") {
             acknowledgeLostAttemptOwnership();
@@ -6418,10 +6586,62 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           );
           activityStatus = "recovering";
           turnMetricOutcome = "recovering";
-          return claimedResult({ status: "recovering" });
+          return claimedResult({
+            status: "recovering",
+            ...(deadlineRotationPending
+              ? { continueDelayMs: sandboxDeadlineRotationRecoveryDelayMs(settings) }
+              : {}),
+          });
         } catch (recoveryError) {
           console.error(
             "sandbox lease supersession recovery failed",
+            safeErrorDiagnostic(recoveryError, (value) => String(redact(value))),
+          );
+          throw recoveryError;
+        }
+      }
+      if (
+        sandboxRotationController.signal.aborted &&
+        sandboxRotationController.signal.reason instanceof SandboxDeadlineRotationError &&
+        !cancellationSignal?.aborted &&
+        recoveryTurnId
+      ) {
+        try {
+          await flushRuntimeBatcher();
+          await reconcileConversationTruth({ requireDurable: true });
+          const rotation = sandboxRotationController.signal.reason;
+          const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+            sessionId: input.sessionId,
+            turnId: recoveryTurnId,
+            triggerEventId: triggerEventId!,
+            attemptId: input.attemptId,
+            reason: "sandbox_deadline_rotation",
+            detail: {
+              sandboxGroupId: rotation.sandboxGroupId,
+              leaseEpoch: rotation.leaseEpoch,
+            },
+          });
+          if (recovery.action === "stale") {
+            acknowledgeLostAttemptOwnership();
+            activityStatus = "cancelled";
+            turnMetricOutcome = "cancelled";
+            return claimedResult({ status: "cancelled" });
+          }
+          await publishDurableSessionEvents(
+            bus,
+            input.workspaceId,
+            input.sessionId,
+            recovery.events,
+          );
+          activityStatus = "recovering";
+          turnMetricOutcome = "recovering";
+          return claimedResult({
+            status: "recovering",
+            continueDelayMs: sandboxDeadlineRotationRecoveryDelayMs(settings),
+          });
+        } catch (recoveryError) {
+          console.error(
+            "sandbox deadline rotation recovery failed",
             safeErrorDiagnostic(recoveryError, (value) => String(redact(value))),
           );
           throw recoveryError;
@@ -7292,6 +7512,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       );
       return claimedResult({ status: "failed" });
     } finally {
+      // This is the logical ownership boundary. Abort before any fallible
+      // housekeeping so a still-pending provider establish releases its private
+      // holder/timer even when Temporal itself never delivered cancellation.
+      if (resolvedSandbox === null && !sandboxResumeController.signal.aborted) {
+        sandboxResumeController.abort(
+          cancellationSignal?.reason ?? new Error("TURN_ATTEMPT_FINALIZED"),
+        );
+      }
       const finalizationStarted = performance.now();
       let finalizationError: unknown;
       let physicalToolQuiescenceConfirmed = !acknowledgeQuiescence;
@@ -7543,8 +7771,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // (bounded) — capture and the warm snapshot both exec on the box, so
           // sequence them, exactly as the turn-end snapshot placement did.
           if (leaseHeartbeatTimer) {
-            clearInterval(leaseHeartbeatTimer);
-            leaseHeartbeatTimer = undefined;
+            stopLeaseHeartbeat();
           }
           if (snapshotInFlight) {
             await waitForWarmSnapshot(
@@ -7594,7 +7821,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // box rides the provider idle-timeout in the meantime. Best-effort: a
         // release failure must never mask the turn's real outcome.
         if (leaseHeartbeatTimer) {
-          clearInterval(leaseHeartbeatTimer);
+          stopLeaseHeartbeat();
+        }
+        if (rotationInFlight) {
+          await waitForTurnFinalizerStep(rotationInFlight, finalizerSignal).catch(() => undefined);
         }
         // A recording normally closes inside the attempt-fenced turn settlement.
         // Reaching finally with one still active means settlement threw, never ran,
@@ -7675,6 +7905,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           safeErrorDiagnostic(error, (value) => String(redact(value))),
         );
       } finally {
+        // If fallible finalization exited before the ordinary exact-holder
+        // release, the resume signal is the unconditional last line of defense.
+        // Normal finalization already removed its listener in release().
+        if (!sandboxResumeController.signal.aborted) {
+          sandboxResumeController.abort(
+            cancellationSignal?.reason ?? new Error("TURN_ATTEMPT_FINALIZED"),
+          );
+        }
         cancellationSignal?.removeEventListener("abort", noteCancellationRequested);
         const completedAt = performance.now();
         const durationSeconds = (completedAt - activityStarted) / 1000;
@@ -8422,7 +8660,11 @@ function sanitizedModelUsageInput(normalized: ModelCallUsageNormalization): Mode
       : {}),
     ...(normalized.totalTokens !== null ? { totalTokens: normalized.totalTokens } : {}),
     ...(normalized.telemetry.cachedTokens !== null
-      ? { inputTokensDetails: { cached_tokens: normalized.telemetry.cachedTokens } }
+      ? {
+          inputTokensDetails: {
+            cached_tokens: normalized.telemetry.cachedTokens,
+          },
+        }
       : {}),
   };
 }

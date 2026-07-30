@@ -74,7 +74,15 @@ export const SANDBOX_REQUIRED_ENV: Record<SandboxBackend, SandboxEnvBackendSpec>
       "OPENGENI_MODAL_TOKEN_SECRET",
       "OPENGENI_MODAL_TIMEOUT_SECONDS",
     ],
-    optional: ["OPENGENI_MODAL_ENVIRONMENT", "OPENGENI_MODAL_IMAGE_REF"],
+    optional: [
+      "OPENGENI_MODAL_ENVIRONMENT",
+      "OPENGENI_MODAL_IMAGE_REF",
+      "OPENGENI_MODAL_IMAGE_REGISTRY_SECRET",
+      "OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS",
+      "OPENGENI_MODAL_WORKSPACE_PERSISTENCE",
+      "OPENGENI_SANDBOX_ROTATION_BATCH_SIZE",
+      "OPENGENI_SANDBOX_ROTATION_LEAD_MS",
+    ],
   },
   daytona: {
     required: ["OPENGENI_DAYTONA_API_KEY"],
@@ -131,6 +139,20 @@ export const SANDBOX_SURFACING_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_STREAM_CONTROL_ENABLED",
   "OPENGENI_SANDBOX_OWNERSHIP_ENABLED",
   "OPENGENI_SANDBOX_DESKTOP_ENABLED",
+];
+
+/** Provider-neutral lease/snapshot lifecycle knobs. These must render for every
+ * backend rather than being accidentally gated behind the Modal credential
+ * table. */
+export const SANDBOX_LIFECYCLE_PASSTHROUGH_ENV: readonly string[] = [
+  "OPENGENI_SANDBOX_IDLE_GRACE_MS",
+  "OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS",
+  "OPENGENI_SANDBOX_LEASE_TTL_MS",
+  "OPENGENI_SANDBOX_LEASE_WARMING_TTL_MS",
+  "OPENGENI_SANDBOX_SNAPSHOT_INTERVAL_MS",
+  "OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS",
+  "OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS",
+  "OPENGENI_SANDBOX_WARMING_TIMEOUT_MS",
 ];
 
 /** Control-plane secrets needed for a complete Connected Machine deployment.
@@ -2256,6 +2278,9 @@ function runtimeEnvValues(
   // @opengeni/config. Preview turns them ON via the helm config map; here we
   // ensure the HMAC secret + the modal image ref reach the runtime secret.
   for (const key of SANDBOX_SURFACING_PASSTHROUGH_ENV) {
+    entries.push(valueEnv(key, env[key]));
+  }
+  for (const key of SANDBOX_LIFECYCLE_PASSTHROUGH_ENV) {
     entries.push(valueEnv(key, env[key]));
   }
 

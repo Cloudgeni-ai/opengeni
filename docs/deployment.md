@@ -269,7 +269,7 @@ PostgreSQL catalogs in a repeatable-read/read-only transaction:
   `row_security=on`;
 - no database/schema/relation/private-routine ownership and no database/schema
   CREATE;
-- exactly 85 declared tenant tables with ENABLE + FORCE + active RLS and at
+- exactly 86 declared tenant tables with ENABLE + FORCE + active RLS and at
   least one policy each;
 - exact SELECT/INSERT/UPDATE/DELETE grants for each declared privilege class,
   absence of TRUNCATE/REFERENCES/TRIGGER everywhere, and no privileges on any
@@ -294,6 +294,28 @@ probe from that exact Secret, then start only the posture-gated runtime. A
 rollback may restore a compatible image digest, but must never restore the old
 broad database URL or role attributes. If an older image cannot run through the
 restricted role, remain in maintenance and fix forward.
+
+Migration `0138_sandbox_checkpoint_artifacts_and_deadlines.sql` is also a
+maintenance-only protocol cutover. Old workers do not stamp provider deadlines
+or honor rotation admission fences, so a rolling/mixed-version application
+deployment would create permanently unrotatable leases after the one-time
+backfill. The required sequence is:
+
+1. bind and verify the exact production subscription, cluster context,
+   namespace, release, database, and image digests;
+2. stop the API, control-worker, and turn-worker Deployments while preserving
+   the migration-only secret and Job identity;
+3. query `pg_stat_activity` through the migration connection and prove zero
+   other sessions with `usename = 'opengeni_app'`;
+4. run the new digest's migration Job and require 0138 to appear in
+   `schema_migrations`;
+5. start only the same new digest's API and workers, then require startup/readiness
+   posture checks before reopening traffic.
+
+The migration repeats the `opengeni_app` guard before and after taking exclusive
+lease-lifecycle table locks, so a missed live application fails with SQLSTATE
+`55000` and leaves the prior schema intact. After 0138 commits, rollback to an
+older application image is forbidden; stop admission and fix forward.
 
 For Azure managed Blob storage, the artifact generator can consume the
 sensitive Terraform output `object_storage_azure_connection_string` into the
@@ -1268,7 +1290,7 @@ helm upgrade --install opengeni deploy/helm/opengeni \
   --set secret.existingSecret=opengeni-runtime
 ```
 
-`ServiceMonitor` and `PrometheusRule` templates render only when `monitoring.coreos.com/v1` CRDs are installed. The starter rules cover stuck turns (`opengeni_turn_oldest_inflight_age_seconds > 900`), sandbox create failure ratio, orphan sandbox growth, and scraped target availability. The chart-managed OpenTelemetry Collector remains optional and is for traces/logs forwarding, not scraped metrics.
+`ServiceMonitor` and `PrometheusRule` templates render only when `monitoring.coreos.com/v1` CRDs are installed. The starter rules cover stuck turns (`opengeni_turn_oldest_inflight_age_seconds > 900`), sandbox create failure ratio, orphan sandbox growth, overdue finite-lifetime rotation, checkpoint deletion failures, terminal-owner retained-process backlog, expired drains, and scraped target availability. The chart-managed OpenTelemetry Collector remains optional and is for traces/logs forwarding, not scraped metrics.
 
 Minimum production dashboards should cover:
 

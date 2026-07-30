@@ -326,15 +326,19 @@ bounded command probe before reporting success. A legacy `warm` row projects to
 retires only the exact `(lease_epoch, instance_id)` and advances the epoch once.
 
 A lost provider is rematerialized by one cold-to-warming winner. Under the lease
-row lock it selects one versioned archive revision containing archive byte/hash
-metadata and a deterministic workspace-tree fingerprint. Repeated starts with
-the same rematerialization id are idempotent; rivals and stale progress/commit
-writes are fenced. The runtime verifies archive bytes before hydration and the
-restored tree before `warm` publication. A partial hydrate or fingerprint
-mismatch terminates the unpublished box and leaves typed degraded/unrecoverable
-state; it never publishes a clean replacement, a previous revision, or a mixed
-snapshot. A legacy per-session archive can participate only after its archive
-fields—never provider identity—are imported and selected under that same lock.
+row lock it selects one versioned archive revision. A native Modal revision must
+match its immutable current artifact receipt, source mutation generation, and
+canonical provider-workspace binding; the exact authenticated client embedded
+in the created session must match that binding before hydration. A real tar
+revision instead carries byte/hash plus deterministic content-tree metadata.
+Repeated starts with the same rematerialization id are idempotent; rivals and
+stale progress/commit writes are fenced. Native restore trusts Modal's snapshot
+semantics and verifies receipt/readiness; only tar restore verifies the restored
+tree. A partial hydrate or failed verification terminates the unpublished box
+and leaves typed degraded/unrecoverable state; it never publishes a clean
+replacement, a previous revision, or a mixed snapshot. A legacy per-session
+archive can participate only after its archive fields—never provider identity—
+are imported and selected under that same lock.
 
 Concurrent routed calls may all discover the same missing provider. Exactly one
 observer wins the lease-loss transition; the others receive typed `superseded`

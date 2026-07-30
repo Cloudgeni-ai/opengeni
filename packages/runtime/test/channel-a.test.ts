@@ -7,7 +7,15 @@
 // parsers are also unit-tested in isolation (no box) for the porcelain/numstat/
 // unified-diff shapes the Pierre diff consumes.
 
-import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  setDefaultTimeout,
+  test,
+} from "bun:test";
 import { testSettings } from "@opengeni/testing";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -55,6 +63,24 @@ type LiveLocalSession = ChannelASession & {
 
 const liveSessions: LiveLocalSession[] = [];
 const temporaryRoots: string[] = [];
+const originalAgentsPython = process.env.OPENAI_AGENTS_PYTHON;
+
+beforeAll(() => {
+  if (originalAgentsPython !== undefined) return;
+  const python = Bun.which("python3");
+  if (python === null) {
+    throw new Error("real local sandbox tests require a Python 3 executable");
+  }
+  // The local sandbox intentionally supplies a minimal child PATH. Give the
+  // Agents SDK's host-side PTY bridge the absolute interpreter selected from
+  // the test runner's PATH so these tests are portable to Nix hosts as well.
+  process.env.OPENAI_AGENTS_PYTHON = python;
+});
+
+afterAll(() => {
+  if (originalAgentsPython === undefined) delete process.env.OPENAI_AGENTS_PYTHON;
+  else process.env.OPENAI_AGENTS_PYTHON = originalAgentsPython;
+});
 
 async function makeBox(): Promise<{ session: LiveLocalSession; root: string }> {
   const settings = testSettings({ sandboxBackend: "local", webSearchEnabled: false });
@@ -86,6 +112,14 @@ function runFixtureCommand(root: string, command: string): void {
       `fixture command failed (${result.exitCode}): ${Buffer.from(result.stderr).toString("utf8")}`,
     );
   }
+}
+
+function requireHostExecutable(name: string): string {
+  const executable = Bun.which(name);
+  if (executable === null) {
+    throw new Error(`Channel-A test requires ${name} on PATH`);
+  }
+  return executable;
 }
 
 function makeModalLikeExecOnlySession(
@@ -132,6 +166,7 @@ function makeModalLikeExecOnlySession(
           .filter((value) => value.length > 0)
           .map((value) => value.trimEnd())
           .join("\n");
+        output += "\nmodal-like provider trailer";
         if (output.length > retainedOutputChars) {
           truncated += 1;
           const dropped = output.length - retainedOutputChars;
@@ -212,6 +247,12 @@ function makeStockMacCommandSurface(root: string): { bin: string; log: string } 
     ].join("\n"),
   );
   return { bin, log };
+}
+
+function framedConfinedOutput(command: string, payload = "", status = 0, prelude = ""): string {
+  const frame = /__OPENGENI_FS_CONFINED_([a-f0-9]{32})_OK__/.exec(command)?.[1];
+  if (!frame) throw new Error("confined command did not contain a frame nonce");
+  return `${prelude}__OPENGENI_FS_CONFINED_${frame}_OK__\n${payload}__OPENGENI_FS_CONFINED_${frame}_END__:${status}__`;
 }
 
 describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
@@ -539,12 +580,14 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
         exec: async (args) => {
           command = args.cmd;
           return {
-            stdout: [
-              "__OPENGENI_FS_CONFINED_OK__\n",
-              `d\t0\t1.0\t755\t./src${recordDelimiter}`,
-              `f\t1\t1.0\t644\t./src/a.ts${recordDelimiter}`,
-              `__OPENGENI_FS_LIST_TRUNCATED__${recordDelimiter}`,
-            ].join(""),
+            stdout: framedConfinedOutput(
+              args.cmd,
+              [
+                `d\t0\t1.0\t755\t./src${recordDelimiter}`,
+                `f\t1\t1.0\t644\t./src/a.ts${recordDelimiter}`,
+                `__OPENGENI_FS_LIST_TRUNCATED__${recordDelimiter}`,
+              ].join(""),
+            ),
             stderr: "",
             exitCode: 0,
           };
@@ -591,7 +634,7 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
           if (commands.length === 1) {
             return { stdout: "provider temporarily unavailable", stderr: "", exitCode: 1 };
           }
-          return { stdout: "__OPENGENI_FS_CONFINED_OK__\n", stderr: "", exitCode: 0 };
+          return { stdout: framedConfinedOutput(args.cmd), stderr: "", exitCode: 0 };
         },
       },
     });
@@ -599,6 +642,11 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
     const list = await svc.fsList({ path: "", depth: 1, maxEntries: 10, includeHidden: true });
     expect(list.root.children).toEqual([]);
     expect(commands).toHaveLength(2);
+    expect(
+      new Set(
+        commands.map((command) => /__OPENGENI_FS_CONFINED_([a-f0-9]{32})_OK__/.exec(command)?.[1]),
+      ).size,
+    ).toBe(2);
     for (const command of commands) {
       expect(command.startsWith("env -u BASH_ENV bash --noprofile --norc -c ")).toBe(true);
       expect(command).not.toContain("bash -lc");
@@ -609,10 +657,10 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
     let calls = 0;
     const svc = new SandboxChannelAService({
       session: {
-        exec: async () => {
+        exec: async (args) => {
           calls += 1;
           return {
-            stdout: "provider prelude\n__OPENGENI_FS_CONFINED_OK__\n",
+            stdout: framedConfinedOutput(args.cmd, "", 0, "provider prelude\n"),
             stderr: "",
             exitCode: 0,
           };
@@ -623,6 +671,26 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
     const list = await svc.fsList({ path: ".", depth: 1, maxEntries: 10, includeHidden: true });
     expect(list.root.children).toEqual([]);
     expect(calls).toBe(1);
+  });
+
+  test("fsList rejects truncated or malformed confined end frames", async () => {
+    for (const corrupt of [
+      (frame: string) => frame.slice(0, -2),
+      (frame: string) => frame.replace(/:0__$/, ":256__"),
+    ]) {
+      const svc = new SandboxChannelAService({
+        session: {
+          exec: async (args) => ({
+            stdout: corrupt(framedConfinedOutput(args.cmd)),
+            stderr: "",
+            exitCode: 0,
+          }),
+        },
+      });
+      await expect(
+        svc.fsList({ path: ".", depth: 1, maxEntries: 10, includeHidden: true }),
+      ).rejects.toBeInstanceOf(ChannelAUnavailableError);
+    }
   });
 
   test("fsList classifies repeated unmarked provider results as unavailable, never bad input", async () => {
@@ -1023,6 +1091,7 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
       "__OPENGENI_FS_ESCAPE__",
       "__OPENGENI_FS_SYMLINK__",
       "__OPENGENI_FS_CONFINED_OK__",
+      "__OPENGENI_FS_CONFINED_END__:0__",
     ]) {
       await svc.fsWrite({
         path,
@@ -1045,6 +1114,7 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
         "__OPENGENI_FS_ESCAPE__",
         "__OPENGENI_FS_SYMLINK__",
         "__OPENGENI_FS_CONFINED_OK__",
+        "__OPENGENI_FS_CONFINED_END__:0__",
       ]),
     );
 
@@ -1055,6 +1125,7 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
         "__OPENGENI_FS_ESCAPE__",
         "__OPENGENI_FS_SYMLINK__",
         "__OPENGENI_FS_CONFINED_OK__",
+        "__OPENGENI_FS_CONFINED_END__:0__",
       ]),
     );
   });
@@ -1295,6 +1366,7 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
     const victim = join(root, "victim.txt");
     const safeContent = "safe payload\n";
     const secretContent = "leak target!\n";
+    const realCat = requireHostExecutable("cat");
     expect(Buffer.byteLength(safeContent)).toBe(Buffer.byteLength(secretContent));
     writeFileSync(outside, secretContent);
     runFixtureCommand(root, "git init -q");
@@ -1309,7 +1381,7 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
         'rm -f -- "$OPENGENI_SWAP_VICTIM"',
         'ln -s -- "$OPENGENI_SWAP_OUTSIDE" "$OPENGENI_SWAP_VICTIM"',
         'printf x >> "$OPENGENI_SWAP_COUNT"',
-        'exec /bin/cat "$@"',
+        `exec ${JSON.stringify(realCat)} "$@"`,
         "",
       ].join("\n"),
     );
@@ -1365,6 +1437,7 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
     const victim = join(root, "victim.txt");
     const safeContent = "safe payload\n";
     const secretContent = "leak target!\n";
+    const realCat = requireHostExecutable("cat");
     expect(Buffer.byteLength(safeContent)).toBe(Buffer.byteLength(secretContent));
     writeFileSync(outside, secretContent);
     runFixtureCommand(root, "git init -q");
@@ -1378,7 +1451,7 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
         'rm -f -- "$OPENGENI_SWAP_VICTIM"',
         'ln -s -- "$OPENGENI_SWAP_OUTSIDE" "$OPENGENI_SWAP_VICTIM"',
         'printf x >> "$OPENGENI_SWAP_COUNT"',
-        'exec /bin/cat "$@"',
+        `exec ${JSON.stringify(realCat)} "$@"`,
         "",
       ].join("\n"),
     );
@@ -1554,6 +1627,7 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
     runFixtureCommand(root, "git init -q && printf 'notes\\n' > notes.txt");
     const bin = join(root, "producer-bin");
     const count = join(root, "ls-files-count");
+    const realGit = requireHostExecutable("git");
     mkdirSync(bin);
     writeFileSync(
       join(bin, "git"),
@@ -1562,12 +1636,12 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
         'if [[ " $* " == *" ls-files "* ]]; then',
         '  n=0; [ ! -f "$OPENGENI_GIT_COUNT" ] || n=$(<"$OPENGENI_GIT_COUNT")',
         '  n=$((n + 1)); printf "%s" "$n" > "$OPENGENI_GIT_COUNT"',
-        '  /usr/bin/git "$@"',
+        `  ${JSON.stringify(realGit)} "$@"`,
         "  status=$?",
         '  if [ "$n" -ge 2 ]; then exit 42; fi',
         '  exit "$status"',
         "fi",
-        'exec /usr/bin/git "$@"',
+        `exec ${JSON.stringify(realGit)} "$@"`,
         "",
       ].join("\n"),
     );
@@ -1601,6 +1675,7 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
     runFixtureCommand(root, "git init -q && printf 'alpha\\n' > alpha.txt");
     const bin = join(root, "producer-bin");
     const count = join(root, "ls-files-count");
+    const realGit = requireHostExecutable("git");
     mkdirSync(bin);
     writeFileSync(
       join(bin, "git"),
@@ -1612,7 +1687,7 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
         '  if [ "$n" -eq 1 ]; then printf "alpha.txt\\0"; else printf "bravo.txt\\0"; fi',
         "  exit 0",
         "fi",
-        'exec /usr/bin/git "$@"',
+        `exec ${JSON.stringify(realGit)} "$@"`,
         "",
       ].join("\n"),
     );
@@ -2156,21 +2231,23 @@ describe("P4.4 SandboxChannelAService — terminal cwd frames", () => {
         paths.push(workdir ?? "");
         if (cmd.includes("git rev-parse")) {
           return {
-            stdout: "__OPENGENI_FS_CONFINED_OK__\ntrue\n",
+            stdout: framedConfinedOutput(cmd, "true\n"),
             stderr: "",
             exitCode: 0,
           };
         }
         if (cmd.includes("wc -c")) {
           return {
-            stdout:
-              "__OPENGENI_FS_CONFINED_OK__\n__OPENGENI_GIT_MEASURE_V1__\t0\t0\te3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            stdout: framedConfinedOutput(
+              cmd,
+              "__OPENGENI_GIT_MEASURE_V1__\t0\t0\te3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            ),
             stderr: "",
             exitCode: 0,
           };
         }
         return {
-          stdout: cmd.includes('cd -P -- "$target"') ? "__OPENGENI_FS_CONFINED_OK__\n" : "",
+          stdout: cmd.includes('cd -P -- "$target"') ? framedConfinedOutput(cmd) : "",
           stderr: "",
           exitCode: 0,
         };

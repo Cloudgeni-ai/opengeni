@@ -54,7 +54,7 @@
     "@opengeni/contracts": "workspace:*",
     "@opengeni/network": "workspace:*",
     "debug": "4.4.3",
-    "modal": "0.7.6",
+    "modal": "0.9.0",
     "openai": "6.47.0",
     "ws": "8.21.1"
   },

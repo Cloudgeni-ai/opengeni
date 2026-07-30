@@ -56,6 +56,25 @@ function reaperServices(settings: Settings): () => Promise<ActivityServices> {
   });
 }
 
+function archiveDescriptor(archive: string, capturedAtMs: number) {
+  const bytes = Buffer.from(archive, "base64");
+  const archiveSha256 = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
+  return {
+    version: 1 as const,
+    revision: `wa1:${capturedAtMs}:${archiveSha256}`,
+    archiveSha256,
+    archiveBytes: bytes.length,
+    capturedAt: new Date(capturedAtMs).toISOString(),
+    workspace: {
+      algorithm: "sha256" as const,
+      sha256: archiveSha256,
+      entryCount: 1,
+      fileCount: 1,
+      totalFileBytes: bytes.length,
+    },
+  };
+}
+
 function makeTerminateSpy(): { fn: TerminateBoxFn; calls: { group: string; epoch: number }[] } {
   const calls: { group: string; epoch: number }[] = [];
   const fn: TerminateBoxFn = async (_settings, lease, _observability, persistArchive) => {
@@ -63,9 +82,8 @@ function makeTerminateSpy(): { fn: TerminateBoxFn; calls: { group: string; epoch
     // Mirror the production seam: persist the /workspace archive onto the lease
     // (epoch-fenced) BEFORE terminating; a CAS miss (re-armed) returns false and
     // the box is left running. Return wrote so the caller colds only on success.
-    const { wrote } = await persistArchive(
-      Buffer.from("WARM_METER_SPY_ARCHIVE").toString("base64"),
-    );
+    const archive = Buffer.from("WARM_METER_SPY_ARCHIVE").toString("base64");
+    const { wrote } = await persistArchive(archive, archiveDescriptor(archive, 1_900_000_000_000));
     return wrote;
   };
   return { fn, calls };

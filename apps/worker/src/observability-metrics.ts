@@ -384,6 +384,97 @@ export function recordSandboxOrphansTerminated(observability: Observability, cou
   });
 }
 
+export type SandboxCheckpointArtifactMetricState =
+  | "candidate"
+  | "current"
+  | "previous"
+  | "delete_pending"
+  | "deleting"
+  | "delete_failed"
+  | "deleted";
+
+export function recordSandboxCheckpointArtifactGauges(
+  observability: Observability,
+  counts: Record<SandboxCheckpointArtifactMetricState, number>,
+): void {
+  for (const state of [
+    "candidate",
+    "current",
+    "previous",
+    "delete_pending",
+    "deleting",
+    "delete_failed",
+    "deleted",
+  ] as const) {
+    observability.setGauge({
+      name: "opengeni_sandbox_checkpoint_artifacts",
+      help: "Current durable provider checkpoint artifacts by lifecycle state.",
+      labels: { state },
+      value: counts[state],
+    });
+  }
+}
+
+export type SandboxCheckpointArtifactOutcome =
+  | "legacy_adopted"
+  | "claimed"
+  | "deleted"
+  | "delete_failed"
+  | "tombstone_pruned";
+
+export function recordSandboxCheckpointArtifactOutcome(
+  observability: Observability,
+  outcome: SandboxCheckpointArtifactOutcome,
+  count = 1,
+): void {
+  if (count <= 0) return;
+  observability.incrementCounter({
+    name: "opengeni_sandbox_checkpoint_artifact_operations_total",
+    help: "Durable provider checkpoint artifact operations by fixed outcome.",
+    labels: { outcome },
+    amount: count,
+  });
+}
+
+export function recordSandboxDeadlineRotationsRequested(
+  observability: Observability,
+  count: number,
+): void {
+  if (count <= 0) return;
+  observability.incrementCounter({
+    name: "opengeni_sandbox_deadline_rotations_requested_total",
+    help: "Total finite-lifetime sandbox rotations requested before provider deadline.",
+    amount: count,
+  });
+}
+
+export function recordSandboxRotationBacklogGauges(
+  observability: Observability,
+  backlog: {
+    requested: number;
+    overdue: number;
+    turnBlocked: number;
+    directBlocked: number;
+    processBlocked: number;
+  },
+): void {
+  const values = {
+    requested: backlog.requested,
+    overdue: backlog.overdue,
+    turn_blocked: backlog.turnBlocked,
+    direct_blocked: backlog.directBlocked,
+    process_blocked: backlog.processBlocked,
+  } as const;
+  for (const [kind, value] of Object.entries(values)) {
+    observability.setGauge({
+      name: "opengeni_sandbox_rotation_backlog",
+      help: "Current finite-lifetime sandbox rotation backlog by fixed condition.",
+      labels: { kind },
+      value,
+    });
+  }
+}
+
 const RETAINED_PROCESS_OWNER_STATES = [
   "direct",
   "queued",
@@ -503,6 +594,9 @@ export const RETAINED_PROCESS_RECONCILIATION_OUTCOMES = [
   "provider_unknown",
   "provider_timeout",
   "provider_error",
+  "provider_binding_missing",
+  "provider_binding_mismatch",
+  "provider_binding_adopted",
   "defer_failed",
 ] as const;
 
