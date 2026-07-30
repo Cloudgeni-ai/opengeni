@@ -5,6 +5,7 @@ import { dbSearchPath, getSettings } from "@opengeni/config";
 import {
   createDb,
   createImportBatch,
+  findCompletedImportBatch,
   markStaleRegistryCatalogItems,
   updateImportBatchCounts,
   upsertRegistryCapabilityCatalogItem,
@@ -18,6 +19,10 @@ const SOURCE = "integrations.sh";
 const MIT_ATTRIBUTION =
   "Seed catalog metadata imported from integrations.sh / UsefulSoftwareCo integrationsdotsh (MIT License, Copyright (c) 2026 Rhys Sullivan).";
 const MAX_LOGO_BYTES = 512 * 1024;
+
+// Bump deliberately whenever normalization or import semantics can change
+// persisted output without changing the reviewed snapshot bytes.
+export const CATALOG_IMPORT_SEMANTIC_VERSION = 1;
 
 export const deadDemoDomains = new Set([
   "auto-calculator.onrender.com",
@@ -1111,11 +1116,13 @@ function parseArgs(argv: string[]): {
   snapshotPath: string;
   dryRun: boolean;
   skipLogos: boolean;
+  ifChanged: boolean;
   snapshotRef?: string;
 } {
   let snapshotPath = "";
   let dryRun = false;
   let skipLogos = false;
+  let ifChanged = false;
   let snapshotRef: string | undefined;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]!;
@@ -1125,6 +1132,8 @@ function parseArgs(argv: string[]): {
       dryRun = true;
     } else if (arg === "--skip-logos") {
       skipLogos = true;
+    } else if (arg === "--if-changed") {
+      ifChanged = true;
     } else if (arg === "--snapshot-ref") {
       snapshotRef = argv[++index];
     } else if (!arg.startsWith("--") && !snapshotPath) {
@@ -1139,13 +1148,62 @@ function parseArgs(argv: string[]): {
   if (!snapshotPath) {
     throw new Error("missing --snapshot <path>");
   }
-  return { snapshotPath, dryRun, skipLogos, ...(snapshotRef ? { snapshotRef } : {}) };
+  return { snapshotPath, dryRun, skipLogos, ifChanged, ...(snapshotRef ? { snapshotRef } : {}) };
 }
 
 function printUsage(): void {
   console.log(
-    "Usage: bun scripts/import-integrations-catalog.ts --snapshot <snapshot.json> [--dry-run] [--skip-logos] [--snapshot-ref <label>]",
+    "Usage: bun scripts/import-integrations-catalog.ts --snapshot <snapshot.json> [--dry-run] [--skip-logos] [--if-changed] [--snapshot-ref <label>]",
   );
+}
+
+export async function catalogImportFingerprint(input: {
+  snapshotPath: string;
+  snapshotRef?: string;
+  skipLogos?: boolean;
+  semanticVersion?: number;
+}): Promise<string> {
+  const semanticVersion = input.semanticVersion ?? CATALOG_IMPORT_SEMANTIC_VERSION;
+  if (!Number.isSafeInteger(semanticVersion) || semanticVersion < 1 || semanticVersion > 9999) {
+    throw new Error("catalog import semantic version must be an integer between 1 and 9999");
+  }
+  const snapshotSha256 = createHash("sha256")
+    .update(await readFile(input.snapshotPath))
+    .digest("hex");
+  const digest = createHash("sha256")
+    .update(
+      JSON.stringify({
+        importerSemanticVersion: semanticVersion,
+        skipLogos: input.skipLogos === true,
+        snapshotRef: input.snapshotRef ?? null,
+        snapshotSha256,
+      }),
+    )
+    .digest("hex");
+  return `catalog-import-v${semanticVersion}@sha256:${digest}`;
+}
+
+export async function resolveIfChangedCatalogImport<T>(
+  input: {
+    snapshotPath: string;
+    snapshotRef?: string;
+    skipLogos?: boolean;
+    importedCount: number;
+    semanticVersion?: number;
+  },
+  findCompleted: (input: {
+    source: string;
+    snapshotRef: string;
+    importedCount: number;
+  }) => Promise<T | null>,
+): Promise<{ snapshotRef: string; completedBatch: T | null }> {
+  const snapshotRef = await catalogImportFingerprint(input);
+  const completedBatch = await findCompleted({
+    source: SOURCE,
+    snapshotRef,
+    importedCount: input.importedCount,
+  });
+  return { snapshotRef, completedBatch };
 }
 
 if (import.meta.main) {
@@ -1177,11 +1235,42 @@ if (import.meta.main) {
     rlsStrategy: settings.rlsStrategy,
   });
   try {
+    const importDecision = args.ifChanged
+      ? await resolveIfChangedCatalogImport(
+          {
+            snapshotPath: args.snapshotPath,
+            ...(args.snapshotRef ? { snapshotRef: args.snapshotRef } : {}),
+            skipLogos: args.skipLogos,
+            importedCount: normalized.rows.length,
+          },
+          (input) => findCompletedImportBatch(dbClient.db, input),
+        )
+      : {
+          snapshotRef: args.snapshotRef ?? basename(args.snapshotPath),
+          completedBatch: null,
+        };
+    const { snapshotRef, completedBatch } = importDecision;
+    if (completedBatch) {
+      console.log(
+        JSON.stringify(
+          {
+            unchanged: true,
+            batchId: completedBatch.id,
+            imported: completedBatch.importedCount,
+            snapshotRef,
+          },
+          null,
+          2,
+        ),
+      );
+      await dbClient.close();
+      process.exit(0);
+    }
     const storage = args.skipLogos ? null : createObjectStorage(settings);
     const result = await importIntegrationsCatalog({
       db: dbClient.db,
       snapshot,
-      snapshotRef: args.snapshotRef ?? basename(args.snapshotPath),
+      snapshotRef,
       storage,
       storeLogos: !args.skipLogos,
     });

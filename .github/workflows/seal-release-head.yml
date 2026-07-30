@@ -9,7 +9,7 @@ on:
         required: true
         type: string
       reviewed_base_sha:
-        description: Exact current main SHA admitted by the base-owned source verifier.
+        description: Exact current main SHA owning the trusted sealing workflow; it may postdate the PR event base.
         required: true
         type: string
       reviewed_head_sha:

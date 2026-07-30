@@ -229,6 +229,17 @@ out of API and worker pods. Its default command serializes `db:migrate`,
 `helm upgrade` before workload replacement begins. Operators running without
 Helm must preserve the same order explicitly.
 
+After a successful install or upgrade, the default-on `catalogImport` hook Job
+imports the committed reviewed integrations snapshot. It receives the runtime
+Secret for object-storage configuration but overrides `OPENGENI_DATABASE_URL`
+from the migration-only Secret because global catalog and import-provenance
+tables are deliberately unavailable to the runtime role. The Job uses a SHA-256
+snapshot reference and performs no database, network, or logo-storage work when
+that exact revision already completed. Set `catalogImport.enabled=false` to opt
+out. Logo fetching is disabled by default so third-party availability cannot
+block a rollout; set `catalogImport.skipLogos=false` to opt into validated,
+self-hosted catalog logos.
+
 The provisioner converges `opengeni_app` to `LOGIN NOSUPERUSER NOBYPASSRLS
 NOCREATEROLE NOCREATEDB NOREPLICATION NOINHERIT`, refuses to guess through any
 privilege-bearing role membership or ownership, revokes database/schema creation
@@ -427,7 +438,7 @@ Current profiles:
 
 ## Local Docker Compose
 
-`bun run dev` is the primary local Docker Compose path. It starts Postgres, NATS, Temporal, MinIO, migrations, the sandbox image build, API, both workers (control and turn), and web.
+`bun run dev` is the primary local Docker Compose path. It starts Postgres, NATS, Temporal, MinIO, migrations, imports the fingerprinted reviewed integrations catalog, builds the sandbox image, and starts the API, both workers (control and turn), and web. Set `OPENGENI_CATALOG_IMPORT_ENABLED=false` to omit the catalog import.
 
 When a common host port is already occupied, `bun run dev` auto-selects a nearby free port for Docker Compose and rewrites the in-memory runtime URLs for that run. Set `OPENGENI_POSTGRES_HOST_PORT`, `OPENGENI_NATS_HOST_PORT`, `OPENGENI_NATS_MONITOR_HOST_PORT`, `OPENGENI_TEMPORAL_HOST_PORT`, `OPENGENI_MINIO_HOST_PORT`, or `OPENGENI_MINIO_CONSOLE_HOST_PORT` in `.env` if you need fixed local port choices.
 
@@ -578,8 +589,8 @@ object with the top-level keys sorted in ascending ASCII order:
 `id` is the live positive release ID and `publishedAt` is the provider
 `published_at` value normalized through `new Date(value).toISOString()`. If an
 existing release differs from this identity after a retention check exists,
-sealing fails rather than creating a second proof; push a new head based on
-current `main`, let source admission pass, and seal that new head.
+sealing fails rather than creating a second proof; publish and seal a fresh
+exact head. Do not rebase an unchanged candidate solely because `main` moved.
 Trusted Version-PR admission publishes the same check. This gives downstream
 release operators a provider-owned proof of immutable source retention without
 requiring a credential that crosses repository boundaries. A tag and immutable
@@ -616,8 +627,19 @@ discontinuous range fails closed.
 
 The exact reviewed head must still resolve directly from its canonical
 `opengeni-release-head-<sha>` tag and have one successful GitHub Actions
-`Current-base source admission` check. The exact source must separately have
-one successful GitHub Actions result for each required candidate check:
+`Current-base source admission` check. The legacy context name is retained for
+the repository ruleset, but the check admits the immutable provider event head
+against the PR's provider merge-base tree; it does not require the event base
+to equal continuously moving `main`. The base-owned workflow/helper SHA must
+remain in protected `main` ancestry, and the provider base/head/repository,
+direct tree manifest, file projection, helper digest, read-only permissions,
+and terminal head identity remain fail-closed. Exact-head review stays bound to
+the candidate. The merge authority separately performs the fresh latest-main
+conflict, canonical patch-equivalence, protected-path, generated/migration,
+identity/manifest, security, and evidence checks immediately before merge.
+
+The exact source must separately have one successful GitHub Actions result for
+each required candidate check:
 `Typecheck and unit tests`, `Deployment artifacts`, and `Workload image
 builds`. Missing, moved, indirect, duplicated, failed, wrong-head, or
 foreign-app evidence is rejected. Check history is read with `filter=all`, and

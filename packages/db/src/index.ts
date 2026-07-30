@@ -4173,6 +4173,25 @@ export async function createImportBatch(
   return mapImportBatch(row);
 }
 
+export async function findCompletedImportBatch(
+  db: Database,
+  input: { source: string; snapshotRef: string; importedCount: number },
+): Promise<ImportBatch | null> {
+  const [row] = await db
+    .select()
+    .from(schema.importBatches)
+    .where(
+      and(
+        eq(schema.importBatches.source, input.source),
+        eq(schema.importBatches.snapshotRef, input.snapshotRef),
+        eq(schema.importBatches.importedCount, input.importedCount),
+      ),
+    )
+    .orderBy(desc(schema.importBatches.updatedAt))
+    .limit(1);
+  return row ? mapImportBatch(row) : null;
+}
+
 export async function updateImportBatchCounts(
   db: Database,
   id: string,

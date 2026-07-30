@@ -587,7 +587,7 @@ function syntheticSourceAdmissionContext(context, pull) {
         `${RELEASE_AUTOMATION_CONTRACT.sourceAdmissionWorkflowPath}@refs/heads/` +
         RELEASE_AUTOMATION_CONTRACT.defaultBranch,
       GITHUB_WORKFLOW_SHA: context.baseSha,
-      OPENGENI_SOURCE_ADMISSION_ACTION: "verify_current_base_head",
+      OPENGENI_SOURCE_ADMISSION_ACTION: "verify_immutable_pr_head",
     },
     event: {
       action: "synchronize",
@@ -626,7 +626,10 @@ export async function validateVersionPrCiAdmission(options = {}) {
     fetchImpl,
     logger,
   });
-  invariant(admission.baseSha === context.baseSha, "source admission returned another base SHA");
+  invariant(
+    admission.workflowSha === context.baseSha,
+    "source admission returned another workflow SHA",
+  );
   invariant(admission.headSha === context.headSha, "source admission returned another head SHA");
   await terminalVersionIdentity(api, context);
   logger.log(`Automation dispatch admitted Version PR #${context.prNumber} at ${context.headSha}.`);
@@ -664,7 +667,7 @@ function releaseHeadSealContext(env, suppliedInputs) {
   };
 }
 
-function assertOpenReleasePull(pull, context) {
+function assertOpenReleasePull(pull, context, expectedBaseSha) {
   invariant(pull?.number === context.prNumber, "release-head pull-request number changed");
   invariant(
     pull?.state === "open" && pull?.merged === false,
@@ -673,13 +676,17 @@ function assertOpenReleasePull(pull, context) {
   invariant(pull?.draft === false, "release-head pull request is a draft");
   invariant(
     pull?.base?.ref === RELEASE_AUTOMATION_CONTRACT.defaultBranch &&
-      pull.base.repo?.full_name === RELEASE_AUTOMATION_CONTRACT.repository &&
-      pull.base.sha === context.baseSha,
+      pull.base.repo?.full_name === RELEASE_AUTOMATION_CONTRACT.repository,
     "release-head pull-request base changed",
   );
+  const baseSha = assertSha(pull.base.sha, "release-head pull-request base SHA");
+  if (expectedBaseSha !== undefined) {
+    invariant(baseSha === expectedBaseSha, "release-head pull-request base changed");
+  }
   invariant(pull?.head?.sha === context.headSha, "release-head pull-request head changed");
   assertString(pull?.head?.ref, "release-head pull-request head branch");
   assertString(pull?.head?.repo?.full_name, "release-head pull-request head repository");
+  return baseSha;
 }
 
 function releaseHeadRecoveryContext(env, suppliedInputs) {
@@ -933,14 +940,18 @@ export async function sealReleaseHeadEvidence(options = {}) {
   ]);
   assertRepository(repository);
   assertMainRef(main, context.baseSha, "release-head default branch");
-  assertOpenReleasePull(pull, context);
+  const pullBaseSha = assertOpenReleasePull(pull, context);
 
   const admission = await verifySourceAdmission({
     ...syntheticSourceAdmissionContext(context, pull),
     fetchImpl,
     logger,
   });
-  invariant(admission.baseSha === context.baseSha, "source admission returned another base SHA");
+  invariant(
+    admission.workflowSha === context.baseSha,
+    "source admission returned another workflow SHA",
+  );
+  invariant(admission.baseSha === pullBaseSha, "source admission returned another PR base SHA");
   invariant(admission.headSha === context.headSha, "source admission returned another head SHA");
   const sourceAdmission = assertSuccessfulCheck(
     await paginatedCheckRuns(api, context.headSha),
@@ -967,7 +978,7 @@ export async function sealReleaseHeadEvidence(options = {}) {
     api.get(repositoryPath(`/pulls/${context.prNumber}`)),
   ]);
   assertMainRef(terminalMain, context.baseSha, "terminal release-head default branch");
-  assertOpenReleasePull(terminalPull, context);
+  assertOpenReleasePull(terminalPull, context, pullBaseSha);
   const terminalReleaseHeadName = assertReleaseHeadRef(
     await api.get(repositoryPath(`/git/ref/tags/${releaseHead.name}`)),
     context.headSha,
