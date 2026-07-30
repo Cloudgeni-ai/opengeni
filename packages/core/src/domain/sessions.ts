@@ -106,7 +106,6 @@ import {
   validateFileResources,
   validateGitHubRepositorySelection,
   validateToolRefs,
-  validateToolRefsForSessionPolicy,
   withDefaultEnabledCapabilityMcpTools,
 } from "./resources";
 
@@ -1659,11 +1658,6 @@ export async function acceptSessionUserMessage(
     operation: input.delivery === "steer" ? "session.steer" : "session.append",
     surface: "core",
   });
-  const capabilityRuntimeSettings = await settingsWithEnabledCapabilityMcpServers(
-    db,
-    workspaceId,
-    settings,
-  );
   // Hoisted above requireLimit so the codex-billed predicate can resolve the
   // turn's effective model (a follow-up turn inherits the session's model). A
   // pure read with no side effects.
@@ -1686,10 +1680,6 @@ export async function acceptSessionUserMessage(
     reasoningEffort: effectiveReasoningEffort,
     reasoningSource: input.reasoningEffort == null ? "session" : "explicit",
   });
-  const runtimeSettings = settingsWithSessionMcpServerMetadata(
-    capabilityRuntimeSettings,
-    existingSession.mcpServers,
-  );
   const requestedResources = normalizeResources(input.resources ?? []);
   await requireLimit(deps, {
     accountId: grant.accountId,

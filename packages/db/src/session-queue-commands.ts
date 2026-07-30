@@ -1,12 +1,9 @@
 import {
   metadataWithTurnExecutionPolicyV1,
   mergeResourceRefs,
-  mergeToolRefs,
   turnExecutionPolicyAuditMetadata,
   type ReasoningEffort,
   type ResourceRef,
-  type SessionToolPolicy,
-  type ToolRef,
   type TurnExecutionPolicyV1,
 } from "@opengeni/contracts";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
