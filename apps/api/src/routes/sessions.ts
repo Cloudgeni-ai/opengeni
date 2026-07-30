@@ -2653,12 +2653,6 @@ function optionalEventSequence(raw: string | undefined): number | undefined {
   return Math.floor(sequence);
 }
 
-function hasOwnProperty(value: unknown, key: string): boolean {
-  return Boolean(
-    value && typeof value === "object" && Object.prototype.hasOwnProperty.call(value, key),
-  );
-}
-
 /** Stable, value-free JSON errors for only the create-session boundary. */
 export function sessionCreateErrorResponse(c: Context, error: unknown): Response {
   if (error instanceof SessionSpawnDeniedError) {

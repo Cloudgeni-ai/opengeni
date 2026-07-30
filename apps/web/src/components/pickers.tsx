@@ -192,7 +192,8 @@ export function SessionToolPicker(props: {
       mcpServerIds: new Set(props.selection.mcpServerIds),
       firstPartyToolIds: new Set(props.selection.firstPartyToolIds),
     };
-    next.mcpServerIds.has(id) ? next.mcpServerIds.delete(id) : next.mcpServerIds.add(id);
+    if (next.mcpServerIds.has(id)) next.mcpServerIds.delete(id);
+    else next.mcpServerIds.add(id);
     props.onChange(next);
   };
   const toggleFirstParty = (id: FirstPartyMcpToolName) => {
@@ -200,9 +201,8 @@ export function SessionToolPicker(props: {
       mcpServerIds: new Set(props.selection.mcpServerIds),
       firstPartyToolIds: new Set(props.selection.firstPartyToolIds),
     };
-    next.firstPartyToolIds.has(id)
-      ? next.firstPartyToolIds.delete(id)
-      : next.firstPartyToolIds.add(id);
+    if (next.firstPartyToolIds.has(id)) next.firstPartyToolIds.delete(id);
+    else next.firstPartyToolIds.add(id);
     props.onChange(next);
   };
   const setAll = (enabled: boolean) =>
