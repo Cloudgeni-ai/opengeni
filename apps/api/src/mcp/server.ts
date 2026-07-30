@@ -36,6 +36,8 @@ import {
   getSessionGoal,
   getSessionQueueSnapshot,
   getSessionTurn,
+  getOrCreatePreferenceRegistrySnapshot,
+  getPreferenceRegistryFullContent,
   getVariableSet,
   getVariableSetByName,
   areGitHubRepositoriesAllowedForWorkspace,
@@ -186,6 +188,8 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   memory_search: { sessionRequired: true, allOf: ["documents:search"] },
   memory_save: { sessionRequired: true, allOf: ["documents:search"] },
   memory_correct: { sessionRequired: true, allOf: ["documents:search"] },
+  preference_registry_summary: { sessionRequired: true, allOf: ["workspace:read"] },
+  preference_registry_get: { sessionRequired: true, allOf: ["workspace:read"] },
   sandboxes_list: { sessionRequired: true, allOf: ["sessions:read"] },
   sandbox_attach: { sessionRequired: true, allOf: ["sessions:control"] },
   sandbox_swap: { sessionRequired: true, allOf: ["sessions:control"] },
@@ -365,6 +369,9 @@ export function buildOpenGeniMcpServer(
   // stays on the normal first-party MCP surface only.
   if (!toolspaceMode && sessionId !== null && options.workspaceMemoryEnabled === true) {
     registerMemoryTools(server, deps, grant, sessionId, json);
+  }
+  if (!toolspaceMode && sessionId !== null && preferenceAttemptClaims(grant) !== null) {
+    registerPreferenceRegistryTools(server, deps, grant, json);
   }
 
   // Fleet tools (M7 bring-your-own-compute): list / attach / swap / run_on /
@@ -1148,6 +1155,70 @@ async function authorizeFirstPartySession(
     operation,
     surface: "first_party_mcp",
   });
+}
+
+function preferenceAttemptClaims(grant: AccessGrant): {
+  sessionId: string;
+  turnId: string;
+  attemptId: string;
+  executionGeneration: number;
+} | null {
+  const metadata = grant.metadata ?? {};
+  if (
+    typeof metadata["sessionId"] !== "string" ||
+    typeof metadata["turnId"] !== "string" ||
+    typeof metadata["attemptId"] !== "string" ||
+    typeof metadata["executionGeneration"] !== "number" ||
+    !Number.isSafeInteger(metadata["executionGeneration"]) ||
+    metadata["executionGeneration"] < 1 ||
+    metadata["executionGeneration"] > 2_147_483_647
+  ) {
+    return null;
+  }
+  return {
+    sessionId: metadata["sessionId"],
+    turnId: metadata["turnId"],
+    attemptId: metadata["attemptId"],
+    executionGeneration: metadata["executionGeneration"],
+  };
+}
+
+function registerPreferenceRegistryTools(
+  server: McpServer,
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  json: JsonResult,
+): void {
+  const attemptClaims = () => {
+    const resolved = preferenceAttemptClaims(grant);
+    if (!resolved) throw new Error("Exact signed preference attempt authority is required.");
+    return {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      ...resolved,
+    };
+  };
+
+  server.registerTool(
+    "preference_registry_summary",
+    {
+      description:
+        "List bounded deterministic descriptors for organization, workspace, and immutable initiating-human preferences frozen to this exact attempt. Full content is omitted; retrieve only a relevant returned handle.",
+      inputSchema: {},
+    },
+    async () => json(await getOrCreatePreferenceRegistrySnapshot(deps.db, attemptClaims())),
+  );
+
+  server.registerTool(
+    "preference_registry_get",
+    {
+      description:
+        "Retrieve full content for one preference in this exact attempt snapshot. Handles from another account, workspace, human, or attempt are rejected.",
+      inputSchema: { retrievalHandle: z4.string().min(1).max(512) },
+    },
+    async ({ retrievalHandle }) =>
+      json(await getPreferenceRegistryFullContent(deps.db, attemptClaims(), retrievalHandle)),
+  );
 }
 
 const MemoryKindSchema = z4.enum(["preference", "semantic", "procedural", "decision", "episodic"]);

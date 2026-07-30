@@ -266,9 +266,20 @@ async function ensureReleaseHeadRelease(api, headSha) {
 }
 
 function assertIdentity(actual, expected, label) {
-  invariant(actual?.login === expected.login, `${label} login changed`);
-  invariant(actual?.id === expected.id, `${label} numeric identity changed`);
-  invariant(actual?.type === expected.type, `${label} account type changed`);
+  const identity = record(actual, label);
+  assertString(identity.login, `${label} login`);
+  const id = assertPositiveInteger(identity.id, `${label} numeric identity`);
+  invariant(id === expected.id, `${label} numeric identity changed`);
+  invariant(
+    identity.type === "User" || identity.type === "Bot",
+    `${label} account type is invalid`,
+  );
+  invariant(identity.type === expected.type, `${label} account type changed`);
+  return identity;
+}
+
+function hasStableIdentity(actual, expected) {
+  return actual?.id === expected.id && actual?.type === expected.type;
 }
 
 function assertVersionPull(pull, expected) {
@@ -718,24 +729,30 @@ function releaseHeadRecoveryContext(env, suppliedInputs) {
   return context;
 }
 
-function assertRecoveryReleasePull(pull, context) {
+function assertRecoveryReleasePull(pull, context, expected) {
   const identity = assertMergedPull(pull, {
     pullNumber: context.prNumber,
     sourceSha: context.sourceSha,
   });
   invariant(identity.baseSha === context.baseSha, "release-head recovery base SHA changed");
   invariant(identity.headSha === context.headSha, "release-head recovery head SHA changed");
-  assertIdentity(
-    pull?.user,
-    RELEASE_AUTOMATION_CONTRACT.versionAuthor,
-    "release-head recovery pull-request author",
+  const headRef = assertString(pull?.head?.ref, "release-head recovery pull-request head branch");
+  const headRepository = assertString(
+    pull?.head?.repo?.full_name,
+    "release-head recovery pull-request head repository",
   );
-  invariant(
-    pull?.head?.ref === RELEASE_AUTOMATION_CONTRACT.versionBranch &&
-      pull.head.repo?.full_name === RELEASE_AUTOMATION_CONTRACT.repository,
-    "release-head recovery pull-request head branch changed",
-  );
-  return identity;
+  if (expected !== undefined) {
+    assertIdentity(pull?.user, expected.author, "release-head recovery pull-request author");
+    invariant(
+      headRef === expected.headRef,
+      "release-head recovery pull-request head branch changed",
+    );
+    invariant(
+      headRepository === expected.headRepository,
+      "release-head recovery pull-request head repository changed",
+    );
+  }
+  return { ...identity, headRef, headRepository };
 }
 
 async function assertSourceAncestorOfCurrentMain(api, sourceSha, currentMainSha) {
@@ -824,7 +841,7 @@ export async function recoverReleaseHeadEvidence(options = {}) {
     readExistingReleaseHeadEvidence(api, context.headSha),
   ]);
   assertMainRef(preMutationMain, context.sha, "pre-mutation release-head recovery default branch");
-  assertRecoveryReleasePull(preMutationPull, context);
+  assertRecoveryReleasePull(preMutationPull, context, pullIdentity);
   invariant(
     JSON.stringify(preMutationEvidence.releaseHead) === JSON.stringify(releaseHead) &&
       JSON.stringify(preMutationEvidence.releaseHeadRelease) === JSON.stringify(releaseHeadRelease),
@@ -890,7 +907,7 @@ export async function recoverReleaseHeadEvidence(options = {}) {
     readExistingReleaseHeadEvidence(api, context.headSha),
   ]);
   assertMainRef(terminalMain, context.sha, "terminal release-head recovery default branch");
-  assertRecoveryReleasePull(terminalPull, context);
+  assertRecoveryReleasePull(terminalPull, context, pullIdentity);
   invariant(
     JSON.stringify(terminalEvidence.releaseHead) === JSON.stringify(releaseHead),
     "release head ref moved during recovery",
@@ -1373,16 +1390,21 @@ function verifyAdminPassBody(body, artifact) {
   } catch {
     throw new Error("single-maintainer admin PASS body is not valid JSON");
   }
+  const reviewerLogin = assertString(
+    parsed?.reviewerLogin,
+    "single-maintainer admin PASS reviewer login snapshot",
+  );
+  const boundArtifact = { ...artifact, reviewerLogin };
   invariant(
-    JSON.stringify(parsed) === JSON.stringify(artifact),
-    "single-maintainer admin PASS does not bind the exact base/head/reviewer",
+    JSON.stringify(parsed) === JSON.stringify(boundArtifact),
+    "single-maintainer admin PASS does not bind the exact base/head contract",
   );
   invariant(
     body ===
-      `<!-- opengeni-exact-head-release-review:v3 -->\n\n\u0060\u0060\u0060json\n${JSON.stringify(artifact, null, 2)}\n\u0060\u0060\u0060`,
+      `<!-- opengeni-exact-head-release-review:v3 -->\n\n\u0060\u0060\u0060json\n${JSON.stringify(boundArtifact, null, 2)}\n\u0060\u0060\u0060`,
     "single-maintainer admin PASS body is not canonical",
   );
-  return canonicalSha256(artifact);
+  return canonicalSha256(boundArtifact);
 }
 
 function sameProviderReview(left, right) {
@@ -1393,7 +1415,6 @@ function sameProviderReview(left, right) {
     left?.html_url === right?.html_url &&
     left?.submitted_at === right?.submitted_at &&
     left?.body === right?.body &&
-    left?.user?.login === right?.user?.login &&
     left?.user?.id === right?.user?.id &&
     left?.user?.type === right?.user?.type
   );
@@ -1542,9 +1563,7 @@ export async function verifyApprovedMerge(options = {}) {
   const decisions = reviews
     .filter(
       (review) =>
-        review?.user?.login === RELEASE_AUTOMATION_CONTRACT.releaseApprover.login &&
-        review.user.id === RELEASE_AUTOMATION_CONTRACT.releaseApprover.id &&
-        review.user.type === RELEASE_AUTOMATION_CONTRACT.releaseApprover.type &&
+        hasStableIdentity(review?.user, RELEASE_AUTOMATION_CONTRACT.releaseApprover) &&
         review.commit_id === pullIdentity.headSha &&
         (decisiveReviewStates.has(review.state) ||
           (review.state === "COMMENTED" &&
@@ -1572,15 +1591,14 @@ export async function verifyApprovedMerge(options = {}) {
     `/pull/${pullNumber}#pullrequestreview-${decision.id}`;
   invariant(decision.review.html_url === reviewUrl, "trusted review URL changed");
   const reviewDetail = await api.get(repositoryPath(`/pulls/${pullNumber}/reviews/${decision.id}`));
+  assertIdentity(reviewDetail?.user, decision.review.user, "trusted review detail actor");
   invariant(
     sameProviderReview(decision.review, reviewDetail),
     "trusted review detail differs from provider review history",
   );
   invariant(
-    !pull.requested_reviewers.some(
-      (candidate) =>
-        candidate?.login?.toLowerCase() ===
-        RELEASE_AUTOMATION_CONTRACT.releaseApprover.login.toLowerCase(),
+    !pull.requested_reviewers.some((candidate) =>
+      hasStableIdentity(candidate, RELEASE_AUTOMATION_CONTRACT.releaseApprover),
     ),
     "trusted review is no longer effective because review was re-requested",
   );

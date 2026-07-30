@@ -1,13 +1,13 @@
 {
   "name": "@opengeni/example-northstar-support",
-  "version": "0.0.32",
+  "version": "0.0.33",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 3101",
     "server": "bun --env-file=.env.local src/server.ts",
     "build": "vite build",
-    "typecheck": "tsgo --noEmit"
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
@@ -26,6 +26,6 @@
   "devDependencies": {
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
-    "typescript": "^6.0.3"
+    "typescript": "7.0.2"
   }
 }

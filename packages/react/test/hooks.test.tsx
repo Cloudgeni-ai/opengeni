@@ -1698,6 +1698,77 @@ describe("useComposer queue-vs-steer", () => {
 });
 
 describe("useComposer durable draft and control binding", () => {
+  test("historical feed hydration reconciles once without replaying every old event", async () => {
+    let reads = 0;
+    const client = fakeClient({
+      getComposerDraft: async () => {
+        reads += 1;
+        return {
+          revision: reads,
+          text: `read-${reads}`,
+          resources: [],
+          model: "model-x",
+          reasoningEffort: "medium",
+          sourceTurnId: null,
+          sourceTurnVersion: null,
+          updatedAt: new Date().toISOString(),
+        } satisfies ComposerDraft;
+      },
+    });
+    const historical = Array.from({ length: 1_000 }, (_, index) =>
+      makeEvent(index + 1, "session.queue.changed", { operation: "edit" }),
+    );
+    const hook = await renderHook(
+      (events: SessionEvent[]) =>
+        useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+      noEvents,
+    );
+    await flush();
+    expect(reads).toBe(1);
+
+    await hook.rerender(historical);
+    await flush();
+    expect(reads).toBe(2);
+
+    await hook.rerender([
+      ...historical,
+      makeEvent(1_001, "session.queue.changed", { operation: "edit" }),
+    ]);
+    await flush();
+    expect(reads).toBe(3);
+    await hook.unmount();
+  });
+
+  test("history already present at mount is treated as a projection, not live traffic", async () => {
+    let reads = 0;
+    const client = fakeClient({
+      getComposerDraft: async () => {
+        reads += 1;
+        return {
+          revision: reads,
+          text: `read-${reads}`,
+          resources: [],
+          model: "model-x",
+          reasoningEffort: "medium",
+          sourceTurnId: null,
+          sourceTurnVersion: null,
+          updatedAt: new Date().toISOString(),
+        } satisfies ComposerDraft;
+      },
+    });
+    const historical = Array.from({ length: 1_000 }, (_, index) =>
+      makeEvent(index + 1, "session.queue.changed", { operation: "edit" }),
+    );
+    const hook = await renderHook(
+      (events: SessionEvent[]) =>
+        useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+      historical,
+    );
+    await flush();
+    expect(reads).toBe(1);
+    await hook.unmount();
+  });
+
   test("callback churn does not reload drafts outside target, explicit, or event triggers", async () => {
     const sessionB: string = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
     const reads: string[] = [];

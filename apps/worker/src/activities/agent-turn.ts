@@ -101,6 +101,7 @@ import {
   toolspaceTokenFileFromEnvironment,
   sandboxFileDownloadFailureNote,
   SUMMARY_BUFFER_TOKENS,
+  isMcpRequestTimeoutError,
   runOwnedSandboxSetup,
   RoutingMutationOutcomeUnknownError,
   WorkspaceArchiveIntegrityError,
@@ -810,7 +811,7 @@ export function classifyMcpTransportTimeoutError(
   error: unknown,
 ): { message: string; detail?: string } | null {
   const fields = collectErrorStrings(error);
-  const matched = fields.find(
+  const matchedText = fields.find(
     (value) =>
       /\bmcp\b/i.test(value) &&
       /(?:request\s+timed\s+out|request\s+timeout|\btimed\s+out\b|\btimeout\b|ETIMEDOUT)/i.test(
@@ -818,13 +819,15 @@ export function classifyMcpTransportTimeoutError(
       ) &&
       !/authentication\s+required/i.test(value),
   );
-  if (!matched) {
+  const sanitizedSdkTimeout = isMcpRequestTimeoutError(error);
+  if (!matchedText && !sanitizedSdkTimeout) {
     return null;
   }
   const message = error instanceof Error ? error.message : String(error);
+  const matched = matchedText ?? fields.find((value) => /\bmcp\b/i.test(value));
   return {
     message,
-    ...(matched !== message ? { detail: matched } : {}),
+    ...(matched && matched !== message ? { detail: matched } : {}),
   };
 }
 

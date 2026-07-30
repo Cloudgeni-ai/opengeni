@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/runtime",
-  "version": "0.14.5",
+  "version": "0.14.6",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -39,8 +39,8 @@
     "provenance": true
   },
   "scripts": {
-    "build": "tsup",
-    "typecheck": "tsgo --noEmit",
+    "build": "bun ../../scripts/build-typescript-package.ts",
+    "typecheck": "tsc --noEmit",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {
@@ -61,7 +61,7 @@
   "devDependencies": {
     "@openai/agents-core": "0.13.3",
     "tsup": "^8.5.0",
-    "typescript": "^6.0.3",
+    "typescript": "7.0.2",
     "zod": "4.4.3"
   }
 }

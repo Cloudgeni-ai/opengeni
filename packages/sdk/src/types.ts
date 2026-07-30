@@ -1673,6 +1673,8 @@ export type FirstPartyMcpToolName =
   | "memory_search"
   | "memory_save"
   | "memory_correct"
+  | "preference_registry_summary"
+  | "preference_registry_get"
   | "sandboxes_list"
   | "sandbox_attach"
   | "sandbox_swap"
@@ -2117,6 +2119,13 @@ export type ClientConfig = {
 
 export type AccountRole = "owner" | "admin" | "member";
 
+export type AccessPrincipalKind =
+  | "human_session"
+  | "agent_attempt"
+  | "service"
+  | "api_key"
+  | "configured_key";
+
 export type AccountGrant = {
   accountId: string;
   subjectId: string;
@@ -2132,6 +2141,7 @@ export type AccessGrant = {
   subjectId: string;
   subjectLabel?: string | undefined;
   permissions: Permission[];
+  principalKind?: AccessPrincipalKind | undefined;
   metadata?: Record<string, unknown> | undefined;
   serviceInitiator?: ServiceTurnInitiator | undefined;
   serviceInitiatorContext?: ServiceTurnInitiatorContext | undefined;

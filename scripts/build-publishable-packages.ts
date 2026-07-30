@@ -395,8 +395,8 @@ function quarantineLegacyReclaimer(lockPath: string): void {
 
 function staleLockCanBeReclaimed(lockPath: string, owner: LockOwner | null): boolean {
   if (owner) {
-    if (owner.requesterPid && !processIsAlive(owner.requesterPid)) {
-      return true;
+    if (owner.requesterPid) {
+      return !processIsAlive(owner.requesterPid);
     }
     return !processIsAlive(owner.pid);
   }
@@ -634,6 +634,7 @@ function publishPackageLock(lockPath: string, pkg: WorkspacePackage): PackageLoc
       },
       waitForBuild: () => supervisorResult,
       markPublishing: () => {
+        pauseForFailureInjection("OPENGENI_BUILD_CACHE_PAUSE_BEFORE_REQUESTER_PUBLISH");
         const owner = readLockOwner(lockPath);
         if (owner?.token !== token) {
           throw new Error(`Package build lock ownership changed: ${lockPath}`);

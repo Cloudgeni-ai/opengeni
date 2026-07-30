@@ -3060,18 +3060,58 @@ function safeMcpErrorFields(error: unknown): {
   return { errorClass, status };
 }
 
-function safeMcpTransportError(error: unknown): Error & { status?: number; code?: number } {
+type SafeMcpTransportError = Error & {
+  status?: number;
+  code?: number;
+  mcpTransportFailureKind?: "request_timeout";
+};
+
+/**
+ * Preserve the MCP SDK's exact request-timeout meaning without retaining or
+ * exposing a raw HTTP response body. The numeric code is not sufficient:
+ * Streamable HTTP also uses -32001 for "Session not found" and arbitrary
+ * AbortSignal reasons, so only the SDK's two owned timeout messages qualify.
+ */
+export function isMcpRequestTimeoutError(error: unknown, seen = new WeakSet<object>()): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  if (seen.has(error)) {
+    return false;
+  }
+  seen.add(error);
+  const record = error as Record<string, unknown>;
+  if (record.mcpTransportFailureKind === "request_timeout") {
+    return true;
+  }
+  const code = typeof record.code === "number" ? record.code : record.status;
+  const message = typeof record.message === "string" ? record.message : "";
+  const sdkTimeoutMessages = new Set([
+    "Request timed out",
+    "MCP error -32001: Request timed out",
+    "Maximum total timeout exceeded",
+    "MCP error -32001: Maximum total timeout exceeded",
+  ]);
+  if (code === -32_001 && sdkTimeoutMessages.has(message)) {
+    return true;
+  }
+  return ["error", "cause", "response", "data"].some((key) =>
+    isMcpRequestTimeoutError(record[key], seen),
+  );
+}
+
+export function safeMcpTransportError(error: unknown): SafeMcpTransportError {
   const fields = safeMcpErrorFields(error);
   const safeError = new Error(
     `MCP transport operation failed (${mcpErrorReason(fields)})`,
-  ) as Error & {
-    status?: number;
-    code?: number;
-  };
+  ) as SafeMcpTransportError;
   safeError.name = "McpTransportError";
   if (fields.status !== undefined) {
     safeError.status = fields.status;
     safeError.code = fields.status;
+  }
+  if (isMcpRequestTimeoutError(error)) {
+    safeError.mcpTransportFailureKind = "request_timeout";
   }
   return safeError;
 }
@@ -3169,17 +3209,33 @@ async function signFirstPartyDelegatedBearer(
   if (!settings.delegationSecret || !options.accountId || !options.workspaceId) {
     return null;
   }
+  const attemptClaims = [
+    options.sessionId,
+    options.turnId,
+    options.attemptId,
+    options.executionGeneration,
+  ];
+  const hasAnyAttemptClaim = attemptClaims.some((claim) => claim !== undefined);
+  const hasExactAttemptClaims = attemptClaims.every((claim) => claim !== undefined);
+  if (hasAnyAttemptClaim && !hasExactAttemptClaims) {
+    return null;
+  }
   return await signDelegatedAccessToken(settings.delegationSecret, {
     accountId: options.accountId,
     workspaceId: options.workspaceId,
     subjectId: options.subjectId ?? "worker:first-party-mcp",
     ...(options.subjectLabel ? { subjectLabel: options.subjectLabel } : {}),
     permissions: options.firstPartyPermissions ?? [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS],
+    principalKind: hasExactAttemptClaims ? "agent_attempt" : "service",
     firstPartyMcpTools: options.firstPartyTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
-    ...(options.sessionId ? { sessionId: options.sessionId } : {}),
-    ...(options.turnId ? { turnId: options.turnId } : {}),
-    ...(options.attemptId ? { attemptId: options.attemptId } : {}),
-    ...(options.executionGeneration ? { executionGeneration: options.executionGeneration } : {}),
+    ...(hasExactAttemptClaims
+      ? {
+          sessionId: options.sessionId!,
+          turnId: options.turnId!,
+          attemptId: options.attemptId!,
+          executionGeneration: options.executionGeneration!,
+        }
+      : {}),
     exp: Math.floor(Date.now() / 1000) + 60 * 60,
   });
 }
