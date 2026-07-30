@@ -1,5 +1,11 @@
 # @opengeni/api-router
 
+## 0.12.10
+
+### Patch Changes
+
+- 83db425: Reuse the already-validated inline workspace-capture response for an immutable capture revision instead of repeating full manifest schema validation on every poll.
+
 ## 0.12.9
 
 ### Patch Changes
