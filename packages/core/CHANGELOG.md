@@ -1,5 +1,11 @@
 # @opengeni/core
 
+## 0.12.9
+
+### Patch Changes
+
+- 47a0927: Authorize first-party MCP Pause, Resume, and Agent Steer commands exactly once at the canonical command boundary instead of repeating the embedding host authorization call before persistence.
+
 ## 0.12.8
 
 ### Patch Changes

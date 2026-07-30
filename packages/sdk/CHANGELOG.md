@@ -1,5 +1,11 @@
 # @opengeni/sdk
 
+## 0.28.3
+
+### Patch Changes
+
+- 28c678d: Publish the current session first-party MCP tool selection types under a new SDK version.
+
 ## 0.28.2
 
 ### Patch Changes
