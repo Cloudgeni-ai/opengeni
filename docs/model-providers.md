@@ -174,15 +174,14 @@ until OpenGeni has the request, recovery, and billing contracts to use it
 safely. Capability metadata also never authorizes an OpenGeni tool; tool
 discovery and authorization remain independent.
 
-### Native web search follows the durable session tool policy
+### Native web search is a runtime capability
 
-Provider-native `web_search` is part of the workspace-default capability set,
-not an MCP catalog entry. A fresh session whose `tools` field is omitted gets
-native search when its resolved Responses provider declares hosted web search
-runnable. An ordinary child that omits `tools` continues to track a
-workspace-default parent. Explicit and inherited-fixed session policies remain
-narrowed. Tool selection is session-level; follow-up messages cannot replace it
-for only one turn.
+Provider-native `web_search` is not an MCP catalog entry and is not governed by
+the session's MCP allow-list. OpenGeni attaches native search whenever the
+resolved provider declares hosted web search runnable, regardless of whether
+the session uses workspace defaults or an explicit/inherited MCP policy.
+Changing a session's connected or OpenGeni tools therefore cannot silently
+disable web search.
 
 `tool_search` is a different capability: it searches bounded deferred tool
 schemas so the model can discover MCP tools without preloading every schema. It

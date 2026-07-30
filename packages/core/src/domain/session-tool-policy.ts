@@ -159,19 +159,6 @@ export function resolveSessionToolPolicy(input: SessionToolPolicyInput): Resolve
   };
 }
 
-/**
- * Native provider tools that belong to the workspace-default capability set
- * follow the same omission/narrowing fence as deferred MCP tools. A durable
- * workspace-default policy receives them; fixed historical policies and an
- * explicit per-turn replacement do not. Provider support remains a separate
- * runtime gate and must also be true before a native tool is attached.
- */
-export function sessionToolPolicyAllowsDefaultNativeTools(
-  policy: SessionEffectiveToolPolicy,
-): boolean {
-  return policy.mode === "workspace_default" && policy.lazyRouter.state === "required";
-}
-
 /** Current full runtime registry IDs, including configured static servers. */
 export async function workspaceSessionToolPolicyServerIds(
   db: Database,
