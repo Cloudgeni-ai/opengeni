@@ -1,5 +1,19 @@
 # @opengeni/worker-bundle
 
+## 0.12.14
+
+### Patch Changes
+
+- 821f664: Seed shared session-event cursors from loaded history to prevent historical replay storms, and preserve the MCP SDK's exact request-timeout classification through safe transport-error sanitization.
+- Updated dependencies [848287f]
+- Updated dependencies [2a7900f]
+- Updated dependencies [821f664]
+  - @opengeni/db@0.14.7
+  - @opengeni/runtime@0.14.6
+  - @opengeni/core@0.13.3
+  - @opengeni/documents@0.2.49
+  - @opengeni/events@0.3.40
+
 ## 0.12.13
 
 ### Patch Changes

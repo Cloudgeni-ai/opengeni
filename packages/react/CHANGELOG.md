@@ -1,5 +1,11 @@
 # @opengeni/react
 
+## 0.29.3
+
+### Patch Changes
+
+- 821f664: Seed shared session-event cursors from loaded history to prevent historical replay storms, and preserve the MCP SDK's exact request-timeout classification through safe transport-error sanitization.
+
 ## 0.29.2
 
 ### Patch Changes
