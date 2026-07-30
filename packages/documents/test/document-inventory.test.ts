@@ -38,6 +38,8 @@ describe("document inventory bounds", () => {
     expect(inventorySource).toContain("jsonb_array_elements(${schema.documents.topics})");
     expect(inventorySource).toContain("jsonb_typeof(topic.value) = 'string'");
     expect(inventorySource).toContain("topic.value #>> '{}'");
+    expect(inventorySource).toContain("normalize(${topicStringValue}, NFKC)");
+    expect(inventorySource).toContain("count(distinct ${schema.documents.id})::int");
     expect(inventorySource).not.toContain("jsonb_array_elements_text");
   });
 });

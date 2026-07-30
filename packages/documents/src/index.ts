@@ -691,7 +691,7 @@ export async function getDocumentInventory(
       .where(documentWhere);
 
     const topicStringValue = sql<string>`topic.value #>> '{}'`;
-    const topicName = sql<string>`left(regexp_replace(btrim(${topicStringValue}), '[[:space:]]+', ' ', 'g'), ${topicMaxChars})`;
+    const topicName = sql<string>`left(regexp_replace(btrim(normalize(${topicStringValue}, NFKC)), '[[:space:]]+', ' ', 'g'), ${topicMaxChars})`;
     const topicDocumentCount = sql<number>`count(distinct ${schema.documents.id})::int`;
     const topicRows = await scopedDb
       .select({ name: topicName, documentCount: topicDocumentCount })

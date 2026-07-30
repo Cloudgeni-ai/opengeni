@@ -103,11 +103,11 @@ async function request(permissions: Permission[]): Promise<Response> {
   });
 }
 
-async function readyFile(name: string): Promise<string> {
+async function readyFile(name: string, targetGrant = grant): Promise<string> {
   const fileId = crypto.randomUUID();
   const upload = await createFileUpload(client.db, {
-    accountId: grant.accountId,
-    workspaceId: grant.workspaceId,
+    accountId: targetGrant.accountId,
+    workspaceId: targetGrant.workspaceId,
     fileId,
     filename: `${name}.txt`,
     safeFilename: `${name}.txt`,
@@ -118,7 +118,7 @@ async function readyFile(name: string): Promise<string> {
     objectKey: `workspace-state/${fileId}.txt`,
     expiresAt: new Date(Date.now() + 60_000),
   });
-  await completeFileUpload(client.db, grant.workspaceId, upload.uploadId);
+  await completeFileUpload(client.db, targetGrant.workspaceId, upload.uploadId);
   return fileId;
 }
 
@@ -229,7 +229,16 @@ describe("workspace state API authorization", () => {
     });
   });
 
-  test("counts and normalizes only string topic elements without leaking private topics", async () => {
+  test("NFKC-normalizes topic coverage per document under FORCE RLS", async () => {
+    const [posture] = await shared.admin<
+      Array<{ rowSecurity: boolean; forceRowSecurity: boolean }>
+    >`
+      select relrowsecurity as "rowSecurity", relforcerowsecurity as "forceRowSecurity"
+      from pg_class
+      where oid = 'documents'::regclass
+    `;
+    expect(posture).toEqual({ rowSecurity: true, forceRowSecurity: true });
+
     const targetBase = (await listDocumentBases(client.db, grant.workspaceId))[0]!;
     const malformedOnly = await addDocumentToBase(client.db, {
       accountId: grant.accountId,
@@ -287,9 +296,56 @@ describe("workspace state API authorization", () => {
       relatedCount: 2,
     });
 
+    const distinctVisible = await addDocumentToBase(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      baseId: targetBase.id,
+      fileId: await readyFile("distinct-normalized-topics"),
+      title: "distinct normalized topics",
+      visibility: "workspace",
+      createdBy: grant.subjectId,
+    });
+    const ownerPrivate = await addDocumentToBase(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      baseId: targetBase.id,
+      fileId: await readyFile("owner-private-normalized-topics"),
+      title: "owner private normalized topics",
+      visibility: "private",
+      createdBy: grant.subjectId,
+    });
+    const otherAccess = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "test",
+      accountExternalId: `workspace-state-other-account-${crypto.randomUUID()}`,
+      accountName: "Workspace State other account",
+      workspaceExternalSource: "test",
+      workspaceExternalId: `workspace-state-other-workspace-${crypto.randomUUID()}`,
+      workspaceName: "Workspace State other workspace",
+      subjectId: "user:workspace-state-other-reader",
+    });
+    const otherGrant = otherAccess.workspaceGrants[0]!;
+    const otherBase = await createDocumentBase(client.db, {
+      accountId: otherGrant.accountId,
+      workspaceId: otherGrant.workspaceId,
+      name: "Other tenant base",
+    });
+    const otherTenant = await addDocumentToBase(client.db, {
+      accountId: otherGrant.accountId,
+      workspaceId: otherGrant.workspaceId,
+      baseId: otherBase.id,
+      fileId: await readyFile("other-tenant-normalized-topics", otherGrant),
+      title: "other tenant normalized topics",
+      visibility: "workspace",
+      createdBy: otherGrant.subjectId,
+    });
+
     const mixedTopics: unknown[] = [
       "  Incident   Response  ",
       "Incident Response",
+      "AI",
+      "ＡＩ",
+      "Security",
+      "Ｓｅｃｕｒｉｔｙ",
       "valid",
       "",
       "   ",
@@ -304,6 +360,34 @@ describe("workspace state API authorization", () => {
       set topics = ${shared.admin.json(mixedTopics)}::jsonb, updated_at = now()
       where id = ${mixed.id}
     `;
+    await shared.admin`
+      update documents
+      set status = 'ready', topics = ${shared.admin.json(["ＡＩ", "Security", "Beta"])}::jsonb,
+          updated_at = now()
+      where id = ${distinctVisible.id}
+    `;
+    await shared.admin`
+      update documents
+      set status = 'ready', topics = ${shared.admin.json(["Security", "Beta"])}::jsonb,
+          updated_at = now()
+      where id = ${ownerPrivate.id}
+    `;
+    await shared.admin`
+      update documents
+      set topics = ${shared.admin.json(["AI", "Security", "Beta", "private-hidden"])}::jsonb,
+          updated_at = now()
+      where id = ${hiddenPrivate.id}
+    `;
+    await shared.admin`
+      update documents
+      set status = 'ready', topics = ${shared.admin.json([
+        "AI",
+        "Security",
+        "cross-tenant",
+      ])}::jsonb,
+          updated_at = now()
+      where id = ${otherTenant.id}
+    `;
 
     const mixedResponse = await request(["workspace:read", "documents:search"]);
     expect(mixedResponse.status).toBe(200);
@@ -311,12 +395,17 @@ describe("workspace state API authorization", () => {
     expect(mixedBody.knowledge.availability).toBe("available");
     if (mixedBody.knowledge.availability !== "available") throw new Error("expected inventory");
     expect(mixedBody.knowledge.topics).toEqual([
+      { name: "Security", documentCount: 3 },
+      { name: "AI", documentCount: 2 },
+      { name: "Beta", documentCount: 2 },
       { name: "Incident Response", documentCount: 1 },
       { name: "valid", documentCount: 1 },
     ]);
+    expect(mixedBody.knowledge.documentStatusCounts.ready).toBe(4);
     expect(mixedBody.knowledge.gaps.map((gap) => gap.code)).not.toContain("missing_topic_coverage");
     const topicLabels = JSON.stringify(mixedBody.knowledge.topics);
     expect(topicLabels).not.toContain("private-hidden");
+    expect(topicLabels).not.toContain("cross-tenant");
     expect(topicLabels).not.toContain("object-label");
     expect(topicLabels).not.toContain("nested-label");
     expect(topicLabels).not.toContain("false");
