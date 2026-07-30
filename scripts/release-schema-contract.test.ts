@@ -155,7 +155,7 @@ describe("release schema contract", () => {
         (migrations.has("0138_sandbox_checkpoint_artifacts_and_deadlines.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "RECOMPUTE_AFTER_REBASE",
+      "0b1fdc945ff41fa8946019ba7ae7ae9f9de54844b7ac6fc43da39fcbdab873b7",
     );
     expect(contract.latestMigration).toBe("0138_sandbox_checkpoint_artifacts_and_deadlines.sql");
     expect(migrations.get("0128_github_installation_authority.sql")).toMatchObject({
@@ -320,7 +320,7 @@ describe("release schema contract", () => {
       deploymentMode: "rolling",
     });
     expect(migrations.get("0138_sandbox_checkpoint_artifacts_and_deadlines.sql")).toMatchObject({
-      sha256: "771b14d2bad6bdf81a385cc0206d1af158d5df0475b703f55212e170c0d3b255",
+      sha256: "c32c70ff47930c77f45482dc5f66b26b13dd444d440397837cca134f97c48e14",
       deploymentMode: "maintenance",
     });
   });
