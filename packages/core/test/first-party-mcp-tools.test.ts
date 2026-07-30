@@ -3,8 +3,10 @@ import { DEFAULT_FIRST_PARTY_MCP_TOOLS } from "@opengeni/contracts";
 import { resolveFirstPartyMcpToolsForCreate } from "../src/domain/sessions";
 
 describe("first-party MCP tool selection at session creation", () => {
-  test("top-level omission stores the minimal-default sentinel", () => {
-    expect(resolveFirstPartyMcpToolsForCreate(undefined, undefined)).toBeNull();
+  test("top-level omission stores the complete default catalog", () => {
+    expect(resolveFirstPartyMcpToolsForCreate(undefined, undefined)).toEqual([
+      ...DEFAULT_FIRST_PARTY_MCP_TOOLS,
+    ]);
   });
 
   test("explicit empty remains authoritative", () => {
