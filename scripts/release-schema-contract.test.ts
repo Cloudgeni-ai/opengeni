@@ -149,12 +149,13 @@ describe("release schema contract", () => {
         (migrations.has("0132_connection_subject_isolation.sql") ? 1 : 0) +
         (migrations.has("0133_session_skills.sql") ? 1 : 0) +
         (migrations.has("0134_session_first_party_mcp_tools.sql") ? 1 : 0) +
-        (migrations.has("0135_durable_machine_input_batches.sql") ? 1 : 0),
+        (migrations.has("0135_durable_machine_input_batches.sql") ? 1 : 0) +
+        (migrations.has("0136_unified_session_tool_policy.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "495f69d6d8cb46e94b632161b4a6721e491a764fb869e511b1c9f1183666b036",
+      "a422f332b21e3478afb9d4ff7c78cfcff6c1b9a0d08b407bd7ca584a9e329824",
     );
-    expect(contract.latestMigration).toBe("0135_durable_machine_input_batches.sql");
+    expect(contract.latestMigration).toBe("0136_unified_session_tool_policy.sql");
     expect(migrations.get("0128_github_installation_authority.sql")).toMatchObject({
       sha256: "365793b2a204a70e214adb90298b522acbb6dcfae22a46681a58f41a6938e6f0",
       deploymentMode: "rolling",
