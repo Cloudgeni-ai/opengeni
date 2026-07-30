@@ -25347,6 +25347,89 @@ export async function latestWorkspaceCapture(
   });
 }
 
+export type SessionWorkspaceCaptureLookup = {
+  sessionExists: boolean;
+  capture: WorkspaceCaptureRow | null;
+};
+
+/**
+ * Resolve session existence and its newest capture in one RLS-scoped query.
+ *
+ * The capture metadata endpoint only needs existence for its 404 contract. Using
+ * `getSession` there mapped the complete session, MCP metadata, and control
+ * projection before issuing a second transaction for the capture. A lateral
+ * lookup preserves the exact absent-session / absent-capture distinction without
+ * loading unrelated session state or adding another database round trip.
+ */
+export async function sessionLatestWorkspaceCapture(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<SessionWorkspaceCaptureLookup> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.execute<{
+      found_session_id: string;
+      capture_id: string | null;
+      capture_session_id: string | null;
+      capture_turn_id: string | null;
+      capture_revision: number | string | null;
+      capture_lease_epoch: number | string | null;
+      capture_state: string | null;
+      capture_manifest_key: string | null;
+      capture_tree_index_key: string | null;
+      capture_blob_keys: unknown;
+      capture_size_bytes: number | string | null;
+      capture_stats: unknown;
+      capture_captured_at: string | Date | null;
+    }>(sql`
+      select
+        sessions.id as found_session_id,
+        capture.id as capture_id,
+        capture.session_id as capture_session_id,
+        capture.turn_id as capture_turn_id,
+        capture.revision as capture_revision,
+        capture.lease_epoch as capture_lease_epoch,
+        capture.state as capture_state,
+        capture.manifest_key as capture_manifest_key,
+        capture.tree_index_key as capture_tree_index_key,
+        capture.blob_keys as capture_blob_keys,
+        capture.size_bytes as capture_size_bytes,
+        capture.stats as capture_stats,
+        capture.captured_at as capture_captured_at
+      from sessions
+      left join lateral (
+        select ${WORKSPACE_CAPTURE_COLUMNS}
+        from workspace_captures
+        where workspace_captures.session_id = sessions.id
+        order by workspace_captures.revision desc
+        limit 1
+      ) capture on true
+      where sessions.workspace_id = ${workspaceId} and sessions.id = ${sessionId}
+      limit 1
+    `);
+    const row = rows[0];
+    if (!row) return { sessionExists: false, capture: null };
+    if (!row.capture_id) return { sessionExists: true, capture: null };
+    return {
+      sessionExists: true,
+      capture: mapWorkspaceCaptureRow({
+        id: row.capture_id,
+        session_id: row.capture_session_id!,
+        turn_id: row.capture_turn_id,
+        revision: row.capture_revision!,
+        lease_epoch: row.capture_lease_epoch!,
+        state: row.capture_state!,
+        manifest_key: row.capture_manifest_key,
+        tree_index_key: row.capture_tree_index_key,
+        blob_keys: row.capture_blob_keys,
+        size_bytes: row.capture_size_bytes,
+        stats: row.capture_stats,
+        captured_at: row.capture_captured_at!,
+      }),
+    };
+  });
+}
+
 /** A specific capture revision for a session (the M2 file route with an explicit
  *  `?revision=`), or null if that revision was never captured / already GC'd. */
 export async function workspaceCaptureAtRevision(
