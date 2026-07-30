@@ -55,7 +55,7 @@ export async function socialSearchLive(
     return { connection, posts: mapXTweets(payload).slice(0, limit) };
   }
   const base = input.subreddit
-    ? `https://oauth.reddit.com/r/${encodeURIComponent(input.subreddit)}/search`
+    ? `https://oauth.reddit.com/r/${redditSubredditName(input.subreddit)}/search`
     : "https://oauth.reddit.com/search";
   const url = new URL(base);
   url.searchParams.set("q", input.query);
@@ -125,8 +125,8 @@ export async function socialThreadLive(
     const payload = await socialApiGet(deps, ref, bundle, url);
     return { connection, posts: mapXTweets(payload).slice(0, limit) };
   }
-  const article = input.id.replace(/^t3_/, "");
-  const url = new URL(`https://oauth.reddit.com/comments/${encodeURIComponent(article)}`);
+  const article = redditArticleId(input.id);
+  const url = new URL(`https://oauth.reddit.com/comments/${article}`);
   url.searchParams.set("limit", String(limit));
   url.searchParams.set("depth", "2");
   url.searchParams.set("raw_json", "1");
@@ -189,7 +189,9 @@ export async function socialPostReply(
     return {
       connection,
       postedId: id,
-      url: id ? `https://x.com/${connection.accountHandle}/status/${id}` : null,
+      url: id
+        ? `https://x.com/${encodeURIComponent(connection.accountHandle)}/status/${encodeURIComponent(id)}`
+        : null,
     };
   }
   const thingId = redditThingId(input.inReplyToId);
@@ -221,6 +223,40 @@ export function redditThingId(id: string): string {
   throw new Error(
     `Reddit reply targets must be fullnames like t3_<postid> or t1_<commentid>; got: ${id}`,
   );
+}
+
+/**
+ * Agent-controlled values that land in a provider URL PATH must be shape-
+ * validated: encodeURIComponent leaves `.` intact, so `..` would collapse a
+ * path segment and select a different endpoint on the same host.
+ */
+export function redditSubredditName(value: string): string {
+  if (/^[A-Za-z0-9_]{1,50}$/.test(value)) {
+    return value;
+  }
+  throw new Error(`invalid subreddit name: ${value}`);
+}
+
+export function redditArticleId(value: string): string {
+  const article = value.replace(/^t3_/, "");
+  if (/^[a-z0-9]{1,20}$/i.test(article)) {
+    return article;
+  }
+  throw new Error(`invalid Reddit post id: ${value}`);
+}
+
+/**
+ * Joins a provider-supplied path against the provider origin and refuses
+ * results that escape it (e.g. a hostile `@evil.com/x` or `//evil.com`
+ * permalink), so mapper output URLs can be trusted downstream.
+ */
+export function redditUrl(path: string): string | null {
+  try {
+    const url = new URL(path, "https://www.reddit.com");
+    return url.host === "www.reddit.com" ? url.toString() : null;
+  } catch {
+    return null;
+  }
 }
 
 async function socialApiGet(
@@ -363,7 +399,9 @@ export function mapXTweets(
     posts.push({
       id: tweet.id,
       provider: "x",
-      url: author ? `https://x.com/${author}/status/${tweet.id}` : null,
+      url: author
+        ? `https://x.com/${encodeURIComponent(author)}/status/${encodeURIComponent(tweet.id)}`
+        : null,
       author,
       text: tweet.text,
       createdAt: typeof tweet.created_at === "string" ? tweet.created_at : null,
@@ -432,11 +470,7 @@ function mapRedditChild(child: Record<string, unknown>): SocialLivePost | null {
   return {
     id: data.name,
     provider: "reddit",
-    url: permalink
-      ? `https://www.reddit.com${permalink}`
-      : context
-        ? `https://www.reddit.com${context}`
-        : null,
+    url: permalink ? redditUrl(permalink) : context ? redditUrl(context) : null,
     author: typeof data.author === "string" ? data.author : null,
     text,
     createdAt: createdUtc ? new Date(createdUtc * 1000).toISOString() : null,
@@ -464,5 +498,5 @@ export function redditCommentFromApiJson(payload: Record<string, unknown>): {
   const data = first?.data as Record<string, unknown> | undefined;
   const id = typeof data?.name === "string" ? data.name : null;
   const permalink = typeof data?.permalink === "string" ? data.permalink : null;
-  return { id, url: permalink ? `https://www.reddit.com${permalink}` : null };
+  return { id, url: permalink ? redditUrl(permalink) : null };
 }

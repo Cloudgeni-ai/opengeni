@@ -9,6 +9,7 @@ import {
   createSocialPost,
   listSocialConnections,
   listSocialPosts,
+  updateSocialConnectionCredential,
 } from "@opengeni/db";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -51,6 +52,25 @@ export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
     } catch (error) {
       throw socialHttpException(error);
     }
+  });
+
+  // Disconnect: drop the stored OAuth credential and disable the connection.
+  // The row stays (posts reference it and the audit trail needs the identity);
+  // reconnecting via the OAuth flow revives it.
+  app.delete("/v1/workspaces/:workspaceId/social/connections/:connectionId", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const connection = await updateSocialConnectionCredential(db, {
+      workspaceId,
+      connectionId: c.req.param("connectionId"),
+      credentialEncrypted: null,
+      status: "disabled",
+      tokenMetadata: {},
+    });
+    if (!connection) {
+      throw new HTTPException(404, { message: "social connection not found" });
+    }
+    return c.json(connection);
   });
 
   // First-party social OAuth (X / Reddit). Distinct from the MCP integrations

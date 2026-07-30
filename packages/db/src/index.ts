@@ -150,6 +150,7 @@ import {
   asc,
   desc,
   eq,
+  getTableColumns,
   gt,
   gte,
   inArray,
@@ -7297,6 +7298,12 @@ export async function updateSocialConnectionCredential(
   });
 }
 
+// List/get never select credential_encrypted (same posture as the broker
+// `connections` helpers): the ciphertext must not ride into API-process memory
+// on every list, where one added debug log or row spread would expose it.
+const { credentialEncrypted: _socialCredentialColumn, ...socialConnectionPublicColumns } =
+  getTableColumns(schema.socialConnections);
+
 export async function listSocialConnections(
   db: Database,
   workspaceId: string,
@@ -7304,7 +7311,7 @@ export async function listSocialConnections(
 ): Promise<SocialConnection[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb
-      .select()
+      .select(socialConnectionPublicColumns)
       .from(schema.socialConnections)
       .where(eq(schema.socialConnections.workspaceId, workspaceId))
       .orderBy(desc(schema.socialConnections.createdAt))
@@ -7320,7 +7327,7 @@ export async function getSocialConnection(
 ): Promise<SocialConnection | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
-      .select()
+      .select(socialConnectionPublicColumns)
       .from(schema.socialConnections)
       .where(
         and(
@@ -40020,7 +40027,9 @@ function mapKnowledgeMemory(row: typeof schema.knowledgeMemories.$inferSelect): 
   };
 }
 
-function mapSocialConnection(row: typeof schema.socialConnections.$inferSelect): SocialConnection {
+function mapSocialConnection(
+  row: Omit<typeof schema.socialConnections.$inferSelect, "credentialEncrypted">,
+): SocialConnection {
   return {
     id: row.id,
     accountId: row.accountId,

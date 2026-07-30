@@ -2815,6 +2815,17 @@ export class OpenGeniClient {
     );
   }
 
+  /** Drop the stored social OAuth credential and disable the connection. */
+  async disconnectSocialConnection(
+    workspaceId: string,
+    connectionId: string,
+  ): Promise<SocialConnection> {
+    return await this.requestJson<SocialConnection>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/social/connections/${connectionId}`,
+    );
+  }
+
   /** Public, immutably-cached URL for a catalog item's logo, or null when the item has none. */
   catalogAssetUrl(logoAssetPath: string | null): string | null {
     return logoAssetPath ? `${this.baseUrl}/v1/${logoAssetPath}` : null;

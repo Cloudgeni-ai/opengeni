@@ -3,8 +3,11 @@ import {
   mapRedditListing,
   mapRedditThread,
   mapXTweets,
+  redditArticleId,
   redditCommentFromApiJson,
+  redditSubredditName,
   redditThingId,
+  redditUrl,
 } from "../src/integrations/social-api";
 
 describe("mapXTweets", () => {
@@ -95,6 +98,29 @@ describe("mapRedditThread", () => {
       listing([{ kind: "t1", data: { name: "t1_def", body: "First comment" } }]),
     ] as unknown as Record<string, unknown>);
     expect(posts.map((post) => post.id)).toEqual(["t3_abc", "t1_def"]);
+  });
+});
+
+describe("path-segment validation", () => {
+  test("subreddit names reject traversal and separators", () => {
+    expect(redditSubredditName("selfhosted")).toBe("selfhosted");
+    expect(() => redditSubredditName("..")).toThrow("invalid subreddit");
+    expect(() => redditSubredditName("a/b")).toThrow("invalid subreddit");
+    expect(() => redditSubredditName("")).toThrow("invalid subreddit");
+  });
+
+  test("article ids strip t3_ and reject traversal", () => {
+    expect(redditArticleId("t3_abc12")).toBe("abc12");
+    expect(redditArticleId("abc12")).toBe("abc12");
+    expect(() => redditArticleId("..")).toThrow("invalid Reddit post id");
+    expect(() => redditArticleId("a/b")).toThrow("invalid Reddit post id");
+  });
+
+  test("provider-supplied paths cannot escape the reddit origin", () => {
+    expect(redditUrl("/r/s/comments/a/_/")).toBe("https://www.reddit.com/r/s/comments/a/_/");
+    expect(redditUrl("@evil.com/x")).toBe("https://www.reddit.com/@evil.com/x");
+    expect(redditUrl("//evil.com/x")).toBeNull();
+    expect(redditUrl("https://evil.com/x")).toBeNull();
   });
 });
 

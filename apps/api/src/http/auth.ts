@@ -54,6 +54,11 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   ) {
     return true;
   }
+  // Social OAuth (X / Reddit) browser redirect: exact path only, protected by
+  // signed single-use state plus a callback-time grant recheck.
+  if (path === "/v1/social/oauth/callback") {
+    return true;
+  }
   // Catalog logos are rendered via bare <img> tags, which carry no credentials;
   // the images are public vendor logos, digest-keyed by content, and the route
   // itself enforces the catalog-assets/ prefix lock and extension whitelist.

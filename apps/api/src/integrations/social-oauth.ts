@@ -211,7 +211,9 @@ export async function completeSocialOAuthCallback(
   if (input.error || !input.code) {
     return {
       redirectTo: callbackReturnPath(state.returnPath, "error", {
-        reason: input.error ?? "missing_code",
+        // The error param arrives on an unauthenticated request; bound it to
+        // known OAuth error-code shape before reflecting it anywhere.
+        reason: input.error ? (boundedErrorCode(input.error) ?? "provider_error") : "missing_code",
       }),
     };
   }
@@ -669,7 +671,10 @@ function safeReturnPath(value: string): string {
     throw new HTTPException(400, { message: "OAuth returnPath must be a relative path" });
   }
   const parsed = new URL(value, "https://opengeni.local");
-  if (parsed.origin !== "https://opengeni.local") {
+  // `..` segments can normalize back into a `//host` prefix, which browsers
+  // resolve as a protocol-relative absolute URL — an open redirect from the
+  // unauthenticated callback. Reject the NORMALIZED path, not just the input.
+  if (parsed.origin !== "https://opengeni.local" || parsed.pathname.startsWith("//")) {
     throw new HTTPException(400, { message: "OAuth returnPath must be a relative path" });
   }
   return `${parsed.pathname}${parsed.search}${parsed.hash}`;
@@ -684,6 +689,13 @@ function callbackReturnPath(
   url.searchParams.set("social_oauth", status);
   for (const [key, value] of Object.entries(params)) {
     url.searchParams.set(key, value);
+  }
+  // Defense in depth against protocol-relative Location values; state payloads
+  // are signed but this function must stay safe for any caller.
+  if (url.pathname.startsWith("//")) {
+    const fallback = new URL("/integrations", "https://opengeni.local");
+    fallback.search = url.search;
+    return `${fallback.pathname}${fallback.search}`;
   }
   return `${url.pathname}${url.search}${url.hash}`;
 }

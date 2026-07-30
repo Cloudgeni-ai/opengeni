@@ -112,6 +112,17 @@ describe("startSocialOAuth", () => {
       ),
     ).rejects.toThrow(HTTPException);
   });
+
+  test("returnPath that normalizes into a protocol-relative URL is rejected", async () => {
+    const settings = settingsWithClients({ x: { clientId: "x-client" } });
+    // `..` collapses /a, leaving //h//@evil.com — a browser-absolute Location.
+    await expect(
+      startSocialOAuth(
+        { db: noDb, settings },
+        { ...startContext, payload: { provider: "x", returnPath: "/a/..//h//@evil.com" } },
+      ),
+    ).rejects.toThrow(HTTPException);
+  });
 });
 
 describe("parseSocialCredentialBundle", () => {
