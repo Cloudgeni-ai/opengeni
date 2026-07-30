@@ -2135,11 +2135,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       return c.json({ available: false });
     }
     return c.json(
-      await serveWorkspaceCapture(
-        lookup.capture,
-        objectStorage,
-        workspaceCaptureManifestCache,
-      ),
+      await serveWorkspaceCapture(lookup.capture, objectStorage, workspaceCaptureManifestCache),
     );
   });
 

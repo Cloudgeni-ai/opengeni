@@ -182,9 +182,7 @@ describe("workspace capture revisions (real PostgreSQL + FORCE RLS)", () => {
         stats: input.stats,
       },
     });
-    expect(
-      await sessionLatestWorkspaceCapture(db, workspace.workspaceId, randomUUID()),
-    ).toEqual({
+    expect(await sessionLatestWorkspaceCapture(db, workspace.workspaceId, randomUUID())).toEqual({
       sessionExists: false,
       capture: null,
     });
