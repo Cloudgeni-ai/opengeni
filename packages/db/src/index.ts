@@ -95,7 +95,10 @@ import type {
   RigChangeStatus,
   RigCheck,
 } from "@opengeni/contracts";
-import { SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS } from "@opengeni/contracts";
+import {
+  DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS,
+} from "@opengeni/contracts";
 import {
   approvalIdentifier,
   boundWorkspaceControlEvent,
@@ -13879,7 +13882,7 @@ export type SessionCreateInput = {
   resources: ResourceRef[];
   skills?: SessionSkill[];
   tools?: ToolRef[];
-  toolPolicy?: SessionToolPolicy | null;
+  toolPolicy?: SessionToolPolicy;
   metadata: Record<string, unknown>;
   createdBy?: TurnInitiator;
   createdByContext?: TurnInitiatorContext;
@@ -13890,7 +13893,7 @@ export type SessionCreateInput = {
   rigId?: string | null;
   rigVersionId?: string | null;
   firstPartyMcpPermissions?: Permission[] | null;
-  firstPartyMcpTools?: FirstPartyMcpToolName[] | null;
+  firstPartyMcpTools?: FirstPartyMcpToolName[];
   instructions?: string | null;
   parentSessionId?: string | null;
   createIdempotencyKey?: string | null;
@@ -14280,7 +14283,10 @@ async function createSessionInTransaction(
       resources: input.resources,
       skills: input.skills ?? [],
       tools: input.tools ?? [],
-      toolPolicy: input.toolPolicy ?? null,
+      toolPolicy: input.toolPolicy ?? {
+        mode: "explicit",
+        inheritedFromSessionId: input.parentSessionId ?? null,
+      },
       metadata: input.metadata,
       ...creatorColumns(frozenCreator),
       model: input.model,
@@ -14291,7 +14297,7 @@ async function createSessionInTransaction(
       rigId: input.rigId ?? null,
       rigVersionId: input.rigVersionId ?? null,
       firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
-      firstPartyMcpTools: input.firstPartyMcpTools ?? null,
+      firstPartyMcpTools: input.firstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
       instructions: input.instructions ?? null,
       parentSessionId: input.parentSessionId ?? null,
       createIdempotencyKey,
@@ -35212,6 +35218,7 @@ function sessionEventTypesAdvanceActivity(inputs: ReadonlyArray<{ type: string }
 function sessionMutationAdvancesActivity(update: {
   resources?: ResourceRef[];
   tools?: ToolRef[];
+  firstPartyMcpTools?: FirstPartyMcpToolName[];
   toolPolicy?: SessionToolPolicy;
   toolPolicyVersion?: number;
   expectedToolPolicyVersion?: number;
@@ -35811,6 +35818,7 @@ type LockedSessionUpdateResult = {
   update?: {
     resources?: ResourceRef[];
     tools?: ToolRef[];
+    firstPartyMcpTools?: FirstPartyMcpToolName[];
     toolPolicy?: SessionToolPolicy;
     toolPolicyVersion?: number;
     expectedToolPolicyVersion?: number;
@@ -35955,6 +35963,9 @@ export async function appendSessionEventsWithLockedSessionUpdate(
             lastSequence: sequence,
             ...(update.resources !== undefined ? { resources: update.resources } : {}),
             ...(update.tools !== undefined ? { tools: update.tools } : {}),
+            ...(update.firstPartyMcpTools !== undefined
+              ? { firstPartyMcpTools: update.firstPartyMcpTools }
+              : {}),
             ...(update.toolPolicy !== undefined ? { toolPolicy: update.toolPolicy } : {}),
             ...(update.toolPolicyVersion !== undefined
               ? { toolPolicyVersion: update.toolPolicyVersion }
@@ -36044,11 +36055,8 @@ function mapSession(
     resources: row.resources as ResourceRef[],
     skills: (row.skills as SessionSkill[]) ?? [],
     tools: row.tools as ToolRef[],
-    toolPolicy: (row.toolPolicy as SessionToolPolicy | null) ?? {
-      mode: "legacy",
-      inheritedFromSessionId: null,
-    },
-    toolPolicyVersion: Number(row.toolPolicyVersion ?? 1),
+    toolPolicy: row.toolPolicy as SessionToolPolicy,
+    toolPolicyVersion: Number(row.toolPolicyVersion),
     metadata: row.metadata,
     createdBy: initiatorFromStorage(
       row.createdByKind,
@@ -36072,7 +36080,7 @@ function mapSession(
     rigId: row.rigId ?? null,
     rigVersionId: row.rigVersionId ?? null,
     firstPartyMcpPermissions: (row.firstPartyMcpPermissions as Permission[] | null) ?? null,
-    firstPartyMcpTools: (row.firstPartyMcpTools as FirstPartyMcpToolName[] | null) ?? null,
+    firstPartyMcpTools: row.firstPartyMcpTools as FirstPartyMcpToolName[],
     mcpServers,
     parentSessionId: row.parentSessionId ?? null,
     rootSessionId: row.rootSessionId,

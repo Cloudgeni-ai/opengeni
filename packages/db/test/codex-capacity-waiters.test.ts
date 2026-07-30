@@ -1067,7 +1067,6 @@ describe("durable Codex capacity waits", () => {
               delivery: "steer",
               text: "replace the blocked direction",
               resources: [],
-              tools: [],
               model: "codex/gpt-5.6-sol",
               reasoningEffort: "xhigh",
               reasoningEffortFallback: "xhigh",

@@ -1956,7 +1956,6 @@ function registerWorkspaceOrchestrationTools(
           targetSessionId,
           {
             text,
-            toolsProvided: false,
             delivery: "send",
             origin: "operator",
             clientEventId: idempotencyKey,

@@ -101,13 +101,12 @@ describe("durable machine-input timeline", () => {
       />,
     );
     await flush();
-    expect(r.container.textContent).toContain("Input batch");
-    const disclosure = r.container.querySelector<HTMLDetailsElement>("details");
-    disclosure!.open = true;
-    await flush();
+    expect(r.container.textContent).toContain("2 updates joined this turn");
+    expect(r.container.textContent).not.toContain("Input batch");
+    expect(r.container.textContent).not.toContain('"sourceId"');
     expect(r.container.textContent).toContain("verification-agent");
     expect(r.container.textContent).toContain("Cache verification completed.");
-    expect(r.container.textContent).toContain("child result");
+    expect(r.container.textContent).toContain("Agent finished");
     await r.unmount();
   });
 });

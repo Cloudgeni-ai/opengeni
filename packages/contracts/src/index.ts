@@ -690,16 +690,12 @@ export const FirstPartyMcpToolName = z.enum(FIRST_PARTY_MCP_TOOL_NAMES);
 export type FirstPartyMcpToolName = z.infer<typeof FirstPartyMcpToolName>;
 
 /**
- * Ordinary sessions get only the small self-management surface. Authorization
- * permissions remain an independent, additional boundary.
+ * Every catalogued OpenGeni tool is selected by default. Registration-time
+ * authorization remains the independent access boundary; an explicit session
+ * policy may narrow this model-visible set.
  */
-export const DEFAULT_FIRST_PARTY_MCP_TOOLS = [
-  "set_session_title",
-  "goal_set",
-  "goal_update",
-  "goal_complete",
-  "goal_pause",
-] as const satisfies readonly FirstPartyMcpToolName[];
+export const DEFAULT_FIRST_PARTY_MCP_TOOLS =
+  FIRST_PARTY_MCP_TOOL_NAMES satisfies readonly FirstPartyMcpToolName[];
 
 export function prefixedMcpToolName(registryId: string, toolName: string): string {
   return `${registryId}__${toolName}`;
@@ -2899,12 +2895,9 @@ const registryId = /^[A-Za-z0-9_-]+$/;
 export const SessionMcpServerId = z.string().min(1).regex(registryId);
 export type SessionMcpServerId = z.infer<typeof SessionMcpServerId>;
 
-// How a session's persisted `tools` snapshot was selected. `legacy` is
-// reserved for rows written before this descriptor existed; those rows must
-// keep their materialized historical allow-list rather than being guessed to
-// mean either omitted or explicitly empty.
+// How a session's persisted tool selection was chosen.
 export const SessionToolPolicy = z.object({
-  mode: z.enum(["workspace_default", "explicit", "inherited", "legacy"]),
+  mode: z.enum(["workspace_default", "explicit", "inherited"]),
   inheritedFromSessionId: z.string().uuid().nullable(),
 });
 export type SessionToolPolicy = z.infer<typeof SessionToolPolicy>;
@@ -2926,7 +2919,7 @@ const SessionEffectiveToolPolicyIds = z
 // counts remain exact and idsTruncated makes that explicit to clients.
 export const SessionEffectiveToolPolicy = z
   .object({
-    mode: z.enum(["workspace_default", "explicit", "inherited", "legacy"]),
+    mode: z.enum(["workspace_default", "explicit", "inherited"]),
     inheritedFromSessionId: z.string().uuid().nullable(),
     selectedIds: SessionEffectiveToolPolicyIds,
     effectiveIds: SessionEffectiveToolPolicyIds,
@@ -3304,10 +3297,9 @@ export const UpdateSessionRequest = z.object({
 export type UpdateSessionRequest = z.infer<typeof UpdateSessionRequest>;
 
 /**
- * Replace an existing session's durable tool policy, or explicitly opt back in
- * to the current workspace defaults. The mode-less explicit shape is retained
- * for compatibility with clients released before workspace-default adoption
- * was supported.
+ * Replace the complete durable session tool policy, or explicitly opt back in
+ * to current workspace defaults. MCP servers and individual OpenGeni tools
+ * advance atomically under one policy version.
  */
 export const UpdateSessionToolPolicyRequest = z.union([
   z
@@ -3318,8 +3310,9 @@ export const UpdateSessionToolPolicyRequest = z.union([
     .strict(),
   z
     .object({
-      mode: z.literal("explicit").optional(),
+      mode: z.literal("explicit"),
       tools: z.array(ToolRef).max(64),
+      firstPartyMcpTools: z.array(FirstPartyMcpToolName),
       expectedVersion: z.number().int().positive(),
     })
     .strict(),
@@ -3674,10 +3667,6 @@ export const ComposerDraft = z.object({
   revision: z.number().int().nonnegative(),
   text: z.string(),
   resources: z.array(ResourceRef),
-  tools: z.array(ToolRef),
-  // False means the draft inherits the session policy. True preserves an
-  // explicit array, including [], across autosave/reload and queue checkout.
-  toolsProvided: z.boolean().default(false),
   model: z.string().min(1),
   reasoningEffort: ReasoningEffort,
   sourceTurnId: z.string().uuid().nullable(),
@@ -3718,8 +3707,6 @@ export type DeleteSessionQueueItemRequest = z.infer<typeof DeleteSessionQueueIte
 export const SaveComposerDraftRequest = ComposerDraft.pick({
   text: true,
   resources: true,
-  tools: true,
-  toolsProvided: true,
   model: true,
   reasoningEffort: true,
 }).extend({ expectedRevision: z.number().int().nonnegative() });
@@ -3738,6 +3725,7 @@ export const NewSessionDraftOptions = z.object({
   rigId: z.string().uuid().optional(),
   goal: GoalSpec.optional(),
   firstPartyMcpPermissions: z.array(Permission).optional(),
+  firstPartyMcpTools: z.array(FirstPartyMcpToolName).optional(),
 });
 export type NewSessionDraftOptions = z.infer<typeof NewSessionDraftOptions>;
 
@@ -5204,13 +5192,9 @@ export const Session = z.object({
   resources: z.array(ResourceRef),
   skills: SessionSkills.default([]),
   tools: z.array(ToolRef),
-  // Origin of the persisted tool allow-list. Optional for rolling client
-  // compatibility; current servers emit it and legacy rows map to `legacy`.
-  toolPolicy: SessionToolPolicy.optional(),
-  // Optimistic-concurrency fence for durable policy mutations. Optional for
-  // older clients/fixtures; current servers always emit the authoritative
-  // value.
-  toolPolicyVersion: z.number().int().positive().optional(),
+  // Origin and optimistic-concurrency fence for the durable session policy.
+  toolPolicy: SessionToolPolicy,
+  toolPolicyVersion: z.number().int().positive(),
   // Secret-safe current resolution, computed at an API/read or execution
   // boundary from IDs only. Optional because internal DB readers need not load
   // the workspace runtime registry.
@@ -5247,9 +5231,9 @@ export const Session = z.object({
   // Non-default first-party MCP token permissions (manager-style sessions);
   // null means the fixed worker default set.
   firstPartyMcpPermissions: z.array(Permission).nullable(),
-  // null means the fixed minimal worker-visible default. An explicit array,
-  // including [], is the exact model-visible first-party selection.
-  firstPartyMcpTools: z.array(FirstPartyMcpToolName).nullable().default(null),
+  // Exact model-visible OpenGeni selection. All catalogued tools are selected
+  // by default; [] intentionally selects none.
+  firstPartyMcpTools: z.array(FirstPartyMcpToolName),
   // Per-session third-party MCP servers, metadata only. Credential values are
   // write-only and never appear here.
   mcpServers: z.array(SessionMcpServerMetadata).default([]),
@@ -7542,7 +7526,7 @@ export const CreateSessionRequest = withVariableSetIdAlias({
   // rejected; creation never silently expands a child beyond that set.
   firstPartyMcpPermissions: z.array(Permission).optional(),
   // Exact model-visible selection from the broad first-party OpenGeni MCP
-  // catalog. Omit for the minimal default; [] intentionally exposes none.
+  // catalog. Omission selects the full catalog; [] intentionally exposes none.
   // This does not grant authority: every registered tool is permission-gated.
   firstPartyMcpTools: z.array(FirstPartyMcpToolName).optional(),
   // Third-party MCP servers attached only to this session. For an agent-created
@@ -7756,21 +7740,22 @@ export const ClientSessionEvent = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("user.message"),
     clientEventId: SessionOperationKey.optional(),
-    payload: z.object({
-      text: z.string().min(1),
-      // System-level host context for this exact turn only. Persisted on the
-      // turn for retry/recovery, never copied into the visible user message.
-      turnInstructions: z.string().trim().min(1).max(32768).optional(),
-      resources: z.array(ResourceRef).default([]),
-      tools: z.array(ToolRef).default([]),
-      model: z.string().min(1).optional(),
-      reasoningEffort: ReasoningEffort.optional(),
-      controlEtag: z.string().min(1).optional(),
-      expectedDraftRevision: z.number().int().nonnegative().optional(),
-      // Header-value rotation only. URL/name/tool settings are immutable after
-      // session create; persisted events expose metadata, never header values.
-      mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
-    }),
+    payload: z
+      .object({
+        text: z.string().min(1),
+        // System-level host context for this exact turn only. Persisted on the
+        // turn for retry/recovery, never copied into the visible user message.
+        turnInstructions: z.string().trim().min(1).max(32768).optional(),
+        resources: z.array(ResourceRef).default([]),
+        model: z.string().min(1).optional(),
+        reasoningEffort: ReasoningEffort.optional(),
+        controlEtag: z.string().min(1).optional(),
+        expectedDraftRevision: z.number().int().nonnegative().optional(),
+        // Header-value rotation only. URL/name/tool settings are immutable after
+        // session create; persisted events expose metadata, never header values.
+        mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
+      })
+      .strict(),
   }),
   z.object({
     type: z.literal("user.approvalDecision"),
@@ -7792,19 +7777,20 @@ export const ClientSessionEvent = z.discriminatedUnion("type", [
 ]);
 export type ClientSessionEvent = z.infer<typeof ClientSessionEvent>;
 
-export const SteerSessionMessageRequest = z.object({
-  text: z.string().min(1),
-  // Same per-turn system-level context as a queued user.message.
-  turnInstructions: z.string().trim().min(1).max(32768).optional(),
-  resources: z.array(ResourceRef).default([]),
-  tools: z.array(ToolRef).default([]),
-  model: z.string().min(1).optional(),
-  reasoningEffort: ReasoningEffort.optional(),
-  clientEventId: SessionOperationKey.optional(),
-  controlEtag: z.string().min(1).optional(),
-  expectedDraftRevision: z.number().int().nonnegative().optional(),
-  mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
-});
+export const SteerSessionMessageRequest = z
+  .object({
+    text: z.string().min(1),
+    // Same per-turn system-level context as a queued user.message.
+    turnInstructions: z.string().trim().min(1).max(32768).optional(),
+    resources: z.array(ResourceRef).default([]),
+    model: z.string().min(1).optional(),
+    reasoningEffort: ReasoningEffort.optional(),
+    clientEventId: SessionOperationKey.optional(),
+    controlEtag: z.string().min(1).optional(),
+    expectedDraftRevision: z.number().int().nonnegative().optional(),
+    mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
+  })
+  .strict();
 export type SteerSessionMessageRequest = z.infer<typeof SteerSessionMessageRequest>;
 
 export const SteerSessionMessageResponse = z.object({

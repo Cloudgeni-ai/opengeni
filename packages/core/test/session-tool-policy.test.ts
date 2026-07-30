@@ -53,7 +53,7 @@ describe("session tool policy resolution", () => {
   });
 
   test("fixed modes search only their configured MCP allow-list", () => {
-    for (const mode of ["explicit", "inherited", "legacy"] as const) {
+    for (const mode of ["explicit", "inherited"] as const) {
       const result = resolve({
         toolPolicy: { mode, inheritedFromSessionId: null },
         sessionTools: [mcp("cap-selected")],
@@ -87,48 +87,14 @@ describe("session tool policy resolution", () => {
     expect(sessionToolPolicyAllowsDefaultNativeTools(result.effectivePolicy)).toBe(false);
   });
 
-  test("distinguishes omitted turn tools from an explicit empty narrowing", () => {
-    const omitted = resolve({
-      sessionTools: [mcp("cap-docs", true)],
-      turnTools: [],
-      turnToolsProvided: false,
-    });
-    expect(omitted.toolRefs).toEqual([mcp("cap-docs", true), mcp("opengeni")]);
-    expect(omitted.effectivePolicy.lazyRouter.state).toBe("required");
-
-    const explicitEmpty = resolve({
-      sessionTools: [mcp("cap-docs", true)],
-      turnTools: [],
-      turnToolsProvided: true,
-    });
-    expect(explicitEmpty.toolRefs).toEqual([mcp("opengeni")]);
-    expect(explicitEmpty.effectivePolicy.lazyRouter).toEqual({
-      state: "disabled",
-      deferredIds: [],
-    });
-    expect(sessionToolPolicyAllowsDefaultNativeTools(omitted.effectivePolicy)).toBe(true);
-    expect(sessionToolPolicyAllowsDefaultNativeTools(explicitEmpty.effectivePolicy)).toBe(false);
-  });
-
   test("fixed historical policies exclude workspace-default native tools", () => {
-    for (const mode of ["explicit", "inherited", "legacy"] as const) {
+    for (const mode of ["explicit", "inherited"] as const) {
       const result = resolve({
         toolPolicy: { mode, inheritedFromSessionId: null },
         sessionTools: [mcp("cap-docs")],
       });
       expect(sessionToolPolicyAllowsDefaultNativeTools(result.effectivePolicy)).toBe(false);
     }
-  });
-
-  test("an explicit follow-up replaces rather than merges the session selection", () => {
-    const result = resolve({
-      sessionTools: [mcp("cap-docs"), mcp("static-configured")],
-      turnTools: [mcp("cap-docs")],
-      turnToolsProvided: true,
-      toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
-    });
-    expect(result.toolRefs).toEqual([mcp("cap-docs"), mcp("opengeni")]);
-    expect(result.effectivePolicy.effectiveIds).toEqual(["cap-docs", "opengeni"]);
   });
 
   test("drops unavailable optional history without hiding it from policy truth", () => {
@@ -161,24 +127,13 @@ describe("session tool policy resolution", () => {
   test("normalizes stable ordering and keeps strict selection over optional selection", () => {
     const result = resolve({
       sessionTools: [mcp("z-server", true), mcp("a-server"), mcp("z-server")],
-      turnTools: [mcp("b-server")],
       availableMcpServerIds: ["opengeni", "a-server", "b-server", "z-server"],
       defaultMcpServerIds: [],
       toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
     });
 
-    expect(result.toolRefs).toEqual([
-      mcp("z-server"),
-      mcp("a-server"),
-      mcp("b-server"),
-      mcp("opengeni"),
-    ]);
-    expect(result.effectivePolicy.effectiveIds).toEqual([
-      "a-server",
-      "b-server",
-      "opengeni",
-      "z-server",
-    ]);
+    expect(result.toolRefs).toEqual([mcp("z-server"), mcp("a-server"), mcp("opengeni")]);
+    expect(result.effectivePolicy.effectiveIds).toEqual(["a-server", "opengeni", "z-server"]);
   });
 
   test("keeps exact counts while bounding exposed IDs", () => {

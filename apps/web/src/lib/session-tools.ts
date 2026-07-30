@@ -7,7 +7,12 @@ import type {
   Session,
   ToolRef,
 } from "@/types";
-import { defaultRepositoryMountPath, resourceMountPathCollisionKey } from "@opengeni/contracts";
+import {
+  FIRST_PARTY_MCP_TOOL_NAMES,
+  defaultRepositoryMountPath,
+  resourceMountPathCollisionKey,
+  type FirstPartyMcpToolName,
+} from "@opengeni/contracts";
 
 export type RepoDraft = { id: number; url: string; ref: string };
 // The composer's effort picker spans the FULL host enum, not a UI-only subset:
@@ -16,6 +21,22 @@ export type RepoDraft = { id: number; url: string; ref: string };
 // (billing impact — "low" beats the deployer's configured default server-side).
 export type IntelligenceEffort = ReasoningEffort;
 export type McpServerOption = { id: string; name: string };
+
+const FIRST_PARTY_ACTION_LABELS: Partial<Record<FirstPartyMcpToolName, string>> = {
+  set_session_title: "Rename this session",
+  set_other_session_title: "Rename another session",
+  run_on: "Choose where work runs",
+};
+
+export const firstPartySessionToolOptions = FIRST_PARTY_MCP_TOOL_NAMES.map((id) => ({
+  id,
+  name: FIRST_PARTY_ACTION_LABELS[id] ?? firstPartyToolLabel(id),
+}));
+
+function firstPartyToolLabel(id: FirstPartyMcpToolName): string {
+  const label = id.replaceAll("_", " ");
+  return label.slice(0, 1).toUpperCase() + label.slice(1);
+}
 
 // Canonical low→high ordering over the full enum; the picker renders efforts in
 // this order, filtered to whatever the host curates in `allowedReasoningEfforts`.
@@ -130,7 +151,7 @@ export function sessionPolicyPickerIds(
   workspaceDefaultIds: Iterable<string>,
 ): Set<string> {
   const selectable = new Set(selectableIds);
-  const mode = session.effectiveToolPolicy?.mode ?? session.toolPolicy?.mode ?? "legacy";
+  const mode = session.effectiveToolPolicy?.mode ?? session.toolPolicy.mode;
   const policyIds =
     mode === "workspace_default"
       ? [...workspaceDefaultIds]

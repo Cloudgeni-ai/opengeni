@@ -181,7 +181,6 @@ async function createRunningTurn(db: Database, grant: WorkspaceGrant) {
         delivery: "send",
         text: "record a fleet shadow decision",
         resources: [],
-        tools: [],
         reasoningEffortFallback: "low",
         source: "user",
       }),

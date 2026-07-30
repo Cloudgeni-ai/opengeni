@@ -10,11 +10,20 @@ describe("session tool policy contracts", () => {
   test("requires a positive optimistic version and preserves explicit empty tools", () => {
     expect(
       UpdateSessionToolPolicyRequest.parse({
+        mode: "explicit",
         tools: [],
+        firstPartyMcpTools: [],
         expectedVersion: 1,
       }),
-    ).toEqual({ tools: [], expectedVersion: 1 });
-    expect(() => UpdateSessionToolPolicyRequest.parse({ tools: [], expectedVersion: 0 })).toThrow();
+    ).toEqual({ mode: "explicit", tools: [], firstPartyMcpTools: [], expectedVersion: 1 });
+    expect(() =>
+      UpdateSessionToolPolicyRequest.parse({
+        mode: "explicit",
+        tools: [],
+        firstPartyMcpTools: [],
+        expectedVersion: 0,
+      }),
+    ).toThrow();
   });
 
   test("supports an explicit, version-fenced return to workspace defaults", () => {
@@ -34,8 +43,8 @@ describe("session tool policy contracts", () => {
   });
 
   test("accepts the durable policy modes and rejects invalid inheritance", () => {
-    expect(SessionToolPolicy.parse({ mode: "legacy", inheritedFromSessionId: null })).toEqual({
-      mode: "legacy",
+    expect(SessionToolPolicy.parse({ mode: "explicit", inheritedFromSessionId: null })).toEqual({
+      mode: "explicit",
       inheritedFromSessionId: null,
     });
     expect(() =>

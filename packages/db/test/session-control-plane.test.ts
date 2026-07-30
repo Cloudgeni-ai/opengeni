@@ -139,7 +139,6 @@ async function send(
           delivery,
           text,
           resources: [],
-          tools: [],
           reasoningEffortFallback: "low",
           source: "user",
         }),

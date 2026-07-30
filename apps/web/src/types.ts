@@ -114,6 +114,7 @@ export type TurnSubmission = {
   rigId?: string;
   goal?: GoalSpec;
   firstPartyMcpPermissions?: string[];
+  firstPartyMcpTools?: import("@opengeni/sdk").FirstPartyMcpToolName[];
 };
 
 export type AuthSession = {

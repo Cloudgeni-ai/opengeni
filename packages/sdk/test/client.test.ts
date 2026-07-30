@@ -243,7 +243,9 @@ describe("OpenGeniClient", () => {
     const { client, requests } = makeClient(() => jsonResponse(response));
     expect(
       await client.updateSessionToolPolicy(WORKSPACE_ID, SESSION_ID, {
+        mode: "explicit",
         tools: [],
+        firstPartyMcpTools: [],
         expectedVersion: 1,
       }),
     ).toEqual(response);
@@ -253,7 +255,9 @@ describe("OpenGeniClient", () => {
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/tool-policy`,
     );
     expect(JSON.parse(requests[0]!.body!)).toEqual({
+      mode: "explicit",
       tools: [],
+      firstPartyMcpTools: [],
       expectedVersion: 1,
     });
   });
@@ -684,8 +688,6 @@ describe("OpenGeniClient", () => {
       revision: 3,
       text: "draft stays local",
       resources: [],
-      tools: [],
-      toolsProvided: false,
       model: "model-x",
       reasoningEffort: "medium",
       sourceTurnId: null,
@@ -696,8 +698,6 @@ describe("OpenGeniClient", () => {
       expectedRevision: 3,
       text: draft.text,
       resources: [],
-      tools: [],
-      toolsProvided: false,
       model: draft.model,
       reasoningEffort: draft.reasoningEffort,
     };

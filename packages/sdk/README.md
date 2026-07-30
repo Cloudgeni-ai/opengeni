@@ -222,14 +222,25 @@ version; the audited change takes effect on its next attempt:
 const session = await client.getSession(workspaceId, sessionId);
 const updated = await client.updateSessionToolPolicy(workspaceId, sessionId, {
   mode: "workspace_default",
-  expectedVersion: session.toolPolicyVersion ?? 1,
+  expectedVersion: session.toolPolicyVersion,
 });
 ```
 
-To keep a fixed MCP allow-list instead, use the backward-compatible explicit
-shape `{ tools, expectedVersion }`. `tool_search` discovers deferred MCP
-schemas; it is not public web search. Unsupported providers do not receive a
-cross-provider, MCP, or sandbox fallback.
+To keep a fixed allow-list, replace both connected MCP servers and individual
+OpenGeni tools atomically:
+
+```ts
+await client.updateSessionToolPolicy(workspaceId, sessionId, {
+  mode: "explicit",
+  tools,
+  firstPartyMcpTools,
+  expectedVersion: session.toolPolicyVersion,
+});
+```
+
+Follow-up Send and Steer requests inherit this session policy and cannot carry
+a private one-turn tool override. `tool_search` discovers deferred MCP schemas;
+it is not public web search.
 
 ## Goals
 
