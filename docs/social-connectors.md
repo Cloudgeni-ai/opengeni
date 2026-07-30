@@ -55,6 +55,17 @@ permission set):
   fullname (`t3_…` post / `t1_…` comment). Pair it with a `requireApproval`
   policy when a human should sign off on every outbound post.
 
+## Identity model
+
+A social connection stores a **human's** personal X/Reddit grant as a
+workspace-shared row, and the live tools are deliberately usable from
+scheduled (service-initiated) turns — that is the point of the marketing
+loop. This is an intentional exception to the personal-connection rule for
+broker `connections` rows (where unattended turns fail closed rather than
+borrow a user's OAuth row) and mirrors the workspace-shared posture of the
+Slack bot connection. Connect a dedicated brand account, not a personal one,
+when the workspace's scheduled tasks should not act as an individual.
+
 ## Composing the marketing loop with scheduled tasks
 
 The intended pattern — opengeni owns connector + schedule, the prompt owns

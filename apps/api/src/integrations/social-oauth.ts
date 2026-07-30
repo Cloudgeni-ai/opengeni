@@ -5,12 +5,13 @@ import {
   type SocialOAuthProviderId,
   type SocialOAuthStartRequest,
 } from "@opengeni/contracts";
-import { requireEnvironmentEncryption } from "@opengeni/core";
+import { hasPermission, requireEnvironmentEncryption } from "@opengeni/core";
 import type { Observability } from "@opengeni/observability";
 import {
   consumeIntegrationOAuthStateNonce,
   decryptEnvironmentValue,
   encryptEnvironmentValue,
+  getWorkspaceGrant,
   loadSocialConnectionCredential,
   updateSocialConnectionCredential,
   upsertSocialOAuthConnection,
@@ -30,6 +31,28 @@ import {
 // Reddit requires a descriptive, stable User-Agent on every request (token
 // endpoint included) and throttles generic ones; X tolerates any.
 export const SOCIAL_USER_AGENT = "opengeni:social-connector:v0.1.0 (self-hosted)";
+
+// Same bound as the Slack connector: a hung provider socket must not stall an
+// agent turn indefinitely.
+export const SOCIAL_TIMEOUT_MS = 10_000;
+
+/** Token-endpoint failure that carries enough to tell invalid_grant from a blip. */
+export class SocialTokenRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status: number | null,
+    readonly oauthError: string | null,
+  ) {
+    super(message);
+    this.name = "SocialTokenRequestError";
+  }
+
+  /** True only for definitive authorization-server rejections of the grant. */
+  get definitive(): boolean {
+    // Reddit reports invalid_grant with HTTP 200; X uses 400/401.
+    return this.status === 400 || this.status === 401 || this.oauthError === "invalid_grant";
+  }
+}
 
 type SocialProviderDefinition = {
   id: SocialOAuthProviderId;
@@ -126,7 +149,10 @@ export async function startSocialOAuth(
   const returnPath = safeReturnPath(context.payload.returnPath ?? "/integrations");
   const scopes = uniqueScopes(context.payload.scopes) ?? provider.defaultScopes;
   const verifier = provider.pkce ? randomBytes(32).toString("base64url") : null;
-  const key = verifier ? requireEnvironmentEncryption(settings) : null;
+  // Require the encryption key for every provider (not just PKCE ones) so a
+  // misconfigured deployment fails here with 503 instead of after the user
+  // has already consented at the provider.
+  const key = requireEnvironmentEncryption(settings);
   const state = createSignedState(requireIntegrationsStateSecret(settings), {
     kind: "social_oauth",
     accountId: context.accountId,
@@ -173,6 +199,23 @@ export async function completeSocialOAuthCallback(
   let state: SocialOAuthStatePayload | null = null;
   try {
     state = readSocialOAuthState(input.state, settings);
+  } catch (error) {
+    logSocialOAuthFailure(observability, "state_verify", state, error);
+    return {
+      redirectTo: callbackReturnPath("/integrations", "error", { reason: "state_invalid" }),
+    };
+  }
+  // Provider denial / missing code: report before burning the single-use
+  // nonce so a user who cancelled at the provider can retry the same flow
+  // within the state TTL.
+  if (input.error || !input.code) {
+    return {
+      redirectTo: callbackReturnPath(state.returnPath, "error", {
+        reason: input.error ?? "missing_code",
+      }),
+    };
+  }
+  try {
     const consumed = await consumeIntegrationOAuthStateNonce(db, {
       accountId: state.accountId,
       workspaceId: state.workspaceId,
@@ -187,16 +230,28 @@ export async function completeSocialOAuthCallback(
   } catch (error) {
     logSocialOAuthFailure(observability, "state_verify", state, error);
     return {
-      redirectTo: callbackReturnPath(state?.returnPath ?? "/integrations", "error", {
-        reason: "state_invalid",
-      }),
+      redirectTo: callbackReturnPath(state.returnPath, "error", { reason: "state_invalid" }),
     };
   }
-  if (input.error || !input.code) {
+  // The signed state proves who STARTED the flow; re-check that the subject
+  // still holds the admin grant now, mirroring requireOAuthCallbackGrant in
+  // the MCP OAuth client — a grant revoked inside the state TTL must not be
+  // able to land a workspace credential.
+  try {
+    const grant = await getWorkspaceGrant(db, state.subjectId, state.workspaceId);
+    if (
+      !grant ||
+      grant.accountId !== state.accountId ||
+      !hasPermission(grant.permissions, "workspace:admin")
+    ) {
+      throw new HTTPException(403, {
+        message: "OAuth subject no longer has permission to connect social accounts",
+      });
+    }
+  } catch (error) {
+    logSocialOAuthFailure(observability, "grant_recheck", state, error);
     return {
-      redirectTo: callbackReturnPath(state.returnPath, "error", {
-        reason: input.error ?? "missing_code",
-      }),
+      redirectTo: callbackReturnPath(state.returnPath, "error", { reason: "not_authorized" }),
     };
   }
   try {
@@ -295,9 +350,34 @@ export async function freshSocialAccessToken(
       refresh_token: bundle.refreshToken,
     });
   } catch (error) {
+    const definitive = error instanceof SocialTokenRequestError && error.definitive;
+    if (!definitive) {
+      // Token-endpoint 5xx/429/timeout: the stored grant may be fine. Fail
+      // this call without poisoning durable status.
+      throw new Error(
+        `Social connection ${ref.connectionId} token refresh hit a transient provider error; retry later (${errorMessage(error)})`,
+        { cause: error },
+      );
+    }
+    // invalid_grant can also mean we LOST a concurrent refresh race: X
+    // rotates refresh tokens per use, so the loser's token is already spent.
+    // Re-read before declaring the connection dead — if another writer
+    // persisted a newer bundle, use that instead of flipping needs_reauth.
+    const reloaded = await loadSocialConnectionCredential(db, ref.workspaceId, ref.connectionId);
+    if (
+      reloaded?.credentialEncrypted &&
+      reloaded.credentialEncrypted !== loaded.credentialEncrypted
+    ) {
+      const winner = parseSocialCredentialBundle(
+        decryptEnvironmentValue(key, reloaded.credentialEncrypted),
+      );
+      if (!socialTokenNeedsRefresh(winner, new Date())) {
+        return { connection: reloaded.connection, bundle: winner };
+      }
+    }
     await markNeedsReauth(deps, ref);
     throw new Error(
-      `Social connection ${ref.connectionId} token refresh failed; reconnect it (${errorMessage(error)})`,
+      `Social connection ${ref.connectionId} token refresh was rejected; reconnect it (${errorMessage(error)})`,
       { cause: error },
     );
   }
@@ -409,13 +489,17 @@ async function socialTokenRequest(
   }
   const response = await pinnedFetch(
     provider.tokenEndpoint,
-    { method: "POST", headers, body },
+    { method: "POST", headers, body, signal: AbortSignal.timeout(SOCIAL_TIMEOUT_MS) },
     settings,
     { label: "social OAuth token exchange", requireHttpsOutsideLocalTest: true },
   );
   if (!response.ok) {
-    await response.body?.cancel().catch(() => undefined);
-    throw new Error(`${provider.id} token endpoint returned HTTP ${response.status}`);
+    const oauthError = await boundedOAuthErrorCode(response);
+    throw new SocialTokenRequestError(
+      `${provider.id} token endpoint returned HTTP ${response.status}${oauthError ? ` (${oauthError})` : ""}`,
+      response.status,
+      oauthError,
+    );
   }
   const payload = await readResponseJsonBounded<Record<string, unknown>>(
     response,
@@ -425,8 +509,12 @@ async function socialTokenRequest(
   const accessToken = typeof payload.access_token === "string" ? payload.access_token : null;
   // Reddit reports errors with HTTP 200 + {"error": "..."} on some paths.
   if (!accessToken) {
-    const reason = typeof payload.error === "string" ? payload.error : "missing access_token";
-    throw new Error(`${provider.id} token response was invalid: ${reason}`);
+    const reason = boundedErrorCode(payload.error) ?? "missing_access_token";
+    throw new SocialTokenRequestError(
+      `${provider.id} token response was invalid: ${reason}`,
+      null,
+      reason,
+    );
   }
   const expiresIn =
     typeof payload.expires_in === "number" ? payload.expires_in : Number(payload.expires_in);
@@ -441,6 +529,24 @@ async function socialTokenRequest(
       : {}),
     ...(typeof payload.scope === "string" && payload.scope ? { scope: payload.scope } : {}),
   };
+}
+
+async function boundedOAuthErrorCode(response: Response): Promise<string | null> {
+  const contentType = response.headers.get("content-type") ?? "";
+  if (!contentType.toLowerCase().includes("application/json")) {
+    await response.body?.cancel().catch(() => undefined);
+    return null;
+  }
+  const payload = await readResponseJsonBounded<Record<string, unknown>>(
+    response,
+    OAUTH_MAX_RESPONSE_BYTES,
+    "social OAuth token error response",
+  ).catch(() => null);
+  return boundedErrorCode(payload?.error);
+}
+
+function boundedErrorCode(value: unknown): string | null {
+  return typeof value === "string" && /^[a-zA-Z0-9_.-]{1,80}$/.test(value) ? value : null;
 }
 
 async function fetchSocialIdentity(
@@ -458,6 +564,7 @@ async function fetchSocialIdentity(
         accept: "application/json",
         "user-agent": SOCIAL_USER_AGENT,
       },
+      signal: AbortSignal.timeout(SOCIAL_TIMEOUT_MS),
     },
     settings,
     { label: "social identity lookup", requireHttpsOutsideLocalTest: true },

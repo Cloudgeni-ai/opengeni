@@ -54,6 +54,7 @@ import {
   listRigVersionMonitoringSummaries,
   listSocialConnections,
   listSocialPosts,
+  recordAuditEvent,
   recordSyncedSocialPosts,
   listVariableSets,
   MEMORY_CORRECT_TOOL_DESCRIPTION,
@@ -230,7 +231,9 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   social_search_live: { allOf: ["connections:read"] },
   social_mentions_live: { allOf: ["connections:read"] },
   social_thread_fetch: { allOf: ["connections:read"] },
-  social_posts_sync: { allOf: ["connections:read"] },
+  // Writes the social_posts store, so it takes the write scope like the REST
+  // equivalent (POST /social/posts is workspace:admin).
+  social_posts_sync: { allOf: ["connections:write"] },
   // Publishes under the user's identity: connections:write keeps it out of the
   // default agent permission set, unlike the read-only social tools above.
   social_post_reply: { allOf: ["connections:write"] },
@@ -625,7 +628,12 @@ export function buildOpenGeniMcpServer(
         return json({ provider: result.connection.provider, posts: result.posts });
       },
     );
+  }
 
+  // Writes are gated on connections:write (never in the default first-party
+  // agent permission set) so scheduled tasks must opt in, and deployments can
+  // additionally wrap posting in a requireApproval policy.
+  if (!toolspaceMode || can("connections:write")) {
     server.registerTool(
       "social_posts_sync",
       {
@@ -642,16 +650,20 @@ export function buildOpenGeniMcpServer(
           { workspaceId: grant.workspaceId, connectionId },
           { limit },
         );
+        // A post without a provider timestamp is skipped rather than recorded
+        // at sync time: publishedAt drives analysis windows, and the dedup
+        // index would freeze a fabricated date forever.
+        const datedPosts = result.posts.filter((post) => post.createdAt !== null);
         const synced = await recordSyncedSocialPosts(deps.db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId,
           connectionId,
-          posts: result.posts.map((post) => ({
+          posts: datedPosts.map((post) => ({
             externalPostId: post.id,
             url: post.url,
             authorHandle: post.author,
             text: post.text,
-            publishedAt: post.createdAt ? new Date(post.createdAt) : new Date(),
+            publishedAt: new Date(post.createdAt!),
             metrics: post.metrics,
           })),
         });
@@ -660,16 +672,11 @@ export function buildOpenGeniMcpServer(
           fetched: result.posts.length,
           inserted: synced.inserted,
           skipped: synced.skipped,
+          skippedMissingDate: result.posts.length - datedPosts.length,
         });
       },
     );
-  }
 
-  // Posting is a write with real-world blast radius: it publishes under the
-  // user's identity. Gated on connections:write (never in the default
-  // first-party agent permission set) so scheduled tasks must opt in, and
-  // deployments can additionally wrap it in a requireApproval policy.
-  if (!toolspaceMode || can("connections:write")) {
     server.registerTool(
       "social_post_reply",
       {
@@ -687,6 +694,23 @@ export function buildOpenGeniMcpServer(
           { workspaceId: grant.workspaceId, connectionId },
           { inReplyToId, text },
         );
+        // Outbound publishes leave a durable, secret-free receipt (house
+        // pattern: the Slack bot post audit), so who posted what where stays
+        // answerable after the session is gone.
+        await recordAuditEvent(deps.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          subjectId: grant.subjectId,
+          action: "social.post_reply",
+          targetType: "social_connection",
+          targetId: connectionId,
+          metadata: {
+            provider: result.connection.provider,
+            inReplyToId,
+            postedId: result.postedId,
+            url: result.url,
+          },
+        });
         return json({
           provider: result.connection.provider,
           postedId: result.postedId,

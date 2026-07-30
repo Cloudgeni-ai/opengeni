@@ -6,6 +6,7 @@ import { OAUTH_MAX_RESPONSE_BYTES, pinnedFetch, readResponseJsonBounded } from "
 import {
   freshSocialAccessToken,
   markNeedsReauth,
+  SOCIAL_TIMEOUT_MS,
   SOCIAL_USER_AGENT,
   type SocialCredentialBundle,
 } from "./social-oauth";
@@ -98,6 +99,11 @@ export async function socialMentionsLive(
   const url = new URL("https://oauth.reddit.com/message/inbox");
   url.searchParams.set("limit", String(limit));
   url.searchParams.set("raw_json", "1");
+  if (input.sinceId) {
+    // Reddit listings page with fullname anchors; `before` returns only items
+    // newer than the anchor, matching X's since_id semantics.
+    url.searchParams.set("before", input.sinceId);
+  }
   const payload = await socialApiGet(deps, ref, bundle, url);
   return { connection, posts: mapRedditListing(payload).slice(0, limit) };
 }
@@ -258,22 +264,45 @@ async function socialApiRequest(
   url: URL,
   init: RequestInit,
 ): Promise<Record<string, unknown>> {
-  const response = await pinnedFetch(url.toString(), init, deps.settings, {
-    label: `social ${bundle.provider} API`,
-    requireHttpsOutsideLocalTest: true,
-  });
-  if (response.status === 401 || response.status === 403) {
+  const response = await pinnedFetch(
+    url.toString(),
+    { ...init, signal: AbortSignal.timeout(SOCIAL_TIMEOUT_MS) },
+    deps.settings,
+    {
+      label: `social ${bundle.provider} API`,
+      requireHttpsOutsideLocalTest: true,
+    },
+  );
+  if (response.status === 401) {
     await response.body?.cancel().catch(() => undefined);
-    // A 401/403 after a just-refreshed token means the grant itself is gone
-    // (revoked app, changed password); a fresh connect is the only fix.
+    // A 401 after freshSocialAccessToken means the access token the provider
+    // just vouched for is no longer honored — the grant itself is gone.
     await markNeedsReauth(deps, ref);
+    deps.observability?.warn("social connection marked needs_reauth after provider 401", {
+      "opengeni.social.provider": bundle.provider,
+      "opengeni.social.connection_id": ref.connectionId,
+    });
     throw new Error(
-      `${bundle.provider} API rejected the stored credential (HTTP ${response.status}); reconnect the social connection`,
+      `${bundle.provider} API rejected the stored credential (HTTP 401); reconnect the social connection`,
+    );
+  }
+  // 403 is NOT a credential failure: X uses it for duplicate content and
+  // access-tier limits, Reddit for banned/private subreddits. The grant is
+  // healthy — report the rejection without poisoning connection status.
+  if (response.status === 403) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new Error(
+      `${bundle.provider} API refused this request (HTTP 403) — likely a permissions, content, or access-tier rule for ${url.pathname}; the connection itself is still valid`,
     );
   }
   if (response.status === 429) {
     const retryAfter = response.headers.get("retry-after");
     await response.body?.cancel().catch(() => undefined);
+    deps.observability?.warn("social API rate limited", {
+      "opengeni.social.provider": bundle.provider,
+      "opengeni.social.connection_id": ref.connectionId,
+      "opengeni.social.retry_after": retryAfter ?? undefined,
+    });
     throw new Error(
       `${bundle.provider} API rate limit hit${retryAfter ? `; retry after ${retryAfter}s` : ""}. Reduce frequency or limit.`,
     );
@@ -290,10 +319,14 @@ async function socialApiRequest(
 }
 
 function boundedLiveLimit(limit: number | undefined): number {
-  if (typeof limit !== "number" || !Number.isFinite(limit) || limit <= 0) {
+  if (typeof limit !== "number" || !Number.isFinite(limit)) {
     return 25;
   }
-  return Math.min(Math.floor(limit), MAX_LIVE_RESULTS);
+  const floored = Math.floor(limit);
+  if (floored <= 0) {
+    return 25;
+  }
+  return Math.min(floored, MAX_LIVE_RESULTS);
 }
 
 // --- Pure response mappers (exported for unit tests) ---

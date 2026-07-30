@@ -7,6 +7,7 @@ import { testSettings } from "@opengeni/testing";
 import { HTTPException } from "hono/http-exception";
 import {
   parseSocialCredentialBundle,
+  SocialTokenRequestError,
   socialTokenNeedsRefresh,
   startSocialOAuth,
   type SocialCredentialBundle,
@@ -132,6 +133,18 @@ describe("parseSocialCredentialBundle", () => {
     );
     expect(() => parseSocialCredentialBundle('{"provider":"x"}')).toThrow("unexpected shape");
     expect(() => parseSocialCredentialBundle("not json")).toThrow("not valid JSON");
+  });
+});
+
+describe("SocialTokenRequestError", () => {
+  test("400/401 and invalid_grant are definitive; 5xx and network-shaped are not", () => {
+    expect(new SocialTokenRequestError("m", 400, null).definitive).toBe(true);
+    expect(new SocialTokenRequestError("m", 401, "invalid_client").definitive).toBe(true);
+    // Reddit reports invalid_grant with HTTP 200.
+    expect(new SocialTokenRequestError("m", null, "invalid_grant").definitive).toBe(true);
+    expect(new SocialTokenRequestError("m", 503, null).definitive).toBe(false);
+    expect(new SocialTokenRequestError("m", 429, null).definitive).toBe(false);
+    expect(new SocialTokenRequestError("m", null, null).definitive).toBe(false);
   });
 });
 
