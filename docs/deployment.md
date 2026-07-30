@@ -575,7 +575,10 @@ first provider read's PR-author numeric ID/account type and exact head
 branch/repository across its pre-mutation and terminal reads; it supports both
 Version and explicitly sealed non-Version release PRs without substituting a
 hard-coded author or branch. Successful replay reuses the exact immutable pair
-and idempotently restores only whichever exact provider checks are absent.
+and always upserts one deterministic historical source-admission receipt before
+restoring retention. Original pull-request workflow checks are historical
+evidence only: a normal draft-to-ready lifecycle may leave more than one, while
+the deterministic recovery receipt remains unique and authoritative.
 
 Before the first seal, a repository administrator must enable the provider
 feature with the API version that introduced its management endpoint:

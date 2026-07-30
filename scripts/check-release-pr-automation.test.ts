@@ -819,6 +819,7 @@ function recoverySealFixture(
     headRefs?: string[];
     headRepositories?: string[];
     pullAuthors?: Array<Record<string, unknown>>;
+    originalSourceAdmissions?: Array<Record<string, unknown>>;
     releaseHeadRef?: Record<string, unknown> | null;
     release?: Record<string, unknown> | null;
     refCreateStatus?: number;
@@ -1022,10 +1023,13 @@ function recoverySealFixture(
       });
     if (url.pathname === `${prefix}/commits/${headSha}/check-runs`) {
       const checkName = url.searchParams.get("check_name");
+      const originalSourceAdmissions =
+        options.originalSourceAdmissions ??
+        (options.existingSourceAdmission ? [sourceAdmission] : []);
       return response({
         check_runs: checkName
           ? checks.filter((check) => check.name === checkName)
-          : [...(options.existingSourceAdmission ? [sourceAdmission] : []), ...checks],
+          : [...originalSourceAdmissions, ...checks],
       });
     }
     if (url.pathname === `${prefix}/git/ref/tags/${releaseTag}`) {
@@ -1048,6 +1052,52 @@ function recoverySealFixture(
 }
 
 describe("release head retention recovery", () => {
+  test("creates one canonical recovery receipt when draft-to-ready emitted duplicate original admissions", async () => {
+    const fixture = recoverySealFixture({
+      originalSourceAdmissions: [
+        {
+          id: 101,
+          name: RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+          head_sha: headSha,
+          status: "completed",
+          conclusion: "success",
+          external_id: "draft-source-admission",
+          app: RELEASE_AUTOMATION_CONTRACT.githubActionsApp,
+        },
+        {
+          id: 102,
+          name: RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+          head_sha: headSha,
+          status: "completed",
+          conclusion: "success",
+          external_id: "ready-source-admission",
+          app: RELEASE_AUTOMATION_CONTRACT.githubActionsApp,
+        },
+      ],
+    });
+
+    const result = await recoverReleaseHeadEvidence({
+      env: recoverySealEnv(),
+      fetchImpl: fixture.fetchImpl,
+      logger: { log() {} },
+      now: () => new Date("2026-07-27T09:30:00Z"),
+    });
+
+    expect(result.sourceAdmission).toEqual({
+      name: RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+      appSlug: RELEASE_AUTOMATION_CONTRACT.githubActionsApp.slug,
+      appId: RELEASE_AUTOMATION_CONTRACT.githubActionsApp.id,
+    });
+    expect(
+      fixture.checks.filter(
+        (check) =>
+          check.name === RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission &&
+          check.external_id ===
+            `opengeni:release-automation:source-admission:v1:pr:${pullNumber}:head:${headSha}`,
+      ),
+    ).toHaveLength(1);
+  });
+
   test("creates a clean absent retained pair after every pre-mutation gate and replays idempotently", async () => {
     const fixture = recoverySealFixture({ releaseHeadRef: null, release: null });
     const options = {

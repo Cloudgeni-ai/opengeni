@@ -870,16 +870,6 @@ export async function recoverReleaseHeadEvidence(options = {}) {
     JSON.stringify(preMutationEvidence) === JSON.stringify(initialEvidence),
     "release head evidence moved before recovery mutation",
   );
-  const sourceChecks = preMutationChecks.filter(
-    (check) => check?.name === RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
-  );
-  if (sourceChecks.length > 0) {
-    assertSuccessfulCheck(
-      preMutationChecks,
-      RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
-      context.headSha,
-    );
-  }
   if (initialEvidence === null) {
     invariant(
       preMutationChecks.every(
@@ -896,39 +886,39 @@ export async function recoverReleaseHeadEvidence(options = {}) {
 
   const now = options.now ?? (() => new Date());
   const checkContext = { ...context, releaseHeadRelease };
-  if (sourceChecks.length === 0) {
-    await upsertCheckRun(
-      api,
-      checkContext,
-      "source-admission",
-      {
-        status: "in_progress",
-        title: "Recovering exact historical source admission",
-        summary:
-          `Reconstructing base ${context.baseSha} to head ${context.headSha}; ` +
-          `manifest ${historicalAdmission.manifestSha256}.`,
-      },
-      now,
-    );
-    await upsertCheckRun(
-      api,
-      checkContext,
-      "source-admission",
-      {
-        status: "completed",
-        conclusion: "success",
-        title: "Historical source admission recovered",
-        summary:
-          `PR #${context.prNumber} exact base/head tree delta is provider-complete; ` +
-          `manifest ${historicalAdmission.manifestSha256}.`,
-      },
-      now,
-    );
-  }
-  const sourceAdmission = assertSuccessfulCheck(
-    await paginatedCheckRuns(api, context.headSha),
+  await upsertCheckRun(
+    api,
+    checkContext,
+    "source-admission",
+    {
+      status: "in_progress",
+      title: "Recovering exact historical source admission",
+      summary:
+        `Reconstructing base ${context.baseSha} to head ${context.headSha}; ` +
+        `manifest ${historicalAdmission.manifestSha256}.`,
+    },
+    now,
+  );
+  await upsertCheckRun(
+    api,
+    checkContext,
+    "source-admission",
+    {
+      status: "completed",
+      conclusion: "success",
+      title: "Historical source admission recovered",
+      summary:
+        `PR #${context.prNumber} exact base/head tree delta is provider-complete; ` +
+        `manifest ${historicalAdmission.manifestSha256}.`,
+    },
+    now,
+  );
+  const sourceAdmissionIdentity = checkIdentity("source-admission", checkContext);
+  const sourceAdmission = assertSuccessfulCheckRun(
+    await findCheckRun(api, checkContext, sourceAdmissionIdentity),
     RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
     context.headSha,
+    sourceAdmissionIdentity.externalId,
   );
   await upsertCheckRun(
     api,
@@ -1313,6 +1303,26 @@ function assertSuccessfulCheck(checks, name, sha) {
   invariant(
     check.status === "completed" && check.conclusion === "success",
     `${name} did not complete successfully`,
+  );
+  return Object.freeze({
+    name,
+    appSlug: RELEASE_AUTOMATION_CONTRACT.githubActionsApp.slug,
+    appId: RELEASE_AUTOMATION_CONTRACT.githubActionsApp.id,
+  });
+}
+
+function assertSuccessfulCheckRun(check, name, sha, externalId) {
+  invariant(check !== undefined, `${name} canonical check run is missing on ${sha}`);
+  invariant(check?.name === name, `${name} canonical check has another name`);
+  invariant(check?.head_sha === sha, `${name} canonical check is bound to another commit`);
+  invariant(
+    check?.external_id === externalId,
+    `${name} canonical check has another idempotency identity`,
+  );
+  assertGitHubActionsApp(check?.app, `${name} canonical check`);
+  invariant(
+    check.status === "completed" && check.conclusion === "success",
+    `${name} canonical check did not complete successfully`,
   );
   return Object.freeze({
     name,
