@@ -752,8 +752,15 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
     // Simulate a LEGACY env-blind share: force an env-carrying member row into
     // A's group directly (the env-aware check would refuse this today).
     await admin`
-      insert into sessions (account_id, workspace_id, initial_message, variable_set_id, sandbox_group_id, model, sandbox_backend)
-      values (${accountId}, ${workspaceId}, 'legacy env-blind member', ${environmentId}, ${a.sandboxGroupId}, 'gpt-test', 'modal')`;
+      insert into sessions (
+        account_id, workspace_id, initial_message, variable_set_id,
+        sandbox_group_id, model, sandbox_backend, tool_policy
+      )
+      values (
+        ${accountId}, ${workspaceId}, 'legacy env-blind member', ${environmentId},
+        ${a.sandboxGroupId}, 'gpt-test', 'modal',
+        jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
+      )`;
     const g = {
       ...grant(accountId, workspaceId),
       permissions: [

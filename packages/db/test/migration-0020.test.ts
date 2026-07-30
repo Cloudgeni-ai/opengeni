@@ -116,8 +116,15 @@ describe("migration 0020 (session_recordings)", () => {
       // since 0018 — supply both from one uuid.
       const sessionId = (
         await sql<{ id: string }[]>`
-        INSERT INTO "sessions" ("id", "account_id", "workspace_id", "status", "sandbox_backend", "initial_message", "model", "sandbox_group_id")
-        VALUES (gen_random_uuid(), ${accountId}, ${workspaceId}, 'idle', 'modal', 'hi', 'gpt-5', gen_random_uuid()) RETURNING "id"`
+        INSERT INTO "sessions" (
+          "id", "account_id", "workspace_id", "status", "sandbox_backend",
+          "initial_message", "model", "sandbox_group_id", "tool_policy"
+        )
+        VALUES (
+          gen_random_uuid(), ${accountId}, ${workspaceId}, 'idle', 'modal',
+          'hi', 'gpt-5', gen_random_uuid(),
+          jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
+        ) RETURNING "id"`
       )[0]!.id;
 
       // --- The CHECK constraints reject a bad state/mode/codec. Each negative

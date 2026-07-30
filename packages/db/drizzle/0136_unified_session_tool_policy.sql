@@ -1,4 +1,4 @@
--- deployment-mode: downtime
+-- deployment-mode: maintenance
 -- One durable session-level tool policy. OpenGeni-native tools are selected by
 -- default, and historical NULL/legacy shapes are eliminated before the new
 -- API starts.

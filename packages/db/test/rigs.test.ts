@@ -66,8 +66,15 @@ async function insertSessionForRig(
   rigId: string,
 ): Promise<string> {
   const [row] = await shared!.admin<{ id: string }[]>`
-    insert into sessions (account_id, workspace_id, initial_message, model, sandbox_backend, sandbox_group_id, rig_id)
-    values (${ws.accountId}, ${ws.workspaceId}, 'hello', 'gpt-5.6-sol', 'none', gen_random_uuid(), ${rigId})
+    insert into sessions (
+      account_id, workspace_id, initial_message, model, sandbox_backend,
+      sandbox_group_id, rig_id, tool_policy
+    )
+    values (
+      ${ws.accountId}, ${ws.workspaceId}, 'hello', 'gpt-5.6-sol', 'none',
+      gen_random_uuid(), ${rigId},
+      jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
+    )
     returning id`;
   return row!.id;
 }

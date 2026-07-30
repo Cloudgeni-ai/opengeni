@@ -174,10 +174,11 @@ describe("nested-agent depth database admission", () => {
       const rows = await sql<{ id: string }[]>`
         insert into sessions (
           account_id, workspace_id, initial_message, model, sandbox_backend,
-          sandbox_group_id, create_idempotency_key
+          sandbox_group_id, create_idempotency_key, tool_policy
         ) values (
           ${workspace.accountId}, ${workspace.workspaceId}, 'old writer',
-          'depth-policy-test', 'none', gen_random_uuid(), ${key}
+          'depth-policy-test', 'none', gen_random_uuid(), ${key},
+          jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
         )
         returning id`;
       await sql`select pg_sleep(0.1)`;
@@ -256,10 +257,11 @@ describe("nested-agent depth database admission", () => {
     const sessionRows = await admin<{ id: string }[]>`
       insert into sessions (
         account_id, workspace_id, initial_message, model, sandbox_backend,
-        sandbox_group_id, create_idempotency_key
+        sandbox_group_id, create_idempotency_key, tool_policy
       ) values (
         ${workspace.accountId}, ${workspace.workspaceId}, 'old success',
-        'depth-policy-test', 'none', gen_random_uuid(), ${key}
+        'depth-policy-test', 'none', gen_random_uuid(), ${key},
+        jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
       )
       returning id`;
     expect(sessionRows).toHaveLength(0);
@@ -289,10 +291,14 @@ describe("nested-agent depth database admission", () => {
     const duplicateRows = await admin<{ id: string }[]>`
       insert into sessions (
         account_id, workspace_id, initial_message, model, sandbox_backend,
-        sandbox_group_id, parent_session_id, create_idempotency_key
+        sandbox_group_id, parent_session_id, create_idempotency_key, tool_policy
       ) values (
         ${workspace.accountId}, ${workspace.workspaceId}, 'duplicate',
-        'depth-policy-test', 'none', gen_random_uuid(), ${deepestParent.id}, ${key}
+        'depth-policy-test', 'none', gen_random_uuid(), ${deepestParent.id}, ${key},
+        jsonb_build_object(
+          'mode', 'explicit',
+          'inheritedFromSessionId', ${deepestParent.id}::uuid
+        )
       )
       returning id`;
     expect(duplicateRows).toHaveLength(0);

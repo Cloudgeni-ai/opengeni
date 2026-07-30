@@ -701,11 +701,11 @@ describe("clean session control plane", () => {
     await shared.admin`
       insert into sessions (
         account_id, workspace_id, initial_message, resources, tools, metadata,
-        model, sandbox_backend, sandbox_group_id, created_at, updated_at
+        model, sandbox_backend, sandbox_group_id, tool_policy, created_at, updated_at
       )
       select ${grant.accountId}, ${grant.workspaceId!}, 'plan-' || n::text,
         '[]'::jsonb, '[]'::jsonb, '{}'::jsonb, 'scripted-model', 'none',
-        gen_random_uuid(),
+        gen_random_uuid(), jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null),
         statement_timestamp() - make_interval(secs => n),
         statement_timestamp() - make_interval(secs => 5001 - n)
       from generate_series(1, 5000) as generated(n)`;

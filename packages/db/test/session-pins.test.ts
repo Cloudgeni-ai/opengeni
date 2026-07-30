@@ -237,11 +237,13 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     await admin`
       insert into sessions (
         id, account_id, workspace_id, status, initial_message, model,
-        sandbox_backend, sandbox_group_id, parent_session_id, temporal_workflow_id
+        sandbox_backend, sandbox_group_id, parent_session_id, temporal_workflow_id,
+        tool_policy
       )
       select
         node.id, ${workspace.accountId}, ${workspace.workspaceId}, 'running', node.message,
-        'test-model', 'none', node.id, node."parentId", 'tree-deep-' || node.id::text
+        'test-model', 'none', node.id, node."parentId", 'tree-deep-' || node.id::text,
+        jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', node."parentId")
       from jsonb_to_recordset(${admin.json(deepRows)}::jsonb)
         as node(id uuid, "parentId" uuid, message text)`;
 
@@ -252,12 +254,17 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       )
       insert into sessions (
         id, account_id, workspace_id, status, initial_message, model,
-        sandbox_backend, sandbox_group_id, parent_session_id, temporal_workflow_id
+        sandbox_backend, sandbox_group_id, parent_session_id, temporal_workflow_id,
+        tool_policy
       )
       select
         id, ${workspace.accountId}, ${workspace.workspaceId}, 'idle',
         'wide-' || ordinal::text, 'test-model', 'none', id, ${wideRoot.id},
-        'tree-wide-' || id::text
+        'tree-wide-' || id::text,
+        jsonb_build_object(
+          'mode', 'explicit',
+          'inheritedFromSessionId', ${wideRoot.id}::uuid
+        )
       from nodes`;
 
     for (const sessionId of [deepRoot.id, deepIds[0]!, wideRoot.id]) {
@@ -319,12 +326,13 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       ), inserted as (
         insert into sessions (
           id, account_id, workspace_id, status, initial_message, model,
-          sandbox_backend, sandbox_group_id, temporal_workflow_id
+          sandbox_backend, sandbox_group_id, temporal_workflow_id, tool_policy
         )
         select
           id, ${workspace.accountId}, ${workspace.workspaceId}, 'idle',
           'pinned-root-' || ordinal::text, 'test-model', 'none', id,
-          'bounded-pinned-root-' || id::text
+          'bounded-pinned-root-' || id::text,
+          jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
         from nodes
         returning id
       )
@@ -1437,11 +1445,13 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     await grantMember(workspace, subjectId);
     await admin`
       insert into sessions (
-        id, account_id, workspace_id, initial_message, model, sandbox_backend, sandbox_group_id
+        id, account_id, workspace_id, initial_message, model, sandbox_backend, sandbox_group_id,
+        tool_policy
       )
       select generated.id, ${workspace.accountId}, ${workspace.workspaceId},
         'bounded concurrent session ' || generated.ordinality,
-        'test-model', 'none', generated.id
+        'test-model', 'none', generated.id,
+        jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
       from (
         select gen_random_uuid() as id, ordinality
         from generate_series(1, 128) with ordinality
@@ -1475,11 +1485,13 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     await grantMember(oversized, oversizedSubject);
     await admin`
       insert into sessions (
-        id, account_id, workspace_id, initial_message, model, sandbox_backend, sandbox_group_id
+        id, account_id, workspace_id, initial_message, model, sandbox_backend, sandbox_group_id,
+        tool_policy
       )
       select generated.id, ${oversized.accountId}, ${oversized.workspaceId},
         'oversized session ' || generated.ordinality,
-        'test-model', 'none', generated.id
+        'test-model', 'none', generated.id,
+        jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
       from (
         select gen_random_uuid() as id, ordinality
         from generate_series(1, ${SESSION_LIST_SNAPSHOT_MAX_IDS + 1}) with ordinality
@@ -1505,11 +1517,13 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     await grantMember(quota, retainedSubject);
     await admin`
       insert into sessions (
-        id, account_id, workspace_id, initial_message, model, sandbox_backend, sandbox_group_id
+        id, account_id, workspace_id, initial_message, model, sandbox_backend, sandbox_group_id,
+        tool_policy
       )
       select generated.id, ${quota.accountId}, ${quota.workspaceId},
         'snapshot query-' || lpad(((generated.ordinality - 1) / 2)::text, 2, '0'),
-        'test-model', 'none', generated.id
+        'test-model', 'none', generated.id,
+        jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
       from (
         select gen_random_uuid() as id, ordinality
         from generate_series(1, 68) with ordinality

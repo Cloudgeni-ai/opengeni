@@ -99,10 +99,11 @@ async function seedTurn(ws: Workspace, position = 1): Promise<string> {
   await admin`
     insert into sessions (
       id, account_id, workspace_id, initial_message, model,
-      sandbox_backend, sandbox_group_id, status
+      sandbox_backend, sandbox_group_id, status, tool_policy
     ) values (
       ${sessionId}, ${ws.accountId}, ${ws.workspaceId}, 'test',
-      'codex/gpt-5.6-sol', 'modal', ${sessionId}, 'running'
+      'codex/gpt-5.6-sol', 'modal', ${sessionId}, 'running',
+      jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
     )`;
   await admin.begin(async (transaction) => {
     await transaction`
