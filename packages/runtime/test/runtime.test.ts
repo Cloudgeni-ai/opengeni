@@ -56,6 +56,7 @@ import {
   loadSkillLibrarySkill,
   deserializeSandboxSessionStateEnvelope,
   ensureReadableStreamFrom,
+  elideSupersededViewImagePairs,
   materializeSandboxFileDownloads,
   repositoryCloneCommand,
   repositoryUsesSandboxClone,
@@ -5259,6 +5260,28 @@ describe("provider item id stripping", () => {
     expect(preserved.id).toBe("cu_abc");
   });
 
+  test("exports the deprecated view_image elision helper as an identity no-op", () => {
+    const prefix = [
+      { type: "message", role: "user", content: "inspect twice" },
+      {
+        type: "function_call",
+        callId: "view-old",
+        name: "view_image",
+        arguments: JSON.stringify({ path: "/tmp/a.png" }),
+      },
+      { type: "function_call_result", callId: "view-old", output: "old" },
+      {
+        type: "function_call",
+        callId: "view-new",
+        name: "view_image",
+        arguments: JSON.stringify({ path: "/tmp/a.png" }),
+      },
+      { type: "function_call_result", callId: "view-new", output: "new" },
+    ];
+
+    expect(elideSupersededViewImagePairs(prefix)).toBe(prefix);
+  });
+
   test("callModelInputFilterForSettings preserves screenshot history prefixes across successive calls", async () => {
     const filter = callModelInputFilterForSettings(
       testSettings({
@@ -5428,37 +5451,39 @@ describe("provider item id stripping", () => {
         output: [{ type: "input_image", image: "data:image/png;base64,AAAA" }],
       },
     ] as any;
+    const firstInputSerialized = JSON.stringify(firstInput);
     const first = await filter({
       modelData: { input: firstInput },
       agent: {} as any,
       context: undefined,
     });
-    const second = await filter({
-      modelData: {
-        input: [
-          ...firstInput,
-          {
-            type: "function_call",
-            callId: "view-new",
-            name: "view_image",
-            arguments: JSON.stringify({ path: "/tmp/a.png" }),
-          },
-          {
-            type: "function_call_result",
-            callId: "view-new",
-            output: [{ type: "input_image", image: "data:image/png;base64,BBBB" }],
-          },
-        ] as any,
+    const secondInput = [
+      ...firstInput,
+      {
+        type: "function_call",
+        callId: "view-new",
+        name: "view_image",
+        arguments: JSON.stringify({ path: "/tmp/a.png" }),
       },
+      {
+        type: "function_call_result",
+        callId: "view-new",
+        output: [{ type: "input_image", image: "data:image/png;base64,BBBB" }],
+      },
+    ] as any;
+    const secondInputSerialized = JSON.stringify(secondInput);
+    const second = await filter({
+      modelData: { input: secondInput },
       agent: {} as any,
       context: undefined,
     });
 
+    expect(JSON.stringify(first.input)).toBe(firstInputSerialized);
     expect(second.input.slice(0, first.input.length)).toEqual(first.input);
-    expect(JSON.stringify(second.input.slice(0, first.input.length))).toBe(
-      JSON.stringify(first.input),
-    );
+    expect(JSON.stringify(second.input.slice(0, first.input.length))).toBe(firstInputSerialized);
     expect(second.input).toHaveLength(first.input.length + 2);
+    expect(JSON.stringify(firstInput)).toBe(firstInputSerialized);
+    expect(JSON.stringify(secondInput)).toBe(secondInputSerialized);
   });
 
   test("same-run provider totals add the complete trailing tool result before the next call", async () => {

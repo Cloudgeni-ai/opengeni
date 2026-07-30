@@ -253,6 +253,7 @@ setSelfhostedApplyDiff(
 );
 
 export {
+  elideSupersededViewImagePairs,
   sanitizeHistoryItemsForModel,
   stripReasoningEncryptedContent,
   stripReasoningIdentityFromSerializedRunState,

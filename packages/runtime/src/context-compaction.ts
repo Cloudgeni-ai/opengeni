@@ -212,13 +212,24 @@ function uint32BigEndian(bytes: Uint8Array, offset: number): number {
 }
 
 function dimensionsFromImageBytes(bytes: Uint8Array): [number, number] | null {
-  // PNG IHDR: width/height are the first two big-endian uint32 values.
+  // PNG IHDR: trust geometry only from a complete first IHDR chunk. Requiring
+  // the whole chunk (including its CRC bytes) prevents a partial signature or
+  // truncated/corrupt header from being mistaken for authoritative geometry.
   if (
-    bytes.length >= 24 &&
+    bytes.length >= 33 &&
     bytes[0] === 0x89 &&
     bytes[1] === 0x50 &&
     bytes[2] === 0x4e &&
-    bytes[3] === 0x47
+    bytes[3] === 0x47 &&
+    bytes[4] === 0x0d &&
+    bytes[5] === 0x0a &&
+    bytes[6] === 0x1a &&
+    bytes[7] === 0x0a &&
+    uint32BigEndian(bytes, 8) === 13 &&
+    bytes[12] === 0x49 &&
+    bytes[13] === 0x48 &&
+    bytes[14] === 0x44 &&
+    bytes[15] === 0x52
   ) {
     const width = uint32BigEndian(bytes, 16);
     const height = uint32BigEndian(bytes, 20);

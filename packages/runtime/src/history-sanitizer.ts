@@ -37,6 +37,16 @@ import {
 export type HistoryItem = Record<string, unknown>;
 
 /**
+ * @deprecated Model-visible history is append-only outside the explicit
+ * durable compaction transition. This compatibility identity function performs
+ * no elision and returns the exact input array with every item untouched and in
+ * its original order.
+ */
+export function elideSupersededViewImagePairs<T extends HistoryItem>(items: readonly T[]): T[] {
+  return items as T[];
+}
+
+/**
  * Tool-call item types and the result-item type that settles them. Kept in
  * sync with the SDK's `TOOL_CALL_RESULT_TYPE_BY_CALL_TYPE`; `function_call` is
  * the one observed live, the rest are included so the same pairing logic holds

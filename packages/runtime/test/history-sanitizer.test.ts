@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   computerCallNormalizingFetch,
+  elideSupersededViewImagePairs,
   normalizeComputerCallActions,
   rewriteComputerCallsToActionsOnly,
   rewriteEmptyComputerCallOutputImageUrls,
@@ -174,6 +175,30 @@ describe("sanitizeHistoryItemsForModel", () => {
     sanitizeHistoryItemsForModel(items);
     expect(items).toHaveLength(2);
     expect(JSON.stringify(items)).toBe(snapshot);
+  });
+});
+
+describe("elideSupersededViewImagePairs compatibility", () => {
+  test("is an identity no-op that never deletes, reorders, clones, or mutates repeated pairs", () => {
+    const items = [
+      userMessage("inspect twice"),
+      reasoning("rs_old"),
+      { ...functionCall("view_old", "view_image"), arguments: '{"path":"/tmp/a.png"}' },
+      functionResult("view_old"),
+      assistantMessage("first observation"),
+      reasoning("rs_new"),
+      { ...functionCall("view_new", "view_image"), arguments: '{"path":"/tmp/a.png"}' },
+      functionResult("view_new"),
+    ];
+    const serialized = JSON.stringify(items);
+
+    const result = elideSupersededViewImagePairs(items);
+
+    expect(result).toBe(items);
+    expect(result).toHaveLength(items.length);
+    result.forEach((item, index) => expect(item).toBe(items[index]));
+    expect(JSON.stringify(result)).toBe(serialized);
+    expect(JSON.stringify(items)).toBe(serialized);
   });
 });
 
