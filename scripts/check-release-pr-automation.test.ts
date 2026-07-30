@@ -22,6 +22,10 @@ const mergeSha = "d".repeat(40);
 const currentMainSha = "9".repeat(40);
 const baseTreeSha = "e".repeat(40);
 const headTreeSha = "f".repeat(40);
+const staleEventBaseSha = "8".repeat(40);
+const staleMergeBaseSha = "7".repeat(40);
+const staleEventBaseTreeSha = "6".repeat(40);
+const staleMergeBaseTreeSha = "5".repeat(40);
 const rebasedFirstSha = "a".repeat(40);
 const pullNumber = 88;
 const runId = 123456;
@@ -334,6 +338,10 @@ function admissionFixture(
     sourceConclusion?: string | null;
     sourceEvent?: string;
     sourceStatus?: string;
+    pullBaseSha?: string;
+    pullBaseTreeSha?: string;
+    pullMergeBaseSha?: string;
+    pullMergeBaseTreeSha?: string;
     terminalMainSha?: string;
   } = {},
 ) {
@@ -343,6 +351,10 @@ function admissionFixture(
   let mainReads = 0;
   let retainedHeadSha = options.releaseHeadRefSha;
   let retainedRelease = options.release ?? null;
+  const pullBaseSha = options.pullBaseSha ?? baseSha;
+  const pullBaseTreeSha = options.pullBaseTreeSha ?? baseTreeSha;
+  const pullMergeBaseSha = options.pullMergeBaseSha ?? pullBaseSha;
+  const pullMergeBaseTreeSha = options.pullMergeBaseTreeSha ?? pullBaseTreeSha;
   const prefix = `/repos/${RELEASE_AUTOMATION_CONTRACT.repository}`;
   async function fetchImpl(input: string | URL | Request, init?: RequestInit) {
     const url = new URL(String(input));
@@ -385,7 +397,8 @@ function admissionFixture(
       mainReads += 1;
       return response(mainRef(mainReads > 2 ? (options.terminalMainSha ?? baseSha) : baseSha));
     }
-    if (url.pathname === `${prefix}/pulls/${pullNumber}`) return response(versionPull());
+    if (url.pathname === `${prefix}/pulls/${pullNumber}`)
+      return response(versionPull({ base: pullBaseSha }));
     if (url.pathname === `${prefix}/actions/runs/${runId}`)
       return response({
         id: runId,
@@ -399,17 +412,26 @@ function admissionFixture(
         repository: { full_name: RELEASE_AUTOMATION_CONTRACT.repository },
         head_repository: { full_name: RELEASE_AUTOMATION_CONTRACT.repository },
       });
-    if (url.pathname === `${prefix}/git/commits/${baseSha}`)
+    if (url.pathname === `${prefix}/git/commits/${pullBaseSha}`)
       return response({
-        sha: baseSha,
-        tree: { sha: baseTreeSha },
+        sha: pullBaseSha,
+        tree: { sha: pullBaseTreeSha },
         parents: [{ sha: "a".repeat(40) }],
+      });
+    if (
+      pullMergeBaseSha !== pullBaseSha &&
+      url.pathname === `${prefix}/git/commits/${pullMergeBaseSha}`
+    )
+      return response({
+        sha: pullMergeBaseSha,
+        tree: { sha: pullMergeBaseTreeSha },
+        parents: [{ sha: "4".repeat(40) }],
       });
     if (url.pathname === `${prefix}/git/commits/${headSha}`)
       return response({
         sha: headSha,
         tree: { sha: headTreeSha },
-        parents: [{ sha: baseSha }],
+        parents: [{ sha: pullMergeBaseSha }],
       });
     if (url.pathname === `${prefix}/git/ref/heads/changeset-release/main`)
       return response({
@@ -458,20 +480,20 @@ function admissionFixture(
           ),
         ],
       });
-    if (url.pathname === `${prefix}/compare/${baseSha}...${headSha}`)
+    if (url.pathname === `${prefix}/compare/${pullBaseSha}...${headSha}`)
       return response({
-        status: "ahead",
-        base_commit: { sha: baseSha },
-        merge_base_commit: { sha: baseSha },
+        status: pullMergeBaseSha === pullBaseSha ? "ahead" : "diverged",
+        base_commit: { sha: pullBaseSha },
+        merge_base_commit: { sha: pullMergeBaseSha },
         commits: [{ sha: headSha }],
-        behind_by: 0,
+        behind_by: pullMergeBaseSha === pullBaseSha ? 0 : 4,
         ahead_by: 1,
       });
     if (url.pathname === `${prefix}/pulls/${pullNumber}/files`)
       return response([{ filename: "package.json", status: "modified" }]);
-    if (url.pathname === `${prefix}/git/trees/${baseTreeSha}`)
+    if (url.pathname === `${prefix}/git/trees/${pullMergeBaseTreeSha}`)
       return response({
-        sha: baseTreeSha,
+        sha: pullMergeBaseTreeSha,
         truncated: false,
         tree: [{ path: "package.json", mode: "100644", type: "blob", sha: "1".repeat(40) }],
       });
@@ -632,6 +654,36 @@ describe("release head evidence retention", () => {
       ),
     ).toHaveLength(1);
     expect(fixture.requests.filter((request) => request.method === "PATCH")).toHaveLength(3);
+  });
+
+  test("retains an immutable stale-event head without equating its PR base to current main", async () => {
+    const fixture = admissionFixture({
+      seal: true,
+      pullBaseSha: staleEventBaseSha,
+      pullBaseTreeSha: staleEventBaseTreeSha,
+      pullMergeBaseSha: staleMergeBaseSha,
+      pullMergeBaseTreeSha: staleMergeBaseTreeSha,
+    });
+    const result = await sealReleaseHeadEvidence({
+      env: sealReleaseHeadEnv(),
+      fetchImpl: fixture.fetchImpl,
+      logger: { log() {} },
+    });
+
+    expect(result.admission).toMatchObject({
+      baseSha: staleEventBaseSha,
+      baseTreeSha: staleMergeBaseTreeSha,
+      currentMainSha: baseSha,
+      headSha,
+      patchBaseSha: staleMergeBaseSha,
+      workflowSha: baseSha,
+    });
+    expect(result.releaseHead.sha).toBe(headSha);
+    expect(result.sourceAdmission).toEqual({
+      name: RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+      appSlug: RELEASE_AUTOMATION_CONTRACT.githubActionsApp.slug,
+      appId: RELEASE_AUTOMATION_CONTRACT.githubActionsApp.id,
+    });
   });
 
   test("fails before mutation when the exact-head source-admission check is not successful", async () => {
@@ -1392,9 +1444,9 @@ describe("release approval provenance", () => {
         },
       }),
     );
-    expect(result.requiredSourceChecks.map((check: { name: string }) => check.name)).toEqual(
-      RELEASE_AUTOMATION_CONTRACT.checks.requiredSource,
-    );
+    expect(result.requiredSourceChecks.map((check: { name: string }) => check.name)).toEqual([
+      ...RELEASE_AUTOMATION_CONTRACT.checks.requiredSource,
+    ]);
     expect(fixture.requests.every((request) => request.method === "GET")).toBe(true);
   });
 

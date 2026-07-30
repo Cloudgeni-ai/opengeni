@@ -578,8 +578,8 @@ object with the top-level keys sorted in ascending ASCII order:
 `id` is the live positive release ID and `publishedAt` is the provider
 `published_at` value normalized through `new Date(value).toISOString()`. If an
 existing release differs from this identity after a retention check exists,
-sealing fails rather than creating a second proof; push a new head based on
-current `main`, let source admission pass, and seal that new head.
+sealing fails rather than creating a second proof; publish and seal a fresh
+exact head. Do not rebase an unchanged candidate solely because `main` moved.
 Trusted Version-PR admission publishes the same check. This gives downstream
 release operators a provider-owned proof of immutable source retention without
 requiring a credential that crosses repository boundaries. A tag and immutable
@@ -616,8 +616,19 @@ discontinuous range fails closed.
 
 The exact reviewed head must still resolve directly from its canonical
 `opengeni-release-head-<sha>` tag and have one successful GitHub Actions
-`Current-base source admission` check. The exact source must separately have
-one successful GitHub Actions result for each required candidate check:
+`Current-base source admission` check. The legacy context name is retained for
+the repository ruleset, but the check admits the immutable provider event head
+against the PR's provider merge-base tree; it does not require the event base
+to equal continuously moving `main`. The base-owned workflow/helper SHA must
+remain in protected `main` ancestry, and the provider base/head/repository,
+direct tree manifest, file projection, helper digest, read-only permissions,
+and terminal head identity remain fail-closed. Exact-head review stays bound to
+the candidate. The merge authority separately performs the fresh latest-main
+conflict, canonical patch-equivalence, protected-path, generated/migration,
+identity/manifest, security, and evidence checks immediately before merge.
+
+The exact source must separately have one successful GitHub Actions result for
+each required candidate check:
 `Typecheck and unit tests`, `Deployment artifacts`, and `Workload image
 builds`. Missing, moved, indirect, duplicated, failed, wrong-head, or
 foreign-app evidence is rejected. Check history is read with `filter=all`, and
