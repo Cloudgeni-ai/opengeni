@@ -1,5 +1,26 @@
 # @opengeni/api-router
 
+## 0.12.11
+
+### Patch Changes
+
+- 47a0927: Authorize first-party MCP Pause, Resume, and Agent Steer commands exactly once at the canonical command boundary instead of repeating the embedding host authorization call before persistence.
+- 1c4018e: Replace one-turn tool overrides with one durable session tool policy, expose
+  OpenGeni-native tools in the same selection, default available tools on, and
+  render delivered machine inputs as compact typed timeline updates instead of
+  raw protocol JSON.
+- Updated dependencies [47a0927]
+- Updated dependencies [1c4018e]
+  - @opengeni/core@0.12.9
+  - @opengeni/config@0.7.12
+  - @opengeni/contracts@0.22.1
+  - @opengeni/db@0.14.2
+  - @opengeni/documents@0.2.44
+  - @opengeni/github@0.3.24
+  - @opengeni/runtime@0.14.2
+  - @opengeni/storage@0.2.36
+  - @opengeni/events@0.3.35
+
 ## 0.12.10
 
 ### Patch Changes
