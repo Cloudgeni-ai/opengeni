@@ -1376,6 +1376,87 @@ enabled. The source repo may contain the contract, Helm values shape, and
 conformance scripts, but not provider secrets, kubeconfigs, Terraform state,
 preview tenant data, or unsanitized evidence.
 
+## Cold lost-provider blocker reconciliation
+
+`scripts/operator/reconcile-cold-lost-sandbox-blockers.ts` is the only
+supported exceptional repair for blocker rows left by an older provider-loss
+transition after the exact lease is already cold. It is not a provider repair,
+archive restore, workspace writer, or general-purpose lease editor. Normal
+provider-loss handling remains the automatic path described in
+[`run-lifecycle.md`](run-lifecycle.md).
+
+Always run the helper from the exact source deployed to the affected control
+plane. Its database connection must be the restricted `opengeni_app` role with
+row security enabled; preview additionally opens one `REPEATABLE READ, READ
+ONLY` transaction and verifies `FORCE ROW LEVEL SECURITY` on every table it
+reads. Preview has no provider dependency and makes no provider or apply call.
+The operator must obtain the provider observation separately and supply it as
+input. An observation is accepted only when its backend/object identity matches
+the selected archive reference, its timestamp is canonical UTC, and it is no
+more than five minutes old or 60 seconds ahead of the database snapshot.
+Missing, `unknown`, stale, future, malformed, or mismatched observations block.
+
+Build one private reviewed input packet containing every variable below. Use
+the exact literal `null` for supplied nullable values; omission means “not
+supplied” and blocks. Hashes are 64 lowercase hexadecimal characters and times
+are canonical ISO-8601 UTC strings.
+
+| Fence | Environment variables |
+| --- | --- |
+| Locator | `OPENGENI_RECOVERY_ACCOUNT_ID`, `OPENGENI_RECOVERY_WORKSPACE_ID`, `OPENGENI_RECOVERY_SESSION_ID`, `OPENGENI_RECOVERY_SANDBOX_GROUP_ID` |
+| Lease/loss | `OPENGENI_RECOVERY_LEASE_ID`, `OPENGENI_RECOVERY_BACKEND`, `OPENGENI_RECOVERY_CURRENT_EPOCH`, `OPENGENI_RECOVERY_LOST_EPOCH`, `OPENGENI_RECOVERY_LOST_INSTANCE_ID`, `OPENGENI_RECOVERY_REFCOUNT`, `OPENGENI_RECOVERY_PROVIDER_BACKEND` |
+| Route | `OPENGENI_RECOVERY_ROUTE_KIND`, `OPENGENI_RECOVERY_ROUTE_TARGET_ID`, `OPENGENI_RECOVERY_ROUTE_EPOCH` |
+| Workspace/restore | `OPENGENI_RECOVERY_WORKSPACE_GENERATION`, `OPENGENI_RECOVERY_WORKSPACE_STATUS`, `OPENGENI_RECOVERY_RESTORE_STATUS`, `OPENGENI_RECOVERY_RESTORE_FAILURE_CODE` |
+| Archive generation | `OPENGENI_RECOVERY_ARCHIVE_GENERATION`, `OPENGENI_RECOVERY_ARCHIVE_COMPLETE` |
+| Descriptor/object | `OPENGENI_RECOVERY_ARCHIVE_DESCRIPTOR_VERSION`, `OPENGENI_RECOVERY_ARCHIVE_REVISION`, `OPENGENI_RECOVERY_ARCHIVE_OBJECT_KIND`, `OPENGENI_RECOVERY_ARCHIVE_OBJECT_ID` |
+| Reference integrity | `OPENGENI_RECOVERY_ARCHIVE_DESCRIPTOR_REFERENCE_BYTES`, `OPENGENI_RECOVERY_ARCHIVE_DESCRIPTOR_REFERENCE_SHA256`, `OPENGENI_RECOVERY_ARCHIVE_REFERENCE_BYTES`, `OPENGENI_RECOVERY_ARCHIVE_REFERENCE_SHA256` |
+| Workspace tree | `OPENGENI_RECOVERY_ARCHIVE_TREE_FINGERPRINT_ALGORITHM`, `OPENGENI_RECOVERY_ARCHIVE_TREE_FINGERPRINT_SHA256`, `OPENGENI_RECOVERY_ARCHIVE_TREE_ENTRY_COUNT`, `OPENGENI_RECOVERY_ARCHIVE_TREE_FILE_COUNT`, `OPENGENI_RECOVERY_ARCHIVE_TOTAL_FILE_BYTES` |
+| Capture/verification | `OPENGENI_RECOVERY_ARCHIVE_CAPTURED_AT`, `OPENGENI_RECOVERY_ARCHIVE_VERIFICATION_STATE`, `OPENGENI_RECOVERY_ARCHIVE_VERIFIED_REVISION`, `OPENGENI_RECOVERY_ARCHIVE_VERIFIED_AT` |
+| External observation | `OPENGENI_RECOVERY_PROVIDER_OBJECT_KIND`, `OPENGENI_RECOVERY_PROVIDER_OBJECT_ID`, `OPENGENI_RECOVERY_PROVIDER_OBJECT_STATUS`, `OPENGENI_RECOVERY_PROVIDER_OBJECT_OBSERVED_AT` |
+
+The descriptor's `archiveBytes`/`archiveSha256` describe the opaque provider
+reference payload. Preview independently decodes `workspaceArchive` and
+recomputes that payload's bytes/SHA. `workspace.totalFileBytes` is the sum of
+file contents, while `workspace.sha256` is the deterministic GNU-tar full-tree
+fingerprint covering names, kinds, modes, symlink targets, and file bytes. They
+are distinct facts. `capturedAt` is never used as verification time;
+`verifiedAt` is authoritative only when workspace status is `ready`, the
+verified revision matches the selected descriptor, and the timestamp is valid.
+
+Run preview:
+
+```bash
+OPENGENI_COLD_LOST_LEASE_RECONCILE=preview \
+  bun scripts/operator/reconcile-cold-lost-sandbox-blockers.ts
+```
+
+The command emits one
+`OPENGENI_COLD_LOST_LEASE_RECONCILE_PREVIEW=<json>` receipt. Exit `0` means
+`eligible`; exit `2` means blocked. Keep the receipt as private operator
+evidence. It binds the complete expected and observed tuple, provider
+observation, and every process/admission/PTY/holder/interruption identity and
+linkage in a deterministic `clrp1:<sha256>` ID. A missing lease explicitly sets
+`inventoryComplete:false` and blocks rather than reporting an authoritative
+empty inventory.
+
+Only after independent review of that exact eligible receipt may an authorized
+operator rerun the **same input packet** with its preview ID:
+
+```bash
+OPENGENI_COLD_LOST_LEASE_RECONCILE=apply \
+OPENGENI_RECOVERY_PREVIEW_ID='clrp1:<reviewed-sha256>' \
+  bun scripts/operator/reconcile-cold-lost-sandbox-blockers.ts
+```
+
+Apply re-previews before locking, locks the exact blocker rows and lease,
+re-reads the complete receipt under those locks, and returns `stale` or
+`blocked` on any drift. A successful apply only marks exact active retained
+processes lost, rejects their exact unsettled admissions, closes exact open
+PTYs, deletes the matching process holders, and recomputes lease counters. It
+does not advance the epoch, modify archive/workspace generations or recovery
+truth, invoke a provider, terminate/create a sandbox, restore an archive, write
+the workspace, alter session control/queue/goal state, or replay an operation.
+
 ## Conformance
 
 A deployment is not acceptable until it proves:

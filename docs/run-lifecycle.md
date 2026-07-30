@@ -348,6 +348,19 @@ is deleted only after a verified workspace capture is durably folded onto the
 fenced lease. Definitive `NOT_FOUND` before capture preserves any existing
 archive or records typed unrecoverable truth when no durable revision exists.
 
+An older deployment may have committed the cold/advanced-epoch transition
+before settling the exact lost-provider blocker rows. The exceptional operator
+path is blocker-first: one DB-only, repeatable-read/read-only preview binds the
+full account/workspace/session/group, lease/epoch/provider/route,
+workspace/archive/verification tuple, fresh externally supplied provider-object
+observation, and every process/admission/PTY/holder/interruption identity into a
+`clrp1:` receipt. Unknown, incomplete, possible-writer, or mismatched truth
+blocks. Apply accepts only that exact reviewed receipt, re-previews before and
+under row locks, and settles the same narrow rows as the automatic loss
+transaction. It never calls a provider, changes epoch/archive/recovery truth,
+writes `/workspace`, or replays an ambiguous operation. The exact runbook is in
+[`deployment.md`](deployment.md#cold-lost-provider-blocker-reconciliation).
+
 Every operation that may mutate a persistable `/workspace` first enters one
 lease-scoped turn/direct/process admission ledger. In one transaction, admission
 binds the session group, warm lease epoch, provider identity, and pinned route to
