@@ -307,14 +307,14 @@ backfill. The required sequence is:
    the migration-only secret and Job identity;
 3. query `pg_stat_activity` through the migration connection and prove zero
    other sessions with `usename = 'opengeni_app'`;
-4. run the new digest's migration Job and require 0137 to appear in
+4. run the new digest's migration Job and require 0138 to appear in
    `schema_migrations`;
 5. start only the same new digest's API and workers, then require startup/readiness
    posture checks before reopening traffic.
 
 The migration repeats the `opengeni_app` guard before and after taking exclusive
 lease-lifecycle table locks, so a missed live application fails with SQLSTATE
-`55000` and leaves the prior schema intact. After 0137 commits, rollback to an
+`55000` and leaves the prior schema intact. After 0138 commits, rollback to an
 older application image is forbidden; stop admission and fix forward.
 
 For Azure managed Blob storage, the artifact generator can consume the

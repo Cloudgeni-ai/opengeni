@@ -1,4 +1,9 @@
-import { ModalImageSelector, ModalSandboxClient } from "@openai/agents-extensions/sandbox/modal";
+import {
+  ModalImageSelector,
+  ModalSandboxClient,
+  type ModalSandboxSession,
+  type ModalSandboxSessionState,
+} from "@openai/agents-extensions/sandbox/modal";
 import { effectiveModalIdleTimeoutSeconds } from "@opengeni/config";
 import type { Settings } from "@opengeni/config";
 import {
@@ -12,6 +17,7 @@ import type { ProviderRegistration } from "./types";
 export type { ModalCheckpointProviderBinding } from "@opengeni/contracts";
 
 const MODAL_ORPHAN_SWEEP_LIMIT = 50;
+const OPENGENI_MODAL_SDK_VERSION = "0.9.0";
 // A provider box is invisible to the lease until Modal create + manifest
 // materialization returns and the creation callback records its instance id.
 // Production baseline (2026-07-15, all 8 turn workers): 155/155 completed creates
@@ -69,6 +75,127 @@ export function modalSandboxAttributionTags(
   };
 }
 
+type MutableModalSnapshotSandbox = {
+  snapshotFilesystem?: (...args: unknown[]) => Promise<unknown>;
+  snapshotDirectory?: (...args: unknown[]) => Promise<unknown>;
+};
+
+type MutableModalSandboxSession = {
+  modal?: { version?: () => string };
+  sandbox?: MutableModalSnapshotSandbox;
+  state?: {
+    workspacePersistence?: string;
+    snapshotFilesystemTimeoutMs?: number;
+  };
+  persistWorkspace?: () => Promise<Uint8Array>;
+};
+
+const modalRetentionWrappedSessions = new WeakSet<object>();
+const modalFilesystemRetentionWrappedSandboxes = new WeakSet<object>();
+const modalDirectoryRetentionWrappedSandboxes = new WeakSet<object>();
+
+function assertPinnedModalSdk(session: MutableModalSandboxSession): void {
+  const actualVersion = session.modal?.version?.();
+  if (actualVersion !== OPENGENI_MODAL_SDK_VERSION) {
+    throw new Error(
+      `OpenGeni Modal snapshot compatibility requires modal@${OPENGENI_MODAL_SDK_VERSION}; ` +
+        `the active session reported ${actualVersion ?? "no version"}`,
+    );
+  }
+}
+
+function installModalNativeSnapshotRetention(session: MutableModalSandboxSession): void {
+  const persistence = session.state?.workspacePersistence;
+  if (persistence !== "snapshot_filesystem" && persistence !== "snapshot_directory") {
+    return;
+  }
+  const sandbox = session.sandbox;
+  if (!sandbox || typeof sandbox !== "object") {
+    throw new Error(`Modal ${persistence} persistence has no active provider sandbox`);
+  }
+
+  if (persistence === "snapshot_filesystem") {
+    if (modalFilesystemRetentionWrappedSandboxes.has(sandbox)) return;
+    const snapshotFilesystem = sandbox.snapshotFilesystem;
+    if (typeof snapshotFilesystem !== "function") {
+      throw new Error("Modal snapshot_filesystem persistence is unavailable");
+    }
+    // Agents Extensions 0.13.x still invokes the Modal 0.7 positional timeout
+    // signature. Modal 0.9 moved timeout into an options object and changed the
+    // default Image retention from indefinite to 30 days. Translate at the
+    // provider boundary and retain the Image until OpenGeni's artifact ledger
+    // proves it unreferenced and garbage-collects its exact provider id.
+    sandbox.snapshotFilesystem = async (legacyParams?: unknown) => {
+      if (legacyParams !== undefined && typeof legacyParams !== "number") {
+        throw new Error("Unexpected Modal snapshot_filesystem adapter call shape");
+      }
+      return await snapshotFilesystem.call(sandbox, {
+        ...(legacyParams === undefined ? {} : { timeoutMs: legacyParams }),
+        ttlMs: null,
+      });
+    };
+    modalFilesystemRetentionWrappedSandboxes.add(sandbox);
+    return;
+  }
+
+  if (modalDirectoryRetentionWrappedSandboxes.has(sandbox)) return;
+  const snapshotDirectory = sandbox.snapshotDirectory;
+  if (typeof snapshotDirectory !== "function") {
+    throw new Error("Modal snapshot_directory persistence is unavailable");
+  }
+  sandbox.snapshotDirectory = async (path?: unknown, legacyParams?: unknown) => {
+    if (typeof path !== "string" || legacyParams !== undefined) {
+      throw new Error("Unexpected Modal snapshot_directory adapter call shape");
+    }
+    return await snapshotDirectory.call(sandbox, path, {
+      ...(session.state?.snapshotFilesystemTimeoutMs === undefined
+        ? {}
+        : { timeoutMs: session.state.snapshotFilesystemTimeoutMs }),
+      ttlMs: null,
+    });
+  };
+  modalDirectoryRetentionWrappedSandboxes.add(sandbox);
+}
+
+/**
+ * Bridge the pinned Agents Extensions Modal adapter to Modal 0.9's snapshot
+ * options. The wrapper re-checks the private provider sandbox on every capture
+ * because snapshot_filesystem hydration replaces that object.
+ */
+export function installOpenGeniModalSnapshotPolicy<T extends object>(session: T): T {
+  const mutable = session as MutableModalSandboxSession;
+  if (modalRetentionWrappedSessions.has(session)) return session;
+  if (typeof mutable.persistWorkspace !== "function") {
+    throw new Error("Modal session does not expose workspace persistence");
+  }
+  assertPinnedModalSdk(mutable);
+  installModalNativeSnapshotRetention(mutable);
+
+  const persistWorkspace = mutable.persistWorkspace.bind(session);
+  mutable.persistWorkspace = async () => {
+    assertPinnedModalSdk(mutable);
+    installModalNativeSnapshotRetention(mutable);
+    return await persistWorkspace();
+  };
+  modalRetentionWrappedSessions.add(session);
+  return session;
+}
+
+export class OpenGeniModalSandboxClient extends ModalSandboxClient {
+  override async create(
+    args?: Parameters<ModalSandboxClient["create"]>[0],
+    manifestOptions?: Parameters<ModalSandboxClient["create"]>[1],
+  ): Promise<ModalSandboxSession> {
+    const session = await super.create(args, manifestOptions);
+    return installOpenGeniModalSnapshotPolicy(session);
+  }
+
+  override async resume(state: ModalSandboxSessionState): Promise<ModalSandboxSession> {
+    const session = await super.resume(state);
+    return installOpenGeniModalSnapshotPolicy(session);
+  }
+}
+
 export const modalProvider: ProviderRegistration = {
   backend: "modal",
   descriptor: CAPABILITY_DESCRIPTORS.modal,
@@ -122,7 +249,7 @@ export const modalProvider: ProviderRegistration = {
     if (settings.modalEnvironment) {
       options.environment = settings.modalEnvironment;
     }
-    return new ModalSandboxClient(options);
+    return new OpenGeniModalSandboxClient(options);
   },
 };
 

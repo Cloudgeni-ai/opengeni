@@ -38,11 +38,11 @@ function modalCheckpointFixture(snapshotId: string, capturedAtMs: number) {
 }
 
 beforeAll(async () => {
-  blank = await acquireBlankTestDatabase("migration-0137");
+  blank = await acquireBlankTestDatabase("migration-0138");
   if (!blank) {
     if (requireRealDatabase) {
       throw new Error(
-        "[migration-0137] OPENGENI_REQUIRE_REAL_DB=1 but the real PostgreSQL harness is unavailable",
+        "[migration-0138] OPENGENI_REQUIRE_REAL_DB=1 but the real PostgreSQL harness is unavailable",
       );
     }
     available = false;
@@ -69,10 +69,10 @@ describe("migration 0138 (checkpoint artifacts and finite provider deadlines)", 
       }
 
       const [account] = await sql<{ id: string }[]>`
-        insert into managed_accounts (name) values ('migration-0137-account') returning id`;
+        insert into managed_accounts (name) values ('migration-0138-account') returning id`;
       const [workspace] = await sql<{ id: string }[]>`
         insert into workspaces (account_id, name)
-        values (${account!.id}, 'migration-0137-workspace') returning id`;
+        values (${account!.id}, 'migration-0138-workspace') returning id`;
       await sql`
         insert into workspace_inference_controls (workspace_id, account_id)
         values (${workspace!.id}, ${account!.id})`;

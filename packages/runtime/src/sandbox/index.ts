@@ -929,6 +929,13 @@ export async function establishSandboxSessionFromEnvelope(
      * is never observable as ready while verification is in flight. */
     onWorkspaceRestoreVerifying?: (descriptor: WorkspaceArchiveDescriptor) => Promise<void>;
     metrics?: RuntimeMetricsHooks;
+    /** Isolated conformance-test/embedding seam. Ordinary runtime callers use
+     * the validated provider registry. */
+    clientFactory?: (
+      backend: SandboxBackend,
+      settings: Settings,
+      environment: Record<string, string>,
+    ) => unknown;
   },
 ): Promise<EstablishedSandboxSession> {
   const envelopeBackend =
@@ -936,9 +943,11 @@ export async function establishSandboxSessionFromEnvelope(
   const backend =
     opts.backendOverride ?? envelopeBackend ?? (settings.sandboxBackend as SandboxBackend);
   const environment = opts.environment ?? collectSandboxEnvironment(settings);
-  const client = createSandboxClientForBackend(backend, settings, environment) as
-    | ResumeCapableClient
-    | undefined;
+  const client = (opts.clientFactory ?? createSandboxClientForBackend)(
+    backend,
+    settings,
+    environment,
+  ) as ResumeCapableClient | undefined;
   if (!client) {
     throw new SandboxConfigError(
       backend,

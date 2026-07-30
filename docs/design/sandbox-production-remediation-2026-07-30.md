@@ -250,6 +250,11 @@ The reaper:
 - records exponential-backoff failure without dropping ownership;
 - keeps deleted tombstones for 30 days, then prunes at most 500 per pass.
 
+OpenGeni pins Modal JS 0.9.0 and passes `ttlMs: null` for both native snapshot
+kinds. Modal's 30-day default is not a safe session-recovery lifetime: a
+checkpoint remains provider-retained until this ledger proves its exact Image
+id unreferenced and completes bounded garbage collection.
+
 This keeps one current and one previous checkpoint per lease. Old Images are not
 left around merely because another writer won a race.
 
@@ -344,7 +349,7 @@ session, turn, execution generation, `active_attempt_id`, and a
 operation to release itself. This is the authoritative backstop when an
 in-process signal is missed.
 
-Migration 0137 removes canonical turn holders whose ownership chain was already
+Migration 0138 removes canonical turn holders whose ownership chain was already
 broken before rollout, recomputes only the affected leases' source-of-truth
 counters, and makes now-empty warm leases immediately drainable. It does not
 reclassify unrelated leases.
@@ -448,7 +453,7 @@ the migration and application rollout.
      the production cohort control, not merely a SQL query cap.
 4. **Canary and first production cohort**
    - complete the isolated short-lifetime canary in staging before production
-     migration 0137 is allowed to start;
+     migration 0138 is allowed to start;
    - after the new production workers start, treat the first automatically
      requested legacy rotation as the production cohort and require its durable
      checkpoint, successor, and cleanup receipts before widening admission;
