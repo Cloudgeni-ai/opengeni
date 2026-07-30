@@ -175,6 +175,21 @@ export type SessionToolSelection = {
   firstPartyToolIds: Set<FirstPartyMcpToolName>;
 };
 
+export function visibleSessionToolSelection(
+  selection: SessionToolSelection,
+  servers: ReadonlyArray<Pick<McpServerOption, "id">>,
+  firstPartyTools: ReadonlyArray<Pick<{ id: FirstPartyMcpToolName }, "id">>,
+): SessionToolSelection {
+  const visibleMcpIds = new Set(servers.map((server) => server.id));
+  const visibleFirstPartyIds = new Set(firstPartyTools.map((tool) => tool.id));
+  return {
+    mcpServerIds: new Set([...selection.mcpServerIds].filter((id) => visibleMcpIds.has(id))),
+    firstPartyToolIds: new Set(
+      [...selection.firstPartyToolIds].filter((id) => visibleFirstPartyIds.has(id)),
+    ),
+  };
+}
+
 export function SessionToolPicker(props: {
   servers: McpServerOption[];
   firstPartyTools: ReadonlyArray<{ id: FirstPartyMcpToolName; name: string }>;
@@ -183,14 +198,21 @@ export function SessionToolPicker(props: {
   saving?: boolean;
   onChange: (selection: SessionToolSelection) => void;
 }) {
+  const visibleSelection = visibleSessionToolSelection(
+    props.selection,
+    props.servers,
+    props.firstPartyTools,
+  );
   const total = props.servers.length + props.firstPartyTools.length;
-  const selected = props.selection.mcpServerIds.size + props.selection.firstPartyToolIds.size;
+  const selectedMcpIds = visibleSelection.mcpServerIds;
+  const selectedFirstPartyIds = visibleSelection.firstPartyToolIds;
+  const selected = selectedMcpIds.size + selectedFirstPartyIds.size;
   if (total === 0) return null;
 
   const toggleMcp = (id: string) => {
     const next: SessionToolSelection = {
-      mcpServerIds: new Set(props.selection.mcpServerIds),
-      firstPartyToolIds: new Set(props.selection.firstPartyToolIds),
+      mcpServerIds: selectedMcpIds,
+      firstPartyToolIds: selectedFirstPartyIds,
     };
     if (next.mcpServerIds.has(id)) next.mcpServerIds.delete(id);
     else next.mcpServerIds.add(id);
@@ -198,8 +220,8 @@ export function SessionToolPicker(props: {
   };
   const toggleFirstParty = (id: FirstPartyMcpToolName) => {
     const next: SessionToolSelection = {
-      mcpServerIds: new Set(props.selection.mcpServerIds),
-      firstPartyToolIds: new Set(props.selection.firstPartyToolIds),
+      mcpServerIds: selectedMcpIds,
+      firstPartyToolIds: selectedFirstPartyIds,
     };
     if (next.firstPartyToolIds.has(id)) next.firstPartyToolIds.delete(id);
     else next.firstPartyToolIds.add(id);

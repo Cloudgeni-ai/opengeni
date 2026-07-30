@@ -10,7 +10,6 @@ import {
 } from "@opengeni/contracts";
 import type { Database } from "@opengeni/db";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
-import { enabledCapabilityMcpToolRefs } from "./resources";
 
 const MANDATORY_SESSION_MCP_SERVER_IDS = ["opengeni"] as const;
 const PROJECTABLE_REGISTRY_ID = /^[A-Za-z0-9_-]+$/;
@@ -32,6 +31,12 @@ function sortedIds(ids: Iterable<string>): string[] {
   return [...new Set(ids)].sort();
 }
 
+/** Every configured runtime MCP defaults on; mandatory carrier IDs are separate. */
+export function defaultSessionMcpServerIds(servers: Iterable<{ id: string }>): string[] {
+  const mandatory = new Set<string>(MANDATORY_SESSION_MCP_SERVER_IDS);
+  return sortedIds([...servers].map((server) => server.id).filter((id) => !mandatory.has(id)));
+}
+
 function projectIds(ids: readonly string[]): { ids: string[]; truncated: boolean } {
   const projectable = ids.filter(
     (id) =>
@@ -49,13 +54,11 @@ function projectIds(ids: readonly string[]): { ids: string[]; truncated: boolean
  * Resolve the same ID-only policy used by API projections and worker turns.
  * This function never receives endpoint URLs, credentials, schemas, or live
  * probe results. `availableMcpServerIds` is the resolved runtime registry;
- * `defaultMcpServerIds` is the capability-only omitted-tools set.
+ * `defaultMcpServerIds` is the current configured omitted-tools default.
  */
 export function resolveSessionToolPolicy(input: SessionToolPolicyInput): ResolvedSessionToolPolicy {
   const policy = input.toolPolicy;
   const availableIds = new Set(input.availableMcpServerIds);
-  // Never infer omitted-tools defaults from the full runtime registry: static
-  // MCPs are explicit-only unless they are capability-derived defaults.
   const defaultIds = new Set(input.defaultMcpServerIds ?? []);
   const mandatoryIds: string[] = MANDATORY_SESSION_MCP_SERVER_IDS.filter((id) =>
     availableIds.has(id),
@@ -169,14 +172,14 @@ export async function workspaceSessionToolPolicyServerIds(
   return sortedIds(runtimeSettings.mcpServers.map((server) => server.id));
 }
 
-/** Current omitted-tools defaults; this preserves capability-first behavior. */
+/** Current omitted-tools defaults: every configured runtime MCP is on. */
 export async function workspaceSessionToolPolicyDefaultServerIds(
   db: Database,
   workspaceId: string,
   settings: Settings,
 ): Promise<string[]> {
   const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(db, workspaceId, settings);
-  return sortedIds(enabledCapabilityMcpToolRefs(settings, runtimeSettings).map((tool) => tool.id));
+  return defaultSessionMcpServerIds(runtimeSettings.mcpServers);
 }
 
 /** Add a bounded, secret-safe effective projection to a session response. */

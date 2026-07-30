@@ -64,6 +64,7 @@ import {
   rehydrateRepositoryResources,
   repositorySelectionFromResources,
   reasoningEffortOrder,
+  selectableMcpServers,
   selectedAvailableCapabilityToolIds,
 } from "./lib/session-tools";
 import {
@@ -1106,17 +1107,9 @@ describe("buildTools", () => {
     ]);
   });
 
-  test("pulls in the file download helper whenever document search is selected", () => {
-    expect(buildTools(undefined, ["docs"])).toEqual([
-      { kind: "mcp", id: "docs" },
-      { kind: "mcp", id: "files" },
-    ]);
+  test("does not manufacture runtime infrastructure from a user selection", () => {
+    expect(buildTools(undefined, ["docs"])).toEqual([{ kind: "mcp", id: "docs" }]);
     expect(buildTools([{ kind: "mcp", id: "docs" }], ["docs"])).toEqual([
-      { kind: "mcp", id: "docs" },
-      { kind: "mcp", id: "files" },
-    ]);
-    expect(buildTools([{ kind: "mcp", id: "files" }], ["docs"])).toEqual([
-      { kind: "mcp", id: "files" },
       { kind: "mcp", id: "docs" },
     ]);
   });
@@ -1131,7 +1124,6 @@ describe("buildTools", () => {
     expect(buildTools(undefined, ["opengeni", "docs"])).toEqual([
       { kind: "mcp", id: "opengeni" },
       { kind: "mcp", id: "docs" },
-      { kind: "mcp", id: "files" },
     ]);
   });
 
@@ -1212,6 +1204,21 @@ describe("buildTools", () => {
         }),
       ]),
     ).toEqual([{ id: "cap-ready", name: "Ready MCP" }]);
+  });
+
+  test("keeps mandatory OpenGeni infrastructure out of selectable server catalogs", () => {
+    const config = {
+      mcpServers: [
+        { id: "opengeni", name: "OpenGeni", url: "https://example.test/opengeni" },
+        { id: "files", name: "Files", url: "https://example.test/files" },
+        { id: "docs", name: "Document Search", url: "https://example.test/docs" },
+        { id: "linear", name: "Linear", url: "https://example.test/linear" },
+      ],
+    } as unknown as Parameters<typeof selectableMcpServers>[0];
+    expect(selectableMcpServers(config)).toEqual([
+      expect.objectContaining({ id: "docs" }),
+      expect.objectContaining({ id: "linear" }),
+    ]);
   });
 
   test("merges configured and workspace MCP options without duplicates", () => {
@@ -1681,7 +1688,7 @@ describe("GitHub repository resources", () => {
 });
 
 describe("new-session draft tool policy", () => {
-  test("keeps omitted defaults distinct from explicit empty and narrowed policies", () => {
+  test("keeps omitted defaults distinct from the UI's Files-only and narrowed policies", () => {
     expect(
       newSessionDraftToolPolicy({
         selectedMcpServerIds: ["opengeni", "docs"],
@@ -1697,7 +1704,7 @@ describe("new-session draft tool policy", () => {
         catalogReady: true,
         explicit: true,
       }),
-    ).toEqual({ tools: [], toolsProvided: true });
+    ).toEqual({ tools: [{ kind: "mcp", id: "files" }], toolsProvided: true });
     expect(
       newSessionDraftToolPolicy({
         selectedMcpServerIds: ["opengeni"],
@@ -1705,7 +1712,7 @@ describe("new-session draft tool policy", () => {
         catalogReady: true,
         explicit: false,
       }),
-    ).toEqual({ tools: [{ kind: "mcp", id: "opengeni" }], toolsProvided: true });
+    ).toEqual({ tools: [{ kind: "mcp", id: "files" }], toolsProvided: true });
     expect(
       newSessionDraftToolPolicy({
         selectedMcpServerIds: ["opengeni"],

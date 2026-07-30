@@ -183,7 +183,7 @@ import {
   type CodexUsageHeaderSnapshot,
 } from "@opengeni/codex";
 import { mergeResourceRefs } from "./common";
-import { enabledCapabilityMcpToolRefs, resolveSessionToolPolicy } from "@opengeni/core";
+import { defaultSessionMcpServerIds, resolveSessionToolPolicy } from "@opengeni/core";
 import { maybeCompactContext } from "./context-compaction";
 import { TurnAttemptFencedError } from "./turn-attempt-fenced";
 import {
@@ -4074,16 +4074,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // narrowed by the session's exact firstPartyMcpTools selection and
       // authorization. Idempotent: mergeToolRefs dedupes if already present.
       // Resolve the durable policy at the turn boundary. Workspace-default
-      // sessions may discover newly enabled capability MCPs and Codex Apps,
+      // sessions follow the current configured MCP set,
       // while explicit, inherited-fixed, and legacy sessions remain narrowed
       // to their stored materialized allow-list.
       const resolvedToolPolicy = resolveSessionToolPolicy({
         toolPolicy: session.toolPolicy,
         sessionTools: session.tools,
         availableMcpServerIds: runSettings.mcpServers.map((server) => server.id),
-        defaultMcpServerIds: enabledCapabilityMcpToolRefs(settings, mcpSettings).map(
-          (tool) => tool.id,
-        ),
+        defaultMcpServerIds: defaultSessionMcpServerIds(capabilitySettings.mcpServers),
       });
       const effectivePolicyTools = resolvedToolPolicy.toolRefs;
       const turnTools = withFirstPartyTools(runSettings, effectivePolicyTools);

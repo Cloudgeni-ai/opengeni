@@ -69,6 +69,7 @@ import {
 } from "@/lib/session-create";
 import {
   firstPartySessionToolOptions,
+  selectableSessionMcpServerIds,
   newSessionDraftToolPolicy,
   rehydrateRepositoryResources,
   repositorySelectionFromResources,
@@ -111,23 +112,19 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
   }, [resetSessionView, workspaceId]);
 
   const computeReady = isSessionDraftComputeReady(draft);
-  const workspaceDefaultToolIds = useMemo(
-    () => ["opengeni", ...context.workspaceDefaultToolIds],
-    [context.workspaceDefaultToolIds],
-  );
   const persistedToolPolicy = useMemo(
     () =>
       newSessionDraftToolPolicy({
         selectedMcpServerIds: context.selectedCapabilityToolIds,
-        workspaceDefaultMcpServerIds: workspaceDefaultToolIds,
+        workspaceDefaultMcpServerIds: context.workspaceDefaultToolIds,
         catalogReady: context.workspaceMcpCatalogReady,
         explicit: toolSelectionExplicit,
       }),
     [
       context.selectedCapabilityToolIds,
       context.workspaceMcpCatalogReady,
+      context.workspaceDefaultToolIds,
       toolSelectionExplicit,
-      workspaceDefaultToolIds,
     ],
   );
   const persistedValue = useMemo(
@@ -171,12 +168,9 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
       const selected = new Set(
         remote.toolsProvided
           ? remote.tools.map((tool) => tool.id)
-          : ["opengeni", ...workspaceDefaultToolIdsForHydration],
+          : workspaceDefaultToolIdsForHydration,
       );
-      // `files` is the hidden download helper automatically paired with the
-      // visible Document Search selection, not a standalone picker choice.
-      if (selected.has("docs")) selected.delete("files");
-      setSelectedCapabilityToolIds(selected);
+      setSelectedCapabilityToolIds(selectableSessionMcpServerIds(selected));
       const repositorySelection = repositorySelectionFromResources(remote.resources, githubRepos);
       setManualRepos(repositorySelection.manualRepos);
       setSelectedRepoIds(repositorySelection.selectedRepoIds);
@@ -515,7 +509,7 @@ function SessionControlStrip({
         onEffortChange={context.setReasoningEffort}
       />
       <SessionToolPicker
-        servers={context.toolMcpServers.filter((server) => server.id !== "opengeni")}
+        servers={context.toolMcpServers}
         firstPartyTools={firstPartySessionToolOptions}
         selection={selection}
         disabled={disabled}

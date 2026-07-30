@@ -50,7 +50,7 @@ import {
 } from "@/lib/session-pins";
 import {
   buildResources,
-  buildTools,
+  buildOpenGeniUiTools,
   enabledWorkspaceCapabilityMcpServers,
   groupRepositories,
   initialReasoningEffort,
@@ -736,7 +736,7 @@ export function RootRouteComponent() {
         });
         return null;
       }
-      const selectedTools = buildTools(submission.tools, [...selectedCapabilityToolIds]);
+      const selectedTools = buildOpenGeniUiTools(submission.tools, selectedCapabilityToolIds);
       const freshIdempotencyKey = crypto.randomUUID();
       const attempt = prepareCreateSessionAttempt({
         pending: pendingCreateAttempt.current,
@@ -752,10 +752,7 @@ export function RootRouteComponent() {
           defaultReasoningEffort: reasoningEffort,
           clientEventId: crypto.randomUUID(),
           idempotencyKey: freshIdempotencyKey,
-          workspaceDefaultMcpServerIds: [
-            "opengeni",
-            ...workspaceMcpServers.map((server) => server.id),
-          ],
+          workspaceDefaultMcpServerIds: ["files", ...toolMcpServers.map((server) => server.id)],
           workspaceMcpCatalogReady,
           targetSandboxId: options?.targetSandboxId,
           workingDir: options?.workingDir,
@@ -1003,7 +1000,7 @@ export function RootRouteComponent() {
           selectedInstallationId,
           repositoryGroups,
           toolMcpServers,
-          workspaceDefaultToolIds: workspaceMcpServers.map((server) => server.id),
+          workspaceDefaultToolIds: toolMcpServers.map((server) => server.id),
           workspaceMcpCatalogReady,
           currentResources,
           addManualRepository: contextAddManualRepository,
@@ -1081,7 +1078,6 @@ export function RootRouteComponent() {
     setSession,
     toolMcpServers,
     workspaceMcpCatalogReady,
-    workspaceMcpServers,
     workspaces,
   ]);
 

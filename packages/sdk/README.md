@@ -32,7 +32,7 @@ for await (const event of client.streamEvents(workspaceId, session.id)) {
 }
 ```
 
-Omit `firstPartyMcpTools` for the minimal self-management default. An explicit
+Omit `firstPartyMcpTools` for the complete OpenGeni tool catalog. An explicit
 `[]` exposes no broad first-party tools; attached resources and separately
 selected `files`/`docs` MCP servers are unaffected.
 
@@ -210,9 +210,12 @@ await client.sendApprovalDecision(workspaceId, sessionId, { approvalId, decision
 ## Session tool policy and native web search
 
 Omitting `tools` when creating a top-level session selects the current
-workspace-default capability policy. Supported Responses providers can then
-attach their native bounded web-search tool without requiring a sandbox.
-Passing `tools`, including `[]`, is an intentional fixed narrowing.
+workspace-default capability policy, including the built-in `files` server.
+Passing `tools`, including `[]`, is an intentional fixed narrowing and can
+therefore disable file-download access for that session. OpenGeni's own web UI
+keeps `files` enabled as a hidden default, while API and embedded clients retain
+exact control over the explicit list. Supported Responses providers attach
+their native bounded web-search tool independently of this MCP policy.
 
 Existing explicit sessions are not widened when a new default capability is
 introduced. Opt one in explicitly with the current optimistic-concurrency
