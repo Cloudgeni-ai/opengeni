@@ -52,6 +52,9 @@ describe("release image workflow contract", () => {
   test("candidate builds every physical image and freezes a full-SHA receipt", async () => {
     const candidate = await workflow("release-candidate.yml");
 
+    expect(candidate).not.toContain("expected_packages:");
+    expect(candidate).not.toContain("OPENGENI_EXPECTED_PACKAGES");
+    expect(candidate).toContain('OPENGENI_RELEASE_PACKAGE_DERIVE_EXPECTED: "true"');
     for (const identity of [
       "target: api",
       "target: worker",
@@ -95,6 +98,10 @@ describe("release image workflow contract", () => {
     const release = await workflow("release.yml");
     const finalJob = release.slice(release.indexOf("\n  images:\n"));
 
+    expect(release).not.toContain("inputs.expected_packages");
+    expect(release).toContain("steps.acceptance-bundle.outputs.expected_packages");
+    expect(release).toContain('map(.name + "@" + .version)');
+    expect(release).toContain("map({name, version})");
     expect(finalJob).toContain("Promote exact accepted manifests");
     expect(finalJob).toContain("docker buildx imagetools create");
     expect(finalJob).toContain("--prefer-index=false");
@@ -201,6 +208,7 @@ describe("release image workflow contract", () => {
     expect(release).toContain("bun run test:publish-consumer");
     expect(release).toContain("uses: changesets/action@");
     expect(release).toContain("OPENGENI_RELEASE_PACKAGE_PHASE: verify");
+    expect(release).not.toContain("OPENGENI_RELEASE_PACKAGE_DERIVE_EXPECTED");
     expect(release).toContain("Publish or reconcile the exact candidate chart");
     expect(release).toContain('[ "$GITHUB_REF" = "refs/heads/main" ]');
     expect(release).not.toContain('[ "$GITHUB_SHA" = "$SOURCE_SHA" ]');
@@ -255,6 +263,7 @@ describe("release image workflow contract", () => {
     const reconciliation = publish.indexOf("Reconcile exact registry package identity");
 
     expect(publish).toContain("expected_packages:");
+    expect(publish).not.toContain("OPENGENI_RELEASE_PACKAGE_DERIVE_EXPECTED");
     expect(publish).toContain("checks: read");
     expect(publish).toContain("filter=latest&per_page=100");
     expect(publish).toContain('test "$GITHUB_REF" = "refs/heads/main"');

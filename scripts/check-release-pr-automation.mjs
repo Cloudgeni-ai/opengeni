@@ -185,13 +185,22 @@ async function ensureReleaseHeadRef(api, headSha) {
   const path = repositoryPath(`/git/ref/tags/${tag}`);
   const existing = await api.getOptional(path);
   if (existing === null) {
-    await api.post(repositoryPath("/git/refs"), {
-      ref: `refs/tags/${tag}`,
-      sha: headSha,
-    });
+    return createReleaseHeadRef(api, headSha);
   } else {
     assertReleaseHeadRef(existing, headSha);
   }
+  const terminal = await api.get(path);
+  assertReleaseHeadRef(terminal, headSha);
+  return { name: tag, ref: `refs/tags/${tag}`, sha: headSha };
+}
+
+async function createReleaseHeadRef(api, headSha) {
+  const tag = releaseHeadTagName(headSha);
+  const path = repositoryPath(`/git/ref/tags/${tag}`);
+  await api.post(repositoryPath("/git/refs"), {
+    ref: `refs/tags/${tag}`,
+    sha: headSha,
+  });
   const terminal = await api.get(path);
   assertReleaseHeadRef(terminal, headSha);
   return { name: tag, ref: `refs/tags/${tag}`, sha: headSha };
@@ -249,19 +258,26 @@ async function ensureReleaseHeadRelease(api, headSha) {
   const path = repositoryPath(`/releases/tags/${tagName}`);
   const existing = await api.getOptional(path);
   if (existing === null) {
-    await api.post(repositoryPath("/releases"), {
-      tag_name: tagName,
-      name: releaseHeadReleaseName(headSha),
-      body:
-        `Provider-retained exact release-source head ${headSha}. ` +
-        "This prerelease exists only as immutable source-retention evidence.",
-      draft: false,
-      prerelease: true,
-      make_latest: "false",
-    });
+    return createReleaseHeadRelease(api, headSha);
   } else {
     assertReleaseHeadRelease(existing, headSha);
   }
+  return assertReleaseHeadRelease(await api.get(path), headSha);
+}
+
+async function createReleaseHeadRelease(api, headSha) {
+  const tagName = releaseHeadTagName(headSha);
+  const path = repositoryPath(`/releases/tags/${tagName}`);
+  await api.post(repositoryPath("/releases"), {
+    tag_name: tagName,
+    name: releaseHeadReleaseName(headSha),
+    body:
+      `Provider-retained exact release-source head ${headSha}. ` +
+      "This prerelease exists only as immutable source-retention evidence.",
+    draft: false,
+    prerelease: true,
+    make_latest: "false",
+  });
   return assertReleaseHeadRelease(await api.get(path), headSha);
 }
 
@@ -770,21 +786,30 @@ async function assertSourceAncestorOfCurrentMain(api, sourceSha, currentMainSha)
   );
 }
 
-async function readExistingReleaseHeadEvidence(api, headSha) {
+async function readOptionalReleaseHeadEvidence(api, headSha) {
   const name = releaseHeadTagName(headSha);
   const ref = `refs/tags/${name}`;
-  const retainedName = assertReleaseHeadRef(
-    await api.get(repositoryPath(`/git/ref/tags/${name}`)),
-    headSha,
+  const [retainedRef, retainedRelease] = await Promise.all([
+    api.getOptional(repositoryPath(`/git/ref/tags/${name}`)),
+    api.getOptional(repositoryPath(`/releases/tags/${name}`)),
+  ]);
+  invariant(
+    (retainedRef === null) === (retainedRelease === null),
+    "release head recovery evidence is only partially present",
   );
-  const release = assertReleaseHeadRelease(
-    await api.get(repositoryPath(`/releases/tags/${name}`)),
-    headSha,
-  );
+  if (retainedRef === null) return null;
+  const retainedName = assertReleaseHeadRef(retainedRef, headSha);
+  const release = assertReleaseHeadRelease(retainedRelease, headSha);
   return {
     releaseHead: { name: retainedName, ref, sha: headSha },
     releaseHeadRelease: release,
   };
+}
+
+async function readExistingReleaseHeadEvidence(api, headSha) {
+  const evidence = await readOptionalReleaseHeadEvidence(api, headSha);
+  invariant(evidence !== null, "release head recovery evidence is absent");
+  return evidence;
 }
 
 export async function recoverReleaseHeadEvidence(options = {}) {
@@ -831,61 +856,69 @@ export async function recoverReleaseHeadEvidence(options = {}) {
     fetchImpl,
     logger,
   });
-  const { releaseHead, releaseHeadRelease } = await readExistingReleaseHeadEvidence(
-    api,
-    context.headSha,
-  );
-  const [preMutationMain, preMutationPull, preMutationEvidence] = await Promise.all([
-    api.get(repositoryPath(`/git/ref/heads/${RELEASE_AUTOMATION_CONTRACT.defaultBranch}`)),
-    api.get(repositoryPath(`/pulls/${context.prNumber}`)),
-    readExistingReleaseHeadEvidence(api, context.headSha),
-  ]);
+  const initialEvidence = await readOptionalReleaseHeadEvidence(api, context.headSha);
+  const [preMutationMain, preMutationPull, preMutationEvidence, preMutationChecks] =
+    await Promise.all([
+      api.get(repositoryPath(`/git/ref/heads/${RELEASE_AUTOMATION_CONTRACT.defaultBranch}`)),
+      api.get(repositoryPath(`/pulls/${context.prNumber}`)),
+      readOptionalReleaseHeadEvidence(api, context.headSha),
+      paginatedCheckRuns(api, context.headSha),
+    ]);
   assertMainRef(preMutationMain, context.sha, "pre-mutation release-head recovery default branch");
   assertRecoveryReleasePull(preMutationPull, context, pullIdentity);
   invariant(
-    JSON.stringify(preMutationEvidence.releaseHead) === JSON.stringify(releaseHead) &&
-      JSON.stringify(preMutationEvidence.releaseHeadRelease) === JSON.stringify(releaseHeadRelease),
+    JSON.stringify(preMutationEvidence) === JSON.stringify(initialEvidence),
     "release head evidence moved before recovery mutation",
   );
+  if (initialEvidence === null) {
+    invariant(
+      preMutationChecks.every(
+        (check) => check?.name !== RELEASE_AUTOMATION_CONTRACT.checks.releaseHeadRetention,
+      ),
+      "release head retention check exists without retained evidence",
+    );
+  }
+
+  const { releaseHead, releaseHeadRelease } = initialEvidence ?? {
+    releaseHead: await createReleaseHeadRef(api, context.headSha),
+    releaseHeadRelease: await createReleaseHeadRelease(api, context.headSha),
+  };
 
   const now = options.now ?? (() => new Date());
   const checkContext = { ...context, releaseHeadRelease };
-  const sourceChecks = (await paginatedCheckRuns(api, context.headSha)).filter(
-    (check) => check?.name === RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+  await upsertCheckRun(
+    api,
+    checkContext,
+    "source-admission",
+    {
+      status: "in_progress",
+      title: "Recovering exact historical source admission",
+      summary:
+        `Reconstructing base ${context.baseSha} to head ${context.headSha}; ` +
+        `manifest ${historicalAdmission.manifestSha256}.`,
+    },
+    now,
   );
-  if (sourceChecks.length === 0) {
-    await upsertCheckRun(
-      api,
-      checkContext,
-      "source-admission",
-      {
-        status: "in_progress",
-        title: "Recovering exact historical source admission",
-        summary:
-          `Reconstructing base ${context.baseSha} to head ${context.headSha}; ` +
-          `manifest ${historicalAdmission.manifestSha256}.`,
-      },
-      now,
-    );
-    await upsertCheckRun(
-      api,
-      checkContext,
-      "source-admission",
-      {
-        status: "completed",
-        conclusion: "success",
-        title: "Historical source admission recovered",
-        summary:
-          `PR #${context.prNumber} exact base/head tree delta is provider-complete; ` +
-          `manifest ${historicalAdmission.manifestSha256}.`,
-      },
-      now,
-    );
-  }
-  const sourceAdmission = assertSuccessfulCheck(
-    await paginatedCheckRuns(api, context.headSha),
+  await upsertCheckRun(
+    api,
+    checkContext,
+    "source-admission",
+    {
+      status: "completed",
+      conclusion: "success",
+      title: "Historical source admission recovered",
+      summary:
+        `PR #${context.prNumber} exact base/head tree delta is provider-complete; ` +
+        `manifest ${historicalAdmission.manifestSha256}.`,
+    },
+    now,
+  );
+  const sourceAdmissionIdentity = checkIdentity("source-admission", checkContext);
+  const sourceAdmission = assertSuccessfulCheckRun(
+    await findCheckRun(api, checkContext, sourceAdmissionIdentity),
     RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
     context.headSha,
+    sourceAdmissionIdentity.externalId,
   );
   await upsertCheckRun(
     api,
@@ -1278,6 +1311,92 @@ function assertSuccessfulCheck(checks, name, sha) {
   });
 }
 
+function assertSuccessfulCheckRun(check, name, sha, externalId) {
+  invariant(check !== undefined, `${name} canonical check run is missing on ${sha}`);
+  invariant(check?.name === name, `${name} canonical check has another name`);
+  invariant(check?.head_sha === sha, `${name} canonical check is bound to another commit`);
+  invariant(
+    check?.external_id === externalId,
+    `${name} canonical check has another idempotency identity`,
+  );
+  assertGitHubActionsApp(check?.app, `${name} canonical check`);
+  invariant(
+    check.status === "completed" && check.conclusion === "success",
+    `${name} canonical check did not complete successfully`,
+  );
+  return Object.freeze({
+    name,
+    appSlug: RELEASE_AUTOMATION_CONTRACT.githubActionsApp.slug,
+    appId: RELEASE_AUTOMATION_CONTRACT.githubActionsApp.id,
+  });
+}
+
+async function verifyDurableSourceAdmission({
+  api,
+  checks,
+  pull,
+  pullNumber,
+  baseSha,
+  headSha,
+  token,
+  fetchImpl,
+  logger,
+}) {
+  const matching = checks.filter(
+    (check) => check?.name === RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+  );
+  const canonicalExternalId = `opengeni:release-automation:source-admission:v1:pr:${pullNumber}:head:${headSha}`;
+  const canonical = matching.filter((check) => check?.external_id === canonicalExternalId);
+  invariant(canonical.length <= 1, "canonical recovered source-admission check is not unique");
+  if (canonical.length === 1) {
+    return assertSuccessfulCheckRun(
+      canonical[0],
+      RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+      headSha,
+      canonicalExternalId,
+    );
+  }
+  if (matching.length > 0) {
+    return assertSuccessfulCheck(
+      checks,
+      RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+      headSha,
+    );
+  }
+
+  // GitHub may discard every check-run projection for a merged head when its
+  // source branch is deleted. The retained commit/release and the provider PR
+  // objects remain authoritative, so reconstruct the same admission directly
+  // instead of making a post-merge release depend on disposable UI state.
+  const historical = await verifyHistoricalSourceAdmission({
+    number: pullNumber,
+    baseSha,
+    headSha,
+    headRef: assertString(pull?.head?.ref, "historical source-admission head ref"),
+    headRepository: assertString(
+      pull?.head?.repo?.full_name,
+      "historical source-admission head repository",
+    ),
+    token,
+    fetchImpl,
+    logger,
+  });
+  const terminalChecks = await paginatedCheckRuns(api, headSha);
+  invariant(
+    terminalChecks.every(
+      (check) => check?.name !== RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+    ),
+    "source-admission check projection changed during historical reconstruction",
+  );
+  return Object.freeze({
+    name: RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+    appSlug: RELEASE_AUTOMATION_CONTRACT.githubActionsApp.slug,
+    appId: RELEASE_AUTOMATION_CONTRACT.githubActionsApp.id,
+    reconstructed: true,
+    manifestSha256: historical.manifestSha256,
+  });
+}
+
 function assertCommit(value, expectedSha, label) {
   invariant(value?.sha === expectedSha, `${label} identity changed`);
   const treeSha = assertSha(value?.tree?.sha, `${label} tree SHA`);
@@ -1331,7 +1450,14 @@ function assertMergedPull(value, expected) {
     merger.type === "User" || merger.type === "Bot",
     "pull-request merge actor type is invalid",
   );
-  return { baseSha, headSha, mergedAt, author, merger, commitCount: value.commits };
+  return {
+    baseSha,
+    headSha,
+    mergedAt,
+    author,
+    merger,
+    commitCount: value.commits,
+  };
 }
 
 function assertProviderMergeEvent(events, sourceSha, pullIdentity) {
@@ -1529,7 +1655,10 @@ export async function verifyApprovedMerge(options = {}) {
     "associated pull summary merge SHA changed",
   );
   const pull = record(await api.get(repositoryPath(`/pulls/${pullNumber}`)), "pull-request detail");
-  const pullIdentity = assertMergedPull(pull, { pullNumber, sourceSha: context.sourceSha });
+  const pullIdentity = assertMergedPull(pull, {
+    pullNumber,
+    sourceSha: context.sourceSha,
+  });
   invariant(
     associatedPull.base?.sha === pullIdentity.baseSha &&
       associatedPull.head?.sha === pullIdentity.headSha,
@@ -1649,11 +1778,17 @@ export async function verifyApprovedMerge(options = {}) {
     releaseHeadReleaseValue,
     pullIdentity.headSha,
   );
-  const sourceAdmission = assertSuccessfulCheck(
-    headChecks,
-    RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
-    pullIdentity.headSha,
-  );
+  const sourceAdmission = await verifyDurableSourceAdmission({
+    api,
+    checks: headChecks,
+    pull,
+    pullNumber,
+    baseSha: pullIdentity.baseSha,
+    headSha: pullIdentity.headSha,
+    token: context.token,
+    fetchImpl: options.fetchImpl ?? globalThis.fetch,
+    logger,
+  });
   const requiredSourceChecks = RELEASE_AUTOMATION_CONTRACT.checks.requiredSource.map((name) =>
     assertSuccessfulCheck(sourceChecks, name, context.sourceSha),
   );
