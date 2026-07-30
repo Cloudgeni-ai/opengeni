@@ -229,6 +229,17 @@ out of API and worker pods. Its default command serializes `db:migrate`,
 `helm upgrade` before workload replacement begins. Operators running without
 Helm must preserve the same order explicitly.
 
+After a successful install or upgrade, the default-on `catalogImport` hook Job
+imports the committed reviewed integrations snapshot. It receives the runtime
+Secret for object-storage configuration but overrides `OPENGENI_DATABASE_URL`
+from the migration-only Secret because global catalog and import-provenance
+tables are deliberately unavailable to the runtime role. The Job uses a SHA-256
+snapshot reference and performs no database, network, or logo-storage work when
+that exact revision already completed. Set `catalogImport.enabled=false` to opt
+out. Logo fetching is disabled by default so third-party availability cannot
+block a rollout; set `catalogImport.skipLogos=false` to opt into validated,
+self-hosted catalog logos.
+
 The provisioner converges `opengeni_app` to `LOGIN NOSUPERUSER NOBYPASSRLS
 NOCREATEROLE NOCREATEDB NOREPLICATION NOINHERIT`, refuses to guess through any
 privilege-bearing role membership or ownership, revokes database/schema creation
@@ -427,7 +438,7 @@ Current profiles:
 
 ## Local Docker Compose
 
-`bun run dev` is the primary local Docker Compose path. It starts Postgres, NATS, Temporal, MinIO, migrations, the sandbox image build, API, both workers (control and turn), and web.
+`bun run dev` is the primary local Docker Compose path. It starts Postgres, NATS, Temporal, MinIO, migrations, imports the fingerprinted reviewed integrations catalog, builds the sandbox image, and starts the API, both workers (control and turn), and web. Set `OPENGENI_CATALOG_IMPORT_ENABLED=false` to omit the catalog import.
 
 When a common host port is already occupied, `bun run dev` auto-selects a nearby free port for Docker Compose and rewrites the in-memory runtime URLs for that run. Set `OPENGENI_POSTGRES_HOST_PORT`, `OPENGENI_NATS_HOST_PORT`, `OPENGENI_NATS_MONITOR_HOST_PORT`, `OPENGENI_TEMPORAL_HOST_PORT`, `OPENGENI_MINIO_HOST_PORT`, or `OPENGENI_MINIO_CONSOLE_HOST_PORT` in `.env` if you need fixed local port choices.
 
