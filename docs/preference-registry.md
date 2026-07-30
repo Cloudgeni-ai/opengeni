@@ -27,9 +27,11 @@ semantic key may be layered at all three tiers:
 - **user** targets one subject in that account and is self-only at human API
   ingress.
 
-Organization writes require the literal `account:admin` permission. Workspace
-writes require `workspace:admin`. Personal writes derive the target from the
-authenticated human and accept no caller-selected subject. A scope change
+Organization writes require the literal `account:admin` permission on the
+unique authenticated account grant matching the workspace grant's account and
+subject; workspace permissions never substitute for that account authority.
+Workspace writes require `workspace:admin`. Personal writes derive the target
+from the authenticated human and accept no caller-selected subject. A scope change
 requires authorization for both the old and new scopes and advances a
 compare-and-swap scope version. Every lifecycle request carries the expected
 scope version. The database locks the visible head first, runs route scope
@@ -80,8 +82,11 @@ All governance mutations require a positively identified `human_session`
 principal. Delegated bearer principal kind is a mandatory immutable HMAC-signed
 claim; agent-attempt, service, API-key, configured-key, and missing principal
 kinds fail closed even when their permission strings would otherwise be
-sufficient. The verified kind is propagated into the database transaction and
-rechecked by the lifecycle function. Each successful transition
+sufficient. Mixed or mismatched authenticated subject/account contexts also
+fail closed. Organization authorization uses the matching account grant rather
+than copying `account:admin` into workspace permissions. The verified kind is
+propagated into the database transaction and rechecked by the lifecycle
+function. Each successful transition
 records the actor, bounded reason, old/new revision or target, related
 preference where applicable, and monotonic event version.
 

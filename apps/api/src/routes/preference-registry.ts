@@ -18,7 +18,13 @@ import {
   type AccessGrant,
   type PreferenceRegistryScope,
 } from "@opengeni/contracts";
-import { hasPermission, requireAccessGrant, type ApiRouteDeps } from "@opengeni/core";
+import {
+  hasPermission,
+  requireAccessGrant,
+  requireAccessGrantAuthorization,
+  type AccessGrantAuthorization,
+  type ApiRouteDeps,
+} from "@opengeni/core";
 import {
   activatePreferenceRegistryRevision,
   changePreferenceRegistryScope,
@@ -96,11 +102,15 @@ function requiredAttemptClaims(grant: AccessGrant): PreferenceRegistryAttemptCla
   };
 }
 
-function requireHumanMutation(grant: AccessGrant): void {
+function requireHumanMutation(access: AccessGrantAuthorization): void {
+  const { grant } = access;
   if (
+    !access.contextIntegrity ||
+    access.authenticatedSubjectId !== grant.subjectId ||
     grant.principalKind !== "human_session" ||
     exactAttemptClaims(grant) !== null ||
     grant.serviceInitiator ||
+    grant.serviceInitiatorContext ||
     grant.subjectId.startsWith("api_key:")
   ) {
     throw new HTTPException(403, {
@@ -109,12 +119,18 @@ function requireHumanMutation(grant: AccessGrant): void {
   }
 }
 
-function requireScopeManage(grant: AccessGrant, scope: PreferenceRegistryScope): void {
-  requireHumanMutation(grant);
+export function authorizePreferenceRegistryScopeMutation(
+  access: AccessGrantAuthorization,
+  scope: PreferenceRegistryScope,
+): void {
+  const { grant } = access;
+  requireHumanMutation(access);
   if (scope === "organization") {
     // Deliberately do not use hasPermission: workspace:admin must not expand to
-    // account:admin for an organization-wide preference.
-    if (!grant.permissions.includes("account:admin")) {
+    // account:admin for an organization-wide preference. Account authority is
+    // carried separately from the authenticated context and must match this
+    // exact workspace grant's account and subject.
+    if (!access.accountGrant?.permissions.includes("account:admin")) {
       throw new HTTPException(403, { message: "missing permission: account:admin" });
     }
     return;
@@ -200,9 +216,15 @@ export function registerPreferenceRegistryRoutes(app: Hono, deps: ApiRouteDeps):
 
   app.post(`${base}/proposals`, async (context) => {
     const workspaceId = context.req.param("workspaceId");
-    const grant = await requireAccessGrant(context, deps, workspaceId, "workspace:read");
+    const access = await requireAccessGrantAuthorization(
+      context,
+      deps,
+      workspaceId,
+      "workspace:read",
+    );
+    const { grant } = access;
     const request = await parseBody(context, CreatePreferenceRegistryProposalRequest);
-    requireScopeManage(grant, request.scope);
+    authorizePreferenceRegistryScopeMutation(access, request.scope);
     try {
       return context.json(
         PreferenceRegistryRecord.parse(
@@ -280,7 +302,13 @@ export function registerPreferenceRegistryRoutes(app: Hono, deps: ApiRouteDeps):
 
   app.post(`${base}/:preferenceId/activate`, async (context) => {
     const workspaceId = context.req.param("workspaceId");
-    const grant = await requireAccessGrant(context, deps, workspaceId, "workspace:read");
+    const access = await requireAccessGrantAuthorization(
+      context,
+      deps,
+      workspaceId,
+      "workspace:read",
+    );
+    const { grant } = access;
     const id = preferenceId(context);
     const request = await parseBody(context, ActivatePreferenceRegistryRevisionRequest);
     try {
@@ -292,7 +320,7 @@ export function registerPreferenceRegistryRoutes(app: Hono, deps: ApiRouteDeps):
             actorSubjectId: grant.subjectId,
             principalKind: grant.principalKind,
             preferenceId: id,
-            authorizeScope: (scope) => requireScopeManage(grant, scope),
+            authorizeScope: (scope) => authorizePreferenceRegistryScopeMutation(access, scope),
             ...request,
           }),
         ),
@@ -304,7 +332,13 @@ export function registerPreferenceRegistryRoutes(app: Hono, deps: ApiRouteDeps):
 
   app.post(`${base}/:preferenceId/correct`, async (context) => {
     const workspaceId = context.req.param("workspaceId");
-    const grant = await requireAccessGrant(context, deps, workspaceId, "workspace:read");
+    const access = await requireAccessGrantAuthorization(
+      context,
+      deps,
+      workspaceId,
+      "workspace:read",
+    );
+    const { grant } = access;
     const id = preferenceId(context);
     const request = await parseBody(context, CorrectPreferenceRegistryRequest);
     try {
@@ -317,7 +351,7 @@ export function registerPreferenceRegistryRoutes(app: Hono, deps: ApiRouteDeps):
             actorSubjectId: grant.subjectId,
             principalKind: grant.principalKind,
             preferenceId: id,
-            authorizeScope: (scope) => requireScopeManage(grant, scope),
+            authorizeScope: (scope) => authorizePreferenceRegistryScopeMutation(access, scope),
           }),
         ),
       );
@@ -328,7 +362,13 @@ export function registerPreferenceRegistryRoutes(app: Hono, deps: ApiRouteDeps):
 
   app.post(`${base}/:preferenceId/scope`, async (context) => {
     const workspaceId = context.req.param("workspaceId");
-    const grant = await requireAccessGrant(context, deps, workspaceId, "workspace:read");
+    const access = await requireAccessGrantAuthorization(
+      context,
+      deps,
+      workspaceId,
+      "workspace:read",
+    );
+    const { grant } = access;
     const id = preferenceId(context);
     const request = await parseBody(context, ChangePreferenceRegistryScopeRequest);
     try {
@@ -341,7 +381,7 @@ export function registerPreferenceRegistryRoutes(app: Hono, deps: ApiRouteDeps):
             actorSubjectId: grant.subjectId,
             principalKind: grant.principalKind,
             preferenceId: id,
-            authorizeScope: (scope) => requireScopeManage(grant, scope),
+            authorizeScope: (scope) => authorizePreferenceRegistryScopeMutation(access, scope),
           }),
         ),
       );
@@ -352,7 +392,13 @@ export function registerPreferenceRegistryRoutes(app: Hono, deps: ApiRouteDeps):
 
   app.post(`${base}/:preferenceId/deactivate`, async (context) => {
     const workspaceId = context.req.param("workspaceId");
-    const grant = await requireAccessGrant(context, deps, workspaceId, "workspace:read");
+    const access = await requireAccessGrantAuthorization(
+      context,
+      deps,
+      workspaceId,
+      "workspace:read",
+    );
+    const { grant } = access;
     const id = preferenceId(context);
     const request = await parseBody(context, DeactivatePreferenceRegistryRequest);
     try {
@@ -365,7 +411,7 @@ export function registerPreferenceRegistryRoutes(app: Hono, deps: ApiRouteDeps):
             actorSubjectId: grant.subjectId,
             principalKind: grant.principalKind,
             preferenceId: id,
-            authorizeScope: (scope) => requireScopeManage(grant, scope),
+            authorizeScope: (scope) => authorizePreferenceRegistryScopeMutation(access, scope),
           }),
         ),
       );
@@ -376,7 +422,13 @@ export function registerPreferenceRegistryRoutes(app: Hono, deps: ApiRouteDeps):
 
   app.post(`${base}/:preferenceId/supersede`, async (context) => {
     const workspaceId = context.req.param("workspaceId");
-    const grant = await requireAccessGrant(context, deps, workspaceId, "workspace:read");
+    const access = await requireAccessGrantAuthorization(
+      context,
+      deps,
+      workspaceId,
+      "workspace:read",
+    );
+    const { grant } = access;
     const id = preferenceId(context);
     const request = await parseBody(context, SupersedePreferenceRegistryRequest);
     try {
@@ -389,7 +441,7 @@ export function registerPreferenceRegistryRoutes(app: Hono, deps: ApiRouteDeps):
             actorSubjectId: grant.subjectId,
             principalKind: grant.principalKind,
             preferenceId: id,
-            authorizeScope: (scope) => requireScopeManage(grant, scope),
+            authorizeScope: (scope) => authorizePreferenceRegistryScopeMutation(access, scope),
           }),
         ),
       );
@@ -400,7 +452,13 @@ export function registerPreferenceRegistryRoutes(app: Hono, deps: ApiRouteDeps):
 
   app.post(`${base}/:preferenceId/reject`, async (context) => {
     const workspaceId = context.req.param("workspaceId");
-    const grant = await requireAccessGrant(context, deps, workspaceId, "workspace:read");
+    const access = await requireAccessGrantAuthorization(
+      context,
+      deps,
+      workspaceId,
+      "workspace:read",
+    );
+    const { grant } = access;
     const id = preferenceId(context);
     const request = await parseBody(context, RejectPreferenceRegistryProposalRequest);
     try {
@@ -413,7 +471,7 @@ export function registerPreferenceRegistryRoutes(app: Hono, deps: ApiRouteDeps):
             actorSubjectId: grant.subjectId,
             principalKind: grant.principalKind,
             preferenceId: id,
-            authorizeScope: (scope) => requireScopeManage(grant, scope),
+            authorizeScope: (scope) => authorizePreferenceRegistryScopeMutation(access, scope),
           }),
         ),
       );

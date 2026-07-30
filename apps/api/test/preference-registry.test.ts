@@ -355,8 +355,13 @@ describe("structured preference registry API and PostgreSQL authority", () => {
       name: user.name,
     });
     const hostedGrant = hostedAccess.workspaceGrants[0]!;
+    const hostedAccountGrant = hostedAccess.accountGrants[0]!;
     expect(hostedAccess.mode).toBe("managed");
     expect(hostedAccess.workspaceGrants.length).toBeGreaterThan(0);
+    expect(hostedGrant.permissions).not.toContain("account:admin");
+    expect(hostedAccountGrant.accountId).toBe(hostedGrant.accountId);
+    expect(hostedAccountGrant.subjectId).toBe(hostedGrant.subjectId);
+    expect(hostedAccountGrant.permissions).toContain("account:admin");
     expect(
       hostedAccess.workspaceGrants.every((grant) => grant.principalKind === "human_session"),
     ).toBe(true);
@@ -400,10 +405,10 @@ describe("structured preference registry API and PostgreSQL authority", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           stableKey: `hosted-${suffix}`,
-          scope: "workspace",
-          title: "Hosted preference",
-          description: "Created through a normal Better Auth session",
-          content: "Hosted humans can govern preferences",
+          scope: "organization",
+          title: "Hosted organization preference",
+          description: "Created through a normal Better Auth account-admin session",
+          content: "Hosted account owners can govern organization preferences",
         }),
       },
     );
@@ -415,10 +420,24 @@ describe("structured preference registry API and PostgreSQL authority", () => {
     expect(hostedDetailResponse.status).toBe(200);
     const hostedDetail = (await hostedDetailResponse.json()) as Json;
     const hostedRevisionId = hostedDetail.revisions[0].id as string;
+    const hostedActivationResponse = await hostedApp.request(
+      `http://x/v1/workspaces/${hostedGrant.workspaceId}/preferences/${hostedProposal.id}/activate`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          revisionId: hostedRevisionId,
+          expectedCurrentRevisionId: null,
+          expectedScopeVersion: hostedProposal.scopeVersion,
+          reason: "Normal hosted account owner approved organization preference",
+        }),
+      },
+    );
+    expect(hostedActivationResponse.status).toBe(200);
 
-    const deniedAgent = await request(hostedGrant, `/${hostedProposal.id}/activate`, {
+    const deniedAgent = await request(hostedGrant, `/${hostedProposal.id}/deactivate`, {
       method: "POST",
-      permissions: WORKSPACE_ADMIN,
+      permissions: ACCOUNT_ADMIN,
       subjectId: "worker:hosted-denial",
       principalKind: "agent_attempt",
       attempt: await seedAttempt(hostedGrant, {
@@ -426,35 +445,32 @@ describe("structured preference registry API and PostgreSQL authority", () => {
         subjectId: hostedGrant.subjectId,
       }),
       body: {
-        revisionId: hostedRevisionId,
-        expectedCurrentRevisionId: null,
+        expectedCurrentRevisionId: hostedRevisionId,
         expectedScopeVersion: hostedProposal.scopeVersion,
         reason: "Agent attempts cannot govern preferences",
       },
     });
     expect(deniedAgent.status).toBe(403);
 
-    const deniedService = await request(hostedGrant, `/${hostedProposal.id}/activate`, {
+    const deniedService = await request(hostedGrant, `/${hostedProposal.id}/deactivate`, {
       method: "POST",
-      permissions: WORKSPACE_ADMIN,
+      permissions: ACCOUNT_ADMIN,
       subjectId: "service:hosted-denial",
       principalKind: "service",
       body: {
-        revisionId: hostedRevisionId,
-        expectedCurrentRevisionId: null,
+        expectedCurrentRevisionId: hostedRevisionId,
         expectedScopeVersion: hostedProposal.scopeVersion,
         reason: "Services cannot govern preferences",
       },
     });
     expect(deniedService.status).toBe(403);
 
-    const deniedApiKey = await request(hostedGrant, `/${hostedProposal.id}/activate`, {
+    const deniedApiKey = await request(hostedGrant, `/${hostedProposal.id}/deactivate`, {
       method: "POST",
-      permissions: WORKSPACE_ADMIN,
+      permissions: ACCOUNT_ADMIN,
       subjectId: `api_key:${suffix}`,
       body: {
-        revisionId: hostedRevisionId,
-        expectedCurrentRevisionId: null,
+        expectedCurrentRevisionId: hostedRevisionId,
         expectedScopeVersion: hostedProposal.scopeVersion,
         reason: "API keys cannot govern preferences",
       },
