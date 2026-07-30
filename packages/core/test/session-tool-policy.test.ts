@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
   resolveSessionToolPolicy,
-  sessionToolPolicyAllowsDefaultNativeTools,
   type SessionToolPolicyInput,
 } from "../src/domain/session-tool-policy";
 import type { ToolRef } from "@opengeni/contracts";
@@ -84,17 +83,6 @@ describe("session tool policy resolution", () => {
       deferredIds: [slackId],
     });
     expect(result.toolRefs.map((tool) => tool.id)).toEqual([slackId, "opengeni"]);
-    expect(sessionToolPolicyAllowsDefaultNativeTools(result.effectivePolicy)).toBe(false);
-  });
-
-  test("fixed historical policies exclude workspace-default native tools", () => {
-    for (const mode of ["explicit", "inherited"] as const) {
-      const result = resolve({
-        toolPolicy: { mode, inheritedFromSessionId: null },
-        sessionTools: [mcp("cap-docs")],
-      });
-      expect(sessionToolPolicyAllowsDefaultNativeTools(result.effectivePolicy)).toBe(false);
-    }
   });
 
   test("drops unavailable optional history without hiding it from policy truth", () => {

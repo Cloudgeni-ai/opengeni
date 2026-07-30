@@ -183,11 +183,7 @@ import {
   type CodexUsageHeaderSnapshot,
 } from "@opengeni/codex";
 import { mergeResourceRefs } from "./common";
-import {
-  enabledCapabilityMcpToolRefs,
-  resolveSessionToolPolicy,
-  sessionToolPolicyAllowsDefaultNativeTools,
-} from "@opengeni/core";
+import { enabledCapabilityMcpToolRefs, resolveSessionToolPolicy } from "@opengeni/core";
 import { maybeCompactContext } from "./context-compaction";
 import { TurnAttemptFencedError } from "./turn-attempt-fenced";
 import {
@@ -1678,18 +1674,16 @@ export function computerToolModeForTurn(
 }
 
 /**
- * Native web search requires two independent grants: the resolved provider
- * must advertise runnable support, and the immutable session/turn policy must
- * still track workspace defaults. The null model is the legacy built-in
- * Responses path, whose deployment flag is its provider capability gate.
- * There is deliberately no cross-provider or sandbox/curl fallback.
+ * Native web search is a runtime capability, not part of the session's MCP
+ * allow-list. Attach it whenever the resolved provider advertises runnable
+ * support. The null model is the legacy built-in Responses path, whose
+ * deployment flag is its provider capability gate. There is deliberately no
+ * cross-provider or sandbox/curl fallback.
  */
 export function hostedWebSearchForTurn(
   resolvedModel: { configured: { hostedWebSearch: boolean } } | null,
   deploymentWebSearchEnabled: boolean,
-  defaultNativeToolsAllowed: boolean,
 ): boolean {
-  if (!defaultNativeToolsAllowed) return false;
   return resolvedModel?.configured.hostedWebSearch ?? deploymentWebSearchEnabled;
 }
 
@@ -2378,10 +2372,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       await current?.flush().catch(() => undefined);
     };
     let preparedTools: Awaited<ReturnType<OpenGeniRuntime["prepareTools"]>> | null = null;
-    // Resolved with the MCP policy at the immutable turn boundary. Provider
-    // capability is checked separately when buildAgent is called; this flag is
-    // only the durable omission/narrowing entitlement.
-    let defaultNativeToolsAllowed = false;
     const toolCancellationFenceRef: {
       current: TurnToolCancellationFence | null;
     } = {
@@ -4096,9 +4086,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         ),
       });
       const effectivePolicyTools = resolvedToolPolicy.toolRefs;
-      defaultNativeToolsAllowed = sessionToolPolicyAllowsDefaultNativeTools(
-        resolvedToolPolicy.effectivePolicy,
-      );
       const turnTools = withFirstPartyTools(runSettings, effectivePolicyTools);
       // §7.6 connection-credential provider — load (and decrypt) the variable set via the host
       // `sandboxSecrets` provider when bound; unset → today's local decrypt.
@@ -5045,11 +5032,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               },
             }
           : {};
-      const hostedWebSearch = hostedWebSearchForTurn(
-        resolvedModel,
-        runSettings.webSearchEnabled,
-        defaultNativeToolsAllowed,
-      );
+      const hostedWebSearch = hostedWebSearchForTurn(resolvedModel, runSettings.webSearchEnabled);
       const agent = runtime.buildAgent(modelRunSettings, turnResources, {
         reasoningEffort: turn.reasoningEffort,
         ...(humanInputResume ? { humanInputResponse: humanInputResume } : {}),
@@ -5109,9 +5092,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // store/compaction follow the provider's compaction mode (registry
         // providers resolve to "client"); encrypted reasoning is only
         // round-tripped on the Responses wire API; hosted web search is attached
-        // only when BOTH the model opts in and this immutable turn still tracks
-        // workspace defaults (an explicit session/turn remains narrowed); the
-        // effective context window drives the compaction threshold.
+        // whenever the provider declares it runnable and is independent of the
+        // session's MCP allow-list; the effective context window drives the
+        // compaction threshold.
         hostedWebSearch,
         ...(resolvedModel
           ? {

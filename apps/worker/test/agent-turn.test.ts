@@ -3052,23 +3052,21 @@ describe("computerToolModeForTurn (explicit computer-use transport derivation)",
   });
 });
 
-describe("hostedWebSearchForTurn (provider support × durable policy)", () => {
+describe("hostedWebSearchForTurn (provider support)", () => {
   const resolved = (hostedWebSearch: boolean) =>
     ({ configured: { hostedWebSearch } }) as Parameters<typeof hostedWebSearchForTurn>[0];
 
-  test("enables a supported provider only for workspace-default turns", () => {
-    expect(hostedWebSearchForTurn(resolved(true), true, true)).toBe(true);
-    expect(hostedWebSearchForTurn(resolved(true), true, false)).toBe(false);
+  test("enables a supported provider without consulting the session MCP policy", () => {
+    expect(hostedWebSearchForTurn(resolved(true), true)).toBe(true);
   });
 
   test("does not invent a fallback for an unsupported resolved provider", () => {
-    expect(hostedWebSearchForTurn(resolved(false), true, true)).toBe(false);
+    expect(hostedWebSearchForTurn(resolved(false), true)).toBe(false);
   });
 
   test("applies the deployment capability gate to the legacy built-in path", () => {
-    expect(hostedWebSearchForTurn(null, true, true)).toBe(true);
-    expect(hostedWebSearchForTurn(null, false, true)).toBe(false);
-    expect(hostedWebSearchForTurn(null, true, false)).toBe(false);
+    expect(hostedWebSearchForTurn(null, true)).toBe(true);
+    expect(hostedWebSearchForTurn(null, false)).toBe(false);
   });
 });
 
