@@ -1,5 +1,25 @@
 # @opengeni/db
 
+## 0.15.0
+
+### Minor Changes
+
+- 1f6f13f: Add the isolated, versioned organization/workspace/user preference registry,
+  including audited proposal and activation flows, deterministic attempt-bound
+  descriptors, authorized full-content retrieval, REST/MCP tools, and SDK types.
+  Attempt reads revalidate current generation and immutable-human authority in one
+  locked transaction; lifecycle writes use scope-version CAS and database-owned
+  audit functions that prevent direct head mutation or history erasure. Snapshot
+  creation is database-canonical and lifecycle governance requires a signed
+  `human_session` principal; expiry filtering and supersession are transactionally
+  enforced before bounds or terminal mutation.
+
+### Patch Changes
+
+- Updated dependencies [1f6f13f]
+  - @opengeni/contracts@0.24.0
+  - @opengeni/config@0.7.15
+
 ## 0.14.7
 
 ### Patch Changes
