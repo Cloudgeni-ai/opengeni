@@ -236,6 +236,7 @@ export function useSessionEventTrigger(
   }, [match, onEvent, reconcileBeforeLive]);
   const consumedRef = useRef(0);
   const feedKeyRef = useRef<string | null>(null);
+  const sharedFeedHasEventsRef = useRef(false);
 
   // Shared-log mode: scan only the unseen tail on every append.
   useEffect(() => {
@@ -244,12 +245,37 @@ export function useSessionEventTrigger(
     }
     const feedKey = `${workspaceId}\u0000${sessionId}`;
     const firstSequence = events[0]?.sequence ?? 0;
-    // A new session target or a log reset (sequence restarted below the
-    // cursor) restarts consumption from the top of the shared log.
-    if (feedKeyRef.current !== feedKey || firstSequence > consumedRef.current + 1) {
+    if (feedKeyRef.current !== feedKey) {
       feedKeyRef.current = feedKey;
-      consumedRef.current = 0;
+      sharedFeedHasEventsRef.current = events.length > 0;
+      // The caller has already loaded its authoritative initial projection.
+      // Seed from the shared log's current tail so mounting a large historical
+      // session cannot replay every old event as a new live trigger.
+      consumedRef.current = events.at(-1)?.sequence ?? 0;
+      return;
     }
+    const firstNonEmptyBatch = !sharedFeedHasEventsRef.current && events.length > 0;
+    if (firstNonEmptyBatch || firstSequence > consumedRef.current + 1) {
+      // The usual shared feed mounts empty, then receives a historical tail.
+      // A later discontinuity can likewise replace the retained browser
+      // window. In either case, reconcile once from the latest relevant event
+      // instead of replaying the whole retained window as live traffic.
+      sharedFeedHasEventsRef.current = events.length > 0;
+      consumedRef.current = events.at(-1)?.sequence ?? consumedRef.current;
+      let latestMatch: SessionEvent | undefined;
+      for (let index = events.length - 1; index >= 0; index -= 1) {
+        const event = events[index];
+        if (event && matchRef.current(event)) {
+          latestMatch = event;
+          break;
+        }
+      }
+      if (latestMatch) {
+        onEventRef.current(latestMatch);
+      }
+      return;
+    }
+    sharedFeedHasEventsRef.current ||= events.length > 0;
     for (const event of events) {
       if (event.sequence <= consumedRef.current) {
         continue;

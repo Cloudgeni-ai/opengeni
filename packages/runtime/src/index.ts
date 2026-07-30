@@ -3060,18 +3060,58 @@ function safeMcpErrorFields(error: unknown): {
   return { errorClass, status };
 }
 
-function safeMcpTransportError(error: unknown): Error & { status?: number; code?: number } {
+type SafeMcpTransportError = Error & {
+  status?: number;
+  code?: number;
+  mcpTransportFailureKind?: "request_timeout";
+};
+
+/**
+ * Preserve the MCP SDK's exact request-timeout meaning without retaining or
+ * exposing a raw HTTP response body. The numeric code is not sufficient:
+ * Streamable HTTP also uses -32001 for "Session not found" and arbitrary
+ * AbortSignal reasons, so only the SDK's two owned timeout messages qualify.
+ */
+export function isMcpRequestTimeoutError(error: unknown, seen = new WeakSet<object>()): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  if (seen.has(error)) {
+    return false;
+  }
+  seen.add(error);
+  const record = error as Record<string, unknown>;
+  if (record.mcpTransportFailureKind === "request_timeout") {
+    return true;
+  }
+  const code = typeof record.code === "number" ? record.code : record.status;
+  const message = typeof record.message === "string" ? record.message : "";
+  const sdkTimeoutMessages = new Set([
+    "Request timed out",
+    "MCP error -32001: Request timed out",
+    "Maximum total timeout exceeded",
+    "MCP error -32001: Maximum total timeout exceeded",
+  ]);
+  if (code === -32_001 && sdkTimeoutMessages.has(message)) {
+    return true;
+  }
+  return ["error", "cause", "response", "data"].some((key) =>
+    isMcpRequestTimeoutError(record[key], seen),
+  );
+}
+
+export function safeMcpTransportError(error: unknown): SafeMcpTransportError {
   const fields = safeMcpErrorFields(error);
   const safeError = new Error(
     `MCP transport operation failed (${mcpErrorReason(fields)})`,
-  ) as Error & {
-    status?: number;
-    code?: number;
-  };
+  ) as SafeMcpTransportError;
   safeError.name = "McpTransportError";
   if (fields.status !== undefined) {
     safeError.status = fields.status;
     safeError.code = fields.status;
+  }
+  if (isMcpRequestTimeoutError(error)) {
+    safeError.mcpTransportFailureKind = "request_timeout";
   }
   return safeError;
 }

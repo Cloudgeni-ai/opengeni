@@ -25,6 +25,7 @@ import {
   WorkspaceArchiveIntegrityError,
   contextRobustnessFilterForSettings,
   modelResponseUsageFromResponse,
+  safeMcpTransportError,
   sanitizeHistoryItemsForModel,
 } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing";
@@ -2564,6 +2565,29 @@ describe("escaped MCP transport timeout classifier", () => {
     const exact = new Error("MCP error -32001: Request timed out");
     expect(classifyMcpTransportTimeoutError(exact)?.message).toBe(exact.message);
 
+    const sdkTimeoutMessages = [
+      "Request timed out",
+      "MCP error -32001: Request timed out",
+      "Maximum total timeout exceeded",
+      "MCP error -32001: Maximum total timeout exceeded",
+    ];
+    for (const message of sdkTimeoutMessages) {
+      const sanitized = safeMcpTransportError(
+        Object.assign(new Error(message), {
+          name: "McpError",
+          code: -32_001,
+        }),
+      );
+      expect(classifyMcpTransportTimeoutError(sanitized)?.message).toBe(sanitized.message);
+      expect(agentRunFailurePayload(sanitized)).toEqual({
+        error:
+          "An MCP server request timed out. Any completed tool output was checkpointed; the session can continue safely.",
+        code: "mcp_transport_timeout",
+        retryable: true,
+        detail: sanitized.message,
+      });
+    }
+
     const nested = {
       error: { message: "MCP transport request timeout while listing tools" },
     };
@@ -2576,6 +2600,19 @@ describe("escaped MCP transport timeout classifier", () => {
       retryable: true,
       detail: exact.message,
     });
+
+    for (const message of [
+      "MCP error -32001: Session not found",
+      "MCP error -32001: operator cancelled this request",
+    ]) {
+      const ambiguous = safeMcpTransportError(
+        Object.assign(new Error(message), {
+          name: "McpError",
+          code: -32_001,
+        }),
+      );
+      expect(classifyMcpTransportTimeoutError(ambiguous)).toBeNull();
+    }
   });
 
   test("does not absorb auth-needed or unrelated timeout failures", () => {
