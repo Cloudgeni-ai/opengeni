@@ -2010,6 +2010,12 @@ function runtimeEnvValues(
     valueEnv("OPENGENI_BILLING_MODE", contract.product.billingMode),
     valueEnv("OPENGENI_ENTITLEMENTS_MODE", contract.product.entitlementsMode),
     valueEnv("OPENGENI_USAGE_LIMITS_MODE", contract.product.usageLimitsMode),
+    valueEnv("OPENGENI_ANALYTICS_ENABLED", env.OPENGENI_ANALYTICS_ENABLED),
+    valueEnv("OPENGENI_ANALYTICS_CONSENT_REQUIRED", env.OPENGENI_ANALYTICS_CONSENT_REQUIRED),
+    valueEnv("OPENGENI_ANALYTICS_REO_CLIENT_ID", env.OPENGENI_ANALYTICS_REO_CLIENT_ID),
+    valueEnv("OPENGENI_ANALYTICS_POSTHOG_PROJECT_KEY", env.OPENGENI_ANALYTICS_POSTHOG_PROJECT_KEY),
+    valueEnv("OPENGENI_ANALYTICS_POSTHOG_HOST", env.OPENGENI_ANALYTICS_POSTHOG_HOST),
+    valueEnv("OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID", env.OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID),
     ...(publicBaseUrl ? [valueEnv("OPENGENI_PUBLIC_BASE_URL", publicBaseUrl)] : []),
     ...(contract.product.accessMode === "managed" || contract.product.accessMode === "configured"
       ? [requiredEnv("OPENGENI_DELEGATION_SECRET", env.OPENGENI_DELEGATION_SECRET)]
@@ -2414,6 +2420,19 @@ function addRuntimeConfigHelmValues(
   values["config.OPENGENI_OPENAI_REASONING_EFFORT"] = env.OPENGENI_OPENAI_REASONING_EFFORT ?? "low";
   values["config.OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS"] =
     env.OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS ?? "low,medium,high,xhigh";
+  for (const key of [
+    "OPENGENI_ANALYTICS_ENABLED",
+    "OPENGENI_ANALYTICS_CONSENT_REQUIRED",
+    "OPENGENI_ANALYTICS_REO_CLIENT_ID",
+    "OPENGENI_ANALYTICS_POSTHOG_PROJECT_KEY",
+    "OPENGENI_ANALYTICS_POSTHOG_HOST",
+    "OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID",
+  ] as const) {
+    const value = env[key];
+    if (value) {
+      values[`config.${key}`] = value;
+    }
+  }
   if (publicBaseUrl) {
     values["config.OPENGENI_PUBLIC_BASE_URL"] = publicBaseUrl;
     values["config.OPENGENI_WEB_ALLOWED_HOSTS"] =

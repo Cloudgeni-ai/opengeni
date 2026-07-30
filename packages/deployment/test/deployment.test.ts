@@ -669,6 +669,9 @@ describe("deployment contract", () => {
         OPENGENI_AZURE_OPENAI_BASE_URL: "https://example.openai.azure.com/openai/v1/",
         OPENGENI_AZURE_OPENAI_DEPLOYMENT: "gpt-5.6-sol",
         OPENGENI_AZURE_OPENAI_API_KEY: "azure-openai",
+        OPENGENI_ANALYTICS_ENABLED: "true",
+        OPENGENI_ANALYTICS_CONSENT_REQUIRED: "true",
+        OPENGENI_ANALYTICS_REO_CLIENT_ID: "reo_client-1",
         OPENGENI_IMAGE_TAG: "release-prod",
         OPENGENI_API_IMAGE_DIGEST: "sha256:api",
         OPENGENI_WORKER_IMAGE_DIGEST: "sha256:worker",
@@ -690,9 +693,13 @@ describe("deployment contract", () => {
     expect(artifacts.runtimeEnv).toContain("OPENGENI_EMAIL_FROM=OpenGeni <auth@mail.opengeni.ai>");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_GITHUB_APP_SLUG=opengeni-ai");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_BILLING_MODE=stripe");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_ANALYTICS_ENABLED=true");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_ANALYTICS_REO_CLIENT_ID=reo_client-1");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_STRIPE_SECRET_KEY=sk_test");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_STRIPE_CREDITS_PRODUCT_ID=prod_test_credits");
     expect(artifacts.helmValuesYaml).toContain('OPENGENI_WEB_ALLOWED_HOSTS: "app.opengeni.ai"');
+    expect(artifacts.helmValuesYaml).toContain('OPENGENI_ANALYTICS_ENABLED: "true"');
+    expect(artifacts.helmValuesYaml).toContain('OPENGENI_ANALYTICS_REO_CLIENT_ID: "reo_client-1"');
     expect(artifacts.helmValuesYaml).toContain('tag: "release-prod"');
     expect(artifacts.helmValuesYaml).toContain('digest: "sha256:api"');
     expect(artifacts.helmValuesYaml).toContain('digest: "sha256:worker"');

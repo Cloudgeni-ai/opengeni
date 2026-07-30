@@ -216,6 +216,18 @@ const SettingsSchema = z.object({
   observabilityMetricsEnabled: EnvBoolean.default(true),
   observabilityOtlpEndpoint: z.string().url().optional(),
   observabilityOtlpHeaders: z.string().default(""),
+  analyticsEnabled: EnvBoolean.default(false),
+  analyticsConsentRequired: EnvBoolean.default(true),
+  analyticsReoClientId: z
+    .string()
+    .regex(/^[A-Za-z0-9_-]+$/u)
+    .optional(),
+  analyticsPosthogProjectKey: z.string().min(1).optional(),
+  analyticsPosthogHost: z.string().url().optional(),
+  analyticsGa4MeasurementId: z
+    .string()
+    .regex(/^G-[A-Z0-9]+$/u)
+    .optional(),
   publicBaseUrl: z.string().url().optional(),
   // Base URL for the bring-your-own-compute agent release assets the get.<domain>
   // install routes redirect to. Defaults to this repo's GitHub Releases. The route
@@ -1350,6 +1362,12 @@ export function getSettings(): Settings {
       optional("OPENGENI_OTEL_EXPORTER_OTLP_ENDPOINT") ?? optional("OTEL_EXPORTER_OTLP_ENDPOINT"),
     observabilityOtlpHeaders:
       optional("OPENGENI_OTEL_EXPORTER_OTLP_HEADERS") ?? optional("OTEL_EXPORTER_OTLP_HEADERS"),
+    analyticsEnabled: optional("OPENGENI_ANALYTICS_ENABLED"),
+    analyticsConsentRequired: optional("OPENGENI_ANALYTICS_CONSENT_REQUIRED"),
+    analyticsReoClientId: optional("OPENGENI_ANALYTICS_REO_CLIENT_ID"),
+    analyticsPosthogProjectKey: optional("OPENGENI_ANALYTICS_POSTHOG_PROJECT_KEY"),
+    analyticsPosthogHost: optional("OPENGENI_ANALYTICS_POSTHOG_HOST"),
+    analyticsGa4MeasurementId: optional("OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID"),
     publicBaseUrl: optional("OPENGENI_PUBLIC_BASE_URL"),
     agentReleasesBaseUrl: optional("OPENGENI_AGENT_RELEASES_BASE_URL"),
     agentStableVersion: optional("OPENGENI_AGENT_STABLE_VERSION"),

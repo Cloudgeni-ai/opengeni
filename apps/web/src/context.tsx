@@ -33,10 +33,12 @@ import {
   signOutManaged,
   signUpEmail,
 } from "@/api";
+import { AnalyticsConsentBanner } from "@/components/analytics-consent";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { configureAnalytics, trackAnalyticsPage } from "@/lib/analytics";
 import { sameSessionForContext } from "@/lib/session-context";
 import {
   buildCreateSessionRequest,
@@ -337,6 +339,14 @@ export function RootRouteComponent() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (!clientConfig || isPublicAuthRoute) {
+      return;
+    }
+    configureAnalytics(clientConfig.analytics);
+    trackAnalyticsPage(pathname);
+  }, [clientConfig, isPublicAuthRoute, pathname]);
 
   useEffect(() => {
     if (!clientConfig) {
@@ -1084,6 +1094,9 @@ export function RootRouteComponent() {
   return (
     <main className="flex h-dvh min-h-screen flex-col overflow-x-hidden bg-bg text-fg">
       <Toaster richColors theme="dark" />
+      {clientConfig && !isPublicAuthRoute ? (
+        <AnalyticsConsentBanner config={clientConfig.analytics} />
+      ) : null}
       {isPublicAuthRoute ? (
         // Self-contained public page (e.g. /reset-password): rendered before the
         // config/auth gates and outside AppContext, so it works for a signed-out

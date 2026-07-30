@@ -1276,6 +1276,30 @@ describe("GET /v1/config/client", () => {
     expect(defaultModel).toMatchObject({ provider: "openai", api: "responses" });
   });
 
+  test("keeps analytics off by default and exposes only configured public identifiers", async () => {
+    const disabled = await fetchClientConfig(testSettings());
+    expect(disabled.analytics).toEqual({ consentRequired: true, providers: {} });
+
+    const enabled = await fetchClientConfig(
+      testSettings({
+        analyticsEnabled: true,
+        analyticsConsentRequired: true,
+        analyticsReoClientId: "reo_client-1",
+        analyticsPosthogProjectKey: "phc_test",
+        analyticsPosthogHost: "https://eu.i.posthog.com",
+        analyticsGa4MeasurementId: "G-ABC123",
+      }),
+    );
+    expect(enabled.analytics).toEqual({
+      consentRequired: true,
+      providers: {
+        reo: { clientId: "reo_client-1" },
+        posthog: { projectKey: "phc_test", host: "https://eu.i.posthog.com" },
+        ga4: { measurementId: "G-ABC123" },
+      },
+    });
+  });
+
   test("supports a Codex subscription model as the client default", async () => {
     const settings = testSettings({
       codexSubscriptionEnabled: true,

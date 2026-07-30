@@ -1886,6 +1886,7 @@ const CLIENT_CONFIG: ClientConfig = {
   fileUploads: { enabled: true, maxSizeBytes: 25 * 1024 * 1024 },
   productAccessMode: "managed",
   auth: { mode: "none" },
+  analytics: { consentRequired: true, providers: {} },
   structuredServices: { fileSystem: true, git: true, terminalEvents: true },
 };
 

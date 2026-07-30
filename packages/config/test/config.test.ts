@@ -55,6 +55,34 @@ describe(".env.example", () => {
   });
 });
 
+describe("browser analytics configuration", () => {
+  test("is disabled and consent-gated by default", () => {
+    const settings = withEnv({}, () => getSettings());
+    expect(settings.analyticsEnabled).toBe(false);
+    expect(settings.analyticsConsentRequired).toBe(true);
+    expect(settings.analyticsReoClientId).toBeUndefined();
+  });
+
+  test("parses public provider identifiers without treating them as credentials", () => {
+    const settings = withEnv(
+      {
+        OPENGENI_ANALYTICS_ENABLED: "true",
+        OPENGENI_ANALYTICS_CONSENT_REQUIRED: "true",
+        OPENGENI_ANALYTICS_REO_CLIENT_ID: "reo_client-1",
+        OPENGENI_ANALYTICS_POSTHOG_PROJECT_KEY: "phc_test",
+        OPENGENI_ANALYTICS_POSTHOG_HOST: "https://eu.i.posthog.com",
+        OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID: "G-ABC123",
+      },
+      () => getSettings(),
+    );
+
+    expect(settings.analyticsEnabled).toBe(true);
+    expect(settings.analyticsReoClientId).toBe("reo_client-1");
+    expect(settings.analyticsPosthogHost).toBe("https://eu.i.posthog.com");
+    expect(settings.analyticsGa4MeasurementId).toBe("G-ABC123");
+  });
+});
+
 describe("Docker workspace materialization", () => {
   test("parses the optional shared workspace base directory", () => {
     expect(
