@@ -3,7 +3,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { parseIntegrationsOauthClientsJson, type Settings } from "@opengeni/config";
 import { OAuthStartResponse, type OAuthStartRequest } from "@opengeni/contracts";
-import { requireEnvironmentEncryption } from "@opengeni/core";
+import { hasPermission, requireEnvironmentEncryption } from "@opengeni/core";
 import type { Observability } from "@opengeni/observability";
 import {
   consumeIntegrationOAuthStateNonce,
@@ -11,7 +11,7 @@ import {
   decryptEnvironmentValue,
   encryptEnvironmentValue,
   getConnectionMetadata,
-  isPrivateAddress,
+  getWorkspaceGrant,
   listConnectionsMetadata,
   loadIntegrationOAuthClient,
   normalizeBearerScheme,
@@ -20,14 +20,23 @@ import {
   type Database,
 } from "@opengeni/db";
 import { createSignedState, readSignedState } from "@opengeni/github";
+import {
+  DestinationPolicyError,
+  OAUTH_MAX_RESPONSE_BYTES,
+  isLocalTestEnvironment,
+  pinnedFetch,
+  readResponseJsonBounded,
+  validateHttpUrl,
+} from "@opengeni/network";
 import { Buffer } from "node:buffer";
 import { createHash, randomBytes } from "node:crypto";
-import { lookup } from "node:dns/promises";
-import { isIP } from "node:net";
 import { HTTPException } from "hono/http-exception";
 import { canonicalProviderDomain } from "./provider-domain";
 
 export const oauthStateTtlMs = 10 * 60 * 1000;
+export const OFFICIAL_SLACK_MCP_URL = "https://mcp.slack.com/mcp";
+const SLACK_OAUTH_ORIGIN = "https://slack.com";
+export { OAUTH_MAX_RESPONSE_BYTES } from "@opengeni/network";
 
 type OAuthClientDeps = {
   db: Database;
@@ -133,9 +142,12 @@ export async function startMcpOAuth(
 ): Promise<OAuthStartResponse> {
   const { db, settings } = deps;
   const mcpUrl = canonicalMcpResource(context.payload.mcpUrl ?? context.payload.resource);
-  const providerDomain = canonicalProviderDomain(
-    context.payload.providerDomain ?? new URL(mcpUrl).hostname,
-  );
+  const officialSlackResource = mcpUrl === OFFICIAL_SLACK_MCP_URL;
+  const providerDomain = officialSlackResource
+    ? "slack.com"
+    : canonicalProviderDomain(context.payload.providerDomain ?? new URL(mcpUrl).hostname);
+  const personalSlack = officialSlackResource || providerDomain === "slack.com";
+  assertPersonalSlackOAuthStart(settings, context.payload, mcpUrl, personalSlack);
   const returnPath = safeReturnPath(context.payload.returnPath ?? "/integrations");
   const baseUrl = integrationBaseUrl(settings.publicBaseUrl, context.requestUrl);
   const redirectUri = `${baseUrl}/v1/integrations/oauth/callback`;
@@ -151,6 +163,9 @@ export async function startMcpOAuth(
   }
 
   const discovery = await discoverMcpOAuth(mcpUrl, settings);
+  if (personalSlack && !isLocalTestEnvironment(settings.environment)) {
+    assertSlackAuthorizationServer(discovery.as);
+  }
   const resource = discovery.prm.resource ? canonicalOAuthResource(discovery.prm.resource) : mcpUrl;
   const verifier = randomPkceVerifier();
   const authorizeScopes = chooseAuthorizeScopes(
@@ -192,6 +207,7 @@ export async function startMcpOAuth(
   });
   const authorizationUrl = buildAuthorizationUrl({
     endpoint: discovery.as.authorizationEndpoint,
+    settings,
     clientId: client.clientId,
     redirectUri,
     state,
@@ -223,6 +239,7 @@ export async function completeMcpOAuthCallback(
   }
   try {
     state = readOAuthState(input.state, settings);
+    await requireOAuthCallbackGrant(db, state);
     if (!input.code) {
       return {
         redirectTo: callbackReturnPath(state.returnPath, "error", { reason: "missing_code" }),
@@ -280,6 +297,7 @@ export async function completeMcpOAuthCallback(
       ...(verification.tools ? { mcpTools: verification.tools } : {}),
     };
     const credentialEncrypted = encryptEnvironmentValue(key, JSON.stringify(credential));
+    await requireOAuthCallbackGrant(db, state);
     const connection = await runCallbackStage("persist", "persist_failed", () =>
       state.connectionId
         ? updateConnection(db, {
@@ -287,6 +305,7 @@ export async function completeMcpOAuthCallback(
             connectionId: state.connectionId,
             visibleToSubjectId: state.subjectId,
             expectedVersion: state.connectionVersion,
+            subjectId: state.subjectId,
             providerDomain: state.providerDomain,
             kind: "oauth2",
             status: "active",
@@ -299,7 +318,7 @@ export async function completeMcpOAuthCallback(
         : createConnection(db, {
             accountId: state.accountId,
             workspaceId: state.workspaceId,
-            subjectId: null,
+            subjectId: state.subjectId,
             providerDomain: state.providerDomain,
             kind: "oauth2",
             credentialEncrypted,
@@ -349,6 +368,56 @@ export function requireIntegrationsStateSecret(settings: Settings): string {
   return secret;
 }
 
+async function requireOAuthCallbackGrant(db: Database, state: OAuthStatePayload): Promise<void> {
+  const grant = await getWorkspaceGrant(db, state.subjectId, state.workspaceId);
+  if (
+    !grant ||
+    grant.accountId !== state.accountId ||
+    !hasPermission(grant.permissions, "connections:write")
+  ) {
+    throw new HTTPException(403, {
+      message: "OAuth subject no longer has permission to write this workspace connection",
+    });
+  }
+}
+
+function assertPersonalSlackOAuthStart(
+  settings: Settings,
+  payload: OAuthStartRequest,
+  mcpUrl: string,
+  personalSlack: boolean,
+): void {
+  if (!personalSlack) return;
+  if (payload.oauthClient) {
+    throw new HTTPException(422, {
+      message: "Slack OAuth client credentials are deployment-managed",
+    });
+  }
+  if (payload.providerDomain && canonicalProviderDomain(payload.providerDomain) !== "slack.com") {
+    throw new HTTPException(422, { message: "Slack provider identity does not match slack.com" });
+  }
+  if (!isLocalTestEnvironment(settings.environment) && mcpUrl !== OFFICIAL_SLACK_MCP_URL) {
+    throw new HTTPException(422, {
+      message: `personal Slack OAuth must use ${OFFICIAL_SLACK_MCP_URL}`,
+    });
+  }
+  if (!settings.slackClientId?.trim() || !settings.slackClientSecret?.trim()) {
+    throw new HTTPException(503, {
+      message:
+        "personal Slack OAuth requires OPENGENI_SLACK_CLIENT_ID and OPENGENI_SLACK_CLIENT_SECRET",
+    });
+  }
+}
+
+export function assertSlackAuthorizationServer(as: AuthorizationServerMetadata): void {
+  const urls = [as.issuer, as.authorizationServer, as.authorizationEndpoint, as.tokenEndpoint];
+  if (urls.some((value) => new URL(value).origin !== SLACK_OAUTH_ORIGIN)) {
+    throw new HTTPException(422, {
+      message: "Slack MCP authorization metadata did not remain bound to slack.com",
+    });
+  }
+}
+
 async function discoverMcpOAuth(
   resource: string,
   settings: Settings,
@@ -386,10 +455,14 @@ async function probeMcpChallenge(
     method: "GET",
     headers: { accept: "application/json" },
   });
-  if (response.status !== 401) {
-    return {};
+  try {
+    if (response.status !== 401) {
+      return {};
+    }
+    return parseWwwAuthenticate(response.headers.get("www-authenticate"));
+  } finally {
+    await cancelResponseBody(response);
   }
-  return parseWwwAuthenticate(response.headers.get("www-authenticate"));
 }
 
 async function discoverProtectedResourceMetadata(
@@ -429,10 +502,15 @@ async function discoverAuthorizationServerMetadata(
   authorizationServer: string,
   settings: Settings,
 ): Promise<AuthorizationServerMetadata> {
-  const candidates = uniqueStrings([
+  const safeAuthorizationServer = oauthEndpointUrl(
     authorizationServer,
-    ...wellKnownCandidates(authorizationServer, "oauth-authorization-server"),
-    ...wellKnownCandidates(authorizationServer, "openid-configuration"),
+    settings,
+    "OAuth authorization server",
+  ).replace(/\/+$/, "");
+  const candidates = uniqueStrings([
+    safeAuthorizationServer,
+    ...wellKnownCandidates(safeAuthorizationServer, "oauth-authorization-server"),
+    ...wellKnownCandidates(safeAuthorizationServer, "openid-configuration"),
   ]);
   for (const candidate of candidates) {
     const payload = await fetchJsonObject(candidate, settings).catch((error) => {
@@ -449,18 +527,31 @@ async function discoverAuthorizationServerMetadata(
     if (!authorizationEndpoint || !tokenEndpoint) {
       continue;
     }
-    return {
-      issuer: stringValue(payload.issuer) ?? authorizationServer.replace(/\/+$/, ""),
-      authorizationServer: authorizationServer.replace(/\/+$/, ""),
+    const safeAuthorizationEndpoint = oauthEndpointUrl(
       authorizationEndpoint,
-      tokenEndpoint,
+      settings,
+      "OAuth authorization endpoint",
+    );
+    const safeTokenEndpoint = oauthEndpointUrl(tokenEndpoint, settings, "OAuth token endpoint");
+    const registrationEndpoint = stringValue(payload.registration_endpoint);
+    const issuer = oauthEndpointUrl(
+      stringValue(payload.issuer) ?? safeAuthorizationServer,
+      settings,
+      "OAuth issuer",
+    );
+    const safeRegistrationEndpoint = registrationEndpoint
+      ? oauthEndpointUrl(registrationEndpoint, settings, "OAuth registration endpoint")
+      : undefined;
+    return {
+      issuer,
+      authorizationServer: safeAuthorizationServer,
+      authorizationEndpoint: safeAuthorizationEndpoint,
+      tokenEndpoint: safeTokenEndpoint,
       clientIdMetadataDocumentSupported: payload.client_id_metadata_document_supported === true,
       tokenEndpointAuthMethodsSupported: stringArray(payload.token_endpoint_auth_methods_supported),
       codeChallengeMethodsSupported: stringArray(payload.code_challenge_methods_supported),
       raw: payload,
-      ...(stringValue(payload.registration_endpoint)
-        ? { registrationEndpoint: stringValue(payload.registration_endpoint)! }
-        : {}),
+      ...(safeRegistrationEndpoint ? { registrationEndpoint: safeRegistrationEndpoint } : {}),
     };
   }
   throw new HTTPException(422, {
@@ -627,6 +718,18 @@ function operatorClientEntryFor(
   settings: Settings,
   candidates: string[],
 ): ReturnType<typeof parseIntegrationsOauthClientsJson>[string] | null {
+  const normalizedCandidates = new Set(candidates.map(normalizedIssuerKey));
+  if (
+    normalizedCandidates.has(SLACK_OAUTH_ORIGIN) &&
+    settings.slackClientId?.trim() &&
+    settings.slackClientSecret?.trim()
+  ) {
+    return {
+      clientId: settings.slackClientId.trim(),
+      clientSecret: settings.slackClientSecret.trim(),
+      tokenEndpointAuthMethod: "client_secret_post",
+    };
+  }
   const configured = parseIntegrationsOauthClientsJson(settings.integrationsOauthClientsJson);
   const exactKeys = uniqueStrings(
     candidates.flatMap((candidate) => [candidate, normalizedIssuerKey(candidate)]),
@@ -637,7 +740,6 @@ function operatorClientEntryFor(
       return entry;
     }
   }
-  const normalizedCandidates = new Set(candidates.map(normalizedIssuerKey));
   for (const [key, entry] of Object.entries(configured)) {
     if (normalizedCandidates.has(normalizedIssuerKey(key))) {
       return entry;
@@ -661,7 +763,6 @@ async function dynamicClientRegistration(
       message: "authorization server does not support dynamic client registration",
     });
   }
-  await assertOAuthFetchAllowed(as.registrationEndpoint, settings);
   const response = await fetchOAuth(as.registrationEndpoint, settings, {
     method: "POST",
     headers: { "content-type": "application/json", accept: "application/json" },
@@ -675,11 +776,16 @@ async function dynamicClientRegistration(
     }),
   });
   if (!response.ok) {
+    await cancelResponseBody(response);
     throw new HTTPException(422, {
       message: `dynamic client registration failed with HTTP ${response.status}`,
     });
   }
-  const payload = (await response.json()) as Record<string, unknown>;
+  const payload = await readResponseJsonBounded<Record<string, unknown>>(
+    response,
+    OAUTH_MAX_RESPONSE_BYTES,
+    "OAuth dynamic registration response",
+  );
   const clientId = stringValue(payload.client_id);
   if (!clientId) {
     throw new HTTPException(422, {
@@ -710,13 +816,23 @@ async function existingOAuthConnectionForStart(
   },
 ) {
   if (input.connectionId) {
-    return await getConnectionMetadata(db, input.workspaceId, input.connectionId, input.subjectId);
+    const connection = await getConnectionMetadata(
+      db,
+      input.workspaceId,
+      input.connectionId,
+      input.subjectId,
+    );
+    return connection?.subjectId === input.subjectId &&
+      connection.kind === "oauth2" &&
+      connection.providerDomain === input.providerDomain
+      ? connection
+      : null;
   }
   const visible = await listConnectionsMetadata(db, input.workspaceId, input.subjectId);
   return (
     visible.find(
       (connection) =>
-        connection.subjectId === null &&
+        connection.subjectId === input.subjectId &&
         connection.kind === "oauth2" &&
         connection.status === "active" &&
         connection.providerDomain === input.providerDomain,
@@ -726,6 +842,7 @@ async function existingOAuthConnectionForStart(
 
 function buildAuthorizationUrl(input: {
   endpoint: string;
+  settings: Settings;
   clientId: string;
   redirectUri: string;
   state: string;
@@ -733,7 +850,8 @@ function buildAuthorizationUrl(input: {
   verifier: string;
   scopes: string[];
 }): string {
-  const url = new URL(input.endpoint);
+  const endpoint = oauthEndpointUrl(input.endpoint, input.settings, "OAuth authorization endpoint");
+  const url = new URL(endpoint);
   url.searchParams.set("response_type", "code");
   url.searchParams.set("client_id", input.clientId);
   url.searchParams.set("redirect_uri", input.redirectUri);
@@ -775,9 +893,21 @@ function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
       "state.encryptedPkceVerifier",
     ),
     clientId: requiredString(payload.clientId, "state.clientId"),
-    tokenEndpoint: requiredString(payload.tokenEndpoint, "state.tokenEndpoint"),
-    authorizationServer: requiredString(payload.authorizationServer, "state.authorizationServer"),
-    issuer: requiredString(payload.issuer, "state.issuer"),
+    tokenEndpoint: oauthEndpointUrl(
+      requiredString(payload.tokenEndpoint, "state.tokenEndpoint"),
+      settings,
+      "OAuth token endpoint",
+    ),
+    authorizationServer: oauthEndpointUrl(
+      requiredString(payload.authorizationServer, "state.authorizationServer"),
+      settings,
+      "OAuth authorization server",
+    ).replace(/\/+$/, ""),
+    issuer: oauthEndpointUrl(
+      requiredString(payload.issuer, "state.issuer"),
+      settings,
+      "OAuth issuer",
+    ),
     clientRegistrationMethod: registrationMethod(payload.clientRegistrationMethod),
     tokenEndpointAuthMethod: tokenAuthMethod(stringValue(payload.tokenEndpointAuthMethod), false),
     ...(stringValue(payload.encryptedClientSecret)
@@ -789,6 +919,9 @@ function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
   };
   const connectionId = stringValue(payload.connectionId);
   const connectionVersion = numberValue(payload.connectionVersion);
+  if (Boolean(connectionId) !== Boolean(connectionVersion)) {
+    throw new HTTPException(400, { message: "invalid OAuth reconnect state" });
+  }
   return {
     ...parsed,
     ...(connectionId ? { connectionId } : {}),
@@ -825,7 +958,12 @@ async function clientForState(
   }
   if (state.clientRegistrationMethod === "dcr") {
     const stored = await loadIntegrationOAuthClient(db, settings, state.issuer);
-    if (!stored || stored.clientId !== state.clientId) {
+    if (
+      !stored ||
+      stored.clientId !== state.clientId ||
+      stored.issuer !== state.issuer ||
+      stored.authorizationServer !== state.authorizationServer
+    ) {
       throw new HTTPException(400, { message: "OAuth client registration is no longer available" });
     }
     return {
@@ -870,7 +1008,6 @@ async function exchangeAuthorizationCode(
     client: OAuthClientRegistration;
   },
 ): Promise<TokenResponse> {
-  await assertOAuthFetchAllowed(input.tokenEndpoint, settings);
   const body = new URLSearchParams();
   body.set("grant_type", "authorization_code");
   body.set("code", input.code);
@@ -905,7 +1042,11 @@ async function exchangeAuthorizationCode(
       new Error(`OAuth token endpoint returned HTTP ${response.status}`),
     );
   }
-  const payload = (await response.json()) as Record<string, unknown>;
+  const payload = await readResponseJsonBounded<Record<string, unknown>>(
+    response,
+    OAUTH_MAX_RESPONSE_BYTES,
+    "OAuth token response",
+  );
   const accessToken = stringValue(payload.access_token);
   if (!accessToken) {
     throw new Error("OAuth token response did not include access_token");
@@ -997,12 +1138,17 @@ function safeHost(rawUrl: string): string | undefined {
 async function oauthErrorFromResponse(response: Response): Promise<string | null> {
   const contentType = response.headers.get("content-type") ?? "";
   if (!contentType.toLowerCase().includes("application/json")) {
+    await cancelResponseBody(response);
     return null;
   }
-  const payload = (await response
-    .clone()
-    .json()
-    .catch(() => null)) as Record<string, unknown> | null;
+  // Consume the original response, not a clone. The pinned transport owns a
+  // per-response dispatcher, so leaving the original body unread would retain
+  // its socket pool after a token endpoint error.
+  const payload = await readResponseJsonBounded<Record<string, unknown>>(
+    response,
+    OAUTH_MAX_RESPONSE_BYTES,
+    "OAuth token error response",
+  ).catch(() => null);
   const error = stringValue(payload?.error);
   if (!error || !/^[a-zA-Z0-9_.-]{1,80}$/.test(error)) {
     return null;
@@ -1015,7 +1161,6 @@ async function verifyMcpToolsList(
   resource: string,
   token: TokenResponse,
 ): Promise<Array<{ name: string; description?: string }>> {
-  await assertOAuthFetchAllowed(resource, settings);
   const client = new Client(
     { name: "opengeni-integration-verify", version: "0.1.0" },
     { capabilities: {} },
@@ -1158,6 +1303,20 @@ function canonicalOAuthResource(value: string): string {
   }
 }
 
+function oauthEndpointUrl(rawUrl: string, settings: Settings, label: string): string {
+  try {
+    return validateHttpUrl(rawUrl, {
+      label,
+      allowLoopbackHttp: isLocalTestEnvironment(settings.environment),
+    });
+  } catch (error) {
+    if (error instanceof DestinationPolicyError) {
+      throw new HTTPException(422, { message: error.message });
+    }
+    throw error;
+  }
+}
+
 function safeReturnPath(value: string): string {
   if (!value.startsWith("/") || value.startsWith("//")) {
     throw new HTTPException(400, { message: "OAuth returnPath must be a relative path" });
@@ -1172,9 +1331,14 @@ function safeReturnPath(value: string): string {
 async function fetchJsonObject(url: string, settings: Settings): Promise<Record<string, unknown>> {
   const response = await fetchOAuth(url, settings, { headers: { accept: "application/json" } });
   if (!response.ok) {
+    await cancelResponseBody(response);
     throw new Error(`HTTP ${response.status}`);
   }
-  const payload = await response.json();
+  const payload = await readResponseJsonBounded<unknown>(
+    response,
+    OAUTH_MAX_RESPONSE_BYTES,
+    "OAuth metadata response",
+  );
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     throw new Error("metadata response was not a JSON object");
   }
@@ -1187,56 +1351,64 @@ async function fetchOAuth(
   init: RequestInit = {},
   hop = 0,
 ): Promise<Response> {
-  await assertOAuthFetchAllowed(rawUrl, settings);
-  const response = await fetch(rawUrl, { ...init, redirect: "manual" });
+  let response: Response;
+  try {
+    const endpoint = oauthEndpointUrl(rawUrl, settings, "OAuth endpoint");
+    response = await pinnedFetch(endpoint, init, settings, {
+      label: "OAuth discovery",
+      requireHttpsOutsideLocalTest: true,
+    });
+  } catch (error) {
+    if (error instanceof DestinationPolicyError) {
+      throw new HTTPException(422, { message: error.message });
+    }
+    throw error;
+  }
   if (response.status < 300 || response.status >= 400) {
     return response;
   }
+  // Discovery is the only redirectable OAuth traffic. Replaying a token
+  // exchange, dynamic registration, or authenticated MCP request would send
+  // its body and/or credential headers to a provider-controlled Location.
+  // Keep this allowlist deliberately narrow so future credential headers fail
+  // closed instead of silently becoming redirectable.
+  if (!oauthRequestMayFollowRedirect(init)) {
+    await cancelResponseBody(response);
+    throw new HTTPException(422, {
+      message: "OAuth credential-bearing requests may not follow redirects",
+    });
+  }
   if (hop >= 3) {
+    await cancelResponseBody(response);
     throw new HTTPException(422, { message: "OAuth fetch exceeded maximum redirect hops" });
   }
   const location = response.headers.get("location");
   if (!location) {
+    await cancelResponseBody(response);
     throw new HTTPException(422, { message: "OAuth fetch redirect was missing Location" });
   }
   let nextUrl: string;
   try {
     nextUrl = new URL(location, rawUrl).toString();
   } catch {
+    await cancelResponseBody(response);
     throw new HTTPException(422, { message: "OAuth fetch redirect Location was invalid" });
   }
+  await cancelResponseBody(response);
   return await fetchOAuth(nextUrl, settings, init, hop + 1);
 }
 
-async function assertOAuthFetchAllowed(rawUrl: string, settings: Settings): Promise<void> {
-  const url = new URL(rawUrl);
-  if (!["https:", "http:"].includes(url.protocol)) {
-    throw new HTTPException(422, { message: "OAuth discovery only supports http and https URLs" });
+function oauthRequestMayFollowRedirect(init: RequestInit): boolean {
+  const method = (init.method ?? "GET").toUpperCase();
+  if ((method !== "GET" && method !== "HEAD") || init.body != null) {
+    return false;
   }
-  if (
-    settings.integrationsAllowPrivateNetworkTargets ||
-    ["local", "test"].includes(settings.environment)
-  ) {
-    return;
-  }
-  if (url.protocol !== "https:") {
-    throw new HTTPException(422, {
-      message: "OAuth discovery targets must use https outside local/test",
-    });
-  }
-  const hostname = url.hostname.toLowerCase();
-  if (hostname === "localhost" || hostname.endsWith(".localhost")) {
-    throw new HTTPException(422, { message: "OAuth discovery may not target localhost" });
-  }
-  const literal = isIP(hostname);
-  const addresses = literal
-    ? [hostname]
-    : (await lookup(hostname, { all: true })).map((entry) => entry.address);
-  if (addresses.some(isPrivateAddress)) {
-    throw new HTTPException(422, {
-      message: "OAuth discovery may not target private network addresses",
-    });
-  }
+  const headers = new Headers(init.headers);
+  return [...headers.keys()].every((name) => name === "accept");
+}
+
+async function cancelResponseBody(response: Response): Promise<void> {
+  await response.body?.cancel().catch(() => undefined);
 }
 
 function parseWwwAuthenticate(header: string | null): WwwAuthenticateChallenge {

@@ -11,6 +11,7 @@ import { RailProvider } from "@/components/rail/rail-context";
 import { RailShell } from "@/components/rail/rail-shell";
 import { Button } from "@/components/ui/button";
 import { useAppContext } from "@/context";
+import { useGitHubHistoryRefresh } from "@/lib/use-github-history-refresh";
 import { isAbortError } from "@/lib/session-tools";
 
 export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
@@ -28,6 +29,7 @@ export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
     refreshWorkspaceMcpServers,
   } = context;
   const previousWorkspaceId = useRef<string | null>(null);
+  useGitHubHistoryRefresh(workspaceId, activeWorkspaceId !== null, refreshGitHub);
 
   useEffect(() => {
     if (!activeWorkspaceId) {

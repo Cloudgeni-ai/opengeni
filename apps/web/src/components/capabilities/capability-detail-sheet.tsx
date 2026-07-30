@@ -1,5 +1,13 @@
 import { ExternalLinkIcon, Loader2Icon, PlugIcon, RefreshCwIcon, TrashIcon } from "lucide-react";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+  type RefObject,
+} from "react";
 
 import { CapabilityLogo } from "@/components/capabilities/capability-logo";
 import { Button } from "@/components/ui/button";
@@ -19,23 +27,17 @@ import {
   capabilityKindLabel,
   capabilityReconnectPlan,
   capabilitySourceLabel,
+  curatedSkillProvenance,
   GENERIC_API_KEY_FIELD,
   type ConnectionHealth,
 } from "@/lib/capabilities";
+import { focusCapabilitySuccessor } from "@/lib/capability-focus";
 import { cn } from "@/lib/utils";
 import type { CapabilityCatalogItem } from "@/types";
 
 export type ConnectAction =
   | { type: "enable"; item: CapabilityCatalogItem }
-  | {
-      type: "oauth";
-      item: CapabilityCatalogItem;
-      oauthClient?: {
-        clientId: string;
-        clientSecret?: string;
-        tokenEndpointAuthMethod?: "none" | "client_secret_post" | "client_secret_basic";
-      };
-    }
+  | { type: "oauth"; item: CapabilityCatalogItem }
   | { type: "api_key"; item: CapabilityCatalogItem; headers: Record<string, string> }
   // connectionId is the existing row to reuse, or null when the row was deleted
   // (reconnect then mints a fresh connection and re-enables with its ref).
@@ -54,6 +56,8 @@ export function CapabilityDetailSheet({
   logoSrc,
   open,
   onOpenChange,
+  restoreFocusRef,
+  restoreFocusFallbackRef,
   busy,
   errorMessage,
   onAction,
@@ -63,13 +67,66 @@ export function CapabilityDetailSheet({
   logoSrc: string | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  restoreFocusRef?: RefObject<HTMLElement | null>;
+  restoreFocusFallbackRef?: RefObject<HTMLElement | null>;
   busy: boolean;
   errorMessage: string | null;
   onAction: (action: ConnectAction) => void;
 }) {
+  const localRestoreFocusRef = useRef<HTMLElement | null>(null);
+  const focusRef = restoreFocusRef ?? localRestoreFocusRef;
+  const focusTargetIdRef = useRef<string | null>(null);
+
+  // The selected item is cleared at the same time the controlled sheet closes.
+  // Retain its identity independently so the close autofocus hook can find the
+  // newly rendered Enabled control after a successful enable refresh.
+  useLayoutEffect(() => {
+    if (item) focusTargetIdRef.current = item.id;
+  }, [item]);
+
+  // Capture before Radix's focus scope moves focus into the sheet. Routes pass
+  // a synchronously captured opener for click/keyboard activation; this local
+  // fallback keeps the controlled sheet safe for other callers too.
+  useLayoutEffect(() => {
+    if (!open) return;
+    if (focusRef.current) return;
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && active !== document.body) {
+      focusRef.current = active;
+    }
+  }, [focusRef, open]);
+
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent className="w-full gap-0 border-border bg-bg p-0 sm:max-w-[30rem]">
+      <SheetContent
+        className="w-full gap-0 border-border bg-bg p-0 sm:max-w-[30rem]"
+        onCloseAutoFocus={(event) => {
+          const opener = focusRef.current;
+          focusRef.current = null;
+          if (opener?.isConnected) {
+            event.preventDefault();
+            opener.focus();
+            return;
+          }
+
+          const restore = () =>
+            focusCapabilitySuccessor(
+              focusTargetIdRef.current,
+              restoreFocusFallbackRef?.current ?? null,
+            );
+          event.preventDefault();
+          // Refresh + close normally commit the Enabled control before Radix
+          // invokes this hook. One frame covers the rare slower commit without
+          // allowing Radix to restore focus to document.body in the meantime.
+          if (!restore()) {
+            if (typeof window.requestAnimationFrame === "function") {
+              window.requestAnimationFrame(restore);
+            } else {
+              window.setTimeout(restore, 0);
+            }
+          }
+        }}
+      >
         {item ? (
           <DetailBody
             item={item}
@@ -160,12 +217,19 @@ function DetailBody({
               <ExternalMetaLink href={item.homepageUrl} />
             </MetaRow>
           ) : null}
+          {item.installUrl && item.installUrl !== item.homepageUrl ? (
+            <MetaRow label="Setup">
+              <ExternalMetaLink href={item.installUrl} />
+            </MetaRow>
+          ) : null}
           {item.endpointUrl ? (
             <MetaRow label="Endpoint">
               <span className="min-w-0 truncate font-mono text-fg-muted">{item.endpointUrl}</span>
             </MetaRow>
           ) : null}
         </dl>
+
+        <CuratedSkillProvenanceSection item={item} />
 
         {/* Action — flows directly after the content so a sparse item stays a
             compact top-flowing column, with no dead void before a bottom-pinned
@@ -228,7 +292,7 @@ function DetailBody({
                 <Button
                   type="button"
                   variant="outline"
-                  className="w-full text-status-failed hover:bg-status-failed/10 hover:text-status-failed"
+                  className="w-full text-status-failed hover:bg-status-failed/10 hover:text-status-failed pointer-coarse:min-h-11"
                   disabled={busy}
                   onClick={() => onAction({ type: "disable", item })}
                 >
@@ -250,29 +314,22 @@ function DetailBody({
               onSubmit={(next) => onAction({ type: "api_key", item, headers: next })}
             />
           ) : plan.mode === "oauth" ? (
-            plan.providerDomain === "slack.com" ? (
-              <OAuthClientForm
-                itemName={item.name}
-                keyPageUrl={keyPageUrl}
-                busy={busy}
-                onSubmit={(oauthClient) => onAction({ type: "oauth", item, oauthClient })}
-              />
-            ) : (
-              <div className="space-y-2">
-                <Button
-                  type="button"
-                  className="w-full"
-                  disabled={busy}
-                  onClick={() => onAction({ type: "oauth", item })}
-                >
-                  {busy ? <Loader2Icon className="animate-spin" /> : <PlugIcon />}
-                  Connect {item.name}
-                </Button>
-                <p className="text-center text-xs text-fg-subtle">
-                  You'll authorize {item.name} in a new step, then return here.
-                </p>
-              </div>
-            )
+            <div className="space-y-2">
+              <Button
+                type="button"
+                className="w-full"
+                disabled={busy}
+                onClick={() => onAction({ type: "oauth", item })}
+              >
+                {busy ? <Loader2Icon className="animate-spin" /> : <PlugIcon />}
+                Connect {item.name}
+              </Button>
+              <p className="text-center text-xs text-fg-subtle">
+                {plan.providerDomain === "slack.com"
+                  ? "Authorize your own Slack account. Messages are sent as you using @OpenGeni."
+                  : `You'll authorize ${item.name} in a new step, then return here.`}
+              </p>
+            </div>
           ) : (
             <Button
               type="button"
@@ -286,7 +343,7 @@ function DetailBody({
               onClick={() => onAction({ type: "enable", item })}
             >
               {busy ? <Loader2Icon className="animate-spin" /> : <PlugIcon />}
-              {item.kind === "mcp" || item.kind === "pack" ? "Enable" : "Track"}
+              Enable
             </Button>
           )}
         </div>
@@ -295,85 +352,71 @@ function DetailBody({
   );
 }
 
-function OAuthClientForm({
-  itemName,
-  keyPageUrl,
-  busy,
-  onSubmit,
-}: {
-  itemName: string;
-  keyPageUrl: string | null;
-  busy: boolean;
-  onSubmit: (oauthClient: {
-    clientId: string;
-    clientSecret: string;
-    tokenEndpointAuthMethod: "client_secret_post";
-  }) => void;
-}) {
-  const [clientId, setClientId] = useState("");
-  const [clientSecret, setClientSecret] = useState("");
-  const ready = clientId.trim().length > 0 && clientSecret.trim().length > 0;
+function CuratedSkillProvenanceSection({ item }: { item: CapabilityCatalogItem }) {
+  const metadata = curatedSkillProvenance(item);
+  if (!metadata) return null;
 
   return (
-    <form
-      className="space-y-3"
-      onSubmit={(event) => {
-        event.preventDefault();
-        if (!ready || busy) return;
-        onSubmit({
-          clientId: clientId.trim(),
-          clientSecret: clientSecret.trim(),
-          tokenEndpointAuthMethod: "client_secret_post",
-        });
-      }}
+    <section
+      aria-labelledby="curated-skill-provenance-heading"
+      className="space-y-2.5 border-t border-border pt-5"
     >
-      <Notice tone="muted">
-        {itemName} requires a Slack app OAuth client. Paste the client ID and client secret from
-        Slack, then you’ll authorize access in Slack.
-      </Notice>
-      <div className="space-y-1.5">
-        <Label htmlFor="oauth-client-id" className="text-xs text-fg-muted">
-          Client ID
-        </Label>
-        <Input
-          id="oauth-client-id"
-          type="text"
-          autoComplete="off"
-          value={clientId}
-          onChange={(event) => setClientId(event.target.value)}
-          placeholder="Paste your Slack client ID"
-        />
+      <div>
+        <h3 id="curated-skill-provenance-heading" className="text-sm font-medium text-fg">
+          Curated skill provenance
+        </h3>
+        <p className="mt-1 text-xs leading-5 text-fg-subtle">
+          Immutable reviewed metadata for the exact artifact selected by this workspace.
+        </p>
       </div>
-      <div className="space-y-1.5">
-        <Label htmlFor="oauth-client-secret" className="text-xs text-fg-muted">
-          Client secret
-        </Label>
-        <Input
-          id="oauth-client-secret"
-          type="password"
-          autoComplete="off"
-          value={clientSecret}
-          onChange={(event) => setClientSecret(event.target.value)}
-          placeholder="Paste your Slack client secret"
-        />
-      </div>
-      {keyPageUrl ? (
-        <a
-          href={keyPageUrl}
-          target="_blank"
-          rel="noreferrer noopener"
-          className="inline-flex items-center gap-1 text-xs font-medium text-brand hover:underline"
-        >
-          Open Slack app settings
-          <ExternalLinkIcon className="size-3" />
-        </a>
-      ) : null}
-      <Button type="submit" className="w-full" disabled={busy || !ready}>
-        {busy ? <Loader2Icon className="animate-spin" /> : <PlugIcon />}
-        Connect {itemName}
-      </Button>
-    </form>
+      <dl className="grid gap-2.5 text-xs">
+        <MetaRow label="Status">
+          <span className="font-medium text-fg">
+            {metadata.status === "enabled" ? "Enabled" : "Not enabled"}
+          </span>
+        </MetaRow>
+        <MetaRow label="Effective selection">
+          <span className="min-w-0 break-words text-right">
+            {humanizeSelection(metadata.effectiveSelection)}
+          </span>
+        </MetaRow>
+        <MetaRow label="Version (immutable)">
+          <span className="font-mono text-fg-muted">{metadata.version ?? "Unavailable"}</span>
+        </MetaRow>
+        <MetaRow label="Artifact SHA-256">
+          <span className="min-w-0 break-all font-mono text-fg-muted">
+            {metadata.contentSha256 ?? "Unavailable"}
+          </span>
+        </MetaRow>
+        <MetaRow label="Source commit">
+          <span className="min-w-0 break-all font-mono text-fg-muted">
+            {metadata.sourceCommit ?? "Unavailable"}
+          </span>
+        </MetaRow>
+        <MetaRow label="Provenance">
+          <span className="min-w-0 break-words text-right text-fg-muted">
+            {metadata.provenance ?? "Unavailable"}
+          </span>
+        </MetaRow>
+        {metadata.sourceUrl ? (
+          <MetaRow label="Source">
+            <ExternalMetaLink href={metadata.sourceUrl} />
+          </MetaRow>
+        ) : null}
+        {metadata.documentationUrl ? (
+          <MetaRow label="Documentation">
+            <ExternalMetaLink href={metadata.documentationUrl} />
+          </MetaRow>
+        ) : null}
+        {metadata.license ? <MetaRow label="License">{metadata.license}</MetaRow> : null}
+      </dl>
+    </section>
   );
+}
+
+function humanizeSelection(value: string): string {
+  const normalized = value.replaceAll("_", " ").trim();
+  return normalized ? normalized.charAt(0).toUpperCase() + normalized.slice(1) : "Unknown";
 }
 
 // The labeled credential form, shared by first-time connect and reconnect. It

@@ -3,7 +3,7 @@
 // state (model choice, repo selection, tool toggles). Everything below the
 // workspace shell consumes this through `useAppContext`.
 import { OpenGeniApiError, type OpenGeniClient } from "@opengeni/sdk";
-import type { SessionEventsConnectionState } from "@opengeni/react";
+import { composerSubmissionErrorMessage, type SessionEventsConnectionState } from "@opengeni/react";
 import { Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import { TanStackRouterDevtools } from "@tanstack/react-router-devtools";
 import { CheckIcon, Loader2Icon, LockIcon, RefreshCwIcon, UserIcon } from "lucide-react";
@@ -39,13 +39,18 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { sameSessionForContext } from "@/lib/session-context";
 import {
+  buildCreateSessionRequest,
+  prepareCreateSessionAttempt,
+  type PendingCreateAttempt,
+} from "@/lib/session-create";
+import {
   applySessionPinProjection,
   notifySessionPinChanged,
   reconcileFailedSessionPin,
 } from "@/lib/session-pins";
 import {
   buildResources,
-  buildTools,
+  buildOpenGeniUiTools,
   enabledWorkspaceCapabilityMcpServers,
   groupRepositories,
   initialReasoningEffort,
@@ -110,6 +115,8 @@ export type AppContextValue = {
   setSelectedRepoRefs: Dispatch<SetStateAction<Record<number, string>>>;
   githubRepos: GitHubRepository[];
   githubStatus: GitHubAppInfo | null;
+  /** True once the current workspace's repository catalog has completed its first load. */
+  githubCatalogReady: boolean;
   githubAppOpen: boolean;
   setGithubAppOpen: Dispatch<SetStateAction<boolean>>;
   githubOrg: string;
@@ -122,6 +129,10 @@ export type AppContextValue = {
   selectedInstallationId: number | null;
   repositoryGroups: RepositoryGroup[];
   toolMcpServers: McpServerOption[];
+  /** Capability MCP servers currently enabled as the workspace default. */
+  workspaceDefaultToolIds: string[];
+  /** True once the workspace capability catalog has completed its authoritative load. */
+  workspaceMcpCatalogReady: boolean;
   currentResources: ResourceRef[];
   addManualRepository: () => void;
   forgetAccessKey: () => void;
@@ -167,6 +178,7 @@ export type AppContextValue = {
       targetSandboxId?: string | null;
       workingDir?: string | null;
       omitWorkspaceResources?: boolean;
+      expectedNewSessionDraftRevision?: number;
     },
   ) => Promise<Session | null>;
   resetSessionView: () => void;
@@ -235,16 +247,17 @@ export function RootRouteComponent() {
   const [selectedRepoRefs, setSelectedRepoRefs] = useState<Record<number, string>>({});
   const [githubRepos, setGithubRepos] = useState<GitHubRepository[]>([]);
   const [githubStatus, setGithubStatus] = useState<GitHubAppInfo | null>(null);
+  const [githubCatalogReady, setGithubCatalogReady] = useState(false);
   const [githubAppOpen, setGithubAppOpen] = useState(false);
   const [githubOrg, setGithubOrg] = useState("");
   const [workspaceMcpServers, setWorkspaceMcpServers] = useState<McpServerOption[]>([]);
+  const [workspaceMcpCatalogReady, setWorkspaceMcpCatalogReady] = useState(false);
   const [selectedCapabilityToolIds, setSelectedCapabilityToolIds] = useState<Set<string>>(
     () => new Set(),
   );
-  // Seed "docs" as already-seen so Document Search is not auto-selected on first
-  // load (it stays opt-in, as the old Docs toggle was). Every other tool server,
-  // including the first-party "opengeni", is auto-selected when it first appears.
-  const previousCapabilityToolIds = useRef<Set<string>>(new Set(["docs"]));
+  // Every available tool is selected when it first appears. Explicit
+  // deselections survive subsequent catalog refreshes.
+  const previousCapabilityToolIds = useRef<Set<string>>(new Set());
   const githubRefreshId = useRef(0);
   const mcpRefreshId = useRef(0);
   // Stable CREATE idempotency key for the in-flight session create. Generated
@@ -253,7 +266,7 @@ export function RootRouteComponent() {
   // session server-side; cleared only once a create succeeds so the next real
   // submit gets a fresh, independent key. Distinct from the per-call
   // clientEventId (a fresh UUID every send).
-  const pendingCreateKey = useRef<string | null>(null);
+  const pendingCreateAttempt = useRef<PendingCreateAttempt | null>(null);
   const [busy, setBusy] = useState(false);
   const [repoBusy, setRepoBusy] = useState(false);
   const [githubAppBusy, setGithubAppBusy] = useState(false);
@@ -656,8 +669,8 @@ export function RootRouteComponent() {
           return;
         }
         setGithubStatus(status);
-        setGithubAppOpen(!status.configured);
-        if (status.configured) {
+        setGithubAppOpen(status.status !== "bound");
+        if (status.status === "bound") {
           // Explicit refreshes re-sync from GitHub (POST /github/repositories/sync)
           // so installations changed after connect show up; passive loads read
           // OpenGeni's cached rows.
@@ -668,15 +681,19 @@ export function RootRouteComponent() {
             return;
           }
           setGithubRepos(repositories);
+          setGithubCatalogReady(true);
         } else {
           setGithubRepos([]);
+          setGithubCatalogReady(true);
         }
       } catch (error) {
         if (isAbortError(error) || signal?.aborted || githubRefreshId.current !== refreshId) {
           return;
         }
-        setGithubStatus(null);
-        setGithubRepos([]);
+        // A failed status/catalog request is unavailable/unknown, not proof
+        // that the last-known installation or repository identities vanished.
+        // Keep the last successful snapshot and readiness fence so draft
+        // hydration cannot project it to [] and autosave destructive loss.
         toast.error("GitHub status unavailable", { description: String(error) });
       } finally {
         if (githubRefreshId.current === refreshId) {
@@ -696,6 +713,7 @@ export function RootRouteComponent() {
         return;
       }
       setWorkspaceMcpServers(enabledWorkspaceCapabilityMcpServers(catalog.items));
+      setWorkspaceMcpCatalogReady(true);
     },
     [client],
   );
@@ -707,56 +725,54 @@ export function RootRouteComponent() {
       targetSandboxId?: string | null;
       workingDir?: string | null;
       omitWorkspaceResources?: boolean;
+      expectedNewSessionDraftRevision?: number;
     },
   ): Promise<Session | null> {
     setBusy(true);
-    // Reuse the in-flight key if one survives a prior failed/double-fired
-    // attempt; otherwise mint a fresh stable key for this logical create.
-    const idempotencyKey = pendingCreateKey.current ?? crypto.randomUUID();
-    pendingCreateKey.current = idempotencyKey;
     try {
-      const selectedTools = buildTools(submission.tools, [...selectedCapabilityToolIds]);
-      const created = await client.createSession(workspaceId, {
-        initialMessage: submission.text,
-        // Workspace repo selection is excluded when the create targets a
-        // connected machine (D3: the machine uses its own checkout & git auth);
-        // uploaded file attachments (submission.resources) still flow through.
-        resources: [
-          ...(options?.omitWorkspaceResources ? [] : currentResources),
-          ...(submission.resources ?? []),
-        ],
-        tools: selectedTools,
-        model: submission.model ?? model,
-        reasoningEffort: submission.reasoningEffort ?? reasoningEffort,
-        clientEventId: crypto.randomUUID(),
-        idempotencyKey,
-        ...(submission.sandboxBackend ? { sandboxBackend: submission.sandboxBackend } : {}),
-        ...(submission.variableSetId ? { variableSetId: submission.variableSetId } : {}),
-        ...(submission.rigId ? { rigId: submission.rigId } : {}),
-        ...(submission.goal ? { goal: submission.goal } : {}),
-        ...(submission.firstPartyMcpPermissions
-          ? { firstPartyMcpPermissions: submission.firstPartyMcpPermissions }
-          : {}),
-        // Seed the active-sandbox pointer at create (race-free) when a machine was
-        // picked. The contract accepts `targetSandboxId`; the SDK's request type
-        // doesn't yet surface it, so cast the field through.
-        ...(options?.targetSandboxId
-          ? ({ targetSandboxId: options.targetSandboxId } as { targetSandboxId: string })
-          : {}),
-        // The targeted machine's per-session working directory — a top-level create
-        // field (only valid alongside targetSandboxId; the backend 422s it solo).
-        ...(options?.workingDir ? { workingDir: options.workingDir } : {}),
+      if (!workspaceMcpCatalogReady) {
+        toast.error("Tools are still loading", {
+          description: "Wait for the workspace tool catalog to finish loading, then try again.",
+        });
+        return null;
+      }
+      const selectedTools = buildOpenGeniUiTools(submission.tools, selectedCapabilityToolIds);
+      const freshIdempotencyKey = crypto.randomUUID();
+      const attempt = prepareCreateSessionAttempt({
+        pending: pendingCreateAttempt.current,
+        client,
+        workspaceId,
+        freshIdempotencyKey,
+        request: buildCreateSessionRequest({
+          currentResources,
+          submission,
+          omitWorkspaceResources: options?.omitWorkspaceResources,
+          selectedTools,
+          defaultModel: model,
+          defaultReasoningEffort: reasoningEffort,
+          clientEventId: crypto.randomUUID(),
+          idempotencyKey: freshIdempotencyKey,
+          workspaceDefaultMcpServerIds: ["files", ...toolMcpServers.map((server) => server.id)],
+          workspaceMcpCatalogReady,
+          targetSandboxId: options?.targetSandboxId,
+          workingDir: options?.workingDir,
+          expectedNewSessionDraftRevision: options?.expectedNewSessionDraftRevision,
+        }),
       });
-      // Success: release the key so the next distinct submit is independent.
-      pendingCreateKey.current = null;
+      pendingCreateAttempt.current = attempt.pending;
+      const created = await client.createSession(workspaceId, attempt.request);
+      // Do not clear a newer concurrent attempt that replaced this one.
+      if (pendingCreateAttempt.current?.idempotencyKey === attempt.pending.idempotencyKey) {
+        pendingCreateAttempt.current = null;
+      }
       setSession(created);
       setConnectionState("idle");
       return created;
     } catch (error) {
-      // Keep the key on failure so a manual retry reuses it and dedups against
-      // a create that may have actually landed server-side.
+      // Keep the attempt on failure. An exact retry dedups against a create that
+      // may have landed server-side; an edited request acquires a fresh key.
       toast.error("Failed to start session", {
-        description: error instanceof Error ? error.message : String(error),
+        description: error instanceof Error ? composerSubmissionErrorMessage(error) : String(error),
       });
       return null;
     } finally {
@@ -914,7 +930,9 @@ export function RootRouteComponent() {
   const resetWorkspaceIntegrations = useCallback(() => {
     setGithubStatus(null);
     setGithubRepos([]);
+    setGithubCatalogReady(false);
     setWorkspaceMcpServers([]);
+    setWorkspaceMcpCatalogReady(false);
   }, []);
 
   // Context actions keep one identity while reading the newest committed state
@@ -969,6 +987,7 @@ export function RootRouteComponent() {
           setSelectedRepoRefs,
           githubRepos,
           githubStatus,
+          githubCatalogReady,
           githubAppOpen,
           setGithubAppOpen,
           githubOrg,
@@ -981,6 +1000,8 @@ export function RootRouteComponent() {
           selectedInstallationId,
           repositoryGroups,
           toolMcpServers,
+          workspaceDefaultToolIds: toolMcpServers.map((server) => server.id),
+          workspaceMcpCatalogReady,
           currentResources,
           addManualRepository: contextAddManualRepository,
           forgetAccessKey: contextForgetAccessKey,
@@ -1033,6 +1054,7 @@ export function RootRouteComponent() {
     githubOrg,
     githubRepos,
     githubStatus,
+    githubCatalogReady,
     inspectorOpen,
     keyAuthRequired,
     manualRepos,
@@ -1055,6 +1077,7 @@ export function RootRouteComponent() {
     setModelForSession,
     setSession,
     toolMcpServers,
+    workspaceMcpCatalogReady,
     workspaces,
   ]);
 

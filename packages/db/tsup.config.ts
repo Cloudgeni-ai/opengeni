@@ -1,4 +1,5 @@
 import { defineConfig } from "tsup";
+import { emitDeclarationsOnSuccess } from "../../scripts/tsup-declarations";
 
 // @opengeni/db ships ESM + .d.ts with four entry points mirroring the committed
 // src subpaths the workspace already uses:
@@ -30,7 +31,8 @@ export default defineConfig({
   },
   format: ["esm"],
   target: "es2022",
-  dts: true,
+  dts: false,
+  onSuccess: emitDeclarationsOnSuccess,
   sourcemap: true,
   clean: true,
   external: [/^@opengeni\//],

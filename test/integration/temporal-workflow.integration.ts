@@ -1,11 +1,11 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Client, Connection } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
-import { startTestServices, type TestServices, waitFor } from "@opengeni/testing";
+import { startTestServices, testSettings, type TestServices, waitFor } from "@opengeni/testing";
 import { currentActivityContext } from "../../apps/worker/src/activities/streaming";
 import {
   CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
-  TURN_WORKER_MAX_CONCURRENT_TURNS,
+  turnWorkerConcurrencyOptions,
 } from "../../apps/worker/src/concurrency";
 import { turnTaskQueue } from "../../apps/worker/src/workflows/activities";
 
@@ -43,7 +43,19 @@ async function hangWithoutHeartbeating(): Promise<{ status: string }> {
 // This finite test ceiling does not change either runtime timeout.
 const workerDeathTestTimeoutMs = 360_000;
 
-const temporalWorkflowTestTimeoutMs = 30_000;
+// The full real-service integration command runs API, upload, and database
+// suites before Temporal. On a saturated shared host, an ordinary workflow can
+// spend more than 30s waiting for its first tasks even though the same recovery
+// case completes in ~6s in the Temporal-only suite. Keep a finite suite-local
+// ceiling that covers that scheduling variance without changing any runtime
+// timeout, retry contract, or behavioral assertion.
+const temporalWorkflowTestTimeoutMs = 60_000;
+
+// This case follows two real 125-second heartbeat-timeout proofs. Temporal can
+// take more than the general 30-second budget to poll and drain its next worker
+// after that accumulated load, even though the same workflow finishes in ~12s
+// in isolation. Keep the bound finite and scoped to this one idle-Pause proof.
+const postHeartbeatIdlePauseTestTimeoutMs = 60_000;
 
 // Goal-continuation cases run real workflow timers and activities after the two
 // long heartbeat-recovery proofs. On a loaded shared runner, task polling and
@@ -56,11 +68,12 @@ const goalContinuationTestTimeoutMs = 60_000;
 // continueAsNew tests legitimately span a continueAsNew chain (the handle only
 // resolves on the FINAL run) plus a possible 5s idle-wait window before the
 // continued run re-claims the durable-queue turn that arrived after the
-// boundary. Run last in the suite, on a server already warmed by 18 prior
-// tests, the 30s default is too tight under CI load — a slow worker poll or
-// bundle reload can blow it even though the workflow logic is correct. The
-// generous bound removes that flakiness without weakening what the test proves.
-const continueAsNewTestTimeoutMs = 120_000;
+// boundary. Run last after two real heartbeat-timeout proofs, a loaded host can
+// spend more than 120s polling and draining the three-run chain even though the
+// same case completes in ~38s in isolation. Keep a finite, suite-local ceiling
+// so a timed-out worker cannot cascade into the following boundary proofs; this
+// does not change any runtime timeout or workflow assertion.
+const continueAsNewTestTimeoutMs = 240_000;
 
 describe("Temporal workflow integration", () => {
   let services: TestServices;
@@ -281,30 +294,48 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
-    "re-dispatches a turn whose worker died (heartbeat timeout) instead of failing the session",
+    "re-dispatches a synthesized goal turn whose worker died instead of duplicating it",
     async () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;
       const scope = workflowScope();
-      const turn = queuedTurn("event-1");
-      const queuedTurns = [turn];
-      const runs: Array<{ attemptId: string; trigger: { kind: string } }> = [];
+      const goalTurn = queuedTurn("goal-event-1");
+      const queuedTurns = [queuedTurn("event-1")];
+      const runs: Array<{
+        attemptId: string;
+        trigger: { kind: string };
+        triggerEventId: string;
+      }> = [];
       const recoveries: Array<{
         attemptId: string;
         timeoutType: string;
       }> = [];
       const failures: unknown[] = [];
-      const admission = createTurnAdmission(queuedTurns, async (input) => {
-        runs.push(input as (typeof runs)[number]);
-        if (runs.length === 1) return await hangWithoutHeartbeating();
+      let goalMaterializations = 0;
+      const admission = createTurnAdmission(queuedTurns, async (input, turn) => {
+        runs.push({
+          ...(input as Omit<(typeof runs)[number], "triggerEventId">),
+          triggerEventId: turn.triggerEventId,
+        });
+        if (turn.triggerEventId === goalTurn.triggerEventId && runs.length === 2) {
+          return await hangWithoutHeartbeating();
+        }
         return { status: "idle" };
       });
       const worker = await testWorker(nativeConnection, taskQueue, {
         ...admission.activities,
         markSessionIdle: async () => undefined,
+        maybeContinueGoal: async () => {
+          if (goalMaterializations === 0) {
+            goalMaterializations += 1;
+            queuedTurns.push(goalTurn);
+            return { action: "continue" as const };
+          }
+          return { action: "none" as const };
+        },
         recoverDispatch: async (input: { attemptId: string; timeoutType: string }) => {
           recoveries.push(input);
           admission.recover();
-          return { action: "recovering", turnId: turn.id, redispatches: 1 };
+          return { action: "recovering", turnId: goalTurn.id, redispatches: 1 };
         },
         failSessionAttempt: async (input: unknown) => {
           failures.push(input);
@@ -328,17 +359,24 @@ describe("Temporal workflow integration", () => {
           ],
         });
         await handle.result();
-        expect(runs).toHaveLength(2);
+        expect(runs).toHaveLength(3);
+        expect(runs.map((attempt) => attempt.triggerEventId)).toEqual([
+          "event-1",
+          "goal-event-1",
+          "goal-event-1",
+        ]);
         expect(runs.map((attempt) => attempt.trigger)).toEqual([
+          { kind: "next" },
           { kind: "next" },
           { kind: "next" },
         ]);
         expect(recoveries).toEqual([
           expect.objectContaining({
-            attemptId: runs[0]!.attemptId,
+            attemptId: runs[1]!.attemptId,
             timeoutType: "HEARTBEAT",
           }),
         ]);
+        expect(goalMaterializations).toBe(1);
         expect(failures).toHaveLength(0);
       } finally {
         worker.shutdown();
@@ -457,7 +495,7 @@ describe("Temporal workflow integration", () => {
         await run;
       }
     },
-    temporalWorkflowTestTimeoutMs,
+    postHeartbeatIdlePauseTestTimeoutMs,
   );
 
   test(
@@ -736,7 +774,7 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
-    "an exact quiescence proof survives signalWithStart and DB activity retry exhaustion",
+    "an exact quiescence proof survives signalWithStart, control-worker restart, and DB retries",
     async () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;
       const scope = workflowScope();
@@ -755,7 +793,11 @@ describe("Temporal workflow integration", () => {
       let receiptAttempts = 0;
       let replacementRuns = 0;
       const persistedProofs: Array<typeof proof> = [];
-      const worker = await testWorker(nativeConnection, taskQueue, {
+      let firstReceiptAttempted!: () => void;
+      const firstReceiptAttempt = new Promise<void>((resolve) => {
+        firstReceiptAttempted = resolve;
+      });
+      const activities = {
         peekSessionWork: async () => {
           if (waitingForReceipt) {
             return { kind: "cancellation-wait", attemptId: proof.attemptId } as const;
@@ -767,6 +809,7 @@ describe("Temporal workflow integration", () => {
         persistSessionAttemptQuiescence: async (input: typeof proof) => {
           persistedProofs.push(input);
           receiptAttempts += 1;
+          if (receiptAttempts === 1) firstReceiptAttempted();
           // Fail multiple real Temporal activity attempts. The workflow's
           // unbounded control-activity retry must retain the signal-owned proof
           // and may not peek/admit replacement work until this succeeds.
@@ -784,8 +827,12 @@ describe("Temporal workflow integration", () => {
         markSessionIdle: async () => undefined,
         failSessionAttempt: async () => undefined,
         settleSessionInterruptions: async () => ({ action: "continue" as const }),
-      });
-      const run = worker.run();
+      };
+      const firstWorker = await testWorker(nativeConnection, taskQueue, activities);
+      const firstRun = firstWorker.run();
+      let restartedWorker: Awaited<ReturnType<typeof testWorker>> | undefined;
+      let restartedRun: Promise<void> | undefined;
+      let firstWorkerStopped = false;
       try {
         const client = new Client({ connection });
         const handle = await client.workflow.signalWithStart("sessionWorkflow", {
@@ -796,6 +843,16 @@ describe("Temporal workflow integration", () => {
           signal: "sessionAttemptQuiesced",
           signalArgs: [proof],
         });
+        // The proof is already accepted into durable workflow history. Stop the
+        // worker after its first DB activity attempt fails, leave the workflow
+        // briefly without a poller, then let a fresh worker execute the exact
+        // retained proof's remaining retries.
+        await firstReceiptAttempt;
+        firstWorker.shutdown();
+        await firstRun;
+        firstWorkerStopped = true;
+        restartedWorker = await testWorker(nativeConnection, taskQueue, activities);
+        restartedRun = restartedWorker.run();
         // A duplicate transport signal in the same run is coalesced; the
         // control activity's own retries still execute until the DB succeeds.
         await handle.signal("sessionAttemptQuiesced", proof);
@@ -805,8 +862,9 @@ describe("Temporal workflow integration", () => {
         expect(persistedProofs).toEqual([proof, proof, proof]);
         expect(replacementRuns).toBe(1);
       } finally {
-        worker.shutdown();
-        await run;
+        if (!firstWorkerStopped) firstWorker.shutdown();
+        restartedWorker?.shutdown();
+        await Promise.all([firstWorkerStopped ? undefined : firstRun, restartedRun]);
       }
     },
     temporalWorkflowTestTimeoutMs,
@@ -921,6 +979,61 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
+    "retries a lost goal-activity response after commit without materializing a second continuation",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope();
+      const sessionId = crypto.randomUUID();
+      const queuedTurns = [queuedTurn("event-1")];
+      const runs: string[] = [];
+      let goalActivityAttempts = 0;
+      let materializations = 0;
+      let committedGoalTurn: WorkflowTestTurn | null = null;
+      const admission = createTurnAdmission(queuedTurns, async (_input, turn) => {
+        runs.push(turn.triggerEventId);
+        return { status: "idle" };
+      });
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        ...admission.activities,
+        markSessionIdle: async () => undefined,
+        failSessionAttempt: async () => undefined,
+        settleSessionInterruptions: async () => ({ action: "continue" as const }),
+        maybeContinueGoal: async () => {
+          goalActivityAttempts += 1;
+          if (!committedGoalTurn) {
+            materializations += 1;
+            committedGoalTurn = queuedTurn("goal-after-lost-response");
+            queuedTurns.push(committedGoalTurn);
+            // The database commit won, but the activity response was lost.
+            throw new Error("simulated response loss after goal commit");
+          }
+          if (queuedTurns.includes(committedGoalTurn)) {
+            return { action: "continue" as const };
+          }
+          return { action: "none" as const };
+        },
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const handle = await client.workflow.start("sessionWorkflow", {
+          taskQueue,
+          workflowId: `wf-${crypto.randomUUID()}`,
+          args: [{ ...scope, sessionId, initialEventId: "event-1" }],
+        });
+        await handle.result();
+        expect(runs).toEqual(["event-1", "goal-after-lost-response"]);
+        expect(materializations).toBe(1);
+        expect(goalActivityAttempts).toBe(3);
+      } finally {
+        worker.shutdown();
+        await run;
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
     "holds the loop for continueDelayMs before the goal continuation check",
     async () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;
@@ -971,7 +1084,7 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
-    "a failing goal continuation check falls back to idle shutdown",
+    "a failed goal check persists a wake and signal-with-start resumes it exactly once",
     async () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;
       const scope = workflowScope();
@@ -979,9 +1092,12 @@ describe("Temporal workflow integration", () => {
       const idleMarks: unknown[] = [];
       const goalRetryWakes: unknown[] = [];
       const queuedTurns = [queuedTurn("event-1")];
-      const runs: unknown[] = [];
-      const admission = createTurnAdmission(queuedTurns, async (input) => {
-        runs.push(input);
+      const runs: string[] = [];
+      let goalActivityAttempts = 0;
+      let retryAdmitted = false;
+      let continuations = 0;
+      const admission = createTurnAdmission(queuedTurns, async (_input, turn) => {
+        runs.push(turn.triggerEventId);
         return { status: "idle" };
       });
       const worker = await testWorker(nativeConnection, taskQueue, {
@@ -994,7 +1110,16 @@ describe("Temporal workflow integration", () => {
           action: "continue" as const,
         }),
         maybeContinueGoal: async () => {
-          throw new Error("goal store unavailable");
+          goalActivityAttempts += 1;
+          if (!retryAdmitted) {
+            throw new Error("goal store unavailable");
+          }
+          if (continuations === 0) {
+            continuations += 1;
+            queuedTurns.push(queuedTurn("goal-after-outbox-wake"));
+            return { action: "continue" as const };
+          }
+          return { action: "none" as const };
         },
         enqueueGoalRetryWake: async (input: unknown) => {
           goalRetryWakes.push(input);
@@ -1003,13 +1128,15 @@ describe("Temporal workflow integration", () => {
       const run = worker.run();
       try {
         const client = new Client({ connection });
+        const workflowId = `wf-${crypto.randomUUID()}`;
         const handle = await client.workflow.start("sessionWorkflow", {
           taskQueue,
-          workflowId: `wf-${crypto.randomUUID()}`,
+          workflowId,
           args: [{ ...scope, sessionId, initialEventId: "event-1" }],
         });
         await handle.result();
-        expect(runs).toHaveLength(1);
+        expect(runs).toEqual(["event-1"]);
+        expect(goalActivityAttempts).toBe(3);
         expect(goalRetryWakes).toEqual([
           {
             accountId: scope.accountId,
@@ -1019,6 +1146,23 @@ describe("Temporal workflow integration", () => {
           },
         ]);
         expect(idleMarks).toEqual([{ workspaceId: scope.workspaceId, sessionId }]);
+
+        // Model the due outbox repair: signalWithStart must create a new run
+        // under the same durable workflow identity after the first run closed.
+        retryAdmitted = true;
+        const restarted = await client.workflow.signalWithStart("sessionWorkflow", {
+          taskQueue,
+          workflowId,
+          workflowIdReusePolicy: "ALLOW_DUPLICATE",
+          args: [{ ...scope, sessionId }],
+          signal: "queueChanged",
+          signalArgs: [],
+        });
+        await restarted.result();
+        expect(restarted.firstExecutionRunId).not.toBe(handle.firstExecutionRunId);
+        expect(runs).toEqual(["event-1", "goal-after-outbox-wake"]);
+        expect(continuations).toBe(1);
+        expect(goalRetryWakes).toHaveLength(1);
       } finally {
         worker.shutdown();
         await run;
@@ -1221,14 +1365,14 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
-    "coalesces duplicate capacity signals into one normal continuation",
+    "coalesces duplicate capacity signals into one same-turn redispatch",
     async () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;
       const scope = workflowScope();
       const sessionId = crypto.randomUUID();
       const workflowId = `session-${sessionId}`;
       const queuedTurns = [queuedTurn("event-1")];
-      const runs: string[] = [];
+      const attempts: Array<{ attemptId: string; turnId: string }> = [];
       const reconciliations: Array<{ cause: string }> = [];
       const waiter = {
         waiterId: crypto.randomUUID(),
@@ -1237,11 +1381,12 @@ describe("Temporal workflow integration", () => {
         wakeRevision: 1,
       };
       let resumed = false;
-      const admission = createTurnAdmission(queuedTurns, async (_input, turn) => {
-        runs.push(turn.triggerEventId);
-        return turn.triggerEventId === "event-1"
-          ? { status: "idle", capacityWait: waiter }
-          : { status: "failed" };
+      const originalTurnId = queuedTurns[0]!.id;
+      const admission = createTurnAdmission(queuedTurns, async (input, turn) => {
+        attempts.push({ attemptId: input.attemptId, turnId: turn.id });
+        return attempts.length === 1
+          ? { status: "waiting_capacity", capacityWait: waiter }
+          : { status: "idle" };
       });
       const worker = await testWorker(nativeConnection, taskQueue, {
         ...admission.activities,
@@ -1256,8 +1401,7 @@ describe("Temporal workflow integration", () => {
           if (!resumed) {
             resumed = true;
             admission.resumeCapacity();
-            queuedTurns.push(queuedTurn("capacity-resume"));
-            return { action: "resumed", turnId: queuedTurns[0]!.id };
+            return { action: "resumed" };
           }
           return { action: "stale" };
         },
@@ -1270,7 +1414,7 @@ describe("Temporal workflow integration", () => {
           workflowId,
           args: [{ ...scope, sessionId, initialEventId: "event-1" }],
         });
-        await waitFor(() => runs.length === 1);
+        await waitFor(() => attempts.length === 1);
         // Signal until the workflow has entered its durable wait, then send a
         // duplicate. The row-locked activity is the sole enqueue writer.
         for (let attempt = 0; attempt < 20 && reconciliations.length === 0; attempt += 1) {
@@ -1279,7 +1423,10 @@ describe("Temporal workflow integration", () => {
         }
         await handle.signal("codexCapacityChanged", waiter.wakeRevision + 100);
         await handle.result();
-        expect(runs).toEqual(["event-1", "capacity-resume"]);
+        expect(attempts).toHaveLength(2);
+        expect(attempts.map((attempt) => attempt.turnId)).toEqual([originalTurnId, originalTurnId]);
+        expect(new Set(attempts.map((attempt) => attempt.attemptId)).size).toBe(2);
+        expect(queuedTurns).toHaveLength(0);
         expect(reconciliations).toHaveLength(1);
         expect(reconciliations[0]?.cause).toBe("signal");
       } finally {
@@ -1298,7 +1445,7 @@ describe("Temporal workflow integration", () => {
       const sessionId = crypto.randomUUID();
       const workflowId = `session-${sessionId}`;
       const queuedTurns = [queuedTurn("event-1")];
-      const runs: string[] = [];
+      const attempts: Array<{ attemptId: string; turnId: string }> = [];
       const reconciliationCauses: string[] = [];
       const waiter = {
         waiterId: crypto.randomUUID(),
@@ -1310,13 +1457,14 @@ describe("Temporal workflow integration", () => {
       const firstRunBlocked = new Promise<void>((resolve) => {
         releaseFirstRun = resolve;
       });
-      const admission = createTurnAdmission(queuedTurns, async (_input, turn) => {
-        runs.push(turn.triggerEventId);
-        if (turn.triggerEventId === "event-1") {
+      const originalTurnId = queuedTurns[0]!.id;
+      const admission = createTurnAdmission(queuedTurns, async (input, turn) => {
+        attempts.push({ attemptId: input.attemptId, turnId: turn.id });
+        if (attempts.length === 1) {
           await firstRunBlocked;
-          return { status: "idle", capacityWait: waiter };
+          return { status: "waiting_capacity", capacityWait: waiter };
         }
-        return { status: "failed" };
+        return { status: "idle" };
       });
       const worker = await testWorker(nativeConnection, taskQueue, {
         ...admission.activities,
@@ -1329,8 +1477,7 @@ describe("Temporal workflow integration", () => {
         reconcileCodexCapacityWait: async (input: { cause: string }) => {
           reconciliationCauses.push(input.cause);
           admission.resumeCapacity();
-          queuedTurns.push(queuedTurn("capacity-resume"));
-          return { action: "resumed", turnId: queuedTurns[0]!.id };
+          return { action: "resumed" };
         },
       });
       const run = worker.run();
@@ -1341,12 +1488,15 @@ describe("Temporal workflow integration", () => {
           workflowId,
           args: [{ ...scope, sessionId, initialEventId: "event-1" }],
         });
-        await waitFor(() => runs.length === 1);
+        await waitFor(() => attempts.length === 1);
         await handle.signal("codexCapacityChanged", waiter.wakeRevision + 1);
         releaseFirstRun();
         await handle.result();
         expect(reconciliationCauses).toEqual(["signal"]);
-        expect(runs).toEqual(["event-1", "capacity-resume"]);
+        expect(attempts).toHaveLength(2);
+        expect(attempts.map((attempt) => attempt.turnId)).toEqual([originalTurnId, originalTurnId]);
+        expect(new Set(attempts.map((attempt) => attempt.attemptId)).size).toBe(2);
+        expect(queuedTurns).toHaveLength(0);
       } finally {
         releaseFirstRun();
         worker.shutdown();
@@ -1357,6 +1507,167 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
+    "recovers the same turn when the waiter commits but the activity result is lost",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope();
+      const sessionId = crypto.randomUUID();
+      const workflowId = `session-${sessionId}`;
+      const queuedTurns = [queuedTurn("event-1")];
+      const originalTurnId = queuedTurns[0]!.id;
+      const attempts: Array<{ attemptId: string; turnId: string }> = [];
+      const waiter = {
+        waiterId: crypto.randomUUID(),
+        generation: 4,
+        nextCheckAt: new Date(Date.now() + 60_000).toISOString(),
+        wakeRevision: 9,
+      };
+      let waiterReads = 0;
+      let resumed = false;
+      let failSessionCalls = 0;
+      let admission!: ReturnType<typeof createTurnAdmission>;
+      admission = createTurnAdmission(queuedTurns, async (input, turn) => {
+        attempts.push({ attemptId: input.attemptId, turnId: turn.id });
+        if (attempts.length === 1) {
+          // Simulate Postgres committing the waiter/attempt closure before the
+          // activity completion is lost on the worker/Temporal transport seam.
+          admission.commitCapacityWait(waiter);
+          throw new Error("simulated activity result loss after waiter commit");
+        }
+        return { status: "idle" };
+      });
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        ...admission.activities,
+        markSessionIdle: async () => undefined,
+        failSessionAttempt: async () => {
+          failSessionCalls += 1;
+        },
+        settleSessionInterruptions: async () => ({
+          action: "continue" as const,
+        }),
+        getCodexCapacityWait: async () => {
+          waiterReads += 1;
+          return resumed ? null : waiter;
+        },
+        reconcileCodexCapacityWait: async () => {
+          resumed = true;
+          admission.resumeCapacity();
+          return { action: "resumed" };
+        },
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const handle = await client.workflow.start("sessionWorkflow", {
+          taskQueue,
+          workflowId,
+          args: [{ ...scope, sessionId, initialEventId: "event-1" }],
+        });
+        await waitFor(() => waiterReads === 1);
+        await handle.signal("codexCapacityChanged", waiter.wakeRevision + 1);
+        await handle.result();
+        expect(failSessionCalls).toBe(0);
+        expect(attempts).toHaveLength(2);
+        expect(attempts.map((attempt) => attempt.turnId)).toEqual([originalTurnId, originalTurnId]);
+        expect(new Set(attempts.map((attempt) => attempt.attemptId)).size).toBe(2);
+        expect(queuedTurns).toHaveLength(0);
+      } finally {
+        worker.shutdown();
+        await run;
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
+    "Pause exits a capacity waiter and Resume reconstructs the same turn",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope();
+      const sessionId = crypto.randomUUID();
+      const workflowId = `session-${sessionId}`;
+      const queuedTurns = [queuedTurn("event-1")];
+      const originalTurnId = queuedTurns[0]!.id;
+      const attempts: Array<{ attemptId: string; turnId: string }> = [];
+      const waiter = {
+        waiterId: crypto.randomUUID(),
+        generation: 5,
+        nextCheckAt: new Date(Date.now() + 60_000).toISOString(),
+        wakeRevision: 12,
+      };
+      let reconciliations = 0;
+      let resumed = false;
+      const idleMarks: unknown[] = [];
+      const admission = createTurnAdmission(queuedTurns, async (input, turn) => {
+        attempts.push({ attemptId: input.attemptId, turnId: turn.id });
+        return attempts.length === 1
+          ? { status: "waiting_capacity", capacityWait: waiter }
+          : { status: "idle" };
+      });
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        ...admission.activities,
+        markSessionIdle: async (input: unknown) => {
+          idleMarks.push(input);
+        },
+        failSessionAttempt: async () => undefined,
+        settleSessionInterruptions: async () => ({
+          action: "continue" as const,
+        }),
+        getCodexCapacityWait: async () => (resumed ? null : waiter),
+        reconcileCodexCapacityWait: async () => {
+          reconciliations += 1;
+          if (!resumed) {
+            admission.resumeCapacity();
+            resumed = true;
+            return { action: "resumed" };
+          }
+          return { action: "stale" };
+        },
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const firstHandle = await client.workflow.start("sessionWorkflow", {
+          taskQueue,
+          workflowId,
+          args: [{ ...scope, sessionId, initialEventId: "event-1" }],
+        });
+        await waitFor(() => attempts.length === 1);
+        admission.pauseControl();
+        await firstHandle.signal("sessionControl");
+        await firstHandle.result();
+        expect(attempts).toHaveLength(1);
+        expect(reconciliations).toBe(0);
+        expect(idleMarks).toHaveLength(1);
+
+        admission.resumeControl();
+        const resumedHandle = await client.workflow.signalWithStart("sessionWorkflow", {
+          taskQueue,
+          workflowId,
+          workflowIdReusePolicy: "ALLOW_DUPLICATE",
+          args: [{ ...scope, sessionId }],
+          signal: "queueChanged",
+        });
+        for (let attempt = 0; attempt < 20; attempt += 1) {
+          if (reconciliations > 0) break;
+          await resumedHandle.signal("codexCapacityChanged", waiter.wakeRevision + attempt + 1);
+          await Bun.sleep(25);
+        }
+        await resumedHandle.result();
+        expect(reconciliations).toBe(1);
+        expect(attempts).toHaveLength(2);
+        expect(attempts.map((attempt) => attempt.turnId)).toEqual([originalTurnId, originalTurnId]);
+        expect(new Set(attempts.map((attempt) => attempt.attemptId)).size).toBe(2);
+        expect(queuedTurns).toHaveLength(0);
+      } finally {
+        worker.shutdown();
+        await run;
+      }
+    },
+    continueAsNewTestTimeoutMs,
+  );
+
+  test(
     "reconstructs a capacity timer across continue-as-new without goal polling",
     async () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;
@@ -1364,8 +1675,8 @@ describe("Temporal workflow integration", () => {
       const sessionId = crypto.randomUUID();
       const workflowId = `session-${sessionId}`;
       const queuedTurns = [queuedTurn("event-1")];
-      const runs: string[] = [];
-      let goalChecks = 0;
+      const attempts: Array<{ attemptId: string; turnId: string }> = [];
+      const goalChecksAtReconciliation: number[] = [];
       let reconciliations = 0;
       let resumed = false;
       const waiter = {
@@ -1374,11 +1685,12 @@ describe("Temporal workflow integration", () => {
         nextCheckAt: new Date(0).toISOString(),
         wakeRevision: 3,
       };
-      const admission = createTurnAdmission(queuedTurns, async (_input, turn) => {
-        runs.push(turn.triggerEventId);
-        return turn.triggerEventId === "event-1"
-          ? { status: "idle", capacityWait: waiter }
-          : { status: "failed" };
+      const originalTurnId = queuedTurns[0]!.id;
+      const admission = createTurnAdmission(queuedTurns, async (input, turn) => {
+        attempts.push({ attemptId: input.attemptId, turnId: turn.id });
+        return attempts.length === 1
+          ? { status: "waiting_capacity", capacityWait: waiter }
+          : { status: "idle" };
       });
       const worker = await testWorker(nativeConnection, taskQueue, {
         ...admission.activities,
@@ -1388,7 +1700,7 @@ describe("Temporal workflow integration", () => {
           action: "continue" as const,
         }),
         maybeContinueGoal: async () => {
-          goalChecks += 1;
+          goalChecksAtReconciliation.push(reconciliations);
           return { action: "none" };
         },
         getCodexCapacityWait: async () => (resumed ? null : waiter),
@@ -1399,8 +1711,7 @@ describe("Temporal workflow integration", () => {
           }
           resumed = true;
           admission.resumeCapacity();
-          queuedTurns.push(queuedTurn("capacity-after-continue-as-new"));
-          return { action: "resumed", turnId: queuedTurns[0]!.id };
+          return { action: "resumed" };
         },
       });
       const run = worker.run();
@@ -1419,9 +1730,12 @@ describe("Temporal workflow integration", () => {
           ],
         });
         await handle.result();
-        expect(runs).toEqual(["event-1", "capacity-after-continue-as-new"]);
+        expect(attempts).toHaveLength(2);
+        expect(attempts.map((attempt) => attempt.turnId)).toEqual([originalTurnId, originalTurnId]);
+        expect(new Set(attempts.map((attempt) => attempt.attemptId)).size).toBe(2);
+        expect(queuedTurns).toHaveLength(0);
         expect(reconciliations).toBe(2);
-        expect(goalChecks).toBe(0);
+        expect(goalChecksAtReconciliation).toEqual([2]);
 
         const firstRun = client.workflow.getHandle(workflowId, handle.firstExecutionRunId);
         const history = await firstRun.fetchHistory();
@@ -1451,7 +1765,7 @@ describe("Temporal workflow integration", () => {
       const sessionId = crypto.randomUUID();
       const workflowId = `session-${sessionId}`;
       const queuedTurns = [queuedTurn("event-1")];
-      const runs: string[] = [];
+      const attempts: Array<{ attemptId: string; turnId: string }> = [];
       const waiter = {
         waiterId: crypto.randomUUID(),
         generation: 11,
@@ -1460,11 +1774,12 @@ describe("Temporal workflow integration", () => {
       };
       let resumed = false;
       let reconciliations = 0;
-      const admission = createTurnAdmission(queuedTurns, async (_input, turn) => {
-        runs.push(turn.triggerEventId);
-        return turn.triggerEventId === "event-1"
-          ? { status: "idle", capacityWait: waiter }
-          : { status: "failed" };
+      const originalTurnId = queuedTurns[0]!.id;
+      const admission = createTurnAdmission(queuedTurns, async (input, turn) => {
+        attempts.push({ attemptId: input.attemptId, turnId: turn.id });
+        return attempts.length === 1
+          ? { status: "waiting_capacity", capacityWait: waiter }
+          : { status: "idle" };
       });
       const activities = {
         ...admission.activities,
@@ -1478,8 +1793,7 @@ describe("Temporal workflow integration", () => {
           reconciliations += 1;
           resumed = true;
           admission.resumeCapacity();
-          queuedTurns.push(queuedTurn("capacity-after-worker-restart"));
-          return { action: "resumed", turnId: queuedTurns[0]!.id };
+          return { action: "resumed" };
         },
       };
       const firstWorker = await testWorker(nativeConnection, taskQueue, activities);
@@ -1490,7 +1804,7 @@ describe("Temporal workflow integration", () => {
         workflowId,
         args: [{ ...scope, sessionId, initialEventId: "event-1" }],
       });
-      await waitFor(() => runs.length === 1);
+      await waitFor(() => attempts.length === 1);
       await Bun.sleep(100);
       firstWorker.shutdown();
       await firstRun;
@@ -1504,7 +1818,10 @@ describe("Temporal workflow integration", () => {
           await Bun.sleep(25);
         }
         await handle.result();
-        expect(runs).toEqual(["event-1", "capacity-after-worker-restart"]);
+        expect(attempts).toHaveLength(2);
+        expect(attempts.map((attempt) => attempt.turnId)).toEqual([originalTurnId, originalTurnId]);
+        expect(new Set(attempts.map((attempt) => attempt.attemptId)).size).toBe(2);
+        expect(queuedTurns).toHaveLength(0);
         expect(reconciliations).toBe(1);
       } finally {
         replacement.shutdown();
@@ -1584,6 +1901,66 @@ describe("Temporal workflow integration", () => {
           maxTurnsPerRun: 1,
         });
         expect(continuedInput.initialEventId).toBeUndefined();
+      } finally {
+        worker.shutdown();
+        await run;
+      }
+    },
+    continueAsNewTestTimeoutMs,
+  );
+
+  test(
+    "continues an armed goal exactly once after a continue-as-new boundary",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope();
+      const sessionId = crypto.randomUUID();
+      const workflowId = `session-${sessionId}`;
+      const queuedTurns = [queuedTurn("event-1")];
+      const runs: string[] = [];
+      let goalChecks = 0;
+      let continuations = 0;
+      const admission = createTurnAdmission(queuedTurns, async (_input, turn) => {
+        runs.push(turn.triggerEventId);
+        return { status: "idle" };
+      });
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        ...admission.activities,
+        markSessionIdle: async () => undefined,
+        failSessionAttempt: async () => undefined,
+        settleSessionInterruptions: async () => ({ action: "continue" as const }),
+        maybeContinueGoal: async () => {
+          goalChecks += 1;
+          if (continuations === 0) {
+            continuations += 1;
+            queuedTurns.push(queuedTurn("goal-after-continue-as-new"));
+            return { action: "continue" as const };
+          }
+          return { action: "none" as const };
+        },
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const handle = await client.workflow.start("sessionWorkflow", {
+          taskQueue,
+          workflowId,
+          args: [{ ...scope, sessionId, initialEventId: "event-1", maxTurnsPerRun: 1 }],
+        });
+        await handle.result();
+        expect(runs).toEqual(["event-1", "goal-after-continue-as-new"]);
+        expect(continuations).toBe(1);
+        // maxTurnsPerRun=1 forces another continue-as-new after the goal turn;
+        // the final idle run may re-evaluate the now-observed obligation, but
+        // it must not materialize another continuation.
+        expect(goalChecks).toBe(2);
+
+        const firstRun = client.workflow.getHandle(workflowId, handle.firstExecutionRunId);
+        const history = await firstRun.fetchHistory();
+        const continuedEvent = (history.events ?? []).find(
+          (event) => event.workflowExecutionContinuedAsNewEventAttributes != null,
+        );
+        expect(continuedEvent).toBeDefined();
       } finally {
         worker.shutdown();
         await run;
@@ -1767,6 +2144,7 @@ function createTurnAdmission(
   let currentAttemptId: string | null = null;
   let currentState: "running" | "approval" | "recovering" | "capacity" | null = null;
   let interruptionPending = false;
+  let controlActive = true;
   let approvalEventId: string | null = null;
   let capacityRef: {
     waiterId: string;
@@ -1786,12 +2164,27 @@ function createTurnAdmission(
       if (!currentAttemptId) throw new Error("cannot interrupt without a current attempt");
       interruptionPending = true;
     },
+    commitCapacityWait(ref: NonNullable<typeof capacityRef>) {
+      if (!current || currentState !== "running") {
+        throw new Error("cannot commit capacity wait without a running turn");
+      }
+      currentAttemptId = null;
+      currentState = "capacity";
+      capacityRef = ref;
+    },
     resumeCapacity() {
       if (currentState !== "capacity") {
         throw new Error("cannot resume without a durable capacity wait");
       }
-      currentState = null;
+      if (!current) throw new Error("capacity wait lost its same logical turn");
+      currentState = "recovering";
       capacityRef = null;
+    },
+    pauseControl() {
+      controlActive = false;
+    },
+    resumeControl() {
+      controlActive = true;
     },
     supersede() {
       current = null;
@@ -1810,6 +2203,7 @@ function createTurnAdmission(
             attemptId: currentAttemptId,
           } as const;
         }
+        if (!controlActive) return { kind: "idle" } as const;
         if (currentState === "approval") {
           return approvalEventId
             ? ({
@@ -1855,7 +2249,6 @@ function createTurnAdmission(
         } else if (result.status === "recovering") {
           currentState = "recovering";
         } else if (result.capacityWait) {
-          current = null;
           currentAttemptId = null;
           currentState = "capacity";
           capacityRef = result.capacityWait as typeof capacityRef;
@@ -1916,7 +2309,7 @@ async function testWorker(
       namespace: "default",
       taskQueue: turnTaskQueue(taskQueue),
       activities: { runAgentTurn },
-      maxConcurrentActivityTaskExecutions: TURN_WORKER_MAX_CONCURRENT_TURNS,
+      ...turnWorkerConcurrencyOptions(testSettings()),
     }),
   ]);
   return {

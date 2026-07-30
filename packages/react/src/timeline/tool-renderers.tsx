@@ -52,7 +52,7 @@ import {
   type DisclosureChip,
 } from "./shared";
 import { RawPatch, ToolDiff } from "./tool-diff";
-import { toolDisplayName } from "./projection";
+import { toolDisplayName } from "./tool-display-name";
 
 /* ----------------------------------------------------------------------------
    Per-tool renderers
@@ -700,13 +700,41 @@ type WebSearchResult = { title: string; domain: string; snippet: string };
 
 function WebSearchRenderer({ item }: ToolRendererProps) {
   const raw = (item.raw ?? {}) as {
-    providerData?: { action?: { query?: string; queries?: string[] } };
+    providerData?: {
+      action?: {
+        type?: string;
+        query?: string;
+        queries?: string[];
+        url?: string;
+        pattern?: string;
+      };
+    };
   };
   const action = raw.providerData?.action ?? {};
-  const query = action.query ?? "(query unavailable)";
+  const actionType = action.type ?? "search";
+  const query =
+    actionType === "open_page"
+      ? (action.url ?? "(page unavailable)")
+      : actionType === "find_in_page"
+        ? action.pattern && action.url
+          ? `"${action.pattern}" in ${action.url}`
+          : (action.pattern ?? action.url ?? "(page unavailable)")
+        : (action.query ?? "(query unavailable)");
   const queries = action.queries ?? [];
   const variants = queries.length > 1 ? ` +${queries.length - 1} variants` : "";
   const running = item.status === "running";
+  const runningTitle =
+    actionType === "open_page"
+      ? "Opening web page"
+      : actionType === "find_in_page"
+        ? "Searching within page"
+        : "Searching the web";
+  const completedTitle =
+    actionType === "open_page"
+      ? "Opened web page"
+      : actionType === "find_in_page"
+        ? "Searched within page"
+        : "Searched the web";
   // web_search may surface a results array on the output when the host enriches it.
   // Filter out null/undefined/non-object entries before casting: host-provided
   // data is untrusted and a null element would throw on result.title access.
@@ -727,7 +755,7 @@ function WebSearchRenderer({ item }: ToolRendererProps) {
       <ActivityDisclosure
         icon={<SearchIcon className={ICON_SIZE} />}
         iconTone="running"
-        title="Searching the web"
+        title={runningTitle}
         running
         preview={<RunningPreview>{`${query}${variants}`}</RunningPreview>}
       >
@@ -740,7 +768,7 @@ function WebSearchRenderer({ item }: ToolRendererProps) {
     <ActivityDisclosure
       icon={<SearchIcon className={ICON_SIZE} />}
       iconTone="muted"
-      title="Searched the web"
+      title={completedTitle}
       preview={`${query}${variants}`}
       failed={item.status === "failed"}
       cancelled={item.status === "cancelled"}

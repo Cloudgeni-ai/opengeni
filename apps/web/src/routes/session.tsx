@@ -1,34 +1,34 @@
 // The session view — live timeline plus one compact prompt queue above the
 // composer. Enter queues and Cmd/Ctrl+Enter steers; failed sessions stay
 // honest (reason + retry history) and revivable from the same composer.
+import { HumanInputForm, MessageTimeline, QueueSurface } from "@opengeni/react/session-ui";
 import {
   creditExhaustedFromEvents,
-  MessageTimeline,
   projectPendingApprovals,
   useComposer,
   useFileAttachments,
   useGoal,
+  useHumanInputRequests,
   useSession,
   useSessionEvents,
   useSessionLineage,
-  QueueSurface,
   useTurnQueue,
   type AgentMessageItem,
   type AuthNeededItem,
   type PendingApproval,
   type TimelineItem,
   type UserMessageItem,
-} from "@opengeni/react";
+} from "@opengeni/react/session";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { CheckIcon, Loader2Icon, MenuIcon, MessagesSquareIcon, XIcon } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { isApiErrorStatus } from "@/api";
 import { ConsoleComposer } from "@/components/Composer";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { MarkdownText } from "@/components/markdown";
-import { EnabledMcpToolPicker, ModelPicker } from "@/components/pickers";
+import { ModelPicker, SessionToolPicker, type SessionToolSelection } from "@/components/pickers";
 import {
   FailedSessionBanner,
   TerminalSessionArchive,
@@ -38,7 +38,6 @@ import {
 import { ComposerAgentsPill } from "@/components/session/composer-agents-pill";
 import { useRail } from "@/components/rail/rail-context";
 import { GoalSurface } from "@/components/session/goal-surface";
-import { SessionInspector } from "@/components/session/inspector";
 import { SessionWorkspace } from "@/components/session/sandbox-workspace";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -52,9 +51,20 @@ import {
   projectSessionTimeline,
   summarizeSessionFailure,
 } from "@/lib/events";
-import { buildTools } from "@/lib/session-tools";
+import { mergeSessionContextProjection } from "@/lib/session-pins";
+import {
+  firstPartySessionToolOptions,
+  sessionPolicyPickerIds,
+  toolsForPolicySelection,
+} from "@/lib/session-tools";
 import type { ComposerDraft, LineageNode } from "@opengeni/sdk";
 import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
+
+const LazySessionInspector = lazy(() =>
+  import("@/components/session/inspector").then(({ SessionInspector }) => ({
+    default: SessionInspector,
+  })),
+);
 
 export function SessionRoute({
   workspaceId,
@@ -83,6 +93,7 @@ export function SessionRoute({
   // Queue + goal share the timeline's event stream — one SSE connection total.
   const queue = useTurnQueue(sessionId, { events });
   const goal = useGoal(sessionId, { events });
+  const humanInput = useHumanInputRequests(sessionId, { events });
   const session = useMemo(
     () =>
       fetchedSession
@@ -154,7 +165,7 @@ export function SessionRoute({
   // Keep the workspace header (title, status badge, connection pill) in sync.
   const { setSession: setContextSession, setConnectionState: setContextConnectionState } = context;
   useEffect(() => {
-    setContextSession(session);
+    setContextSession((current) => mergeSessionContextProjection(current, session));
   }, [session, setContextSession]);
   useEffect(() => {
     setContextConnectionState(connectionState);
@@ -180,8 +191,9 @@ export function SessionRoute({
   }, [loadError]);
 
   // A reconnect OAuth round-trip lands back here (the reconnect card set
-  // returnPath to this session). The connection is refreshed server-side, so we
-  // just acknowledge it and strip the params — the user retries their message.
+  // returnPath to this session). The connection is refreshed server-side, but
+  // the original tool call was settled as an error and is never replayed. Strip
+  // the params and tell the user to start a new turn.
   const oauthReturnHandled = useRef(false);
   useEffect(() => {
     if (oauthReturnHandled.current) {
@@ -195,8 +207,8 @@ export function SessionRoute({
     oauthReturnHandled.current = true;
     window.history.replaceState(null, "", window.location.pathname);
     if (outcome === "success") {
-      toast.success("Reconnected", {
-        description: "Send your message again to continue.",
+      toast.success("Connection restored", {
+        description: "The earlier tool call wasn't replayed. Send a new message to try again.",
       });
     } else {
       toast.error("Reconnect failed", {
@@ -355,11 +367,13 @@ export function SessionRoute({
 
   const chatPane = (
     <SessionChatPane
+      key={session.id}
       session={session}
       events={events}
       timeline={timeline}
       initialLoading={initialLoading}
       approvals={approvals}
+      humanInput={humanInput}
       failure={failure}
       creditExhausted={creditExhausted}
       goal={goal}
@@ -377,7 +391,7 @@ export function SessionRoute({
       }
       onMemoryClick={(memoryId) =>
         void navigate({
-          to: "/workspaces/$workspaceId/documents",
+          to: "/workspaces/$workspaceId/memory",
           params: { workspaceId },
           search: { memory: memoryId },
         })
@@ -453,11 +467,13 @@ function SessionDock(props: {
     id: "debug",
     label: "Debug",
     content: (
-      <SessionInspector
-        session={props.session}
-        events={props.events}
-        connectionState={props.connectionState}
-      />
+      <Suspense fallback={<LoadingPanel label="Opening debug inspector" />}>
+        <LazySessionInspector
+          session={props.session}
+          events={props.events}
+          connectionState={props.connectionState}
+        />
+      </Suspense>
     ),
   };
 
@@ -492,6 +508,7 @@ function SessionChatPane(props: {
   timeline: TimelineItem[];
   initialLoading: boolean;
   approvals: PendingApproval[];
+  humanInput: ReturnType<typeof useHumanInputRequests>;
   failure: ReturnType<typeof summarizeSessionFailure> | null;
   /** The last turn ended budget_exhausted — the workspace is out of credits. */
   creditExhausted: boolean;
@@ -505,7 +522,7 @@ function SessionChatPane(props: {
   /** Reset the local timeline view (the /clear-view command target). */
   onClearView: () => void;
   onOpenSession: (sessionId: string) => void;
-  /** Deep-link a timeline memory step to its record in the Documents memory pane. */
+  /** Deep-link a timeline memory step to its first-class workspace Memory record. */
   onMemoryClick: (memoryId: string) => void;
   onNewSession: () => void;
   onApprove: (approvalId: string) => Promise<void>;
@@ -560,32 +577,157 @@ function SessionChatPane(props: {
   // Workspace-scoped: the provider (mounted on the workspace route) supplies
   // the workspaceId, so the hook needs no positional argument.
   const attachments = useFileAttachments();
-  const { selectedCapabilityToolIds, reasoningEffort } = context;
+  const { reasoningEffort } = context;
+  const selectableSessionMcpServers = context.toolMcpServers;
+  const selectableToolIds = useMemo(
+    () => selectableSessionMcpServers.map((server) => server.id),
+    [selectableSessionMcpServers],
+  );
+  const policyToolIds = useMemo(
+    () => sessionPolicyPickerIds(props.session, selectableToolIds, context.workspaceDefaultToolIds),
+    [context.workspaceDefaultToolIds, props.session, selectableToolIds],
+  );
+  const [durableToolSelection, setDurableToolSelection] = useState<SessionToolSelection>(() => ({
+    mcpServerIds: new Set(policyToolIds),
+    firstPartyToolIds: new Set(props.session.firstPartyMcpTools),
+  }));
+  const [durableToolPolicyVersion, setDurableToolPolicyVersion] = useState(
+    () => props.session.toolPolicyVersion,
+  );
+  const [durableToolsHydrated, setDurableToolsHydrated] = useState(false);
+  const durableToolsSessionId = useRef(props.session.id);
+  const [durableToolsSaving, setDurableToolsSaving] = useState(false);
+  const [durableToolsError, setDurableToolsError] = useState<string | null>(null);
   // The model is session-scoped: this session remembers its own pick (falling
   // back to the deployment default), so a switch here doesn't bleed into others.
   const model = context.modelForSession(props.session.id);
-  const { setModelForSession, setReasoningEffort, setSelectedCapabilityToolIds } = context;
+  const { setModelForSession, setReasoningEffort } = context;
+  useEffect(() => {
+    if (durableToolsSessionId.current !== props.session.id) {
+      durableToolsSessionId.current = props.session.id;
+      setDurableToolsHydrated(false);
+      return;
+    }
+    if (!context.workspaceMcpCatalogReady) {
+      if (durableToolsHydrated) {
+        setDurableToolsHydrated(false);
+      }
+      return;
+    }
+    if (durableToolsHydrated) {
+      return;
+    }
+    setDurableToolSelection({
+      mcpServerIds: new Set(policyToolIds),
+      firstPartyToolIds: new Set(props.session.firstPartyMcpTools),
+    });
+    setDurableToolPolicyVersion(props.session.toolPolicyVersion);
+    setDurableToolsHydrated(true);
+  }, [
+    context.workspaceMcpCatalogReady,
+    durableToolsHydrated,
+    policyToolIds,
+    props.session.id,
+    props.session.firstPartyMcpTools,
+    props.session.toolPolicyVersion,
+  ]);
+  const saveDurableToolPolicy = useCallback(
+    async (next: SessionToolSelection) => {
+      setDurableToolSelection({
+        mcpServerIds: new Set(next.mcpServerIds),
+        firstPartyToolIds: new Set(next.firstPartyToolIds),
+      });
+      setDurableToolsSaving(true);
+      setDurableToolsError(null);
+      try {
+        const tools = toolsForPolicySelection({
+          selectedMcpServerIds: next.mcpServerIds,
+          baselineMcpServerIds: [],
+          forceExplicit: true,
+        });
+        const updated = await context.client.updateSessionToolPolicy(
+          props.session.workspaceId,
+          props.session.id,
+          {
+            mode: "explicit",
+            tools: tools ?? [],
+            firstPartyMcpTools: [...next.firstPartyToolIds],
+            expectedVersion: durableToolPolicyVersion,
+          },
+        );
+        setDurableToolSelection({
+          mcpServerIds: sessionPolicyPickerIds(
+            updated,
+            selectableToolIds,
+            context.workspaceDefaultToolIds,
+          ),
+          firstPartyToolIds: new Set(updated.firstPartyMcpTools),
+        });
+        setDurableToolPolicyVersion(updated.toolPolicyVersion);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setDurableToolsError(message);
+        toast.error("Failed to save session tools", { description: message });
+        // Reconcile with the server after both a 409 and a transport failure;
+        // the failed local click must never be presented as durable truth.
+        try {
+          const refreshed = await context.client.getSession(
+            props.session.workspaceId,
+            props.session.id,
+          );
+          setDurableToolSelection({
+            mcpServerIds: sessionPolicyPickerIds(
+              refreshed,
+              selectableToolIds,
+              context.workspaceDefaultToolIds,
+            ),
+            firstPartyToolIds: new Set(refreshed.firstPartyMcpTools),
+          });
+          setDurableToolPolicyVersion(refreshed.toolPolicyVersion);
+        } catch {
+          // Keep the last authoritative selection when reconciliation is also
+          // unavailable; the visible error makes the state non-silent.
+        }
+      } finally {
+        setDurableToolsSaving(false);
+      }
+    },
+    [
+      context.client,
+      context.workspaceDefaultToolIds,
+      durableToolPolicyVersion,
+      props.session.id,
+      props.session.workspaceId,
+      selectableToolIds,
+    ],
+  );
   const applyComposerSettings = useCallback(
     (draft: ComposerDraft) => {
       setModelForSession(props.session.id, draft.model);
       setReasoningEffort(draft.reasoningEffort);
-      setSelectedCapabilityToolIds(new Set(draft.tools.map((tool) => tool.id)));
     },
-    [props.session.id, setModelForSession, setReasoningEffort, setSelectedCapabilityToolIds],
+    [props.session.id, setModelForSession, setReasoningEffort],
   );
   const composer = useComposer(props.session.id, {
     events: props.events,
-    // Evaluated at send time: attachments and tools picked while the draft was
-    // being written ride along with the message.
-    sendExtras: () => ({
-      resources: attachments.readyResources,
-      tools: buildTools(undefined, [...selectedCapabilityToolIds]),
-      model,
-      reasoningEffort,
-    }),
+    sendExtras: () => {
+      return {
+        resources: attachments.readyResources,
+        model,
+        reasoningEffort,
+      };
+    },
+    sendBlocked: () => attachments.hasUnresolved,
     effectiveControl: props.queue.effectiveControl ?? props.session.effectiveControl,
     onDraftApplied: applyComposerSettings,
-    onSent: () => attachments.clear(),
+    // Clear only files included in the accepted wire input. A file added while
+    // sendMessage is in flight belongs to the next message and must survive.
+    onSent: (_text, input) =>
+      attachments.removeReadyFiles(
+        (input.resources ?? []).flatMap((resource) =>
+          resource.kind === "file" ? [resource.fileId] : [],
+        ),
+      ),
   });
 
   // Slash-command palette context: the operator controls (/goal, /clear,
@@ -742,6 +884,27 @@ function SessionChatPane(props: {
         </div>
       ) : null}
 
+      {/* Structured questions are tool output, not approvals: answer/skip
+          resumes the exact frozen call. The authoritative hook reads pending
+          rows and uses this shared event feed only as a refresh trigger. */}
+      {props.humanInput.requests.length > 0 && props.session.status === "requires_action" ? (
+        <div className="mx-auto w-full max-w-3xl shrink-0 px-4 sm:px-6">
+          <div className="grid max-h-[28rem] gap-3 overflow-y-auto pb-2">
+            {props.humanInput.requests.map((request) => (
+              <HumanInputForm
+                key={request.id}
+                request={request}
+                submitting={props.humanInput.respondingRequestId !== null}
+                error={props.humanInput.mutationError?.message}
+                onSubmit={(response) =>
+                  props.humanInput.respond(request.id, response).then(() => undefined)
+                }
+              />
+            ))}
+          </div>
+        </div>
+      ) : null}
+
       {/* The one compact control stack above the composer. Each surface hides
           when it has nothing to show, so the stack degrades to
           whichever one is present — or neither. */}
@@ -752,6 +915,7 @@ function SessionChatPane(props: {
       <div className="shrink-0 px-4 pb-4 pt-1 sm:px-6">
         <div className="mx-auto w-full max-w-3xl">
           <ConsoleComposer
+            workspaceId={props.session.workspaceId}
             composer={composer}
             attachments={attachments}
             effectiveControl={props.queue.effectiveControl ?? props.session.effectiveControl}
@@ -789,12 +953,21 @@ function SessionChatPane(props: {
                   onModelChange={(value) => context.setModelForSession(props.session.id, value)}
                   onEffortChange={context.setReasoningEffort}
                 />
-                <EnabledMcpToolPicker
-                  servers={context.toolMcpServers}
-                  selectedIds={context.selectedCapabilityToolIds}
-                  disabled={composer.sending || terminal}
-                  onChange={context.setSelectedCapabilityToolIds}
+                <SessionToolPicker
+                  servers={selectableSessionMcpServers}
+                  firstPartyTools={firstPartySessionToolOptions}
+                  selection={durableToolSelection}
+                  disabled={
+                    composer.sending || terminal || durableToolsSaving || !durableToolsHydrated
+                  }
+                  saving={durableToolsSaving}
+                  onChange={(next) => void saveDurableToolPolicy(next)}
                 />
+                {durableToolsError ? (
+                  <span className="sr-only" role="alert">
+                    {durableToolsError}
+                  </span>
+                ) : null}
               </div>
             }
           />

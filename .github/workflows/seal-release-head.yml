@@ -1,0 +1,61 @@
+name: Seal Release Head
+run-name: seal-release-head:${{ inputs.pull_request_number }}:${{ inputs.reviewed_head_sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      pull_request_number:
+        description: Open pull request whose exact head may become a release source.
+        required: true
+        type: string
+      reviewed_base_sha:
+        description: Exact current main SHA admitted by the base-owned source verifier.
+        required: true
+        type: string
+      reviewed_head_sha:
+        description: Exact admitted pull-request head SHA to retain immutably.
+        required: true
+        type: string
+      merged_source_sha:
+        description: Optional exact merged source SHA when recovering missing exact-head checks for an already-immutable head.
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: seal-release-head-${{ inputs.reviewed_head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  seal:
+    name: Retain exact admitted release head
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      checks: write
+      contents: write
+      pull-requests: read
+    steps:
+      - name: Check out trusted workflow source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Revalidate and retain exact release head
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_HEAD_PR_NUMBER: ${{ inputs.pull_request_number }}
+          RELEASE_HEAD_BASE_SHA: ${{ inputs.reviewed_base_sha }}
+          RELEASE_HEAD_SHA: ${{ inputs.reviewed_head_sha }}
+          RELEASE_HEAD_MERGED_SOURCE_SHA: ${{ inputs.merged_source_sha }}
+        run: |
+          if [ -n "$RELEASE_HEAD_MERGED_SOURCE_SHA" ]; then
+            node scripts/check-release-pr-automation.mjs recover-release-head
+          else
+            node scripts/check-release-pr-automation.mjs seal-release-head
+          fi

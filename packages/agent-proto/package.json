@@ -28,7 +28,7 @@
     "provenance": true
   },
   "scripts": {
-    "typecheck": "tsgo --noEmit",
+    "typecheck": "tsc --noEmit",
     "build": "tsup",
     "codegen": "bash scripts/codegen.sh",
     "test": "bun test ./test",
@@ -40,7 +40,7 @@
   "devDependencies": {
     "ts-proto": "^2.7.7",
     "tsup": "^8.5.0",
-    "typescript": "^6.0.3"
+    "typescript": "7.0.2"
   },
   "engines": {
     "node": ">=18"

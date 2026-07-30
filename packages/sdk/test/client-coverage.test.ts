@@ -1,7 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { OpenGeniClient } from "../src/client";
 import { OpenGeniApiError } from "../src/errors";
-import type { ConnectionMetadata, SessionTurn } from "../src/types";
+import {
+  OPENGENI_CORRELATION_HEADER,
+  RETAINED_OUTPUT_MAX_PAGE_BYTES,
+  type ConnectionMetadata,
+  type SessionTurn,
+} from "../src/types";
 import { makeEvent, SESSION_ID, WORKSPACE_ID } from "./helpers";
 
 const ENVIRONMENT_ID = "33333333-3333-4333-8333-333333333333";
@@ -86,6 +91,8 @@ function fakeTurn(overrides: Partial<SessionTurn>): SessionTurn {
     executionGeneration: 0,
     activeAttemptId: null,
     lineage: {},
+    initiator: { kind: "subject", subjectId: "user:test" },
+    initiatorContext: {},
     cancelledBy: null,
     cancelReason: null,
     startedAt: null,
@@ -225,7 +232,7 @@ describe("OpenGeniClient access + workspaces", () => {
   test("getClientConfig fetches the public bootstrap endpoint and returns the provider-grouped models", async () => {
     const config = {
       deploymentRevision: "rev-1",
-      apiContractRevision: "2026-07-session-control-v1",
+      apiContractRevision: "2026-07-turn-instructions-v1",
       defaultModel: "gpt-5.6-sol",
       allowedModels: ["gpt-5.6-sol", "accounts/fireworks/models/glm-5p2"],
       models: [
@@ -263,6 +270,39 @@ describe("OpenGeniClient access + workspaces", () => {
       "openai:gpt-5.6-sol:responses",
       "fireworks:accounts/fireworks/models/glm-5p2:chat",
     ]);
+  });
+
+  test("getWorkspaceModelCatalog fetches authenticated selectability", async () => {
+    const catalog = {
+      models: [
+        {
+          id: "gpt-5.6-sol",
+          label: "GPT-5.6 Sol",
+          provider: "openai",
+          providerLabel: "OpenAI",
+          api: "responses",
+          credentialReadiness: {
+            status: "ready",
+            reason: null,
+            basis: "configuration",
+            checkedAt: null,
+          },
+          availability: {
+            status: "unknown",
+            selectable: true,
+            reason: null,
+            checkedAt: null,
+          },
+        },
+      ],
+    } as const;
+    const { client, requests } = makeClient(() => jsonResponse(catalog));
+    const result = await client.getWorkspaceModelCatalog(WORKSPACE_ID);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.method).toBe("GET");
+    expect(new URL(requests[0]!.url).pathname).toBe(`/v1/workspaces/${WORKSPACE_ID}/model-catalog`);
+    expect(result.models[0]?.availability.selectable).toBe(true);
+    expect(result.models[0]?.credentialReadiness.status).toBe("ready");
   });
 });
 
@@ -383,6 +423,7 @@ describe("OpenGeniClient files", () => {
       filename: "notes.txt",
       contentType: "text/plain",
       sizeBytes: 11,
+      sha256: "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
     });
     const put = requests[1]!;
     expect(put.method).toBe("PUT");
@@ -398,6 +439,74 @@ describe("OpenGeniClient files", () => {
     expect(put.headers.authorization).toBeUndefined();
     expect(put.body).toBe("hello world");
     expect(requests[2]!.url).toContain(`/files/uploads/${UPLOAD_ID}/complete`);
+  });
+
+  test("uploadFile preserves a caller-supplied checksum", async () => {
+    const suppliedSha256 = "A".repeat(64);
+    const { client, requests } = makeClient((request) => {
+      if (request.url.endsWith("/files/uploads")) {
+        return jsonResponse(
+          {
+            fileId: FILE_ID,
+            uploadId: UPLOAD_ID,
+            putUrl: "https://storage.example.test/put/supplied",
+            requiredHeaders: {},
+            expiresAt: "",
+            maxSizeBytes: 1,
+          },
+          201,
+        );
+      }
+      if (request.url.startsWith("https://storage.example.test/")) {
+        return new Response(null, { status: 200 });
+      }
+      return jsonResponse({ file: { id: FILE_ID, status: "ready" } });
+    });
+
+    await client.uploadFile(WORKSPACE_ID, {
+      filename: "a",
+      contentType: "text/plain",
+      data: "x",
+      sha256: suppliedSha256,
+    });
+
+    expect(JSON.parse(requests[0]!.body!).sha256).toBe(suppliedSha256);
+  });
+
+  test("uploadFile snapshots an ArrayBuffer before hashing and uploading it", async () => {
+    const data = new ArrayBuffer(5);
+    new Uint8Array(data).set(new TextEncoder().encode("hello"));
+    const { client, requests } = makeClient((request) => {
+      if (request.url.endsWith("/files/uploads")) {
+        new Uint8Array(data).fill("x".charCodeAt(0));
+        return jsonResponse(
+          {
+            fileId: FILE_ID,
+            uploadId: UPLOAD_ID,
+            putUrl: "https://storage.example.test/put/snapshot",
+            requiredHeaders: {},
+            expiresAt: "",
+            maxSizeBytes: 5,
+          },
+          201,
+        );
+      }
+      if (request.url.startsWith("https://storage.example.test/")) {
+        return new Response(null, { status: 200 });
+      }
+      return jsonResponse({ file: { id: FILE_ID, status: "ready" } });
+    });
+
+    await client.uploadFile(WORKSPACE_ID, {
+      filename: "snapshot.txt",
+      contentType: "text/plain",
+      data,
+    });
+
+    expect(JSON.parse(requests[0]!.body!).sha256).toBe(
+      "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+    );
+    expect(requests[1]!.body).toBe("hello");
   });
 
   test("uploadFile surfaces a failed signed PUT as OpenGeniApiError without completing", async () => {
@@ -428,6 +537,52 @@ describe("OpenGeniClient files", () => {
     expect(requests.some((request) => request.url.includes("/complete"))).toBe(false);
   });
 
+  test("uploadFile discards raw HTML gateway PUT failures and never completes", async () => {
+    const correlationId = "storage-edge-503";
+    const { client, requests } = makeClient((request) => {
+      if (request.url.endsWith("/files/uploads")) {
+        return jsonResponse(
+          {
+            fileId: FILE_ID,
+            uploadId: UPLOAD_ID,
+            putUrl: "https://storage.example.test/put/gateway",
+            requiredHeaders: {},
+            expiresAt: "",
+            maxSizeBytes: 1,
+          },
+          201,
+        );
+      }
+      return new Response("<html><body>proxy detail must not escape</body></html>", {
+        status: 503,
+        headers: {
+          "content-type": "text/html",
+          [OPENGENI_CORRELATION_HEADER]: correlationId,
+        },
+      });
+    });
+
+    const error = await client
+      .uploadFile(WORKSPACE_ID, { filename: "a", contentType: "text/plain", data: "x" })
+      .then(
+        () => null,
+        (caught: unknown) => caught,
+      );
+
+    expect(error).toBeInstanceOf(OpenGeniApiError);
+    expect(error).toMatchObject({
+      status: 503,
+      code: "upstream_unavailable",
+      retryable: true,
+      correlationId,
+      outcomeUnknown: true,
+      body: "",
+      message: `OpenGeni is temporarily unavailable — retry. Reference: ${correlationId}.`,
+    });
+    expect(requests).toHaveLength(2);
+    expect(requests.some((request) => request.url.includes("/complete"))).toBe(false);
+  });
+
   test("getFile and createFileDownloadUrl hit the expected endpoints", async () => {
     const { client, requests } = makeClient(() =>
       jsonResponse({ url: "https://storage.example.test/get/x", expiresAt: "" }),
@@ -440,6 +595,118 @@ describe("OpenGeniClient files", () => {
         `POST /v1/workspaces/${WORKSPACE_ID}/files/${FILE_ID}/download-url`,
       ],
     );
+  });
+
+  test("reads retained metadata and one authenticated bounded API range", async () => {
+    const metadata = {
+      available: true as const,
+      artifactId: FILE_ID,
+      kind: "tool_result" as const,
+      contentType: "application/json",
+      originalBytes: 5_000_000,
+      sha256: "a".repeat(64),
+      retainedAt: "2026-07-21T00:00:00.000Z",
+      retention: { policy: "workspace_file" as const, expiresAt: null },
+      retrieval: {
+        method: "GET" as const,
+        path: `/v1/workspaces/${WORKSPACE_ID}/artifacts/${FILE_ID}/content`,
+        acceptRanges: "bytes" as const,
+        maxRangeBytes: RETAINED_OUTPUT_MAX_PAGE_BYTES,
+      },
+    };
+    const expected = new Uint8Array([4, 5, 6, 7]);
+    const { client, requests } = makeClient((request) => {
+      if (request.url.endsWith(`/artifacts/${FILE_ID}`)) return jsonResponse(metadata);
+      if (request.url.endsWith(`/artifacts/${FILE_ID}/content`)) {
+        return new Response(expected, {
+          status: 206,
+          headers: {
+            "Accept-Ranges": "bytes",
+            "Content-Length": String(expected.byteLength),
+            "Content-Range": "bytes 4-7/5000000",
+            "Content-Type": "application/json",
+          },
+        });
+      }
+      throw new Error(`unexpected request: ${request.url}`);
+    });
+
+    expect(await client.getRetainedArtifact(WORKSPACE_ID, FILE_ID)).toEqual(metadata);
+    const content = await client.getRetainedArtifactContent(WORKSPACE_ID, FILE_ID, {
+      range: "bytes=4-7",
+    });
+    expect(content).toEqual({
+      bytes: expected,
+      status: 206,
+      contentType: "application/json",
+      contentLength: 4,
+      contentRange: "bytes 4-7/5000000",
+      acceptRanges: "bytes",
+    });
+    expect(requests.map((request) => new URL(request.url).pathname)).toEqual([
+      `/v1/workspaces/${WORKSPACE_ID}/artifacts/${FILE_ID}`,
+      `/v1/workspaces/${WORKSPACE_ID}/artifacts/${FILE_ID}/content`,
+    ]);
+    expect(requests[1]!.headers.range).toBe("bytes=4-7");
+    expect(requests[1]!.headers.authorization).toBe("Bearer og_test_key");
+    expect(requests.some((request) => request.url.includes("download-url"))).toBeFalse();
+  });
+
+  test("fails closed when retained content exceeds the SDK byte ceiling", async () => {
+    let cancelReason: unknown;
+    const oversized = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(new Uint8Array(RETAINED_OUTPUT_MAX_PAGE_BYTES + 1));
+      },
+      cancel(reason) {
+        cancelReason = reason;
+      },
+    });
+    const { client } = makeClient(
+      () =>
+        new Response(oversized, {
+          status: 206,
+          headers: {
+            "Accept-Ranges": "bytes",
+            "Content-Range": `bytes 0-${RETAINED_OUTPUT_MAX_PAGE_BYTES}/${RETAINED_OUTPUT_MAX_PAGE_BYTES + 1}`,
+          },
+        }),
+    );
+    const error = await client.getRetainedArtifactContent(WORKSPACE_ID, FILE_ID).then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(OpenGeniApiError);
+    expect((error as OpenGeniApiError).status).toBe(502);
+    expect((error as OpenGeniApiError).body).toContain("exceeds the SDK byte limit");
+    expect(cancelReason).toBe("retained artifact response exceeded the SDK byte limit");
+  });
+
+  test("cancels retained content rejected from response headers before reading bytes", async () => {
+    let cancelReason: unknown;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(new Uint8Array([1]));
+      },
+      cancel(reason) {
+        cancelReason = reason;
+      },
+    });
+    const { client } = makeClient(
+      () =>
+        new Response(body, {
+          status: 206,
+          headers: {
+            "Accept-Ranges": "bytes",
+            "Content-Length": String(RETAINED_OUTPUT_MAX_PAGE_BYTES + 1),
+          },
+        }),
+    );
+
+    await expect(client.getRetainedArtifactContent(WORKSPACE_ID, FILE_ID)).rejects.toThrow(
+      "exceeds the SDK byte limit",
+    );
+    expect(cancelReason).toBe("invalid retained artifact content-length");
   });
 });
 
@@ -479,6 +746,12 @@ describe("OpenGeniClient documents", () => {
       kind: "decision",
     });
     await client.updateKnowledgeMemory(WORKSPACE_ID, DOCUMENT_ID, { status: "approved" });
+    await client.createKnowledgeDrop(WORKSPACE_ID, {
+      text: "meeting notes",
+      visibility: "private",
+      agentAccess: false,
+    });
+    await client.moveDocument(WORKSPACE_ID, DOCUMENT_ID);
     await client.searchWorkspaceMemories(WORKSPACE_ID, {
       query: "rollback evidence",
       scopeTypes: ["user", "role"],
@@ -521,6 +794,8 @@ describe("OpenGeniClient documents", () => {
         `GET /v1/workspaces/${WORKSPACE_ID}/knowledge/memories/${DOCUMENT_ID}`,
         `POST /v1/workspaces/${WORKSPACE_ID}/knowledge/memories`,
         `PATCH /v1/workspaces/${WORKSPACE_ID}/knowledge/memories/${DOCUMENT_ID}`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/knowledge/drops`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/documents/${DOCUMENT_ID}/move`,
         `POST /v1/workspaces/${WORKSPACE_ID}/knowledge/memories/search`,
         `GET /v1/workspaces/${WORKSPACE_ID}/knowledge/memories/relationships`,
         `POST /v1/workspaces/${WORKSPACE_ID}/knowledge/memories/relationships`,
@@ -548,21 +823,27 @@ describe("OpenGeniClient documents", () => {
     });
     expect(JSON.parse(requests[11]!.body!)).toEqual({ status: "approved" });
     expect(JSON.parse(requests[12]!.body!)).toEqual({
+      text: "meeting notes",
+      visibility: "private",
+      agentAccess: false,
+    });
+    expect(JSON.parse(requests[13]!.body!)).toEqual({});
+    expect(JSON.parse(requests[14]!.body!)).toEqual({
       query: "rollback evidence",
       scopeTypes: ["user", "role"],
       labels: ["release"],
     });
-    expect(new URL(requests[13]!.url).searchParams.get("memoryId")).toBe(DOCUMENT_ID);
-    expect(new URL(requests[13]!.url).searchParams.get("type")).toBe("contradicts");
-    expect(new URL(requests[16]!.url).searchParams.get("includeEphemeral")).toBe("true");
-    expect(new URL(requests[16]!.url).searchParams.get("includePrivate")).toBe("true");
-    expect(new URL(requests[17]!.url).searchParams.get("includePrivate")).toBe("true");
-    expect(JSON.parse(requests[18]!.body!)).toEqual({
+    expect(new URL(requests[15]!.url).searchParams.get("memoryId")).toBe(DOCUMENT_ID);
+    expect(new URL(requests[15]!.url).searchParams.get("type")).toBe("contradicts");
+    expect(new URL(requests[18]!.url).searchParams.get("includeEphemeral")).toBe("true");
+    expect(new URL(requests[18]!.url).searchParams.get("includePrivate")).toBe("true");
+    expect(new URL(requests[19]!.url).searchParams.get("includePrivate")).toBe("true");
+    expect(JSON.parse(requests[20]!.body!)).toEqual({
       type: "retention",
       expiredBefore: "2026-07-19T00:00:00.000Z",
     });
-    expect(JSON.parse(requests[19]!.body!)).toEqual({ planHash: "a".repeat(64) });
-    expect(JSON.parse(requests[20]!.body!)).toEqual({ planHash: "a".repeat(64) });
+    expect(JSON.parse(requests[21]!.body!)).toEqual({ planHash: "a".repeat(64) });
+    expect(JSON.parse(requests[22]!.body!)).toEqual({ planHash: "a".repeat(64) });
   });
 
   test("deleteDocument DELETEs the document and resolves on 204", async () => {
@@ -798,6 +1079,24 @@ describe("OpenGeniClient connections", () => {
     });
   });
 
+  test("startOpenGeniSlackBotInstall POSTs the optional replacement connection", async () => {
+    const { client, requests } = makeClient(() =>
+      jsonResponse({
+        authorizationUrl: "https://slack.com/oauth/v2/authorize?state=signed",
+        expiresAt: "2026-06-12T00:10:00.000Z",
+      }),
+    );
+    const result = await client.startOpenGeniSlackBotInstall(WORKSPACE_ID, {
+      connectionId: "conn-1",
+    });
+    expect(result.authorizationUrl).toStartWith("https://slack.com/oauth/v2/authorize");
+    expect(requests[0]!.method).toBe("POST");
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/connections/slack-bot/install`,
+    );
+    expect(JSON.parse(requests[0]!.body!)).toEqual({ connectionId: "conn-1" });
+  });
+
   test("catalogAssetUrl builds a public v1 URL and is null-safe", () => {
     const { client } = makeClient(() => jsonResponse({}));
     expect(
@@ -818,6 +1117,6 @@ describe("OpenGeniClient error handling for new endpoints", () => {
     );
     expect(error).toBeInstanceOf(OpenGeniApiError);
     expect((error as OpenGeniApiError).status).toBe(404);
-    expect((error as OpenGeniApiError).body).toBe("goal not found");
+    expect((error as OpenGeniApiError).body).toBe("");
   });
 });

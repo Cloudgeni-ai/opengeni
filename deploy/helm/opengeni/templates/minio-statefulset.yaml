@@ -1,4 +1,5 @@
 {{- if .Values.minio.enabled }}
+{{- $priorityClassName := include "opengeni.priorityClassName" (dict "root" . "explicit" .Values.minio.priorityClassName "tier" "durable") }}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -19,6 +20,9 @@ spec:
         {{- include "opengeni.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: minio
     spec:
+      {{- if $priorityClassName }}
+      priorityClassName: {{ $priorityClassName | quote }}
+      {{- end }}
       containers:
         - name: minio
           image: {{ printf "%s:%s" .Values.minio.image.repository .Values.minio.image.tag | quote }}
@@ -60,8 +64,10 @@ spec:
               port: api
             initialDelaySeconds: 30
             periodSeconds: 20
+          {{- with .Values.minio.resources }}
           resources:
-            {{- toYaml .Values.minio.resources | nindent 12 }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           volumeMounts:
             - name: data
               mountPath: /data

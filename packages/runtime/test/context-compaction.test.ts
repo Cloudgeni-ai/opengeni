@@ -31,7 +31,6 @@ import {
   compactionReplacementFingerprint,
   latestCompactionReplacementFingerprint,
   isCompactionSummary,
-  isEphemeralInternalContext,
   isUserMessage,
   prepareCompactionPromptInput,
   renderCompactionPromptInputForChat,
@@ -400,20 +399,15 @@ describe("codex-parity rebuild", () => {
     expect(rebuilt.some((item) => item.type === "function_call")).toBe(false);
   });
 
-  test("ephemeral internal context never becomes permanent user history", () => {
+  test("durable system input participates in the explicit compaction transition", () => {
     const internalContext = {
       type: "message",
       role: "system",
       content: "continue the same inference",
     };
-    expect(isEphemeralInternalContext(internalContext)).toBe(true);
-
-    const rebuilt = buildCompactionReplacementHistory(
-      [user("real request"), internalContext],
-      "summary",
-    );
-    expect(rebuilt).toHaveLength(2);
-    expect(rebuilt[0]).toMatchObject(user("real request"));
+    const prepared = prepareCompactionPromptInput([user("real request"), internalContext], 10_000);
+    expect(prepared.input).toContainEqual(internalContext);
+    expect(prepared.input.at(-1)).toMatchObject({ role: "user", content: COMPACTION_PROMPT });
   });
 
   test("drops images from retained user messages", () => {

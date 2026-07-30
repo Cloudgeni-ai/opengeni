@@ -2,13 +2,57 @@ import { describe, expect, test } from "bun:test";
 import {
   CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
   CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS,
-  TURN_WORKER_MAX_CONCURRENT_TURNS,
+  turnWorkerConcurrencyLogFields,
+  turnWorkerConcurrencyOptions,
+  type TurnWorkerConcurrencySettings,
 } from "../src/concurrency";
 
+const fixed: TurnWorkerConcurrencySettings = {
+  turnWorkerConcurrencyMode: "fixed",
+  turnWorkerMaxConcurrentTurns: 16,
+  turnWorkerTargetCpuUsage: 0.8,
+  turnWorkerTargetMemoryUsage: 0.75,
+};
+
 describe("worker concurrency contract", () => {
-  test("pins the temporary production turn density independently of control work", () => {
-    expect(TURN_WORKER_MAX_CONCURRENT_TURNS).toBe(16);
+  test("keeps ordinary horizontally-scaled workers on a fixed ceiling", () => {
+    expect(turnWorkerConcurrencyOptions(fixed)).toEqual({
+      maxConcurrentActivityTaskExecutions: 16,
+    });
+    expect(turnWorkerConcurrencyLogFields(fixed)).toEqual({
+      concurrencyMode: "fixed",
+      maxConcurrentTurns: 16,
+      targetCpuUsage: null,
+      targetMemoryUsage: null,
+    });
     expect(CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES).toBe(32);
     expect(CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS).toBe(40);
+  });
+
+  test("lets one worker fill a machine within system resource targets", () => {
+    const settings: TurnWorkerConcurrencySettings = {
+      ...fixed,
+      turnWorkerConcurrencyMode: "resource-based",
+      turnWorkerMaxConcurrentTurns: 256,
+    };
+    expect(turnWorkerConcurrencyOptions(settings)).toEqual({
+      tuner: {
+        tunerOptions: {
+          targetCpuUsage: 0.8,
+          targetMemoryUsage: 0.75,
+        },
+        activityTaskSlotOptions: {
+          minimumSlots: 1,
+          maximumSlots: 256,
+          rampThrottle: "50ms",
+        },
+      },
+    });
+    expect(turnWorkerConcurrencyLogFields(settings)).toEqual({
+      concurrencyMode: "resource-based",
+      maxConcurrentTurns: 256,
+      targetCpuUsage: 0.8,
+      targetMemoryUsage: 0.75,
+    });
   });
 });

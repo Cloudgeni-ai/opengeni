@@ -39,6 +39,7 @@ import {
   PointerButton,
   type DesktopInputRequest,
 } from "@opengeni/agent-proto";
+import { redactSensitiveText } from "@opengeni/contracts";
 
 import { sandboxCommandExitCode, sandboxCommandOutput, sandboxCommandStillRunning } from "./index";
 // `stripExecBanner` is the SAME pure helper recording.ts uses to recover the raw
@@ -328,7 +329,7 @@ export class SandboxComputer implements Computer {
       // produces empty bytes, and the retry loop eventually throws. The wire-level
       // backstop in computerCallNormalizingFetch is also in place as a second net.
       console.warn(
-        `[SandboxComputer] action command did not finish before the ${ACTION_YIELD_MS}ms yield window — proceeding to screenshot: ${cmd}`,
+        `[SandboxComputer] action command did not finish before the ${ACTION_YIELD_MS}ms yield window — proceeding to screenshot: ${redactSensitiveText(cmd)}`,
       );
       return output;
     }
@@ -758,7 +759,9 @@ export class NativeDesktopComputer implements Computer {
     // Exhausted the budget (or hit a terminal denial): FAIL LOUD. Log the specific
     // reason so the failure is DIAGNOSABLE (not a silent blank the model misreads),
     // then rethrow — never return "".
-    const reason = lastError instanceof Error ? lastError.message : String(lastError);
+    const reason = redactSensitiveText(
+      lastError instanceof Error ? lastError.message : String(lastError),
+    );
     console.warn(
       `[NativeDesktopComputer] screenshot failed after ${attempt} attempt(s): ${reason}`,
     );
@@ -1279,7 +1282,9 @@ export class ComputerUseCapability extends Capability {
           // any computer-use-only recording. One SandboxComputer instance caches
           // this for the rest of the turn.
           prepare: async (preparedSession) => {
-            await ensureDisplayStack(preparedSession);
+            await ensureDisplayStack(preparedSession, {
+              telemetryContext: { callerKind: "computer" },
+            });
             await this.args.onReady?.(preparedSession);
           },
         });

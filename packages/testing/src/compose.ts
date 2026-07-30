@@ -1,4 +1,5 @@
 import { migrate } from "@opengeni/db/migrate";
+import { provisionRoles } from "@opengeni/db/provision-roles";
 import { Connection } from "@temporalio/client";
 import { connect as connectNats } from "nats";
 import postgres from "postgres";
@@ -19,6 +20,8 @@ export type TestServices = {
   minioPort?: number;
   minioConsolePort?: number;
   databaseUrl: string;
+  /** Restricted opengeni_app URL for starting API/worker entry points. */
+  runtimeDatabaseUrl: string;
   natsUrl: string;
   temporalHost: string;
   dockerNetwork: string;
@@ -31,6 +34,10 @@ export type TestServices = {
 export async function startTestServices(
   options: { temporal?: boolean; objectStorage?: boolean } = {},
 ): Promise<TestServices> {
+  const external = externalTestServices(options);
+  if (external) {
+    return await external;
+  }
   let lastError: unknown;
   for (let attempt = 1; attempt <= 5; attempt += 1) {
     try {
@@ -44,6 +51,139 @@ export async function startTestServices(
     }
   }
   throw lastError;
+}
+
+function externalTestServices(options: {
+  temporal?: boolean;
+  objectStorage?: boolean;
+}): Promise<TestServices> | null {
+  const databaseUrl = process.env.OPENGENI_TEST_DATABASE_URL;
+  const databaseAdminUrl = process.env.OPENGENI_TEST_DATABASE_ADMIN_URL ?? databaseUrl;
+  const runtimeDatabaseUrl = process.env.OPENGENI_TEST_RUNTIME_DATABASE_URL ?? databaseUrl;
+  const natsUrl = process.env.OPENGENI_TEST_NATS_URL;
+  const temporalHost = process.env.OPENGENI_TEST_TEMPORAL_HOST;
+  const objectStorageEndpoint = process.env.OPENGENI_TEST_OBJECT_STORAGE_ENDPOINT;
+  const objectStorageSandboxEndpoint =
+    process.env.OPENGENI_TEST_OBJECT_STORAGE_SANDBOX_ENDPOINT ?? objectStorageEndpoint;
+  const configured = [
+    databaseUrl,
+    process.env.OPENGENI_TEST_DATABASE_ADMIN_URL,
+    process.env.OPENGENI_TEST_RUNTIME_DATABASE_URL,
+    natsUrl,
+    temporalHost,
+    objectStorageEndpoint,
+    process.env.OPENGENI_TEST_OBJECT_STORAGE_SANDBOX_ENDPOINT,
+  ].some(Boolean);
+  if (!configured) {
+    return null;
+  }
+  const missing = [
+    !databaseUrl && "OPENGENI_TEST_DATABASE_URL",
+    !natsUrl && "OPENGENI_TEST_NATS_URL",
+    (options.temporal ?? true) && !temporalHost && "OPENGENI_TEST_TEMPORAL_HOST",
+    (options.objectStorage ?? false) &&
+      !objectStorageEndpoint &&
+      "OPENGENI_TEST_OBJECT_STORAGE_ENDPOINT",
+  ].filter((name): name is string => Boolean(name));
+  if (missing.length > 0) {
+    throw new Error(`external test services are missing: ${missing.join(", ")}`);
+  }
+
+  return startExternalTestServices({
+    databaseUrl: databaseUrl!,
+    databaseAdminUrl: databaseAdminUrl!,
+    runtimeDatabaseUrl: runtimeDatabaseUrl!,
+    natsUrl: natsUrl!,
+    temporalHost: temporalHost ?? "127.0.0.1:0",
+    ...(objectStorageEndpoint ? { objectStorageEndpoint } : {}),
+    ...(objectStorageSandboxEndpoint ? { objectStorageSandboxEndpoint } : {}),
+    temporal: options.temporal ?? true,
+    objectStorage: options.objectStorage ?? false,
+  });
+}
+
+async function startExternalTestServices(input: {
+  databaseUrl: string;
+  databaseAdminUrl: string;
+  runtimeDatabaseUrl: string;
+  natsUrl: string;
+  temporalHost: string;
+  objectStorageEndpoint?: string;
+  objectStorageSandboxEndpoint?: string;
+  temporal: boolean;
+  objectStorage: boolean;
+}): Promise<TestServices> {
+  const services: TestServices = {
+    projectName: "opengeni_external_test_services",
+    cwd: process.cwd(),
+    composeFile: "",
+    postgresPort: urlPort(input.databaseUrl),
+    natsPort: urlPort(input.natsUrl),
+    natsMonitorPort: 0,
+    temporalPort: hostPort(input.temporalHost),
+    databaseUrl: input.databaseUrl,
+    runtimeDatabaseUrl: input.runtimeDatabaseUrl,
+    natsUrl: input.natsUrl,
+    temporalHost: input.temporalHost,
+    dockerNetwork: process.env.OPENGENI_TEST_DOCKER_NETWORK ?? "",
+    ...(input.objectStorage
+      ? {
+          objectStorageEndpoint: input.objectStorageEndpoint!,
+          objectStorageSandboxEndpoint: input.objectStorageSandboxEndpoint!,
+          minioPort: urlPort(input.objectStorageEndpoint!),
+        }
+      : {}),
+    migrate: async () => {
+      await migrate(input.databaseAdminUrl);
+      await provisionRoles(input.databaseAdminUrl, {
+        appRole: "opengeni_app",
+        appPassword: "opengeni_app",
+        rlsStrategy: "force",
+      });
+    },
+    // External services are supplied and owned by the caller. In particular,
+    // callers requesting object storage must provision the test bucket before
+    // starting the suite; this harness only verifies service readiness.
+    down: async () => undefined,
+  };
+
+  await waitForPostgres(input.databaseUrl);
+  await waitForNats(input.natsUrl);
+  if (input.temporal) {
+    await waitForTemporal(input.temporalHost);
+  }
+  if (input.objectStorage) {
+    await waitForMinio(input.objectStorageEndpoint!);
+  }
+  return services;
+}
+
+function urlPort(value: string): number {
+  const url = new URL(value);
+  if (url.port) {
+    return Number.parseInt(url.port, 10);
+  }
+  if (url.protocol === "postgres:" || url.protocol === "postgresql:") {
+    return 5432;
+  }
+  if (url.protocol === "nats:") {
+    return 4222;
+  }
+  if (url.protocol === "http:") {
+    return 80;
+  }
+  if (url.protocol === "https:") {
+    return 443;
+  }
+  throw new Error(`external test service URL has no port: ${url.protocol}`);
+}
+
+function hostPort(value: string): number {
+  const port = Number.parseInt(value.slice(value.lastIndexOf(":") + 1), 10);
+  if (!Number.isInteger(port)) {
+    throw new Error("external Temporal host must include a numeric port");
+  }
+  return port;
 }
 
 async function startTestServicesAttempt(
@@ -105,6 +245,7 @@ async function startTestServicesAttempt(
       ? { minioPort: ports.minio, minioConsolePort: ports.minioConsole }
       : {}),
     databaseUrl: `postgres://opengeni:opengeni@127.0.0.1:${ports.postgres}/opengeni`,
+    runtimeDatabaseUrl: `postgres://opengeni_app:opengeni_app@127.0.0.1:${ports.postgres}/opengeni`,
     natsUrl: `nats://127.0.0.1:${ports.nats}`,
     temporalHost: `127.0.0.1:${ports.temporal}`,
     dockerNetwork: `${projectName}_default`,
@@ -116,6 +257,11 @@ async function startTestServicesAttempt(
       : {}),
     migrate: async () => {
       await migrate(services.databaseUrl);
+      await provisionRoles(services.databaseUrl, {
+        appRole: "opengeni_app",
+        appPassword: "opengeni_app",
+        rlsStrategy: "force",
+      });
     },
     down: () => (downPromise ??= stopTestServices(projectName, composeFile, cwd)),
   };
@@ -274,7 +420,11 @@ async function removeAttachedSandboxContainers(
     }
     for (const mount of mounts) {
       if (!mount || typeof mount !== "object") continue;
-      const record = mount as { Type?: unknown; Source?: unknown; Name?: unknown };
+      const record = mount as {
+        Type?: unknown;
+        Source?: unknown;
+        Name?: unknown;
+      };
       if (
         record.Type === "bind" &&
         typeof record.Source === "string" &&
@@ -316,7 +466,9 @@ async function removeAttachedSandboxContainers(
   try {
     await Promise.all([...workspaceDirs].map((path) => removeTempDir(path)));
   } catch (error) {
-    return { failure: `attached sandbox workspace removal failed: ${String(error)}` };
+    return {
+      failure: `attached sandbox workspace removal failed: ${String(error)}`,
+    };
   }
 
   return {

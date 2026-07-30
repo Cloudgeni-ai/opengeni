@@ -69,6 +69,8 @@ export function capabilitySourceLabel(source: CapabilitySource | string): string
   switch (source) {
     case "built_in":
       return "Built in";
+    case "library":
+      return "Curated library";
     case "configured":
       return "Configured";
     case "public_registry":
@@ -79,6 +81,45 @@ export function capabilitySourceLabel(source: CapabilitySource | string): string
     default:
       return String(source).replaceAll("_", " ");
   }
+}
+
+export type CuratedSkillProvenance = {
+  libraryId: string | null;
+  version: string | null;
+  contentSha256: string | null;
+  sourceCommit: string | null;
+  provenance: string | null;
+  sourceUrl: string | null;
+  license: string | null;
+  documentationUrl: string | null;
+  artifactPath: string | null;
+  status: "enabled" | "not_enabled";
+  effectiveSelection: string;
+};
+
+/**
+ * Return the public, immutable identity and effective selection state for a
+ * curated skill. Credentials and other runtime configuration are deliberately
+ * not part of this projection.
+ */
+export function curatedSkillProvenance(item: CapabilityCatalogItem): CuratedSkillProvenance | null {
+  if (item.kind !== "skill" || item.source !== "library") {
+    return null;
+  }
+  const metadata = item.metadata;
+  return {
+    libraryId: stringValue(metadata.libraryId),
+    version: stringValue(metadata.version),
+    contentSha256: stringValue(metadata.contentSha256),
+    sourceCommit: stringValue(metadata.sourceCommit),
+    provenance: stringValue(metadata.provenance) ?? item.provenance,
+    sourceUrl: stringValue(metadata.sourceUrl),
+    license: stringValue(metadata.license),
+    documentationUrl: stringValue(metadata.documentationUrl),
+    artifactPath: stringValue(metadata.artifactPath),
+    status: item.enabled ? "enabled" : "not_enabled",
+    effectiveSelection: item.enabled ? (item.enabledReason ?? "enabled") : "not selected",
+  };
 }
 
 export type CapabilityFormState = {
@@ -195,7 +236,7 @@ export type CapabilityConnectPlan =
   | { mode: "api_key"; providerDomain: string; fields: RequiredHeaderField[] };
 
 export function capabilityConnectPlan(item: CapabilityCatalogItem): CapabilityConnectPlan {
-  // Non-runtime kinds and MCPs with no auth just enable/track directly.
+  // Non-runtime kinds and MCPs with no auth just enable directly.
   if (item.kind !== "mcp") {
     return { mode: "enable" };
   }
@@ -315,14 +356,13 @@ export type ConnectionHealth =
   | { state: "attention"; connection: ConnectionMetadata | null };
 
 /**
- * Health of an enabled item, resolved BY the installation's connection id (not
- * by domain). `loaded` is whether the connections list actually loaded: no ref →
- * nothing to worry about; ref present but connections did NOT load → unverified
- * (stay neutral, never alarm); loaded and the row is gone or inactive → needs
- * attention (the row may be null if it was deleted); loaded and active → connected.
+ * Health of an enabled item. Workspace bindings resolve by their exact id;
+ * subject bindings intentionally store no id and resolve only among the current
+ * caller's visible personal rows by provider and kind. `loaded` distinguishes a
+ * failed connection-list read from a genuinely missing or inactive row.
  *
  * The `loaded` gate matters because listConnections needs a distinct
- * `connections:read` scope: a grant with catalog access but not that scope 403s,
+ * `connections:read` scope: a grant with catalog access but not that sctracking-403s,
  * and a failed load must not read as "every connection was deleted" and paint
  * healthy integrations amber.
  */
@@ -332,9 +372,18 @@ export function connectionHealth(
   loaded: boolean,
 ): ConnectionHealth {
   const ref = installedConnectionRef(item);
-  if (!ref?.connectionId) return { state: "none" };
+  if (!ref) return { state: "none" };
   if (!loaded) return { state: "unverified" };
-  const connection = connections.find((candidate) => candidate.id === ref.connectionId) ?? null;
+  const connection =
+    ref.subjectScope === "subject"
+      ? (connections.find(
+          (candidate) =>
+            candidate.subjectId !== null &&
+            normalizeProviderDomain(candidate.providerDomain) ===
+              normalizeProviderDomain(ref.providerDomain) &&
+            candidate.kind === ref.kind,
+        ) ?? null)
+      : (connections.find((candidate) => candidate.id === ref.connectionId) ?? null);
   if (!connection || connection.status !== "active") return { state: "attention", connection };
   return { state: "connected", connection };
 }
@@ -455,11 +504,21 @@ export function oauthResumeAction(
 ): OAuthResumeAction {
   if (!item) return "missing";
   if (!connectionId) return "no_connection";
-  // An enabled item whose stored ref points at the returned connection was
-  // refreshed in place. A different id (or no stored ref) means the row was
-  // recreated, so re-enable to repoint the installation.
+  // Subject-owned installations are generic by design: whether OAuth refreshed
+  // or recreated the caller's row, the existing provider/kind binding remains
+  // valid and must never be rewritten with a private UUID.
+  if (item.enabled && item.connectionRef?.subjectScope === "subject") return "reconnect";
   if (item.enabled && item.connectionRef?.connectionId === connectionId) return "reconnect";
   return "enable";
+}
+
+/** Generic per-subject OAuth binding; never persist the returned personal row id. */
+export function subjectOAuthConnectionRef(providerDomain: string): {
+  providerDomain: string;
+  kind: "oauth2";
+  subjectScope: "subject";
+} {
+  return { providerDomain, kind: "oauth2", subjectScope: "subject" };
 }
 
 /** First one or two initials for the logo monogram fallback. */
@@ -653,7 +712,7 @@ export function createInputFromCatalogItem(item: CapabilityCatalogItem): CreateC
 /**
  * Kind-aware validation for the "Add custom" dialog. Only MCP servers need an
  * endpoint URL — that field is hidden for every other kind (the user's explicit
- * complaint was being asked for an endpoint when tracking a skill).
+ * complaint was being asked for an endpoint when enabling a skill).
  */
 export function capabilityFormError(form: CapabilityFormState): string | null {
   if (!form.name.trim()) {

@@ -152,7 +152,11 @@ export class Observability {
           return;
         }
         ended = true;
-        const errorAttributes = input.error ? errorToAttributes(input.error) : {};
+        const sanitizedError =
+          input.error !== undefined && input.error !== null
+            ? sanitizeSpanError(input.error)
+            : undefined;
+        const errorAttributes = sanitizedError ? errorToAttributes(sanitizedError) : {};
         this.exportSpan({
           traceId,
           spanId,
@@ -164,7 +168,7 @@ export class Observability {
             ...input.attributes,
             ...errorAttributes,
           },
-          error: input.error,
+          ...(sanitizedError ? { error: sanitizedError } : {}),
         });
       },
     };
@@ -362,7 +366,7 @@ export class Observability {
     startMs: number;
     endMs: number;
     attributes: Attributes;
-    error?: unknown;
+    error?: SanitizedSpanError;
   }): void {
     if (!this.settings.observabilityOtlpEndpoint) {
       return;
@@ -389,7 +393,7 @@ export class Observability {
                   startTimeUnixNano: millisToNanos(span.startMs),
                   endTimeUnixNano: millisToNanos(span.endMs),
                   attributes: otlpAttributes(span.attributes),
-                  status: span.error ? { code: 2, message: errorMessage(span.error) } : { code: 1 },
+                  status: span.error ? { code: 2, message: span.error.statusMessage } : { code: 1 },
                 },
               ],
             },
@@ -446,10 +450,44 @@ function cleanAttributes(attributes: Attributes): Record<string, string | number
   ) as Record<string, string | number | boolean | null>;
 }
 
-function errorToAttributes(error: unknown): Attributes {
+type SanitizedSpanError = {
+  type: string;
+  statusCode?: number;
+  statusMessage: string;
+};
+
+function sanitizeSpanError(error: unknown): SanitizedSpanError {
+  const type =
+    error instanceof Error && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(error.name)
+      ? error.name
+      : "Error";
+  const statusCode = errorStatusCode(error);
   return {
-    "error.type": error instanceof Error ? error.name : "Error",
-    "error.message": errorMessage(error),
+    type,
+    ...(statusCode === undefined ? {} : { statusCode }),
+    statusMessage: statusCode === undefined ? "operation failed" : `HTTP ${statusCode}`,
+  };
+}
+
+function errorStatusCode(error: unknown): number | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  const value = (error as { status?: unknown; statusCode?: unknown }).status;
+  const statusCode =
+    Number.isInteger(value) && typeof value === "number"
+      ? value
+      : (error as { statusCode?: unknown }).statusCode;
+  return Number.isInteger(statusCode) &&
+    typeof statusCode === "number" &&
+    statusCode >= 100 &&
+    statusCode <= 599
+    ? statusCode
+    : undefined;
+}
+
+function errorToAttributes(error: SanitizedSpanError): Attributes {
+  return {
+    "error.type": error.type,
+    ...(error.statusCode === undefined ? {} : { "error.status_code": error.statusCode }),
   };
 }
 
@@ -475,7 +513,13 @@ function otlpValue(
   if (typeof value === "boolean") {
     return { boolValue: value };
   }
-  return { stringValue: value === null ? "" : value };
+  return { stringValue: value === null ? "" : boundedOtlpString(value) };
+}
+
+function boundedOtlpString(value: string): string {
+  const bytes = new TextEncoder().encode(value);
+  if (bytes.byteLength <= 512) return value;
+  return `${new TextDecoder().decode(bytes.slice(0, 509))}…`;
 }
 
 function millisToNanos(ms: number): string {

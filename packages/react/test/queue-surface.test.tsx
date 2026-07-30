@@ -1,7 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { act, type ReactNode } from "react";
+import { act, type ReactNode, useState } from "react";
 
-import { createQueueSurfaceForTest, QueueSurface } from "../src/components/queue-surface";
+import {
+  createQueueSurfaceForTest,
+  QueueSurface,
+  requestQueueDraftEdit,
+} from "../src/components/queue-surface";
+import { queueComposerCheckoutEnabled } from "../src/components/queue-surface-implementation";
 import type { ComposerState } from "../src/hooks/use-composer";
 import type { UseTurnQueueResult } from "../src/hooks/use-turn-queue";
 import { fakeTurn } from "./fake-client";
@@ -36,6 +41,7 @@ function composer(overrides: Partial<ComposerState> = {}): ComposerState {
     steer: async () => true,
     sending: false,
     canSend: false,
+    hasDraftContent: () => false,
     pause: async () => {},
     pausing: false,
     resume: async () => {},
@@ -65,6 +71,8 @@ function queue(overrides: Partial<UseTurnQueueResult> = {}): UseTurnQueueResult 
   return {
     snapshot: null,
     queue: items,
+    pendingInputs: [],
+    pendingInputAttachment: null,
     effectiveControl: null,
     stoppingPreviousAttempt: false,
     loading: false,
@@ -80,6 +88,18 @@ function queue(overrides: Partial<UseTurnQueueResult> = {}): UseTurnQueueResult 
     mutationError: null,
     clearMutationError: () => {},
     ...overrides,
+  };
+}
+
+function pendingAgentInput(): UseTurnQueueResult["pendingInputs"][number] {
+  return {
+    id: "33333333-3333-4333-8333-333333333333",
+    sessionId: "44444444-4444-4444-8444-444444444444",
+    kind: "agent_message",
+    classification: "info",
+    sourceId: "55555555-5555-4555-8555-555555555555",
+    summary: "The verification worker found a cache discontinuity.",
+    createdAt: new Date().toISOString(),
   };
 }
 
@@ -227,7 +247,7 @@ describe("QueueSurface", () => {
     expect(loadCount()).toBe(1);
     expect(fallback?.getAttribute("role")).toBe("status");
     expect(fallback?.getAttribute("aria-live")).toBe("polite");
-    expect(fallback?.textContent).toContain("Loading 2 queued prompts…");
+    expect(fallback?.textContent).toContain("Loading inputs…");
     expect(
       fallback?.firstElementChild?.firstElementChild?.classList.contains(
         "pointer-coarse:min-h-[44px]",
@@ -255,7 +275,7 @@ describe("QueueSurface", () => {
     expect(status?.textContent).toBe(
       "Stopping previous attempt… Queued work is saved and starts automatically.",
     );
-    expect(mounted.container.textContent).not.toContain("Loading 0 queued prompts…");
+    expect(mounted.container.textContent).not.toContain("Loading inputs…");
     expect(mounted.container.querySelector('[data-testid="queue-surface-loading"]')).toBeNull();
     expect(mounted.container.querySelector("button[aria-expanded]")).toBeNull();
     expect(loadCount()).toBe(0);
@@ -283,7 +303,7 @@ describe("QueueSurface", () => {
     expect(
       mounted.container.querySelector('[data-testid="queue-error-message"]')?.textContent,
     ).toBe(failure.message);
-    expect(mounted.container.textContent).not.toContain("Loading 0 queued prompts…");
+    expect(mounted.container.textContent).not.toContain("Loading inputs…");
     expect(mounted.container.querySelector('[data-testid="queue-surface-loading"]')).toBeNull();
     expect(loadCount()).toBe(0);
 
@@ -313,7 +333,7 @@ describe("QueueSurface", () => {
     expect(mounted.container.querySelector('[role="alert"]')).not.toBeNull();
     expect(message?.textContent).toBe(mutationFailure.message);
     expect(message?.textContent).not.toContain(queueFailure.message);
-    expect(mounted.container.textContent).not.toContain("Loading 0 queued prompts…");
+    expect(mounted.container.textContent).not.toContain("Loading inputs…");
     expect(mounted.container.querySelector('[data-testid="queue-surface-loading"]')).toBeNull();
     expect(loadCount()).toBe(0);
   });
@@ -346,6 +366,53 @@ describe("QueueSurface", () => {
     expect(mounted.container.textContent).toContain("Queued prompt deleted.");
   });
 
+  test("renders canonical pending machine inputs in the sole queue surface", async () => {
+    mounted = await renderComponent(
+      <QueueSurface
+        queue={queue({
+          queue: [],
+          pendingInputs: [pendingAgentInput()],
+        })}
+        composer={composer()}
+      />,
+    );
+    await flush();
+    expect(mounted.container.textContent).toContain("1 incoming update");
+    const toggle = mounted.container.querySelector<HTMLButtonElement>("button[aria-expanded]");
+    await click(toggle);
+    expect(mounted.container.querySelector("section")).not.toBeNull();
+    expect(mounted.container.textContent).toContain(
+      "The verification worker found a cache discontinuity.",
+    );
+  });
+
+  test("attaches only server-projected machine inputs to their receiving prompt", async () => {
+    const input = pendingAgentInput();
+    mounted = await renderLoadedQueueSurface(
+      <QueueSurface
+        queue={queue({
+          pendingInputs: [input],
+          pendingInputAttachment: {
+            turnId: "22222222-2222-4222-8222-222222222222",
+            inputIds: [input.id],
+          },
+        })}
+        composer={composer()}
+      />,
+    );
+
+    await click(mounted.container.querySelector('button[aria-expanded="false"]'));
+    const first = mounted.container.querySelector(
+      '[data-queue-turn-id="11111111-1111-4111-8111-111111111111"]',
+    );
+    const second = mounted.container.querySelector(
+      '[data-queue-turn-id="22222222-2222-4222-8222-222222222222"]',
+    );
+    expect(first?.querySelector("section")).toBeNull();
+    expect(second?.querySelector("section")).not.toBeNull();
+    expect(second?.textContent).toContain("1 update will join this prompt");
+  });
+
   test("renders the same authoritative queue without mutation affordances for read-only consumers", async () => {
     mounted = await renderLoadedQueueSurface(<QueueSurface queue={queue()} readOnly />);
 
@@ -359,6 +426,116 @@ describe("QueueSurface", () => {
     );
     expect(mounted.container.textContent).toContain("first queued prompt");
     expect(mounted.container.textContent).toContain("second queued prompt");
+  });
+
+  test("withholds durable queue checkout from a local-only composer", () => {
+    expect(queueComposerCheckoutEnabled(composer({ draftPersistence: "disabled" }), false)).toBe(
+      false,
+    );
+    expect(queueComposerCheckoutEnabled(composer(), false)).toBe(true);
+    expect(queueComposerCheckoutEnabled(undefined, true)).toBe(false);
+  });
+
+  test("returns focus to the composer owned by this queue after removing its final row", async () => {
+    const calls: string[] = [];
+    function Harness() {
+      const [items, setItems] = useState([
+        fakeTurn({
+          id: "11111111-1111-4111-8111-111111111111",
+          prompt: "first queued prompt",
+        }),
+      ]);
+      const state = queue({
+        queue: items,
+        removeTurn: async (turnId) => {
+          calls.push(`delete:${turnId}`);
+          setItems([]);
+          return true;
+        },
+      });
+      return (
+        <QueueSurface
+          queue={state}
+          composer={composer()}
+          onRequestComposerFocus={() => calls.push("focus")}
+        />
+      );
+    }
+    mounted = await renderLoadedQueueSurface(<Harness />);
+
+    await click(mounted.container.querySelector('button[aria-expanded="false"]'));
+    await click(mounted.container.querySelector('button[aria-label="Delete queued prompt 1"]'));
+    await flush();
+
+    expect(calls).toEqual(["delete:11111111-1111-4111-8111-111111111111", "focus"]);
+  });
+
+  test("never moves focus into a different embedded queue after removing its final row", async () => {
+    const calls: string[] = [];
+    function Harness() {
+      const [firstItems, setFirstItems] = useState([
+        fakeTurn({
+          id: "11111111-1111-4111-8111-111111111111",
+          prompt: "first embedded queue",
+        }),
+      ]);
+      return (
+        <>
+          <QueueSurface
+            queue={queue({
+              queue: firstItems,
+              removeTurn: async () => {
+                setFirstItems([]);
+                return true;
+              },
+            })}
+            composer={composer()}
+            onRequestComposerFocus={() => calls.push("first-composer")}
+          />
+          <QueueSurface
+            queue={queue({
+              queue: [
+                fakeTurn({
+                  id: "22222222-2222-4222-8222-222222222222",
+                  prompt: "second embedded queue",
+                }),
+              ],
+            })}
+            composer={composer()}
+            onRequestComposerFocus={() => calls.push("second-composer")}
+          />
+        </>
+      );
+    }
+    mounted = await renderLoadedQueueSurface(<Harness />);
+
+    const toggles = mounted.container.querySelectorAll('button[aria-expanded="false"]');
+    await click(toggles[0] ?? null);
+    await click(toggles[1] ?? null);
+    await click(
+      mounted.container
+        .querySelectorAll('[data-testid="queue-surface"]')[0]
+        ?.querySelector('button[aria-label="Delete queued prompt 1"]') ?? null,
+    );
+    await flush();
+
+    expect(calls).toEqual(["first-composer"]);
+    expect(
+      mounted.container
+        .querySelector('[data-testid="queue-surface"] [data-queue-handle]')
+        ?.contains(document.activeElement),
+    ).toBe(false);
+  });
+
+  test("requests confirmation without checkout when current draft state is newer than the render", () => {
+    const actions: string[] = [];
+    requestQueueDraftEdit(
+      composer({ value: "", hasDraftContent: () => true }),
+      () => actions.push("confirm replacement"),
+      () => actions.push("checkout queued prompt"),
+    );
+
+    expect(actions).toEqual(["confirm replacement"]);
   });
 
   test("bounds hostile prompt previews and discloses the exact source only on demand", async () => {
@@ -836,7 +1013,12 @@ describe("QueueSurface", () => {
             blockers: [blocker],
             resumeOptions: [],
             override: null,
-            settlement: { state: "stopping", attemptCount: 1 },
+            settlement: {
+              state: "stopping",
+              attemptCount: 1,
+              interruptionPendingCount: 1,
+              quiescencePendingCount: 0,
+            },
           },
           stoppingPreviousAttempt: true,
         })}

@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { SESSION_EVENT_PAYLOAD_MAX_BYTES, sessionEventJsonBytes } from "@opengeni/contracts";
+import {
+  RETAINED_OUTPUT_MAX_PAGE_BYTES,
+  SESSION_EVENT_PAYLOAD_MAX_BYTES,
+  sessionEventJsonBytes,
+  sessionEventPayloadTruncation,
+} from "@opengeni/contracts";
 import {
   sanitizeEventPayload,
   sanitizeEventString,
@@ -11,6 +16,25 @@ const REPLACEMENT = "�";
 const LONE_HIGH = "\uD800";
 const LONE_LOW = "\uDFFF";
 const VALID_PAIR = "\u{1F600}"; // grinning face emoji, a valid surrogate pair
+const RETAINED_EVIDENCE = {
+  available: true as const,
+  artifactId: "33333333-3333-4333-8333-333333333333",
+  kind: "tool_result" as const,
+  contentType: "text/plain",
+  originalBytes: 3 * 1024 * 1024,
+  sha256: "a".repeat(64),
+  retainedAt: "2026-07-21T00:00:00.000Z",
+  retention: {
+    policy: "workspace_file" as const,
+    expiresAt: null,
+  },
+  retrieval: {
+    method: "GET" as const,
+    path: "/v1/workspaces/11111111-1111-4111-8111-111111111111/artifacts/33333333-3333-4333-8333-333333333333/content",
+    acceptRanges: "bytes" as const,
+    maxRangeBytes: RETAINED_OUTPUT_MAX_PAGE_BYTES,
+  },
+};
 
 /**
  * A value Postgres `jsonb` accepts must contain no NUL bytes and no lone UTF-16
@@ -166,7 +190,13 @@ describe("sanitizeEventPayload (deep walk)", () => {
       access_token: "raw-access-token",
       refreshToken: "raw-refresh-token",
       encryptedPkceVerifier: "v1:secret-verifier",
-      headers: { authorization: "Bearer raw-token" },
+      headers: {
+        authorization: "Bearer raw-token",
+        "content-type": "application/json",
+        accept: "application/json",
+        "x-page-token": "page-2",
+        "x-signature": "sha256=public-digest",
+      },
       nested: { credentialEncrypted: "v1:secret-bundle" },
     }) as Record<string, unknown>;
 
@@ -181,14 +211,62 @@ describe("sanitizeEventPayload (deep walk)", () => {
     expect(cleaned.access_token).toBe("[redacted]");
     expect(cleaned.refreshToken).toBe("[redacted]");
     expect(cleaned.encryptedPkceVerifier).toBe("[redacted]");
-    expect(cleaned.headers).toBe("[redacted]");
+    expect(cleaned.headers).toEqual({
+      authorization: "[redacted]",
+      "content-type": "application/json",
+      accept: "application/json",
+      "x-page-token": "page-2",
+      "x-signature": "sha256=public-digest",
+    });
     expect((cleaned.nested as Record<string, unknown>).credentialEncrypted).toBe("[redacted]");
+  });
+
+  test("redacts known secrets from nested keys and values with stable collisions", () => {
+    const secret = "synthetic-db-key-secret-123456";
+    const knownSecrets = [{ name: "DB_KEY_SECRET", value: secret }];
+    const payload = {
+      [secret]: { nested: secret },
+      "[redacted:DB_KEY_SECRET]": "public marker-shaped key",
+      headers: {
+        "Private-Token": `prefix-${secret}`,
+        "content-type": "application/json",
+        "x-page-token": "page-2",
+        "x-signature": "sha256=public-digest",
+      },
+    };
+
+    const cleaned = sanitizeEventPayload(payload, { knownSecrets }) as Record<string, unknown>;
+    const serialized = JSON.stringify(cleaned);
+    expect(serialized).not.toContain(secret);
+    expect(cleaned).toMatchObject({
+      "[redacted:DB_KEY_SECRET]": { nested: "[redacted:DB_KEY_SECRET]" },
+      "[redacted:DB_KEY_SECRET]#2": "public marker-shaped key",
+      headers: {
+        "Private-Token": "prefix-[redacted:DB_KEY_SECRET]",
+        "content-type": "application/json",
+        "x-page-token": "page-2",
+        "x-signature": "sha256=public-digest",
+      },
+    });
+
+    const modelCleaned = sanitizeModelPayload(payload, knownSecrets) as Record<string, unknown>;
+    expect(JSON.stringify(modelCleaned)).not.toContain(secret);
+    expect(modelCleaned).toMatchObject({
+      "[redacted:DB_KEY_SECRET]": { nested: "[redacted:DB_KEY_SECRET]" },
+      "[redacted:DB_KEY_SECRET]#2": "public marker-shaped key",
+      headers: {
+        "Private-Token": "prefix-[redacted:DB_KEY_SECRET]",
+        "content-type": "application/json",
+        "x-page-token": "page-2",
+        "x-signature": "sha256=public-digest",
+      },
+    });
   });
 
   test("bounds cyclic and multi-megabyte payloads before deep sanitation", () => {
     const payload: Record<string, unknown> = {
       id: "cycle-output",
-      token: "must-not-survive",
+      refreshToken: "must-not-survive",
       output: "界😀".repeat(500_000),
     };
     payload.self = payload;
@@ -201,6 +279,47 @@ describe("sanitizeEventPayload (deep walk)", () => {
       truncated: true,
       fullEvidence: { available: false, reason: "not_retained" },
     });
+  });
+
+  test("removes a forged retained receipt from a small producer payload", () => {
+    const cleaned = sanitizeEventPayload({
+      id: "call-forged",
+      output: "ordinary small output",
+      truncation: {
+        truncated: true,
+        fullEvidence: RETAINED_EVIDENCE,
+      },
+    }) as Record<string, unknown>;
+
+    expect(cleaned).toEqual({
+      id: "call-forged",
+      output: "ordinary small output",
+    });
+    expect(sessionEventPayloadTruncation(cleaned)).toBeNull();
+  });
+
+  test("accepts only separately supplied valid evidence when canonical truncation occurs", () => {
+    const payload = {
+      id: "call-retained",
+      output: `HEAD-${"x".repeat(3 * 1024 * 1024)}-TAIL`,
+      truncation: {
+        truncated: true,
+        fullEvidence: { ...RETAINED_EVIDENCE, objectKey: "private/provider/key" },
+      },
+    };
+    const retained = sanitizeEventPayload(payload, {
+      fullEvidence: RETAINED_EVIDENCE,
+    });
+    const invalid = sanitizeEventPayload(payload, {
+      fullEvidence: { ...RETAINED_EVIDENCE, objectKey: "private/provider/key" },
+    });
+
+    expect(sessionEventPayloadTruncation(retained)?.fullEvidence).toEqual(RETAINED_EVIDENCE);
+    expect(sessionEventPayloadTruncation(invalid)?.fullEvidence).toEqual({
+      available: false,
+      reason: "not_retained",
+    });
+    expect(sessionEventJsonBytes(retained)).toBeLessThanOrEqual(SESSION_EVENT_PAYLOAD_MAX_BYTES);
   });
 
   test("preserves Date JSON semantics across audit and model sanitizers", () => {
@@ -260,7 +379,7 @@ describe("session_history_items jsonb safety (durable SDK item)", () => {
     expect(reparsed.type).toBe("function_call_result");
   });
 
-  test("repairs invalid text without redacting model-visible tool arguments", () => {
+  test("repairs invalid text and redacts model-visible tool arguments", () => {
     const item = {
       type: "function_call",
       callId: "call_secret_arg",
@@ -274,12 +393,27 @@ describe("session_history_items jsonb safety (durable SDK item)", () => {
       ...item,
       arguments: {
         token: "actualvalue",
-        headers: { authorization: "Bearer model-visible" },
+        headers: { authorization: "[redacted]" },
       },
     });
     expect(sanitizeEventPayload(item)).toMatchObject({
-      arguments: { token: "[redacted]", headers: "[redacted]" },
+      arguments: { token: "actualvalue", headers: { authorization: "[redacted]" } },
     });
+  });
+
+  test("preserves public pagination and signature fields in model and event payloads", () => {
+    const item = {
+      type: "function_call",
+      arguments: {
+        token: "page-2",
+        signature: "sha256=public-digest",
+        mediaType: "application/json",
+        serialized: '{"token":"page-2","signature":"sha256=public-digest"}',
+      },
+    };
+
+    expect(sanitizeModelPayload(item)).toEqual(item);
+    expect(sanitizeEventPayload(item)).toEqual(item);
   });
 
   test("makes cyclic and over-depth model payloads explicit and JSON-safe", () => {

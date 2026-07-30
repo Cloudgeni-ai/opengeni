@@ -38,11 +38,11 @@ import {
   ShieldIcon,
   SlidersHorizontalIcon,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { ConsoleComposer, useDraftAttachments } from "@/components/Composer";
 import { PermissionGroupPicker } from "@/components/permission-picker";
-import { EnabledMcpToolPicker, ModelPicker } from "@/components/pickers";
+import { ModelPicker, SessionToolPicker, type SessionToolSelection } from "@/components/pickers";
 import { RepositoryContextPicker } from "@/components/repository-picker";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
@@ -50,7 +50,7 @@ import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/ui/notice";
 import { Select } from "@/components/ui/select";
 import { StatusDot, type StatusTone } from "@/components/ui/status-dot";
-import { useAppContext } from "@/context";
+import { useAppContext, useLatestCallback } from "@/context";
 import { groupSessionsForRail, relativeTimeLabel } from "@/lib/sessions-group";
 import { useCodexModels } from "@/lib/use-codex-models";
 import { isMachineComputeSelectable } from "@/lib/machine-selectability";
@@ -59,18 +59,42 @@ import {
   emptySessionDraft,
   isSessionDraftComputeReady,
   managedBackendOptions,
+  newSessionDraftOptionsFromSessionDraft,
   selfhostedCapabilityChips,
+  sessionDraftFromNewSessionDraftOptions,
   submissionFromSessionDraft,
   type ConnectedMachineTarget,
   type ManagedSandboxTarget,
   type SessionDraft,
 } from "@/lib/session-create";
+import {
+  firstPartySessionToolOptions,
+  selectableSessionMcpServerIds,
+  newSessionDraftToolPolicy,
+  rehydrateRepositoryResources,
+  repositorySelectionFromResources,
+} from "@/lib/session-tools";
+import { useNewSessionDraft, type NewSessionDraftEditable } from "@/lib/use-new-session-draft";
 import { cn } from "@/lib/utils";
+import {
+  runNewSessionRouteSubmission,
+  type CreatedSessionRouteAuthority,
+} from "@/routes/sessions-index-submission";
 import type { SandboxBackend, Session } from "@/types";
 
 const BACKEND_OPTIONS = managedBackendOptions();
 
 export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
+  const { accessKeyVersion } = useAppContext();
+  return (
+    <SessionsIndexRouteContent
+      key={`${workspaceId}:${accessKeyVersion}`}
+      workspaceId={workspaceId}
+    />
+  );
+}
+
+function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
   const navigate = useNavigate();
   const attachments = useDraftAttachments(workspaceId);
@@ -78,12 +102,101 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
   const [message, setMessage] = useState("");
   const [optionsOpen, setOptionsOpen] = useState(false);
   const [draft, setDraft] = useState<SessionDraft>(() => emptySessionDraft());
+  const [toolSelectionExplicit, setToolSelectionExplicit] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [createdSessionAuthority, setCreatedSessionAuthority] =
+    useState<CreatedSessionRouteAuthority | null>(null);
 
   useEffect(() => {
     resetSessionView();
   }, [resetSessionView, workspaceId]);
 
   const computeReady = isSessionDraftComputeReady(draft);
+  const persistedToolPolicy = useMemo(
+    () =>
+      newSessionDraftToolPolicy({
+        selectedMcpServerIds: context.selectedCapabilityToolIds,
+        workspaceDefaultMcpServerIds: context.workspaceDefaultToolIds,
+        catalogReady: context.workspaceMcpCatalogReady,
+        explicit: toolSelectionExplicit,
+      }),
+    [
+      context.selectedCapabilityToolIds,
+      context.workspaceMcpCatalogReady,
+      context.workspaceDefaultToolIds,
+      toolSelectionExplicit,
+    ],
+  );
+  const persistedValue = useMemo(
+    () => ({
+      text: message,
+      resources: [...context.currentResources, ...attachments.readyResources],
+      tools: persistedToolPolicy.tools,
+      toolsProvided: persistedToolPolicy.toolsProvided,
+      model: context.model,
+      reasoningEffort: context.reasoningEffort,
+      options: newSessionDraftOptionsFromSessionDraft(draft),
+    }),
+    [
+      attachments.readyResources,
+      context.model,
+      context.reasoningEffort,
+      context.currentResources,
+      draft,
+      message,
+      persistedToolPolicy,
+    ],
+  );
+  const hydrateResources = useLatestCallback((resources: NewSessionDraftEditable["resources"]) =>
+    rehydrateRepositoryResources(resources, context.githubRepos),
+  );
+  const setModel = context.setModel;
+  const setReasoningEffort = context.setReasoningEffort;
+  const setSelectedCapabilityToolIds = context.setSelectedCapabilityToolIds;
+  const setManualRepos = context.setManualRepos;
+  const setSelectedRepoIds = context.setSelectedRepoIds;
+  const setSelectedRepoRefs = context.setSelectedRepoRefs;
+  const githubRepos = context.githubRepos;
+  const workspaceDefaultToolIdsForHydration = context.workspaceDefaultToolIds;
+  const applyRemoteDraft = useCallback(
+    (remote: NewSessionDraftEditable) => {
+      setMessage(remote.text);
+      setDraft(sessionDraftFromNewSessionDraftOptions(remote.options));
+      setModel(remote.model);
+      setReasoningEffort(remote.reasoningEffort);
+      setToolSelectionExplicit(remote.toolsProvided);
+      const selected = new Set(
+        remote.toolsProvided
+          ? remote.tools.map((tool) => tool.id)
+          : workspaceDefaultToolIdsForHydration,
+      );
+      setSelectedCapabilityToolIds(selectableSessionMcpServerIds(selected));
+      const repositorySelection = repositorySelectionFromResources(remote.resources, githubRepos);
+      setManualRepos(repositorySelection.manualRepos);
+      setSelectedRepoIds(repositorySelection.selectedRepoIds);
+      setSelectedRepoRefs(repositorySelection.selectedRepoRefs);
+    },
+    [
+      setManualRepos,
+      setModel,
+      setReasoningEffort,
+      setSelectedCapabilityToolIds,
+      setSelectedRepoIds,
+      setSelectedRepoRefs,
+      githubRepos,
+      workspaceDefaultToolIdsForHydration,
+    ],
+  );
+  const newSessionDraft = useNewSessionDraft({
+    workspaceId,
+    client: context.client,
+    value: persistedValue,
+    onApplyRemote: applyRemoteDraft,
+    restoreReadyFiles: attachments.restoreReadyFiles,
+    hydrateResources,
+    resourceHydrationReady: context.githubCatalogReady && context.workspaceMcpCatalogReady,
+  });
+  const busy = context.busy || submitting;
 
   // The session does not exist yet, so this surface cannot use `useComposer`
   // (that hook sends to a session). It still renders the package ChatComposer
@@ -91,67 +204,129 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
   const createComposer: ComposerState = {
     value: message,
     setValue: setMessage,
-    sending: context.busy,
+    hasDraftContent: () => message.length > 0 || attachments.attachments.length > 0,
+    sending: busy,
     // Mirrors useComposer's gate: a ready attachment with no typed draft is a
     // sendable file-only message (the API requires non-empty text, so send()
     // substitutes FILE_ONLY_MESSAGE_TEXT).
     canSend:
-      (message.trim().length > 0 || attachments.readyResources.length > 0) &&
-      !context.busy &&
-      !attachments.uploading &&
-      computeReady,
+      (createdSessionAuthority !== null ||
+        message.trim().length > 0 ||
+        attachments.readyResources.length > 0) &&
+      !busy &&
+      !newSessionDraft.loading &&
+      !newSessionDraft.conflict &&
+      (createdSessionAuthority !== null || (!attachments.hasUnresolved && computeReady)),
     pause: async () => {},
     pausing: false,
     resume: async () => {},
     resumeScope: async () => {},
     resuming: false,
     draft: null,
-    draftRevision: 0,
-    draftLoading: false,
-    draftSaving: false,
-    draftConflict: null,
+    draftRevision: newSessionDraft.revision,
+    draftLoading: newSessionDraft.loading,
+    draftSaving: newSessionDraft.saving,
+    draftConflict: newSessionDraft.conflict,
     applyDraft: () => {},
-    reloadDraft: async () => {},
-    resolveDraftConflict: async () => {},
+    reloadDraft: newSessionDraft.reload,
+    resolveDraftConflict: newSessionDraft.resolveConflict,
     restoredResources: [],
     removeRestoredResource: () => {},
-    error: null,
-    clearError: () => {},
+    error: newSessionDraft.error,
+    clearError: newSessionDraft.clearError,
     send: async () => {
       const text =
         message.trim() || (attachments.readyResources.length > 0 ? FILE_ONLY_MESSAGE_TEXT : "");
-      if (!text || context.busy || attachments.uploading || !computeReady) {
+      if (busy || newSessionDraft.loading || newSessionDraft.conflict) {
         return false;
       }
-      const submission = submissionFromSessionDraft(draft);
-      const created = await context.startSession(
-        workspaceId,
-        {
-          text,
-          resources: attachments.readyResources,
-          ...submission.extras,
-        },
-        {
-          targetSandboxId: submission.options.targetSandboxId,
-          workingDir: submission.options.workingDir,
-          omitWorkspaceResources: submission.omitWorkspaceResources,
-        },
-      );
-      if (!created) {
+      if (
+        createdSessionAuthority === null &&
+        (!text || attachments.hasUnresolved || !computeReady)
+      ) {
         return false;
       }
-      setMessage("");
-      attachments.clear();
-      await navigate({
-        to: "/workspaces/$workspaceId/sessions/$sessionId",
-        params: { workspaceId, sessionId: created.id },
-      });
-      return true;
+      setSubmitting(true);
+      try {
+        return await runNewSessionRouteSubmission({
+          authority: createdSessionAuthority,
+          onAuthorityChange: setCreatedSessionAuthority,
+          create: async () => {
+            // This render's resources are the immutable create snapshot. Files
+            // can still be added through paste/drop/picker while the request is
+            // in flight; those newer ids belong to the next draft.
+            const submittedResources =
+              draft.compute.kind === "machine"
+                ? attachments.readyResources
+                : persistedValue.resources;
+            const flushed = await newSessionDraft.flush();
+            if (!flushed) return null;
+            const submission = submissionFromSessionDraft(draft);
+            const created = await context.startSession(
+              workspaceId,
+              {
+                text,
+                resources: submittedResources,
+                tools: persistedValue.tools,
+                model: persistedValue.model,
+                reasoningEffort: persistedValue.reasoningEffort,
+                ...submission.extras,
+              },
+              {
+                targetSandboxId: submission.options.targetSandboxId,
+                workingDir: submission.options.workingDir,
+                omitWorkspaceResources: submission.omitWorkspaceResources,
+                expectedNewSessionDraftRevision: flushed.revision,
+              },
+            );
+            if (!created) return null;
+            return {
+              sessionId: created.id,
+              settleDraft: async () => {
+                // A programmatic edit made while create was in flight was not
+                // submitted and must not be abandoned when this route unmounts.
+                // A sibling-tab OCC conflict remains visible, while the route
+                // retains exact authority for the already-created session.
+                const acknowledged = await newSessionDraft.acknowledgeConsumed(flushed);
+                if (acknowledged?.kind === "consumed") {
+                  setMessage("");
+                  setDraft(emptySessionDraft());
+                  attachments.removeReadyFiles(
+                    submittedResources.flatMap((resource) =>
+                      resource.kind === "file" ? [resource.fileId] : [],
+                    ),
+                  );
+                } else if (
+                  !acknowledged ||
+                  !newSessionDraft.isCurrentSignature(acknowledged.flushed.signature)
+                ) {
+                  // A non-conflict revision-zero insert can fail transiently.
+                  // Retry it (or prove a concurrently saved current signature)
+                  // before allowing this route to unmount through navigation.
+                  const preserved = await newSessionDraft.flush();
+                  if (!preserved || !newSessionDraft.isCurrentSignature(preserved.signature)) {
+                    return false;
+                  }
+                }
+                return true;
+              },
+            };
+          },
+          navigate: async (sessionId) => {
+            await navigate({
+              to: "/workspaces/$workspaceId/sessions/$sessionId",
+              params: { workspaceId, sessionId },
+            });
+          },
+        });
+      } finally {
+        setSubmitting(false);
+      }
     },
     steer: async () => {
       const text =
         message.trim() || (attachments.readyResources.length > 0 ? FILE_ONLY_MESSAGE_TEXT : "");
-      if (!text || context.busy || attachments.uploading || !computeReady) return false;
+      if (!text || busy || attachments.hasUnresolved || !computeReady) return false;
       return await createComposer.send();
     },
   };
@@ -169,19 +344,38 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
 
         <div className="mt-8">
           <ConsoleComposer
+            workspaceId={workspaceId}
             composer={createComposer}
             attachments={attachments}
             autoFocus
+            disabled={newSessionDraft.loading}
             fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
             placeholder="Describe a task for the agent…"
-            controls={<SessionControlStrip workspaceId={workspaceId} />}
+            controls={
+              <SessionControlStrip
+                workspaceId={workspaceId}
+                disabled={busy || newSessionDraft.loading}
+                selection={{
+                  mcpServerIds: context.selectedCapabilityToolIds,
+                  firstPartyToolIds: draft.firstPartyMcpTools,
+                }}
+                onToolSelectionChange={(selection) => {
+                  setToolSelectionExplicit(true);
+                  context.setSelectedCapabilityToolIds(selection.mcpServerIds);
+                  setDraft((current) => ({
+                    ...current,
+                    firstPartyMcpTools: selection.firstPartyToolIds,
+                  }));
+                }}
+              />
+            }
           />
 
           <ComputeTargetControl
             workspaceId={workspaceId}
             draft={draft}
             onChange={setDraft}
-            disabled={context.busy}
+            disabled={busy || newSessionDraft.loading}
           />
 
           <OptionalSessionOptions
@@ -189,7 +383,7 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
             onOpenChange={setOptionsOpen}
             draft={draft}
             onChange={setDraft}
-            disabled={context.busy}
+            disabled={busy || newSessionDraft.loading}
           />
         </div>
 
@@ -290,7 +484,17 @@ function RecentSessionRow({ workspaceId, session }: { workspaceId: string; sessi
 // The composer's inline strip: compute-INDEPENDENT controls only (model + tools).
 // Repository context now lives in the compute-dependent band below (it only makes
 // sense once a managed sandbox is the target), not as an always-visible pill.
-function SessionControlStrip({ workspaceId }: { workspaceId: string }) {
+function SessionControlStrip({
+  workspaceId,
+  disabled,
+  selection,
+  onToolSelectionChange,
+}: {
+  workspaceId: string;
+  disabled: boolean;
+  selection: SessionToolSelection;
+  onToolSelectionChange: (selection: SessionToolSelection) => void;
+}) {
   const context = useAppContext();
   const codexModels = useCodexModels(workspaceId);
   return (
@@ -299,16 +503,17 @@ function SessionControlStrip({ workspaceId }: { workspaceId: string }) {
         config={context.clientConfig}
         model={context.model}
         effort={context.reasoningEffort}
-        disabled={context.busy}
+        disabled={disabled}
         extraModels={codexModels}
         onModelChange={context.setModel}
         onEffortChange={context.setReasoningEffort}
       />
-      <EnabledMcpToolPicker
+      <SessionToolPicker
         servers={context.toolMcpServers}
-        selectedIds={context.selectedCapabilityToolIds}
-        disabled={context.busy}
-        onChange={context.setSelectedCapabilityToolIds}
+        firstPartyTools={firstPartySessionToolOptions}
+        selection={selection}
+        disabled={disabled}
+        onChange={onToolSelectionChange}
       />
     </div>
   );
@@ -327,7 +532,12 @@ function WorkspaceRepositoryPicker({
   const context = useAppContext();
   return (
     <RepositoryContextPicker
+      setupMode={
+        context.githubStatus?.setupMode ??
+        (context.clientConfig.productAccessMode === "managed" ? "platform" : "operator")
+      }
       configured={context.githubStatus?.configured === true}
+      status={context.githubStatus?.status ?? "disabled"}
       installUrl={context.githubStatus?.installUrl ?? null}
       linkUrl={context.githubStatus?.linkUrl ?? null}
       installations={context.githubStatus?.installations ?? []}

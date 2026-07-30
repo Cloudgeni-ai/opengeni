@@ -5,6 +5,7 @@ import type { EventLogger } from "@opengeni/events";
 import type { Attributes, AttributeValue, Observability } from "@opengeni/observability";
 import {
   SELFHOSTED_INFRASTRUCTURE_FAULT_CLASSES,
+  modelUsageTokenCountOrNull,
   type RuntimeMetricsHooks,
   type SelfhostedOpObservation,
   type SelfhostedOpObserver,
@@ -17,6 +18,14 @@ export type CreditBalanceGauge = { accountId: string; balanceMicros: number };
 
 const turnTrackers = new WeakMap<Observability, TurnLifecycleMetrics>();
 const creditBalanceGaugeAccounts = new WeakMap<Observability, Set<string>>();
+const modelCacheCounterTotals = new WeakMap<Observability, Map<string, number>>();
+const retainedProcessTerminalBacklogTotals = new WeakMap<Observability, number>();
+
+// A worker process reaching one trillion tokens in one provider/cache counter is
+// already far outside an ordinary scrape lifetime. Refuse further increments
+// before floating-point precision can degrade; a restart resets both the
+// process-local Prometheus registry and this guard together.
+const MAX_MODEL_CACHE_COUNTER_TOTAL = 1_000_000_000_000;
 
 export function observabilityEventLogger(observability: Observability): EventLogger {
   return {
@@ -375,6 +384,142 @@ export function recordSandboxOrphansTerminated(observability: Observability, cou
   });
 }
 
+const RETAINED_PROCESS_OWNER_STATES = [
+  "direct",
+  "queued",
+  "running",
+  "requires_action",
+  "recovering",
+  "waiting_capacity",
+  "completed",
+  "failed",
+  "cancelled",
+  "superseded",
+  "withdrawn_for_edit",
+  "missing",
+  "unknown",
+] as const;
+
+const RETAINED_PROCESS_OWNER_STATE_SET = new Set<string>(RETAINED_PROCESS_OWNER_STATES);
+
+export function recordRetainedProcessInventoryGauges(
+  observability: Observability,
+  counts: Array<{ ownerState: string; activeCount: number; terminalOwnerCount: number }>,
+): void {
+  const normalized = new Map<string, { active: number; terminal: number }>();
+  for (const ownerState of RETAINED_PROCESS_OWNER_STATES) {
+    normalized.set(ownerState, { active: 0, terminal: 0 });
+  }
+  for (const count of counts) {
+    const ownerState = RETAINED_PROCESS_OWNER_STATE_SET.has(count.ownerState)
+      ? count.ownerState
+      : "unknown";
+    const current = normalized.get(ownerState)!;
+    current.active += Math.max(0, count.activeCount);
+    current.terminal += Math.max(0, count.terminalOwnerCount);
+  }
+
+  let terminalTotal = 0;
+  for (const [ownerState, count] of normalized) {
+    terminalTotal += count.terminal;
+    observability.setGauge({
+      name: "opengeni_retained_processes_active",
+      help: "Current active retained provider processes by durable owner state.",
+      labels: { owner_state: ownerState },
+      value: count.active,
+    });
+    observability.setGauge({
+      name: "opengeni_retained_processes_terminal_owner_backlog",
+      help: "Current active retained processes whose exact owner attempt is terminal.",
+      labels: { owner_state: ownerState },
+      value: count.terminal,
+    });
+  }
+  const previous = retainedProcessTerminalBacklogTotals.get(observability);
+  if (previous !== undefined && terminalTotal > previous) {
+    observability.incrementCounter({
+      name: "opengeni_retained_process_terminal_owner_backlog_growth_total",
+      help: "Positive growth in terminal-owner retained-process backlog between app samples.",
+      amount: terminalTotal - previous,
+    });
+  }
+  retainedProcessTerminalBacklogTotals.set(observability, terminalTotal);
+}
+
+const EXPIRED_DRAINING_BACKENDS = [
+  "none",
+  "local",
+  "docker",
+  "modal",
+  "e2b",
+  "daytona",
+  "blaxel",
+  "runloop",
+  "selfhosted",
+  "unknown",
+] as const;
+const EXPIRED_DRAINING_BACKEND_SET = new Set<string>(EXPIRED_DRAINING_BACKENDS);
+const EXPIRED_DRAINING_AGE_BUCKETS = ["lt_5m", "5m_1h", "1h_1d", "gte_1d"] as const;
+
+export function recordExpiredDrainingSandboxLeaseGauges(
+  observability: Observability,
+  counts: Array<{ backend: string; ageBucket: string; count: number }>,
+): void {
+  const normalized = new Map<string, number>();
+  for (const backend of EXPIRED_DRAINING_BACKENDS) {
+    for (const ageBucket of EXPIRED_DRAINING_AGE_BUCKETS) {
+      normalized.set(`${backend}:${ageBucket}`, 0);
+    }
+  }
+  for (const count of counts) {
+    const backend = EXPIRED_DRAINING_BACKEND_SET.has(count.backend) ? count.backend : "unknown";
+    if (!EXPIRED_DRAINING_AGE_BUCKETS.includes(count.ageBucket as never)) continue;
+    const key = `${backend}:${count.ageBucket}`;
+    normalized.set(key, (normalized.get(key) ?? 0) + Math.max(0, count.count));
+  }
+  for (const [key, value] of normalized) {
+    const [backend, ageBucket] = key.split(":") as [string, string];
+    observability.setGauge({
+      name: "opengeni_sandbox_leases_expired_draining",
+      help: "Current expired draining sandbox leases by backend and fixed age bucket.",
+      labels: { backend, age_bucket: ageBucket },
+      value,
+    });
+  }
+}
+
+export const RETAINED_PROCESS_RECONCILIATION_OUTCOMES = [
+  "claim_failed",
+  "proof_exited",
+  "proof_lost",
+  "proof_checkpoint_failed",
+  "settled_exited",
+  "settled_lost",
+  "settlement_failed",
+  "identity_mismatch",
+  "resume_state_missing",
+  "backend_unsupported",
+  "provider_running",
+  "provider_unknown",
+  "provider_timeout",
+  "provider_error",
+  "defer_failed",
+] as const;
+
+export type RetainedProcessReconciliationOutcome =
+  (typeof RETAINED_PROCESS_RECONCILIATION_OUTCOMES)[number];
+
+export function recordRetainedProcessReconciliation(
+  observability: Observability,
+  outcome: RetainedProcessReconciliationOutcome,
+): void {
+  observability.incrementCounter({
+    name: "opengeni_retained_process_reconciliation_total",
+    help: "Bounded retained-process reconciliation observations by fixed app outcome.",
+    labels: { outcome },
+  });
+}
+
 export function recordCreditMicros(
   observability: Observability | undefined,
   kind: CreditMicrosKind,
@@ -553,7 +698,8 @@ export function recordModelInputTokens(
   provider: string,
   inputTokens: number,
 ): void {
-  if (!(inputTokens > 0)) {
+  const normalizedInputTokens = modelUsageTokenCountOrNull(inputTokens);
+  if (normalizedInputTokens === null || normalizedInputTokens === 0) {
     return;
   }
   observability.observeHistogram({
@@ -561,7 +707,7 @@ export function recordModelInputTokens(
     help: "Observed input (context) tokens per model response, by provider.",
     buckets: MODEL_INPUT_TOKENS_BUCKETS,
     labels: { provider },
-    value: inputTokens,
+    value: normalizedInputTokens,
   });
 }
 
@@ -598,29 +744,56 @@ const MODEL_CACHE_HIT_RATIO_BUCKETS = [
  *   - `opengeni_model_cached_tokens_total{provider}` — cumulative prompt tokens the
  *     provider served from cache. Advanced only when >0, so a provider that never
  *     reports cached tokens contributes nothing rather than phantom zero-increments.
+ *   - `opengeni_model_cache_write_tokens_total{provider}` — cumulative tokens a
+ *     reporting provider wrote into its prompt cache. Absent telemetry contributes
+ *     nothing; in particular, Codex subscription usage does not currently expose it.
  *   - `opengeni_model_cache_hit_ratio{provider}` — cached/prompt for the call,
- *     observed whenever prompt tokens are known (>0). A call whose provider does NOT
- *     report cached_tokens records a real 0 here — "we saw a call and the cache did
- *     nothing" is exactly the signal the alert watches, so it must not be swallowed.
- * Absent/zero/non-finite `cachedTokens` (providers that don't report it) is safe: no
- * counter increment, ratio 0. A call with no prompt tokens has no ratio (skipped).
+ *     observed only when prompt tokens are known (>0) AND cached tokens are reported.
+ *     A reported cached-token zero records a real 0%; absent/null telemetry remains
+ *     unknown and must not fabricate a low-cache signal.
+ *   - `opengeni_model_cache_read_telemetry_total{provider,status}` — one bounded
+ *     availability observation per authoritative call (`reported` or `missing`).
+ * Invalid, fractional, unsafe, or over-contract token telemetry is rejected. A call
+ * with no prompt tokens has no ratio (skipped).
  */
 export function recordModelCacheTokens(
   observability: Observability,
   provider: string,
-  input: { cachedTokens: number | null | undefined; promptTokens: number | null | undefined },
+  input: {
+    cachedTokens: number | null | undefined;
+    cacheWriteTokens?: number | null | undefined;
+    promptTokens: number | null | undefined;
+  },
 ): void {
-  const cached = nonNegativeTokenCount(input.cachedTokens);
-  const prompt = nonNegativeTokenCount(input.promptTokens);
-  if (cached > 0) {
-    observability.incrementCounter({
+  const cached = modelUsageTokenCountOrNull(input.cachedTokens);
+  const cacheWrite = modelUsageTokenCountOrNull(input.cacheWriteTokens);
+  const prompt = modelUsageTokenCountOrNull(input.promptTokens);
+  incrementBoundedModelCacheCounter(observability, {
+    name: "opengeni_model_cache_read_telemetry_total",
+    help: "Authoritative model calls with reported or missing cache-read telemetry, by provider.",
+    provider,
+    labels: { provider, status: cached === null ? "missing" : "reported" },
+    amount: 1,
+  });
+  if (cached !== null && cached > 0) {
+    incrementBoundedModelCacheCounter(observability, {
       name: "opengeni_model_cached_tokens_total",
       help: "Total prompt tokens served from the provider's prompt cache, by provider.",
+      provider,
       labels: { provider },
       amount: cached,
     });
   }
-  if (prompt > 0) {
+  if (cacheWrite !== null && cacheWrite > 0) {
+    incrementBoundedModelCacheCounter(observability, {
+      name: "opengeni_model_cache_write_tokens_total",
+      help: "Total prompt tokens written to the provider's prompt cache, by provider.",
+      provider,
+      labels: { provider },
+      amount: cacheWrite,
+    });
+  }
+  if (cached !== null && prompt !== null && prompt > 0) {
     observability.observeHistogram({
       name: "opengeni_model_cache_hit_ratio",
       help: "Per-call prompt-cache hit ratio (cached/prompt tokens) by provider.",
@@ -633,8 +806,40 @@ export function recordModelCacheTokens(
   }
 }
 
-function nonNegativeTokenCount(value: number | null | undefined): number {
-  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+function incrementBoundedModelCacheCounter(
+  observability: Observability,
+  input: {
+    name: string;
+    help: string;
+    provider: string;
+    labels: Record<string, string>;
+    amount: number;
+  },
+): void {
+  const totals = modelCacheCounterTotals.get(observability) ?? new Map<string, number>();
+  if (!modelCacheCounterTotals.has(observability)) {
+    modelCacheCounterTotals.set(observability, totals);
+  }
+  const labelKey = Object.entries(input.labels)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `${key}=${value}`)
+    .join(",");
+  const key = `${input.name}:${labelKey}`;
+  const current = totals.get(key) ?? 0;
+  if (input.amount > MAX_MODEL_CACHE_COUNTER_TOTAL - current) {
+    observability.warn("model cache metric cumulative limit reached", {
+      provider: input.provider,
+      metric: input.name,
+    });
+    return;
+  }
+  observability.incrementCounter({
+    name: input.name,
+    help: input.help,
+    labels: input.labels,
+    amount: input.amount,
+  });
+  totals.set(key, current + input.amount);
 }
 
 /**

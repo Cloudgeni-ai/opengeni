@@ -1,8 +1,8 @@
 # Conversation context compaction
 
 OpenGeni has one compaction mechanism: durable, portable plaintext compaction
-that follows the local compaction path in Codex CLI 0.144.6 (upstream tag
-`rust-v0.144.6`, commit `5d1fbf26c43abc65a203928b2e31561cb039e06d`). It is used for
+that follows the local compaction path in Codex CLI 0.146.0 (upstream tag
+`rust-v0.146.0`, commit `be449751a978f02e5bbba886999662956c7f38f5`). It is used for
 OpenAI, Azure, Codex subscriptions, and registry providers. There is no
 provider-side mode, off switch, compatibility ladder, request-local history
 trim, or deterministic non-model fallback.
@@ -38,7 +38,7 @@ If a model has no explicit automatic limit, OpenGeni uses
 0.9 and is clamped to 0.3–0.9. An explicit limit is capped at 90% of the raw
 window, matching Codex core.
 
-The Codex subscription catalog verified with Codex CLI 0.144.6 on 2026-07-18
+The Codex subscription catalog verified with Codex CLI 0.146.0 on 2026-07-29
 has:
 
 | quantity | tokens |
@@ -57,6 +57,10 @@ consumption lags the SDK's background model loop, the guard uses the complete
 request estimate instead of binding delayed usage to a newer request. A durable prior-turn input count is only a
 conservative floor; it can never hide a larger active-history estimate. Attempt
 fencing prevents a stale worker from overwriting durable token state.
+MCP schemas marked `defer_loading:true` are excluded from that estimate because
+the provider excludes them from context until a bounded `tool_search_output`
+discloses a match. The disclosed definition is then ordinary structured history
+and is counted there.
 
 ## Model-facing tool output
 
@@ -118,9 +122,10 @@ The replacement history is:
 2. one user-role summary item prefixed with Codex's `summary_prefix.md` text and
    marked `opengeni_context_summary: true`.
 
-Prior summaries, platform-authored ephemeral context, and images are not kept
-as user boundaries. Assistant messages, reasoning, tool calls, and tool results
-leave the active model history but remain in inactive audit rows.
+Prior summaries and images are not kept as user boundaries. Durable machine
+inputs participate in the history being summarized like every other canonical
+model item. Assistant messages, reasoning, tool calls, and tool results leave
+the active model history but remain in inactive audit rows.
 
 The generated replacement must estimate strictly smaller than the active input.
 Its deterministic fingerprint must also differ from the latest durable
@@ -160,15 +165,15 @@ When a terminal failure belongs to an explicit `/compact`, one attempt-fenced
 database settlement records
 `session.context.compaction.skipped(reason="summarization_failed")`, clears that
 one request, records `turn.failed`, and returns the session to idle. For a
-failure during same-turn recovery, the exact turn is settled once, ordinary
-internal updates are deferred, and any delivered goal-continuation receipt is
-terminalized. A worker crash therefore cannot clear the request without the
-matching terminal truth, and an idle maintenance execution cannot immediately
-recreate itself forever. With no newer actionable work wake, the workflow ends
-instead of retrying against unchanged history. Ordinary machine updates remain
-pending; a later human/API prompt, Steer, or explicitly requested Compact can
-create newer truth and make one new attempt. The active history stays unchanged
-throughout.
+failure during same-turn recovery, the exact turn is settled once. Machine
+inputs already visible to the model remain delivered in active history and are
+never requeued; only genuinely new updates remain pending. A worker crash
+therefore cannot clear the request without matching terminal truth, and an idle
+maintenance execution cannot immediately recreate itself forever. With no
+newer actionable work wake, the workflow ends instead of retrying against
+unchanged history. A later human/API prompt, Steer, explicitly requested
+Compact, or genuinely new machine input can create newer truth and make one new
+attempt. The active history stays unchanged throughout.
 
 Codex-subscription responses are streaming on the wire even for this
 non-streaming summarizer. Terminal `response.failed`, `response.error`, `error`,

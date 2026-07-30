@@ -1,8 +1,11 @@
 import { defineConfig } from "tsup";
+import { emitDeclarationsOnSuccess } from "../../scripts/tsup-declarations";
 
-// @opengeni/runtime has two public entry points:
-//   .          -> the full agent loop
-//   ./sandbox  -> the API-safe sandbox leaf
+// @opengeni/runtime has four public entry points:
+//   .             -> the full agent loop
+//   ./sandbox     -> the API-safe sandbox leaf
+//   ./skill-library -> immutable bundled skill metadata
+//   ./mcp-network -> the credential-bearing MCP network leaf
 //
 // The runtime ships `src/` as well as `dist/` because the bundled skill library
 // is data, not compiled JS; index.ts resolves it from src when running from dist.
@@ -10,11 +13,24 @@ export default defineConfig({
   entry: {
     index: "src/index.ts",
     "sandbox/index": "src/sandbox/index.ts",
+    "skill-library": "src/skill-library.ts",
+    "mcp-network": "src/mcp-network.ts",
   },
   format: ["esm"],
   target: "es2022",
-  dts: true,
+  dts: false,
+  onSuccess: emitDeclarationsOnSuccess,
   sourcemap: true,
   clean: true,
-  external: [/^@opengeni\//],
+  external: [
+    /^@opengeni\//,
+    /^@modelcontextprotocol\/sdk(?:$|\/)/,
+    /^debug$/,
+    /^openai(?:$|\/)/,
+    /^ws$/,
+  ],
+  // The OpenAI Agents packages require Zod 4 as a peer. Bundle that complete
+  // implementation boundary so an embedding host can use another Zod major
+  // without changing Agents' runtime schema identity underneath it.
+  noExternal: [/^@openai\/agents(?:$|\/|-)/, /^zod(?:$|\/)/],
 });

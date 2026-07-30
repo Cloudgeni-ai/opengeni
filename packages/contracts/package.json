@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/contracts",
-  "version": "0.11.0",
+  "version": "0.23.1",
   "description": "Shared zod schemas and wire-contract types for the OpenGeni API.",
   "license": "Apache-2.0",
   "repository": {
@@ -28,16 +28,17 @@
     "provenance": true
   },
   "scripts": {
-    "typecheck": "tsgo --noEmit",
+    "typecheck": "tsc --noEmit",
     "build": "tsup",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {
+    "@noble/hashes": "^1.8.0",
     "zod": "^4.2.1"
   },
   "devDependencies": {
     "tsup": "^8.5.0",
-    "typescript": "^6.0.3"
+    "typescript": "7.0.2"
   },
   "engines": {
     "node": ">=18"

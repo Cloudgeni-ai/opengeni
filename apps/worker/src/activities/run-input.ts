@@ -1,7 +1,9 @@
-import type { FileAsset, ResourceRef, SessionSystemUpdate } from "@opengeni/contracts";
+import type { FileAsset, ResourceRef } from "@opengeni/contracts";
+import { createHash } from "node:crypto";
 import {
   getActiveSessionHistoryItems,
   getLatestRunState,
+  getHumanInputResumeForEvent,
   getSandboxSessionEnvelope,
   getSessionEvent,
   listSessionSystemUpdatesForTurn,
@@ -144,7 +146,155 @@ export type TurnInputOptions = {
   turnId: string;
   recovering?: boolean;
   unavailableSandboxFilesNote?: string;
+  runCredentialsNote?: string;
+  readFileBytesForModel?: (file: FileAsset) => Promise<Uint8Array>;
 };
+
+export const MAX_INLINE_MODEL_ATTACHMENT_BYTES = 20 * 1024 * 1024;
+
+export type ModelAttachmentContent = {
+  kind: "image" | "file";
+  fileId: string;
+  filename: string;
+  contentType: string;
+  dataUrl: string;
+};
+
+const MODEL_IMAGE_CONTENT_TYPES = new Set(["image/gif", "image/jpeg", "image/png", "image/webp"]);
+
+const MODEL_FILE_CONTENT_TYPES = new Set([
+  "application/json",
+  "application/pdf",
+  "application/x-yaml",
+  "application/yaml",
+]);
+
+// Generic XML has equivalent application/* and text/* registrations. Keep both
+// aliases on the sandbox-path fallback until a provider parser boundary is
+// explicitly supported and verified; MIME spelling must not bypass the fence.
+const BLOCKED_TEXT_CONTENT_TYPES = new Set([
+  "text/css",
+  "text/html",
+  "text/javascript",
+  "text/xml",
+]);
+
+function safeErrorType(error: unknown): string {
+  if (!(error instanceof Error)) return typeof error;
+  const name = error.name.trim();
+  return /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(name) ? name : "Error";
+}
+
+function modelAttachmentDescriptor(
+  contentType: string,
+): Pick<ModelAttachmentContent, "kind" | "contentType"> | null {
+  const normalized = contentType.toLowerCase().split(";", 1)[0]?.trim() ?? "";
+  if (MODEL_IMAGE_CONTENT_TYPES.has(normalized)) {
+    return { kind: "image", contentType: normalized };
+  }
+  if (
+    MODEL_FILE_CONTENT_TYPES.has(normalized) ||
+    (normalized.startsWith("text/") && !BLOCKED_TEXT_CONTENT_TYPES.has(normalized))
+  ) {
+    return { kind: "file", contentType: normalized };
+  }
+  return null;
+}
+
+export async function modelAttachmentContentForFiles(
+  files: FileAsset[],
+  readFileBytes: (file: FileAsset) => Promise<Uint8Array>,
+): Promise<ModelAttachmentContent[]> {
+  const attachments: ModelAttachmentContent[] = [];
+  let remainingBytes = MAX_INLINE_MODEL_ATTACHMENT_BYTES;
+  for (const file of files) {
+    const descriptor = modelAttachmentDescriptor(file.contentType);
+    const checksum = file.sha256?.trim().toLowerCase() ?? "";
+    if (
+      file.status !== "ready" ||
+      !descriptor ||
+      file.sizeBytes > remainingBytes ||
+      !/^[a-f0-9]{64}$/.test(checksum)
+    ) {
+      continue;
+    }
+    try {
+      const bytes = await readFileBytes(file);
+      if (bytes.byteLength !== file.sizeBytes || bytes.byteLength > remainingBytes) {
+        console.error("model attachment bytes did not match finalized metadata", {
+          fileId: file.id,
+          expectedSizeBytes: file.sizeBytes,
+          actualSizeBytes: bytes.byteLength,
+        });
+        continue;
+      }
+      if (createHash("sha256").update(bytes).digest("hex") !== checksum) {
+        console.error("model attachment checksum did not match finalized metadata", {
+          fileId: file.id,
+        });
+        continue;
+      }
+      attachments.push({
+        kind: descriptor.kind,
+        fileId: file.id,
+        filename: file.safeFilename,
+        contentType: descriptor.contentType,
+        dataUrl: `data:${descriptor.contentType};base64,${Buffer.from(bytes).toString("base64")}`,
+      });
+      remainingBytes -= bytes.byteLength;
+    } catch (error) {
+      // The sandbox-path projection remains available for every file. A direct
+      // provider-content read is an additive fast path and must not turn a
+      // transient storage read into loss of the accepted prompt.
+      console.error("model attachment content read failed; retaining sandbox path fallback", {
+        fileId: file.id,
+        errorType: safeErrorType(error),
+      });
+    }
+  }
+  return attachments;
+}
+
+/**
+ * Enrich the current turn's durable user boundary for this model attempt only.
+ * The item count stays unchanged, so the turn reconciler still treats the
+ * enriched row as the already-persisted prefix and never writes inline bytes to
+ * session_history_items. Recovery rebuilds the same projection from the trigger.
+ */
+export function withCurrentUserAttachmentContent(
+  historyItems: Array<Record<string, unknown>>,
+  attachments: ModelAttachmentContent[],
+): Array<Record<string, unknown>> {
+  if (attachments.length === 0) return historyItems;
+  let currentUserIndex = -1;
+  for (let index = historyItems.length - 1; index >= 0; index -= 1) {
+    const item = historyItems[index];
+    if (item?.type === "message" && item.role === "user") {
+      currentUserIndex = index;
+      break;
+    }
+  }
+  if (currentUserIndex < 0) return historyItems;
+  const currentUser = historyItems[currentUserIndex]!;
+  const existingContent = Array.isArray(currentUser.content)
+    ? [...currentUser.content]
+    : [{ type: "input_text", text: String(currentUser.content ?? "") }];
+  const attachmentContent = attachments.map((attachment) =>
+    attachment.kind === "image"
+      ? { type: "input_image", image: attachment.dataUrl }
+      : {
+          type: "input_file",
+          file: attachment.dataUrl,
+          filename: attachment.filename,
+        },
+  );
+  const projected = [...historyItems];
+  projected[currentUserIndex] = {
+    ...currentUser,
+    content: [...existingContent, ...attachmentContent],
+  };
+  return projected;
+}
 
 export async function turnInput(
   db: Database,
@@ -163,7 +313,14 @@ export async function turnInput(
     trigger.sessionId,
     options.turnId,
   );
-  const updateContext = systemUpdateContext(updates);
+  if (updates.length > 0) {
+    const historyItemIds = new Set(
+      updates.map((update) => update.deliveredHistoryItemId).filter(Boolean),
+    );
+    if (historyItemIds.size !== 1 || updates.some((update) => !update.deliveredHistoryItemId)) {
+      throw new Error("Delivered internal updates have no single durable model-memory batch");
+    }
+  }
   const internalContext = joinInternalContext(
     options.recovering
       ? [
@@ -171,19 +328,27 @@ export async function turnInput(
           "Continue the same inference from durable conversation and sandbox state. A previous execution stopped before it could finish. Do not repeat completed side effects; inspect actual state when uncertain.",
         ].join("\n")
       : undefined,
-    updateContext,
     options.unavailableSandboxFilesNote,
+    options.runCredentialsNote,
   );
   if (trigger.type === "user.message") {
     const payload = trigger.payload as { text?: unknown; resources?: unknown };
     if (typeof payload.text !== "string" || payload.text.trim().length === 0) {
       throw new Error("user.message payload is missing text");
     }
-    const attachmentContext = await userMessageAttachmentsContext(
+    const resources = Array.isArray(payload.resources) ? (payload.resources as ResourceRef[]) : [];
+    const fileAttachments = await resolveUserMessageFileAttachments(
       db,
       trigger.workspaceId,
-      Array.isArray(payload.resources) ? (payload.resources as ResourceRef[]) : [],
+      resources,
     );
+    const attachmentContext = userMessageAttachmentsContext(fileAttachments);
+    const modelAttachments = options.readFileBytesForModel
+      ? await modelAttachmentContentForFiles(
+          fileAttachments.map((attachment) => attachment.file),
+          options.readFileBytesForModel,
+        )
+      : [];
     return await messageInput(
       db,
       runtime,
@@ -192,10 +357,13 @@ export async function turnInput(
       undefined,
       joinInternalContext(internalContext, attachmentContext),
       current,
+      modelAttachments,
     );
   }
   if (trigger.type === "system.update.delivered") {
-    if (!internalContext) throw new Error("Internal update inference has no delivered updates");
+    if (updates.length === 0) {
+      throw new Error("Internal update inference has no delivered updates");
+    }
     return await messageInput(db, runtime, agent, trigger, undefined, internalContext, current);
   }
   if (trigger.type === "user.approvalDecision") {
@@ -228,6 +396,26 @@ export async function turnInput(
       modelHistoryFromItems: false,
     };
   }
+  if (trigger.type === "user.humanInputResponse") {
+    const [state, resume] = await Promise.all([
+      getLatestRunState(db, trigger.workspaceId, trigger.sessionId),
+      getHumanInputResumeForEvent(db, trigger.workspaceId, trigger.sessionId, trigger),
+    ]);
+    if (!state) {
+      throw new Error("No saved run state is available for human-input response");
+    }
+    if (!resume) {
+      throw new Error("Human-input response does not resolve to a durable request");
+    }
+    return {
+      input: await runtime.prepareInput(agent, {
+        kind: "human_input",
+        serializedRunState: resumeRunStateForCodexAccount(state, current),
+        toolCallId: resume.toolCallId,
+      }),
+      modelHistoryFromItems: false,
+    };
+  }
   throw new Error(`Unsupported trigger event type: ${trigger.type}`);
 }
 
@@ -236,26 +424,7 @@ function joinInternalContext(...parts: Array<string | undefined>): string | unde
   return content.length > 0 ? content.join("\n\n") : undefined;
 }
 
-function systemUpdateContext(updates: SessionSystemUpdate[]): string | undefined {
-  if (updates.length === 0) return undefined;
-  return [
-    "[OpenGeni internal updates]",
-    "These platform updates were delivered together for this inference. They are not human prompts.",
-    JSON.stringify({
-      updates: updates.map((update) => ({
-        id: update.id,
-        kind: update.kind,
-        classification: update.classification,
-        sourceId: update.sourceId,
-        summary: update.summary,
-        payload: update.payload,
-        lineage: update.lineage,
-      })),
-    }),
-  ].join("\n");
-}
-
-/** Build one inference from canonical history plus optional ephemeral system context. */
+/** Build one inference from canonical history plus attempt-local operational context. */
 async function messageInput(
   db: Database,
   runtime: OpenGeniRuntime,
@@ -264,10 +433,14 @@ async function messageInput(
   text: string | undefined,
   internalContext: string | undefined,
   current: TurnCodexAccount = NON_CODEX_TURN,
+  modelAttachments: ModelAttachmentContent[] = [],
 ): Promise<PreparedTurnInput> {
   const stored = await getActiveSessionHistoryItems(db, trigger.workspaceId, trigger.sessionId);
   const envelope = await getSandboxSessionEnvelope(db, trigger.workspaceId, trigger.sessionId);
-  const historyItems = applyCodexHistoryStrip(stored, current);
+  const historyItems = withCurrentUserAttachmentContent(
+    applyCodexHistoryStrip(stored, current),
+    modelAttachments,
+  );
   return {
     input: await runtime.prepareInput(agent, {
       kind: "message",
@@ -286,25 +459,37 @@ export async function userMessageTextWithAttachments(
   text: string,
   resources: ResourceRef[],
 ): Promise<string> {
-  const attachmentContext = await userMessageAttachmentsContext(db, workspaceId, resources);
+  const fileAttachments = await resolveUserMessageFileAttachments(db, workspaceId, resources);
+  const attachmentContext = userMessageAttachmentsContext(fileAttachments);
   return attachmentContext ? [text, "", attachmentContext].join("\n") : text;
 }
 
-async function userMessageAttachmentsContext(
+type UserMessageFileAttachment = {
+  resource: Extract<ResourceRef, { kind: "file" }>;
+  file: FileAsset;
+};
+
+async function resolveUserMessageFileAttachments(
   db: Database,
   workspaceId: string,
   resources: ResourceRef[],
-): Promise<string | undefined> {
-  const attachedFiles: string[] = [];
+): Promise<UserMessageFileAttachment[]> {
+  const attachments: UserMessageFileAttachment[] = [];
   for (const resource of resources) {
-    if (resource.kind !== "file") {
-      continue;
-    }
+    if (resource.kind !== "file") continue;
     const file = await requireFile(db, workspaceId, resource.fileId);
-    attachedFiles.push(
-      `- ${file.filename} (${file.contentType}, ${file.sizeBytes} bytes): ${sandboxFilePath(resource, file)}`,
-    );
+    attachments.push({ resource, file });
   }
+  return attachments;
+}
+
+function userMessageAttachmentsContext(
+  attachments: UserMessageFileAttachment[],
+): string | undefined {
+  const attachedFiles = attachments.map(
+    ({ resource, file }) =>
+      `- ${file.filename} (${file.contentType}, ${file.sizeBytes} bytes): ${sandboxFilePath(resource, file)}`,
+  );
   if (attachedFiles.length === 0) {
     return undefined;
   }

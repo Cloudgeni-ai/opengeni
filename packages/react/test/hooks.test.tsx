@@ -5,16 +5,26 @@
    needs them and restored afterwards.
    -------------------------------------------------------------------------- */
 import { describe, expect, test } from "bun:test";
+import { act as reactAct } from "react";
+import { startTransition, Suspense, useState } from "react";
+import { flushSync } from "react-dom";
+import { createRoot } from "react-dom/client";
 import type {
   ComposerDraft,
+  SendMessageInput,
   SessionEvent,
+  SessionControlResponse,
   SessionQueueMutationResponse,
   SessionQueueSnapshot,
+  SessionListResponse,
+  SessionMcpApprovalPolicy,
+  SessionMcpServerMetadata,
   SessionTurn,
   WorkspaceEnvironment,
 } from "@opengeni/sdk";
 import { registerDom, renderHook, flush } from "./render-hook";
 import { fakeClient, fakeGoal, fakeTurn, SESSION_ID, WORKSPACE_ID } from "./fake-client";
+import type { EmbeddedSessionMcpApprovalPolicyClientLike } from "../src/client";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import { useAvailableModels } from "../src/hooks/use-available-models";
 import { useBillingUsage } from "../src/hooks/use-billing-usage";
@@ -25,6 +35,7 @@ import { usePacks } from "../src/hooks/use-packs";
 import { useWorkspaceSessions } from "../src/hooks/use-workspace-sessions";
 import { useSessionControl } from "../src/hooks/use-session-control";
 import { useSessionLineage } from "../src/hooks/use-session-lineage";
+import { useSessionMcpApprovalPolicy } from "../src/hooks/use-session-mcp-approval-policy";
 import { useTurnQueue } from "../src/hooks/use-turn-queue";
 import { useWorkspaces } from "../src/hooks/use-workspaces";
 
@@ -48,6 +59,31 @@ function makeEvent(
 
 const noEvents: SessionEvent[] = [];
 
+function gatewayError(status = 502): OpenGeniApiError {
+  return new OpenGeniApiError(status, "", {
+    code: "upstream_unavailable",
+    retryable: true,
+    correlationId: `edge-${status}-safe`,
+    outcomeUnknown: true,
+    displayMessage: "OpenGeni is temporarily unavailable — retry.",
+  });
+}
+
+function paymentRequiredError(): OpenGeniApiError {
+  return new OpenGeniApiError(
+    402,
+    JSON.stringify({
+      error: {
+        status: 402,
+        code: "payment_required",
+        message: "insufficient OpenGeni credits",
+        retryable: false,
+      },
+    }),
+    { mutation: true },
+  );
+}
+
 function queueSnapshot(
   items: SessionTurn[],
   overrides: Partial<SessionQueueSnapshot> = {},
@@ -68,11 +104,39 @@ function queueSnapshot(
     },
     stoppingPreviousAttempt: false,
     items,
+    pendingInputs: [],
+    pendingInputAttachment: null,
     ...overrides,
   };
 }
 
 describe("useWorkspaceSessions", () => {
+  test("forwards pins-only mode without changing the historical visible-row projection", async () => {
+    const pinned = { id: "pin-only", pinned: true } as never;
+    let observedPinsOnly = false;
+    const client = fakeClient({
+      listSessionPage: async (_workspaceId, options) => {
+        observedPinsOnly = options?.pinsOnly === true;
+        return { pinned: [pinned], sessions: [], nextCursor: null };
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useWorkspaceSessions({
+          client,
+          workspaceId: WORKSPACE_ID,
+          pinsOnly: true,
+        }),
+      undefined,
+    );
+    await flush();
+
+    expect(observedPinsOnly).toBe(true);
+    expect(hook.result.current.sessions).toEqual([pinned]);
+    expect(hook.result.current.pinned).toEqual([pinned]);
+    await hook.unmount();
+  });
+
   test("keeps pinned rows in the historical sessions result while exposing the section", async () => {
     const pinned = { id: "pinned", pinned: true } as never;
     const ordinary = { id: "ordinary", pinned: false } as never;
@@ -99,6 +163,89 @@ describe("useWorkspaceSessions", () => {
     expect(hook.result.current.nextCursor).toBe("next-page");
     await hook.unmount();
   });
+
+  test("treats the query-key transition render as loading", async () => {
+    const initial = { id: "initial", pinned: false } as never;
+    const searched = { id: "searched", pinned: false } as never;
+    let resolveSearch: (() => void) | null = null;
+    const client = fakeClient({
+      listSessionPage: async (_workspaceId, options) => {
+        if (options?.search === "needle") {
+          return await new Promise<SessionListResponse>((resolve) => {
+            resolveSearch = () =>
+              resolve({
+                pinned: [],
+                sessions: [searched],
+                nextCursor: null,
+              } as SessionListResponse);
+          });
+        }
+        return { pinned: [], sessions: [initial], nextCursor: null };
+      },
+    });
+    const hook = await renderHook(
+      (search: string) => useWorkspaceSessions({ client, workspaceId: WORKSPACE_ID, search }),
+      "" as string,
+    );
+    await flush();
+    expect(hook.result.current.sessions.map((session) => session.id)).toEqual(["initial"]);
+
+    await hook.rerender("needle");
+    await flush();
+    expect(hook.result.current.loading).toBe(true);
+    expect(hook.result.current.sessions).toEqual([]);
+
+    await reactAct(async () => {
+      resolveSearch!();
+    });
+    await flush();
+    expect(hook.result.current.loading).toBe(false);
+    expect(hook.result.current.sessions.map((session) => session.id)).toEqual(["searched"]);
+    await hook.unmount();
+  });
+
+  test("keeps the last successful page visible when a poll fails", async () => {
+    const stable = { id: "stable", pinned: false } as never;
+    let calls = 0;
+    const client = fakeClient({
+      listSessionPage: async () => {
+        calls += 1;
+        if (calls > 1) throw new Error("poll unavailable");
+        return { pinned: [], sessions: [stable], nextCursor: null };
+      },
+    });
+    const hook = await renderHook(
+      () => useWorkspaceSessions({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+    expect(hook.result.current.loading).toBe(false);
+    await reactAct(async () => {
+      await hook.result.current.refresh();
+    });
+    await flush();
+    expect(hook.result.current.sessions.map((session) => session.id)).toEqual(["stable"]);
+    expect(hook.result.current.error?.message).toBe("poll unavailable");
+    expect(hook.result.current.loading).toBe(false);
+    await hook.unmount();
+  });
+
+  test("does not report a query transition as loading while disabled", async () => {
+    const client = fakeClient({
+      listSessionPage: async () => ({ pinned: [], sessions: [], nextCursor: null }),
+    });
+    const hook = await renderHook(
+      (search: string) =>
+        useWorkspaceSessions({ client, workspaceId: WORKSPACE_ID, search, enabled: false }),
+      "" as string,
+    );
+    await flush();
+    expect(hook.result.current.loading).toBe(false);
+
+    await hook.rerender("disabled-transition");
+    expect(hook.result.current.loading).toBe(false);
+    await hook.unmount();
+  });
 });
 
 describe("useTurnQueue", () => {
@@ -106,7 +253,12 @@ describe("useTurnQueue", () => {
     const turns = [fakeTurn({ id: "second", position: 2 }), fakeTurn({ id: "first", position: 1 })];
     const client = fakeClient({ getQueue: async () => queueSnapshot(turns) });
     const hook = await renderHook(
-      () => useTurnQueue(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: noEvents }),
+      () =>
+        useTurnQueue(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: noEvents,
+        }),
       undefined,
     );
     await flush();
@@ -129,7 +281,12 @@ describe("useTurnQueue", () => {
       },
     });
     const hook = await renderHook(
-      () => useTurnQueue(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: noEvents }),
+      () =>
+        useTurnQueue(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: noEvents,
+        }),
       undefined,
     );
     await flush();
@@ -190,10 +347,13 @@ describe("useTurnQueue", () => {
       streamEvents: (_ws, _session, options) => {
         streamedAfter.value = options?.after ?? null;
         return (async function* () {
+          await options?.beforeLive?.();
           while (true) {
             const event = await new Promise<SessionEvent | null>((resolve) => {
               push = resolve;
-              options?.signal?.addEventListener("abort", () => resolve(null), { once: true });
+              options?.signal?.addEventListener("abort", () => resolve(null), {
+                once: true,
+              });
             });
             if (!event) {
               return;
@@ -208,19 +368,151 @@ describe("useTurnQueue", () => {
       undefined,
     );
     await flush();
-    expect(listCalls).toBe(1);
+    // The authoritative queue is loaded once for first paint, then once more
+    // after the SSE connection opens. An update included in lastSequence but
+    // missed by the first GET therefore cannot leave providerless hooks stale.
+    expect(listCalls).toBe(2);
     expect(streamedAfter.value).toBe(41);
+    expect(hook.result.current.queue[0]?.id).toBe("turn-2");
     await flushing(async () => {
       push!(makeEvent(42, "turn.queued"));
     });
     await flush(250);
-    expect(listCalls).toBe(2);
+    expect(listCalls).toBe(3);
+    await hook.unmount();
+  });
+
+  test("a failed queue handoff rejects live, surfaces the error, then recovers", async () => {
+    let reads = 0;
+    let handoffRejections = 0;
+    let releaseRetry = (): void => undefined;
+    const retryGate = new Promise<void>((resolve) => {
+      releaseRetry = resolve;
+    });
+    const client = fakeClient({
+      getQueue: async () => {
+        reads += 1;
+        if (reads === 2) throw new TypeError("queue handoff unavailable");
+        return queueSnapshot([fakeTurn({ id: reads === 1 ? "stale" : "recovered" })]);
+      },
+      getSession: async () => ({ lastSequence: 41 }) as never,
+      streamEvents: (_workspaceId, _sessionId, options) =>
+        (async function* () {
+          try {
+            await options?.beforeLive?.();
+          } catch {
+            handoffRejections += 1;
+            await retryGate;
+            await options?.beforeLive?.();
+          }
+          const event = await new Promise<SessionEvent | null>((resolve) => {
+            options?.signal?.addEventListener("abort", () => resolve(null), {
+              once: true,
+            });
+          });
+          if (event) yield event;
+        })(),
+    });
+    const hook = await renderHook(
+      () => useTurnQueue(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+
+    expect(handoffRejections).toBe(1);
+    expect(hook.result.current.queue[0]?.id).toBe("stale");
+    expect(hook.result.current.error?.message).toContain("queue handoff unavailable");
+
+    releaseRetry();
+    await flush();
+    expect(reads).toBe(3);
+    expect(hook.result.current.queue[0]?.id).toBe("recovered");
+    expect(hook.result.current.error).toBeNull();
+    await hook.unmount();
+  });
+
+  test("the queue handoff commits before a superseding ordinary read can fail", async () => {
+    let reads = 0;
+    let resolveHandoffRead: ((snapshot: SessionQueueSnapshot) => void) | null = null;
+    let rejectSupersedingRead: ((cause: Error) => void) | null = null;
+    let markHandoffComplete: (() => void) | null = null;
+    const handoffRead = new Promise<SessionQueueSnapshot>((resolve) => {
+      resolveHandoffRead = resolve;
+    });
+    const supersedingRead = new Promise<SessionQueueSnapshot>((_resolve, reject) => {
+      rejectSupersedingRead = reject;
+    });
+    const handoffComplete = new Promise<void>((resolve) => {
+      markHandoffComplete = resolve;
+    });
+    const client = fakeClient({
+      getQueue: async () => {
+        reads += 1;
+        if (reads === 1) return queueSnapshot([fakeTurn({ id: "stale" })], { version: 1 });
+        if (reads === 2) return await handoffRead;
+        return await supersedingRead;
+      },
+      getSession: async () => ({ lastSequence: 41 }) as never,
+      streamEvents: (_workspaceId, _sessionId, options) =>
+        (async function* () {
+          await options?.beforeLive?.();
+          markHandoffComplete?.();
+          const event = await new Promise<SessionEvent | null>((resolve) => {
+            options?.signal?.addEventListener("abort", () => resolve(null), {
+              once: true,
+            });
+          });
+          if (event) yield event;
+        })(),
+    });
+    const hook = await renderHook(
+      () => useTurnQueue(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+    expect(reads).toBe(2);
+    expect(hook.result.current.queue[0]?.id).toBe("stale");
+
+    let laterRefresh: Promise<void> | null = null;
+    await flushing(() => {
+      laterRefresh = hook.result.current.refresh();
+    });
+    expect(reads).toBe(3);
+
+    await flushing(async () => {
+      resolveHandoffRead?.(
+        queueSnapshot([fakeTurn({ id: "handoff" })], {
+          version: 2,
+          effectiveControl: {
+            ...queueSnapshot([]).effectiveControl,
+            controlVersion: 4,
+          },
+        }),
+      );
+      await handoffComplete;
+    });
+    expect(hook.result.current.queue[0]?.id).toBe("handoff");
+    expect(hook.result.current.snapshot?.version).toBe(2);
+
+    await flushing(async () => {
+      rejectSupersedingRead?.(new TypeError("later ordinary read failed"));
+      await laterRefresh;
+    });
+    expect(hook.result.current.error?.message).toContain("later ordinary read failed");
+    expect(hook.result.current.queue[0]?.id).toBe("handoff");
+    expect(hook.result.current.snapshot?.version).toBe(2);
     await hook.unmount();
   });
 
   test("move, Edit, Steer, and Delete bind the displayed versions and accept server order", async () => {
-    const first = fakeTurn({ id: "11111111-aaaa-4aaa-8aaa-111111111111", version: 2 });
-    const second = fakeTurn({ id: "22222222-bbbb-4bbb-8bbb-222222222222", version: 4 });
+    const first = fakeTurn({
+      id: "11111111-aaaa-4aaa-8aaa-111111111111",
+      version: 2,
+    });
+    const second = fakeTurn({
+      id: "22222222-bbbb-4bbb-8bbb-222222222222",
+      version: 4,
+    });
     let current = queueSnapshot([first, second], { version: 5 });
     const calls: Array<{ action: string; request: unknown }> = [];
     const response = (items: SessionTurn[], version: number, draft?: ComposerDraft) => ({
@@ -253,6 +545,7 @@ describe("useTurnQueue", () => {
           text: second.prompt,
           resources: [],
           tools: [],
+          toolsProvided: false,
           model: second.model,
           reasoningEffort: second.reasoningEffort,
           sourceTurnId: second.id,
@@ -273,7 +566,12 @@ describe("useTurnQueue", () => {
       },
     });
     const hook = await renderHook(
-      () => useTurnQueue(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: noEvents }),
+      () =>
+        useTurnQueue(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: noEvents,
+        }),
       undefined,
     );
     await flush();
@@ -292,9 +590,18 @@ describe("useTurnQueue", () => {
     await flushing(async () => expect(await hook.result.current.steerTurn(first.id)).toBe(true));
     await flushing(async () => expect(await hook.result.current.removeTurn(first.id)).toBe(true));
     expect(calls.map((call) => call.action)).toEqual(["move", "edit", "steer", "delete"]);
-    expect(calls[0]?.request).toMatchObject({ expectedQueueVersion: 5, beforeTurnId: null });
-    expect(calls[1]?.request).toMatchObject({ expectedTurnVersion: 4, expectedDraftRevision: 2 });
-    expect(calls[2]?.request).toMatchObject({ expectedTurnVersion: 2, controlEtag: "control-3" });
+    expect(calls[0]?.request).toMatchObject({
+      expectedQueueVersion: 5,
+      beforeTurnId: null,
+    });
+    expect(calls[1]?.request).toMatchObject({
+      expectedTurnVersion: 4,
+      expectedDraftRevision: 2,
+    });
+    expect(calls[2]?.request).toMatchObject({
+      expectedTurnVersion: 2,
+      controlEtag: "control-3",
+    });
     expect(calls[3]?.request).toMatchObject({ expectedTurnVersion: 2 });
     await hook.unmount();
   });
@@ -326,7 +633,12 @@ describe("useTurnQueue", () => {
       }),
     });
     const hook = await renderHook(
-      () => useTurnQueue(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: noEvents }),
+      () =>
+        useTurnQueue(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: noEvents,
+        }),
       undefined,
     );
     await flush();
@@ -365,7 +677,12 @@ describe("useTurnQueue", () => {
         }),
     });
     const hook = await renderHook(
-      () => useTurnQueue(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: noEvents }),
+      () =>
+        useTurnQueue(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: noEvents,
+        }),
       undefined,
     );
     await flush();
@@ -399,6 +716,77 @@ describe("useTurnQueue", () => {
     expect(hook.result.current.queue.map((turn) => turn.id)).toEqual([queued.id]);
     await hook.unmount();
   });
+
+  test("a session switch hides the old queue and drops its delayed mutation settlement", async () => {
+    const sessionA: string = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const sessionB: string = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const turnA = fakeTurn({
+      id: "aaaaaaaa-0000-4000-8000-000000000001",
+      prompt: "A PRIVATE",
+    });
+    const turnB = fakeTurn({
+      id: "bbbbbbbb-0000-4000-8000-000000000001",
+      prompt: "B PRIVATE",
+    });
+    let resolveBRead!: (snapshot: SessionQueueSnapshot) => void;
+    let resolveAMutation!: (result: SessionQueueMutationResponse) => void;
+    const client = fakeClient({
+      getQueue: async (_workspaceId, sessionId) => {
+        if (sessionId === sessionA) return queueSnapshot([turnA]);
+        return await new Promise<SessionQueueSnapshot>((resolve) => {
+          resolveBRead = resolve;
+        });
+      },
+      deleteQueueItem: async () =>
+        await new Promise<SessionQueueMutationResponse>((resolve) => {
+          resolveAMutation = resolve;
+        }),
+    });
+    const hook = await renderHook(
+      (sessionId: string) =>
+        useTurnQueue(sessionId, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: noEvents,
+        }),
+      sessionA,
+    );
+    await flush();
+    expect(hook.result.current.queue.map((turn) => turn.prompt)).toEqual(["A PRIVATE"]);
+
+    let staleMutation!: Promise<boolean>;
+    await flushing(() => {
+      staleMutation = hook.result.current.removeTurn(turnA.id);
+    });
+    await hook.rerender(sessionB);
+    expect(hook.result.current.queue).toEqual([]);
+    expect(hook.result.current.loading).toBe(true);
+
+    await flushing(() => resolveBRead(queueSnapshot([turnB])));
+    expect(hook.result.current.queue.map((turn) => turn.prompt)).toEqual(["B PRIVATE"]);
+
+    await flushing(async () => {
+      resolveAMutation({
+        receipt: {
+          id: crypto.randomUUID(),
+          action: "queue.delete",
+          operationKey: "stale-a-delete",
+          targetSessionId: sessionA,
+          targetTurnId: turnA.id,
+          appliedControlRevision: null,
+          appliedQueueVersion: 2,
+          appliedTurnVersion: 2,
+          appliedDraftRevision: null,
+          createdAt: new Date().toISOString(),
+        },
+        snapshot: queueSnapshot([], { version: 2 }),
+      });
+      expect(await staleMutation).toBe(false);
+    });
+    expect(hook.result.current.queue.map((turn) => turn.prompt)).toEqual(["B PRIVATE"]);
+    expect(hook.result.current.mutationError).toBeNull();
+    await hook.unmount();
+  });
 });
 
 describe("useSessionLineage", () => {
@@ -416,7 +804,11 @@ describe("useSessionLineage", () => {
     });
     const hook = await renderHook(
       (events: SessionEvent[]) =>
-        useSessionLineage(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+        useSessionLineage(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events,
+        }),
       [] as SessionEvent[],
     );
     await flush();
@@ -448,7 +840,11 @@ describe("useSessionLineage", () => {
     });
     const hook = await renderHook(
       (events: SessionEvent[]) =>
-        useSessionLineage(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+        useSessionLineage(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events,
+        }),
       [] as SessionEvent[],
     );
     await flush();
@@ -507,7 +903,12 @@ describe("useGoal", () => {
       },
     });
     const hook = await renderHook(
-      () => useGoal(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: noEvents }),
+      () =>
+        useGoal(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: noEvents,
+        }),
       undefined,
     );
     await flush();
@@ -530,7 +931,12 @@ describe("useGoal", () => {
       },
     });
     const hook = await renderHook(
-      () => useGoal(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: noEvents }),
+      () =>
+        useGoal(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: noEvents,
+        }),
       undefined,
     );
     await flush();
@@ -558,7 +964,12 @@ describe("useGoal", () => {
       },
     });
     const hook = await renderHook(
-      () => useGoal(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: noEvents }),
+      () =>
+        useGoal(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: noEvents,
+        }),
       undefined,
     );
     await flush();
@@ -579,7 +990,12 @@ describe("useGoal", () => {
       },
     });
     const hook = await renderHook(
-      () => useGoal(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: noEvents }),
+      () =>
+        useGoal(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: noEvents,
+        }),
       undefined,
     );
     await flush();
@@ -619,6 +1035,45 @@ describe("useGoal", () => {
     await hook.unmount();
   });
 
+  test("turn, session, control, and system-update events refresh continuation truth", async () => {
+    let reads = 0;
+    const client = fakeClient({
+      getGoal: async () => {
+        reads += 1;
+        return fakeGoal({
+          continuation: {
+            state: "scheduled",
+            reason: "wake_pending",
+            wakeRevision: reads,
+            observedRevision: reads,
+            nextAttemptAt: null,
+            lastError: null,
+          },
+        });
+      },
+    });
+    const hook = await renderHook(
+      (events: SessionEvent[]) =>
+        useGoal(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+      [] as SessionEvent[],
+    );
+    await flush();
+    expect(reads).toBe(0);
+
+    await hook.rerender([
+      makeEvent(1, "agent.message.delta"),
+      makeEvent(2, "turn.started"),
+      makeEvent(3, "session.status.changed"),
+      makeEvent(4, "session.control.paused"),
+      makeEvent(5, "system.update.pending"),
+    ]);
+    await flush(250);
+
+    expect(reads).toBe(1);
+    expect(hook.result.current.goal?.continuation?.state).toBe("scheduled");
+    await hook.unmount();
+  });
+
   test("shared-feed goal refreshes are discarded after the session changes", async () => {
     const initialSessionId: string = SESSION_ID;
     const otherSessionId = "33333333-3333-4333-8333-333333333333";
@@ -634,7 +1089,11 @@ describe("useGoal", () => {
     });
     const hook = await renderHook(
       (sessionId: string) =>
-        useGoal(sessionId, { client, workspaceId: WORKSPACE_ID, events: noEvents }),
+        useGoal(sessionId, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: noEvents,
+        }),
       initialSessionId,
     );
     await flush();
@@ -648,6 +1107,365 @@ describe("useGoal", () => {
     });
 
     expect(hook.result.current.goal).toBeNull();
+    await hook.unmount();
+  });
+});
+
+describe("useSessionMcpApprovalPolicy", () => {
+  test("updates optimistically and reconciles the authoritative policy event", async () => {
+    let reads = 0;
+    let currentPolicy: SessionMcpApprovalPolicy = false;
+    const metadata = (): SessionMcpServerMetadata => ({
+      id: "external_tools",
+      name: "External tools",
+      url: "https://tools.example.test/mcp",
+      headerNames: [],
+      credentialVersion: 1,
+      requireApproval: currentPolicy,
+      connectionRef: null,
+    });
+    const client = {
+      ...fakeClient({
+        getSession: async () => {
+          reads += 1;
+          return {
+            id: SESSION_ID,
+            lastSequence: reads,
+            mcpServers: [metadata()],
+          } as never;
+        },
+      }),
+      updateSessionMcpApprovalPolicy: async (_workspaceId, _sessionId, serverId, request) => {
+        expect(serverId).toBe("external_tools");
+        currentPolicy = request.requireApproval;
+        return { server: metadata(), effectiveFrom: "next_attempt" };
+      },
+    } satisfies EmbeddedSessionMcpApprovalPolicyClientLike;
+    const hook = await renderHook(
+      (events: SessionEvent[]) =>
+        useSessionMcpApprovalPolicy(SESSION_ID, "external_tools", {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events,
+        }),
+      [] as SessionEvent[],
+    );
+    await flush();
+    expect(hook.result.current.policy).toBe(false);
+    expect(reads).toBe(1);
+
+    await flushing(async () => {
+      const response = await hook.result.current.update(["write_record"]);
+      expect(response?.effectiveFrom).toBe("next_attempt");
+    });
+    expect(hook.result.current.policy).toEqual(["write_record"]);
+
+    currentPolicy = ["write_record", "delete_record"];
+    await hook.rerender([
+      makeEvent(1, "session.mcp.approval_policy.updated", {
+        serverId: "another_server",
+        requireApproval: true,
+        effectiveFrom: "next_attempt",
+      }),
+    ]);
+    await flush(200);
+    expect(reads).toBe(2);
+    await hook.rerender([
+      makeEvent(1, "session.mcp.approval_policy.updated", {
+        serverId: "another_server",
+        requireApproval: true,
+        effectiveFrom: "next_attempt",
+      }),
+      makeEvent(2, "session.mcp.approval_policy.updated", {
+        serverId: "external_tools",
+        requireApproval: currentPolicy,
+        effectiveFrom: "next_attempt",
+      }),
+    ]);
+    await flush(250);
+    expect(reads).toBe(3);
+    expect(hook.result.current.policy).toEqual(["write_record", "delete_record"]);
+    await hook.unmount();
+  });
+
+  test("a delayed pre-mutation read cannot clear the newer policy response", async () => {
+    const metadata = (requireApproval: SessionMcpApprovalPolicy): SessionMcpServerMetadata => ({
+      id: "external_tools",
+      name: "External tools",
+      url: "https://tools.example.test/mcp",
+      headerNames: [],
+      credentialVersion: 1,
+      requireApproval,
+      connectionRef: null,
+    });
+    let reads = 0;
+    let resolveInitialRead:
+      | ((session: {
+          id: string;
+          lastSequence: number;
+          mcpServers: SessionMcpServerMetadata[];
+        }) => void)
+      | null = null;
+    let resolveReconcileRead:
+      | ((session: {
+          id: string;
+          lastSequence: number;
+          mcpServers: SessionMcpServerMetadata[];
+        }) => void)
+      | null = null;
+    const initialRead = new Promise<{
+      id: string;
+      lastSequence: number;
+      mcpServers: SessionMcpServerMetadata[];
+    }>((resolve) => {
+      resolveInitialRead = resolve;
+    });
+    const reconcileRead = new Promise<{
+      id: string;
+      lastSequence: number;
+      mcpServers: SessionMcpServerMetadata[];
+    }>((resolve) => {
+      resolveReconcileRead = resolve;
+    });
+    const client = {
+      ...fakeClient({
+        getSession: async () => {
+          reads += 1;
+          return (await (reads === 1 ? initialRead : reconcileRead)) as never;
+        },
+      }),
+      updateSessionMcpApprovalPolicy: async () => ({
+        server: metadata(["write_record"]),
+        effectiveFrom: "next_attempt" as const,
+      }),
+    } satisfies EmbeddedSessionMcpApprovalPolicyClientLike;
+    const hook = await renderHook(
+      () =>
+        useSessionMcpApprovalPolicy(SESSION_ID, "external_tools", {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: noEvents,
+        }),
+      undefined,
+    );
+    await flush();
+    expect(reads).toBe(1);
+
+    await flushing(async () => {
+      await hook.result.current.update(["write_record"]);
+    });
+    expect(reads).toBe(2);
+    expect(hook.result.current.policy).toEqual(["write_record"]);
+
+    await flushing(() => {
+      resolveInitialRead?.({
+        id: SESSION_ID,
+        lastSequence: 1,
+        mcpServers: [metadata(false)],
+      });
+    });
+    expect(hook.result.current.policy).toEqual(["write_record"]);
+
+    await flushing(() => {
+      resolveReconcileRead?.({
+        id: SESSION_ID,
+        lastSequence: 2,
+        mcpServers: [metadata(["write_record"])],
+      });
+    });
+    expect(hook.result.current.policy).toEqual(["write_record"]);
+    await hook.unmount();
+  });
+
+  test("providerless stream handoff reconciles policy state before going live", async () => {
+    let reads = 0;
+    let currentPolicy: SessionMcpApprovalPolicy = false;
+    const metadata = (): SessionMcpServerMetadata => ({
+      id: "external_tools",
+      name: "External tools",
+      url: "https://tools.example.test/mcp",
+      headerNames: [],
+      credentialVersion: 1,
+      requireApproval: currentPolicy,
+      connectionRef: null,
+    });
+    const client = {
+      ...fakeClient({
+        getSession: async () => {
+          reads += 1;
+          return {
+            id: SESSION_ID,
+            lastSequence: 41,
+            mcpServers: [metadata()],
+          } as never;
+        },
+        streamEvents: (_workspaceId, _sessionId, options) =>
+          (async function* () {
+            currentPolicy = ["write_record"];
+            await options?.beforeLive?.();
+            const event = await new Promise<SessionEvent | null>((resolve) => {
+              options?.signal?.addEventListener("abort", () => resolve(null), {
+                once: true,
+              });
+            });
+            if (event) yield event;
+          })(),
+      }),
+      updateSessionMcpApprovalPolicy: async () => ({
+        server: metadata(),
+        effectiveFrom: "next_attempt" as const,
+      }),
+    } satisfies EmbeddedSessionMcpApprovalPolicyClientLike;
+    const hook = await renderHook(
+      () =>
+        useSessionMcpApprovalPolicy(SESSION_ID, "external_tools", {
+          client,
+          workspaceId: WORKSPACE_ID,
+        }),
+      undefined,
+    );
+    await flush();
+
+    expect(reads).toBe(3);
+    expect(hook.result.current.policy).toEqual(["write_record"]);
+    await hook.unmount();
+  });
+
+  test("a target switch drops settlement from the previous policy mutation", async () => {
+    const initialSessionId: string = SESSION_ID;
+    const otherSessionId = "33333333-3333-4333-8333-333333333333";
+    const metadata = (requireApproval: SessionMcpApprovalPolicy): SessionMcpServerMetadata => ({
+      id: "external_tools",
+      name: "External tools",
+      url: "https://tools.example.test/mcp",
+      headerNames: [],
+      credentialVersion: 1,
+      requireApproval,
+      connectionRef: null,
+    });
+    let resolveMutation:
+      | ((response: { server: SessionMcpServerMetadata; effectiveFrom: "next_attempt" }) => void)
+      | null = null;
+    const mutation = new Promise<{
+      server: SessionMcpServerMetadata;
+      effectiveFrom: "next_attempt";
+    }>((resolve) => {
+      resolveMutation = resolve;
+    });
+    const client = {
+      ...fakeClient({
+        getSession: async (_workspaceId, sessionId) =>
+          ({
+            id: sessionId,
+            lastSequence: 1,
+            mcpServers: [metadata(sessionId !== SESSION_ID)],
+          }) as never,
+      }),
+      updateSessionMcpApprovalPolicy: async () => await mutation,
+    } satisfies EmbeddedSessionMcpApprovalPolicyClientLike;
+    const hook = await renderHook(
+      (sessionId: string) =>
+        useSessionMcpApprovalPolicy(sessionId, "external_tools", {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: noEvents,
+        }),
+      initialSessionId,
+    );
+    await flush();
+    expect(hook.result.current.policy).toBe(false);
+
+    let pending: ReturnType<typeof hook.result.current.update> | null = null;
+    await flushing(() => {
+      pending = hook.result.current.update(["obsolete_write"]);
+    });
+    await hook.rerender(otherSessionId);
+    await flush();
+    expect(hook.result.current.policy).toBe(true);
+
+    await flushing(() => {
+      resolveMutation?.({
+        server: metadata(["obsolete_write"]),
+        effectiveFrom: "next_attempt",
+      });
+    });
+    expect(await pending).toBeNull();
+    expect(hook.result.current.policy).toBe(true);
+    await hook.unmount();
+  });
+
+  test("a client switch drops settlement from the previous policy mutation", async () => {
+    const metadata = (requireApproval: SessionMcpApprovalPolicy): SessionMcpServerMetadata => ({
+      id: "external_tools",
+      name: "External tools",
+      url: "https://tools.example.test/mcp",
+      headerNames: [],
+      credentialVersion: 1,
+      requireApproval,
+      connectionRef: null,
+    });
+    let resolveMutation:
+      | ((response: { server: SessionMcpServerMetadata; effectiveFrom: "next_attempt" }) => void)
+      | null = null;
+    const mutation = new Promise<{
+      server: SessionMcpServerMetadata;
+      effectiveFrom: "next_attempt";
+    }>((resolve) => {
+      resolveMutation = resolve;
+    });
+    const previousClient = {
+      ...fakeClient({
+        getSession: async () =>
+          ({
+            id: SESSION_ID,
+            lastSequence: 1,
+            mcpServers: [metadata(false)],
+          }) as never,
+      }),
+      updateSessionMcpApprovalPolicy: async () => await mutation,
+    } satisfies EmbeddedSessionMcpApprovalPolicyClientLike;
+    const nextClient = {
+      ...fakeClient({
+        getSession: async () =>
+          ({
+            id: SESSION_ID,
+            lastSequence: 2,
+            mcpServers: [metadata(true)],
+          }) as never,
+      }),
+      updateSessionMcpApprovalPolicy: async () => ({
+        server: metadata(true),
+        effectiveFrom: "next_attempt" as const,
+      }),
+    } satisfies EmbeddedSessionMcpApprovalPolicyClientLike;
+    const hook = await renderHook(
+      (client: EmbeddedSessionMcpApprovalPolicyClientLike) =>
+        useSessionMcpApprovalPolicy(SESSION_ID, "external_tools", {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: noEvents,
+        }),
+      previousClient,
+    );
+    await flush();
+    expect(hook.result.current.policy).toBe(false);
+
+    let pending: ReturnType<typeof hook.result.current.update> | null = null;
+    await flushing(() => {
+      pending = hook.result.current.update(["obsolete_write"]);
+    });
+    await hook.rerender(nextClient);
+    await flush();
+    expect(hook.result.current.policy).toBe(true);
+
+    await flushing(() => {
+      resolveMutation?.({
+        server: metadata(["obsolete_write"]),
+        effectiveFrom: "next_attempt",
+      });
+    });
+    expect(await pending).toBeNull();
+    expect(hook.result.current.policy).toBe(true);
     await hook.unmount();
   });
 });
@@ -703,9 +1521,129 @@ describe("useSessionControl", () => {
     expect(sent).toEqual([
       { kind: "pause", reason: "stop now" },
       { kind: "resume", reason: "continue" },
-      { kind: "decision", approvalId: "ap-1", decision: "approve", message: "looks safe" },
-      { kind: "decision", approvalId: "ap-2", decision: "reject" },
+      {
+        kind: "decision",
+        approvalId: "ap-1",
+        decision: "approve",
+        message: "looks safe",
+        clientEventId: expect.any(String),
+      },
+      {
+        kind: "decision",
+        approvalId: "ap-2",
+        decision: "reject",
+        clientEventId: expect.any(String),
+      },
     ]);
+    expect(hook.result.current.error).toBeNull();
+    await hook.unmount();
+  });
+
+  test("reuses an approval idempotency key after a lost response", async () => {
+    const clientEventIds: string[] = [];
+    let attempts = 0;
+    const client = fakeClient({
+      sendApprovalDecision: async (_ws, _session, decision) => {
+        clientEventIds.push(decision.clientEventId ?? "");
+        attempts += 1;
+        if (attempts === 1) throw new Error("response lost");
+        return makeEvent(3, "user.approvalDecision");
+      },
+    });
+    const hook = await renderHook(
+      () => useSessionControl(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+
+    await flushing(async () => {
+      expect(await hook.result.current.approve("ap-1", "looks safe")).toBeNull();
+      expect(await hook.result.current.approve("ap-1", "looks safe")).not.toBeNull();
+    });
+
+    expect(clientEventIds).toHaveLength(2);
+    expect(clientEventIds[0]).not.toBe("");
+    expect(clientEventIds[1]).toBe(clientEventIds[0]);
+    await hook.unmount();
+  });
+
+  test("a session switch drops stale control loading and error settlement", async () => {
+    const sessionA: string = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const sessionB: string = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    let rejectPause!: (cause: Error) => void;
+    const client = fakeClient({
+      pauseSession: async () =>
+        await new Promise((_resolve, reject) => {
+          rejectPause = reject;
+        }),
+    });
+    const hook = await renderHook(
+      (sessionId: string) => useSessionControl(sessionId, { client, workspaceId: WORKSPACE_ID }),
+      sessionA,
+    );
+
+    let stalePause!: Promise<unknown>;
+    await flushing(() => {
+      stalePause = hook.result.current.pause();
+    });
+    expect(hook.result.current.controlling).toBe(true);
+    await hook.rerender(sessionB);
+    expect(hook.result.current.controlling).toBe(false);
+    expect(hook.result.current.error).toBeNull();
+
+    await flushing(async () => {
+      rejectPause(new Error("A PRIVATE CONTROL ERROR"));
+      expect(await stalePause).toBeNull();
+    });
+    expect(hook.result.current.controlling).toBe(false);
+    expect(hook.result.current.error).toBeNull();
+    await hook.unmount();
+  });
+
+  test("a session switch returns null for a successful stale control settlement", async () => {
+    const sessionA: string = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const sessionB: string = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    let resolvePause!: (response: SessionControlResponse) => void;
+    const client = fakeClient({
+      pauseSession: async () =>
+        await new Promise<SessionControlResponse>((resolve) => {
+          resolvePause = resolve;
+        }),
+    });
+    const hook = await renderHook(
+      (sessionId: string) => useSessionControl(sessionId, { client, workspaceId: WORKSPACE_ID }),
+      sessionA,
+    );
+
+    let stalePause!: Promise<SessionControlResponse | null>;
+    await flushing(() => {
+      stalePause = hook.result.current.pause();
+    });
+    await hook.rerender(sessionB);
+    await flushing(async () => {
+      resolvePause({
+        receipt: {
+          id: crypto.randomUUID(),
+          action: "session.paused",
+          operationKey: crypto.randomUUID(),
+          targetSessionId: sessionA,
+          targetTurnId: null,
+          appliedControlRevision: 1,
+          appliedQueueVersion: null,
+          appliedTurnVersion: null,
+          appliedDraftRevision: null,
+          createdAt: new Date().toISOString(),
+        },
+        effectiveControl: {
+          ...queueSnapshot([]).effectiveControl,
+          state: "paused",
+          directState: "paused",
+        },
+        interruptionCount: 1,
+        wakeCount: 0,
+      });
+      expect(await stalePause).toBeNull();
+    });
+    expect(hook.result.current.controlling).toBe(false);
     expect(hook.result.current.error).toBeNull();
     await hook.unmount();
   });
@@ -760,12 +1698,76 @@ describe("useComposer queue-vs-steer", () => {
 });
 
 describe("useComposer durable draft and control binding", () => {
+  test("callback churn does not reload drafts outside target, explicit, or event triggers", async () => {
+    const sessionB: string = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const reads: string[] = [];
+    const applied: string[] = [];
+    const client = fakeClient({
+      getComposerDraft: async (_workspaceId, sessionId) => {
+        reads.push(sessionId);
+        return {
+          revision: reads.length,
+          text: `${sessionId}:read-${reads.length}`,
+          resources: [],
+          model: "model-x",
+          reasoningEffort: "medium",
+          sourceTurnId: null,
+          sourceTurnVersion: null,
+          updatedAt: new Date().toISOString(),
+        } satisfies ComposerDraft;
+      },
+    });
+    type Props = {
+      sessionId: string;
+      policyVersion: number;
+      events: SessionEvent[];
+    };
+    const hook = await renderHook(
+      (props: Props) =>
+        useComposer(props.sessionId, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: props.events,
+          onDraftApplied: (draft) => {
+            applied.push(`${props.policyVersion}:${draft.text}`);
+          },
+        }),
+      { sessionId: SESSION_ID, policyVersion: 0, events: noEvents },
+    );
+    await flush();
+    expect(reads).toEqual([SESSION_ID]);
+    expect(applied).toEqual([`0:${SESSION_ID}:read-1`]);
+
+    await hook.rerender({ sessionId: SESSION_ID, policyVersion: 1, events: noEvents });
+    await hook.rerender({ sessionId: SESSION_ID, policyVersion: 2, events: noEvents });
+    await flush();
+    expect(reads).toEqual([SESSION_ID]);
+
+    await flushing(async () => await hook.result.current.reloadDraft());
+    expect(reads).toEqual([SESSION_ID, SESSION_ID]);
+    expect(applied.at(-1)).toBe(`2:${SESSION_ID}:read-2`);
+
+    await hook.rerender({
+      sessionId: SESSION_ID,
+      policyVersion: 3,
+      events: [makeEvent(1, "session.queue.changed", { operation: "edit" })],
+    });
+    await flush();
+    expect(reads).toEqual([SESSION_ID, SESSION_ID, SESSION_ID]);
+    expect(applied.at(-1)).toBe(`3:${SESSION_ID}:read-3`);
+
+    await hook.rerender({ sessionId: sessionB, policyVersion: 4, events: noEvents });
+    await flush();
+    expect(reads).toEqual([SESSION_ID, SESSION_ID, SESSION_ID, sessionB]);
+    expect(applied.at(-1)).toBe(`4:${sessionB}:read-4`);
+    await hook.unmount();
+  });
+
   test("a live queue mutation reloads the authoritative draft in another tab", async () => {
     let current: ComposerDraft = {
       revision: 1,
       text: "first tab state",
       resources: [],
-      tools: [],
       model: "model-x",
       reasoningEffort: "medium",
       sourceTurnId: null,
@@ -795,7 +1797,10 @@ describe("useComposer durable draft and control binding", () => {
       sourceTurnVersion: 1,
     };
     await hook.rerender([
-      makeEvent(1, "session.queue.changed", { operation: "edit", queueVersion: 2 }),
+      makeEvent(1, "session.queue.changed", {
+        operation: "edit",
+        queueVersion: 2,
+      }),
     ]);
     await flush();
     expect(reads).toBe(2);
@@ -810,7 +1815,6 @@ describe("useComposer durable draft and control binding", () => {
       revision: 4,
       text: "restored text",
       resources: [],
-      tools: [],
       model: "model-x",
       reasoningEffort: "medium" as const,
       sourceTurnId: null,
@@ -821,7 +1825,11 @@ describe("useComposer durable draft and control binding", () => {
       getComposerDraft: async () => initial,
       saveComposerDraft: async (_ws, _session, request) => {
         saved.push(request);
-        return { ...initial, ...request, revision: request.expectedRevision + 1 };
+        return {
+          ...initial,
+          ...request,
+          revision: request.expectedRevision + 1,
+        };
       },
       sendMessage: async (_ws, _session, input) => {
         sent.push(input);
@@ -842,7 +1850,10 @@ describe("useComposer durable draft and control binding", () => {
     expect(hook.result.current.value).toBe("restored text");
     await flushing(async () => hook.result.current.setValue("edited locally"));
     await flush(600);
-    expect(saved.at(-1)).toMatchObject({ expectedRevision: 4, text: "edited locally" });
+    expect(saved.at(-1)).toMatchObject({
+      expectedRevision: 4,
+      text: "edited locally",
+    });
     await flushing(async () => expect(await hook.result.current.send()).toBe(true));
     expect(sent.at(-1)).toMatchObject({
       text: "edited locally",
@@ -859,7 +1870,6 @@ describe("useComposer durable draft and control binding", () => {
         revision: 4,
         text: "",
         resources: [],
-        tools: [],
         model: "model-x",
         reasoningEffort: "medium",
         sourceTurnId: null,
@@ -872,7 +1882,6 @@ describe("useComposer durable draft and control binding", () => {
           ...initial,
           text: request.text,
           resources: request.resources,
-          tools: request.tools,
           model: request.model,
           reasoningEffort: request.reasoningEffort,
           revision: request.expectedRevision + 1,
@@ -916,7 +1925,6 @@ describe("useComposer durable draft and control binding", () => {
       revision: 1,
       text: "",
       resources: [],
-      tools: [],
       model: "model-x",
       reasoningEffort: "medium",
       sourceTurnId: null,
@@ -931,7 +1939,6 @@ describe("useComposer durable draft and control binding", () => {
           ...initial,
           text: request.text,
           resources: request.resources,
-          tools: request.tools,
           model: request.model,
           reasoningEffort: request.reasoningEffort,
           revision: request.expectedRevision + 1,
@@ -963,12 +1970,352 @@ describe("useComposer durable draft and control binding", () => {
     await hook.unmount();
   });
 
+  test("a transient draft save preserves text and resources without claiming a cross-tab conflict", async () => {
+    const resource = {
+      kind: "file" as const,
+      fileId: "33333333-3333-4333-8333-333333333333",
+    };
+    const initial: ComposerDraft = {
+      revision: 4,
+      text: "local draft",
+      resources: [resource],
+      model: "model-x",
+      reasoningEffort: "medium",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    };
+    const client = fakeClient({
+      getComposerDraft: async () => initial,
+      saveComposerDraft: async () => {
+        throw gatewayError(503);
+      },
+    });
+    const hook = await renderHook(
+      () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+    await flushing(() => hook.result.current.setValue("local edit survives"));
+    await flush(600);
+
+    expect(hook.result.current.value).toBe("local edit survives");
+    expect(hook.result.current.restoredResources).toEqual([resource]);
+    expect(hook.result.current.draftConflict).toBeNull();
+    expect(hook.result.current.error).toMatchObject({
+      status: 503,
+      retryable: true,
+      outcomeUnknown: true,
+    });
+    expect(hook.result.current.error?.message).toBe(
+      "OpenGeni is temporarily unavailable — retry. Reference: edge-503-safe.",
+    );
+    await hook.unmount();
+  });
+
+  test("a failed draft reload never replaces newer local text or restored resources", async () => {
+    const resource = {
+      kind: "file" as const,
+      fileId: "44444444-4444-4444-8444-444444444444",
+    };
+    const initial: ComposerDraft = {
+      revision: 2,
+      text: "server draft",
+      resources: [resource],
+      model: "model-x",
+      reasoningEffort: "medium",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    };
+    let reads = 0;
+    const client = fakeClient({
+      getComposerDraft: async () => {
+        reads += 1;
+        if (reads === 1) return initial;
+        throw gatewayError(504);
+      },
+    });
+    const hook = await renderHook(
+      () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+    await flushing(() => hook.result.current.setValue("newer unsaved local edit"));
+    await flushing(async () => await hook.result.current.reloadDraft());
+
+    expect(hook.result.current.value).toBe("newer unsaved local edit");
+    expect(hook.result.current.restoredResources).toEqual([resource]);
+    expect(hook.result.current.error?.message).not.toContain("html");
+    expect(hook.result.current.error?.message.length).toBeLessThan(160);
+    await hook.unmount();
+  });
+
+  for (const delivery of ["send", "steer"] as const) {
+    test(`${delivery} preserves its draft and file after a definite payment rejection, then retries once with Codex`, async () => {
+      const resource = {
+        kind: "file" as const,
+        fileId: "55555555-5555-4555-8555-555555555555",
+      };
+      let serverDraft: ComposerDraft = {
+        revision: 7,
+        text: "read the exact attached bytes",
+        resources: [resource],
+        model: "gpt-5.6-sol",
+        reasoningEffort: "xhigh",
+        sourceTurnId: null,
+        sourceTurnVersion: null,
+        updatedAt: new Date().toISOString(),
+      };
+      const attempts: SendMessageInput[] = [];
+      let accepted = 0;
+      const deliver = async (input: string | SendMessageInput) => {
+        const typed = typeof input === "string" ? { text: input } : input;
+        attempts.push(typed);
+        if (attempts.length === 1) throw paymentRequiredError();
+        accepted += 1;
+        return makeEvent(1, "user.message");
+      };
+      const client = fakeClient({
+        getComposerDraft: async () => serverDraft,
+        saveComposerDraft: async (_workspaceId, _sessionId, request) => {
+          serverDraft = {
+            ...serverDraft,
+            ...request,
+            revision: request.expectedRevision + 1,
+            updatedAt: new Date().toISOString(),
+          };
+          return serverDraft;
+        },
+        sendMessage: async (_workspaceId, _sessionId, input) => await deliver(input),
+        steerMessage: async (_workspaceId, _sessionId, input) => ({
+          accepted: await deliver(input),
+          turn: fakeTurn(),
+        }),
+      });
+      const hook = await renderHook(
+        (model: string) =>
+          useComposer(SESSION_ID, {
+            client,
+            workspaceId: WORKSPACE_ID,
+            sendExtras: { model, reasoningEffort: "xhigh" },
+          }),
+        "gpt-5.6-sol" as string,
+      );
+      await flush();
+
+      await flushing(async () => expect(await hook.result.current[delivery]()).toBe(false));
+      expect(hook.result.current.error).toMatchObject({
+        status: 402,
+        code: "payment_required",
+        retryable: false,
+        outcomeUnknown: false,
+      });
+      expect(hook.result.current.value).toBe(serverDraft.text);
+      expect(hook.result.current.restoredResources).toEqual([resource]);
+      expect(attempts).toHaveLength(1);
+      expect(attempts[0]).toMatchObject({
+        text: "read the exact attached bytes",
+        resources: [resource],
+        model: "gpt-5.6-sol",
+      });
+
+      await hook.rerender("codex/gpt-5.6-sol");
+      await flushing(async () => expect(await hook.result.current[delivery]()).toBe(true));
+
+      expect(attempts).toHaveLength(2);
+      expect(attempts[1]).toMatchObject({
+        text: "read the exact attached bytes",
+        resources: [resource],
+        model: "codex/gpt-5.6-sol",
+      });
+      expect(attempts[1]!.clientEventId).not.toBe(attempts[0]!.clientEventId);
+      expect(accepted).toBe(1);
+      expect(hook.result.current.value).toBe("");
+      expect(hook.result.current.restoredResources).toEqual([]);
+      await hook.unmount();
+    });
+  }
+
+  for (const delivery of ["send", "steer"] as const) {
+    test(`${delivery} retries an outcome-unknown gateway failure with one idempotency key`, async () => {
+      const resource = {
+        kind: "file" as const,
+        fileId: "55555555-5555-4555-8555-555555555555",
+      };
+      const initial: ComposerDraft = {
+        revision: 7,
+        text: "do not duplicate this",
+        resources: [resource],
+        model: "model-x",
+        reasoningEffort: "medium",
+        sourceTurnId: null,
+        sourceTurnVersion: null,
+        updatedAt: new Date().toISOString(),
+      };
+      const attempts: SendMessageInput[] = [];
+      const deliver = async (input: string | SendMessageInput) => {
+        const typed = typeof input === "string" ? { text: input } : input;
+        attempts.push(typed);
+        if (attempts.length === 1) throw gatewayError(502);
+        return makeEvent(1, "user.message");
+      };
+      const client = fakeClient({
+        getComposerDraft: async () => initial,
+        sendMessage: async (_workspaceId, _sessionId, input) => await deliver(input),
+        steerMessage: async (_workspaceId, _sessionId, input) => ({
+          accepted: await deliver(input),
+          turn: fakeTurn(),
+        }),
+      });
+      const hook = await renderHook(
+        () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+        undefined,
+      );
+      await flush();
+
+      await flushing(async () => expect(await hook.result.current[delivery]()).toBe(false));
+      expect(hook.result.current.value).toBe(initial.text);
+      expect(hook.result.current.restoredResources).toEqual([resource]);
+      expect(hook.result.current.error).toMatchObject({ outcomeUnknown: true });
+
+      await flushing(async () => expect(await hook.result.current[delivery]()).toBe(true));
+      expect(attempts).toHaveLength(2);
+      expect(attempts[0]!.clientEventId).toBe(attempts[1]!.clientEventId);
+      expect(attempts[0]!.resources).toEqual([resource]);
+      expect(hook.result.current.value).toBe("");
+      expect(hook.result.current.restoredResources).toEqual([]);
+      await hook.unmount();
+    });
+  }
+
+  for (const delivery of ["send", "steer"] as const) {
+    test(`${delivery} reconciles an outcome-unknown request before retrying`, async () => {
+      const initial: ComposerDraft = {
+        revision: 9,
+        text: "do not send twice",
+        resources: [],
+        model: "model-x",
+        reasoningEffort: "medium",
+        sourceTurnId: null,
+        sourceTurnVersion: null,
+        updatedAt: new Date().toISOString(),
+      };
+      const attempts: SendMessageInput[] = [];
+      let acceptedEvent: SessionEvent | null = null;
+      const client = fakeClient({
+        getComposerDraft: async () => initial,
+        listEvents: async () => (acceptedEvent ? [acceptedEvent] : []),
+        sendMessage: async (_workspaceId, _sessionId, input) => {
+          const typed = typeof input === "string" ? { text: input } : input;
+          attempts.push(typed);
+          if (attempts.length === 1) throw gatewayError(503);
+          return makeEvent(2, "user.message");
+        },
+        steerMessage: async (_workspaceId, _sessionId, input) => {
+          const typed = typeof input === "string" ? { text: input } : input;
+          attempts.push(typed);
+          if (attempts.length === 1) throw gatewayError(503);
+          return { accepted: makeEvent(2, "user.message"), turn: fakeTurn() };
+        },
+      });
+      const hook = await renderHook(
+        () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+        undefined,
+      );
+      await flush();
+
+      await flushing(async () => expect(await hook.result.current[delivery]()).toBe(false));
+      acceptedEvent = {
+        ...makeEvent(1, "user.message"),
+        clientEventId: attempts[0]!.clientEventId,
+      };
+      await flushing(async () => expect(await hook.result.current[delivery]()).toBe(true));
+
+      expect(attempts).toHaveLength(1);
+      expect(hook.result.current.value).toBe("");
+      await hook.unmount();
+    });
+  }
+
+  for (const delivery of ["send", "steer"] as const) {
+    test(`${delivery} keeps the original key and payload across edit and remount`, async () => {
+      const originalResource = {
+        kind: "file" as const,
+        fileId: "66666666-6666-4666-8666-666666666666",
+      };
+      const newerResource = {
+        kind: "file" as const,
+        fileId: "77777777-7777-4777-8777-777777777777",
+      };
+      const initial: ComposerDraft = {
+        revision: 10,
+        text: "original uncertain prompt",
+        resources: [originalResource],
+        model: "model-x",
+        reasoningEffort: "medium",
+        sourceTurnId: null,
+        sourceTurnVersion: null,
+        updatedAt: new Date().toISOString(),
+      };
+      const attempts: SendMessageInput[] = [];
+      const client = fakeClient({
+        getComposerDraft: async () => initial,
+        sendMessage: async (_workspaceId, _sessionId, input) => {
+          const typed = typeof input === "string" ? { text: input } : input;
+          attempts.push(typed);
+          if (attempts.length === 1) throw gatewayError(502);
+          return makeEvent(2, "user.message");
+        },
+        steerMessage: async (_workspaceId, _sessionId, input) => {
+          const typed = typeof input === "string" ? { text: input } : input;
+          attempts.push(typed);
+          if (attempts.length === 1) throw gatewayError(502);
+          return { accepted: makeEvent(2, "user.message"), turn: fakeTurn() };
+        },
+      });
+
+      const first = await renderHook(
+        () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+        undefined,
+      );
+      await flush();
+      await flushing(async () => expect(await first.result.current[delivery]()).toBe(false));
+      await first.unmount();
+
+      const second = await renderHook(
+        () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+        undefined,
+      );
+      await flush();
+      expect(second.result.current.value).toBe("original uncertain prompt");
+      expect(second.result.current.restoredResources).toEqual([originalResource]);
+      await flushing(() =>
+        second.result.current.applyDraft({
+          ...initial,
+          text: "edited after timeout",
+          resources: [newerResource],
+        }),
+      );
+      expect(second.result.current.value).toBe("edited after timeout");
+      expect(second.result.current.restoredResources).toEqual([newerResource]);
+      await flushing(async () => expect(await second.result.current[delivery]()).toBe(true));
+
+      expect(attempts).toHaveLength(2);
+      expect(attempts[1]!.clientEventId).toBe(attempts[0]!.clientEventId);
+      expect(attempts[1]!.text).toBe("original uncertain prompt");
+      expect(attempts[1]!.resources).toEqual([originalResource]);
+      expect(second.result.current.value).toBe("edited after timeout");
+      expect(second.result.current.restoredResources).toEqual([newerResource]);
+      await second.unmount();
+    });
+  }
+
   test("an autosave conflict preserves the local text and exposes both resolution choices", async () => {
     const initial = {
       revision: 1,
       text: "remote one",
       resources: [],
-      tools: [],
       model: "model-x",
       reasoningEffort: "medium" as const,
       sourceTurnId: null,
@@ -992,23 +2339,365 @@ describe("useComposer durable draft and control binding", () => {
     expect(hook.result.current.draftConflict?.message).toContain("409");
     await hook.unmount();
   });
+
+  test("a session switch hides the old draft and drops its delayed autosave settlement", async () => {
+    const sessionA: string = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const sessionB: string = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const makeDraft = (text: string): ComposerDraft => ({
+      revision: 1,
+      text,
+      resources: [],
+      model: "model-x",
+      reasoningEffort: "medium",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    });
+    let resolveBRead!: (value: ComposerDraft) => void;
+    let resolveASave!: (value: ComposerDraft) => void;
+    let savedARequest: { text: string } | null = null;
+    const client = fakeClient({
+      getComposerDraft: async (_workspaceId, sessionId) => {
+        if (sessionId === sessionA) return makeDraft("A PRIVATE");
+        return await new Promise<ComposerDraft>((resolve) => {
+          resolveBRead = resolve;
+        });
+      },
+      saveComposerDraft: async (_workspaceId, sessionId, request) => {
+        if (sessionId !== sessionA) throw new Error("unexpected B autosave");
+        savedARequest = request;
+        return await new Promise<ComposerDraft>((resolve) => {
+          resolveASave = resolve;
+        });
+      },
+    });
+    const hook = await renderHook(
+      (sessionId: string) => useComposer(sessionId, { client, workspaceId: WORKSPACE_ID }),
+      sessionA,
+    );
+    await flush();
+    expect(hook.result.current.value).toBe("A PRIVATE");
+
+    await flushing(() => hook.result.current.setValue("A PRIVATE EDIT"));
+    await flush(600);
+    expect(savedARequest).toMatchObject({ text: "A PRIVATE EDIT" });
+
+    await hook.rerender(sessionB);
+    expect(hook.result.current.value).toBe("");
+    expect(hook.result.current.draft).toBeNull();
+    await flushing(() => resolveBRead(makeDraft("B PRIVATE")));
+    expect(hook.result.current.value).toBe("B PRIVATE");
+
+    await flushing(() =>
+      resolveASave({
+        ...makeDraft("A PRIVATE EDIT"),
+        revision: 2,
+      }),
+    );
+    expect(hook.result.current.value).toBe("B PRIVATE");
+    expect(hook.result.current.draft?.text).toBe("B PRIVATE");
+    expect(hook.result.current.draftConflict).toBeNull();
+    await hook.unmount();
+  });
+
+  test("a session switch drops stale composer control settlement", async () => {
+    const sessionA: string = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const sessionB: string = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    let rejectPause!: (cause: Error) => void;
+    const client = fakeClient({
+      pauseSession: async () =>
+        await new Promise((_resolve, reject) => {
+          rejectPause = reject;
+        }),
+    });
+    const hook = await renderHook(
+      (sessionId: string) => useComposer(sessionId, { client, workspaceId: WORKSPACE_ID }),
+      sessionA,
+    );
+    await flush();
+
+    let stalePause!: Promise<void>;
+    await flushing(() => {
+      stalePause = hook.result.current.pause();
+    });
+    expect(hook.result.current.pausing).toBe(true);
+    await hook.rerender(sessionB);
+    expect(hook.result.current.pausing).toBe(false);
+    expect(hook.result.current.error).toBeNull();
+
+    await flushing(async () => {
+      rejectPause(new Error("A PRIVATE CONTROL ERROR"));
+      await stalePause;
+    });
+    expect(hook.result.current.pausing).toBe(false);
+    expect(hook.result.current.error).toBeNull();
+    await hook.unmount();
+  });
+
+  test("a session switch stops a stale scoped resume before its follow-up write", async () => {
+    const sessionA: string = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const sessionB: string = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const scopedSession: string = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    let resolveScopedQueue!: (value: SessionQueueSnapshot) => void;
+    const resumedSessions: string[] = [];
+    const client = fakeClient({
+      getQueue: async (_workspaceId, sessionId) => {
+        if (sessionId !== scopedSession) return queueSnapshot([]);
+        return await new Promise<SessionQueueSnapshot>((resolve) => {
+          resolveScopedQueue = resolve;
+        });
+      },
+      resumeSession: async (_workspaceId, sessionId) => {
+        resumedSessions.push(sessionId);
+        throw new Error("unexpected stale resume");
+      },
+    });
+    const hook = await renderHook(
+      (sessionId: string) => useComposer(sessionId, { client, workspaceId: WORKSPACE_ID }),
+      sessionA,
+    );
+    await flush();
+
+    let staleResume!: Promise<void>;
+    await flushing(() => {
+      staleResume = hook.result.current.resumeScope({
+        scope: "session",
+        targetId: scopedSession,
+        selectedStateAfter: "active",
+        impactCopy: "Resume scoped session",
+      });
+    });
+    await hook.rerender(sessionB);
+    expect(hook.result.current.resuming).toBe(false);
+
+    await flushing(async () => {
+      resolveScopedQueue(queueSnapshot([]));
+      await staleResume;
+    });
+    expect(resumedSessions).toEqual([]);
+    expect(hook.result.current.error).toBeNull();
+    await hook.unmount();
+  });
+});
+
+describe("session hook concurrent target ownership", () => {
+  test("a suspended target transition leaves the committed session fully interactive", async () => {
+    const sessionA: string = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const sessionB: string = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const turn = fakeTurn({
+      id: "aaaaaaaa-0000-4000-8000-000000000001",
+      prompt: "A queue item",
+    });
+    const draft: ComposerDraft = {
+      revision: 1,
+      text: "A draft",
+      resources: [],
+      model: "model-x",
+      reasoningEffort: "medium",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    };
+    let deleteCalls = 0;
+    let pauseCalls = 0;
+    const client = fakeClient({
+      getQueue: async () => queueSnapshot([turn]),
+      getComposerDraft: async () => draft,
+      deleteQueueItem: async () => {
+        deleteCalls += 1;
+        throw new Error("expected test rollback");
+      },
+      pauseSession: async () => {
+        pauseCalls += 1;
+        throw new Error("expected test rollback");
+      },
+    });
+    let setTarget!: (target: string) => void;
+    let renderedSessionB = false;
+    let committed:
+      | {
+          queue: ReturnType<typeof useTurnQueue>;
+          composer: ReturnType<typeof useComposer>;
+          control: ReturnType<typeof useSessionControl>;
+        }
+      | undefined;
+    const suspended = new Promise<never>(() => {});
+
+    function Harness() {
+      const [target, setTargetState] = useState(sessionA);
+      setTarget = setTargetState;
+      const queue = useTurnQueue(target, {
+        client,
+        workspaceId: WORKSPACE_ID,
+        events: noEvents,
+      });
+      const composer = useComposer(target, {
+        client,
+        workspaceId: WORKSPACE_ID,
+        events: noEvents,
+      });
+      const control = useSessionControl(target, {
+        client,
+        workspaceId: WORKSPACE_ID,
+      });
+      if (target === sessionB) {
+        renderedSessionB = true;
+        throw suspended;
+      }
+      committed = { queue, composer, control };
+      return <div>{`${composer.value}|${queue.queue.map((item) => item.prompt).join(",")}`}</div>;
+    }
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const previousActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT;
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false;
+    try {
+      flushSync(() => {
+        root.render(
+          <Suspense fallback={<div>Loading B</div>}>
+            <Harness />
+          </Suspense>,
+        );
+      });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(committed?.composer.value).toBe("A draft");
+      expect(committed?.queue.queue.map((item) => item.prompt)).toEqual(["A queue item"]);
+
+      startTransition(() => setTarget(sessionB));
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(renderedSessionB).toBe(true);
+      expect(container.textContent).toBe("A draft|A queue item");
+
+      committed?.composer.setValue("A edited while B waits");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      await committed?.queue.removeTurn(turn.id);
+      await committed?.control.pause();
+
+      expect(committed?.composer.value).toBe("A edited while B waits");
+      expect(deleteCalls).toBe(1);
+      expect(pauseCalls).toBe(1);
+    } finally {
+      flushSync(() => root.unmount());
+      container.remove();
+      globalThis.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
+    }
+  });
+
+  test("a suspended target render cannot retarget a committed draft callback", async () => {
+    const sessionA: string = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const sessionB: string = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const draftA: ComposerDraft = {
+      revision: 1,
+      text: "A draft",
+      resources: [],
+      model: "model-a",
+      reasoningEffort: "medium",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    };
+    let resolveA!: (draft: ComposerDraft) => void;
+    const client = fakeClient({
+      getComposerDraft: async (_workspaceId, sessionId) => {
+        if (sessionId !== sessionA) throw new Error("uncommitted B must not read");
+        return await new Promise<ComposerDraft>((resolve) => {
+          resolveA = resolve;
+        });
+      },
+    });
+    const applied: string[] = [];
+    let setTarget!: (target: string) => void;
+    let renderedB = false;
+    const suspended = new Promise<never>(() => {});
+
+    function Harness() {
+      const [target, setTargetState] = useState(sessionA);
+      setTarget = setTargetState;
+      useComposer(target, {
+        client,
+        workspaceId: WORKSPACE_ID,
+        events: noEvents,
+        onDraftApplied: (draft) => applied.push(`${target}:${draft.text}`),
+      });
+      if (target === sessionB) {
+        renderedB = true;
+        throw suspended;
+      }
+      return null;
+    }
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const previousActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT;
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false;
+    try {
+      flushSync(() => {
+        root.render(
+          <Suspense fallback={null}>
+            <Harness />
+          </Suspense>,
+        );
+      });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      startTransition(() => setTarget(sessionB));
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(renderedB).toBe(true);
+
+      resolveA(draftA);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(applied).toEqual([`${sessionA}:A draft`]);
+    } finally {
+      flushSync(() => root.unmount());
+      container.remove();
+      globalThis.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  });
 });
 
 describe("useComposer file-only send", () => {
   test("canSend lights up with a ready resource even when the draft is empty", async () => {
-    const client = fakeClient({ sendMessage: async () => makeEvent(1, "user.message") });
+    const client = fakeClient({
+      sendMessage: async () => makeEvent(1, "user.message"),
+    });
     const hook = await renderHook(
       () =>
         useComposer(SESSION_ID, {
           client,
           workspaceId: WORKSPACE_ID,
-          sendExtras: () => ({ resources: [{ kind: "file", fileId: "file-1" }] }),
+          sendExtras: () => ({
+            resources: [{ kind: "file", fileId: "file-1" }],
+          }),
         }),
       undefined,
     );
     // Empty draft, but a resource is attached → sendable.
     expect(hook.result.current.value).toBe("");
     expect(hook.result.current.canSend).toBe(true);
+    await hook.unmount();
+  });
+
+  test("canSend follows attachment additions and removals in the same session render", async () => {
+    const client = fakeClient({});
+    const hook = await renderHook(
+      (attached: boolean) =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          sendExtras: () => ({
+            resources: attached ? [{ kind: "file", fileId: "file-1" }] : [],
+          }),
+        }),
+      false as boolean,
+    );
+    expect(hook.result.current.canSend).toBe(false);
+    await hook.rerender(true);
+    expect(hook.result.current.canSend).toBe(true);
+    await hook.rerender(false);
+    expect(hook.result.current.canSend).toBe(false);
     await hook.unmount();
   });
 
@@ -1034,6 +2723,36 @@ describe("useComposer file-only send", () => {
     await hook.unmount();
   });
 
+  test("sendBlocked gates canSend and direct send() calls until the host resolves attachments", async () => {
+    const sent: unknown[] = [];
+    const client = fakeClient({
+      sendMessage: async (_ws, _session, message) => {
+        sent.push(message);
+        return makeEvent(1, "user.message");
+      },
+    });
+    const hook = await renderHook(
+      (blocked: boolean) =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          sendExtras: () => ({ resources: [{ kind: "file", fileId: "ready-file" }] }),
+          sendBlocked: () => blocked,
+        }),
+      true as boolean,
+    );
+
+    expect(hook.result.current.canSend).toBe(false);
+    await flushing(async () => expect(await hook.result.current.send()).toBe(false));
+    expect(sent).toEqual([]);
+
+    await hook.rerender(false);
+    expect(hook.result.current.canSend).toBe(true);
+    await flushing(async () => expect(await hook.result.current.send()).toBe(true));
+    expect(sent).toHaveLength(1);
+    await hook.unmount();
+  });
+
   test("sending a file-only message dispatches the resources with a minimal default text", async () => {
     const sent: { text: string; resources?: unknown }[] = [];
     const client = fakeClient({
@@ -1047,7 +2766,9 @@ describe("useComposer file-only send", () => {
         useComposer(SESSION_ID, {
           client,
           workspaceId: WORKSPACE_ID,
-          sendExtras: () => ({ resources: [{ kind: "file", fileId: "file-1" }] }),
+          sendExtras: () => ({
+            resources: [{ kind: "file", fileId: "file-1" }],
+          }),
         }),
       undefined,
     );
@@ -1060,6 +2781,95 @@ describe("useComposer file-only send", () => {
     // Resources ride along, and the wire text is non-empty (contract: min(1)).
     expect(sent[0]!.resources).toEqual([{ kind: "file", fileId: "file-1" }]);
     expect(sent[0]!.text.trim().length).toBeGreaterThan(0);
+    await hook.unmount();
+  });
+  test("onSent receives the immutable input snapshot accepted before an in-flight edit", async () => {
+    let currentFileId = "accepted-file";
+    let releaseSend!: () => void;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const pending = new Promise<void>((resolve) => {
+      releaseSend = resolve;
+    });
+    let accepted: SendMessageInput | undefined;
+    const client = fakeClient({
+      sendMessage: async () => {
+        markStarted();
+        await pending;
+        return makeEvent(1, "user.message");
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          sendExtras: () => ({ resources: [{ kind: "file", fileId: currentFileId }] }),
+          onSent: (_text, input) => {
+            accepted = input;
+          },
+        }),
+      undefined,
+    );
+
+    let result!: Promise<boolean>;
+    await flushing(() => {
+      result = hook.result.current.send();
+    });
+    await started;
+    currentFileId = "later-file";
+    await flushing(async () => {
+      releaseSend();
+      expect(await result).toBe(true);
+    });
+
+    expect(accepted?.resources).toEqual([{ kind: "file", fileId: "accepted-file" }]);
+    await hook.unmount();
+  });
+
+  test("persists the same file-only text that it submits", async () => {
+    const initial: ComposerDraft = {
+      revision: 3,
+      text: "",
+      resources: [],
+      model: "model-x",
+      reasoningEffort: "medium",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: null,
+    };
+    const saved: unknown[] = [];
+    const sent: unknown[] = [];
+    const client = fakeClient({
+      getComposerDraft: async () => initial,
+      saveComposerDraft: async (_ws, _session, request) => {
+        saved.push(request);
+        return { ...initial, ...request, revision: request.expectedRevision + 1 };
+      },
+      sendMessage: async (_ws, _session, message) => {
+        sent.push(message);
+        return makeEvent(1, "user.message");
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          sendExtras: () => ({ resources: [{ kind: "file", fileId: "file-1" }] }),
+        }),
+      undefined,
+    );
+    await flush();
+
+    await flushing(async () => expect(await hook.result.current.send()).toBe(true));
+
+    expect(saved).toHaveLength(1);
+    expect(sent).toHaveLength(1);
+    expect((saved[0] as { text: string }).text).toBe(FILE_ONLY_MESSAGE_TEXT);
+    expect((sent[0] as { text: string }).text).toBe(FILE_ONLY_MESSAGE_TEXT);
     await hook.unmount();
   });
 });
@@ -1213,7 +3023,12 @@ describe("useBillingUsage", () => {
       },
     });
     const hook = await renderHook(
-      () => useBillingUsage({ client, accountId: "acc-1", workspaceId: WORKSPACE_ID }),
+      () =>
+        useBillingUsage({
+          client,
+          accountId: "acc-1",
+          workspaceId: WORKSPACE_ID,
+        }),
       undefined,
     );
     await flush();
@@ -1276,7 +3091,9 @@ describe("useAvailableModels", () => {
   });
 
   test("starts with empty models and a null default before the config loads", async () => {
-    const client = fakeClient({ getClientConfig: async () => new Promise(() => {}) as never });
+    const client = fakeClient({
+      getClientConfig: async () => new Promise(() => {}) as never,
+    });
     const hook = await renderHook(() => useAvailableModels({ client }), undefined);
     expect(hook.result.current.loading).toBe(true);
     expect(hook.result.current.models).toEqual([]);

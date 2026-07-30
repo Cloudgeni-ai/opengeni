@@ -1,0 +1,196 @@
+# Supported non-HA, single-machine profile. Every process has one replica and
+# shares the host dynamically: no HPA, topology spreading, PDB, CPU quota, or
+# per-pod memory partition. Excess turns remain durable in Temporal.
+#
+# Bootstrap in two phases so Postgres/Temporal/NATS/MinIO are healthy before the
+# pre-upgrade migration/role/posture gate runs. See docs/deployment.md.
+
+priorityClasses:
+  enabled: true
+
+api:
+  replicaCount: 1
+  resources: null
+  topologySpreadConstraints:
+    enabled: false
+  podDisruptionBudget:
+    enabled: false
+  autoscaling:
+    enabled: false
+  probes:
+    # Keep safe database-backed API traffic available when restartable
+    # orchestration or machine-control plumbing is temporarily unavailable.
+    readiness:
+      path: /traffic-readyz
+  service:
+    type: NodePort
+    port: 8000
+    nodePort: 30081
+
+worker:
+  control:
+    replicaCount: 1
+    resources: null
+    podDisruptionBudget:
+      enabled: false
+    autoscaling:
+      enabled: false
+  turns:
+    replicaCount: 1
+    resources: null
+    podDisruptionBudget:
+      enabled: false
+    autoscaling:
+      enabled: false
+  topologySpreadConstraints:
+    enabled: false
+
+web:
+  replicaCount: 1
+  resources: null
+  topologySpreadConstraints:
+    enabled: false
+  podDisruptionBudget:
+    enabled: false
+  autoscaling:
+    enabled: false
+  service:
+    type: NodePort
+    port: 3000
+    nodePort: 30080
+
+relay:
+  enabled: true
+  replicaCount: 1
+  resources: null
+  topologySpreadConstraints:
+    enabled: false
+  podDisruptionBudget:
+    enabled: false
+  autoscaling:
+    enabled: false
+  service:
+    type: NodePort
+    port: 8443
+    nodePort: 30443
+
+migrations:
+  resources: null
+  secret:
+    existingSecret: opengeni-migrations
+
+secret:
+  create: false
+  existingSecret: opengeni-runtime
+
+config:
+  OPENGENI_SERVICE_NAME: opengeni
+  OPENGENI_ENVIRONMENT: single-node
+  OPENGENI_DEPLOYMENT_REVISION: single-node
+  OPENGENI_API_HOST: 0.0.0.0
+  OPENGENI_API_PORT: "8000"
+  OPENGENI_WORKER_HTTP_PORT: "8001"
+  OPENGENI_TEMPORAL_NAMESPACE: default
+  OPENGENI_TEMPORAL_TASK_QUEUE: opengeni-runs-ts
+  OPENGENI_STARTUP_DEPENDENCY_RETRY_ATTEMPTS: "30"
+  OPENGENI_STARTUP_DEPENDENCY_RETRY_INITIAL_DELAY_MS: "1000"
+  OPENGENI_STARTUP_DEPENDENCY_RETRY_MAX_DELAY_MS: "5000"
+  # One turn worker expands activity slots while total machine use stays below
+  # these targets. Temporal durably queues excess work above the safety ceiling.
+  OPENGENI_TURN_WORKER_CONCURRENCY_MODE: resource-based
+  OPENGENI_TURN_WORKER_MAX_CONCURRENT_TURNS: "256"
+  OPENGENI_TURN_WORKER_TARGET_CPU_USAGE: "0.8"
+  OPENGENI_TURN_WORKER_TARGET_MEMORY_USAGE: "0.75"
+  OPENGENI_AUTH_REQUIRED: "false"
+  OPENGENI_AUTH_ALLOW_HEALTH: "true"
+  OPENGENI_AUTH_ALLOW_METRICS: "false"
+  # Set this in the private overlay to the browser/API origin exposed by the
+  # private edge. It makes enrollment installers fetch this deployment's agent.
+  # OPENGENI_PUBLIC_BASE_URL: https://node.example-tailnet.ts.net
+  OPENGENI_PRODUCT_ACCESS_MODE: local
+  OPENGENI_BILLING_MODE: disabled
+  OPENGENI_ENTITLEMENTS_MODE: none
+  OPENGENI_USAGE_LIMITS_MODE: none
+  OPENGENI_OBJECT_STORAGE_BACKEND: s3-compatible
+  OPENGENI_OBJECT_STORAGE_BUCKET: opengeni-files
+  OPENGENI_OBJECT_STORAGE_REGION: us-east-1
+  OPENGENI_OBJECT_STORAGE_S3_PROVIDER: Minio
+  OPENGENI_OBJECT_STORAGE_FORCE_PATH_STYLE: "true"
+  OPENGENI_SANDBOX_OWNERSHIP_ENABLED: "true"
+  OPENGENI_SANDBOX_BACKEND: selfhosted
+  OPENGENI_SANDBOX_PREPARATION_PROFILES: none
+
+postgres:
+  enabled: true
+  auth:
+    database: opengeni
+    username: opengeni
+    existingSecret: opengeni-postgres
+    passwordKey: POSTGRES_PASSWORD
+  runtime:
+    existingSecret: opengeni-runtime
+    databaseUrlKey: OPENGENI_DATABASE_URL
+  resources: null
+  persistence:
+    enabled: true
+    size: 20Gi
+
+temporal:
+  enabled: true
+  resources: null
+
+nats:
+  enabled: true
+  resources: null
+  authCallout:
+    enabled: true
+  websocketEdgeService:
+    enabled: true
+    type: NodePort
+    nodePort: 30222
+
+minio:
+  enabled: true
+  auth:
+    existingSecret: opengeni-minio
+    accessKeyKey: MINIO_ROOT_USER
+    secretKeyKey: MINIO_ROOT_PASSWORD
+  # Set this to the private edge URL browsers use for signed file transfers.
+  # Example: https://node.example-tailnet.ts.net:9443
+  publicEndpoint: ""
+  resources: null
+  service:
+    apiPort: 9000
+    consolePort: 9001
+  edgeService:
+    enabled: true
+    type: NodePort
+    nodePort: 30900
+  persistence:
+    enabled: true
+    size: 20Gi
+
+selfhosted:
+  enabled: true
+  # Set these to private wss URLs exposed by the deployment edge.
+  natsUrl: ""
+  relayUrl: ""
+  natsCalloutAccountName: APP
+  natsControlUser: control
+  natsCalloutUser: auth
+
+ingress:
+  enabled: false
+
+observability:
+  structuredLogs: true
+  metrics:
+    enabled: true
+  serviceMonitor:
+    enabled: false
+  prometheusRule:
+    enabled: false
+  otel:
+    enabled: false
+  collector:
+    enabled: false

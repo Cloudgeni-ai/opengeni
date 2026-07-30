@@ -30,7 +30,11 @@ export type {
   ActivityItem,
   AgentMessageItem,
   AuthNeededItem,
+  FleetDecisionItem,
+  FleetDecisionScoreItem,
   GoalItem,
+  MachineInputBatchItem,
+  MachineInputMember,
   MemoryItem,
   NoticeItem,
   ReasoningItem,
@@ -82,8 +86,17 @@ export { LightboxProvider, useLightbox, useLightboxOptional } from "./screenshot
 export { DisclosureDefaultsProvider, useForcedDefaultOpen } from "./disclosure-context";
 
 // turn-collapse summary chip
-export { TurnSummary } from "./turn-summary";
-export type { TurnOutcome, TurnSummaryProps } from "./turn-summary";
+export { BUILT_IN_TURN_SUMMARY_FACET_IDS, TurnSummary } from "./turn-summary";
+export type {
+  BuiltInTurnSummaryFacetId,
+  TurnOutcome,
+  TurnSummaryContext,
+  TurnSummaryFacet,
+  TurnSummaryFacetConfiguration,
+  TurnSummaryFacetResult,
+  TurnSummaryOptions,
+  TurnSummaryProps,
+} from "./turn-summary";
 
 // parsers (pure, reusable by custom renderers)
 export {

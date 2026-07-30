@@ -101,7 +101,9 @@ function grant(accountId: string, workspaceId: string, fromSessionId?: string): 
     workspaceId,
     subjectId: "subject",
     permissions: ["sessions:create", "sessions:read"],
-    ...(fromSessionId ? { metadata: { sessionId: fromSessionId } } : {}),
+    ...(fromSessionId
+      ? { metadata: { sessionId: fromSessionId, firstPartyMcpTools: ["session_create"] } }
+      : {}),
   } as AccessGrant;
 }
 
@@ -345,8 +347,15 @@ describe("M3 rig binding: rig-aware shared-sandbox gate", () => {
     // A's group directly. Today the create gate must compare the joiner against
     // ALL members, not just parent A.
     await admin`
-      insert into sessions (account_id, workspace_id, initial_message, rig_id, rig_version_id, sandbox_group_id, model, sandbox_backend)
-      values (${accountId}, ${workspaceId}, 'legacy mixed-rig member', ${rigB.rigId}, ${rigB.activeVersionId}, ${a.sandboxGroupId}, 'gpt-test', 'modal')`;
+      insert into sessions (
+        account_id, workspace_id, initial_message, rig_id, rig_version_id,
+        sandbox_group_id, model, sandbox_backend, tool_policy
+      )
+      values (
+        ${accountId}, ${workspaceId}, 'legacy mixed-rig member', ${rigB.rigId},
+        ${rigB.activeVersionId}, ${a.sandboxGroupId}, 'gpt-test', 'modal',
+        jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
+      )`;
     await expect(
       createSessionForRequest(deps(bus), grant(accountId, workspaceId, a.id), workspaceId, {
         initialMessage: "joiner matching parent only",

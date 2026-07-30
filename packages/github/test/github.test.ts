@@ -3,8 +3,10 @@ import { generateKeyPairSync } from "node:crypto";
 import {
   buildGitHubAppManifest,
   authorizeGitHubAppUser,
+  authorizeGitHubInstallationBinding,
   createGitHubAppInstallationTokenWithExpiry,
   createSignedState,
+  discoverGitHubInstallationBindingCandidates,
   envLinesFromGitHubManifestConversion,
   githubAppBotIdentity,
   githubOAuthAuthorizeUrl,
@@ -32,6 +34,7 @@ describe("GitHub app manifest helpers", () => {
     });
     expect(local.hook_attributes).toBeUndefined();
     expect(local.request_oauth_on_install).toBe(true);
+    expect(local.default_permissions).toMatchObject({ members: "read" });
     expect(local.callback_urls).toEqual(["http://127.0.0.1:8000/v1/github/oauth/callback"]);
 
     const hosted = buildGitHubAppManifest({
@@ -44,6 +47,16 @@ describe("GitHub app manifest helpers", () => {
     expect(hosted.default_events).toBeUndefined();
     expect(hosted.request_oauth_on_install).toBe(true);
     expect(hosted.callback_urls).toEqual(["https://agents.example.com/v1/github/oauth/callback"]);
+
+    const setupCallback = buildGitHubAppManifest({
+      appName: "Hosted setup",
+      baseUrl: "https://agents.example.com",
+      public: false,
+      includeCiPermissions: true,
+      setupUrl: "https://agents.example.com/v1/github/setup",
+    });
+    expect(setupCallback.request_oauth_on_install).toBe(false);
+    expect(setupCallback.setup_on_update).toBe(true);
   });
 
   test("renders env lines with escaped private key", () => {
@@ -89,7 +102,7 @@ describe("GitHub app manifest helpers", () => {
           installations: [
             {
               id: 42,
-              account: { login: "acme", type: "Organization" },
+              account: { id: 7, login: "acme", type: "Organization" },
               suspended_at: null,
             },
           ],
@@ -169,6 +182,171 @@ describe("GitHub app manifest helpers", () => {
     });
   });
 
+  test("proves exact personal-account ownership with a fresh GitHub user authorization", async () => {
+    await withAuthorityGitHub(
+      { accountType: "User", accountId: 501, actorId: 501 },
+      async (requests) => {
+        const proof = await authorizeGitHubInstallationBinding(authoritySettings(), {
+          code: "fresh-code",
+          installationId: 42,
+        });
+        expect(proof).toMatchObject({
+          actorId: 501,
+          actorLogin: "actor",
+          authorityKind: "personal_owner",
+          installation: { installationId: 42, accountId: 501, suspended: false },
+        });
+        expect(proof.repositories.map((repository) => repository.id)).toEqual([1001]);
+        expect(requests.filter((url) => url.includes("/user/memberships/orgs/"))).toEqual([]);
+      },
+    );
+  });
+
+  test("discovers only existing installations with exact owner authority", async () => {
+    await withAuthorityGitHub(
+      { accountType: "Organization", membershipRole: "admin", membershipState: "active" },
+      async (requests) => {
+        const candidates = await discoverGitHubInstallationBindingCandidates(authoritySettings(), {
+          code: "fresh-code",
+        });
+        expect(candidates).toEqual([
+          {
+            authorityKind: "organization_owner",
+            installation: {
+              installationId: 42,
+              accountId: 700,
+              accountLogin: "acme",
+              accountType: "Organization",
+              suspended: false,
+            },
+          },
+        ]);
+        expect(
+          requests.filter((url) => url === "https://api.github.com/user/memberships/orgs/acme"),
+        ).toHaveLength(1);
+        expect(requests.some((url) => url.includes("/access_tokens"))).toBe(false);
+      },
+    );
+  });
+
+  test("does not treat repository visibility as organization ownership", async () => {
+    await withAuthorityGitHub(
+      { accountType: "Organization", membershipRole: "member", membershipState: "active" },
+      async () => {
+        expect(
+          await discoverGitHubInstallationBindingCandidates(authoritySettings(), {
+            code: "fresh-code",
+          }),
+        ).toEqual([]);
+      },
+    );
+  });
+
+  test("keeps hidden organization membership out of discovery without granting authority", async () => {
+    await withAuthorityGitHub({ accountType: "Organization", membershipStatus: 403 }, async () => {
+      expect(
+        await discoverGitHubInstallationBindingCandidates(authoritySettings(), {
+          code: "fresh-code",
+        }),
+      ).toEqual([]);
+    });
+  });
+
+  test("proves active organization ownership where GitHub exposes membership authority", async () => {
+    await withAuthorityGitHub(
+      { accountType: "Organization", membershipRole: "admin", membershipState: "active" },
+      async (requests) => {
+        const proof = await authorizeGitHubInstallationBinding(authoritySettings(), {
+          code: "fresh-code",
+          installationId: 42,
+        });
+        expect(proof.authorityKind).toBe("organization_owner");
+        const membershipUrl = "https://api.github.com/user/memberships/orgs/acme";
+        expect(requests.filter((url) => url === membershipUrl)).toHaveLength(2);
+        expect(requests.lastIndexOf(membershipUrl)).toBeGreaterThan(
+          requests.findIndex((url) =>
+            url.startsWith("https://api.github.com/installation/repositories?"),
+          ),
+        );
+      },
+    );
+  });
+
+  test.each([
+    [
+      "revoked",
+      [
+        { role: "admin", state: "active" },
+        { role: "member", state: "active" },
+      ],
+      "authority_denied",
+    ],
+    ["unavailable", [{ role: "admin", state: "active" }, { status: 403 }], "authority_unavailable"],
+  ] as const)(
+    "fails closed when organization-owner authority becomes %s before commit",
+    async (_label, membershipChecks, reason) => {
+      await withAuthorityGitHub(
+        { accountType: "Organization", membershipChecks: [...membershipChecks] },
+        async () => {
+          await expect(
+            authorizeGitHubInstallationBinding(authoritySettings(), {
+              code: "fresh-code",
+              installationId: 42,
+            }),
+          ).rejects.toMatchObject({ reason });
+        },
+      );
+    },
+  );
+
+  test.each([
+    ["non-owner repository administrator", "member", "active"],
+    ["ordinary collaborator", "member", "active"],
+    ["GitHub App Manager without organization ownership", "member", "active"],
+    ["stale organization owner", "admin", "pending"],
+  ])(
+    "denies %s without inferring authority from repository access",
+    async (_label, role, state) => {
+      await withAuthorityGitHub(
+        { accountType: "Organization", membershipRole: role, membershipState: state },
+        async () => {
+          await expect(
+            authorizeGitHubInstallationBinding(authoritySettings(), {
+              code: "fresh-code",
+              installationId: 42,
+            }),
+          ).rejects.toMatchObject({ reason: "authority_denied" });
+        },
+      );
+    },
+  );
+
+  test("fails closed when GitHub policy or token permissions hide owner membership", async () => {
+    await withAuthorityGitHub({ accountType: "Organization", membershipStatus: 403 }, async () => {
+      await expect(
+        authorizeGitHubInstallationBinding(authoritySettings(), {
+          code: "fresh-code",
+          installationId: 42,
+        }),
+      ).rejects.toMatchObject({ reason: "authority_unavailable", status: 403 });
+    });
+  });
+
+  test.each([
+    ["suspended", { suspended: true }, "installation_suspended"],
+    ["deleted", { deleted: true }, "installation_missing"],
+    ["empty", { repositories: [] }, "repository_access_empty"],
+  ])("fails closed for %s installations", async (_label, patch, reason) => {
+    await withAuthorityGitHub(patch, async () => {
+      await expect(
+        authorizeGitHubInstallationBinding(authoritySettings(), {
+          code: "fresh-code",
+          installationId: 42,
+        }),
+      ).rejects.toMatchObject({ reason });
+    });
+  });
+
   test("normalizes GitHub App RSA private keys to PKCS#8 for JWT signing", () => {
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const pkcs1 = privateKey.export({ type: "pkcs1", format: "pem" }).toString();
@@ -201,4 +379,102 @@ describe("GitHub app manifest helpers", () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  test("refuses every unscoped or ambiguous exported installation-token mint", async () => {
+    await expect(
+      createGitHubAppInstallationTokenWithExpiry(authoritySettings(), {
+        installationId: 123,
+      } as { installationId: number; repositoryIds: number[] }),
+    ).rejects.toThrow("explicit, unique repository allowlist");
+    for (const repositoryIds of [[], [456, 456], [0], [Number.MAX_SAFE_INTEGER + 1]]) {
+      await expect(
+        createGitHubAppInstallationTokenWithExpiry(authoritySettings(), {
+          installationId: 123,
+          repositoryIds,
+        }),
+      ).rejects.toThrow("explicit, unique repository allowlist");
+    }
+  });
 });
+
+function authoritySettings() {
+  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  return {
+    githubAppId: "12345",
+    githubClientId: "client-id",
+    githubClientSecret: "client-secret",
+    githubAppSlug: "opengeni",
+    githubAppPrivateKey: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+  } as any;
+}
+
+async function withAuthorityGitHub(
+  input: {
+    accountType?: "User" | "Organization";
+    accountId?: number;
+    actorId?: number;
+    membershipRole?: string;
+    membershipState?: string;
+    membershipStatus?: number;
+    membershipChecks?: Array<{ role?: string; state?: string; status?: number }>;
+    suspended?: boolean;
+    deleted?: boolean;
+    repositories?: Array<Record<string, unknown>>;
+  },
+  run: (requests: string[]) => Promise<void>,
+): Promise<void> {
+  const originalFetch = globalThis.fetch;
+  const requests: string[] = [];
+  let membershipCheck = 0;
+  const accountId = input.accountId ?? 700;
+  const accountType = input.accountType ?? "Organization";
+  const account = { id: accountId, login: "acme", type: accountType };
+  globalThis.fetch = (async (request: RequestInfo | URL) => {
+    const url = String(request);
+    requests.push(url);
+    if (url === "https://github.com/login/oauth/access_token") {
+      return Response.json({ access_token: "user-access" });
+    }
+    if (url === "https://api.github.com/user") {
+      return Response.json({ id: input.actorId ?? 900, login: "actor" });
+    }
+    if (url.startsWith("https://api.github.com/user/installations?")) {
+      return Response.json({
+        installations: [{ id: 42, account, suspended_at: input.suspended ? "now" : null }],
+      });
+    }
+    if (url.startsWith("https://api.github.com/app/installations?")) {
+      return Response.json(
+        input.deleted ? [] : [{ id: 42, account, suspended_at: input.suspended ? "now" : null }],
+      );
+    }
+    if (url === "https://api.github.com/user/memberships/orgs/acme") {
+      const current = input.membershipChecks?.[membershipCheck++];
+      const status = current?.status ?? input.membershipStatus;
+      if (status) {
+        return Response.json({ message: "membership unavailable" }, { status });
+      }
+      return Response.json({
+        role: current?.role ?? input.membershipRole ?? "admin",
+        state: current?.state ?? input.membershipState ?? "active",
+        organization: { id: accountId, login: "acme" },
+      });
+    }
+    if (url === "https://api.github.com/app/installations/42/access_tokens") {
+      return Response.json({ token: "installation-access", expires_at: "2026-07-28T10:00:00Z" });
+    }
+    if (url.startsWith("https://api.github.com/installation/repositories?")) {
+      return Response.json({
+        repositories: input.repositories ?? [
+          { id: 1001, full_name: "acme/repo", name: "repo", default_branch: "main" },
+        ],
+      });
+    }
+    return Response.json({ message: `unexpected request ${url}` }, { status: 500 });
+  }) as typeof fetch;
+  try {
+    await run(requests);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}

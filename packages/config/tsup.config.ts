@@ -1,4 +1,5 @@
 import { defineConfig } from "tsup";
+import { emitDeclarationsOnSuccess } from "../../scripts/tsup-declarations";
 
 // @opengeni/config ships ESM + .d.ts. Every @opengeni/* specifier is marked
 // external so sibling published packages (e.g. @opengeni/contracts) are resolved
@@ -8,7 +9,8 @@ export default defineConfig({
   entry: ["src/index.ts"],
   format: ["esm"],
   target: "es2022",
-  dts: true,
+  dts: false,
+  onSuccess: emitDeclarationsOnSuccess,
   sourcemap: true,
   clean: true,
   external: [/^@opengeni\//],

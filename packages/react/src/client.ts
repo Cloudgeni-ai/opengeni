@@ -21,6 +21,9 @@ export type SessionClientLike = Pick<
   | "pauseSession"
   | "resumeSession"
   | "sendApprovalDecision"
+  | "listHumanInputRequests"
+  | "getHumanInputRequest"
+  | "submitHumanInputResponse"
   | "listEvents"
   | "streamEvents"
   // Turn queue
@@ -111,3 +114,59 @@ export type SessionClientLike = Pick<
   | "terminalPtyResize"
   | "terminalPtyClose"
 >;
+
+/**
+ * Tenant-safe client surface required by the session-only React entry.
+ *
+ * A host proxy can implement only these session-scoped operations instead of
+ * stubbing OpenGeni's workbench, billing, rig, file-system, and workspace
+ * administration APIs. Workspace-level resume is deliberately optional: a
+ * host that does not expose that authority still supports every session-local
+ * composer/control path.
+ */
+export type EmbeddedSessionClientLike = Pick<
+  OpenGeniClient,
+  | "getSession"
+  | "listEvents"
+  | "streamEvents"
+  | "getComposerDraft"
+  | "saveComposerDraft"
+  | "sendMessage"
+  | "steerMessage"
+  | "getQueue"
+  | "moveQueueItem"
+  | "editQueueItem"
+  | "steerQueueItem"
+  | "deleteQueueItem"
+  | "pauseSession"
+  | "resumeSession"
+  | "sendApprovalDecision"
+> & {
+  setWorkspaceInferenceState?: OpenGeniClient["setWorkspaceInferenceState"] | undefined;
+};
+
+/** Event-read surface shared by hooks that optionally tail a session. */
+export type EmbeddedSessionEventClientLike = Pick<OpenGeniClient, "getSession" | "streamEvents">;
+
+/** Exact client surface required by {@link useSession}. */
+export type EmbeddedSessionReadClientLike = EmbeddedSessionEventClientLike &
+  Pick<OpenGeniClient, "getSession" | "updateSession">;
+
+/** Exact client surface required by {@link useGoal}. */
+export type EmbeddedGoalClientLike = EmbeddedSessionEventClientLike &
+  Pick<OpenGeniClient, "getGoal" | "updateGoal" | "deleteGoal">;
+
+/** Exact client surface required by {@link useSessionLineage}. */
+export type EmbeddedSessionLineageClientLike = EmbeddedSessionEventClientLike &
+  Pick<OpenGeniClient, "getSessionLineage">;
+
+/** Exact client surface required by {@link useFileAttachments}. */
+export type EmbeddedFileAttachmentClientLike = Pick<OpenGeniClient, "uploadFile">;
+
+/** Exact client surface required by structured human-input hooks. */
+export type EmbeddedHumanInputSessionClientLike = EmbeddedSessionEventClientLike &
+  Pick<OpenGeniClient, "listHumanInputRequests" | "submitHumanInputResponse">;
+
+/** Exact client surface required by MCP approval-policy hooks. */
+export type EmbeddedSessionMcpApprovalPolicyClientLike = EmbeddedSessionEventClientLike &
+  Pick<OpenGeniClient, "updateSessionMcpApprovalPolicy">;

@@ -2,6 +2,7 @@ import {
   getDocumentChunk,
   listDocumentBases,
   searchDocuments,
+  type DocumentAccessFilter,
   type DocumentServices,
 } from "@opengeni/documents";
 import {
@@ -52,12 +53,21 @@ export function buildDocumentsMcpServer(
   options: {
     createdBySessionId?: string | undefined;
     access?: MemoryAccessContext | undefined;
+    /** The human subject whose agent is making this retrieval request. */
+    viewerSubjectId?: string | undefined;
   } = {},
 ): McpServer {
   const server = new McpServer({
     name: "opengeni-documents",
     version: "1.0.0",
   });
+  // This server is the agent retrieval surface. Agent-disabled documents are
+  // never reachable. Workspace-visible documents are shared; private
+  // documents are available only to the creating subject's agent.
+  const agentAccess: DocumentAccessFilter = {
+    agentOnly: true,
+    ...(options.viewerSubjectId ? { viewerSubjectId: options.viewerSubjectId } : {}),
+  };
 
   server.registerTool(
     "list_document_bases",
@@ -76,7 +86,7 @@ export function buildDocumentsMcpServer(
       description: "Search indexed documents with hybrid, vector, or keyword retrieval.",
       inputSchema: SearchInputSchema,
     },
-    async (input) => searchContent(db, workspaceId, documentServices, input),
+    async (input) => searchContent(db, workspaceId, documentServices, input, agentAccess),
   );
 
   server.registerTool(
@@ -86,7 +96,7 @@ export function buildDocumentsMcpServer(
         "Search company knowledge sources with optional base, source-kind, ACL, and retrieval-mode filters.",
       inputSchema: SearchInputSchema,
     },
-    async (input) => searchContent(db, workspaceId, documentServices, input),
+    async (input) => searchContent(db, workspaceId, documentServices, input, agentAccess),
   );
 
   server.registerTool(
@@ -98,7 +108,7 @@ export function buildDocumentsMcpServer(
       },
     },
     async ({ chunkId }) => {
-      const found = await getDocumentChunk(db, workspaceId, chunkId);
+      const found = await getDocumentChunk(db, workspaceId, chunkId, agentAccess);
       return {
         content: [
           { type: "text", text: found ? JSON.stringify(found) : `chunk not found: ${chunkId}` },
@@ -117,7 +127,7 @@ export function buildDocumentsMcpServer(
       },
     },
     async ({ chunkId }) => {
-      const found = await getDocumentChunk(db, workspaceId, chunkId);
+      const found = await getDocumentChunk(db, workspaceId, chunkId, agentAccess);
       return {
         content: [
           { type: "text", text: found ? JSON.stringify(found) : `chunk not found: ${chunkId}` },
@@ -224,6 +234,7 @@ async function searchContent(
       | undefined;
     aclTags?: string[] | undefined;
   },
+  access: DocumentAccessFilter,
 ) {
   return {
     content: [
@@ -240,6 +251,7 @@ async function searchContent(
               ...(input.mode ? { mode: input.mode } : {}),
               ...(input.sourceKinds ? { sourceKinds: input.sourceKinds } : {}),
               ...(input.aclTags ? { aclTags: input.aclTags } : {}),
+              access,
             },
             documentServices,
           ),

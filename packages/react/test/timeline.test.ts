@@ -9,6 +9,7 @@ import {
   sessionStatusFromEvents,
   toolDisplayName,
   type AgentMessageItem,
+  type FleetDecisionItem,
   type MemoryItem,
   type SandboxItem,
   type TimelineGroup,
@@ -80,6 +81,56 @@ function reset(): void {
   sequence = 0;
 }
 
+function fleetDecisionPayload(): Record<string, unknown> {
+  return {
+    schemaVersion: 1,
+    mode: "shadow",
+    actual: { outcome: "selected", candidateKey: "c00", reason: "active" },
+    comparison: "match",
+    replay: {
+      schemaVersion: 1,
+      policyVersion: "adaptive-shadow-v1",
+      mode: "shadow",
+      input: { candidates: [{ key: "c00" }, { key: "c01" }] },
+      truncatedCandidateCount: 0,
+      policyFingerprint: "must-not-reach-the-view",
+      inputFingerprint: "must-not-reach-the-view",
+      decisionFingerprint: "must-not-reach-the-view",
+      decision: {
+        outcome: "selected",
+        selectedCandidateKey: "c00",
+        reason: "affinity_best",
+        admission: {
+          outcome: "admit",
+          reason: "pacing_disabled",
+          borrowedIdleCapacity: false,
+        },
+        borrowedOverlayCapacity: false,
+        strandedEligibleCount: 0,
+        confidence: "unknown",
+        scores: [
+          {
+            candidateKey: "c00",
+            eligible: true,
+            rejectionReason: null,
+            total: -2_400,
+            confidence: "unknown",
+          },
+          {
+            candidateKey: "c01",
+            eligible: true,
+            rejectionReason: null,
+            total: 1_600,
+            confidence: "unknown",
+          },
+        ],
+      },
+    },
+    accountEmail: "secret-owner@example.test",
+    credentialId: "credential-secret",
+  };
+}
+
 type ActivityGroup = Extract<TimelineGroup, { kind: "activity" }>;
 type TurnGroup = Extract<TimelineGroup, { kind: "turn" }>;
 
@@ -106,6 +157,156 @@ function flattenActivityIds(group: TurnGroup | undefined): string[] {
 }
 
 describe("buildTimeline", () => {
+  test("projects a bounded identity-free fleet shadow decision", () => {
+    reset();
+    const items = buildTimeline([event("codex.fleet.decision", fleetDecisionPayload())]);
+
+    expect(items).toHaveLength(1);
+    const decision = items[0] as FleetDecisionItem;
+    expect(decision).toMatchObject({
+      kind: "fleet-decision",
+      turnId: "turn-1",
+      policyVersion: "adaptive-shadow-v1",
+      actualOutcome: "selected",
+      actualCandidateKey: "c00",
+      shadowOutcome: "selected",
+      shadowCandidateKey: "c00",
+      comparison: "match",
+      candidateCount: 2,
+      truncatedCandidateCount: 0,
+      scoreRowsTruncatedCount: 0,
+    });
+    expect(decision.scores).toEqual([
+      {
+        candidateKey: "c00",
+        eligible: true,
+        rejectionReason: null,
+        total: -2_400,
+        confidence: "unknown",
+      },
+      {
+        candidateKey: "c01",
+        eligible: true,
+        rejectionReason: null,
+        total: 1_600,
+        confidence: "unknown",
+      },
+    ]);
+    const projected = JSON.stringify(decision);
+    expect(projected).not.toContain("secret-owner@example.test");
+    expect(projected).not.toContain("credential-secret");
+    expect(projected).not.toContain("Fingerprint");
+    expect(projected).not.toContain("must-not-reach-the-view");
+  });
+
+  test("accepts every typed admission reason with its matching event semantics", () => {
+    reset();
+    const cases = [
+      { reason: "fenced_in_flight", outcome: "admit", borrowedIdleCapacity: false },
+      { reason: "pacing_disabled", outcome: "admit", borrowedIdleCapacity: false },
+      { reason: "capacity_unknown", outcome: "admit", borrowedIdleCapacity: false },
+      { reason: "capacity_available", outcome: "admit", borrowedIdleCapacity: false },
+      { reason: "work_conserving_borrow", outcome: "admit", borrowedIdleCapacity: true },
+      { reason: "manager_priority", outcome: "pace", borrowedIdleCapacity: false },
+      { reason: "standard_starvation_bound", outcome: "admit", borrowedIdleCapacity: false },
+      { reason: "capacity_saturated", outcome: "pace", borrowedIdleCapacity: false },
+      { reason: "emergency_fuse", outcome: "pace", borrowedIdleCapacity: false },
+    ] as const satisfies ReadonlyArray<{
+      reason: FleetDecisionItem["admissionReason"];
+      outcome: FleetDecisionItem["admissionOutcome"];
+      borrowedIdleCapacity: boolean;
+    }>;
+
+    for (const admissionCase of cases) {
+      const payload = fleetDecisionPayload();
+      const isPaced = admissionCase.outcome === "pace";
+      payload.comparison = isPaced ? "different_outcome" : "match";
+      const replay = payload.replay as { decision: Record<string, unknown> };
+      replay.decision = {
+        ...replay.decision,
+        outcome: isPaced ? "paced" : "selected",
+        selectedCandidateKey: isPaced ? null : "c00",
+        reason: isPaced ? "admission_paced" : "affinity_best",
+        admission: {
+          outcome: admissionCase.outcome,
+          reason: admissionCase.reason,
+          borrowedIdleCapacity: admissionCase.borrowedIdleCapacity,
+        },
+        borrowedOverlayCapacity: false,
+        strandedEligibleCount: 0,
+        scores: isPaced ? [] : (replay.decision.scores ?? []),
+      };
+
+      const [item] = buildTimeline([event("codex.fleet.decision", payload)]);
+      expect(item).toMatchObject({
+        kind: "fleet-decision",
+        shadowOutcome: isPaced ? "paced" : "selected",
+        shadowReason: isPaced ? "admission_paced" : "affinity_best",
+        admissionOutcome: admissionCase.outcome,
+        admissionReason: admissionCase.reason,
+        borrowedIdleCapacity: admissionCase.borrowedIdleCapacity,
+      });
+    }
+  });
+
+  test("caps score rows at 32 without reading an extra secret-shaped row", () => {
+    reset();
+    const payload = fleetDecisionPayload();
+    const replay = payload.replay as Record<string, unknown>;
+    const input = replay.input as Record<string, unknown>;
+    const decision = replay.decision as Record<string, unknown>;
+    input.candidates = Array.from({ length: 32 }, (_, index) => ({
+      key: `c${index.toString(36).padStart(2, "0")}`,
+    }));
+    decision.scores = [
+      ...Array.from({ length: 32 }, (_, index) => ({
+        candidateKey: `c${index.toString(36).padStart(2, "0")}`,
+        eligible: true,
+        rejectionReason: null,
+        total: index,
+        confidence: "unknown",
+      })),
+      {
+        candidateKey: "credential-secret@example.test",
+        eligible: true,
+        rejectionReason: null,
+        total: 33,
+        confidence: "unknown",
+      },
+    ];
+
+    const [item] = buildTimeline([event("codex.fleet.decision", payload)]);
+    expect(item?.kind).toBe("fleet-decision");
+    if (item?.kind !== "fleet-decision") throw new Error("expected fleet decision");
+    expect(item.scores).toHaveLength(32);
+    expect(item.scoreRowsTruncatedCount).toBe(1);
+    expect(JSON.stringify(item)).not.toContain("credential-secret@example.test");
+  });
+
+  test("drops malformed or identity-shaped fleet events instead of rendering payload strings", () => {
+    reset();
+    const invalidAlias = fleetDecisionPayload();
+    (invalidAlias.actual as Record<string, unknown>).candidateKey =
+      "credential-secret@example.test";
+
+    const invalidEnum = fleetDecisionPayload();
+    (invalidEnum.replay as { decision: Record<string, unknown> }).decision.reason =
+      "operator supplied this arbitrary message";
+
+    const invalidNumber = fleetDecisionPayload();
+    const invalidScores = (invalidNumber.replay as { decision: { scores: unknown[] } }).decision
+      .scores;
+    (invalidScores[0] as Record<string, unknown>).total = Number.POSITIVE_INFINITY;
+
+    const inconsistentReason = fleetDecisionPayload();
+    (inconsistentReason.actual as Record<string, unknown>).reason = "all_capped";
+
+    expect(buildTimeline([event("codex.fleet.decision", invalidAlias)])).toEqual([]);
+    expect(buildTimeline([event("codex.fleet.decision", invalidEnum)])).toEqual([]);
+    expect(buildTimeline([event("codex.fleet.decision", invalidNumber)])).toEqual([]);
+    expect(buildTimeline([event("codex.fleet.decision", inconsistentReason)])).toEqual([]);
+  });
+
   test("projects childCompletion user messages as worker-completion items", () => {
     reset();
     const items = buildTimeline([
@@ -579,6 +780,56 @@ describe("buildTimeline", () => {
     expect(first.status).toBe("running");
     expect(second.status).toBe("complete");
     expect(second.output).toBe("resource {}");
+  });
+
+  test("a completed hosted web-search item settles without a separate output event", () => {
+    reset();
+    const items = buildTimeline([
+      event("agent.toolCall.created", {
+        id: "ws-1",
+        name: "web_search_call",
+        raw: {
+          type: "hosted_tool_call",
+          status: "completed",
+          providerData: {
+            action: { type: "search", query: "OpenAI official website" },
+          },
+        },
+      }),
+    ]);
+
+    expect((items[0] as ToolCallItem).status).toBe("complete");
+  });
+
+  test("completed message ordering follows intervening hosted search activity", () => {
+    reset();
+    const items = buildTimeline([
+      event("agent.message.delta", { text: "Answer" }),
+      event("agent.toolCall.created", {
+        id: "ws-1",
+        name: "web_search_call",
+        raw: {
+          type: "hosted_tool_call",
+          status: "completed",
+          providerData: { action: { type: "search", query: "source" } },
+        },
+      }),
+      event("agent.message.completed", { text: "Answer with sources." }),
+    ]);
+
+    expect(items.map((item) => item.kind)).toEqual(["tool-call", "agent-message"]);
+    expect((items[1] as AgentMessageItem).text).toBe("Answer with sources.");
+  });
+
+  test("removes unresolved private citation handles from timeline text", () => {
+    reset();
+    const items = buildTimeline([
+      event("agent.message.completed", {
+        text: "OpenAI docs. citeturn1search3turn2view0",
+      }),
+    ]);
+
+    expect((items[0] as AgentMessageItem).text).toBe("OpenAI docs.");
   });
 
   test("session_create becomes a worker item with prompt and spawned session id from MCP output", () => {
@@ -1172,6 +1423,31 @@ describe("buildTimeline", () => {
       resource: null,
       toolName: null,
       authorizationUrl: null,
+    });
+  });
+
+  test("credential.auth_needed reuses the reconnect card without inventing a tool", () => {
+    reset();
+    const items = buildTimeline([
+      event(
+        "credential.auth_needed",
+        {
+          credentialClass: "run",
+          providerDomain: "cloud.example",
+          connectionId: "host:connection:1",
+          reason: "expired",
+          authorizationUrl: "https://cloud.example/connect",
+        },
+        { turnId: "turn-1" },
+      ),
+    ]);
+    expect(items[0]).toMatchObject({
+      kind: "auth-needed",
+      turnId: "turn-1",
+      providerDomain: "cloud.example",
+      connectionId: "host:connection:1",
+      reason: "expired",
+      toolName: null,
     });
   });
 

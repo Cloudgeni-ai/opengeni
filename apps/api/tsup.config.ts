@@ -1,4 +1,5 @@
 import { defineConfig } from "tsup";
+import { emitDeclarationsOnSuccess } from "../../scripts/tsup-declarations";
 
 // @opengeni/api-router is an ENGINE-DISTRIBUTION surface. Stage C publishes the
 // full @opengeni/* runtime closure to npm, so every @opengeni/*, hono, and
@@ -17,7 +18,8 @@ export default defineConfig({
   },
   format: ["esm"],
   target: "es2022",
-  dts: true,
+  dts: false,
+  onSuccess: emitDeclarationsOnSuccess,
   sourcemap: true,
   clean: true,
   external: [/^@opengeni\//, /^@temporalio\//, "hono"],

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { SessionEvent } from "@opengeni/sdk";
+import type { SessionEvent, SessionEventPayloadMode } from "@opengeni/sdk";
 import { actRun, registerDom, renderHook, flush } from "./render-hook";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import {
@@ -41,6 +41,7 @@ type ListOptions = {
   before?: number;
   limit?: number;
   compact?: boolean;
+  payloadMode?: SessionEventPayloadMode;
 };
 
 function listPage(store: SessionEvent[], options: ListOptions = {}): SessionEvent[] {
@@ -99,7 +100,9 @@ describe("useSessionEvents", () => {
     }, undefined);
     await flush(20);
 
-    expect(listCalls).toEqual([{ before: Number.MAX_SAFE_INTEGER, limit: 1000, compact: true }]);
+    expect(listCalls).toEqual([
+      { before: Number.MAX_SAFE_INTEGER, limit: 1000, compact: true, payloadMode: "full" },
+    ]);
     expect(hook.result.current.events).toHaveLength(1000);
     expect(hook.result.current.events[0]?.sequence).toBe(201);
     expect(hook.result.current.hasOlder).toBe(true);
@@ -286,7 +289,9 @@ describe("useSessionEvents", () => {
     // TRIMMED to the oldest user message rather than fetching further down.
     // loadOlder's `before` cursor is the trimmed top, so the fragment is
     // refetched with its own turn.
-    expect(listCalls).toEqual([{ before: Number.MAX_SAFE_INTEGER, limit: 1000, compact: true }]);
+    expect(listCalls).toEqual([
+      { before: Number.MAX_SAFE_INTEGER, limit: 1000, compact: true, payloadMode: "full" },
+    ]);
     expect(hook.result.current.events[0]?.type).toBe("user.message");
     expect(hook.result.current.events[0]?.sequence).toBe(6103);
     expect(hook.result.current.hasOlder).toBe(true);
@@ -296,8 +301,8 @@ describe("useSessionEvents", () => {
     // The older window starts exactly below the kept window and reaches the log
     // start within the older two-fetch cap.
     expect(more).toBe(false);
-    expect(listCalls[1]).toEqual({ before: 6103, limit: 5000, compact: true });
-    expect(listCalls[2]).toEqual({ before: 1103, limit: 5000, compact: true });
+    expect(listCalls[1]).toEqual({ before: 6103, limit: 5000, compact: true, payloadMode: "full" });
+    expect(listCalls[2]).toEqual({ before: 1103, limit: 5000, compact: true, payloadMode: "full" });
     expect(hook.result.current.events[0]?.type).toBe("session.created");
     expect(hook.result.current.events[0]?.sequence).toBe(1);
     expect(hook.result.current.hasOlder).toBe(false);
@@ -414,7 +419,9 @@ describe("useSessionEvents", () => {
     expect(hook.result.current.events).toHaveLength(1000);
     expect(hook.result.current.events[0]?.sequence).toBe(39_001);
     expect(hook.result.current.hasOlder).toBe(true);
-    expect(listCalls).toEqual([{ before: Number.MAX_SAFE_INTEGER, limit: 1000, compact: true }]);
+    expect(listCalls).toEqual([
+      { before: Number.MAX_SAFE_INTEGER, limit: 1000, compact: true, payloadMode: "full" },
+    ]);
 
     await hook.unmount();
   });
@@ -437,7 +444,9 @@ describe("useSessionEvents", () => {
     );
     await flush(20);
 
-    expect(listCalls).toEqual([{ before: Number.MAX_SAFE_INTEGER, limit: 1000, compact: true }]);
+    expect(listCalls).toEqual([
+      { before: Number.MAX_SAFE_INTEGER, limit: 1000, compact: true, payloadMode: "full" },
+    ]);
     expect(hook.result.current.events.map((item) => item.sequence)).toEqual([1, 10]);
     expect(streamCalls).toEqual([99]);
 
@@ -488,10 +497,10 @@ describe("useSessionEvents", () => {
 
     expect(more).toBe(false);
     expect(calls).toEqual([
-      { before: Number.MAX_SAFE_INTEGER, limit: 1000, compact: true },
-      { before: 8, limit: 5000, compact: true },
-      { before: 6, limit: 5000, compact: true },
-      { before: 4, limit: 5000, compact: true },
+      { before: Number.MAX_SAFE_INTEGER, limit: 1000, compact: true, payloadMode: "full" },
+      { before: 8, limit: 5000, compact: true, payloadMode: "full" },
+      { before: 6, limit: 5000, compact: true, payloadMode: "full" },
+      { before: 4, limit: 5000, compact: true, payloadMode: "full" },
     ]);
     const agentText = hook.result.current.timeline
       .filter(
@@ -528,7 +537,9 @@ describe("useSessionEvents", () => {
     );
     await flush(20);
 
-    expect(listCalls).toEqual([{ before: Number.MAX_SAFE_INTEGER, limit: 1000, compact: true }]);
+    expect(listCalls).toEqual([
+      { before: Number.MAX_SAFE_INTEGER, limit: 1000, compact: true, payloadMode: "full" },
+    ]);
     expect(hook.result.current.events).toHaveLength(1000);
     expect(hook.result.current.events[0]?.sequence).toBe(19_001);
     expect(hook.result.current.hasOlder).toBe(true);
@@ -571,7 +582,9 @@ describe("useSessionEvents", () => {
     const more = await actRun(() => hook.result.current.loadOlder());
     await flush(20);
     expect(more).toBeFalse();
-    expect(listCalls).toEqual([{ before: oldFirst, limit: 5000, compact: true }]);
+    expect(listCalls).toEqual([
+      { before: oldFirst, limit: 5000, compact: true, payloadMode: "full" },
+    ]);
     // The loaded prefix temporarily retained 1..10000. Reconnecting from
     // 10000 then replayed 10001..10051, restoring one contiguous newest suffix
     // instead of appending live rows across a historical gap.
@@ -850,7 +863,7 @@ describe("useSessionEvents", () => {
     await flush(100);
 
     expect(more).toBeFalse();
-    expect(listCalls).toEqual([{ before: 52, limit: 5000, compact: true }]);
+    expect(listCalls).toEqual([{ before: 52, limit: 5000, compact: true, payloadMode: "full" }]);
     // loadOlder retained 1..10000, then the restarted stream replayed the
     // evicted 10001..10051 tail before delivering the new live row 10052.
     expect(streamCalls).toEqual([0, 10_000]);
@@ -869,6 +882,59 @@ describe("useSessionEvents", () => {
 });
 
 describe("boundBrowserSessionEventWindow", () => {
+  test("preserves a normal bounded retained receipt while enforcing the browser window", () => {
+    const artifactId = "44444444-4444-4444-8444-444444444444";
+    const receipt = {
+      available: true as const,
+      artifactId,
+      kind: "tool_result" as const,
+      contentType: "application/json",
+      originalBytes: 4 * 1024 * 1024,
+      sha256: "a".repeat(64),
+      retainedAt: "2026-07-21T00:00:00.000Z",
+      retention: { policy: "workspace_file" as const, expiresAt: null },
+      retrieval: {
+        method: "GET" as const,
+        path: `/v1/workspaces/${WORKSPACE_ID}/artifacts/${artifactId}/content`,
+        acceptRanges: "bytes" as const,
+        maxRangeBytes: 1024 * 1024,
+      },
+    };
+    const bounded = event(6, "agent.toolCall.output", {
+      id: "call-retained",
+      output: "bounded human preview",
+      truncation: {
+        truncated: true,
+        surface: "durable_audit",
+        reason: "payload_bytes_exceeded",
+        originalBytes: 4 * 1024 * 1024,
+        deliveredBytes: 1_024,
+        omittedBytes: 4 * 1024 * 1024 - 1_024,
+        estimatedOriginalTokens: 1024 * 1024,
+        estimatedDeliveredTokens: 256,
+        fullEvidence: receipt,
+        details: [],
+      },
+    });
+    const window = boundBrowserSessionEventWindow(
+      [event(1), event(2), event(3), event(4), event(5), bounded],
+      { maxCount: 3, maxBytes: 16 * 1024 },
+    );
+
+    expect(window.truncated).toBeTrue();
+    expect(window.events).toHaveLength(3);
+    expect(window.events.at(-1)).toBe(bounded);
+    const latestPayload = window.events.at(-1)!.payload as Record<string, unknown>;
+    expect(
+      (
+        latestPayload.truncation as {
+          fullEvidence: unknown;
+        }
+      ).fullEvidence,
+    ).toEqual(receipt);
+    expect(window.bytes).toBeLessThanOrEqual(16 * 1024);
+  });
+
   test("defensively replaces a multi-megabyte legacy event before rendering", () => {
     const legacy = event(1, "agent.toolCall.output", {
       id: "call-1",

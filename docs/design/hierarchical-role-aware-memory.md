@@ -61,7 +61,8 @@ the audited SHA. These values are a point-in-time observation, not a live SLO.
 
 Implemented on the focused branch after the audited baseline:
 
-- maintenance/drain-only migration `0096_hierarchical_role_aware_memory.sql` adds trusted session
+- maintenance/drain-only migration `0137_hierarchical_role_aware_memory.sql` consumes the existing
+  immutable session creator/turn-initiator contract and adds trusted session
   creator provenance, typed scopes, bounded labels, relationships, reversible
   maintenance operations, and text-free deletion/private-export audit tables;
   all five memory tables are FORCE RLS;
@@ -139,27 +140,30 @@ exists.
 #### Trusted user context
 
 The first-party MCP principal is `worker:first-party-mcp`, not the human that
-created the session. Session rows at the audited SHA do not persist their creator.
-Therefore memory-design adds nullable, immutable `sessions.created_by_subject_id`:
+initiated the session lineage. The existing session-turn-initiator contract
+freezes `sessions.created_by_kind`, `created_by_subject_id`, and
+`created_by_context`, and freezes each turn's own initiator separately:
 
-- direct creation records `grant.subjectId`;
-- child creation inherits the parent session's creator subject;
-- system/scheduled and historical sessions remain null unless a trusted creator
-  already exists;
-- user-scope agent search, save, and injection fail closed when it is null.
+- direct human creation records the authenticated subject initiator;
+- agent-created sessions inherit that causal initiator only through the exact
+  worker-signed calling turn/attempt validated under the create transaction;
+- scheduled, delegated-service, and unattributed legacy creation remain explicit
+  service initiators rather than being inferred back to a human;
+- user-scope agent search, save, and injection accept only
+  `created_by_kind = 'subject'` and fail closed for every service/legacy creator.
 
 For REST and the deprecated documents-MCP route, a signed session id is resolved
 against the requested workspace before any memory operation. Missing or foreign
 sessions fail with 403. The worker bearer subject never substitutes for the
-persisted creator; a signed session without a creator fails closed for user writes,
-while workspace writes remain valid. Sessionless human/API grants retain their
-authenticated subject. Only the validated session id may become creator/actor
-provenance, and the composite `(workspace_id, created_by_session_id)` foreign key
-prevents a valid session from another tenant being attached to a memory.
+persisted initiating human; a signed service/legacy-created session fails closed
+for user writes, while workspace writes remain valid. Sessionless human/API grants
+retain their authenticated subject. Only the validated session id may become
+creator/actor provenance, and the composite
+`(workspace_id, created_by_session_id)` foreign key prevents a valid session from
+another tenant being attached to a memory.
 
-The creator subject stays an internal runtime field; it need not be exposed in the
-public `Session` response. Subject labels and arbitrary session metadata are never
-used as identity.
+The creator initiator remains immutable session truth; subject labels and arbitrary
+session metadata are never used as identity.
 
 #### Role and task context
 
@@ -354,7 +358,7 @@ Required database evidence uses a non-owner app role and at least:
 
 ## Migration and rollout
 
-The implementation uses maintenance/drain-only migration `0096` after the retained migrations.
+The implementation uses maintenance/drain-only migration `0137` after the retained migrations.
 Although its storage changes are additive, it is not safe for mixed worker
 versions: an old worker ignores typed applicability and can over-read role-,
 session-, or ephemeral-scoped rows written by a new worker during overlap.
@@ -363,7 +367,7 @@ The cutover sequence is therefore:
 
 1. stop new session/turn admission;
 2. drain and terminate every old worker and in-flight session execution;
-3. apply `0096` with no old application process reading memory;
+3. apply `0137` with no old application process reading memory;
 4. start only compatible API and worker versions;
 5. verify health and reopen admission.
 

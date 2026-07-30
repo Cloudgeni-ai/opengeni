@@ -9,7 +9,10 @@ import {
 import postgres from "postgres";
 import {
   buildConnectionTokenResolver,
+  buildHostConnectionTokenResolver,
   ConnectionRefreshHttpError,
+  HostMcpCredentialBindingError,
+  HostMcpCredentialScopeError,
   normalizeBearerScheme,
   createConnection,
   createDb,
@@ -21,6 +24,7 @@ import {
   listConnectionsMetadata,
   loadConnectionCredentialForBroker,
   recordConnectionTokenRefresh,
+  recordConnectionUsed,
   refreshOAuthConnectionCredential,
   revokeConnection,
   setConnectionStatus,
@@ -265,6 +269,112 @@ describe("connections table and helpers", () => {
     expect(allowed?.credential).toEqual({ headers: { authorization: "Bearer subject-a" } });
   });
 
+  test("provider lookup selects the exact subject even when shared and other-subject rows are newer", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const alice = await createConnection(db, {
+      ...ws,
+      subjectId: "subject-alice",
+      providerDomain: "slack.com",
+      kind: "oauth2",
+      credentialEncrypted: enc({ headers: { authorization: "Bearer alice" } }),
+    });
+    const bob = await createConnection(db, {
+      ...ws,
+      subjectId: "subject-bob",
+      providerDomain: "slack.com",
+      kind: "oauth2",
+      credentialEncrypted: enc({ headers: { authorization: "Bearer bob" } }),
+    });
+    await createConnection(db, {
+      ...ws,
+      subjectId: null,
+      providerDomain: "slack.com",
+      kind: "oauth2",
+      credentialEncrypted: enc({ headers: { authorization: "Bearer shared" } }),
+    });
+
+    const aliceLoaded = await loadConnectionCredentialForBroker(db, settings, {
+      workspaceId: ws.workspaceId,
+      providerDomain: "slack.com",
+      kind: "oauth2",
+      subjectId: "subject-alice",
+      allowSubjectOwned: true,
+    });
+    const bobLoaded = await loadConnectionCredentialForBroker(db, settings, {
+      workspaceId: ws.workspaceId,
+      providerDomain: "slack.com",
+      kind: "oauth2",
+      subjectId: "subject-bob",
+      allowSubjectOwned: true,
+    });
+    expect(aliceLoaded?.id).toBe(alice.id);
+    expect(aliceLoaded?.credential).toEqual({ headers: { authorization: "Bearer alice" } });
+    expect(bobLoaded?.id).toBe(bob.id);
+    expect(bobLoaded?.credential).toEqual({ headers: { authorization: "Bearer bob" } });
+    expect(
+      await loadConnectionCredentialForBroker(db, settings, {
+        workspaceId: ws.workspaceId,
+        providerDomain: "slack.com",
+        kind: "oauth2",
+        allowSubjectOwned: true,
+      }),
+    ).toBeNull();
+  });
+
+  test("refresh, status, and usage writes retain the exact connection subject", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const alice = await createConnection(db, {
+      ...ws,
+      subjectId: "subject-alice",
+      providerDomain: "slack.com",
+      kind: "oauth2",
+      credentialEncrypted: enc({
+        access_token: "access-alice",
+        refresh_token: "refresh-alice",
+        token_type: "Bearer",
+      }),
+    });
+
+    expect(
+      await recordConnectionTokenRefresh(db, {
+        id: alice.id,
+        version: alice.version,
+        workspaceId: ws.workspaceId,
+        subjectId: "subject-bob",
+        credentialEncrypted: enc({ access_token: "access-wrong", token_type: "Bearer" }),
+        expiresAt: null,
+        lastRefreshAt: new Date(),
+      }),
+    ).toBe(false);
+    expect(
+      await setConnectionStatus(db, ws.workspaceId, "needs_reauth", "wrong-subject", {
+        id: alice.id,
+        version: alice.version,
+        subjectId: "subject-bob",
+      }),
+    ).toBe(false);
+    await recordConnectionUsed(db, ws.workspaceId, alice.id, "subject-bob");
+    const untouched = await getConnectionMetadata(db, ws.workspaceId, alice.id, "subject-alice");
+    expect(untouched).toMatchObject({ status: "active", version: alice.version, lastUsedAt: null });
+
+    await recordConnectionUsed(db, ws.workspaceId, alice.id, "subject-alice");
+    expect(
+      (await getConnectionMetadata(db, ws.workspaceId, alice.id, "subject-alice"))?.lastUsedAt,
+    ).not.toBeNull();
+    expect(
+      await setConnectionStatus(db, ws.workspaceId, "needs_reauth", "expired", {
+        id: alice.id,
+        version: alice.version,
+        subjectId: "subject-alice",
+      }),
+    ).toBe(true);
+    expect(
+      await getConnectionMetadata(db, ws.workspaceId, alice.id, "subject-alice"),
+    ).toMatchObject({ status: "needs_reauth", lastError: "expired", subjectId: "subject-alice" });
+  });
+
   test("token refresh and status updates are compare-and-set on id plus version", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
@@ -495,7 +605,257 @@ describe("connections table and helpers", () => {
   });
 });
 
+describe("buildHostConnectionTokenResolver", () => {
+  const context = {
+    accountId: "acct_1",
+    workspaceId: "ws_1",
+    sessionId: "session_1",
+    rootSessionId: "session_root",
+    turnId: "turn_1",
+    attemptId: "attempt_1",
+    executionGeneration: 4,
+    initiator: { kind: "subject" as const, subjectId: "host:user:42", label: "Ada" },
+    initiatorContext: { source: "host", via: [{ kind: "agent" }] },
+    surface: "model" as const,
+  };
+
+  test("forwards frozen turn authority and returns a scope-checked header snapshot", async () => {
+    let received: unknown;
+    const headers = { Authorization: "Bearer host-token" };
+    const resolver = buildHostConnectionTokenResolver(async (request) => {
+      received = request;
+      return {
+        status: "ok",
+        accountId: request.accountId,
+        workspaceId: request.workspaceId,
+        sessionId: request.sessionId,
+        headers,
+        connectionId: "host-connection-7",
+        providerDomain: request.connectionRef.providerDomain,
+        ...(request.connectionRef.provider ? { provider: request.connectionRef.provider } : {}),
+        ...(request.connectionRef.scopes ? { scopes: request.connectionRef.scopes } : {}),
+        ...(request.connectionRef.selectedResources
+          ? { selectedResources: request.connectionRef.selectedResources }
+          : {}),
+        expiresAt: "2026-07-21T23:00:00.000Z",
+      };
+    }, context);
+
+    const result = await resolver({
+      workspaceId: "ws_1",
+      subjectId: "worker:first-party-mcp",
+      serverId: "github",
+      destinationUrl: "https://GitHub.com/mcp/",
+      toolName: "create_pull_request",
+      connectionRef: {
+        provider: "github",
+        providerDomain: "github.com",
+        kind: "app_install",
+        connectionId: "host-connection-7",
+        scopes: ["repo"],
+        selectedResources: [
+          { kind: "repository", id: "101" },
+          { kind: "repository", id: "202" },
+        ],
+      },
+      forceRefresh: true,
+    });
+
+    expect(received).toEqual({
+      ...context,
+      callerSubjectId: "worker:first-party-mcp",
+      serverId: "github",
+      toolName: "create_pull_request",
+      destinationUrl: "https://github.com/mcp",
+      connectionRef: {
+        provider: "github",
+        providerDomain: "github.com",
+        kind: "app_install",
+        connectionId: "host-connection-7",
+        scopes: ["repo"],
+        selectedResources: [
+          { kind: "repository", id: "101" },
+          { kind: "repository", id: "202" },
+        ],
+      },
+      forceRefresh: true,
+    });
+    expect(result).toEqual({
+      status: "ok",
+      headers: { Authorization: "Bearer host-token" },
+      connectionId: "host-connection-7",
+      expiresAt: new Date("2026-07-21T23:00:00.000Z"),
+    });
+    headers.Authorization = "Bearer mutated-after-return";
+    expect(result).toMatchObject({ headers: { Authorization: "Bearer host-token" } });
+  });
+
+  test("rejects a mismatched host scope before returning credential material", async () => {
+    const resolver = buildHostConnectionTokenResolver(
+      async () => ({
+        status: "ok",
+        accountId: "acct_1",
+        workspaceId: "other-workspace",
+        sessionId: "session_1",
+        headers: { Authorization: "Bearer wrong-tenant" },
+        connectionId: "host-connection-7",
+        providerDomain: "github.com",
+      }),
+      context,
+    );
+
+    expect(
+      resolver({
+        workspaceId: "ws_1",
+        serverId: "github",
+        destinationUrl: "https://github.com/mcp",
+        connectionRef: { providerDomain: "github.com" },
+      }),
+    ).rejects.toBeInstanceOf(HostMcpCredentialScopeError);
+  });
+
+  test("rejects a destination/provider mismatch before invoking the host", async () => {
+    let calls = 0;
+    const resolver = buildHostConnectionTokenResolver(async () => {
+      calls += 1;
+      return {
+        status: "ok",
+        accountId: "acct_1",
+        workspaceId: "ws_1",
+        sessionId: "session_1",
+        headers: { Authorization: "Bearer must-not-escape" },
+        connectionId: "host-connection-7",
+        providerDomain: "github.com",
+      };
+    }, context);
+
+    await expect(
+      resolver({
+        workspaceId: "ws_1",
+        serverId: "github",
+        destinationUrl: "https://attacker.example/mcp",
+        connectionRef: { provider: "github", providerDomain: "github.com" },
+      }),
+    ).rejects.toBeInstanceOf(HostMcpCredentialBindingError);
+    expect(calls).toBe(0);
+  });
+
+  test("rejects host credential material routed from a different binding or repository set", async () => {
+    const resolver = buildHostConnectionTokenResolver(
+      async (request) => ({
+        status: "ok",
+        accountId: request.accountId,
+        workspaceId: request.workspaceId,
+        sessionId: request.sessionId,
+        headers: { Authorization: "Bearer wrong-binding" },
+        connectionId: "host-connection-other",
+        provider: "github",
+        providerDomain: "github.com",
+        selectedResources: [{ kind: "repository", id: "999" }],
+      }),
+      context,
+    );
+
+    expect(
+      resolver({
+        workspaceId: "ws_1",
+        serverId: "github",
+        destinationUrl: "https://github.com/mcp",
+        connectionRef: {
+          connectionId: "host-connection-7",
+          provider: "github",
+          providerDomain: "github.com",
+          selectedResources: [{ kind: "repository", id: "101" }],
+        },
+      }),
+    ).rejects.toBeInstanceOf(HostMcpCredentialBindingError);
+  });
+
+  test("passes through reconnect metadata without credential headers", async () => {
+    const resolver = buildHostConnectionTokenResolver(
+      async (request) => ({
+        status: "auth_needed",
+        accountId: request.accountId,
+        workspaceId: request.workspaceId,
+        sessionId: request.sessionId,
+        reason: "expired",
+        providerDomain: "gitlab.com",
+        connectionId: "gitlab-connection",
+        scopes: ["api"],
+        authorizationUrl: "https://host.example/reconnect/gitlab-connection",
+      }),
+      { ...context, surface: "toolspace" },
+    );
+
+    const result = await resolver({
+      workspaceId: "ws_1",
+      serverId: "gitlab",
+      destinationUrl: "https://gitlab.com/mcp",
+      connectionRef: { providerDomain: "gitlab.com" },
+    });
+    expect(result).toEqual({
+      status: "auth_needed",
+      reason: "expired",
+      providerDomain: "gitlab.com",
+      connectionId: "gitlab-connection",
+      scopes: ["api"],
+      authorizationUrl: "https://host.example/reconnect/gitlab-connection",
+    });
+    expect(JSON.stringify(result)).not.toContain("Bearer");
+  });
+
+  test("rejects insecure non-loopback reconnect URLs", async () => {
+    const resolver = buildHostConnectionTokenResolver(
+      async (request) => ({
+        status: "auth_needed",
+        accountId: request.accountId,
+        workspaceId: request.workspaceId,
+        sessionId: request.sessionId,
+        reason: "expired",
+        providerDomain: "gitlab.com",
+        authorizationUrl: "http://host.example/reconnect",
+      }),
+      context,
+    );
+    expect(
+      resolver({
+        workspaceId: "ws_1",
+        serverId: "gitlab",
+        destinationUrl: "https://gitlab.com/mcp",
+        connectionRef: { providerDomain: "gitlab.com" },
+      }),
+    ).rejects.toThrow("invalid authorizationUrl");
+  });
+});
+
 describe("buildConnectionTokenResolver", () => {
+  test("fails closed before credential lookup for repository-scoped provider bindings", async () => {
+    const { deps, counts } = resolverDeps();
+    const resolver = buildConnectionTokenResolver({} as Database, settings, deps);
+    const result = await resolver({
+      workspaceId: "ws_1",
+      serverId: "github",
+      destinationUrl: "https://github.com/mcp",
+      connectionRef: {
+        connectionId: "github-installation-one",
+        provider: "github",
+        providerDomain: "github.com",
+        kind: "app_install",
+        selectedResources: [{ kind: "repository", id: "101" }],
+      },
+    });
+    expect(result).toEqual({
+      status: "auth_needed",
+      reason: "resource_scope_unavailable",
+      connectionId: "github-installation-one",
+      provider: "github",
+      providerDomain: "github.com",
+      selectedResources: [{ kind: "repository", id: "101" }],
+    });
+    expect(counts.load).toBe(0);
+    expect(counts.recordUsed).toBe(0);
+  });
+
   test("materializes api_key headers and records usage", async () => {
     const { deps, counts } = resolverDeps();
     const resolver = buildConnectionTokenResolver({} as Database, settings, deps);
@@ -503,6 +863,7 @@ describe("buildConnectionTokenResolver", () => {
       workspaceId: "ws_1",
       subjectId: "subject-a",
       serverId: "srv_1",
+      destinationUrl: "https://api.example.com/mcp",
       connectionRef: { providerDomain: "api.example.com", kind: "api_key", scopes: [] },
     });
     expect(result).toEqual({
@@ -514,8 +875,58 @@ describe("buildConnectionTokenResolver", () => {
     expect(counts.recordUsed).toBe(1);
     expect(counts.loadInputs[0]).toMatchObject({
       allowSubjectOwned: false,
-      subjectId: "subject-a",
+      providerDomain: "api.example.com",
+      kind: "api_key",
     });
+    expect(counts.loadInputs[0]).not.toHaveProperty("subjectId");
+  });
+
+  test("subject refs require a concrete owner and reject a faulty cross-subject loader", async () => {
+    const { deps, counts } = resolverDeps();
+    deps.loadCredential = async (_db, _settings, input) => {
+      counts.load += 1;
+      counts.loadInputs.push(input);
+      return brokerCredential({
+        id: "conn-bob",
+        subjectId: "subject-bob",
+        providerDomain: "slack.com",
+        kind: "oauth2",
+      });
+    };
+    const resolver = buildConnectionTokenResolver({} as Database, settings, deps);
+    const noSubject = await resolver({
+      workspaceId: "ws_1",
+      serverId: "slack",
+      destinationUrl: "https://slack.com/mcp",
+      connectionRef: {
+        providerDomain: "slack.com",
+        kind: "oauth2",
+        subjectScope: "subject",
+      },
+    });
+    expect(noSubject).toMatchObject({ status: "auth_needed", reason: "missing_connection" });
+    expect(counts.load).toBe(0);
+
+    const wrongOwner = await resolver({
+      workspaceId: "ws_1",
+      subjectId: "subject-alice",
+      serverId: "slack",
+      destinationUrl: "https://slack.com/mcp",
+      connectionRef: {
+        providerDomain: "slack.com",
+        kind: "oauth2",
+        subjectScope: "subject",
+      },
+    });
+    expect(wrongOwner).toMatchObject({ status: "auth_needed", reason: "missing_connection" });
+    expect(counts.load).toBe(1);
+    expect(counts.loadInputs[0]).toMatchObject({
+      allowSubjectOwned: true,
+      subjectId: "subject-alice",
+      providerDomain: "slack.com",
+      kind: "oauth2",
+    });
+    expect(counts.recordUsed).toBe(0);
   });
 
   test("returns auth_needed for missing scopes without exposing credential material", async () => {
@@ -526,6 +937,7 @@ describe("buildConnectionTokenResolver", () => {
     const result = await resolver({
       workspaceId: "ws_1",
       serverId: "srv_1",
+      destinationUrl: "https://api.example.com/mcp",
       connectionRef: {
         providerDomain: "api.example.com",
         kind: "api_key",
@@ -551,6 +963,7 @@ describe("buildConnectionTokenResolver", () => {
     let loadCalls = 0;
     const stale = brokerCredential({
       id: "conn_oauth",
+      providerDomain: "oauth.example.com",
       kind: "oauth2",
       credential: { access_token: "AC", refresh_token: "RF", token_type: "Bearer" },
       expiresAt: new Date(Date.now() - 1_000),
@@ -583,12 +996,14 @@ describe("buildConnectionTokenResolver", () => {
       resolver({
         workspaceId: "ws_1",
         serverId: "srv_1",
+        destinationUrl: "https://oauth.example.com/mcp",
         connectionRef: { providerDomain: "oauth.example.com", kind: "oauth2", scopes: ["read"] },
         forceRefresh: true,
       }),
       resolver({
         workspaceId: "ws_1",
         serverId: "srv_1",
+        destinationUrl: "https://oauth.example.com/mcp",
         connectionRef: { providerDomain: "oauth.example.com", kind: "oauth2", scopes: ["read"] },
         forceRefresh: true,
       }),
@@ -617,6 +1032,7 @@ describe("buildConnectionTokenResolver", () => {
   test("a transient refresh failure (AS 5xx / network) does not poison the connection", async () => {
     const stale = brokerCredential({
       id: "conn_oauth",
+      providerDomain: "oauth.example.com",
       kind: "oauth2",
       credential: { access_token: "AC", refresh_token: "RF", token_type: "Bearer" },
       expiresAt: new Date(Date.now() - 1_000),
@@ -633,6 +1049,7 @@ describe("buildConnectionTokenResolver", () => {
     const result = await resolver({
       workspaceId: "ws_1",
       serverId: "srv_1",
+      destinationUrl: "https://oauth.example.com/mcp",
       connectionRef: { providerDomain: "oauth.example.com", kind: "oauth2" },
     });
     expect(result).toMatchObject({
@@ -646,6 +1063,7 @@ describe("buildConnectionTokenResolver", () => {
   test("a 429 from the token endpoint is transient — no needs_reauth", async () => {
     const stale = brokerCredential({
       id: "conn_oauth",
+      providerDomain: "oauth.example.com",
       kind: "oauth2",
       credential: { access_token: "AC", refresh_token: "RF", token_type: "Bearer" },
       expiresAt: new Date(Date.now() - 1_000),
@@ -662,6 +1080,7 @@ describe("buildConnectionTokenResolver", () => {
     const result = await resolver({
       workspaceId: "ws_1",
       serverId: "srv_1",
+      destinationUrl: "https://oauth.example.com/mcp",
       connectionRef: { providerDomain: "oauth.example.com", kind: "oauth2" },
     });
     expect(result).toMatchObject({ status: "auth_needed", reason: "refresh_failed" });
@@ -716,7 +1135,7 @@ describe("buildConnectionTokenResolver", () => {
         refresh: async (cred, ref) => {
           counts.refresh += 1;
           try {
-            return await refreshOAuthConnectionCredential(cred, ref);
+            return await refreshOAuthConnectionCredential(cred, ref, settings);
           } catch (error) {
             observedError = error;
             throw error;
@@ -727,6 +1146,7 @@ describe("buildConnectionTokenResolver", () => {
       const result = await resolver({
         workspaceId: "ws_1",
         serverId: "srv_1",
+        destinationUrl: "https://oauth.example.com/mcp",
         connectionRef: { providerDomain: "oauth.example.com", kind: "oauth2" },
       });
       expect(result).toMatchObject({
@@ -750,8 +1170,10 @@ describe("buildConnectionTokenResolver", () => {
   test("public-client refresh sends client_id from the credential bundle", async () => {
     const originalFetch = globalThis.fetch;
     let capturedBody: URLSearchParams | null = null;
+    let capturedSignal: AbortSignal | null = null;
     globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
       capturedBody = new URLSearchParams(String(init?.body));
+      capturedSignal = init?.signal ?? null;
       return new Response(
         JSON.stringify({ access_token: "AC2", token_type: "Bearer", expires_in: 3600 }),
         {
@@ -773,12 +1195,18 @@ describe("buildConnectionTokenResolver", () => {
           },
         }),
         { providerDomain: "oauth.example.com", kind: "oauth2" },
+        settings,
+        {
+          fetchImpl: globalThis.fetch,
+          dnsLookup: async () => [{ address: "93.184.216.34", family: 4 }],
+        },
       );
       expect(refreshed.credential).toMatchObject({ access_token: "AC2" });
       expect(capturedBody!.get("client_id")).toBe(
         "https://opengeni.example.com/v1/integrations/oauth/client-metadata.json",
       );
       expect(capturedBody!.get("grant_type")).toBe("refresh_token");
+      expect(capturedSignal).toBeInstanceOf(AbortSignal);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -787,6 +1215,7 @@ describe("buildConnectionTokenResolver", () => {
   test("a rejected refresh grant (4xx) marks the connection needs_reauth", async () => {
     const stale = brokerCredential({
       id: "conn_oauth",
+      providerDomain: "oauth.example.com",
       kind: "oauth2",
       credential: { access_token: "AC", refresh_token: "RF", token_type: "Bearer" },
       expiresAt: new Date(Date.now() - 1_000),
@@ -803,6 +1232,7 @@ describe("buildConnectionTokenResolver", () => {
     const result = await resolver({
       workspaceId: "ws_1",
       serverId: "srv_1",
+      destinationUrl: "https://oauth.example.com/mcp",
       connectionRef: { providerDomain: "oauth.example.com", kind: "oauth2" },
     });
     expect(result).toMatchObject({

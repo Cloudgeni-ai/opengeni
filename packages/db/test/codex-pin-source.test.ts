@@ -36,8 +36,14 @@ async function freshWorkspace(): Promise<{ accountId: string; workspaceId: strin
 async function seedSession(ws: { accountId: string; workspaceId: string }): Promise<string> {
   const id = crypto.randomUUID();
   await admin`
-    insert into sessions (id, account_id, workspace_id, initial_message, model, sandbox_backend, sandbox_group_id)
-    values (${id}, ${ws.accountId}, ${ws.workspaceId}, 'go', 'gpt', 'modal', ${id})`;
+    insert into sessions (
+      id, account_id, workspace_id, initial_message, model,
+      sandbox_backend, sandbox_group_id, tool_policy
+    )
+    values (
+      ${id}, ${ws.accountId}, ${ws.workspaceId}, 'go', 'gpt', 'modal', ${id},
+      jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
+    )`;
   return id;
 }
 

@@ -1,5 +1,303 @@
 # @opengeni/events
 
+## 0.3.39
+
+### Patch Changes
+
+- Updated dependencies [2aca964]
+  - @opengeni/db@0.14.6
+
+## 0.3.38
+
+### Patch Changes
+
+- Updated dependencies [ad0bdc3]
+  - @opengeni/contracts@0.23.1
+  - @opengeni/db@0.14.5
+
+## 0.3.37
+
+### Patch Changes
+
+- Updated dependencies [ea38a4c]
+  - @opengeni/db@0.14.4
+
+## 0.3.36
+
+### Patch Changes
+
+- Updated dependencies [33dc88f]
+  - @opengeni/contracts@0.23.0
+  - @opengeni/db@0.14.3
+
+## 0.3.35
+
+### Patch Changes
+
+- Updated dependencies [1c4018e]
+  - @opengeni/contracts@0.22.1
+  - @opengeni/db@0.14.2
+
+## 0.3.34
+
+### Patch Changes
+
+- Updated dependencies [6908a7a]
+  - @opengeni/db@0.14.1
+
+## 0.3.33
+
+### Patch Changes
+
+- Updated dependencies [29ad09b]
+- Updated dependencies [dfc3235]
+  - @opengeni/contracts@0.22.0
+  - @opengeni/db@0.14.0
+
+## 0.3.32
+
+### Patch Changes
+
+- 519d93c: Add validated inline per-session skills and discover skills directly from already-materialized repository resources.
+- Updated dependencies [519d93c]
+  - @opengeni/contracts@0.21.0
+  - @opengeni/db@0.13.4
+
+## 0.3.31
+
+### Patch Changes
+
+- Updated dependencies [110bb77]
+  - @opengeni/contracts@0.20.2
+  - @opengeni/db@0.13.3
+
+## 0.3.30
+
+### Patch Changes
+
+- Updated dependencies [8b8545e]
+  - @opengeni/db@0.13.2
+
+## 0.3.29
+
+### Patch Changes
+
+- Updated dependencies [ffd246c]
+  - @opengeni/contracts@0.20.1
+  - @opengeni/db@0.13.1
+
+## 0.3.28
+
+### Patch Changes
+
+- Updated dependencies [06a5801]
+- Updated dependencies [5511c24]
+  - @opengeni/contracts@0.20.0
+  - @opengeni/db@0.13.0
+
+## 0.3.27
+
+### Patch Changes
+
+- Updated dependencies [9a8f793]
+- Updated dependencies [c135339]
+  - @opengeni/contracts@0.19.4
+  - @opengeni/db@0.12.6
+
+## 0.3.26
+
+### Patch Changes
+
+- Updated dependencies [a0f2442]
+  - @opengeni/contracts@0.19.3
+  - @opengeni/db@0.12.5
+
+## 0.3.25
+
+### Patch Changes
+
+- Updated dependencies [85cb323]
+  - @opengeni/contracts@0.19.2
+  - @opengeni/db@0.12.4
+
+## 0.3.24
+
+### Patch Changes
+
+- Updated dependencies [1386679]
+- Updated dependencies [b7290a3]
+- Updated dependencies [dcde939]
+- Updated dependencies [5685f32]
+- Updated dependencies [de20184]
+  - @opengeni/db@0.12.3
+  - @opengeni/contracts@0.19.1
+
+## 0.3.23
+
+### Patch Changes
+
+- Updated dependencies [7c6aa7c]
+  - @opengeni/db@0.12.2
+
+## 0.3.22
+
+### Patch Changes
+
+- @opengeni/db@0.12.1
+
+## 0.3.21
+
+### Patch Changes
+
+- Updated dependencies [c549ed8]
+- Updated dependencies [46bac05]
+- Updated dependencies [860de22]
+- Updated dependencies [5b57a2d]
+  - @opengeni/contracts@0.19.0
+  - @opengeni/db@0.12.0
+
+## 0.3.20
+
+### Patch Changes
+
+- Updated dependencies [744a93d]
+- Updated dependencies [0ed0f01]
+- Updated dependencies [b32938f]
+  - @opengeni/contracts@0.18.1
+  - @opengeni/db@0.11.0
+
+## 0.3.19
+
+### Patch Changes
+
+- Updated dependencies [0d60720]
+- Updated dependencies [bdd531c]
+  - @opengeni/contracts@0.18.0
+  - @opengeni/db@0.10.7
+
+## 0.3.18
+
+### Patch Changes
+
+- Updated dependencies [524599e]
+  - @opengeni/contracts@0.17.3
+  - @opengeni/db@0.10.6
+
+## 0.3.17
+
+### Patch Changes
+
+- Updated dependencies [229902b]
+  - @opengeni/db@0.10.5
+
+## 0.3.16
+
+### Patch Changes
+
+- Updated dependencies [4966649]
+  - @opengeni/contracts@0.17.2
+  - @opengeni/db@0.10.4
+
+## 0.3.15
+
+### Patch Changes
+
+- Updated dependencies [495c62c]
+  - @opengeni/db@0.10.3
+
+## 0.3.14
+
+### Patch Changes
+
+- ff23da5: Keep oversized event previews bounded while optionally linking them to integrity-addressed workspace-file evidence, and expose access-controlled metadata plus capped provider-native range retrieval through the API and SDK.
+- Updated dependencies [ff23da5]
+  - @opengeni/contracts@0.17.1
+  - @opengeni/db@0.10.2
+
+## 0.3.13
+
+### Patch Changes
+
+- Updated dependencies [eed3438]
+  - @opengeni/db@0.10.1
+
+## 0.3.12
+
+### Patch Changes
+
+- Updated dependencies [d1dee7a]
+  - @opengeni/contracts@0.17.0
+  - @opengeni/db@0.10.0
+
+## 0.3.11
+
+### Patch Changes
+
+- Updated dependencies [b9cec61]
+  - @opengeni/contracts@0.16.0
+  - @opengeni/db@0.9.4
+
+## 0.3.10
+
+### Patch Changes
+
+- Updated dependencies [9f84cc9]
+  - @opengeni/contracts@0.15.0
+  - @opengeni/db@0.9.3
+
+## 0.3.9
+
+### Patch Changes
+
+- Updated dependencies [136227e]
+- Updated dependencies [3aee519]
+  - @opengeni/contracts@0.14.0
+  - @opengeni/db@0.9.2
+
+## 0.3.8
+
+### Patch Changes
+
+- Updated dependencies [1f0ed18]
+- Updated dependencies [00e1cdc]
+  - @opengeni/db@0.9.1
+
+## 0.3.7
+
+### Patch Changes
+
+- Updated dependencies [1fcd83d]
+- Updated dependencies [32011f1]
+- Updated dependencies [3983021]
+- Updated dependencies [4401ce7]
+- Updated dependencies [c389adc]
+- Updated dependencies [1f9305b]
+- Updated dependencies [8c66185]
+- Updated dependencies [d249403]
+- Updated dependencies [a11a7fc]
+- Updated dependencies [44ff327]
+- Updated dependencies [dda6398]
+- Updated dependencies [e8ca4f6]
+- Updated dependencies [736f4fe]
+  - @opengeni/contracts@0.13.0
+  - @opengeni/db@0.9.0
+
+## 0.3.6
+
+### Patch Changes
+
+- Bound model-facing tool output, complete input accounting, compact session discovery,
+  event and realtime projections, authorized evidence retrieval, and compaction failure
+  convergence with explicit truncation and loss metadata throughout the output lifecycle.
+  Session event `latest` lookups are now class-exclusive across REST, MCP, and SDK clients.
+  Updated-order session discovery now uses a transactional workspace activity-revision fence,
+  and the workspace-control bounds migration rewrites only historical cap violations.
+- Updated dependencies [77d65f9]
+- Updated dependencies
+- Updated dependencies [dbb6232]
+  - @opengeni/db@0.8.0
+  - @opengeni/contracts@0.12.0
+
 ## 0.3.5
 
 ### Patch Changes

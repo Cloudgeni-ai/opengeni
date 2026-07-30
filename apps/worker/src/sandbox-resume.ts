@@ -21,30 +21,40 @@
 // Liveness between turns is the lease refcount; there is no keepalive loop.
 
 import type { Settings } from "@opengeni/config";
+import { redactSensitiveText } from "@opengeni/contracts";
 import {
   acquireLease,
+  beginSandboxRematerialization,
   commitWarmingToWarm,
+  failSandboxRematerialization,
   failWarmingToCold,
   getSandboxSessionEnvelope,
+  markSandboxRestoreVerifying,
   markWarmLeaseInstanceLost,
   persistWarmSnapshot,
+  readWorkspaceArchiveCapturePreflight,
   readLease,
   recordWarmingSandboxCreated,
   releaseLeaseHolder,
   touchLeaseHolder,
+  SandboxLeaseRecoveryBlockedError,
   SandboxLeaseSupersededError,
   type Database,
   type LeaseHolderKind,
 } from "@opengeni/db";
 import {
+  captureVerifiedWorkspaceArchive,
+  WorkspaceArchiveIntegrityError,
   establishSandboxSessionFromEnvelope,
   isProviderSandboxNotFoundError,
-  SandboxResumeStateUnavailableError,
-  serializeEstablishedSandboxEnvelope,
+  requirePersistableReplacementSandboxEnvelope,
+  serializeReplacementSandboxEnvelope,
   deletePriorPersistedSnapshot,
   tagModalSandbox,
+  verifySandboxExecReadiness,
   type EstablishedSandboxSession,
   type RuntimeMetricsHooks,
+  type WorkspaceArchiveDescriptor,
 } from "@opengeni/runtime";
 
 // Re-exported for callers that just want the ack-kind union.
@@ -64,6 +74,13 @@ export function sandboxLeaseHolderIdForAttempt(attemptId: string): TurnSandboxLe
     throw new Error("Sandbox lease holder requires a turn attempt id");
   }
   return `turn-attempt:${normalized}`;
+}
+
+export function isRetryableDegradedRestore(restore: {
+  status: string;
+  retryable?: boolean;
+}): boolean {
+  return restore.status === "degraded" && restore.retryable === true;
 }
 
 /** The minimal services surface resumeBoxForTurn needs. A subset of
@@ -181,43 +198,13 @@ export async function waitForSandboxExecReadiness(
   established: EstablishedSandboxSession,
   timeoutMs = MODAL_EXEC_READINESS_TIMEOUT_MS,
 ): Promise<void> {
-  if (established.backendId !== "modal") return;
-
-  const session = established.session as {
-    exec?: (args: {
-      cmd: string;
-      yieldTimeMs?: number;
-      maxOutputTokens?: number;
-    }) => Promise<unknown>;
-    execCommand?: (args: {
-      cmd: string;
-      yieldTimeMs?: number;
-      maxOutputTokens?: number;
-    }) => Promise<unknown>;
-  };
-  const run = session.exec ?? session.execCommand;
-  if (!run) {
-    throw new Error("Modal sandbox session does not expose exec");
-  }
-
-  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    await Promise.race([
-      run.call(session, {
-        cmd: "true",
-        yieldTimeMs: 1_000,
-        maxOutputTokens: 1_000,
-      }),
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(
-          () => reject(new SandboxWarmingTimeoutError(established.backendId, timeoutMs)),
-          timeoutMs,
-        );
-        if (timer && "unref" in timer && typeof timer.unref === "function") timer.unref();
-      }),
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
+    await verifySandboxExecReadiness(established, timeoutMs);
+  } catch (error) {
+    if (/sandbox creation timed out/i.test(error instanceof Error ? error.message : "")) {
+      throw new SandboxWarmingTimeoutError(established.backendId, timeoutMs);
+    }
+    throw error;
   }
 }
 
@@ -226,6 +213,17 @@ class SnapshotTimeoutError extends Error {
     super(`workspace snapshot timed out after ${timeoutMs}ms`);
     this.name = "SnapshotTimeoutError";
   }
+}
+
+function safeSnapshotError(error: unknown): { name: string; message: string } {
+  const rawName = error instanceof Error ? error.name : "Error";
+  return {
+    name: /^[A-Za-z][A-Za-z0-9_.-]{0,79}$/.test(rawName) ? rawName : "Error",
+    message: redactSensitiveText(error instanceof Error ? error.message : String(error)).slice(
+      0,
+      2_048,
+    ),
+  };
 }
 
 export async function waitForWarmSnapshot(
@@ -260,7 +258,10 @@ export async function waitForWarmSnapshot(
   } catch (error) {
     if (signal?.aborted) return false;
     if (error instanceof SnapshotTimeoutError) {
-      console.error("mid-session workspace snapshot wait timed out (turn unaffected)", error);
+      console.error(
+        "mid-session workspace snapshot wait timed out (turn unaffected)",
+        safeSnapshotError(error),
+      );
       return false;
     }
     return true;
@@ -285,7 +286,10 @@ async function terminateEstablishedSandbox(
     try {
       await client.delete(established.sessionState);
       return true;
-    } catch {
+    } catch (error) {
+      if (isProviderSandboxNotFoundError(established.backendId, error)) {
+        return true;
+      }
       return false;
     }
   }
@@ -309,7 +313,10 @@ async function terminateEstablishedSandbox(
       return true;
     }
     return false;
-  } catch {
+  } catch (error) {
+    if (isProviderSandboxNotFoundError(established.backendId, error)) {
+      return true;
+    }
     // Best-effort cleanup. A provider-side orphan sweep is the backstop.
     return false;
   }
@@ -338,7 +345,7 @@ function recordSandboxWarmingTimeout(
 
 function workspaceArchiveFieldsFromEnvelope(
   envelope: Record<string, unknown> | null | undefined,
-): Record<string, string> | null {
+): Record<string, unknown> | null {
   const sessionState =
     envelope && typeof envelope.sessionState === "object" && envelope.sessionState !== null
       ? (envelope.sessionState as Record<string, unknown>)
@@ -348,40 +355,37 @@ function workspaceArchiveFieldsFromEnvelope(
     return null;
   }
   const previous = sessionState?.workspaceArchivePrev;
+  const metadata = sessionState?.workspaceArchiveMeta;
+  const previousMetadata = sessionState?.workspaceArchivePrevMeta;
   const capturedAt = sessionState?.workspaceArchiveAt;
   return {
     workspaceArchive: archive,
+    ...(metadata !== undefined ? { workspaceArchiveMeta: metadata } : {}),
     ...(typeof previous === "string" && previous.length > 0
       ? { workspaceArchivePrev: previous }
       : {}),
+    ...(previousMetadata !== undefined ? { workspaceArchivePrevMeta: previousMetadata } : {}),
     ...(typeof capturedAt === "string" && capturedAt.length > 0
       ? { workspaceArchiveAt: capturedAt }
       : {}),
   };
 }
 
-function preserveWorkspaceArchivesOnResumeState(
-  resumeState: Record<string, unknown> | null,
-  archiveSource: Record<string, unknown> | null,
+/** A per-session fallback may still carry the dead provider identity that made
+ * recovery necessary. It is useful only as durable archive/config input: never
+ * let a cold rematerialization resume that stale provider before hydrating the
+ * selected revision. */
+function withoutProviderIdentity(
+  envelope: Record<string, unknown> | null,
 ): Record<string, unknown> | null {
-  const archiveFields = workspaceArchiveFieldsFromEnvelope(archiveSource);
-  if (!archiveFields) {
-    return resumeState;
-  }
-  const existingSessionState =
-    resumeState && typeof resumeState.sessionState === "object" && resumeState.sessionState !== null
-      ? (resumeState.sessionState as Record<string, unknown>)
-      : {};
-  return {
-    ...(resumeState ?? {}),
-    ...(resumeState?.backendId === undefined && archiveSource?.backendId !== undefined
-      ? { backendId: archiveSource.backendId }
-      : {}),
-    sessionState: {
-      ...existingSessionState,
-      ...archiveFields,
-    },
-  };
+  if (!envelope) return null;
+  const sessionState =
+    envelope.sessionState && typeof envelope.sessionState === "object"
+      ? (envelope.sessionState as Record<string, unknown>)
+      : null;
+  if (!sessionState) return envelope;
+  const { providerState: _providerState, ...providerIndependentState } = sessionState;
+  return { ...envelope, sessionState: providerIndependentState };
 }
 
 /**
@@ -435,9 +439,23 @@ export async function maybePersistWarmWorkspaceSnapshot(
     // persistWarmSnapshot re-checks atomically under the row lock, so this is
     // purely a cost optimization, not the correctness guard.
     const lease = await readLease(db, ids.workspaceId, ids.sandboxGroupId);
-    if (!lease || lease.leaseEpoch !== leaseEpoch || lease.liveness !== "warm") {
+    if (
+      !lease ||
+      lease.leaseEpoch !== leaseEpoch ||
+      lease.liveness !== "warm" ||
+      lease.instanceId === null
+    ) {
       return false;
     }
+    const preflight = await readWorkspaceArchiveCapturePreflight(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.sandboxGroupId,
+      expectedEpoch: leaseEpoch,
+      expectedInstanceId: lease.instanceId,
+      liveness: "warm",
+    });
+    if (!preflight) return false;
     if (signal?.aborted) {
       return false;
     }
@@ -450,7 +468,11 @@ export async function maybePersistWarmWorkspaceSnapshot(
         ? sessionState.workspaceArchiveAt
         : undefined;
     const priorAtMs = typeof priorAtRaw === "string" ? Date.parse(priorAtRaw) : Number.NaN;
-    if (Number.isFinite(priorAtMs) && Date.now() - priorAtMs < intervalMs) {
+    if (
+      preflight.archiveComplete &&
+      Number.isFinite(priorAtMs) &&
+      Date.now() - priorAtMs < intervalMs
+    ) {
       return false;
     }
     let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -464,10 +486,10 @@ export async function maybePersistWarmWorkspaceSnapshot(
     // after the race resolved would surface as an unhandledRejection and can
     // take down the whole worker process — which would defeat the very hang-
     // guard this timeout exists to provide.
-    const capture = persistable.persistWorkspace();
+    const capture = captureVerifiedWorkspaceArchive(session, capturedAtMs);
     capture.catch(() => undefined);
     let cancelListener: (() => void) | undefined;
-    const bytes = await Promise.race([
+    const archive = await Promise.race([
       capture,
       ...(signal
         ? [
@@ -490,7 +512,7 @@ export async function maybePersistWarmWorkspaceSnapshot(
       }
       if (cancelListener) signal?.removeEventListener("abort", cancelListener);
     });
-    if (!bytes || bytes.length === 0) {
+    if (!archive) {
       return false;
     }
     if (signal?.aborted) {
@@ -504,7 +526,10 @@ export async function maybePersistWarmWorkspaceSnapshot(
       attemptId: ids.attemptId,
       sandboxGroupId: ids.sandboxGroupId,
       expectedEpoch: leaseEpoch,
-      workspaceArchive: Buffer.from(bytes).toString("base64"),
+      expectedInstanceId: lease.instanceId,
+      expectedWorkspaceGeneration: preflight.workspaceGeneration,
+      workspaceArchive: archive.base64,
+      workspaceArchiveMeta: archive.descriptor,
       minIntervalMs: intervalMs,
       capturedAtMs,
     });
@@ -518,7 +543,10 @@ export async function maybePersistWarmWorkspaceSnapshot(
   } catch (error) {
     // Protection, not a dependency: a failed snapshot must never fail (or slow
     // down retrying) the turn. The next heartbeat/turn-end tick retries.
-    console.error("mid-session workspace snapshot failed (turn unaffected)", error);
+    console.error(
+      "mid-session workspace snapshot failed (turn unaffected)",
+      safeSnapshotError(error),
+    );
     return false;
   }
 }
@@ -613,6 +641,15 @@ export async function resumeBoxForTurn(
   // FENCED: a newer epoch exists (a later turn re-established the box). Back off;
   // NEVER create(). Release our (just-registered) holder so we don't pin a stale
   // lease, then surface the supersession.
+  if (acquired.role === "blocked") {
+    await release();
+    throw new SandboxLeaseRecoveryBlockedError(
+      ids.sandboxGroupId,
+      acquired.lease.leaseEpoch,
+      acquired.code,
+      acquired.lease.recovery,
+    );
+  }
   if (acquired.role === "fenced") {
     await release();
     throw new SandboxLeaseSupersededError(ids.sandboxGroupId, acquired.lease.leaseEpoch);
@@ -623,8 +660,71 @@ export async function resumeBoxForTurn(
   if (acquired.role === "spawner") {
     const expectedEpoch = acquired.lease.leaseEpoch;
     let createdEstablished: EstablishedSandboxSession | null = null;
+    let rematerialization: {
+      id: string;
+      selectedRevision: string;
+    } | null = null;
     try {
       const envelope = await getSandboxSessionEnvelope(db, ids.workspaceId, ids.sessionId);
+      // The lease is authoritative. A legacy per-session fallback archive may
+      // only be used after beginSandboxRematerialization imports its archive
+      // fields under the warming-row lock and records one selected revision.
+      // Select the fallback only when the lease has no archive truth at all. A
+      // lease-carried unverified/invalid archive must fail closed rather than
+      // silently substituting another revision.
+      const fallbackArchiveEnvelope =
+        acquired.lease.recovery.archive.status === "none" &&
+        workspaceArchiveFieldsFromEnvelope(envelope) !== null
+          ? withoutProviderIdentity(envelope)
+          : null;
+      const spawnEnvelope = fallbackArchiveEnvelope ?? acquired.lease.resumeState ?? envelope;
+      const archiveSource =
+        acquired.lease.recovery.archive.status === "none"
+          ? fallbackArchiveEnvelope
+          : acquired.lease.resumeState;
+      if (
+        acquired.lease.recovery.archive.status === "available" ||
+        workspaceArchiveFieldsFromEnvelope(archiveSource) !== null
+      ) {
+        const rematerializationId = crypto.randomUUID();
+        const begun = await beginSandboxRematerialization(db, {
+          accountId: ids.accountId,
+          workspaceId: ids.workspaceId,
+          sandboxGroupId: ids.sandboxGroupId,
+          expectedEpoch,
+          rematerializationId,
+          archiveSource,
+        });
+        if (begun.status !== "started") {
+          if (begun.code === "stale_epoch" || begun.code === "attempt_conflict") {
+            throw new SandboxLeaseSupersededError(
+              ids.sandboxGroupId,
+              begun.lease?.leaseEpoch ?? expectedEpoch,
+            );
+          }
+          throw new SandboxLeaseRecoveryBlockedError(
+            ids.sandboxGroupId,
+            begun.lease?.leaseEpoch ?? expectedEpoch,
+            begun.code === "archive_unverified" ? "restore_degraded" : "restore_unrecoverable",
+            begun.lease?.recovery ?? acquired.lease.recovery,
+          );
+        }
+        const selectedRevision = begun.lease.recovery.restore.selectedRevision;
+        if (!selectedRevision) {
+          throw new WorkspaceArchiveIntegrityError(
+            "archive_metadata_invalid",
+            "sandbox rematerialization selected no durable archive revision",
+          );
+        }
+        rematerialization = { id: rematerializationId, selectedRevision };
+      } else if (acquired.lease.recovery.archive.status !== "none") {
+        throw new SandboxLeaseRecoveryBlockedError(
+          ids.sandboxGroupId,
+          expectedEpoch,
+          "restore_degraded",
+          acquired.lease.recovery,
+        );
+      }
       // Prefer the COLD lease's preserved resume_state when it carries a persisted
       // /workspace snapshot (confirmDrainCold keeps a minimal archive-only envelope
       // across draining->cold for exactly this re-warm). establishSandboxSessionFromEnvelope
@@ -634,7 +734,6 @@ export async function resumeBoxForTurn(
       // spawner branch: the lease's resume_state is authoritative; the session
       // `_sandbox` envelope is the per-session fallback. Without this a turn-first
       // re-warm after a drain->cold would ignore the archive and start an EMPTY box.
-      const spawnEnvelope = acquired.lease.resumeState ?? envelope;
       const established = await establishSandboxSessionFromEnvelope(settings, spawnEnvelope, {
         sessionId: ids.sessionId,
         recovery: "create-or-restore",
@@ -643,15 +742,16 @@ export async function resumeBoxForTurn(
         ...(services.sandboxMetrics ? { metrics: services.sandboxMetrics } : {}),
         onSandboxCreated: async (created) => {
           createdEstablished = created;
-          const resumeEnvelope = preserveWorkspaceArchivesOnResumeState(
-            (await serializeEstablishedSandboxEnvelope(created)) ?? null,
-            spawnEnvelope,
+          const resumeEnvelope = requirePersistableReplacementSandboxEnvelope(
+            await serializeReplacementSandboxEnvelope(created, spawnEnvelope),
+            created.backendId,
           );
           const recorded = await recordWarmingSandboxCreated(db, {
             accountId: ids.accountId,
             workspaceId: ids.workspaceId,
             sandboxGroupId: ids.sandboxGroupId,
             expectedEpoch,
+            rematerializationId: rematerialization?.id ?? null,
             instanceId: created.instanceId,
             resumeBackendId: created.backendId,
             resumeState: resumeEnvelope,
@@ -671,6 +771,24 @@ export async function resumeBoxForTurn(
             }).catch(() => undefined);
           }
         },
+        onWorkspaceRestoreVerifying: async (descriptor: WorkspaceArchiveDescriptor) => {
+          if (!rematerialization || descriptor.revision !== rematerialization.selectedRevision) {
+            throw new WorkspaceArchiveIntegrityError(
+              "archive_metadata_invalid",
+              `hydrated archive revision ${descriptor.revision} does not match the selected rematerialization revision`,
+            );
+          }
+          const verifying = await markSandboxRestoreVerifying(db, {
+            accountId: ids.accountId,
+            workspaceId: ids.workspaceId,
+            sandboxGroupId: ids.sandboxGroupId,
+            expectedEpoch,
+            rematerializationId: rematerialization.id,
+          });
+          if (!verifying.wrote) {
+            throw new SandboxLeaseSupersededError(ids.sandboxGroupId, expectedEpoch);
+          }
+        },
       });
       createdEstablished = established;
       // A sandbox handle is not sufficient evidence that Modal's command router
@@ -683,22 +801,31 @@ export async function resumeBoxForTurn(
       // viewer.ts). Without this the turn committed the ORIGINAL session manifest
       // as resume_state, so every LATER op off this lease (Channel-A fs/git/
       // terminal, the desktop viewer, the reaper) cold-restored a FRESH rival box
-      // and never saw the turn's live box. Fall back to the session envelope only
-      // when the client cannot serialize live state.
-      const serializedResumeEnvelope =
-        (await serializeEstablishedSandboxEnvelope(established)) ?? envelope;
+      // and never saw the turn's live box. Historical state may contribute only
+      // durable archive pointers: if live serialization fails, publishing its
+      // dead provider identity would pair the replacement instance with the box
+      // that initiated recovery.
       // A successful cold hydrate has already proved this archive usable and the
       // replacement box now contains its files. Keep the current + fallback
       // archive pointers on the committed live envelope until a later warm
       // snapshot replaces them. Without this merge, serialization publishes only
       // the new provider id; a second provider loss before the snapshot cadence
-      // fires would retire the lease with no archive and recreate an empty box.
-      // A failed hydrate falls back to a clean box with origin="created", so its
-      // unusable archive is deliberately cleared by the unmerged serialized state.
-      const resumeEnvelope =
-        established.origin === "restored"
-          ? preserveWorkspaceArchivesOnResumeState(serializedResumeEnvelope, spawnEnvelope)
-          : serializedResumeEnvelope;
+      // fires would otherwise make truthful recovery impossible. Failed hydrate
+      // attempts terminate the replacement and fail closed; they never publish a
+      // clean or mixed workspace.
+      const resumeEnvelope = requirePersistableReplacementSandboxEnvelope(
+        await serializeReplacementSandboxEnvelope(established, spawnEnvelope),
+        established.backendId,
+      );
+      if (
+        rematerialization &&
+        established.restoredArchive?.revision !== rematerialization.selectedRevision
+      ) {
+        throw new WorkspaceArchiveIntegrityError(
+          "workspace_fingerprint_mismatch",
+          "sandbox restore completed without the exact selected durable archive revision",
+        );
+      }
       const committed = await commitWarmingToWarm(db, {
         accountId: ids.accountId,
         workspaceId: ids.workspaceId,
@@ -710,6 +837,14 @@ export async function resumeBoxForTurn(
         dataPlaneUrl: null,
         resumeBackendId: established.backendId,
         resumeState: resumeEnvelope,
+        ...(rematerialization
+          ? {
+              rematerialization: {
+                id: rematerialization.id,
+                verifiedRevision: rematerialization.selectedRevision,
+              },
+            }
+          : {}),
         leaseTtlMs,
       });
       if (!committed.committed || !committed.lease) {
@@ -717,7 +852,18 @@ export async function resumeBoxForTurn(
         // re-established and bumped the epoch. Drop the handle; release our
         // holder; surface supersession. This spawner created the box, so stop it
         // before retrying to avoid an untracked running sandbox.
-        await terminateEstablishedSandbox(established);
+        const terminated = await terminateEstablishedSandbox(established);
+        if (terminated && rematerialization) {
+          await failSandboxRematerialization(db, {
+            accountId: ids.accountId,
+            workspaceId: ids.workspaceId,
+            sandboxGroupId: ids.sandboxGroupId,
+            expectedEpoch,
+            rematerializationId: rematerialization.id,
+            failureCode: committed.reason ?? "warm_commit_rejected",
+            retryable: false,
+          });
+        }
         await release();
         throw new SandboxLeaseSupersededError(ids.sandboxGroupId, expectedEpoch);
       }
@@ -735,12 +881,27 @@ export async function resumeBoxForTurn(
       // the warming row; the lease TTL/reaper and Modal orphan sweep are the
       // tracked backstops, and we must not erase the only provider pointer.
       if (terminated) {
-        await failWarmingToCold(db, {
-          accountId: ids.accountId,
-          workspaceId: ids.workspaceId,
-          sandboxGroupId: ids.sandboxGroupId,
-          expectedEpoch,
-        });
+        if (rematerialization) {
+          await failSandboxRematerialization(db, {
+            accountId: ids.accountId,
+            workspaceId: ids.workspaceId,
+            sandboxGroupId: ids.sandboxGroupId,
+            expectedEpoch,
+            rematerializationId: rematerialization.id,
+            failureCode:
+              error instanceof WorkspaceArchiveIntegrityError
+                ? error.code
+                : "sandbox_rematerialization_failed",
+            retryable: error instanceof WorkspaceArchiveIntegrityError ? error.retryable : true,
+          });
+        } else {
+          await failWarmingToCold(db, {
+            accountId: ids.accountId,
+            workspaceId: ids.workspaceId,
+            sandboxGroupId: ids.sandboxGroupId,
+            expectedEpoch,
+          });
+        }
       }
       await release();
       const warmingError = asSandboxWarmingError(
@@ -787,10 +948,7 @@ export async function resumeBoxForTurn(
         ...(services.sandboxMetrics ? { metrics: services.sandboxMetrics } : {}),
       });
     } catch (error) {
-      if (
-        !(error instanceof SandboxResumeStateUnavailableError) &&
-        !isProviderSandboxNotFoundError(ids.backend, error)
-      ) {
+      if (!isProviderSandboxNotFoundError(ids.backend, error)) {
         throw error;
       }
       const marked = await markWarmLeaseInstanceLost(db, {
@@ -831,109 +989,6 @@ export async function resumeBoxForTurn(
 }
 
 /**
- * Stage D machine-primary: acquire the group lease for a turn whose ACTIVE sandbox
- * is a connected machine (selfhosted) WITHOUT establishing a provider box. The
- * "box" is the user's physical machine reached over NATS; there is NOTHING to
- * spawn, snapshot, expose, or serialize — so we take the lease (the SAME group-keyed
- * refcount/idle/epoch bookkeeping resumeBoxForTurn uses) but skip every box step.
- *
- * The lease is keyed backend "selfhosted": the reaper's terminateProviderBox
- * short-circuits a selfhosted lease (it is the user's machine — NEVER provider-stop),
- * draining it to cold with no stop; and the reaper's warm-meter rate for "selfhosted"
- * is 0 (no cloud seconds billed for a box that does not exist). Returns the lease
- * epoch + an idempotent release so the turn's lease-heartbeat + `finally` release are
- * identical to the cloud path.
- *
- * holderId is the globally unique durable turn-attempt id. It must not be a
- * Temporal activity id, because activity ids are only workflow-local and
- * collide when sibling sessions share one sandbox group.
- */
-export async function acquireSelfhostedLeaseForTurn(
-  services: SandboxResumeServices,
-  ids: {
-    accountId: string;
-    workspaceId: string;
-    sandboxGroupId: string;
-    sessionId: string;
-  },
-  kind: "turn",
-  holderId: TurnSandboxLeaseHolderId,
-): Promise<{ leaseEpoch: number; release: () => Promise<void> }> {
-  const { db, settings } = services;
-  const leaseTtlMs = settings.sandboxLeaseTtlMs;
-
-  let released = false;
-  const release = async (): Promise<void> => {
-    if (released) {
-      return;
-    }
-    released = true;
-    await releaseLeaseHolder(db, {
-      accountId: ids.accountId,
-      workspaceId: ids.workspaceId,
-      sandboxGroupId: ids.sandboxGroupId,
-      kind,
-      holderId,
-      idleGraceMs: settings.sandboxIdleGraceMs,
-    });
-  };
-
-  const acquired = await acquireLease(db, {
-    accountId: ids.accountId,
-    workspaceId: ids.workspaceId,
-    sandboxGroupId: ids.sandboxGroupId,
-    kind,
-    holderId,
-    subjectId: ids.sessionId,
-    backend: "selfhosted",
-    os: "linux",
-    leaseTtlMs,
-    warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,
-  });
-
-  // FENCED: a newer epoch re-established the group concurrently. Release our
-  // just-registered holder + surface the supersession (the outer turn catch
-  // requeues, mirroring resumeBoxForTurn).
-  if (acquired.role === "fenced") {
-    await release();
-    throw new SandboxLeaseSupersededError(ids.sandboxGroupId, acquired.lease.leaseEpoch);
-  }
-
-  // SPAWNER: we won the cold->warming CAS. There is NO box to establish — commit
-  // warm immediately so the lease does not linger in 'warming' (no box id, no
-  // resume_state; selfhosted is re-addressed by enrollment via the active pointer,
-  // never resumed from an envelope). resume_backend_id "selfhosted" keeps the
-  // reaper's never-provider-stop short-circuit correct.
-  if (acquired.role === "spawner") {
-    const expectedEpoch = acquired.lease.leaseEpoch;
-    const committed = await commitWarmingToWarm(db, {
-      accountId: ids.accountId,
-      workspaceId: ids.workspaceId,
-      sandboxGroupId: ids.sandboxGroupId,
-      expectedEpoch,
-      // No provider box id; stamp a clearly non-box marker for diagnostics.
-      instanceId: `selfhosted:${ids.sessionId}`,
-      resumeBackendId: "selfhosted",
-      resumeState: null,
-      leaseTtlMs,
-    });
-    if (!committed.committed || !committed.lease) {
-      // A reaper reset our warming row, or a sibling re-established + bumped the
-      // epoch. Release our holder; surface supersession (NEVER touch any box).
-      await release();
-      throw new SandboxLeaseSupersededError(ids.sandboxGroupId, expectedEpoch);
-    }
-    return { leaseEpoch: committed.lease.leaseEpoch, release };
-  }
-
-  // ATTACHED / REARMED: the lease is live. There is no box to resume — just carry
-  // the lease epoch (same-session turns are serialized, so a concurrent 'warming'
-  // spawner on this group is not expected; the machine session is independent of the
-  // lease state regardless).
-  return { leaseEpoch: acquired.lease.leaseEpoch, release };
-}
-
-/**
  * Poll a warming lease until the spawner commits warm. If the warming row is
  * reset to cold (the spawner died and the reaper reset it), surface supersession
  * so the turn is re-dispatched and can enter the normal spawner branch from
@@ -962,6 +1017,25 @@ async function waitForWarm(
       throw new SandboxLeaseSupersededError(ids.sandboxGroupId, lease.leaseEpoch);
     }
     if (lease.liveness === "cold") {
+      if (isRetryableDegradedRestore(lease.recovery.restore)) {
+        // The elected spawner hit a transient archive verification failure.
+        // Re-enter admission so one caller can become the next fenced spawner;
+        // the archive remains authoritative and must not become terminal.
+        throw new SandboxLeaseSupersededError(ids.sandboxGroupId, lease.leaseEpoch);
+      }
+      if (
+        lease.recovery.restore.status === "degraded" ||
+        lease.recovery.restore.status === "unrecoverable"
+      ) {
+        throw new SandboxLeaseRecoveryBlockedError(
+          ids.sandboxGroupId,
+          lease.leaseEpoch,
+          lease.recovery.restore.status === "degraded"
+            ? "restore_degraded"
+            : "restore_unrecoverable",
+          lease.recovery,
+        );
+      }
       // The spawner died; re-dispatch so the normal acquireLease path can win
       // cold->warming and run the full spawner branch.
       throw new SandboxLeaseSupersededError(ids.sandboxGroupId, lease.leaseEpoch);

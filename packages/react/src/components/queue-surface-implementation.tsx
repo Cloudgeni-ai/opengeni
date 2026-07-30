@@ -16,7 +16,7 @@ import {
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import type { SessionTurn } from "@opengeni/sdk";
+import type { SessionPendingInputPreview, SessionTurn } from "@opengeni/sdk";
 import {
   ArrowDownToLineIcon,
   ArrowUpToLineIcon,
@@ -32,6 +32,7 @@ import {
   useCallback,
   useId,
   useMemo,
+  useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
@@ -39,34 +40,66 @@ import {
 import { DropdownMenu } from "radix-ui";
 import type { ComposerState } from "../hooks/use-composer";
 import type { QueueMutationKind, UseTurnQueueResult } from "../hooks/use-turn-queue";
+import { requestQueueDraftEdit } from "./queue-draft-policy";
 import { QueueErrorAlert, QueueStoppingStatus } from "./queue-surface-state";
 
-/** The sole human prompt queue: compact above Goal, Agents, and composer. */
+/** The sole pending-input surface: compact above Goal, Agents, and composer. */
+type QueueSurfaceCommonProps = {
+  /** Focus the composer owned by this queue after checkout/removal. */
+  onRequestComposerFocus?: (() => void) | undefined;
+};
+
 export type QueueSurfaceProps =
-  | {
+  | (QueueSurfaceCommonProps & {
       queue: UseTurnQueueResult;
       composer: ComposerState;
       readOnly?: false | undefined;
-    }
-  | {
+    })
+  | (QueueSurfaceCommonProps & {
       queue: UseTurnQueueResult;
       composer?: undefined;
       readOnly: true;
-    };
+    });
 
-export function QueueSurface({ queue, composer, readOnly = false }: QueueSurfaceProps) {
+/** @internal Pure policy seam for queue/composer embedding tests. */
+export function queueComposerCheckoutEnabled(
+  composer: ComposerState | undefined,
+  readOnly: boolean,
+): boolean {
+  return !readOnly && composer !== undefined && composer.draftPersistence !== "disabled";
+}
+
+export function QueueSurface({
+  queue,
+  composer,
+  readOnly = false,
+  onRequestComposerFocus,
+}: QueueSurfaceProps) {
   const [open, setOpen] = useState(false);
   const [replaceDraftFor, setReplaceDraftFor] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState("");
   const [draggedTurnId, setDraggedTurnId] = useState<string | null>(null);
+  const surfaceRef = useRef<HTMLDivElement | null>(null);
   const [keyboardDrag, setKeyboardDrag] = useState<{
     turnId: string;
     projectedIndex: number;
   } | null>(null);
   const count = queue.queue.length;
+  const pendingInputCount = queue.pendingInputs.length;
+  const totalCount = count + pendingInputCount;
+  const attachedInputIds = queue.pendingInputAttachment?.inputIds ?? [];
+  const attachedInputs = queue.pendingInputs.filter((input) => attachedInputIds.includes(input.id));
+  const standaloneInputs = queue.pendingInputs.filter(
+    (input) => !attachedInputIds.includes(input.id),
+  );
+  const canEditInComposer = queueComposerCheckoutEnabled(composer, readOnly);
   const collapsedPreview = useMemo(
-    () => queuePromptPreview(queue.queue[0]?.prompt ?? "", QUEUE_COLLAPSED_PREVIEW_CHARACTERS),
-    [queue.queue],
+    () =>
+      queuePromptPreview(
+        queue.queue[0]?.prompt ?? queue.pendingInputs[0]?.summary ?? "",
+        QUEUE_COLLAPSED_PREVIEW_CHARACTERS,
+      ),
+    [queue.pendingInputs, queue.queue],
   );
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
 
@@ -92,7 +125,7 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
           ? `Queued prompt moved to position ${boundedIndex + 1}.`
           : "The queue changed before that prompt could be moved. Refreshed server order.",
       );
-      if (moved) focusQueueTurn(turnId);
+      if (moved) focusQueueTurn(surfaceRef.current, turnId);
     },
     [queue],
   );
@@ -169,7 +202,7 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
 
   const edit = useCallback(
     async (turn: SessionTurn, replaceDraft: boolean) => {
-      if (!composer || readOnly) return;
+      if (!composer || !canEditInComposer) return;
       const restored = await queue.editTurn(turn.id, {
         expectedDraftRevision: composer.draftRevision,
         replaceDraft,
@@ -179,6 +212,10 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
       setReplaceDraftFor(null);
       setAnnouncement("Queued prompt moved back to the composer for editing.");
       window.requestAnimationFrame(() => {
+        if (onRequestComposerFocus) {
+          onRequestComposerFocus();
+          return;
+        }
         const input = document.querySelector<HTMLTextAreaElement>(
           'textarea[aria-label="Message the agent"]',
         );
@@ -186,31 +223,27 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
         input?.focus();
       });
     },
-    [composer, queue, readOnly],
+    [canEditInComposer, composer, onRequestComposerFocus, queue],
   );
 
   const requestEdit = useCallback(
     (turn: SessionTurn) => {
-      if (!composer || readOnly) return;
-      const draftDirty =
-        composer.value.length > 0 ||
-        composer.restoredResources.length > 0 ||
-        (composer.draft?.tools.length ?? 0) > 0 ||
-        (composer.draft?.sourceTurnId !== null && composer.draft?.sourceTurnId !== undefined);
-      if (draftDirty) {
-        setReplaceDraftFor(turn.id);
-      } else {
-        void edit(turn, false);
-      }
+      if (!composer || !canEditInComposer) return;
+      requestQueueDraftEdit(
+        composer,
+        () => setReplaceDraftFor(turn.id),
+        () => void edit(turn, false),
+      );
     },
-    [composer, edit, readOnly],
+    [canEditInComposer, composer, edit],
   );
 
-  if (count === 0 && !queue.stoppingPreviousAttempt && !queue.error && !queue.mutationError)
+  if (totalCount === 0 && !queue.stoppingPreviousAttempt && !queue.error && !queue.mutationError)
     return null;
 
   return (
     <div
+      ref={surfaceRef}
       className="mx-auto mb-2 w-full max-w-3xl shrink-0 px-4 sm:px-6"
       data-testid="queue-surface"
     >
@@ -220,23 +253,31 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
           type="button"
           className="flex w-full min-w-0 flex-wrap items-center gap-2 px-3 py-2 text-left outline-none transition-colors hover:bg-surface-2/60 focus-visible:bg-surface-2/60 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/40 pointer-coarse:min-h-[44px]"
           onClick={() => setOpen((value) => !value)}
-          aria-description={!open && count > 0 ? collapsedPreview.summary : undefined}
+          aria-description={!open && totalCount > 0 ? collapsedPreview.summary : undefined}
           aria-expanded={open}
-          aria-label={`${count} queued prompt${count === 1 ? "" : "s"}${readOnly ? " Read-only" : ""}`}
+          aria-label={`${count} queued prompt${count === 1 ? "" : "s"}${
+            pendingInputCount > 0
+              ? ` and ${pendingInputCount} pending machine input${pendingInputCount === 1 ? "" : "s"}`
+              : ""
+          }${readOnly ? " Read-only" : ""}`}
         >
           <ChevronDownIcon
             aria-hidden="true"
             className={`size-3.5 shrink-0 text-fg-subtle transition-transform ${open ? "rotate-180" : ""}`}
           />
           <span className="text-xs font-medium text-fg">
-            {count} queued prompt{count === 1 ? "" : "s"}
+            {count > 0 ? `${count} queued prompt${count === 1 ? "" : "s"}` : null}
+            {count > 0 && pendingInputCount > 0 ? " · " : null}
+            {pendingInputCount > 0
+              ? `${pendingInputCount} incoming update${pendingInputCount === 1 ? "" : "s"}`
+              : null}
           </span>
           {readOnly ? (
             <span className="shrink-0 rounded border border-border px-1.5 py-0.5 text-2xs text-fg-subtle">
               Read-only
             </span>
           ) : null}
-          {!open && count > 0 ? (
+          {!open && totalCount > 0 ? (
             <span
               aria-hidden="true"
               className={`max-w-full truncate text-fg-muted ${
@@ -253,6 +294,10 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
           {queue.loading ? <Loader2Icon className="ml-auto size-3.5 animate-spin" /> : null}
         </button>
 
+        {open && standaloneInputs.length > 0 ? (
+          <PendingMachineInputs inputs={standaloneInputs} />
+        ) : null}
+
         {open && count > 0 && readOnly ? (
           <ol
             className="max-h-[min(30rem,60dvh)] divide-y divide-border overflow-y-auto overscroll-contain border-t border-border"
@@ -264,6 +309,9 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
                 key={turn.id}
                 turn={turn}
                 index={index}
+                attachedInputs={
+                  turn.id === queue.pendingInputAttachment?.turnId ? attachedInputs : []
+                }
                 onDisclosureChange={(expanded) =>
                   setAnnouncement(
                     `Full content for queued prompt ${index + 1} ${expanded ? "shown" : "hidden"}.`,
@@ -298,12 +346,15 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
                     turn={turn}
                     index={index}
                     count={count}
+                    attachedInputs={
+                      turn.id === queue.pendingInputAttachment?.turnId ? attachedInputs : []
+                    }
                     pending={queue.mutationFor(turn.id)}
                     confirmingReplace={replaceDraftFor === turn.id}
                     keyboardDragging={keyboardDrag?.turnId === turn.id}
                     onHandleKeyDown={(event) => onHandleKeyDown(event, turn.id)}
                     onMove={(nextIndex) => void moveToIndex(turn.id, nextIndex)}
-                    onEdit={() => requestEdit(turn)}
+                    onEdit={canEditInComposer ? () => requestEdit(turn) : undefined}
                     onConfirmReplace={() => void edit(turn, true)}
                     onCancelReplace={() => setReplaceDraftFor(null)}
                     onSteer={() => {
@@ -313,7 +364,9 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
                             ? "Queued prompt is now the next direction."
                             : "That prompt changed before it could be steered.",
                         );
-                        if (steered) focusAfterQueueRemoval(index);
+                        if (steered) {
+                          focusAfterQueueRemoval(surfaceRef.current, index, onRequestComposerFocus);
+                        }
                       });
                     }}
                     onDelete={() => {
@@ -323,7 +376,9 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
                             ? "Queued prompt deleted."
                             : "That prompt changed before it could be deleted.",
                         );
-                        if (removed) focusAfterQueueRemoval(index);
+                        if (removed) {
+                          focusAfterQueueRemoval(surfaceRef.current, index, onRequestComposerFocus);
+                        }
                       });
                     }}
                     onDisclosureChange={(expanded) =>
@@ -367,6 +422,35 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
         {announcement}
       </p>
     </div>
+  );
+}
+
+function PendingMachineInputs({
+  inputs,
+  attached = false,
+}: {
+  inputs: SessionPendingInputPreview[];
+  attached?: boolean;
+}) {
+  return (
+    <section className="border-t border-border px-3 py-2">
+      <p className="text-2xs font-medium text-fg-subtle">
+        {attached
+          ? `${inputs.length} update${inputs.length === 1 ? "" : "s"} will join this prompt`
+          : "Incoming updates waiting to run"}
+      </p>
+      <ol className="mt-1 space-y-1">
+        {inputs.map((input) => (
+          <li key={input.id} className="line-clamp-3 break-words text-xs text-fg" dir="auto">
+            <strong className="capitalize text-fg-muted">
+              {input.kind.replace("_terminal", "").replaceAll("_", " ")}
+            </strong>{" "}
+            · {input.sourceId}
+            {input.summary ? ` — ${input.summary}` : ""}
+          </li>
+        ))}
+      </ol>
+    </section>
   );
 }
 
@@ -709,7 +793,7 @@ function QueuePrompt({
         aria-controls={fullContentId}
         aria-expanded={expanded}
         aria-label={`${expanded ? "Hide" : "Show"} full content for queued prompt ${index + 1}`}
-        className="mt-1 inline-flex min-h-7 min-w-0 max-w-full items-center gap-1 whitespace-normal rounded-md text-left text-2xs font-medium text-fg-muted outline-none transition-colors hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/40 pointer-coarse:min-h-[44px]"
+        className="mt-1 inline-flex min-h-7 min-w-0 max-w-full items-center gap-1 whitespace-normal rounded-md text-left text-2xs font-medium text-fg outline-none focus-visible:ring-2 focus-visible:ring-ring/40 pointer-coarse:min-h-[44px]"
         data-testid={`queue-prompt-disclosure-${index + 1}`}
         onClick={() => {
           const next = !expanded;
@@ -743,10 +827,12 @@ function QueuePrompt({
 function ReadOnlyQueueRow({
   turn,
   index,
+  attachedInputs,
   onDisclosureChange,
 }: {
   turn: SessionTurn;
   index: number;
+  attachedInputs: SessionPendingInputPreview[];
   onDisclosureChange: (expanded: boolean) => void;
 }) {
   return (
@@ -754,6 +840,9 @@ function ReadOnlyQueueRow({
       <span className="mt-1 shrink-0 font-mono text-2xs text-fg-subtle">{index + 1}</span>
       <div className="min-w-0 flex-1">
         <QueuePrompt prompt={turn.prompt} index={index} onDisclosureChange={onDisclosureChange} />
+        {attachedInputs.length > 0 ? (
+          <PendingMachineInputs inputs={attachedInputs} attached />
+        ) : null}
         <div className="mt-1 flex min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap text-2xs text-fg-subtle">
           {turn.resources.length > 0 ? (
             <span className="shrink-0">
@@ -777,6 +866,7 @@ function SortableQueueRow({
   turn,
   index,
   count,
+  attachedInputs,
   pending,
   confirmingReplace,
   keyboardDragging,
@@ -792,12 +882,13 @@ function SortableQueueRow({
   turn: SessionTurn;
   index: number;
   count: number;
+  attachedInputs: SessionPendingInputPreview[];
   pending: QueueMutationKind | null;
   confirmingReplace: boolean;
   keyboardDragging: boolean;
   onHandleKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => void;
   onMove: (index: number) => void;
-  onEdit: () => void;
+  onEdit?: (() => void) | undefined;
   onConfirmReplace: () => void;
   onCancelReplace: () => void;
   onSteer: () => void;
@@ -838,6 +929,9 @@ function SortableQueueRow({
         </span>
         <div className="col-span-full row-start-2 min-w-0 sm:col-span-1 sm:col-start-3 sm:row-start-1">
           <QueuePrompt prompt={turn.prompt} index={index} onDisclosureChange={onDisclosureChange} />
+          {attachedInputs.length > 0 ? (
+            <PendingMachineInputs inputs={attachedInputs} attached />
+          ) : null}
           <div className="mt-1 flex min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap text-2xs text-fg-subtle">
             {turn.resources.length > 0 ? (
               <span className="shrink-0">
@@ -860,7 +954,7 @@ function SortableQueueRow({
             onClick={onSteer}
             aria-label={`Steer queued prompt ${index + 1}`}
             title="Make this the next direction"
-            className="inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded-md px-2 text-xs font-medium outline-none transition-colors hover:bg-surface-2 focus-visible:ring-2 focus-visible:ring-ring/40 disabled:pointer-events-none disabled:opacity-50 pointer-coarse:min-h-[44px] pointer-coarse:min-w-[44px]"
+            className="inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded-md px-2 text-xs font-medium text-fg outline-none transition-[background-color] hover:bg-surface-2 focus-visible:ring-2 focus-visible:ring-ring/40 disabled:pointer-events-none disabled:opacity-50 pointer-coarse:min-h-[44px] pointer-coarse:min-w-[44px]"
           >
             {pending === "steer" ? (
               <Loader2Icon className="size-3.5 animate-spin" />
@@ -905,13 +999,17 @@ function SortableQueueRow({
                 className="z-50 w-48 max-w-[calc(100vw-16px)] rounded-md border border-border bg-surface p-1 text-xs text-fg shadow-lg"
                 data-testid={`queue-actions-menu-${index + 1}`}
               >
-                <DropdownMenu.Item
-                  className="flex min-w-0 cursor-default items-center gap-2 whitespace-normal break-words rounded-sm px-2 py-1.5 outline-none focus:bg-surface-2 pointer-coarse:min-h-[44px]"
-                  onSelect={onEdit}
-                >
-                  <PencilIcon className="size-3.5" /> Edit in composer
-                </DropdownMenu.Item>
-                <DropdownMenu.Separator className="my-1 h-px bg-border" />
+                {onEdit ? (
+                  <>
+                    <DropdownMenu.Item
+                      className="flex min-w-0 cursor-default items-center gap-2 whitespace-normal break-words rounded-sm px-2 py-1.5 outline-none focus:bg-surface-2 pointer-coarse:min-h-[44px]"
+                      onSelect={onEdit}
+                    >
+                      <PencilIcon className="size-3.5" /> Edit in composer
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Separator className="my-1 h-px bg-border" />
+                  </>
+                ) : null}
                 <DropdownMenu.Item
                   className="flex min-w-0 cursor-default items-center gap-2 whitespace-normal break-words rounded-sm px-2 py-1.5 outline-none focus:bg-surface-2 data-[disabled]:opacity-50 pointer-coarse:min-h-[44px]"
                   disabled={index === 0}
@@ -976,20 +1074,28 @@ function SortableQueueRow({
 
 const verticalOnly: Modifier = ({ transform }) => ({ ...transform, x: 0 });
 
-function focusQueueTurn(turnId: string): void {
+function focusQueueTurn(surface: HTMLElement | null, turnId: string): void {
   window.requestAnimationFrame(() => {
-    document
-      .querySelector<HTMLElement>(`[data-queue-turn-id="${turnId}"] [data-queue-handle]`)
+    surface
+      ?.querySelector<HTMLElement>(`[data-queue-turn-id="${turnId}"] [data-queue-handle]`)
       ?.focus();
   });
 }
 
-function focusAfterQueueRemoval(previousIndex: number): void {
+function focusAfterQueueRemoval(
+  surface: HTMLElement | null,
+  previousIndex: number,
+  onRequestComposerFocus?: (() => void) | undefined,
+): void {
   window.requestAnimationFrame(() => {
-    const handles = document.querySelectorAll<HTMLElement>("[data-queue-handle]");
+    const handles = surface?.querySelectorAll<HTMLElement>("[data-queue-handle]") ?? [];
     const nearest = handles[Math.min(previousIndex, Math.max(0, handles.length - 1))];
     if (nearest) {
       nearest.focus();
+      return;
+    }
+    if (onRequestComposerFocus) {
+      onRequestComposerFocus();
       return;
     }
     document

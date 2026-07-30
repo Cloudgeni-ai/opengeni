@@ -17,6 +17,9 @@ import {
   listSessionEvents,
   listSessionSystemUpdatesForTurn,
   listSessionTurns,
+  markSessionWorkflowWakeDelivered,
+  steerAgentSessionInTransaction,
+  withWorkspaceRls,
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
 import { createNatsEventBus, type EventBus } from "@opengeni/events";
@@ -32,7 +35,7 @@ import { createActivityTestHarness } from "../../apps/worker/src/activities";
 import { currentActivityContext } from "../../apps/worker/src/activities/streaming";
 import {
   CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
-  TURN_WORKER_MAX_CONCURRENT_TURNS,
+  turnWorkerConcurrencyOptions,
 } from "../../apps/worker/src/concurrency";
 import { turnTaskQueue } from "../../apps/worker/src/workflows/activities";
 import { submitTestHumanPrompt } from "./helpers/session-control";
@@ -104,7 +107,11 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
         temporalHost: services.temporalHost,
         temporalTaskQueue: taskQueue,
       });
-      const workflowClient = sessionWorkflowClient(new Client({ connection }), taskQueue);
+      const workflowClient = sessionWorkflowClient(
+        new Client({ connection }),
+        taskQueue,
+        dbClient.db,
+      );
       const activities = createActivityTestHarness({
         settings,
         db: dbClient.db,
@@ -336,7 +343,7 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
         temporalTaskQueue: taskQueue,
       });
       const temporal = new Client({ connection });
-      const workflowClient = sessionWorkflowClient(temporal, taskQueue);
+      const workflowClient = sessionWorkflowClient(temporal, taskQueue, dbClient.db);
       const realActivities = createActivityTestHarness({
         settings,
         db: dbClient.db,
@@ -480,7 +487,7 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
         temporalTaskQueue: taskQueue,
       });
       const temporal = new Client({ connection });
-      const workflowClient = sessionWorkflowClient(temporal, taskQueue);
+      const workflowClient = sessionWorkflowClient(temporal, taskQueue, dbClient.db);
       const activities = createActivityTestHarness({
         settings,
         db: dbClient.db,
@@ -597,6 +604,239 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
   );
 
   test(
+    "an accepted idle Agent Steer wake survives duplicate delivery and continue-as-new until one newest-direction admission",
+    async () => {
+      const grant = await testGrant(dbClient.db, "idle-agent-steer-admission");
+      const caller = await createDurableSession(
+        dbClient.db,
+        grant,
+        "caller remains active while steering the target",
+      );
+      const callerPrompt = await submitTestHumanPrompt(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: caller.id,
+        subjectId: grant.subjectId,
+        text: "own an attempt that can issue Agent Steer",
+        resources: [],
+        tools: [],
+        operationKey: `idle-steer-caller-${crypto.randomUUID()}`,
+        delivery: "send",
+        reasoningEffortFallback: "low",
+      });
+      const callerAttemptId = crypto.randomUUID();
+      const callerClaim = await claimSessionWorkForAttempt(dbClient.db, grant.workspaceId, {
+        sessionId: caller.id,
+        workflowId: callerPrompt.turn.temporalWorkflowId,
+        workflowRunId: crypto.randomUUID(),
+        attemptId: callerAttemptId,
+        dispatchId: crypto.randomUUID(),
+        trigger: { kind: "next" },
+      });
+      if (callerClaim.action !== "claimed") throw new Error("Agent Steer caller was not claimed");
+      const actor = {
+        type: "agent_attempt" as const,
+        sessionId: caller.id,
+        turnId: callerClaim.turn.id,
+        attemptId: callerAttemptId,
+        executionGeneration: callerClaim.turn.executionGeneration,
+      };
+      const target = await createDurableSession(
+        dbClient.db,
+        grant,
+        "idle target must admit only the newest Agent Steer",
+      );
+      const steer = (instruction: string) =>
+        withWorkspaceRls(dbClient.db, grant.workspaceId, (db) =>
+          db.transaction((tx) =>
+            steerAgentSessionInTransaction(tx as typeof db, {
+              accountId: grant.accountId,
+              workspaceId: grant.workspaceId,
+              targetSessionId: target.id,
+              actor,
+              operationKey: crypto.randomUUID(),
+              instruction,
+            }),
+          ),
+        );
+      const firstText = `superseded idle steer ${crypto.randomUUID()}`;
+      const newestText = `accepted newest idle steer ${crypto.randomUUID()}`;
+      const first = await steer(firstText);
+      const firstWakeRevision = first.wakeRevision;
+      if (firstWakeRevision === null) throw new Error("Agent Steer did not register a wake");
+      const taskQueue = `durable-idle-agent-steer-${crypto.randomUUID()}`;
+      const model = new ScriptedModel("newest idle Agent Steer consumed once");
+      const settings = testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+        temporalHost: services.temporalHost,
+        temporalTaskQueue: taskQueue,
+      });
+      const temporal = new Client({ connection });
+      const workflowClient = sessionWorkflowClient(temporal, taskQueue, dbClient.db);
+      const activities = createActivityTestHarness({
+        settings,
+        db: dbClient.db,
+        bus,
+        runtime: createProductionAgentRuntime({ model }),
+        wakeSessionWorkflow: workflowClient.wakeSessionWorkflow,
+      });
+      const scope = {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: target.id,
+        maxTurnsPerRun: 1,
+      };
+
+      // Temporal accepts both the original signal and a lost-response retry
+      // before any worker polls the task queue. Neither transport acceptance
+      // may exhaust the Postgres wake while the Steer is still pending.
+      const handle = await temporal.workflow.signalWithStart("sessionWorkflow", {
+        taskQueue,
+        workflowId: first.workflowId,
+        workflowIdReusePolicy: "ALLOW_DUPLICATE",
+        args: [scope],
+        signal: "sessionControl",
+      });
+      await temporal.workflow.signalWithStart("sessionWorkflow", {
+        taskQueue,
+        workflowId: first.workflowId,
+        workflowIdReusePolicy: "ALLOW_DUPLICATE",
+        args: [scope],
+        signal: "sessionControl",
+      });
+      expect(
+        await markSessionWorkflowWakeDelivered(dbClient.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: target.id,
+          temporalWorkflowId: first.workflowId,
+          wakeRevision: firstWakeRevision,
+        }),
+      ).toEqual({ action: "pending_admission", blocker: "pending_agent_steer" });
+
+      const newest = await steer(newestText);
+      const newestWakeRevision = newest.wakeRevision;
+      if (newestWakeRevision === null)
+        throw new Error("Newest Agent Steer did not register a wake");
+      await temporal.workflow.signalWithStart("sessionWorkflow", {
+        taskQueue,
+        workflowId: newest.workflowId,
+        workflowIdReusePolicy: "ALLOW_DUPLICATE",
+        args: [scope],
+        signal: "sessionControl",
+      });
+      expect(
+        await markSessionWorkflowWakeDelivered(dbClient.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: target.id,
+          temporalWorkflowId: newest.workflowId,
+          wakeRevision: firstWakeRevision,
+        }),
+      ).toEqual({ action: "pending_admission", blocker: "pending_agent_steer" });
+      expect(
+        await markSessionWorkflowWakeDelivered(dbClient.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: target.id,
+          temporalWorkflowId: newest.workflowId,
+          wakeRevision: newestWakeRevision,
+        }),
+      ).toEqual({ action: "pending_admission", blocker: "pending_agent_steer" });
+      expect(await workflowWakeRow(admin, grant.workspaceId, target.id)).toMatchObject({
+        wakeRevision: newestWakeRevision,
+        deliveredRevision: 0,
+      });
+
+      // Exercise the real bounded dispatcher while the workflow is still
+      // unpolled. It may redeliver transport, but acknowledgement remains held.
+      const beforeAdmissionRepair = await activities.dispatchSessionWorkflowWakes();
+      expect(beforeAdmissionRepair.failed).toBe(0);
+      expect(beforeAdmissionRepair.claimed).toBeGreaterThanOrEqual(1);
+      expect(await workflowWakeRow(admin, grant.workspaceId, target.id)).toMatchObject({
+        wakeRevision: newestWakeRevision,
+        deliveredRevision: 0,
+      });
+
+      const worker = await integrationWorker(nativeConnection, taskQueue, activities);
+      const workerRun = worker.run();
+      try {
+        await handle.result();
+        expect(model.calls).toBe(1);
+        const turns = await listSessionTurns(dbClient.db, grant.workspaceId, target.id);
+        expect(turns).toHaveLength(1);
+        expect(turns[0]).toMatchObject({ source: "system", status: "completed" });
+        const updates = await agentSteerRows(admin, grant.workspaceId, target.id);
+        expect(updates.find((update) => update.id === first.updateId)).toMatchObject({
+          state: "superseded",
+          deliveredTurnId: null,
+        });
+        expect(updates.find((update) => update.id === newest.updateId)).toMatchObject({
+          state: "delivered",
+          deliveredTurnId: turns[0]!.id,
+        });
+        expect(
+          await listSessionSystemUpdatesForTurn(
+            dbClient.db,
+            grant.workspaceId,
+            target.id,
+            turns[0]!.id,
+          ),
+        ).toMatchObject([{ id: newest.updateId, kind: "agent_steer_instruction" }]);
+        const events = await listSessionEvents(dbClient.db, grant.workspaceId, target.id, 0, 500);
+        expect(events.filter((event) => event.type === "turn.started")).toHaveLength(1);
+        const presentedUpdates = internalUpdatesFromModelRequest(model.requests[0]?.input);
+        expect(JSON.stringify(presentedUpdates)).not.toContain(firstText);
+        expect(presentedUpdates).toEqual([
+          expect.objectContaining({
+            id: newest.updateId,
+            kind: "agent_steer_instruction",
+            summary: newestText,
+            payload: expect.objectContaining({
+              type: "agent_steer_instruction",
+              instruction: newestText,
+            }),
+          }),
+        ]);
+
+        const firstRun = temporal.workflow.getHandle(first.workflowId, handle.signaledRunId);
+        const history = await firstRun.fetchHistory();
+        expect(
+          history.events?.some(
+            (event) => event.workflowExecutionContinuedAsNewEventAttributes != null,
+          ),
+        ).toBe(true);
+
+        // The claim consumed the instruction exactly once. The next due repair
+        // may now acknowledge the same revision, even if it starts a no-op run
+        // after the continue-as-new chain already closed.
+        await waitFor(
+          async () => {
+            await activities.dispatchSessionWorkflowWakes();
+            const row = await workflowWakeRow(admin, grant.workspaceId, target.id);
+            return row?.deliveredRevision === newestWakeRevision;
+          },
+          {
+            timeoutMs: 5_000,
+            intervalMs: 100,
+            describe: () => "admitted Agent Steer wake revision was not acknowledged",
+          },
+        );
+        expect(model.calls).toBe(1);
+        expect(await workflowWakeRow(admin, grant.workspaceId, target.id)).toMatchObject({
+          wakeRevision: newestWakeRevision,
+          deliveredRevision: newestWakeRevision,
+        });
+      } finally {
+        worker.shutdown();
+        await workerRun;
+      }
+    },
+    integrationTimeoutMs,
+  );
+
+  test(
     "Pause reaches quiescence and physically stops the active attempt within two seconds",
     async () => {
       const grant = await testGrant(dbClient.db, "pause-quiescence");
@@ -632,7 +872,7 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
         temporalTaskQueue: taskQueue,
       });
       const temporal = new Client({ connection });
-      const workflowClient = sessionWorkflowClient(temporal, taskQueue);
+      const workflowClient = sessionWorkflowClient(temporal, taskQueue, dbClient.db);
       const activities = createActivityTestHarness({
         settings,
         db: dbClient.db,
@@ -766,7 +1006,7 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
         temporalTaskQueue: taskQueue,
       });
       const temporal = new Client({ connection });
-      const workflowClient = sessionWorkflowClient(temporal, taskQueue);
+      const workflowClient = sessionWorkflowClient(temporal, taskQueue, dbClient.db);
       const realActivities = createActivityTestHarness({
         settings,
         db: dbClient.db,
@@ -918,6 +1158,38 @@ async function createDurableSession(
   });
 }
 
+async function workflowWakeRow(sql: postgres.Sql, workspaceId: string, sessionId: string) {
+  const [row] = await sql<
+    Array<{ wake_revision: string | number; delivered_revision: string | number }>
+  >`
+    select wake_revision, delivered_revision
+    from session_workflow_wake_outbox
+    where workspace_id = ${workspaceId}::uuid and session_id = ${sessionId}::uuid
+    limit 1
+  `;
+  return row
+    ? {
+        wakeRevision: Number(row.wake_revision),
+        deliveredRevision: Number(row.delivered_revision),
+      }
+    : null;
+}
+
+async function agentSteerRows(sql: postgres.Sql, workspaceId: string, sessionId: string) {
+  const rows = await sql<Array<{ id: string; state: string; delivered_turn_id: string | null }>>`
+    select id, state, delivered_turn_id
+    from session_system_updates
+    where workspace_id = ${workspaceId}::uuid
+      and session_id = ${sessionId}::uuid
+      and kind = 'agent_steer_instruction'
+  `;
+  return rows.map((row) => ({
+    id: row.id,
+    state: row.state,
+    deliveredTurnId: row.delivered_turn_id,
+  }));
+}
+
 function systemUpdateInput(
   grant: AccessGrant,
   sessionId: string,
@@ -942,13 +1214,18 @@ function systemUpdateInput(
   };
 }
 
-function sessionWorkflowClient(temporal: Client, taskQueue: string) {
+function sessionWorkflowClient(
+  temporal: Client,
+  taskQueue: string,
+  db: ReturnType<typeof createDb>["db"],
+) {
   return {
     wakeSessionWorkflow: async (input: {
       accountId: string;
       workspaceId: string;
       sessionId: string;
       workflowId: string;
+      wakeRevision: number;
       interruptionRequested?: boolean;
     }) => {
       await temporal.workflow.signalWithStart("sessionWorkflow", {
@@ -963,6 +1240,13 @@ function sessionWorkflowClient(temporal: Client, taskQueue: string) {
           },
         ],
         signal: input.interruptionRequested ? "sessionControl" : "queueChanged",
+      });
+      await markSessionWorkflowWakeDelivered(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        temporalWorkflowId: input.workflowId,
+        wakeRevision: input.wakeRevision,
       });
     },
     signalSessionControl: async (input: {
@@ -1074,6 +1358,35 @@ function countOccurrences(haystack: string, needle: string): number {
   return haystack.split(needle).length - 1;
 }
 
+function internalUpdatesFromModelRequest(input: unknown): unknown[] {
+  if (!Array.isArray(input)) throw new Error("internal update model input is not an array");
+  const message = input.find(
+    (item) =>
+      item !== null &&
+      typeof item === "object" &&
+      "role" in item &&
+      item.role === "system" &&
+      "content" in item &&
+      typeof item.content === "string" &&
+      item.content.startsWith("[OpenGeni internal updates]\n"),
+  );
+  if (message === undefined || !("content" in message) || typeof message.content !== "string") {
+    throw new Error("internal update model input has no system update message");
+  }
+  const payloadStart = message.content.indexOf('{"updates":');
+  if (payloadStart < 0) throw new Error("internal update system message has no JSON payload");
+  const payload: unknown = JSON.parse(message.content.slice(payloadStart));
+  if (
+    payload === null ||
+    typeof payload !== "object" ||
+    !("updates" in payload) ||
+    !Array.isArray(payload.updates)
+  ) {
+    throw new Error("internal update system message has an invalid update batch");
+  }
+  return payload.updates;
+}
+
 async function integrationWorker(
   temporalConnection: NativeConnection,
   taskQueue: string,
@@ -1095,7 +1408,7 @@ async function integrationWorker(
       namespace: "default",
       taskQueue: turnTaskQueue(taskQueue),
       activities: { runAgentTurn },
-      maxConcurrentActivityTaskExecutions: TURN_WORKER_MAX_CONCURRENT_TURNS,
+      ...turnWorkerConcurrencyOptions(testSettings()),
     }),
   ]);
   return {

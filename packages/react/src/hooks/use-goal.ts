@@ -1,6 +1,6 @@
 import { OpenGeniApiError, type SessionEvent, type SessionGoal } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useOpenGeni, type ClientOverride } from "../provider";
+import { useEmbeddedGoal, type EmbeddedGoalClientOverride } from "../session-context";
 import {
   useDebouncedCallback,
   useMutationRunner,
@@ -13,9 +13,26 @@ export function isGoalEvent(event: Pick<SessionEvent, "type">): boolean {
   return event.type.startsWith("goal.");
 }
 
-export type UseGoalOptions = ClientOverride &
+/**
+ * Events that can change the server-authoritative continuation projection.
+ * The projection is derived from durable turn, session, control, and system
+ * update state, so those events refresh the goal without model polling.
+ */
+export function isGoalRefreshEvent(event: Pick<SessionEvent, "type">): boolean {
+  const type = event.type;
+  return (
+    isGoalEvent(event) ||
+    type.startsWith("turn.") ||
+    type.startsWith("session.") ||
+    type.startsWith("system.update.") ||
+    type.startsWith("workspace.inference.") ||
+    type.startsWith("user.")
+  );
+}
+
+export type UseGoalOptions = EmbeddedGoalClientOverride &
   SessionEventFeedOptions & {
-    /** Optional safety-net polling (ms). Off by default — goal.* events drive updates. */
+    /** Optional safety-net polling (ms). Off by default — event refreshes drive updates. */
     pollIntervalMs?: number | undefined;
   };
 
@@ -46,14 +63,15 @@ export type UseGoalResult = {
 /**
  * The session's goal: state, the autonomy counters (`autoContinuations`,
  * `noProgressStreak`), and pause/resume control. A goal-less session yields
- * `goal: null` (the 404 is absorbed). Live-updates on `goal.*` events —
- * pass `options.events` from `useSessionEvents` to reuse its stream.
+ * `goal: null` (the 404 is absorbed). Live-updates on goal, turn, session,
+ * control, and system-update events — pass `options.events` from
+ * `useSessionEvents` to reuse its stream.
  */
 export function useGoal(
   sessionId: string | null | undefined,
   options: UseGoalOptions = {},
 ): UseGoalResult {
-  const { client, workspaceId } = useOpenGeni(options);
+  const { client, workspaceId } = useEmbeddedGoal(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
   const sharedEvents = options.events;
   const sharedFeed = sharedEvents !== undefined;
@@ -124,7 +142,7 @@ export function useGoal(
   }, [load, enabled, workspaceId, sessionId, options.pollIntervalMs, sharedFeed]);
 
   const scheduleRefresh = useDebouncedCallback(() => void load());
-  useSessionEventTrigger(client, workspaceId, sessionId, isGoalEvent, scheduleRefresh, {
+  useSessionEventTrigger(client, workspaceId, sessionId, isGoalRefreshEvent, scheduleRefresh, {
     enabled,
     ...(sharedEvents !== undefined ? { events: sharedEvents } : {}),
   });

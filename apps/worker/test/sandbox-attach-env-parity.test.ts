@@ -91,13 +91,14 @@ describe("attach-vs-turn manifest-environment parity (no repo attached)", () => 
     expect(attachEnv.HOME).toBe("/workspace");
   });
 
-  test("selfhosted stable env does not gain managed-sandbox git helper pointers", async () => {
+  test("selfhosted stable env preserves the machine HOME without managed-sandbox git helpers", async () => {
     const settings = testSettings({ sandboxBackend: "selfhosted" });
     const { environment: turnEnv } = await sandboxEnvironmentForRun(settings, [], {});
     const attachEnv = stableSandboxEnvironmentForRun(settings, {});
 
-    expect(turnEnv).toEqual({ HOME: "/" });
+    expect(turnEnv).toEqual({});
     expect(attachEnv).toEqual(turnEnv);
+    expect(turnEnv.HOME).toBeUndefined();
     expect(turnEnv.OPENGENI_GIT_CREDENTIALS_DIR).toBeUndefined();
     expect(turnEnv.OPENGENI_GIT_TOKEN_FILE).toBeUndefined();
     expect(turnEnv.OPENGENI_GIT_CLI_WRAPPER_DIR).toBeUndefined();
@@ -331,6 +332,15 @@ describe("repo-attached attach-vs-turn parity (the viewer-attach cold-create rac
       };
     };
     const scope = { accountId: "acct-1", workspaceId: "ws-1" };
+    const authority = {
+      sessionId: "00000000-0000-4000-8000-000000000001",
+      rootSessionId: "00000000-0000-4000-8000-000000000002",
+      turnId: "00000000-0000-4000-8000-000000000003",
+      attemptId: "00000000-0000-4000-8000-000000000004",
+      executionGeneration: 3,
+      initiator: { kind: "subject" as const, subjectId: "host:user:42" },
+      initiatorContext: { source: "embedded-host" },
+    };
 
     const { environment: lazyEnv, gitToken } = await sandboxEnvironmentForRun(
       settings,
@@ -339,6 +349,7 @@ describe("repo-attached attach-vs-turn parity (the viewer-attach cold-create rac
       {
         deferGitHubToken: true,
         scope,
+        authority,
         gitCredentials,
       },
     );
@@ -351,7 +362,11 @@ describe("repo-attached attach-vs-turn parity (the viewer-attach cold-create rac
     expect(Object.values(lazyEnv)).not.toContain("ghs_lazy_mint");
     expect(calls).toEqual([{ purpose: "identity" }]);
 
-    const token = await mintRunGitToken(settings, [repoResource], { scope, gitCredentials });
+    const token = await mintRunGitToken(settings, [repoResource], {
+      scope,
+      authority,
+      gitCredentials,
+    });
     expect(token).toBe("ghs_lazy_mint");
     expect(calls).toEqual([{ purpose: "identity" }, { purpose: "token" }]);
   });

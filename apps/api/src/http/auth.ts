@@ -49,7 +49,8 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   }
   if (
     path === "/v1/integrations/oauth/callback" ||
-    path === "/v1/integrations/oauth/client-metadata.json"
+    path === "/v1/integrations/oauth/client-metadata.json" ||
+    path === "/v1/integrations/slack/callback"
   ) {
     return true;
   }
@@ -59,17 +60,15 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   if (path.startsWith("/v1/catalog-assets/")) {
     return true;
   }
-  // Browser entry for MCP-issued GitHub install links: opened in a browser
-  // that holds no API credentials, like the callbacks above. The route itself
-  // verifies the signed workspace-bound state before doing anything.
+  // The GitHub owner-consent entry remains public like the callbacks above; it
+  // verifies fresh signed workspace-bound state before redirecting to GitHub.
   if (githubConnectPathPattern.test(path)) {
     return true;
   }
-  // The OAuth callback renders a same-origin POST form for choosing an existing
-  // installation's repositories. The signed OAuth state + per-installation and
-  // per-repository tickets are the coarse-boundary credential; the route still
-  // requires github:manage from the ordinary access resolver or a bounded
-  // configured-token browser handoff before binding.
+  // Compatibility endpoint for stale chooser submissions. It remains public
+  // only so already-rendered forms can authenticate their signed account and
+  // workspace state locally before terminating with 410; it does not parse a
+  // ticket, resolve browser authority, or write an installation binding.
   if (c.req.method === "POST" && githubInstallationLinkPathPattern.test(path)) {
     return true;
   }
@@ -79,7 +78,10 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   if (installExactPaths.has(path) || isInstallRedirectPath(path)) {
     return true;
   }
-  if (settings.authAllowHealth && (path === "/healthz" || path === "/readyz")) {
+  if (
+    settings.authAllowHealth &&
+    (path === "/healthz" || path === "/readyz" || path === "/traffic-readyz")
+  ) {
     return true;
   }
   if (settings.authAllowMetrics && path === "/metrics") {

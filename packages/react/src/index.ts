@@ -7,9 +7,21 @@
 //   @import "@opengeni/react/styles.css";
 //   @source "../node_modules/@opengeni/react/src";
 
-export type { SessionClientLike } from "./client";
-export { OpenGeniProvider, useOpenGeni, useOpenGeniClient } from "./provider";
-export type { ClientOverride, OpenGeniContextValue, OpenGeniProviderProps } from "./provider";
+export type {
+  EmbeddedFileAttachmentClientLike,
+  EmbeddedGoalClientLike,
+  EmbeddedHumanInputSessionClientLike,
+  EmbeddedSessionEventClientLike,
+  EmbeddedSessionLineageClientLike,
+  EmbeddedSessionMcpApprovalPolicyClientLike,
+  EmbeddedSessionReadClientLike,
+  EmbeddedSessionClientLike,
+  SessionClientLike,
+} from "./client";
+export { OpenGeniProvider } from "./provider";
+export type { OpenGeniProviderProps } from "./provider";
+export { useOpenGeni, useOpenGeniClient } from "./session-context";
+export type { ClientOverride, OpenGeniContextValue } from "./session-context";
 
 // Hooks
 export { useSession, isTitleEvent } from "./hooks/use-session";
@@ -37,6 +49,20 @@ export {
   FILE_ONLY_MESSAGE_TEXT,
 } from "./hooks/use-composer";
 export type { ComposerSendExtras, ComposerState, UseComposerOptions } from "./hooks/use-composer";
+export { COMPOSER_PAYMENT_REQUIRED_MESSAGE, composerSubmissionErrorMessage } from "./lib/format";
+export {
+  INITIAL_TRANSCRIPTION_CONTROL_STATE,
+  appendFinalTranscript,
+  transitionTranscriptionControl,
+  useTranscription,
+} from "./hooks/use-transcription";
+export type {
+  TranscriptionControlAction,
+  TranscriptionControlState,
+  TranscriptionControlTransition,
+  UseTranscriptionOptions,
+  UseTranscriptionResult,
+} from "./hooks/use-transcription";
 export { useFileAttachments } from "./hooks/use-file-attachments";
 export type {
   FileAttachment,
@@ -59,6 +85,14 @@ export type {
   UseSessionControlOptions,
   UseSessionControlResult,
 } from "./hooks/use-session-control";
+export {
+  isSessionMcpApprovalPolicyEvent,
+  useSessionMcpApprovalPolicy,
+} from "./hooks/use-session-mcp-approval-policy";
+export type {
+  UseSessionMcpApprovalPolicyOptions,
+  UseSessionMcpApprovalPolicyResult,
+} from "./hooks/use-session-mcp-approval-policy";
 export { useScheduledTasks } from "./hooks/use-scheduled-tasks";
 export type {
   UseScheduledTasksOptions,
@@ -176,6 +210,27 @@ export type {
 // Pending-approvals projection
 export { approvalsFromRequiresAction, projectPendingApprovals } from "./approvals";
 export type { PendingApproval } from "./approvals";
+export { ApprovalSurface, defaultApprovalSurfaceMessages } from "./components/approval-surface";
+export type { ApprovalSurfaceMessages, ApprovalSurfaceProps } from "./components/approval-surface";
+
+// Structured human input: event projection, authoritative hook, and styled form.
+export { humanInputRequestFromEvent, projectPendingHumanInputRequests } from "./human-input";
+export type { PendingHumanInputRequest } from "./human-input";
+export { isHumanInputEvent, useHumanInputRequests } from "./hooks/use-human-input";
+export type {
+  UseHumanInputRequestsOptions,
+  UseHumanInputRequestsResult,
+} from "./hooks/use-human-input";
+export {
+  HumanInputForm,
+  answersFromDrafts,
+  defaultHumanInputFormMessages,
+} from "./components/human-input-form";
+export type {
+  HumanInputAnswerDraft,
+  HumanInputFormMessages,
+  HumanInputFormProps,
+} from "./components/human-input-form";
 
 // Timeline projection
 export {
@@ -191,6 +246,8 @@ export type {
   AgentMessageItem,
   AuthNeededItem,
   GoalItem,
+  MachineInputBatchItem,
+  MachineInputMember,
   NoticeItem,
   ReasoningItem,
   SandboxItem,
@@ -232,6 +289,7 @@ export {
   TermBlock,
   Thumbnail,
   TurnSummary,
+  BUILT_IN_TURN_SUMMARY_FACET_IDS,
   useLightbox,
   useLightboxOptional,
 } from "./timeline";
@@ -239,7 +297,13 @@ export type {
   ActivityDisclosureProps,
   ActivityRailProps,
   DisclosureChip,
+  BuiltInTurnSummaryFacetId,
   TurnOutcome,
+  TurnSummaryContext,
+  TurnSummaryFacet,
+  TurnSummaryFacetConfiguration,
+  TurnSummaryFacetResult,
+  TurnSummaryOptions,
   TurnSummaryProps,
 } from "./timeline";
 
@@ -294,6 +358,11 @@ export type { CommandPaletteProps } from "./components/command-palette";
 // Components
 export { ChatComposer } from "./components/chat-composer";
 export type { ChatComposerProps } from "./components/chat-composer";
+export { ComposerTranscriptionControl } from "./components/composer-transcription-control";
+export type {
+  ComposerTranscriptionControlProps,
+  ComposerTranscriptionMessages,
+} from "./components/composer-transcription-control";
 export { defaultChatComposerMessages } from "./components/composer";
 export type { ChatComposerMessages } from "./components/composer";
 export { ModelPicker } from "./components/model-picker";
@@ -339,8 +408,12 @@ export {
   initialWorkspaceTab,
   WORKBENCH_TAB_CHANGES,
   WORKBENCH_TAB_FILES,
+  WORKBENCH_TAB_TERMINAL,
+  WORKBENCH_TAB_DESKTOP,
+  WORKBENCH_SURFACES,
 } from "./components/sandbox-workspace";
 export type {
+  SandboxWorkspaceSurface,
   SandboxWorkspaceProps,
   UseSandboxWorkspaceTabsOptions,
   UseSandboxWorkspaceTabsResult,

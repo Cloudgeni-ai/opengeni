@@ -1,4 +1,5 @@
 {{- if .Values.worker.enabled }}
+{{- $priorityClassName := include "opengeni.priorityClassName" (dict "root" . "explicit" (.Values.worker.control.priorityClassName | default .Values.worker.priorityClassName) "tier" "control") }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -34,8 +35,8 @@ spec:
       serviceAccountName: {{ include "opengeni.serviceAccountName" . }}
       automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
       terminationGracePeriodSeconds: {{ .Values.worker.terminationGracePeriodSeconds }}
-      {{- if .Values.worker.priorityClassName }}
-      priorityClassName: {{ .Values.worker.priorityClassName | quote }}
+      {{- if $priorityClassName }}
+      priorityClassName: {{ $priorityClassName | quote }}
       {{- end }}
       securityContext:
         {{- toYaml .Values.worker.podSecurityContext | nindent 8 }}
@@ -67,20 +68,7 @@ spec:
             - name: OPENGENI_WORKER_ROLE
               value: control
             {{- if or .Values.postgres.enabled .Values.temporal.enabled .Values.minio.enabled }}
-            {{- include "opengeni.generatedRuntimeEnv" . | nindent 12 }}
-            {{- if .Values.minio.enabled }}
-            # Worker-only override: the worker performs SERVER-SIDE object-storage
-            # PUTs in-cluster (e.g. recording uploads) and mints NO browser-facing
-            # presigned URLs, so it must reach MinIO over the in-cluster Service. The
-            # shared OPENGENI_OBJECT_STORAGE_ENDPOINT emitted by generatedRuntimeEnv is
-            # the PUBLIC endpoint that api/web sign browser presigned URLs against; on
-            # managed deployments that host has no MinIO ingress route, so a server-side
-            # PUT there 401s (the recording-upload bug). A later duplicate env entry
-            # wins in a container env list, so this overrides ONLY the worker — api/web
-            # keep the public endpoint for browser uploads.
-            - name: OPENGENI_OBJECT_STORAGE_ENDPOINT
-              value: {{ include "opengeni.minioInternalEndpoint" . | quote }}
-            {{- end }}
+            {{- include "opengeni.generatedRuntimeEnv" (dict "root" . "objectStorageEndpoint" (include "opengeni.minioInternalEndpoint" .)) | nindent 12 }}
             {{- end }}
           {{- if (((.Values.worker).probes).readiness).enabled }}
           readinessProbe:
@@ -90,8 +78,10 @@ spec:
           livenessProbe:
             {{- include "opengeni.httpProbe" (dict "probe" ((.Values.worker).probes).liveness) | nindent 12 }}
           {{- end }}
+          {{- with .Values.worker.control.resources }}
           resources:
-            {{- toYaml .Values.worker.control.resources | nindent 12 }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
       {{- if ((.Values.worker).topologySpreadConstraints).enabled }}
       topologySpreadConstraints:
         {{- include "opengeni.topologySpreadConstraints" (dict "root" . "component" "worker-control" "values" .Values.worker) | nindent 8 }}

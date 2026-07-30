@@ -51,7 +51,7 @@ export function ComposerAgentsPill({
               // border / surface-2 / shadow-md / backdrop-blur), and matched to
               // its height + left inset so the two read as siblings when stacked.
               "inline-flex h-8 max-w-full items-center gap-2 rounded-full border bg-surface-2/90 pl-3 pr-3.5 text-xs shadow-md backdrop-blur",
-              "supports-[backdrop-filter]:bg-surface-2/75 outline-none transition-colors",
+              "supports-[backdrop-filter]:bg-surface-2/75 outline-none transition-[border-color]",
               "hover:border-border-strong focus-visible:ring-2 focus-visible:ring-ring/40 data-[state=open]:border-border-strong",
               "pointer-coarse:min-h-11",
               live ? "border-status-running/40" : "border-border",

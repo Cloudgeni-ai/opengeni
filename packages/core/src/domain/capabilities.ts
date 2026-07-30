@@ -13,6 +13,12 @@ import {
   type McpServerConnectionRef,
 } from "@opengeni/contracts";
 import {
+  CODEX_APPS_MCP_SERVER_ID,
+  CODEX_APPS_MCP_SERVER_NAME,
+  CODEX_APPS_MCP_URL,
+  CODEX_APPS_STARTUP_TIMEOUT_MS,
+} from "@opengeni/codex";
+import {
   decryptVariableSetValue,
   decryptedCapabilityHeaders,
   disableCapabilityInstallation,
@@ -27,6 +33,7 @@ import {
   getVariableSet,
   listCapabilityCatalogItems,
   listCapabilityInstallations,
+  listConnectionsMetadata,
   listEnabledMcpCapabilityServers,
   listPackInstallations,
   mcpServerIdForCapability,
@@ -36,6 +43,11 @@ import {
   type EnabledMcpCapabilityServer,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
+import {
+  getSkillLibraryEntry,
+  listSkillLibraryEntries,
+  type SkillLibraryEntry,
+} from "@opengeni/runtime/skill-library";
 import { validateVariableSetAttachment } from "./environments";
 import {
   assertPackSandboxImageCompatible,
@@ -65,12 +77,14 @@ export async function buildCapabilityCatalog(input: {
     packInstallations,
     workspacePacks,
     bundledSkills,
+    curatedLibrarySkills,
   ] = await Promise.all([
     listCapabilityCatalogItems(input.db, input.workspaceId),
     listCapabilityInstallations(input.db, input.workspaceId),
     listPackInstallations(input.db, input.workspaceId),
     listWorkspaceCapabilityPacks(input.db, input.workspaceId),
     discoverBundledSkills(),
+    discoverCuratedSkillLibraryItems(),
   ]);
   const capabilityInstallationById = new Map(
     capabilityInstallations.map((installation) => [installation.capabilityId, installation]),
@@ -88,6 +102,7 @@ export async function buildCapabilityCatalog(input: {
     ...configuredMcpCatalogItems(input.settings),
     ...platformApiCatalogItems(),
     ...bundledSkills,
+    ...curatedLibrarySkills,
   ];
   const items = dedupeCatalogItems([...builtIns, ...persistedItems])
     .map((item) =>
@@ -112,8 +127,14 @@ export async function createCatalogItem(input: {
       message: "packs are managed by OpenGeni and cannot be manually created",
     });
   }
+  if (id.startsWith("skill:")) {
+    throw new HTTPException(422, {
+      message: "skill ids are managed by the OpenGeni skill library or runtime adapters",
+    });
+  }
   const source =
     input.payload.source === "built_in" ||
+    input.payload.source === "library" ||
     input.payload.source === "configured" ||
     input.payload.source === "registry"
       ? "manual"
@@ -169,11 +190,49 @@ export async function enableCapability(input: {
   // Credential-header storage is written exclusively by this flow; strip the
   // reserved keys from caller-provided config so the stored shape stays
   // trustworthy and no plaintext credentials sneak in through config.headers.
-  const installationConfig: Record<string, unknown> = { ...input.payload.config };
+  let installationConfig: Record<string, unknown> = { ...input.payload.config };
   delete installationConfig.headers;
   delete installationConfig.headersEncrypted;
   delete installationConfig.headerNames;
   delete installationConfig.connectionRef;
+  if (item.kind === "skill" && item.source === "library") {
+    const libraryId = stringMetadata(item.metadata.libraryId);
+    const catalogVersion = stringMetadata(item.metadata.version);
+    if (!libraryId || !catalogVersion) {
+      throw new HTTPException(422, {
+        message: `skill library metadata is incomplete for ${item.id}`,
+      });
+    }
+    const requestedVersion = input.payload.config.version;
+    if (requestedVersion !== undefined && typeof requestedVersion !== "string") {
+      throw new HTTPException(422, {
+        message: "skill activation config.version must be a string",
+      });
+    }
+    const normalizedVersion = requestedVersion?.trim() || catalogVersion;
+    if (normalizedVersion !== catalogVersion) {
+      throw new HTTPException(422, {
+        message: `skill ${libraryId} only supports immutable version ${catalogVersion}`,
+      });
+    }
+    const entry = getSkillLibraryEntry(libraryId, normalizedVersion);
+    if (!entry) {
+      throw new HTTPException(422, {
+        message: `skill library entry is unavailable: ${libraryId}@${normalizedVersion}`,
+      });
+    }
+    // Skill activation has a deliberately narrow config surface. In
+    // particular, no variable-set, connection, credential-header, MCP, or
+    // provider-routing input is persisted or consulted for a library skill.
+    installationConfig = { version: entry.version };
+    installationMetadata = {
+      libraryId: entry.id,
+      libraryVersion: entry.version,
+      contentSha256: entry.contentSha256,
+      sourceCommit: entry.sourceCommit,
+      provenance: entry.provenance,
+    };
+  }
   if (item.kind === "mcp") {
     const headers = await resolveMcpCredentialHeaders(input, item);
     const connectionRef = input.payload.connectionRef
@@ -372,18 +431,18 @@ async function validateMcpCapabilityConnectionRef(
   item: CapabilityCatalogItem,
   ref: McpServerConnectionRef,
 ): Promise<McpServerConnectionRef> {
-  if (ref.subjectScope === "subject") {
-    throw new HTTPException(422, {
-      message: "subject-owned connection refs are not supported for agent runtime use yet",
-    });
-  }
+  const subjectScope = ref.subjectScope ?? "workspace";
   const normalized: McpServerConnectionRef = {
     providerDomain: ref.providerDomain.trim(),
-    subjectScope: "workspace",
+    subjectScope,
     ...(ref.connectionId ? { connectionId: ref.connectionId } : {}),
+    ...(ref.provider ? { provider: ref.provider.trim() } : {}),
     ...(ref.kind ? { kind: ref.kind } : {}),
     ...(ref.scopes ? { scopes: uniqueStrings(ref.scopes) } : {}),
     ...(ref.resource ? { resource: ref.resource } : {}),
+    ...(ref.selectedResources
+      ? { selectedResources: ref.selectedResources.map((resource) => ({ ...resource })) }
+      : {}),
   };
   if (!normalized.providerDomain) {
     throw new HTTPException(422, { message: "connectionRef.providerDomain is required" });
@@ -394,23 +453,41 @@ async function validateMcpCapabilityConnectionRef(
         "MCP capabilities need a remote streamable HTTP endpoint before they can use a connectionRef",
     });
   }
-  if (!normalized.connectionId) {
-    return normalized;
+
+  let connection = normalized.connectionId
+    ? await getConnectionMetadata(
+        input.db,
+        input.workspaceId,
+        normalized.connectionId,
+        input.grant.subjectId,
+      )
+    : null;
+  if (!connection && subjectScope === "subject" && !normalized.connectionId) {
+    const visible = await listConnectionsMetadata(
+      input.db,
+      input.workspaceId,
+      input.grant.subjectId,
+    );
+    connection =
+      visible.find(
+        (candidate) =>
+          candidate.subjectId === input.grant.subjectId &&
+          candidate.providerDomain === normalized.providerDomain &&
+          (!normalized.kind || candidate.kind === normalized.kind) &&
+          candidate.status === "active",
+      ) ?? null;
   }
-  const connection = await getConnectionMetadata(
-    input.db,
-    input.workspaceId,
-    normalized.connectionId,
-    input.grant.subjectId,
-  );
   if (!connection) {
     throw new HTTPException(422, {
-      message: "connectionRef.connectionId does not reference a visible connection",
+      message: "connectionRef does not reference a visible active connection",
     });
   }
-  if (connection.subjectId !== null) {
+  if (
+    (subjectScope === "subject" && connection.subjectId !== input.grant.subjectId) ||
+    (subjectScope === "workspace" && connection.subjectId !== null)
+  ) {
     throw new HTTPException(422, {
-      message: "agent runtime connection refs must reference workspace-shared connections in I1",
+      message: `connectionRef does not reference a ${subjectScope}-owned connection`,
     });
   }
   if (connection.status !== "active") {
@@ -427,6 +504,11 @@ async function validateMcpCapabilityConnectionRef(
     throw new HTTPException(422, {
       message: "connectionRef.kind does not match the referenced connection",
     });
+  }
+  if (subjectScope === "subject") {
+    const genericSubjectRef = { ...normalized, kind: connection.kind };
+    delete genericSubjectRef.connectionId;
+    return genericSubjectRef;
   }
   return normalized;
 }
@@ -635,7 +717,36 @@ export async function settingsWithEnabledCapabilityMcpServers(
   settings: Settings,
 ): Promise<Settings> {
   const enabled = await listEnabledMcpCapabilityServers(db, workspaceId);
-  return settingsWithMcpCapabilityServers(settings, enabled);
+  return settingsWithCodexAppsMcpServer(settingsWithMcpCapabilityServers(settings, enabled));
+}
+
+/**
+ * Register Codex Apps as an optional runtime MCP when the deployment enables
+ * it. Registration only makes the server selectable; the session tool policy
+ * decides whether the model sees it, and Codex credential resolution
+ * independently decides whether calls can authenticate.
+ */
+export function settingsWithCodexAppsMcpServer(settings: Settings): Settings {
+  if (
+    !settings.codexConnectedAppsEnabled ||
+    settings.mcpServers.some((server) => server.id === CODEX_APPS_MCP_SERVER_ID)
+  ) {
+    return settings;
+  }
+  return {
+    ...settings,
+    mcpServers: [
+      ...settings.mcpServers,
+      {
+        id: CODEX_APPS_MCP_SERVER_ID,
+        name: CODEX_APPS_MCP_SERVER_NAME,
+        url: CODEX_APPS_MCP_URL,
+        timeoutMs: CODEX_APPS_STARTUP_TIMEOUT_MS,
+        // Availability is credential-specific, so discover on every run.
+        cacheToolsList: false,
+      },
+    ],
+  };
 }
 
 export function settingsWithMcpCapabilityServers(
@@ -936,6 +1047,52 @@ async function discoverBundledSkills(): Promise<CapabilityCatalogItem[]> {
   }
 }
 
+/**
+ * Curated skills are catalogued independently from the always-mounted bundle.
+ * The runtime helper only returns entries whose reviewed artifact is present,
+ * so a deployment that omits optional library assets does not advertise a
+ * skill it cannot materialize.
+ */
+async function discoverCuratedSkillLibraryItems(): Promise<CapabilityCatalogItem[]> {
+  return listSkillLibraryEntries().map((entry) => curatedSkillCatalogItem(entry));
+}
+
+function curatedSkillCatalogItem(entry: SkillLibraryEntry): CapabilityCatalogItem {
+  return CapabilityCatalogItem.parse({
+    id: `skill:${entry.id}`,
+    kind: "skill",
+    source: "library",
+    name: entry.name,
+    description: entry.description,
+    category: entry.category,
+    tags: [...entry.tags],
+    homepageUrl: entry.sourceUrl,
+    provenance: entry.provenance,
+    tier: "verified",
+    runtime: {
+      available: true,
+      notes: "Available as an explicit immutable opt-in skill selection.",
+    },
+    metadata: {
+      libraryId: entry.id,
+      version: entry.version,
+      contentSha256: entry.contentSha256,
+      sourceCommit: entry.sourceCommit,
+      sourceUrl: entry.sourceUrl,
+      provenance: entry.provenance,
+      license: entry.license,
+      documentationUrl: entry.documentationUrl,
+      compatibility: entry.compatibility,
+      upgrade: entry.upgrade,
+      artifactPath: entry.relativePath,
+    },
+  });
+}
+
+function stringMetadata(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
 async function readSkillMetadata(
   url: URL,
   fallbackName: string,
@@ -986,6 +1143,16 @@ export function applyCapabilityEnablement(
       enabledReason: item.source === "configured" ? "configured" : "built in",
     };
   }
+  if (item.source === "library") {
+    const enabled =
+      installation?.status === "active" && skillLibraryInstallationRuntimeReady(item, installation);
+    return {
+      ...item,
+      enabled,
+      enabledReason: enabled ? "explicitly selected" : null,
+      connectionRef: null,
+    };
+  }
   const activeInstallation = installation?.status === "active";
   const enabled = !!activeInstallation && capabilityInstallationRuntimeReady(item, installation);
   return {
@@ -994,6 +1161,42 @@ export function applyCapabilityEnablement(
     enabledReason: enabled ? "enabled" : null,
     connectionRef: enabled && installation ? installationConnectionRef(installation.config) : null,
   };
+}
+
+function skillLibraryInstallationRuntimeReady(
+  item: CapabilityCatalogItem,
+  installation: CapabilityInstallation,
+): boolean {
+  if (item.kind !== "skill" || item.source !== "library" || installation.kind !== "skill") {
+    return false;
+  }
+  const libraryId = stringMetadata(item.metadata.libraryId);
+  const version = stringMetadata(item.metadata.version);
+  const contentSha256 = stringMetadata(item.metadata.contentSha256);
+  const sourceCommit = stringMetadata(item.metadata.sourceCommit);
+  const provenance = stringMetadata(item.metadata.provenance);
+  if (!libraryId || !version || !contentSha256 || !sourceCommit || !provenance) {
+    return false;
+  }
+  const entry = getSkillLibraryEntry(libraryId, version);
+  if (
+    !entry ||
+    item.id !== `skill:${entry.id}` ||
+    installation.capabilityId !== `skill:${entry.id}` ||
+    contentSha256 !== entry.contentSha256 ||
+    sourceCommit !== entry.sourceCommit ||
+    provenance !== entry.provenance
+  ) {
+    return false;
+  }
+  return (
+    installation.config.version === entry.version &&
+    stringMetadata(installation.metadata.libraryId) === entry.id &&
+    stringMetadata(installation.metadata.libraryVersion) === entry.version &&
+    stringMetadata(installation.metadata.contentSha256) === entry.contentSha256 &&
+    stringMetadata(installation.metadata.sourceCommit) === entry.sourceCommit &&
+    stringMetadata(installation.metadata.provenance) === entry.provenance
+  );
 }
 
 /**
@@ -1009,12 +1212,16 @@ function installationConnectionRef(
   if (!ref || typeof ref !== "object") {
     return null;
   }
-  const { connectionId, providerDomain, kind } = ref as Record<string, unknown>;
-  if (
-    typeof connectionId !== "string" ||
-    typeof providerDomain !== "string" ||
-    typeof kind !== "string"
-  ) {
+  const { connectionId, providerDomain, kind, subjectScope } = ref as Record<string, unknown>;
+  if (typeof providerDomain !== "string" || typeof kind !== "string") {
+    return null;
+  }
+  if (subjectScope === "subject") {
+    // Never project a personal connection UUID through workspace-visible
+    // capability configuration, including legacy rows that still contain one.
+    return { providerDomain, kind, subjectScope: "subject" };
+  }
+  if (typeof connectionId !== "string") {
     return null;
   }
   return { connectionId, providerDomain, kind };
@@ -1023,6 +1230,17 @@ function installationConnectionRef(
 function dedupeCatalogItems(items: CapabilityCatalogItem[]): CapabilityCatalogItem[] {
   const byId = new Map<string, CapabilityCatalogItem>();
   for (const item of items) {
+    // Curated library entries are runtime-managed and must not be replaced by
+    // stale/manual rows with the same reserved skill id. Other catalog sources
+    // retain the historical last-write-wins behavior below.
+    if (item.kind === "skill" && item.source === "library" && byId.has(item.id)) {
+      byId.set(item.id, item);
+      continue;
+    }
+    const existing = byId.get(item.id);
+    if (existing?.kind === "skill" && existing.source === "library") {
+      continue;
+    }
     byId.set(item.id, item);
   }
   return [...byId.values()];

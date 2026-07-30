@@ -46,6 +46,7 @@ import {
   normalizeProviderDomain,
   oauthResumeAction,
   registryResultsForQuery,
+  subjectOAuthConnectionRef,
   resolveSheetItem,
   type CapabilityFilter,
   type CapabilityFormState,
@@ -53,6 +54,12 @@ import {
   type SheetSelection,
 } from "@/lib/capabilities";
 import { listViewState } from "@/lib/load-state";
+import {
+  openGeniSlackBotConnections,
+  openGeniSlackBotInstallInput,
+  openGeniSlackBotUiMetadata,
+  preferredOpenGeniSlackBotConnection,
+} from "@/lib/slack-bot";
 import { cn } from "@/lib/utils";
 import type { CapabilityCatalogItem, CapabilityPack, ConnectionMetadata } from "@/types";
 
@@ -81,6 +88,7 @@ export function CapabilitiesRoute({
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<Error | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [slackBotBusy, setSlackBotBusy] = useState(false);
 
   const [filter, setFilter] = useState<CapabilityFilter>(
     initialSection === "packs" ? "pack" : "all",
@@ -94,6 +102,8 @@ export function CapabilitiesRoute({
   // (strip disable, pack disable, background reload) re-derives the sheet instead
   // of leaving it on a stale snapshot that could re-enable what was just disabled.
   const [selected, setSelected] = useState<SheetSelection | null>(null);
+  const sheetOpenerRef = useRef<HTMLElement | null>(null);
+  const capabilityFocusFallbackRef = useRef<HTMLDivElement | null>(null);
   const [sheetError, setSheetError] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
 
@@ -117,6 +127,11 @@ export function CapabilitiesRoute({
   const enabledItems = useMemo(() => filtered.filter((item) => item.enabled), [filtered]);
   const browseItems = useMemo(() => filtered.filter((item) => !item.enabled), [filtered]);
   const visibleBrowse = browseItems.slice(0, visibleCount);
+  const slackBotConnections = openGeniSlackBotConnections(connections ?? []);
+  const slackBotConnection = preferredOpenGeniSlackBotConnection(slackBotConnections);
+  const slackBotMetadata = slackBotConnection
+    ? openGeniSlackBotUiMetadata(slackBotConnection)
+    : null;
 
   const showPacks = filter === "all" || filter === "pack";
   const showCatalog = filter !== "pack";
@@ -140,6 +155,25 @@ export function CapabilitiesRoute({
 
   useEffect(() => {
     void refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceId]);
+
+  const slackInstallHandled = useRef(false);
+  useEffect(() => {
+    if (slackInstallHandled.current) return;
+    const params = new URLSearchParams(window.location.search);
+    const outcome = params.get("slack");
+    if (!outcome) return;
+    slackInstallHandled.current = true;
+    window.history.replaceState(null, "", window.location.pathname);
+    if (outcome === "connected") {
+      void refresh();
+      toast.success("OpenGeni installed in Slack");
+    } else {
+      toast.error("Couldn't install OpenGeni in Slack", {
+        description: "Try again, or install another Slack workspace/bot as a new connection.",
+      });
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId]);
 
@@ -198,10 +232,45 @@ export function CapabilitiesRoute({
     void packs.refresh();
   }
 
+  async function installSlackBot(createNewConnection = false) {
+    setSlackBotBusy(true);
+    try {
+      const installation = await client.startOpenGeniSlackBotInstall(
+        workspaceId,
+        openGeniSlackBotInstallInput(slackBotConnection, createNewConnection),
+      );
+      window.location.assign(installation.authorizationUrl);
+    } catch (error) {
+      toast.error("Couldn't start the OpenGeni Slack installation", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+      setSlackBotBusy(false);
+    }
+  }
+
+  async function disconnectSlackBot() {
+    if (!slackBotConnection) return;
+    setSlackBotBusy(true);
+    try {
+      await client.deleteConnection(workspaceId, slackBotConnection.id);
+      await refresh();
+      toast.success("OpenGeni Slack bot disconnected");
+    } catch (error) {
+      toast.error("Couldn't disconnect the OpenGeni Slack bot", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setSlackBotBusy(false);
+    }
+  }
+
   // `snapshotFallback` defaults to `registry` (a registry result renders from its
   // snapshot until persisted); the add-custom flow passes it explicitly for a
   // just-created item whose row may not be in `items` yet.
   function openItem(item: CapabilityCatalogItem, registry = false, snapshotFallback = registry) {
+    const active = document.activeElement;
+    sheetOpenerRef.current =
+      active instanceof HTMLElement && active !== document.body ? active : null;
     setSheetError(null);
     setSelected({ id: item.id, registry, snapshotFallback, snapshot: item });
   }
@@ -315,7 +384,6 @@ export function CapabilitiesRoute({
         const response = await client.startConnectionOAuth(workspaceId, {
           ...(plan.mcpUrl ? { mcpUrl: plan.mcpUrl } : {}),
           ...(plan.providerDomain ? { providerDomain: plan.providerDomain } : {}),
-          ...(action.oauthClient ? { oauthClient: action.oauthClient } : {}),
           returnPath,
         });
         if (!response.authorizationUrl) {
@@ -358,13 +426,11 @@ export function CapabilitiesRoute({
         return;
       }
 
-      // Plain enable / track (no credentials).
+      // Plain enable (no credentials).
       await client.enableCapability(workspaceId, persisted.id);
       await refresh();
       if (persisted.kind === "mcp") onRuntimeChanged();
-      toast.success(
-        persisted.kind === "mcp" ? `Enabled ${persisted.name}` : `Tracking ${persisted.name}`,
-      );
+      toast.success(`Enabled ${persisted.name}`);
       setSelected(null);
     } catch (error) {
       const copy = capabilityErrorToast(error, "Something went wrong");
@@ -502,7 +568,7 @@ export function CapabilitiesRoute({
         return;
       }
       await client.enableCapability(workspaceId, item!.id, {
-        connectionRef: { connectionId: connectionId!, providerDomain: refDomain, kind: "oauth2" },
+        connectionRef: subjectOAuthConnectionRef(refDomain),
       });
       await refresh();
       onRuntimeChanged();
@@ -560,7 +626,7 @@ export function CapabilitiesRoute({
           toast.success(
             created.kind === "mcp"
               ? `Added and enabled ${created.name}`
-              : `Added and tracking ${created.name}`,
+              : `Added and enabled ${created.name}`,
           );
         } else {
           toast.success(`Added ${created.name}`);
@@ -687,7 +753,13 @@ export function CapabilitiesRoute({
     // vertical scroll. This root IS that scroll viewport (min-h-0 so it can
     // shrink inside the flex parent, overflow-y-auto so the tall catalog grid
     // scrolls); the centered max-width column lives inside it.
-    <div className="min-h-0 flex-1 overflow-y-auto">
+    <div
+      ref={capabilityFocusFallbackRef}
+      role="region"
+      aria-label="Capabilities"
+      tabIndex={-1}
+      className="min-h-0 flex-1 overflow-y-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-inset"
+    >
       <div className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 lg:px-8">
         <PageHeader
           icon={<PlugIcon className="size-4" />}
@@ -712,6 +784,111 @@ export function CapabilitiesRoute({
             </>
           }
         />
+
+        <section
+          className="mt-6 rounded-xl border border-border bg-surface p-4"
+          aria-labelledby="slack-bot-heading"
+        >
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="grid size-8 place-items-center rounded-lg bg-brand/10 text-brand">
+                  <PlugIcon className="size-4" />
+                </span>
+                <div>
+                  <h2 id="slack-bot-heading" className="text-sm font-semibold text-fg">
+                    OpenGeni Slack bot
+                  </h2>
+                  <p className="text-2xs text-fg-subtle">Workspace-shared bot identity</p>
+                </div>
+              </div>
+              <p className="mt-3 max-w-3xl text-xs text-fg-muted">
+                Install <strong>OpenGeni</strong> in your Slack workspace. Slack will show the
+                permissions before approval, then return you here automatically. The workspace bot
+                token is exchanged server-side, encrypted, and never shown in the browser.
+              </p>
+              <p className="mt-2 max-w-3xl text-2xs text-fg-subtle">
+                Required bot scopes: chat:write, im:write, channels:read, channels:history,
+                groups:read, groups:history, users:read. This workspace-shared app is separate from
+                personal Slack OAuth connections.
+              </p>
+              {slackBotConnection && slackBotMetadata ? (
+                <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
+                  <span className="rounded-full border border-border px-2 py-1 text-fg-muted">
+                    {slackBotMetadata.slackTeamName}
+                  </span>
+                  <span className="rounded-full border border-border px-2 py-1 text-fg-muted">
+                    {slackBotConnection.status === "active" ? "Connected" : "Needs reinstall"}
+                  </span>
+                  <span className="font-mono text-2xs text-fg-subtle">{slackBotConnection.id}</span>
+                  {slackBotConnections.length > 1 ? (
+                    <span className="text-2xs text-fg-subtle">
+                      {slackBotConnections.length} explicit Slack bot connections
+                    </span>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+            {slackBotConnection?.status === "active" ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                disabled={slackBotBusy}
+                onClick={() => void disconnectSlackBot()}
+              >
+                Disconnect
+              </Button>
+            ) : null}
+          </div>
+          <div className="mt-4 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              aria-busy={slackBotBusy}
+              aria-label={
+                slackBotConnection ? "Reinstall OpenGeni in Slack" : "Install OpenGeni in Slack"
+              }
+              data-opengeni-slack-install
+              className="relative inline-flex h-10 w-[139px] items-center justify-center overflow-hidden rounded-md outline-none ring-focus transition-opacity focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-bg disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={slackBotBusy}
+              onClick={() => void installSlackBot(false)}
+            >
+              <img
+                src="https://platform.slack-edge.com/img/add_to_slack.png"
+                srcSet="https://platform.slack-edge.com/img/add_to_slack@2x.png 2x"
+                alt=""
+                aria-hidden="true"
+                width={139}
+                height={40}
+                className="h-10 w-[139px]"
+              />
+              {slackBotBusy ? (
+                <span
+                  className="absolute inset-0 grid place-items-center bg-bg/75"
+                  aria-hidden="true"
+                >
+                  <Loader2Icon className="animate-spin" />
+                </span>
+              ) : null}
+            </button>
+            {slackBotConnection ? (
+              <Button
+                type="button"
+                variant="outline"
+                disabled={slackBotBusy}
+                onClick={() => void installSlackBot(true)}
+              >
+                Install another Slack workspace/bot
+              </Button>
+            ) : null}
+          </div>
+          {slackBotConnection ? (
+            <p className="mt-2 text-2xs text-fg-subtle">
+              A new installation creates a separate connection. Existing scheduled tasks stay bound
+              to their current Slack workspace/bot until explicitly changed.
+            </p>
+          ) : null}
+        </section>
 
         {/* Primary search — front and center. */}
         <div className="relative mt-6">
@@ -861,6 +1038,8 @@ export function CapabilitiesRoute({
         health={selectedHealth}
         logoSrc={selectedItem ? logoUrl(selectedItem) : null}
         open={selectedItem !== null}
+        restoreFocusRef={sheetOpenerRef}
+        restoreFocusFallbackRef={capabilityFocusFallbackRef}
         onOpenChange={(open) => {
           if (!open) {
             setSelected(null);
@@ -921,7 +1100,9 @@ function EnabledCard({
       <button
         type="button"
         onClick={onOpen}
-        className="flex min-w-0 flex-1 items-center gap-3 text-left"
+        data-capability-focus-target
+        data-capability-id={item.id}
+        className="flex min-w-0 flex-1 items-center gap-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg"
       >
         <CapabilityLogo src={logoSrc} name={item.name} size="sm" />
         <div className="min-w-0">

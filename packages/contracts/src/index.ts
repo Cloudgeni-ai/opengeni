@@ -22,6 +22,30 @@ export {
   type SessionEventPayloadTruncation,
 } from "./event-preview";
 
+export {
+  RETAINED_OUTPUT_DEFAULT_PAGE_BYTES,
+  RETAINED_OUTPUT_MAX_PAGE_BYTES,
+  RETAINED_OUTPUT_RECEIPT_MAX_BYTES,
+  RetainedArtifactMetadataSchema,
+  RetainedArtifactReferenceSchema,
+  RetainedArtifactUnavailableSchema,
+  RetainedOutputEvidenceSchema,
+  RetainedOutputKind,
+  RetainedOutputUnavailableReason,
+  retainedArtifactReferenceFromFile,
+  retainedOutputUnavailable,
+  resolveRetainedOutputRange,
+  validateRetainedOutputEvidence,
+  type RetainedArtifactFileInput,
+  type RetainedArtifactMetadata,
+  type RetainedArtifactReference,
+  type RetainedArtifactUnavailable,
+  type RetainedOutputAvailableEvidence,
+  type RetainedOutputEvidence,
+  type RetainedOutputRangeResolution,
+  type RetainedOutputResolvedRange,
+} from "./retained-output";
+
 export const SessionStatus = z.enum([
   "queued",
   "running",
@@ -443,7 +467,10 @@ export const ErrorCode = z.enum([
   "validation_failed",
   "conflict",
   "idempotency_conflict",
+  "payment_required",
   "limit_exceeded",
+  "nested_agent_depth_exceeded",
+  "nested_agent_depth_override_forbidden",
   "provider_verification_failed",
   "upstream_unavailable",
   "internal_error",
@@ -452,13 +479,54 @@ export type ErrorCode = z.infer<typeof ErrorCode>;
 
 export const ErrorEnvelope = z.object({
   error: z.object({
+    status: z.number().int().min(400).max(599),
     code: ErrorCode,
     message: z.string(),
+    retryable: z.boolean(),
     requestId: z.string().optional(),
     details: z.record(z.string(), z.unknown()).optional(),
   }),
 });
 export type ErrorEnvelope = z.infer<typeof ErrorEnvelope>;
+
+/** Physical ceiling of the PostgreSQL integer columns that persist depth policy. */
+export const MAX_NESTED_AGENT_DEPTH = 2_147_483_647;
+export const NestedAgentDepthValue = z.number().int().nonnegative().max(MAX_NESTED_AGENT_DEPTH);
+export type NestedAgentDepthValue = z.infer<typeof NestedAgentDepthValue>;
+/** A denied child can be one greater than the persisted PostgreSQL int ceiling. */
+export const NestedAgentDepthAttemptValue = z
+  .number()
+  .int()
+  .nonnegative()
+  .max(MAX_NESTED_AGENT_DEPTH + 1);
+
+export const NestedAgentDepthPolicySource = z.enum([
+  "session",
+  "workspace",
+  "deployment",
+  "default",
+]);
+export type NestedAgentDepthPolicySource = z.infer<typeof NestedAgentDepthPolicySource>;
+
+/** Durable evidence for a session-create denial at the database admission boundary. */
+export const SessionSpawnDenial = z.object({
+  id: z.string().uuid(),
+  accountId: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  parentSessionId: z.string().uuid().nullable(),
+  rootSessionId: z.string().uuid().nullable(),
+  currentDepth: NestedAgentDepthValue,
+  attemptedDepth: NestedAgentDepthAttemptValue,
+  effectiveMaxNestedAgentDepth: NestedAgentDepthValue,
+  requestedMaxNestedAgentDepthOverride: NestedAgentDepthValue.nullable(),
+  policySource: NestedAgentDepthPolicySource,
+  policySessionId: z.string().uuid().nullable(),
+  subjectId: z.string().nullable(),
+  code: z.enum(["nested_agent_depth_exceeded", "nested_agent_depth_override_forbidden"]),
+  idempotencyKey: z.string().nullable(),
+  createdAt: z.string(),
+});
+export type SessionSpawnDenial = z.infer<typeof SessionSpawnDenial>;
 
 export const Permission = z.enum([
   "account:read",
@@ -535,6 +603,101 @@ export const Permission = z.enum([
 ]);
 export type Permission = z.infer<typeof Permission>;
 
+/**
+ * Capability-first permissions signed into a session's first-party OpenGeni
+ * MCP token when a top-level creator does not explicitly narrow them.
+ *
+ * Keep this contract shared by admission and runtime signing: a worker-signed
+ * child whose parent was narrowed must inherit the parent's effective subset,
+ * never fall back to a different runtime-local default.
+ */
+export const DEFAULT_FIRST_PARTY_MCP_PERMISSIONS = [
+  "workspace:read",
+  "files:read",
+  "documents:search",
+  "scheduled_tasks:manage",
+  "scheduled_tasks:run",
+  "goals:manage",
+  "sessions:read",
+  "sessions:create",
+  "sessions:control",
+  "variable-sets:use",
+  "variable-sets:manage",
+  "rigs:use",
+  "github:use",
+] as const satisfies readonly Permission[];
+
+/**
+ * Exact public catalog for tools served by the broad first-party `opengeni`
+ * MCP server. Adding a registration does not make it model-visible: the name
+ * must be admitted here and selected by the session policy.
+ *
+ * `files_get_download_url` intentionally is not in this catalog. It belongs to
+ * the dedicated `files` MCP server.
+ */
+export const FIRST_PARTY_MCP_TOOL_NAMES = [
+  "set_session_title",
+  "goal_set",
+  "goal_update",
+  "goal_complete",
+  "goal_pause",
+  "memory_search",
+  "memory_save",
+  "memory_correct",
+  "sandboxes_list",
+  "sandbox_attach",
+  "sandbox_swap",
+  "run_on",
+  "sandbox_provision",
+  "rig_list",
+  "rig_get",
+  "rig_propose_change",
+  "rig_verify",
+  "rig_promote",
+  "sessions_list",
+  "session_get",
+  "session_events",
+  "session_create",
+  "session_send_message",
+  "session_pause",
+  "session_resume",
+  "session_steer",
+  "set_other_session_title",
+  "variable_set_list",
+  "environment_list",
+  "variable_set_set_variable",
+  "environment_set_variable",
+  "github_connect_link",
+  "github_token",
+  "github_repositories_list",
+  "social_connections_list",
+  "social_posts_recent",
+  "social_daily_analysis_context",
+  "scheduled_tasks_list",
+  "scheduled_tasks_get",
+  "scheduled_tasks_create",
+  "scheduled_tasks_update",
+  "scheduled_tasks_pause",
+  "scheduled_tasks_resume",
+  "scheduled_tasks_trigger",
+  "scheduled_tasks_delete",
+  "scheduled_task_runs_list",
+  "slack_bot_list_channels",
+  "slack_bot_channel_history",
+  "slack_bot_list_users",
+  "slack_bot_post_message",
+] as const;
+export const FirstPartyMcpToolName = z.enum(FIRST_PARTY_MCP_TOOL_NAMES);
+export type FirstPartyMcpToolName = z.infer<typeof FirstPartyMcpToolName>;
+
+/**
+ * Every catalogued OpenGeni tool is selected by default. Registration-time
+ * authorization remains the independent access boundary; an explicit session
+ * policy may narrow this model-visible set.
+ */
+export const DEFAULT_FIRST_PARTY_MCP_TOOLS =
+  FIRST_PARTY_MCP_TOOL_NAMES satisfies readonly FirstPartyMcpToolName[];
+
 export function prefixedMcpToolName(registryId: string, toolName: string): string {
   return `${registryId}__${toolName}`;
 }
@@ -595,12 +758,300 @@ export const Workspace = z.object({
 });
 export type Workspace = z.infer<typeof Workspace>;
 
+export const WorkspaceTranscriptionTarget = z
+  .object({
+    provider: z.string().trim().min(1).max(128),
+    model: z.string().trim().min(1).max(256).nullable(),
+    credentialMode: z.enum(["managed", "byok"]),
+    // A workspace-scoped connection reference, never credential material.
+    credentialConnectionId: z.string().uuid().nullable(),
+    region: z.string().trim().min(1).max(128).nullable(),
+  })
+  .strict()
+  .superRefine((target, context) => {
+    if (target.provider === "azure-speech" && target.credentialMode !== "byok") {
+      context.addIssue({
+        code: "custom",
+        path: ["credentialMode"],
+        message: "Azure Speech is supported only through workspace BYOK",
+      });
+    }
+    if (target.credentialMode === "byok" && target.credentialConnectionId === null) {
+      context.addIssue({
+        code: "custom",
+        path: ["credentialConnectionId"],
+        message: "BYOK transcription targets require a workspace connection reference",
+      });
+    }
+    if (target.credentialMode === "managed" && target.credentialConnectionId !== null) {
+      context.addIssue({
+        code: "custom",
+        path: ["credentialConnectionId"],
+        message: "managed transcription targets cannot name a BYOK connection",
+      });
+    }
+  });
+export type WorkspaceTranscriptionTarget = z.infer<typeof WorkspaceTranscriptionTarget>;
+
+export const TranscriptionErrorCode = z.enum([
+  "permission_denied",
+  "not_supported",
+  "network",
+  "provider",
+  "policy_blocked",
+  "timeout",
+  "cancelled",
+  "unknown",
+]);
+export type TranscriptionErrorCode = z.infer<typeof TranscriptionErrorCode>;
+
+export const TranscriptionTimeSpan = z
+  .object({
+    startMilliseconds: z.number().finite().nonnegative(),
+    endMilliseconds: z.number().finite().nonnegative(),
+  })
+  .strict()
+  .superRefine((span, context) => {
+    if (span.endMilliseconds < span.startMilliseconds) {
+      context.addIssue({
+        code: "custom",
+        path: ["endMilliseconds"],
+        message: "transcription spans must not end before they start",
+      });
+    }
+  });
+export type TranscriptionTimeSpan = z.infer<typeof TranscriptionTimeSpan>;
+
+export const TranscriptionSpeaker = z
+  .object({
+    id: z.string().trim().min(1).max(128),
+    label: z.string().trim().min(1).max(128).optional(),
+  })
+  .strict();
+export type TranscriptionSpeaker = z.infer<typeof TranscriptionSpeaker>;
+
+export const TranscriptionWord = z
+  .object({
+    text: z.string().min(1).max(4096),
+    span: TranscriptionTimeSpan,
+    confidence: z.number().finite().min(0).max(1).optional(),
+    speaker: TranscriptionSpeaker.optional(),
+  })
+  .strict();
+export type TranscriptionWord = z.infer<typeof TranscriptionWord>;
+
+export const TranscriptionResultMetadata = z
+  .object({
+    detectedLanguage: z.string().trim().min(1).max(64).optional(),
+    span: TranscriptionTimeSpan.optional(),
+    confidence: z.number().finite().min(0).max(1).optional(),
+    speaker: TranscriptionSpeaker.optional(),
+    words: z.array(TranscriptionWord).max(10_000).optional(),
+  })
+  .strict()
+  .superRefine((metadata, context) => {
+    let previousStart = -1;
+    for (const [index, word] of (metadata.words ?? []).entries()) {
+      if (word.span.startMilliseconds < previousStart) {
+        context.addIssue({
+          code: "custom",
+          path: ["words", index, "span", "startMilliseconds"],
+          message: "transcription words must be ordered by start time",
+        });
+      }
+      previousStart = word.span.startMilliseconds;
+      if (
+        metadata.span &&
+        (word.span.startMilliseconds < metadata.span.startMilliseconds ||
+          word.span.endMilliseconds > metadata.span.endMilliseconds)
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["words", index, "span"],
+          message: "transcription word spans must fall within the result span",
+        });
+      }
+    }
+  });
+export type TranscriptionResultMetadata = z.infer<typeof TranscriptionResultMetadata>;
+
+const TranscriptionEventBase = z
+  .object({
+    localSessionId: z.string().min(1).max(256),
+    sequence: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    occurredAt: z.string().datetime({ offset: true }),
+  })
+  .strict();
+
+/** Strict provider-neutral event surface; provider payload bags are rejected. */
+export const TranscriptionEvent = z.discriminatedUnion("type", [
+  TranscriptionEventBase.extend({ type: z.literal("permission.requested") }),
+  TranscriptionEventBase.extend({
+    type: z.literal("session.opened"),
+    providerSessionId: z.string().min(1).max(512),
+  }),
+  TranscriptionEventBase.extend({
+    type: z.literal("transcript.partial"),
+    segmentId: z.string().min(1).max(512),
+    text: z.string().max(1_000_000),
+    metadata: TranscriptionResultMetadata.optional(),
+  }),
+  TranscriptionEventBase.extend({
+    type: z.literal("transcript.final"),
+    segmentId: z.string().min(1).max(512),
+    text: z.string().max(1_000_000),
+    providerAcceptanceId: z.string().min(1).max(512),
+    metadata: TranscriptionResultMetadata.optional(),
+  }),
+  TranscriptionEventBase.extend({
+    type: z.literal("usage"),
+    audioMilliseconds: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    costUsd: z.number().finite().nonnegative().max(1_000_000_000).nullable(),
+  }),
+  TranscriptionEventBase.extend({
+    type: z.literal("session.reconnecting"),
+    attempt: z.number().int().nonnegative().max(10_000),
+    reason: z.string().min(1).max(256),
+  }),
+  TranscriptionEventBase.extend({
+    type: z.literal("session.error"),
+    code: TranscriptionErrorCode,
+    recoverable: z.boolean(),
+  }),
+  TranscriptionEventBase.extend({
+    type: z.literal("session.closed"),
+    reason: z.enum(["completed", "cancelled", "error", "replaced"]),
+  }),
+]);
+export type TranscriptionEvent = z.infer<typeof TranscriptionEvent>;
+
+/**
+ * Workspace-only policy for the distinct speech-to-text capability. It never
+ * authorizes a turn model/provider and contains connection references rather
+ * than secrets. `acceptanceId` changes whenever an admin accepts a new target
+ * set, so clients can bind a microphone session to one exact policy revision.
+ */
+export const WorkspaceTranscriptionPolicy = z
+  .object({
+    enabled: z.boolean(),
+    acceptanceId: z.string().uuid().nullable(),
+    primary: WorkspaceTranscriptionTarget.nullable(),
+    language: z.string().trim().min(1).max(64).nullable(),
+    autoDetectLanguage: z.boolean(),
+    diarization: z
+      .object({
+        enabled: z.boolean(),
+        maxSpeakers: z.number().int().min(2).max(100).nullable(),
+      })
+      .strict(),
+    retention: z
+      .object({
+        mode: z.enum(["none", "provider-policy"]),
+        maxDays: z.number().int().nonnegative().max(3650).nullable(),
+      })
+      .strict(),
+    privacy: z
+      .object({
+        allowProviderLogging: z.boolean(),
+        allowProviderTraining: z.boolean(),
+      })
+      .strict(),
+    fallback: z
+      .object({
+        mode: z.enum(["disabled", "explicit"]),
+        targets: z.array(WorkspaceTranscriptionTarget).max(8),
+      })
+      .strict(),
+    cost: z
+      .object({
+        currency: z.literal("USD"),
+        maxPerHour: z.number().finite().nonnegative().max(10_000).nullable(),
+        maxPerMonth: z.number().finite().nonnegative().max(1_000_000).nullable(),
+      })
+      .strict(),
+  })
+  .strict()
+  .superRefine((policy, context) => {
+    if (policy.enabled && policy.acceptanceId === null) {
+      context.addIssue({
+        code: "custom",
+        path: ["acceptanceId"],
+        message: "enabled transcription requires an accepted policy identity",
+      });
+    }
+    if (policy.enabled && policy.primary === null) {
+      context.addIssue({
+        code: "custom",
+        path: ["primary"],
+        message: "enabled transcription requires a primary target",
+      });
+    }
+    if (policy.enabled && !policy.autoDetectLanguage && policy.language === null) {
+      context.addIssue({
+        code: "custom",
+        path: ["language"],
+        message: "enabled transcription requires a language or accepted automatic detection",
+      });
+    }
+    if (policy.autoDetectLanguage && policy.language !== null) {
+      context.addIssue({
+        code: "custom",
+        path: ["language"],
+        message: "automatic language detection and a fixed language are mutually exclusive",
+      });
+    }
+    if (!policy.diarization.enabled && policy.diarization.maxSpeakers !== null) {
+      context.addIssue({
+        code: "custom",
+        path: ["diarization", "maxSpeakers"],
+        message: "disabled diarization cannot retain a speaker limit",
+      });
+    }
+    if (policy.fallback.mode === "disabled" && policy.fallback.targets.length > 0) {
+      context.addIssue({
+        code: "custom",
+        path: ["fallback", "targets"],
+        message: "disabled fallback cannot retain accepted targets",
+      });
+    }
+    if (policy.fallback.mode === "explicit" && policy.fallback.targets.length === 0) {
+      context.addIssue({
+        code: "custom",
+        path: ["fallback", "targets"],
+        message: "explicit fallback requires at least one accepted target",
+      });
+    }
+    const targetKeys = [policy.primary, ...policy.fallback.targets]
+      .filter((target): target is WorkspaceTranscriptionTarget => target !== null)
+      .map((target) =>
+        [
+          target.provider,
+          target.model ?? "",
+          target.credentialMode,
+          target.credentialConnectionId ?? "",
+          target.region ?? "",
+        ].join("\u0000"),
+      );
+    if (new Set(targetKeys).size !== targetKeys.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["fallback", "targets"],
+        message: "transcription targets must be unique",
+      });
+    }
+  });
+export type WorkspaceTranscriptionPolicy = z.infer<typeof WorkspaceTranscriptionPolicy>;
+
 // Validates the KNOWN keys of workspaces.settings; passthrough keeps unknown
-// (future) keys rather than stripping them. memoryEnabled gates Workspace Memory
-// V1 agent surfaces (turn injection + first-party memory tools); default false.
+// (future) keys rather than stripping them. memoryEnabled and transcription are
+// both default-off capabilities.
 export const WorkspaceSettingsSchema = z
   .object({
     memoryEnabled: z.boolean().optional(),
+    transcription: WorkspaceTranscriptionPolicy.optional(),
+    // null clears the workspace override and falls back to the persisted
+    // deployment policy. The database boundary validates the same range.
+    maxNestedAgentDepth: NestedAgentDepthValue.nullable().optional(),
   })
   .passthrough();
 export type WorkspaceSettings = z.infer<typeof WorkspaceSettingsSchema>;
@@ -611,12 +1062,14 @@ export function resolveWorkspaceMemoryEnabled(settings: unknown): boolean {
   return parsed.success ? parsed.data.memoryEnabled === true : false;
 }
 
-// PATCH body for workspace settings: a partial patch that deep-merges into the
-// stored bag. memoryEnabled is the only typed key today; passthrough carries
-// forward-compatible unknown keys through validation.
+// PATCH body for workspace settings: a partial top-level patch that merges into
+// the stored bag. Nested transcription policy updates are therefore full
+// replacements; passthrough carries forward-compatible unknown keys.
 export const UpdateWorkspaceSettingsRequest = z
   .object({
     memoryEnabled: z.boolean().optional(),
+    transcription: WorkspaceTranscriptionPolicy.optional(),
+    maxNestedAgentDepth: NestedAgentDepthValue.nullable().optional(),
   })
   .passthrough();
 export type UpdateWorkspaceSettingsRequest = z.infer<typeof UpdateWorkspaceSettingsRequest>;
@@ -636,6 +1089,78 @@ export const UpdateWorkspaceModelPolicyRequest = z.object({
 });
 export type UpdateWorkspaceModelPolicyRequest = z.infer<typeof UpdateWorkspaceModelPolicyRequest>;
 
+const turnInitiatorIdentityFields = {
+  subjectId: z.string().min(1),
+  /** Immutable display snapshot; never an authorization input. */
+  label: z.string().min(1).optional(),
+} as const;
+
+/** Reserved creator/initiator id used only by legacy-row migration defaults. */
+export const UNATTRIBUTED_LEGACY_INITIATOR_SUBJECT_ID = "unattributed-legacy" as const;
+
+/**
+ * A named machine/service principal asserted by a trusted embedding host. This
+ * deliberately excludes `kind: "subject"`: a delegated service assertion may
+ * describe causal machine work, but it is not a generic human-impersonation
+ * mechanism. The authenticated grant remains the authorization boundary.
+ */
+export const ServiceTurnInitiator = z.object({
+  kind: z.literal("service"),
+  subjectId: z
+    .string()
+    .min(1)
+    .max(1024)
+    .refine((value) => value !== UNATTRIBUTED_LEGACY_INITIATOR_SUBJECT_ID, {
+      message: "unattributed-legacy is reserved for migrated rows",
+    }),
+  /** Immutable display snapshot; never an authorization input. */
+  label: z.string().min(1).max(256).optional(),
+});
+export type ServiceTurnInitiator = z.infer<typeof ServiceTurnInitiator>;
+
+/**
+ * Immutable, non-secret provenance captured with an initiator. This is audit
+ * context (for example an external occurrence id), not a second identity or
+ * authorization surface.
+ */
+export const TurnInitiatorContext = z.record(z.string(), z.unknown());
+export type TurnInitiatorContext = z.infer<typeof TurnInitiatorContext>;
+
+const reservedServiceTurnInitiatorContextKeys = new Set([
+  "backfill",
+  "label",
+  "provenanceError",
+  "via",
+  "viaTruncated",
+]);
+
+/** Bounded host provenance that cannot forge OpenGeni-owned lineage fields. */
+export const ServiceTurnInitiatorContext = TurnInitiatorContext.superRefine((value, ctx) => {
+  for (const key of reservedServiceTurnInitiatorContextKeys) {
+    if (Object.prototype.hasOwnProperty.call(value, key)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [key],
+        message: `${key} is reserved OpenGeni initiator context`,
+      });
+    }
+  }
+  try {
+    if (new TextEncoder().encode(JSON.stringify(value)).byteLength > 4096) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "service initiator context exceeds 4096 UTF-8 bytes",
+      });
+    }
+  } catch {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "service initiator context must be JSON-serializable",
+    });
+  }
+});
+export type ServiceTurnInitiatorContext = z.infer<typeof ServiceTurnInitiatorContext>;
+
 export const AccountGrant = z.object({
   accountId: z.string().uuid(),
   subjectId: z.string().min(1),
@@ -653,6 +1178,10 @@ export const AccessGrant = z.object({
   subjectLabel: z.string().optional(),
   permissions: z.array(Permission),
   metadata: z.record(z.string(), z.unknown()).optional(),
+  // Optional trusted causal principal for a command submitted by an embedding
+  // host. Authorization still uses subjectId + permissions above.
+  serviceInitiator: ServiceTurnInitiator.optional(),
+  serviceInitiatorContext: ServiceTurnInitiatorContext.optional(),
 });
 export type AccessGrant = z.infer<typeof AccessGrant>;
 
@@ -667,38 +1196,79 @@ export const AccessContext = z.object({
 });
 export type AccessContext = z.infer<typeof AccessContext>;
 
-export const DelegatedAccessTokenPayload = z.object({
-  accountId: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  subjectId: z.string().min(1),
-  subjectLabel: z.string().optional(),
-  permissions: z.array(Permission).min(1),
-  // Worker-asserted session scope for first-party MCP calls (HMAC-signed, not
-  // agent-controlled); enables session-scoped tools such as goal management.
-  sessionId: z.string().uuid().optional(),
-  // The turn making the call (the caller's identity), HMAC-signed by the worker
-  // at turn setup. Lets a tool classify WHO is calling from the token itself,
-  // instead of racily re-reading the session's live active_turn_id — e.g. the
-  // sacred-pause guard must know if the CALLER is a machine child-notification
-  // turn, and the active pointer can flip to another turn mid-check.
-  turnId: z.string().uuid().optional(),
-  // Exact execution owner. Agent control commands are accepted only while this
-  // attempt still owns the signed turn.
-  attemptId: z.string().uuid().optional(),
-  executionGeneration: z.number().int().positive().optional(),
-  exp: z.number().int().positive(),
-});
+export const DelegatedAccessTokenPayload = z
+  .object({
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    subjectId: z.string().min(1),
+    subjectLabel: z.string().optional(),
+    permissions: z.array(Permission).min(1),
+    // Trusted embedding hosts can sign a causal service principal separately
+    // from the grant subject that authorizes the request. The claim is consumed
+    // only when a command creates a new session/turn.
+    serviceInitiator: ServiceTurnInitiator.optional(),
+    serviceInitiatorContext: ServiceTurnInitiatorContext.optional(),
+    // Worker-asserted session scope for first-party MCP calls (HMAC-signed, not
+    // agent-controlled); enables session-scoped tools such as goal management.
+    sessionId: z.string().uuid().optional(),
+    // Model-visible first-party tool selection for a worker-bound session.
+    // This is visibility only; permissions remain the authorization boundary.
+    firstPartyMcpTools: z.array(FirstPartyMcpToolName).optional(),
+    // The turn making the call (the caller's identity), HMAC-signed by the worker
+    // at turn setup. Lets a tool classify WHO is calling from the token itself,
+    // instead of racily re-reading the session's live active_turn_id — e.g. the
+    // sacred-pause guard must know if the CALLER is a machine child-notification
+    // turn, and the active pointer can flip to another turn mid-check.
+    turnId: z.string().uuid().optional(),
+    // Exact execution owner. Agent control commands are accepted only while this
+    // attempt still owns the signed turn.
+    attemptId: z.string().uuid().optional(),
+    executionGeneration: z.number().int().positive().optional(),
+    exp: z.number().int().positive(),
+  })
+  .superRefine((payload, ctx) => {
+    if (payload.serviceInitiatorContext && !payload.serviceInitiator) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["serviceInitiatorContext"],
+        message: "serviceInitiatorContext requires serviceInitiator",
+      });
+    }
+    if (
+      payload.serviceInitiator &&
+      (payload.turnId !== undefined ||
+        payload.attemptId !== undefined ||
+        payload.executionGeneration !== undefined)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["serviceInitiator"],
+        message: "serviceInitiator cannot replace an exact agent-attempt initiator",
+      });
+    }
+  });
 export type DelegatedAccessTokenPayload = z.infer<typeof DelegatedAccessTokenPayload>;
+
+const delegatedAccessTokenPrefix = "ogd_";
+const delegatedServiceAccessTokenPrefix = "ogd2_";
 
 export async function signDelegatedAccessToken(
   secret: string,
   payload: DelegatedAccessTokenPayload,
 ): Promise<string> {
-  const encodedPayload = base64UrlEncode(
-    JSON.stringify(DelegatedAccessTokenPayload.parse(payload)),
+  const parsed = DelegatedAccessTokenPayload.parse(payload);
+  const prefix = parsed.serviceInitiator
+    ? delegatedServiceAccessTokenPrefix
+    : delegatedAccessTokenPrefix;
+  const encodedPayload = base64UrlEncode(JSON.stringify(parsed));
+  // The service-capable envelope binds its prefix into the signature. An old
+  // verifier accepts only ogd_ and therefore fails closed during a rolling
+  // deploy; changing ogd2_ to ogd_ cannot turn provenance loss into success.
+  const signature = await hmacSha256Base64Url(
+    secret,
+    prefix === delegatedServiceAccessTokenPrefix ? `${prefix}${encodedPayload}` : encodedPayload,
   );
-  const signature = await hmacSha256Base64Url(secret, encodedPayload);
-  return `ogd_${encodedPayload}.${signature}`;
+  return `${prefix}${encodedPayload}.${signature}`;
 }
 
 export async function verifyDelegatedAccessToken(
@@ -706,24 +1276,42 @@ export async function verifyDelegatedAccessToken(
   token: string,
   nowSeconds = Math.floor(Date.now() / 1000),
 ): Promise<DelegatedAccessTokenPayload | null> {
-  if (!token.startsWith("ogd_")) {
+  const prefix = token.startsWith(delegatedServiceAccessTokenPrefix)
+    ? delegatedServiceAccessTokenPrefix
+    : token.startsWith(delegatedAccessTokenPrefix)
+      ? delegatedAccessTokenPrefix
+      : null;
+  if (!prefix) {
     return null;
   }
-  const withoutPrefix = token.slice("ogd_".length);
+  const withoutPrefix = token.slice(prefix.length);
   const dot = withoutPrefix.lastIndexOf(".");
   if (dot <= 0) {
     return null;
   }
   const encodedPayload = withoutPrefix.slice(0, dot);
   const signature = withoutPrefix.slice(dot + 1);
-  const expected = await hmacSha256Base64Url(secret, encodedPayload);
+  const expected = await hmacSha256Base64Url(
+    secret,
+    prefix === delegatedServiceAccessTokenPrefix ? `${prefix}${encodedPayload}` : encodedPayload,
+  );
   if (!constantTimeEqual(signature, expected)) {
     return null;
   }
-  const payload = DelegatedAccessTokenPayload.safeParse(
-    JSON.parse(base64UrlDecode(encodedPayload)),
-  );
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(base64UrlDecode(encodedPayload));
+  } catch {
+    return null;
+  }
+  const payload = DelegatedAccessTokenPayload.safeParse(decoded);
   if (!payload.success || payload.data.exp < nowSeconds) {
+    return null;
+  }
+  if (
+    (prefix === delegatedServiceAccessTokenPrefix) !==
+    (payload.data.serviceInitiator !== undefined)
+  ) {
     return null;
   }
   return payload.data;
@@ -1233,10 +1821,21 @@ export type EntitlementsPort = {
 export const GitCredentialProvider = z.enum(["github", "gitlab", "azure_devops"]);
 export type GitCredentialProvider = z.infer<typeof GitCredentialProvider>;
 
+// Host-opaque identity for one independently mintable Git credential. It is
+// deliberately NOT constrained to a filesystem-safe alphabet: runtimes hash it
+// before using it in paths, command text, or environment variable names.
+export const GitCredentialBindingId = z.string().min(1).max(256);
+export type GitCredentialBindingId = z.infer<typeof GitCredentialBindingId>;
+
+export const GitRepositoryAccess = z.enum(["read", "write"]);
+export type GitRepositoryAccess = z.infer<typeof GitRepositoryAccess>;
+
 const GitProviderRepositoryId = z.union([z.number().int().positive(), z.string().min(1)]);
 
 export const GitCredentialRepositoryRef = z.object({
   provider: GitCredentialProvider.optional(),
+  credentialBindingId: GitCredentialBindingId.optional(),
+  access: GitRepositoryAccess.optional(),
   uri: z.string().min(1),
   ref: z.string().min(1),
   repositoryId: GitProviderRepositoryId.optional(),
@@ -1248,8 +1847,8 @@ export type GitCredentialRepositoryRef = z.infer<typeof GitCredentialRepositoryR
 
 // ============ connection-credential provider — Connection-credential provider (§7.6) ============
 //
-// The host-providable per-run credential-mint seam over OpenGeni's TWO
-// run-scoped credential sites in the worker:
+// The host-providable credential seam over OpenGeni's run-scoped credential
+// sites in the worker and API:
 //   - GIT credentials: run-scoped provider tokens minted in
 //     `sandboxEnvironmentForRun` (standalone self-mints GitHub App tokens from
 //     `settings`; embedded hosts can broker GitHub, GitLab, and Azure DevOps)
@@ -1257,6 +1856,8 @@ export type GitCredentialRepositoryRef = z.infer<typeof GitCredentialRepositoryR
 //   - SANDBOX secrets: the decrypted variable set values loaded in
 //     `loadVariableSetForRun` (today decrypted with
 //     `environmentsEncryptionKeyBytes(settings)`).
+//   - MCP credentials: request-time transport headers for connection-backed
+//     servers, shared by normal model tools and Toolspace/Code Mode.
 //
 // In embedded/separate topologies the HOST owns these external connections
 // (its GitHub App, its secret vault + encryption key). When a host binds this
@@ -1274,10 +1875,26 @@ export type GitCredentialRepositoryRef = z.infer<typeof GitCredentialRepositoryR
 export type GitCredentialsRequest = {
   accountId: string;
   workspaceId: string;
+  /** Immutable authority admitted with the turn requesting this credential. */
+  sessionId: string;
+  rootSessionId: string;
+  turnId: string;
+  attemptId: string;
+  executionGeneration: number;
+  initiator: TurnInitiator;
+  initiatorContext: TurnInitiatorContext;
   // Provider defaults to "github" for the legacy request shape. GitHub-only
   // hosts can keep reading installationId/repositoryIds exactly as before;
   // provider-aware hosts should branch on this and repositoryRefs.
   provider?: GitCredentialProvider;
+  // Present when the host supplied an explicit binding or when more than one
+  // independently mintable credential exists for this provider. A host must
+  // mint only this binding; OpenGeni never treats provider identity as enough
+  // to select among multiple accounts/installations.
+  credentialBindingId?: GitCredentialBindingId;
+  // Canonical lower-case host shared by this binding's repository refs when
+  // there is exactly one. Binding-aware providers echo it when present.
+  providerHost?: string;
   // Token requests are the existing behavior. Identity requests let lazy
   // sandbox provisioning resolve stable git author/committer identity before
   // the box exists while deferring the rotating token value to first provision.
@@ -1290,14 +1907,49 @@ export type GitCredentialsRequest = {
   repositoryIds: number[];
 };
 
+/**
+ * One exact repository route exposed by a host-owned HTTPS smart-Git broker.
+ *
+ * `repositoryUri` must echo one URI from the request's `repositoryRefs`.
+ * `brokerUri` is a stable, credential-free HTTPS remote. The rotating bearer
+ * remains separate in `GitCredentials.token`, so it cannot leak through Git
+ * configuration, provider-CLI arguments, manifests, or repository metadata.
+ */
+export type GitHttpBrokerRepositoryRoute = {
+  repositoryUri: string;
+  brokerUri: string;
+};
+
+/**
+ * Optional transport override for credentials that cannot be safely narrowed
+ * into a provider token. Omission retains the provider-token behavior.
+ */
+export type GitCredentialTransport = {
+  kind: "http_broker";
+  repositories: GitHttpBrokerRepositoryRoute[];
+};
+
 export type GitCredentials = {
-  // The minted provider token. Required for purpose="token"; optional for
-  // purpose="identity" so hosts can return only stable git identity before lazy
-  // sandbox provision. The value never enters the manifest.
+  // The minted secret. For the default transport this is a provider token; for
+  // `http_broker` it is the broker bearer. Required for purpose="token";
+  // optional for purpose="identity" so hosts can return only stable git identity
+  // before lazy sandbox provision. The value never enters the manifest.
   token?: string;
+  // A host-owned exact smart-Git transport for providers whose available token
+  // cannot be constrained to the selected repositories. OpenGeni rewrites only
+  // the echoed repository remotes and never exposes this bearer to provider
+  // CLIs. Omitted means the token is a direct provider credential.
+  transport?: GitCredentialTransport;
   // workspace-scope cross-check echo: the workspace the provider scoped this token to. The activity
   // asserts `workspaceId === request.workspaceId` before injecting.
   workspaceId: string;
+  // Strict request echoes for binding-aware requests. OpenGeni validates these
+  // before accepting a token, preventing a host routing bug from returning a
+  // sibling connection's credential. They remain optional for legacy single-
+  // binding/provider hosts.
+  credentialBindingId?: GitCredentialBindingId;
+  provider?: GitCredentialProvider;
+  providerHost?: string;
   // Optional provider expiry for host-managed proactive renewal. ISO-8601;
   // null/omitted means the host does not expose a deadline and OpenGeni uses
   // its conservative bounded refresh cadence instead.
@@ -1330,12 +1982,250 @@ export type SandboxSecrets = {
   description?: string | null;
 };
 
+export type CredentialAuthNeededReason =
+  | "missing_connection"
+  | "expired"
+  | "insufficient_scope"
+  | "refresh_failed";
+
+/**
+ * Host-owned run credentials are materialized below one OpenGeni-owned sandbox
+ * directory. Paths are relative POSIX names; the runtime validates traversal,
+ * collisions, bounds, and modes before any content reaches a sandbox.
+ */
+export type RunCredentialFile = {
+  path: string;
+  content: string;
+  mode?: "0400" | "0600";
+};
+
+export type RunCredentialAuthNeeded = {
+  reason: CredentialAuthNeededReason;
+  providerDomain?: string;
+  connectionId?: string;
+  scopes?: string[];
+  resource?: string;
+  authorizationUrl?: string;
+  /** Bounded non-secret guidance. Never place credential material here. */
+  message?: string;
+};
+
+export type RunCredentialRedaction = {
+  /** Bounded diagnostic label used only in the replacement marker. */
+  name: string;
+  /** One atomic secret value that must be removed from streamed/audit output. */
+  value: string;
+};
+
+export type RunCredentialsRequest = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  parentSessionId: string | null;
+  rootSessionId: string;
+  /** All sessions sharing this sandbox group share one OS/filesystem trust boundary. */
+  sandboxGroupId: string;
+  turnId: string;
+  attemptId: string;
+  executionGeneration: number;
+  /** Immutable authority admitted with this turn. */
+  initiator: TurnInitiator;
+  initiatorContext: TurnInitiatorContext;
+  effectiveSandboxBackend: SandboxBackend;
+  sandboxOs: SandboxOs;
+  purpose: "provision" | "renewal";
+  forceRefresh: boolean;
+  /** Informational standalone variable-set identity; never gates host resolution. */
+  variableSet: { id: string; name: string } | null;
+};
+
+export type RunCredentialsResolution =
+  | {
+      /**
+       * The frozen target/attempt must not receive host material. Hosts use
+       * this for unsupported OSes/backends and policy-based opt-out; the
+       * decision must remain stable for the attempt.
+       */
+      status: "not_applicable";
+      accountId: string;
+      workspaceId: string;
+      sessionId: string;
+    }
+  | {
+      status: "ok";
+      /** Scope echoes are mandatory and checked before materialization. */
+      accountId: string;
+      workspaceId: string;
+      sessionId: string;
+      /** Secret environment values. Always delivered off-manifest. */
+      environment: Record<string, string>;
+      files?: RunCredentialFile[];
+      /** Environment name to one returned relative file path. */
+      fileEnvironment?: Record<string, string>;
+      /**
+       * Atomic sensitive values embedded inside credential files or derived
+       * material. Environment values are registered automatically; hosts list
+       * additional file-contained values here so chunked output is redacted.
+       */
+      redactions?: RunCredentialRedaction[];
+      /** Earliest material expiry. Null/omitted uses a bounded refresh cadence. */
+      expiresAt?: string | null;
+      /** Partial degradation: usable material may coexist with reconnect notices. */
+      authNeeded?: RunCredentialAuthNeeded[];
+    }
+  | {
+      status: "auth_needed";
+      accountId: string;
+      workspaceId: string;
+      sessionId: string;
+      authNeeded: RunCredentialAuthNeeded[];
+    };
+
+export const McpConnectionResourceScope = z
+  .object({
+    /** Provider-stable repository identity, serialized as a string on the wire. */
+    id: z.string().min(1).max(512),
+    kind: z.literal("repository"),
+  })
+  .strict();
+export type McpConnectionResourceScope = z.infer<typeof McpConnectionResourceScope>;
+
+const McpConnectionResourceScopes = z
+  .array(McpConnectionResourceScope)
+  .min(1)
+  .max(256)
+  .superRefine((resources, context) => {
+    const seen = new Set<string>();
+    for (const [index, resource] of resources.entries()) {
+      const key = `${resource.kind}\0${resource.id}`;
+      if (seen.has(key)) {
+        context.addIssue({
+          code: "custom",
+          message: "selectedResources must not contain duplicates",
+          path: [index],
+        });
+      }
+      seen.add(key);
+    }
+  });
+
+export const McpServerConnectionRef = z
+  .object({
+    /** Opaque host or standalone connection identifier. */
+    connectionId: z.string().min(1).optional(),
+    /** Stable provider family (for example github, gitlab, or azure_devops). */
+    provider: z.string().min(1).max(128).optional(),
+    /** Provider host or tenant domain. */
+    providerDomain: z.string().min(1),
+    kind: z.enum(["oauth2", "api_key", "app_install", "delegated"]).optional(),
+    scopes: z.array(z.string().min(1)).optional(),
+    /** OAuth resource indicator. This is distinct from selectedResources. */
+    resource: z.string().min(1).optional(),
+    /** Exact provider resources this MCP binding is allowed to operate on. */
+    selectedResources: McpConnectionResourceScopes.optional(),
+    subjectScope: z.enum(["workspace", "subject"]).optional(),
+  })
+  .strict()
+  .superRefine((reference, context) => {
+    if (!reference.selectedResources) return;
+    if (!reference.connectionId) {
+      context.addIssue({
+        code: "custom",
+        message: "selectedResources requires connectionId",
+        path: ["connectionId"],
+      });
+    }
+    if (!reference.provider) {
+      context.addIssue({
+        code: "custom",
+        message: "selectedResources requires provider",
+        path: ["provider"],
+      });
+    }
+  });
+export type McpServerConnectionRef = z.infer<typeof McpServerConnectionRef>;
+
+export type McpCredentialsRequest = {
+  accountId: string;
+  workspaceId: string;
+  /** Immediate session whose model or Toolspace call needs the credential. */
+  sessionId: string;
+  /** Workspace-scoped lineage root for host authorization and binding lookup. */
+  rootSessionId: string;
+  turnId: string;
+  /** Null only while a durable turn exists without a currently executing attempt. */
+  attemptId: string | null;
+  executionGeneration: number;
+  /** The immutable authority that admitted this turn. Never substitute the sandbox caller. */
+  initiator: TurnInitiator;
+  initiatorContext: TurnInitiatorContext;
+  /** Immediate technical caller, retained only as non-authoritative audit context. */
+  callerSubjectId?: string;
+  surface: "model" | "toolspace";
+  /** Canonical MCP destination that will receive the resolved headers. */
+  destinationUrl: string;
+  serverId: string;
+  toolName?: string;
+  connectionRef: McpServerConnectionRef;
+  forceRefresh: boolean;
+};
+
+export type McpCredentialAuthNeededReason =
+  | CredentialAuthNeededReason
+  | "unsupported_auth"
+  | "resource_scope_unavailable";
+
+export type McpCredentialResolution =
+  | {
+      status: "ok";
+      /** Scope echoes are mandatory and verified before any header is used. */
+      accountId: string;
+      workspaceId: string;
+      sessionId: string;
+      headers: Record<string, string>;
+      connectionId: string;
+      providerDomain: string;
+      provider?: string;
+      scopes?: string[];
+      resource?: string;
+      selectedResources?: McpConnectionResourceScope[];
+      expiresAt?: string | null;
+    }
+  | {
+      status: "auth_needed";
+      /** Scope echoes are mandatory even when the credential cannot be resolved. */
+      accountId: string;
+      workspaceId: string;
+      sessionId: string;
+      reason: McpCredentialAuthNeededReason;
+      providerDomain: string;
+      provider?: string;
+      connectionId?: string;
+      scopes?: string[];
+      resource?: string;
+      selectedResources?: McpConnectionResourceScope[];
+      authorizationUrl?: string;
+    };
+
 export type ConnectionCredentialsPort = {
-  // Both legs are optional: a host may drive ONLY git creds (BYO-GitHub-App)
-  // and leave sandbox secrets to OpenGeni's local decrypt, or vice-versa. An
-  // unset leg falls through to today's self-mint for THAT leg only.
+  // Every leg is optional: a host may drive only the credential classes it
+  // owns. An unset leg falls through to today's standalone implementation for
+  // that leg only.
   gitCredentials?(input: GitCredentialsRequest): Promise<GitCredentials>;
   sandboxSecrets?(input: SandboxSecretsRequest): Promise<SandboxSecrets>;
+  /**
+   * Resolve host-owned, session-aware sandbox credentials independently of an
+   * OpenGeni variable set. OpenGeni transports and renews the material; the host
+   * remains the sole owner of connection selection and credential policy.
+   */
+  runCredentials?(input: RunCredentialsRequest): Promise<RunCredentialsResolution>;
+  /**
+   * Resolve rotating MCP transport credentials at request time. Embedded hosts
+   * use this to keep their provider connection as the sole credential source;
+   * OpenGeni never requires a duplicate connection record. The same resolver is
+   * used by model-visible MCP tools and the additive Toolspace/Code Mode proxy.
+   */
+  mcpCredentials?(input: McpCredentialsRequest): Promise<McpCredentialResolution>;
 };
 
 // ============ connection-credential provider — GitHub App API port (BYO-App, §7.6 / GitHub credential prototype remainder) ===
@@ -1345,13 +2235,15 @@ export type ConnectionCredentialsPort = {
 // GitHub-API calls host-PROVIDABLE so a BYO-GitHub-App host drives its OWN App
 // credentials (its own JWT-signing key, its own OAuth client) instead of
 // OpenGeni self-minting from `settings`:
-//   - authorizeUser: OAuth code exchange + discovery of every existing
-//     installation/repository the user may link, including permission bits.
-//   - verifyInstallationAccessForUser: the OAuth code→token + installation
-//     lookup retained for compatibility with install-only hosts (today
-//     `verifyGitHubInstallationAccessForUser(settings, …)`).
-//   - getInstallation: a live belongs-to-this-App/suspension check before an
-//     existing installation selection is persisted.
+//   - authorizeUser: OAuth code exchange + user-visible installation and
+//     repository permission discovery. Retained for provider ABI compatibility;
+//     visibility is not proof of installation authority and core does not use
+//     this method for new workspace binding.
+//   - verifyInstallationAccessForUser: OAuth code→token + installation lookup,
+//     also retained for provider ABI compatibility and not used for binding.
+//   - getInstallation: retained in the provider ABI for compatibility. Direct
+//     existing-installation selection is fail-closed and core does not call
+//     this method for binding.
 //   - listRepositories: the installation-scoped repo listing behind
 //     `GET /v1/workspaces/:id/github/repositories` (today
 //     `listGitHubAppRepositories(settings, …)`).
@@ -1361,10 +2253,26 @@ export type ConnectionCredentialsPort = {
 
 export type GitHubInstallationSummary = {
   installationId: number;
+  accountId: number;
   accountLogin: string | null;
   accountType: string | null;
   suspended: boolean;
 };
+
+export type GitHubInstallationAuthorityKind = "personal_owner" | "organization_owner";
+
+export interface GitHubInstallationBindingCandidate {
+  installation: GitHubInstallationSummary;
+  authorityKind: GitHubInstallationAuthorityKind;
+}
+
+export interface GitHubInstallationBindingProof {
+  actorId: number;
+  actorLogin: string;
+  authorityKind: GitHubInstallationAuthorityKind;
+  installation: GitHubInstallationSummary;
+  repositories: GitHubRepository[];
+}
 
 export type GitHubRepositoryPermissions = {
   admin: boolean;
@@ -1383,6 +2291,27 @@ export type GitHubUserInstallationAccess = GitHubInstallationSummary & {
 };
 
 export type GitHubAppApiPort = {
+  /**
+   * Exchange one fresh GitHub user-authorization code and prove current
+   * installation authority. Implementations must accept only exact personal
+   * ownership or active organization ownership; installation visibility,
+   * repository permission bits, and App Manager metadata are not authority.
+   * Organization ownership must be revalidated after repository discovery,
+   * immediately before returning the proof used by the durable bind.
+   */
+  authorizeInstallationBinding?: (input: {
+    code: string;
+    installationId: number;
+  }) => Promise<GitHubInstallationBindingProof>;
+  /**
+   * Exchange one fresh GitHub user-authorization code and return only existing
+   * App installations for which that exact human is the personal owner or an
+   * active organization owner. Visibility and repository permissions alone
+   * must never produce a candidate.
+   */
+  discoverInstallationBindingCandidates?: (input: {
+    code: string;
+  }) => Promise<GitHubInstallationBindingCandidate[]>;
   authorizeUser?: (input: { code: string }) => Promise<GitHubUserInstallationAccess[]>;
   verifyInstallationAccessForUser?: (input: {
     code: string;
@@ -1430,6 +2359,8 @@ export const RepositoryResourceRef = z.object({
   mountPath: z.string().min(1).optional(),
   subpath: z.string().min(1).optional(),
   provider: GitCredentialProvider.optional(),
+  credentialBindingId: GitCredentialBindingId.optional(),
+  access: GitRepositoryAccess.optional(),
   repositoryId: GitProviderRepositoryId.optional(),
   installationId: GitProviderRepositoryId.optional(),
   projectId: GitProviderRepositoryId.optional(),
@@ -1438,6 +2369,53 @@ export const RepositoryResourceRef = z.object({
   githubRepositoryId: z.number().int().positive().optional(),
 });
 export type RepositoryResourceRef = z.infer<typeof RepositoryResourceRef>;
+
+function positiveGitProviderInteger(value: unknown): number | null {
+  if (typeof value === "number" && Number.isInteger(value) && value > 0) return value;
+  if (typeof value === "string" && /^\d+$/.test(value) && Number(value) > 0) {
+    return Number(value);
+  }
+  return null;
+}
+
+/**
+ * Resolve whether a repository participates in platform-brokered Git auth.
+ * Provider-less public repositories return null; legacy GitHub aliases infer
+ * GitHub only when both positive installation and repository ids are present.
+ */
+export function gitCredentialProviderForRepository(
+  resource: RepositoryResourceRef,
+): GitCredentialProvider | null {
+  if (resource.provider) return resource.provider;
+  if (
+    positiveGitProviderInteger(resource.githubInstallationId) &&
+    positiveGitProviderInteger(resource.githubRepositoryId)
+  ) {
+    return "github";
+  }
+  return null;
+}
+
+/**
+ * Derive the one canonical runtime/broker identity for a repository credential.
+ * Every consumer must use this helper so mint grouping, token filenames, and
+ * credential-helper routing cannot diverge on legacy provider ids.
+ */
+export function gitCredentialBindingIdForRepository(
+  resource: RepositoryResourceRef,
+  provider: GitCredentialProvider | null = gitCredentialProviderForRepository(resource),
+): GitCredentialBindingId | null {
+  if (!provider) return null;
+  const installationId =
+    provider === "github"
+      ? positiveGitProviderInteger(resource.githubInstallationId ?? resource.installationId)
+      : null;
+  return (
+    resource.credentialBindingId ??
+    resource.connectionId ??
+    (installationId ? `github-installation:${installationId}` : provider)
+  );
+}
 
 export const FileResourceRef = z.object({
   kind: z.literal("file"),
@@ -1448,6 +2426,109 @@ export type FileResourceRef = z.infer<typeof FileResourceRef>;
 
 export const ResourceRef = z.discriminatedUnion("kind", [RepositoryResourceRef, FileResourceRef]);
 export type ResourceRef = z.infer<typeof ResourceRef>;
+
+export class ResourceMountPathError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ResourceMountPathError";
+  }
+}
+
+/**
+ * Normalize one workspace-relative resource mount path for every runtime.
+ *
+ * Backslashes are treated as separators so a path cannot be harmless on Linux
+ * but become traversal on a connected Windows machine. Empty, absolute,
+ * drive-qualified, dot-segment, NUL-containing, and repeated-separator paths
+ * fail closed instead of being silently reinterpreted.
+ */
+export function normalizeResourceMountPath(path: string): string {
+  const normalizedSeparators = path.trim().replace(/\\/g, "/");
+  if (
+    !normalizedSeparators ||
+    normalizedSeparators.startsWith("/") ||
+    /^[A-Za-z]:\//.test(normalizedSeparators) ||
+    normalizedSeparators.includes("\0")
+  ) {
+    throw new ResourceMountPathError(`invalid resource mount path: ${path}`);
+  }
+  const segments = normalizedSeparators.split("/");
+  if (
+    segments.some(
+      (segment) =>
+        !segment ||
+        segment === "." ||
+        segment === ".." ||
+        /[<>:"|?*\u0000-\u001f]/.test(segment) ||
+        /[ .]$/.test(segment) ||
+        /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(segment),
+    )
+  ) {
+    throw new ResourceMountPathError(`invalid resource mount path: ${path}`);
+  }
+  return segments.join("/");
+}
+
+/** Normalize a repository-internal subpath while preserving legacy `/path/` input. */
+export function normalizeRepositorySubpath(path: string): string {
+  const relative = path
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/^\/+|\/+$/g, "");
+  return normalizeResourceMountPath(relative);
+}
+
+/** A conservative collision identity that is portable to case-insensitive hosts. */
+export function resourceMountPathCollisionKey(path: string): string {
+  return normalizeResourceMountPath(path).normalize("NFKC").toLowerCase();
+}
+
+/**
+ * Default repository mount identity. The normalized remote host (including a
+ * non-default port) is part of the path, so equal owner/repo names on GitHub,
+ * GitLab, Azure DevOps, or a custom host do not collide. Encoding the host keeps
+ * IPv6/custom-port identities inside one portable path segment.
+ */
+export function defaultRepositoryMountPath(uri: string): string {
+  let url: URL;
+  try {
+    url = new URL(uri);
+  } catch {
+    throw new ResourceMountPathError(`invalid repository URI for mount path: ${uri}`);
+  }
+  if (url.protocol !== "https:" || !url.host) {
+    throw new ResourceMountPathError(`invalid repository URI for mount path: ${uri}`);
+  }
+  const repositoryPath = url.pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
+  const segments = repositoryPath.split("/").filter(Boolean);
+  if (segments.length < 2) {
+    throw new ResourceMountPathError(`repository URI must include owner and repo: ${uri}`);
+  }
+  return normalizeResourceMountPath(
+    `repos/${encodeURIComponent(url.host.toLowerCase())}/${segments.join("/")}`,
+  );
+}
+
+/** Resolve the exact mount used by API normalization, manifests, and clone hooks. */
+export function resourceMountPath(resource: ResourceRef): string {
+  if (resource.mountPath) return normalizeResourceMountPath(resource.mountPath);
+  return resource.kind === "file"
+    ? normalizeResourceMountPath(`files/${resource.fileId}`)
+    : defaultRepositoryMountPath(resource.uri);
+}
+
+/** Fail before sandbox execution when two resources share a portable path. */
+export function assertUniqueResourceMountPaths(resources: readonly ResourceRef[]): void {
+  const mounted = new Set<string>();
+  for (const resource of resources) {
+    const path = resourceMountPath(resource);
+    const key = resourceMountPathCollisionKey(path);
+    if (mounted.has(key)) {
+      throw new ResourceRefConflictError(`resource mount path is already attached: ${path}`);
+    }
+    mounted.add(key);
+  }
+}
 
 export const FileStatus = z.enum(["pending_upload", "ready", "failed", "expired", "deleted"]);
 export type FileStatus = z.infer<typeof FileStatus>;
@@ -1524,6 +2605,37 @@ export type KnowledgeSourceKind = z.infer<typeof KnowledgeSourceKind>;
 export const DocumentSearchMode = z.enum(["hybrid", "vector", "keyword"]);
 export type DocumentSearchMode = z.infer<typeof DocumentSearchMode>;
 
+// 'workspace' documents are readable by anyone with workspace access;
+// 'private' documents are readable only by the grant subject that created them.
+export const DocumentVisibility = z.enum(["workspace", "private"]);
+export type DocumentVisibility = z.infer<typeof DocumentVisibility>;
+
+// Knowledge-drop auto-curation lifecycle. 'none' = ordinary caller-described add
+// (never auto-curated). 'pending' = dropped, curation runs during indexing.
+// 'suggested' = curated but the base move was NOT applied (low confidence or
+// conflict) — the suggestion lives in Document.curation. 'auto_filed' = curated
+// and moved into the suggested base. 'failed' = curation errored (fail-soft;
+// the document still indexes and stays searchable).
+export const DocumentCurationStatus = z.enum([
+  "none",
+  "pending",
+  "suggested",
+  "auto_filed",
+  "failed",
+]);
+export type DocumentCurationStatus = z.infer<typeof DocumentCurationStatus>;
+
+// Curator audit blob persisted on the document.
+export const DocumentCuration = z.object({
+  suggestedBaseId: z.string().uuid().nullable(),
+  suggestedBaseName: z.string().nullable(),
+  confidence: z.number().min(0).max(1),
+  reason: z.string().nullable(),
+  originalTitle: z.string().nullable(),
+  model: z.string().nullable(),
+});
+export type DocumentCuration = z.infer<typeof DocumentCuration>;
+
 export const DocumentBase = z.object({
   id: z.string().uuid(),
   workspaceId: z.string().uuid(),
@@ -1553,6 +2665,13 @@ export const Document = z.object({
   sourceUpdatedAt: z.string().nullable(),
   sourceVersion: z.string().nullable(),
   aclTags: z.array(z.string()),
+  visibility: DocumentVisibility,
+  createdBy: z.string().nullable(),
+  agentAccess: z.boolean(),
+  summary: z.string().nullable(),
+  topics: z.array(z.string()),
+  curationStatus: DocumentCurationStatus,
+  curation: DocumentCuration.nullable(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -1602,8 +2721,36 @@ export const AddDocumentRequest = z.object({
   sourceUpdatedAt: z.string().datetime({ offset: true }).optional(),
   sourceVersion: z.string().min(1).optional(),
   aclTags: z.array(z.string().min(1)).optional(),
+  visibility: DocumentVisibility.optional(),
+  agentAccess: z.boolean().optional(),
 });
 export type AddDocumentRequest = z.infer<typeof AddDocumentRequest>;
+
+// A knowledge drop: raw text or an already-uploaded file, with no required
+// metadata. The server files it into the workspace Default base. When a
+// curation provider is enabled, it may name, summarize, categorize, and
+// (confidence permitting) move the document; provider=none leaves caller
+// metadata and Default placement unchanged.
+export const CreateKnowledgeDropRequest = z
+  .object({
+    text: z.string().min(1).max(2_000_000).optional(),
+    fileId: z.string().uuid().optional(),
+    filename: z.string().min(1).optional(),
+    title: z.string().min(1).optional(),
+    visibility: DocumentVisibility.optional(),
+    agentAccess: z.boolean().optional(),
+  })
+  .refine((value) => (value.text === undefined) !== (value.fileId === undefined), {
+    message: "provide exactly one of text or fileId",
+  });
+export type CreateKnowledgeDropRequest = z.infer<typeof CreateKnowledgeDropRequest>;
+
+// Move a document (and its indexed chunks) to another base. With no explicit
+// targetBaseId, applies the document's stored curation suggestion.
+export const MoveDocumentRequest = z.object({
+  targetBaseId: z.string().uuid().optional(),
+});
+export type MoveDocumentRequest = z.infer<typeof MoveDocumentRequest>;
 
 export const DocumentSearchRequest = z.object({
   query: z.string().min(1),
@@ -1933,6 +3080,60 @@ export const ToolRef = z.object({
 export type ToolRef = z.infer<typeof ToolRef>;
 
 const registryId = /^[A-Za-z0-9_-]+$/;
+export const SessionMcpServerId = z.string().min(1).regex(registryId);
+export type SessionMcpServerId = z.infer<typeof SessionMcpServerId>;
+
+// How a session's persisted tool selection was chosen.
+export const SessionToolPolicy = z.object({
+  mode: z.enum(["workspace_default", "explicit", "inherited"]),
+  inheritedFromSessionId: z.string().uuid().nullable(),
+});
+export type SessionToolPolicy = z.infer<typeof SessionToolPolicy>;
+
+export const SESSION_EFFECTIVE_TOOL_POLICY_ID_LIMIT = 64;
+export const SESSION_EFFECTIVE_TOOL_POLICY_ID_MAX_LENGTH = 200;
+const SessionEffectiveToolPolicyId = z
+  .string()
+  .min(1)
+  .max(SESSION_EFFECTIVE_TOOL_POLICY_ID_MAX_LENGTH)
+  .regex(registryId);
+const SessionEffectiveToolPolicyIds = z
+  .array(SessionEffectiveToolPolicyId)
+  .max(SESSION_EFFECTIVE_TOOL_POLICY_ID_LIMIT);
+
+// Secret-safe, read-time policy truth. This projection contains only bounded
+// MCP registry ids and exact counts: never URLs, names, headers, credentials,
+// connector configuration, or tool schemas. IDs are samples when capped;
+// counts remain exact and idsTruncated makes that explicit to clients.
+export const SessionEffectiveToolPolicy = z
+  .object({
+    mode: z.enum(["workspace_default", "explicit", "inherited"]),
+    inheritedFromSessionId: z.string().uuid().nullable(),
+    selectedIds: SessionEffectiveToolPolicyIds,
+    effectiveIds: SessionEffectiveToolPolicyIds,
+    mandatoryIds: SessionEffectiveToolPolicyIds,
+    lazyRouter: z
+      .object({
+        state: z.enum(["required", "disabled"]),
+        deferredIds: SessionEffectiveToolPolicyIds,
+      })
+      .strict(),
+    configuredIds: SessionEffectiveToolPolicyIds,
+    droppedIds: SessionEffectiveToolPolicyIds,
+    counts: z
+      .object({
+        selected: z.number().int().nonnegative(),
+        effective: z.number().int().nonnegative(),
+        mandatory: z.number().int().nonnegative(),
+        deferred: z.number().int().nonnegative(),
+        configured: z.number().int().nonnegative(),
+        dropped: z.number().int().nonnegative(),
+      })
+      .strict(),
+    idsTruncated: z.boolean(),
+  })
+  .strict();
+export type SessionEffectiveToolPolicy = z.infer<typeof SessionEffectiveToolPolicy>;
 const httpsUrl = z
   .string()
   .url()
@@ -1947,41 +3148,100 @@ const httpsUrl = z
     { message: "URL must use https" },
   );
 
+/**
+ * Human-approval policy for one MCP server. `true` gates every tool, `false`
+ * gates none, and a list gates only those unprefixed names.
+ */
+export const SESSION_MCP_APPROVAL_POLICY_MAX_TOOL_NAMES = 2_048;
+export const SESSION_MCP_APPROVAL_POLICY_MAX_BYTES = 256 * 1024;
+export const SESSION_MCP_APPROVAL_TOOL_NAME_MAX_BYTES = 1_024;
+export const SESSION_MCP_SERVERS_MAX = 64;
+
+const sessionMcpApprovalToolName = z
+  .string()
+  .min(1)
+  .superRefine((name, ctx) => {
+    if (new TextEncoder().encode(name).byteLength > SESSION_MCP_APPROVAL_TOOL_NAME_MAX_BYTES) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `MCP approval tool names must be at most ${SESSION_MCP_APPROVAL_TOOL_NAME_MAX_BYTES} UTF-8 bytes`,
+      });
+    }
+  });
+const selectiveSessionMcpApprovalPolicy = z
+  .array(sessionMcpApprovalToolName)
+  .max(SESSION_MCP_APPROVAL_POLICY_MAX_TOOL_NAMES)
+  .superRefine((names, ctx) => {
+    const bytes = names.reduce(
+      (total, name) => total + new TextEncoder().encode(name).byteLength,
+      0,
+    );
+    if (bytes > SESSION_MCP_APPROVAL_POLICY_MAX_BYTES) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `MCP approval policies must be at most ${SESSION_MCP_APPROVAL_POLICY_MAX_BYTES} UTF-8 bytes`,
+      });
+    }
+  })
+  .transform((names) => [...new Set(names)].sort());
+export const SessionMcpApprovalPolicy = z.union([z.boolean(), selectiveSessionMcpApprovalPolicy]);
+export type SessionMcpApprovalPolicy = z.infer<typeof SessionMcpApprovalPolicy>;
+
 export const SessionMcpServerInput = z.object({
-  id: z.string().min(1).regex(registryId),
+  id: SessionMcpServerId,
   name: z.string().min(1).optional(),
   url: httpsUrl,
   allowedTools: z.array(z.string().min(1)).optional(),
   timeoutMs: z.number().int().positive().optional(),
   cacheToolsList: z.boolean().optional(),
-  // Human-approval policy for this server's tools. `true` = every tool of this
-  // server requires approval before it runs (a `session.requiresAction` pause
-  // the caller resolves with `user.approvalDecision`); a string[] = ONLY the
-  // listed UNPREFIXED tool names require approval (e.g. reads auto-run, writes
-  // ask); absent / `false` = auto-run everything (the historical default).
-  requireApproval: z.union([z.boolean(), z.array(z.string().min(1))]).optional(),
+  // The caller resolves an approval pause with `user.approvalDecision`.
+  requireApproval: SessionMcpApprovalPolicy.optional(),
   // Write-only credential headers. Values are encrypted at rest and never
   // returned in session responses or events; response metadata exposes names.
   headers: z.record(z.string(), z.string()).optional(),
+  // Non-secret opaque pointer resolved at request time by the standalone
+  // connection broker or an embedding host's mcpCredentials port.
+  connectionRef: McpServerConnectionRef.optional(),
 });
 export type SessionMcpServerInput = z.infer<typeof SessionMcpServerInput>;
 
 export const SessionMcpCredentialUpdateInput = z.object({
-  id: z.string().min(1).regex(registryId),
+  id: SessionMcpServerId,
   headers: z.record(z.string(), z.string()),
 });
 export type SessionMcpCredentialUpdateInput = z.infer<typeof SessionMcpCredentialUpdateInput>;
 
 export const SessionMcpServerMetadata = z
   .object({
-    id: z.string().min(1).regex(registryId),
+    id: SessionMcpServerId,
     name: z.string().min(1).nullable(),
     url: httpsUrl,
     headerNames: z.array(z.string()).default([]),
     credentialVersion: z.number().int().positive(),
+    requireApproval: SessionMcpApprovalPolicy.default(false),
+    connectionRef: McpServerConnectionRef.nullable().default(null),
   })
   .strict();
 export type SessionMcpServerMetadata = z.infer<typeof SessionMcpServerMetadata>;
+
+export const UpdateSessionMcpApprovalPolicyRequest = z
+  .object({
+    requireApproval: SessionMcpApprovalPolicy,
+  })
+  .strict();
+export type UpdateSessionMcpApprovalPolicyRequest = z.infer<
+  typeof UpdateSessionMcpApprovalPolicyRequest
+>;
+
+export const UpdateSessionMcpApprovalPolicyResponse = z
+  .object({
+    server: SessionMcpServerMetadata,
+    effectiveFrom: z.literal("next_attempt"),
+  })
+  .strict();
+export type UpdateSessionMcpApprovalPolicyResponse = z.infer<
+  typeof UpdateSessionMcpApprovalPolicyResponse
+>;
 
 export class ResourceRefConflictError extends Error {
   constructor(message: string) {
@@ -2018,10 +3278,14 @@ export function mergeResourceRefs(
   additions: ResourceRef[],
   options: { rejectConflicts?: boolean } = {},
 ): ResourceRef[] {
+  if (options.rejectConflicts) {
+    assertUniqueResourceMountPaths(existing);
+  }
   const out = [...existing];
   const mountPaths = new Map(
-    existing.flatMap((resource) =>
-      resource.mountPath ? [[resource.mountPath, stableJson(resource)] as const] : [],
+    existing.map(
+      (resource) =>
+        [resourceMountPathCollisionKey(resourceMountPath(resource)), stableJson(resource)] as const,
     ),
   );
   const identities = new Map(
@@ -2035,11 +3299,10 @@ export function mergeResourceRefs(
       continue;
     }
     if (options.rejectConflicts) {
-      const existingAtMount = resource.mountPath ? mountPaths.get(resource.mountPath) : undefined;
+      const mountPath = resourceMountPath(resource);
+      const existingAtMount = mountPaths.get(resourceMountPathCollisionKey(mountPath));
       if (existingAtMount && existingAtMount !== serialized) {
-        throw new ResourceRefConflictError(
-          `resource mount path is already attached: ${resource.mountPath}`,
-        );
+        throw new ResourceRefConflictError(`resource mount path is already attached: ${mountPath}`);
       }
       const identity = resourceIdentityKey(resource);
       const existingIdentity = identities.get(identity);
@@ -2052,9 +3315,7 @@ export function mergeResourceRefs(
     out.push(resource);
     exact.add(serialized);
     identities.set(resourceIdentityKey(resource), serialized);
-    if (resource.mountPath) {
-      mountPaths.set(resource.mountPath, serialized);
-    }
+    mountPaths.set(resourceMountPathCollisionKey(resourceMountPath(resource)), serialized);
   }
   return out;
 }
@@ -2145,6 +3406,41 @@ export const SessionGoalPausedReason = z.enum([
 ]);
 export type SessionGoalPausedReason = z.infer<typeof SessionGoalPausedReason>;
 
+export const SessionGoalContinuationState = z.enum([
+  "inactive",
+  "scheduled",
+  "running",
+  "blocked",
+  "invariant_broken",
+]);
+export type SessionGoalContinuationState = z.infer<typeof SessionGoalContinuationState>;
+
+export const SessionGoalContinuationReason = z.enum([
+  "goal_inactive",
+  "wake_pending",
+  "continuation_pending",
+  "human_work_pending",
+  "goal_turn_running",
+  "human_turn_running",
+  "workstream_paused",
+  "approval_required",
+  "provider_backpressure",
+  "session_cancelled",
+  "system_work_pending",
+  "missing_obligation",
+]);
+export type SessionGoalContinuationReason = z.infer<typeof SessionGoalContinuationReason>;
+
+export const SessionGoalContinuation = z.object({
+  state: SessionGoalContinuationState,
+  reason: SessionGoalContinuationReason,
+  wakeRevision: z.number().int().nonnegative(),
+  observedRevision: z.number().int().nonnegative(),
+  nextAttemptAt: z.string().datetime({ offset: true }).nullable(),
+  lastError: z.string().nullable(),
+});
+export type SessionGoalContinuation = z.infer<typeof SessionGoalContinuation>;
+
 export const SessionGoal = z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),
@@ -2162,6 +3458,9 @@ export const SessionGoal = z.object({
   noProgressStreak: z.number().int().nonnegative(),
   maxAutoContinuations: z.number().int().positive().nullable(),
   metadata: z.record(z.string(), z.unknown()),
+  // Optional for source compatibility with older clients; the API always
+  // supplies this authoritative continuation projection.
+  continuation: SessionGoalContinuation.optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -2184,6 +3483,29 @@ export const UpdateSessionRequest = z.object({
   title: z.string().min(1).max(200),
 });
 export type UpdateSessionRequest = z.infer<typeof UpdateSessionRequest>;
+
+/**
+ * Replace the complete durable session tool policy, or explicitly opt back in
+ * to current workspace defaults. MCP servers and individual OpenGeni tools
+ * advance atomically under one policy version.
+ */
+export const UpdateSessionToolPolicyRequest = z.union([
+  z
+    .object({
+      mode: z.literal("workspace_default"),
+      expectedVersion: z.number().int().positive(),
+    })
+    .strict(),
+  z
+    .object({
+      mode: z.literal("explicit"),
+      tools: z.array(ToolRef).max(64),
+      firstPartyMcpTools: z.array(FirstPartyMcpToolName),
+      expectedVersion: z.number().int().positive(),
+    })
+    .strict(),
+]);
+export type UpdateSessionToolPolicyRequest = z.infer<typeof UpdateSessionToolPolicyRequest>;
 
 /**
  * A member's personal pin preference for a session. `expectedVersion` is
@@ -2265,6 +3587,170 @@ export const CompactSessionContextResult = z.object({
 });
 export type CompactSessionContextResult = z.infer<typeof CompactSessionContextResult>;
 
+/**
+ * The principal whose authority accepted a session or turn. `subjectId` is an
+ * opaque host/standalone identity and therefore must never encode `kind` by
+ * convention: embedding hosts own their subject namespace.
+ */
+export const TurnInitiator = z.object({
+  kind: z.enum(["subject", "service"]),
+  ...turnInitiatorIdentityFields,
+});
+export type TurnInitiator = z.infer<typeof TurnInitiator>;
+
+// ============ embedding host session authorization ============
+//
+// Workspace permissions answer whether a principal may use an OpenGeni
+// capability. An embedding host can additionally own per-session visibility
+// (ownership, sharing, nested workspaces, revocation). This port is the one
+// host-neutral boundary for that second decision. Inputs contain OpenGeni ids
+// and immutable, non-secret authority only; host records and policy details
+// never cross the boundary.
+
+export const SessionAuthorizationSurface = z.enum([
+  "http",
+  "core",
+  "stream",
+  "first_party_mcp",
+  "toolspace",
+]);
+export type SessionAuthorizationSurface = z.infer<typeof SessionAuthorizationSurface>;
+
+export const SessionAuthorizationOperation = z.enum([
+  "session.read",
+  "session.events.read",
+  "session.stream.read",
+  "session.stream.acknowledge",
+  "session.turns.read",
+  "session.append",
+  "session.steer",
+  "session.control",
+  "session.queue.read",
+  "session.queue.control",
+  "session.composer.read",
+  "session.composer.write",
+  "session.lineage.read",
+  "session.capture.read",
+  "session.files.read",
+  "session.files.write",
+  "session.git.read",
+  "session.terminal.read",
+  "session.terminal.control",
+  "session.viewer.read",
+  "session.viewer.control",
+  "session.first_party_mcp.call",
+  "session.toolspace.call",
+  "session.pin.write",
+  "session.codex_account.write",
+  "session.context.write",
+  "session.approval.write",
+  "session.human_input.read",
+  "session.human_input.write",
+  "session.title.write",
+  "session.mcp.approval_policy.write",
+  "session.tool_policy.write",
+  "session.goal.read",
+  "session.goal.write",
+  "session.child.create",
+]);
+export type SessionAuthorizationOperation = z.infer<typeof SessionAuthorizationOperation>;
+
+export const SessionAuthorizationActor = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("subject"),
+    subjectId: z.string().min(1),
+    subjectLabel: z.string().min(1).optional(),
+  }),
+  z.object({
+    kind: z.literal("agent_attempt"),
+    /** Technical, authenticated first-party caller (not the host authority). */
+    subjectId: z.string().min(1),
+    callerSessionId: z.string().uuid(),
+    callerRootSessionId: z.string().uuid(),
+    turnId: z.string().uuid(),
+    attemptId: z.string().uuid(),
+    executionGeneration: z.number().int().positive(),
+    /** Frozen authority that admitted the calling turn. */
+    initiator: TurnInitiator,
+    initiatorContext: TurnInitiatorContext,
+  }),
+]);
+export type SessionAuthorizationActor = z.infer<typeof SessionAuthorizationActor>;
+
+export const SessionAuthorizationTarget = z.object({
+  sessionId: z.string().uuid(),
+  /** Server-resolved workspace lineage root; never accepted from a caller. */
+  rootSessionId: z.string().uuid(),
+});
+export type SessionAuthorizationTarget = z.infer<typeof SessionAuthorizationTarget>;
+
+export type AuthorizeSessionInput = {
+  accountId: string;
+  workspaceId: string;
+  actor: SessionAuthorizationActor;
+  target: SessionAuthorizationTarget;
+  operation: SessionAuthorizationOperation;
+  surface: SessionAuthorizationSurface;
+};
+
+export const SessionAuthorizationDecision = z.discriminatedUnion("allowed", [
+  z.object({
+    allowed: z.literal(true),
+    /**
+     * Whether related-session metadata may be projected with the target.
+     * `target` is the fail-closed default for exact shares; `root` permits the
+     * target's full lineage tree. This does not authorize a separate operation
+     * against another session, which always requires its own decision.
+     */
+    relatedSessionAccess: z.enum(["target", "root"]).optional(),
+    /** A host may request a tighter stream reauthorization bound. */
+    reauthorizeAfterMs: z.number().int().min(1_000).max(60_000).optional(),
+  }),
+  z.object({
+    allowed: z.literal(false),
+    reason: z.enum(["not_found", "forbidden", "revoked"]),
+  }),
+]);
+export type SessionAuthorizationDecision = z.infer<typeof SessionAuthorizationDecision>;
+
+/**
+ * A database-applicable listing scope. `rootSessionIds` includes every
+ * descendant of those lineage anchors; `sessionIds` authorizes only the exact
+ * sessions. Supplying neither is an explicit empty scope. OpenGeni intersects
+ * every id with the requested workspace and never trusts a host scope as
+ * session existence evidence.
+ */
+export const SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS = 10_000;
+
+export const SessionAuthorizationListScope = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("all") }),
+  z.object({
+    kind: z.literal("scoped"),
+    rootSessionIds: z.array(z.string().uuid()).max(SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS),
+    sessionIds: z.array(z.string().uuid()).max(SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS),
+  }),
+]);
+export type SessionAuthorizationListScope = z.infer<typeof SessionAuthorizationListScope>;
+
+export type ResolveSessionAuthorizationListScopeInput = {
+  accountId: string;
+  workspaceId: string;
+  actor: SessionAuthorizationActor;
+  surface: SessionAuthorizationSurface;
+};
+
+export type SessionAuthorizationPort = {
+  authorizeSession(input: AuthorizeSessionInput): Promise<SessionAuthorizationDecision>;
+  /**
+   * Return the complete current scope used inside OpenGeni's cursor query.
+   * This is deliberately not a post-filter callback: search, pinning, ordering,
+   * totals, and cursor advancement must all operate on authorized rows.
+   */
+  resolveListScope(
+    input: ResolveSessionAuthorizationListScopeInput,
+  ): Promise<SessionAuthorizationListScope>;
+};
+
 export const SessionTurn = z.object({
   id: z.string().uuid(),
   workspaceId: z.string().uuid(),
@@ -2277,6 +3763,10 @@ export const SessionTurn = z.object({
   prompt: z.string().min(1),
   resources: z.array(ResourceRef),
   tools: z.array(ToolRef),
+  // Omitted/default discovery and explicit `tools: []` are distinct. False
+  // inherits the durable session policy; true replaces it for this turn after
+  // admission proves the selection is a subset.
+  toolsProvided: z.boolean().optional(),
   model: z.string().min(1),
   reasoningEffort: ReasoningEffort,
   sandboxBackend: SandboxBackend,
@@ -2287,6 +3777,8 @@ export const SessionTurn = z.object({
   executionGeneration: z.number().int().nonnegative(),
   activeAttemptId: z.string().uuid().nullable(),
   lineage: z.record(z.string(), z.unknown()),
+  initiator: TurnInitiator,
+  initiatorContext: TurnInitiatorContext,
   cancelledBy: z.string().nullable(),
   cancelReason: z.string().nullable(),
   startedAt: z.string().nullable(),
@@ -2335,6 +3827,8 @@ export const EffectiveSessionControl = z.object({
     .object({
       state: z.literal("stopping"),
       attemptCount: z.number().int().positive(),
+      interruptionPendingCount: z.number().int().nonnegative(),
+      quiescencePendingCount: z.number().int().nonnegative(),
     })
     .nullable(),
 });
@@ -2361,7 +3855,6 @@ export const ComposerDraft = z.object({
   revision: z.number().int().nonnegative(),
   text: z.string(),
   resources: z.array(ResourceRef),
-  tools: z.array(ToolRef),
   model: z.string().min(1),
   reasoningEffort: ReasoningEffort,
   sourceTurnId: z.string().uuid().nullable(),
@@ -2369,21 +3862,6 @@ export const ComposerDraft = z.object({
   updatedAt: z.string().nullable(),
 });
 export type ComposerDraft = z.infer<typeof ComposerDraft>;
-
-export const SessionQueueSnapshot = z.object({
-  version: z.number().int().nonnegative(),
-  effectiveControl: EffectiveSessionControl,
-  /**
-   * True while the latest attempt is interrupted but has not durably proved
-   * quiescence: no more inference, user-visible output, or workspace-persistence
-   * authority. Temporal cancellation/terminalization is not that proof. This is
-   * distinct from ordinary capacity queueing, remains accurate with an empty
-   * visible queue, and is independent of Steer-row metadata or withdrawal.
-   */
-  stoppingPreviousAttempt: z.boolean(),
-  items: z.array(SessionTurn),
-});
-export type SessionQueueSnapshot = z.infer<typeof SessionQueueSnapshot>;
 
 export const MoveSessionQueueItemRequest = z.object({
   clientEventId: SessionOperationKey,
@@ -2417,11 +3895,53 @@ export type DeleteSessionQueueItemRequest = z.infer<typeof DeleteSessionQueueIte
 export const SaveComposerDraftRequest = ComposerDraft.pick({
   text: true,
   resources: true,
-  tools: true,
   model: true,
   reasoningEffort: true,
 }).extend({ expectedRevision: z.number().int().nonnegative() });
 export type SaveComposerDraftRequest = z.infer<typeof SaveComposerDraftRequest>;
+
+/**
+ * Create-only options saved with an actor's private pre-session draft. This is
+ * deliberately narrower than CreateSessionRequest: idempotency/event keys and
+ * credential-bearing MCP server inputs are per-attempt data, never draft state.
+ */
+export const NewSessionDraftOptions = z.object({
+  sandboxBackend: SandboxBackend.optional(),
+  targetSandboxId: z.string().uuid().optional(),
+  workingDir: z.string().min(1).optional(),
+  variableSetId: z.string().uuid().optional(),
+  rigId: z.string().uuid().optional(),
+  goal: GoalSpec.optional(),
+  firstPartyMcpPermissions: z.array(Permission).optional(),
+  firstPartyMcpTools: z.array(FirstPartyMcpToolName).optional(),
+});
+export type NewSessionDraftOptions = z.infer<typeof NewSessionDraftOptions>;
+
+/** Actor-private, server-authoritative composer state before a session exists. */
+export const NewSessionDraft = z.object({
+  revision: z.number().int().nonnegative(),
+  text: z.string(),
+  resources: z.array(ResourceRef),
+  tools: z.array(ToolRef),
+  /** False means the workspace-default MCP policy is still inherited. */
+  toolsProvided: z.boolean().default(false),
+  model: z.string().min(1),
+  reasoningEffort: ReasoningEffort,
+  options: NewSessionDraftOptions,
+  updatedAt: z.string().nullable(),
+});
+export type NewSessionDraft = z.infer<typeof NewSessionDraft>;
+
+export const SaveNewSessionDraftRequest = NewSessionDraft.pick({
+  text: true,
+  resources: true,
+  tools: true,
+  toolsProvided: true,
+  model: true,
+  reasoningEffort: true,
+  options: true,
+}).extend({ expectedRevision: z.number().int().nonnegative() });
+export type SaveNewSessionDraftRequest = z.infer<typeof SaveNewSessionDraftRequest>;
 
 export const WORKSPACE_CONTROL_REASON_MAX_BYTES = 8 * 1024;
 export const WORKSPACE_CONTROL_ACTOR_MAX_BYTES = 1024;
@@ -2584,7 +4104,12 @@ export function boundWorkspaceControlEvent(
     fields,
     fullEvidence: { available: false, reason: "not_retained" },
   };
-  const bounded: WorkspaceControlEvent = { ...event, reason, actor, truncation };
+  const bounded: WorkspaceControlEvent = {
+    ...event,
+    reason,
+    actor,
+    truncation,
+  };
   settleWorkspaceControlDeliveredBytes(bounded, truncation);
   const deliveredBytes = sessionEventJsonBytes(bounded);
   if (deliveredBytes > WORKSPACE_CONTROL_EVENT_MAX_BYTES) {
@@ -2688,7 +4213,6 @@ export type SessionSystemUpdatePayload = z.infer<typeof SessionSystemUpdatePaylo
 
 export const SessionSystemUpdateState = z.enum([
   "pending",
-  "deferred",
   "delivered",
   "cancelled",
   "superseded",
@@ -2708,10 +4232,103 @@ export const SessionSystemUpdate = z.object({
   lineage: z.record(z.string(), z.unknown()),
   state: SessionSystemUpdateState,
   deliveredTurnId: z.string().uuid().nullable(),
+  /**
+   * The exact durable model-memory row containing the coalesced batch that
+   * delivered this update. Null until claim; every member of one batch shares
+   * the same id.
+   */
+  deliveredHistoryItemId: z.string().uuid().nullable(),
   deliveredAt: z.string().nullable(),
   createdAt: z.string(),
 });
 export type SessionSystemUpdate = z.infer<typeof SessionSystemUpdate>;
+
+/**
+ * Bounded queue projection of a canonical pending machine input. Full payload,
+ * lineage, and dedupe data remain in canonical storage and never inflate the
+ * hot queue response.
+ */
+export const SessionPendingInputPreview = SessionSystemUpdate.pick({
+  id: true,
+  sessionId: true,
+  kind: true,
+  classification: true,
+  sourceId: true,
+  summary: true,
+  createdAt: true,
+});
+export type SessionPendingInputPreview = z.infer<typeof SessionPendingInputPreview>;
+
+export const SessionQueueSnapshot = z.object({
+  version: z.number().int().nonnegative(),
+  effectiveControl: EffectiveSessionControl,
+  /**
+   * True while the latest attempt is interrupted but has not durably proved
+   * quiescence: no more inference, user-visible output, or workspace-persistence
+   * authority. Temporal cancellation/terminalization is not that proof. This is
+   * distinct from ordinary capacity queueing, remains accurate with an empty
+   * visible queue, and is independent of Steer-row metadata or withdrawal.
+   */
+  stoppingPreviousAttempt: z.boolean(),
+  items: z.array(SessionTurn),
+  /** Canonical bounded previews; never reconstructed from session events. */
+  pendingInputs: z.array(SessionPendingInputPreview),
+  /**
+   * Exact members of the next bounded machine-input batch that will join an
+   * already-waiting human/API prompt. Null means the next machine-input claim
+   * is standalone. This is a projection of canonical rows, not queue state.
+   */
+  pendingInputAttachment: z
+    .object({
+      turnId: z.string().uuid(),
+      inputIds: z.array(z.string().uuid()).min(1),
+    })
+    .nullable(),
+});
+export type SessionQueueSnapshot = z.infer<typeof SessionQueueSnapshot>;
+
+/**
+ * Deterministic, protocol-safe model representation of one claimed machine
+ * input batch. This exact string is persisted before inference and replayed on
+ * every later turn; callers must not synthesize an equivalent transient copy.
+ */
+export function renderSessionSystemUpdateBatch(
+  updates: ReadonlyArray<
+    Pick<
+      SessionSystemUpdate,
+      "id" | "kind" | "classification" | "sourceId" | "summary" | "payload" | "lineage"
+    >
+  >,
+): string {
+  if (updates.length === 0) {
+    throw new TypeError("A durable machine-input batch requires at least one update");
+  }
+  return [
+    "[OpenGeni internal updates]",
+    "These platform updates were delivered together for this inference. They are not human prompts.",
+    JSON.stringify({
+      updates: updates.map((update) => ({
+        id: update.id,
+        kind: update.kind,
+        classification: update.classification,
+        sourceId: update.sourceId,
+        summary: update.summary,
+        payload: update.payload,
+        lineage: update.lineage,
+      })),
+    }),
+  ].join("\n");
+}
+
+export function sessionSystemUpdateBatchHistoryItem(
+  updates: Parameters<typeof renderSessionSystemUpdateBatch>[0],
+): { type: "message"; role: "system"; content: string } {
+  return {
+    type: "message",
+    role: "system",
+    content: renderSessionSystemUpdateBatch(updates),
+  };
+}
 
 export const VariableSetVariableName = z
   .string()
@@ -2987,10 +4604,17 @@ export const ScheduledTaskAgentConfig = z.object({
   resources: z.array(ResourceRef).default([]),
   tools: z.array(ToolRef).default([]),
   metadata: z.record(z.string(), z.unknown()).default({}),
+  // Explicit workspace-shared OpenGeni Slack bot binding for scheduled runs.
+  // The worker copies this non-secret pointer into session metadata; the
+  // first-party Slack tools never fall back to a personal hosted-MCP grant.
+  slackBotConnectionId: z.string().uuid().optional(),
   model: z.string().min(1).optional(),
   reasoningEffort: ReasoningEffort.optional(),
   sandboxBackend: SandboxBackend.optional(),
   goal: GoalSpec.optional(),
+  // Durable task override. Scheduled dispatch is trusted to preserve this
+  // snapshot even if the workspace/deployment policy narrows later.
+  maxNestedAgentDepth: NestedAgentDepthValue.optional(),
 });
 export type ScheduledTaskAgentConfig = z.infer<typeof ScheduledTaskAgentConfig>;
 
@@ -3170,6 +4794,41 @@ export const CapabilityPackSkill = z
     }
   });
 export type CapabilityPackSkill = z.infer<typeof CapabilityPackSkill>;
+
+// Inline skill content fixed onto one session at creation. It intentionally
+// uses the exact same validated directory shape as a pack skill, but has a
+// different semantic owner and lifecycle. Session readers can inspect it; it
+// is configuration, never a secret store.
+export const SessionSkill = CapabilityPackSkill;
+export type SessionSkill = z.infer<typeof SessionSkill>;
+
+export const SessionSkills = z
+  .array(SessionSkill)
+  .max(32)
+  .transform((skills, ctx) => {
+    const selected = new Map<string, { fingerprint: string; skill: SessionSkill }>();
+    for (const skill of skills) {
+      const key = skill.name.toLowerCase();
+      const fingerprint = JSON.stringify({
+        description: skill.description ?? null,
+        files: [...skill.files]
+          .sort((left, right) => left.path.localeCompare(right.path))
+          .map(({ path, content }) => ({ path, content })),
+      });
+      const existing = selected.get(key);
+      if (!existing) {
+        selected.set(key, { fingerprint, skill });
+        continue;
+      }
+      if (existing.fingerprint !== fingerprint) {
+        ctx.addIssue({
+          code: "custom",
+          message: `conflicting session skill definitions: ${skill.name}`,
+        });
+      }
+    }
+    return [...selected.values()].map(({ skill }) => skill);
+  });
 
 function isSafePackSkillRelativePath(path: string): boolean {
   if (path.startsWith("/") || path.includes("\\")) {
@@ -3368,17 +5027,33 @@ export type ConnectionKind = z.infer<typeof ConnectionKind>;
 export const ConnectionStatus = z.enum(["active", "needs_reauth", "revoked", "error"]);
 export type ConnectionStatus = z.infer<typeof ConnectionStatus>;
 
-export const McpServerConnectionRef = z
+export const OPENGENI_SLACK_BOT_CREDENTIAL_ROLE = "opengeni_slack_bot" as const;
+export const OPENGENI_SLACK_BOT_CREDENTIAL_LABEL = "OpenGeni Slack bot" as const;
+export const OPENGENI_SLACK_BOT_SESSION_METADATA_KEY = "opengeniSlackBotConnectionId" as const;
+export const OPENGENI_SLACK_BOT_REQUIRED_SCOPES = [
+  "chat:write",
+  "im:write",
+  "channels:read",
+  "channels:history",
+  "groups:read",
+  "groups:history",
+  "users:read",
+] as const;
+export const OPENGENI_SLACK_BOT_FORBIDDEN_SCOPES = ["channels:join", "chat:write.public"] as const;
+
+export const OpenGeniSlackBotConnectionMetadata = z
   .object({
-    connectionId: z.string().uuid().optional(),
-    providerDomain: z.string().min(1),
-    kind: ConnectionKind.optional(),
-    scopes: z.array(z.string().min(1)).optional(),
-    resource: z.string().min(1).optional(),
-    subjectScope: z.enum(["workspace", "subject"]).optional(),
+    credentialRole: z.literal(OPENGENI_SLACK_BOT_CREDENTIAL_ROLE),
+    credentialLabel: z.literal(OPENGENI_SLACK_BOT_CREDENTIAL_LABEL),
+    slackTeamId: z.string().min(1).max(64),
+    slackTeamName: z.string().min(1).max(256),
+    botUserId: z.string().min(1).max(64),
+    botId: z.string().min(1).max(64),
+    botDisplayName: z.literal("OpenGeni"),
+    verifiedAt: z.string().datetime({ offset: true }),
   })
-  .strict();
-export type McpServerConnectionRef = z.infer<typeof McpServerConnectionRef>;
+  .passthrough();
+export type OpenGeniSlackBotConnectionMetadata = z.infer<typeof OpenGeniSlackBotConnectionMetadata>;
 
 export const ConnectionMetadata = z.object({
   id: z.string().uuid(),
@@ -3394,6 +5069,8 @@ export const ConnectionMetadata = z.object({
   lastUsedAt: z.string().nullable(),
   lastError: z.string().nullable(),
   version: z.number().int().positive(),
+  verifiedInstallAt: z.string().datetime({ offset: true }).nullable().optional(),
+  verifiedInstallVersion: z.number().int().positive().nullable().optional(),
   metadata: z.record(z.string(), z.unknown()),
   createdBySubjectId: z.string().nullable(),
   updatedBySubjectId: z.string().nullable(),
@@ -3415,6 +5092,17 @@ export const CreateConnectionRequest = z.object({
   metadata: z.record(z.string(), z.unknown()).default({}),
 });
 export type CreateConnectionRequest = z.infer<typeof CreateConnectionRequest>;
+
+export const OpenGeniSlackBotInstallRequest = z.object({
+  connectionId: z.string().uuid().optional(),
+});
+export type OpenGeniSlackBotInstallRequest = z.infer<typeof OpenGeniSlackBotInstallRequest>;
+
+export const OpenGeniSlackBotInstallStart = z.object({
+  authorizationUrl: z.string().url(),
+  expiresAt: z.string().datetime({ offset: true }),
+});
+export type OpenGeniSlackBotInstallStart = z.infer<typeof OpenGeniSlackBotInstallStart>;
 
 export const UpdateConnectionRequest = z.object({
   providerDomain: z.string().min(1).optional(),
@@ -3498,6 +5186,7 @@ export type CapabilityKind = z.infer<typeof CapabilityKind>;
 
 export const CapabilitySource = z.enum([
   "built_in",
+  "library",
   "configured",
   "public_registry",
   "registry",
@@ -3519,6 +5208,19 @@ export const CapabilityRuntime = z.object({
   mcpServerId: z.string().min(1).optional(),
   transport: z.string().min(1).optional(),
   notes: z.string().nullable().default(null),
+  // Registry exposure provenance is server-derived and contains no endpoint or
+  // credential material.
+  catalogTrust: z
+    .object({
+      state: z.enum(["trusted", "legacy_active", "unverified"]),
+      reason: z.enum([
+        "trusted_source",
+        "verified_probe",
+        "active_installation_compatibility",
+        "missing_verification",
+      ]),
+    })
+    .optional(),
 });
 export type CapabilityRuntime = z.infer<typeof CapabilityRuntime>;
 
@@ -3552,15 +5254,15 @@ export const CapabilityCatalogItem = z.object({
   runtime: CapabilityRuntime.default({ available: false, notes: null }),
   enabled: z.boolean().default(false),
   enabledReason: z.string().nullable().default(null),
-  // The connection backing this enabled installation, when the enable-time
-  // connectionRef resolved to one (null for header/credential-free items —
-  // that means "no connection involved", not "broken"). Lets the UI match
-  // connection health by id instead of guessing from providerDomain alone.
+  // The non-secret connection binding stored with an enabled installation.
+  // Workspace refs retain an exact row id. Subject refs deliberately omit it:
+  // each caller resolves their own visible row by provider/kind at runtime.
   connectionRef: z
     .object({
-      connectionId: z.string().min(1),
+      connectionId: z.string().min(1).optional(),
       providerDomain: z.string().min(1),
       kind: z.string().min(1),
+      subjectScope: z.enum(["workspace", "subject"]).optional(),
     })
     .nullable()
     .default(null),
@@ -3569,6 +5271,34 @@ export const CapabilityCatalogItem = z.object({
   updatedAt: z.string().optional(),
 });
 export type CapabilityCatalogItem = z.infer<typeof CapabilityCatalogItem>;
+
+/**
+ * Shared trust gate for catalog visibility and runtime selection. Registry rows
+ * remain durable for provenance and audit, but only a reviewed real-MCP probe
+ * with known authentication is exposable. API-key rows additionally need a
+ * machine-actionable header contract; prose credential instructions are not a
+ * runtime contract and must fail closed.
+ */
+export function capabilityCatalogItemIsTrustedForExposure(
+  item: Pick<CapabilityCatalogItem, "source" | "stale" | "authKind" | "metadata">,
+): boolean {
+  if (item.stale) return false;
+  if (item.source !== "registry") return true;
+  const probe = item.metadata.mcpProbe;
+  if (!probe || typeof probe !== "object" || Array.isArray(probe)) return false;
+  if ((probe as Record<string, unknown>).status !== "real") return false;
+  if (item.authKind === null || item.authKind === "unknown") return false;
+  if (item.authKind !== "api_key") return true;
+  const contract = item.metadata.authContract;
+  if (!contract || typeof contract !== "object" || Array.isArray(contract)) return false;
+  const record = contract as Record<string, unknown>;
+  return (
+    typeof record.headerName === "string" &&
+    /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/.test(record.headerName) &&
+    typeof record.scheme === "string" &&
+    record.scheme.trim().length > 0
+  );
+}
 
 export const CapabilityInstallation = z.object({
   id: z.string().uuid(),
@@ -3648,8 +5378,19 @@ export const Session = z.object({
   // null when the session carried none.
   instructions: z.string().nullable(),
   resources: z.array(ResourceRef),
+  skills: SessionSkills.default([]),
   tools: z.array(ToolRef),
+  // Origin and optimistic-concurrency fence for the durable session policy.
+  toolPolicy: SessionToolPolicy,
+  toolPolicyVersion: z.number().int().positive(),
+  // Secret-safe current resolution, computed at an API/read or execution
+  // boundary from IDs only. Optional because internal DB readers need not load
+  // the workspace runtime registry.
+  effectiveToolPolicy: SessionEffectiveToolPolicy.optional(),
   metadata: z.record(z.string(), z.unknown()),
+  /** Frozen creator fact used only for creation attribution/idempotent repair. */
+  createdBy: TurnInitiator,
+  createdByContext: TurnInitiatorContext,
   model: z.string(),
   sandboxBackend: SandboxBackend,
   // The OS the session's box runs. Defaults to 'linux' (today's only OS).
@@ -3678,6 +5419,9 @@ export const Session = z.object({
   // Non-default first-party MCP token permissions (manager-style sessions);
   // null means the fixed worker default set.
   firstPartyMcpPermissions: z.array(Permission).nullable(),
+  // Exact model-visible OpenGeni selection. All catalogued tools are selected
+  // by default; [] intentionally selects none.
+  firstPartyMcpTools: z.array(FirstPartyMcpToolName),
   // Per-session third-party MCP servers, metadata only. Credential values are
   // write-only and never appear here.
   mcpServers: z.array(SessionMcpServerMetadata).default([]),
@@ -3686,6 +5430,14 @@ export const Session = z.object({
   // direct API creates and scheduled-task runs. When set, this session's
   // terminal-for-now transitions wake the parent.
   parentSessionId: z.string().uuid().nullable(),
+  // Server-authored nested-agent lineage/policy. Root sessions are depth 0;
+  // snapshots are immutable and govern only future descendant creation.
+  rootSessionId: z.string().uuid(),
+  nestedAgentDepth: NestedAgentDepthValue,
+  maxNestedAgentDepthOverride: NestedAgentDepthValue.nullable(),
+  effectiveMaxNestedAgentDepth: NestedAgentDepthValue,
+  nestedAgentDepthPolicySource: NestedAgentDepthPolicySource,
+  nestedAgentDepthPolicySessionId: z.string().uuid().nullable(),
   // Workspace-scoped CREATE idempotency key the session was created under (the
   // dedup target collapsing double-submit/retry races to one session); null
   // when the create carried no key.
@@ -3736,6 +5488,16 @@ export const Session = z.object({
 });
 export type Session = z.infer<typeof Session>;
 
+/**
+ * Additive receipt returned only by session creation. `activeTurnId` remains an
+ * execution pointer and is correctly null while the first turn is queued;
+ * embedders use this immutable identity to correlate their preallocated run.
+ */
+export const CreateSessionResponse = Session.extend({
+  initialTurnId: z.string().uuid().nullable(),
+});
+export type CreateSessionResponse = z.infer<typeof CreateSessionResponse>;
+
 export type SessionSummary = Session;
 
 /**
@@ -3785,6 +5547,7 @@ export const SessionEventType = z.enum([
   "session.event.envelope_omitted",
   "session.status.changed",
   "session.requiresAction",
+  "session.humanInput.requested",
   "session.context.compaction.requested",
   "session.context.compacted",
   "session.context.compaction.skipped",
@@ -3792,6 +5555,7 @@ export const SessionEventType = z.enum([
   "user.message",
   "user.pause",
   "user.approvalDecision",
+  "user.humanInputResponse",
   "turn.queued",
   "turn.started",
   "turn.completed",
@@ -3805,8 +5569,12 @@ export const SessionEventType = z.enum([
   "agent.reasoning.delta",
   "agent.toolCall.created",
   "agent.toolCall.output",
+  // Attempt-fenced Codex Responses lifecycle metadata (request identity,
+  // deadlines, first-byte/terminal phase, provider request id). Never body/auth.
+  "agent.model.request",
   "agent.model.usage",
   "tool.auth_needed",
+  "credential.auth_needed",
   "agent.updated",
   "rig.setup.started",
   "rig.setup.completed",
@@ -3826,6 +5594,9 @@ export const SessionEventType = z.enum([
   "goal.continuation",
   "system.update.pending",
   "system.update.delivered",
+  "system.update.superseded",
+  "system.update.cancelled",
+  "system.update.settled",
   "session.control.paused",
   "session.control.resumed",
   "session.control.steer_requested",
@@ -3867,6 +5638,8 @@ export const SessionEventType = z.enum([
   "terminal.pty.output.delta", // PTY stdout/stderr bytes (separate from command.output)
   "terminal.pty.exited", // PTY session ended (exitCode/reason)
   "session.title_set",
+  "session.mcp.approval_policy.updated",
+  "session.tool_policy.updated",
   // Multi-account Codex (P1): the account a session's turn runs on changed
   // (manual switch in P1; failover/rotation in P3 reuse the same event). Drives
   // the in-session "Running on:" indicator's live flip.
@@ -3874,6 +5647,10 @@ export const SessionEventType = z.enum([
   // credential allocator per-turn selection audit. Payload is metadata only: credential row
   // id, bounded strategy/reason, and pool counts — never token material.
   "codex.credential.selected",
+  // Adaptive fleet shadow decision record. Contains only bounded opaque candidate aliases,
+  // normalized pressure/cache/confidence features, deterministic fingerprints,
+  // the actual-vs-shadow comparison, and no credential/account identity.
+  "codex.fleet.decision",
   // credential allocator durable zero-capacity wait lifecycle. Runtime/system events only;
   // no synthetic user message is created when capacity returns.
   "codex.capacity.waiting",
@@ -3961,8 +5738,34 @@ export const SessionEventSemanticClass = z.enum([
 ]);
 export type SessionEventSemanticClass = z.infer<typeof SessionEventSemanticClass>;
 
+/**
+ * The semantic classes accepted by an exclusive latest lookup. `receipt` is
+ * the concise public spelling for the historical `tool_receipt` class; the
+ * latter remains accepted everywhere for backwards compatibility.
+ */
+export const SessionEventLatestClass = z.enum([
+  "control",
+  "terminal",
+  "failure",
+  "checkpoint",
+  "tool_receipt",
+  "provider_account",
+  "receipt",
+]);
+export type SessionEventLatestClass = z.infer<typeof SessionEventLatestClass>;
+
+export function sessionEventLatestClassToSemanticClass(
+  value: SessionEventLatestClass,
+): SessionEventSemanticClass {
+  return value === "receipt" ? "tool_receipt" : value;
+}
+
 export const SessionEventPayloadMode = z.enum(["none", "summary", "full"]);
 export type SessionEventPayloadMode = z.infer<typeof SessionEventPayloadMode>;
+
+/** Select the compact semantic-result projection instead of an event array. */
+export const SessionEventResultMode = z.enum(["events", "compact"]);
+export type SessionEventResultMode = z.infer<typeof SessionEventResultMode>;
 
 export const SessionEventReadMode = z.enum(["monitoring", "forensic"]);
 export type SessionEventReadMode = z.infer<typeof SessionEventReadMode>;
@@ -3981,8 +5784,10 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
   control: [
     "session.status.changed",
     "session.requiresAction",
+    "session.humanInput.requested",
     "user.pause",
     "user.approvalDecision",
+    "user.humanInputResponse",
     "goal.set",
     "goal.updated",
     "goal.completed",
@@ -3992,6 +5797,9 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "goal.continuation",
     "system.update.pending",
     "system.update.delivered",
+    "system.update.superseded",
+    "system.update.cancelled",
+    "system.update.settled",
     "session.control.paused",
     "session.control.resumed",
     "session.control.steer_requested",
@@ -3999,9 +5807,12 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "workspace.inference.resumed",
     "session.queue.changed",
     "session.queue.prompt.cancelled",
+    "session.mcp.approval_policy.updated",
+    "session.tool_policy.updated",
   ],
   terminal: [
     "turn.completed",
+    "agent.message.completed",
     "turn.failed",
     "turn.cancelled",
     "turn.superseded",
@@ -4020,6 +5831,7 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "session.event.envelope_omitted",
     "turn.failed",
     "tool.auth_needed",
+    "credential.auth_needed",
     "rig.setup.failed",
     "sandbox.operation.failed",
     "recording.failed",
@@ -4101,14 +5913,38 @@ export const ToolAuthNeededPayload = z.object({
   serverId: z.string().min(1),
   toolName: z.string().min(1).nullable().optional(),
   providerDomain: z.string().min(1),
-  connectionId: z.string().uuid().nullable().optional(),
-  reason: z.enum(["missing_connection", "expired", "insufficient_scope", "refresh_failed"]),
+  provider: z.string().min(1).max(128).optional(),
+  // Embedded hosts may use an opaque connection identity; never assume an
+  // OpenGeni UUID on the public event wire.
+  connectionId: z.string().min(1).nullable().optional(),
+  reason: z.enum([
+    "missing_connection",
+    "expired",
+    "insufficient_scope",
+    "refresh_failed",
+    "unsupported_auth",
+    "resource_scope_unavailable",
+  ]),
   scopes: z.array(z.string().min(1)).optional(),
   resource: z.string().min(1).optional(),
+  selectedResources: McpConnectionResourceScopes.optional(),
   authorizationUrl: z.string().url().optional(),
   subjectId: z.string().min(1).nullable().optional(),
 });
 export type ToolAuthNeededPayload = z.infer<typeof ToolAuthNeededPayload>;
+
+/** A host-owned non-tool credential needed by the active run. */
+export const CredentialAuthNeededPayload = z.object({
+  credentialClass: z.literal("run"),
+  providerDomain: z.string().min(1).optional(),
+  connectionId: z.string().min(1).optional(),
+  reason: z.enum(["missing_connection", "expired", "insufficient_scope", "refresh_failed"]),
+  scopes: z.array(z.string().min(1)).optional(),
+  resource: z.string().min(1).optional(),
+  authorizationUrl: z.string().url().optional(),
+  message: z.string().min(1).optional(),
+});
+export type CredentialAuthNeededPayload = z.infer<typeof CredentialAuthNeededPayload>;
 
 // Channel-B stream-event payloads (07-channel-b §1.2). SessionEvent.payload is
 // z.unknown() (NOT a discriminated union) — these are standalone schemas parsed
@@ -4288,7 +6124,7 @@ export type TerminalPtyOutputDeltaPayload = z.infer<typeof TerminalPtyOutputDelt
 export const TerminalPtyExitedPayload = z.object({
   ptyId: z.string().uuid(),
   exitCode: z.number().int().nullable(),
-  reason: z.enum(["exit", "killed", "owner_gone", "timeout"]),
+  reason: z.enum(["exit", "killed", "owner_gone", "timeout", "lost"]),
 });
 export type TerminalPtyExitedPayload = z.infer<typeof TerminalPtyExitedPayload>;
 
@@ -4553,6 +6389,7 @@ export const WorkspaceCaptureDegradedReason = z.enum([
   "repository_discovery_command_failed",
   "repository_discovery_timed_out",
   "repository_discovery_result_limit_exceeded",
+  "repository_read_unavailable",
 ]);
 export type WorkspaceCaptureDegradedReason = z.infer<typeof WorkspaceCaptureDegradedReason>;
 
@@ -4747,7 +6584,8 @@ export type GitShowResponse = z.infer<typeof GitShowResponse>;
 export const TerminalExecRequest = z.object({
   command: z.string().min(1),
   cwd: z.string().default(""), // workspace-relative
-  // Soft per-call wall-clock bound (the box yields output back when reached).
+  // Hard wall-clock bound. A timeout response is returned only after the exact
+  // provider process is physically absent and any retained admission settles.
   timeoutMs: z.number().int().positive().max(120_000).default(30_000),
   // Stream the deltas onto A1 as the agent firehose (so other viewers see it),
   // in addition to returning the buffered result inline.
@@ -4757,10 +6595,10 @@ export type TerminalExecRequest = z.infer<typeof TerminalExecRequest>;
 export const TerminalExecResponse = z.object({
   stdout: z.string(),
   stderr: z.string(),
-  exitCode: z.number().int().nullable(),
-  // True when the process was still running when the call yielded (a long
-  // command); the remaining output drains onto A1 if emitStream was set.
-  running: z.boolean(),
+  exitCode: z.number().int(),
+  // Retained for wire compatibility; synchronous exec never exposes a live
+  // provider process. Interactive work uses the PTY API.
+  running: z.literal(false),
   wallTimeSeconds: z.number().nonnegative(),
 });
 export type TerminalExecResponse = z.infer<typeof TerminalExecResponse>;
@@ -4829,6 +6667,496 @@ export const SessionEvent = z.object({
   duplicateReason: z.string().min(1).max(1024).nullable().optional(),
 });
 export type SessionEvent = z.infer<typeof SessionEvent>;
+
+export type SessionEventCompactResult = {
+  version: 1;
+  semanticClass: SessionEventSemanticClass;
+  source: {
+    id: string;
+    type: SessionEventType;
+    sequence: number;
+    occurredAt: string;
+    turnId: string | null;
+    turnGeneration: number | null;
+    turnAttemptId: string | null;
+    turnAssociation: SessionEvent["turnAssociation"];
+  };
+  // These identity fields are repeated at the top level intentionally: an
+  // MCP caller can act on the result without unpacking the source envelope.
+  id: string;
+  type: SessionEventType;
+  sequence: number;
+  occurredAt: string;
+  turnId: string | null;
+  turnGeneration: number | null;
+  turnAttemptId: string | null;
+  turnAssociation: SessionEvent["turnAssociation"];
+  coveredSequence: { first: number; last: number };
+  status:
+    | "completed"
+    | "failed"
+    | "cancelled"
+    | "superseded"
+    | "checkpoint"
+    | "receipt"
+    | "unknown";
+  text: string | null;
+  output: unknown;
+  result: unknown;
+  failure: {
+    error: string | null;
+    code: string | null;
+    retryable: boolean | null;
+    recovery: string | null;
+  } | null;
+  checkpoint: unknown;
+  receipt: unknown;
+  truncation: {
+    truncated: boolean;
+    fields: string[];
+    originalBytes: number | null;
+    deliveredBytes: number;
+  };
+};
+
+const SESSION_EVENT_COMPACT_RESULT_TEXT_MAX_BYTES = 12 * 1024;
+// Five independently bounded slots plus identity/metadata must fit below the
+// 64 KiB MCP envelope even when a pathological producer supplies every slot.
+const SESSION_EVENT_COMPACT_RESULT_VALUE_MAX_BYTES = 8 * 1024;
+
+type CompactValue = {
+  value: unknown;
+  truncated: boolean;
+  originalBytes: number | null;
+};
+
+type JsonRecord = Record<string, unknown>;
+
+/**
+ * Build the bounded semantic result used by `latest + result=compact`.
+ *
+ * This is intentionally a pure projection over one already-authoritative
+ * event. It never reads history, invokes a model, follows a URL, or stores an
+ * artifact. The DB/API/MCP layers decide which event is authoritative; this
+ * helper only extracts the small result facts that can cross a client boundary.
+ */
+export function compactSessionEventResult(
+  event: SessionEvent,
+  semanticClass: SessionEventSemanticClass,
+  coveredSequence: { first: number; last: number } = {
+    first: event.sequence,
+    last: event.sequence,
+  },
+): SessionEventCompactResult {
+  const payload = isSessionEventJsonRecord(event.payload) ? event.payload : {};
+  const fields: string[] = [];
+  let originalBytes = 0;
+
+  const textCandidate = typeof payload.text === "string" ? payload.text : null;
+  const outputCandidate = Object.prototype.hasOwnProperty.call(payload, "output")
+    ? payload.output
+    : null;
+  const resultCandidate = Object.prototype.hasOwnProperty.call(payload, "result")
+    ? payload.result
+    : undefined;
+  const textValue = textCandidate ?? (typeof outputCandidate === "string" ? outputCandidate : null);
+  const text = textValue === null ? null : compactResultText(textValue);
+  if (text && text.truncated) {
+    fields.push("text");
+    originalBytes += text.originalBytes ?? 0;
+  }
+
+  const output = compactResultValue(outputCandidate);
+  if (outputCandidate !== null && output.truncated) {
+    fields.push("output");
+    originalBytes += output.originalBytes ?? 0;
+  }
+
+  const result = compactResultValue(
+    resultCandidate === undefined ? (textValue ?? outputCandidate) : resultCandidate,
+  );
+  if (resultCandidate !== undefined && result.truncated) {
+    fields.push("result");
+    originalBytes += result.originalBytes ?? 0;
+  }
+
+  const checkpointField = firstOwnPayloadValue(payload, ["checkpoint", "summary", "snapshot"]);
+  const checkpointCandidate =
+    checkpointField !== undefined
+      ? checkpointField
+      : semanticClass === "checkpoint"
+        ? payload
+        : null;
+  const checkpoint = compactResultValue(checkpointCandidate);
+  if (checkpointCandidate !== null && checkpoint.truncated) {
+    fields.push("checkpoint");
+    originalBytes += checkpoint.originalBytes ?? 0;
+  }
+
+  const receiptCandidate = firstOwnPayloadValue(payload, ["receipt", "receiptData"]);
+  const receipt = compactResultValue(
+    receiptCandidate !== undefined
+      ? receiptCandidate
+      : semanticClass === "tool_receipt"
+        ? payload
+        : null,
+  );
+  if (receipt.truncated) {
+    fields.push("receipt");
+    originalBytes += receipt.originalBytes ?? 0;
+  }
+
+  const failure = compactFailure(payload, event.type);
+  if (failure.truncated) {
+    fields.push("failure");
+    originalBytes += failure.originalBytes ?? 0;
+  }
+
+  if (isSessionEventJsonRecord(payload.truncation) && payload.truncation.truncated === true) {
+    fields.push("payload");
+  }
+
+  const source = {
+    id: event.id,
+    type: event.type,
+    sequence: event.sequence,
+    occurredAt: event.occurredAt,
+    turnId: event.turnId ?? null,
+    turnGeneration: event.turnGeneration ?? null,
+    turnAttemptId: event.turnAttemptId ?? null,
+    turnAssociation: event.turnAssociation ?? null,
+  };
+  const status = compactResultStatus(event.type, semanticClass, payload);
+  const outputValue = outputCandidate === null ? null : output.value;
+  const resultValue = result.value;
+  const checkpointValue = checkpointCandidate === null ? null : checkpoint.value;
+  const receiptValue =
+    receiptCandidate === null && semanticClass !== "tool_receipt" ? null : receipt.value;
+  const compact: SessionEventCompactResult = {
+    version: 1,
+    semanticClass,
+    source,
+    id: source.id,
+    type: source.type,
+    sequence: source.sequence,
+    occurredAt: source.occurredAt,
+    turnId: source.turnId,
+    turnGeneration: source.turnGeneration,
+    turnAttemptId: source.turnAttemptId,
+    turnAssociation: source.turnAssociation,
+    coveredSequence,
+    status,
+    text: text?.value ?? null,
+    output: outputValue,
+    result: resultValue,
+    failure: failure.value,
+    checkpoint: checkpointValue,
+    receipt: receiptValue,
+    truncation: {
+      truncated: fields.length > 0,
+      fields: [...new Set(fields)],
+      originalBytes: fields.length > 0 ? originalBytes || null : null,
+      deliveredBytes: sessionEventJsonBytes({
+        text: text?.value ?? null,
+        output: outputValue,
+        result: resultValue,
+        failure: failure.value,
+        checkpoint: checkpointValue,
+        receipt: receiptValue,
+      }),
+    },
+  };
+  return compact;
+}
+
+function isSessionEventJsonRecord(value: unknown): value is JsonRecord {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function firstOwnPayloadValue(payload: JsonRecord, keys: readonly string[]): unknown | undefined {
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(payload, key)) return payload[key];
+  }
+  return undefined;
+}
+
+function compactResultText(value: string): CompactValue & { value: string } {
+  const originalBytes = new TextEncoder().encode(value).byteLength;
+  if (originalBytes <= SESSION_EVENT_COMPACT_RESULT_TEXT_MAX_BYTES) {
+    return { value, truncated: false, originalBytes };
+  }
+  let omittedBytes = originalBytes - SESSION_EVENT_COMPACT_RESULT_TEXT_MAX_BYTES;
+  let projected = value;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const marker = `…[${omittedBytes} UTF-8 bytes omitted from compact result]…`;
+    const budget = Math.max(0, SESSION_EVENT_COMPACT_RESULT_TEXT_MAX_BYTES - utf8Bytes(marker));
+    const head = utf8PrefixForResult(value, Math.floor(budget * 0.7));
+    const tail = utf8SuffixForResult(value, budget - utf8Bytes(head));
+    projected = `${head}${marker}${tail}`;
+    const nextOmitted = Math.max(0, originalBytes - utf8Bytes(head) - utf8Bytes(tail));
+    if (nextOmitted === omittedBytes) break;
+    omittedBytes = nextOmitted;
+  }
+  return { value: projected, truncated: true, originalBytes };
+}
+
+function compactResultValue(value: unknown): CompactValue {
+  if (value === null || value === undefined) {
+    return { value: null, truncated: false, originalBytes: null };
+  }
+  const measurement = measureSessionEventJson(value);
+  const bounded = boundSessionEventPayload(value, {
+    surface: "http_projection",
+    maxBytes: SESSION_EVENT_COMPACT_RESULT_VALUE_MAX_BYTES,
+  });
+  const deliveredBytes = measureSessionEventJson(bounded).bytes;
+  return {
+    value: bounded,
+    truncated:
+      measurement.bytes === null || deliveredBytes === null || measurement.bytes !== deliveredBytes,
+    originalBytes: measurement.bytes,
+  };
+}
+
+function compactFailure(
+  payload: JsonRecord,
+  eventType: SessionEventType,
+): CompactValue & {
+  value: SessionEventCompactResult["failure"];
+} {
+  const isFailure =
+    eventType === "turn.failed" ||
+    eventType === "turn.cancelled" ||
+    eventType === "turn.superseded";
+  const hasFailureField = ["error", "code", "retryable", "recovery"].some((key) =>
+    Object.prototype.hasOwnProperty.call(payload, key),
+  );
+  if (!isFailure && !hasFailureField) {
+    return { value: null, truncated: false, originalBytes: null };
+  }
+  const error = compactResultStringField(payload.error);
+  const code = compactResultStringField(payload.code);
+  const recovery = compactResultStringField(payload.recovery);
+  const retryable = typeof payload.retryable === "boolean" ? payload.retryable : null;
+  const value = { error: error.value, code: code.value, retryable, recovery: recovery.value };
+  const originalBytes = [error, code, recovery]
+    .map((field) => field.originalBytes ?? 0)
+    .reduce((sum, bytes) => sum + bytes, 0);
+  return {
+    value,
+    truncated: error.truncated || code.truncated || recovery.truncated,
+    originalBytes: originalBytes || null,
+  };
+}
+
+function compactResultStringField(value: unknown): CompactValue & { value: string | null } {
+  if (typeof value !== "string") {
+    return { value: null, truncated: false, originalBytes: null };
+  }
+  return compactResultText(value);
+}
+
+function compactResultStatus(
+  eventType: SessionEventType,
+  semanticClass: SessionEventSemanticClass,
+  payload: JsonRecord,
+): SessionEventCompactResult["status"] {
+  if (eventType === "turn.failed") return "failed";
+  if (eventType === "turn.cancelled") return "cancelled";
+  if (eventType === "turn.superseded") return "superseded";
+  if (eventType === "turn.completed" || eventType === "agent.message.completed") {
+    return "completed";
+  }
+  if (semanticClass === "checkpoint") return "checkpoint";
+  if (
+    semanticClass === "tool_receipt" ||
+    eventType === "artifact.created" ||
+    eventType === "recording.available"
+  ) {
+    return "receipt";
+  }
+  if (payload.status === "failed") return "failed";
+  if (payload.status === "completed") return "completed";
+  return "unknown";
+}
+
+function utf8Bytes(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
+}
+
+function utf8PrefixForResult(value: string, maxBytes: number): string {
+  let bytes = 0;
+  let index = 0;
+  while (index < value.length) {
+    const codePoint = value.codePointAt(index);
+    if (codePoint === undefined) break;
+    const character = String.fromCodePoint(codePoint);
+    const next = utf8Bytes(character);
+    if (bytes + next > maxBytes) break;
+    bytes += next;
+    index += character.length;
+  }
+  return value.slice(0, index);
+}
+
+function utf8SuffixForResult(value: string, maxBytes: number): string {
+  let bytes = 0;
+  let index = value.length;
+  while (index > 0) {
+    const width =
+      index > 1 && value.charCodeAt(index - 1) >= 0xdc00 && value.charCodeAt(index - 1) <= 0xdfff
+        ? 2
+        : 1;
+    const character = value.slice(index - width, index);
+    const next = utf8Bytes(character);
+    if (bytes + next > maxBytes) break;
+    bytes += next;
+    index -= width;
+  }
+  return value.slice(index);
+}
+
+// --- Durable host export ------------------------------------------------------
+
+/** Wire revision for the durable host event/usage export stream. */
+export const OPENGENI_HOST_EXPORT_SCHEMA_REVISION = "2026-07-host-export-v1" as const;
+
+/**
+ * Decimal string rather than a JavaScript number: export cursors are PostgreSQL
+ * bigint values and must remain exact beyond Number.MAX_SAFE_INTEGER.
+ */
+export const HostExportCursor = z.string().regex(/^(0|[1-9][0-9]*)$/);
+export type HostExportCursor = z.infer<typeof HostExportCursor>;
+
+export const HostExportConsumerId = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/);
+export type HostExportConsumerId = z.infer<typeof HostExportConsumerId>;
+
+export const HostExportInitiator = TurnInitiator.extend({
+  subjectId: z.string().min(1).max(1024),
+  label: z.string().min(1).max(256).optional(),
+});
+export type HostExportInitiator = z.infer<typeof HostExportInitiator>;
+
+export const HostExportInitiatorContext = TurnInitiatorContext.refine(
+  (value) => {
+    try {
+      return new TextEncoder().encode(JSON.stringify(value)).byteLength <= 4096;
+    } catch {
+      return false;
+    }
+  },
+  { message: "Host export initiator context exceeds 4096 UTF-8 bytes" },
+);
+export type HostExportInitiatorContext = z.infer<typeof HostExportInitiatorContext>;
+
+const HostExportAttribution = {
+  initiator: HostExportInitiator.nullable(),
+  initiatorContext: HostExportInitiatorContext,
+  origin: SessionTurnSource.nullable(),
+} as const;
+
+/**
+ * Host streams are deliberately forward-tolerant across rolling upgrades.
+ * OpenGeni's application contract enumerates the event types known to this
+ * build, while the durable export may be read by an older host consumer after
+ * a newer writer has committed a bounded type. The database remains the
+ * authority for the byte bounds on these persisted strings.
+ */
+export const HostSessionEvent = SessionEvent.extend({
+  type: z.string().min(1).max(256),
+  clientEventId: z.string().max(1024).nullable().optional(),
+  turnAssociation: z.string().min(1).max(64).nullable().optional(),
+  duplicateReason: z.string().max(4096).nullable().optional(),
+});
+export type HostSessionEvent = z.infer<typeof HostSessionEvent>;
+
+/** Export-bounded usage fact; custom bounded metric names remain supported. */
+export const HostUsageEvent = UsageEvent.extend({
+  subjectId: z.string().max(1024).nullable(),
+  eventType: z.string().min(1).max(256),
+  unit: z.string().min(1).max(128),
+  sourceResourceType: z.string().max(256).nullable(),
+  sourceResourceId: z.string().max(2048).nullable(),
+  idempotencyKey: z.string().min(1).max(2048),
+  billingProviderEventId: z.string().max(2048).nullable(),
+});
+export type HostUsageEvent = z.infer<typeof HostUsageEvent>;
+
+/**
+ * One immutable, bounded session-event snapshot from the transactional host
+ * outbox. Cross-session cursor order is stable but deliberately non-causal;
+ * within a session, `event.sequence` remains authoritative and monotonic.
+ */
+export const HostEventExport = z.object({
+  schemaRevision: z.literal(OPENGENI_HOST_EXPORT_SCHEMA_REVISION),
+  cursor: HostExportCursor,
+  idempotencyKey: z.string().min(1).max(2048),
+  accountId: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  /**
+   * Immutable root of event.sessionId's session lineage at capture time. Null
+   * only for an unresolved pre-lineage/legacy export row.
+   */
+  rootSessionId: z.string().uuid().nullable(),
+  ...HostExportAttribution,
+  event: HostSessionEvent,
+});
+export type HostEventExport = z.infer<typeof HostEventExport>;
+
+/** One exact, idempotency-keyed usage fact from the same ordered outbox. */
+export const HostUsageExport = z.object({
+  schemaRevision: z.literal(OPENGENI_HOST_EXPORT_SCHEMA_REVISION),
+  cursor: HostExportCursor,
+  accountId: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  sessionId: z.string().uuid().nullable(),
+  /** Null when sessionId is null or an unresolved pre-lineage legacy row. */
+  rootSessionId: z.string().uuid().nullable(),
+  turnId: z.string().uuid().nullable(),
+  turnAttemptId: z.string().uuid().nullable(),
+  ...HostExportAttribution,
+  usage: HostUsageEvent,
+});
+export type HostUsageExport = z.infer<typeof HostUsageExport>;
+
+export const HostEventExportBatch = z.object({
+  schemaRevision: z.literal(OPENGENI_HOST_EXPORT_SCHEMA_REVISION),
+  consumerId: HostExportConsumerId,
+  leaseToken: z.string().uuid(),
+  checkpoint: HostExportCursor,
+  throughCursor: HostExportCursor,
+  events: z.array(HostEventExport).min(1).max(256),
+});
+export type HostEventExportBatch = z.infer<typeof HostEventExportBatch>;
+
+export const HostUsageExportBatch = z.object({
+  schemaRevision: z.literal(OPENGENI_HOST_EXPORT_SCHEMA_REVISION),
+  consumerId: HostExportConsumerId,
+  leaseToken: z.string().uuid(),
+  checkpoint: HostExportCursor,
+  throughCursor: HostExportCursor,
+  events: z.array(HostUsageExport).min(1).max(256),
+});
+export type HostUsageExportBatch = z.infer<typeof HostUsageExportBatch>;
+
+/**
+ * Optional embedded-host sinks. Delivery is at least once: the same batch may
+ * be repeated after a process dies between sink success and checkpoint commit,
+ * so sinks must deduplicate by event/usage idempotency key.
+ */
+export type HostEventSink = {
+  consumerId: HostExportConsumerId;
+  deliverEvents: (batch: HostEventExportBatch) => Promise<void>;
+};
+
+export type HostUsageSink = {
+  consumerId: HostExportConsumerId;
+  deliverUsage: (batch: HostUsageExportBatch) => Promise<void>;
+};
 
 export const SESSION_EVENT_TYPE_MAX_BYTES = 256;
 export const SESSION_EVENT_CLIENT_EVENT_ID_MAX_BYTES = SESSION_OPERATION_KEY_MAX_CHARS * 4;
@@ -5067,7 +7395,11 @@ function sessionEventEnvelopeFieldProjection(
 function sessionEventCustomSerializerProjection(
   event: SessionEvent,
 ): { field: string; originalBytes: null; deliveredBytes: 0 } | null {
-  const projection = { field: "toJSON", originalBytes: null, deliveredBytes: 0 } as const;
+  const projection = {
+    field: "toJSON",
+    originalBytes: null,
+    deliveredBytes: 0,
+  } as const;
   let candidate: object | null = event;
   try {
     for (let depth = 0; depth <= SESSION_EVENT_PROTOTYPE_MAX_DEPTH; depth += 1) {
@@ -5206,7 +7538,11 @@ function sessionEventCanonicalFieldProjections(
     sequence: number;
     occurredAt: string;
   },
-): Array<{ field: string; originalBytes: number | null; deliveredBytes: number }> {
+): Array<{
+  field: string;
+  originalBytes: number | null;
+  deliveredBytes: number;
+}> {
   return (["id", "workspaceId", "sessionId", "sequence", "occurredAt"] as const).flatMap(
     (field) => {
       const original = source[field].readable ? source[field].value : undefined;
@@ -5232,7 +7568,11 @@ function sessionEventOptionalFieldProjections(
     turnAttemptId: string | null;
     duplicateOfEventId: string | null;
   },
-): Array<{ field: string; originalBytes: number | null; deliveredBytes: number }> {
+): Array<{
+  field: string;
+  originalBytes: number | null;
+  deliveredBytes: number;
+}> {
   return (["turnId", "turnGeneration", "turnAttemptId", "duplicateOfEventId"] as const).flatMap(
     (field) => {
       const original = source[field].readable ? source[field].value : undefined;
@@ -5293,7 +7633,17 @@ export const SessionControlResponse = z.object({
 export type SessionControlResponse = z.infer<typeof SessionControlResponse>;
 
 export const CreateSessionRequest = withVariableSetIdAlias({
+  /**
+   * Optional UUID preallocated by an embedding host. This lets the host durably
+   * link its own projection before OpenGeni admits the initial turn. Replays
+   * must pair it with the same idempotency key; OpenGeni never derives host
+   * identity or authorization from the UUID.
+   */
+  requestedSessionId: z.string().uuid().optional(),
   initialMessage: z.string().min(1),
+  // System-level host context for the initial turn only. Unlike `instructions`,
+  // this does not persist into later turns and is never emitted as a user event.
+  turnInstructions: z.string().trim().min(1).max(32768).optional(),
   // Per-session agent persona/system instructions (org-visible metadata, NOT a
   // secret). Rides the SAME system-level instructions channel the per-workspace
   // agentInstructions rides, composed AFTER the workspace persona so it refines
@@ -5303,7 +7653,17 @@ export const CreateSessionRequest = withVariableSetIdAlias({
   // matches the codebase's largest free-form string convention (workspace
   // variable set variable values). Absent ⇒ byte-identical to today.
   instructions: z.string().trim().min(1).max(32768).optional(),
+  // For an agent-created child, omission inherits the trusted immediate
+  // parent's repository/file context. An explicit array, including [], is
+  // authoritative. Top-level omission remains []. Presence is resolved from
+  // the raw request because this Zod default erases absent-vs-empty.
   resources: z.array(ResourceRef).default([]),
+  // Inline skills are fixed onto the session. Child omission inherits the
+  // trusted parent's selection; an explicit array, including [], wins.
+  skills: SessionSkills.default([]),
+  // The same child omission rule applies to selected MCP tool refs. Top-level
+  // omission still applies workspace-default capability MCP tools; explicit []
+  // suppresses those defaults (the first-party OpenGeni server remains added).
   tools: z.array(ToolRef).default([]),
   metadata: z.record(z.string(), z.unknown()).default({}),
   model: z.string().min(1).optional(),
@@ -5338,14 +7698,32 @@ export const CreateSessionRequest = withVariableSetIdAlias({
   // creation of a brand-new session. Absent means no create-dedup (each call
   // is an independent create).
   idempotencyKey: z.string().min(1).max(200).optional(),
-  // Permissions the session's first-party MCP token should carry instead of
-  // the fixed worker default — how an operator hands a manager-style session
-  // the orchestration/variableSet/github tools. Capped at creation: every
-  // requested permission must be held by the creating grant (no escalation).
+  // The exact actor-private pre-session draft revision represented by this
+  // create. The durable initializer consumes only this revision. A newer draft
+  // written by a sibling tab survives, while every failed pre-initialization
+  // create leaves the submitted draft intact.
+  expectedNewSessionDraftRevision: z.number().int().nonnegative().optional(),
+  // A child may lower its inherited limit freely; an increase requires
+  // workspace:admin and is checked again at the DB transaction boundary.
+  maxNestedAgentDepth: NestedAgentDepthValue.optional(),
+  // Permissions the session's first-party MCP token should carry. A top-level
+  // omission uses the deployment's worker default; a child omission inherits
+  // the creating session's effective grant. An explicit set is capped at
+  // creation: every requested permission must be held by the creating grant.
+  // A goal-bearing session whose explicit/effective set omits goals:manage is
+  // rejected; creation never silently expands a child beyond that set.
   firstPartyMcpPermissions: z.array(Permission).optional(),
-  // Third-party MCP servers attached only to this session. Credential headers are
-  // write-only: create responses and events expose only SessionMcpServerMetadata.
-  mcpServers: z.array(SessionMcpServerInput).default([]),
+  // Exact model-visible selection from the broad first-party OpenGeni MCP
+  // catalog. Omission selects the full catalog; [] intentionally exposes none.
+  // This does not grant authority: every registered tool is permission-gated.
+  firstPartyMcpTools: z.array(FirstPartyMcpToolName).optional(),
+  // Third-party MCP servers attached only to this session. For an agent-created
+  // child, omission snapshots its trusted immediate parent's server definitions,
+  // policies, connection refs, and encrypted credentials. Explicit arrays,
+  // including [], are authoritative; non-empty explicit arrays require attach
+  // permission. Credential headers are write-only: create responses and events
+  // expose only SessionMcpServerMetadata.
+  mcpServers: z.array(SessionMcpServerInput).max(SESSION_MCP_SERVERS_MAX).default([]),
   // Shared-sandbox placement (addendum 05 §D.1). Three-way union; OMITTED ⇒
   // today's behavior (a context-dependent default resolved server-side: from
   // inside a session → "shared" with the creator's box, top-level → "new").
@@ -5369,22 +7747,203 @@ export const CreateSessionRequest = withVariableSetIdAlias({
 });
 export type CreateSessionRequest = z.infer<typeof CreateSessionRequest>;
 
+// Generic, host-neutral structured human input. One model tool call creates one
+// request containing one or more questions; the durable response resumes that
+// exact call. This is deliberately distinct from tool approval: an answer,
+// skip, or expiry is structured tool output, never an approve/reject decision.
+export const HumanInputQuestionKind = z.enum(["text", "single_select", "multi_select"]);
+export type HumanInputQuestionKind = z.infer<typeof HumanInputQuestionKind>;
+
+export const HumanInputOption = z.object({
+  id: z.string().min(1).max(64),
+  label: z.string().min(1).max(256),
+  description: z.string().max(2048).nullable().optional(),
+});
+export type HumanInputOption = z.infer<typeof HumanInputOption>;
+
+export const HumanInputQuestion = z
+  .object({
+    id: z.string().min(1).max(64),
+    kind: HumanInputQuestionKind,
+    prompt: z.string().min(1).max(4096),
+    label: z.string().min(1).max(128).nullable().optional(),
+    helpText: z.string().max(2048).nullable().optional(),
+    options: z.array(HumanInputOption).max(20).default([]),
+    required: z.boolean().default(true),
+    allowOther: z.boolean().default(false),
+    validation: z
+      .object({
+        minLength: z.number().int().nonnegative().max(8192).nullable().optional(),
+        maxLength: z.number().int().positive().max(8192).nullable().optional(),
+        minSelections: z.number().int().nonnegative().max(20).nullable().optional(),
+        maxSelections: z.number().int().positive().max(20).nullable().optional(),
+      })
+      .nullable()
+      .optional(),
+  })
+  .superRefine((question, ctx) => {
+    const optionIds = new Set(question.options.map((option) => option.id));
+    if (optionIds.size !== question.options.length) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["options"],
+        message: "option ids must be unique",
+      });
+    }
+    if (question.kind === "text") {
+      if (question.options.length > 0) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["options"],
+          message: "text questions cannot have options",
+        });
+      }
+      if (question.allowOther) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["allowOther"],
+          message: "text questions do not use Other",
+        });
+      }
+    } else if (question.options.length === 0) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["options"],
+        message: "select questions require options",
+      });
+    }
+    const validation = question.validation;
+    if (
+      validation?.minLength != null &&
+      validation?.maxLength != null &&
+      validation.minLength > validation.maxLength
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["validation"],
+        message: "minLength exceeds maxLength",
+      });
+    }
+    if (
+      validation?.minSelections != null &&
+      validation?.maxSelections != null &&
+      validation.minSelections > validation.maxSelections
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["validation"],
+        message: "minSelections exceeds maxSelections",
+      });
+    }
+  });
+export type HumanInputQuestion = z.infer<typeof HumanInputQuestion>;
+
+export const HumanInputRequestStatus = z.enum([
+  "pending",
+  "answered",
+  "skipped",
+  "expired",
+  "cancelled",
+]);
+export type HumanInputRequestStatus = z.infer<typeof HumanInputRequestStatus>;
+
+export const RequestHumanInputToolInput = z.object({
+  questions: z.array(HumanInputQuestion).min(1).max(20),
+  allowSkip: z.boolean().default(false),
+  expiresInSeconds: z
+    .number()
+    .int()
+    .positive()
+    .max(30 * 24 * 60 * 60)
+    .nullable()
+    .optional(),
+});
+export type RequestHumanInputToolInput = z.infer<typeof RequestHumanInputToolInput>;
+
+export const HumanInputAnswer = z.object({
+  questionId: z.string().min(1).max(64),
+  values: z.array(z.string().max(8192)).max(20),
+  other: z.string().max(8192).nullable().optional(),
+});
+export type HumanInputAnswer = z.infer<typeof HumanInputAnswer>;
+
+export const HumanInputResponse = z.discriminatedUnion("outcome", [
+  z.object({
+    outcome: z.literal("answered"),
+    answers: z.array(HumanInputAnswer).max(20),
+  }),
+  z.object({ outcome: z.literal("skipped") }),
+  z.object({ outcome: z.literal("expired") }),
+  z.object({ outcome: z.literal("cancelled") }),
+]);
+export type HumanInputResponse = z.infer<typeof HumanInputResponse>;
+
+export const SubmitHumanInputResponseRequest = z.discriminatedUnion("outcome", [
+  z.object({
+    outcome: z.literal("answered"),
+    answers: z.array(HumanInputAnswer).max(20),
+  }),
+  z.object({ outcome: z.literal("skipped") }),
+]);
+export type SubmitHumanInputResponseRequest = z.infer<typeof SubmitHumanInputResponseRequest>;
+
+export const SessionHumanInputRequest = z.object({
+  id: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  sessionId: z.string().uuid(),
+  turnId: z.string().uuid(),
+  turnGeneration: z.number().int().positive(),
+  creationAttemptId: z.string().uuid(),
+  toolCallId: z.string().min(1).max(1024),
+  status: HumanInputRequestStatus,
+  questions: z.array(HumanInputQuestion).min(1).max(20),
+  allowSkip: z.boolean(),
+  response: HumanInputResponse.nullable(),
+  respondedBy: z.string().max(1024).nullable(),
+  respondedAt: z.string().nullable(),
+  expiresAt: z.string().nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type SessionHumanInputRequest = z.infer<typeof SessionHumanInputRequest>;
+
+/**
+ * Extract the stable approval identity used by both durable admission and
+ * runtime resume. Serialized SDK interruptions may place it on the wrapper or
+ * its raw item; malformed entries fail closed instead of inventing an id.
+ */
+export function approvalIdentifier(value: unknown): string | null {
+  if (!value || typeof value !== "object") return null;
+  const approval = value as Record<string, unknown>;
+  const rawItem =
+    approval.rawItem && typeof approval.rawItem === "object"
+      ? (approval.rawItem as Record<string, unknown>)
+      : null;
+  const candidate = rawItem?.callId ?? rawItem?.id ?? approval.id ?? approval.name;
+  if (typeof candidate !== "string" && typeof candidate !== "number") return null;
+  return String(candidate);
+}
+
 export const ClientSessionEvent = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("user.message"),
     clientEventId: SessionOperationKey.optional(),
-    payload: z.object({
-      text: z.string().min(1),
-      resources: z.array(ResourceRef).default([]),
-      tools: z.array(ToolRef).default([]),
-      model: z.string().min(1).optional(),
-      reasoningEffort: ReasoningEffort.optional(),
-      controlEtag: z.string().min(1).optional(),
-      expectedDraftRevision: z.number().int().nonnegative().optional(),
-      // Header-value rotation only. URL/name/tool settings are immutable after
-      // session create; persisted events expose metadata, never header values.
-      mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
-    }),
+    payload: z
+      .object({
+        text: z.string().min(1),
+        // System-level host context for this exact turn only. Persisted on the
+        // turn for retry/recovery, never copied into the visible user message.
+        turnInstructions: z.string().trim().min(1).max(32768).optional(),
+        resources: z.array(ResourceRef).default([]),
+        model: z.string().min(1).optional(),
+        reasoningEffort: ReasoningEffort.optional(),
+        controlEtag: z.string().min(1).optional(),
+        expectedDraftRevision: z.number().int().nonnegative().optional(),
+        // Header-value rotation only. URL/name/tool settings are immutable after
+        // session create; persisted events expose metadata, never header values.
+        mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
+      })
+      .strict(),
   }),
   z.object({
     type: z.literal("user.approvalDecision"),
@@ -5395,20 +7954,31 @@ export const ClientSessionEvent = z.discriminatedUnion("type", [
       message: z.string().optional(),
     }),
   }),
+  z.object({
+    type: z.literal("user.humanInputResponse"),
+    clientEventId: SessionOperationKey.optional(),
+    payload: z.object({
+      requestId: z.string().uuid(),
+      response: SubmitHumanInputResponseRequest,
+    }),
+  }),
 ]);
 export type ClientSessionEvent = z.infer<typeof ClientSessionEvent>;
 
-export const SteerSessionMessageRequest = z.object({
-  text: z.string().min(1),
-  resources: z.array(ResourceRef).default([]),
-  tools: z.array(ToolRef).default([]),
-  model: z.string().min(1).optional(),
-  reasoningEffort: ReasoningEffort.optional(),
-  clientEventId: SessionOperationKey.optional(),
-  controlEtag: z.string().min(1).optional(),
-  expectedDraftRevision: z.number().int().nonnegative().optional(),
-  mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
-});
+export const SteerSessionMessageRequest = z
+  .object({
+    text: z.string().min(1),
+    // Same per-turn system-level context as a queued user.message.
+    turnInstructions: z.string().trim().min(1).max(32768).optional(),
+    resources: z.array(ResourceRef).default([]),
+    model: z.string().min(1).optional(),
+    reasoningEffort: ReasoningEffort.optional(),
+    clientEventId: SessionOperationKey.optional(),
+    controlEtag: z.string().min(1).optional(),
+    expectedDraftRevision: z.number().int().nonnegative().optional(),
+    mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
+  })
+  .strict();
 export type SteerSessionMessageRequest = z.infer<typeof SteerSessionMessageRequest>;
 
 export const SteerSessionMessageResponse = z.object({
@@ -5449,12 +8019,24 @@ export type GitHubRepository = z.infer<typeof GitHubRepository>;
 export const GitHubRepositoryScope = z.enum(["all", "selected"]);
 export type GitHubRepositoryScope = z.infer<typeof GitHubRepositoryScope>;
 
+export const GitHubBindingStatus = z.enum(["disabled", "unbound", "bound"]);
+export type GitHubBindingStatus = z.infer<typeof GitHubBindingStatus>;
+
+export const GitHubAppSetupMode = z.enum(["platform", "operator"]);
+export type GitHubAppSetupMode = z.infer<typeof GitHubAppSetupMode>;
+
+export const GitHubInstallationLifecycle = z.enum(["active", "suspended", "deleted", "unverified"]);
+export type GitHubInstallationLifecycle = z.infer<typeof GitHubInstallationLifecycle>;
+
 export const GitHubInstallationBinding = z.object({
   installationId: z.number().int().positive(),
+  githubAccountId: z.number().int().positive().nullable(),
   accountLogin: z.string().nullable(),
   accountType: z.string().nullable(),
+  lifecycle: GitHubInstallationLifecycle,
   repositoryScope: GitHubRepositoryScope,
   repositoryCount: z.number().int().nonnegative(),
+  configureUrl: z.string().url().nullable(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -5462,6 +8044,8 @@ export type GitHubInstallationBinding = z.infer<typeof GitHubInstallationBinding
 
 export const GitHubAppInfo = z.object({
   configured: z.boolean(),
+  status: GitHubBindingStatus,
+  setupMode: GitHubAppSetupMode,
   appId: z.string().nullable(),
   clientId: z.string().nullable(),
   appSlug: z.string().nullable(),
@@ -5524,6 +8108,9 @@ export const SessionCapabilities = z.object({
   liveness: z.enum(["cold", "warming", "warm", "draining"]),
   // Echoed on viewer heartbeats (the split-brain fence).
   leaseEpoch: z.number().int().nonnegative(),
+  workspaceGeneration: z.number().int().nonnegative().nullable().default(null),
+  archiveGeneration: z.number().int().nonnegative().nullable().default(null),
+  archiveComplete: z.boolean().default(false),
   viewerHeartbeatIntervalMs: z.number().int().positive().default(30_000),
   FileSystem: z.object({
     available: z.boolean(),
@@ -5628,6 +8215,9 @@ export const ViewerHolder = z.object({
   liveness: z.enum(["cold", "warming", "warm", "draining"]),
   // The epoch the viewer is fenced on; echoed back on heartbeats.
   leaseEpoch: z.number().int().nonnegative(),
+  workspaceGeneration: z.number().int().nonnegative().nullable(),
+  archiveGeneration: z.number().int().nonnegative().nullable(),
+  archiveComplete: z.boolean(),
   viewerHeartbeatIntervalMs: z.number().int().positive(),
   // The desktop pixel tunnel URL the viewer connects to directly; null until
   // a viewer grant is minted (gated until then).
@@ -5991,6 +8581,9 @@ export const MachineView = z.object({
   state: MachineState,
   active: z.boolean(),
   isSessionGroup: z.boolean(),
+  workspaceGeneration: z.number().int().nonnegative().nullable(),
+  archiveGeneration: z.number().int().nonnegative().nullable(),
+  archiveComplete: z.boolean(),
   os: z.string(),
   arch: z.string(),
   hasDisplay: z.boolean(),
@@ -6050,6 +8643,9 @@ export const SwapActiveSandboxResponse = z.object({
       "unsupported_backend_context",
       "transient_establishment",
       "concurrent_swap",
+      "recovery_in_progress",
+      "recovery_degraded",
+      "recovery_unrecoverable",
     ])
     .optional(),
 });
@@ -6065,21 +8661,372 @@ export const MachineMetricsSeriesResponse = z.object({
 export type MachineMetricsSeriesResponse = z.infer<typeof MachineMetricsSeriesResponse>;
 
 /**
+ * Keep this server-facing schema graph eager when imported while allowing
+ * browser bundlers to discard it when contracts is used only for unrelated
+ * helpers. Keep each call site annotated as pure; the factory argument itself
+ * is side-effect-free until invoked.
+ */
+function defineModelContractSchema<Schema>(factory: () => Schema): Schema {
+  return factory();
+}
+
+export const ModelCapabilitySupportV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.enum(["supported", "unsupported", "unknown"]),
+);
+export type ModelCapabilitySupportV1 = z.infer<typeof ModelCapabilitySupportV1>;
+
+export const ModelCapabilityStateV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.object({
+    upstream: ModelCapabilitySupportV1,
+    runnable: z.boolean(),
+  }),
+);
+export type ModelCapabilityStateV1 = z.infer<typeof ModelCapabilityStateV1>;
+
+export const ModelCapabilitiesV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.object({
+    reasoning: ModelCapabilityStateV1.extend({
+      efforts: z.array(ReasoningEffort),
+      defaultEffort: ReasoningEffort.nullable(),
+      required: z.boolean(),
+    }),
+    functionCalling: ModelCapabilityStateV1,
+    structuredOutput: ModelCapabilityStateV1,
+    hostedTools: z.object({
+      webSearch: ModelCapabilityStateV1,
+      xSearch: ModelCapabilityStateV1,
+      codeExecution: ModelCapabilityStateV1,
+    }),
+    inputModalities: z.array(z.enum(["text", "image", "audio"])),
+    outputModalities: z.array(z.enum(["text", "image", "audio"])),
+    transports: z.object({
+      sse: ModelCapabilityStateV1,
+      responsesWebSocket: ModelCapabilityStateV1,
+      realtimeAudio: ModelCapabilityStateV1,
+    }),
+    latencyModes: z.array(
+      z.object({
+        id: z.enum(["standard", "priority", "fast"]),
+        upstream: ModelCapabilitySupportV1,
+        runnable: z.boolean(),
+        billingMultiplierBps: z.number().int().positive().optional(),
+      }),
+    ),
+  }),
+);
+export type ModelCapabilitiesV1 = z.infer<typeof ModelCapabilitiesV1>;
+
+export const ModelCredentialSourceV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.union([
+    z
+      .object({ kind: z.literal("deployment"), mechanism: z.enum(["api_key", "azure_ad_bearer"]) })
+      .strict(),
+    z.object({ kind: z.literal("connected_subscription"), provider: z.literal("codex") }).strict(),
+    z.object({ kind: z.literal("workspace_connection"), mechanism: z.literal("api_key") }).strict(),
+  ]),
+);
+export type ModelCredentialSourceV1 = z.infer<typeof ModelCredentialSourceV1>;
+
+export const ModelBillingAttributionV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z
+    .object({
+      upstreamPayer: z.enum(["deployment", "workspace", "connected_subscription"]),
+      metering: z.enum(["opengeni_credits", "external"]),
+    })
+    .strict(),
+);
+export type ModelBillingAttributionV1 = z.infer<typeof ModelBillingAttributionV1>;
+
+export const TURN_EXECUTION_POLICY_METADATA_KEY = "turnExecutionPolicyV1" as const;
+
+export const TurnExecutionModelSourceV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.enum(["explicit", "session", "deployment", "continuation"]),
+);
+export type TurnExecutionModelSourceV1 = z.infer<typeof TurnExecutionModelSourceV1>;
+
+export const TurnExecutionReasoningSourceV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.enum(["explicit", "session", "deployment", "continuation"]),
+);
+export type TurnExecutionReasoningSourceV1 = z.infer<typeof TurnExecutionReasoningSourceV1>;
+
+/**
+ * Secret-safe execution identity frozen onto one accepted logical turn.
+ *
+ * This is deliberately a strict, normalized reference to the deployment
+ * definition rather than a serialized provider client. It must never contain
+ * a key/token, concrete connected credential id, account label, authorization
+ * header, or credential-bearing URL/query value.
+ */
+export const TurnExecutionPolicyV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z
+    .object({
+      schemaVersion: z.literal(1),
+      productModelId: z.string().min(1),
+      requestedModelId: z.string().min(1).nullable(),
+      modelSource: TurnExecutionModelSourceV1,
+      reasoningEffort: ReasoningEffort,
+      reasoningSource: TurnExecutionReasoningSourceV1,
+      providerId: z.string().min(1),
+      upstreamModelId: z.string().min(1),
+      wireApi: z.enum(["responses", "chat"]),
+      credentialSource: ModelCredentialSourceV1,
+      billing: ModelBillingAttributionV1,
+      definitionVersion: z.string().regex(/^sha256:[a-f0-9]{64}$/u),
+    })
+    .strict()
+    .superRefine((policy, context) => {
+      if (policy.modelSource === "explicit" && policy.requestedModelId === null) {
+        context.addIssue({
+          code: "custom",
+          path: ["requestedModelId"],
+          message: "an explicit model source requires a requested model id",
+        });
+      }
+      if (policy.modelSource !== "explicit" && policy.requestedModelId !== null) {
+        context.addIssue({
+          code: "custom",
+          path: ["requestedModelId"],
+          message: "only an explicit model source may retain a requested model id",
+        });
+      }
+    }),
+);
+export type TurnExecutionPolicyV1 = z.infer<typeof TurnExecutionPolicyV1>;
+
+export type TurnExecutionPolicyReadV1 =
+  | { kind: "absent" }
+  | { kind: "valid"; policy: TurnExecutionPolicyV1 };
+
+/**
+ * Read the policy from turn metadata. Only a literally absent key is legacy;
+ * null, undefined, an unknown schema version, extra fields, and every other
+ * malformed present value fail closed. Error text reports paths only and never
+ * reflects the untrusted value into logs or events.
+ */
+export function readTurnExecutionPolicyV1(metadata: unknown): TurnExecutionPolicyReadV1 {
+  if (metadata === null || metadata === undefined) {
+    return { kind: "absent" };
+  }
+  if (typeof metadata !== "object" || Array.isArray(metadata)) {
+    throw new Error("Malformed turn execution policy metadata: turn metadata is not an object");
+  }
+  const record = metadata as Record<string, unknown>;
+  if (!Object.prototype.hasOwnProperty.call(record, TURN_EXECUTION_POLICY_METADATA_KEY)) {
+    return { kind: "absent" };
+  }
+  const parsed = TurnExecutionPolicyV1.safeParse(record[TURN_EXECUTION_POLICY_METADATA_KEY]);
+  if (!parsed.success) {
+    const paths = [
+      ...new Set(
+        parsed.error.issues.map((issue) =>
+          issue.path.length === 0 ? "policy" : `policy.${issue.path.join(".")}`,
+        ),
+      ),
+    ].join(", ");
+    throw new Error(`Malformed turn execution policy metadata at ${paths || "policy"}`);
+  }
+  return { kind: "valid", policy: parsed.data };
+}
+
+/** Merge a trusted policy into metadata without disturbing dispatch/recovery state. */
+export function metadataWithTurnExecutionPolicyV1(
+  metadata: Readonly<Record<string, unknown>> | null | undefined,
+  policy: TurnExecutionPolicyV1,
+): Record<string, unknown> {
+  return {
+    ...(metadata ?? {}),
+    [TURN_EXECUTION_POLICY_METADATA_KEY]: TurnExecutionPolicyV1.parse(policy),
+  };
+}
+
+/**
+ * Minimal, stable evidence projection for command receipts and audit events.
+ * It intentionally excludes aliases, URLs, request metadata, and all concrete
+ * credential-selection identity.
+ */
+export function turnExecutionPolicyAuditMetadata(
+  policy: TurnExecutionPolicyV1,
+  turnId: string,
+): Record<string, unknown> {
+  const parsed = TurnExecutionPolicyV1.parse(policy);
+  return {
+    turnId,
+    requestedModelId: parsed.requestedModelId,
+    effectiveModelId: parsed.productModelId,
+    modelSource: parsed.modelSource,
+    effectiveReasoningEffort: parsed.reasoningEffort,
+    reasoningSource: parsed.reasoningSource,
+    providerId: parsed.providerId,
+    credentialSourceKind: parsed.credentialSource.kind,
+    credentialSourceMechanism:
+      parsed.credentialSource.kind === "connected_subscription"
+        ? parsed.credentialSource.provider
+        : parsed.credentialSource.mechanism,
+    billingOwner: parsed.billing.upstreamPayer,
+    billingMetering: parsed.billing.metering,
+    definitionVersion: parsed.definitionVersion,
+  };
+}
+
+export const ModelPricingV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.object({
+    inputMicrosPerMillionTokens: z.number().int().nonnegative(),
+    cachedInputMicrosPerMillionTokens: z.number().int().nonnegative().optional(),
+    outputMicrosPerMillionTokens: z.number().int().nonnegative(),
+    marginBps: z.number().int().min(0).max(100_000).optional(),
+  }),
+);
+export type ModelPricingV1 = z.infer<typeof ModelPricingV1>;
+
+export const ModelPricingScheduleV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.object({
+    default: ModelPricingV1,
+    inputTokenTiers: z
+      .array(
+        z.object({
+          minimumInputTokens: z.number().int().nonnegative(),
+          pricing: ModelPricingV1,
+        }),
+      )
+      .optional(),
+  }),
+);
+export type ModelPricingScheduleV1 = z.infer<typeof ModelPricingScheduleV1>;
+
+/**
  * A single host-exposed model + the provider that serves it, as surfaced to
  * clients (SDK + React composer) by GET /v1/config/client. The wire `api`
  * ("responses" | "chat") lets a client reason about provider capabilities; the
  * provider id/label drive the picker's grouping. This mirrors the runtime's
  * ConfiguredModel (packages/config) projected to the client-safe fields.
  */
-export const ClientModel = z.object({
-  id: z.string(),
-  label: z.string(),
-  provider: z.string(), // provider id
-  providerLabel: z.string(),
-  api: z.enum(["responses", "chat"]),
-  contextWindowTokens: z.number().int().positive().optional(),
-});
+export const ClientModel = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.object({
+    id: z.string(),
+    label: z.string(),
+    provider: z.string(), // provider id
+    providerLabel: z.string(),
+    api: z.enum(["responses", "chat"]),
+    contextWindowTokens: z.number().int().positive().optional(),
+    // Additive normalized definition metadata. Optional so older server payloads
+    // remain parseable; current servers project the complete V1 set.
+    schemaVersion: z.literal(1).optional(),
+    aliases: z.array(z.string()).optional(),
+    deployment: z
+      .object({
+        upstreamModelId: z.string().min(1),
+        wireApi: z.enum(["responses", "chat"]),
+      })
+      .optional(),
+    executionLimits: z
+      .object({
+        contextWindowTokens: z.number().int().positive().nullable(),
+        effectiveContextWindowTokens: z.number().int().positive().nullable(),
+        autoCompactTokenLimit: z.number().int().positive().nullable(),
+        toolOutputTruncationTokens: z.number().int().positive().nullable(),
+      })
+      .optional(),
+    credentialSource: ModelCredentialSourceV1.optional(),
+    billing: ModelBillingAttributionV1.optional(),
+    capabilities: ModelCapabilitiesV1.optional(),
+    pricing: ModelPricingScheduleV1.optional(),
+    definitionVersion: z
+      .string()
+      .regex(/^sha256:[a-f0-9]{64}$/u)
+      .optional(),
+  }),
+);
 export type ClientModel = z.infer<typeof ClientModel>;
+
+export const ModelCredentialReadinessV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z
+    .object({
+      status: z.enum(["ready", "not_ready", "error"]),
+      reason: z
+        .enum([
+          "missing_credential",
+          "needs_reauth",
+          "prerequisites_missing",
+          "resolver_error",
+          "observation_stale",
+        ])
+        .nullable(),
+      basis: z.enum(["configuration", "connection", "resolver"]),
+      checkedAt: z.string().datetime().nullable(),
+    })
+    .strict()
+    .superRefine((readiness, context) => {
+      if ((readiness.status === "ready") !== (readiness.reason === null)) {
+        context.addIssue({
+          code: "custom",
+          path: ["reason"],
+          message: "ready credential state requires no reason; non-ready state requires a reason",
+        });
+      }
+      if ((readiness.status === "error") !== (readiness.reason === "resolver_error")) {
+        context.addIssue({
+          code: "custom",
+          path: ["reason"],
+          message:
+            "credential errors require resolver_error and resolver_error requires error status",
+        });
+      }
+      if (
+        readiness.basis === "resolver" &&
+        readiness.status === "ready" &&
+        readiness.checkedAt === null
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["checkedAt"],
+          message: "resolver readiness requires an observation timestamp",
+        });
+      }
+      if (readiness.reason === "observation_stale" && readiness.checkedAt === null) {
+        context.addIssue({
+          code: "custom",
+          path: ["checkedAt"],
+          message: "a stale observation requires its observation timestamp",
+        });
+      }
+    }),
+);
+export type ModelCredentialReadinessV1 = z.infer<typeof ModelCredentialReadinessV1>;
+
+export const ModelAvailabilityV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.object({
+    status: z.enum(["available", "unavailable", "degraded", "unknown"]),
+    selectable: z.boolean(),
+    reason: z
+      .enum([
+        "missing_credential",
+        "needs_reauth",
+        "credential_not_ready",
+        "not_entitled",
+        "provider_unhealthy",
+        "policy_blocked",
+        "unsupported",
+      ])
+      .nullable(),
+    checkedAt: z.string().datetime().nullable(),
+  }),
+);
+export type ModelAvailabilityV1 = z.infer<typeof ModelAvailabilityV1>;
+
+export const WorkspaceModelCatalogModel = /* @__PURE__ */ defineModelContractSchema(() =>
+  ClientModel.extend({
+    credentialReadiness: ModelCredentialReadinessV1,
+    availability: ModelAvailabilityV1,
+  }),
+);
+export type WorkspaceModelCatalogModel = z.infer<typeof WorkspaceModelCatalogModel>;
+
+export const WorkspaceModelCatalogResponse = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.object({
+    models: z.array(WorkspaceModelCatalogModel),
+  }),
+);
+export type WorkspaceModelCatalogResponse = z.infer<typeof WorkspaceModelCatalogResponse>;
 
 /**
  * Exact public HTTP protocol revision spoken by this release train.
@@ -6089,49 +9036,53 @@ export type ClientModel = z.infer<typeof ClientModel>;
  * that rollout boundary. Mutating clients send this value in
  * `x-opengeni-api-contract`; the API rejects any other value before routing.
  */
-export const OPENGENI_API_CONTRACT_REVISION = "2026-07-session-control-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-07-turn-instructions-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
+/** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
+export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
 
-export const ClientConfig = z.object({
-  deploymentRevision: z.string(),
-  apiContractRevision: z.literal(OPENGENI_API_CONTRACT_REVISION),
-  // Release-train version of the server (absent on dev/source builds). The
-  // compatibility policy lives in docs/architecture.md — clients within the
-  // same major are supported; evolution is additive within a major.
-  serverVersion: z.string().optional(),
-  defaultModel: z.string(),
-  allowedModels: z.array(z.string()).min(1),
-  // Richer model list (provider-grouped) for the picker. Defaults to [] for
-  // back-compat: callers that only read allowedModels are unaffected.
-  models: z.array(ClientModel).default([]),
-  defaultReasoningEffort: ReasoningEffort,
-  allowedReasoningEfforts: z.array(ReasoningEffort).min(1),
-  mcpServers: z
-    .array(
-      z.object({
-        id: z.string(),
-        name: z.string(),
-      }),
-    )
-    .default([]),
-  fileUploads: z.object({
-    enabled: z.boolean(),
-    maxSizeBytes: z.number().int().positive(),
+export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.object({
+    deploymentRevision: z.string(),
+    apiContractRevision: z.literal(OPENGENI_API_CONTRACT_REVISION),
+    // Release-train version of the server (absent on dev/source builds). The
+    // compatibility policy lives in docs/architecture.md — clients within the
+    // same major are supported; evolution is additive within a major.
+    serverVersion: z.string().optional(),
+    defaultModel: z.string(),
+    allowedModels: z.array(z.string()).min(1),
+    // Richer model list (provider-grouped) for the picker. Defaults to [] for
+    // back-compat: callers that only read allowedModels are unaffected.
+    models: z.array(ClientModel).default([]),
+    defaultReasoningEffort: ReasoningEffort,
+    allowedReasoningEfforts: z.array(ReasoningEffort).min(1),
+    mcpServers: z
+      .array(
+        z.object({
+          id: z.string(),
+          name: z.string(),
+        }),
+      )
+      .default([]),
+    fileUploads: z.object({
+      enabled: z.boolean(),
+      maxSizeBytes: z.number().int().positive(),
+    }),
+    productAccessMode: ProductAccessMode,
+    auth: ClientAuthConfig.default({ mode: "none" }),
+    // Server-wide hint: does this deployment support Channel-A structured services
+    // at all (P4.4). Per-session availability is negotiated on /stream-capabilities
+    // (it depends on the session's pinned backend); this is the coarse on/off the
+    // client uses to decide whether to even attempt the fs/git/terminal panels.
+    structuredServices: z
+      .object({
+        fileSystem: z.boolean(),
+        git: z.boolean(),
+        terminalEvents: z.boolean(),
+      })
+      .default({ fileSystem: false, git: false, terminalEvents: false }),
   }),
-  productAccessMode: ProductAccessMode,
-  auth: ClientAuthConfig.default({ mode: "none" }),
-  // Server-wide hint: does this deployment support Channel-A structured services
-  // at all (P4.4). Per-session availability is negotiated on /stream-capabilities
-  // (it depends on the session's pinned backend); this is the coarse on/off the
-  // client uses to decide whether to even attempt the fs/git/terminal panels.
-  structuredServices: z
-    .object({
-      fileSystem: z.boolean(),
-      git: z.boolean(),
-      terminalEvents: z.boolean(),
-    })
-    .default({ fileSystem: false, git: false, terminalEvents: false }),
-});
+);
 export type ClientConfig = z.infer<typeof ClientConfig>;
 
 function base64UrlEncode(value: string): string {
@@ -6208,3 +9159,7 @@ export function evaluateWorkspaceModelPolicy(
   }
   return { allowed: true };
 }
+
+export * from "./codex-fleet-policy";
+export * from "./secret-redaction";
+export * from "./workspace-instruction-policies";

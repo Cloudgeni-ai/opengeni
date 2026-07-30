@@ -88,6 +88,38 @@ describe("deployment contract", () => {
     ).toBe(true);
   });
 
+  test("models a persistent non-HA single-machine deployment without local image builds", () => {
+    const contract = deploymentProfiles["single-node-kubernetes"];
+    const plan = stackPlanFor(contract);
+
+    expect(contract.runtime.platform).toBe("kubernetes");
+    expect(contract.database.mode).toBe("inCluster");
+    expect(contract.temporal.mode).toBe("inCluster");
+    expect(contract.nats.mode).toBe("inCluster");
+    expect(contract.objectStorage.mode).toBe("inCluster");
+    expect(contract.ingress.enabled).toBe(false);
+    expect(contract.access.mode).toBe("disabled");
+    expect(contract.sandbox.backend).toBe("selfhosted");
+    expect(plan.helmValuesFile).toBe("deploy/helm/opengeni/values.single-node.example.yaml");
+    expect(plan.creates).toContain(
+      "persistent single-node Postgres/Temporal/NATS/MinIO services and local volumes",
+    );
+    expect(plan.deployCommands.filter((command) => command.includes("helm upgrade"))).toHaveLength(
+      2,
+    );
+    expect(plan.deployCommands.some((command) => command.includes("docker build"))).toBe(false);
+    expect(plan.deployCommands.join("\n")).not.toContain("OPENGENI_OPENAI_API_KEY");
+    expect(plan.requiredSecretKeys).toContain("OPENGENI_ENROLLMENT_SIGNING_SECRET");
+    expect(plan.requiredSecretKeys).toContain("OPENGENI_SELFHOSTED_NATS_CALLOUT_ACCOUNT_SEED");
+    expect(plan.requiredSecretKeys).toContain("opengeni-postgres/POSTGRES_PASSWORD");
+    expect(plan.requiredSecretKeys).toContain(
+      "opengeni-runtime/OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY",
+    );
+    expect(plan.requiredSecretKeys).toContain(
+      "opengeni-migrations/OPENGENI_MIGRATIONS_DATABASE_URL",
+    );
+  });
+
   test("models Azure managed profile with external Temporal/NATS and Azure Blob storage", () => {
     const contract = deploymentProfiles["azure-managed"];
 
@@ -414,6 +446,8 @@ describe("deployment contract", () => {
         OPENGENI_DATABASE_URL: "postgres://opengeni:secret@postgres/opengeni",
         OPENGENI_IMAGE_TAG: "test-sha",
         OPENGENI_OPENAI_API_KEY: "openai",
+        OPENGENI_TEMPORAL_API_KEY: "temporal-api-key",
+        OPENGENI_TEMPORAL_TLS_ROOT_CA_CERTIFICATE_BASE64: "cm9v\ndC1jYQ==",
       },
     );
 
@@ -430,6 +464,11 @@ describe("deployment contract", () => {
     expect(artifacts.runtimeEnv).toContain("OPENGENI_OBJECT_STORAGE_BACKEND=gcs");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_PRODUCT_ACCESS_MODE=configured");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_DEPLOYMENT_REVISION=test-sha");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_TEMPORAL_TLS_ENABLED=false");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_TEMPORAL_API_KEY=temporal-api-key");
+    expect(artifacts.runtimeEnv).toContain(
+      "OPENGENI_TEMPORAL_TLS_ROOT_CA_CERTIFICATE_BASE64=cm9vdC1jYQ==",
+    );
     expect(artifacts.runtimeEnv).toContain(
       "OPENGENI_OBJECT_STORAGE_GCS_PROJECT_ID=opengeni-example",
     );
@@ -734,7 +773,7 @@ describe("deployment contract", () => {
     expect(artifacts.runtimeEnv).not.toContain("OPENGENI_AZURE_OPENAI_API_VERSION=");
   });
 
-  test("generates preview managed runtime artifacts without external fixture secrets", () => {
+  test("generates preview runtime artifacts with a restricted DB identity", () => {
     const contract = contractForProfile("preview-pr");
     const artifacts = generateRuntimeArtifacts(
       contract,
@@ -742,6 +781,8 @@ describe("deployment contract", () => {
         helm_set_values: { value: {} },
       },
       {
+        OPENGENI_DATABASE_URL:
+          "postgres://opengeni_app:runtime-password@opengeni-preview-postgres:5432/opengeni",
         OPENGENI_PUBLIC_BASE_URL: "https://preview-123.app.opengeni.ai",
         OPENGENI_DELEGATION_SECRET: "delegation",
         OPENGENI_BETTER_AUTH_SECRET: "better-auth",
@@ -785,7 +826,9 @@ describe("deployment contract", () => {
     // The sandbox workspace HMAC secret is NEVER required (graceful-degrade /
     // delegation-secret fallback) — it must not enter missingEnvVars.
     expect(artifacts.missingEnvVars).not.toContain("OPENGENI_STREAM_TOKEN_SECRET");
-    expect(artifacts.runtimeEnv).not.toContain("OPENGENI_DATABASE_URL=");
+    expect(artifacts.runtimeEnv).toContain(
+      "OPENGENI_DATABASE_URL=postgres://opengeni_app:runtime-password@opengeni-preview-postgres:5432/opengeni",
+    );
     expect(artifacts.runtimeEnv).not.toContain("OPENGENI_OBJECT_STORAGE_ENDPOINT=");
     expect(artifacts.runtimeEnv).not.toContain("OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID=");
     expect(artifacts.runtimeEnv).toContain(
@@ -807,6 +850,8 @@ describe("deployment contract", () => {
     );
     expect(artifacts.helmValuesYaml).toContain('tag: "preview-123"');
     expect(artifacts.helmValuesYaml).toContain('digest: "sha256:worker"');
+    expect(artifacts.helmValuesYaml).toContain('existingSecret: "opengeni-migrations"');
+    expect(artifacts.helmValuesYaml).toContain('existingSecret: "opengeni-runtime"');
   });
 
   test("escapes multiline runtime env values for kubectl env-file secrets", () => {

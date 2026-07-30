@@ -3,8 +3,9 @@ import type { SessionEvent } from "@opengeni/sdk";
 import { act } from "react";
 import { registerDom, renderComponent, flush } from "./render-hook";
 import { defaultToolRegistry, ActivityRail } from "../src/timeline";
-import type { MemoryItem, ToolCallItem, SandboxItem } from "../src/timeline";
+import type { AuthNeededItem, MemoryItem, ToolCallItem, SandboxItem } from "../src/timeline";
 import { MessageTimeline } from "../src";
+import { TimelineRow } from "../src/components/message-timeline";
 
 /* ----------------------------------------------------------------------------
    Renderer integration tests for Issue-2 (multi-file apply_patch count) and
@@ -36,6 +37,79 @@ function timelineEvent(
     turnId,
   };
 }
+
+describe("provider MCP unavailable rendering", () => {
+  test("does not offer a duplicate reconnect flow for unsupported host-owned auth", async () => {
+    let reconnects = 0;
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          timelineEvent("tool.auth_needed", {
+            serverId: "gitlab-hosted",
+            provider: "gitlab",
+            providerDomain: "gitlab.com",
+            connectionId: "host-gitlab-one",
+            reason: "unsupported_auth",
+            authorizationUrl: "https://should-not-be-used.example/connect",
+          }),
+        ]}
+        onReconnect={() => {
+          reconnects += 1;
+        }}
+      />,
+    );
+    await flush();
+    expect(r.container.textContent).toContain("Gitlab tools unavailable");
+    expect(r.container.textContent).toContain(
+      "This connection cannot authenticate the configured tool endpoint.",
+    );
+    expect(r.container.textContent).not.toContain("Reconnect");
+    expect(r.container.querySelector("button")).toBeNull();
+    expect(r.container.querySelector("a")).toBeNull();
+    expect(reconnects).toBe(0);
+    await r.unmount();
+  });
+});
+
+describe("durable machine-input timeline", () => {
+  test("renders a delivered coalesced batch with source and typed members", async () => {
+    resetTimelineEvents();
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          timelineEvent("system.update.delivered", {
+            historyItemId: "history-1",
+            count: 2,
+            members: [
+              {
+                id: "update-1",
+                kind: "agent_message",
+                classification: "info",
+                sourceId: "verification-agent",
+                summary: "Cache verification completed.",
+              },
+              {
+                id: "update-2",
+                kind: "child_terminal_result",
+                classification: "success",
+                sourceId: "child-session",
+                summary: "Child session finished.",
+              },
+            ],
+          }),
+        ]}
+      />,
+    );
+    await flush();
+    expect(r.container.textContent).toContain("2 updates joined this turn");
+    expect(r.container.textContent).not.toContain("Input batch");
+    expect(r.container.textContent).not.toContain('"sourceId"');
+    expect(r.container.textContent).toContain("verification-agent");
+    expect(r.container.textContent).toContain("Cache verification completed.");
+    expect(r.container.textContent).toContain("Agent finished");
+    await r.unmount();
+  });
+});
 
 function resetTimelineEvents(): void {
   timelineSequence = 0;
@@ -85,6 +159,195 @@ function toolItem(overrides: Partial<ToolCallItem>): ToolCallItem {
     ...overrides,
   };
 }
+
+function fleetDecisionEventPayload(): Record<string, unknown> {
+  return {
+    schemaVersion: 1,
+    mode: "shadow",
+    actual: { outcome: "selected", candidateKey: "c00", reason: "active" },
+    comparison: "different_candidate",
+    replay: {
+      schemaVersion: 1,
+      policyVersion: "adaptive-shadow-v1",
+      mode: "shadow",
+      input: { candidates: [{ key: "c00" }, { key: "c01" }] },
+      truncatedCandidateCount: 3,
+      inputFingerprint: "secret-input-fingerprint",
+      decisionFingerprint: "secret-decision-fingerprint",
+      decision: {
+        outcome: "selected",
+        selectedCandidateKey: "c01",
+        reason: "best_score",
+        admission: {
+          outcome: "admit",
+          reason: "work_conserving_borrow",
+          borrowedIdleCapacity: true,
+        },
+        borrowedOverlayCapacity: false,
+        strandedEligibleCount: 1,
+        confidence: "low",
+        scores: [
+          {
+            candidateKey: "c00",
+            eligible: false,
+            rejectionReason: "overlay_isolation",
+            total: 2_000,
+            confidence: "low",
+          },
+          {
+            candidateKey: "c01",
+            eligible: true,
+            rejectionReason: null,
+            total: 1_200,
+            confidence: "low",
+          },
+        ],
+      },
+    },
+    accountEmail: "secret-owner@example.test",
+    credentialId: "credential-secret",
+  };
+}
+
+describe("FleetDecisionRow", () => {
+  test("renders an accessible bounded production-vs-shadow explanation without secret metadata", async () => {
+    resetTimelineEvents();
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[timelineEvent("codex.fleet.decision", fleetDecisionEventPayload())]}
+      />,
+    );
+    await flush();
+
+    const disclosure = r.container.querySelector('[role="button"]') as HTMLElement | null;
+    expect(disclosure?.getAttribute("aria-expanded")).toBe("false");
+    expect(r.container.textContent ?? "").toContain("Fleet policy shadow");
+    expect(r.container.textContent ?? "").toContain("Shadow preferred another candidate");
+
+    await act(async () => {
+      disclosure?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    expect(disclosure?.getAttribute("aria-expanded")).toBe("true");
+    expect(
+      r.container.querySelector('section[aria-label="Fleet policy shadow details"]'),
+    ).toBeTruthy();
+    expect(r.container.querySelectorAll("dt").length).toBeGreaterThanOrEqual(8);
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("Shadow observation only");
+    expect(text).toContain("Selected c00");
+    expect(text).toContain("Selected c01");
+    expect(text).toContain("Borrowed for standard work");
+    expect(text).toContain("1 eligible candidate");
+    expect(text).toContain("temporary and local to this event");
+    expect(text).toContain("3 additional candidates were excluded");
+    expect(text).not.toContain("different_candidate");
+    expect(text).not.toContain("work_conserving_borrow");
+    expect(text).not.toContain("overlay_isolation");
+    expect(text).not.toContain("secret-owner@example.test");
+    expect(text).not.toContain("credential-secret");
+    expect(text).not.toContain("secret-input-fingerprint");
+    expect(text).not.toContain("secret-decision-fingerprint");
+
+    await r.unmount();
+  });
+
+  test("renders manager priority as standard-work pacing rather than manager admission", async () => {
+    resetTimelineEvents();
+    const payload = fleetDecisionEventPayload();
+    payload.comparison = "different_outcome";
+    const replay = payload.replay as { decision: Record<string, unknown> };
+    replay.decision = {
+      ...replay.decision,
+      outcome: "paced",
+      selectedCandidateKey: null,
+      reason: "admission_paced",
+      admission: {
+        outcome: "pace",
+        reason: "manager_priority",
+        borrowedIdleCapacity: false,
+      },
+      borrowedOverlayCapacity: false,
+      strandedEligibleCount: 0,
+      scores: [],
+    };
+    const r = await renderComponent(
+      <MessageTimeline events={[timelineEvent("codex.fleet.decision", payload)]} />,
+    );
+    await flush();
+    const disclosure = r.container.querySelector('[role="button"]') as HTMLElement | null;
+    await act(async () => {
+      disclosure?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("Standard work was paced for queued manager demand");
+    expect(text).not.toContain("Manager-priority work was admitted");
+    await r.unmount();
+  });
+});
+
+function authNeededItem(overrides: Partial<AuthNeededItem> = {}): AuthNeededItem {
+  return {
+    kind: "auth-needed",
+    id: "auth-1",
+    turnId: "turn-1",
+    providerDomain: "linear.app",
+    connectionId: null,
+    reason: "missing_connection",
+    scopes: [],
+    resource: null,
+    toolName: null,
+    authorizationUrl: null,
+    occurredAt: new Date(0).toISOString(),
+    ...overrides,
+  };
+}
+
+describe("TimelineRow — connection recovery", () => {
+  test("says a missing connection starts a new-message retry rather than replaying the call", async () => {
+    const r = await renderComponent(<TimelineRow item={authNeededItem()} />);
+    await flush();
+
+    expect(r.container.textContent).toContain("Connect Linear");
+    expect(r.container.textContent).toContain("This tool call wasn't replayed.");
+    expect(r.container.textContent).toContain("send a new message to try again");
+    expect(r.container.textContent).not.toContain("Reconnect Linear");
+
+    await r.unmount();
+  });
+
+  test("pins the authorization-opening state without claiming the turn is resuming", async () => {
+    let finish!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const r = await renderComponent(
+      <TimelineRow
+        item={authNeededItem({ connectionId: "conn-1", reason: "expired" })}
+        onReconnect={() => pending}
+      />,
+    );
+    await flush();
+
+    const button = r.container.querySelector("button");
+    expect(button?.textContent).toContain("Reconnect");
+    await act(async () => {
+      button?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+    expect(button?.textContent).toContain("Opening…");
+    expect(button?.hasAttribute("disabled")).toBe(true);
+    expect(r.container.textContent).toContain("After reconnecting, send a new message");
+    expect(r.container.textContent).not.toContain("Resuming");
+
+    finish();
+    await flush();
+    await r.unmount();
+  });
+});
 
 describe("MessageTimeline — settled turn folding", () => {
   test("settled turn renders one top-level chip, final answer, and folded narration", async () => {
@@ -568,6 +831,30 @@ describe("ExecRenderer — failed+empty-output distinction", () => {
 /* ---- Finding A: WebSearchRenderer — null entry in results array --------- */
 
 describe("WebSearchRenderer — null/undefined entries in results array", () => {
+  test("renders a completed open-page action as settled page activity", async () => {
+    const item = toolItem({
+      name: "web_search_call",
+      raw: {
+        type: "hosted_tool_call",
+        status: "completed",
+        providerData: {
+          action: { type: "open_page", url: "https://openai.com/research" },
+        },
+      },
+      status: "complete",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("Opened web page");
+    expect(text).toContain("https://openai.com/research");
+    expect(text).not.toContain("query unavailable");
+
+    await r.unmount();
+  });
+
   test("renders without throwing when results contains a null entry", async () => {
     // Simulate a host-enriched output where one entry is null (untrusted data).
     const item = toolItem({

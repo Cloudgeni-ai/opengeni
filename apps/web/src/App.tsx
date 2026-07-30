@@ -5,6 +5,7 @@
 //   /workspaces/:id/agent                    → sessions redirect (legacy URL)
 //   /workspaces/:id/sessions                 → sessions index + create
 //   /workspaces/:id/sessions/:sessionId      → session view (queue/goal rail)
+//   /sessions/:sessionId                     → authorized compatibility redirect
 //   /workspaces/:id/variable-sets            → variable sets + variables
 //   /workspaces/:id/rigs                     → rigs list + create
 //   /workspaces/:id/rigs/:rigId              → rig detail (overview/setup/versions/changes)
@@ -12,6 +13,7 @@
 //   /workspaces/:id/capabilities             → capability catalog + registry (incl. Packs subsection)
 //   /workspaces/:id/schedules                → scheduled tasks + run history
 //   /workspaces/:id/documents                → document bases + search
+//   /workspaces/:id/memory                   → durable workspace memory
 //   /workspaces/:id/settings                 → workspace settings (name, API keys, danger zone)
 //   /workspaces/:id/organization             → organization settings (billing, usage, plan, members)
 //   /workspaces/:id/account                  → legacy redirect to /organization
@@ -38,6 +40,7 @@ const LazyCapabilitiesRoute = lazyRouteComponent(
 );
 const LazyDeviceRoute = lazyRouteComponent(() => import("@/routes/device"), "DeviceRoute");
 const LazyDocumentsRoute = lazyRouteComponent(() => import("@/routes/documents"), "DocumentsRoute");
+const LazyMemoryRoute = lazyRouteComponent(() => import("@/routes/memory"), "MemoryRoute");
 const LazyVariableSetsRoute = lazyRouteComponent(
   () => import("@/routes/variable-sets"),
   "VariableSetsRoute",
@@ -58,6 +61,10 @@ const LazyRigDetailRoute = lazyRouteComponent(
 );
 const LazySchedulesRoute = lazyRouteComponent(() => import("@/routes/schedules"), "SchedulesRoute");
 const LazySessionRoute = lazyRouteComponent(() => import("@/routes/session"), "SessionRoute");
+const LazySessionDeepLinkRoute = lazyRouteComponent(
+  () => import("@/routes/session-deep-link"),
+  "SessionDeepLinkRoute",
+);
 const LazySessionsIndexRoute = lazyRouteComponent(
   () => import("@/routes/sessions-index"),
   "SessionsIndexRoute",
@@ -79,6 +86,11 @@ const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
   component: RootIndexRoute,
+});
+const sessionDeepLinkRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "sessions/$sessionId",
+  component: SessionDeepLink,
 });
 // Stripe checkout return target. The API bakes `/billing?checkout=…` into every
 // checkout session's success_url/cancel_url; this top-level route forwards the
@@ -191,12 +203,22 @@ const workspaceSchedulesRoute = createRoute({
 const workspaceDocumentsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "documents",
-  // `?memory=<id>` deep-links a memory record (from a timeline memory step): the
-  // Documents page reveals + highlights that memory even when the filters would
-  // otherwise hide it. Unknown values are ignored.
+  // Memory used to live inside Documents, so existing timeline links and
+  // bookmarks can still carry `?memory=<id>`. Preserve that public URL as a
+  // compatibility redirect to the first-class Memory surface.
   validateSearch: (search: Record<string, unknown>): { memory?: string } =>
     typeof search.memory === "string" ? { memory: search.memory } : {},
   component: Documents,
+});
+const workspaceMemoryRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "memory",
+  // `?memory=<id>` deep-links a memory record (from a timeline memory step): the
+  // Memory page reveals + highlights that record even when the filters would
+  // otherwise hide it. Unknown values are ignored.
+  validateSearch: (search: Record<string, unknown>): { memory?: string } =>
+    typeof search.memory === "string" ? { memory: search.memory } : {},
+  component: Memory,
 });
 const workspaceSettingsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
@@ -227,6 +249,7 @@ const workspaceAccountRoute = createRoute({
 });
 const routeTree = rootRoute.addChildren([
   indexRoute,
+  sessionDeepLinkRoute,
   billingReturnRoute,
   deviceRoute,
   resetPasswordRoute,
@@ -244,6 +267,7 @@ const routeTree = rootRoute.addChildren([
     workspaceCapabilitiesRoute,
     workspaceSchedulesRoute,
     workspaceDocumentsRoute,
+    workspaceMemoryRoute,
     workspaceSettingsRoute,
     workspaceOrganizationRoute,
     workspaceAccountRoute,
@@ -298,6 +322,11 @@ function SessionView() {
   return <LazySessionRoute workspaceId={workspaceId} sessionId={sessionId} />;
 }
 
+function SessionDeepLink() {
+  const { sessionId } = sessionDeepLinkRoute.useParams();
+  return <LazySessionDeepLinkRoute sessionId={sessionId} />;
+}
+
 function VariableSets() {
   const { workspaceId } = workspaceVariableSetsRoute.useParams();
   return <LazyVariableSetsRoute workspaceId={workspaceId} />;
@@ -349,7 +378,23 @@ function Schedules() {
 function Documents() {
   const { workspaceId } = workspaceDocumentsRoute.useParams();
   const { memory } = workspaceDocumentsRoute.useSearch();
-  return <LazyDocumentsRoute workspaceId={workspaceId} focusMemoryId={memory} />;
+  if (memory) {
+    return (
+      <Navigate
+        to="/workspaces/$workspaceId/memory"
+        params={{ workspaceId }}
+        search={{ memory }}
+        replace
+      />
+    );
+  }
+  return <LazyDocumentsRoute workspaceId={workspaceId} />;
+}
+
+function Memory() {
+  const { workspaceId } = workspaceMemoryRoute.useParams();
+  const { memory } = workspaceMemoryRoute.useSearch();
+  return <LazyMemoryRoute workspaceId={workspaceId} focusMemoryId={memory} />;
 }
 
 function WorkspaceSettings() {

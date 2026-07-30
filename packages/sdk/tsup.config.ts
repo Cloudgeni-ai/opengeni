@@ -1,4 +1,5 @@
 import { defineConfig } from "tsup";
+import { emitDeclarationsOnSuccess } from "../../scripts/tsup-declarations";
 
 // @opengeni/sdk ships ESM + .d.ts with ZERO runtime dependencies. It hand-mirrors
 // the contracts wire types in src/types.ts (pinned by test/contract-parity.test.ts),
@@ -15,7 +16,8 @@ export default defineConfig({
   entry: ["src/index.ts"],
   format: ["esm"],
   target: "es2022",
-  dts: true,
+  dts: false,
+  onSuccess: emitDeclarationsOnSuccess,
   sourcemap: true,
   clean: true,
   external: [/^@opengeni\//],

@@ -1,5 +1,7 @@
 import type { Settings } from "@opengeni/config";
 import type {
+  GitHubInstallationBindingCandidate,
+  GitHubInstallationBindingProof,
   GitHubRepository,
   GitHubRepositoryPermissions,
   GitHubUserInstallationAccess,
@@ -21,10 +23,35 @@ export class GitHubAppConfigurationError extends Error {
   }
 }
 
-export class GitHubAppApiError extends Error {}
+export class GitHubAppApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number | null = null,
+  ) {
+    super(message);
+  }
+}
+
+export type GitHubInstallationAuthorityFailure =
+  | "authority_denied"
+  | "authority_unavailable"
+  | "installation_missing"
+  | "installation_suspended"
+  | "repository_access_empty";
+
+export class GitHubInstallationAuthorityError extends GitHubAppApiError {
+  constructor(
+    readonly reason: GitHubInstallationAuthorityFailure,
+    message: string,
+    status: number | null = null,
+  ) {
+    super(message, status);
+  }
+}
 
 export type GitHubAppInstallationSummary = {
   installationId: number;
+  accountId: number;
   accountLogin: string | null;
   accountType: string | null;
   suspended: boolean;
@@ -61,6 +88,10 @@ export function buildGitHubAppManifest(input: {
     metadata: "read",
     contents: "write",
     pull_requests: "write",
+    // Required for the authenticated-user membership endpoint that proves an
+    // active organization owner. Existing installations must approve this
+    // permission before organization-owner self-service can succeed.
+    members: "read",
   };
   if (input.includeCiPermissions) {
     permissions.actions = "read";
@@ -73,7 +104,10 @@ export function buildGitHubAppManifest(input: {
     redirect_url: `${base}/v1/github/app-manifest/callback`,
     callback_urls: [`${base}/v1/github/oauth/callback`],
     public: input.public,
-    request_oauth_on_install: true,
+    // A setup URL and OAuth-on-install are mutually exclusive in GitHub's App
+    // contract. OpenGeni needs the setup callback to receive the installation
+    // id, then starts its own exact user-authorization flow.
+    request_oauth_on_install: !input.setupUrl,
     default_permissions: permissions,
   };
   if (input.setupUrl) {
@@ -229,9 +263,10 @@ export async function verifyGitHubInstallationAccessForUser(
 
 /**
  * Exchange a GitHub App user-authorization code and discover the installations
- * and repositories the user can explicitly access. Repository permission bits
- * are returned so the API can require admin authority before delegating an
- * app's write-capable installation to an OpenGeni workspace.
+ * and repositories the user can explicitly access. This is compatibility
+ * discovery metadata only: visibility and repository permission bits do not
+ * prove that the human may install, configure, or bind the App installation.
+ * No production binding path may treat this result as authority.
  */
 export async function authorizeGitHubAppUser(
   settings: Settings,
@@ -246,6 +281,184 @@ export async function authorizeGitHubAppUser(
         ? []
         : await listUserInstallationRepositories(token, installation),
     })),
+  );
+}
+
+/**
+ * Prove current GitHub installation authority without treating repository
+ * administration or installation visibility as delegation authority.
+ *
+ * GitHub exposes an exact personal-account owner through the authenticated
+ * user's immutable id. For organizations, GitHub's authenticated membership
+ * endpoint exposes active owners as role=admin. GitHub does not expose an
+ * equivalent current-authority receipt for App Managers, so that case remains
+ * unsupported and fails closed.
+ */
+export async function authorizeGitHubInstallationBinding(
+  settings: Settings,
+  input: { code: string; installationId: number },
+): Promise<GitHubInstallationBindingProof> {
+  const userToken = await exchangeGitHubOAuthCodeForUserToken(settings, input.code);
+  const actor = await getAuthenticatedGitHubUser(userToken);
+  const visibleInstallations = await listUserAccessibleInstallations(userToken);
+  const visible = visibleInstallations.find(
+    (installation) => installation.installationId === input.installationId,
+  );
+  if (!visible) {
+    throw new GitHubInstallationAuthorityError(
+      "authority_denied",
+      "GitHub did not associate this installation with the authorized user",
+    );
+  }
+
+  const jwt = await createGitHubAppJwt(settings);
+  const livePayload = (await listInstallations(jwt)).find(
+    (installation) => asInt(installation.id) === input.installationId,
+  );
+  if (!livePayload) {
+    throw new GitHubInstallationAuthorityError(
+      "installation_missing",
+      "GitHub App installation was deleted or is not owned by this App",
+    );
+  }
+  const installation = installationSummaryFromPayload(livePayload);
+  if (
+    installation.accountId !== visible.accountId ||
+    installation.accountLogin !== visible.accountLogin ||
+    installation.accountType !== visible.accountType
+  ) {
+    throw new GitHubInstallationAuthorityError(
+      "authority_denied",
+      "GitHub installation identity changed during authorization",
+    );
+  }
+  if (installation.suspended) {
+    throw new GitHubInstallationAuthorityError(
+      "installation_suspended",
+      "GitHub App installation is suspended",
+    );
+  }
+
+  let authorityKind: GitHubInstallationBindingProof["authorityKind"];
+  if (installation.accountType === "User" && actor.id === installation.accountId) {
+    authorityKind = "personal_owner";
+  } else if (installation.accountType === "Organization" && installation.accountLogin) {
+    await assertActiveOrganizationOwner(
+      userToken,
+      installation.accountId,
+      installation.accountLogin,
+    );
+    authorityKind = "organization_owner";
+  } else {
+    throw new GitHubInstallationAuthorityError(
+      "authority_denied",
+      "Only a GitHub personal-account owner or organization owner may bind an installation",
+    );
+  }
+
+  const installationToken = await createInstallationToken(jwt, {
+    installationId: installation.installationId,
+  });
+  const repositories = await listInstallationRepositories(
+    installationToken.token,
+    installation.installationId,
+    { login: installation.accountLogin, type: installation.accountType },
+  );
+  if (repositories.length === 0) {
+    throw new GitHubInstallationAuthorityError(
+      "repository_access_empty",
+      "GitHub App installation does not currently grant access to any repositories",
+    );
+  }
+  if (authorityKind === "organization_owner") {
+    // Repository enumeration is an async provider boundary. Re-read the live
+    // owner tuple after it so a role revoked after the chooser proof cannot be
+    // durably bound with a later, misleading authority timestamp.
+    await assertActiveOrganizationOwner(
+      userToken,
+      installation.accountId,
+      installation.accountLogin!,
+    );
+  }
+  return {
+    actorId: actor.id,
+    actorLogin: actor.login,
+    authorityKind,
+    installation,
+    repositories,
+  };
+}
+
+/**
+ * Discover existing installations that the freshly authorized GitHub human
+ * can bind as an exact personal owner or active organization owner.
+ *
+ * `GET /user/installations` is discovery input only. Every candidate is
+ * cross-checked against the App's live installation inventory and an
+ * organization candidate requires a live `state=active, role=admin`
+ * membership proof. The later exact authorization still re-runs the complete
+ * proof immediately before the durable bind.
+ */
+export async function discoverGitHubInstallationBindingCandidates(
+  settings: Settings,
+  input: { code: string },
+): Promise<GitHubInstallationBindingCandidate[]> {
+  const userToken = await exchangeGitHubOAuthCodeForUserToken(settings, input.code);
+  const actor = await getAuthenticatedGitHubUser(userToken);
+  const visibleInstallations = await listUserAccessibleInstallations(userToken);
+  const jwt = await createGitHubAppJwt(settings);
+  const liveInstallations = new Map(
+    (await listInstallations(jwt)).map((payload) => {
+      const installation = installationSummaryFromPayload(payload);
+      return [installation.installationId, installation] as const;
+    }),
+  );
+  const candidates: GitHubInstallationBindingCandidate[] = [];
+
+  for (const visible of visibleInstallations) {
+    const installation = liveInstallations.get(visible.installationId);
+    if (
+      !installation ||
+      installation.suspended ||
+      installation.accountId !== visible.accountId ||
+      installation.accountLogin !== visible.accountLogin ||
+      installation.accountType !== visible.accountType
+    ) {
+      continue;
+    }
+    if (installation.accountType === "User" && actor.id === installation.accountId) {
+      candidates.push({ installation, authorityKind: "personal_owner" });
+      continue;
+    }
+    if (installation.accountType !== "Organization" || !installation.accountLogin) {
+      continue;
+    }
+    try {
+      await assertActiveOrganizationOwner(
+        userToken,
+        installation.accountId,
+        installation.accountLogin,
+      );
+      candidates.push({ installation, authorityKind: "organization_owner" });
+    } catch (error) {
+      if (
+        error instanceof GitHubInstallationAuthorityError &&
+        error.reason === "authority_unavailable"
+      ) {
+        continue;
+      }
+      if (
+        error instanceof GitHubInstallationAuthorityError &&
+        error.reason === "authority_denied"
+      ) {
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  return candidates.sort((left, right) =>
+    (left.installation.accountLogin ?? "").localeCompare(right.installation.accountLogin ?? ""),
   );
 }
 
@@ -294,7 +507,7 @@ export async function createGitHubAppInstallationToken(
   settings: Settings,
   input: {
     installationId: number;
-    repositoryIds?: number[];
+    repositoryIds: number[];
   },
 ): Promise<string> {
   return (await createGitHubAppInstallationTokenWithExpiry(settings, input)).token;
@@ -309,15 +522,35 @@ export async function createGitHubAppInstallationTokenWithExpiry(
   settings: Settings,
   input: {
     installationId: number;
-    repositoryIds?: number[];
+    repositoryIds: number[];
   },
 ): Promise<GitHubAppInstallationToken> {
   const missing = githubAppMissingSettings(settings);
   if (missing.length > 0) {
     throw new GitHubAppConfigurationError(missing);
   }
+  if (!Array.isArray(input.repositoryIds)) {
+    throw new GitHubAppApiError(
+      "GitHub installation token mint requires an explicit, unique repository allowlist",
+    );
+  }
+  const repositoryIds = [...new Set(input.repositoryIds)];
+  if (
+    !Number.isSafeInteger(input.installationId) ||
+    input.installationId <= 0 ||
+    repositoryIds.length === 0 ||
+    repositoryIds.length !== input.repositoryIds.length ||
+    repositoryIds.some((id) => !Number.isSafeInteger(id) || id <= 0)
+  ) {
+    throw new GitHubAppApiError(
+      "GitHub installation token mint requires an explicit, unique repository allowlist",
+    );
+  }
   const jwt = await createGitHubAppJwt(settings);
-  return await createInstallationToken(jwt, input);
+  return await createInstallationToken(jwt, {
+    installationId: input.installationId,
+    repositoryIds,
+  });
 }
 
 export function githubAppBotIdentity(settings: Settings): { name: string; email: string } | null {
@@ -397,6 +630,74 @@ async function exchangeGitHubOAuthCodeForUserToken(
     throw new GitHubAppApiError("GitHub returned an invalid OAuth token payload");
   }
   return payload.access_token;
+}
+
+async function getAuthenticatedGitHubUser(token: string): Promise<{ id: number; login: string }> {
+  const payload = await githubGet("/user", token);
+  const id = payload && typeof payload === "object" ? asInt(payload.id) : null;
+  const login =
+    payload && typeof payload === "object" && typeof payload.login === "string"
+      ? payload.login
+      : null;
+  if (id === null || !login) {
+    throw new GitHubAppApiError("GitHub returned an invalid authenticated user payload");
+  }
+  return { id, login };
+}
+
+async function getAuthenticatedOrganizationMembership(
+  token: string,
+  organizationLogin: string,
+): Promise<{ organizationId: number; role: string; state: string }> {
+  let payload: any;
+  try {
+    payload = await githubGet(
+      `/user/memberships/orgs/${encodeURIComponent(organizationLogin)}`,
+      token,
+    );
+  } catch (error) {
+    if (error instanceof GitHubAppApiError) {
+      throw new GitHubInstallationAuthorityError(
+        "authority_unavailable",
+        "GitHub could not prove current organization-owner membership",
+        error.status,
+      );
+    }
+    throw error;
+  }
+  const organization =
+    payload && typeof payload === "object" && payload.organization ? payload.organization : null;
+  const organizationId =
+    organization && typeof organization === "object" ? asInt(organization.id) : null;
+  if (
+    organizationId === null ||
+    typeof payload?.role !== "string" ||
+    typeof payload?.state !== "string"
+  ) {
+    throw new GitHubInstallationAuthorityError(
+      "authority_unavailable",
+      "GitHub returned an invalid organization membership proof",
+    );
+  }
+  return { organizationId, role: payload.role, state: payload.state };
+}
+
+async function assertActiveOrganizationOwner(
+  token: string,
+  organizationId: number,
+  organizationLogin: string,
+): Promise<void> {
+  const membership = await getAuthenticatedOrganizationMembership(token, organizationLogin);
+  if (
+    membership.organizationId !== organizationId ||
+    membership.state !== "active" ||
+    membership.role !== "admin"
+  ) {
+    throw new GitHubInstallationAuthorityError(
+      "authority_denied",
+      "Only an active GitHub organization owner may bind this installation",
+    );
+  }
 }
 
 async function listUserAccessibleInstallations(
@@ -543,8 +844,13 @@ function installationSummaryFromPayload(
     typeof payload.account === "object" && payload.account
       ? (payload.account as Record<string, unknown>)
       : {};
+  const accountId = asInt(account.id);
+  if (accountId === null) {
+    throw new GitHubAppApiError("GitHub returned an installation without an account id");
+  }
   return {
     installationId,
+    accountId,
     accountLogin: typeof account.login === "string" ? account.login : null,
     accountType: typeof account.type === "string" ? account.type : null,
     suspended: Boolean(payload.suspended_at),
@@ -554,7 +860,7 @@ function installationSummaryFromPayload(
 async function githubGet(
   path: string,
   token: string,
-  params: Record<string, string>,
+  params: Record<string, string> = {},
 ): Promise<any> {
   const url = new URL(`${githubApiBase}${path}`);
   for (const [key, value] of Object.entries(params)) {
@@ -562,7 +868,7 @@ async function githubGet(
   }
   const response = await fetch(url, { headers: githubHeaders(token) });
   if (!response.ok) {
-    throw new GitHubAppApiError(await githubErrorMessage(response));
+    throw new GitHubAppApiError(await githubErrorMessage(response), response.status);
   }
   return await response.json();
 }

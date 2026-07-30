@@ -2,9 +2,9 @@ name: Source Admission
 
 # This required PR check executes only base-owned workflow/helper bytes. It never
 # checks out, executes, or grants credentials to candidate content. The helper
-# reads provider metadata and Git objects, rejects a head that is not strictly
-# based on current main, reconciles the provider file projection with a direct
-# tree-object manifest, and fences both refs with terminal readbacks.
+# reads provider metadata and Git objects, reconciles the provider file
+# projection with a direct tree-object manifest, and fences both refs with
+# terminal readbacks.
 on:
   pull_request_target:
     branches:
@@ -27,7 +27,7 @@ jobs:
     env:
       GITHUB_TOKEN: ${{ github.token }}
       OPENGENI_SOURCE_ADMISSION_ACTION: verify_current_base_head
-      ADMISSION_HELPER_SHA256: d40edb61d547e9ca4c7a9a3524912b447cb5fcb20946b490e8ab2b22de5fcc7e
+      ADMISSION_HELPER_SHA256: 87de508b0c10151c052d2a57f846a342461c18b1a3dee5382d36e058292ecda7
     steps:
       - name: Execute the exact base-owned admission verifier
         shell: bash

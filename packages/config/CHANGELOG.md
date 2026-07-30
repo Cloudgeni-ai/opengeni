@@ -1,5 +1,298 @@
 # @opengeni/config
 
+## 0.7.14
+
+### Patch Changes
+
+- Updated dependencies [ad0bdc3]
+  - @opengeni/contracts@0.23.1
+
+## 0.7.13
+
+### Patch Changes
+
+- 36451c6: Support an explicit shared workspace base directory for containerized Docker workers.
+- Updated dependencies [33dc88f]
+  - @opengeni/contracts@0.23.0
+
+## 0.7.12
+
+### Patch Changes
+
+- 1c4018e: Replace one-turn tool overrides with one durable session tool policy, expose
+  OpenGeni-native tools in the same selection, default available tools on, and
+  render delivered machine inputs as compact typed timeline updates instead of
+  raw protocol JSON.
+- Updated dependencies [1c4018e]
+  - @opengeni/contracts@0.22.1
+
+## 0.7.11
+
+### Patch Changes
+
+- b2e23f3: Resolve Connected Machine Toolspace token files against the machine user's real
+  home directory instead of the selfhosted capability root.
+- dfc3235: Separate first-party MCP authorization from exact per-session tool visibility, add fail-closed registration policy, and isolate file download URLs on the files MCP surface.
+- Updated dependencies [29ad09b]
+- Updated dependencies [dfc3235]
+  - @opengeni/contracts@0.22.0
+
+## 0.7.10
+
+### Patch Changes
+
+- 519d93c: Add validated inline per-session skills and discover skills directly from already-materialized repository resources.
+- Updated dependencies [519d93c]
+  - @opengeni/contracts@0.21.0
+
+## 0.7.9
+
+### Patch Changes
+
+- 110bb77: Enforce exact-subject ownership for personal OAuth capabilities and add secure direct OAuth installation for the separate workspace OpenGeni Slack bot.
+- Updated dependencies [110bb77]
+  - @opengeni/contracts@0.20.2
+
+## 0.7.8
+
+### Patch Changes
+
+- Updated dependencies [ffd246c]
+  - @opengeni/contracts@0.20.1
+
+## 0.7.7
+
+### Patch Changes
+
+- 9326255: Let a single-machine turn worker adapt activity concurrency to whole-system CPU
+  and memory targets while preserving fixed per-worker concurrency elsewhere.
+- Updated dependencies [06a5801]
+- Updated dependencies [5511c24]
+  - @opengeni/contracts@0.20.0
+
+## 0.7.6
+
+### Patch Changes
+
+- Updated dependencies [9a8f793]
+- Updated dependencies [c135339]
+  - @opengeni/contracts@0.19.4
+
+## 0.7.5
+
+### Patch Changes
+
+- Updated dependencies [a0f2442]
+  - @opengeni/contracts@0.19.3
+
+## 0.7.4
+
+### Patch Changes
+
+- 85cb323: Restore provider-native web search for workspace-default Codex sessions while preserving explicit
+  tool narrowing, child policy ceilings, version-fenced policy adoption, and structured URL citations.
+- Updated dependencies [85cb323]
+  - @opengeni/contracts@0.19.2
+
+## 0.7.3
+
+### Patch Changes
+
+- 5685f32: Add the restricted runtime database posture contract and workspace-scoped RLS context validation, together with the runtime-role configuration required by standalone API and worker startup.
+- Updated dependencies [de20184]
+  - @opengeni/contracts@0.19.1
+
+## 0.7.2
+
+### Patch Changes
+
+- 7c6aa7c: Keep Codex connected-app MCP tools disabled by default behind the independent
+  `OPENGENI_CODEX_CONNECTED_APPS_ENABLED` deployment switch.
+
+## 0.7.1
+
+### Patch Changes
+
+- 55c6559: Retain release-capable source heads with immutable GitHub prereleases and make
+  the unbaked agent installer resolve through an explicitly configured stable
+  version instead of a mutable release alias.
+
+## 0.7.0
+
+### Minor Changes
+
+- 46bac05: Enforce a configurable inclusive nested-agent depth at the transactional
+  session-creation boundary with a server default of three. Persist immutable
+  lineage and policy snapshots, and return idempotent typed denial evidence without
+  creating run, workflow, sandbox, usage, or billing artifacts.
+
+### Patch Changes
+
+- Updated dependencies [c549ed8]
+- Updated dependencies [46bac05]
+- Updated dependencies [860de22]
+- Updated dependencies [5b57a2d]
+  - @opengeni/contracts@0.19.0
+
+## 0.6.10
+
+### Patch Changes
+
+- 744a93d: Add default-off, bounded adaptive Codex fleet decision telemetry with strict deterministic replay, cache-aware and work-conserving policy simulation, secret-safe event/UI observability, and independent future policy gates.
+- Updated dependencies [744a93d]
+  - @opengeni/contracts@0.18.1
+
+## 0.6.9
+
+### Patch Changes
+
+- 0d60720: Add capability-first session tool policies with omission-as-discovery defaults,
+  explicit per-turn narrowing and child inheritance, secret-safe effective-policy
+  projections, stable lazy `tool_search` catalogs, and matching API, SDK, React,
+  worker, embedding, and audit contracts.
+
+  Harden credential-bearing MCP and OAuth traffic with destination-bound
+  credentials, single-resolution DNS-pinned transport, bounded catalogs, schemas,
+  results, request and response bodies, and independently validated manual
+  redirects. Extend renewable, session-bound Toolspace access to connected
+  machines while dynamically fencing every call to the session's active attempt.
+
+- Updated dependencies [0d60720]
+- Updated dependencies [bdd531c]
+  - @opengeni/contracts@0.18.0
+  - @opengeni/codex@0.2.7
+
+## 0.6.8
+
+### Patch Changes
+
+- 524599e: Normalize model, provider, upstream deployment, credential source, billing,
+  capability, health, and pricing identity; expose a secret-safe authenticated
+  workspace catalog with separate fail-closed credential readiness for federated
+  providers; and persist the accepted model/reasoning execution policy on new
+  logical turns.
+- Updated dependencies [524599e]
+  - @opengeni/contracts@0.17.3
+
+## 0.6.7
+
+### Patch Changes
+
+- Updated dependencies [229902b]
+  - @opengeni/codex@0.2.6
+
+## 0.6.6
+
+### Patch Changes
+
+- cb188f9: Protect clean rig verification sandboxes with canonical exact-instance leases, make Modal orphan termination revalidate durable ownership immediately before deletion, and add a default-off two-phase rollout flag.
+- Updated dependencies [4966649]
+  - @opengeni/contracts@0.17.2
+
+## 0.6.5
+
+### Patch Changes
+
+- Updated dependencies [ff23da5]
+  - @opengeni/contracts@0.17.1
+
+## 0.6.4
+
+### Patch Changes
+
+- d1dee7a: Let embedding hosts read and update an existing session MCP server's approval
+  policy through the public API, SDK, and React session hook. Each claimed
+  attempt freezes its policy under the session lock, so updates affect the next
+  attempt without reinterpreting work already running; model MCP and
+  Toolspace/Code Mode consume the same exact snapshot. Toolspace tokens and
+  side-effect receipts bind every proxied call to the exact active attempt, so
+  Pause, Steer, recovery, and late outputs preserve one authoritative owner.
+- Updated dependencies [d1dee7a]
+  - @opengeni/contracts@0.17.0
+
+## 0.6.3
+
+### Patch Changes
+
+- c978676: Cut a release checkpoint that requires staging, production, and the complete
+  72-hour canary evidence chain before public package and image publication.
+- Updated dependencies [b9cec61]
+  - @opengeni/contracts@0.16.0
+
+## 0.6.2
+
+### Patch Changes
+
+- Updated dependencies [9f84cc9]
+  - @opengeni/contracts@0.15.0
+
+## 0.6.1
+
+### Patch Changes
+
+- Updated dependencies [136227e]
+- Updated dependencies [3aee519]
+  - @opengeni/contracts@0.14.0
+
+## 0.6.0
+
+### Minor Changes
+
+- 4401ce7: Add a scope-checked host MCP credential resolver to the public embedding port and use it consistently for model-visible MCP tools and Toolspace/Code Mode while preserving the standalone connection broker as the default. Requests carry both the immediate session and its workspace-scoped lineage root so embedded hosts can authorize child sessions through one durable root binding. Provider-neutral bindings now carry a provider family, provider host, opaque host binding id, and exact selected-repository set; successful credentials must echo the complete binding before headers are accepted. Incompatible endpoint authentication and unenforceable resource containment surface as explicit unavailable states instead of starting a duplicate OpenGeni provider connection.
+- 334b63f: Publish the dependency-free Toolspace CLI, consume its canonical source from stock sandbox images, and expose an exact deployment-pinned bootstrap hint so custom rigs and connected machines can install it without ever guessing `latest`.
+
+### Patch Changes
+
+- 1fcd83d: Make repository mount paths provider-neutral and collision-free. Omitted paths
+  now resolve to a canonical host-aware default that distinguishes GitHub,
+  GitLab, Azure DevOps, and custom hosts, while one shared portable-path validator
+  rejects traversal and case-folded collisions before sandbox execution.
+
+  Hosts upgrading sessions persisted without `mountPath` should expect those
+  repositories to materialize at the new host-aware location. To preserve an
+  existing warm workspace location, stamp the session's former effective
+  `repos/<owner>/<repo>` path explicitly before upgrading. Previously accepted
+  explicit paths that are non-portable or collide after Unicode normalization and
+  case folding now fail validation and must be renamed.
+
+- 5529945: Support Temporal Cloud and secured external Temporal endpoints across every API
+  and worker connection. API-key authentication enables TLS automatically, while
+  optional server-auth TLS, SNI override, custom root CA, and paired mTLS
+  certificate settings share one validated connection policy.
+- Updated dependencies [1fcd83d]
+- Updated dependencies [32011f1]
+- Updated dependencies [3983021]
+- Updated dependencies [4401ce7]
+- Updated dependencies [c389adc]
+- Updated dependencies [1f9305b]
+- Updated dependencies [8c66185]
+- Updated dependencies [d249403]
+- Updated dependencies [a11a7fc]
+- Updated dependencies [44ff327]
+- Updated dependencies [dda6398]
+- Updated dependencies [e8ca4f6]
+- Updated dependencies [736f4fe]
+  - @opengeni/contracts@0.13.0
+
+## 0.5.3
+
+### Patch Changes
+
+- Bound model-facing tool output, complete input accounting, compact session discovery,
+  event and realtime projections, authorized evidence retrieval, and compaction failure
+  convergence with explicit truncation and loss metadata throughout the output lifecycle.
+  Session event `latest` lookups are now class-exclusive across REST, MCP, and SDK clients.
+  Updated-order session discovery now uses a transactional workspace activity-revision fence,
+  and the workspace-control bounds migration rewrites only historical cap violations.
+- 3e65c23: Keep deterministic Codex subscription sharding sticky through 99% usage and
+  rotate only after actual exhaustion or a definitive provider refusal. Remove the
+  configurable near-exhaustion cutoff so warning presentation cannot strand usable
+  subscription allowance.
+- Updated dependencies
+- Updated dependencies [dbb6232]
+  - @opengeni/codex@0.2.5
+  - @opengeni/contracts@0.12.0
+
 ## 0.5.2
 
 ### Patch Changes

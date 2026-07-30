@@ -43,10 +43,12 @@ import {
   listWorkspaceControlEvents,
   isSessionCompactionRequested,
   markSessionAttemptQuiesced,
+  markSessionWorkflowWakeDelivered,
   insertRecording,
   getRecording,
   peekSessionWork,
   recoverSessionDispatch,
+  reconcileSessionAttemptQuiescence,
   requestSessionCompaction,
   requestSessionTurnRecovery,
   mutateSessionControlInTransaction,
@@ -55,6 +57,7 @@ import {
   recordPendingSessionToolCallResult,
   recordUsageEvent,
   recordSkippedContextCompaction,
+  saveRunState,
   setSessionLastInputTokensForTurnAttempt,
   settleSessionIdleWithParentOutbox,
   settleSessionAttemptInterruptions,
@@ -136,7 +139,6 @@ async function send(
           delivery,
           text,
           resources: [],
-          tools: [],
           reasoningEffortFallback: "low",
           source: "user",
         }),
@@ -297,6 +299,7 @@ describe("clean session control plane", () => {
     });
     expect(pageOne).toMatchObject({ total: 3, hasMore: true });
     expect(pageOne.sessions).toHaveLength(2);
+    expect(pageOne.sessions.every((entry) => entry.latestMessage === null)).toBeTrue();
     expect(pageOne.nextCursor).toBeTruthy();
 
     const pageTwo = await listSessionDiscoverySummaries(client.db, grant.workspaceId!, {
@@ -304,6 +307,7 @@ describe("clean session control plane", () => {
       cursor: pageOne.nextCursor!,
     });
     expect(pageTwo.sessions).toHaveLength(1);
+    expect(pageTwo.sessions[0]!.latestMessage).toBeNull();
     expect(pageTwo.hasMore).toBe(false);
     expect(new Set([...pageOne.sessions, ...pageTwo.sessions].map((entry) => entry.id))).toEqual(
       new Set([first.id, second.id, third.id]),
@@ -697,11 +701,11 @@ describe("clean session control plane", () => {
     await shared.admin`
       insert into sessions (
         account_id, workspace_id, initial_message, resources, tools, metadata,
-        model, sandbox_backend, sandbox_group_id, created_at, updated_at
+        model, sandbox_backend, sandbox_group_id, tool_policy, created_at, updated_at
       )
       select ${grant.accountId}, ${grant.workspaceId!}, 'plan-' || n::text,
         '[]'::jsonb, '[]'::jsonb, '{}'::jsonb, 'scripted-model', 'none',
-        gen_random_uuid(),
+        gen_random_uuid(), jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null),
         statement_timestamp() - make_interval(secs => n),
         statement_timestamp() - make_interval(secs => 5001 - n)
       from generate_series(1, 5000) as generated(n)`;
@@ -1043,6 +1047,11 @@ describe("clean session control plane", () => {
       JSON.stringify(canonicalMixed),
     );
 
+    const pendingTextResultItem = {
+      type: "function_call_result",
+      callId: "pending-call",
+      output: { type: "text", text: huge },
+    };
     expect(
       await registerPendingSessionToolCall(client.db, {
         accountId: grant.accountId,
@@ -1053,6 +1062,7 @@ describe("clean session control plane", () => {
         attemptId,
         callId: "pending-call",
         callType: "function_call",
+        modelToolOutputTruncationTokens: 100,
         callItem: {
           type: "function_call",
           callId: "pending-call",
@@ -1069,12 +1079,15 @@ describe("clean session control plane", () => {
       executionGeneration: turn!.executionGeneration,
       attemptId,
       callId: "pending-call",
-      resultItem: {
-        type: "function_call_result",
-        callId: "pending-call",
-        output: { type: "text", text: huge },
-      },
+      modelToolOutputTruncationTokens: 100,
+      resultItem: pendingTextResultItem,
     });
+    const pendingMixedResultItem = {
+      type: "function_call_result",
+      callId: "pending-mixed-call",
+      status: "completed",
+      output: mixedOutput,
+    };
     expect(
       await registerPendingSessionToolCall(client.db, {
         accountId: grant.accountId,
@@ -1085,6 +1098,7 @@ describe("clean session control plane", () => {
         attemptId,
         callId: "pending-mixed-call",
         callType: "function_call",
+        modelToolOutputTruncationTokens: 100,
         callItem: {
           type: "function_call",
           callId: "pending-mixed-call",
@@ -1102,27 +1116,33 @@ describe("clean session control plane", () => {
       executionGeneration: turn!.executionGeneration,
       attemptId,
       callId: "pending-mixed-call",
-      resultItem: {
-        type: "function_call_result",
-        callId: "pending-mixed-call",
-        status: "completed",
-        output: mixedOutput,
-      },
+      modelToolOutputTruncationTokens: 100,
+      resultItem: pendingMixedResultItem,
     });
     const [pending] = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
       db
-        .select({ resultItem: schema.sessionPendingToolCalls.resultItem })
+        .select({
+          resultItem: schema.sessionPendingToolCalls.resultItem,
+          modelToolOutputTruncationTokens:
+            schema.sessionPendingToolCalls.modelToolOutputTruncationTokens,
+        })
         .from(schema.sessionPendingToolCalls)
         .where(eq(schema.sessionPendingToolCalls.callId, "pending-call")),
     );
     expect(((pending!.resultItem as any).output as { text: string }).text).toBe(huge);
+    expect(pending!.modelToolOutputTruncationTokens).toBe(100);
     const [pendingMixed] = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
       db
-        .select({ resultItem: schema.sessionPendingToolCalls.resultItem })
+        .select({
+          resultItem: schema.sessionPendingToolCalls.resultItem,
+          modelToolOutputTruncationTokens:
+            schema.sessionPendingToolCalls.modelToolOutputTruncationTokens,
+        })
         .from(schema.sessionPendingToolCalls)
         .where(eq(schema.sessionPendingToolCalls.callId, "pending-mixed-call")),
     );
     expect((pendingMixed!.resultItem as { output: unknown[] }).output).toHaveLength(360);
+    expect(pendingMixed!.modelToolOutputTruncationTokens).toBe(100);
 
     const recovery = await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
       sessionId: session.id,
@@ -1144,8 +1164,11 @@ describe("clean session control plane", () => {
           item.type === "function_call_result" &&
           (item as { callId?: unknown }).callId === "pending-call",
       ) as { output: { text: string } };
-    expect(recoveredResult.output.text).toContain("tokens truncated");
-    expect(recoveredResult.output.text.length).toBeLessThan(50_000);
+    const expectedRecoveredResult = boundModelToolOutputItem(pendingTextResultItem, 100);
+    expect(recoveredResult).toEqual(expectedRecoveredResult);
+    expect(JSON.stringify(boundModelToolOutputItem(recoveredResult, 100))).toBe(
+      JSON.stringify(recoveredResult),
+    );
     const recoveredMixedResult = recoveredHistory
       .map((row) => row.item)
       .find(
@@ -1153,8 +1176,8 @@ describe("clean session control plane", () => {
           item.type === "function_call_result" &&
           (item as { callId?: unknown }).callId === "pending-mixed-call",
       ) as { output: Array<Record<string, unknown>> };
-    expect(recoveredMixedResult.output).toEqual(canonicalMixedOutput);
-    expect(JSON.stringify(boundModelToolOutputItem(recoveredMixedResult))).toBe(
+    expect(recoveredMixedResult).toEqual(boundModelToolOutputItem(pendingMixedResultItem, 100));
+    expect(JSON.stringify(boundModelToolOutputItem(recoveredMixedResult, 100))).toBe(
       JSON.stringify(recoveredMixedResult),
     );
     const recoveryOutput = recovery.events.find(
@@ -1328,6 +1351,174 @@ describe("clean session control plane", () => {
         ),
       ).toHaveLength(2);
     }
+  });
+
+  test("pending recovery policy fills rolling nulls and rejects conflicting retries", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "recover calls across a rolling worker update");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    const rawText = "界😀".repeat(30_000);
+    const baseInput = {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn!.id,
+      executionGeneration: turn!.executionGeneration,
+      attemptId,
+    };
+    const policyCall = {
+      type: "function_call",
+      name: "rolling_policy_tool",
+      callId: "rolling-policy-call",
+      arguments: "{}",
+    };
+    expect(
+      await registerPendingSessionToolCall(client.db, {
+        ...baseInput,
+        callId: "rolling-policy-call",
+        callType: "function_call",
+        callItem: policyCall,
+      }),
+    ).toEqual({ accepted: true, registered: true });
+    expect(
+      await registerPendingSessionToolCall(client.db, {
+        ...baseInput,
+        callId: "rolling-policy-call",
+        callType: "function_call",
+        callItem: policyCall,
+        modelToolOutputTruncationTokens: 100,
+      }),
+    ).toEqual({ accepted: true, registered: false });
+    const policyResult = {
+      type: "function_call_result",
+      callId: "rolling-policy-call",
+      output: { type: "text", text: rawText },
+    };
+    expect(
+      await recordPendingSessionToolCallResult(client.db, {
+        ...baseInput,
+        callId: "rolling-policy-call",
+        modelToolOutputTruncationTokens: 100,
+        resultItem: policyResult,
+      }),
+    ).toEqual({ accepted: true, recorded: true });
+
+    const resultFirstCall = {
+      type: "function_call",
+      name: "result_first_policy_tool",
+      callId: "result-first-policy-call",
+      arguments: "{}",
+    };
+    const resultFirstResult = {
+      type: "function_call_result",
+      callId: "result-first-policy-call",
+      output: { type: "text", text: rawText },
+    };
+    await registerPendingSessionToolCall(client.db, {
+      ...baseInput,
+      callId: "result-first-policy-call",
+      callType: "function_call",
+      callItem: resultFirstCall,
+    });
+    expect(
+      await recordPendingSessionToolCallResult(client.db, {
+        ...baseInput,
+        callId: "result-first-policy-call",
+        resultItem: resultFirstResult,
+      }),
+    ).toEqual({ accepted: true, recorded: true });
+    expect(
+      await recordPendingSessionToolCallResult(client.db, {
+        ...baseInput,
+        callId: "result-first-policy-call",
+        modelToolOutputTruncationTokens: 100,
+        resultItem: resultFirstResult,
+      }),
+    ).toEqual({ accepted: true, recorded: false });
+
+    const fallbackCall = {
+      type: "function_call",
+      name: "fallback_policy_tool",
+      callId: "fallback-policy-call",
+      arguments: "{}",
+    };
+    const fallbackResult = {
+      type: "function_call_result",
+      callId: "fallback-policy-call",
+      output: { type: "text", text: rawText },
+    };
+    await registerPendingSessionToolCall(client.db, {
+      ...baseInput,
+      callId: "fallback-policy-call",
+      callType: "function_call",
+      callItem: fallbackCall,
+    });
+    await recordPendingSessionToolCallResult(client.db, {
+      ...baseInput,
+      callId: "fallback-policy-call",
+      resultItem: fallbackResult,
+    });
+
+    await expect(
+      registerPendingSessionToolCall(client.db, {
+        ...baseInput,
+        callId: "rolling-policy-call",
+        callType: "function_call",
+        callItem: policyCall,
+        modelToolOutputTruncationTokens: 200,
+      }),
+    ).rejects.toThrow("changed model tool-output policy from 100 to 200");
+    await expect(
+      recordPendingSessionToolCallResult(client.db, {
+        ...baseInput,
+        callId: "rolling-policy-call",
+        modelToolOutputTruncationTokens: 200,
+        resultItem: policyResult,
+      }),
+    ).rejects.toThrow("changed model tool-output policy from 100 to 200");
+    expect(
+      await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+        db
+          .select({
+            callId: schema.sessionPendingToolCalls.callId,
+            policy: schema.sessionPendingToolCalls.modelToolOutputTruncationTokens,
+          })
+          .from(schema.sessionPendingToolCalls)
+          .where(eq(schema.sessionPendingToolCalls.turnId, turn!.id))
+          .orderBy(schema.sessionPendingToolCalls.callId),
+      ),
+    ).toEqual([
+      { callId: "fallback-policy-call", policy: null },
+      { callId: "result-first-policy-call", policy: 100 },
+      { callId: "rolling-policy-call", policy: 100 },
+    ]);
+
+    await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: turn!.id,
+      triggerEventId: turn!.triggerEventId,
+      attemptId,
+      reason: "worker_shutdown",
+    });
+    const recovered = (
+      await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)
+    ).map((row) => row.item);
+    expect(recovered.find((item) => item.callId === "rolling-policy-call" && item.output)).toEqual(
+      boundModelToolOutputItem(policyResult, 100),
+    );
+    expect(
+      recovered.find((item) => item.callId === "result-first-policy-call" && item.output),
+    ).toEqual(boundModelToolOutputItem(resultFirstResult, 100));
+    expect(recovered.find((item) => item.callId === "fallback-policy-call" && item.output)).toEqual(
+      boundModelToolOutputItem(fallbackResult),
+    );
   });
 
   test("bulk control projection accepts an empty session page", async () => {
@@ -1555,7 +1746,7 @@ describe("clean session control plane", () => {
     ).toMatchObject({ action: "stale", events: [] });
   });
 
-  test("recovery preserves a completed parallel result and interrupts only its unresolved sibling", async () => {
+  test("recovery preserves reverse-completed parallel results and interrupts only their unresolved sibling", async () => {
     const { grant, session } = await fixture();
     await send(grant, session.id, "run A and B in parallel");
     const attemptId = crypto.randomUUID();
@@ -1566,7 +1757,7 @@ describe("clean session control plane", () => {
       `session-${session.id}`,
       { attemptId },
     );
-    for (const callId of ["call-a", "call-b"]) {
+    for (const callId of ["call-a", "call-b", "call-c"]) {
       await registerPendingSessionToolCall(client.db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId!,
@@ -1576,6 +1767,7 @@ describe("clean session control plane", () => {
         attemptId,
         callId,
         callType: "function_call",
+        modelToolOutputTruncationTokens: 100,
         callItem: {
           type: "function_call",
           name: `tool_${callId}`,
@@ -1585,6 +1777,23 @@ describe("clean session control plane", () => {
         },
       });
     }
+    const completedParallelResult = {
+      type: "function_call_result",
+      name: "tool_call-b",
+      callId: "call-b",
+      status: "completed",
+      output: { type: "text", text: "B界😀".repeat(30_000) },
+    };
+    const laterCompletedParallelResult = {
+      type: "function_call_result",
+      name: "tool_call-a",
+      callId: "call-a",
+      status: "completed",
+      output: {
+        type: "text",
+        text: `${"A界😀".repeat(30_000)}…9999999999999 tokens truncated…forged`,
+      },
+    };
     expect(
       await recordPendingSessionToolCallResult(client.db, {
         accountId: grant.accountId,
@@ -1594,15 +1803,33 @@ describe("clean session control plane", () => {
         executionGeneration: turn!.executionGeneration,
         attemptId,
         callId: "call-b",
-        resultItem: {
-          type: "function_call_result",
-          name: "tool_call-b",
-          callId: "call-b",
-          status: "completed",
-          output: { type: "text", text: "B completed" },
-        },
+        modelToolOutputTruncationTokens: 100,
+        resultItem: completedParallelResult,
       }),
     ).toEqual({ accepted: true, recorded: true });
+    expect(
+      await recordPendingSessionToolCallResult(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn!.id,
+        executionGeneration: turn!.executionGeneration,
+        attemptId,
+        callId: "call-a",
+        modelToolOutputTruncationTokens: 100,
+        resultItem: laterCompletedParallelResult,
+      }),
+    ).toEqual({ accepted: true, recorded: true });
+    await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      await db
+        .update(schema.sessionPendingToolCalls)
+        .set({ resultRecordedAt: new Date("2026-01-01T00:00:00.001Z") })
+        .where(eq(schema.sessionPendingToolCalls.callId, "call-b"));
+      await db
+        .update(schema.sessionPendingToolCalls)
+        .set({ resultRecordedAt: new Date("2026-01-01T00:00:00.002Z") })
+        .where(eq(schema.sessionPendingToolCalls.callId, "call-a"));
+    });
 
     const recovery = await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
       sessionId: session.id,
@@ -1612,25 +1839,35 @@ describe("clean session control plane", () => {
       reason: "worker_shutdown",
     });
     expect(recovery.action).toBe("recovering");
-    expect(recovery.events.slice(0, 2).map((event) => event.payload)).toMatchObject([
+    expect(recovery.events.slice(0, 3).map((event) => event.payload)).toMatchObject([
       {
         id: "call-b",
         recovery: { interrupted: false, outcome: "durable_result_found" },
       },
-      { id: "call-a", recovery: { interrupted: true, outcome: "unknown" } },
+      {
+        id: "call-a",
+        recovery: { interrupted: false, outcome: "durable_result_found" },
+      },
+      { id: "call-c", recovery: { interrupted: true, outcome: "unknown" } },
     ]);
     const history = await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id);
     expect(history.slice(1).map((row) => [row.item.type, row.item.callId])).toEqual([
       ["function_call", "call-a"],
       ["function_call", "call-b"],
+      ["function_call", "call-c"],
       ["function_call_result", "call-b"],
       ["function_call_result", "call-a"],
+      ["function_call_result", "call-c"],
     ]);
-    expect(history[3]?.item).toMatchObject({
-      status: "completed",
-      output: { text: "B completed" },
-    });
-    expect(history[4]?.item).toMatchObject({ status: "incomplete" });
+    expect(history[4]?.item).toEqual(boundModelToolOutputItem(completedParallelResult, 100));
+    expect(JSON.stringify(boundModelToolOutputItem(history[4]!.item, 100))).toBe(
+      JSON.stringify(history[4]!.item),
+    );
+    expect(history[5]?.item).toEqual(boundModelToolOutputItem(laterCompletedParallelResult, 100));
+    expect(JSON.stringify(boundModelToolOutputItem(history[5]!.item, 100))).toBe(
+      JSON.stringify(history[5]!.item),
+    );
+    expect(history[6]?.item).toMatchObject({ status: "incomplete" });
   });
 
   test("a completed response batch clears even when an older call remains unresolved", async () => {
@@ -1742,7 +1979,7 @@ describe("clean session control plane", () => {
     const resultItem = {
       type: "function_call_result",
       callId: "compacted-call",
-      output: { type: "text", text: "durable result" },
+      output: { type: "text", text: "compacted界😀".repeat(30_000) },
     };
     await registerPendingSessionToolCall(client.db, {
       accountId: grant.accountId,
@@ -1753,6 +1990,7 @@ describe("clean session control plane", () => {
       attemptId,
       callId: "compacted-call",
       callType: "function_call",
+      modelToolOutputTruncationTokens: 100,
       callItem,
     });
     await recordPendingSessionToolCallResult(client.db, {
@@ -1763,6 +2001,7 @@ describe("clean session control plane", () => {
       executionGeneration: turn!.executionGeneration,
       attemptId,
       callId: "compacted-call",
+      modelToolOutputTruncationTokens: 100,
       resultItem,
     });
     expect(
@@ -1773,12 +2012,35 @@ describe("clean session control plane", () => {
         turnId: turn!.id,
         expectedExecutionGeneration: turn!.executionGeneration,
         expectedAttemptId: attemptId,
+        modelToolOutputTruncationTokens: 100,
         items: [
           { position: 100, item: callItem },
           { position: 101, item: resultItem },
         ],
       }),
     ).toBe(true);
+    const beforeCompaction = await getActiveSessionHistoryItems(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+    );
+    expect(beforeCompaction.find((row) => row.item.callId === "compacted-call")?.item).toEqual(
+      callItem,
+    );
+    expect(
+      beforeCompaction.find(
+        (row) => row.item.callId === "compacted-call" && row.item.type === "function_call_result",
+      )?.item,
+    ).toEqual(boundModelToolOutputItem(resultItem, 100));
+    const [rawReceipt] = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db
+        .select({ resultItem: schema.sessionPendingToolCalls.resultItem })
+        .from(schema.sessionPendingToolCalls)
+        .where(eq(schema.sessionPendingToolCalls.callId, "compacted-call")),
+    );
+    expect(((rawReceipt!.resultItem as any).output as { text: string }).text).toBe(
+      (resultItem.output as { text: string }).text,
+    );
     const compacted = await applyContextCompaction(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId!,
@@ -1839,7 +2101,7 @@ describe("clean session control plane", () => {
     const resultItem = {
       type: "function_call_result",
       callId: "active-completed-call",
-      output: { type: "text", text: "completed before crash" },
+      output: { type: "text", text: "completed界😀".repeat(30_000) },
     };
     const alreadyProjectedCallItem = {
       type: "function_call",
@@ -1861,6 +2123,7 @@ describe("clean session control plane", () => {
       attemptId,
       callId: "active-completed-call",
       callType: "function_call",
+      modelToolOutputTruncationTokens: 100,
       callItem,
     });
     await recordPendingSessionToolCallResult(client.db, {
@@ -1871,6 +2134,7 @@ describe("clean session control plane", () => {
       executionGeneration: turn!.executionGeneration,
       attemptId,
       callId: "active-completed-call",
+      modelToolOutputTruncationTokens: 100,
       resultItem,
     });
     await registerPendingSessionToolCall(client.db, {
@@ -1882,6 +2146,7 @@ describe("clean session control plane", () => {
       attemptId,
       callId: "active-already-projected-call",
       callType: "function_call",
+      modelToolOutputTruncationTokens: 100,
       callItem: alreadyProjectedCallItem,
     });
     await recordPendingSessionToolCallResult(client.db, {
@@ -1892,6 +2157,7 @@ describe("clean session control plane", () => {
       executionGeneration: turn!.executionGeneration,
       attemptId,
       callId: "active-already-projected-call",
+      modelToolOutputTruncationTokens: 100,
       resultItem: alreadyProjectedResultItem,
     });
     await appendSessionHistoryItems(client.db, {
@@ -1901,6 +2167,7 @@ describe("clean session control plane", () => {
       turnId: turn!.id,
       expectedExecutionGeneration: turn!.executionGeneration,
       expectedAttemptId: attemptId,
+      modelToolOutputTruncationTokens: 100,
       items: [
         { position: 100, item: callItem },
         { position: 101, item: resultItem },
@@ -1941,6 +2208,14 @@ describe("clean session control plane", () => {
         )
         .map((item) => item.type),
     ).toEqual(["function_call", "function_call_result", "function_call", "function_call_result"]);
+    const activeCompletedResult = (
+      await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)
+    )
+      .map((row) => row.item)
+      .find(
+        (item) => item.type === "function_call_result" && item.callId === "active-completed-call",
+      );
+    expect(activeCompletedResult).toEqual(boundModelToolOutputItem(resultItem, 100));
   });
 
   test("a pending approval tool receipt follows the logical turn into its next attempt", async () => {
@@ -1963,6 +2238,7 @@ describe("clean session control plane", () => {
       attemptId: firstAttemptId,
       callId: "approval-call",
       callType: "function_call",
+      modelToolOutputTruncationTokens: 100,
       callItem: {
         type: "function_call",
         name: "protected_tool",
@@ -2005,6 +2281,13 @@ describe("clean session control plane", () => {
       },
     );
     expect(resumedTurn?.id).toBe(turn!.id);
+    const approvalResult = {
+      type: "function_call_result",
+      name: "protected_tool",
+      callId: "approval-call",
+      status: "completed",
+      output: { type: "text", text: "approved界😀".repeat(30_000) },
+    };
     expect(
       await recordPendingSessionToolCallResult(client.db, {
         accountId: grant.accountId,
@@ -2014,13 +2297,8 @@ describe("clean session control plane", () => {
         executionGeneration: resumedTurn!.executionGeneration,
         attemptId: resumedAttemptId,
         callId: "approval-call",
-        resultItem: {
-          type: "function_call_result",
-          name: "protected_tool",
-          callId: "approval-call",
-          status: "completed",
-          output: { type: "text", text: "approved result" },
-        },
+        modelToolOutputTruncationTokens: 100,
+        resultItem: approvalResult,
       }),
     ).toEqual({ accepted: true, recorded: true });
     const recovery = await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
@@ -2037,11 +2315,14 @@ describe("clean session control plane", () => {
         recovery: { interrupted: false, outcome: "durable_result_found" },
       },
     });
-    expect(
-      (await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id))
-        .slice(-2)
-        .map((row) => row.item.type),
-    ).toEqual(["function_call", "function_call_result"]);
+    const resumedHistory = (
+      await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)
+    ).slice(-2);
+    expect(resumedHistory.map((row) => row.item.type)).toEqual([
+      "function_call",
+      "function_call_result",
+    ]);
+    expect(resumedHistory[1]!.item).toEqual(boundModelToolOutputItem(approvalResult, 100));
   });
 
   test("Pause preserves a pending approval, while Steer permanently closes it", async () => {
@@ -2260,17 +2541,105 @@ describe("clean session control plane", () => {
     };
     const first = await addSessionSystemUpdate(client.db, input);
     const duplicate = await addSessionSystemUpdate(client.db, input);
+    if (!first.added) throw new Error(`system update was not inserted: ${first.reason}`);
     expect(first.reason).toBe("added");
     expect(duplicate.reason).toBe("duplicate");
     expect(
       await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, session.id),
     ).toHaveLength(1);
-    expect(
-      (await getSessionQueueSnapshot(client.db, grant.workspaceId!, session.id))?.items,
-    ).toHaveLength(0);
+    expect(await getSessionQueueSnapshot(client.db, grant.workspaceId!, session.id)).toMatchObject({
+      items: [],
+      pendingInputs: [{ id: first.update.id }],
+      pendingInputAttachment: null,
+    });
   });
 
-  test("failed internal-only inference defers updates until a real prompt", async () => {
+  test("queue projection attaches only the exact next eligible machine-input batch", async () => {
+    const ordinaryFixture = await fixture();
+    const ordinaryPrompt = await send(
+      ordinaryFixture.grant,
+      ordinaryFixture.session.id,
+      "Use the incoming result",
+    );
+    const ordinary = await addSessionSystemUpdate(client.db, {
+      accountId: ordinaryFixture.grant.accountId,
+      workspaceId: ordinaryFixture.grant.workspaceId!,
+      sessionId: ordinaryFixture.session.id,
+      kind: "agent_message",
+      classification: "info",
+      sourceId: crypto.randomUUID(),
+      dedupeKey: `agent-${crypto.randomUUID()}`,
+      summary: "New agent context",
+      payload: {
+        type: "agent_message",
+        text: "New agent context",
+        operationId: crypto.randomUUID(),
+      },
+    });
+    if (!ordinary.added) throw new Error("ordinary system update was not inserted");
+    expect(
+      await getSessionQueueSnapshot(
+        client.db,
+        ordinaryFixture.grant.workspaceId!,
+        ordinaryFixture.session.id,
+      ),
+    ).toMatchObject({
+      pendingInputAttachment: {
+        turnId: ordinaryPrompt.turn.id,
+        inputIds: [ordinary.update.id],
+      },
+    });
+
+    const agentSteerFixture = await fixture();
+    await send(agentSteerFixture.grant, agentSteerFixture.session.id, "Older queued send");
+    const agentSteer = await addSessionSystemUpdate(client.db, {
+      accountId: agentSteerFixture.grant.accountId,
+      workspaceId: agentSteerFixture.grant.workspaceId!,
+      sessionId: agentSteerFixture.session.id,
+      kind: "agent_steer_instruction",
+      classification: "action_required",
+      sourceId: crypto.randomUUID(),
+      dedupeKey: `agent-steer-${crypto.randomUUID()}`,
+      summary: "Replace the current direction",
+      payload: {
+        type: "agent_steer_instruction",
+        instruction: "Replace the current direction",
+        operationId: crypto.randomUUID(),
+      },
+    });
+    if (!agentSteer.added) throw new Error("agent steer was not inserted");
+    expect(
+      await getSessionQueueSnapshot(
+        client.db,
+        agentSteerFixture.grant.workspaceId!,
+        agentSteerFixture.session.id,
+      ),
+    ).toMatchObject({
+      pendingInputs: [{ id: agentSteer.update.id }],
+      pendingInputAttachment: null,
+    });
+
+    const humanSteer = await send(
+      agentSteerFixture.grant,
+      agentSteerFixture.session.id,
+      "Newest human direction",
+      "steer",
+    );
+    expect(
+      await getSessionQueueSnapshot(
+        client.db,
+        agentSteerFixture.grant.workspaceId!,
+        agentSteerFixture.session.id,
+      ),
+    ).toMatchObject({
+      pendingInputAttachment: {
+        turnId: humanSteer.turn.id,
+        inputIds: [agentSteer.update.id],
+      },
+    });
+  });
+
+  test("claim persists one exact machine-input batch and failure never requeues it", async () => {
     const { grant, session } = await fixture();
     const update = await addSessionSystemUpdate(client.db, {
       accountId: grant.accountId,
@@ -2298,6 +2667,31 @@ describe("clean session control plane", () => {
       { attemptId: failedAttemptId },
     );
     expect(internalTurn).toMatchObject({ source: "system", status: "running" });
+    const delivered = await listSessionSystemUpdatesForTurn(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      internalTurn!.id,
+    );
+    expect(delivered).toMatchObject([
+      {
+        id: update.update.id,
+        state: "delivered",
+        deliveredTurnId: internalTurn!.id,
+      },
+    ]);
+    expect(delivered[0]?.deliveredHistoryItemId).toBeTruthy();
+    const claimedHistory = await getActiveSessionHistoryItems(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+    );
+    expect(claimedHistory).toHaveLength(1);
+    expect(claimedHistory[0]?.item).toMatchObject({
+      type: "message",
+      role: "system",
+    });
+    expect(String(claimedHistory[0]?.item.content)).toContain(update.update.id);
     await applySessionTurnSettlement(client.db, grant.workspaceId!, {
       sessionId: session.id,
       turnId: internalTurn!.id,
@@ -2311,10 +2705,15 @@ describe("clean session control plane", () => {
         { type: "session.status.changed", payload: { status: "idle" } },
       ],
     });
+    expect(
+      (await listSessionEvents(client.db, grant.workspaceId!, session.id))
+        .filter((event) => event.type.startsWith("system.update."))
+        .map((event) => event.type),
+    ).toEqual(["system.update.pending", "system.update.delivered", "system.update.settled"]);
 
     expect(
       await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, session.id),
-    ).toMatchObject([{ id: update.update.id, state: "deferred", deliveredTurnId: null }]);
+    ).toEqual([]);
     expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
       kind: "idle",
     });
@@ -2333,10 +2732,97 @@ describe("clean session control plane", () => {
         session.id,
         promptTurn!.id,
       ),
-    ).toMatchObject([{ id: update.update.id, state: "delivered" }]);
+    ).toEqual([]);
+    const nextHistory = await getActiveSessionHistoryItems(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+    );
+    expect(nextHistory.slice(0, claimedHistory.length)).toEqual(claimedHistory);
+    expect(nextHistory.at(-1)?.item).toMatchObject({
+      type: "message",
+      role: "user",
+      content: "Use the child result now",
+    });
   });
 
-  test("a new internal update collapses deferred updates into one inference", async () => {
+  test("recovery reuses the exact persisted machine-input batch without duplicate delivery", async () => {
+    const { grant, session } = await fixture();
+    const update = await addSessionSystemUpdate(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      kind: "agent_message",
+      classification: "info",
+      sourceId: crypto.randomUUID(),
+      dedupeKey: `agent-${crypto.randomUUID()}`,
+      summary: "Durable direction",
+      payload: {
+        type: "agent_message",
+        text: "Durable direction",
+        operationId: crypto.randomUUID(),
+      },
+    });
+    if (!update.added) throw new Error("system update was not inserted");
+    const firstAttemptId = crypto.randomUUID();
+    const firstTurn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId: firstAttemptId },
+    );
+    if (!firstTurn) throw new Error("machine-input turn was not claimed");
+    const beforeRecovery = await getActiveSessionHistoryItems(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+    );
+    expect(beforeRecovery).toHaveLength(1);
+    const [firstDelivery] = await listSessionSystemUpdatesForTurn(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      firstTurn.id,
+    );
+    expect(firstDelivery?.deliveredHistoryItemId).toBeTruthy();
+
+    expect(
+      await recoverSessionDispatch(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        attemptId: firstAttemptId,
+        timeoutType: "HEARTBEAT",
+        maxRedispatches: 3,
+      }),
+    ).toMatchObject({ action: "recovering", turnId: firstTurn.id });
+    const recovered = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId: crypto.randomUUID() },
+    );
+    expect(recovered?.id).toBe(firstTurn.id);
+    expect(await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)).toEqual(
+      beforeRecovery,
+    );
+    expect(
+      await listSessionSystemUpdatesForTurn(
+        client.db,
+        grant.workspaceId!,
+        session.id,
+        firstTurn.id,
+      ),
+    ).toMatchObject([
+      {
+        id: update.update.id,
+        state: "delivered",
+        deliveredHistoryItemId: firstDelivery?.deliveredHistoryItemId,
+      },
+    ]);
+  });
+
+  test("a new machine input after a failed batch creates only one new inference", async () => {
     const { grant, session } = await fixture();
     const first = await addSessionSystemUpdate(client.db, {
       accountId: grant.accountId,
@@ -2397,7 +2883,7 @@ describe("clean session control plane", () => {
     );
     expect(retryTurn).toMatchObject({
       source: "system",
-      metadata: { internalUpdateCount: 2 },
+      metadata: { internalUpdateCount: 1 },
     });
     expect(
       (
@@ -2408,7 +2894,7 @@ describe("clean session control plane", () => {
           retryTurn!.id,
         )
       ).map((entry) => entry.id),
-    ).toEqual(expect.arrayContaining([first.update.id, second.update.id]));
+    ).toEqual([second.update.id]);
   });
 
   test("a compaction failure holds ordinary internal updates without blocking explicit Compact", async () => {
@@ -2508,7 +2994,7 @@ describe("clean session control plane", () => {
     ).toContain(held.update.id);
   });
 
-  test("a failed goal-continuation notice is terminal instead of replayable", async () => {
+  test("a model-visible goal-continuation notice remains delivered after turn failure", async () => {
     const { grant, session } = await fixture();
     const goal = await createSessionGoal(client.db, {
       accountId: grant.accountId,
@@ -2555,11 +3041,15 @@ describe("clean session control plane", () => {
     });
     const [stored] = await withWorkspaceRls(client.db, grant.workspaceId!, async (db) =>
       db
-        .select({ state: schema.sessionSystemUpdates.state })
+        .select({
+          state: schema.sessionSystemUpdates.state,
+          historyItemId: schema.sessionSystemUpdates.deliveredHistoryItemId,
+        })
         .from(schema.sessionSystemUpdates)
         .where(eq(schema.sessionSystemUpdates.id, update.update.id)),
     );
-    expect(stored?.state).toBe("failed");
+    expect(stored?.state).toBe("delivered");
+    expect(stored?.historyItemId).toBeTruthy();
     expect(
       await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, session.id),
     ).toEqual([]);
@@ -2940,6 +3430,68 @@ describe("clean session control plane", () => {
     ).toEqual(events);
   });
 
+  test("a closed interrupted attempt converges from its fully settled durable writer set", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "run the predecessor");
+    const attemptId = crypto.randomUUID();
+    const workflowId = `session-${session.id}`;
+    const workflowRunId = crypto.randomUUID();
+    const dispatchId = `dispatch-${crypto.randomUUID()}`;
+    const predecessor = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      workflowId,
+      { attemptId, workflowRunId, dispatchId },
+    );
+    expect(predecessor).not.toBeNull();
+    const steered = await send(grant, session.id, "replace the vanished worker", "steer");
+    await settleSessionAttemptInterruptions(client.db, grant.workspaceId!, session.id, attemptId);
+    expect(
+      await markSessionWorkflowWakeDelivered(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        temporalWorkflowId: workflowId,
+        wakeRevision: steered.wakeRevision,
+      }),
+    ).toEqual({ action: "pending_admission", blocker: "pending_quiescence" });
+
+    const recovered = await reconcileSessionAttemptQuiescence(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      attemptId,
+      temporalWorkflowId: workflowId,
+      temporalWorkflowRunId: workflowRunId,
+      temporalActivityId: dispatchId,
+      activitySettled: true,
+    });
+    expect(recovered).toMatchObject({
+      action: "quiesced",
+      events: [
+        {
+          type: "session.queue.changed",
+          turnId: predecessor!.id,
+          turnAttemptId: attemptId,
+          payload: expect.objectContaining({ operation: "attempt_quiesced", attemptId }),
+        },
+      ],
+    });
+    expect(
+      await reconcileSessionAttemptQuiescence(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        attemptId,
+        temporalWorkflowId: workflowId,
+        temporalWorkflowRunId: workflowRunId,
+        temporalActivityId: dispatchId,
+        activitySettled: true,
+      }),
+    ).toEqual({ action: "quiesced", events: [] });
+  });
+
   test("worker death recovers the same compaction execution without entering the queue", async () => {
     const { grant, session } = await fixture();
     await requestSessionCompaction(client.db, grant.workspaceId!, session.id);
@@ -3298,7 +3850,12 @@ describe("clean session control plane", () => {
       ),
     ).toMatchObject({
       state: "active",
-      settlement: { state: "stopping", attemptCount: 1 },
+      settlement: {
+        state: "stopping",
+        attemptCount: 1,
+        interruptionPendingCount: 1,
+        quiescencePendingCount: 0,
+      },
     });
   });
 
@@ -3890,6 +4447,18 @@ describe("clean session control plane", () => {
       { attemptId: firstAttemptId },
     );
     if (!turn) throw new Error("approval test turn was not claimed");
+    expect(
+      await saveRunState(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn.id,
+        expectedExecutionGeneration: turn.executionGeneration,
+        expectedAttemptId: firstAttemptId,
+        serializedRunState: "approval-race-state",
+        pendingApprovals: [{ id: "approval-race" }],
+      }),
+    ).toBe(true);
     await applySessionTurnSettlement(client.db, grant.workspaceId!, {
       sessionId: session.id,
       turnId: turn.id,
@@ -3951,6 +4520,66 @@ describe("clean session control plane", () => {
       triggerEventId: accepted.event.id,
       executionGeneration: turn.executionGeneration + 1,
     });
+  });
+
+  test("approval admission rejects an id outside the current saved run boundary", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "wait for the exact approval");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    if (!turn) throw new Error("approval identity test turn was not claimed");
+    expect(
+      await saveRunState(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn.id,
+        expectedExecutionGeneration: turn.executionGeneration,
+        expectedAttemptId: attemptId,
+        serializedRunState: "approval-identity-state",
+        pendingApprovals: [{ id: "approval-current" }, { rawItem: { callId: "approval-second" } }],
+      }),
+    ).toBe(true);
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: turn.id,
+      triggerEventId: turn.triggerEventId,
+      attemptId,
+      turnStatus: "requires_action",
+      sessionStatus: "requires_action",
+      activeTurnId: turn.id,
+      events: [
+        {
+          type: "session.requiresAction",
+          payload: { approvals: [{ id: "approval-current" }] },
+        },
+      ],
+    });
+
+    expect(
+      await acceptSessionApprovalDecision(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        payload: { approvalId: "approval-stale", decision: "approve" },
+        clientEventId: crypto.randomUUID(),
+      }),
+    ).toEqual({ action: "conflict", sessionStatus: "requires_action" });
+
+    const accepted = await acceptSessionApprovalDecision(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      payload: { approvalId: "approval-current", decision: "approve" },
+      clientEventId: crypto.randomUUID(),
+    });
+    expect(accepted.action).toBe("accepted");
   });
 
   test("a committed session control command replays before its stale control fence is checked", async () => {

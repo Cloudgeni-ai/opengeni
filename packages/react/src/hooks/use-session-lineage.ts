@@ -1,9 +1,12 @@
 import type { SessionEvent, SessionLineageResponse } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef } from "react";
-import { useOpenGeni, type ClientOverride } from "../provider";
+import {
+  useEmbeddedSessionLineage,
+  type EmbeddedSessionLineageClientOverride,
+} from "../session-context";
 import { useDebouncedCallback, usePolledValue, useSessionEventTrigger } from "./internal";
 
-export type UseSessionLineageOptions = ClientOverride & {
+export type UseSessionLineageOptions = EmbeddedSessionLineageClientOverride & {
   events?: SessionEvent[] | undefined;
   /** Refresh interval (ms). Off by default. */
   pollIntervalMs?: number | undefined;
@@ -58,7 +61,7 @@ export function useSessionLineage(
   options: UseSessionLineageOptions = {},
 ): UseSessionLineageResult {
   const { client, workspaceId, workspaceControlEvent, registerSessionReconciler } =
-    useOpenGeni(options);
+    useEmbeddedSessionLineage(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
   const load = useCallback(
     async () =>

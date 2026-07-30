@@ -34,8 +34,10 @@ describe("workspace environment secret redaction", () => {
     expect(redact("abc appears verbatim")).toBe("abc appears verbatim");
   });
 
-  test("returns the identity function when no usable secrets exist", () => {
-    expect(createSecretRedactor([])).toBe(identityRedactor);
+  test("keeps generic classification active without exact known secrets", () => {
+    expect(createSecretRedactor([])("Authorization: Bearer synthetic-token-value-123456")).toBe(
+      "Authorization: Bearer [redacted]",
+    );
     const payload = { keep: "everything" };
     expect(identityRedactor(payload)).toBe(payload);
   });

@@ -32,7 +32,7 @@ import { createActivityTestHarness } from "../../apps/worker/src/activities";
 import { currentActivityContext } from "../../apps/worker/src/activities/streaming";
 import {
   CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
-  TURN_WORKER_MAX_CONCURRENT_TURNS,
+  turnWorkerConcurrencyOptions,
 } from "../../apps/worker/src/concurrency";
 import { turnTaskQueue } from "../../apps/worker/src/workflows/activities";
 import { submitTestHumanPrompt } from "./helpers/session-control";
@@ -733,7 +733,7 @@ async function restartTestWorker(
       namespace: "default",
       taskQueue: turnTaskQueue(taskQueue),
       activities: { runAgentTurn },
-      maxConcurrentActivityTaskExecutions: TURN_WORKER_MAX_CONCURRENT_TURNS,
+      ...turnWorkerConcurrencyOptions(testSettings()),
     }),
   ]);
   return {

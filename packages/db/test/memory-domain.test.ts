@@ -410,13 +410,18 @@ describe("renderWorkspaceMemoryBlock", () => {
       record({ id: "55555555-0000-4000-8000-000000000000", kind: "episodic", text: "excluded" }),
     ])!;
     expect(block.startsWith(WORKSPACE_MEMORY_BLOCK_HEADER_POPULATED)).toBe(true);
-    expect(block).toContain("### Preferences\n- [11111111] Prefer Terraform.");
+    expect(block).toContain(
+      "### Preference observations (non-authoritative)\n- [11111111] Prefer Terraform.",
+    );
+    expect(block).toContain("must never activate one");
     expect(block).toContain("### Facts & environment\n- [22222222] Staging deploys from main.");
     expect(block).toContain("### How we do things");
     expect(block).toContain("### Decisions");
     expect(block).not.toContain("excluded");
     // Sections appear in the fixed order preference -> semantic -> procedural -> decision.
-    expect(block.indexOf("### Preferences")).toBeLessThan(block.indexOf("### Facts & environment"));
+    expect(block.indexOf("### Preference observations")).toBeLessThan(
+      block.indexOf("### Facts & environment"),
+    );
     expect(block.indexOf("### Facts & environment")).toBeLessThan(
       block.indexOf("### How we do things"),
     );

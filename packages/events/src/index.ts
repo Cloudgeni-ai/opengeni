@@ -956,7 +956,10 @@ function observeEventBoundaries(events: readonly SessionEvent[], logger?: EventL
       reason: boundary.reason,
       originalBytes: boundary.originalBytes,
       deliveredBytes: boundary.deliveredBytes,
-      fullEvidenceAvailable: false,
+      estimatedOriginalTokens: boundary.estimatedOriginalTokens,
+      estimatedDeliveredTokens: boundary.estimatedDeliveredTokens,
+      fullEvidenceAvailable: boundary.fullEvidence.available,
+      retainedOutputKind: boundary.fullEvidence.available ? boundary.fullEvidence.kind : null,
     });
   }
 }

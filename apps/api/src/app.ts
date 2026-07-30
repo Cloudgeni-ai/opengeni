@@ -1,14 +1,19 @@
 import {
+  canonicalizeConfiguredModelId,
   configuredAllowedModels,
   configuredAllowedReasoningEfforts,
   configuredModels,
+  withCodexCatalogProvider,
 } from "@opengeni/config";
 import {
   ClientConfig,
+  ErrorEnvelope,
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
+  OPENGENI_CORRELATION_HEADER,
   resolveWorkspaceMemoryEnabled,
   type AccessGrant,
+  type ErrorCode,
 } from "@opengeni/contracts";
 import {
   createDocumentServices,
@@ -23,13 +28,22 @@ import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
 import { HTTPException } from "hono/http-exception";
+import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { ApiRouteDeps, AppDependencies } from "@opengeni/core";
-import { hasPermission, requireAccessGrant, requirePermission } from "@opengeni/core";
+import {
+  hasPermission,
+  requireAccessGrant,
+  requirePermission,
+  requireSessionAuthorization,
+  SessionAuthorizationDeniedError,
+  SessionAuthorizationUnavailableError,
+} from "@opengeni/core";
 import { createManagedAuth } from "./auth/managed-auth";
 import { createApiSandboxClient, makeResumeBoxById } from "./sandbox/access";
 import { requireLimit } from "@opengeni/core";
 import { buildOpenGeniMcpServer } from "./mcp/server";
 import { isToolspaceGrant, prepareToolspaceMcpSurface } from "./mcp/toolspace";
+import { boundedMcpRequest, McpPayloadTooLargeError } from "@opengeni/runtime/mcp-network";
 import { requireAccessKey } from "./http/auth";
 import { registerCapabilityRoutes } from "./routes/capabilities";
 import { registerCatalogAssetRoutes } from "./routes/catalog-assets";
@@ -50,6 +64,8 @@ import { registerScheduledTaskRoutes } from "./routes/scheduled-tasks";
 import { registerSessionRoutes } from "./routes/sessions";
 import { registerSocialRoutes } from "./routes/social";
 import { registerWorkspaceRoutes } from "./routes/workspaces";
+import { registerWorkspaceInstructionPolicyRoutes } from "./routes/workspace-instruction-policies";
+import { projectClientModel } from "./model-catalog";
 
 export type {
   ApiRouteDeps,
@@ -65,6 +81,7 @@ export {
   validateFileResources,
   validateGitHubRepositorySelection,
   validateGitHubRepositorySelectionShape,
+  validateGitHubRepositorySelectionShapes,
   validateToolRefs,
   withDefaultEnabledCapabilityMcpTools,
 } from "@opengeni/core";
@@ -72,6 +89,7 @@ export { workflowIdForSession } from "@opengeni/core";
 export { replaySessionEvents, sseSessionStream, sseWorkspaceControlStream } from "./http/sse";
 
 export const API_MAX_REQUEST_BODY_BYTES = 8 * 1024 * 1024;
+const API_PUBLIC_ERROR_MESSAGE_MAX_BYTES = 512;
 
 export function createApp(deps: AppDependencies): Hono {
   const managedAuth = deps.managedAuth ?? createManagedAuth(deps.settings, deps.db);
@@ -137,6 +155,15 @@ export function createApp(deps: AppDependencies): Hono {
     resumeBoxById,
   };
   const app = new Hono();
+  const correlationIds = new WeakMap<Request, string>();
+
+  app.use("*", async (c, next) => {
+    const correlationId =
+      boundedCorrelationId(c.req.header(OPENGENI_CORRELATION_HEADER)) ?? crypto.randomUUID();
+    correlationIds.set(c.req.raw, correlationId);
+    c.header(OPENGENI_CORRELATION_HEADER, correlationId);
+    await next();
+  });
 
   app.use(
     "*",
@@ -148,9 +175,10 @@ export function createApp(deps: AppDependencies): Hono {
         "Content-Type",
         "X-OpenGeni-Access-Key",
         "X-OpenGeni-Api-Contract",
+        "X-OpenGeni-Correlation-Id",
         "X-OpenGeni-Subject",
       ],
-      exposeHeaders: ["X-OpenGeni-Api-Contract"],
+      exposeHeaders: ["X-OpenGeni-Api-Contract", "X-OpenGeni-Correlation-Id"],
       origin: (origin) => {
         if (!origin) {
           return null;
@@ -172,6 +200,7 @@ export function createApp(deps: AppDependencies): Hono {
   app.use("*", async (c, next) => {
     const url = new URL(c.req.url);
     const route = routeLabel(url.pathname);
+    const correlationId = correlationIds.get(c.req.raw) ?? crypto.randomUUID();
     const start = performance.now();
     const span = observability.startSpan(`HTTP ${c.req.method} ${route}`, {
       "http.request.method": c.req.method,
@@ -201,15 +230,22 @@ export function createApp(deps: AppDependencies): Hono {
         durationMs: Math.round(durationSeconds * 1000),
         traceId: span.traceId,
         spanId: span.spanId,
+        correlationId,
       });
     } catch (error) {
       const status = httpStatusForError(error);
+      const errorCode = errorCodeForStatus(status);
       const durationSeconds = (performance.now() - start) / 1000;
       observability.recordHttpRequest({
         method: c.req.method,
         route,
         status,
         durationSeconds,
+      });
+      observability.incrementCounter({
+        name: "opengeni_http_errors_total",
+        help: "Total OpenGeni HTTP request failures by bounded route, status, and stable code.",
+        labels: { route, status: String(status), code: errorCode },
       });
       span.end({
         attributes: {
@@ -225,7 +261,9 @@ export function createApp(deps: AppDependencies): Hono {
         durationMs: Math.round(durationSeconds * 1000),
         traceId: span.traceId,
         spanId: span.spanId,
-        error: error instanceof Error ? error.message : String(error),
+        correlationId,
+        errorCode,
+        errorClass: error instanceof Error ? error.name : "NonErrorThrown",
       });
       throw error;
     }
@@ -271,6 +309,12 @@ export function createApp(deps: AppDependencies): Hono {
     return c.json(result, result.ok ? 200 : 503);
   });
 
+  app.get("/traffic-readyz", async (c) => {
+    const { db } = readinessChecks(deps);
+    const result = await runReadinessChecks({ db }, 2_000);
+    return c.json(result, result.ok ? 200 : 503);
+  });
+
   app.get("/metrics", async (c) =>
     c.text(await observability.prometheusMetrics(), 200, {
       "content-type": "text/plain; version=0.0.4; charset=utf-8",
@@ -279,27 +323,21 @@ export function createApp(deps: AppDependencies): Hono {
 
   app.get("/v1/config/client", (c) => {
     c.header("cache-control", "no-store");
+    const catalogSettings = deps.settings.codexSubscriptionEnabled
+      ? withCodexCatalogProvider(deps.settings)
+      : deps.settings;
     return c.json(
       ClientConfig.parse({
         deploymentRevision: deps.settings.deploymentRevision,
         apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
         ...(deps.settings.serverVersion ? { serverVersion: deps.settings.serverVersion } : {}),
-        defaultModel: deps.settings.openaiModel,
-        allowedModels: configuredAllowedModels(deps.settings),
+        defaultModel: canonicalizeConfiguredModelId(catalogSettings, catalogSettings.openaiModel),
+        allowedModels: configuredAllowedModels(catalogSettings),
         // Provider-grouped model list for the picker. configuredModels() carries the
         // union of the built-in allow-list and every registry provider's models, in
         // selection order (default model first); project each to the client-safe
         // ClientModel shape (ConfiguredModel.providerId → ClientModel.provider).
-        models: configuredModels(deps.settings).map((model) => ({
-          id: model.id,
-          label: model.label,
-          provider: model.providerId,
-          providerLabel: model.providerLabel,
-          api: model.api,
-          ...(model.contextWindowTokens === undefined
-            ? {}
-            : { contextWindowTokens: model.contextWindowTokens }),
-        })),
+        models: configuredModels(catalogSettings).map(projectClientModel),
         defaultReasoningEffort: deps.settings.openaiReasoningEffort,
         allowedReasoningEfforts: configuredAllowedReasoningEfforts(deps.settings),
         mcpServers: deps.settings.mcpServers.map((server) => ({
@@ -322,10 +360,49 @@ export function createApp(deps: AppDependencies): Hono {
 
   app.all("/v1/workspaces/:workspaceId/mcp", async (c) => {
     const workspaceId = c.req.param("workspaceId");
+    let boundedRequest: Request;
+    try {
+      boundedRequest = await boundedMcpRequest(c.req.raw);
+    } catch (error) {
+      if (error instanceof McpPayloadTooLargeError) {
+        throw new HTTPException(413, { message: "MCP request body exceeds the safety limit" });
+      }
+      throw error;
+    }
     const grant = await requireMcpAccessGrant(c, routeDeps, workspaceId);
-    const toolspace = isToolspaceGrant(routeDeps.settings, grant)
-      ? await prepareToolspaceMcpSurface({ deps: routeDeps, grant })
-      : null;
+    const toolspaceGrant = isToolspaceGrant(routeDeps.settings, grant);
+    const boundSessionId = grant.metadata?.sessionId;
+    if (toolspaceGrant || typeof boundSessionId === "string") {
+      if (typeof boundSessionId !== "string") {
+        throw new HTTPException(404, { message: "session not found" });
+      }
+      try {
+        await requireSessionAuthorization(routeDeps, grant, {
+          sessionId: boundSessionId,
+          operation: toolspaceGrant ? "session.toolspace.call" : "session.first_party_mcp.call",
+          surface: toolspaceGrant ? "toolspace" : "first_party_mcp",
+        });
+      } catch (error) {
+        if (error instanceof SessionAuthorizationDeniedError) {
+          throw new HTTPException(404, { message: "session not found" });
+        }
+        if (error instanceof SessionAuthorizationUnavailableError) {
+          throw new HTTPException(503, { message: "session authorization is unavailable" });
+        }
+        throw error;
+      }
+    }
+    let toolspace: Awaited<ReturnType<typeof prepareToolspaceMcpSurface>> = null;
+    if (toolspaceGrant) {
+      try {
+        toolspace = await prepareToolspaceMcpSurface({ deps: routeDeps, grant });
+      } catch (error) {
+        if (error instanceof McpPayloadTooLargeError) {
+          throw new HTTPException(413, { message: "MCP tool list exceeds the safety limit" });
+        }
+        throw error;
+      }
+    }
     const workspace = await getWorkspace(routeDeps.db, workspaceId);
     const workspaceMemoryEnabled = resolveWorkspaceMemoryEnabled(workspace?.settings);
     const transport = new WebStandardStreamableHTTPServerTransport({
@@ -338,7 +415,7 @@ export function createApp(deps: AppDependencies): Hono {
     });
     try {
       await mcp.connect(transport);
-      return await transport.handleRequest(c.req.raw);
+      return await transport.handleRequest(boundedRequest);
     } finally {
       await toolspace?.close().catch(() => undefined);
     }
@@ -351,6 +428,7 @@ export function createApp(deps: AppDependencies): Hono {
   registerGitHubRoutes(app, routeDeps);
   registerInstallRoutes(app, routeDeps);
   registerWorkspaceRoutes(app, routeDeps);
+  registerWorkspaceInstructionPolicyRoutes(app, routeDeps);
   registerSocialRoutes(app, routeDeps);
   registerConnectionRoutes(app, routeDeps);
   registerCapabilityRoutes(app, routeDeps);
@@ -363,6 +441,43 @@ export function createApp(deps: AppDependencies): Hono {
   registerSessionRoutes(app, routeDeps);
   registerScheduledTaskRoutes(app, routeDeps);
   registerCodexRoutes(app, routeDeps);
+
+  app.notFound((c) => {
+    if (!new URL(c.req.url).pathname.startsWith("/v1/")) return c.text("Not Found", 404);
+    const requestId = correlationIds.get(c.req.raw) ?? crypto.randomUUID();
+    return c.json(
+      ErrorEnvelope.parse({
+        error: {
+          status: 404,
+          code: "not_found",
+          message: "Resource not found.",
+          retryable: false,
+          requestId,
+        },
+      }),
+      404,
+    );
+  });
+
+  app.onError((error, c) => {
+    const status = httpStatusForError(error);
+    const code = errorCodeForStatus(status);
+    const requestId = correlationIds.get(c.req.raw) ?? crypto.randomUUID();
+    c.header(OPENGENI_CORRELATION_HEADER, requestId);
+    if (new URL(c.req.url).pathname.startsWith("/v1/")) {
+      c.header(OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION);
+    }
+    const envelope = ErrorEnvelope.parse({
+      error: {
+        status,
+        code,
+        message: publicErrorMessage(error, status),
+        retryable: retryableHttpStatus(status),
+        requestId,
+      },
+    });
+    return c.json(envelope, status as ContentfulStatusCode);
+  });
 
   return app;
 }
@@ -377,6 +492,13 @@ async function requireMcpAccessGrant(
     return grant;
   }
   if (isToolspaceGrant(deps.settings, grant)) {
+    return grant;
+  }
+  // A worker-signed session-bound grant is allowed to reach the transport
+  // without inheriting broad workspace read access. The exact session
+  // authorization seam runs immediately after this gate, and tool registration
+  // still exposes only capabilities permitted by the delegated grant.
+  if (grant.metadata?.delegated === true && typeof grant.metadata.sessionId === "string") {
     return grant;
   }
   requirePermission(grant, "workspace:read");
@@ -420,11 +542,61 @@ export function httpStatusForError(error: unknown): number {
   if (error instanceof HTTPException) {
     return error.status;
   }
+  if (error instanceof McpPayloadTooLargeError) {
+    return 413;
+  }
   return 500;
 }
 
+export function errorCodeForStatus(status: number): ErrorCode {
+  if (status === 401) return "unauthenticated";
+  if (status === 402) return "payment_required";
+  if (status === 403) return "forbidden";
+  if (status === 404) return "not_found";
+  if (status === 409) return "conflict";
+  if (status === 413 || status === 422 || status === 400) return "validation_failed";
+  if (status === 429) return "limit_exceeded";
+  if (status === 502 || status === 503 || status === 504) return "upstream_unavailable";
+  return "internal_error";
+}
+
+function retryableHttpStatus(status: number): boolean {
+  return status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
+function publicErrorMessage(error: unknown, status: number): string {
+  if (status === 502 || status === 503 || status === 504) {
+    return "OpenGeni is temporarily unavailable — retry.";
+  }
+  if (status >= 500) {
+    return "OpenGeni could not complete the request.";
+  }
+  if (error instanceof HTTPException) {
+    return boundedPublicMessage(error.message) ?? "Request failed.";
+  }
+  if (error instanceof McpPayloadTooLargeError) {
+    return "Request payload is too large.";
+  }
+  return "Request failed.";
+}
+
+function boundedPublicMessage(value: string): string | null {
+  const normalized = value.replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
+  if (!normalized) return null;
+  const bytes = new TextEncoder().encode(normalized);
+  if (bytes.byteLength <= API_PUBLIC_ERROR_MESSAGE_MAX_BYTES) return normalized;
+  return new TextDecoder().decode(bytes.slice(0, API_PUBLIC_ERROR_MESSAGE_MAX_BYTES)).trim();
+}
+
+function boundedCorrelationId(value: string | undefined): string | null {
+  if (!value || value.length > 128 || !/^[A-Za-z0-9._:-]+$/.test(value)) return null;
+  return value;
+}
+
 type ReadinessCheckName = "db" | "nats" | "temporal";
-type ReadinessChecks = Record<ReadinessCheckName, () => Promise<void> | void>;
+type ReadinessCheck = () => Promise<void> | void;
+type ReadinessChecks = Record<ReadinessCheckName, ReadinessCheck>;
+type ReadinessCheckResult = { ok: boolean; error?: string };
 
 function readinessChecks(deps: AppDependencies): ReadinessChecks {
   return {
@@ -449,35 +621,30 @@ function readinessChecks(deps: AppDependencies): ReadinessChecks {
   };
 }
 
-async function runReadinessChecks(
-  checks: ReadinessChecks,
+async function runReadinessChecks<const Checks extends Readonly<Record<string, ReadinessCheck>>>(
+  checks: Checks,
   timeoutMs: number,
 ): Promise<{
   ok: boolean;
-  checks: Record<ReadinessCheckName, { ok: boolean; error?: string }>;
+  checks: { [Name in keyof Checks]: ReadinessCheckResult };
 }> {
   const entries = await Promise.all(
-    (Object.entries(checks) as Array<[ReadinessCheckName, () => Promise<void> | void]>).map(
-      async ([name, check]) => {
-        try {
-          await withTimeout(Promise.resolve().then(check), timeoutMs);
-          return [name, { ok: true }] as const;
-        } catch (error) {
-          return [
-            name,
-            {
-              ok: false,
-              error: error instanceof Error ? error.message : String(error),
-            },
-          ] as const;
-        }
-      },
-    ),
+    (Object.entries(checks) as Array<[keyof Checks, ReadinessCheck]>).map(async ([name, check]) => {
+      try {
+        await withTimeout(Promise.resolve().then(check), timeoutMs);
+        return [name, { ok: true }] as const;
+      } catch (error) {
+        return [
+          name,
+          {
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+          },
+        ] as const;
+      }
+    }),
   );
-  const result = Object.fromEntries(entries) as Record<
-    ReadinessCheckName,
-    { ok: boolean; error?: string }
-  >;
+  const result = Object.fromEntries(entries) as { [Name in keyof Checks]: ReadinessCheckResult };
   return {
     ok: Object.values(result).every((check) => check.ok),
     checks: result,
@@ -506,6 +673,7 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T
 const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /^\/healthz$/, label: "/healthz" },
   { pattern: /^\/readyz$/, label: "/readyz" },
+  { pattern: /^\/traffic-readyz$/, label: "/traffic-readyz" },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/codex\/connect\/start$/,
     label: "/v1/workspaces/:workspaceId/codex/connect/start",
@@ -543,6 +711,10 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/mcp\/docs$/,
     label: "/v1/workspaces/:workspaceId/mcp/docs",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/mcp\/files$/,
+    label: "/v1/workspaces/:workspaceId/mcp/files",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/default-rig$/,
@@ -633,6 +805,14 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
     label: "/v1/workspaces/:workspaceId/files/:id",
   },
   {
+    pattern: /^\/v1\/workspaces\/[^/]+\/artifacts\/[^/]+\/content$/,
+    label: "/v1/workspaces/:workspaceId/artifacts/:id/content",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/artifacts\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId/artifacts/:id",
+  },
+  {
     pattern: /^\/v1\/workspaces\/[^/]+\/api-keys$/,
     label: "/v1/workspaces/:workspaceId/api-keys",
   },
@@ -717,6 +897,14 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
     label: "/v1/workspaces/:workspaceId/github/connect",
   },
   {
+    pattern: /^\/v1\/workspaces\/[^/]+\/github\/installations\/select$/,
+    label: "/v1/workspaces/:workspaceId/github/installations/select",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/github\/installations\/[^/]+\/configure$/,
+    label: "/v1/workspaces/:workspaceId/github/installations/:installationId/configure",
+  },
+  {
     pattern: /^\/v1\/workspaces\/[^/]+\/github\/installations$/,
     label: "/v1/workspaces/:workspaceId/github/installations",
   },
@@ -793,6 +981,10 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
     label: "/v1/workspaces/:workspaceId/connections/oauth/start",
   },
   {
+    pattern: /^\/v1\/workspaces\/[^/]+\/connections\/slack-bot\/install$/,
+    label: "/v1/workspaces/:workspaceId/connections/slack-bot/install",
+  },
+  {
     pattern: /^\/v1\/workspaces\/[^/]+\/connections\/[^/]+$/,
     label: "/v1/workspaces/:workspaceId/connections/:connectionId",
   },
@@ -804,6 +996,10 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
   {
     pattern: /^\/v1\/integrations\/oauth\/client-metadata\.json$/,
     label: "/v1/integrations/oauth/client-metadata.json",
+  },
+  {
+    pattern: /^\/v1\/integrations\/slack\/callback$/,
+    label: "/v1/integrations/slack/callback",
   },
   {
     pattern: /^\/v1\/enrollments\/device\/start$/,

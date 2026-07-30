@@ -12,9 +12,10 @@
 // Built on `session.exec(args): Promise<SandboxExecResult>`, which
 // returns RAW {stdout,stderr,exitCode} on the agents-core local/docker sessions
 // (and Modal/the extensions providers expose the equivalent). `execCommand`
-// returns a BANNER-DECORATED string (formatExecResponse) — NEVER used for
-// parsing; only as a last-resort fallback when `exec` is absent, with the banner
-// stripped. `readFile` returns string|Uint8Array (binary-safe). Writes go
+// returns a BANNER-DECORATED string (formatExecResponse). Structured reads use
+// it only with bounded, explicit framing and strip the banner before parsing;
+// raw `exec` remains preferred. `readFile` returns string|Uint8Array
+// (binary-safe). Writes go
 // through `exec` (a base64 heredoc — raw + binary capable, unlike createEditor's
 // apply-patch-only path which cannot do binary, C4), falling back to
 // `createEditor` for text when `exec` is absent.
@@ -58,6 +59,21 @@ import type {
   TerminalExecRequest,
   TerminalExecResponse,
 } from "@opengeni/contracts";
+import {
+  isExecSessionLostBanner,
+  parseExecBannerExitCode,
+  parseExecBannerSessionId,
+} from "./exec-banner";
+import {
+  createTurnToolCancellationController,
+  TurnSandboxCommandCancelledError,
+} from "./turn-tool-cancellation";
+
+export {
+  isExecSessionLostBanner,
+  parseExecBannerExitCode,
+  parseExecBannerSessionId,
+} from "./exec-banner";
 
 // ── The minimal session surface Channel A consumes (a structural subset of the
 // SDK's SandboxSession, all optional — capability-probed before use). ─────────
@@ -98,6 +114,21 @@ export type ChannelASession = {
     yieldTimeMs?: number;
     maxOutputTokens?: number;
   }): Promise<string>;
+  writeStdinForProcessMutation?(args: {
+    sessionId: number;
+    chars?: string;
+    yieldTimeMs?: number;
+    maxOutputTokens?: number;
+  }): Promise<string>;
+  writeStdinForProcessControl?(args: {
+    sessionId: number;
+    chars?: string;
+    yieldTimeMs?: number;
+    maxOutputTokens?: number;
+  }): Promise<string>;
+  cancelExecCommand?(opId: string): Promise<boolean>;
+  hasRetainedProcess?(providerSessionId: number): boolean;
+  execCommandForProcessControl?(providerSessionId: number, args: ChannelAExecArgs): Promise<string>;
   createEditor?(runAs?: string): ChannelAEditor;
   supportsPty?(): boolean;
 };
@@ -182,6 +213,12 @@ const FS_LIST_TRUNCATED_MARKER = "__OPENGENI_FS_LIST_TRUNCATED__";
 // stream. Leave ample framing/translation headroom and emit an explicit marker
 // instead of allowing the SDK to drop the tree's leading parent records.
 const FS_LIST_MAX_OUTPUT_BYTES = 768 * 1024;
+// Modal and the local SDK retain at most 1 MiB of command output and discard
+// the prefix when that limit is crossed. Git's NUL-delimited metadata and
+// unified patches therefore travel as bounded base64 chunks. 512 KiB of raw
+// data expands to ~683 KiB, leaving room for confinement/provider framing.
+const GIT_COMMAND_CHUNK_BYTES = 512 * 1024;
+const GIT_METADATA_MAX_BYTES = 2 * 1024 * 1024;
 const US = String.fromCharCode(0x1f); // \x1f unit sep — git-log field separator
 const RS = String.fromCharCode(0x1e); // \x1e record sep — git-log record separator
 const SELFHOSTED_VIRTUAL_ROOT = "/workspace";
@@ -226,8 +263,9 @@ export class SandboxChannelAService {
   // ════════════════════════════ exec primitive ══════════════════════════════
   // RAW exec — returns {stdout, stderr, exitCode}. Uses session.exec when present
   // (the local/docker sessions return raw output); falls back to execCommand +
-  // a banner strip (last resort; banner-truncation can mangle, so exec is always
-  // preferred). Throws ChannelAUnsupportedError when neither exists.
+  // a banner strip. Callers that parse output must independently bound/frame it
+  // because provider retained-output truncation drops command prefixes. Throws
+  // ChannelAUnsupportedError when neither exists.
   private async run(args: ChannelAExecArgs): Promise<{
     stdout: string;
     stderr: string;
@@ -767,6 +805,141 @@ export class SandboxChannelAService {
 
   // ════════════════════════════ Git (A2, read-only) ═════════════════════════
 
+  /** Measure one Git command without returning its potentially large or
+   * NUL-bearing output through the provider's text transport. */
+  private async measureConfinedCommandBytes(repo: string, command: string): Promise<number> {
+    const measured = await this.runInConfinedDirectory(repo, {
+      cmd: [
+        "set -o pipefail",
+        `{ ${command}; } 2>/dev/null | { bytes=$(wc -c | tr -d ' \\n'); printf '%s' "$bytes"; }`,
+        "producer_status=${PIPESTATUS[0]}",
+        "printf '\\t%s\\n' \"$producer_status\"",
+      ].join("; "),
+      maxOutputTokens: 1_024,
+    });
+    const match = measured.stdout.match(/^(\d+)\t(\d+)\n?$/);
+    if (
+      !match ||
+      (measured.exitCode !== null && measured.exitCode !== 0) ||
+      Number(match[2]) !== 0
+    ) {
+      throw new ChannelAUnavailableError(
+        "Workspace Git data is temporarily unavailable. Retry the operation.",
+      );
+    }
+    const size = Number(match[1]);
+    if (!Number.isSafeInteger(size) || size < 0) {
+      throw new ChannelAUnavailableError(
+        "Workspace Git data is temporarily unavailable. Retry the operation.",
+      );
+    }
+    return size;
+  }
+
+  /** Read an exact prefix of a command's output in chunks that remain below
+   * every supported execCommand retained-output ceiling. The producer is
+   * intentionally rerun per chunk; turn-end capture calls this only after the
+   * durable mutation authority has quiesced the workspace. */
+  private async readConfinedCommandPrefix(
+    repo: string,
+    command: string,
+    byteLength: number,
+  ): Promise<Buffer> {
+    if (byteLength === 0) return Buffer.alloc(0);
+    const chunks: Buffer[] = [];
+    for (let offset = 0; offset < byteLength; offset += GIT_COMMAND_CHUNK_BYTES) {
+      const expected = Math.min(GIT_COMMAND_CHUNK_BYTES, byteLength - offset);
+      const chunk = await this.runInConfinedDirectory(repo, {
+        cmd: [
+          `{ ${command}; } 2>/dev/null`,
+          `tail -c +${offset + 1}`,
+          `head -c ${expected}`,
+          "base64",
+          `tr -d '\\n'`,
+        ].join(" | "),
+        maxOutputTokens: Math.ceil((GIT_COMMAND_CHUNK_BYTES * 4) / 3) + 1_024,
+      });
+      if (chunk.exitCode !== null && chunk.exitCode !== 0) {
+        throw new ChannelAUnavailableError(
+          "Workspace Git data is temporarily unavailable. Retry the operation.",
+        );
+      }
+      const encoded = chunk.stdout.replace(/\s/g, "");
+      const bytes = Buffer.from(encoded, "base64");
+      if (bytes.byteLength !== expected || bytes.toString("base64") !== encoded) {
+        throw new ChannelAUnavailableError(
+          "Workspace Git data is temporarily unavailable. Retry the operation.",
+        );
+      }
+      chunks.push(bytes);
+    }
+    return Buffer.concat(chunks, byteLength);
+  }
+
+  private async readConfinedCommandBytes(
+    repo: string,
+    command: string,
+    maxBytes: number,
+  ): Promise<{ bytes: Buffer; sizeBytes: number; truncated: boolean }> {
+    const sizeBytes = await this.measureConfinedCommandBytes(repo, command);
+    if (sizeBytes > maxBytes) {
+      return { bytes: Buffer.alloc(0), sizeBytes, truncated: true };
+    }
+    return {
+      bytes: await this.readConfinedCommandPrefix(repo, command, sizeBytes),
+      sizeBytes,
+      truncated: false,
+    };
+  }
+
+  /** Read a regular untracked file without routing its body through one large
+   * execCommand response. Native provider reads are binary-safe; providers
+   * without that surface use the same bounded chunk protocol as Git patches. */
+  private async readUntrackedRegularFile(
+    repo: string,
+    target: string,
+    byteLength: number,
+  ): Promise<Buffer> {
+    if (byteLength === 0) return Buffer.alloc(0);
+    const path = repo ? `${repo}/${target}` : target;
+    assertSafeRelPath(path);
+    if (this.session.readFile) {
+      try {
+        const raw = await this.session.readFile({
+          path: this.joinRoot(path),
+          maxBytes: byteLength,
+          ...(this.runAs ? { runAs: this.runAs } : {}),
+        });
+        const bytes = typeof raw === "string" ? Buffer.from(raw, "utf8") : Buffer.from(raw);
+        if (bytes.byteLength !== byteLength) {
+          throw new ChannelAUnavailableError(
+            "Workspace Git data changed during capture. Retry the operation.",
+          );
+        }
+        return bytes;
+      } catch (error) {
+        if (error instanceof ChannelAUnavailableError) throw error;
+        if (isWorkspaceEscapeError(error)) {
+          throw new ChannelAValidationError(`path resolves outside workspace: ${path}`);
+        }
+        if (isDefinitePathNotFoundError(error)) {
+          throw new ChannelANotFoundError(`file not found: ${path}`);
+        }
+        if (!this.session.exec && !this.session.execCommand) {
+          throw new ChannelAUnavailableError(
+            "Workspace Git data is temporarily unavailable. Retry the operation.",
+          );
+        }
+      }
+    }
+    const fileArg = target.startsWith("./") ? target : `./${target}`;
+    return await this.readConfinedCommandPrefix(
+      repo,
+      `file=${shellQuote(fileArg)}; test ! -L "$file" && test -f "$file" || exit 66; cat -- "$file"`,
+      byteLength,
+    );
+  }
+
   async gitStatus(req: GitStatusRequest): Promise<GitStatusResponse> {
     const repo = assertSafeRelPathOrRoot(req.path);
     const inside = await this.runInConfinedDirectory(repo, {
@@ -784,10 +957,17 @@ export class SandboxChannelAService {
         revision: this.revision,
       };
     }
-    const { stdout } = await this.runInConfinedDirectory(repo, {
-      cmd: "git status --porcelain=v2 --branch -z",
-    });
-    return { ...parsePorcelainV2(stdout), revision: this.revision };
+    const status = await this.readConfinedCommandBytes(
+      repo,
+      "git status --porcelain=v2 --branch -z",
+      GIT_METADATA_MAX_BYTES,
+    );
+    if (status.truncated) {
+      throw new ChannelAUnavailableError(
+        "Workspace Git metadata exceeded the safe capture limit. Retry with a narrower path.",
+      );
+    }
+    return { ...parsePorcelainV2(status.bytes.toString("utf8")), revision: this.revision };
   }
 
   async gitDiff(req: GitDiffRequest): Promise<GitDiffResponse> {
@@ -796,16 +976,34 @@ export class SandboxChannelAService {
     // Selector precedence: refs > staged > worktree.
     let range = "";
     if (req.fromRef && req.toRef) range = `${shellQuote(req.fromRef)} ${shellQuote(req.toRef)}`;
-    else if (req.fromRef) range = `${shellQuote(req.fromRef)}`;
-    else if (req.staged) range = "--cached";
+    else if (req.fromRef) {
+      if (req.fromRef === "HEAD") {
+        const head = await this.runInConfinedDirectory(repo, {
+          cmd: "if git rev-parse --verify --quiet HEAD >/dev/null; then printf 'present'; else printf 'unborn'; fi",
+        });
+        // An unborn repository has no HEAD tree. `--cached` compares its index
+        // to Git's empty tree and preserves staged additions; every other
+        // invalid ref remains a real read failure in the bounded command path.
+        range = head.stdout.trim() === "present" ? shellQuote(req.fromRef) : "--cached";
+      } else {
+        range = shellQuote(req.fromRef);
+      }
+    } else if (req.staged) range = "--cached";
     const pathspec = req.pathspec.length ? ` -- ${req.pathspec.map(shellQuote).join(" ")}` : "";
 
     // Pass 1: numstat (stats + binary detection). -z gives NUL-separated fields;
     // a rename emits old\0new for that record's path fields.
-    const numstat = await this.runInConfinedDirectory(repo, {
-      cmd: `git -c core.quotePath=false diff --no-color -z --numstat ${range}${pathspec}`.trim(),
-    });
-    const stats = parseNumstatZ(numstat.stdout);
+    const numstat = await this.readConfinedCommandBytes(
+      repo,
+      `git -c core.quotePath=false diff --no-color -z --numstat ${range}${pathspec}`.trim(),
+      GIT_METADATA_MAX_BYTES,
+    );
+    if (numstat.truncated) {
+      throw new ChannelAUnavailableError(
+        "Workspace Git metadata exceeded the safe capture limit. Retry with a narrower path.",
+      );
+    }
+    const stats = parseNumstatZ(numstat.bytes.toString("utf8"));
 
     const files: GitFileDiff[] = [];
     for (const stat of stats) {
@@ -826,13 +1024,14 @@ export class SandboxChannelAService {
         continue;
       }
       // Pass 2: the per-file unified patch -> hunks.
-      const patch = await this.runInConfinedDirectory(repo, {
-        cmd: `git -c core.quotePath=false diff --no-color -U${ctx} ${range} -- ${shellQuote(target)}`.trim(),
-      });
-      const oversized = Buffer.byteLength(patch.stdout, "utf8") > req.maxBytesPerFile;
-      const parsed = oversized
+      const patch = await this.readConfinedCommandBytes(
+        repo,
+        `git -c core.quotePath=false diff --no-color -U${ctx} ${range} -- ${shellQuote(target)}`.trim(),
+        req.maxBytesPerFile,
+      );
+      const parsed = patch.truncated
         ? { hunks: [] as GitDiffHunk[], status: "modified" as GitFileStatusCode }
-        : parseUnifiedPatch(patch.stdout);
+        : parseUnifiedPatch(patch.bytes.toString("utf8"));
       files.push({
         path: target,
         oldPath: stat.oldPath,
@@ -842,7 +1041,7 @@ export class SandboxChannelAService {
         additions: stat.additions,
         deletions: stat.deletions,
         hunks: parsed.hunks,
-        truncated: oversized,
+        truncated: patch.truncated,
       });
     }
 
@@ -852,32 +1051,41 @@ export class SandboxChannelAService {
       // Ask Git for the exact NUL-delimited set, then synthesize an added-file
       // hunk from a bounded read. The explicit request flag keeps commit/staged
       // consumers on native Git semantics.
-      const untracked = await this.runInConfinedDirectory(repo, {
-        cmd: `git -c core.quotePath=false ls-files --others --exclude-standard -z${pathspec}`,
-      });
-      for (const target of untracked.stdout.split(NUL).filter(Boolean)) {
+      const untracked = await this.readConfinedCommandBytes(
+        repo,
+        `git -c core.quotePath=false ls-files --others --exclude-standard -z${pathspec}`,
+        GIT_METADATA_MAX_BYTES,
+      );
+      if (untracked.truncated) {
+        throw new ChannelAUnavailableError(
+          "Workspace Git metadata exceeded the safe capture limit. Retry with a narrower path.",
+        );
+      }
+      for (const target of untracked.bytes.toString("utf8").split(NUL).filter(Boolean)) {
         const fileArg = target.startsWith("./") ? target : `./${target}`;
         const read = await this.runInConfinedDirectory(repo, {
           cmd: [
             `file=${shellQuote(fileArg)}`,
-            'if [ -L "$file" ]; then printf "L\\n"; readlink -z -- "$file" | base64 | tr -d "\\n"; exit; fi',
+            'if [ -L "$file" ]; then printf "L\\t"; readlink -z -- "$file" | base64 | tr -d "\\n"; exit; fi',
             'size=$(wc -c < "$file") || exit 66',
             'line_count=$(wc -l < "$file") || exit 66',
             'if [ "$size" -gt 0 ]; then last_byte=$(tail -c 1 "$file" | od -An -tu1 | tr -d " \\n"); if [ "$last_byte" != "10" ]; then line_count=$((line_count + 1)); fi; fi',
-            'printf "F\\t%s\\t%s\\n" "$size" "$line_count"',
-            `head -c ${req.maxBytesPerFile + 1} "$file" | base64 | tr -d "\\n"`,
+            'printf "F\\t%s\\t%s" "$size" "$line_count"',
           ].join("; "),
         });
-        if (read.exitCode !== null && read.exitCode !== 0) continue;
+        if (read.exitCode !== null && read.exitCode !== 0) {
+          throw new ChannelAUnavailableError(
+            "Workspace Git data is temporarily unavailable. Retry the operation.",
+          );
+        }
 
-        const lineBreak = read.stdout.indexOf("\n");
-        if (lineBreak < 0) continue;
-        const header = read.stdout.slice(0, lineBreak);
-        const encoded = read.stdout.slice(lineBreak + 1).replace(/\s/g, "");
-        let sampled = Buffer.from(encoded, "base64");
+        const [kind, first, second] = read.stdout.split("\t");
+        let sampled: Buffer = Buffer.alloc(0);
         let sizeBytes: number;
         let lineCount: number;
-        if (header === "L") {
+        if (kind === "L") {
+          const encoded = (first ?? "").replace(/\s/g, "");
+          sampled = Buffer.from(encoded, "base64");
           // GNU readlink -z preserves every byte (including trailing newlines)
           // and adds one NUL framing byte. The diff shows the link destination
           // itself, matching Git's symlink-blob semantics, never target content.
@@ -886,10 +1094,9 @@ export class SandboxChannelAService {
           sizeBytes = sampled.length;
           lineCount = addedLines(sampled).length;
         } else {
-          const [kind, sizeRaw, lineCountRaw] = header.split("\t");
           if (kind !== "F") continue;
-          const parsedSize = safeInt(sizeRaw);
-          const parsedLineCount = safeInt(lineCountRaw);
+          const parsedSize = safeInt(first);
+          const parsedLineCount = safeInt(second);
           if (
             parsedSize === null ||
             parsedSize < 0 ||
@@ -900,6 +1107,12 @@ export class SandboxChannelAService {
           }
           sizeBytes = parsedSize;
           lineCount = parsedLineCount;
+          const truncated = sizeBytes > req.maxBytesPerFile;
+          const sampleSize = Math.min(sizeBytes, 8_192);
+          sampled = await this.readUntrackedRegularFile(repo, target, sampleSize);
+          if (!sniffBinary(sampled) && !truncated && sampleSize < sizeBytes) {
+            sampled = await this.readUntrackedRegularFile(repo, target, sizeBytes);
+          }
         }
         const truncated = sizeBytes > req.maxBytesPerFile || sampled.length > req.maxBytesPerFile;
         const bytes = truncated ? sampled.subarray(0, req.maxBytesPerFile) : sampled;
@@ -1017,9 +1230,10 @@ export class SandboxChannelAService {
   /**
    * Detect repo roots within every supported workspace layout.
    *
-   * The platform seeds GitHub repositories at
-   * `repos/<owner>/<repo>`, which puts the `.git` marker at depth four from the
-   * workspace root. Do not reintroduce a fixed maxdepth here. Traversal is
+   * The platform normally seeds repositories at
+   * `repos/<encoded-host>/<owner>/<repo>`, while explicit mount paths and
+   * connected-machine layouts can be deeper. Do not reintroduce a fixed
+   * maxdepth here. Traversal is
    * bounded instead by pruning known machine/build residue, a wall-clock
    * timeout, and a result limit. `.git` may be either a directory (ordinary
    * clone/submodule) or a file (linked worktree).
@@ -1129,17 +1343,49 @@ export class SandboxChannelAService {
 
   // ════════════════════════ Terminal exec + PTY (A2) ════════════════════════
 
-  /** Run a bounded command, return buffered stdout/stderr + exit code inline. The
-   *  long-running tail (when the process hasn't exited within timeoutMs) keeps
-   *  running in-box; if emitStream is set the buffered output is also published as
-   *  the agent firehose so other viewers see it. */
+  /** Run a bounded command to physical completion and return buffered output.
+   *  A deadline cancels the exact provider operation, proves its process group
+   *  absent, and settles any retained-process admission before returning 124. */
   async terminalExec(req: TerminalExecRequest): Promise<TerminalExecResponse> {
-    const r = await this.run({
-      cmd: req.command,
-      workdir: this.terminalWorkdir(req.cwd),
-      yieldTimeMs: req.timeoutMs,
-    });
-    const running = r.exitCode === null && typeof r.sessionId === "number";
+    const abort = new AbortController();
+    const controller = createTurnToolCancellationController(abort.signal);
+    const timeoutReason = new Error(`Terminal command exceeded ${req.timeoutMs}ms`);
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      abort.abort(timeoutReason);
+    }, req.timeoutMs);
+    const terminalWorkdir = this.terminalWorkdir(req.cwd);
+    let r: Awaited<ReturnType<typeof controller.runSandboxCommandStructured>>;
+    try {
+      r = await controller.runSandboxCommandStructured(this.session, {
+        cmd: req.command,
+        ...(terminalWorkdir ? { workdir: terminalWorkdir } : {}),
+        ...(this.runAs ? { runAs: this.runAs } : {}),
+        yieldTimeMs: req.timeoutMs,
+      });
+      if (timedOut) {
+        await controller.waitForQuiescence();
+        r = {
+          stdout: "",
+          stderr: timeoutReason.message,
+          exitCode: 124,
+          wallTimeSeconds: req.timeoutMs / 1_000,
+        };
+      }
+    } catch (error) {
+      controller.cancel(error);
+      await controller.waitForQuiescence();
+      if (!timedOut && !(error instanceof TurnSandboxCommandCancelledError)) throw error;
+      r = {
+        stdout: "",
+        stderr: timeoutReason.message,
+        exitCode: 124,
+        wallTimeSeconds: req.timeoutMs / 1_000,
+      };
+    } finally {
+      clearTimeout(timer);
+    }
     if (req.emitStream && (r.stdout || r.stderr)) {
       const events: { type: SessionEventType; payload: unknown }[] = [];
       const commandId = crypto.randomUUID();
@@ -1159,7 +1405,7 @@ export class SandboxChannelAService {
       stdout: r.stdout,
       stderr: r.stderr,
       exitCode: r.exitCode,
-      running,
+      running: false,
       wallTimeSeconds: r.wallTimeSeconds,
     };
   }
@@ -1199,10 +1445,13 @@ export class SandboxChannelAService {
    *  it as terminal.pty.output.delta). Throws ChannelAUnsupportedError when the
    *  backend has no writeStdin. */
   async ptyWrite(_req: PtyWriteRequest, execSessionId: number, data: string): Promise<string> {
-    if (!this.session.writeStdin) {
+    const write =
+      this.session.writeStdinForProcessMutation?.bind(this.session) ??
+      this.session.writeStdin?.bind(this.session);
+    if (!write) {
       throw new ChannelAUnsupportedError("interactive terminal unsupported on this backend");
     }
-    const out = await this.session.writeStdin({
+    const out = await write({
       sessionId: execSessionId,
       chars: data,
       yieldTimeMs: 250,
@@ -1224,25 +1473,27 @@ export class SandboxChannelAService {
   /** Resize an open PTY (SIGWINCH via stty against the exec-session). The SDK has
    *  no resize method; stty in the same tty session updates the geometry. */
   async ptyResize(req: PtyResizeRequest, execSessionId: number): Promise<void> {
-    if (!this.session.writeStdin) return;
+    const write =
+      this.session.writeStdinForProcessControl?.bind(this.session) ??
+      this.session.writeStdin?.bind(this.session);
+    if (!write) return;
     // Send a stty in-band on the same pty session.
-    await this.session.writeStdin({
+    await write({
       sessionId: execSessionId,
       chars: `stty cols ${req.cols} rows ${req.rows}\n`,
       yieldTimeMs: 50,
     });
   }
 
-  /** Close an open PTY: write exit/EOF. The caller marks the row closed + emits
-   *  terminal.pty.exited. */
-  async ptyClose(_req: PtyCloseRequest, execSessionId: number | null): Promise<void> {
-    if (execSessionId !== null && this.session.writeStdin) {
-      try {
-        await this.session.writeStdin({ sessionId: execSessionId, chars: "", yieldTimeMs: 50 }); // EOF
-      } catch {
-        // best-effort; the row is marked closed regardless.
-      }
-    }
+  /** Ask an open PTY to exit and return the exact provider banner. The routing
+   * session settles durable process authority only when that banner proves this
+   * locator exited or was lost; callers must keep metadata open otherwise. */
+  async ptyClose(_req: PtyCloseRequest, execSessionId: number | null): Promise<string> {
+    const write =
+      this.session.writeStdinForProcessControl?.bind(this.session) ??
+      this.session.writeStdin?.bind(this.session);
+    if (execSessionId === null || !write) return "";
+    return await write({ sessionId: execSessionId, chars: "", yieldTimeMs: 250 }); // EOF
   }
 
   // ──────────────────────────── helpers ──────────────────────────────────────
@@ -1429,52 +1680,6 @@ function isDefinitePathNotFoundError(error: unknown): boolean {
     candidate.errno === "ENOENT" ||
     candidate.errno === -2
   );
-}
-
-// Detect the Modal "the exec-session you're writing to no longer exists" banner.
-// writeStdin reports a vanished session as a non-throwing string of the shape
-// `write_stdin failed: session not found: <N>` (it does NOT raise). This is a
-// hard cancellation-fence fact, so classify only the complete known banner (or
-// its bare provider fact) carrying the exact tracked numeric id. ID-less,
-// malformed, mismatched, or embellished/ambiguous text must remain fail-closed.
-export function isExecSessionLostBanner(out: string, execSessionId: number): boolean {
-  if (!out || !Number.isSafeInteger(execSessionId) || execSessionId < 0) return false;
-  const match = out.match(/^(?:write_stdin failed: )?session not found: (\d+)$/);
-  // JavaScript's `$` also matches immediately before one final line terminator.
-  // Requiring the regex match to consume the entire string keeps even that
-  // otherwise-special case fail-closed.
-  if (!match || match[0] !== out) return false;
-  // String equality is intentional: parseInt would normalize malformed facts
-  // such as `01` and can round an out-of-range integer into another identity.
-  return match[1] === String(execSessionId);
-}
-
-// Recover the numeric exec-session id the SDK embeds in a formatExecResponse
-// banner for a STILL-RUNNING process (`Process running with session ID <N>`).
-// A finished command emits `Process exited with code <N>` instead (no session
-// id) — that yields null. Only the banner region (before the `Output:` marker)
-// is scanned so a session-id-looking line in the command's own output can't
-// spoof it. This is what makes the interactive PTY work on backends whose only
-// exec surface is execCommand (Modal): without it ptyOpen reports execSessionId
-// = null and every pty/write 409s ("interactive terminal unsupported").
-export function parseExecBannerSessionId(raw: string): number | null {
-  const outputIdx = raw.indexOf("\nOutput:\n");
-  const banner = outputIdx >= 0 ? raw.slice(0, outputIdx) : raw.startsWith("Output:\n") ? "" : raw;
-  const match = banner.match(/Process running with session ID (\d+)/);
-  if (!match) return null;
-  const n = Number.parseInt(match[1]!, 10);
-  return Number.isFinite(n) ? n : null;
-}
-
-/** Recover a completed execCommand fallback's exit status from its banner.
- * Only the banner region is inspected, so command output cannot spoof success. */
-export function parseExecBannerExitCode(raw: string): number | null {
-  const outputIdx = raw.indexOf("\nOutput:\n");
-  const banner = outputIdx >= 0 ? raw.slice(0, outputIdx) : raw.startsWith("Output:\n") ? "" : raw;
-  const match = banner.match(/Process exited with code (-?\d+)/);
-  if (!match) return null;
-  const exitCode = Number.parseInt(match[1]!, 10);
-  return Number.isSafeInteger(exitCode) ? exitCode : null;
 }
 
 function sniffBinary(bytes: Buffer): boolean {

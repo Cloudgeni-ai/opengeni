@@ -3,6 +3,7 @@ import type {
   ConnectionCredentialsPort,
   EntitlementsPort,
   ScheduledTaskTriggerType,
+  TurnInitiator,
 } from "@opengeni/contracts";
 import type { Database } from "@opengeni/db";
 import type { DocumentServices } from "@opengeni/documents";
@@ -51,6 +52,12 @@ export type SessionAttemptQuiescenceProof = {
 
 export type SignalSessionAttemptQuiesced = (input: SessionAttemptQuiescenceProof) => Promise<void>;
 
+export type InspectSessionAttemptActivity = (input: {
+  workflowId: string;
+  workflowRunId: string;
+  activityId: string;
+}) => Promise<"pending" | "settled">;
+
 export type ActivityServices = {
   settings: Settings;
   db: Database;
@@ -63,6 +70,9 @@ export type ActivityServices = {
   /** Durable signalWithStart fallback used only after the activity's direct
    * physical-quiescence receipt write exhausts its bounded DB retries. */
   signalSessionAttemptQuiesced: SignalSessionAttemptQuiesced | null;
+  /** Server-authoritative Temporal activity lease inspection used only to
+   * recover a missing quiescence receipt after the original activity vanished. */
+  inspectSessionAttemptActivity: InspectSessionAttemptActivity | null;
   /** Revision-carrying capacity nudge; generic outbox repair is also sufficient. */
   signalCodexCapacityWorkflow?: SignalCodexCapacityWorkflow | null;
   // §7.5 P3 — host-entitlements port, the WORKER half of the same seam the API
@@ -120,8 +130,7 @@ export type ReconcileCodexCapacityWaitInput = {
 
 export type ReconcileCodexCapacityWaitResult =
   | ({ action: "waiting" } & CodexCapacityWaitRef)
-  | { action: "resumed"; updateId: string }
-  | { action: "superseded" | "stale" };
+  | { action: "resumed" | "paused" | "superseded" | "stale" };
 
 export type ActivityDependencies = Partial<ActivityServices>;
 
@@ -150,6 +159,18 @@ export type SettleSessionInterruptionsInput = {
 };
 
 export type PersistSessionAttemptQuiescenceInput = SessionAttemptQuiescenceProof;
+
+export type ReconcileSessionAttemptQuiescenceInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  attemptId: string;
+  workflowId: string;
+};
+
+export type ReconcileSessionAttemptQuiescenceResult = {
+  action: "quiesced" | "pending" | "stale";
+};
 
 export type FailSessionAttemptInput = {
   accountId: string;
@@ -186,6 +207,17 @@ export type PeekSessionWorkInput = {
   sessionId: string;
 };
 
+export type ExpireSessionHumanInputInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  requestId: string;
+};
+
+export type ExpireSessionHumanInputResult = {
+  action: "expired" | "stale" | "not_found";
+};
+
 export type MarkSessionIdleInput = {
   workspaceId: string;
   sessionId: string;
@@ -205,21 +237,41 @@ export type MaybeContinueGoalResult = {
 export type DispatchScheduledTaskRunInput = {
   workspaceId: string;
   taskId: string;
-  triggerType: ScheduledTaskTriggerType;
   /** Stable Temporal workflow identity; retries must reuse the same source row. */
   producerKey?: string;
-  agentRunUsageIdempotencyKey?: string;
-};
+} & (
+  | {
+      triggerType: Extract<ScheduledTaskTriggerType, "scheduled">;
+      agentRunUsageIdempotencyKey?: never;
+      initiator?: never;
+    }
+  | {
+      triggerType: Extract<ScheduledTaskTriggerType, "manual">;
+      agentRunUsageIdempotencyKey: string;
+      /** Exact identity used by the API-side charge for this same trigger. */
+      initiator: TurnInitiator;
+    }
+);
 
-export type DispatchScheduledTaskRunResult = {
-  action: "start" | "signal";
-  accountId: string;
-  workspaceId: string;
-  sessionId: string;
-  triggerEventId: string;
-  workflowId: string;
-  workflowWakeRevision: number | null;
-};
+export type DispatchScheduledTaskRunResult =
+  | { action: "deleted" }
+  | {
+      action: "blocked";
+      reason:
+        | "insufficient_credits"
+        | "monthly_model_cost_limit"
+        | "monthly_agent_run_limit"
+        | "malformed_manual_trigger";
+    }
+  | {
+      action: "start" | "signal";
+      accountId: string;
+      workspaceId: string;
+      sessionId: string;
+      triggerEventId: string;
+      workflowId: string;
+      workflowWakeRevision: number | null;
+    };
 
 export type IndexDocumentInput = {
   accountId: string;
@@ -230,7 +282,7 @@ export type IndexDocumentInput = {
 type ClaimedRunAgentTurnResult = {
   // "recovering": this attempt ended after durably preserving the same current
   // inference for a new attempt. Recovery is not prompt queue work.
-  status: "idle" | "requires_action" | "failed" | "cancelled" | "recovering";
+  status: "idle" | "requires_action" | "failed" | "cancelled" | "recovering" | "waiting_capacity";
   turnId: string;
   attemptId: string;
   // Provider backpressure pacing: when set on an idle or recovering result, the
@@ -242,9 +294,10 @@ type ClaimedRunAgentTurnResult = {
   // "continue now" (invariant 4: NO THRASH). Distinct from a normal continueDelayMs:0
   // which legitimately means "a rotation candidate is ready, re-dispatch immediately".
   idleUntilReset?: boolean;
-  // Durable native zero-pool wait. Unlike continueDelayMs, this reference is
-  // persisted in Postgres and reconstructed after workflow/worker restart.
-  // The workflow must not call maybeContinueGoal while this waiter is active.
+  // Durable native zero-pool wait for this same nonterminal logical turn.
+  // Unlike continueDelayMs, this reference is persisted in Postgres and
+  // reconstructed after workflow/worker restart. The workflow must not call
+  // maybeContinueGoal or manufacture queue/input work while it is active.
   capacityWait?: CodexCapacityWaitRef;
   // This execution reached a durable terminal-for-now boundary (for example,
   // maintenance could not run or same-turn context recovery failed). End this

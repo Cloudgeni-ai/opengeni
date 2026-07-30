@@ -14,7 +14,7 @@ import {
 import type { SessionEventsConnectionState } from "@opengeni/react";
 import type { SessionSummary } from "@opengeni/sdk";
 import { LockIcon, PanelRightIcon, PauseIcon, PencilIcon, PinIcon, PlayIcon } from "lucide-react";
-import { useId, useState, type ReactNode } from "react";
+import { useCallback, useRef, useState, type ReactNode } from "react";
 
 import { ConnectionPill } from "@/components/common";
 import { SessionAncestryBreadcrumb } from "@/components/session/subagents";
@@ -24,11 +24,13 @@ import {
   sessionDisplayTitle,
   useInlineRename,
 } from "@/lib/session-rename";
+import { pinLiveAnnouncement } from "@/lib/pin-live-announcement";
 import type { Session } from "@/types";
 
 export function SessionHeader({
   session,
   ancestors,
+  lineageLoading,
   lineageError,
   connectionState,
   status,
@@ -45,6 +47,7 @@ export function SessionHeader({
   session: Session;
   /** Root-to-direct-parent order. */
   ancestors: SessionSummary[];
+  lineageLoading?: boolean;
   lineageError?: Error | null;
   connectionState: SessionEventsConnectionState;
   status: Session["status"];
@@ -66,17 +69,16 @@ export function SessionHeader({
     // bar was the light-theme fix — a near-white header on a near-white canvas
     // needs its own surface + a crisp divider to look intentional (and it lifts
     // the dark bar a touch above the canvas too).
-    <header
-      data-sessionpin-session-header
-      className="flex h-14 min-w-0 shrink-0 items-center gap-1.5 overflow-hidden border-b border-border bg-surface/80 px-2 backdrop-blur supports-[backdrop-filter]:bg-surface/65 sm:gap-3 sm:px-5"
-    >
+    <header className="flex min-h-14 min-w-0 shrink-0 flex-wrap items-center gap-1 border-b border-border bg-surface/80 pb-1 pl-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-left))] pr-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-right))] pt-[max(0.375rem,env(safe-area-inset-top))] backdrop-blur supports-[backdrop-filter]:bg-surface/65">
       {leading}
-      <div className="flex min-w-0 flex-1 flex-col justify-center gap-0.5 overflow-hidden">
+      <div className="flex min-w-20 flex-[1_1_5rem] flex-col justify-center gap-0.5">
         {/* Child sessions link back to the manager that spawned them. */}
         <div className="min-w-0">
           <SessionAncestryBreadcrumb
             workspaceId={session.workspaceId}
+            parentSessionId={session.parentSessionId}
             ancestors={ancestors}
+            loading={lineageLoading}
             error={lineageError}
           />
         </div>
@@ -97,7 +99,7 @@ export function SessionHeader({
           {codexSlot}
         </div>
       </div>
-      <div className="flex shrink-0 items-center gap-1 sm:gap-2">
+      <div className="ml-auto flex min-w-0 max-w-full flex-wrap items-center justify-end gap-1 sm:gap-2">
         <SessionPinButton session={session} onPin={onPin} />
         <div className="hidden items-center gap-2 md:flex">
           <ConnectionPill state={connectionState} />
@@ -181,7 +183,11 @@ function SessionPinButton({
 }) {
   const [busy, setBusy] = useState(false);
   const [announcement, setAnnouncement] = useState("");
-  const announcementId = useId();
+  const announcementSequence = useRef(0);
+  const announce = useCallback((message: string) => {
+    announcementSequence.current += 1;
+    setAnnouncement(pinLiveAnnouncement(message, announcementSequence.current));
+  }, []);
   return (
     <>
       <Button
@@ -189,7 +195,6 @@ function SessionPinButton({
         variant={session.pinned ? "secondary" : "ghost"}
         size="icon-sm"
         aria-label={session.pinned ? "Unpin session" : "Pin session"}
-        aria-describedby={announcement ? announcementId : undefined}
         aria-pressed={Boolean(session.pinned)}
         aria-busy={busy}
         disabled={busy}
@@ -199,21 +204,21 @@ function SessionPinButton({
           setBusy(true);
           void onPin(session, nextPinned)
             .then((updated) => {
-              setAnnouncement(
+              announce(
                 updated
                   ? `Session ${nextPinned ? "pinned" : "unpinned"}.`
                   : `Session was not ${nextPinned ? "pinned" : "unpinned"}.`,
               );
             })
             .catch(() => {
-              setAnnouncement(`Session was not ${nextPinned ? "pinned" : "unpinned"}.`);
+              announce(`Session was not ${nextPinned ? "pinned" : "unpinned"}.`);
             })
             .finally(() => setBusy(false));
         }}
       >
         <PinIcon className={session.pinned ? "size-4 fill-current" : "size-4"} />
       </Button>
-      <span id={announcementId} className="sr-only" aria-live="polite" aria-atomic="true">
+      <span className="sr-only" aria-live="polite" aria-atomic="true">
         {announcement}
       </span>
     </>
@@ -260,6 +265,7 @@ function SessionTitleEditor(props: {
         }}
         maxLength={SESSION_TITLE_MAX_LENGTH}
         aria-label="Session title"
+        dir="auto"
         className="-mx-1.5 w-full truncate rounded-md bg-surface-2/70 px-1.5 text-[15px] font-semibold leading-6 tracking-[-0.01em] outline-none ring-1 ring-border-strong focus:outline-none focus-visible:outline-none"
         style={{ outline: "none" }}
       />
@@ -272,6 +278,7 @@ function SessionTitleEditor(props: {
         type="button"
         onClick={rename.startEditing}
         title={`${display} · click to rename`}
+        dir="auto"
         className="min-w-0 shrink truncate rounded-sm text-left text-[15px] font-semibold leading-6 tracking-[-0.01em] text-fg hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/40"
       >
         {display}

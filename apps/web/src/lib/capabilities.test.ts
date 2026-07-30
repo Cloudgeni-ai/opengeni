@@ -11,6 +11,7 @@ import {
   capabilitySourceLabel,
   connectionHealth,
   connectionToReuseForApiKey,
+  curatedSkillProvenance,
   domainFromUrl,
   emptyCapabilityForm,
   filterCapabilityCatalogItems,
@@ -19,6 +20,7 @@ import {
   oauthResumeAction,
   registryResultsForQuery,
   resolveSheetItem,
+  subjectOAuthConnectionRef,
   workspaceConnectionForDomain,
 } from "./capabilities";
 import type { CapabilityCatalogItem, CapabilityKind, ConnectionMetadata } from "@/types";
@@ -123,6 +125,7 @@ describe("human labels", () => {
 
   test("source labels are human", () => {
     expect(capabilitySourceLabel("built_in")).toBe("Built in");
+    expect(capabilitySourceLabel("library")).toBe("Curated library");
     expect(capabilitySourceLabel("public_registry")).toBe("Public registry");
     expect(capabilitySourceLabel("manual")).toBe("Added");
   });
@@ -130,6 +133,48 @@ describe("human labels", () => {
   test("filter labels are plural human forms", () => {
     expect(capabilityFilterLabel("mcp")).toBe("MCP servers");
     expect(capabilityFilterLabel("all")).toBe("All");
+  });
+});
+
+describe("curated skill provenance", () => {
+  test("projects immutable public metadata and effective selection", () => {
+    const skill = item({
+      kind: "skill",
+      source: "library",
+      enabled: true,
+      enabledReason: "explicitly selected",
+      provenance: "Reviewed curated entry",
+      metadata: {
+        libraryId: "azure-verified-modules",
+        version: "1.0.0",
+        contentSha256: "a".repeat(64),
+        sourceCommit: "b".repeat(40),
+        provenance: "Reviewed curated entry",
+        sourceUrl: "https://example.com/source",
+        license: "MPL-2.0",
+        documentationUrl: "https://example.com/docs",
+        artifactPath: "azure-verified-modules",
+      },
+    });
+
+    expect(curatedSkillProvenance(skill)).toEqual({
+      libraryId: "azure-verified-modules",
+      version: "1.0.0",
+      contentSha256: "a".repeat(64),
+      sourceCommit: "b".repeat(40),
+      provenance: "Reviewed curated entry",
+      sourceUrl: "https://example.com/source",
+      license: "MPL-2.0",
+      documentationUrl: "https://example.com/docs",
+      artifactPath: "azure-verified-modules",
+      status: "enabled",
+      effectiveSelection: "explicitly selected",
+    });
+  });
+
+  test("does not treat non-library capabilities as curated skills", () => {
+    expect(curatedSkillProvenance(item({ kind: "skill", source: "manual" }))).toBeNull();
+    expect(curatedSkillProvenance(item({ kind: "api", source: "library" }))).toBeNull();
   });
 });
 
@@ -329,6 +374,18 @@ describe("oauthResumeAction", () => {
     expect(oauthResumeAction(enabled, "conn-2")).toBe("enable");
   });
 
+  test("an enabled generic subject binding remains a reconnect without persisting the returned UUID", () => {
+    const enabled = item({
+      enabled: true,
+      connectionRef: {
+        providerDomain: "slack.com",
+        kind: "oauth2",
+        subjectScope: "subject",
+      },
+    });
+    expect(oauthResumeAction(enabled, "private-personal-row")).toBe("reconnect");
+  });
+
   test("a fresh connect of a disabled item enables it", () => {
     expect(oauthResumeAction(item({ enabled: false }), "conn-1")).toBe("enable");
   });
@@ -384,7 +441,47 @@ describe("connectionHealth", () => {
     expect(health.connection?.id).toBe("conn-1");
   });
 
-  test("matches by id, not domain — a same-domain row with a different id is not a match", () => {
+  test("matches a generic subject binding to the caller's personal provider/kind row without a UUID", () => {
+    const subjectRef = {
+      providerDomain: "slack.com",
+      kind: "oauth2" as const,
+      subjectScope: "subject" as const,
+    };
+    const personal = connection({
+      id: "private-personal-row",
+      subjectId: "current-user",
+      providerDomain: "WWW.Slack.com",
+      kind: "oauth2",
+      status: "active",
+    });
+    const health = connectionHealth(
+      item({ enabled: true, connectionRef: subjectRef }),
+      [personal],
+      true,
+    );
+    expect(health).toEqual({ state: "connected", connection: personal });
+    expect(subjectRef).not.toHaveProperty("connectionId");
+  });
+
+  test("a workspace-shared row never satisfies a generic subject binding", () => {
+    const subjectRef = {
+      providerDomain: "slack.com",
+      kind: "oauth2" as const,
+      subjectScope: "subject" as const,
+    };
+    const shared = connection({
+      id: "shared-bot-row",
+      subjectId: null,
+      providerDomain: "slack.com",
+      kind: "oauth2",
+      status: "active",
+    });
+    expect(
+      connectionHealth(item({ enabled: true, connectionRef: subjectRef }), [shared], true),
+    ).toEqual({ state: "attention", connection: null });
+  });
+
+  test("workspace bindings continue to match only their exact UUID", () => {
     const conns = [connection({ id: "other", providerDomain: "linear.app", status: "active" })];
     expect(connectionHealth(item({ enabled: true, connectionRef: ref }), conns, true)).toEqual({
       state: "attention",
@@ -429,6 +526,22 @@ describe("capabilityReconnectPlan", () => {
       kind: "oauth",
       connectionId: null,
     });
+  });
+
+  test("a generic subject binding reconnects through OAuth without an installation UUID", () => {
+    const oauthItem = item({
+      enabled: true,
+      connectionRef: {
+        providerDomain: "slack.com",
+        kind: "oauth2",
+        subjectScope: "subject",
+      },
+    });
+    expect(capabilityReconnectPlan(oauthItem, deleted)).toEqual({
+      kind: "oauth",
+      connectionId: null,
+    });
+    expect(oauthItem.connectionRef).not.toHaveProperty("connectionId");
   });
 
   test("nothing to repair when healthy, unverified, or without a ref", () => {
@@ -517,6 +630,18 @@ describe("resolveSheetItem (sheet binds to the live catalog row, never a snapsho
 
   test("null selection resolves to null", () => {
     expect(resolveSheetItem(null, [item({ id: "cap-1" })])).toBeNull();
+  });
+});
+
+describe("subjectOAuthConnectionRef", () => {
+  test("builds a generic subject-owned OAuth ref with no private connection UUID", () => {
+    const ref = subjectOAuthConnectionRef("slack.com");
+    expect(ref).toEqual({
+      providerDomain: "slack.com",
+      kind: "oauth2",
+      subjectScope: "subject",
+    });
+    expect(ref).not.toHaveProperty("connectionId");
   });
 });
 

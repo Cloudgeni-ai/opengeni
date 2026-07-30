@@ -30,13 +30,17 @@ export type {
   CreateWorkspaceRequest,
   Document as IndexedDocument,
   DocumentBase,
+  DocumentCurationStatus,
   DocumentSearchMode,
   DocumentSearchResult,
+  DocumentVisibility,
   EntitlementValue,
   Entitlements,
   FileAsset,
   FileDownloadUrlResponse,
   GitHubAppInfo,
+  GitHubAppSetupMode,
+  GitHubBindingStatus,
   GitHubInstallationBinding,
   GitHubRepository,
   GoalSpec,
@@ -111,6 +115,7 @@ export type TurnSubmission = {
   rigId?: string;
   goal?: GoalSpec;
   firstPartyMcpPermissions?: string[];
+  firstPartyMcpTools?: import("@opengeni/sdk").FirstPartyMcpToolName[];
 };
 
 export type AuthSession = {

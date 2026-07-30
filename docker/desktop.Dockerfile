@@ -252,15 +252,16 @@ COPY docker/desktop/opengeni-terminal-up.sh   /usr/local/bin/opengeni-terminal-u
 COPY docker/desktop/opengeni-terminal-down.sh /usr/local/bin/opengeni-terminal-down
 COPY docker/desktop/opengeni-record.sh        /usr/local/bin/opengeni-record
 COPY docker/opengeni-git-askpass              /usr/local/bin/opengeni-git-askpass
-COPY docker/ogtool                            /usr/local/bin/ogtool
+COPY packages/ogtool/package.json             /opt/opengeni/ogtool/package.json
+COPY packages/ogtool/bin/ogtool.cjs           /opt/opengeni/ogtool/bin/ogtool.cjs
 RUN set -eux; \
     chmod 0755 /usr/local/bin/opengeni-desktop-up /usr/local/bin/opengeni-desktop-down \
                /usr/local/bin/opengeni-terminal-up /usr/local/bin/opengeni-terminal-down \
-               /usr/local/bin/opengeni-record /usr/local/bin/opengeni-git-askpass \
-               /usr/local/bin/ogtool; \
-    cp /usr/local/bin/ogtool /tmp/ogtool-check.js; \
-    node --check /tmp/ogtool-check.js; \
-    rm /tmp/ogtool-check.js; \
+               /usr/local/bin/opengeni-record /usr/local/bin/opengeni-git-askpass; \
+    chmod 0755 /opt/opengeni/ogtool/bin/ogtool.cjs; \
+    ln -s /opt/opengeni/ogtool/bin/ogtool.cjs /usr/local/bin/ogtool; \
+    node --check /opt/opengeni/ogtool/bin/ogtool.cjs; \
+    test -n "$(ogtool --version)"; \
     bash -n /usr/local/bin/opengeni-desktop-up; \
     bash -n /usr/local/bin/opengeni-desktop-down; \
     bash -n /usr/local/bin/opengeni-terminal-up; \

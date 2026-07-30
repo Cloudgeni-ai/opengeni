@@ -1,14 +1,14 @@
-// Progressive connector disclosure for the ChatGPT/Codex backend — parity with
-// how the Codex CLI surfaces its ~217 `codex_apps` connector tools WITHOUT paying
-// their schemas in every turn's context.
+// Progressive MCP disclosure for the ChatGPT/Codex backend — parity with how the
+// Codex CLI surfaces its ~217 `codex_apps` connector tools WITHOUT paying their
+// schemas in every turn's context, while applying the same bounded search seam to
+// other selected MCP servers.
 //
-// WHY. OpenGeni connects the codex_apps MCP server as a CLIENT and the SDK
-// materializes EVERY connector tool as a `function` tool in request.tools[] on
-// every codex turn (~217 tools ≈ tens of thousands of context tokens). The Codex
-// CLI instead uses the backend's NATIVE tool-search: the model gets one compact
-// search tool + all connector tools flagged `defer_loading:true` (schemas dropped
-// from model context), searches by capability, and only the matched tools are
-// disclosed back and become callable.
+// WHY. OpenGeni connects MCP servers as CLIENTs and the SDK materializes every
+// selected MCP tool as a `function` tool in request.tools[] on a Codex turn. The
+// Codex CLI instead uses the backend's NATIVE tool-search: the model gets one
+// compact search tool + deferred MCP tools (schemas dropped from model context),
+// searches by capability, and only matched tools are disclosed back and become
+// callable.
 //
 // PROVEN LIVE (Phase 0 probe against /codex/responses on gpt-5.6-sol): the backend
 // HONORS `defer_loading:true` on function tools — 50 fat tools dropped input_tokens
@@ -16,16 +16,24 @@
 // disclosed it (V3). The model emits `tool_search_call` on our slug.
 //
 // HOW. We wrap the agent's `getAllTools` (codex turns only, flag-gated): tag every
-// `codex_apps__*` function tool `deferLoading = true` (converTool then serializes
+// non-mandatory MCP function tool `deferLoading = true` (converTool then serializes
 // `defer_loading:true`, dropping the schema from context) and append one
 // client-executed `toolSearchTool`. The SDK routes a `tool_search_call` to our
 // executor (ClientToolSearchExecutor), which BM25-ranks the deferred pool and
-// returns the matched tools BY REFERENCE — the SDK emits the `tool_search_output`
-// that discloses them; the subsequent `function_call` resolves through the normal
-// PrefixedMcpServer.callTool path (auth + name-sanitize + structuredContent inline
-// all unchanged). Invocation is untouched; only the wire tool-set shrinks.
+// returns matched tools BY REFERENCE — the SDK emits the `tool_search_output` that
+// discloses them; the subsequent `function_call` resolves through the normal
+// `PrefixedMcpServer.callTool` path (auth + name-sanitize + structuredContent
+// inline all unchanged). Invocation is untouched; only the wire tool-set shrinks.
 
 import { toolSearchTool, type Tool } from "@openai/agents";
+import {
+  MCP_MAX_TOOL_DEFINITION_BYTES,
+  MCP_MAX_TOOL_SEARCH_DESCRIPTION_BYTES,
+  MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES,
+  MCP_MAX_TOOL_SEARCH_SOURCE_LABEL_LENGTH,
+  MCP_MAX_TOOL_SEARCH_SOURCES,
+  mcpSerializedSizeBytes,
+} from "./mcp-network";
 
 /** The prefix OpenGeni's PrefixedMcpServer stamps on codex_apps connector tools. */
 export const CODEX_APPS_TOOL_PREFIX = "codex_apps__";
@@ -43,6 +51,91 @@ export function isCodexAppsFunctionTool(
     typeof (tool as { name?: unknown }).name === "string" &&
     (tool as { name: string }).name.startsWith(CODEX_APPS_TOOL_PREFIX)
   );
+}
+
+const MCP_TOOL_NAME_SEPARATOR = "__";
+const MANDATORY_FIRST_PARTY_MCP_SERVER_ID = "opengeni";
+const NO_MCP_SERVER_IDS: ReadonlySet<string> = new Set();
+
+/** Return the authorized server id for a runtime MCP function tool name. */
+function mcpServerIdForTool(tool: unknown, mcpServerIds: ReadonlySet<string>): string | null {
+  if (!tool || typeof tool !== "object") return null;
+  if ((tool as { type?: unknown }).type !== "function") return null;
+  const name = (tool as { name?: unknown }).name;
+  if (typeof name !== "string") return null;
+  let match: string | null = null;
+  for (const serverId of mcpServerIds) {
+    if (
+      typeof serverId !== "string" ||
+      serverId.length === 0 ||
+      !name.startsWith(`${serverId}${MCP_TOOL_NAME_SEPARATOR}`)
+    ) {
+      continue;
+    }
+    if (match === null || serverId.length > match.length) {
+      match = serverId;
+    }
+  }
+  return match;
+}
+
+/**
+ * True for non-mandatory MCP function tools on the effective agent surface.
+ * The prefix is the same runtime namespace used by PrefixedMcpServer; this
+ * intentionally does not inspect the global registry, connection metadata, or
+ * credentials, so search cannot widen the already-authorized tool set.
+ */
+export function isSearchableMcpFunctionTool(
+  tool: unknown,
+  mcpServerIds: ReadonlySet<string> = NO_MCP_SERVER_IDS,
+): tool is Tool & { name: string; deferLoading?: boolean } {
+  const serverId = mcpServerIdForTool(tool, mcpServerIds);
+  return serverId !== null && serverId !== MANDATORY_FIRST_PARTY_MCP_SERVER_ID;
+}
+
+function truncateUtf8(value: string, maxBytes: number): string {
+  if (Buffer.byteLength(value) <= maxBytes) return value;
+  let output = "";
+  for (const character of value) {
+    const candidate = output + character;
+    if (Buffer.byteLength(candidate) > maxBytes) break;
+    output = candidate;
+  }
+  return output;
+}
+
+function searchSourceForTool(tool: Tool, mcpServerIds: ReadonlySet<string>): string | null {
+  const serverId = mcpServerIdForTool(tool, mcpServerIds);
+  return serverId && serverId !== MANDATORY_FIRST_PARTY_MCP_SERVER_ID
+    ? truncateUtf8(serverId, MCP_MAX_TOOL_SEARCH_SOURCE_LABEL_LENGTH)
+    : null;
+}
+
+function searchSourcesForTools(
+  connectorNamespaces: ReadonlySet<string>,
+  tools: readonly Tool[],
+  mcpServerIds: ReadonlySet<string>,
+): Set<string> {
+  const sources = new Set<string>();
+  for (const source of connectorNamespaces) {
+    if (typeof source !== "string" || source.length === 0) continue;
+    if (sources.size >= MCP_MAX_TOOL_SEARCH_SOURCES) break;
+    sources.add(truncateUtf8(source, MCP_MAX_TOOL_SEARCH_SOURCE_LABEL_LENGTH));
+  }
+  for (const tool of tools) {
+    // Codex connector labels come from the transport's original namespace set
+    // (for example, `gmail`), not from the synthetic `codex_apps__` prefix.
+    // Keep that authoritative path intact; derive fallback labels only for
+    // directly materialized non-Codex MCP tools such as selected Slack tools.
+    const source =
+      isSearchableMcpFunctionTool(tool, mcpServerIds) && !isCodexAppsFunctionTool(tool)
+        ? searchSourceForTool(tool, mcpServerIds)
+        : null;
+    if (!source || sources.has(source)) continue;
+    if (sources.size >= MCP_MAX_TOOL_SEARCH_SOURCES) break;
+    sources.add(source);
+  }
+  return sources;
 }
 
 // Minimal English stopword set: query phrasings like "send an email to someone"
@@ -206,11 +299,23 @@ export function renderSearchToolDescription(connectorNamespaces: ReadonlySet<str
     "rather than guessing exact tool names. Returns the matching connector tools, which then become callable.";
   const sources = Array.from(connectorNamespaces)
     .filter((n) => typeof n === "string" && n.length > 0)
+    .slice(0, MCP_MAX_TOOL_SEARCH_SOURCES)
+    .map((source) => truncateUtf8(source, MCP_MAX_TOOL_SEARCH_SOURCE_LABEL_LENGTH))
+    .filter(Boolean)
     .sort();
   if (sources.length === 0) {
     return `${base}\nConnected sources: none currently available.`;
   }
-  return `${base}\nYou have access to tools from the following sources:\n${sources.map((s) => `- ${s}`).join("\n")}`;
+  const header = `${base}\nYou have access to tools from the following sources:`;
+  const lines: string[] = [];
+  for (const source of sources) {
+    const candidate = `${header}${[...lines, `- ${source}`].map((line) => `\n${line}`).join("")}`;
+    if (Buffer.byteLength(candidate) > MCP_MAX_TOOL_SEARCH_DESCRIPTION_BYTES) break;
+    lines.push(`- ${source}`);
+  }
+  return lines.length > 0
+    ? `${header}\n${lines.join("\n")}`
+    : `${base}\nConnected sources: none currently available.`;
 }
 
 const SEARCH_TOOL_PARAMETERS = {
@@ -227,19 +332,38 @@ const SEARCH_TOOL_PARAMETERS = {
 } as const;
 
 /**
- * The client tool-search executor: BM25 over the deferred codex_apps pool from the
+ * The client tool-search executor: BM25 over the deferred MCP pool from the
  * turn's live `availableTools`, returning matched tools BY REFERENCE (the only legal
  * return — the SDK emits the disclosing `tool_search_output` and flips the loaded
  * gate; returning copies would throw). Stateless — reads the pool per call.
  */
-function codexToolSearchExecutor(args: {
-  availableTools?: Tool[];
-  toolCall?: { arguments?: unknown };
-}): Tool[] {
-  const deferred = (args.availableTools ?? []).filter(isCodexAppsFunctionTool);
+function codexToolSearchExecutor(
+  args: {
+    availableTools?: Tool[];
+    toolCall?: { arguments?: unknown };
+  },
+  mcpServerIds: ReadonlySet<string>,
+): Tool[] {
+  const deferred = (args.availableTools ?? []).filter((tool) =>
+    isSearchableMcpFunctionTool(tool, mcpServerIds),
+  );
   if (deferred.length === 0) return [];
   const { query, limit } = parseSearchArgs(args.toolCall?.arguments);
-  return bm25RankTools(deferred, query, limit);
+  const ranked = bm25RankTools(deferred, query, limit);
+  const bounded: Tool[] = [];
+  let disclosedBytes = 0;
+  for (const tool of ranked) {
+    const toolBytes = mcpSerializedSizeBytes(tool);
+    if (toolBytes > MCP_MAX_TOOL_DEFINITION_BYTES) {
+      continue;
+    }
+    if (disclosedBytes + toolBytes > MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES) {
+      break;
+    }
+    disclosedBytes += toolBytes;
+    bounded.push(tool);
+  }
+  return bounded;
 }
 
 const NO_NAMESPACES: ReadonlySet<string> = new Set();
@@ -301,20 +425,28 @@ function resolveSearchToolDescription(
 }
 
 /** Build the client-executed tool_search tool from an already-rendered description. */
-function buildCodexToolSearchToolFromDescription(description: string): Tool {
+function buildCodexToolSearchToolFromDescription(
+  description: string,
+  mcpServerIds: ReadonlySet<string>,
+): Tool {
   return toolSearchTool({
     execution: "client",
     description,
     parameters: SEARCH_TOOL_PARAMETERS as unknown as Record<string, unknown>,
-    execute: codexToolSearchExecutor as never,
+    execute: ((args: Parameters<typeof codexToolSearchExecutor>[0]) =>
+      codexToolSearchExecutor(args, mcpServerIds)) as never,
   }) as unknown as Tool;
 }
 
-/** Build the client-executed tool_search tool that discloses codex_apps connectors on demand. */
+/** Build the client-executed tool_search tool that discloses deferred MCP tools on demand. */
 export function buildCodexToolSearchTool(
   connectorNamespaces: ReadonlySet<string> = NO_NAMESPACES,
+  mcpServerIds: ReadonlySet<string> = NO_MCP_SERVER_IDS,
 ): Tool {
-  return buildCodexToolSearchToolFromDescription(renderSearchToolDescription(connectorNamespaces));
+  return buildCodexToolSearchToolFromDescription(
+    renderSearchToolDescription(connectorNamespaces),
+    mcpServerIds,
+  );
 }
 
 /** True for the built-in tool_search tool (so we never add a second one). */
@@ -324,15 +456,15 @@ function isToolSearchTool(tool: unknown): boolean {
 }
 
 /**
- * The transform applied to a turn's resolved tool list: tag every codex_apps
- * connector function tool `deferLoading = true`, and — unless one is already
+ * The transform applied to a turn's resolved tool list: tag every searchable
+ * non-mandatory MCP function tool `deferLoading = true`, and — unless one is already
  * present — append the client tool_search tool. Pure (mutates the passed tools +
  * returns the possibly-extended array); the SDK's `getTools` gate requires a
  * tool_search whenever a deferred tool is present, which appending here satisfies
  * in the same request.
  *
  * The search tool is appended UNCONDITIONALLY (even when the turn has no
- * codex_apps tools, e.g. the best-effort codex_apps connect was dropped this
+ * searchable MCP tools, e.g. a best-effort connector was dropped this
  * turn): a prior turn's history may carry tool_search_call/output items, and
  * replaying those without a tool_search tool in the request risks a backend
  * reject; a search over an empty pool simply discloses nothing. The description
@@ -343,10 +475,11 @@ export function applyCodexToolSearch(
   tools: Tool[],
   connectorNamespaces: ReadonlySet<string> = NO_NAMESPACES,
   descriptionFreeze?: CodexToolSearchDescriptionFreeze,
+  mcpServerIds: ReadonlySet<string> = NO_MCP_SERVER_IDS,
 ): Tool[] {
   for (const tool of tools) {
     if (
-      isCodexAppsFunctionTool(tool) &&
+      isSearchableMcpFunctionTool(tool, mcpServerIds) &&
       (tool as { deferLoading?: boolean }).deferLoading !== true
     ) {
       (tool as { deferLoading?: boolean }).deferLoading = true;
@@ -357,8 +490,11 @@ export function applyCodexToolSearch(
   }
   // AM-8: render through the per-turn freeze so the tools-block prefix stays
   // byte-stable across a turn's model calls once connectors are discovered.
-  const description = resolveSearchToolDescription(connectorNamespaces, descriptionFreeze);
-  return [...tools, buildCodexToolSearchToolFromDescription(description)];
+  const description = resolveSearchToolDescription(
+    searchSourcesForTools(connectorNamespaces, tools, mcpServerIds),
+    descriptionFreeze,
+  );
+  return [...tools, buildCodexToolSearchToolFromDescription(description, mcpServerIds)];
 }
 
 type CloneCapableAgent = {
@@ -367,11 +503,11 @@ type CloneCapableAgent = {
 };
 
 /**
- * Install progressive connector disclosure on a codex-path agent by wrapping
+ * Install progressive MCP disclosure on a Codex-path agent by wrapping
  * `getAllTools` so every per-model-call tool resolution runs
  * {@link applyCodexToolSearch}. Idempotent-per-call (re-tags each
  * freshly-materialized MCP tool under cacheToolsList:false). Gated by the caller
- * (flag + codex path).
+ * (flag + Codex path).
  *
  * CLONE SURVIVAL (the part that makes this work on the REAL sandbox path): the
  * SDK's sandbox runtime routes EVERY model call through
@@ -389,17 +525,19 @@ type CloneCapableAgent = {
 export function installCodexToolSearch(
   agent: CloneCapableAgent,
   connectorNamespaces: ReadonlySet<string> = NO_NAMESPACES,
+  mcpServerIds: ReadonlySet<string> = NO_MCP_SERVER_IDS,
 ): void {
   // ONE freeze cell per install (i.e. per turn), shared BY REFERENCE into every
   // clone re-install below so the whole turn — the built agent and every clone the
   // sandbox runtime resolves tools on — agrees on the same frozen description
   // (AM-8). Created here, at the top-level install, never per clone.
-  installCodexToolSearchWithFreeze(agent, connectorNamespaces, { value: null });
+  installCodexToolSearchWithFreeze(agent, connectorNamespaces, mcpServerIds, { value: null });
 }
 
 function installCodexToolSearchWithFreeze(
   agent: CloneCapableAgent,
   connectorNamespaces: ReadonlySet<string>,
+  mcpServerIds: ReadonlySet<string>,
   descriptionFreeze: CodexToolSearchDescriptionFreeze,
 ): void {
   const originalGetAllTools = agent.getAllTools.bind(agent);
@@ -408,12 +546,18 @@ function installCodexToolSearchWithFreeze(
       await originalGetAllTools(runContext),
       connectorNamespaces,
       descriptionFreeze,
+      mcpServerIds,
     )) as typeof agent.getAllTools;
   const originalClone = agent.clone?.bind(agent);
   if (originalClone) {
     const cloneWithToolSearch: NonNullable<CloneCapableAgent["clone"]> = (config: unknown) => {
       const cloned = originalClone(config);
-      installCodexToolSearchWithFreeze(cloned, connectorNamespaces, descriptionFreeze);
+      installCodexToolSearchWithFreeze(
+        cloned,
+        connectorNamespaces,
+        mcpServerIds,
+        descriptionFreeze,
+      );
       return cloned;
     };
     agent.clone = cloneWithToolSearch;

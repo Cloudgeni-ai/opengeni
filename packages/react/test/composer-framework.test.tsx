@@ -44,6 +44,7 @@ function delivery(
 function fullComposer(overrides: Partial<ComposerState> = {}): ComposerState {
   return {
     ...delivery("hello", () => {}),
+    hasDraftContent: () => true,
     pause: async () => {},
     pausing: false,
     resume: async () => {},
@@ -68,10 +69,13 @@ function attachments(overrides: Partial<UseFileAttachmentsResult> = {}): UseFile
     attachments: [],
     readyResources: [],
     uploading: false,
+    hasUnresolved: false,
     addFiles: () => {},
     addFromPaste: () => {},
+    restoreReadyFiles: () => {},
     retry: () => {},
     remove: () => {},
+    removeReadyFiles: () => {},
     clear: () => {},
     ...overrides,
   };
@@ -189,7 +193,7 @@ describe("compound composer framework", () => {
             return true;
           },
         }),
-        attachments: attachments({ uploading: true }),
+        attachments: attachments({ uploading: true, hasUnresolved: true }),
       });
       return (
         <Composer.Root controller={controller}>

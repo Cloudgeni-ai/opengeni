@@ -96,6 +96,41 @@ describe("observability", () => {
     );
   });
 
+  test("sanitizes and bounds span errors before OTLP export", async () => {
+    const exported: Array<{ body: any }> = [];
+    const obs = createObservability(settings, {
+      component: "api",
+      exporter: async (_url, body) => {
+        exported.push({ body });
+      },
+    });
+    const error = Object.assign(
+      new Error("PRIVATE proxy body Bearer super-secret-provider-token"),
+      { status: 502 },
+    );
+
+    const span = obs.startSpan("HTTP POST /v1/sessions", {});
+    span.end({ error, attributes: { "custom.large": "x".repeat(2_000) } });
+    await Bun.sleep(0);
+
+    expect(exported).toHaveLength(1);
+    const body = exported[0]!.body;
+    expect(JSON.stringify(body)).not.toContain("PRIVATE");
+    expect(JSON.stringify(body)).not.toContain("super-secret-provider-token");
+    const spanBody = body.resourceSpans[0].scopeSpans[0].spans[0];
+    expect(spanBody.status).toEqual({ code: 2, message: "HTTP 502" });
+    expect(spanBody.attributes).toContainEqual({
+      key: "error.type",
+      value: { stringValue: "Error" },
+    });
+    expect(spanBody.attributes).toContainEqual({
+      key: "error.status_code",
+      value: { intValue: 502 },
+    });
+    const large = spanBody.attributes.find((entry: any) => entry.key === "custom.large");
+    expect(large.value.stringValue.length).toBeLessThanOrEqual(512);
+  });
+
   test("parses OTLP headers", () => {
     expect(parseHeaders("a=b,c=d=e")).toEqual({ a: "b", c: "d=e" });
   });

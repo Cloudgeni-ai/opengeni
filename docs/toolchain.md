@@ -15,17 +15,15 @@ provenance attestations, so the release workflow (`.github/workflows/release.yml
 and the npm registry for that one step only. Don't "fix" this to use bun; provenance is the reason
 it exists.
 
-## Typecheck: tsgo
+## Typecheck: stable TypeScript 7
 
-Typecheck runs on **tsgo** (`@typescript/native-preview`, the native-Go TypeScript 7 compiler),
-not `tsc`. `bun run typecheck` invokes `bun scripts/typecheck.ts`, which runs `tsgo --noEmit`
-sequentially over every project's `tsconfig.json` (one process at a time, fail-fast). This
-replaced an 18-step chain of per-package `tsc --noEmit` calls that used to be the dominant cost of
-local verification, both in wall time and peak memory.
+Typecheck runs on the exact stable **TypeScript 7.0.2** release. `bun run typecheck` invokes
+`bun scripts/typecheck.ts`, which runs `tsc --noEmit` over every project's `tsconfig.json` through
+a bounded worker pool. This keeps verification fast while capping memory on constrained hosts.
 
-`typescript@6` is still a dependency, but only as `tsup`'s internal `.d.ts` emitter for
-publishable packages (`dts: true`) — it is never invoked as a gating typecheck. If you see a
-`tsc`-shaped error during a package build, that's the dts emit path, not the typecheck gate.
+The same exact stable compiler is used by package scripts, publish-consumer proofs, and `tsup`'s
+`.d.ts` emitter. Preview, beta, development, nightly, and native-preview compilers are not part of
+the repository toolchain.
 
 CI runs the same `bun run typecheck` step (`.github/workflows/ci.yml`), so there is nothing
 special to configure locally beyond `bun install`.
