@@ -2264,6 +2264,11 @@ export type GitHubInstallationSummary = {
 
 export type GitHubInstallationAuthorityKind = "personal_owner" | "organization_owner";
 
+export interface GitHubInstallationBindingCandidate {
+  installation: GitHubInstallationSummary;
+  authorityKind: GitHubInstallationAuthorityKind;
+}
+
 export interface GitHubInstallationBindingProof {
   actorId: number;
   actorLogin: string;
@@ -2301,6 +2306,15 @@ export type GitHubAppApiPort = {
     code: string;
     installationId: number;
   }) => Promise<GitHubInstallationBindingProof>;
+  /**
+   * Exchange one fresh GitHub user-authorization code and return only existing
+   * App installations for which that exact human is the personal owner or an
+   * active organization owner. Visibility and repository permissions alone
+   * must never produce a candidate.
+   */
+  discoverInstallationBindingCandidates?: (input: {
+    code: string;
+  }) => Promise<GitHubInstallationBindingCandidate[]>;
   authorizeUser?: (input: { code: string }) => Promise<GitHubUserInstallationAccess[]>;
   verifyInstallationAccessForUser?: (input: {
     code: string;
@@ -7848,6 +7862,9 @@ export type GitHubRepositoryScope = z.infer<typeof GitHubRepositoryScope>;
 export const GitHubBindingStatus = z.enum(["disabled", "unbound", "bound"]);
 export type GitHubBindingStatus = z.infer<typeof GitHubBindingStatus>;
 
+export const GitHubAppSetupMode = z.enum(["platform", "operator"]);
+export type GitHubAppSetupMode = z.infer<typeof GitHubAppSetupMode>;
+
 export const GitHubInstallationLifecycle = z.enum(["active", "suspended", "deleted", "unverified"]);
 export type GitHubInstallationLifecycle = z.infer<typeof GitHubInstallationLifecycle>;
 
@@ -7859,6 +7876,7 @@ export const GitHubInstallationBinding = z.object({
   lifecycle: GitHubInstallationLifecycle,
   repositoryScope: GitHubRepositoryScope,
   repositoryCount: z.number().int().nonnegative(),
+  configureUrl: z.string().url().nullable(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -7867,6 +7885,7 @@ export type GitHubInstallationBinding = z.infer<typeof GitHubInstallationBinding
 export const GitHubAppInfo = z.object({
   configured: z.boolean(),
   status: GitHubBindingStatus,
+  setupMode: GitHubAppSetupMode,
   appId: z.string().nullable(),
   clientId: z.string().nullable(),
   appSlug: z.string().nullable(),

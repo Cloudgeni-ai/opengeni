@@ -1,6 +1,7 @@
 import {
   GitHubAppManifestCreate,
   type AccessGrant,
+  type GitHubInstallationBindingCandidate,
   type GitHubInstallationBindingProof,
 } from "@opengeni/contracts";
 import {
@@ -13,6 +14,7 @@ import {
   buildGitHubAppManifest,
   convertGitHubAppManifest,
   createSignedState,
+  discoverGitHubInstallationBindingCandidates,
   envLinesFromGitHubManifestConversion,
   GitHubAppApiError,
   GitHubAppConfigurationError,
@@ -47,7 +49,6 @@ const githubStateCookie = "opengeni_github_state";
 const githubBindingStateMaxAgeSeconds = 10 * 60;
 const legacyInstallationChooserDisabledMessage =
   "The legacy repository-admin GitHub installation chooser is disabled; use the GitHub owner-consent connect flow";
-
 export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, settings, githubStateSecret } = deps;
 
@@ -61,6 +62,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
         ? await listWorkspaceGitHubInstallationBindings(deps, grant.workspaceId)
         : [];
     const status = githubBindingStatus(missing.length === 0, installations);
+    const setupMode = settings.productAccessMode === "managed" ? "platform" : "operator";
     const canManage = hasPermission(grant.permissions, "github:manage");
     const connectState =
       missing.length === 0 && slug && canManage
@@ -74,23 +76,29 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     const connectUrl = connectState
       ? `${openGeniBaseUrl(settings, c)}/v1/workspaces/${grant.workspaceId}/github/connect?state=${encodeURIComponent(connectState)}`
       : null;
+    const installationViews = installations.map((installation) => ({
+      ...installation,
+      configureUrl: connectState
+        ? `${openGeniBaseUrl(settings, c)}/v1/workspaces/${grant.workspaceId}/github/installations/${installation.installationId}/configure?state=${encodeURIComponent(connectState)}`
+        : null,
+    }));
     return c.json({
       configured: missing.length === 0,
       status,
-      appId: settings.githubAppId ?? null,
-      clientId: settings.githubClientId ?? null,
-      appSlug: slug,
+      setupMode,
+      appId: setupMode === "operator" ? (settings.githubAppId ?? null) : null,
+      clientId: setupMode === "operator" ? (settings.githubClientId ?? null) : null,
+      appSlug: setupMode === "operator" ? slug : null,
       installUrl: connectUrl,
       linkUrl: connectUrl,
-      installations,
-      missing,
+      installations: installationViews,
+      missing: setupMode === "operator" ? missing : [],
     });
   });
 
-  // The signed state is a short browser handoff minted only for an OpenGeni
-  // github:manage grant. GitHub remains responsible for installation/config
-  // consent; the later OAuth callback independently proves current owner
-  // authority before any workspace binding write.
+  // Start with user authorization, not GitHub's install/configure selector.
+  // This lets an owner link an already-installed App without relying on
+  // GitHub's Configure page to preserve or return OpenGeni state.
   app.get("/v1/workspaces/:workspaceId/github/connect", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const state = c.req.query("state");
@@ -107,8 +115,8 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     ) {
       throw new HTTPException(400, { message: "invalid or expired GitHub installation state" });
     }
-    const slug = settings.githubAppSlug?.trim();
-    if (!slug || githubAppMissingSettings(settings).length > 0) {
+    const clientId = settings.githubClientId?.trim();
+    if (!clientId || githubAppMissingSettings(settings).length > 0) {
       throw new HTTPException(409, {
         message: JSON.stringify({
           message: "GitHub App is not configured",
@@ -116,9 +124,19 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
         }),
       });
     }
-    setGitHubStateCookie(c, deps, state);
+    const discoveryState = createSignedState(githubStateSecret, {
+      accountId: statePayload.accountId,
+      workspaceId,
+      intent: "installation_authority_discovery",
+      ...continuedGitHubBrowserGrantClaims(statePayload),
+    });
+    setGitHubStateCookie(c, deps, discoveryState);
     return c.redirect(
-      `https://github.com/apps/${slug}/installations/new?state=${encodeURIComponent(state)}`,
+      githubOAuthAuthorizeUrl({
+        clientId,
+        state: discoveryState,
+        redirectUri: `${openGeniBaseUrl(settings, c)}/v1/github/oauth/callback`,
+      }),
     );
   });
 
@@ -174,7 +192,55 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.body(null, 204);
   });
 
+  app.get(
+    "/v1/workspaces/:workspaceId/github/installations/:installationId/configure",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const installationId = parsePositiveInteger(c.req.param("installationId"));
+      const state = c.req.query("state");
+      if (installationId === null || !state) {
+        throw new HTTPException(400, { message: "invalid GitHub installation configuration" });
+      }
+      const statePayload = readSignedState(state, githubStateSecret);
+      if (
+        !statePayload ||
+        statePayload.intent !== "installation_authority" ||
+        statePayload.workspaceId !== workspaceId ||
+        typeof statePayload.accountId !== "string" ||
+        !isFreshGitHubBindingState(statePayload)
+      ) {
+        throw new HTTPException(400, {
+          message: "invalid or expired GitHub installation configuration state",
+        });
+      }
+      const grant = await requireGitHubManageGrant(c, deps, workspaceId, statePayload);
+      if (grant.accountId !== statePayload.accountId) {
+        throw new HTTPException(403, {
+          message: "GitHub installation state does not match this workspace",
+        });
+      }
+      const installation = (
+        await listWorkspaceGitHubInstallationBindings(deps, grant.workspaceId)
+      ).find((candidate) => candidate.installationId === installationId);
+      if (!installation) {
+        throw new HTTPException(404, { message: "GitHub installation binding not found" });
+      }
+      const configureState = createSignedState(githubStateSecret, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        expectedInstallationId: installationId,
+        intent: "installation_authority_install",
+        ...continuedGitHubBrowserGrantClaims(statePayload),
+      });
+      setGitHubStateCookie(c, deps, configureState);
+      const configureUrl = githubInstallationSettingsUrl(installation);
+      configureUrl.searchParams.set("state", configureState);
+      return c.redirect(configureUrl.toString());
+    },
+  );
+
   app.post("/v1/workspaces/:workspaceId/github/app-manifest", async (c) => {
+    assertOperatorGitHubAppSetup(settings);
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "github:manage");
     const payload = GitHubAppManifestCreate.parse(await c.req.json());
@@ -206,6 +272,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
 
   app.get("/v1/github/app-manifest/callback", async (c) => {
+    assertOperatorGitHubAppSetup(settings);
     const code = c.req.query("code");
     const state = c.req.query("state");
     if (!code) {
@@ -226,14 +293,21 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
 
   const handleGitHubInstallCallback = async (c: Context) => {
-    const state = c.req.query("state");
+    const state =
+      c.req.query("state") ??
+      allCookieValues(c, githubStateCookie).find((candidate) => {
+        const payload = readSignedState(candidate, githubStateSecret);
+        return (
+          payload?.intent === "installation_authority_install" && isFreshGitHubBindingState(payload)
+        );
+      });
     if (!state) {
       throw new HTTPException(400, { message: "missing GitHub installation state" });
     }
     const statePayload = readSignedState(state, githubStateSecret);
     if (
       !statePayload ||
-      statePayload.intent !== "installation_authority" ||
+      statePayload.intent !== "installation_authority_install" ||
       typeof statePayload.accountId !== "string" ||
       typeof statePayload.workspaceId !== "string" ||
       !isFreshGitHubBindingState(statePayload)
@@ -257,6 +331,14 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     const installationId = parsePositiveInteger(c.req.query("installation_id"));
     if (installationId === null) {
       throw new HTTPException(400, { message: "missing or invalid GitHub installation_id" });
+    }
+    if (
+      statePayload.expectedInstallationId !== undefined &&
+      statePayload.expectedInstallationId !== installationId
+    ) {
+      throw new HTTPException(409, {
+        message: "GitHub returned a different installation than the one being configured",
+      });
     }
     const clientId = settings.githubClientId?.trim();
     if (!clientId) {
@@ -299,11 +381,69 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     const statePayload = readSignedState(state, githubStateSecret);
     if (
       !statePayload ||
-      statePayload.intent !== "installation_authority_oauth" ||
       typeof statePayload.accountId !== "string" ||
       typeof statePayload.workspaceId !== "string" ||
       !isFreshGitHubBindingState(statePayload)
     ) {
+      throw new HTTPException(400, { message: "invalid or expired GitHub OAuth state" });
+    }
+    if (statePayload.intent === "installation_authority_discovery") {
+      requireGitHubStateCookie(c, state);
+      const grant = await requireGitHubManageGrant(c, deps, statePayload.workspaceId, statePayload);
+      if (grant.accountId !== statePayload.accountId) {
+        throw new HTTPException(403, {
+          message: "GitHub OAuth state does not match this workspace",
+        });
+      }
+      let candidates: GitHubInstallationBindingCandidate[] | null;
+      try {
+        candidates = deps.githubAppApi?.discoverInstallationBindingCandidates
+          ? await deps.githubAppApi.discoverInstallationBindingCandidates({ code })
+          : deps.githubAppApi
+            ? null
+            : await discoverGitHubInstallationBindingCandidates(settings, { code });
+      } catch (error) {
+        throw githubAuthorityHttpError(error);
+      }
+      if (!candidates) {
+        throw new HTTPException(409, {
+          message: "The configured GitHub provider cannot discover owner-authorized installations",
+        });
+      }
+      if (!isConsistentGitHubBindingCandidates(candidates)) {
+        throw new HTTPException(409, {
+          message: "GitHub installation discovery proof is stale or invalid",
+        });
+      }
+      const selectionState = createSignedState(githubStateSecret, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        intent: "installation_authority_selection",
+        allowedInstallationIds: candidates.map(({ installation }) => installation.installationId),
+        ...continuedGitHubBrowserGrantClaims(statePayload),
+      });
+      if (candidates.length === 0) {
+        return redirectToGitHubInstallation(c, deps, selectionState);
+      }
+      if (candidates.length === 1) {
+        return redirectToExactGitHubAuthorization(
+          c,
+          deps,
+          selectionState,
+          candidates[0]!.installation.installationId,
+        );
+      }
+      setGitHubStateCookie(c, deps, selectionState);
+      return c.html(
+        githubInstallationChooserHtml(
+          candidates,
+          selectionState,
+          grant.workspaceId,
+          openGeniBaseUrl(settings, c),
+        ),
+      );
+    }
+    if (statePayload.intent !== "installation_authority_oauth") {
       throw new HTTPException(400, { message: "invalid or expired GitHub OAuth state" });
     }
     const installationId = parsePositiveInteger(String(statePayload.installationId ?? ""));
@@ -382,6 +522,52 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
   });
 
+  app.post("/v1/workspaces/:workspaceId/github/installations/select", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const form = new URLSearchParams(await c.req.text());
+    const state = form.get("state");
+    if (!state) {
+      throw new HTTPException(400, { message: "missing GitHub installation selection state" });
+    }
+    const statePayload = readSignedState(state, githubStateSecret);
+    if (
+      !statePayload ||
+      statePayload.intent !== "installation_authority_selection" ||
+      typeof statePayload.accountId !== "string" ||
+      statePayload.accountId.length === 0 ||
+      statePayload.workspaceId !== workspaceId ||
+      !isFreshGitHubBindingState(statePayload)
+    ) {
+      throw new HTTPException(400, {
+        message: "invalid or expired GitHub installation selection state",
+      });
+    }
+    requireGitHubStateCookie(c, state);
+    const grant = await requireGitHubManageGrant(c, deps, workspaceId, statePayload);
+    if (grant.accountId !== statePayload.accountId) {
+      throw new HTTPException(403, {
+        message: "GitHub installation state does not match this workspace",
+      });
+    }
+    const selected = form.get("installation_id");
+    if (selected === "new") {
+      return redirectToGitHubInstallation(c, deps, state);
+    }
+    const installationId = parsePositiveInteger(selected);
+    if (installationId === null) {
+      throw new HTTPException(400, { message: "invalid GitHub installation selection" });
+    }
+    if (
+      !Array.isArray(statePayload.allowedInstallationIds) ||
+      !statePayload.allowedInstallationIds.includes(installationId)
+    ) {
+      throw new HTTPException(403, {
+        message: "GitHub installation was not in the owner-authorized selection",
+      });
+    }
+    return redirectToExactGitHubAuthorization(c, deps, state, installationId);
+  });
+
   app.post("/v1/workspaces/:workspaceId/github/installations", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const form = new URLSearchParams(await c.req.text());
@@ -398,12 +584,89 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     ) {
       throw new HTTPException(400, { message: "invalid or expired GitHub OAuth state" });
     }
-    throw legacyInstallationChooserDisabled();
+    throw new HTTPException(410, { message: legacyInstallationChooserDisabledMessage });
   });
 }
 
-function legacyInstallationChooserDisabled(): HTTPException {
-  return new HTTPException(410, { message: legacyInstallationChooserDisabledMessage });
+function assertOperatorGitHubAppSetup(settings: ApiRouteDeps["settings"]): void {
+  if (settings.productAccessMode === "managed") {
+    throw new HTTPException(404, {
+      message: "GitHub App creation is unavailable in platform-managed deployments",
+    });
+  }
+}
+
+function redirectToGitHubInstallation(
+  c: Context,
+  deps: ApiRouteDeps,
+  sourceState: string,
+): Response {
+  const payload = readSignedState(sourceState, deps.githubStateSecret);
+  const slug = deps.settings.githubAppSlug?.trim();
+  if (
+    !payload ||
+    typeof payload.accountId !== "string" ||
+    typeof payload.workspaceId !== "string" ||
+    !slug
+  ) {
+    throw new HTTPException(409, { message: "GitHub App installation is unavailable" });
+  }
+  const installState = createSignedState(deps.githubStateSecret, {
+    accountId: payload.accountId,
+    workspaceId: payload.workspaceId,
+    intent: "installation_authority_install",
+    ...continuedGitHubBrowserGrantClaims(payload),
+  });
+  setGitHubStateCookie(c, deps, installState);
+  return c.redirect(
+    `https://github.com/apps/${encodeURIComponent(slug)}/installations/new?state=${encodeURIComponent(installState)}`,
+  );
+}
+
+function githubInstallationSettingsUrl(installation: {
+  installationId: number;
+  accountLogin: string | null;
+  accountType: string | null;
+}): URL {
+  if (installation.accountType === "Organization" && installation.accountLogin) {
+    return new URL(
+      `https://github.com/organizations/${encodeURIComponent(installation.accountLogin)}/settings/installations/${installation.installationId}`,
+    );
+  }
+  return new URL(`https://github.com/settings/installations/${installation.installationId}`);
+}
+
+function redirectToExactGitHubAuthorization(
+  c: Context,
+  deps: ApiRouteDeps,
+  sourceState: string,
+  installationId: number,
+): Response {
+  const payload = readSignedState(sourceState, deps.githubStateSecret);
+  const clientId = deps.settings.githubClientId?.trim();
+  if (
+    !payload ||
+    typeof payload.accountId !== "string" ||
+    typeof payload.workspaceId !== "string" ||
+    !clientId
+  ) {
+    throw new HTTPException(409, { message: "GitHub user authorization is unavailable" });
+  }
+  const oauthState = createSignedState(deps.githubStateSecret, {
+    accountId: payload.accountId,
+    workspaceId: payload.workspaceId,
+    installationId,
+    intent: "installation_authority_oauth",
+    ...continuedGitHubBrowserGrantClaims(payload),
+  });
+  setGitHubStateCookie(c, deps, oauthState);
+  return c.redirect(
+    githubOAuthAuthorizeUrl({
+      clientId,
+      state: oauthState,
+      redirectUri: `${openGeniBaseUrl(deps.settings, c)}/v1/github/oauth/callback`,
+    }),
+  );
 }
 
 function setGitHubStateCookie(c: Context, deps: ApiRouteDeps, state: string): void {
@@ -502,8 +765,50 @@ function githubSetupSuccessHtml(account: string, returnUrl: string): string {
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GitHub App Connected</title><style>body{font-family:system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#0b0b0d;color:#f4f4f5}main{width:min(640px,calc(100vw - 32px));border:1px solid #27272a;border-radius:8px;padding:28px;background:#111114}h1{margin:0 0 10px;font-size:24px;line-height:1.2}p{margin:0 0 18px;color:#d4d4d8}.button{display:inline-flex;align-items:center;justify-content:center;min-height:36px;border-radius:6px;border:1px solid #3f3f46;padding:0 12px;background:#f4f4f5;color:#09090b;font:600 14px system-ui,sans-serif;text-decoration:none}</style></head><body><main><h1>GitHub App connected</h1><p>${escapeHtml(account)} is now available to this OpenGeni workspace through an explicit repository allowlist.</p><a class="button" href="${escapeHtml(returnUrl)}">Back to OpenGeni</a></main></body></html>`;
 }
 
+function githubInstallationChooserHtml(
+  candidates: GitHubInstallationBindingCandidate[],
+  state: string,
+  workspaceId: string,
+  baseUrl: string,
+): string {
+  const action = `${baseUrl}/v1/workspaces/${encodeURIComponent(workspaceId)}/github/installations/select`;
+  const options = candidates
+    .map(({ installation, authorityKind }) => {
+      const account = escapeHtml(
+        installation.accountLogin ?? `installation ${installation.installationId}`,
+      );
+      const label = authorityKind === "personal_owner" ? "Personal account" : "Organization owner";
+      return `<label class="option"><input type="radio" name="installation_id" value="${installation.installationId}" required><span><strong>${account}</strong><small>${label}</small></span></label>`;
+    })
+    .join("");
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Choose GitHub installation</title><style>body{font-family:system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#0b0b0d;color:#f4f4f5}main{width:min(640px,calc(100vw - 32px));border:1px solid #27272a;border-radius:12px;padding:28px;background:#111114}h1{margin:0 0 10px;font-size:24px}p{margin:0 0 18px;color:#d4d4d8}.options{display:grid;gap:8px;margin-bottom:18px}.option{display:flex;align-items:center;gap:12px;border:1px solid #3f3f46;border-radius:8px;padding:12px;cursor:pointer}.option span{display:grid;gap:2px}.option small{color:#a1a1aa}button{min-height:38px;border-radius:7px;border:1px solid #3f3f46;padding:0 14px;background:#f4f4f5;color:#09090b;font:600 14px system-ui,sans-serif;cursor:pointer}.secondary{margin-left:8px;background:transparent;color:#f4f4f5}</style></head><body><main><h1>Choose a GitHub account</h1><p>Only installations where GitHub proved you are the personal owner or an active organization owner are shown.</p><form method="post" action="${escapeHtml(action)}"><input type="hidden" name="state" value="${escapeHtml(state)}"><div class="options">${options}</div><button type="submit">Connect selected</button><button class="secondary" type="submit" name="installation_id" value="new" formnovalidate>Install on another account</button></form></main></body></html>`;
+}
+
 function githubSetupPendingHtml(): string {
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GitHub App Requested</title><style>body{font-family:system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#0b0b0d;color:#f4f4f5}main{width:min(640px,calc(100vw - 32px));border:1px solid #27272a;border-radius:8px;padding:28px;background:#111114}h1{margin:0 0 10px;font-size:24px;line-height:1.2}p{margin:0;color:#d4d4d8}</style></head><body><main><h1>GitHub App request sent</h1><p>A GitHub organization owner must approve the installation. OpenGeni has not created a workspace binding.</p></main></body></html>`;
+}
+
+function isConsistentGitHubBindingCandidates(
+  candidates: GitHubInstallationBindingCandidate[],
+): boolean {
+  const ids = new Set<number>();
+  return candidates.every(({ installation, authorityKind }) => {
+    if (
+      !Number.isSafeInteger(installation.installationId) ||
+      installation.installationId <= 0 ||
+      !Number.isSafeInteger(installation.accountId) ||
+      installation.accountId <= 0 ||
+      !installation.accountLogin?.trim() ||
+      installation.suspended ||
+      ids.has(installation.installationId)
+    ) {
+      return false;
+    }
+    ids.add(installation.installationId);
+    return authorityKind === "personal_owner"
+      ? installation.accountType === "User"
+      : installation.accountType === "Organization";
+  });
 }
 
 function parsePositiveInteger(value: string | undefined | null): number | null {

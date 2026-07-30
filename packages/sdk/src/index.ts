@@ -239,6 +239,7 @@ export type {
   FileUploadData,
   GetPackResponse,
   GitHubAppInfo,
+  GitHubAppSetupMode,
   GitHubBindingStatus,
   GitHubInstallationBinding,
   GitHubInstallationLifecycle,

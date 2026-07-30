@@ -889,6 +889,14 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
     label: "/v1/workspaces/:workspaceId/github/connect",
   },
   {
+    pattern: /^\/v1\/workspaces\/[^/]+\/github\/installations\/select$/,
+    label: "/v1/workspaces/:workspaceId/github/installations/select",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/github\/installations\/[^/]+\/configure$/,
+    label: "/v1/workspaces/:workspaceId/github/installations/:installationId/configure",
+  },
+  {
     pattern: /^\/v1\/workspaces\/[^/]+\/github\/installations$/,
     label: "/v1/workspaces/:workspaceId/github/installations",
   },

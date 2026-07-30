@@ -526,6 +526,10 @@ function WorkspaceRepositoryPicker({
   const context = useAppContext();
   return (
     <RepositoryContextPicker
+      setupMode={
+        context.githubStatus?.setupMode ??
+        (context.clientConfig.productAccessMode === "managed" ? "platform" : "operator")
+      }
       configured={context.githubStatus?.configured === true}
       status={context.githubStatus?.status ?? "disabled"}
       installUrl={context.githubStatus?.installUrl ?? null}

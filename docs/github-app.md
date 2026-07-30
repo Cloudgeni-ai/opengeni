@@ -23,10 +23,21 @@ without an authority receipt is `unverified`, never healthy.
 ## Owner-authority flow
 
 Creating the App and binding an installation are distinct operations. A caller
-with `github:manage` receives a signed, ten-minute browser handoff and enters
-GitHub's installation/configuration UI. `setup_action=request` is only a pending
-organization-policy request and never creates a binding. `install` and `update`
-advance to a fresh GitHub App user authorization. The callback then verifies:
+with `github:manage` receives a signed, ten-minute browser handoff and first
+authorizes the App as a GitHub user. OpenGeni discovers existing installations
+visible to that user, but retains only exact personal-account ownership or live
+active organization-owner membership. One retained installation advances
+directly; several produce an owner-only chooser; none enters GitHub's new
+installation UI. This order lets an existing installation connect without
+depending on GitHub's Configure page to return OpenGeni state.
+
+The selected installation then receives a second, exact fresh GitHub user
+authorization immediately before binding. The second pass is deliberate: no
+GitHub user token is persisted between discovery and selection, and authority is
+revalidated near the durable commit. For a new installation, `install` and
+`update` advance to this exact authorization. `setup_action=request` is only a
+pending organization-policy request and never creates a binding. The exact
+callback verifies:
 
 1. the exact authenticated GitHub user, live App installation, installation
    account, suspension state, and current installation repositories;
@@ -52,6 +63,13 @@ silently rewrite that delegation. GitHub installation suspension, deletion, or
 repository removal remains effective immediately through live listing and
 installation-token APIs.
 
+An existing binding exposes a workspace-scoped **Repositories** action. OpenGeni
+mints fresh signed browser state before opening GitHub's installation settings.
+The setup callback accepts that state from GitHub or the same-site browser
+cookie, then repeats exact OAuth authority proof before updating the binding.
+This keeps repository reconfiguration working even if GitHub omits `state` from
+its update redirect.
+
 ## Supported authority matrix
 
 | GitHub case | Self-service binding | Evidence / result |
@@ -70,6 +88,14 @@ OpenGeni never infers installation or configuration authority from
 `GET /user/installations`, setup callback IDs, App Manager metadata, repository
 permission bits, or repository administration. A human-managed token injected
 into an agent sandbox is also not a product binding mechanism.
+
+The App uses one GitHub registration with two credential paths:
+
+- App ID + private key mint short-lived installation tokens for repository work.
+- Client ID + client secret perform human OAuth for identity and ownership proof.
+
+An installation is an instance of that same App on a personal account or
+organization. It is not a second App and has no second private key.
 
 ## Repository and token scope
 
@@ -96,5 +122,10 @@ to use their machine's ambient Git authentication.
   github.com and api.github.com.
 - The generated App does not register webhooks. Live installation and repository
   reads plus short-lived installation tokens enforce provider state.
+- A manifest with a setup URL sets `request_oauth_on_install=false`; GitHub does
+  not support requesting OAuth-on-install together with a setup URL.
+- Managed deployments expose only install/connect UI and keep App registration
+  identifiers and operator manifest creation server-side. Configured/local
+  deployments retain the operator setup flow.
 - Workspace unlink deletes only that OpenGeni binding. It does not uninstall the
   App from GitHub or change another workspace's independent binding.
