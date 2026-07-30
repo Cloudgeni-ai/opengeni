@@ -1,9 +1,10 @@
 import {
   metadataWithTurnExecutionPolicyV1,
   mergeResourceRefs,
+  ResourceRef,
+  resourceMountPath,
   turnExecutionPolicyAuditMetadata,
   type ReasoningEffort,
-  type ResourceRef,
   type TurnExecutionPolicyV1,
 } from "@opengeni/contracts";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
@@ -367,6 +368,17 @@ function draftIsNonEmpty(draft: ComposerDraftRow): boolean {
   return draft.text.length > 0 || draft.resources.length > 0 || draft.sourceTurnId !== null;
 }
 
+function withCanonicalResourceMountPaths(resources: readonly unknown[]): unknown[] {
+  return resources.map((value) => {
+    const parsed = ResourceRef.safeParse(value);
+    if (!parsed.success) return value;
+    return {
+      ...(value as Record<string, unknown>),
+      mountPath: resourceMountPath(parsed.data),
+    };
+  });
+}
+
 export async function getComposerDraftInTransaction(
   db: Database,
   input: {
@@ -430,7 +442,7 @@ export async function saveComposerDraftInTransaction(
     subjectId: input.subjectId,
     revision,
     text: input.text,
-    resources: input.resources,
+    resources: withCanonicalResourceMountPaths(input.resources),
     tools: [],
     toolsProvided: false,
     model: input.model,
@@ -802,7 +814,7 @@ export async function editQueuedTurnInTransaction(
     subjectId: input.subjectId,
     revision: nextDraftRevision,
     text: turn.prompt,
-    resources: turn.resources,
+    resources: withCanonicalResourceMountPaths(turn.resources),
     tools: [],
     toolsProvided: false,
     model: turn.model,
@@ -1149,7 +1161,7 @@ export async function submitHumanPromptInTransaction(
     expectedDraftRevision: input.expectedDraftRevision ?? null,
     text: input.text,
     turnInstructions: input.turnInstructions ?? null,
-    resources: input.resources,
+    resources: withCanonicalResourceMountPaths(input.resources),
     model: input.model ?? null,
     reasoningEffort: input.reasoningEffort ?? null,
     source: input.source,
@@ -1256,13 +1268,13 @@ export async function submitHumanPromptInTransaction(
       draft &&
       canonicalSessionCommandHash({
         text: draft.text,
-        resources: draft.resources,
+        resources: withCanonicalResourceMountPaths(draft.resources),
         model: draft.model,
         reasoningEffort: draft.reasoningEffort,
       }) !==
         canonicalSessionCommandHash({
           text: input.text,
-          resources: input.resources,
+          resources: withCanonicalResourceMountPaths(input.resources),
           model: input.model ?? session.model,
           reasoningEffort: input.reasoningEffort ?? input.reasoningEffortFallback,
         })

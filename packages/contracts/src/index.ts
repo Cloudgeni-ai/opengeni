@@ -467,6 +467,7 @@ export const ErrorCode = z.enum([
   "validation_failed",
   "conflict",
   "idempotency_conflict",
+  "payment_required",
   "limit_exceeded",
   "nested_agent_depth_exceeded",
   "nested_agent_depth_override_forbidden",
