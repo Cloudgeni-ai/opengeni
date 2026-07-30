@@ -85,6 +85,7 @@ const {
   establishSandboxSessionFromEnvelope,
   readWorkspaceArchiveFromEnvelopeSessionState,
   decodeModalSnapshotId,
+  describeNativeSnapshotArchive,
   SandboxResumeStateUnavailableError,
 } = await import("@opengeni/runtime");
 const { testSettings } = await import("@opengeni/testing");
@@ -102,6 +103,8 @@ const SNAPSHOT_PREV_REF =
 const SNAPSHOT_PREV_B64 = Buffer.from(new TextEncoder().encode(SNAPSHOT_PREV_REF)).toString(
   "base64",
 );
+const TAR_BYTES = new TextEncoder().encode("PK-opengeni-test-tar");
+const TAR_B64 = Buffer.from(TAR_BYTES).toString("base64");
 
 function envelopeWithArchive(archiveB64: string | undefined) {
   const sessionState: Record<string, unknown> = {
@@ -113,7 +116,7 @@ function envelopeWithArchive(archiveB64: string | undefined) {
     sessionState.workspaceArchive = archiveB64;
     const bytes = Buffer.from(archiveB64, "base64");
     const archiveSha256 = createHash("sha256").update(bytes).digest("hex");
-    sessionState.workspaceArchiveMeta = {
+    sessionState.workspaceArchiveMeta = describeNativeSnapshotArchive(bytes, 1_700_000_000_000) ?? {
       version: 1,
       revision: `wa1:1700000000000:${archiveSha256}`,
       archiveSha256,
@@ -240,7 +243,6 @@ describe("cold-restore archive+hydrate (sandbox-file-persistence)", () => {
         "hydrate",
         "attributed:sb-restored",
         "restore-verifying",
-        "fingerprint-exec",
       ]);
       expect(established.instanceId).toBe("sb-restored");
     } finally {
@@ -316,7 +318,7 @@ describe("cold-restore archive+hydrate (sandbox-file-persistence)", () => {
     observedWorkspaceSha = "b".repeat(64);
     try {
       await expect(
-        establishSandboxSessionFromEnvelope(modalSettings(), envelopeWithArchive(SNAPSHOT_B64), {
+        establishSandboxSessionFromEnvelope(modalSettings(), envelopeWithArchive(TAR_B64), {
           sessionId: "sess-partial-restore",
           recovery: "create-or-restore",
           environment: {},

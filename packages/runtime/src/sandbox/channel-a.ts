@@ -1669,18 +1669,28 @@ export class SandboxChannelAService {
     const rejectLink = safe
       ? `test ! -L ${shellQuote(abs)} || { printf '__OPENGENI_FS_SYMLINK__'; exit 68; }`
       : ":";
-    const script = [
-      `root=$(realpath -e -- ${shellQuote(root)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
-      rejectLink,
-      `target=$(realpath -e -- ${shellQuote(abs)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
-      `case "$target" in "$root"|"$root"/*) ;; *) printf '__OPENGENI_FS_ESCAPE__'; exit 67 ;; esac`,
-      `test -d "$target" || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
-      `cd -P -- "$target"`,
-      `printf '__OPENGENI_FS_CONFINED_OK__\\n'`,
-      args.cmd,
-    ].join("; ");
-    const successPrefix = "__OPENGENI_FS_CONFINED_OK__\n";
     for (let attempt = 0; attempt < 2; attempt += 1) {
+      // A fresh nonce on each transport attempt prevents a delayed/replayed
+      // response from an earlier attempt from satisfying this attempt's frame.
+      const frameId = crypto.randomUUID().replaceAll("-", "");
+      const successPrefix = `__OPENGENI_FS_CONFINED_${frameId}_OK__\n`;
+      const successSuffixPrefix = `__OPENGENI_FS_CONFINED_${frameId}_END__:`;
+      const successSuffixTerminator = "__";
+      const script = [
+        `root=$(realpath -e -- ${shellQuote(root)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
+        rejectLink,
+        `target=$(realpath -e -- ${shellQuote(abs)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
+        `case "$target" in "$root"|"$root"/*) ;; *) printf '__OPENGENI_FS_ESCAPE__'; exit 67 ;; esac`,
+        `test -d "$target" || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
+        `cd -P -- "$target"`,
+        `printf ${shellQuote(successPrefix)}`,
+        // Keep an operation-level `exit` inside the subshell so the trusted end
+        // frame is emitted for every completed command.
+        `( ${args.cmd} )`,
+        `operation_status=$?`,
+        `printf ${shellQuote(`${successSuffixPrefix}%s${successSuffixTerminator}`)} "$operation_status"`,
+        `exit "$operation_status"`,
+      ].join("; ");
       let result: Awaited<ReturnType<SandboxChannelAService["run"]>>;
       try {
         result = await this.run({
@@ -1702,7 +1712,27 @@ export class SandboxChannelAService {
       }
       const successIndex = result.stdout.indexOf(successPrefix);
       if (successIndex >= 0) {
-        return { ...result, stdout: result.stdout.slice(successIndex + successPrefix.length) };
+        const payloadStart = successIndex + successPrefix.length;
+        const suffixIndex = result.stdout.lastIndexOf(successSuffixPrefix);
+        if (suffixIndex >= payloadStart) {
+          const suffixEnd = result.stdout.indexOf(
+            successSuffixTerminator,
+            suffixIndex + successSuffixPrefix.length,
+          );
+          const statusText =
+            suffixEnd < 0
+              ? null
+              : result.stdout.slice(suffixIndex + successSuffixPrefix.length, suffixEnd);
+          if (statusText && /^(?:0|[1-9][0-9]{0,2})$/.test(statusText)) {
+            const operationStatus = Number(statusText);
+            if (operationStatus > 255) continue;
+            return {
+              ...result,
+              stdout: result.stdout.slice(payloadStart, suffixIndex),
+              exitCode: operationStatus,
+            };
+          }
+        }
       }
       if (result.stdout.includes("__OPENGENI_FS_ESCAPE__") || result.exitCode === 67) {
         throw new ChannelAValidationError(`path resolves outside workspace: ${safe || "."}`);

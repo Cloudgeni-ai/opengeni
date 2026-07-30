@@ -43,6 +43,7 @@ import {
   NatsOpStreamTransport,
   RoutingBackendRecoveryRequiredError,
   RoutingSandboxSession,
+  resolveModalCheckpointProviderBindingForSession,
   verifySandboxExecReadiness,
   type ControlRpc,
   type EstablishedSandboxSession,
@@ -59,6 +60,13 @@ import {
   type SelfhostedOpStreamDeps,
 } from "@opengeni/runtime";
 import { sandboxLeaseHolderIdForAttempt } from "./sandbox-resume";
+
+type PersistableMutationAdmission = {
+  admission: SandboxWorkspaceMutationAdmission;
+  providerBinding: Awaited<
+    ReturnType<typeof resolveModalCheckpointProviderBindingForSession>
+  > | null;
+};
 
 export type RoutingWiringServices = {
   db: Database;
@@ -390,12 +398,12 @@ async function resolveCurrentHomeBackend(
 function beforePersistableHomeMutation(
   services: RoutingWiringServices,
   ids: RoutingWiringIds,
-  home: { accountId: string; sandboxGroupId: string } | undefined,
+  home: { accountId: string; sandboxGroupId: string; backend: string } | undefined,
 ):
   | ((input: {
       op: string;
       backend: ResolvedActiveBackend;
-    }) => Promise<SandboxWorkspaceMutationAdmission | null>)
+    }) => Promise<PersistableMutationAdmission | null>)
   | undefined {
   const fence = ids.workspaceMutationFence;
   if (!home || !fence) return undefined;
@@ -410,7 +418,11 @@ function beforePersistableHomeMutation(
     ) {
       return null;
     }
-    return await advanceWorkspaceGeneration(services.db, {
+    const providerBinding =
+      home.backend === "modal"
+        ? await resolveModalCheckpointProviderBindingForSession(services.settings, backend.session)
+        : null;
+    const admission = await advanceWorkspaceGeneration(services.db, {
       accountId: fence.accountId,
       workspaceId: ids.workspaceId,
       sessionId: ids.sessionId,
@@ -423,13 +435,14 @@ function beforePersistableHomeMutation(
       expectedInstanceId: backend.providerInstanceId,
       operation: op,
     });
+    return { admission, providerBinding };
   };
 }
 
 function afterPersistableHomeMutation(
   services: RoutingWiringServices,
   ids: RoutingWiringIds,
-  home: { accountId: string; sandboxGroupId: string } | undefined,
+  home: { accountId: string; sandboxGroupId: string; backend: string } | undefined,
 ):
   | ((input: {
       op: string;
@@ -448,14 +461,20 @@ function afterPersistableHomeMutation(
       backend.leaseEpoch === undefined ||
       backend.providerInstanceId === undefined ||
       !admission ||
-      typeof admission !== "object" ||
-      typeof (admission as Partial<SandboxWorkspaceMutationAdmission>).id !== "string" ||
-      typeof (admission as Partial<SandboxWorkspaceMutationAdmission>).workspaceGeneration !==
-        "number"
+      typeof admission !== "object"
     ) {
       return;
     }
-    const exactAdmission = admission as SandboxWorkspaceMutationAdmission;
+    const boundAdmission = admission as Partial<PersistableMutationAdmission>;
+    const exactAdmission = boundAdmission.admission;
+    if (
+      !exactAdmission ||
+      typeof exactAdmission.id !== "string" ||
+      typeof exactAdmission.workspaceGeneration !== "number" ||
+      !("providerBinding" in boundAdmission)
+    ) {
+      throw new Error("Persistable home mutation settlement lacked its bound admission");
+    }
     if (outcome === "resolved" && retainedProcess) {
       try {
         await retainWorkspaceMutationProcess(services.db, {
@@ -467,6 +486,7 @@ function afterPersistableHomeMutation(
           admissionId: exactAdmission.id,
           admittedWorkspaceGeneration: exactAdmission.workspaceGeneration,
           operation: op,
+          providerBinding: boundAdmission.providerBinding ?? null,
           owner: {
             kind: "turn",
             turnId: fence.turnId,

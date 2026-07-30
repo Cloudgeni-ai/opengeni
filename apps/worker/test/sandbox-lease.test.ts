@@ -74,6 +74,16 @@ import {
 import { sandboxLeaseHolderIdForAttempt } from "../src/sandbox-resume";
 import type { ActivityServices } from "../src/activities/types";
 
+const MODAL_PROVIDER_BINDING = {
+  key: '{"version":1,"serverUrl":"https://modal.test","workspaceName":"opengeni-test","environment":"test"}',
+  binding: {
+    version: 1 as const,
+    serverUrl: "https://modal.test",
+    workspaceName: "opengeni-test",
+    environment: "test",
+  },
+};
+
 // Swap process.env for the duration of a getSettings() parse (mirrors the
 // @opengeni/config test harness; getSettings reads process.env, not an arg).
 function withEnv<T>(env: NodeJS.ProcessEnv, fn: () => T): T {
@@ -153,9 +163,8 @@ function makeTerminateSpy(): {
     // production order is resume -> persistWorkspace -> persistArchive -> stop).
     // A re-armed lease returns wrote:false and the production seam leaves the box
     // running; mirror that so the spy never colds a re-armed lease either.
-    const { wrote } = await persistArchive(
-      Buffer.from("TERMINATE_SPY_TEST_ARCHIVE").toString("base64"),
-    );
+    const archive = Buffer.from("TERMINATE_SPY_TEST_ARCHIVE").toString("base64");
+    const { wrote } = await persistArchive(archive, archiveDescriptor(archive, 1_900_000_000_000));
     persisted.push({ group: lease.sandboxGroupId, wrote });
     return wrote;
   };
@@ -437,7 +446,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(result.terminated).toBeGreaterThanOrEqual(1);
   }, 60_000);
 
-  test("(1b) persist-before-terminate: persistDrainSnapshot folds the /workspace archive onto the lease under the epoch fence (keep-latest GC returns the prior)", async () => {
+  test("(1b) persist-before-terminate: persistDrainSnapshot folds the /workspace archive onto the lease under the epoch fence", async () => {
     if (!available) return;
     // A draining lease carrying the production envelope shape (sessionState with
     // providerState). This is exactly the row the reaper persists onto BEFORE it
@@ -474,9 +483,9 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       expectedInstanceId: "box-persist",
       expectedWorkspaceGeneration: 0,
       workspaceArchive: archive1,
+      workspaceArchiveMeta: archiveDescriptor(archive1, 1_900_000_000_000),
     });
     expect(r1.wrote).toBe(true);
-    expect(r1.priorArchiveForGc).toBeNull();
     // The archive is folded at resume_state.sessionState.workspaceArchive AND the
     // existing providerState sibling is preserved (resume-by-id still works).
     const [row1] =
@@ -485,8 +494,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(ss1.workspaceArchive).toBe(archive1);
     expect(ss1.providerState.sandboxId).toBe("sb-old");
 
-    // Second persist (a later drain): supersedes, returns the PRIOR archive so the
-    // reaper can GC the superseded snapshot (keep-latest-per-lease).
+    // Second persist (a later drain) rotates the previous restore slot.
     const archive2 = Buffer.from('MODAL_SANDBOX_FS_SNAPSHOT_V1\n{"snapshot_id":"im-2"}').toString(
       "base64",
     );
@@ -498,9 +506,9 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       expectedInstanceId: "box-persist",
       expectedWorkspaceGeneration: 0,
       workspaceArchive: archive2,
+      workspaceArchiveMeta: archiveDescriptor(archive2, 1_900_000_001_000),
     });
     expect(r2.wrote).toBe(true);
-    expect(r2.priorArchiveForGc).toBeNull();
 
     // Epoch fence: a stale-epoch persist writes ZERO rows (wrote:false) so the
     // reaper leaves the (re-armed/superseded) box RUNNING — never terminates it.
@@ -512,6 +520,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       expectedInstanceId: "box-persist",
       expectedWorkspaceGeneration: 0,
       workspaceArchive: archive2,
+      workspaceArchiveMeta: archiveDescriptor(archive2, 1_900_000_001_000),
     });
     expect(r3.wrote).toBe(false);
   }, 60_000);
@@ -556,12 +565,12 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       expectedInstanceId: "box-warm-persist",
       expectedWorkspaceGeneration: 0,
       workspaceArchive: archive1,
+      workspaceArchiveMeta: archiveDescriptor(archive1, t0),
       minIntervalMs: 60_000,
       capturedAtMs: t0,
     });
     expect(r1.wrote).toBe(true);
     expect(r1.throttled).toBe(false);
-    expect(r1.priorArchiveForGc).toBeNull();
     const [row1] =
       await admin`select resume_state from sandbox_leases where sandbox_group_id = ${ids.groupId}`;
     const ss1 = (row1!.resume_state as any).sessionState;
@@ -582,6 +591,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       expectedInstanceId: "box-warm-persist",
       expectedWorkspaceGeneration: 0,
       workspaceArchive: archive2,
+      workspaceArchiveMeta: archiveDescriptor(archive2, t0 + 1_000),
       minIntervalMs: 60_000,
       capturedAtMs: t0 + 1_000,
     });
@@ -604,6 +614,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       expectedInstanceId: "box-warm-persist",
       expectedWorkspaceGeneration: 0,
       workspaceArchive: staleArchive,
+      workspaceArchiveMeta: archiveDescriptor(staleArchive, t0 - 5_000),
       minIntervalMs: 0,
       capturedAtMs: t0 - 5_000,
     });
@@ -613,8 +624,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       await admin`select resume_state from sandbox_leases where sandbox_group_id = ${ids.groupId}`;
     expect((rowStale!.resume_state as any).sessionState.workspaceArchive).toBe(archive1);
 
-    // Interval 0 = always write: shifts current to previous and returns only the
-    // two-ago archive for GC, retaining a 2-deep restore fallback.
+    // Interval 0 = always write and retains a two-deep restore fallback.
     const r3 = await persistWarmSnapshot(db, {
       accountId: ids.accountId,
       workspaceId: ids.workspaceId,
@@ -624,11 +634,11 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       expectedInstanceId: "box-warm-persist",
       expectedWorkspaceGeneration: 0,
       workspaceArchive: archive2,
+      workspaceArchiveMeta: archiveDescriptor(archive2, t0 + 2_000),
       minIntervalMs: 0,
       capturedAtMs: t0 + 2_000,
     });
     expect(r3.wrote).toBe(true);
-    expect(r3.priorArchiveForGc).toBeNull();
     const [row3] =
       await admin`select resume_state from sandbox_leases where sandbox_group_id = ${ids.groupId}`;
     const ss3 = (row3!.resume_state as any).sessionState;
@@ -647,11 +657,11 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       expectedInstanceId: "box-warm-persist",
       expectedWorkspaceGeneration: 0,
       workspaceArchive: archive3,
+      workspaceArchiveMeta: archiveDescriptor(archive3, t0 + 3_000),
       minIntervalMs: 0,
       capturedAtMs: t0 + 3_000,
     });
     expect(r3b.wrote).toBe(true);
-    expect(r3b.priorArchiveForGc).toBe(archive1);
     const [row3b] =
       await admin`select resume_state from sandbox_leases where sandbox_group_id = ${ids.groupId}`;
     const ss3b = (row3b!.resume_state as any).sessionState;
@@ -668,6 +678,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       expectedInstanceId: "box-warm-persist",
       expectedWorkspaceGeneration: 0,
       workspaceArchive: archive1,
+      workspaceArchiveMeta: archiveDescriptor(archive1, t0 + 4_000),
       minIntervalMs: 0,
       capturedAtMs: t0 + 4_000,
     });
@@ -686,6 +697,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       expectedInstanceId: "box-warm-persist",
       expectedWorkspaceGeneration: 0,
       workspaceArchive: archive1,
+      workspaceArchiveMeta: archiveDescriptor(archive1, t0 + 5_000),
       minIntervalMs: 0,
       capturedAtMs: t0 + 5_000,
     });
@@ -732,6 +744,10 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       expectedInstanceId: "box-warm-control-fence",
       expectedWorkspaceGeneration: 0,
       workspaceArchive: Buffer.from("must-not-land").toString("base64"),
+      workspaceArchiveMeta: archiveDescriptor(
+        Buffer.from("must-not-land").toString("base64"),
+        Date.now(),
+      ),
       minIntervalMs: 0,
     });
     expect(fenced).toMatchObject({ wrote: false, superseded: true });
@@ -1176,6 +1192,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
         admissionId: admission.id,
         admittedWorkspaceGeneration: admission.workspaceGeneration,
         operation: "yieldBeforeRouteMove",
+        providerBinding: MODAL_PROVIDER_BINDING,
         owner: {
           kind: "turn",
           turnId: attempt.turnId,
@@ -1238,6 +1255,31 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
         liveness: "warm",
       }),
     ).toBeNull();
+
+    // A retained process remains durable audit/lifecycle truth, but once a
+    // successor provider identity owns the lease it is no longer a write lock on
+    // that different filesystem. Historical rows used to block this preflight
+    // forever because the guard matched only lease_id.
+    await admin`
+      update sandbox_leases
+      set lease_epoch = 13, instance_id = 'box-retained-successor'
+      where id = ${leaseId}
+    `;
+    expect(
+      await readWorkspaceArchiveCapturePreflight(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: ids.groupId,
+        expectedEpoch: 13,
+        expectedInstanceId: "box-retained-successor",
+        liveness: "warm",
+      }),
+    ).toMatchObject({ workspaceGeneration: admission.workspaceGeneration });
+    await admin`
+      update sandbox_leases
+      set lease_epoch = 12, instance_id = 'box-retained-race'
+      where id = ${leaseId}
+    `;
 
     const replay = await promote().catch((error) => error);
     expect(replay).toBeInstanceOf(SandboxRetainedProcessPromotionFencedError);
@@ -1334,6 +1376,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
         admissionId: admission.id,
         admittedWorkspaceGeneration: admission.workspaceGeneration,
         operation,
+        providerBinding: MODAL_PROVIDER_BINDING,
         owner: {
           kind: "turn",
           turnId: attempt.turnId,
@@ -1614,6 +1657,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       admissionId: admission.id,
       admittedWorkspaceGeneration: admission.workspaceGeneration,
       operation: "preFixRetainedProcess",
+      providerBinding: MODAL_PROVIDER_BINDING,
       owner: {
         kind: "turn",
         turnId: attempt.turnId,
@@ -2291,7 +2335,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       minIntervalMs: 0,
       capturedAtMs: t0 + 1_000,
     });
-    expect(warm2.priorArchiveForGc).toBeNull();
+    expect(warm2.wrote).toBe(true);
 
     const warm3 = await persistWarmSnapshot(db, {
       accountId: ids.accountId,
@@ -2306,7 +2350,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       minIntervalMs: 0,
       capturedAtMs: t0 + 2_000,
     });
-    expect(warm3.priorArchiveForGc).toBe(archive2);
+    expect(warm3.wrote).toBe(true);
     const [afterWarm] =
       await admin`select resume_state from sandbox_leases where sandbox_group_id = ${ids.groupId}`;
     expect((afterWarm!.resume_state as any).sessionState).toMatchObject({
@@ -2316,9 +2360,8 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       workspaceArchivePrevMeta: descriptor1,
     });
 
-    // The drain seam uses the same rotation policy. It may GC the superseded
-    // unverified current revision, but the independently verified fallback must
-    // remain reachable in the previous slot.
+    // The drain seam uses the same rotation policy. The independently verified
+    // fallback must remain reachable in the previous slot.
     await admin`update sandbox_leases
       set liveness = 'draining', refcount = 0, turn_holders = 0
       where sandbox_group_id = ${ids.groupId}`;
@@ -2332,7 +2375,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       workspaceArchive: archive4,
       workspaceArchiveMeta: descriptor4,
     });
-    expect(drain4.priorArchiveForGc).toBe(archive3);
+    expect(drain4.wrote).toBe(true);
     const [afterDrain] =
       await admin`select resume_state from sandbox_leases where sandbox_group_id = ${ids.groupId}`;
     expect((afterDrain!.resume_state as any).sessionState).toMatchObject({
@@ -2343,8 +2386,8 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     });
 
     // Only independent verification of the newer durable revision releases the
-    // old fallback for GC. The next rotation keeps revision 4 and returns exactly
-    // revision 1 — never the newly verified archive — as its sole GC candidate.
+    // old fallback. The next rotation keeps revision 4 and evicts revision 1,
+    // never the newly verified archive.
     await admin`update sandbox_leases set resume_state = jsonb_set(
       jsonb_set(
         resume_state,
@@ -2366,7 +2409,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       workspaceArchive: archive5,
       workspaceArchiveMeta: descriptor5,
     });
-    expect(drain5.priorArchiveForGc).toBe(archive1);
+    expect(drain5.wrote).toBe(true);
     const [afterNewVerification] =
       await admin`select resume_state from sandbox_leases where sandbox_group_id = ${ids.groupId}`;
     expect((afterNewVerification!.resume_state as any).sessionState).toMatchObject({
@@ -2824,6 +2867,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       OPENGENI_TEMPORAL_HOST: "127.0.0.1:7233",
       OPENGENI_NATS_URL: "nats://127.0.0.1:4222",
       OPENGENI_SANDBOX_OWNERSHIP_ENABLED: "true",
+      OPENGENI_SANDBOX_ROTATION_LEAD_MS: "300000",
     } as Record<string, string>;
 
     // reaperPeriod (100s) >= viewerHolderTTL (90s) → throws (the reaper must run

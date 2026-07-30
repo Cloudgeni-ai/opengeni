@@ -34,6 +34,7 @@ import { PROVIDER_REGISTRY } from "./providers";
 import { SandboxConfigError, SandboxResumeStateUnavailableError } from "./errors";
 import { isProviderSandboxNotFoundError } from "./provider-errors";
 import {
+  decodeNativeSnapshotRef,
   readVerifiedWorkspaceArchive,
   verifyRestoredWorkspace,
   WorkspaceArchiveIntegrityError,
@@ -81,10 +82,17 @@ export {
   WORKSPACE_ARCHIVE_DESCRIPTOR_VERSION,
   WorkspaceArchiveIntegrityError,
   captureVerifiedWorkspaceArchive,
+  decodeNativeSnapshotRef,
+  describeLegacyNativeSnapshotArchive,
+  describeNativeSnapshotArchive,
   fingerprintSandboxWorkspace,
   parseWorkspaceArchiveDescriptor,
   readVerifiedWorkspaceArchive,
   verifyRestoredWorkspace,
+  type NativeSnapshotDescriptor,
+  type NativeSnapshotProvider,
+  type NativeSnapshotRef,
+  type TarWorkspaceArchiveDescriptor,
   type VerifiedWorkspaceArchive,
   type WorkspaceArchiveDescriptor,
   type WorkspaceArchiveIntegrityCode,
@@ -92,13 +100,20 @@ export {
 } from "./workspace-archive";
 export {
   ensureModalRegistryImage,
+  deleteModalCheckpointSnapshot,
+  inspectModalSandboxLifecycle,
+  modalSessionMatchesCheckpointProviderBinding,
   modalSandboxAttributionEnvironment,
   modalSandboxAttributionTags,
+  resolveModalCheckpointProviderBinding,
+  resolveModalCheckpointProviderBindingForLiveSandbox,
+  resolveModalCheckpointProviderBindingForSession,
   sweepModalOrphanSandboxes,
   tagModalSandbox,
   terminateModalSandboxById,
   type LiveModalSandboxLeaseAttribution,
   type ModalModuleLoader,
+  type ModalCheckpointProviderBinding,
   type ModalOrphanSweepResult,
   type ModalOrphanSweepTermination,
   type ModalSandboxAttribution,
@@ -506,7 +521,9 @@ function withDockerNetwork(client: SandboxClient, network: string | undefined): 
         }
       : {}),
     ...(client.delete
-      ? { delete: async (state: SandboxSessionState) => await client.delete!(state) }
+      ? {
+          delete: async (state: SandboxSessionState) => await client.delete!(state),
+        }
       : {}),
     ...(client.serializeSessionState
       ? {
@@ -628,84 +645,14 @@ export function readWorkspaceArchiveFromEnvelopeSessionState(
   }
 }
 
-// The native snapshot-ref prefixes the @openai/agents-extensions modal client
-// encodes (snapshots.mjs `NATIVE_SNAPSHOT_PREFIXES`). The ref is
-// `<PREFIX>\n{"snapshot_id":"...",...}`. We re-implement the decode here because
-// `@openai/agents-extensions/sandbox/shared` is NOT an exported subpath (the
-// package `exports` map only exposes `./sandbox/<provider>`), so decodeNativeSnapshotRef
-// is unreachable — same reasoning as isProviderSandboxNotFoundError below.
-const MODAL_SNAPSHOT_REF_PREFIXES = [
-  "MODAL_SANDBOX_FS_SNAPSHOT_V1\n",
-  "MODAL_SANDBOX_DIR_SNAPSHOT_V1\n",
-];
-
 /** Decode the Modal snapshot id out of a persisted base64 archive ref, or
- *  undefined when the archive is a tar payload (no provider snapshot to GC) or
- *  is unparseable. Used only for keep-latest-per-lease snapshot GC. */
+ *  undefined when the archive is a tar payload or is unparseable. */
 export function decodeModalSnapshotId(archive: Uint8Array): string | undefined {
-  let text: string;
-  try {
-    text = new TextDecoder().decode(archive);
-  } catch {
-    return undefined;
-  }
-  for (const prefix of MODAL_SNAPSHOT_REF_PREFIXES) {
-    if (!text.startsWith(prefix)) {
-      continue;
-    }
-    try {
-      const payload = JSON.parse(text.slice(prefix.length)) as { snapshot_id?: unknown };
-      return typeof payload.snapshot_id === "string" && payload.snapshot_id.length > 0
-        ? payload.snapshot_id
-        : undefined;
-    } catch {
-      return undefined;
-    }
-  }
-  return undefined;
-}
-
-/**
- * Best-effort GC of a SUPERSEDED Modal filesystem/directory snapshot
- * (sandbox-file-persistence). restoreSnapshotFilesystem terminates the previous
- * SANDBOX but never deletes the prior SNAPSHOT image, so snapshots accumulate
- * unbounded across warm/cold cycles. The reaper keeps only the latest per lease:
- * when it writes a NEW archive it passes the PRIOR archive here to delete its
- * image via the live session's Modal client (`session.modal.images.delete(id)` —
- * the same API the SDK uses for directory images). Never throws (GC is a
- * best-effort backstop; a leaked snapshot is a cost issue, not a correctness one).
- * A tar archive (no snapshot id) is a no-op. Returns the deleted snapshot id (or
- * undefined when nothing was deleted) for observability.
- */
-export async function deletePriorPersistedSnapshot(
-  session: unknown,
-  priorArchiveBase64: string | null | undefined,
-): Promise<string | undefined> {
-  if (!priorArchiveBase64) {
-    return undefined;
-  }
-  let bytes: Uint8Array;
-  try {
-    bytes = Uint8Array.from(Buffer.from(priorArchiveBase64, "base64"));
-  } catch {
-    return undefined;
-  }
-  const snapshotId = decodeModalSnapshotId(bytes);
-  if (!snapshotId) {
-    return undefined;
-  }
-  const modal = (session as { modal?: { images?: { delete?: (id: string) => Promise<unknown> } } })
-    .modal;
-  const del = modal?.images?.delete;
-  if (typeof del !== "function") {
-    return undefined;
-  }
-  try {
-    await del.call(modal!.images, snapshotId);
-    return snapshotId;
-  } catch {
-    return undefined;
-  }
+  const ref = decodeNativeSnapshotRef(archive);
+  return ref?.provider === "modal_snapshot_filesystem" ||
+    ref?.provider === "modal_snapshot_directory"
+    ? ref.snapshotId
+    : undefined;
 }
 
 export async function deserializeSandboxSessionStateEnvelope(
@@ -932,7 +879,9 @@ async function terminateCreatedSandbox(
   session: unknown,
   sessionState: unknown,
 ): Promise<void> {
-  const clientWithDelete = client as { delete?: (state: unknown) => Promise<unknown> };
+  const clientWithDelete = client as {
+    delete?: (state: unknown) => Promise<unknown>;
+  };
   if (typeof clientWithDelete.delete === "function" && sessionState !== undefined) {
     try {
       await clientWithDelete.delete(sessionState);
@@ -1137,22 +1086,26 @@ export async function establishSandboxSessionFromEnvelope(
           throw error;
         }
       }
-      try {
-        // Verification happens on the hydrated replacement before any caller
-        // may publish it warm or route an operation to it.
-        await verifyRestoredWorkspace(restored, workspaceArchive.descriptor);
-      } catch (error) {
-        await terminateCreatedSandbox(client, restored, (restored as { state?: unknown }).state);
-        if (error instanceof WorkspaceArchiveIntegrityError) throw error;
-        throw new WorkspaceArchiveIntegrityError(
-          "workspace_fingerprint_unavailable",
-          `failed to verify selected workspace archive revision ${workspaceArchive.descriptor.revision}`,
-          { retryable: true },
-        );
+      // Native provider snapshots are restored by their exact opaque receipt.
+      // OpenGeni verifies receipt identity/hash before hydration, but it must not
+      // impose a tar/inode equivalence contract on the provider's filesystem
+      // image. Tar archives remain content-verified after hydration.
+      if (workspaceArchive.kind === "tar") {
+        try {
+          await verifyRestoredWorkspace(restored, workspaceArchive.descriptor);
+        } catch (error) {
+          await terminateCreatedSandbox(client, restored, (restored as { state?: unknown }).state);
+          if (error instanceof WorkspaceArchiveIntegrityError) throw error;
+          throw new WorkspaceArchiveIntegrityError(
+            "workspace_fingerprint_unavailable",
+            `failed to verify selected workspace archive revision ${workspaceArchive.descriptor.revision}`,
+            { retryable: true },
+          );
+        }
       }
       hydrationApplied = true;
       console.info(
-        `[sandbox] cold-restore verified workspace archive revision ${workspaceArchive.descriptor.revision}`,
+        `[sandbox] cold-restore applied ${workspaceArchive.kind === "provider_snapshot" ? "native snapshot receipt" : "verified tar archive"} revision ${workspaceArchive.descriptor.revision}`,
       );
     }
     restoredState = (restored as { state?: unknown }).state;

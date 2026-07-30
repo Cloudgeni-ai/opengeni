@@ -24,6 +24,7 @@ import type { Settings } from "@opengeni/config";
 import { redactSensitiveText } from "@opengeni/contracts";
 import {
   acquireLease,
+  adoptLegacyModalCheckpointArtifact,
   beginSandboxRematerialization,
   commitWarmingToWarm,
   failSandboxRematerialization,
@@ -31,9 +32,11 @@ import {
   getSandboxSessionEnvelope,
   markSandboxRestoreVerifying,
   markWarmLeaseInstanceLost,
+  markSandboxCheckpointArtifactDeletePending,
   persistWarmSnapshot,
   readWorkspaceArchiveCapturePreflight,
   readLease,
+  registerSandboxCheckpointArtifact,
   recordWarmingSandboxCreated,
   releaseLeaseHolder,
   touchLeaseHolder,
@@ -44,12 +47,15 @@ import {
 } from "@opengeni/db";
 import {
   captureVerifiedWorkspaceArchive,
+  describeLegacyNativeSnapshotArchive,
   WorkspaceArchiveIntegrityError,
   establishSandboxSessionFromEnvelope,
   isProviderSandboxNotFoundError,
+  parseWorkspaceArchiveDescriptor,
   requirePersistableReplacementSandboxEnvelope,
+  modalSessionMatchesCheckpointProviderBinding,
+  resolveModalCheckpointProviderBindingForSession,
   serializeReplacementSandboxEnvelope,
-  deletePriorPersistedSnapshot,
   tagModalSandbox,
   verifySandboxExecReadiness,
   type EstablishedSandboxSession,
@@ -273,6 +279,44 @@ export async function waitForWarmSnapshot(
   }
 }
 
+async function resolveModalCheckpointBindingBeforeCapture(
+  settings: SandboxResumeServices["settings"],
+  session: unknown,
+  signal?: AbortSignal,
+): Promise<Awaited<ReturnType<typeof resolveModalCheckpointProviderBindingForSession>>> {
+  if (signal?.aborted) {
+    throw signal.reason ?? new Error("workspace snapshot identity lookup cancelled");
+  }
+  const pending = resolveModalCheckpointProviderBindingForSession(settings, session);
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  let cancelListener: (() => void) | undefined;
+  try {
+    return await Promise.race([
+      pending,
+      ...(signal
+        ? [
+            new Promise<never>((_resolve, reject) => {
+              cancelListener = () =>
+                reject(signal.reason ?? new Error("workspace snapshot identity lookup cancelled"));
+              signal.addEventListener("abort", cancelListener, { once: true });
+              if (signal.aborted) cancelListener();
+            }),
+          ]
+        : []),
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(
+          () => reject(new SnapshotTimeoutError(settings.sandboxSnapshotTimeoutMs)),
+          settings.sandboxSnapshotTimeoutMs,
+        );
+        timeout.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+    if (cancelListener) signal?.removeEventListener("abort", cancelListener);
+  }
+}
+
 async function terminateEstablishedSandbox(
   established: EstablishedSandboxSession | null,
 ): Promise<boolean> {
@@ -371,6 +415,20 @@ function workspaceArchiveFieldsFromEnvelope(
   };
 }
 
+function legacyNativeArchiveFromEnvelope(envelope: Record<string, unknown> | null | undefined) {
+  const sessionState =
+    envelope && typeof envelope.sessionState === "object" && envelope.sessionState !== null
+      ? (envelope.sessionState as Record<string, unknown>)
+      : null;
+  if (!sessionState) return null;
+  const existing = parseWorkspaceArchiveDescriptor(sessionState.workspaceArchiveMeta);
+  if (existing?.version === 2) return null;
+  return describeLegacyNativeSnapshotArchive(
+    sessionState.workspaceArchive,
+    existing?.version === 1 ? Date.parse(existing.capturedAt) : Date.now(),
+  );
+}
+
 /** A per-session fallback may still carry the dead provider identity that made
  * recovery necessary. It is useful only as durable archive/config input: never
  * let a cold rematerialization resume that stale provider before hydrating the
@@ -419,14 +477,16 @@ export async function maybePersistWarmWorkspaceSnapshot(
   session: unknown,
   leaseEpoch: number,
   signal?: AbortSignal,
+  force = false,
 ): Promise<boolean> {
   const { db, settings } = services;
   const intervalMs = settings.sandboxSnapshotIntervalMs;
-  if (intervalMs <= 0) {
+  if (intervalMs <= 0 && !force) {
     return false;
   }
   const persistable = session as {
     persistWorkspace?: () => Promise<Uint8Array | undefined>;
+    state?: { workspacePersistence?: unknown };
   };
   if (typeof persistable.persistWorkspace !== "function") {
     return false;
@@ -469,39 +529,43 @@ export async function maybePersistWarmWorkspaceSnapshot(
         : undefined;
     const priorAtMs = typeof priorAtRaw === "string" ? Date.parse(priorAtRaw) : Number.NaN;
     if (
+      !force &&
       preflight.archiveComplete &&
       Number.isFinite(priorAtMs) &&
       Date.now() - priorAtMs < intervalMs
     ) {
       return false;
     }
+    const nativeModalPersistence =
+      persistable.state?.workspacePersistence === "snapshot_filesystem" ||
+      persistable.state?.workspacePersistence === "snapshot_directory";
+    const checkpointBinding = nativeModalPersistence
+      ? await resolveModalCheckpointBindingBeforeCapture(settings, persistable, signal)
+      : null;
     let timeout: ReturnType<typeof setTimeout> | undefined;
     // Stamp WHEN this capture started: persistWarmSnapshot orders warm snapshots
     // by capture-initiation, not land time, so a slower heartbeat capture that
     // started earlier can never overwrite a fresher turn-end capture that landed
     // first (the bounded-wait race Bugbot flagged).
     const capturedAtMs = Date.now();
-    // On timeout the race settles on `undefined` while persistWorkspace() keeps
-    // running orphaned. Swallow its LATE settlement: an un-awaited rejection
-    // after the race resolved would surface as an unhandledRejection and can
-    // take down the whole worker process — which would defeat the very hang-
-    // guard this timeout exists to provide.
     const capture = captureVerifiedWorkspaceArchive(session, capturedAtMs);
-    capture.catch(() => undefined);
     let cancelListener: (() => void) | undefined;
-    const archive = await Promise.race([
-      capture,
+    const outcome = await Promise.race([
+      capture.then((archive) => ({ kind: "captured" as const, archive })),
       ...(signal
         ? [
-            new Promise<undefined>((resolve) => {
-              cancelListener = () => resolve(undefined);
+            new Promise<{ kind: "cancelled" }>((resolve) => {
+              cancelListener = () => resolve({ kind: "cancelled" });
               signal.addEventListener("abort", cancelListener, { once: true });
               if (signal.aborted) cancelListener();
             }),
           ]
         : []),
-      new Promise<undefined>((resolve) => {
-        timeout = setTimeout(() => resolve(undefined), settings.sandboxSnapshotTimeoutMs);
+      new Promise<{ kind: "timed_out" }>((resolve) => {
+        timeout = setTimeout(
+          () => resolve({ kind: "timed_out" }),
+          settings.sandboxSnapshotTimeoutMs,
+        );
         if (timeout && "unref" in timeout && typeof timeout.unref === "function") {
           timeout.unref();
         }
@@ -512,13 +576,72 @@ export async function maybePersistWarmWorkspaceSnapshot(
       }
       if (cancelListener) signal?.removeEventListener("abort", cancelListener);
     });
-    if (!archive) {
+
+    const registerCandidate = async (
+      archive: Awaited<typeof capture>,
+    ): Promise<{ id: string } | null> => {
+      if (
+        archive.descriptor.version !== 2 ||
+        (archive.descriptor.provider !== "modal_snapshot_filesystem" &&
+          archive.descriptor.provider !== "modal_snapshot_directory")
+      ) {
+        return null;
+      }
+      if (!checkpointBinding) {
+        throw new Error("Modal native snapshot has no exact session provider identity");
+      }
+      return await registerSandboxCheckpointArtifact(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: ids.sandboxGroupId,
+        sourceLeaseId: lease.id,
+        sourceLeaseEpoch: leaseEpoch,
+        sourceInstanceId: lease.instanceId!,
+        sourceWorkspaceGeneration: preflight.workspaceGeneration,
+        providerBindingKey: checkpointBinding.key,
+        providerBinding: checkpointBinding.binding,
+        workspaceArchive: archive.base64,
+        workspaceArchiveMeta: archive.descriptor,
+      });
+    };
+
+    const abandonCandidate = async (artifactId: string, reason: string): Promise<void> => {
+      await markSandboxCheckpointArtifactDeletePending(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        artifactId,
+        reason,
+      }).catch(() => undefined);
+    };
+    const registerCandidateDurably = async (
+      archive: Awaited<typeof capture>,
+    ): Promise<{ id: string } | null> => {
+      return await registerCandidate(archive);
+    };
+
+    if (outcome.kind !== "captured") {
+      // The provider operation itself is not cancellable in the pinned SDK. If
+      // it returns after our bounded wait, immediately register the new object
+      // and durably hand it to GC. This closes the former guaranteed leak on
+      // every local timeout/cancellation; a process crash in the tiny provider-
+      // response-before-registration interval remains externally unavoidable
+      // because Modal exposes no snapshot list/idempotency API.
+      void capture
+        .then(async (lateArchive) => {
+          const late = await registerCandidateDurably(lateArchive);
+          if (late) await abandonCandidate(late.id, `snapshot_${outcome.kind}`);
+        })
+        .catch(() => undefined);
       return false;
     }
+    const archive = outcome.archive;
+    let candidate: { id: string } | null = null;
+    candidate = await registerCandidateDurably(archive);
     if (signal?.aborted) {
+      if (candidate) await abandonCandidate(candidate.id, "snapshot_cancelled_before_publish");
       return false;
     }
-    const { wrote, priorArchiveForGc } = await persistWarmSnapshot(db, {
+    const { wrote } = await persistWarmSnapshot(db, {
       accountId: ids.accountId,
       workspaceId: ids.workspaceId,
       sessionId: ids.sessionId,
@@ -530,15 +653,17 @@ export async function maybePersistWarmWorkspaceSnapshot(
       expectedWorkspaceGeneration: preflight.workspaceGeneration,
       workspaceArchive: archive.base64,
       workspaceArchiveMeta: archive.descriptor,
-      minIntervalMs: intervalMs,
+      checkpointArtifactId: candidate?.id ?? null,
+      minIntervalMs: force ? 0 : intervalMs,
       capturedAtMs,
     });
     if (!wrote) {
+      if (candidate) await abandonCandidate(candidate.id, "snapshot_publication_fenced");
       return false;
     }
-    // Warm snapshots retain a 2-deep restore window. Only the two-ago archive
-    // returned by persistWarmSnapshot is GC-eligible.
-    await deletePriorPersistedSnapshot(persistable, priorArchiveForGc);
+    // The fold retains the two-deep restore window and atomically marks the
+    // displaced provider object delete-pending. Provider-bound global GC owns
+    // deletion; do not issue it through this successor session's credentials.
     return true;
   } catch (error) {
     // Protection, not a dependency: a failed snapshot must never fail (or slow
@@ -663,6 +788,12 @@ export async function resumeBoxForTurn(
     let rematerialization: {
       id: string;
       selectedRevision: string;
+      workspaceGeneration: number;
+      providerBindingKey: string | null;
+      legacyCheckpoint: NonNullable<ReturnType<typeof legacyNativeArchiveFromEnvelope>> | null;
+      legacyProviderBinding: Awaited<
+        ReturnType<typeof resolveModalCheckpointProviderBindingForSession>
+      > | null;
     } | null = null;
     try {
       const envelope = await getSandboxSessionEnvelope(db, ids.workspaceId, ids.sessionId);
@@ -677,7 +808,7 @@ export async function resumeBoxForTurn(
         workspaceArchiveFieldsFromEnvelope(envelope) !== null
           ? withoutProviderIdentity(envelope)
           : null;
-      const spawnEnvelope = fallbackArchiveEnvelope ?? acquired.lease.resumeState ?? envelope;
+      let spawnEnvelope = fallbackArchiveEnvelope ?? acquired.lease.resumeState ?? envelope;
       const archiveSource =
         acquired.lease.recovery.archive.status === "none"
           ? fallbackArchiveEnvelope
@@ -687,6 +818,7 @@ export async function resumeBoxForTurn(
         workspaceArchiveFieldsFromEnvelope(archiveSource) !== null
       ) {
         const rematerializationId = crypto.randomUUID();
+        const legacyNativeArchive = legacyNativeArchiveFromEnvelope(archiveSource);
         const begun = await beginSandboxRematerialization(db, {
           accountId: ids.accountId,
           workspaceId: ids.workspaceId,
@@ -694,6 +826,7 @@ export async function resumeBoxForTurn(
           expectedEpoch,
           rematerializationId,
           archiveSource,
+          legacyNativeArchive,
         });
         if (begun.status !== "started") {
           if (begun.code === "stale_epoch" || begun.code === "attempt_conflict") {
@@ -709,6 +842,7 @@ export async function resumeBoxForTurn(
             begun.lease?.recovery ?? acquired.lease.recovery,
           );
         }
+        spawnEnvelope = begun.lease.resumeState ?? spawnEnvelope;
         const selectedRevision = begun.lease.recovery.restore.selectedRevision;
         if (!selectedRevision) {
           throw new WorkspaceArchiveIntegrityError(
@@ -716,7 +850,14 @@ export async function resumeBoxForTurn(
             "sandbox rematerialization selected no durable archive revision",
           );
         }
-        rematerialization = { id: rematerializationId, selectedRevision };
+        rematerialization = {
+          id: rematerializationId,
+          selectedRevision,
+          workspaceGeneration: begun.lease.workspaceGeneration,
+          providerBindingKey: begun.checkpointArtifact?.providerBindingKey ?? null,
+          legacyCheckpoint: begun.checkpointArtifact === null ? legacyNativeArchive : null,
+          legacyProviderBinding: null,
+        };
       } else if (acquired.lease.recovery.archive.status !== "none") {
         throw new SandboxLeaseRecoveryBlockedError(
           ids.sandboxGroupId,
@@ -734,6 +875,7 @@ export async function resumeBoxForTurn(
       // spawner branch: the lease's resume_state is authoritative; the session
       // `_sandbox` envelope is the per-session fallback. Without this a turn-first
       // re-warm after a drain->cold would ignore the archive and start an EMPTY box.
+      const providerCreateStartedAt = new Date();
       const established = await establishSandboxSessionFromEnvelope(settings, spawnEnvelope, {
         sessionId: ids.sessionId,
         recovery: "create-or-restore",
@@ -742,6 +884,46 @@ export async function resumeBoxForTurn(
         ...(services.sandboxMetrics ? { metrics: services.sandboxMetrics } : {}),
         onSandboxCreated: async (created) => {
           createdEstablished = created;
+          if (
+            rematerialization &&
+            (rematerialization.providerBindingKey || rematerialization.legacyCheckpoint)
+          ) {
+            if (created.backendId !== "modal") {
+              throw new WorkspaceArchiveIntegrityError(
+                "native_snapshot_reference_invalid",
+                "Modal checkpoint restore resolved a non-Modal sandbox backend",
+              );
+            }
+            if (rematerialization.providerBindingKey) {
+              if (
+                !(await modalSessionMatchesCheckpointProviderBinding(
+                  settings,
+                  created.session,
+                  rematerialization.providerBindingKey,
+                ))
+              ) {
+                throw new WorkspaceArchiveIntegrityError(
+                  "native_snapshot_reference_invalid",
+                  "Modal checkpoint restore refused because the authenticated provider workspace changed",
+                );
+              }
+            } else {
+              const resolved = await resolveModalCheckpointProviderBindingForSession(
+                settings,
+                created.session,
+              );
+              if (
+                rematerialization.legacyProviderBinding &&
+                rematerialization.legacyProviderBinding.key !== resolved.key
+              ) {
+                throw new WorkspaceArchiveIntegrityError(
+                  "native_snapshot_reference_invalid",
+                  "Legacy Modal checkpoint restore crossed authenticated provider workspaces",
+                );
+              }
+              rematerialization.legacyProviderBinding = resolved;
+            }
+          }
           const resumeEnvelope = requirePersistableReplacementSandboxEnvelope(
             await serializeReplacementSandboxEnvelope(created, spawnEnvelope),
             created.backendId,
@@ -755,6 +937,14 @@ export async function resumeBoxForTurn(
             instanceId: created.instanceId,
             resumeBackendId: created.backendId,
             resumeState: resumeEnvelope,
+            ...(created.backendId === "modal"
+              ? {
+                  providerCreatedAt: providerCreateStartedAt,
+                  providerDeadlineAt: new Date(
+                    providerCreateStartedAt.getTime() + settings.modalTimeoutSeconds * 1000,
+                  ),
+                }
+              : {}),
             leaseTtlMs,
             // Keep the warming budget after create(): manifest setup and
             // commitWarmingToWarm still run, and can exceed the 90s turn TTL.
@@ -777,6 +967,33 @@ export async function resumeBoxForTurn(
               "archive_metadata_invalid",
               `hydrated archive revision ${descriptor.revision} does not match the selected rematerialization revision`,
             );
+          }
+          if (rematerialization.legacyCheckpoint) {
+            const binding = rematerialization.legacyProviderBinding;
+            if (!binding) {
+              throw new WorkspaceArchiveIntegrityError(
+                "native_snapshot_reference_invalid",
+                "Legacy Modal checkpoint restore produced no authenticated provider identity",
+              );
+            }
+            const adopted = await adoptLegacyModalCheckpointArtifact(db, {
+              accountId: ids.accountId,
+              workspaceId: ids.workspaceId,
+              sandboxGroupId: ids.sandboxGroupId,
+              leaseId: acquired.lease.id,
+              leaseEpoch: expectedEpoch,
+              workspaceGeneration: rematerialization.workspaceGeneration,
+              slot: "current",
+              archiveBase64: rematerialization.legacyCheckpoint.archiveBase64,
+              descriptor: rematerialization.legacyCheckpoint.descriptor,
+              providerBindingKey: binding.key,
+              providerBinding: binding.binding,
+              rematerializationId: rematerialization.id,
+            });
+            if (!adopted) {
+              throw new SandboxLeaseSupersededError(ids.sandboxGroupId, expectedEpoch);
+            }
+            rematerialization.providerBindingKey = binding.key;
           }
           const verifying = await markSandboxRestoreVerifying(db, {
             accountId: ids.accountId,

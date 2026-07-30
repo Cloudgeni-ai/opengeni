@@ -64,18 +64,21 @@ const ADMIN_BASE_URL = `postgres://postgres:${PASSWORD}@127.0.0.1:${PORT}`;
 // is what lets concurrent clones proceed (they serialize on the source but do
 // not error) and guarantees every clone is byte-identical to the migrated schema.
 //
-// The name carries a FINGERPRINT of the migration chain (sorted file names +
-// contents). The container OUTLIVES checkouts — it persists across sessions and
+// The name carries a FINGERPRINT of every input that defines the template:
+// migration files, the migration runner, and the runtime-role provisioning
+// contract. The container OUTLIVES checkouts — it persists across sessions and
 // is shared by every worktree on the machine — so a bare name would freeze the
-// schema at whichever migration chain first built it: a branch that ADDS a
-// migration would then run all its tests against clones missing the new
-// column, failing on every touched table. Baking the fingerprint into the name
-// gives each distinct chain its own template (built on first use, coexisting
-// with older ones), with no rebuild races between checkouts.
+// schema/ACLs at whichever checkout first built it. Baking every template input
+// into the name gives each exact contract its own immutable template.
 const TEMPLATE_DB_PREFIX = "og_test_template_";
 
 /** The migrations dir this checkout's `migrate()` applies (@opengeni/db). */
 const MIGRATIONS_DIR = fileURLToPath(new URL("../../db/drizzle", import.meta.url));
+const TEMPLATE_CONTRACT_FILES = [
+  fileURLToPath(new URL("../../db/src/migrate.ts", import.meta.url)),
+  fileURLToPath(new URL("../../db/src/provision-roles.ts", import.meta.url)),
+  fileURLToPath(new URL("../../db/src/runtime-posture.ts", import.meta.url)),
+] as const;
 
 let templateDbNameMemo: string | undefined;
 
@@ -91,6 +94,12 @@ async function templateDbName(): Promise<string> {
     hasher.update(file);
     hasher.update("\0");
     hasher.update(await readFile(join(MIGRATIONS_DIR, file)));
+    hasher.update("\0");
+  }
+  for (const file of TEMPLATE_CONTRACT_FILES) {
+    hasher.update(file);
+    hasher.update("\0");
+    hasher.update(await readFile(file));
     hasher.update("\0");
   }
   templateDbNameMemo = `${TEMPLATE_DB_PREFIX}${hasher.digest("hex").slice(0, 12)}`;

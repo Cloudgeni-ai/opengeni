@@ -1,5 +1,6 @@
 import type { Settings } from "@opengeni/config";
 import {
+  adoptLegacyModalCheckpointArtifact,
   beginSandboxRematerialization,
   commitWarmingToWarm,
   failSandboxRematerialization,
@@ -12,9 +13,13 @@ import {
   type LeaseSnapshot,
 } from "@opengeni/db";
 import {
+  describeLegacyNativeSnapshotArchive,
   establishSandboxSessionFromEnvelope,
   isProviderSandboxNotFoundError,
+  modalSessionMatchesCheckpointProviderBinding,
+  parseWorkspaceArchiveDescriptor,
   requirePersistableReplacementSandboxEnvelope,
+  resolveModalCheckpointProviderBindingForSession,
   serializeReplacementSandboxEnvelope,
   tagModalSandbox,
   verifySandboxExecReadiness,
@@ -33,6 +38,20 @@ function hasWorkspaceArchive(envelope: Record<string, unknown> | null): boolean 
   );
 }
 
+function legacyNativeArchiveFromEnvelope(envelope: Record<string, unknown> | null) {
+  const sessionState =
+    envelope?.sessionState && typeof envelope.sessionState === "object"
+      ? (envelope.sessionState as Record<string, unknown>)
+      : null;
+  if (!sessionState) return null;
+  const existing = parseWorkspaceArchiveDescriptor(sessionState.workspaceArchiveMeta);
+  if (existing?.version === 2) return null;
+  return describeLegacyNativeSnapshotArchive(
+    sessionState.workspaceArchive,
+    existing?.version === 1 ? Date.parse(existing.capturedAt) : Date.now(),
+  );
+}
+
 function withoutProviderIdentity(
   envelope: Record<string, unknown> | null,
 ): Record<string, unknown> | null {
@@ -48,7 +67,9 @@ function withoutProviderIdentity(
 
 async function terminateCreated(established: EstablishedSandboxSession | null): Promise<boolean> {
   if (!established) return true;
-  const client = established.client as { delete?: (state: unknown) => Promise<unknown> };
+  const client = established.client as {
+    delete?: (state: unknown) => Promise<unknown>;
+  };
   try {
     if (typeof client.delete === "function" && established.sessionState !== undefined) {
       await client.delete(established.sessionState);
@@ -93,20 +114,30 @@ export async function establishApiSandboxSpawner(input: {
     hasWorkspaceArchive(input.fallbackEnvelope)
       ? withoutProviderIdentity(input.fallbackEnvelope)
       : null;
-  const spawnEnvelope =
+  let spawnEnvelope =
     fallbackArchiveEnvelope ?? input.acquiredLease.resumeState ?? input.fallbackEnvelope;
   const archiveSource =
     input.acquiredLease.recovery.archive.status === "none"
       ? fallbackArchiveEnvelope
       : input.acquiredLease.resumeState;
   let established: EstablishedSandboxSession | null = null;
-  let rematerialization: { id: string; selectedRevision: string } | null = null;
+  let rematerialization: {
+    id: string;
+    selectedRevision: string;
+    workspaceGeneration: number;
+    providerBindingKey: string | null;
+    legacyCheckpoint: ReturnType<typeof legacyNativeArchiveFromEnvelope>;
+    legacyProviderBinding: Awaited<
+      ReturnType<typeof resolveModalCheckpointProviderBindingForSession>
+    > | null;
+  } | null = null;
   try {
     if (
       input.acquiredLease.recovery.archive.status === "available" ||
       hasWorkspaceArchive(archiveSource)
     ) {
       const id = crypto.randomUUID();
+      const legacyNativeArchive = legacyNativeArchiveFromEnvelope(archiveSource);
       const begun = await beginSandboxRematerialization(input.db, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
@@ -114,6 +145,7 @@ export async function establishApiSandboxSpawner(input: {
         expectedEpoch: input.expectedEpoch,
         rematerializationId: id,
         archiveSource,
+        legacyNativeArchive,
       });
       if (begun.status !== "started") {
         if (begun.code === "stale_epoch" || begun.code === "attempt_conflict") {
@@ -129,6 +161,7 @@ export async function establishApiSandboxSpawner(input: {
           begun.lease?.recovery ?? input.acquiredLease.recovery,
         );
       }
+      spawnEnvelope = begun.lease.resumeState ?? spawnEnvelope;
       const selectedRevision = begun.lease.recovery.restore.selectedRevision;
       if (!selectedRevision) {
         throw new WorkspaceArchiveIntegrityError(
@@ -136,7 +169,14 @@ export async function establishApiSandboxSpawner(input: {
           "sandbox rematerialization selected no durable archive revision",
         );
       }
-      rematerialization = { id, selectedRevision };
+      rematerialization = {
+        id,
+        selectedRevision,
+        workspaceGeneration: begun.lease.workspaceGeneration,
+        providerBindingKey: begun.checkpointArtifact?.providerBindingKey ?? null,
+        legacyCheckpoint: begun.checkpointArtifact === null ? legacyNativeArchive : null,
+        legacyProviderBinding: null,
+      };
     } else if (input.acquiredLease.recovery.archive.status !== "none") {
       throw new SandboxLeaseRecoveryBlockedError(
         input.sandboxGroupId,
@@ -146,6 +186,7 @@ export async function establishApiSandboxSpawner(input: {
       );
     }
 
+    const providerCreateStartedAt = new Date();
     established = await establishSandboxSessionFromEnvelope(input.settings, spawnEnvelope, {
       sessionId: input.sessionId,
       recovery: "create-or-restore",
@@ -153,6 +194,37 @@ export async function establishApiSandboxSpawner(input: {
       environment: input.environment,
       onSandboxCreated: async (created) => {
         established = created;
+        if (
+          rematerialization &&
+          (rematerialization.providerBindingKey || rematerialization.legacyCheckpoint)
+        ) {
+          if (created.backendId !== "modal") {
+            throw new WorkspaceArchiveIntegrityError(
+              "native_snapshot_reference_invalid",
+              "Modal checkpoint restore resolved a non-Modal sandbox backend",
+            );
+          }
+          if (rematerialization.providerBindingKey) {
+            if (
+              !(await modalSessionMatchesCheckpointProviderBinding(
+                input.settings,
+                created.session,
+                rematerialization.providerBindingKey,
+              ))
+            ) {
+              throw new WorkspaceArchiveIntegrityError(
+                "native_snapshot_reference_invalid",
+                "Modal checkpoint restore refused because the authenticated provider workspace changed",
+              );
+            }
+          } else {
+            rematerialization.legacyProviderBinding =
+              await resolveModalCheckpointProviderBindingForSession(
+                input.settings,
+                created.session,
+              );
+          }
+        }
         const resumeState = requirePersistableReplacementSandboxEnvelope(
           await serializeReplacementSandboxEnvelope(created, spawnEnvelope),
           created.backendId,
@@ -166,6 +238,14 @@ export async function establishApiSandboxSpawner(input: {
           instanceId: created.instanceId,
           resumeBackendId: created.backendId,
           resumeState,
+          ...(created.backendId === "modal"
+            ? {
+                providerCreatedAt: providerCreateStartedAt,
+                providerDeadlineAt: new Date(
+                  providerCreateStartedAt.getTime() + input.settings.modalTimeoutSeconds * 1000,
+                ),
+              }
+            : {}),
           leaseTtlMs: input.settings.sandboxLeaseTtlMs,
           warmingLeaseTtlMs: input.settings.sandboxWarmingTimeoutMs,
         });
@@ -186,6 +266,33 @@ export async function establishApiSandboxSpawner(input: {
             "archive_metadata_invalid",
             `hydrated archive revision ${descriptor.revision} does not match the selected rematerialization revision`,
           );
+        }
+        if (rematerialization.legacyCheckpoint) {
+          const binding = rematerialization.legacyProviderBinding;
+          if (!binding) {
+            throw new WorkspaceArchiveIntegrityError(
+              "native_snapshot_reference_invalid",
+              "Legacy Modal checkpoint restore produced no authenticated provider identity",
+            );
+          }
+          const adopted = await adoptLegacyModalCheckpointArtifact(input.db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sandboxGroupId: input.sandboxGroupId,
+            leaseId: input.acquiredLease.id,
+            leaseEpoch: input.expectedEpoch,
+            workspaceGeneration: rematerialization.workspaceGeneration,
+            slot: "current",
+            archiveBase64: rematerialization.legacyCheckpoint.archiveBase64,
+            descriptor: rematerialization.legacyCheckpoint.descriptor,
+            providerBindingKey: binding.key,
+            providerBinding: binding.binding,
+            rematerializationId: rematerialization.id,
+          });
+          if (!adopted) {
+            throw new SandboxLeaseSupersededError(input.sandboxGroupId, input.expectedEpoch);
+          }
+          rematerialization.providerBindingKey = binding.key;
         }
         const verifying = await markSandboxRestoreVerifying(input.db, {
           accountId: input.accountId,

@@ -1286,9 +1286,11 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
   test("idle timeout defaults to the hard lifetime and the default cadence passes boot", () => {
     const settings = withEnv({}, () => getSettings());
     // Default config: idleGrace 900s + reaper 30s = 930s warm window must fit under
-    // the effective box idle timeout — which defaults to the hard lifetime (3600s).
+    // the effective box idle timeout — which defaults to the hard lifetime (86400s).
     expect(effectiveModalIdleTimeoutSeconds(settings)).toBe(settings.modalTimeoutSeconds);
-    expect(effectiveModalIdleTimeoutSeconds(settings)).toBe(3600);
+    expect(effectiveModalIdleTimeoutSeconds(settings)).toBe(86_400);
+    expect(settings.sandboxRotationLeadMs).toBe(3_600_000);
+    expect(settings.sandboxRotationBatchSize).toBe(25);
     expect(settings.sandboxLeaseReaperPeriodMs + settings.sandboxIdleGraceMs).toBeLessThan(
       effectiveModalIdleTimeoutSeconds(settings) * 1000,
     );
@@ -1297,6 +1299,53 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
   test("an explicit idle timeout overrides the default", () => {
     const settings = withEnv({ OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS: "1200" }, () => getSettings());
     expect(effectiveModalIdleTimeoutSeconds(settings)).toBe(1200);
+  });
+
+  test("rotation lead derives from a short provider lifetime when not explicitly pinned", () => {
+    const settings = withEnv({ OPENGENI_MODAL_TIMEOUT_SECONDS: "300" }, () => getSettings());
+    expect(settings.sandboxRotationLeadMs).toBe(150_000);
+    expect(settings.sandboxIdleGraceMs).toBe(150_000);
+  });
+
+  test("an explicit rotation lead overrides the provider-relative default", () => {
+    const settings = withEnv(
+      {
+        OPENGENI_MODAL_TIMEOUT_SECONDS: "900",
+        OPENGENI_SANDBOX_ROTATION_LEAD_MS: "300000",
+      },
+      () => getSettings(),
+    );
+    expect(settings.sandboxRotationLeadMs).toBe(300_000);
+  });
+
+  test("the configured hard lifetime cannot exceed Modal's 24-hour maximum", () => {
+    expect(() => withEnv({ OPENGENI_MODAL_TIMEOUT_SECONDS: "86401" }, () => getSettings())).toThrow(
+      /<=86400/i,
+    );
+  });
+
+  test("boot rejects a rotation window outside the finite provider lifetime", () => {
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_MODAL_TIMEOUT_SECONDS: "3600",
+          OPENGENI_SANDBOX_ROTATION_LEAD_MS: "3600000",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow(/rotation_lead_ms.*strictly less/i);
+  });
+
+  test("boot reserves snapshot timeout plus two reaper ticks before rotation", () => {
+    expect(() =>
+      withEnv({ OPENGENI_SANDBOX_ROTATION_LEAD_MS: "120000" }, () => getSettings()),
+    ).toThrow(/must exceed the snapshot timeout/i);
+  });
+
+  test("the rotation batch is positive and bounded", () => {
+    expect(() =>
+      withEnv({ OPENGENI_SANDBOX_ROTATION_BATCH_SIZE: "501" }, () => getSettings()),
+    ).toThrow(/<=500/i);
   });
 
   test("boot fails when reaperPeriod + idleGrace would outlive the box idle timeout", () => {
@@ -1320,6 +1369,7 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
         {
           OPENGENI_MODAL_TIMEOUT_SECONDS: "300",
           OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS: "600",
+          OPENGENI_SANDBOX_ROTATION_LEAD_MS: "180000",
         },
         () => getSettings(),
       ),
