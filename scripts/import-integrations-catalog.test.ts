@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
+  CATALOG_IMPORT_SEMANTIC_VERSION,
   catalogCapabilityId,
+  catalogImportFingerprint,
   catalogRowToDbInput,
-  catalogSnapshotRef,
   normalizeCatalogSnapshot,
   readSnapshotFile,
+  resolveIfChangedCatalogImport,
   storeLogoForRow,
   type CatalogIntegrationRow,
   type LogoStorage,
@@ -14,12 +16,69 @@ import { probeCatalogSnapshot, probeMcpEndpoint } from "./integrations-catalog-p
 const fixtureUrl = new URL("./fixtures/integrations-catalog-sample.json", import.meta.url);
 
 describe("integrations.sh catalog import normalization", () => {
-  test("fingerprints snapshot bytes for idempotent deployment imports", async () => {
-    const defaultRef = await catalogSnapshotRef(fixtureUrl.pathname);
-    const labeledRef = await catalogSnapshotRef(fixtureUrl.pathname, "reviewed-catalog");
+  test("keeps import fingerprints deterministic and bounded", async () => {
+    const input = {
+      snapshotPath: fixtureUrl.pathname,
+      snapshotRef: "x".repeat(10_000),
+      skipLogos: false,
+    };
+    const first = await catalogImportFingerprint(input);
+    const second = await catalogImportFingerprint(input);
 
-    expect(defaultRef).toMatch(/^integrations-catalog-sample\.json@sha256:[a-f0-9]{64}$/);
-    expect(labeledRef).toBe(`reviewed-catalog@${defaultRef.split("@")[1]}`);
+    expect(first).toBe(second);
+    expect(first).toMatch(
+      new RegExp(`^catalog-import-v${CATALOG_IMPORT_SEMANTIC_VERSION}@sha256:[a-f0-9]{64}$`),
+    );
+    expect(first.length).toBeLessThanOrEqual(96);
+  });
+
+  test("normalizes skipLogos and invalidates on output or semantic changes", async () => {
+    const base = { snapshotPath: fixtureUrl.pathname, snapshotRef: "reviewed-catalog" };
+    const omitted = await catalogImportFingerprint(base);
+    const explicitFalse = await catalogImportFingerprint({ ...base, skipLogos: false });
+    const skipLogos = await catalogImportFingerprint({ ...base, skipLogos: true });
+    const nextSemanticVersion = await catalogImportFingerprint({
+      ...base,
+      semanticVersion: CATALOG_IMPORT_SEMANTIC_VERSION + 1,
+    });
+
+    expect(explicitFalse).toBe(omitted);
+    expect(skipLogos).not.toBe(omitted);
+    expect(nextSemanticVersion).not.toBe(omitted);
+  });
+
+  test("reuses only an exact completed import fingerprint", async () => {
+    const completed = new Map<string, { id: string; importedCount: number }>();
+    const findCompleted = async (input: { snapshotRef: string; importedCount: number }) =>
+      completed.get(input.snapshotRef) ?? null;
+    const base = {
+      snapshotPath: fixtureUrl.pathname,
+      snapshotRef: "reviewed-catalog",
+      importedCount: 6,
+    };
+
+    const first = await resolveIfChangedCatalogImport({ ...base, skipLogos: false }, findCompleted);
+    expect(first.completedBatch).toBeNull();
+    completed.set(first.snapshotRef, { id: "completed-batch", importedCount: 6 });
+
+    const unchanged = await resolveIfChangedCatalogImport(base, findCompleted);
+    const changedLogos = await resolveIfChangedCatalogImport(
+      { ...base, skipLogos: true },
+      findCompleted,
+    );
+    const changedSemantics = await resolveIfChangedCatalogImport(
+      { ...base, semanticVersion: CATALOG_IMPORT_SEMANTIC_VERSION + 1 },
+      findCompleted,
+    );
+
+    expect(unchanged).toMatchObject({
+      snapshotRef: first.snapshotRef,
+      completedBatch: { id: "completed-batch", importedCount: 6 },
+    });
+    expect(changedLogos.completedBatch).toBeNull();
+    expect(changedSemantics.completedBatch).toBeNull();
+    expect(changedLogos.snapshotRef).not.toBe(first.snapshotRef);
+    expect(changedSemantics.snapshotRef).not.toBe(first.snapshotRef);
   });
 
   test("normalizes the committed sample fixture and quarantines flagged suspicious URLs", async () => {

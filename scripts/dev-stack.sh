@@ -109,7 +109,8 @@ docker compose up -d postgres nats temporal minio minio-init
 (cd packages/db && bun run provision-roles)
 if [ "${OPENGENI_CATALOG_IMPORT_ENABLED:-true}" = "true" ]; then
   OPENGENI_DATABASE_URL="$OPENGENI_MIGRATIONS_DATABASE_URL" \
-    bun run catalog:import --snapshot data/catalog/integrations-snapshot.json --if-changed --skip-logos
+    bun scripts/import-integrations-catalog.ts \
+      --snapshot data/catalog/integrations-snapshot.json --if-changed --skip-logos
 fi
 docker build -f docker/sandbox.Dockerfile -t opengeni-sandbox:local .
 

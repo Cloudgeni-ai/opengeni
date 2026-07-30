@@ -20,6 +20,10 @@ const MIT_ATTRIBUTION =
   "Seed catalog metadata imported from integrations.sh / UsefulSoftwareCo integrationsdotsh (MIT License, Copyright (c) 2026 Rhys Sullivan).";
 const MAX_LOGO_BYTES = 512 * 1024;
 
+// Bump deliberately whenever normalization or import semantics can change
+// persisted output without changing the reviewed snapshot bytes.
+export const CATALOG_IMPORT_SEMANTIC_VERSION = 1;
+
 export const deadDemoDomains = new Set([
   "auto-calculator.onrender.com",
   "body-health-calculator.onrender.com",
@@ -1153,11 +1157,53 @@ function printUsage(): void {
   );
 }
 
-export async function catalogSnapshotRef(path: string, label?: string): Promise<string> {
-  const digest = createHash("sha256")
-    .update(await readFile(path))
+export async function catalogImportFingerprint(input: {
+  snapshotPath: string;
+  snapshotRef?: string;
+  skipLogos?: boolean;
+  semanticVersion?: number;
+}): Promise<string> {
+  const semanticVersion = input.semanticVersion ?? CATALOG_IMPORT_SEMANTIC_VERSION;
+  if (!Number.isSafeInteger(semanticVersion) || semanticVersion < 1 || semanticVersion > 9999) {
+    throw new Error("catalog import semantic version must be an integer between 1 and 9999");
+  }
+  const snapshotSha256 = createHash("sha256")
+    .update(await readFile(input.snapshotPath))
     .digest("hex");
-  return `${label ?? basename(path)}@sha256:${digest}`;
+  const digest = createHash("sha256")
+    .update(
+      JSON.stringify({
+        importerSemanticVersion: semanticVersion,
+        skipLogos: input.skipLogos === true,
+        snapshotRef: input.snapshotRef ?? null,
+        snapshotSha256,
+      }),
+    )
+    .digest("hex");
+  return `catalog-import-v${semanticVersion}@sha256:${digest}`;
+}
+
+export async function resolveIfChangedCatalogImport<T>(
+  input: {
+    snapshotPath: string;
+    snapshotRef?: string;
+    skipLogos?: boolean;
+    importedCount: number;
+    semanticVersion?: number;
+  },
+  findCompleted: (input: {
+    source: string;
+    snapshotRef: string;
+    importedCount: number;
+  }) => Promise<T | null>,
+): Promise<{ snapshotRef: string; completedBatch: T | null }> {
+  const snapshotRef = await catalogImportFingerprint(input);
+  const completedBatch = await findCompleted({
+    source: SOURCE,
+    snapshotRef,
+    importedCount: input.importedCount,
+  });
+  return { snapshotRef, completedBatch };
 }
 
 if (import.meta.main) {
@@ -1189,31 +1235,36 @@ if (import.meta.main) {
     rlsStrategy: settings.rlsStrategy,
   });
   try {
-    const snapshotRef = args.ifChanged
-      ? await catalogSnapshotRef(args.snapshotPath, args.snapshotRef)
-      : (args.snapshotRef ?? basename(args.snapshotPath));
-    if (args.ifChanged) {
-      const existing = await findCompletedImportBatch(dbClient.db, {
-        source: SOURCE,
-        snapshotRef,
-        importedCount: normalized.rows.length,
-      });
-      if (existing) {
-        console.log(
-          JSON.stringify(
-            {
-              unchanged: true,
-              batchId: existing.id,
-              imported: existing.importedCount,
-              snapshotRef,
-            },
-            null,
-            2,
-          ),
-        );
-        await dbClient.close();
-        process.exit(0);
-      }
+    const importDecision = args.ifChanged
+      ? await resolveIfChangedCatalogImport(
+          {
+            snapshotPath: args.snapshotPath,
+            ...(args.snapshotRef ? { snapshotRef: args.snapshotRef } : {}),
+            skipLogos: args.skipLogos,
+            importedCount: normalized.rows.length,
+          },
+          (input) => findCompletedImportBatch(dbClient.db, input),
+        )
+      : {
+          snapshotRef: args.snapshotRef ?? basename(args.snapshotPath),
+          completedBatch: null,
+        };
+    const { snapshotRef, completedBatch } = importDecision;
+    if (completedBatch) {
+      console.log(
+        JSON.stringify(
+          {
+            unchanged: true,
+            batchId: completedBatch.id,
+            imported: completedBatch.importedCount,
+            snapshotRef,
+          },
+          null,
+          2,
+        ),
+      );
+      await dbClient.close();
+      process.exit(0);
     }
     const storage = args.skipLogos ? null : createObjectStorage(settings);
     const result = await importIntegrationsCatalog({
