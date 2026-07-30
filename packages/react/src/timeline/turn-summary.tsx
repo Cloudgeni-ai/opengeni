@@ -1,4 +1,4 @@
-import { CheckIcon, ChevronRightIcon, CircleSlashIcon, TriangleAlertIcon } from "lucide-react";
+import { ChevronRightIcon, CircleSlashIcon, TriangleAlertIcon } from "lucide-react";
 import { Component, useMemo, useState, type ReactNode } from "react";
 import { Collapsible } from "radix-ui";
 import { cn } from "../lib/cn";
@@ -177,30 +177,29 @@ export function TurnSummary({
             : "hover:bg-og-surface-1 hover:text-og-fg",
         )}
       >
-        {/* Disclosure grammar matches the rows: chevron leads (far left), then the
-            outcome glyph, then the facets — one expand affordance side everywhere. */}
+        {/* Disclosure grammar matches the rows: chevron leads (far left), then any
+            exceptional or active state, then the facets — one expand affordance
+            side everywhere. */}
         <ChevronRightIcon className="size-3.5 shrink-0 text-og-fg-subtle transition-transform duration-150 group-data-[state=open]:rotate-90" />
-        {/* The outcome glyph carries the state by hue alone — no filled circle, no
-            card. A clean (complete) run draws a bare muted check; a failed one a
-            red triangle; a cancelled one a muted slash; a still-running cluster a
-            quiet pulse dot in the glyph's place so alignment holds. */}
-        <span
-          className={cn(
-            "inline-flex shrink-0 items-center justify-center",
-            bare ? "size-3.5" : "size-5",
-            outcome === "failed" ? "text-og-status-failed" : "text-og-fg-subtle",
-          )}
-        >
-          {outcome === "failed" ? (
-            <TriangleAlertIcon className="size-3" />
-          ) : outcome === "cancelled" ? (
-            <CircleSlashIcon className="size-3" />
-          ) : outcome === "complete" ? (
-            <CheckIcon className={bare ? "size-3" : "size-3.5"} />
-          ) : (
-            <span className="size-1.5 animate-og-pulse rounded-full bg-og-fg-subtle" />
-          )}
-        </span>
+        {/* Completion is the quiet default and needs no repeated glyph. Failed,
+            cancelled, and still-running folds retain a visible state marker. */}
+        {outcome === "complete" ? null : (
+          <span
+            className={cn(
+              "inline-flex shrink-0 items-center justify-center",
+              bare ? "size-3.5" : "size-5",
+              outcome === "failed" ? "text-og-status-failed" : "text-og-fg-subtle",
+            )}
+          >
+            {outcome === "failed" ? (
+              <TriangleAlertIcon className="size-3" />
+            ) : outcome === "cancelled" ? (
+              <CircleSlashIcon className="size-3" />
+            ) : (
+              <span className="size-1.5 animate-og-pulse rounded-full bg-og-fg-subtle" />
+            )}
+          </span>
+        )}
         <span className={cn("min-w-0 flex-1 truncate", bare ? "text-og-sm" : "text-og-fg-muted")}>
           {facets.map(({ facet, result }, index) => (
             <FacetRenderBoundary key={facet.id}>
