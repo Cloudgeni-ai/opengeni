@@ -692,9 +692,10 @@ Actions app identity (`github-actions`, app ID `15368`). This admission
 metadata does not alter the reproducible schema-v2 candidate receipt or any
 chart, manifest, SBOM, provenance, or workload digest.
 
-That workflow requires the exact current `main` SHA, no pending changesets, and
-the exact expected package set (for example, `@opengeni/react@0.15.0`). It
-builds API, worker, web, relay, and stock headless-sandbox images under
+That workflow requires the exact current `main` SHA and no pending changesets.
+It derives every unpublished publishable workspace package directly from the
+exact checkout and npm registry, so a caller-maintained list cannot omit a
+package. It builds API, worker, web, relay, and stock headless-sandbox images under
 full-source-SHA candidate tags. Migrations explicitly reuse the API manifest.
 Each manifest is built at most once; retries reuse existing partial results.
 Before acceptance, the same workflow packages the Helm chart twice through the
@@ -789,8 +790,9 @@ GitHub API and requires the canonical repository/workflow, a completed
 successful `workflow_dispatch` run, exact commit/tree SHA and run attempt, one
 owned unexpired Actions artifact with its provider digest, and the expected
 artifact name. URLs and archive digests are derived only after those checks. The
-same exact expected package set (including an empty set for an application-only
-release) and an explicit zero-gap confirmation are still required. The product
+exact package set is carried from the immutable candidate receipt and
+re-derived from registry state immediately before publication; the dispatch
+caller cannot add or omit packages. An explicit zero-gap confirmation is still required. The product
 release identity comes from the exact SemVer `version`/`appVersion` pair
 committed in `deploy/helm/opengeni/Chart.yaml`; it is independent of whichever
 npm packages changed. The selected dispatch ref, `source_sha`, checked-out

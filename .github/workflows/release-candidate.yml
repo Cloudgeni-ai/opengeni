@@ -12,11 +12,6 @@ on:
         description: Exact current versioned main SHA; dispatch this workflow from that same ref.
         required: true
         type: string
-      expected_packages:
-        description: Exact comma-separated package set intended for npm publication; leave empty for an application-only release.
-        required: false
-        default: ""
-        type: string
 
 concurrency:
   group: release-candidate-${{ inputs.source_sha }}
@@ -108,7 +103,7 @@ jobs:
         id: package-plan
         env:
           OPENGENI_RELEASE_SOURCE_SHA: ${{ inputs.source_sha }}
-          OPENGENI_EXPECTED_PACKAGES: ${{ inputs.expected_packages }}
+          OPENGENI_RELEASE_PACKAGE_DERIVE_EXPECTED: "true"
           OPENGENI_RELEASE_PACKAGE_PHASE: plan
           OPENGENI_RELEASE_PACKAGE_RECEIPT: evidence/release-packages-plan.json
         run: bun scripts/verify-release-packages.ts

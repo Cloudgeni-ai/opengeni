@@ -37,11 +37,6 @@ on:
         description: Exact 40-character source SHA that passed acceptance; dispatch this workflow from that same ref.
         required: true
         type: string
-      expected_packages:
-        description: Exact comma-separated package set, or empty when this release publishes no npm package changes.
-        required: false
-        default: ""
-        type: string
       candidate_run_id:
         description: Completed run ID of the canonical release-candidate workflow for source_sha.
         required: true
@@ -254,6 +249,7 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Download and validate the complete acceptance bundle
+        id: acceptance-bundle
         env:
           SOURCE_SHA: ${{ steps.preflight.outputs.source_sha }}
           GITHUB_TOKEN: ${{ github.token }}
@@ -263,7 +259,6 @@ jobs:
           ACCEPTANCE_ARTIFACT_ID: ${{ steps.preflight.outputs.acceptance_artifact_id }}
           ACCEPTANCE_ARTIFACT_DIGEST: ${{ steps.preflight.outputs.acceptance_artifact_digest }}
           ACCEPTANCE_ARTIFACT_URL: ${{ steps.preflight.outputs.acceptance_artifact_url }}
-          EXPECTED_PACKAGES: ${{ inputs.expected_packages }}
         run: |
           set -euo pipefail
           mkdir -p evidence .release/candidate-artifact .release/acceptance-artifact
@@ -312,8 +307,10 @@ jobs:
             evidence/release-candidate.json >/dev/null
           bun scripts/release-candidate.ts \
             --verify evidence/release-candidate.json \
-            --source-sha "$SOURCE_SHA" \
-            --expected-packages "$EXPECTED_PACKAGES"
+            --source-sha "$SOURCE_SHA"
+          expected_packages="$(jq -r '.packages | map(.name + "@" + .version) | join(",")' \
+            evidence/release-candidate.json)"
+          echo "expected_packages=$expected_packages" >> "$GITHUB_OUTPUT"
           bun scripts/verify-workbench-acceptance-bundle.ts \
             --bundle evidence/workbench-acceptance.json \
             --source-sha "$SOURCE_SHA" \
@@ -344,10 +341,14 @@ jobs:
         id: package-plan
         env:
           OPENGENI_RELEASE_SOURCE_SHA: ${{ steps.preflight.outputs.source_sha }}
-          OPENGENI_EXPECTED_PACKAGES: ${{ inputs.expected_packages }}
+          OPENGENI_EXPECTED_PACKAGES: ${{ steps.acceptance-bundle.outputs.expected_packages }}
           OPENGENI_RELEASE_PACKAGE_PHASE: plan
           OPENGENI_RELEASE_PACKAGE_RECEIPT: evidence/release-packages-plan.json
-        run: bun scripts/verify-release-packages.ts
+        run: |
+          bun scripts/verify-release-packages.ts
+          jq -e --slurpfile candidate evidence/release-candidate.json \
+            '(.packages | map({name, version})) == $candidate[0].packages' \
+            evidence/release-packages-plan.json >/dev/null
 
       - name: Write pre-publication release plan
         env:
@@ -433,7 +434,7 @@ jobs:
         id: registry
         env:
           OPENGENI_RELEASE_SOURCE_SHA: ${{ steps.preflight.outputs.source_sha }}
-          OPENGENI_EXPECTED_PACKAGES: ${{ inputs.expected_packages }}
+          OPENGENI_EXPECTED_PACKAGES: ${{ steps.acceptance-bundle.outputs.expected_packages }}
           OPENGENI_RELEASE_PACKAGE_PHASE: verify
           OPENGENI_RELEASE_PACKAGE_RECEIPT: evidence/release-packages-verified.json
         run: bun scripts/verify-release-packages.ts
@@ -514,7 +515,6 @@ jobs:
           CANDIDATE_ARTIFACT_URL: ${{ needs.publish.outputs.candidateArtifactUrl }}
           CANDIDATE_SOURCE_TREE_SHA: ${{ needs.publish.outputs.candidateSourceTreeSha }}
           SOURCE_SHA: ${{ needs.publish.outputs.sourceSha }}
-          EXPECTED_PACKAGES: ${{ inputs.expected_packages }}
         run: |
           set -euo pipefail
           mkdir -p evidence .release/candidate-artifact
@@ -541,8 +541,7 @@ jobs:
           [ "$chart_sha256" = "$(jq -er '.chart.bytesSha256' evidence/release-candidate.json)" ]
           bun scripts/release-candidate.ts \
             --verify evidence/release-candidate.json \
-            --source-sha "$SOURCE_SHA" \
-            --expected-packages "$EXPECTED_PACKAGES"
+            --source-sha "$SOURCE_SHA"
           release_version="$(jq -er '.releaseVersion' evidence/release-candidate.json)"
           source_release_version="$(bun scripts/release-version.ts deploy/helm/opengeni/Chart.yaml)"
           [ "$release_version" = "$source_release_version" ] || {

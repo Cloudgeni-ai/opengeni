@@ -171,7 +171,12 @@ function dispatchFixture(
     const url = new URL(String(input));
     const method = init?.method ?? "GET";
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
-    requests.push({ method, path: url.pathname, query: url.searchParams, body });
+    requests.push({
+      method,
+      path: url.pathname,
+      query: url.searchParams,
+      body,
+    });
     const prefix = `/repos/${RELEASE_AUTOMATION_CONTRACT.repository}`;
     if (method === "GET" && url.pathname === prefix) return response(repository());
     if (method === "GET" && url.pathname === `${prefix}/git/ref/heads/main`)
@@ -338,11 +343,17 @@ describe("Version PR dispatch identity", () => {
   test("rejects fork identity and stale main before dispatch", async () => {
     const fork = dispatchFixture({ headRepository: "attacker/opengeni" });
     await expect(
-      validateVersionPrDispatch({ env: releasePushEnv(), fetchImpl: fork.fetchImpl }),
+      validateVersionPrDispatch({
+        env: releasePushEnv(),
+        fetchImpl: fork.fetchImpl,
+      }),
     ).rejects.toThrow("Version PR is not from the base repository");
     const stale = dispatchFixture({ mainSha: "9".repeat(40) });
     await expect(
-      validateVersionPrDispatch({ env: releasePushEnv(), fetchImpl: stale.fetchImpl }),
+      validateVersionPrDispatch({
+        env: releasePushEnv(),
+        fetchImpl: stale.fetchImpl,
+      }),
     ).rejects.toThrow("default branch differs from the admitted base SHA");
   });
 });
@@ -378,7 +389,12 @@ function admissionFixture(
     const url = new URL(String(input));
     const method = init?.method ?? "GET";
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
-    requests.push({ method, path: url.pathname, query: url.searchParams, body });
+    requests.push({
+      method,
+      path: url.pathname,
+      query: url.searchParams,
+      body,
+    });
     if (method === "POST" && options.seal && url.pathname === `${prefix}/git/refs`) {
       retainedHeadSha = body?.sha;
       return response(
@@ -513,13 +529,27 @@ function admissionFixture(
       return response({
         sha: pullMergeBaseTreeSha,
         truncated: false,
-        tree: [{ path: "package.json", mode: "100644", type: "blob", sha: "1".repeat(40) }],
+        tree: [
+          {
+            path: "package.json",
+            mode: "100644",
+            type: "blob",
+            sha: "1".repeat(40),
+          },
+        ],
       });
     if (url.pathname === `${prefix}/git/trees/${headTreeSha}`)
       return response({
         sha: headTreeSha,
         truncated: false,
-        tree: [{ path: "package.json", mode: "100644", type: "blob", sha: "2".repeat(40) }],
+        tree: [
+          {
+            path: "package.json",
+            mode: "100644",
+            type: "blob",
+            sha: "2".repeat(40),
+          },
+        ],
       });
     return response({ message: `unexpected GET ${url.pathname}` }, 404);
   }
@@ -535,7 +565,12 @@ describe("automation CI admission", () => {
       logger: { log() {} },
     });
     expect(result).toMatchObject({ prNumber: pullNumber, baseSha, headSha });
-    expect(result.admission).toMatchObject({ baseSha, headSha, baseTreeSha, headTreeSha });
+    expect(result.admission).toMatchObject({
+      baseSha,
+      headSha,
+      baseTreeSha,
+      headTreeSha,
+    });
     expect(fixture.requests.every((request) => request.method === "GET")).toBe(true);
   });
 
@@ -734,7 +769,10 @@ describe("release head evidence retention", () => {
   });
 
   test("rejects a conflicting retained head and workflow/base drift", async () => {
-    const fixture = admissionFixture({ seal: true, releaseHeadRefSha: "9".repeat(40) });
+    const fixture = admissionFixture({
+      seal: true,
+      releaseHeadRefSha: "9".repeat(40),
+    });
     await expect(
       sealReleaseHeadEvidence({
         env: sealReleaseHeadEnv(),
@@ -831,7 +869,12 @@ function recoverySealFixture(
     const url = new URL(String(input));
     const method = init?.method ?? "GET";
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
-    requests.push({ method, path: url.pathname, query: url.searchParams, body });
+    requests.push({
+      method,
+      path: url.pathname,
+      query: url.searchParams,
+      body,
+    });
     if (method === "POST" && url.pathname === `${prefix}/check-runs`) {
       const check = {
         ...body,
@@ -926,13 +969,27 @@ function recoverySealFixture(
       return response({
         sha: baseTreeSha,
         truncated: false,
-        tree: [{ path: "package.json", mode: "100644", type: "blob", sha: "1".repeat(40) }],
+        tree: [
+          {
+            path: "package.json",
+            mode: "100644",
+            type: "blob",
+            sha: "1".repeat(40),
+          },
+        ],
       });
     if (url.pathname === `${prefix}/git/trees/${headTreeSha}`)
       return response({
         sha: headTreeSha,
         truncated: false,
-        tree: [{ path: "package.json", mode: "100644", type: "blob", sha: "2".repeat(40) }],
+        tree: [
+          {
+            path: "package.json",
+            mode: "100644",
+            type: "blob",
+            sha: "2".repeat(40),
+          },
+        ],
       });
     if (url.pathname === `${prefix}/commits/${headSha}/check-runs`) {
       const checkName = url.searchParams.get("check_name");
@@ -1134,7 +1191,12 @@ function checksFixture(
     const url = new URL(String(input));
     const method = init?.method ?? "GET";
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
-    requests.push({ method, path: url.pathname, query: url.searchParams, body });
+    requests.push({
+      method,
+      path: url.pathname,
+      query: url.searchParams,
+      body,
+    });
     if (method === "GET" && url.pathname === `${prefix}/git/ref/heads/main`)
       return response(mainRef());
     if (method === "GET" && url.pathname === `${prefix}/pulls/${pullNumber}`)
@@ -1408,6 +1470,7 @@ function approvalFixture(
       mainReads += 1;
       return response(mainRef(mainReads === 1 ? mergeSha : (options.terminalMainSha ?? mergeSha)));
     }
+    if (method === "GET" && url.pathname === prefix) return response(repository());
     if (method === "GET" && url.pathname === `${prefix}/git/commits/${mergeSha}`)
       return response({
         sha: mergeSha,
@@ -1450,11 +1513,54 @@ function approvalFixture(
           sha: baseSha,
           repo: { full_name: RELEASE_AUTOMATION_CONTRACT.repository },
         },
-        head: { sha: pullHeadSha },
+        head: {
+          ref: "changeset-release/main",
+          sha: pullHeadSha,
+          repo: { full_name: RELEASE_AUTOMATION_CONTRACT.repository },
+        },
         commits: pullCommitCount,
+        changed_files: 1,
         requested_reviewers: options.requestedReview
           ? [options.requestedReviewer ?? RELEASE_AUTOMATION_CONTRACT.releaseApprover]
           : [],
+      });
+    if (method === "GET" && url.pathname === `${prefix}/compare/${baseSha}...${pullHeadSha}`)
+      return response({
+        status: "ahead",
+        base_commit: { sha: baseSha },
+        merge_base_commit: { sha: baseSha },
+        ahead_by: pullCommitCount,
+        behind_by: 0,
+        total_commits: pullCommitCount,
+        commits: [{ sha: pullHeadSha }],
+      });
+    if (method === "GET" && url.pathname === `${prefix}/pulls/${pullNumber}/files`)
+      return response([{ filename: "package.json", status: "modified" }]);
+    if (method === "GET" && url.pathname === `${prefix}/git/trees/${baseTreeSha}`)
+      return response({
+        sha: baseTreeSha,
+        truncated: false,
+        tree: [
+          {
+            path: "package.json",
+            mode: "100644",
+            type: "blob",
+            sha: "1".repeat(40),
+          },
+        ],
+      });
+    if (method === "GET" && url.pathname === `${prefix}/git/trees/${headTreeSha}`)
+      return response({
+        sha: headTreeSha,
+        truncated: false,
+        tree: [
+          {
+            path: "package.json",
+            mode: "100644",
+            type: "blob",
+            sha: "2".repeat(40),
+          },
+        ],
       });
     if (method === "GET" && url.pathname === `${prefix}/issues/${pullNumber}/timeline`)
       return response(mergeEvent);
@@ -1465,7 +1571,11 @@ function approvalFixture(
               { sha: rebasedFirstSha, parents: [{ sha: baseSha }] },
               {
                 sha: mergeSha,
-                parents: [{ sha: options.discontinuousCompare ? baseSha : rebasedFirstSha }],
+                parents: [
+                  {
+                    sha: options.discontinuousCompare ? baseSha : rebasedFirstSha,
+                  },
+                ],
               },
             ]
           : [{ sha: mergeSha, parents: [{ sha: baseSha }] }];
@@ -1595,7 +1705,10 @@ describe("release approval provenance", () => {
   });
 
   test("accepts the provider-bound structured single-maintainer admin PASS", async () => {
-    const fixture = approvalFixture({ mergeMethod: "single", reviewState: "COMMENTED" });
+    const fixture = approvalFixture({
+      mergeMethod: "single",
+      reviewState: "COMMENTED",
+    });
     await expect(
       verifyApprovedMerge({
         env: approvalEnv(),
@@ -1605,9 +1718,34 @@ describe("release approval provenance", () => {
     ).resolves.toEqual(
       expect.objectContaining({
         mergeMethod: "single-commit-squash-or-rebase",
-        review: expect.objectContaining({ type: "single-maintainer-admin-pass" }),
+        review: expect.objectContaining({
+          type: "single-maintainer-admin-pass",
+        }),
       }),
     );
+  });
+
+  test("reconstructs source admission when GitHub deletes merged-head check projections", async () => {
+    const fixture = approvalFixture({ headChecks: [] });
+    const result = await verifyApprovedMerge({
+      env: approvalEnv(),
+      fetchImpl: fixture.fetchImpl,
+      logger: { log() {} },
+    });
+    expect(result.sourceAdmission).toEqual({
+      name: RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+      appSlug: "github-actions",
+      appId: 15368,
+      reconstructed: true,
+      manifestSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+    });
+    expect(
+      fixture.requests.filter(
+        (request) =>
+          request.path ===
+          `/repos/${RELEASE_AUTOMATION_CONTRACT.repository}/commits/${headSha}/check-runs`,
+      ),
+    ).toHaveLength(2);
   });
 
   test("accepts reviewer login movement while preserving stable provider identity", async () => {
@@ -1653,7 +1791,9 @@ describe("release approval provenance", () => {
     });
     expect(result).toEqual(
       expect.objectContaining({
-        review: expect.objectContaining({ type: "single-maintainer-admin-pass" }),
+        review: expect.objectContaining({
+          type: "single-maintainer-admin-pass",
+        }),
       }),
     );
   });
@@ -1678,7 +1818,10 @@ describe("release approval provenance", () => {
     ] as const) {
       const fixture = approvalFixture({ reviewDetailReviewer });
       await expect(
-        verifyApprovedMerge({ env: approvalEnv(), fetchImpl: fixture.fetchImpl }),
+        verifyApprovedMerge({
+          env: approvalEnv(),
+          fetchImpl: fixture.fetchImpl,
+        }),
       ).rejects.toThrow(message);
     }
 
@@ -1688,7 +1831,10 @@ describe("release approval provenance", () => {
       reviewerLoginSnapshot: "",
     });
     await expect(
-      verifyApprovedMerge({ env: approvalEnv(), fetchImpl: missingSnapshot.fetchImpl }),
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: missingSnapshot.fetchImpl,
+      }),
     ).rejects.toThrow("single-maintainer admin PASS reviewer login snapshot is missing");
   });
 
@@ -1704,13 +1850,18 @@ describe("release approval provenance", () => {
   });
 
   test("rejects self-approval and a non-approval decision", async () => {
-    const self = approvalFixture({ authorId: RELEASE_AUTOMATION_CONTRACT.releaseApprover.id });
+    const self = approvalFixture({
+      authorId: RELEASE_AUTOMATION_CONTRACT.releaseApprover.id,
+    });
     await expect(
       verifyApprovedMerge({ env: approvalEnv(), fetchImpl: self.fetchImpl }),
     ).rejects.toThrow("trusted reviewer authored the independently approved pull request");
     const requested = approvalFixture({ reviewState: "CHANGES_REQUESTED" });
     await expect(
-      verifyApprovedMerge({ env: approvalEnv(), fetchImpl: requested.fetchImpl }),
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: requested.fetchImpl,
+      }),
     ).rejects.toThrow(
       "neither independent approval nor a provider-bound single-maintainer admin PASS",
     );
@@ -1756,14 +1907,19 @@ describe("release approval provenance", () => {
     await expect(
       verifyApprovedMerge({
         env: approvalEnv(),
-        fetchImpl: approvalFixture({ pullHeadSha: "8".repeat(40), reviewCommit: headSha })
-          .fetchImpl,
+        fetchImpl: approvalFixture({
+          pullHeadSha: "8".repeat(40),
+          reviewCommit: headSha,
+        }).fetchImpl,
       }),
     ).rejects.toThrow("did not review the exact PR head");
     await expect(
       verifyApprovedMerge({
         env: approvalEnv(),
-        fetchImpl: approvalFixture({ mergeMethod: "rebase", discontinuousCompare: true }).fetchImpl,
+        fetchImpl: approvalFixture({
+          mergeMethod: "rebase",
+          discontinuousCompare: true,
+        }).fetchImpl,
       }),
     ).rejects.toThrow("discontinuity");
     await expect(
@@ -1786,7 +1942,7 @@ describe("release approval provenance", () => {
     ).rejects.toThrow("terminal release main differs");
   });
 
-  test("rejects missing, duplicate, failed, or foreign source-admission and source checks", async () => {
+  test("rejects duplicate, failed, or foreign source-admission and source checks", async () => {
     const success = (name: string, sha = headSha, appSlug = "github-actions", appId = 15368) => ({
       name,
       head_sha: sha,
@@ -1794,12 +1950,6 @@ describe("release approval provenance", () => {
       conclusion: "success",
       app: { slug: appSlug, id: appId },
     });
-    await expect(
-      verifyApprovedMerge({
-        env: approvalEnv(),
-        fetchImpl: approvalFixture({ headChecks: [] }).fetchImpl,
-      }),
-    ).rejects.toThrow("exactly one check run");
     await expect(
       verifyApprovedMerge({
         env: approvalEnv(),
@@ -2034,7 +2184,10 @@ describe("workflow contracts", () => {
       "actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10",
     );
     expect(admission.steps[0].with).toEqual(
-      expect.objectContaining({ ref: "${{ github.sha }}", "persist-credentials": false }),
+      expect.objectContaining({
+        ref: "${{ github.sha }}",
+        "persist-credentials": false,
+      }),
     );
     expect(admission.steps.find((step: any) => step.name === "Set up Bun").uses).toBe(
       "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6",
@@ -2064,7 +2217,10 @@ describe("workflow contracts", () => {
       pull_request_number: expect.objectContaining({ required: true }),
       reviewed_base_sha: expect.objectContaining({ required: true }),
       reviewed_head_sha: expect.objectContaining({ required: true }),
-      merged_source_sha: expect.objectContaining({ required: false, default: "" }),
+      merged_source_sha: expect.objectContaining({
+        required: false,
+        default: "",
+      }),
     });
     expect(seal.permissions).toEqual({ contents: "read" });
     expect(seal.jobs.seal.permissions).toEqual({
@@ -2081,7 +2237,10 @@ describe("workflow contracts", () => {
       "actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10",
     );
     expect(seal.jobs.seal.steps[0].with).toEqual(
-      expect.objectContaining({ ref: "${{ github.sha }}", "persist-credentials": false }),
+      expect.objectContaining({
+        ref: "${{ github.sha }}",
+        "persist-credentials": false,
+      }),
     );
   });
 

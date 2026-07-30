@@ -1278,6 +1278,61 @@ function assertSuccessfulCheck(checks, name, sha) {
   });
 }
 
+async function verifyDurableSourceAdmission({
+  api,
+  checks,
+  pull,
+  pullNumber,
+  baseSha,
+  headSha,
+  token,
+  fetchImpl,
+  logger,
+}) {
+  const matching = checks.filter(
+    (check) => check?.name === RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+  );
+  if (matching.length > 0) {
+    return assertSuccessfulCheck(
+      checks,
+      RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+      headSha,
+    );
+  }
+
+  // GitHub may discard every check-run projection for a merged head when its
+  // source branch is deleted. The retained commit/release and the provider PR
+  // objects remain authoritative, so reconstruct the same admission directly
+  // instead of making a post-merge release depend on disposable UI state.
+  const historical = await verifyHistoricalSourceAdmission({
+    number: pullNumber,
+    baseSha,
+    headSha,
+    headRef: assertString(pull?.head?.ref, "historical source-admission head ref"),
+    headRepository: assertString(
+      pull?.head?.repo?.full_name,
+      "historical source-admission head repository",
+    ),
+    token,
+    fetchImpl,
+    logger,
+  });
+  const terminalChecks = await paginatedCheckRuns(api, headSha);
+  invariant(
+    terminalChecks.every(
+      (check) => check?.name !== RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+    ),
+    "source-admission check projection changed during historical reconstruction",
+  );
+  return Object.freeze({
+    name: RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+    appSlug: RELEASE_AUTOMATION_CONTRACT.githubActionsApp.slug,
+    appId: RELEASE_AUTOMATION_CONTRACT.githubActionsApp.id,
+    reconstructed: true,
+    manifestSha256: historical.manifestSha256,
+  });
+}
+
 function assertCommit(value, expectedSha, label) {
   invariant(value?.sha === expectedSha, `${label} identity changed`);
   const treeSha = assertSha(value?.tree?.sha, `${label} tree SHA`);
@@ -1331,7 +1386,14 @@ function assertMergedPull(value, expected) {
     merger.type === "User" || merger.type === "Bot",
     "pull-request merge actor type is invalid",
   );
-  return { baseSha, headSha, mergedAt, author, merger, commitCount: value.commits };
+  return {
+    baseSha,
+    headSha,
+    mergedAt,
+    author,
+    merger,
+    commitCount: value.commits,
+  };
 }
 
 function assertProviderMergeEvent(events, sourceSha, pullIdentity) {
@@ -1529,7 +1591,10 @@ export async function verifyApprovedMerge(options = {}) {
     "associated pull summary merge SHA changed",
   );
   const pull = record(await api.get(repositoryPath(`/pulls/${pullNumber}`)), "pull-request detail");
-  const pullIdentity = assertMergedPull(pull, { pullNumber, sourceSha: context.sourceSha });
+  const pullIdentity = assertMergedPull(pull, {
+    pullNumber,
+    sourceSha: context.sourceSha,
+  });
   invariant(
     associatedPull.base?.sha === pullIdentity.baseSha &&
       associatedPull.head?.sha === pullIdentity.headSha,
@@ -1649,11 +1714,17 @@ export async function verifyApprovedMerge(options = {}) {
     releaseHeadReleaseValue,
     pullIdentity.headSha,
   );
-  const sourceAdmission = assertSuccessfulCheck(
-    headChecks,
-    RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
-    pullIdentity.headSha,
-  );
+  const sourceAdmission = await verifyDurableSourceAdmission({
+    api,
+    checks: headChecks,
+    pull,
+    pullNumber,
+    baseSha: pullIdentity.baseSha,
+    headSha: pullIdentity.headSha,
+    token: context.token,
+    fetchImpl: options.fetchImpl ?? globalThis.fetch,
+    logger,
+  });
   const requiredSourceChecks = RELEASE_AUTOMATION_CONTRACT.checks.requiredSource.map((name) =>
     assertSuccessfulCheck(sourceChecks, name, context.sourceSha),
   );
