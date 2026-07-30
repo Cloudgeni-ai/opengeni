@@ -1110,6 +1110,7 @@ describe("API component integration", () => {
       workspaceId: delegatedWorkspace.defaultWorkspaceId!,
       subjectId: "test:local-delegated-worker",
       permissions: ["workspace:read"],
+      principalKind: "service",
       sessionId,
       exp: Math.floor(Date.now() / 1000) + 60,
     });
@@ -1139,7 +1140,26 @@ describe("API component integration", () => {
     const fallback = (await fallbackResponse.json()) as AccessContext;
     expect(fallback.mode).toBe("local");
     expect(fallback.subjectId).toBe("dev");
+    expect(fallback.workspaceGrants[0]?.principalKind).toBe("human_session");
     expect(fallback.workspaceGrants[0]?.metadata).toBeUndefined();
+
+    const mcpSession = await createSession(dbClient.db, {
+      accountId: delegatedWorkspace.defaultAccountId!,
+      workspaceId: delegatedWorkspace.defaultWorkspaceId!,
+      initialMessage: "exercise exact local first-party MCP delegation",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+      createdBy: { kind: "subject", subjectId: "test:local-delegated-human" },
+    });
+    const mcpAttempt = await claimHumanSessionAttempt(
+      dbClient.db,
+      delegatedWorkspace.workspaceGrants[0]!,
+      mcpSession.id,
+      "test:local-delegated-human",
+      "claim the exact local first-party MCP turn",
+    );
 
     const server = Bun.serve({
       port: 0,
@@ -1165,7 +1185,7 @@ describe("API component integration", () => {
         {
           accountId: delegatedWorkspace.defaultAccountId!,
           workspaceId: delegatedWorkspace.defaultWorkspaceId!,
-          sessionId,
+          ...mcpAttempt,
         },
       );
       const toolNames = (await prepared.mcpServers[0]!.listTools()).map((tool) => tool.name);
@@ -5537,6 +5557,11 @@ describe("API component integration", () => {
       subjectId: subjectB,
       permissions: ["documents:search", "documents:manage"],
     });
+    const sessionlessServiceToken = await signDelegatedBearer(delegationSecret, grant, {
+      subjectId: subjectA,
+      permissions: ["documents:search", "documents:manage"],
+      principalKind: "service",
+    });
     const adminToken = await signDelegatedBearer(delegationSecret, grant, {
       subjectId: `admin:memory:${crypto.randomUUID()}`,
       permissions: ["workspace:admin"],
@@ -5600,6 +5625,52 @@ describe("API component integration", () => {
       scopeSubjectId: subjectA,
       createdBySessionId: null,
     });
+
+    const sessionlessServiceRead = await app.request(
+      workspacePath(grant.workspaceId, `/knowledge/memories/${created.id}`),
+      { headers: { authorization: sessionlessServiceToken } },
+    );
+    expect(sessionlessServiceRead.status).toBe(403);
+    const sessionlessServiceWrite = await app.request(
+      workspacePath(grant.workspaceId, "/knowledge/memories"),
+      {
+        method: "POST",
+        headers: jsonHeaders(sessionlessServiceToken),
+        body: JSON.stringify({
+          text: "A sessionless service principal must not write private user memory.",
+          kind: "preference",
+          scopeSpec: { type: "user" },
+        }),
+      },
+    );
+    expect(sessionlessServiceWrite.status).toBe(403);
+    for (const [name, args] of [
+      ["memory_search", { query: "concise rollback evidence", scope: "user" }],
+      [
+        "memory_propose",
+        {
+          text: "A sessionless service principal must not write through deprecated MCP.",
+          kind: "preference",
+          scope: "user",
+        },
+      ],
+    ] as const) {
+      const response = await app.request(workspacePath(grant.workspaceId, "/mcp/docs"), {
+        method: "POST",
+        headers: {
+          authorization: sessionlessServiceToken,
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: crypto.randomUUID(),
+          method: "tools/call",
+          params: { name, arguments: args },
+        }),
+      });
+      expect(response.status).toBe(403);
+    }
 
     const unsignedRoleWrite = await app.request(
       workspacePath(grant.workspaceId, "/knowledge/memories"),
@@ -10526,6 +10597,7 @@ async function signDelegatedBearer(
     turnId?: string;
     attemptId?: string;
     executionGeneration?: number;
+    principalKind?: "human_session" | "agent_attempt" | "service";
   },
 ): Promise<string> {
   return `Bearer ${await signDelegatedAccessToken(secret, {
@@ -10538,7 +10610,7 @@ async function signDelegatedBearer(
     ...(input.turnId ? { turnId: input.turnId } : {}),
     ...(input.attemptId ? { attemptId: input.attemptId } : {}),
     ...(input.executionGeneration ? { executionGeneration: input.executionGeneration } : {}),
-    principalKind: input.sessionId ? "agent_attempt" : "human_session",
+    principalKind: input.principalKind ?? (input.sessionId ? "agent_attempt" : "human_session"),
     exp: Math.floor(Date.now() / 1000) + 300,
   })}`;
 }

@@ -106,8 +106,9 @@ type ResolvedMemoryRequestContext = {
  * whose private memory is applicable. Session-bound grants must carry the exact
  * current turn, attempt, and generation; the persisted immutable human turn
  * initiator supplies private-memory authority. Stale, partial, service, and
- * foreign claims fail closed. Sessionless human/API grants keep their
- * authenticated subject for direct human memory administration.
+ * foreign claims fail closed. Only an explicitly authenticated, sessionless
+ * human principal keeps its subject for direct API memory administration;
+ * service, key, configured-key, and legacy/missing provenance fail closed.
  */
 async function resolveMemoryRequestContext(
   db: ApiRouteDeps["db"],
@@ -116,11 +117,29 @@ async function resolveMemoryRequestContext(
 ): Promise<ResolvedMemoryRequestContext> {
   const attemptClaims = exactMemoryAttemptClaims(grant);
   if (!attemptClaims) {
+    if (
+      grant.principalKind !== "human_session" ||
+      grant.serviceInitiator !== undefined ||
+      grant.serviceInitiatorContext !== undefined
+    ) {
+      throw new HTTPException(403, {
+        message: "user memory requires direct human or exact human-turn authority",
+      });
+    }
     return {
       actorSessionId: null,
       access: { subjectId: grant.subjectId },
       sessionContext: null,
     };
+  }
+  if (
+    grant.principalKind !== "agent_attempt" ||
+    grant.serviceInitiator !== undefined ||
+    grant.serviceInitiatorContext !== undefined
+  ) {
+    throw new HTTPException(403, {
+      message: "exact signed memory claims require agent-attempt provenance",
+    });
   }
   const sessionContext = await getSessionMemoryContext(db, {
     accountId: grant.accountId,

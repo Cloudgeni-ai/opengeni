@@ -159,16 +159,19 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
     if (delegated) {
       return delegated;
     }
-    return await bootstrapWorkspace(deps.db, {
-      accountExternalSource: "opengeni:local",
-      accountExternalId: "default",
-      accountName: "Local",
-      workspaceExternalSource: "opengeni:local",
-      workspaceExternalId: "default",
-      workspaceName: "Local",
-      subjectId: "dev",
-      subjectLabel: "Local dev",
-    });
+    return accessContextWithPrincipalKind(
+      await bootstrapWorkspace(deps.db, {
+        accountExternalSource: "opengeni:local",
+        accountExternalId: "default",
+        accountName: "Local",
+        workspaceExternalSource: "opengeni:local",
+        workspaceExternalId: "default",
+        workspaceName: "Local",
+        subjectId: "dev",
+        subjectLabel: "Local dev",
+      }),
+      "human_session",
+    );
   }
 
   if (deps.settings.productAccessMode === "configured") {
@@ -183,16 +186,19 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
     if (deps.settings.delegationSecret) {
       return null;
     }
-    return await bootstrapWorkspace(deps.db, {
-      accountExternalSource: "opengeni:configured",
-      accountExternalId: "default",
-      accountName: "Configured",
-      workspaceExternalSource: "opengeni:configured",
-      workspaceExternalId: "default",
-      workspaceName: "Configured",
-      subjectId: configuredSubject(c),
-      subjectLabel: "Configured key",
-    });
+    return accessContextWithPrincipalKind(
+      await bootstrapWorkspace(deps.db, {
+        accountExternalSource: "opengeni:configured",
+        accountExternalId: "default",
+        accountName: "Configured",
+        workspaceExternalSource: "opengeni:configured",
+        workspaceExternalId: "default",
+        workspaceName: "Configured",
+        subjectId: configuredSubject(c),
+        subjectLabel: "Configured key",
+      }),
+      "configured_key",
+    );
   }
 
   const bearer = bearerToken(c);
@@ -219,6 +225,16 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
   }
 
   return null;
+}
+
+function accessContextWithPrincipalKind(
+  context: AccessContext,
+  principalKind: "human_session" | "configured_key",
+): AccessContext {
+  return {
+    ...context,
+    workspaceGrants: context.workspaceGrants.map((grant) => ({ ...grant, principalKind })),
+  };
 }
 
 async function apiKeyAccessContext(
