@@ -30,7 +30,19 @@ const rebasedFirstSha = "a".repeat(40);
 const pullNumber = 88;
 const runId = 123456;
 const runAttempt = 2;
+const recoveryRunId = 790;
+const recoveryRunAttempt = 3;
 const releaseHeadReleaseId = 7654321;
+
+function recoveredSourceAdmissionExternalId(
+  workflowRunId = recoveryRunId,
+  workflowRunAttempt = recoveryRunAttempt,
+) {
+  return (
+    `opengeni:release-automation:source-admission-recovery:v2:` +
+    `pr:${pullNumber}:head:${headSha}:run:${workflowRunId}:attempt:${workflowRunAttempt}`
+  );
+}
 
 type RequestRecord = {
   method: string;
@@ -799,7 +811,8 @@ function recoverySealEnv(overrides: Record<string, string> = {}) {
     GITHUB_SERVER_URL: RELEASE_AUTOMATION_CONTRACT.serverUrl,
     GITHUB_SHA: currentMainSha,
     GITHUB_TOKEN: "fixture-token",
-    GITHUB_RUN_ID: "790",
+    GITHUB_RUN_ATTEMPT: String(recoveryRunAttempt),
+    GITHUB_RUN_ID: String(recoveryRunId),
     GITHUB_WORKFLOW_REF:
       `${RELEASE_AUTOMATION_CONTRACT.repository}/` +
       `${RELEASE_AUTOMATION_CONTRACT.sealWorkflowPath}@refs/heads/main`,
@@ -820,6 +833,7 @@ function recoverySealFixture(
     headRepositories?: string[];
     pullAuthors?: Array<Record<string, unknown>>;
     originalSourceAdmissions?: Array<Record<string, unknown>>;
+    existingRecoveryChecks?: Array<Record<string, unknown>>;
     releaseHeadRef?: Record<string, unknown> | null;
     release?: Record<string, unknown> | null;
     refCreateStatus?: number;
@@ -831,6 +845,7 @@ function recoverySealFixture(
 ) {
   const requests: RequestRecord[] = [];
   const checks: Array<Record<string, any>> = [];
+  checks.push(...(options.existingRecoveryChecks ?? []));
   const prefix = `/repos/${RELEASE_AUTOMATION_CONTRACT.repository}`;
   const releaseTag = `${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${headSha}`;
   const merger = { login: "merge-maintainer", id: 1234567, type: "User" };
@@ -1092,10 +1107,122 @@ describe("release head retention recovery", () => {
       fixture.checks.filter(
         (check) =>
           check.name === RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission &&
-          check.external_id ===
-            `opengeni:release-automation:source-admission:v1:pr:${pullNumber}:head:${headSha}`,
+          check.external_id === recoveredSourceAdmissionExternalId(),
       ),
     ).toHaveLength(1);
+  });
+
+  test("migrates the prior deterministic recovery check in place", async () => {
+    const legacyExternalId = String.raw`opengeni:release-automation:source-admission:v1:pr:${pullNumber}:head:${headSha}`;
+    const fixture = recoverySealFixture({
+      existingRecoveryChecks: [
+        {
+          id: 777,
+          name: RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+          head_sha: headSha,
+          status: "completed",
+          conclusion: "success",
+          external_id: legacyExternalId,
+          app: RELEASE_AUTOMATION_CONTRACT.githubActionsApp,
+        },
+      ],
+    });
+
+    await recoverReleaseHeadEvidence({
+      env: recoverySealEnv(),
+      fetchImpl: fixture.fetchImpl,
+      logger: { log() {} },
+      now: () => new Date("2026-07-27T09:30:00Z"),
+    });
+
+    expect(
+      fixture.checks.filter(
+        (check) => check.name === RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        id: 777,
+        external_id: recoveredSourceAdmissionExternalId(),
+        status: "completed",
+        conclusion: "success",
+      }),
+    ]);
+    expect(
+      fixture.requests.filter(
+        (request) =>
+          request.method === "POST" &&
+          request.path.endsWith("/check-runs") &&
+          request.body?.name === RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+      ),
+    ).toHaveLength(0);
+  });
+
+  test("moves one prior v2 recovery check to the current seal run without duplicating it", async () => {
+    const fixture = recoverySealFixture();
+    const options = {
+      fetchImpl: fixture.fetchImpl,
+      logger: { log() {} },
+      now: () => new Date("2026-07-27T09:30:00Z"),
+    };
+
+    await recoverReleaseHeadEvidence({
+      ...options,
+      env: recoverySealEnv(),
+    });
+    await recoverReleaseHeadEvidence({
+      ...options,
+      env: recoverySealEnv({
+        GITHUB_RUN_ID: String(recoveryRunId + 1),
+        GITHUB_RUN_ATTEMPT: String(recoveryRunAttempt + 1),
+      }),
+    });
+
+    expect(
+      fixture.checks.filter(
+        (check) => check.name === RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        external_id: recoveredSourceAdmissionExternalId(recoveryRunId + 1, recoveryRunAttempt + 1),
+        status: "completed",
+        conclusion: "success",
+      }),
+    ]);
+    expect(
+      fixture.requests.filter(
+        (request) =>
+          request.method === "POST" &&
+          request.path.endsWith("/check-runs") &&
+          request.body?.name === RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+      ),
+    ).toHaveLength(1);
+  });
+
+  test("rejects duplicate prior v2 recovery checks before mutation", async () => {
+    const canonical = (id: number, workflowRunId: number) => ({
+      id,
+      name: RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+      head_sha: headSha,
+      status: "completed",
+      conclusion: "success",
+      external_id: recoveredSourceAdmissionExternalId(workflowRunId, 1),
+      app: RELEASE_AUTOMATION_CONTRACT.githubActionsApp,
+    });
+    const fixture = recoverySealFixture({
+      existingRecoveryChecks: [
+        canonical(777, recoveryRunId - 2),
+        canonical(778, recoveryRunId - 1),
+      ],
+    });
+
+    await expect(
+      recoverReleaseHeadEvidence({
+        env: recoverySealEnv(),
+        fetchImpl: fixture.fetchImpl,
+        logger: { log() {} },
+      }),
+    ).rejects.toThrow("multiple check runs share the idempotency marker");
+    expect(fixture.requests.every((request) => request.method === "GET")).toBe(true);
   });
 
   test("creates a clean absent retained pair after every pre-mutation gate and replays idempotently", async () => {
@@ -1983,7 +2110,7 @@ describe("release approval provenance", () => {
         original(102),
         {
           ...original(103),
-          external_id: `opengeni:release-automation:source-admission:v1:pr:${pullNumber}:head:${headSha}`,
+          external_id: recoveredSourceAdmissionExternalId(),
         },
       ],
     });
@@ -2004,7 +2131,7 @@ describe("release approval provenance", () => {
   });
 
   test("rejects duplicate canonical recovered admissions", async () => {
-    const externalId = `opengeni:release-automation:source-admission:v1:pr:${pullNumber}:head:${headSha}`;
+    const externalId = recoveredSourceAdmissionExternalId();
     const canonical = {
       name: RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
       head_sha: headSha,
