@@ -1290,7 +1290,7 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
     expect(effectiveModalIdleTimeoutSeconds(settings)).toBe(settings.modalTimeoutSeconds);
     expect(effectiveModalIdleTimeoutSeconds(settings)).toBe(86_400);
     expect(settings.sandboxRotationLeadMs).toBe(3_600_000);
-    expect(settings.sandboxRotationBatchSize).toBe(25);
+    expect(settings.sandboxRotationBatchSize).toBe(1);
     expect(settings.sandboxLeaseReaperPeriodMs + settings.sandboxIdleGraceMs).toBeLessThan(
       effectiveModalIdleTimeoutSeconds(settings) * 1000,
     );
@@ -1343,6 +1343,10 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
   });
 
   test("the rotation batch is positive and bounded", () => {
+    expect(
+      withEnv({ OPENGENI_SANDBOX_ROTATION_BATCH_SIZE: "25" }, () => getSettings())
+        .sandboxRotationBatchSize,
+    ).toBe(25);
     expect(() =>
       withEnv({ OPENGENI_SANDBOX_ROTATION_BATCH_SIZE: "501" }, () => getSettings()),
     ).toThrow(/<=500/i);

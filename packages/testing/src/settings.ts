@@ -205,7 +205,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     sandboxSnapshotIntervalMs: 900_000,
     sandboxSnapshotTimeoutMs: 60_000,
     sandboxRotationLeadMs: 3_600_000,
-    sandboxRotationBatchSize: 25,
+    sandboxRotationBatchSize: 1,
     sandboxLeaseTtlMs: 90_000,
     sandboxLeaseWarmingTtlMs: 120_000,
     sandboxWarmingTimeoutMs: 600_000,

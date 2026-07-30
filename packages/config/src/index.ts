@@ -718,7 +718,11 @@ const SettingsSchema = z.object({
   sandboxRotationLeadMs: z.coerce.number().int().positive().default(3_600_000),
   // Bound each global reaper pass so a rollout that discovers many legacy boxes
   // with unknown creation clocks cannot create a provider/API thundering herd.
-  sandboxRotationBatchSize: z.coerce.number().int().positive().max(500).default(25),
+  // One is the safe admission default: the reaper services provider transitions
+  // sequentially, so claiming a wider batch would fence boxes before the same
+  // sweep can service them. Larger fleets may raise this only as an explicit,
+  // observed deployment choice.
+  sandboxRotationBatchSize: z.coerce.number().int().positive().max(500).default(1),
   // expires_at refresh window for a held lease (>> the turn 10s heartbeat so a
   // single missed heartbeat never TTL-reaps a live turn). The warming TTL is the
   // window a cold->warming spawner has to commit warm before a reaper resets it.

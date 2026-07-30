@@ -27,6 +27,9 @@ It produced several independent defects:
 7. The `execCommand` fallback framed confined filesystem/Git output only at its
    start, so provider or shell diagnostics appended after stdout could corrupt
    control probes and byte-count records.
+8. A durable `warm` lease was treated as provider-liveness proof. Modal could
+   terminate the exact box while OpenGeni was idle, leaving a false-live pointer
+   that was discovered only inside a later user operation.
 
 These defects interact, but no single flag fixes all of them. The remediation
 draws four explicit boundaries:
@@ -120,6 +123,13 @@ same read found 19 Modal leases past their drain deadline (one under five
 minutes, 16 between five minutes and one hour, and two between one hour and one
 day). These are rollout baseline metrics, not proof that every row shares the
 same low-level cause.
+
+The later provider-bound preflight at 2026-07-30 16:29 UTC made the false-live
+case concrete: PostgreSQL exposed 17 Modal leases as warming/warm/draining, but
+exact `Sandbox.poll()` calls found only ten running. Six had already exited 124
+at the configured two-hour lifetime and one warming instance had exited 137.
+This is why a database lease can look available while Shell/Files/Terminal are
+not.
 
 The repair probes the exact historical Modal sandbox ID. It settles only from a
 durable exit/loss proof and removes only the copied historical holder; it never
@@ -268,6 +278,13 @@ terminated; the overdue alert fires while the reaper retries. The provider's
 hard deadline remains the final failure boundary, which is why rotation begins
 with an hour of headroom.
 
+Every normal worker attach also performs one bounded command-readiness probe
+before handing a supposedly warm box to the agent. Authoritative terminal
+evidence atomically retires only the exact lease epoch/instance and enters the
+existing recoverable supersession path. A provider transport timeout or
+ambiguous error leaves the lease untouched; a dead box is never guessed from
+generic message text.
+
 ### Retry semantics
 
 Nonretryable recovery failures are memoized for the frozen turn, so every later
@@ -347,8 +364,13 @@ the migration and application rollout.
    - bind the exact Azure subscription/AKS context and Modal workspace;
    - record current lease, retained-process, artifact, rotation, and provider
      inventories;
+   - use Modal's control-plane sandbox listing to bind each live instance ID to
+     its provider `createdAt` clock and compute its deadline from the currently
+     deployed lifetime (two hours for the pre-cutover production cohort);
    - confirm the reaper schedule is running;
-   - verify at least one hour of deadline headroom for every live Modal box.
+   - classify boxes with less than one hour of headroom as urgent rotation
+     candidates; do not invent a later deadline for them or delay the cutover
+     merely to make the inventory look healthy.
 2. **Maintenance migration 0138**
    - stop API, control-worker, and turn-worker application pods first;
    - verify there are no `opengeni_app` sessions in `pg_stat_activity`;
@@ -360,11 +382,18 @@ the migration and application rollout.
      rotation because their actual provider creation clocks are unknowable;
    - leaves legacy retained-process bindings null.
 3. **Application rollout**
-   - start only the new API/control/turn image after 0137 commits; mixed old/new
+   - start only the new API/control/turn image after 0138 commits; mixed old/new
      application versions are forbidden;
    - ensure new retained processes carry canonical provider bindings;
-   - keep rotation batch size at 25 and lead at one hour.
-4. **Canary**
+   - keep the rotation batch size at its safe default of one and the lead at one
+     hour. This admits one newly due box per non-overlapping reaper sweep; it is
+     the production cohort control, not merely a SQL query cap.
+4. **Canary and first production cohort**
+   - complete the isolated short-lifetime canary in staging before production
+     migration 0137 is allowed to start;
+   - after the new production workers start, treat the first automatically
+     requested legacy rotation as the production cohort and require its durable
+     checkpoint, successor, and cleanup receipts before widening admission;
    - create an isolated sandbox with a deliberately short test timeout;
    - exercise Shell/Files/Terminal across checkpoint, drain, and successor;
    - prove current/previous references and provider Image deletion;
@@ -377,7 +406,10 @@ the migration and application rollout.
 6. **Cohort expansion**
    - watch overdue rotation, terminal-owner backlog, checkpoint deletion,
      expired drain, orphan termination, and provider API errors;
-   - increase cohort only after two clean rotation cycles.
+   - leave the batch at one through at least two clean production rotation
+     cycles; raise `OPENGENI_SANDBOX_ROTATION_BATCH_SIZE` only through the
+     reviewed deployment configuration, and only when observed provider and
+     worker capacity justify servicing more fenced boxes per sweep.
 
 Rollback may stop requesting new rotations, but must not remove migration 0138
 or discard artifact/process ownership rows. Old application code is not

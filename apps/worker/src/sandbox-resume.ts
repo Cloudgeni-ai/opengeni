@@ -95,6 +95,12 @@ export type SandboxResumeServices = {
   db: Database;
   settings: Settings;
   sandboxMetrics?: RuntimeMetricsHooks;
+  /** Test seam for the attached/resumed path. Production uses the one runtime
+   * resume primitive; callers must not use this to create a replacement box. */
+  establishAttachedSandbox?: typeof establishSandboxSessionFromEnvelope;
+  /** Test seam for the bounded command-readiness proof performed before an
+   * attached provider box is handed to the agent. */
+  verifyAttachedSandboxReadiness?: (established: EstablishedSandboxSession) => Promise<void>;
   /** Called only by the observer that wins the exact warm->cold loss CAS. */
   onSandboxLost?: (input: {
     sandboxGroupId: string;
@@ -1157,13 +1163,20 @@ export async function resumeBoxForTurn(
     }
     let established: EstablishedSandboxSession;
     try {
-      established = await establishSandboxSessionFromEnvelope(settings, live.resumeState, {
+      const establish = services.establishAttachedSandbox ?? establishSandboxSessionFromEnvelope;
+      established = await establish(settings, live.resumeState, {
         sessionId: ids.sessionId,
         recovery: "resume-only",
         backendOverride: ids.backend as never,
         ...(ids.environment ? { environment: ids.environment } : {}),
         ...(services.sandboxMetrics ? { metrics: services.sandboxMetrics } : {}),
       });
+      // A durable `warm` row is an ownership assertion, not provider liveness.
+      // Modal may have ended the exact box at its finite timeout while OpenGeni
+      // was idle. Prove the command router before handing the session to the
+      // agent so terminal evidence enters the atomic warm->cold recovery path
+      // below instead of surfacing inside a model-visible tool call.
+      await (services.verifyAttachedSandboxReadiness ?? waitForSandboxExecReadiness)(established);
     } catch (error) {
       if (!isProviderSandboxNotFoundError(ids.backend, error)) {
         throw error;

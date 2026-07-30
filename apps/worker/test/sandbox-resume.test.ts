@@ -51,6 +51,7 @@ import {
 import {
   resumeBoxForTurn,
   sandboxLeaseHolderIdForAttempt,
+  SandboxLeaseInstanceLostError,
   SandboxWarmingTimeoutError,
 } from "../src/sandbox-resume";
 
@@ -265,6 +266,82 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
     // both released -> draining.
     const row = await readRow(workspaceId, groupId);
     expect(row?.liveness).toBe("draining");
+  }, 60_000);
+
+  test("(2a) an attached Modal lease whose command router is terminal retires the exact warm epoch before agent execution", async () => {
+    if (!available) return;
+    const settings = testSettings({
+      ...settingsFor(true),
+      sandboxBackend: "modal",
+    });
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const instanceId = "sb-terminal";
+    const leaseEpoch = 7;
+    const resumeState = {
+      backendId: "modal",
+      sessionState: {
+        providerState: { sandboxId: instanceId },
+      },
+    };
+    await admin`
+      insert into sandbox_leases (
+        account_id, workspace_id, sandbox_group_id, liveness, refcount,
+        turn_holders, viewer_holders, instance_id, backend, lease_epoch,
+        resume_backend_id, resume_state, expires_at
+      ) values (
+        ${accountId}, ${workspaceId}, ${groupId}, 'warm', 0,
+        0, 0, ${instanceId}, 'modal', ${leaseEpoch},
+        'modal', ${JSON.stringify(resumeState)}::jsonb, now() + interval '60 seconds'
+      )`;
+
+    const lost: Array<{ instanceId: string; leaseEpoch: number }> = [];
+    await expect(
+      resumeBoxForTurn(
+        {
+          db,
+          settings,
+          establishAttachedSandbox: async () => ({
+            client: {},
+            session: {},
+            sessionState: resumeState.sessionState,
+            instanceId,
+            backendId: "modal",
+            origin: "resumed",
+          }),
+          verifyAttachedSandboxReadiness: async () => {
+            throw new Error(`Modal sandbox ${instanceId} is no longer running.`);
+          },
+          onSandboxLost: async (event) => {
+            lost.push({
+              instanceId: event.instanceId,
+              leaseEpoch: event.leaseEpoch,
+            });
+          },
+        },
+        {
+          accountId,
+          workspaceId,
+          sandboxGroupId: groupId,
+          sessionId: groupId,
+          backend: "modal",
+        },
+        "turn",
+        sandboxLeaseHolderIdForAttempt("activity-terminal"),
+      ),
+    ).rejects.toBeInstanceOf(SandboxLeaseInstanceLostError);
+
+    expect(lost).toEqual([{ instanceId, leaseEpoch: leaseEpoch + 1 }]);
+    expect(await readRow(workspaceId, groupId)).toMatchObject({
+      liveness: "cold",
+      refcount: 0,
+      turn_holders: 0,
+      lease_epoch: leaseEpoch + 1,
+      instance_id: null,
+      resume_backend_id: "modal",
+    });
+    expect(
+      await holderCount(workspaceId, groupId, sandboxLeaseHolderIdForAttempt("activity-terminal")),
+    ).toBe(0);
   }, 60_000);
 
   test("(2b) concurrent observers of one missing warm instance elect exactly one replacement owner", async () => {
