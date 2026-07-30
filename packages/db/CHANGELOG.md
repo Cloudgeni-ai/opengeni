@@ -1,5 +1,11 @@
 # @opengeni/db
 
+## 0.14.4
+
+### Patch Changes
+
+- ea38a4c: Make cold sandbox recovery fail closed for database roles that bypass row-level security, preserving recovery safety before blocker settlement.
+
 ## 0.14.3
 
 ### Patch Changes
