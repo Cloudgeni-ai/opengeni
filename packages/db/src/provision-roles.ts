@@ -262,6 +262,9 @@ async function assertAppRoleSafeToNormalize(sql: postgres.Sql, role: string): Pr
     return;
   }
 
+  // PostgreSQL 16 added per-grant INHERIT and SET options. Reading through
+  // to_jsonb keeps this inspection compatible with PostgreSQL 14/15; missing
+  // options default to true so every legacy membership remains unsafe.
   const memberships = await sql<
     {
       relationship: string;
@@ -278,8 +281,14 @@ async function assertAppRoleSafeToNormalize(sql: postgres.Sql, role: string): Pr
       parent.rolname::text as parent_role,
       member.rolname::text as member_role,
       membership.admin_option,
-      membership.inherit_option,
-      membership.set_option,
+      coalesce(
+        (to_jsonb(membership) ->> 'inherit_option')::boolean,
+        true
+      ) as inherit_option,
+      coalesce(
+        (to_jsonb(membership) ->> 'set_option')::boolean,
+        true
+      ) as set_option,
       current_user::text as session_role
     from pg_auth_members membership
     join pg_roles member on member.oid = membership.member
@@ -291,8 +300,14 @@ async function assertAppRoleSafeToNormalize(sql: postgres.Sql, role: string): Pr
       parent.rolname::text as parent_role,
       member.rolname::text as member_role,
       membership.admin_option,
-      membership.inherit_option,
-      membership.set_option,
+      coalesce(
+        (to_jsonb(membership) ->> 'inherit_option')::boolean,
+        true
+      ) as inherit_option,
+      coalesce(
+        (to_jsonb(membership) ->> 'set_option')::boolean,
+        true
+      ) as set_option,
       current_user::text as session_role
     from pg_auth_members membership
     join pg_roles member on member.oid = membership.member

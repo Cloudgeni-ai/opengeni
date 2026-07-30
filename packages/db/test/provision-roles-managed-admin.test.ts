@@ -11,7 +11,7 @@ const ADMIN_PASSWORD = "adminpw";
 const DATABASE = "managed_role_test";
 const APP_ROLE = "opengeni_app";
 const APP_PASSWORD = "apppw";
-const IMAGE = "pgvector/pgvector:pg17";
+const IMAGE = process.env.OPENGENI_MANAGED_ROLE_TEST_IMAGE ?? "pgvector/pgvector:pg17";
 const SUPERUSER_URL = `postgres://postgres:${SUPERUSER_PASSWORD}@127.0.0.1:${PORT}/postgres`;
 const ADMIN_URL = `postgres://${ADMIN_ROLE}:${ADMIN_PASSWORD}@127.0.0.1:${PORT}/${DATABASE}`;
 const APP_URL = `postgres://${APP_ROLE}:${APP_PASSWORD}@127.0.0.1:${PORT}/${DATABASE}`;
@@ -117,6 +117,9 @@ describe("managed Postgres role provisioning", () => {
 
     const control = postgres(SUPERUSER_URL, { max: 1 });
     try {
+      const version = await control<{ server_version_num: number }[]>`
+        select current_setting('server_version_num')::integer as server_version_num
+      `;
       const creatorEdges = await control<
         {
           member_role: string;
@@ -128,21 +131,31 @@ describe("managed Postgres role provisioning", () => {
         select
           member.rolname::text as member_role,
           membership.admin_option,
-          membership.inherit_option,
-          membership.set_option
+          coalesce(
+            (to_jsonb(membership) ->> 'inherit_option')::boolean,
+            true
+          ) as inherit_option,
+          coalesce(
+            (to_jsonb(membership) ->> 'set_option')::boolean,
+            true
+          ) as set_option
         from pg_auth_members membership
         join pg_roles member on member.oid = membership.member
         join pg_roles parent on parent.oid = membership.roleid
         where parent.rolname = ${APP_ROLE}
       `;
-      expect([...creatorEdges]).toEqual([
-        {
-          member_role: ADMIN_ROLE,
-          admin_option: true,
-          inherit_option: false,
-          set_option: false,
-        },
-      ]);
+      if ((version[0]?.server_version_num ?? 0) >= 160_000) {
+        expect([...creatorEdges]).toEqual([
+          {
+            member_role: ADMIN_ROLE,
+            admin_option: true,
+            inherit_option: false,
+            set_option: false,
+          },
+        ]);
+      } else {
+        expect([...creatorEdges]).toEqual([]);
+      }
 
       await control.unsafe(`create role "unexpected_app_member"`);
       await control.unsafe(`grant "${APP_ROLE}" to "unexpected_app_member"`);
