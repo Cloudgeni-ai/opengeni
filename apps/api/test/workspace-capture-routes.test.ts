@@ -70,6 +70,7 @@ describe("M2 capture-read route discipline (static)", () => {
       for (const needle of [
         "c.req.query",
         "latestWorkspaceCapture",
+        "sessionLatestWorkspaceCapture",
         "workspaceCaptureAtRevision",
         "getSession(",
       ]) {
@@ -84,7 +85,7 @@ describe("M2 capture-read route discipline (static)", () => {
     expect(body).not.toContain("channelAPreamble");
     expect(body).not.toContain("withChannelA");
     // Served from the DB helper + object storage.
-    expect(body).toContain("latestWorkspaceCapture");
+    expect(body).toContain("sessionLatestWorkspaceCapture");
     expect(body).toContain("serveWorkspaceCapture");
   });
 

@@ -102,6 +102,7 @@ import {
   SessionContextBusyError,
   HumanInputResponseValidationError,
   latestWorkspaceCapture,
+  sessionLatestWorkspaceCapture,
   workspaceCaptureAtRevision,
   type AppendEventInput,
   type SandboxOpenPtySessionRow,
@@ -2125,16 +2126,21 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const workspaceId = c.req.param("workspaceId") ?? "";
     await requireAccessGrant(c, deps, workspaceId, "files:read");
     const sessionId = c.req.param("sessionId") ?? "";
-    const session = await getSession(db, workspaceId, sessionId);
-    if (!session) {
+    const lookup = await sessionLatestWorkspaceCapture(db, workspaceId, sessionId);
+    if (!lookup.sessionExists) {
       throw new HTTPException(404, { message: "session not found" });
     }
     if (!objectStorage) {
       // No storage configured → no captures can exist. Cold-fallback, not an error.
       return c.json({ available: false });
     }
-    const row = await latestWorkspaceCapture(db, workspaceId, sessionId);
-    return c.json(await serveWorkspaceCapture(row, objectStorage, workspaceCaptureManifestCache));
+    return c.json(
+      await serveWorkspaceCapture(
+        lookup.capture,
+        objectStorage,
+        workspaceCaptureManifestCache,
+      ),
+    );
   });
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/workspace/capture/file", async (c) => {
