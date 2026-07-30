@@ -1,5 +1,11 @@
 # @opengeni/runtime
 
+## 0.14.4
+
+### Patch Changes
+
+- 39b1b84: Keep MCP request timeouts distinct from recoverable connection authentication errors.
+
 ## 0.14.3
 
 ### Patch Changes
