@@ -1,5 +1,11 @@
 # @opengeni/db
 
+## 0.14.7
+
+### Patch Changes
+
+- 848287f: Seed the reviewed integrations capability catalog by default in Helm and local deployments while skipping unchanged snapshots.
+
 ## 0.14.6
 
 ### Patch Changes
