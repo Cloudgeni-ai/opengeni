@@ -156,6 +156,16 @@ cannot exit and leave invisible same-group work behind.
 An oversized reply is likewise returned as typed `PAYLOAD_TOO_LARGE`; neither
 backpressure nor a reply-size failure changes the machine's heartbeat state.
 
+The agent-facing `run_on` MCP tool is intentionally a one-off side channel to a
+specific enrolled machine and never changes the session's active route. Its
+`exec` receipt reports the exact `exitCode`, typed `timedOut`, and effective
+`deadlineMs`. A process killed at the deadline, or a response with no terminal
+exit proof, is never reported as `ok: true`; a transport loss after dispatch is
+ambiguous and is not replayed. `run_on` uses the deployment's separate
+`OPENGENI_SANDBOX_SELFHOSTED_CONTROL_TIMEOUT_MS` and
+`OPENGENI_SANDBOX_SELFHOSTED_EXEC_TIMEOUT_MS` settings (30 seconds and 120
+seconds by default), while preserving the active sandbox pointer and epoch.
+
 ### Streaming exec (op-stream)
 
 Runners that advertise the `op_stream` capability can serve exec over the
