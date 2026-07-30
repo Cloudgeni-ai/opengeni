@@ -18,7 +18,7 @@ import {
   WorkspaceRevisionDegradedPayload,
 } from "@opengeni/contracts";
 import type { ObjectStorage } from "@opengeni/storage";
-import type { ChannelASession } from "@opengeni/runtime/sandbox";
+import { ChannelAUnavailableError, type ChannelASession } from "@opengeni/runtime/sandbox";
 import {
   blobKey,
   BoxExitingError,
@@ -197,6 +197,25 @@ describe("workspace-capture — repository read authority", () => {
       complete: false,
       degradedReason: "repository_read_unavailable",
     });
+    expect(result).not.toHaveProperty("diff");
+  });
+
+  test("a partial Git frame remains typed and non-authoritative", async () => {
+    const result = await readCaptureRepository(
+      {
+        gitStatus: async () => status,
+        gitDiff: async () => {
+          throw new ChannelAUnavailableError("partial untracked-file frame");
+        },
+      },
+      "api",
+    );
+
+    expect(result).toEqual({
+      complete: false,
+      degradedReason: "repository_read_unavailable",
+    });
+    expect(result).not.toHaveProperty("status");
     expect(result).not.toHaveProperty("diff");
   });
 
