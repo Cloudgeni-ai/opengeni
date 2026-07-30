@@ -522,10 +522,12 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
   });
 
-  app.post("/v1/workspaces/:workspaceId/github/installations/select", async (c) => {
+  // This is browser navigation, like /github/connect and the OAuth callbacks.
+  // Keep it GET: a native HTML form cannot attach the API contract header that
+  // protects product mutations, and no durable binding is written here.
+  app.get("/v1/workspaces/:workspaceId/github/installations/select", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const form = new URLSearchParams(await c.req.text());
-    const state = form.get("state");
+    const state = c.req.query("state");
     if (!state) {
       throw new HTTPException(400, { message: "missing GitHub installation selection state" });
     }
@@ -549,7 +551,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "GitHub installation state does not match this workspace",
       });
     }
-    const selected = form.get("installation_id");
+    const selected = c.req.query("installation_id");
     if (selected === "new") {
       return redirectToGitHubInstallation(c, deps, state);
     }
@@ -781,7 +783,7 @@ function githubInstallationChooserHtml(
       return `<label class="option"><input type="radio" name="installation_id" value="${installation.installationId}" required><span><strong>${account}</strong><small>${label}</small></span></label>`;
     })
     .join("");
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Choose GitHub installation</title><style>body{font-family:system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#0b0b0d;color:#f4f4f5}main{width:min(640px,calc(100vw - 32px));border:1px solid #27272a;border-radius:12px;padding:28px;background:#111114}h1{margin:0 0 10px;font-size:24px}p{margin:0 0 18px;color:#d4d4d8}.options{display:grid;gap:8px;margin-bottom:18px}.option{display:flex;align-items:center;gap:12px;border:1px solid #3f3f46;border-radius:8px;padding:12px;cursor:pointer}.option span{display:grid;gap:2px}.option small{color:#a1a1aa}button{min-height:38px;border-radius:7px;border:1px solid #3f3f46;padding:0 14px;background:#f4f4f5;color:#09090b;font:600 14px system-ui,sans-serif;cursor:pointer}.secondary{margin-left:8px;background:transparent;color:#f4f4f5}</style></head><body><main><h1>Choose a GitHub account</h1><p>Only installations where GitHub proved you are the personal owner or an active organization owner are shown.</p><form method="post" action="${escapeHtml(action)}"><input type="hidden" name="state" value="${escapeHtml(state)}"><div class="options">${options}</div><button type="submit">Connect selected</button><button class="secondary" type="submit" name="installation_id" value="new" formnovalidate>Install on another account</button></form></main></body></html>`;
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Choose GitHub installation</title><style>body{font-family:system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#0b0b0d;color:#f4f4f5}main{width:min(640px,calc(100vw - 32px));border:1px solid #27272a;border-radius:12px;padding:28px;background:#111114}h1{margin:0 0 10px;font-size:24px}p{margin:0 0 18px;color:#d4d4d8}.options{display:grid;gap:8px;margin-bottom:18px}.option{display:flex;align-items:center;gap:12px;border:1px solid #3f3f46;border-radius:8px;padding:12px;cursor:pointer}.option span{display:grid;gap:2px}.option small{color:#a1a1aa}button{min-height:38px;border-radius:7px;border:1px solid #3f3f46;padding:0 14px;background:#f4f4f5;color:#09090b;font:600 14px system-ui,sans-serif;cursor:pointer}.secondary{margin-left:8px;background:transparent;color:#f4f4f5}</style></head><body><main><h1>Choose a GitHub account</h1><p>Only installations where GitHub proved you are the personal owner or an active organization owner are shown.</p><form method="get" action="${escapeHtml(action)}"><input type="hidden" name="state" value="${escapeHtml(state)}"><div class="options">${options}</div><button type="submit">Connect selected</button><button class="secondary" type="submit" name="installation_id" value="new" formnovalidate>Install on another account</button></form></main></body></html>`;
 }
 
 function githubSetupPendingHtml(): string {

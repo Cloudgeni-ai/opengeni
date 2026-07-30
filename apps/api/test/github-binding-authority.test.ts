@@ -244,6 +244,7 @@ describe("GitHub owner-authority binding routes", () => {
     expect(html).toContain("owner");
     expect(html).toContain("owners-org");
     expect(html).toContain(`/v1/workspaces/${workspaceId}/github/installations/select`);
+    expect(html).toContain('<form method="get"');
     expect(html).toContain('value="new"');
     const selectionState = html.match(/name="state" value="([^"]+)"/)?.[1];
     expect(selectionState).toBeTruthy();
@@ -252,14 +253,11 @@ describe("GitHub owner-authority binding routes", () => {
     });
 
     const tampered = await app.request(
-      `http://test/v1/workspaces/${workspaceId}/github/installations/select`,
+      `http://test/v1/workspaces/${workspaceId}/github/installations/select?state=${encodeURIComponent(selectionState!)}&installation_id=99`,
       {
-        method: "POST",
         headers: {
           cookie: `opengeni_github_state=${selectionState}`,
-          "content-type": "application/x-www-form-urlencoded",
         },
-        body: new URLSearchParams({ state: selectionState!, installation_id: "99" }).toString(),
       },
     );
     expect(tampered.status).toBe(403);
