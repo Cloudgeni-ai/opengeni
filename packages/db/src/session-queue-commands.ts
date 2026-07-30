@@ -4,6 +4,8 @@ import {
   ResourceRef,
   resourceMountPath,
   turnExecutionPolicyAuditMetadata,
+  type SessionEvent,
+  type SessionTurn,
   type ReasoningEffort,
   type TurnExecutionPolicyV1,
 } from "@opengeni/contracts";
@@ -21,6 +23,7 @@ import {
   registerInternalUpdateWakeInTransaction,
   reserveSessionCommandReceipt,
   registerSessionWorkflowWakeInTransaction,
+  serializeEffectiveSessionControl,
   type SessionCommandActor,
   type SessionCommandReceiptRow,
   SessionControlConflictError,
@@ -83,6 +86,11 @@ export type SteerQueueCommandResult = QueueCommandResult & {
 export type SubmitHumanPromptResult = {
   receipt: SessionCommandReceiptRow;
   queueVersion: number;
+  accepted: SessionEvent;
+  events: SessionEvent[];
+  turn: SessionTurn;
+  items: SessionTurn[];
+  effectiveControl: ReturnType<typeof serializeEffectiveSessionControl>;
   acceptedEventId: string;
   eventIds: string[];
   turnId: string;
@@ -91,6 +99,63 @@ export type SubmitHumanPromptResult = {
   workspaceControlEventId: string | null;
   replay: boolean;
 };
+
+function promptEvent(row: typeof schema.sessionEvents.$inferSelect): SessionEvent {
+  return {
+    id: row.id,
+    workspaceId: row.workspaceId,
+    sessionId: row.sessionId,
+    sequence: row.sequence,
+    type: row.type as SessionEvent["type"],
+    payload: row.payload,
+    occurredAt: row.occurredAt.toISOString(),
+    clientEventId: row.clientEventId,
+    turnId: row.turnId,
+    turnGeneration: row.turnGeneration,
+    turnAttemptId: row.turnAttemptId,
+    turnAssociation: row.turnAssociation as SessionEvent["turnAssociation"],
+    duplicateOfEventId: row.duplicateOfEventId,
+    duplicateReason: row.duplicateReason,
+  };
+}
+
+function promptTurn(row: QueuedTurnRow): SessionTurn {
+  return {
+    id: row.id,
+    workspaceId: row.workspaceId,
+    sessionId: row.sessionId,
+    triggerEventId: row.triggerEventId,
+    temporalWorkflowId: row.temporalWorkflowId,
+    status: row.status as SessionTurn["status"],
+    source: row.source as SessionTurn["source"],
+    position: row.position,
+    prompt: row.prompt,
+    resources: row.resources as ResourceRef[],
+    tools: row.tools as SessionTurn["tools"],
+    toolsProvided: row.toolsProvided,
+    model: row.model,
+    reasoningEffort: row.reasoningEffort as ReasoningEffort,
+    sandboxBackend: row.sandboxBackend as SessionTurn["sandboxBackend"],
+    sandboxOs: (row.sandboxOs as SessionTurn["sandboxOs"]) ?? null,
+    metadata: row.metadata,
+    version: row.version,
+    executionGeneration: row.executionGeneration,
+    activeAttemptId: row.activeAttemptId,
+    lineage: row.lineage,
+    initiator: initiatorFromStorage(
+      row.initiatorKind,
+      row.initiatorSubjectId,
+      row.initiatorContext ?? {},
+    ),
+    initiatorContext: row.initiatorContext ?? {},
+    cancelledBy: row.cancelledBy,
+    cancelReason: row.cancelReason,
+    startedAt: row.startedAt?.toISOString() ?? null,
+    finishedAt: row.finishedAt?.toISOString() ?? null,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
 
 export type AgentInternalUpdateCommandResult = {
   receipt: SessionCommandReceiptRow;
@@ -1138,12 +1203,20 @@ export async function submitHumanPromptInTransaction(
     /** Trusted API/core admission snapshot. Omitted only by legacy low-level callers. */
     turnExecutionPolicy?: TurnExecutionPolicyV1;
     source: "user" | "api";
+    /** Record the accepted logical run in the same commit as its turn and wake. */
+    recordAgentRunUsage?: boolean;
     mcpCredentialUpdates?: Array<{
       id: string;
       headersEncrypted: Record<string, string>;
     }>;
   },
 ): Promise<SubmitHumanPromptResult> {
+  // A human enqueue acknowledgement must never sit behind an unbounded
+  // control/session lock or runaway statement. The operation key makes a
+  // bounded retry safe, while the caller turns these provider errors into a
+  // typed public 503 without exposing SQL or infrastructure details.
+  await db.execute(sql`select set_config('lock_timeout', '2s', true)`);
+  await db.execute(sql`select set_config('statement_timeout', '10s', true)`);
   const workspaceControl = await lockWorkspaceInferenceControl(db, input.workspaceId, "update");
   await lockSessionEventWriteRows(db, {
     workspaceId: input.workspaceId,
@@ -1196,9 +1269,48 @@ export async function submitHumanPromptInTransaction(
     if (!turnId || !acceptedEventId || wakeRevision < 1) {
       throw new SessionControlInvariantError("Replayed prompt receipt is incomplete");
     }
+    const replayEventRows =
+      eventIds.length === 0
+        ? []
+        : await db
+            .select()
+            .from(schema.sessionEvents)
+            .where(
+              and(
+                eq(schema.sessionEvents.workspaceId, input.workspaceId),
+                inArray(schema.sessionEvents.id, eventIds),
+              ),
+            )
+            .orderBy(asc(schema.sessionEvents.sequence));
+    const [replayTurnRow] = await db
+      .select()
+      .from(schema.sessionTurns)
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, input.workspaceId),
+          eq(schema.sessionTurns.sessionId, input.sessionId),
+          eq(schema.sessionTurns.id, turnId),
+        ),
+      )
+      .limit(1);
+    const acceptedRow = replayEventRows.find((event) => event.id === acceptedEventId);
+    if (!acceptedRow || !replayTurnRow) {
+      throw new SessionControlInvariantError("Replayed prompt rows are incomplete");
+    }
+    const replayItems = (await loadQueuedTurns(db, input.workspaceId, input.sessionId)).map(
+      promptTurn,
+    );
+    const replayControl = serializeEffectiveSessionControl(
+      await evaluateSessionControl(db, input.workspaceId, input.sessionId, { workspaceControl }),
+    );
     return {
       receipt: reserved.receipt,
       queueVersion: Number(reserved.receipt.appliedQueueVersion),
+      accepted: promptEvent(acceptedRow),
+      events: replayEventRows.map(promptEvent),
+      turn: promptTurn(replayTurnRow),
+      items: replayItems,
+      effectiveControl: replayControl,
       acceptedEventId,
       eventIds,
       turnId,
@@ -1579,6 +1691,24 @@ export async function submitHumanPromptInTransaction(
   if (draft) {
     await db.delete(schema.composerDrafts).where(eq(schema.composerDrafts.id, draft.id));
   }
+  if (input.recordAgentRunUsage) {
+    await db.insert(schema.usageEvents).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      subjectId: input.subjectId,
+      eventType: "agent_run.created",
+      quantity: 1,
+      unit: "run",
+      sourceResourceType: "session_turn",
+      sourceResourceId: turnId,
+      sessionId: input.sessionId,
+      turnId,
+      ...initiatorColumns(frozenInitiator),
+      origin: input.source,
+      idempotencyKey: `agent_run.created:${input.workspaceId}:${turnId}`,
+      occurredAt: now,
+    });
+  }
   const wakeRevision = await registerSessionWorkflowWakeInTransaction(db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
@@ -1626,9 +1756,20 @@ export async function submitHumanPromptInTransaction(
         : {}),
     },
   });
+  const items = (await loadQueuedTurns(db, input.workspaceId, input.sessionId)).map(promptTurn);
+  const canonicalTurn = items.find((candidate) => candidate.id === turnId);
+  const acceptedRow = eventRows.find((event) => event.id === acceptedEventId);
+  if (!canonicalTurn || !acceptedRow) {
+    throw new SessionControlInvariantError("Committed prompt projection is incomplete");
+  }
   return {
     receipt,
     queueVersion,
+    accepted: promptEvent(acceptedRow),
+    events: eventRows.map(promptEvent),
+    turn: canonicalTurn,
+    items,
+    effectiveControl: serializeEffectiveSessionControl(resumed.control),
     acceptedEventId,
     eventIds,
     turnId,

@@ -148,7 +148,7 @@ export type ApiRouteDeps = AppDependencies & {
  */
 export type AcceptSessionUserMessageDependencies = Pick<
   AppDependencies,
-  "settings" | "db" | "bus" | "sessionAuthorization"
+  "settings" | "db" | "bus" | "sessionAuthorization" | "observability"
 > & {
   workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
   objectStorage: ObjectStorageDependency;

@@ -113,7 +113,10 @@ export type SessionClientLike = Pick<
   | "terminalPtyWrite"
   | "terminalPtyResize"
   | "terminalPtyClose"
->;
+> & {
+  /** Dedicated durable composer acknowledgement; legacy embedded clients may omit it. */
+  enqueueMessage?: OpenGeniClient["enqueueMessage"] | undefined;
+};
 
 /**
  * Tenant-safe client surface required by the session-only React entry.
@@ -142,6 +145,7 @@ export type EmbeddedSessionClientLike = Pick<
   | "resumeSession"
   | "sendApprovalDecision"
 > & {
+  enqueueMessage?: OpenGeniClient["enqueueMessage"] | undefined;
   setWorkspaceInferenceState?: OpenGeniClient["setWorkspaceInferenceState"] | undefined;
 };
 

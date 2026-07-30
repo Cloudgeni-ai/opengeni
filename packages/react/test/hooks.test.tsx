@@ -11,6 +11,7 @@ import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import type {
   ComposerDraft,
+  PromptEnqueueResult,
   SendMessageInput,
   SessionEvent,
   SessionControlResponse,
@@ -265,6 +266,92 @@ describe("useTurnQueue", () => {
     expect(hook.result.current.loading).toBe(false);
     expect(hook.result.current.queue.map((turn) => turn.id)).toEqual(["second", "first"]);
     expect(hook.result.current.effectiveControl?.controlVersion).toBe(3);
+    await hook.unmount();
+  });
+
+  test("paints the exact committed queue before SSE or a reconciliation read", async () => {
+    const initial = fakeTurn({ id: "queued-before", position: 1, prompt: "older work" });
+    const accepted = fakeTurn({ id: "accepted-now", position: 2, prompt: "new work" });
+    let reads = 0;
+    const client = fakeClient({
+      getQueue: async () => {
+        reads += 1;
+        return queueSnapshot([initial], { version: 4 });
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useTurnQueue(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: noEvents,
+        }),
+      undefined,
+    );
+    await flush();
+
+    const result: PromptEnqueueResult = {
+      accepted: makeEvent(5, "user.message"),
+      turn: accepted,
+      queueVersion: 5,
+      queue: [initial, accepted],
+      effectiveControl: queueSnapshot([]).effectiveControl,
+      stoppingPreviousAttempt: false,
+    };
+    await reactAct(async () => {
+      expect(hook.result.current.acceptEnqueue(result)).toBe(true);
+    });
+
+    expect(hook.result.current.snapshot?.version).toBe(5);
+    expect(hook.result.current.queue.map((turn) => turn.id)).toEqual([
+      "queued-before",
+      "accepted-now",
+    ]);
+    expect(reads).toBe(1);
+    await hook.unmount();
+  });
+
+  test("paints a committed enqueue while the initial queue read is still unresolved", async () => {
+    const accepted = fakeTurn({ id: "accepted-during-load", prompt: "new work" });
+    let resolveRead!: (snapshot: SessionQueueSnapshot) => void;
+    const initialRead = new Promise<SessionQueueSnapshot>((resolve) => {
+      resolveRead = resolve;
+    });
+    const client = fakeClient({ getQueue: async () => await initialRead });
+    const hook = await renderHook(
+      () =>
+        useTurnQueue(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: noEvents,
+        }),
+      undefined,
+    );
+    await flush();
+    expect(hook.result.current.loading).toBe(true);
+
+    const result: PromptEnqueueResult = {
+      accepted: makeEvent(5, "user.message"),
+      turn: accepted,
+      queueVersion: 5,
+      queue: [accepted],
+      effectiveControl: queueSnapshot([]).effectiveControl,
+      stoppingPreviousAttempt: false,
+    };
+    await reactAct(async () => {
+      expect(hook.result.current.acceptEnqueue(result)).toBe(true);
+    });
+
+    expect(hook.result.current.loading).toBe(false);
+    expect(hook.result.current.snapshot?.version).toBe(5);
+    expect(hook.result.current.queue.map((turn) => turn.id)).toEqual(["accepted-during-load"]);
+
+    await reactAct(async () => {
+      resolveRead(queueSnapshot([], { version: 4 }));
+      await initialRead;
+    });
+    expect(hook.result.current.snapshot?.version).toBe(5);
+    expect(hook.result.current.queue.map((turn) => turn.id)).toEqual(["accepted-during-load"]);
     await hook.unmount();
   });
 
@@ -1670,6 +1757,82 @@ describe("useComposer queue-vs-steer", () => {
       await hook.result.current.send("queued message");
     });
     expect(calls).toEqual(["send"]);
+    await hook.unmount();
+  });
+
+  test("uses the durable enqueue receipt when the host exposes it", async () => {
+    const turn = fakeTurn({ id: "accepted-turn", prompt: "queued message" });
+    const receipt: PromptEnqueueResult = {
+      accepted: makeEvent(1, "user.message"),
+      turn,
+      queueVersion: 8,
+      queue: [turn],
+      effectiveControl: queueSnapshot([]).effectiveControl,
+      stoppingPreviousAttempt: false,
+    };
+    let observed: PromptEnqueueResult | undefined;
+    const client = fakeClient({
+      enqueueMessage: async () => receipt,
+      sendMessage: async () => {
+        throw new Error("legacy event send must not be used");
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          onSent: (_text, _input, result) => {
+            observed = result;
+          },
+        }),
+      undefined,
+    );
+
+    await flushing(async () => expect(await hook.result.current.send("queued message")).toBe(true));
+
+    expect(observed).toBe(receipt);
+    expect(hook.result.current.sending).toBe(false);
+    await hook.unmount();
+  });
+
+  test("settles composer pending state only when the durable enqueue receipt arrives", async () => {
+    const turn = fakeTurn({ id: "pending-accepted-turn", prompt: "queued message" });
+    const receipt: PromptEnqueueResult = {
+      accepted: makeEvent(1, "user.message"),
+      turn,
+      queueVersion: 8,
+      queue: [turn],
+      effectiveControl: queueSnapshot([]).effectiveControl,
+      stoppingPreviousAttempt: false,
+    };
+    let resolveEnqueue!: (value: PromptEnqueueResult) => void;
+    const enqueue = new Promise<PromptEnqueueResult>((resolve) => {
+      resolveEnqueue = resolve;
+    });
+    const client = fakeClient({ enqueueMessage: async () => await enqueue });
+    const hook = await renderHook(
+      () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flushing(() => hook.result.current.setValue("queued message"));
+
+    let send!: Promise<boolean>;
+    await reactAct(async () => {
+      send = hook.result.current.send();
+      await Promise.resolve();
+    });
+    expect(hook.result.current.sending).toBe(true);
+    expect(hook.result.current.value).toBe("queued message");
+
+    let sent = false;
+    await reactAct(async () => {
+      resolveEnqueue(receipt);
+      sent = await send;
+    });
+    expect(sent).toBe(true);
+    expect(hook.result.current.sending).toBe(false);
+    expect(hook.result.current.value).toBe("");
     await hook.unmount();
   });
 

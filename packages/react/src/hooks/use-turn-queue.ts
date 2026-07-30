@@ -1,6 +1,7 @@
 import type {
   ComposerDraft,
   EffectiveSessionControl,
+  PromptEnqueueResult,
   SessionEvent,
   SessionQueueMutationResponse,
   SessionQueueSnapshot,
@@ -59,6 +60,8 @@ export type UseTurnQueueResult = {
   loading: boolean;
   error: Error | null;
   refresh: () => Promise<void>;
+  /** Apply the exact queue committed with a composer acknowledgement. */
+  acceptEnqueue: (result: PromptEnqueueResult) => boolean;
   moveTurn: (turnId: string, beforeTurnId: string | null) => Promise<boolean>;
   /** Atomically withdraw a waiting prompt into the private durable composer draft. */
   editTurn: (
@@ -255,6 +258,42 @@ export function useTurnQueue(
     [acceptSnapshot, load, sessionId, targetKey],
   );
 
+  const acceptEnqueue = useCallback(
+    (result: PromptEnqueueResult): boolean => {
+      const ownedTargetKey = targetKey;
+      if (targetKeyRef.current !== ownedTargetKey) return false;
+      const current = snapshotRef.current;
+      if (current && result.queueVersion < current.version) {
+        void load();
+        return false;
+      }
+      const effectiveControl =
+        !current ||
+        result.effectiveControl.controlVersion >= current.effectiveControl.controlVersion
+          ? result.effectiveControl
+          : current.effectiveControl;
+      const itemIds = new Set(result.queue.map((turn) => turn.id));
+      const pendingInputAttachment =
+        current?.pendingInputAttachment && itemIds.has(current.pendingInputAttachment.turnId)
+          ? current.pendingInputAttachment
+          : null;
+      const accepted = acceptSnapshot(ownedTargetKey, {
+        version: result.queueVersion,
+        effectiveControl,
+        stoppingPreviousAttempt: result.stoppingPreviousAttempt,
+        items: result.queue,
+        pendingInputs: current?.pendingInputs ?? [],
+        pendingInputAttachment,
+      });
+      if (accepted) {
+        setError(null);
+        setLoading(false);
+      }
+      return accepted;
+    },
+    [acceptSnapshot, load, targetKey],
+  );
+
   const moveTurn = useCallback(
     async (turnId: string, beforeTurnId: string | null): Promise<boolean> => {
       const result = await mutate(turnId, "move", (current) =>
@@ -337,6 +376,7 @@ export function useTurnQueue(
     loading: identityMatches ? loading : enabled,
     error: identityMatches ? error : null,
     refresh: load,
+    acceptEnqueue,
     moveTurn,
     editTurn,
     steerTurn,

@@ -3,6 +3,7 @@ export type {
   FetchLike,
   OpenGeniClientOptions,
   OpenGeniRequestOptions,
+  PromptEnqueueResult,
   SendMessageInput,
   SteerMessageResult,
   WorkspaceControlEventPage,

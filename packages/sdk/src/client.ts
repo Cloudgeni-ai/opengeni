@@ -119,6 +119,7 @@ import type {
   ComposerDraft,
   DeleteSessionQueueItemRequest,
   EditSessionQueueItemRequest,
+  EffectiveSessionControl,
   MoveSessionQueueItemRequest,
   NewSessionDraft,
   SaveComposerDraftRequest,
@@ -272,6 +273,16 @@ export type SteerMessageResult = {
   accepted: SessionEvent;
   /** The exact turn created for this message in the same server transaction. */
   turn: SessionTurn;
+};
+
+/** Definitive durable acknowledgement for the dedicated composer Send path. */
+export type PromptEnqueueResult = SteerMessageResult & {
+  /** Queue version committed by the same transaction as `accepted` and `turn`. */
+  queueVersion: number;
+  /** Canonical queued human/API turns in server order at that committed version. */
+  queue: SessionTurn[];
+  effectiveControl: EffectiveSessionControl;
+  stoppingPreviousAttempt: boolean;
 };
 
 /**
@@ -812,6 +823,24 @@ export class OpenGeniClient {
       ...(clientEventId !== undefined ? { clientEventId } : {}),
       payload,
     });
+  }
+
+  /**
+   * Composer Send: returns the durable queued turn and canonical queue without
+   * waiting for Temporal, worker/sandbox/model admission, or realtime fanout.
+   * `sendEvent({ type: "user.message" })` remains backwards compatible.
+   */
+  async enqueueMessage(
+    workspaceId: string,
+    sessionId: string,
+    message: string | SendMessageInput,
+  ): Promise<PromptEnqueueResult> {
+    const input = typeof message === "string" ? { text: message } : message;
+    return await this.requestJson<PromptEnqueueResult>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/messages`,
+      input,
+    );
   }
 
   async pauseSession(

@@ -197,6 +197,7 @@ import {
   SessionControlInvariantError,
   updateSessionCommandReceiptResult,
   type SessionTurnAttemptOutcome,
+  type WorkspaceControlLockMode,
   type WorkspaceControlRow,
 } from "./session-control";
 import * as schema from "./schema";
@@ -14453,6 +14454,7 @@ export async function getSession(
   db: Database,
   workspaceId: string,
   sessionId: string,
+  options: { controlLock?: WorkspaceControlLockMode } = {},
 ): Promise<Session | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
@@ -14462,7 +14464,14 @@ export async function getSession(
       .limit(1);
     if (!row) return null;
     const grouped = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, [row.id]);
-    return await mapSessionWithControl(scopedDb, row, grouped.get(row.id) ?? []);
+    return await mapSessionWithControl(
+      scopedDb,
+      row,
+      grouped.get(row.id) ?? [],
+      undefined,
+      undefined,
+      options.controlLock ?? "share",
+    );
   });
 }
 
@@ -37551,9 +37560,10 @@ async function sessionControlProjections(
   workspaceId: string,
   sessionIds: string[],
   workspaceControl?: WorkspaceControlRow,
+  controlLock: WorkspaceControlLockMode = "share",
 ): Promise<Map<string, Session["effectiveControl"]>> {
   const controls = await evaluateSessionControls(db, workspaceId, sessionIds, {
-    ...(workspaceControl ? { workspaceControl } : { lock: "share" as const }),
+    ...(workspaceControl ? { workspaceControl } : { lock: controlLock }),
   });
   return new Map(
     [...controls].map(([sessionId, control]) => [
@@ -37569,8 +37579,15 @@ async function mapSessionWithControl(
   mcpServers: SessionMcpServerMetadata[] = [],
   pin: Pick<Session, "pinned" | "pinnedAt" | "pinVersion"> = mapSessionPin(null),
   workspaceControl?: WorkspaceControlRow,
+  controlLock: WorkspaceControlLockMode = "share",
 ): Promise<Session> {
-  const controls = await sessionControlProjections(db, row.workspaceId, [row.id], workspaceControl);
+  const controls = await sessionControlProjections(
+    db,
+    row.workspaceId,
+    [row.id],
+    workspaceControl,
+    controlLock,
+  );
   const control = controls.get(row.id);
   if (!control) throw new Error(`Effective control missing for session ${row.id}`);
   return mapSession(row, control, mcpServers, pin);

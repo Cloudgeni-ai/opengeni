@@ -135,7 +135,7 @@ async function resolveSessionAuthorizationTarget(
   grant: AccessGrant,
   sessionId: string,
 ): Promise<SessionAuthorizationTarget> {
-  const session = await getSession(db, grant.workspaceId, sessionId);
+  const session = await getSession(db, grant.workspaceId, sessionId, { controlLock: "none" });
   if (!session || session.accountId !== grant.accountId) {
     throw new SessionAuthorizationDeniedError("not_found");
   }

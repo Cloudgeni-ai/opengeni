@@ -197,6 +197,7 @@ function QueueHarness() {
         setRefreshCount((current) => current + 1);
         setQueueError(null);
       },
+      acceptEnqueue: () => true,
       moveTurn: async () => true,
       editTurn: async () => null,
       steerTurn: async () => true,

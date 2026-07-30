@@ -451,6 +451,36 @@ describe("OpenGeniClient", () => {
     });
   });
 
+  test("enqueueMessage uses the dedicated durable composer acknowledgement", async () => {
+    const accepted = makeEvent(5, "user.message", { text: "queue this" });
+    const response = {
+      accepted,
+      turn: { id: "33333333-3333-4333-8333-333333333333", status: "queued" },
+      queueVersion: 7,
+      queue: [],
+      effectiveControl: { controlVersion: 2 },
+      stoppingPreviousAttempt: false,
+    };
+    const { client, requests } = makeClient(() => jsonResponse(response, 202));
+
+    const result = await client.enqueueMessage(WORKSPACE_ID, SESSION_ID, {
+      text: "queue this",
+      clientEventId: "enqueue-once",
+      expectedDraftRevision: 4,
+    });
+
+    expect(result.queueVersion).toBe(7);
+    expect(result.turn.id).toBe("33333333-3333-4333-8333-333333333333");
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/messages`,
+    );
+    expect(JSON.parse(requests[0]!.body!)).toEqual({
+      text: "queue this",
+      clientEventId: "enqueue-once",
+      expectedDraftRevision: 4,
+    });
+  });
+
   test("pause uses atomic control while approval posts a typed event", async () => {
     const { client, requests } = makeClient(() =>
       jsonResponse({ event: makeEvent(5, "user.pause") }, 202),

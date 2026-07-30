@@ -78,6 +78,7 @@ function queue(overrides: Partial<UseTurnQueueResult> = {}): UseTurnQueueResult 
     loading: false,
     error: null,
     refresh: async () => {},
+    acceptEnqueue: () => true,
     moveTurn: async () => true,
     editTurn: async () => null,
     steerTurn: async () => true,

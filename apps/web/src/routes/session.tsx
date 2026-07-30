@@ -722,12 +722,17 @@ function SessionChatPane(props: {
     onDraftApplied: applyComposerSettings,
     // Clear only files included in the accepted wire input. A file added while
     // sendMessage is in flight belongs to the next message and must survive.
-    onSent: (_text, input) =>
+    onSent: (_text, input, result) => {
       attachments.removeReadyFiles(
         (input.resources ?? []).flatMap((resource) =>
           resource.kind === "file" ? [resource.fileId] : [],
         ),
-      ),
+      );
+      if (result) props.queue.acceptEnqueue(result);
+      // The committed receipt paints immediately; the ordinary authoritative
+      // read then reconciles pending machine inputs and any concurrent changes.
+      void props.queue.refresh();
+    },
   });
 
   // Slash-command palette context: the operator controls (/goal, /clear,

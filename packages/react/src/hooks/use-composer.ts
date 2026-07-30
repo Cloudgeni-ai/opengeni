@@ -3,6 +3,7 @@ import type {
   EffectiveControlResumeOption,
   EffectiveSessionControl,
   OpenGeniApiError,
+  PromptEnqueueResult,
   ResourceRef,
   SaveComposerDraftRequest,
   SendMessageInput,
@@ -16,8 +17,10 @@ export type ComposerSendExtras = Omit<SendMessageInput, "text" | "clientEventId"
 
 export type UseComposerOptions = EmbeddedSessionClientOverride &
   SessionEventFeedOptions & {
-    /** Called with the exact accepted wire input after a successful send. */
-    onSent?: ((text: string, input: SendMessageInput) => void) | undefined;
+    /** Called with the exact accepted wire input and, when supported, its durable queue receipt. */
+    onSent?:
+      | ((text: string, input: SendMessageInput, result?: PromptEnqueueResult) => void)
+      | undefined;
     /**
      * Extra message fields (resources, tools, model, reasoningEffort) merged
      * into every send. A function is evaluated at send time so it can read the
@@ -652,7 +655,10 @@ export function useComposer(
         forgetPendingComposerOperation(operationKey);
       };
 
-      const settleAccepted = (operation: PendingComposerOperation): void => {
+      const settleAccepted = (
+        operation: PendingComposerOperation,
+        result?: PromptEnqueueResult,
+      ): void => {
         clearPending();
         const draftWasUnchanged = valueRef.current === operation.draftAtSend;
         const resourcesWereUnchanged =
@@ -681,15 +687,21 @@ export function useComposer(
           valueRef.current = "";
           setValue("");
         }
-        onSent?.(operation.input.text, operation.input);
+        onSent?.(operation.input.text, operation.input, result);
       };
 
-      const deliver = async (operation: PendingComposerOperation): Promise<void> => {
+      const deliver = async (
+        operation: PendingComposerOperation,
+      ): Promise<PromptEnqueueResult | undefined> => {
         if (operation.delivery === "steer") {
-          await client.steerMessage(workspaceId, sessionId, operation.input);
-        } else {
-          await client.sendMessage(workspaceId, sessionId, operation.input);
+          const result = await client.steerMessage(workspaceId, sessionId, operation.input);
+          return "queueVersion" in result ? (result as PromptEnqueueResult) : undefined;
         }
+        if ("enqueueMessage" in client && typeof client.enqueueMessage === "function") {
+          return await client.enqueueMessage(workspaceId, sessionId, operation.input);
+        }
+        await client.sendMessage(workspaceId, sessionId, operation.input);
+        return undefined;
       };
 
       setSending(true);
@@ -736,7 +748,15 @@ export function useComposer(
             return false;
           }
           try {
-            await deliver(pending);
+            const result = await deliver(pending);
+            if (
+              targetKeyRef.current !== ownedTargetKey ||
+              targetGeneration.current !== ownedGeneration
+            ) {
+              return false;
+            }
+            settleAccepted(pending, result);
+            return true;
           } catch (cause) {
             if (
               targetKeyRef.current === ownedTargetKey &&
@@ -746,14 +766,6 @@ export function useComposer(
             }
             return false;
           }
-          if (
-            targetKeyRef.current !== ownedTargetKey ||
-            targetGeneration.current !== ownedGeneration
-          ) {
-            return false;
-          }
-          settleAccepted(pending);
-          return true;
         }
 
         // Trimming is only an emptiness check. A non-blank prompt is persisted
@@ -798,7 +810,15 @@ export function useComposer(
         pendingOperationRef.current = operation;
         rememberPendingComposerOperation(operationKey, operation);
         try {
-          await deliver(operation);
+          const result = await deliver(operation);
+          if (
+            targetKeyRef.current !== ownedTargetKey ||
+            targetGeneration.current !== ownedGeneration
+          ) {
+            return false;
+          }
+          settleAccepted(operation, result);
+          return true;
         } catch (cause) {
           if (!isOutcomeUnknownError(cause)) {
             clearPending();
@@ -811,14 +831,6 @@ export function useComposer(
           }
           return false;
         }
-        if (
-          targetKeyRef.current !== ownedTargetKey ||
-          targetGeneration.current !== ownedGeneration
-        ) {
-          return false;
-        }
-        settleAccepted(operation);
-        return true;
       } finally {
         if (
           targetKeyRef.current === ownedTargetKey &&

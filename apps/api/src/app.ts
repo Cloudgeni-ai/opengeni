@@ -45,6 +45,7 @@ import { buildOpenGeniMcpServer } from "./mcp/server";
 import { isToolspaceGrant, prepareToolspaceMcpSurface } from "./mcp/toolspace";
 import { boundedMcpRequest, McpPayloadTooLargeError } from "@opengeni/runtime/mcp-network";
 import { requireAccessKey } from "./http/auth";
+import { assignRequestCorrelationId, correlationIdForContext } from "./http/correlation";
 import { registerCapabilityRoutes } from "./routes/capabilities";
 import { registerCatalogAssetRoutes } from "./routes/catalog-assets";
 import { registerCodexRoutes } from "./routes/codex";
@@ -155,12 +156,9 @@ export function createApp(deps: AppDependencies): Hono {
     resumeBoxById,
   };
   const app = new Hono();
-  const correlationIds = new WeakMap<Request, string>();
 
   app.use("*", async (c, next) => {
-    const correlationId =
-      boundedCorrelationId(c.req.header(OPENGENI_CORRELATION_HEADER)) ?? crypto.randomUUID();
-    correlationIds.set(c.req.raw, correlationId);
+    const correlationId = assignRequestCorrelationId(c, c.req.header(OPENGENI_CORRELATION_HEADER));
     c.header(OPENGENI_CORRELATION_HEADER, correlationId);
     await next();
   });
@@ -178,7 +176,7 @@ export function createApp(deps: AppDependencies): Hono {
         "X-OpenGeni-Correlation-Id",
         "X-OpenGeni-Subject",
       ],
-      exposeHeaders: ["X-OpenGeni-Api-Contract", "X-OpenGeni-Correlation-Id"],
+      exposeHeaders: ["X-OpenGeni-Api-Contract", "X-OpenGeni-Correlation-Id", "Server-Timing"],
       origin: (origin) => {
         if (!origin) {
           return null;
@@ -200,7 +198,7 @@ export function createApp(deps: AppDependencies): Hono {
   app.use("*", async (c, next) => {
     const url = new URL(c.req.url);
     const route = routeLabel(url.pathname);
-    const correlationId = correlationIds.get(c.req.raw) ?? crypto.randomUUID();
+    const correlationId = correlationIdForContext(c) ?? crypto.randomUUID();
     const start = performance.now();
     const span = observability.startSpan(`HTTP ${c.req.method} ${route}`, {
       "http.request.method": c.req.method,
@@ -444,7 +442,7 @@ export function createApp(deps: AppDependencies): Hono {
 
   app.notFound((c) => {
     if (!new URL(c.req.url).pathname.startsWith("/v1/")) return c.text("Not Found", 404);
-    const requestId = correlationIds.get(c.req.raw) ?? crypto.randomUUID();
+    const requestId = correlationIdForContext(c) ?? crypto.randomUUID();
     return c.json(
       ErrorEnvelope.parse({
         error: {
@@ -462,7 +460,7 @@ export function createApp(deps: AppDependencies): Hono {
   app.onError((error, c) => {
     const status = httpStatusForError(error);
     const code = errorCodeForStatus(status);
-    const requestId = correlationIds.get(c.req.raw) ?? crypto.randomUUID();
+    const requestId = correlationIdForContext(c) ?? crypto.randomUUID();
     c.header(OPENGENI_CORRELATION_HEADER, requestId);
     if (new URL(c.req.url).pathname.startsWith("/v1/")) {
       c.header(OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION);
@@ -586,11 +584,6 @@ function boundedPublicMessage(value: string): string | null {
   const bytes = new TextEncoder().encode(normalized);
   if (bytes.byteLength <= API_PUBLIC_ERROR_MESSAGE_MAX_BYTES) return normalized;
   return new TextDecoder().decode(bytes.slice(0, API_PUBLIC_ERROR_MESSAGE_MAX_BYTES)).trim();
-}
-
-function boundedCorrelationId(value: string | undefined): string | null {
-  if (!value || value.length > 128 || !/^[A-Za-z0-9._:-]+$/.test(value)) return null;
-  return value;
 }
 
 type ReadinessCheckName = "db" | "nats" | "temporal";

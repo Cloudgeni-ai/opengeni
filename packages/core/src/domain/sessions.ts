@@ -20,6 +20,7 @@ import {
   stableJson,
   type AccessGrant,
   type CreateSessionResponse,
+  type EffectiveSessionControl,
   type GoalSpec,
   type FirstPartyMcpToolName,
   type Permission,
@@ -56,16 +57,17 @@ import {
   getSession,
   SessionIdConflictError,
   getSessionSpawnDenialByIdempotencyKey,
-  getSessionEvent,
   getWorkspaceControlEvent,
   getSessionLineage,
   getSessionTurn,
   getWorkspaceModelPolicy,
   initializeSessionStartAtomically,
+  isSessionEventPersistenceError,
   listSessionTurns,
   listSessionMcpServersForChildInheritance,
   requireSession,
   submitHumanPromptInTransaction,
+  runIdempotentPersistenceTransaction,
   appendSessionEventsWithLockedSessionUpdate,
   updateSessionTitle as updateSessionTitleRow,
   withWorkspaceSubjectRls,
@@ -902,17 +904,136 @@ export function reasoningEffortForSession(
   return reasoningEffortForMetadata(metadata, fallback);
 }
 
+export type PromptEnqueueTimings = {
+  authorizationMs: number;
+  admissionMs: number;
+  persistenceMs: number;
+};
+
+export type PromptEnqueueAcceptance = {
+  accepted: SessionEvent;
+  turn: SessionTurn;
+  queueVersion: number;
+  queue: SessionTurn[];
+  effectiveControl: EffectiveSessionControl;
+  stoppingPreviousAttempt: boolean;
+  timings: PromptEnqueueTimings;
+};
+
+type PromptEnqueueStage = "authorization" | "admission" | "persistence" | "fanout" | "wake";
+
+function observePromptEnqueueStage(
+  observability: AcceptSessionUserMessageDependencies["observability"],
+  input: {
+    correlationId: string;
+    stage: PromptEnqueueStage;
+    durationMs: number;
+    outcome: "accepted" | "failed";
+  },
+): void {
+  observability?.observeHistogram({
+    name: "opengeni_prompt_enqueue_stage_duration_seconds",
+    help: "Prompt enqueue stage duration, excluding later turn execution and admission.",
+    labels: { stage: input.stage, outcome: input.outcome },
+    value: input.durationMs / 1000,
+  });
+  observability?.info("Prompt enqueue stage completed", {
+    correlationId: input.correlationId,
+    stage: input.stage,
+    outcome: input.outcome,
+    durationMs: Math.round(input.durationMs),
+  });
+}
+
+function deferCommittedPromptDelivery(input: {
+  db: Database;
+  bus: EventBus;
+  workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
+  observability: AcceptSessionUserMessageDependencies["observability"];
+  correlationId: string;
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  result: Awaited<ReturnType<typeof submitHumanPromptInTransaction>>;
+}): void {
+  queueMicrotask(() => {
+    const fanoutStarted = performance.now();
+    const fanout = (async () => {
+      await publishDurableSessionEvents(
+        input.bus,
+        input.workspaceId,
+        input.sessionId,
+        input.result.events,
+      );
+      if (!input.result.workspaceControlEventId) return;
+      const controlEvent = await getWorkspaceControlEvent(
+        input.db,
+        input.workspaceId,
+        input.result.workspaceControlEventId,
+      );
+      if (!controlEvent) return;
+      await publishDurableWorkspaceControlEvent(input.bus, input.workspaceId, controlEvent);
+    })();
+    void fanout.then(
+      () =>
+        observePromptEnqueueStage(input.observability, {
+          correlationId: input.correlationId,
+          stage: "fanout",
+          durationMs: performance.now() - fanoutStarted,
+          outcome: "accepted",
+        }),
+      () =>
+        observePromptEnqueueStage(input.observability, {
+          correlationId: input.correlationId,
+          stage: "fanout",
+          durationMs: performance.now() - fanoutStarted,
+          outcome: "failed",
+        }),
+    );
+
+    const wakeStarted = performance.now();
+    const wake = Promise.resolve().then(
+      async () =>
+        await input.workflowClient.wakeSessionWorkflow({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          workflowId: input.result.turn.temporalWorkflowId,
+          wakeRevision: input.result.wakeRevision,
+          ...(input.result.interruptionCount > 0 ? { interruptionRequested: true } : {}),
+        }),
+    );
+    void wake.then(
+      () =>
+        observePromptEnqueueStage(input.observability, {
+          correlationId: input.correlationId,
+          stage: "wake",
+          durationMs: performance.now() - wakeStarted,
+          outcome: "accepted",
+        }),
+      () =>
+        observePromptEnqueueStage(input.observability, {
+          correlationId: input.correlationId,
+          stage: "wake",
+          durationMs: performance.now() - wakeStarted,
+          outcome: "failed",
+        }),
+    );
+  });
+}
+
 /**
- * Appends a `user.message` to an existing session and enqueues the resulting
- * turn, merging requested resources/tools into the session and waking the
- * workflow. Shared by the public events route and the first-party MCP
- * `session_send_message` tool so the two surfaces cannot drift. Callers own
- * resource/tool validation and the per-message usage limit before calling.
+ * Appends a `user.message` and returns once its event, queued turn, draft
+ * consumption, usage fact, command receipt, and workflow-wake revision commit
+ * atomically. NATS fanout and Temporal delivery are repairable post-commit
+ * nudges and must never hold the human acknowledgement open.
  */
 export async function postUserMessageTurn(input: {
   db: Database;
   bus: EventBus;
   workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
+  observability?: AcceptSessionUserMessageDependencies["observability"];
+  correlationId?: string;
   settings: Settings;
   accountId: string;
   workspaceId: string;
@@ -933,8 +1054,9 @@ export async function postUserMessageTurn(input: {
   expectedDraftRevision?: number | null;
   reasoningEffortFallback?: Settings["openaiReasoningEffort"];
   turnExecutionPolicy: TurnExecutionPolicyV1;
-}): Promise<{ accepted: SessionEvent; turn: SessionTurn }> {
+}): Promise<PromptEnqueueAcceptance> {
   const { db, bus, workflowClient, settings, accountId, workspaceId, sessionId } = input;
+  const correlationId = input.correlationId ?? crypto.randomUUID();
   const requestedModel = canonicalConfiguredModel(settings, input.model ?? null) ?? null;
   const requestedReasoningEffort = input.reasoningEffort ?? null;
   // Reject an explicit per-message model the host does not expose; an omitted
@@ -943,36 +1065,54 @@ export async function postUserMessageTurn(input: {
   await assertWorkspaceModelPolicyAllows(db, settings, workspaceId, requestedModel);
   const operationKey = input.clientEventId ?? crypto.randomUUID();
   let result;
+  const persistenceStarted = performance.now();
   try {
-    result = await withWorkspaceSubjectRls(db, workspaceId, input.actor ?? accountId, (scoped) =>
-      scoped.transaction((tx) =>
-        submitHumanPromptInTransaction(tx as unknown as Database, {
-          accountId,
-          workspaceId,
-          sessionId,
-          subjectId: input.actor ?? accountId,
-          ...(input.actorLabel ? { subjectLabel: input.actorLabel } : {}),
-          actor: input.commandActor ?? {
-            type: "human",
-            subjectId: input.actor ?? accountId,
-          },
-          operationKey,
-          delivery: input.delivery ?? "send",
-          controlEtag: input.controlEtag ?? null,
-          expectedDraftRevision: input.expectedDraftRevision ?? null,
-          text: input.text,
-          turnInstructions: input.turnInstructions ?? null,
-          resources: input.resources,
-          model: requestedModel,
-          reasoningEffort: requestedReasoningEffort,
-          reasoningEffortFallback: input.reasoningEffortFallback ?? settings.openaiReasoningEffort,
-          turnExecutionPolicy: input.turnExecutionPolicy,
-          source: input.origin === "operator" ? "api" : "user",
-          mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
-        }),
-      ),
+    result = await runIdempotentPersistenceTransaction(
+      {
+        stage: "session.prompt.enqueue",
+        eventTypes: ["user.message", "turn.queued"],
+        maxAttempts: 3,
+        correlationId,
+      },
+      async () =>
+        await withWorkspaceSubjectRls(db, workspaceId, input.actor ?? accountId, (scoped) =>
+          scoped.transaction((tx) =>
+            submitHumanPromptInTransaction(tx as unknown as Database, {
+              accountId,
+              workspaceId,
+              sessionId,
+              subjectId: input.actor ?? accountId,
+              ...(input.actorLabel ? { subjectLabel: input.actorLabel } : {}),
+              actor: input.commandActor ?? {
+                type: "human",
+                subjectId: input.actor ?? accountId,
+              },
+              operationKey,
+              delivery: input.delivery ?? "send",
+              controlEtag: input.controlEtag ?? null,
+              expectedDraftRevision: input.expectedDraftRevision ?? null,
+              text: input.text,
+              turnInstructions: input.turnInstructions ?? null,
+              resources: input.resources,
+              model: requestedModel,
+              reasoningEffort: requestedReasoningEffort,
+              reasoningEffortFallback:
+                input.reasoningEffortFallback ?? settings.openaiReasoningEffort,
+              turnExecutionPolicy: input.turnExecutionPolicy,
+              source: input.origin === "operator" ? "api" : "user",
+              recordAgentRunUsage: true,
+              mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
+            }),
+          ),
+        ),
     );
   } catch (error) {
+    observePromptEnqueueStage(input.observability, {
+      correlationId,
+      stage: "persistence",
+      durationMs: performance.now() - persistenceStarted,
+      outcome: "failed",
+    });
     if (
       error instanceof QueueCommandConflictError ||
       error instanceof SessionControlConflictError
@@ -985,53 +1125,38 @@ export async function postUserMessageTurn(input: {
     if (error instanceof Error && error.message.startsWith("Unknown session MCP server")) {
       throw new HTTPException(422, { message: error.message });
     }
+    if (isSessionEventPersistenceError(error)) {
+      throw new HTTPException(503, { message: "prompt enqueue is temporarily unavailable" });
+    }
     throw error;
   }
-  const events = await Promise.all(
-    result.eventIds.map((eventId) => getSessionEvent(db, workspaceId, eventId)),
-  );
-  if (events.some((event) => event === null)) {
-    throw new Error("Committed prompt events could not be reloaded");
-  }
-  const turn = await getSessionTurn(db, workspaceId, result.turnId);
-  if (!turn) throw new Error("Committed prompt turn could not be reloaded");
-  const accepted = events.find((event) => event?.id === result.acceptedEventId);
-  if (!accepted) throw new Error("Committed user.message event could not be reloaded");
-  await publishDurableSessionEvents(
+  const persistenceMs = performance.now() - persistenceStarted;
+  observePromptEnqueueStage(input.observability, {
+    correlationId,
+    stage: "persistence",
+    durationMs: persistenceMs,
+    outcome: "accepted",
+  });
+  deferCommittedPromptDelivery({
+    db,
     bus,
+    workflowClient,
+    observability: input.observability,
+    correlationId,
+    accountId,
     workspaceId,
     sessionId,
-    events.filter((event): event is SessionEvent => event !== null),
-  );
-  if (result.workspaceControlEventId) {
-    const controlEvent = await getWorkspaceControlEvent(
-      db,
-      workspaceId,
-      result.workspaceControlEventId,
-    );
-    if (!controlEvent) {
-      throw new Error(
-        `Committed workspace control event disappeared: ${result.workspaceControlEventId}`,
-      );
-    }
-    await publishDurableWorkspaceControlEvent(bus, workspaceId, controlEvent);
-  }
-  try {
-    await workflowClient.wakeSessionWorkflow({
-      accountId,
-      workspaceId,
-      sessionId,
-      workflowId: turn.temporalWorkflowId,
-      wakeRevision: result.wakeRevision,
-      ...(result.interruptionCount > 0 ? { interruptionRequested: true } : {}),
-    });
-  } catch (error) {
-    console.warn(
-      `[sessions] workflow wake failed for committed prompt ${workspaceId}/${sessionId}; durable outbox will retry`,
-      error,
-    );
-  }
-  return { accepted, turn };
+    result,
+  });
+  return {
+    accepted: result.accepted,
+    turn: result.turn,
+    queueVersion: result.queueVersion,
+    queue: result.items,
+    effectiveControl: result.effectiveControl,
+    stoppingPreviousAttempt: result.interruptionCount > 0,
+    timings: { authorizationMs: 0, admissionMs: 0, persistenceMs },
+  };
 }
 
 /**
@@ -1650,63 +1775,120 @@ export async function acceptSessionUserMessage(
     origin?: "human" | "operator";
     controlEtag?: string | null;
     expectedDraftRevision?: number | null;
+    correlationId?: string;
   },
-): Promise<{ accepted: SessionEvent; turn: SessionTurn }> {
+): Promise<PromptEnqueueAcceptance> {
   const { settings, db, bus, workflowClient, objectStorage } = deps;
-  await requireSessionAuthorization(deps, grant, {
-    sessionId,
-    operation: input.delivery === "steer" ? "session.steer" : "session.append",
-    surface: "core",
-  });
-  // Hoisted above requireLimit so the codex-billed predicate can resolve the
-  // turn's effective model (a follow-up turn inherits the session's model). A
-  // pure read with no side effects.
-  const existingSession = await requireSession(db, workspaceId, sessionId);
-  const requestedModel = canonicalConfiguredModel(settings, input.model ?? null) ?? null;
-  const effectiveModel =
-    canonicalConfiguredModel(settings, requestedModel ?? existingSession.model) ?? null;
-  if (effectiveModel === null) {
-    throw new Error("effective follow-up model unexpectedly resolved to null");
+  const correlationId = input.correlationId ?? crypto.randomUUID();
+  const authorizationStarted = performance.now();
+  try {
+    await requireSessionAuthorization(deps, grant, {
+      sessionId,
+      operation: input.delivery === "steer" ? "session.steer" : "session.append",
+      surface: "core",
+    });
+  } catch (error) {
+    observePromptEnqueueStage(deps.observability, {
+      correlationId,
+      stage: "authorization",
+      durationMs: performance.now() - authorizationStarted,
+      outcome: "failed",
+    });
+    throw error;
   }
-  const sessionReasoningEffort = reasoningEffortForSession(
-    existingSession.metadata,
-    settings.openaiReasoningEffort,
-  );
-  const effectiveReasoningEffort = input.reasoningEffort ?? sessionReasoningEffort;
-  const turnExecutionPolicy = resolveTurnExecutionPolicyV1(settings, {
-    modelId: effectiveModel,
-    requestedModelId: input.model ?? null,
-    modelSource: input.model == null ? "session" : "explicit",
-    reasoningEffort: effectiveReasoningEffort,
-    reasoningSource: input.reasoningEffort == null ? "session" : "explicit",
+  const authorizationMs = performance.now() - authorizationStarted;
+  observePromptEnqueueStage(deps.observability, {
+    correlationId,
+    stage: "authorization",
+    durationMs: authorizationMs,
+    outcome: "accepted",
   });
-  const requestedResources = normalizeResources(input.resources ?? []);
-  await requireLimit(deps, {
-    accountId: grant.accountId,
-    workspaceId,
-    action: "agent_run:create",
-    quantity: 1,
-    model: effectiveModel,
+  const admissionStarted = performance.now();
+  const admission = await (async () => {
+    // Hoisted above requireLimit so the codex-billed predicate can resolve the
+    // turn's effective model (a follow-up turn inherits the session's model). A
+    // pure read with no side effects.
+    const existingSession = await getSession(db, workspaceId, sessionId, { controlLock: "none" });
+    if (!existingSession) {
+      throw new HTTPException(404, { message: "session not found" });
+    }
+    const requestedModel = canonicalConfiguredModel(settings, input.model ?? null) ?? null;
+    const effectiveModel =
+      canonicalConfiguredModel(settings, requestedModel ?? existingSession.model) ?? null;
+    if (effectiveModel === null) {
+      throw new Error("effective follow-up model unexpectedly resolved to null");
+    }
+    const sessionReasoningEffort = reasoningEffortForSession(
+      existingSession.metadata,
+      settings.openaiReasoningEffort,
+    );
+    const effectiveReasoningEffort = input.reasoningEffort ?? sessionReasoningEffort;
+    const turnExecutionPolicy = resolveTurnExecutionPolicyV1(settings, {
+      modelId: effectiveModel,
+      requestedModelId: input.model ?? null,
+      modelSource: input.model == null ? "session" : "explicit",
+      reasoningEffort: effectiveReasoningEffort,
+      reasoningSource: input.reasoningEffort == null ? "session" : "explicit",
+    });
+    const requestedResources = normalizeResources(input.resources ?? []);
+    await requireLimit(deps, {
+      accountId: grant.accountId,
+      workspaceId,
+      action: "agent_run:create",
+      quantity: 1,
+      model: effectiveModel,
+    });
+    if (requestedResources.some((resource) => resource.kind === "file") && !objectStorage) {
+      throw new HTTPException(503, { message: "object storage is not configured" });
+    }
+    await validateFileResources(db, workspaceId, requestedResources);
+    await validateGitHubRepositorySelection(db, workspaceId, [
+      ...existingSession.resources,
+      ...requestedResources,
+    ]);
+    const mcpCredentialUpdates = validateSessionMcpCredentialUpdates({
+      settings,
+      grant,
+      session: existingSession,
+      updates: input.mcpCredentialUpdates ?? [],
+    });
+    const delegatedServiceInitiator = serviceInitiatorForGrant(grant);
+    return {
+      requestedResources,
+      sessionReasoningEffort,
+      turnExecutionPolicy,
+      mcpCredentialUpdates,
+      delegatedServiceInitiator,
+    };
+  })().catch((error: unknown) => {
+    observePromptEnqueueStage(deps.observability, {
+      correlationId,
+      stage: "admission",
+      durationMs: performance.now() - admissionStarted,
+      outcome: "failed",
+    });
+    throw error;
   });
-  if (requestedResources.some((resource) => resource.kind === "file") && !objectStorage) {
-    throw new HTTPException(503, { message: "object storage is not configured" });
-  }
-  await validateFileResources(db, workspaceId, requestedResources);
-  await validateGitHubRepositorySelection(db, workspaceId, [
-    ...existingSession.resources,
-    ...requestedResources,
-  ]);
-  const mcpCredentialUpdates = validateSessionMcpCredentialUpdates({
-    settings,
-    grant,
-    session: existingSession,
-    updates: input.mcpCredentialUpdates ?? [],
+  const {
+    requestedResources,
+    sessionReasoningEffort,
+    turnExecutionPolicy,
+    mcpCredentialUpdates,
+    delegatedServiceInitiator,
+  } = admission;
+  const admissionMs = performance.now() - admissionStarted;
+  observePromptEnqueueStage(deps.observability, {
+    correlationId,
+    stage: "admission",
+    durationMs: admissionMs,
+    outcome: "accepted",
   });
-  const delegatedServiceInitiator = serviceInitiatorForGrant(grant);
-  const { accepted, turn } = await postUserMessageTurn({
+  const accepted = await postUserMessageTurn({
     db,
     bus,
     workflowClient,
+    observability: deps.observability,
+    correlationId,
     settings,
     accountId: grant.accountId,
     workspaceId,
@@ -1741,23 +1923,14 @@ export async function acceptSessionUserMessage(
       : {}),
     ...(input.clientEventId ? { clientEventId: input.clientEventId } : {}),
   });
-  await recordWorkspaceUsage(deps, {
-    accountId: grant.accountId,
-    workspaceId,
-    subjectId: grant.subjectId,
-    eventType: "agent_run.created",
-    quantity: 1,
-    unit: "run",
-    sourceResourceType: "session_turn",
-    sourceResourceId: turn.id,
-    sessionId,
-    turnId: turn.id,
-    initiator: turn.initiator,
-    initiatorContext: turn.initiatorContext,
-    origin: turn.source,
-    idempotencyKey: `agent_run.created:${workspaceId}:${turn.id}`,
-  });
-  return { accepted, turn };
+  return {
+    ...accepted,
+    timings: {
+      authorizationMs,
+      admissionMs,
+      persistenceMs: accepted.timings.persistenceMs,
+    },
+  };
 }
 
 /**

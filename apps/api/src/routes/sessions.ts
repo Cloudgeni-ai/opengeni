@@ -167,12 +167,30 @@ import {
   workspaceSessionToolPolicyServerIds,
 } from "@opengeni/core";
 import { assertSessionExists, boundedLimit } from "../http/common";
+import { correlationIdForContext } from "../http/correlation";
 import { sseSessionStream } from "../http/sse";
 import {
   serveWorkspaceCapture,
   serveWorkspaceCaptureFile,
   WorkspaceCaptureManifestCache,
 } from "./workspace-capture";
+
+function promptCorrelationId(c: Context): string {
+  return correlationIdForContext(c) ?? crypto.randomUUID();
+}
+
+function promptServerTiming(input: {
+  authorizationMs: number;
+  admissionMs: number;
+  persistenceMs: number;
+}): string {
+  const duration = (value: number) => Math.max(0, value).toFixed(1);
+  return [
+    `prompt-authz;dur=${duration(input.authorizationMs)}`,
+    `prompt-admission;dur=${duration(input.admissionMs)}`,
+    `prompt-persistence;dur=${duration(input.persistenceMs)}`,
+  ].join(", ");
+}
 
 type SessionRouteDeps = ApiRouteDeps & Pick<ViewerServices, "establishSandboxSession">;
 
@@ -1275,7 +1293,6 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
-    await assertSessionExists(db, workspaceId, sessionId);
     const raw = await c.req.json();
     const payload = SteerSessionMessageRequest.parse(raw);
     const result = await acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
@@ -1292,8 +1309,37 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         ? { expectedDraftRevision: payload.expectedDraftRevision }
         : {}),
       ...(payload.clientEventId ? { clientEventId: payload.clientEventId } : {}),
+      correlationId: promptCorrelationId(c),
     });
-    return c.json(result, 202);
+    const { timings, ...response } = result;
+    c.header("Server-Timing", promptServerTiming(timings));
+    return c.json(response, 202);
+  });
+
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/messages", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const sessionId = c.req.param("sessionId");
+    const payload = SteerSessionMessageRequest.parse(await c.req.json());
+    const result = await acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
+      text: payload.text,
+      turnInstructions: payload.turnInstructions ?? null,
+      resources: payload.resources,
+      model: payload.model ?? null,
+      reasoningEffort: payload.reasoningEffort ?? null,
+      mcpCredentialUpdates: payload.mcpCredentialUpdates ?? [],
+      delivery: "send",
+      origin: "human",
+      ...(payload.controlEtag !== undefined ? { controlEtag: payload.controlEtag } : {}),
+      ...(payload.expectedDraftRevision !== undefined
+        ? { expectedDraftRevision: payload.expectedDraftRevision }
+        : {}),
+      ...(payload.clientEventId ? { clientEventId: payload.clientEventId } : {}),
+      correlationId: promptCorrelationId(c),
+    });
+    const { timings, ...response } = result;
+    c.header("Server-Timing", promptServerTiming(timings));
+    return c.json(response, 202);
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/events", async (c) => {
@@ -1320,21 +1366,29 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       }
     }
     if (event.type === "user.message") {
-      const { accepted } = await acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
-        text: event.payload.text,
-        turnInstructions: event.payload.turnInstructions ?? null,
-        resources: event.payload.resources ?? [],
-        model: event.payload.model ?? null,
-        reasoningEffort: event.payload.reasoningEffort ?? null,
-        mcpCredentialUpdates: event.payload.mcpCredentialUpdates ?? [],
-        ...(event.payload.controlEtag !== undefined
-          ? { controlEtag: event.payload.controlEtag }
-          : {}),
-        ...(event.payload.expectedDraftRevision !== undefined
-          ? { expectedDraftRevision: event.payload.expectedDraftRevision }
-          : {}),
-        ...(event.clientEventId ? { clientEventId: event.clientEventId } : {}),
-      });
+      const { accepted, timings } = await acceptSessionUserMessage(
+        deps,
+        grant,
+        workspaceId,
+        sessionId,
+        {
+          text: event.payload.text,
+          turnInstructions: event.payload.turnInstructions ?? null,
+          resources: event.payload.resources ?? [],
+          model: event.payload.model ?? null,
+          reasoningEffort: event.payload.reasoningEffort ?? null,
+          mcpCredentialUpdates: event.payload.mcpCredentialUpdates ?? [],
+          ...(event.payload.controlEtag !== undefined
+            ? { controlEtag: event.payload.controlEtag }
+            : {}),
+          ...(event.payload.expectedDraftRevision !== undefined
+            ? { expectedDraftRevision: event.payload.expectedDraftRevision }
+            : {}),
+          ...(event.clientEventId ? { clientEventId: event.clientEventId } : {}),
+          correlationId: promptCorrelationId(c),
+        },
+      );
+      c.header("Server-Timing", promptServerTiming(timings));
       return c.json(accepted, 202);
     }
 
