@@ -209,6 +209,10 @@ function availableKnowledgeProjection(knowledge: KnowledgeProjectionInput) {
       limitReached: memoryLimitReached,
       statusCounts: memoryStatuses,
       kindCounts: memoryKinds,
+      preferenceAuthority: {
+        kindCountSource: "knowledge_memories_legacy_observations" as const,
+        activeAuthority: "structured_preference_registry" as const,
+      },
       latestUpdatedAt: newestTimestamp(memories.map((memory) => memory.updatedAt)),
     },
     gaps,

@@ -34,6 +34,8 @@ describe("workspace state route discipline", () => {
   test("uses the narrow deterministic Workspace State Memory projection", () => {
     expect(route).toContain("listWorkspaceStateMemoryRecords");
     expect(route).not.toContain("listKnowledgeMemories");
+    expect(route).not.toContain("preference_registry");
+    expect(route).not.toContain("listPreferenceRegistry");
     expect(route).not.toContain("WORKSPACE_STATE_MEMORY_SAMPLE_LIMIT,");
   });
 

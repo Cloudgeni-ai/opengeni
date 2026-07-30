@@ -20,8 +20,14 @@ Workspace State projects existing sources; it owns none of them:
   [`workspace-instruction-policies.md`](workspace-instruction-policies.md);
 - indexed knowledge remains in Documents (`document_bases`, `documents`, and
   `document_chunks`);
-- durable facts, decisions, procedures, and preferences remain in Memory
-  (`knowledge_memories`);
+- durable facts, decisions, procedures, and other retrieval observations remain
+  in Memory (`knowledge_memories`); historical rows with
+  `knowledge_memories.kind = preference` are legacy, non-authoritative
+  observations only;
+- the OPE-122 structured preference registry (`preference_registry_preferences`
+  plus its immutable revisions and lifecycle events) is the sole active
+  preference authority, as documented in
+  [`preference-registry.md`](preference-registry.md);
 - skills, tools, agents/sessions, rigs, variable sets, and workspace settings
   remain on their existing API and console surfaces.
 
@@ -85,7 +91,11 @@ The Memory sample has its own Workspace-State-only SQL query. It selects exactly
 `id ASC`, and applies the 100-row limit in SQL. The stable id is used only as a
 deterministic tie-breaker and is not exposed by the HTTP response. Memory text,
 source references, metadata, and embedding/vector columns are never selected or
-materialized for this surface.
+materialized for this surface. The adjacent `memorySample.preferenceAuthority`
+descriptor explicitly labels `kindCounts.preference` as a count of legacy,
+non-authoritative `knowledge_memories` observations and names the structured
+preference registry as the sole active preference authority. Workspace State
+does not read, duplicate, or create another preference store.
 
 `generatedAt`, `latestDocumentUpdatedAt`, per-base `latestUpdatedAt`, and the
 Memory sample's `latestUpdatedAt` make freshness explicit.

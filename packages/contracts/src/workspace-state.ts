@@ -169,6 +169,12 @@ export const WorkspaceStateKnowledgeAvailable = z
         limitReached: z.boolean(),
         statusCounts: WorkspaceStateMemoryStatusCounts,
         kindCounts: WorkspaceStateMemoryKindCounts,
+        preferenceAuthority: z
+          .object({
+            kindCountSource: z.literal("knowledge_memories_legacy_observations"),
+            activeAuthority: z.literal("structured_preference_registry"),
+          })
+          .strict(),
         latestUpdatedAt: z.string().datetime().nullable(),
       })
       .strict(),

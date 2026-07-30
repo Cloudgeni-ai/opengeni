@@ -187,6 +187,10 @@ describe("workspace state projection", () => {
         limitReached: true,
         statusCounts: { proposed: 1, active: WORKSPACE_STATE_MEMORY_SAMPLE_LIMIT - 1 },
         kindCounts: { decision: 1, semantic: WORKSPACE_STATE_MEMORY_SAMPLE_LIMIT - 1 },
+        preferenceAuthority: {
+          kindCountSource: "knowledge_memories_legacy_observations",
+          activeAuthority: "structured_preference_registry",
+        },
       },
     });
     expect(projected.knowledge.bases).toHaveLength(WORKSPACE_STATE_MAX_BASES);

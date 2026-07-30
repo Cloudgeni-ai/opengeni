@@ -119,6 +119,10 @@ export type WorkspaceStateResponse = {
           limitReached: boolean;
           statusCounts: WorkspaceStateMemoryStatusCounts;
           kindCounts: WorkspaceStateMemoryKindCounts;
+          preferenceAuthority: {
+            kindCountSource: "knowledge_memories_legacy_observations";
+            activeAuthority: "structured_preference_registry";
+          };
           latestUpdatedAt: string | null;
         };
         gaps: Array<{
