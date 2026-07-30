@@ -99,6 +99,7 @@ async function request(permissions: Permission[]): Promise<Response> {
     workspaceId: grant.workspaceId,
     subjectId: grant.subjectId,
     permissions,
+    principalKind: "human_session",
     exp: Math.floor(Date.now() / 1_000) + 3_600,
   });
   const headers = new Headers();
