@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       pull_request_number:
-        description: Open pull request whose exact head may become a release source.
+        description: Pull request whose exact head may become a release source.
         required: true
         type: string
       reviewed_base_sha:
@@ -17,7 +17,7 @@ on:
         required: true
         type: string
       merged_source_sha:
-        description: Optional exact merged source SHA when recovering missing exact-head checks for an already-immutable head.
+        description: Optional exact merged source SHA when recovering historical retention evidence for an already-merged head.
         required: false
         default: ""
         type: string

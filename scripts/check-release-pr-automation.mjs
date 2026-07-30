@@ -185,13 +185,22 @@ async function ensureReleaseHeadRef(api, headSha) {
   const path = repositoryPath(`/git/ref/tags/${tag}`);
   const existing = await api.getOptional(path);
   if (existing === null) {
-    await api.post(repositoryPath("/git/refs"), {
-      ref: `refs/tags/${tag}`,
-      sha: headSha,
-    });
+    return createReleaseHeadRef(api, headSha);
   } else {
     assertReleaseHeadRef(existing, headSha);
   }
+  const terminal = await api.get(path);
+  assertReleaseHeadRef(terminal, headSha);
+  return { name: tag, ref: `refs/tags/${tag}`, sha: headSha };
+}
+
+async function createReleaseHeadRef(api, headSha) {
+  const tag = releaseHeadTagName(headSha);
+  const path = repositoryPath(`/git/ref/tags/${tag}`);
+  await api.post(repositoryPath("/git/refs"), {
+    ref: `refs/tags/${tag}`,
+    sha: headSha,
+  });
   const terminal = await api.get(path);
   assertReleaseHeadRef(terminal, headSha);
   return { name: tag, ref: `refs/tags/${tag}`, sha: headSha };
@@ -249,19 +258,26 @@ async function ensureReleaseHeadRelease(api, headSha) {
   const path = repositoryPath(`/releases/tags/${tagName}`);
   const existing = await api.getOptional(path);
   if (existing === null) {
-    await api.post(repositoryPath("/releases"), {
-      tag_name: tagName,
-      name: releaseHeadReleaseName(headSha),
-      body:
-        `Provider-retained exact release-source head ${headSha}. ` +
-        "This prerelease exists only as immutable source-retention evidence.",
-      draft: false,
-      prerelease: true,
-      make_latest: "false",
-    });
+    return createReleaseHeadRelease(api, headSha);
   } else {
     assertReleaseHeadRelease(existing, headSha);
   }
+  return assertReleaseHeadRelease(await api.get(path), headSha);
+}
+
+async function createReleaseHeadRelease(api, headSha) {
+  const tagName = releaseHeadTagName(headSha);
+  const path = repositoryPath(`/releases/tags/${tagName}`);
+  await api.post(repositoryPath("/releases"), {
+    tag_name: tagName,
+    name: releaseHeadReleaseName(headSha),
+    body:
+      `Provider-retained exact release-source head ${headSha}. ` +
+      "This prerelease exists only as immutable source-retention evidence.",
+    draft: false,
+    prerelease: true,
+    make_latest: "false",
+  });
   return assertReleaseHeadRelease(await api.get(path), headSha);
 }
 
@@ -770,21 +786,30 @@ async function assertSourceAncestorOfCurrentMain(api, sourceSha, currentMainSha)
   );
 }
 
-async function readExistingReleaseHeadEvidence(api, headSha) {
+async function readOptionalReleaseHeadEvidence(api, headSha) {
   const name = releaseHeadTagName(headSha);
   const ref = `refs/tags/${name}`;
-  const retainedName = assertReleaseHeadRef(
-    await api.get(repositoryPath(`/git/ref/tags/${name}`)),
-    headSha,
+  const [retainedRef, retainedRelease] = await Promise.all([
+    api.getOptional(repositoryPath(`/git/ref/tags/${name}`)),
+    api.getOptional(repositoryPath(`/releases/tags/${name}`)),
+  ]);
+  invariant(
+    (retainedRef === null) === (retainedRelease === null),
+    "release head recovery evidence is only partially present",
   );
-  const release = assertReleaseHeadRelease(
-    await api.get(repositoryPath(`/releases/tags/${name}`)),
-    headSha,
-  );
+  if (retainedRef === null) return null;
+  const retainedName = assertReleaseHeadRef(retainedRef, headSha);
+  const release = assertReleaseHeadRelease(retainedRelease, headSha);
   return {
     releaseHead: { name: retainedName, ref, sha: headSha },
     releaseHeadRelease: release,
   };
+}
+
+async function readExistingReleaseHeadEvidence(api, headSha) {
+  const evidence = await readOptionalReleaseHeadEvidence(api, headSha);
+  invariant(evidence !== null, "release head recovery evidence is absent");
+  return evidence;
 }
 
 export async function recoverReleaseHeadEvidence(options = {}) {
@@ -831,28 +856,46 @@ export async function recoverReleaseHeadEvidence(options = {}) {
     fetchImpl,
     logger,
   });
-  const { releaseHead, releaseHeadRelease } = await readExistingReleaseHeadEvidence(
-    api,
-    context.headSha,
-  );
-  const [preMutationMain, preMutationPull, preMutationEvidence] = await Promise.all([
-    api.get(repositoryPath(`/git/ref/heads/${RELEASE_AUTOMATION_CONTRACT.defaultBranch}`)),
-    api.get(repositoryPath(`/pulls/${context.prNumber}`)),
-    readExistingReleaseHeadEvidence(api, context.headSha),
-  ]);
+  const initialEvidence = await readOptionalReleaseHeadEvidence(api, context.headSha);
+  const [preMutationMain, preMutationPull, preMutationEvidence, preMutationChecks] =
+    await Promise.all([
+      api.get(repositoryPath(`/git/ref/heads/${RELEASE_AUTOMATION_CONTRACT.defaultBranch}`)),
+      api.get(repositoryPath(`/pulls/${context.prNumber}`)),
+      readOptionalReleaseHeadEvidence(api, context.headSha),
+      paginatedCheckRuns(api, context.headSha),
+    ]);
   assertMainRef(preMutationMain, context.sha, "pre-mutation release-head recovery default branch");
   assertRecoveryReleasePull(preMutationPull, context, pullIdentity);
   invariant(
-    JSON.stringify(preMutationEvidence.releaseHead) === JSON.stringify(releaseHead) &&
-      JSON.stringify(preMutationEvidence.releaseHeadRelease) === JSON.stringify(releaseHeadRelease),
+    JSON.stringify(preMutationEvidence) === JSON.stringify(initialEvidence),
     "release head evidence moved before recovery mutation",
   );
+  const sourceChecks = preMutationChecks.filter(
+    (check) => check?.name === RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+  );
+  if (sourceChecks.length > 0) {
+    assertSuccessfulCheck(
+      preMutationChecks,
+      RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+      context.headSha,
+    );
+  }
+  if (initialEvidence === null) {
+    invariant(
+      preMutationChecks.every(
+        (check) => check?.name !== RELEASE_AUTOMATION_CONTRACT.checks.releaseHeadRetention,
+      ),
+      "release head retention check exists without retained evidence",
+    );
+  }
+
+  const { releaseHead, releaseHeadRelease } = initialEvidence ?? {
+    releaseHead: await createReleaseHeadRef(api, context.headSha),
+    releaseHeadRelease: await createReleaseHeadRelease(api, context.headSha),
+  };
 
   const now = options.now ?? (() => new Date());
   const checkContext = { ...context, releaseHeadRelease };
-  const sourceChecks = (await paginatedCheckRuns(api, context.headSha)).filter(
-    (check) => check?.name === RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
-  );
   if (sourceChecks.length === 0) {
     await upsertCheckRun(
       api,

@@ -558,19 +558,24 @@ provider response must identify the GitHub Actions bot as author and report the
 published prerelease as `immutable: true`, or sealing fails closed. GitHub then
 locks the tag and emits its native release attestation.
 
-If a seal creates and publishes that immutable tag/release but is interrupted
-before its source-admission and retention checks complete, dispatch the same
-workflow from current `main` with `merged_source_sha` set to the exact accepted
-PR merge source. This is recovery, not a late seal: it refuses to create either
-retained artifact. Before the first check mutation it reconstructs the complete
-historical base-to-head tree/file admission, proves the original PR
-base/head/merge and tree, re-reads the unchanged GitHub Actions-owned immutable
-release, and proves the merged source's ancestry into current `main`. Recovery
-pins the first provider read's PR-author numeric ID/account type and exact head
+If a seal fails before merge or is interrupted and the reviewed PR has since
+merged, dispatch the same workflow from current `main` with `merged_source_sha`
+set to the exact accepted PR merge source. Before its first mutation, recovery
+reconstructs the complete historical base-to-head tree/file admission, proves
+the original PR base/head/merge and tree, proves the merged source's ancestry
+into current `main`, and reads the retained tag/release as one paired state. It
+accepts either an unchanged GitHub Actions-owned immutable pair or a pair that
+is still completely absent through the pre-mutation fence. In the absent case,
+there must also be no pre-existing retention check; recovery then creates the
+exact tag and immutable prerelease before restoring checks. A partial pair,
+preclaimed check, non-404 provider read error, identity drift, or evidence
+movement fails before mutation. A create conflict or provider error is never
+normalized or followed by takeover of the competing state. Recovery pins the
+first provider read's PR-author numeric ID/account type and exact head
 branch/repository across its pre-mutation and terminal reads; it supports both
 Version and explicitly sealed non-Version release PRs without substituting a
-hard-coded author or branch. It then idempotently restores only whichever exact
-provider checks are absent.
+hard-coded author or branch. Successful replay reuses the exact immutable pair
+and idempotently restores only whichever exact provider checks are absent.
 
 Before the first seal, a repository administrator must enable the provider
 feature with the API version that introduced its management endpoint:
@@ -640,10 +645,10 @@ release operators a provider-owned proof of immutable source retention without
 requiring a credential that crosses repository boundaries. A tag and immutable
 prerelease are retention evidence, not approval: the native pre-merge review
 and every later source/acceptance gate remain mandatory. A missing, moved,
-indirect, mutable, non-provider-authored, or post-hoc substitute fails release
-provenance. Retained-head prereleases and their tags intentionally accumulate
-for the lifetime of their release evidence; never include them in routine
-release or tag cleanup.
+indirect, mutable, non-provider-authored, or post-hoc substitute outside the
+fenced merged-source recovery above fails release provenance. Retained-head
+prereleases and their tags intentionally accumulate for the lifetime of their
+release evidence; never include them in routine release or tag cleanup.
 
 Release admission derives the merge outcome exclusively from GitHub records; a
 workflow caller cannot assert a merge method. The exact current `main` SHA is
