@@ -1,5 +1,10 @@
 import { sql } from "drizzle-orm";
 import type { Database, RlsStrategy } from "./index";
+import {
+  classifyRoleRelationships,
+  roleRelationshipsCatalogQuery,
+  type RoleRelationshipCatalogRow,
+} from "./role-relationships";
 
 /**
  * The complete standalone tenant-table contract. Adding or removing a
@@ -299,6 +304,7 @@ export type RuntimeRoutinePosture = {
 
 export type RuntimeDatabasePosture = {
   identity: RuntimeDatabaseIdentity;
+  /** Privilege-bearing role relationships; exact PG16+ management-only grants are excluded. */
   memberships: string[];
   schemas: RuntimeSchemaPosture[];
   ownedSchemas: string[];
@@ -418,30 +424,10 @@ export async function inspectRuntimeDatabasePosture(
         };
       }
 
-      const memberships = resultRows<{ relationship: string }>(
-        await tx.execute(sql`
-          with recursive inherited_roles(oid, rolname) as (
-            select parent.oid, parent.rolname
-            from pg_auth_members membership
-            join pg_roles member on member.oid = membership.member
-            join pg_roles parent on parent.oid = membership.roleid
-            where member.rolname = current_user
-            union
-            select parent.oid, parent.rolname
-            from inherited_roles inherited
-            join pg_auth_members membership on membership.member = inherited.oid
-            join pg_roles parent on parent.oid = membership.roleid
-          )
-          select ('inherits:' || rolname)::text as relationship from inherited_roles
-          union
-          select ('member:' || member.rolname)::text as relationship
-          from pg_auth_members membership
-          join pg_roles parent on parent.oid = membership.roleid
-          join pg_roles member on member.oid = membership.member
-          where parent.rolname = current_user
-          order by relationship
-        `),
-      ).map((row) => row.relationship);
+      const relationshipRows = resultRows<RoleRelationshipCatalogRow>(
+        await tx.execute(sql.raw(roleRelationshipsCatalogQuery("current_user"))),
+      );
+      const memberships = classifyRoleRelationships(relationshipRows).unsafeRelationships;
 
       const schemas = resultRows<{
         name: string;
