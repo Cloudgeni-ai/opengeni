@@ -1,5 +1,11 @@
 # @opengeni/db
 
+## 0.14.1
+
+### Patch Changes
+
+- 6908a7a: Resolve session existence and the latest workspace capture in one RLS-scoped query so capture metadata requests avoid loading the full session projection.
+
 ## 0.14.0
 
 ### Minor Changes
