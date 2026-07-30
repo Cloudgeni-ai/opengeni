@@ -1,5 +1,21 @@
 # @opengeni/worker-bundle
 
+## 0.12.11
+
+### Patch Changes
+
+- 1973d2a: Treat provider-native web search as an always-on runtime capability whenever
+  the selected provider supports it. Session MCP selection no longer disables
+  native search.
+- Updated dependencies [ea38a4c]
+- Updated dependencies [39b1b84]
+- Updated dependencies [1973d2a]
+  - @opengeni/db@0.14.4
+  - @opengeni/runtime@0.14.4
+  - @opengeni/core@0.13.0
+  - @opengeni/documents@0.2.46
+  - @opengeni/events@0.3.37
+
 ## 0.12.10
 
 ### Patch Changes
