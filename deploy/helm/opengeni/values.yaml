@@ -546,6 +546,30 @@ migrations:
       cpu: 500m
       memory: 512Mi
 
+# Import the reviewed, committed integrations snapshot into the global
+# capability catalog after installs and upgrades. The importer fingerprints the
+# snapshot and exits without database or object-storage writes when that exact
+# revision has already completed successfully.
+catalogImport:
+  enabled: true
+  snapshotPath: /app/data/catalog/integrations-snapshot.json
+  # Keep deployment success independent of hundreds of third-party logo hosts.
+  # Set false to fetch, validate, and self-host logos during the import.
+  skipLogos: true
+  backoffLimit: 3
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    # Migrations use -5 and the disposable MinIO bucket initializer uses 5.
+    helm.sh/hook-weight: "10"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
 # Embedded Postgres for disposable conformance stacks and the persistent non-HA
 # single-machine profile. Multi-node deployments should use managed Postgres,
 # an existing database, or an upstream Postgres operator.

@@ -1,0 +1,57 @@
+{{- if and .Values.catalogImport.enabled .Values.api.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "opengeni.fullname" . }}-catalog-import
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: catalog-import
+  annotations:
+    {{- toYaml .Values.catalogImport.annotations | nindent 4 }}
+spec:
+  backoffLimit: {{ .Values.catalogImport.backoffLimit }}
+  template:
+    metadata:
+      labels:
+        {{- include "opengeni.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: catalog-import
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "opengeni.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: catalog-import
+          image: {{ include "opengeni.image" (dict "root" . "image" .Values.migrations.image) | quote }}
+          imagePullPolicy: {{ .Values.migrations.image.pullPolicy }}
+          command:
+            - /bin/sh
+            - -ec
+            - >-
+              bun run catalog:import --snapshot {{ .Values.catalogImport.snapshotPath | quote }} --if-changed
+              {{- if .Values.catalogImport.skipLogos }} --skip-logos{{- end }}
+          envFrom:
+            - secretRef:
+                name: {{ include "opengeni.secretName" . }}
+            - configMapRef:
+                name: {{ include "opengeni.fullname" . }}-config
+          env:
+            # Global catalog/import-batch tables are intentionally unavailable
+            # to the restricted runtime role. Keep this owner credential scoped
+            # to the one-shot Job, just like schema migration credentials.
+            - name: OPENGENI_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "opengeni.migrationSecretName" . }}
+                  key: OPENGENI_MIGRATIONS_DATABASE_URL
+            {{- if or .Values.postgres.enabled .Values.temporal.enabled .Values.minio.enabled }}
+            {{- include "opengeni.generatedRuntimeEnv" (dict "root" . "objectStorageEndpoint" (include "opengeni.minioEndpoint" .) "includeDatabaseUrl" false) | nindent 12 }}
+            {{- end }}
+          {{- with .Values.catalogImport.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}

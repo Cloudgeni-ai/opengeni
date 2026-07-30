@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   catalogCapabilityId,
   catalogRowToDbInput,
+  catalogSnapshotRef,
   normalizeCatalogSnapshot,
   readSnapshotFile,
   storeLogoForRow,
@@ -13,6 +14,14 @@ import { probeCatalogSnapshot, probeMcpEndpoint } from "./integrations-catalog-p
 const fixtureUrl = new URL("./fixtures/integrations-catalog-sample.json", import.meta.url);
 
 describe("integrations.sh catalog import normalization", () => {
+  test("fingerprints snapshot bytes for idempotent deployment imports", async () => {
+    const defaultRef = await catalogSnapshotRef(fixtureUrl.pathname);
+    const labeledRef = await catalogSnapshotRef(fixtureUrl.pathname, "reviewed-catalog");
+
+    expect(defaultRef).toMatch(/^integrations-catalog-sample\.json@sha256:[a-f0-9]{64}$/);
+    expect(labeledRef).toBe(`reviewed-catalog@${defaultRef.split("@")[1]}`);
+  });
+
   test("normalizes the committed sample fixture and quarantines flagged suspicious URLs", async () => {
     const snapshot = await readSnapshotFile(fixtureUrl.pathname);
     const normalized = normalizeCatalogSnapshot(snapshot);

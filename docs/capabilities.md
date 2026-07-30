@@ -146,11 +146,20 @@ The integrations catalog import pipeline is offline and reviewable. It never
 live-consumes integrations.sh at request time. The reviewed source of truth is
 the committed snapshot at `data/catalog/integrations-snapshot.json`. Updating it
 is a PR workflow: run `bun run catalog:refresh`, review the snapshot diff, then
-merge. Operators import that committed snapshot with `bun run catalog:import
---snapshot data/catalog/integrations-snapshot.json` (or the same path inside the
-application image). The importer writes global capability rows, records an
-`import_batches` provenance row with MIT attribution, and upserts registry
-entries by `(provider_domain, mcp_url)`.
+merge. Standard Helm installs and upgrades import that committed snapshot by
+default through the `catalogImport` hook Job; set `catalogImport.enabled=false`
+to opt out. The default `catalogImport.skipLogos=true` keeps deployment success
+independent of third-party logo hosts and uses generic monograms; set it to
+`false` to fetch, validate, and self-host the reviewed logos. `bun run dev` also
+imports metadata after migrations by default; set
+`OPENGENI_CATALOG_IMPORT_ENABLED=false` to opt out locally. Operators using a
+different deployment system should run `bun run catalog:import --snapshot
+data/catalog/integrations-snapshot.json --if-changed --skip-logos` after
+migrations. The
+fingerprinted `--if-changed` mode exits without database or object-storage
+writes when that exact snapshot already completed successfully. The importer
+writes global capability rows, records an `import_batches` provenance row with
+MIT attribution, and upserts registry entries by `(provider_domain, mcp_url)`.
 Rows removed from a later snapshot are marked `stale`, not deleted, and are
 excluded from default workspace catalog listings.
 

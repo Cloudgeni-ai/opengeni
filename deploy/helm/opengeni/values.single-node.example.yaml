@@ -79,6 +79,9 @@ migrations:
   secret:
     existingSecret: opengeni-migrations
 
+catalogImport:
+  resources: null
+
 secret:
   create: false
   existingSecret: opengeni-runtime

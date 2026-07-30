@@ -5,6 +5,7 @@ import { dbSearchPath, getSettings } from "@opengeni/config";
 import {
   createDb,
   createImportBatch,
+  findCompletedImportBatch,
   markStaleRegistryCatalogItems,
   updateImportBatchCounts,
   upsertRegistryCapabilityCatalogItem,
@@ -1111,11 +1112,13 @@ function parseArgs(argv: string[]): {
   snapshotPath: string;
   dryRun: boolean;
   skipLogos: boolean;
+  ifChanged: boolean;
   snapshotRef?: string;
 } {
   let snapshotPath = "";
   let dryRun = false;
   let skipLogos = false;
+  let ifChanged = false;
   let snapshotRef: string | undefined;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]!;
@@ -1125,6 +1128,8 @@ function parseArgs(argv: string[]): {
       dryRun = true;
     } else if (arg === "--skip-logos") {
       skipLogos = true;
+    } else if (arg === "--if-changed") {
+      ifChanged = true;
     } else if (arg === "--snapshot-ref") {
       snapshotRef = argv[++index];
     } else if (!arg.startsWith("--") && !snapshotPath) {
@@ -1139,13 +1144,20 @@ function parseArgs(argv: string[]): {
   if (!snapshotPath) {
     throw new Error("missing --snapshot <path>");
   }
-  return { snapshotPath, dryRun, skipLogos, ...(snapshotRef ? { snapshotRef } : {}) };
+  return { snapshotPath, dryRun, skipLogos, ifChanged, ...(snapshotRef ? { snapshotRef } : {}) };
 }
 
 function printUsage(): void {
   console.log(
-    "Usage: bun scripts/import-integrations-catalog.ts --snapshot <snapshot.json> [--dry-run] [--skip-logos] [--snapshot-ref <label>]",
+    "Usage: bun scripts/import-integrations-catalog.ts --snapshot <snapshot.json> [--dry-run] [--skip-logos] [--if-changed] [--snapshot-ref <label>]",
   );
+}
+
+export async function catalogSnapshotRef(path: string, label?: string): Promise<string> {
+  const digest = createHash("sha256")
+    .update(await readFile(path))
+    .digest("hex");
+  return `${label ?? basename(path)}@sha256:${digest}`;
 }
 
 if (import.meta.main) {
@@ -1177,11 +1189,37 @@ if (import.meta.main) {
     rlsStrategy: settings.rlsStrategy,
   });
   try {
+    const snapshotRef = args.ifChanged
+      ? await catalogSnapshotRef(args.snapshotPath, args.snapshotRef)
+      : (args.snapshotRef ?? basename(args.snapshotPath));
+    if (args.ifChanged) {
+      const existing = await findCompletedImportBatch(dbClient.db, {
+        source: SOURCE,
+        snapshotRef,
+        importedCount: normalized.rows.length,
+      });
+      if (existing) {
+        console.log(
+          JSON.stringify(
+            {
+              unchanged: true,
+              batchId: existing.id,
+              imported: existing.importedCount,
+              snapshotRef,
+            },
+            null,
+            2,
+          ),
+        );
+        await dbClient.close();
+        process.exit(0);
+      }
+    }
     const storage = args.skipLogos ? null : createObjectStorage(settings);
     const result = await importIntegrationsCatalog({
       db: dbClient.db,
       snapshot,
-      snapshotRef: args.snapshotRef ?? basename(args.snapshotPath),
+      snapshotRef,
       storage,
       storeLogos: !args.skipLogos,
     });
