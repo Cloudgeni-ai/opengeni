@@ -553,7 +553,10 @@ export class OpenGeniSlackBotClient {
     operation: "file.info" | "file.content.read",
     input: { channelId: string; fileId: string; parentFileId?: string },
   ) {
-    const payload = await this.call(headers, "files.info", { file: input.fileId });
+    const payload = await this.call(headers, "files.info", {
+      file: input.fileId,
+      ...(operation === "file.content.read" ? { include_transcription: "true" } : {}),
+    });
     const fileRecord = slackRecord(payload.file);
     const file = projectFile(fileRecord);
     if (!fileRecord || !file) {

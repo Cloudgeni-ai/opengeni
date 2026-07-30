@@ -317,7 +317,9 @@ function fakeSlack(
           canvas_metadata: transcript ? undefined : { originating_huddle_id: "H_FIXTURE" },
           huddle_transcript_file_id: transcript ? undefined : "FTRANSCRIPT",
           huddle_transcription:
-            options.transcriptInFileInfo && transcript
+            options.transcriptInFileInfo &&
+            transcript &&
+            params.get("include_transcription") === "true"
               ? {
                   channel_id: "C_MEMBER",
                   date_start: 1_785_141_690,
