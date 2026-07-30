@@ -45,11 +45,24 @@ async function renderControls(props: Partial<Parameters<typeof SlackBotInstallCo
   };
 }
 
-function accessContext(permissions: string[]): AccessContext {
+function accessContext(
+  permissions: AccessContext["workspaceGrants"][number]["permissions"],
+): AccessContext {
   return {
-    workspaceGrants: [{ workspaceId: "workspace-a", permissions }],
+    mode: "managed",
+    subjectId: "subject-a",
     accountGrants: [],
-  } as AccessContext;
+    workspaceGrants: [
+      {
+        workspaceId: "workspace-a",
+        accountId: "account-a",
+        subjectId: "subject-a",
+        permissions,
+      },
+    ],
+    defaultAccountId: "account-a",
+    defaultWorkspaceId: "workspace-a",
+  };
 }
 
 describe("OpenGeni Slack bot install controls", () => {
