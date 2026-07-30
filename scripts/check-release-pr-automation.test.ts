@@ -235,6 +235,24 @@ describe("Version PR dispatch identity", () => {
     });
   });
 
+  test("accepts Version bot login normalization with the same stable identity", async () => {
+    const fixture = dispatchFixture({
+      author: {
+        login: "github-actions",
+        id: RELEASE_AUTOMATION_CONTRACT.versionAuthor.id,
+        type: RELEASE_AUTOMATION_CONTRACT.versionAuthor.type,
+      },
+    });
+    await expect(
+      validateVersionPrDispatch({
+        env: releasePushEnv(),
+        fetchImpl: fixture.fetchImpl,
+        logger: { log() {} },
+      }),
+    ).resolves.toEqual({ prNumber: pullNumber, headSha, baseSha });
+    expect(fixture.requests.filter((request) => request.method === "POST")).toHaveLength(1);
+  });
+
   test("waits for the exact Version PR base projection before dispatching", async () => {
     const fixture = dispatchFixture({ stalePullReads: 1 });
     const sleeps: number[] = [];
@@ -312,7 +330,7 @@ describe("Version PR dispatch identity", () => {
           sleeps.push(milliseconds);
         },
       }),
-    ).rejects.toThrow("Version PR author login changed");
+    ).rejects.toThrow("Version PR author numeric identity changed");
     expect(sleeps).toEqual([]);
     expect(fixture.requests.some((request) => request.method === "POST")).toBe(false);
   });
@@ -760,6 +778,9 @@ function recoverySealFixture(
   options: {
     currentMainContainsSource?: boolean;
     existingSourceAdmission?: boolean;
+    headRefs?: string[];
+    headRepositories?: string[];
+    pullAuthors?: Array<Record<string, unknown>>;
     release?: Record<string, unknown> | null;
     sourceTreeSha?: string;
   } = {},
@@ -770,6 +791,9 @@ function recoverySealFixture(
   const releaseTag = `${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${headSha}`;
   const merger = { login: "merge-maintainer", id: 1234567, type: "User" };
   let nextCheckId = 900;
+  let pullReads = 0;
+  const valueAt = <T>(values: T[] | undefined, index: number, fallback: T) =>
+    values?.[Math.min(index, values.length - 1)] ?? fallback;
   const mergedPull = {
     number: pullNumber,
     html_url:
@@ -780,7 +804,7 @@ function recoverySealFixture(
     merge_commit_sha: mergeSha,
     merged_at: "2026-07-27T09:00:00Z",
     draft: false,
-    user: RELEASE_AUTOMATION_CONTRACT.versionAuthor,
+    user: RELEASE_AUTOMATION_CONTRACT.releaseApprover,
     merged_by: merger,
     base: {
       ref: "main",
@@ -788,7 +812,7 @@ function recoverySealFixture(
       repo: { full_name: RELEASE_AUTOMATION_CONTRACT.repository },
     },
     head: {
-      ref: "changeset-release/main",
+      ref: "codex/release-chart-0.22.24",
       sha: headSha,
       repo: { full_name: RELEASE_AUTOMATION_CONTRACT.repository },
     },
@@ -827,7 +851,25 @@ function recoverySealFixture(
     if (method !== "GET") return response({ message: "unexpected mutation" }, 405);
     if (url.pathname === prefix) return response(repository());
     if (url.pathname === `${prefix}/git/ref/heads/main`) return response(mainRef(currentMainSha));
-    if (url.pathname === `${prefix}/pulls/${pullNumber}`) return response(mergedPull);
+    if (url.pathname === `${prefix}/pulls/${pullNumber}`) {
+      const readIndex = pullReads;
+      pullReads += 1;
+      return response({
+        ...mergedPull,
+        user: valueAt(options.pullAuthors, readIndex, RELEASE_AUTOMATION_CONTRACT.releaseApprover),
+        head: {
+          ...mergedPull.head,
+          ref: valueAt(options.headRefs, readIndex, mergedPull.head.ref),
+          repo: {
+            full_name: valueAt(
+              options.headRepositories,
+              readIndex,
+              RELEASE_AUTOMATION_CONTRACT.repository,
+            ),
+          },
+        },
+      });
+    }
     if (url.pathname === `${prefix}/git/commits/${mergeSha}`)
       return response({
         sha: mergeSha,
@@ -915,14 +957,28 @@ function recoverySealFixture(
 }
 
 describe("release head retention recovery", () => {
-  test("recovers only the missing provider check from an existing immutable merged head", async () => {
-    const fixture = recoverySealFixture();
-    const result = await recoverReleaseHeadEvidence({
+  test("replays recovery idempotently for a reviewed non-Version release head", async () => {
+    const fixture = recoverySealFixture({
+      pullAuthors: [
+        RELEASE_AUTOMATION_CONTRACT.releaseApprover,
+        {
+          ...RELEASE_AUTOMATION_CONTRACT.releaseApprover,
+          login: "Jorgen-Sandhaug",
+        },
+        {
+          ...RELEASE_AUTOMATION_CONTRACT.releaseApprover,
+          login: "renamed-maintainer",
+        },
+      ],
+    });
+    const options = {
       env: recoverySealEnv(),
       fetchImpl: fixture.fetchImpl,
       logger: { log() {} },
       now: () => new Date("2026-07-27T09:30:00Z"),
-    });
+    };
+    const result = await recoverReleaseHeadEvidence(options);
+    const replay = await recoverReleaseHeadEvidence(options);
     expect(result).toMatchObject({
       prNumber: pullNumber,
       baseSha,
@@ -934,6 +990,8 @@ describe("release head retention recovery", () => {
         sha: headSha,
       },
     });
+    expect(replay.releaseHead).toEqual(result.releaseHead);
+    expect(replay.releaseHeadRelease).toEqual(result.releaseHeadRelease);
     expect(fixture.checks).toHaveLength(2);
     for (const name of [
       RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
@@ -947,12 +1005,90 @@ describe("release head retention recovery", () => {
       });
     }
     expect(
+      fixture.checks.every((check) =>
+        check.external_id.includes(`pr:${pullNumber}:head:${headSha}`),
+      ),
+    ).toBe(true);
+    expect(new Set(fixture.checks.map((check) => check.external_id)).size).toBe(2);
+    expect(
+      fixture.checks.find(
+        (check) => check.name === RELEASE_AUTOMATION_CONTRACT.checks.releaseHeadRetention,
+      )?.external_id,
+    ).toMatch(
+      new RegExp(
+        `^opengeni:release-automation:release-head-retention:v2:` +
+          `pr:${pullNumber}:head:${headSha}:release-sha256:[0-9a-f]{64}$`,
+      ),
+    );
+    expect(
       fixture.requests.some(
         (request) =>
           request.method === "POST" &&
           (request.path.endsWith("/git/refs") || request.path.endsWith("/releases")),
       ),
     ).toBe(false);
+  });
+
+  test("fails closed on recovery author identity substitution or missing identity", async () => {
+    for (const [author, message] of [
+      [
+        { ...RELEASE_AUTOMATION_CONTRACT.releaseApprover, id: 999 },
+        "release-head recovery pull-request author numeric identity changed",
+      ],
+      [
+        { ...RELEASE_AUTOMATION_CONTRACT.releaseApprover, type: "Bot" },
+        "release-head recovery pull-request author account type changed",
+      ],
+      [
+        { id: RELEASE_AUTOMATION_CONTRACT.releaseApprover.id, type: "User" },
+        "pull-request author login is missing",
+      ],
+    ] as const) {
+      const fixture = recoverySealFixture({
+        pullAuthors: [RELEASE_AUTOMATION_CONTRACT.releaseApprover, author],
+      });
+      await expect(
+        recoverReleaseHeadEvidence({
+          env: recoverySealEnv(),
+          fetchImpl: fixture.fetchImpl,
+        }),
+      ).rejects.toThrow(message);
+      expect(fixture.checks).toHaveLength(0);
+    }
+  });
+
+  test("fails closed before check mutation when recovery head topology changes", async () => {
+    const branch = recoverySealFixture({
+      headRefs: [
+        "codex/release-chart-0.22.24",
+        "codex/release-chart-0.22.24",
+        "codex/release-chart-0.22.24",
+        "attacker/substitute",
+      ],
+    });
+    await expect(
+      recoverReleaseHeadEvidence({
+        env: recoverySealEnv(),
+        fetchImpl: branch.fetchImpl,
+      }),
+    ).rejects.toThrow("release-head recovery pull-request head branch changed");
+    expect(branch.checks).toHaveLength(0);
+
+    const movedRepository = recoverySealFixture({
+      headRepositories: [
+        RELEASE_AUTOMATION_CONTRACT.repository,
+        RELEASE_AUTOMATION_CONTRACT.repository,
+        RELEASE_AUTOMATION_CONTRACT.repository,
+        "attacker/opengeni",
+      ],
+    });
+    await expect(
+      recoverReleaseHeadEvidence({
+        env: recoverySealEnv(),
+        fetchImpl: movedRepository.fetchImpl,
+      }),
+    ).rejects.toThrow("release-head recovery pull-request head repository changed");
+    expect(movedRepository.checks).toHaveLength(0);
   });
 
   test("fails closed before check mutation when retained evidence is absent or main lost ancestry", async () => {
@@ -1182,6 +1318,10 @@ function approvalFixture(
     reviewTime?: string;
     reviewBody?: string;
     requestedReview?: boolean;
+    requestedReviewer?: Record<string, unknown>;
+    reviewer?: Record<string, unknown>;
+    reviewDetailReviewer?: Record<string, unknown>;
+    reviewerLoginSnapshot?: string;
     headChecks?: Array<Record<string, unknown>>;
     sourceChecks?: Array<Record<string, unknown>>;
     historicalHeadChecks?: Array<Record<string, unknown>>;
@@ -1218,7 +1358,8 @@ function approvalFixture(
     repository: RELEASE_AUTOMATION_CONTRACT.repository,
     reviewedBaseSha: baseSha,
     reviewedHeadSha: pullHeadSha,
-    reviewerLogin: RELEASE_AUTOMATION_CONTRACT.releaseApprover.login,
+    reviewerLogin:
+      options.reviewerLoginSnapshot ?? RELEASE_AUTOMATION_CONTRACT.releaseApprover.login,
     reviewProfile: "exact-head-maintainer-v1",
     verdict: "PASS",
   };
@@ -1234,7 +1375,7 @@ function approvalFixture(
       `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}` +
       `/pull/${pullNumber}#pullrequestreview-9001`,
     body: reviewBody,
-    user: RELEASE_AUTOMATION_CONTRACT.releaseApprover,
+    user: options.reviewer ?? RELEASE_AUTOMATION_CONTRACT.releaseApprover,
   };
   const successfulCheck = (name: string, sha: string) => ({
     name,
@@ -1312,7 +1453,7 @@ function approvalFixture(
         head: { sha: pullHeadSha },
         commits: pullCommitCount,
         requested_reviewers: options.requestedReview
-          ? [RELEASE_AUTOMATION_CONTRACT.releaseApprover]
+          ? [options.requestedReviewer ?? RELEASE_AUTOMATION_CONTRACT.releaseApprover]
           : [],
       });
     if (method === "GET" && url.pathname === `${prefix}/issues/${pullNumber}/timeline`)
@@ -1341,7 +1482,10 @@ function approvalFixture(
     if (method === "GET" && url.pathname === `${prefix}/pulls/${pullNumber}/reviews`)
       return response([review]);
     if (method === "GET" && url.pathname === `${prefix}/pulls/${pullNumber}/reviews/9001`)
-      return response(review);
+      return response({
+        ...review,
+        user: options.reviewDetailReviewer ?? review.user,
+      });
     if (
       method === "GET" &&
       url.pathname ===
@@ -1466,6 +1610,88 @@ describe("release approval provenance", () => {
     );
   });
 
+  test("accepts reviewer login movement while preserving stable provider identity", async () => {
+    const reviewer = {
+      ...RELEASE_AUTOMATION_CONTRACT.releaseApprover,
+      login: "renamed-maintainer",
+    };
+    const fixture = approvalFixture({
+      reviewer,
+      reviewDetailReviewer: { ...reviewer, login: "Renamed-Maintainer" },
+    });
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: fixture.fetchImpl,
+        logger: { log() {} },
+      }),
+    ).resolves.toEqual(
+      expect.objectContaining({
+        review: expect.objectContaining({ type: "independent-approval" }),
+      }),
+    );
+  });
+
+  test("treats the legacy v3 reviewer login as a snapshot, not account authority", async () => {
+    const fixture = approvalFixture({
+      mergeMethod: "single",
+      reviewState: "COMMENTED",
+      reviewer: {
+        ...RELEASE_AUTOMATION_CONTRACT.releaseApprover,
+        login: "renamed-maintainer",
+      },
+      reviewDetailReviewer: {
+        ...RELEASE_AUTOMATION_CONTRACT.releaseApprover,
+        login: "RENAMED-MAINTAINER",
+      },
+      reviewerLoginSnapshot: "former-maintainer-login",
+    });
+    const result = await verifyApprovedMerge({
+      env: approvalEnv(),
+      fetchImpl: fixture.fetchImpl,
+      logger: { log() {} },
+    });
+    expect(result).toEqual(
+      expect.objectContaining({
+        review: expect.objectContaining({ type: "single-maintainer-admin-pass" }),
+      }),
+    );
+  });
+
+  test("rejects reviewer identity substitution and missing provider identity", async () => {
+    for (const [reviewDetailReviewer, message] of [
+      [
+        { ...RELEASE_AUTOMATION_CONTRACT.releaseApprover, id: 999 },
+        "trusted review detail actor numeric identity changed",
+      ],
+      [
+        { ...RELEASE_AUTOMATION_CONTRACT.releaseApprover, type: "Bot" },
+        "trusted review detail actor account type changed",
+      ],
+      [
+        {
+          login: RELEASE_AUTOMATION_CONTRACT.releaseApprover.login,
+          type: RELEASE_AUTOMATION_CONTRACT.releaseApprover.type,
+        },
+        "trusted review detail actor numeric identity is not a positive integer",
+      ],
+    ] as const) {
+      const fixture = approvalFixture({ reviewDetailReviewer });
+      await expect(
+        verifyApprovedMerge({ env: approvalEnv(), fetchImpl: fixture.fetchImpl }),
+      ).rejects.toThrow(message);
+    }
+
+    const missingSnapshot = approvalFixture({
+      mergeMethod: "single",
+      reviewState: "COMMENTED",
+      reviewerLoginSnapshot: "",
+    });
+    await expect(
+      verifyApprovedMerge({ env: approvalEnv(), fetchImpl: missingSnapshot.fetchImpl }),
+    ).rejects.toThrow("single-maintainer admin PASS reviewer login snapshot is missing");
+  });
+
   test("rejects stale-head and post-merge approvals", async () => {
     const stale = approvalFixture({ reviewCommit: "9".repeat(40) });
     await expect(
@@ -1543,7 +1769,13 @@ describe("release approval provenance", () => {
     await expect(
       verifyApprovedMerge({
         env: approvalEnv(),
-        fetchImpl: approvalFixture({ requestedReview: true }).fetchImpl,
+        fetchImpl: approvalFixture({
+          requestedReview: true,
+          requestedReviewer: {
+            ...RELEASE_AUTOMATION_CONTRACT.releaseApprover,
+            login: "renamed-maintainer",
+          },
+        }).fetchImpl,
       }),
     ).rejects.toThrow("review was re-requested");
     await expect(
@@ -1673,7 +1905,45 @@ describe("release approval provenance", () => {
           },
         }).fetchImpl,
       }),
-    ).rejects.toThrow("release head immutable release author login changed");
+    ).rejects.toThrow("release head immutable release author numeric identity changed");
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: approvalFixture({
+          release: {
+            ...releaseHeadRelease(),
+            author: {
+              login: "github-actions",
+              id: RELEASE_AUTOMATION_CONTRACT.versionAuthor.id,
+              type: RELEASE_AUTOMATION_CONTRACT.versionAuthor.type,
+            },
+          },
+        }).fetchImpl,
+        logger: { log() {} },
+      }),
+    ).resolves.toEqual(
+      expect.objectContaining({
+        releaseHeadRelease: expect.objectContaining({
+          authorId: RELEASE_AUTOMATION_CONTRACT.versionAuthor.id,
+          authorLogin: RELEASE_AUTOMATION_CONTRACT.versionAuthor.login,
+          authorType: RELEASE_AUTOMATION_CONTRACT.versionAuthor.type,
+        }),
+      }),
+    );
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: approvalFixture({
+          release: {
+            ...releaseHeadRelease(),
+            author: {
+              ...RELEASE_AUTOMATION_CONTRACT.versionAuthor,
+              type: "User",
+            },
+          },
+        }).fetchImpl,
+      }),
+    ).rejects.toThrow("release head immutable release author account type changed");
   });
 
   test("uses all check runs so a failed run hidden by a successful rerequest is rejected", async () => {

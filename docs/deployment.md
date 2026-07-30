@@ -486,6 +486,16 @@ Candidate or operator admission must fail closed when those provider identities
 do not match; do not weaken the provenance check or recreate approval from a
 comment, commit message, or local record.
 
+GitHub account identity is authoritative by the provider's positive numeric
+account ID plus account type (`User` or `Bot`). The provider login is still
+required as a non-empty audit snapshot, but login spelling, case normalization,
+or an account rename does not replace that stable identity. A changed numeric
+ID, changed account type, or missing identity field fails closed. The legacy v3
+structured admin-PASS `reviewerLogin` field is likewise an informational login
+snapshot: the native provider review actor's configured numeric ID and account
+type provide reviewer authority, while every other v3 field and the canonical
+body continue to bind the exact base/head verdict.
+
 For a single-maintainer source PR, generate the exact structured review body
 before merging. Submit the result as a native `COMMENTED` pull-request review;
 the formatter can also print the canonical SHA-256 needed by an external
@@ -531,8 +541,12 @@ PR merge source. This is recovery, not a late seal: it refuses to create either
 retained artifact. Before the first check mutation it reconstructs the complete
 historical base-to-head tree/file admission, proves the original PR
 base/head/merge and tree, re-reads the unchanged GitHub Actions-owned immutable
-release, and proves the merged source's ancestry into current `main`. It then
-idempotently restores only whichever exact provider checks are absent.
+release, and proves the merged source's ancestry into current `main`. Recovery
+pins the first provider read's PR-author numeric ID/account type and exact head
+branch/repository across its pre-mutation and terminal reads; it supports both
+Version and explicitly sealed non-Version release PRs without substituting a
+hard-coded author or branch. It then idempotently restores only whichever exact
+provider checks are absent.
 
 Before the first seal, a repository administrator must enable the provider
 feature with the API version that introduced its management endpoint:
@@ -591,6 +605,12 @@ object with the top-level keys sorted in ascending ASCII order:
 existing release differs from this identity after a retention check exists,
 sealing fails rather than creating a second proof; publish and seal a fresh
 exact head. Do not rebase an unchanged candidate solely because `main` moved.
+The live immutable-release author is authenticated by numeric account ID and
+account type. `authorLogin` remains the canonical contract snapshot shown above
+so existing v2 retention-check digests and release manifests remain
+byte-compatible when GitHub normalizes or renames the same bot login; no schema
+or evidence migration is required. A different author ID or account type still
+fails closed.
 Trusted Version-PR admission publishes the same check. This gives downstream
 release operators a provider-owned proof of immutable source retention without
 requiring a credential that crosses repository boundaries. A tag and immutable
