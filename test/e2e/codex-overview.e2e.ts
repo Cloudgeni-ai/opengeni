@@ -629,7 +629,10 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
       .getByRole("dialog")
       .getByRole("button", { name: "Redeem usage limit reset" })
       .click();
-    await recoveryPage.getByText(/earlier redemption succeeded/i).waitFor({ timeout: 20_000 });
+    await recoveryPage
+      .getByRole("region", { name: /^Notifications / })
+      .getByText("The earlier redemption succeeded; usage was refreshed.", { exact: true })
+      .waitFor({ timeout: 20_000 });
     expect(provider.consumeBodies).toHaveLength(2);
     expect(new Set(provider.consumeBodies.map((body) => body.redeem_request_id)).size).toBe(1);
     expect(
