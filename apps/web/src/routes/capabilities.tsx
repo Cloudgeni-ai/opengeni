@@ -5,6 +5,7 @@
 // spine (OAuth redirect or an API-key form) in a right-hand detail sheet, never
 // by hand-editing enable headers. Packs keep their first-class register/enable/
 // disable/unregister surface, restyled flat.
+import { OPENGENI_SLACK_BOT_REQUIRED_SCOPES } from "@opengeni/contracts";
 import { usePacks, useVariableSets } from "@opengeni/react";
 import {
   CheckCircle2Icon,
@@ -912,8 +913,7 @@ export function CapabilitiesRoute({
                 <div className="mt-3 rounded-md bg-bg/50 p-3">
                   <p className="text-2xs font-medium text-fg-muted">Required bot scopes</p>
                   <p className="mt-1 break-words font-mono text-2xs leading-relaxed text-fg-subtle">
-                    chat:write, im:write, channels:read, channels:history, groups:read,
-                    groups:history, users:read, files:read, canvases:read
+                    {OPENGENI_SLACK_BOT_REQUIRED_SCOPES.join(", ")}
                   </p>
                   <p className="mt-2 text-2xs text-fg-subtle">
                     Connection ID: <span className="font-mono">{slackBotConnection.id}</span>
@@ -959,8 +959,7 @@ export function CapabilitiesRoute({
                   <span>Permissions requested</span>
                 </summary>
                 <p className="mt-2 max-w-3xl break-words font-mono text-2xs leading-relaxed text-fg-subtle">
-                  chat:write, im:write, channels:read, channels:history, groups:read,
-                  groups:history, users:read, files:read, canvases:read
+                  {OPENGENI_SLACK_BOT_REQUIRED_SCOPES.join(", ")}
                 </p>
               </details>
             </>
