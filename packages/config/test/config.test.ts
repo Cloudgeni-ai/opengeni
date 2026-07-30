@@ -55,6 +55,16 @@ describe(".env.example", () => {
   });
 });
 
+describe("Docker workspace materialization", () => {
+  test("parses the optional shared workspace base directory", () => {
+    expect(
+      withEnv({ OPENGENI_DOCKER_WORKSPACE_BASE_DIR: "/var/lib/opengeni/docker-workspaces" }, () =>
+        getSettings(),
+      ).dockerWorkspaceBaseDir,
+    ).toBe("/var/lib/opengeni/docker-workspaces");
+  });
+});
+
 describe("agent stable release selection", () => {
   test("uses an exact stable version and supports an explicit operator promotion", () => {
     expect(withEnv({}, () => getSettings()).agentStableVersion).toBe("0.1.8");

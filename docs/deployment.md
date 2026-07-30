@@ -418,6 +418,15 @@ Current profiles:
 
 When a common host port is already occupied, `bun run dev` auto-selects a nearby free port for Docker Compose and rewrites the in-memory runtime URLs for that run. Set `OPENGENI_POSTGRES_HOST_PORT`, `OPENGENI_NATS_HOST_PORT`, `OPENGENI_NATS_MONITOR_HOST_PORT`, `OPENGENI_TEMPORAL_HOST_PORT`, `OPENGENI_MINIO_HOST_PORT`, or `OPENGENI_MINIO_CONSOLE_HOST_PORT` in `.env` if you need fixed local port choices.
 
+When the turn worker itself runs in a container and controls the host Docker
+daemon through its socket, configure
+`OPENGENI_DOCKER_WORKSPACE_BASE_DIR` to an absolute host directory and
+bind-mount that directory into the worker at the exact same absolute path. The
+Agents SDK materializes repositories, resources, and lazy-loaded skills in that
+directory before the host daemon bind-mounts each workspace into its sandbox.
+Without the shared-path identity, the worker and sandbox see different
+filesystems even though Docker accepts the mount.
+
 ## Build Images
 
 Build local OpenGeni workload images:
