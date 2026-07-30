@@ -919,6 +919,153 @@ describe("canonical queue commands", () => {
     expect(replay).toMatchObject({ replay: true, turnId: submitted.turnId });
   });
 
+  for (const attachmentSource of ["chooser", "drop", "paste"] as const) {
+    test(`Send admits and replays the ${attachmentSource} bare file draft as its canonical default mount`, async () => {
+      const value = await fixture(1);
+      const fileId = crypto.randomUUID();
+      const bareResource = { kind: "file" as const, fileId };
+      const canonicalResource = {
+        ...bareResource,
+        mountPath: `files/${fileId}`,
+      };
+      const draft = await withWorkspaceSubjectRls(
+        client.db,
+        value.grant.workspaceId!,
+        value.grant.subjectId,
+        (db) =>
+          db.transaction((tx) =>
+            saveComposerDraftInTransaction(tx as typeof db, {
+              accountId: value.grant.accountId,
+              workspaceId: value.grant.workspaceId!,
+              sessionId: value.session.id,
+              subjectId: value.grant.subjectId,
+              expectedRevision: 0,
+              text: `${attachmentSource} attachment`,
+              resources: [bareResource],
+              tools: [],
+              toolsProvided: false,
+              model: "scripted-model",
+              reasoningEffort: "low",
+            }),
+          ),
+      );
+      expect(draft.resources).toEqual([canonicalResource]);
+
+      const operationKey = crypto.randomUUID();
+      const command = {
+        accountId: value.grant.accountId,
+        workspaceId: value.grant.workspaceId!,
+        sessionId: value.session.id,
+        subjectId: value.grant.subjectId,
+        actor: value.actor,
+        operationKey,
+        delivery: "send" as const,
+        expectedDraftRevision: draft.revision,
+        text: draft.text,
+        resources: [canonicalResource],
+        tools: [],
+        toolsProvided: false,
+        model: "scripted-model",
+        reasoningEffort: "low" as const,
+        reasoningEffortFallback: "medium" as const,
+        source: "user" as const,
+      };
+      const submitted = await withWorkspaceSubjectRls(
+        client.db,
+        value.grant.workspaceId!,
+        value.grant.subjectId,
+        (db) => db.transaction((tx) => submitHumanPromptInTransaction(tx as typeof db, command)),
+      );
+      expect(submitted.replay).toBe(false);
+      expect(
+        (await getSessionTurn(client.db, value.grant.workspaceId!, submitted.turnId))?.resources,
+      ).toEqual([canonicalResource]);
+
+      const replay = await withWorkspaceSubjectRls(
+        client.db,
+        value.grant.workspaceId!,
+        value.grant.subjectId,
+        (db) =>
+          db.transaction((tx) =>
+            submitHumanPromptInTransaction(tx as typeof db, {
+              ...command,
+              resources: [bareResource],
+            }),
+          ),
+      );
+      expect(replay).toMatchObject({ replay: true, turnId: submitted.turnId });
+    });
+  }
+
+  test("Send keeps custom file mounts distinct and rejects genuinely changed drafts", async () => {
+    const value = await fixture(1);
+    const fileId = crypto.randomUUID();
+    const customResource = {
+      kind: "file" as const,
+      fileId,
+      mountPath: `evidence/${fileId}`,
+    };
+    const draft = await withWorkspaceSubjectRls(
+      client.db,
+      value.grant.workspaceId!,
+      value.grant.subjectId,
+      (db) =>
+        db.transaction((tx) =>
+          saveComposerDraftInTransaction(tx as typeof db, {
+            accountId: value.grant.accountId,
+            workspaceId: value.grant.workspaceId!,
+            sessionId: value.session.id,
+            subjectId: value.grant.subjectId,
+            expectedRevision: 0,
+            text: "inspect the custom mount",
+            resources: [customResource],
+            tools: [],
+            toolsProvided: false,
+            model: "scripted-model",
+            reasoningEffort: "low",
+          }),
+        ),
+    );
+    const submit = (overrides: { text?: string; resources?: ResourceRef[] }) =>
+      withWorkspaceSubjectRls(client.db, value.grant.workspaceId!, value.grant.subjectId, (db) =>
+        db.transaction((tx) =>
+          submitHumanPromptInTransaction(tx as typeof db, {
+            accountId: value.grant.accountId,
+            workspaceId: value.grant.workspaceId!,
+            sessionId: value.session.id,
+            subjectId: value.grant.subjectId,
+            actor: value.actor,
+            operationKey: crypto.randomUUID(),
+            delivery: "send",
+            expectedDraftRevision: draft.revision,
+            text: overrides.text ?? draft.text,
+            resources: overrides.resources ?? (draft.resources as ResourceRef[]),
+            tools: [],
+            toolsProvided: false,
+            model: "scripted-model",
+            reasoningEffort: "low",
+            reasoningEffortFallback: "medium",
+            source: "user",
+          }),
+        ),
+      );
+
+    for (const changed of [
+      {
+        resources: [{ kind: "file" as const, fileId, mountPath: `files/${fileId}` }],
+      },
+      { text: "inspect different content" },
+    ]) {
+      try {
+        await submit(changed);
+        throw new Error("changed draft unexpectedly admitted");
+      } catch (error) {
+        expect(error).toBeInstanceOf(QueueCommandConflictError);
+        expect((error as QueueCommandConflictError).code).toBe("DRAFT_CHANGED");
+      }
+    }
+  });
+
   test("Send preserves omitted versus explicit turn tool provenance without mutating a fixed policy", async () => {
     const value = await fixture(1);
     const workspaceId = value.grant.workspaceId!;

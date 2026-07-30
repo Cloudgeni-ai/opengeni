@@ -144,8 +144,16 @@ describe("ChatComposer attachments", () => {
   });
 
   test("the attach button and hidden file input render in controlsStart when attachments is present", async () => {
+    const added: File[][] = [];
     const container = await mount(
-      <ChatComposer composer={makeComposer()} attachments={makeAttachments()} />,
+      <ChatComposer
+        composer={makeComposer()}
+        attachments={makeAttachments({
+          addFiles: (files) => {
+            added.push([...files]);
+          },
+        })}
+      />,
     );
     const attach = [...container.querySelectorAll("button")].find(
       (b) => b.getAttribute("aria-label") === "Attach files",
@@ -154,6 +162,14 @@ describe("ChatComposer attachments", () => {
     const input = container.querySelector('input[type="file"]');
     expect(input).toBeTruthy();
     expect(input?.getAttribute("multiple")).not.toBeNull();
+    const image = new File(["image"], "chosen.png", { type: "image/png" });
+    Object.defineProperty(input, "files", { configurable: true, value: [image] });
+    await act(async () => {
+      input?.dispatchEvent(new Event("change", { bubbles: true }));
+      await Promise.resolve();
+    });
+    expect(added).toHaveLength(1);
+    expect(added[0]!.map((file) => file.name)).toEqual(["chosen.png"]);
   });
 
   test("attachment chips render above the textarea when files are attached", async () => {

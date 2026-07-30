@@ -2,9 +2,10 @@ import {
   metadataWithTurnExecutionPolicyV1,
   mergeResourceRefs,
   mergeToolRefs,
+  ResourceRef,
+  resourceMountPath,
   turnExecutionPolicyAuditMetadata,
   type ReasoningEffort,
-  type ResourceRef,
   type SessionToolPolicy,
   type ToolRef,
   type TurnExecutionPolicyV1,
@@ -387,6 +388,17 @@ function draftIsNonEmpty(draft: ComposerDraftRow): boolean {
   );
 }
 
+function withCanonicalResourceMountPaths(resources: readonly unknown[]): unknown[] {
+  return resources.map((value) => {
+    const parsed = ResourceRef.safeParse(value);
+    if (!parsed.success) return value;
+    return {
+      ...(value as Record<string, unknown>),
+      mountPath: resourceMountPath(parsed.data),
+    };
+  });
+}
+
 export async function getComposerDraftInTransaction(
   db: Database,
   input: {
@@ -452,7 +464,7 @@ export async function saveComposerDraftInTransaction(
     subjectId: input.subjectId,
     revision,
     text: input.text,
-    resources: input.resources,
+    resources: withCanonicalResourceMountPaths(input.resources),
     tools: input.tools,
     toolsProvided: input.toolsProvided,
     model: input.model,
@@ -824,7 +836,7 @@ export async function editQueuedTurnInTransaction(
     subjectId: input.subjectId,
     revision: nextDraftRevision,
     text: turn.prompt,
-    resources: turn.resources,
+    resources: withCanonicalResourceMountPaths(turn.resources),
     tools: turn.tools,
     toolsProvided: turn.toolsProvided,
     model: turn.model,
@@ -1173,7 +1185,7 @@ export async function submitHumanPromptInTransaction(
     expectedDraftRevision: input.expectedDraftRevision ?? null,
     text: input.text,
     turnInstructions: input.turnInstructions ?? null,
-    resources: input.resources,
+    resources: withCanonicalResourceMountPaths(input.resources),
     tools: input.tools,
     toolsProvided: input.toolsProvided === true,
     model: input.model ?? null,
@@ -1282,7 +1294,7 @@ export async function submitHumanPromptInTransaction(
       draft &&
       canonicalSessionCommandHash({
         text: draft.text,
-        resources: draft.resources,
+        resources: withCanonicalResourceMountPaths(draft.resources),
         tools: draft.tools,
         toolsProvided: draft.toolsProvided,
         model: draft.model,
@@ -1290,7 +1302,7 @@ export async function submitHumanPromptInTransaction(
       }) !==
         canonicalSessionCommandHash({
           text: input.text,
-          resources: input.resources,
+          resources: withCanonicalResourceMountPaths(input.resources),
           tools: input.tools,
           toolsProvided: input.toolsProvided === true,
           model: input.model ?? session.model,

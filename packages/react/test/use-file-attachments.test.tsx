@@ -175,7 +175,8 @@ describe("useFileAttachments", () => {
   });
 
   test("addFromPaste applies the default image/* filter — only the image is enqueued", async () => {
-    const client = fakeClient({ uploadFile: async () => fakeAsset() });
+    const asset = fakeAsset();
+    const client = fakeClient({ uploadFile: async () => asset });
     const hook = await renderHook(
       () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
       undefined,
@@ -187,6 +188,7 @@ describe("useFileAttachments", () => {
     await flushing(() => hook.result.current.addFromPaste({ clipboardData }));
     expect(hook.result.current.attachments).toHaveLength(1);
     expect(hook.result.current.attachments[0]?.contentType).toBe("image/png");
+    expect(hook.result.current.readyResources).toEqual([{ kind: "file", fileId: asset.id }]);
     await hook.unmount();
   });
 
