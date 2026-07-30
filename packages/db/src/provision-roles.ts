@@ -181,12 +181,60 @@ async function ensureRestrictedAppLoginRole(
   role: string,
   password: string,
 ): Promise<void> {
+  const existing = await sql<
+    {
+      superuser: boolean;
+      bypass_rls: boolean;
+      create_role: boolean;
+      create_database: boolean;
+      replication: boolean;
+      session_superuser: boolean;
+    }[]
+  >`
+    select
+      target.rolsuper as superuser,
+      target.rolbypassrls as bypass_rls,
+      target.rolcreaterole as create_role,
+      target.rolcreatedb as create_database,
+      target.rolreplication as replication,
+      actor.rolsuper as session_superuser
+    from pg_roles target
+    cross join pg_roles actor
+    where target.rolname = ${role}
+      and actor.rolname = current_user
+  `;
+  const state = existing[0];
+  if (
+    state &&
+    !state.session_superuser &&
+    (state.superuser ||
+      state.bypass_rls ||
+      state.create_role ||
+      state.create_database ||
+      state.replication)
+  ) {
+    throw new Error(
+      `Refusing to normalize app role ${role}: a non-superuser role administrator cannot remove existing privileged attributes`,
+    );
+  }
+
   await sql.unsafe(`
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${literal(role)}) THEN
     EXECUTE format(
       'CREATE ROLE %I WITH LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION NOINHERIT PASSWORD %L',
+      ${literal(role)},
+      ${literal(password)}
+    );
+  ELSIF NOT (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) THEN
+    -- PostgreSQL 16+ gives a non-superuser CREATEROLE actor an ADMIN-only,
+    -- non-inheriting, non-settable edge to each role it creates. That actor may
+    -- administer ordinary fields, but only a superuser may mention SUPERUSER
+    -- or REPLICATION attributes in ALTER ROLE, even when setting them false.
+    -- The query above already proved every privileged attribute is false.
+    EXECUTE format(
+      'ALTER ROLE %I WITH LOGIN NOINHERIT PASSWORD %L',
       ${literal(role)},
       ${literal(password)}
     );
@@ -214,23 +262,57 @@ async function assertAppRoleSafeToNormalize(sql: postgres.Sql, role: string): Pr
     return;
   }
 
-  const memberships = await sql<{ relationship: string }[]>`
-    select ('inherits:' || parent.rolname)::text as relationship
+  const memberships = await sql<
+    {
+      relationship: string;
+      parent_role: string;
+      member_role: string;
+      admin_option: boolean;
+      inherit_option: boolean;
+      set_option: boolean;
+      session_role: string;
+    }[]
+  >`
+    select
+      ('inherits:' || parent.rolname)::text as relationship,
+      parent.rolname::text as parent_role,
+      member.rolname::text as member_role,
+      membership.admin_option,
+      membership.inherit_option,
+      membership.set_option,
+      current_user::text as session_role
     from pg_auth_members membership
     join pg_roles member on member.oid = membership.member
     join pg_roles parent on parent.oid = membership.roleid
     where member.rolname = ${role}
     union all
-    select ('member:' || member.rolname)::text as relationship
+    select
+      ('member:' || member.rolname)::text as relationship,
+      parent.rolname::text as parent_role,
+      member.rolname::text as member_role,
+      membership.admin_option,
+      membership.inherit_option,
+      membership.set_option,
+      current_user::text as session_role
     from pg_auth_members membership
     join pg_roles member on member.oid = membership.member
     join pg_roles parent on parent.oid = membership.roleid
     where parent.rolname = ${role}
     order by relationship
   `;
-  if (memberships.length > 0) {
+  const unsafeMemberships = memberships.filter(
+    (membership) =>
+      !(
+        membership.parent_role === role &&
+        membership.member_role === membership.session_role &&
+        membership.admin_option &&
+        !membership.inherit_option &&
+        !membership.set_option
+      ),
+  );
+  if (unsafeMemberships.length > 0) {
     throw new Error(
-      `Refusing to normalize app role ${role}: remove role relationships first (${memberships
+      `Refusing to normalize app role ${role}: remove role relationships first (${unsafeMemberships
         .map((row) => row.relationship)
         .join(", ")})`,
     );
