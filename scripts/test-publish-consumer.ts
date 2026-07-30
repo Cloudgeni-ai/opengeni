@@ -249,6 +249,7 @@ try {
             "browser.tsx",
             "presentation.tsx",
             "runtime-proof.ts",
+            "sdk-types.ts",
             "session.ts",
             "session.vite.config.ts",
             "ssr.tsx",
@@ -382,6 +383,10 @@ try {
     writeFile(
       join(consumerRoot, "runtime-proof.ts"),
       'import { getSkillLibraryEntry, listSkillLibraryEntries } from "@opengeni/runtime/skill-library";\nconst entry = getSkillLibraryEntry("azure-verified-modules", "1.0.0");\nif (!entry) throw new Error("packed runtime skill-library entry was not available");\nif (!listSkillLibraryEntries().some((candidate) => candidate.id === entry.id && candidate.version === entry.version)) throw new Error("packed runtime skill-library list did not include the entry");\nconsole.log(`RUNTIME_SKILL_LIBRARY_OK version=${entry.version} hash=${entry.contentSha256}`);\n',
+    ),
+    writeFile(
+      join(consumerRoot, "sdk-types.ts"),
+      'import type { CreateSessionRequest, Session } from "@opengeni/sdk";\ntype Assert<T extends true> = T;\nexport type CreateSessionRequestExposesFirstPartyMcpTools = Assert<"firstPartyMcpTools" extends keyof CreateSessionRequest ? true : false>;\nexport type SessionExposesFirstPartyMcpTools = Assert<"firstPartyMcpTools" extends keyof Session ? true : false>;\n',
     ),
     writeFile(
       join(consumerRoot, "session.ts"),
