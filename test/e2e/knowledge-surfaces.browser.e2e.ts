@@ -21,6 +21,10 @@ import {
   type Page,
   type Route,
 } from "playwright";
+import {
+  isExpectedDisabledMachinesConsoleError,
+  isExpectedDisabledMachinesResponse,
+} from "./knowledge-surfaces.diagnostics";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const ownerHeaders = { "x-opengeni-subject": "knowledge-surfaces-owner" };
@@ -85,6 +89,18 @@ const workflowClient: SessionWorkflowClient = {
   startRigVerification: async () => undefined,
 };
 
+// The browser fixture intentionally exercises the default deployment contract:
+// Connected Machines are disabled, so only its exact invisible list endpoint
+// may return 404. The API route and enabled/disabled behavior are covered by
+// apps/api/test/machines-routes.test.ts.
+const browserTestSettings = testSettings({
+  productAccessMode: "configured",
+  delegationSecret: undefined,
+  environmentsEncryptionKey: Buffer.alloc(32, 15).toString("base64"),
+  documentEmbeddingProvider: "deterministic",
+  sandboxSelfhostedEnabled: false,
+});
+
 describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
   let shared: SharedTestDatabase;
   let dbClient: ReturnType<typeof createDb>;
@@ -104,13 +120,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     shared = acquired;
     dbClient = createDb(shared.appUrl);
     const app = createApp({
-      settings: testSettings({
-        databaseUrl: shared.appUrl,
-        productAccessMode: "configured",
-        delegationSecret: undefined,
-        environmentsEncryptionKey: Buffer.alloc(32, 15).toString("base64"),
-        documentEmbeddingProvider: "deterministic",
-      }),
+      settings: { ...browserTestSettings, databaseUrl: shared.appUrl },
       db: dbClient.db,
       bus: new MemoryEventBus(),
       workflowClient,
@@ -161,10 +171,14 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
   }, 60_000);
 
   test("ships first-class, responsive, accessible variable sets, documents, and memory", async () => {
-    const bootstrap = await configuredContext(browser, {
-      viewport: { width: 1280, height: 900 },
-      extraHTTPHeaders: ownerHeaders,
-    });
+    const bootstrap = await configuredContext(
+      browser,
+      {
+        viewport: { width: 1280, height: 900 },
+        extraHTTPHeaders: ownerHeaders,
+      },
+      browserTestSettings.sandboxSelfhostedEnabled,
+    );
     let workspaceId: string;
     let fixtures: SeededFixtures;
     try {
@@ -214,12 +228,16 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     ];
 
     for (const matrixCase of matrix) {
-      const context = await configuredContext(browser, {
-        viewport: matrixCase.viewport,
-        isMobile: matrixCase.isMobile,
-        hasTouch: matrixCase.hasTouch,
-        extraHTTPHeaders: ownerHeaders,
-      });
+      const context = await configuredContext(
+        browser,
+        {
+          viewport: matrixCase.viewport,
+          isMobile: matrixCase.isMobile,
+          hasTouch: matrixCase.hasTouch,
+          extraHTTPHeaders: ownerHeaders,
+        },
+        browserTestSettings.sandboxSelfhostedEnabled,
+      );
       try {
         const page = await context.newPage();
         for (const theme of ["light", "dark"] as const) {
@@ -428,9 +446,11 @@ const diagnostics = new WeakMap<BrowserContext, string[]>();
 async function configuredContext(
   browser: Browser,
   options: BrowserContextOptions,
+  sandboxSelfhostedEnabled: boolean,
 ): Promise<BrowserContext> {
   const context = await browser.newContext(options);
   const problems: string[] = [];
+  const expectedMachines404Urls = new Set<string>();
   diagnostics.set(context, problems);
   context.on("page", (page) => {
     page.on("pageerror", (error) => problems.push(`page error: ${String(error)}`));
@@ -445,9 +465,26 @@ async function configuredContext(
   });
   context.on("response", (response) => {
     if (response.status() < 400) return;
-    const url = new URL(response.url());
     // This one response is the explicit error-state fixture above.
+    let url: URL;
+    try {
+      url = new URL(response.url());
+    } catch {
+      problems.push(
+        `response ${response.status()}: ${response.request().method()} ${response.url()}`,
+      );
+      return;
+    }
     if (response.status() === 503 && /\/knowledge\/memories$/.test(url.pathname)) return;
+    if (
+      isExpectedDisabledMachinesResponse(
+        { status: response.status(), method: response.request().method(), url: response.url() },
+        sandboxSelfhostedEnabled,
+      )
+    ) {
+      expectedMachines404Urls.add(response.url());
+      return;
+    }
     problems.push(
       `response ${response.status()}: ${response.request().method()} ${response.url()}`,
     );
@@ -460,6 +497,17 @@ async function configuredContext(
       message.text() ===
       "Failed to load resource: the server responded with a status of 503 (Service Unavailable)"
     ) {
+      return;
+    }
+    const locationUrl = message.location().url;
+    if (
+      isExpectedDisabledMachinesConsoleError(
+        { text: message.text(), locationUrl },
+        sandboxSelfhostedEnabled,
+        expectedMachines404Urls,
+      )
+    ) {
+      expectedMachines404Urls.delete(locationUrl);
       return;
     }
     problems.push(`console error: ${message.text()}`);
@@ -783,11 +831,7 @@ async function expectOwnedTouchTargets(page: Page, surface: Surface): Promise<vo
             page.getByRole("button", { name: "Create base", exact: true }),
             page.getByRole("button", { name: longBaseName, exact: true }),
           ]
-        : [
-            page.getByRole("button", { name: "Add memory", exact: true }),
-            page.getByRole("button", { name: "Approve", exact: true }),
-            page.getByRole("button", { name: "Reject", exact: true }),
-          ];
+        : [page.getByRole("button", { name: "Add memory", exact: true })];
   for (const target of targets) {
     const box = await target.boundingBox();
     expect(box).not.toBeNull();
