@@ -59,7 +59,13 @@ export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/social/oauth/start", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
-    const payload = SocialOAuthStartRequest.parse(await c.req.json());
+    const parsed = SocialOAuthStartRequest.safeParse(await c.req.json());
+    if (!parsed.success) {
+      throw new HTTPException(400, {
+        message: parsed.error.issues[0]?.message ?? "invalid social OAuth start request",
+      });
+    }
+    const payload = parsed.data;
     const result = await startSocialOAuth(
       { db, settings, observability },
       {
