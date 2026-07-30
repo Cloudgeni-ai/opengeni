@@ -5,6 +5,8 @@ const setupAuthNeeded = {
   providerDomain: "slack.com",
   toolName: null,
 };
+const humanInitiator = { kind: "subject" as const };
+const serviceInitiator = { kind: "service" as const };
 
 describe("Slack auth prompt gating", () => {
   test.each([
@@ -13,10 +15,14 @@ describe("Slack auth prompt gating", () => {
     "Can you summarize the latest Slack thread?",
   ])("allows setup-time prompts for explicit Slack intent: %s", (text) => {
     expect(
-      shouldPublishToolAuthNeededForTurn(setupAuthNeeded, {
-        type: "user.message",
-        payload: { text },
-      }),
+      shouldPublishToolAuthNeededForTurn(
+        setupAuthNeeded,
+        {
+          type: "user.message",
+          payload: { text },
+        },
+        humanInitiator,
+      ),
     ).toBe(true);
   });
 
@@ -26,19 +32,37 @@ describe("Slack auth prompt gating", () => {
     "Draft a concise project update.",
   ])("suppresses setup-time Slack prompts for unrelated chat: %s", (text) => {
     expect(
-      shouldPublishToolAuthNeededForTurn(setupAuthNeeded, {
-        type: "user.message",
-        payload: { text },
-      }),
+      shouldPublishToolAuthNeededForTurn(
+        setupAuthNeeded,
+        {
+          type: "user.message",
+          payload: { text },
+        },
+        humanInitiator,
+      ),
     ).toBe(false);
   });
 
   test("suppresses setup-time Slack prompts for non-human continuation turns", () => {
     expect(
-      shouldPublishToolAuthNeededForTurn(setupAuthNeeded, {
-        type: "system.update.delivered",
-        payload: {},
-      }),
+      shouldPublishToolAuthNeededForTurn(
+        setupAuthNeeded,
+        {
+          type: "system.update.delivered",
+          payload: {},
+        },
+        serviceInitiator,
+      ),
+    ).toBe(false);
+  });
+
+  test("suppresses setup-time Slack prompts for service-initiated user messages", () => {
+    expect(
+      shouldPublishToolAuthNeededForTurn(
+        setupAuthNeeded,
+        { type: "user.message", payload: { text: "Post this update in Slack." } },
+        serviceInitiator,
+      ),
     ).toBe(false);
   });
 
@@ -47,6 +71,7 @@ describe("Slack auth prompt gating", () => {
       shouldPublishToolAuthNeededForTurn(
         { providerDomain: "slack.com", toolName: "search" },
         { type: "system.update.delivered", payload: {} },
+        serviceInitiator,
       ),
     ).toBe(true);
   });
@@ -56,6 +81,7 @@ describe("Slack auth prompt gating", () => {
       shouldPublishToolAuthNeededForTurn(
         { providerDomain: "linear.app", toolName: null },
         { type: "user.message", payload: { text: "Summarize this Terraform plan." } },
+        serviceInitiator,
       ),
     ).toBe(true);
   });

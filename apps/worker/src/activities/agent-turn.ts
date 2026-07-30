@@ -333,6 +333,7 @@ export function credentialSubjectIdForTurnInitiator(
 export function shouldPublishToolAuthNeededForTurn(
   payload: Pick<ToolAuthNeededPayload, "providerDomain" | "toolName">,
   trigger: Pick<SessionEvent, "type" | "payload">,
+  initiator: Pick<TurnInitiator, "kind">,
 ): boolean {
   if (typeof payload.toolName === "string" && payload.toolName.trim().length > 0) {
     return true;
@@ -342,7 +343,7 @@ export function shouldPublishToolAuthNeededForTurn(
   if (!isSlack) {
     return true;
   }
-  if (trigger.type !== "user.message") {
+  if (initiator.kind !== "subject" || trigger.type !== "user.message") {
     return false;
   }
   const text = (trigger.payload as { text?: unknown }).text;
@@ -5022,7 +5023,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             ...(credentialSubjectId ? { credentialSubjectId } : {}),
             resolveCredential,
             onAuthNeeded: async (payload) => {
-              if (!shouldPublishToolAuthNeededForTurn(payload, trigger)) {
+              if (!shouldPublishToolAuthNeededForTurn(payload, trigger, turn.initiator)) {
                 return;
               }
               await publish!([{ type: "tool.auth_needed", payload }], true);
