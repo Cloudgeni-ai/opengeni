@@ -62,8 +62,8 @@ the audited SHA. These values are a point-in-time observation, not a live SLO.
 Implemented on the focused branch after the audited baseline:
 
 - maintenance/drain-only migration `0139_hierarchical_role_aware_memory.sql` consumes the existing
-  immutable session creator/turn-initiator contract and adds trusted session
-  creator provenance, typed scopes, bounded labels, relationships, reversible
+  immutable exact-turn-initiator contract and adds trusted session provenance,
+  typed scopes, bounded labels, relationships, reversible
   maintenance operations, and text-free deletion/private-export audit tables;
   all five memory tables are FORCE RLS;
 - DB applicability/ranking, bounded standing injection, atomic correction edges,
@@ -71,8 +71,8 @@ Implemented on the focused branch after the audited baseline:
   wired through REST, capability-first MCP tools, contracts, and the SDK;
 - REST/MCP adapters bind user/role/session/actor selectors from signed grants and
   persisted session context, never caller-controlled identity fields; a worker
-  bearer is only the transport principal, while the persisted session creator
-  supplies private-memory subject and creator/actor attribution;
+  bearer is only the transport principal, while the immutable human initiating
+  the exact current turn supplies private-memory authority;
 - workspace-qualified creator provenance replaces the old global session FK;
   reviewed `approved`/`rejected` states are created only by a row-locked
   `proposed` transition; and workspace-readable session events redact private
@@ -140,29 +140,31 @@ exists.
 #### Trusted user context
 
 The first-party MCP principal is `worker:first-party-mcp`, not the human that
-initiated the session lineage. The existing session-turn-initiator contract
-freezes `sessions.created_by_kind`, `created_by_subject_id`, and
-`created_by_context`, and freezes each turn's own initiator separately:
+initiated the current turn. The existing session-turn-initiator contract freezes
+session creation attribution separately from each turn's own immutable
+initiator:
 
 - direct human creation records the authenticated subject initiator;
 - agent-created sessions inherit that causal initiator only through the exact
   worker-signed calling turn/attempt validated under the create transaction;
 - scheduled, delegated-service, and unattributed legacy creation remain explicit
   service initiators rather than being inferred back to a human;
-- user-scope agent search, save, and injection accept only
-  `created_by_kind = 'subject'` and fail closed for every service/legacy creator.
+- user-scope agent search, save, and injection accept only the exact active
+  turn/attempt/generation with `initiator_kind = 'subject'`; stale, interrupted,
+  service, partial, and legacy attempts fail closed. The session creator is not
+  substituted for a later human turn.
 
-For REST and the deprecated documents-MCP route, a signed session id is resolved
-against the requested workspace before any memory operation. Missing or foreign
-sessions fail with 403. The worker bearer subject never substitutes for the
-persisted initiating human; a signed service/legacy-created session fails closed
-for user writes, while workspace writes remain valid. Sessionless human/API grants
-retain their authenticated subject. Only the validated session id may become
-creator/actor provenance, and the composite
+For REST and the deprecated documents-MCP route, complete signed
+session/turn/attempt/generation claims are resolved against the requested
+workspace before any memory operation. Missing, partial, stale, interrupted,
+service, or foreign attempts fail with 403. The worker bearer subject and session
+creator never substitute for the persisted exact-turn human. Sessionless
+human/API grants retain their authenticated subject. Only the validated session
+id may become creator/actor provenance, and the composite
 `(workspace_id, created_by_session_id)` foreign key prevents a valid session from
 another tenant being attached to a memory.
 
-The creator initiator remains immutable session truth; subject labels and arbitrary
+The turn initiator remains immutable turn truth; subject labels and arbitrary
 session metadata are never used as identity.
 
 #### Role and task context
@@ -358,7 +360,10 @@ Required database evidence uses a non-owner app role and at least:
 
 ## Migration and rollout
 
-The implementation uses maintenance/drain-only migration `0137` after the retained migrations.
+The implementation uses maintenance/drain-only migration
+`0139_hierarchical_role_aware_memory.sql` after the retained, byte-identical
+`0137_preference_registry.sql` and the `0138_sandbox_checkpoint_artifacts_and_deadlines.sql`
+maintenance cutover.
 Although its storage changes are additive, it is not safe for mixed worker
 versions: an old worker ignores typed applicability and can over-read role-,
 session-, or ephemeral-scoped rows written by a new worker during overlap.
@@ -367,11 +372,11 @@ The cutover sequence is therefore:
 
 1. stop new session/turn admission;
 2. drain and terminate every old worker and in-flight session execution;
-3. apply `0137` with no old application process reading memory;
+3. apply `0139_hierarchical_role_aware_memory.sql` with no old application process reading memory;
 4. start only compatible API and worker versions;
 5. verify health and reopen admission.
 
-Within that fenced cutover, `0096`:
+Within that fenced cutover, `0139_hierarchical_role_aware_memory.sql`:
 
 1. add nullable session creator provenance and typed memory columns with safe
    defaults;

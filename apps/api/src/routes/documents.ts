@@ -41,6 +41,7 @@ import {
   updateKnowledgeMemory,
   saveWorkspaceMemory,
   searchWorkspaceMemories,
+  type ExactHumanTurnAttemptClaims,
   type MemoryAccessContext,
   type WorkspaceMemoryContext,
 } from "@opengeni/db";
@@ -66,8 +67,30 @@ import type { ApiRouteDeps } from "@opengeni/core";
 import { buildDocumentsMcpServer } from "../mcp/documents";
 import { sanitizeFilename } from "./files";
 
-function trustedMemoryActorSessionId(grant: AccessGrant): string | null {
-  return typeof grant.metadata?.sessionId === "string" ? grant.metadata.sessionId : null;
+function exactMemoryAttemptClaims(
+  grant: AccessGrant,
+): Omit<ExactHumanTurnAttemptClaims, "accountId" | "workspaceId"> | null {
+  const metadata = grant.metadata ?? {};
+  const values = {
+    sessionId: metadata["sessionId"],
+    turnId: metadata["turnId"],
+    attemptId: metadata["attemptId"],
+    executionGeneration: metadata["executionGeneration"],
+  };
+  const present = Object.values(values).filter((value) => value !== undefined).length;
+  if (present === 0) return null;
+  if (
+    typeof values.sessionId !== "string" ||
+    typeof values.turnId !== "string" ||
+    typeof values.attemptId !== "string" ||
+    typeof values.executionGeneration !== "number" ||
+    !Number.isSafeInteger(values.executionGeneration) ||
+    values.executionGeneration < 1 ||
+    values.executionGeneration > 2_147_483_647
+  ) {
+    throw new HTTPException(403, { message: "incomplete signed memory attempt authority" });
+  }
+  return values as Omit<ExactHumanTurnAttemptClaims, "accountId" | "workspaceId">;
 }
 
 type ResolvedMemoryRequestContext = {
@@ -77,33 +100,36 @@ type ResolvedMemoryRequestContext = {
 };
 
 /**
- * Resolve a signed session claim once at the REST trust boundary.
+ * Resolve signed exact-attempt claims once at the REST trust boundary.
  *
  * A worker bearer identifies the transport principal, not the initiating human
- * whose private memory is applicable. When it carries a session claim, the
- * persisted immutable session creator is accepted only when it is a subject
- * initiator; service and legacy creators fail closed for private memory. The
- * claimed session must belong to the requested workspace before it can be used
- * for either access or provenance. Sessionless human/API grants keep their
- * authenticated subject.
+ * whose private memory is applicable. Session-bound grants must carry the exact
+ * current turn, attempt, and generation; the persisted immutable human turn
+ * initiator supplies private-memory authority. Stale, partial, service, and
+ * foreign claims fail closed. Sessionless human/API grants keep their
+ * authenticated subject for direct human memory administration.
  */
 async function resolveMemoryRequestContext(
   db: ApiRouteDeps["db"],
   workspaceId: string,
   grant: AccessGrant,
 ): Promise<ResolvedMemoryRequestContext> {
-  const signedSessionId = trustedMemoryActorSessionId(grant);
-  if (!signedSessionId) {
+  const attemptClaims = exactMemoryAttemptClaims(grant);
+  if (!attemptClaims) {
     return {
       actorSessionId: null,
       access: { subjectId: grant.subjectId },
       sessionContext: null,
     };
   }
-  const sessionContext = await getSessionMemoryContext(db, workspaceId, signedSessionId);
+  const sessionContext = await getSessionMemoryContext(db, {
+    accountId: grant.accountId,
+    workspaceId,
+    ...attemptClaims,
+  });
   if (!sessionContext?.sessionId) {
     throw new HTTPException(403, {
-      message: "trusted signed memory session was not found in this workspace",
+      message: "exact signed memory attempt is not current human authority in this workspace",
     });
   }
   return {

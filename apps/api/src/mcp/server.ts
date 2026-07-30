@@ -368,7 +368,12 @@ export function buildOpenGeniMcpServer(
   // normal first-party worker token, a bare toolspace:call token does not see
   // unpermissioned session tools; memory follows that title/goal parity and
   // stays on the normal first-party MCP surface only.
-  if (!toolspaceMode && sessionId !== null && options.workspaceMemoryEnabled === true) {
+  if (
+    !toolspaceMode &&
+    sessionId !== null &&
+    options.workspaceMemoryEnabled === true &&
+    preferenceAttemptClaims(grant) !== null
+  ) {
     registerMemoryTools(server, deps, grant, sessionId, json);
   }
   if (!toolspaceMode && sessionId !== null && preferenceAttemptClaims(grant) !== null) {
@@ -1235,12 +1240,19 @@ type TrustedMemoryContext = NonNullable<Awaited<ReturnType<typeof getSessionMemo
 
 async function trustedMemoryContext(
   deps: ApiRouteDeps,
-  workspaceId: string,
-  sessionId: string,
+  grant: AccessGrant,
 ): Promise<TrustedMemoryContext> {
-  const context = await getSessionMemoryContext(deps.db, workspaceId, sessionId);
+  const claims = preferenceAttemptClaims(grant);
+  if (!claims) {
+    throw new Error("Exact signed memory attempt authority is required.");
+  }
+  const context = await getSessionMemoryContext(deps.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    ...claims,
+  });
   if (!context) {
-    throw new Error("Signed memory session was not found in this workspace.");
+    throw new Error("Exact signed memory attempt is not current human authority.");
   }
   return context;
 }
@@ -1255,7 +1267,7 @@ function bindSessionMemoryScope(
     case "user": {
       const subjectId = context.access?.subjectId;
       if (!subjectId) {
-        throw new Error("User-scoped memory requires a persisted session creator.");
+        throw new Error("User-scoped memory requires an immutable human turn initiator.");
       }
       return { type: "user", subjectId };
     }
@@ -1290,7 +1302,7 @@ function registerMemoryTools(
       },
     },
     async ({ query, kind, scope_types, labels, limit }) => {
-      const context = await trustedMemoryContext(deps, grant.workspaceId, sessionId);
+      const context = await trustedMemoryContext(deps, grant);
       return json({
         results: await searchWorkspaceMemories(
           deps.db,
@@ -1324,7 +1336,7 @@ function registerMemoryTools(
       },
     },
     async ({ text, kind, scope, labels, valid_until, confidence, replaces_id }) => {
-      const context = await trustedMemoryContext(deps, grant.workspaceId, sessionId);
+      const context = await trustedMemoryContext(deps, grant);
       const scopeKind = scope ?? "workspace";
       if (scopeKind === "ephemeral" && !valid_until) {
         throw new Error("Ephemeral memory requires valid_until.");
@@ -1373,7 +1385,7 @@ function registerMemoryTools(
       },
     },
     async ({ id, reason, replacement_text }) => {
-      const context = await trustedMemoryContext(deps, grant.workspaceId, sessionId);
+      const context = await trustedMemoryContext(deps, grant);
       const result = await correctWorkspaceMemory(
         deps.db,
         {

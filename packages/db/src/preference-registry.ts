@@ -22,7 +22,12 @@ import {
 } from "@opengeni/contracts";
 import { and, asc, desc, eq, gt, inArray, isNull, lte, or, sql, type SQL } from "drizzle-orm";
 import type { Database } from "./index";
-import { setSubjectRlsContext, withWorkspaceRls, withWorkspaceSubjectRls } from "./index";
+import {
+  resolveExactHumanTurnAttemptAuthority,
+  setSubjectRlsContext,
+  withWorkspaceRls,
+  withWorkspaceSubjectRls,
+} from "./index";
 import { nestedPostgresSqlState, safeDatabaseErrorFacts } from "./persistence-errors";
 import * as schema from "./schema";
 
@@ -979,77 +984,17 @@ async function withPreferenceRegistryAttemptAuthority<T>(
   fn: (db: Database, authority: PreferenceRegistryAttemptAuthority) => Promise<T>,
 ): Promise<T> {
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
-    const rows = (await scopedDb.execute(sql`
-      WITH locked_workspace AS MATERIALIZED (
-        SELECT workspace.id, workspace.account_id
-        FROM workspaces workspace
-        WHERE workspace.id = ${input.workspaceId}::uuid
-          AND workspace.account_id = ${input.accountId}::uuid
-        FOR KEY SHARE OF workspace
-      ), locked_session AS MATERIALIZED (
-        SELECT session.id, session.account_id, session.workspace_id, session.active_turn_id
-        FROM sessions session
-        JOIN locked_workspace workspace
-          ON workspace.id = session.workspace_id
-          AND workspace.account_id = session.account_id
-        WHERE session.id = ${input.sessionId}::uuid
-          AND session.active_turn_id = ${input.turnId}::uuid
-        FOR SHARE OF session
-      ), locked_turn AS MATERIALIZED (
-        SELECT turn.id, turn.account_id, turn.workspace_id, turn.session_id,
-          turn.active_attempt_id, turn.execution_generation,
-          turn.initiator_kind, turn.initiator_subject_id
-        FROM session_turns turn
-        JOIN locked_session session
-          ON session.id = turn.session_id
-          AND session.workspace_id = turn.workspace_id
-          AND session.account_id = turn.account_id
-        WHERE turn.id = ${input.turnId}::uuid
-          AND turn.active_attempt_id = ${input.attemptId}::uuid
-          AND turn.execution_generation = ${input.executionGeneration}
-          AND turn.status IN ('running', 'requires_action', 'recovering', 'waiting_capacity')
-          AND turn.initiator_kind = 'subject'
-          AND length(btrim(turn.initiator_subject_id)) BETWEEN 1 AND 1024
-        FOR SHARE OF turn
-      ), locked_attempt AS MATERIALIZED (
-        SELECT attempt.id, attempt.account_id, attempt.workspace_id,
-          attempt.session_id, attempt.turn_id, attempt.execution_generation
-        FROM session_turn_attempts attempt
-        JOIN locked_turn turn
-          ON turn.id = attempt.turn_id
-          AND turn.session_id = attempt.session_id
-          AND turn.workspace_id = attempt.workspace_id
-          AND turn.account_id = attempt.account_id
-        WHERE attempt.id = ${input.attemptId}::uuid
-          AND attempt.execution_generation = ${input.executionGeneration}
-          AND attempt.state IN ('claimed', 'running')
-          AND NOT EXISTS (
-            SELECT 1
-            FROM session_attempt_interruptions interruption
-            WHERE interruption.workspace_id = attempt.workspace_id
-              AND interruption.attempt_id = attempt.id
-              AND interruption.state IN ('pending', 'delivered', 'acknowledged')
-          )
-        FOR SHARE OF attempt
-      )
-      SELECT turn.initiator_subject_id
-      FROM locked_workspace workspace
-      JOIN locked_session session ON true
-      JOIN locked_turn turn ON true
-      JOIN locked_attempt attempt ON true
-      WHERE workspace.account_id = attempt.account_id
-        AND workspace.id = attempt.workspace_id
-        AND session.id = attempt.session_id
-        AND turn.id = attempt.turn_id
-    `)) as unknown as Array<{ initiator_subject_id: string }>;
-    const initiatingHumanSubjectId = rows[0]?.initiator_subject_id;
-    if (!initiatingHumanSubjectId) {
+    const resolved = await resolveExactHumanTurnAttemptAuthority(scopedDb, input);
+    if (!resolved) {
       throw new PreferenceRegistryInitiatorError(
         "Preference retrieval requires the exact current attempt, generation, and immutable human initiator",
       );
     }
-    const authority = { ...input, initiatingHumanSubjectId };
-    await setSubjectRlsContext(scopedDb, initiatingHumanSubjectId);
+    const authority = {
+      ...input,
+      initiatingHumanSubjectId: resolved.initiatingHumanSubjectId,
+    };
+    await setSubjectRlsContext(scopedDb, resolved.initiatingHumanSubjectId);
     return await fn(scopedDb, authority);
   });
 }

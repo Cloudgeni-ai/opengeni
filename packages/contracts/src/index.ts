@@ -2900,7 +2900,8 @@ export function isPrivateMemoryToolName(name: unknown): name is string {
 
 // Public selectors intentionally omit the private user subject id. A user-scoped
 // response is already RLS-filtered to the caller; writes bind it from the trusted
-// grant/session creator rather than accepting an arbitrary subject on the wire.
+// authenticated grant/exact current turn rather than accepting an arbitrary
+// subject on the wire.
 export const MemoryScopeSpec = /* @__PURE__ */ z.discriminatedUnion("type", [
   z.object({ type: z.literal("workspace") }),
   z.object({ type: z.literal("user") }),

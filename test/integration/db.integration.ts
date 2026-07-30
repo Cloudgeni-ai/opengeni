@@ -12,6 +12,7 @@ import {
   createWorkspace,
   createKnowledgeMemory,
   getKnowledgeMemory,
+  getSessionMemoryContext,
   saveWorkspaceMemory,
   correctWorkspaceMemory,
   searchWorkspaceMemories,
@@ -2286,6 +2287,106 @@ describe("DB integration", () => {
     await enableWorkspaceMemory(empty.workspaceId);
     const emptyBlock = await resolveWorkspaceMemoryBlock(dbClient.db, empty.workspaceId);
     expect(emptyBlock).toContain("currently empty");
+  });
+
+  test("shared sessions bind private memory to the exact current human turn, not the creator", async () => {
+    const grant = await testGrant(dbClient.db);
+    const sessionCreatorSubject = `test:memory-creator:${crypto.randomUUID()}`;
+    const turnInitiatorSubject = `test:memory-turn:${crypto.randomUUID()}`;
+    const session = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "shared session exact-turn memory authority",
+      resources: [],
+      metadata: { role: "Release.Ops", memoryLabels: ["release"] },
+      model: "scripted-model",
+      sandboxBackend: "none",
+      createdBy: { kind: "subject", subjectId: sessionCreatorSubject },
+    });
+    const accepted = await submitTestHumanPrompt(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      subjectId: turnInitiatorSubject,
+      text: "the non-creator starts a later turn",
+      resources: [],
+      tools: [],
+      delivery: "send",
+      reasoningEffortFallback: "medium",
+    });
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(dbClient.db, grant.workspaceId, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: `memory-authority-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    expect(claimed.action).toBe("claimed");
+    if (claimed.action !== "claimed" || claimed.turn.id !== accepted.turn.id) {
+      throw new Error("shared-session memory turn was not claimed");
+    }
+
+    await enableWorkspaceMemory(grant.workspaceId);
+    const sharedText = `shared-memory-${crypto.randomUUID()}`;
+    const creatorText = `creator-private-${crypto.randomUUID()}`;
+    const initiatorText = `initiator-private-${crypto.randomUUID()}`;
+    await saveWorkspaceMemory(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      text: sharedText,
+    });
+    await saveWorkspaceMemory(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      text: creatorText,
+      scopeSpec: { type: "user", subjectId: sessionCreatorSubject },
+      access: { subjectId: sessionCreatorSubject },
+    });
+    await saveWorkspaceMemory(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      text: initiatorText,
+      scopeSpec: { type: "user", subjectId: turnInitiatorSubject },
+      access: { subjectId: turnInitiatorSubject },
+    });
+
+    const appRoleUrl = await createRlsAppRole(dbClient.db, services.databaseUrl);
+    const appDbClient = createDb(appRoleUrl);
+    try {
+      const claims = {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        turnId: claimed.turn.id,
+        attemptId,
+        executionGeneration: claimed.turn.executionGeneration,
+      };
+      const context = await getSessionMemoryContext(appDbClient.db, claims);
+      expect(context).toEqual({
+        access: { subjectId: turnInitiatorSubject },
+        roleKey: "release.ops",
+        sessionId: session.id,
+        memoryLabels: ["release"],
+      });
+      const block = await resolveWorkspaceMemoryBlock(
+        appDbClient.db,
+        grant.workspaceId,
+        context ?? {},
+      );
+      expect(block).toContain(sharedText);
+      expect(block).toContain(initiatorText);
+      expect(block).not.toContain(creatorText);
+      expect(
+        await getSessionMemoryContext(appDbClient.db, {
+          ...claims,
+          attemptId: crypto.randomUUID(),
+        }),
+      ).toBeNull();
+    } finally {
+      await appDbClient.close();
+    }
   });
 
   test("RLS policies isolate capability, pack, and social rows for a non-owner app role", async () => {

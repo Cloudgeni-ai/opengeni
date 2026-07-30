@@ -661,17 +661,20 @@ migration history.
 `knowledge_memories` is a fourth, separate continuity surface, not conversation
 truth. Agent-visible `active ∪ approved` records compose typed workspace, user,
 role, session, and ephemeral scopes. Applicability derives only from the signed
-session id, the session's persisted creator subject, and normalized persisted
-`metadata.role`/`metadata.memoryLabels`; public payloads cannot select another
-subject, role, session, or actor. Role/label matches affect relevance and never
-grant access. Missing trusted user context fails closed under subject-aware FORCE
-RLS.
+exact session/turn/attempt/generation, that turn's immutable human initiator, and
+normalized persisted `metadata.role`/`metadata.memoryLabels`; public payloads
+cannot select another subject, role, session, or actor. The session creator is
+not authority for a later shared-session turn. Role/label matches affect
+relevance and never grant access. Missing, stale, interrupted, service, or
+partial exact-turn authority fails closed under subject-aware FORCE RLS.
 
-REST validates any signed session id against the requested workspace before all
-memory reads, writes, relationships, export, maintenance, or deprecated
-documents-MCP operations. The worker bearer is only a transport principal: the
-effective subject and creator/actor attribution come from the persisted session
-creator. Creator provenance is protected by the composite workspace/session FK.
+REST validates complete signed exact-attempt claims against the requested
+workspace before all memory reads, writes, relationships, export, maintenance,
+or deprecated documents-MCP operations. The worker bearer is only a transport
+principal: the effective private-memory subject comes from the persisted current
+turn initiator, while the validated session remains provenance protected by the
+composite workspace/session FK. Sessionless direct human/API administration
+continues to use its authenticated subject.
 The curated review lane rejects direct approved/rejected creation and permits a
 reviewed transition only from a row-locked `proposed` record.
 

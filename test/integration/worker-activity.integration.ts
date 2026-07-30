@@ -626,6 +626,10 @@ describe("worker activities integration", () => {
     const searchSentinel = `private-memory-search-${crypto.randomUUID()}`;
     const replacementSentinel = `private-memory-replacement-${crypto.randomUUID()}`;
     const reasonSentinel = `private-memory-reason-${crypto.randomUUID()}`;
+    const sessionCreatorSubject = `test:memory-session-creator:${crypto.randomUUID()}`;
+    const creatorPrivateSentinel = `creator-private-memory-${crypto.randomUUID()}`;
+    const turnPrivateSentinel = `turn-private-memory-${crypto.randomUUID()}`;
+    const sharedWorkspaceSentinel = `shared-workspace-memory-${crypto.randomUUID()}`;
     const privateSentinels = [saveSentinel, searchSentinel, replacementSentinel, reasonSentinel];
     try {
       await updateWorkspaceSettings(dbClient.db, grant.workspaceId, {
@@ -638,6 +642,28 @@ describe("worker activities integration", () => {
         kind: "semantic",
         access: { subjectId: grant.subjectId },
       });
+      await saveWorkspaceMemory(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        text: creatorPrivateSentinel,
+        kind: "semantic",
+        scopeSpec: { type: "user", subjectId: sessionCreatorSubject },
+        access: { subjectId: sessionCreatorSubject },
+      });
+      await saveWorkspaceMemory(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        text: turnPrivateSentinel,
+        kind: "semantic",
+        scopeSpec: { type: "user", subjectId: grant.subjectId },
+        access: { subjectId: grant.subjectId },
+      });
+      await saveWorkspaceMemory(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        text: sharedWorkspaceSentinel,
+        kind: "semantic",
+      });
       const session = await createOwnedSession(dbClient.db, grant, {
         initialMessage: "exercise private workspace memory tools",
         resources: [],
@@ -645,7 +671,7 @@ describe("worker activities integration", () => {
         metadata: {},
         model: "scripted-model",
         sandboxBackend: "none",
-        createdBy: { kind: "subject", subjectId: grant.subjectId },
+        createdBy: { kind: "subject", subjectId: sessionCreatorSubject },
         firstPartyMcpPermissions: ["workspace:read", "documents:search"],
       });
       await appendOwnedEvents(dbClient.db, grant, session.id, [
@@ -661,7 +687,7 @@ describe("worker activities integration", () => {
           output: [
             functionCall(
               "opengeni__memory_save",
-              { text: saveSentinel, kind: "semantic" },
+              { text: saveSentinel, kind: "semantic", scope: "user" },
               "call-private-memory-save",
             ),
           ],
@@ -727,6 +753,20 @@ describe("worker activities integration", () => {
         }),
       ).resolves.toMatchObject({ status: "idle" });
 
+      const firstModelRequest = JSON.stringify(model.requests[0] ?? "");
+      expect(firstModelRequest).toContain(sharedWorkspaceSentinel);
+      expect(firstModelRequest).toContain(turnPrivateSentinel);
+      expect(firstModelRequest).not.toContain(creatorPrivateSentinel);
+      const [savedPrivateRow] = await dbClient.db.execute<{
+        scopeSubjectId: string | null;
+      }>(dbSql`
+        select scope_subject_id as "scopeSubjectId"
+        from knowledge_memories
+        where workspace_id = ${grant.workspaceId}::uuid and text = ${saveSentinel}
+        limit 1
+      `);
+      expect(savedPrivateRow?.scopeSubjectId).toBe(grant.subjectId);
+
       const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 200);
       const persistedProjection = JSON.stringify(events);
       for (const sentinel of privateSentinels) {
@@ -766,6 +806,7 @@ describe("worker activities integration", () => {
         workspaceId: grant.workspaceId,
         subjectId: `test:memory-event-reader:${crypto.randomUUID()}`,
         permissions: ["sessions:read"],
+        principalKind: "human_session",
         exp: Math.floor(Date.now() / 1000) + 60,
       });
       const replay = await fetch(

@@ -1159,6 +1159,107 @@ export type MemoryAccessContext = {
   privateAdmin?: boolean;
 };
 
+export type ExactHumanTurnAttemptClaims = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  attemptId: string;
+  executionGeneration: number;
+};
+
+export type ExactHumanTurnAttemptAuthority = ExactHumanTurnAttemptClaims & {
+  initiatingHumanSubjectId: string;
+  sessionMetadata: Record<string, unknown>;
+};
+
+/**
+ * Resolve the immutable human that owns one exact current turn attempt.
+ *
+ * The caller must supply an already workspace-RLS-scoped transaction handle.
+ * Session creation attribution is deliberately absent: only the active turn,
+ * attempt, execution generation, and frozen subject initiator are authority.
+ */
+export async function resolveExactHumanTurnAttemptAuthority(
+  db: Database,
+  input: ExactHumanTurnAttemptClaims,
+): Promise<ExactHumanTurnAttemptAuthority | null> {
+  const rows = (await db.execute(sql`
+    WITH locked_workspace AS MATERIALIZED (
+      SELECT workspace.id, workspace.account_id
+      FROM workspaces workspace
+      WHERE workspace.id = ${input.workspaceId}::uuid
+        AND workspace.account_id = ${input.accountId}::uuid
+      FOR KEY SHARE OF workspace
+    ), locked_session AS MATERIALIZED (
+      SELECT session.id, session.account_id, session.workspace_id,
+        session.active_turn_id, session.metadata
+      FROM sessions session
+      JOIN locked_workspace workspace
+        ON workspace.id = session.workspace_id
+        AND workspace.account_id = session.account_id
+      WHERE session.id = ${input.sessionId}::uuid
+        AND session.active_turn_id = ${input.turnId}::uuid
+      FOR SHARE OF session
+    ), locked_turn AS MATERIALIZED (
+      SELECT turn.id, turn.account_id, turn.workspace_id, turn.session_id,
+        turn.active_attempt_id, turn.execution_generation,
+        turn.initiator_kind, turn.initiator_subject_id
+      FROM session_turns turn
+      JOIN locked_session session
+        ON session.id = turn.session_id
+        AND session.workspace_id = turn.workspace_id
+        AND session.account_id = turn.account_id
+      WHERE turn.id = ${input.turnId}::uuid
+        AND turn.active_attempt_id = ${input.attemptId}::uuid
+        AND turn.execution_generation = ${input.executionGeneration}
+        AND turn.status IN ('running', 'requires_action', 'recovering', 'waiting_capacity')
+        AND turn.initiator_kind = 'subject'
+        AND length(btrim(turn.initiator_subject_id)) BETWEEN 1 AND 1024
+      FOR SHARE OF turn
+    ), locked_attempt AS MATERIALIZED (
+      SELECT attempt.id, attempt.account_id, attempt.workspace_id,
+        attempt.session_id, attempt.turn_id, attempt.execution_generation
+      FROM session_turn_attempts attempt
+      JOIN locked_turn turn
+        ON turn.id = attempt.turn_id
+        AND turn.session_id = attempt.session_id
+        AND turn.workspace_id = attempt.workspace_id
+        AND turn.account_id = attempt.account_id
+      WHERE attempt.id = ${input.attemptId}::uuid
+        AND attempt.execution_generation = ${input.executionGeneration}
+        AND attempt.state IN ('claimed', 'running')
+        AND NOT EXISTS (
+          SELECT 1
+          FROM session_attempt_interruptions interruption
+          WHERE interruption.workspace_id = attempt.workspace_id
+            AND interruption.attempt_id = attempt.id
+            AND interruption.state IN ('pending', 'delivered', 'acknowledged')
+        )
+      FOR SHARE OF attempt
+    )
+    SELECT turn.initiator_subject_id, session.metadata
+    FROM locked_workspace workspace
+    JOIN locked_session session ON true
+    JOIN locked_turn turn ON true
+    JOIN locked_attempt attempt ON true
+    WHERE workspace.account_id = attempt.account_id
+      AND workspace.id = attempt.workspace_id
+      AND session.id = attempt.session_id
+      AND turn.id = attempt.turn_id
+  `)) as unknown as Array<{
+    initiator_subject_id: string;
+    metadata: Record<string, unknown>;
+  }>;
+  const row = rows[0];
+  if (!row?.initiator_subject_id) return null;
+  return {
+    ...input,
+    initiatingHumanSubjectId: row.initiator_subject_id,
+    sessionMetadata: row.metadata ?? {},
+  };
+}
+
 /**
  * Knowledge memory composes workspace RLS with an optional authenticated
  * subject. Missing subject fails closed for user-scoped rows at the policy;
@@ -6621,36 +6722,24 @@ export type WorkspaceMemoryContext = {
   now?: Date | undefined;
 };
 
-/** Internal trusted session-derived memory selectors; not part of public Session. */
+/** Internal exact-turn-derived memory selectors; not part of public Session. */
 export async function getSessionMemoryContext(
   db: Database,
-  workspaceId: string,
-  sessionId: string,
+  claims: ExactHumanTurnAttemptClaims,
 ): Promise<WorkspaceMemoryContext | null> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select({
-        createdByKind: schema.sessions.createdByKind,
-        createdBySubjectId: schema.sessions.createdBySubjectId,
-        metadata: schema.sessions.metadata,
-      })
-      .from(schema.sessions)
-      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
-      .limit(1);
-    if (!row) {
-      return null;
-    }
+  return await withWorkspaceRls(db, claims.workspaceId, async (scopedDb) => {
+    const authority = await resolveExactHumanTurnAttemptAuthority(scopedDb, claims);
+    if (!authority) return null;
+    const metadata = authority.sessionMetadata;
     const roleKey =
-      typeof row.metadata.role === "string" ? normalizeMemoryRoleKey(row.metadata.role) : null;
-    const rawLabels = Array.isArray(row.metadata.memoryLabels)
-      ? row.metadata.memoryLabels.filter((value): value is string => typeof value === "string")
+      typeof metadata.role === "string" ? normalizeMemoryRoleKey(metadata.role) : null;
+    const rawLabels = Array.isArray(metadata.memoryLabels)
+      ? metadata.memoryLabels.filter((value): value is string => typeof value === "string")
       : [];
-    const initiatingHumanSubjectId =
-      row.createdByKind === "subject" ? cleanDbString(row.createdBySubjectId) : undefined;
     return {
-      access: initiatingHumanSubjectId ? { subjectId: initiatingHumanSubjectId } : {},
+      access: { subjectId: authority.initiatingHumanSubjectId },
       roleKey,
-      sessionId,
+      sessionId: claims.sessionId,
       memoryLabels: normalizeMemoryLabels(rawLabels),
     };
   });

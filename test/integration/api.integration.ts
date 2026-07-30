@@ -5451,19 +5451,26 @@ describe("API component integration", () => {
       sandboxBackend: "none",
       createdBy: { kind: "subject", subjectId: subjectA },
     });
+    const currentAttempt = await claimHumanSessionAttempt(
+      dbClient.db,
+      grant,
+      trustedSession.id,
+      subjectB,
+      "subject B initiates a later shared-session memory turn",
+    );
     const tokenA = await signDelegatedBearer(delegationSecret, grant, {
       subjectId: subjectA,
       permissions: ["documents:search", "documents:manage"],
     });
-    const sessionTokenA = await signDelegatedBearer(delegationSecret, grant, {
+    const sessionAttemptToken = await signDelegatedBearer(delegationSecret, grant, {
       subjectId: subjectA,
       permissions: ["documents:search", "documents:manage"],
-      sessionId: trustedSession.id,
+      ...currentAttempt,
     });
     const workerSessionToken = await signDelegatedBearer(delegationSecret, grant, {
       subjectId: "worker:first-party-mcp",
       permissions: ["documents:search", "documents:manage"],
-      sessionId: trustedSession.id,
+      ...currentAttempt,
     });
     const serviceSession = await createSession(dbClient.db, {
       accountId: grant.accountId,
@@ -5475,16 +5482,34 @@ describe("API component integration", () => {
       sandboxBackend: "none",
       createdBy: { kind: "service", subjectId: "scheduler:memory-test" },
     });
+    const serviceAttempt = await initializeAndClaimCreatedSessionAttempt(
+      dbClient.db,
+      grant,
+      serviceSession.id,
+    );
     const serviceSessionToken = await signDelegatedBearer(delegationSecret, grant, {
       subjectId: "worker:first-party-mcp",
       permissions: ["documents:search", "documents:manage"],
-      sessionId: serviceSession.id,
+      ...serviceAttempt,
     });
     const missingSessionTokenA = await signDelegatedBearer(delegationSecret, grant, {
       subjectId: subjectA,
       permissions: ["documents:search", "documents:manage"],
       sessionId: forgedSessionId,
+      turnId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      executionGeneration: 1,
     });
+    const partialSessionTokenA = `Bearer ${await signDelegatedAccessToken(delegationSecret, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: subjectA,
+      subjectLabel: subjectA,
+      permissions: ["documents:search", "documents:manage"],
+      principalKind: "service",
+      sessionId: trustedSession.id,
+      exp: Math.floor(Date.now() / 1000) + 300,
+    })}`;
     const foreignGrant = await bootstrapMcpGrant(dbClient.db);
     const foreignSession = await createSession(dbClient.db, {
       accountId: foreignGrant.accountId,
@@ -5496,10 +5521,17 @@ describe("API component integration", () => {
       sandboxBackend: "none",
       createdBy: { kind: "subject", subjectId: subjectA },
     });
+    const foreignAttempt = await claimHumanSessionAttempt(
+      dbClient.db,
+      foreignGrant,
+      foreignSession.id,
+      subjectA,
+      "foreign exact memory attempt",
+    );
     const foreignSessionTokenA = await signDelegatedBearer(delegationSecret, grant, {
       subjectId: subjectA,
       permissions: ["documents:search", "documents:manage"],
-      sessionId: foreignSession.id,
+      ...foreignAttempt,
     });
     const tokenB = await signDelegatedBearer(delegationSecret, grant, {
       subjectId: subjectB,
@@ -5581,6 +5613,18 @@ describe("API component integration", () => {
       },
     );
     expect(unsignedRoleWrite.status).toBe(403);
+    const partialSessionWrite = await app.request(
+      workspacePath(grant.workspaceId, "/knowledge/memories"),
+      {
+        method: "POST",
+        headers: jsonHeaders(partialSessionTokenA),
+        body: JSON.stringify({
+          text: "Partial exact-attempt authority must fail closed.",
+          scopeSpec: { type: "workspace" },
+        }),
+      },
+    );
+    expect(partialSessionWrite.status).toBe(403);
     const missingSessionWrite = await app.request(
       workspacePath(grant.workspaceId, "/knowledge/memories"),
       {
@@ -5631,7 +5675,7 @@ describe("API component integration", () => {
         method: "POST",
         headers: jsonHeaders(workerSessionToken),
         body: JSON.stringify({
-          text: "Worker bearer must persist the session creator's private preference.",
+          text: "Worker bearer must persist the exact turn initiator's private preference.",
           kind: "preference",
           scopeSpec: { type: "user" },
         }),
@@ -5657,7 +5701,7 @@ describe("API component integration", () => {
       where id = ${workerPrivate.id}::uuid
     `);
     expect(workerPrivateStored).toEqual({
-      scopeSubjectId: subjectA,
+      scopeSubjectId: subjectB,
       createdBySessionId: trustedSession.id,
     });
 
@@ -5669,7 +5713,7 @@ describe("API component integration", () => {
     ) => {
       const response = await app.request(workspacePath(grant.workspaceId, "/knowledge/memories"), {
         method: "POST",
-        headers: jsonHeaders(sessionTokenA),
+        headers: jsonHeaders(sessionAttemptToken),
         body: JSON.stringify({
           text: `Trusted REST ${scopeSpec.type} selector ${crypto.randomUUID()}.`,
           scopeSpec,
@@ -5737,7 +5781,7 @@ describe("API component integration", () => {
       workspacePath(grant.workspaceId, `/knowledge/memories/${roleScoped.id}`),
       {
         method: "PATCH",
-        headers: jsonHeaders(sessionTokenA),
+        headers: jsonHeaders(sessionAttemptToken),
         body: JSON.stringify({
           scopeSpec: { type: "session", sessionId: forgedSessionId },
         }),
@@ -5819,9 +5863,9 @@ describe("API component integration", () => {
       { headers: { authorization: tokenB } },
     );
     expect(listB.status).toBe(200);
-    expect(
-      ((await listB.json()) as Array<{ id: string }>).map((memory) => memory.id),
-    ).not.toContain(created.id);
+    const listBIds = ((await listB.json()) as Array<{ id: string }>).map((memory) => memory.id);
+    expect(listBIds).not.toContain(created.id);
+    expect(listBIds).toContain(workerPrivate.id);
     const getB = await rlsApp.request(
       workspacePath(grant.workspaceId, `/knowledge/memories/${created.id}`),
       { headers: { authorization: tokenB } },
@@ -7355,7 +7399,8 @@ describe("API component integration", () => {
       const grant = await bootstrapMcpGrant(dbClient.db);
       const workspaceId = grant.workspaceId;
       const accountId = grant.accountId;
-      const memoryOwnerSubject = `human:memory-owner:${crypto.randomUUID()}`;
+      const sessionCreatorSubject = `human:memory-creator:${crypto.randomUUID()}`;
+      const memoryOwnerSubject = `human:memory-turn-owner:${crypto.randomUUID()}`;
       const session = await createSession(dbClient.db, {
         accountId,
         workspaceId,
@@ -7367,13 +7412,20 @@ describe("API component integration", () => {
         },
         model: "scripted-model",
         sandboxBackend: "none",
-        createdBy: { kind: "subject", subjectId: memoryOwnerSubject },
+        createdBy: { kind: "subject", subjectId: sessionCreatorSubject },
       });
+      const memoryAttempt = await claimHumanSessionAttempt(
+        dbClient.db,
+        grant,
+        session.id,
+        memoryOwnerSubject,
+        "non-creator human initiates the shared-session memory turn",
+      );
 
       prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "opengeni" }], {
         accountId,
         workspaceId,
-        sessionId: session.id,
+        ...memoryAttempt,
         subjectId: "test:mcp-memory-disabled",
         firstPartyTools: ["memory_search", "memory_save", "memory_correct"],
       });
@@ -7394,10 +7446,20 @@ describe("API component integration", () => {
       await prepared.close();
       prepared = null;
 
+      await expect(
+        prepareAgentTools(settings, [{ kind: "mcp", id: "opengeni" }], {
+          accountId,
+          workspaceId,
+          sessionId: session.id,
+          subjectId: "test:mcp-memory-partial-attempt",
+          firstPartyTools: ["memory_search", "memory_save", "memory_correct"],
+        }),
+      ).rejects.toThrow("MCP transport operation failed");
+
       prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "opengeni" }], {
         accountId,
         workspaceId,
-        sessionId: session.id,
+        ...memoryAttempt,
         subjectId: "test:mcp-memory-enabled",
         firstPartyTools: ["memory_search", "memory_save", "memory_correct"],
       });
@@ -7496,7 +7558,7 @@ describe("API component integration", () => {
         });
         expect(
           await getKnowledgeMemory(privateRlsDbClient.db, workspaceId, privateSaved.memory.id, {
-            subjectId: "worker:first-party-mcp",
+            subjectId: sessionCreatorSubject,
           }),
         ).toBeNull();
       } finally {
@@ -10348,6 +10410,84 @@ async function claimCreatedSessionForRun(
   return attemptId;
 }
 
+type ExactAttemptFixture = {
+  sessionId: string;
+  turnId: string;
+  attemptId: string;
+  executionGeneration: number;
+};
+
+async function claimHumanSessionAttempt(
+  db: ReturnType<typeof createDb>["db"],
+  grant: TestWorkspaceGrant,
+  sessionId: string,
+  subjectId: string,
+  text: string,
+): Promise<ExactAttemptFixture> {
+  const accepted = await submitTestHumanPrompt(db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    sessionId,
+    subjectId,
+    text,
+    resources: [],
+    tools: [],
+    delivery: "send",
+    reasoningEffortFallback: "medium",
+  });
+  const attemptId = crypto.randomUUID();
+  const claimed = await claimSessionWorkForAttempt(db, grant.workspaceId, {
+    sessionId,
+    workflowId: `session-${sessionId}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId,
+    dispatchId: `memory-attempt-${crypto.randomUUID()}`,
+    trigger: { kind: "next" },
+  });
+  if (claimed.action !== "claimed" || claimed.turn.id !== accepted.turn.id) {
+    throw new Error(`failed to claim exact human memory turn for ${sessionId}`);
+  }
+  return {
+    sessionId,
+    turnId: claimed.turn.id,
+    attemptId,
+    executionGeneration: claimed.turn.executionGeneration,
+  };
+}
+
+async function initializeAndClaimCreatedSessionAttempt(
+  db: ReturnType<typeof createDb>["db"],
+  grant: TestWorkspaceGrant,
+  sessionId: string,
+): Promise<ExactAttemptFixture> {
+  await initializeSessionStartAtomically(db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    sessionId,
+    clientEventId: `initial:${sessionId}`,
+    reasoningEffortFallback: "medium",
+    createdEventPayload: {},
+  });
+  const attemptId = crypto.randomUUID();
+  const claimed = await claimSessionWorkForAttempt(db, grant.workspaceId, {
+    sessionId,
+    workflowId: `session-${sessionId}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId,
+    dispatchId: `memory-created-attempt-${crypto.randomUUID()}`,
+    trigger: { kind: "next" },
+  });
+  if (claimed.action !== "claimed") {
+    throw new Error(`failed to claim created-session memory turn for ${sessionId}`);
+  }
+  return {
+    sessionId,
+    turnId: claimed.turn.id,
+    attemptId,
+    executionGeneration: claimed.turn.executionGeneration,
+  };
+}
+
 async function readStoredSessionMcpServer(
   db: ReturnType<typeof createDb>["db"],
   sessionId: string,
@@ -10398,7 +10538,7 @@ async function signDelegatedBearer(
     ...(input.turnId ? { turnId: input.turnId } : {}),
     ...(input.attemptId ? { attemptId: input.attemptId } : {}),
     ...(input.executionGeneration ? { executionGeneration: input.executionGeneration } : {}),
-    principalKind: "agent_attempt",
+    principalKind: input.sessionId ? "agent_attempt" : "human_session",
     exp: Math.floor(Date.now() / 1000) + 300,
   })}`;
 }
