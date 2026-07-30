@@ -1392,6 +1392,7 @@ describe("contracts", () => {
       mode: "hybrid",
       sourceKinds: ["repository"],
     });
+    expect(DocumentSearchRequest.parse({ query: "boundary", limit: 50 }).limit).toBe(50);
   });
 
   test("accepts knowledge memory contracts", () => {
@@ -1420,6 +1421,7 @@ describe("contracts", () => {
     expect(() => CreateDocumentBaseRequest.parse({ name: "" })).toThrow();
     expect(() => AddDocumentRequest.parse({ fileId: "not-a-uuid" })).toThrow();
     expect(() => DocumentSearchRequest.parse({ query: "" })).toThrow();
+    expect(() => DocumentSearchRequest.parse({ query: "oversized", limit: 51 })).toThrow();
     expect(() => CreateKnowledgeMemoryRequest.parse({ text: "", confidence: 1.1 })).toThrow();
   });
 

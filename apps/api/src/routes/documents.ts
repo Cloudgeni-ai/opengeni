@@ -252,7 +252,11 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/knowledge/search", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "documents:search");
-    const payload = DocumentSearchRequest.parse(await c.req.json());
+    const parsed = DocumentSearchRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "invalid knowledge search request" });
+    }
+    const payload = parsed.data;
     return c.json({
       results: await searchDocuments(
         db,
