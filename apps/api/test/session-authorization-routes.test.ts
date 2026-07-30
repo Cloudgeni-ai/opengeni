@@ -301,7 +301,12 @@ describe("embedding host session authorization routes", () => {
           authorization: value.authorization,
           "content-type": "application/json",
         },
-        body: JSON.stringify({ tools: [], expectedVersion }),
+        body: JSON.stringify({
+          mode: "explicit",
+          tools: [],
+          firstPartyMcpTools: [],
+          expectedVersion,
+        }),
       });
 
     const response = await request(1);
@@ -611,7 +616,7 @@ describe("embedding host session authorization routes", () => {
     expect(sharedSibling.id).not.toBe(value.child.id);
   });
 
-  test("authorizes every session-bound first-party MCP request at the transport seam", async () => {
+  test("authorizes narrowly delegated session-bound MCP requests without workspace read", async () => {
     if (!available) return;
     const value = await fixture();
     const calls: Array<{ operation: string; surface: string; sessionId: string }> = [];
@@ -626,7 +631,7 @@ describe("embedding host session authorization routes", () => {
       accountId: value.grant.accountId,
       workspaceId: value.grant.workspaceId,
       subjectId: value.grant.subjectId,
-      permissions: ["workspace:read", "sessions:read"],
+      permissions: ["sessions:control"],
       sessionId: value.child.id,
       exp: Math.floor(Date.now() / 1000) + 3_600,
     });
@@ -671,6 +676,36 @@ describe("embedding host session authorization routes", () => {
       body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" }),
     });
     expect(denied.status).toBe(404);
+
+    const unboundToken = await signDelegatedAccessToken(SECRET, {
+      accountId: value.grant.accountId,
+      workspaceId: value.grant.workspaceId,
+      subjectId: value.grant.subjectId,
+      permissions: ["sessions:control"],
+      exp: Math.floor(Date.now() / 1000) + 3_600,
+    });
+    const unbound = await fullAppWith(port).request(
+      `/v1/workspaces/${value.grant.workspaceId}/mcp`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${unboundToken}`,
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 3,
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-03-26",
+            capabilities: {},
+            clientInfo: { name: "session-authorization-test", version: "1" },
+          },
+        }),
+      },
+    );
+    expect(unbound.status).toBe(403);
   });
 
   test("applies exact host scope to first-party MCP target reads and discovery", async () => {
