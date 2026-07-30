@@ -410,6 +410,11 @@ const SettingsSchema = z.object({
   dockerImage: z.string().default("opengeni-sandbox:local"),
   dockerExposedPorts: z.string().default(""),
   dockerNetwork: z.string().optional(),
+  // When the worker itself runs in a container and talks to a host Docker daemon,
+  // this directory must be bind-mounted at the exact same absolute path on both
+  // sides. The Agents SDK materializes the workspace here before bind-mounting it
+  // into the sandbox container.
+  dockerWorkspaceBaseDir: z.string().min(1).optional(),
   modalAppName: z.string().default("opengeni-sandbox"),
   modalImageRef: z.string().optional(),
   // Name of a Modal Secret (containing REGISTRY_USERNAME + REGISTRY_PASSWORD) used
@@ -1420,6 +1425,7 @@ export function getSettings(): Settings {
     dockerImage: optional("OPENGENI_DOCKER_IMAGE"),
     dockerExposedPorts: optional("OPENGENI_DOCKER_EXPOSED_PORTS"),
     dockerNetwork: optional("OPENGENI_DOCKER_NETWORK"),
+    dockerWorkspaceBaseDir: optional("OPENGENI_DOCKER_WORKSPACE_BASE_DIR"),
     modalAppName: optional("OPENGENI_MODAL_APP_NAME"),
     modalImageRef: optional("OPENGENI_MODAL_IMAGE_REF"),
     modalImageRegistrySecret: optional("OPENGENI_MODAL_IMAGE_REGISTRY_SECRET"),
