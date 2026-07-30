@@ -11,6 +11,7 @@ import type {
   ActivityItem,
   AuthNeededItem,
   GoalItem,
+  MachineInputBatchItem,
   MemoryItem,
   SandboxItem,
   SessionStatusItem,
@@ -128,11 +129,10 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         if (inputs.length === 0) break;
         closeStreamingTail();
         items.push({
-          kind: "notice",
+          kind: "machine-input-batch",
           id: event.id,
-          tone: "input",
-          text: "Input batch",
-          details: { label: "Inputs", value: inputs },
+          turnId,
+          members: inputs,
           occurredAt: event.occurredAt,
         });
         break;
@@ -1053,17 +1053,37 @@ function stringValue(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
-function machineInputMembers(value: unknown) {
+function machineInputMembers(value: unknown): MachineInputBatchItem["members"] {
+  const kinds = new Set<MachineInputBatchItem["members"][number]["kind"]>([
+    "scheduled_occurrence",
+    "goal_continuation",
+    "agent_message",
+    "agent_steer_instruction",
+    "child_terminal_result",
+  ]);
+  const classifications = new Set<MachineInputBatchItem["members"][number]["classification"]>([
+    "success",
+    "failure",
+    "action_required",
+    "info",
+  ]);
   return Array.isArray(value)
     ? value.flatMap((candidate) => {
         const member = asRecord(candidate);
         return typeof member.id === "string" &&
           typeof member.kind === "string" &&
+          kinds.has(member.kind as MachineInputBatchItem["members"][number]["kind"]) &&
+          typeof member.classification === "string" &&
+          classifications.has(
+            member.classification as MachineInputBatchItem["members"][number]["classification"],
+          ) &&
           typeof member.sourceId === "string"
           ? [
               {
                 id: member.id,
-                kind: member.kind.replace("_terminal", "").replaceAll("_", " "),
+                kind: member.kind as MachineInputBatchItem["members"][number]["kind"],
+                classification:
+                  member.classification as MachineInputBatchItem["members"][number]["classification"],
                 sourceId: member.sourceId,
                 summary: stringValue(member.summary),
               },

@@ -237,6 +237,7 @@ export type {
   FileResourceRef,
   FileStatus,
   FileUploadData,
+  FirstPartyMcpToolName,
   GetPackResponse,
   GitHubAppInfo,
   GitHubBindingStatus,

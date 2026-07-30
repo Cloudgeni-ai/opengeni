@@ -245,6 +245,8 @@ export type {
   AgentMessageItem,
   AuthNeededItem,
   GoalItem,
+  MachineInputBatchItem,
+  MachineInputMember,
   NoticeItem,
   ReasoningItem,
   SandboxItem,

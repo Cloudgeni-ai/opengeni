@@ -272,7 +272,7 @@ export type ToolRef = {
 };
 
 export type SessionToolPolicy = {
-  mode: "workspace_default" | "explicit" | "inherited" | "legacy";
+  mode: "workspace_default" | "explicit" | "inherited";
   inheritedFromSessionId: string | null;
 };
 
@@ -282,9 +282,9 @@ export type UpdateSessionToolPolicyRequest =
       expectedVersion: number;
     }
   | {
-      /** Omitted for compatibility with the original explicit-only API. */
-      mode?: "explicit" | undefined;
+      mode: "explicit";
       tools: ToolRef[];
+      firstPartyMcpTools: FirstPartyMcpToolName[];
       expectedVersion: number;
     };
 
@@ -496,8 +496,8 @@ export type Session = {
   resources: ResourceRef[];
   skills: SessionSkill[];
   tools: ToolRef[];
-  toolPolicy?: SessionToolPolicy | undefined;
-  toolPolicyVersion?: number | undefined;
+  toolPolicy: SessionToolPolicy;
+  toolPolicyVersion: number;
   effectiveToolPolicy?: SessionEffectiveToolPolicy | undefined;
   metadata: Record<string, unknown>;
   /** Frozen creator fact; later turns carry their own independent initiator. */
@@ -517,7 +517,7 @@ export type Session = {
   rigId: string | null;
   rigVersionId: string | null;
   firstPartyMcpPermissions: string[] | null;
-  firstPartyMcpTools: FirstPartyMcpToolName[] | null;
+  firstPartyMcpTools: FirstPartyMcpToolName[];
   mcpServers: SessionMcpServerMetadata[];
   parentSessionId: string | null;
   /** Immutable server-authored nested-agent lineage and policy snapshot. */
@@ -2389,9 +2389,6 @@ export type ComposerDraft = {
   revision: number;
   text: string;
   resources: ResourceRef[];
-  tools: ToolRef[];
-  /** False inherits the session policy; true preserves an explicit array. */
-  toolsProvided: boolean;
   model: string;
   reasoningEffort: ReasoningEffort;
   sourceTurnId: string | null;
@@ -2407,6 +2404,7 @@ export type NewSessionDraftOptions = {
   rigId?: string | undefined;
   goal?: GoalSpec | undefined;
   firstPartyMcpPermissions?: Permission[] | undefined;
+  firstPartyMcpTools?: FirstPartyMcpToolName[] | undefined;
 };
 
 export type NewSessionDraft = {
@@ -3616,7 +3614,6 @@ export type UserMessageEventInput = {
     text: string;
     turnInstructions?: string | undefined;
     resources?: ResourceRef[] | undefined;
-    tools?: ToolRef[] | undefined;
     model?: string | undefined;
     reasoningEffort?: ReasoningEffort | undefined;
     mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[] | undefined;

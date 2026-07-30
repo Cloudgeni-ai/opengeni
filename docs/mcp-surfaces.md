@@ -26,9 +26,8 @@ setting is true. The REST/UI memory audit and seed surfaces remain available whe
 the setting is off.
 
 `CreateSessionRequest.firstPartyMcpTools` is an exact allowlist over the exported
-`FIRST_PARTY_MCP_TOOL_NAMES` catalog. Omission uses the intentionally small
-self-management default (session title plus goal lifecycle); explicit `[]`
-means no tools from the broad server. Unknown names fail validation. This field
+`FIRST_PARTY_MCP_TOOL_NAMES` catalog. Omission selects the complete catalog;
+explicit `[]` means no tools from the broad server. Unknown names fail validation. This field
 does not grant authority: every catalog entry also has an explicit
 registration-time permission predicate, and target-scoped authorization still
 runs on calls. Child omission inherits the parent's exact effective selection.
@@ -41,8 +40,8 @@ Attaching a resource still materializes it for the session when
 Codex Apps follows that same separation. Enabling
 `OPENGENI_CODEX_CONNECTED_APPS_ENABLED` registers `codex_apps` as a selectable
 runtime MCP; it does not bypass the durable session tool policy. Omitted
-session tools use the workspace default and include it as optional. Explicit,
-inherited-fixed, and legacy policies remain exact. A usable Codex credential is
+session tools use the workspace default and include it as optional. Explicit
+and inherited-fixed policies remain exact. A usable Codex credential is
 still required at call time, but authentication never changes which tools the
 model is allowed to see.
 

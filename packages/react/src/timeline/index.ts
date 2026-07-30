@@ -33,6 +33,8 @@ export type {
   FleetDecisionItem,
   FleetDecisionScoreItem,
   GoalItem,
+  MachineInputBatchItem,
+  MachineInputMember,
   MemoryItem,
   NoticeItem,
   ReasoningItem,

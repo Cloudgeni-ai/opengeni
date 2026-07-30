@@ -366,7 +366,7 @@ describe("SDK / contracts parity", () => {
     const message: ClientSessionEventInput = {
       type: "user.message",
       clientEventId: "ce-1",
-      payload: { text: "hello", tools: [{ kind: "mcp", id: "documents" }] },
+      payload: { text: "hello" },
     };
     const approval: ClientSessionEventInput = {
       type: "user.approvalDecision",

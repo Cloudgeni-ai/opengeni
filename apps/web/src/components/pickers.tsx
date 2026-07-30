@@ -1,4 +1,5 @@
 import { CheckIcon, ChevronDownIcon, PlugIcon } from "lucide-react";
+import type { FirstPartyMcpToolName } from "@opengeni/contracts";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -169,42 +170,65 @@ function pillClass(active: boolean): string {
   );
 }
 
-export function EnabledMcpToolPicker(props: {
+export type SessionToolSelection = {
+  mcpServerIds: Set<string>;
+  firstPartyToolIds: Set<FirstPartyMcpToolName>;
+};
+
+export function SessionToolPicker(props: {
   servers: McpServerOption[];
-  selectedIds: Set<string>;
+  firstPartyTools: ReadonlyArray<{ id: FirstPartyMcpToolName; name: string }>;
+  selection: SessionToolSelection;
   disabled?: boolean;
-  label?: string;
-  onChange: (ids: Set<string>) => void;
+  saving?: boolean;
+  onChange: (selection: SessionToolSelection) => void;
 }) {
-  if (props.servers.length === 0) {
-    return null;
-  }
-  const selectedCount = props.selectedIds.size;
-  function toggle(id: string) {
-    const next = new Set(props.selectedIds);
-    if (next.has(id)) {
-      next.delete(id);
-    } else {
-      next.add(id);
-    }
+  const total = props.servers.length + props.firstPartyTools.length;
+  const selected = props.selection.mcpServerIds.size + props.selection.firstPartyToolIds.size;
+  if (total === 0) return null;
+
+  const toggleMcp = (id: string) => {
+    const next: SessionToolSelection = {
+      mcpServerIds: new Set(props.selection.mcpServerIds),
+      firstPartyToolIds: new Set(props.selection.firstPartyToolIds),
+    };
+    next.mcpServerIds.has(id) ? next.mcpServerIds.delete(id) : next.mcpServerIds.add(id);
     props.onChange(next);
-  }
+  };
+  const toggleFirstParty = (id: FirstPartyMcpToolName) => {
+    const next: SessionToolSelection = {
+      mcpServerIds: new Set(props.selection.mcpServerIds),
+      firstPartyToolIds: new Set(props.selection.firstPartyToolIds),
+    };
+    next.firstPartyToolIds.has(id)
+      ? next.firstPartyToolIds.delete(id)
+      : next.firstPartyToolIds.add(id);
+    props.onChange(next);
+  };
+  const setAll = (enabled: boolean) =>
+    props.onChange({
+      mcpServerIds: new Set(enabled ? props.servers.map((server) => server.id) : []),
+      firstPartyToolIds: new Set(enabled ? props.firstPartyTools.map((tool) => tool.id) : []),
+    });
+
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button
           type="button"
-          variant={selectedCount > 0 ? "secondary" : "ghost"}
+          variant="secondary"
           size="sm"
           disabled={props.disabled}
-          aria-label={props.label ?? "Enabled MCP tools"}
-          className={pillClass(selectedCount > 0)}
+          aria-label={props.saving ? "Saving tools" : "Session tools"}
+          className={pillClass(selected > 0)}
         >
           <PlugIcon className="size-3.5" />
           <span className="truncate">
-            {selectedCount > 0
-              ? `${props.label ?? "Tools"} (${selectedCount})`
-              : (props.label ?? "Tools")}
+            {props.saving
+              ? "Saving tools"
+              : selected === total
+                ? "Tools · All"
+                : `Tools · ${selected}/${total}`}
           </span>
           <ChevronDownIcon className="size-3 shrink-0" />
         </Button>
@@ -213,28 +237,86 @@ export function EnabledMcpToolPicker(props: {
         align="start"
         side="top"
         sideOffset={8}
-        className="w-72 rounded-xl border-border bg-surface p-2 shadow-xl"
+        className="max-h-[min(32rem,70vh)] w-80 overflow-y-auto rounded-xl border-border bg-surface p-2 shadow-xl"
       >
-        <DropdownMenuLabel className="px-2 pt-1 pb-1 text-xs font-normal text-fg-subtle">
-          Enabled MCPs
-        </DropdownMenuLabel>
-        {props.servers.map((server) => (
-          <DropdownMenuItem
-            key={server.id}
-            title={server.id}
-            onSelect={(event) => {
+        <div className="flex items-center justify-between px-2 pt-1 pb-1.5">
+          <div>
+            <DropdownMenuLabel className="p-0 text-sm font-medium text-fg">
+              Session tools
+            </DropdownMenuLabel>
+            <p className="mt-0.5 text-xs text-fg-subtle">
+              Changes apply to future work in this session.
+            </p>
+          </div>
+          <button
+            type="button"
+            className="shrink-0 rounded-md px-2 py-1 text-xs font-medium text-fg-muted hover:bg-surface-2 hover:text-fg"
+            onClick={(event) => {
               event.preventDefault();
-              toggle(server.id);
+              setAll(selected !== total);
             }}
-            className="h-9 cursor-pointer rounded-md px-2 text-sm"
           >
-            <span className="min-w-0 flex-1 truncate">{server.name}</span>
-            {props.selectedIds.has(server.id) ? (
-              <CheckIcon className="ml-2 size-4 shrink-0" />
-            ) : null}
-          </DropdownMenuItem>
+            {selected === total ? "Clear all" : "Enable all"}
+          </button>
+        </div>
+        {props.servers.length > 0 ? (
+          <>
+            <DropdownMenuLabel className="px-2 pt-2 pb-1 text-xs font-normal text-fg-subtle">
+              Connected tools
+            </DropdownMenuLabel>
+            {props.servers.map((server) => (
+              <SessionToolPickerItem
+                key={`mcp:${server.id}`}
+                id={server.id}
+                name={server.name}
+                selected={props.selection.mcpServerIds.has(server.id)}
+                onToggle={() => toggleMcp(server.id)}
+              />
+            ))}
+          </>
+        ) : null}
+        <DropdownMenuLabel className="px-2 pt-2 pb-1 text-xs font-normal text-fg-subtle">
+          OpenGeni
+        </DropdownMenuLabel>
+        {props.firstPartyTools.map((tool) => (
+          <SessionToolPickerItem
+            key={`opengeni:${tool.id}`}
+            id={tool.id}
+            name={tool.name}
+            selected={props.selection.firstPartyToolIds.has(tool.id)}
+            onToggle={() => toggleFirstParty(tool.id)}
+          />
         ))}
       </DropdownMenuContent>
     </DropdownMenu>
+  );
+}
+
+function SessionToolPickerItem(props: {
+  id: string;
+  name: string;
+  selected: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <DropdownMenuItem
+      title={props.id}
+      onSelect={(event) => {
+        event.preventDefault();
+        props.onToggle();
+      }}
+      className="min-h-9 cursor-pointer rounded-md px-2 py-1.5 text-sm"
+    >
+      <span className="min-w-0 flex-1 truncate">{props.name}</span>
+      <span
+        className={cn(
+          "ml-2 flex size-4 shrink-0 items-center justify-center rounded border",
+          props.selected ? "border-brand bg-brand text-white" : "border-border bg-surface",
+        )}
+        aria-hidden
+      >
+        {props.selected ? <CheckIcon className="size-3" /> : null}
+      </span>
+    </DropdownMenuItem>
   );
 }

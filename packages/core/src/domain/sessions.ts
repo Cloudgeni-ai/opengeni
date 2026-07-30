@@ -10,6 +10,7 @@ import {
   CreateSessionRequest,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  FIRST_PARTY_MCP_TOOL_NAMES,
   OPENGENI_SLACK_BOT_SESSION_METADATA_KEY,
   SessionSpawnDenial,
   ServiceTurnInitiator,
@@ -138,9 +139,9 @@ export class SessionSpawnDeniedError extends Error {
 export function resolveFirstPartyMcpToolsForCreate(
   requested: FirstPartyMcpToolName[] | undefined,
   parentStored: FirstPartyMcpToolName[] | null | undefined,
-): FirstPartyMcpToolName[] | null {
+): FirstPartyMcpToolName[] {
   if (requested !== undefined) return [...requested];
-  if (parentStored === undefined) return null;
+  if (parentStored === undefined) return [...DEFAULT_FIRST_PARTY_MCP_TOOLS];
   return [...(parentStored ?? DEFAULT_FIRST_PARTY_MCP_TOOLS)];
 }
 
@@ -514,7 +515,7 @@ export async function createAndStartSession(input: {
   // Public admission always supplies provenance; optional keeps internal
   // callers that predate durable tool-policy provenance source-compatible
   // during the rolling deploy.
-  toolPolicy?: SessionToolPolicy;
+  toolPolicy: SessionToolPolicy;
   clientEventId?: string;
   model: string;
   reasoningEffort: Settings["openaiReasoningEffort"];
@@ -541,7 +542,7 @@ export async function createAndStartSession(input: {
   firstPartyMcpPermissions?: Permission[] | null;
   // Model-visible first-party tool names. Authorization remains controlled by
   // firstPartyMcpPermissions and the target resource checks.
-  firstPartyMcpTools?: FirstPartyMcpToolName[] | null;
+  firstPartyMcpTools: FirstPartyMcpToolName[];
   // Encrypted DB rows plus matching safe metadata for create-time per-session
   // MCP servers. Metadata is the only shape emitted in events/responses.
   mcpServers?: CreateSessionMcpServerInput[];
@@ -602,7 +603,7 @@ export async function createAndStartSession(input: {
       resources: input.resources,
       skills: input.skills ?? [],
       tools: input.tools,
-      ...(input.toolPolicy ? { toolPolicy: input.toolPolicy } : {}),
+      toolPolicy: input.toolPolicy,
       metadata: sessionMetadata,
       ...(input.createdBy ? { createdBy: input.createdBy } : {}),
       ...(input.createdByContext ? { createdByContext: input.createdByContext } : {}),
@@ -613,7 +614,7 @@ export async function createAndStartSession(input: {
       rigId: input.rigId ?? null,
       rigVersionId: input.rigVersionId ?? null,
       firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
-      firstPartyMcpTools: input.firstPartyMcpTools ?? null,
+      firstPartyMcpTools: input.firstPartyMcpTools,
       instructions: input.instructions ?? null,
       parentSessionId: input.parentSessionId ?? null,
       createIdempotencyKey: input.createIdempotencyKey,
@@ -647,7 +648,7 @@ export async function createAndStartSession(input: {
       resources: input.resources,
       skills: input.skills ?? [],
       tools: input.tools,
-      ...(input.toolPolicy ? { toolPolicy: input.toolPolicy } : {}),
+      toolPolicy: input.toolPolicy,
       metadata: sessionMetadata,
       ...(input.createdBy ? { createdBy: input.createdBy } : {}),
       ...(input.createdByContext ? { createdByContext: input.createdByContext } : {}),
@@ -658,7 +659,7 @@ export async function createAndStartSession(input: {
       rigId: input.rigId ?? null,
       rigVersionId: input.rigVersionId ?? null,
       firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
-      firstPartyMcpTools: input.firstPartyMcpTools ?? null,
+      firstPartyMcpTools: input.firstPartyMcpTools,
       instructions: input.instructions ?? null,
       parentSessionId: input.parentSessionId ?? null,
       sandboxGroupId: input.sandboxGroupId ?? null,
@@ -692,7 +693,7 @@ async function finishStartSession(
     turnInstructions?: string | null;
     resources: ResourceRef[];
     tools: ToolRef[];
-    toolPolicy?: SessionToolPolicy;
+    toolPolicy: SessionToolPolicy;
     clientEventId?: string;
     model: string;
     reasoningEffort: Settings["openaiReasoningEffort"];
@@ -750,7 +751,7 @@ async function finishStartSession(
     reasoningEffortFallback: input.reasoningEffort,
     turnExecutionPolicy: input.turnExecutionPolicy,
     createdEventPayload: {
-      ...(input.toolPolicy ? { toolPolicy: input.toolPolicy } : {}),
+      toolPolicy: input.toolPolicy,
       ...(input.variableSet
         ? { variableSetId: input.variableSet.id, variableSetName: input.variableSet.name }
         : {}),
@@ -920,8 +921,6 @@ export async function postUserMessageTurn(input: {
   text: string;
   turnInstructions?: string | null;
   resources: ResourceRef[];
-  tools: ToolRef[];
-  toolsProvided: boolean;
   model?: string | null;
   reasoningEffort?: Settings["openaiReasoningEffort"] | null;
   clientEventId?: string;
@@ -965,8 +964,6 @@ export async function postUserMessageTurn(input: {
           text: input.text,
           turnInstructions: input.turnInstructions ?? null,
           resources: input.resources,
-          tools: input.tools,
-          toolsProvided: input.toolsProvided,
           model: requestedModel,
           reasoningEffort: requestedReasoningEffort,
           reasoningEffortFallback: input.reasoningEffortFallback ?? settings.openaiReasoningEffort,
@@ -1298,15 +1295,14 @@ export async function createSessionForRequest(
   }
   // Tool visibility is independent from permission authority. A child that
   // omits the field inherits the parent's exact effective selection; a
-  // top-level omission resolves to the fixed minimal default at execution.
+  // top-level omission selects the complete catalog.
   const firstPartyMcpTools = resolveFirstPartyMcpToolsForCreate(
     payload.firstPartyMcpTools,
     parentSession ? parentSession.firstPartyMcpTools : undefined,
   );
   if (payload.goal) {
-    const effectiveTools = firstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS];
     const missingGoalTools = ["goal_update", "goal_complete", "goal_pause"].filter(
-      (name) => !effectiveTools.includes(name as FirstPartyMcpToolName),
+      (name) => !firstPartyMcpTools.includes(name as FirstPartyMcpToolName),
     );
     if (missingGoalTools.length > 0) {
       throw new HTTPException(422, {
@@ -1636,8 +1632,7 @@ export async function createSessionForRequest(
  * `POST /sessions/:id/events` and the first-party MCP `session_send_message`
  * tool: resource/tool validation, usage limits, the locked append + turn
  * enqueue, and usage recording. `toolsProvided: false` durably preserves an
- * absent `tools` key so execution inherits the session policy; an explicit
- * empty array is a deliberate per-turn narrowing.
+ * Tool selection is durable session state and never rides a follow-up prompt.
  */
 export async function acceptSessionUserMessage(
   deps: AcceptSessionUserMessageDependencies,
@@ -1648,8 +1643,6 @@ export async function acceptSessionUserMessage(
     text: string;
     turnInstructions?: string | null;
     resources?: ResourceRef[];
-    tools?: ToolRef[];
-    toolsProvided: boolean;
     model?: string | null;
     reasoningEffort?: ReasoningEffort | null;
     clientEventId?: string;
@@ -1660,12 +1653,6 @@ export async function acceptSessionUserMessage(
     expectedDraftRevision?: number | null;
   },
 ): Promise<{ accepted: SessionEvent; turn: SessionTurn }> {
-  if (input.toolsProvided && !deps.settings.sessionTurnToolReplacementEnabled) {
-    throw new HTTPException(503, {
-      message:
-        "explicit follow-up tool replacement is temporarily unavailable until provenance-aware turn workers finish rolling out; omit tools to inherit the session policy and retry",
-    });
-  }
   const { settings, db, bus, workflowClient, objectStorage } = deps;
   await requireSessionAuthorization(deps, grant, {
     sessionId,
@@ -1704,26 +1691,6 @@ export async function acceptSessionUserMessage(
     existingSession.mcpServers,
   );
   const requestedResources = normalizeResources(input.resources ?? []);
-  const tracksWorkspaceDefaults = existingSession.toolPolicy?.mode === "workspace_default";
-  const sessionPolicyTools = withFirstPartyTools(
-    tracksWorkspaceDefaults
-      ? withDefaultEnabledCapabilityMcpTools(
-          availableToolRefs(existingSession.tools, runtimeSettings),
-          settings,
-          capabilityRuntimeSettings,
-        )
-      : existingSession.tools,
-    runtimeSettings,
-  );
-  const validatedTools = input.toolsProvided
-    ? validateToolRefsForSessionPolicy({
-        requested: input.tools ?? [],
-        settings: runtimeSettings,
-        allowedTools: sessionPolicyTools,
-        message: "message tools may only narrow the session tool policy",
-      })
-    : [];
-  const requestedTools = input.toolsProvided ? validatedTools : [];
   await requireLimit(deps, {
     accountId: grant.accountId,
     workspaceId,
@@ -1757,8 +1724,6 @@ export async function acceptSessionUserMessage(
     text: input.text,
     turnInstructions: input.turnInstructions ?? null,
     resources: requestedResources,
-    tools: requestedTools,
-    toolsProvided: input.toolsProvided,
     model: input.model ?? null,
     reasoningEffort: input.reasoningEffort ?? null,
     reasoningEffortFallback: sessionReasoningEffort,
@@ -1919,7 +1884,8 @@ export async function updateSessionMcpApprovalPolicy(
 function toolPolicyAuditSnapshot(
   session: Session,
   tools: ToolRef[],
-  policy = session.toolPolicy ?? { mode: "legacy" as const, inheritedFromSessionId: null },
+  firstPartyMcpTools: FirstPartyMcpToolName[],
+  policy = session.toolPolicy,
 ) {
   // Tool policy refs contain only public server ids and the optional/strict
   // execution mode; they never carry URLs, names, headers, credentials,
@@ -1951,6 +1917,8 @@ function toolPolicyAuditSnapshot(
       .map((tool) => tool.id),
     toolRefs,
     toolCount: allToolRefs.length,
+    firstPartyMcpTools: [...firstPartyMcpTools].sort(),
+    firstPartyMcpToolCount: firstPartyMcpTools.length,
     truncated: allToolRefs.length > toolRefs.length,
   };
 }
@@ -2004,10 +1972,14 @@ export async function updateSessionToolPolicy(
         return withFirstPartyTools(validatedTools, runtimeSettings);
       })()
     : null;
+  const explicitRequestedFirstPartyTools = explicitRequest
+    ? [...explicitRequest.firstPartyMcpTools]
+    : null;
   const workspaceDefaultTools = withFirstPartyTools(
     withDefaultEnabledCapabilityMcpTools([], deps.settings, capabilityRuntimeSettings),
     runtimeSettings,
   );
+  const workspaceDefaultFirstPartyTools = [...FIRST_PARTY_MCP_TOOL_NAMES];
   const events = await appendSessionEventsWithLockedSessionUpdate(
     deps.db,
     grant.workspaceId,
@@ -2019,6 +1991,7 @@ export async function updateSessionToolPolicy(
       }
 
       let nextTools: ToolRef[];
+      let nextFirstPartyMcpTools: FirstPartyMcpToolName[];
       let nextPolicy: SessionToolPolicy;
       if (session.parentSessionId) {
         const parent = await context.getLockedSession(session.parentSessionId);
@@ -2036,6 +2009,9 @@ export async function updateSessionToolPolicy(
             : parent.tools,
           runtimeSettings,
         );
+        const parentFirstPartyMcpTools = [
+          ...(parent.firstPartyMcpTools ?? DEFAULT_FIRST_PARTY_MCP_TOOLS),
+        ];
         if (requestedMode === "workspace_default") {
           if (!parentTracksWorkspaceDefaults) {
             throw new HTTPException(403, {
@@ -2044,6 +2020,7 @@ export async function updateSessionToolPolicy(
             });
           }
           nextTools = parentEffective;
+          nextFirstPartyMcpTools = parentFirstPartyMcpTools;
           nextPolicy = {
             mode: "workspace_default",
             inheritedFromSessionId: parent.id,
@@ -2055,6 +2032,16 @@ export async function updateSessionToolPolicy(
             parentEffective,
             "session tools may only narrow the parent session tool policy",
           );
+          const parentFirstPartySet = new Set(parentFirstPartyMcpTools);
+          const widenedFirstPartyTool = explicitRequestedFirstPartyTools!.find(
+            (tool) => !parentFirstPartySet.has(tool),
+          );
+          if (widenedFirstPartyTool) {
+            throw new HTTPException(403, {
+              message: `session OpenGeni tools may only narrow the parent policy: ${widenedFirstPartyTool}`,
+            });
+          }
+          nextFirstPartyMcpTools = explicitRequestedFirstPartyTools!;
           nextPolicy = {
             mode: "explicit",
             inheritedFromSessionId: parent.id,
@@ -2063,20 +2050,29 @@ export async function updateSessionToolPolicy(
       } else {
         nextTools =
           requestedMode === "workspace_default" ? workspaceDefaultTools : explicitRequestedTools!;
+        nextFirstPartyMcpTools =
+          requestedMode === "workspace_default"
+            ? workspaceDefaultFirstPartyTools
+            : explicitRequestedFirstPartyTools!;
         nextPolicy = { mode: requestedMode, inheritedFromSessionId: null };
       }
 
-      const currentPolicy = session.toolPolicy ?? {
-        mode: "legacy" as const,
-        inheritedFromSessionId: null,
-      };
+      const currentPolicy = session.toolPolicy;
       // JSONB normalizes object-key order on the round trip, so plain
       // JSON.stringify would turn an identical retry into a second mutation
       // (and version bump) merely because the persisted key order differs from
       // the request object. Compare canonical JSON instead.
       const unchanged =
-        stableJson({ tools: session.tools, policy: currentPolicy }) ===
-        stableJson({ tools: nextTools, policy: nextPolicy });
+        stableJson({
+          tools: session.tools,
+          firstPartyMcpTools: session.firstPartyMcpTools ?? DEFAULT_FIRST_PARTY_MCP_TOOLS,
+          policy: currentPolicy,
+        }) ===
+        stableJson({
+          tools: nextTools,
+          firstPartyMcpTools: nextFirstPartyMcpTools,
+          policy: nextPolicy,
+        });
       if (unchanged) {
         return { events: [] };
       }
@@ -2087,8 +2083,18 @@ export async function updateSessionToolPolicy(
           {
             type: "session.tool_policy.updated" as const,
             payload: {
-              before: toolPolicyAuditSnapshot(session, session.tools, currentPolicy),
-              after: toolPolicyAuditSnapshot(session, nextTools, nextPolicy),
+              before: toolPolicyAuditSnapshot(
+                session,
+                session.tools,
+                [...(session.firstPartyMcpTools ?? DEFAULT_FIRST_PARTY_MCP_TOOLS)],
+                currentPolicy,
+              ),
+              after: toolPolicyAuditSnapshot(
+                session,
+                nextTools,
+                nextFirstPartyMcpTools,
+                nextPolicy,
+              ),
               version: nextVersion,
               effectiveFrom: "next_attempt",
             },
@@ -2096,6 +2102,7 @@ export async function updateSessionToolPolicy(
         ],
         update: {
           tools: nextTools,
+          firstPartyMcpTools: nextFirstPartyMcpTools,
           toolPolicy: nextPolicy,
           toolPolicyVersion: nextVersion,
           expectedToolPolicyVersion: request.expectedVersion,

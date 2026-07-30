@@ -180,9 +180,9 @@ Provider-native `web_search` is part of the workspace-default capability set,
 not an MCP catalog entry. A fresh session whose `tools` field is omitted gets
 native search when its resolved Responses provider declares hosted web search
 runnable. An ordinary child that omits `tools` continues to track a
-workspace-default parent. Explicit, inherited-fixed, and legacy session
-policies remain narrowed, and an explicit per-turn tool replacement disables
-default native search for that turn.
+workspace-default parent. Explicit and inherited-fixed session policies remain
+narrowed. Tool selection is session-level; follow-up messages cannot replace it
+for only one turn.
 
 `tool_search` is a different capability: it searches bounded deferred tool
 schemas so the model can discover MCP tools without preloading every schema. It

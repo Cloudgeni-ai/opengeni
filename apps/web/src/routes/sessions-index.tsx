@@ -42,7 +42,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 
 import { ConsoleComposer, useDraftAttachments } from "@/components/Composer";
 import { PermissionGroupPicker } from "@/components/permission-picker";
-import { EnabledMcpToolPicker, ModelPicker } from "@/components/pickers";
+import { ModelPicker, SessionToolPicker, type SessionToolSelection } from "@/components/pickers";
 import { RepositoryContextPicker } from "@/components/repository-picker";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
@@ -68,6 +68,7 @@ import {
   type SessionDraft,
 } from "@/lib/session-create";
 import {
+  firstPartySessionToolOptions,
   newSessionDraftToolPolicy,
   rehydrateRepositoryResources,
   repositorySelectionFromResources,
@@ -360,9 +361,17 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
               <SessionControlStrip
                 workspaceId={workspaceId}
                 disabled={busy || newSessionDraft.loading}
-                onToolSelectionChange={(ids) => {
+                selection={{
+                  mcpServerIds: context.selectedCapabilityToolIds,
+                  firstPartyToolIds: draft.firstPartyMcpTools,
+                }}
+                onToolSelectionChange={(selection) => {
                   setToolSelectionExplicit(true);
-                  context.setSelectedCapabilityToolIds(ids);
+                  context.setSelectedCapabilityToolIds(selection.mcpServerIds);
+                  setDraft((current) => ({
+                    ...current,
+                    firstPartyMcpTools: selection.firstPartyToolIds,
+                  }));
                 }}
               />
             }
@@ -484,11 +493,13 @@ function RecentSessionRow({ workspaceId, session }: { workspaceId: string; sessi
 function SessionControlStrip({
   workspaceId,
   disabled,
+  selection,
   onToolSelectionChange,
 }: {
   workspaceId: string;
   disabled: boolean;
-  onToolSelectionChange: (ids: Set<string>) => void;
+  selection: SessionToolSelection;
+  onToolSelectionChange: (selection: SessionToolSelection) => void;
 }) {
   const context = useAppContext();
   const codexModels = useCodexModels(workspaceId);
@@ -503,9 +514,10 @@ function SessionControlStrip({
         onModelChange={context.setModel}
         onEffortChange={context.setReasoningEffort}
       />
-      <EnabledMcpToolPicker
-        servers={context.toolMcpServers}
-        selectedIds={context.selectedCapabilityToolIds}
+      <SessionToolPicker
+        servers={context.toolMcpServers.filter((server) => server.id !== "opengeni")}
+        firstPartyTools={firstPartySessionToolOptions}
+        selection={selection}
         disabled={disabled}
         onChange={onToolSelectionChange}
       />

@@ -4088,10 +4088,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // while explicit, inherited-fixed, and legacy sessions remain narrowed
       // to their stored materialized allow-list.
       const resolvedToolPolicy = resolveSessionToolPolicy({
-        ...(session.toolPolicy ? { toolPolicy: session.toolPolicy } : {}),
+        toolPolicy: session.toolPolicy,
         sessionTools: session.tools,
-        turnTools: turn.tools,
-        ...(turn.toolsProvided !== undefined ? { turnToolsProvided: turn.toolsProvided } : {}),
         availableMcpServerIds: runSettings.mcpServers.map((server) => server.id),
         defaultMcpServerIds: enabledCapabilityMcpToolRefs(settings, mcpSettings).map(
           (tool) => tool.id,

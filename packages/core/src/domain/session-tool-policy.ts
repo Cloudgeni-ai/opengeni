@@ -21,11 +21,8 @@ export type ResolvedSessionToolPolicy = {
 };
 
 export type SessionToolPolicyInput = {
-  toolPolicy?: SessionToolPolicy | null;
+  toolPolicy: SessionToolPolicy;
   sessionTools: ToolRef[];
-  turnTools?: ToolRef[];
-  /** Undefined preserves the legacy merge path for pre-provenance callers. */
-  turnToolsProvided?: boolean;
   availableMcpServerIds: Iterable<string>;
   /** Current omitted-tools defaults, intentionally narrower than all servers. */
   defaultMcpServerIds?: Iterable<string>;
@@ -55,7 +52,7 @@ function projectIds(ids: readonly string[]): { ids: string[]; truncated: boolean
  * `defaultMcpServerIds` is the capability-only omitted-tools set.
  */
 export function resolveSessionToolPolicy(input: SessionToolPolicyInput): ResolvedSessionToolPolicy {
-  const policy = input.toolPolicy ?? { mode: "legacy" as const, inheritedFromSessionId: null };
+  const policy = input.toolPolicy;
   const availableIds = new Set(input.availableMcpServerIds);
   // Never infer omitted-tools defaults from the full runtime registry: static
   // MCPs are explicit-only unless they are capability-derived defaults.
@@ -64,14 +61,8 @@ export function resolveSessionToolPolicy(input: SessionToolPolicyInput): Resolve
     availableIds.has(id),
   );
   const mandatoryIdSet = new Set<string>(mandatoryIds);
-  const selectedRefs =
-    input.turnToolsProvided === true
-      ? mergeToolRefs([], input.turnTools ?? [])
-      : input.turnToolsProvided === false
-        ? mergeToolRefs([], input.sessionTools)
-        : mergeToolRefs(input.sessionTools, input.turnTools ?? []);
-  const tracksWorkspaceDefaults =
-    policy.mode === "workspace_default" && input.turnToolsProvided !== true;
+  const selectedRefs = mergeToolRefs([], input.sessionTools);
+  const tracksWorkspaceDefaults = policy.mode === "workspace_default";
 
   // Optional capability refs are a historical materialization of a
   // workspace-default selection. They may outlive an installation or its
@@ -214,7 +205,7 @@ export function sessionWithEffectiveToolPolicy(
   return {
     ...session,
     effectiveToolPolicy: resolveSessionToolPolicy({
-      ...(session.toolPolicy ? { toolPolicy: session.toolPolicy } : {}),
+      toolPolicy: session.toolPolicy,
       sessionTools: session.tools,
       availableMcpServerIds: availableIds,
       defaultMcpServerIds: workspaceDefaultServerIds,

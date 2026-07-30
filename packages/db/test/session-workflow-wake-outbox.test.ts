@@ -81,7 +81,6 @@ async function send(wakeFixture: WakeFixture, text: string, clientEventId = cryp
           delivery: "send",
           text,
           resources: [],
-          tools: [],
           reasoningEffortFallback: "low",
           source: "user",
         }),

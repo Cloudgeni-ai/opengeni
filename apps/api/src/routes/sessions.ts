@@ -1282,8 +1282,6 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       text: payload.text,
       turnInstructions: payload.turnInstructions ?? null,
       resources: payload.resources,
-      tools: payload.tools,
-      toolsProvided: userMessagePayloadHasOwnProperty({ payload: raw }, "tools"),
       model: payload.model ?? null,
       reasoningEffort: payload.reasoningEffort ?? null,
       mcpCredentialUpdates: payload.mcpCredentialUpdates ?? [],
@@ -1326,8 +1324,6 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         text: event.payload.text,
         turnInstructions: event.payload.turnInstructions ?? null,
         resources: event.payload.resources ?? [],
-        tools: event.payload.tools ?? [],
-        toolsProvided: userMessagePayloadHasOwnProperty(rawEvent, "tools"),
         model: event.payload.model ?? null,
         reasoningEffort: event.payload.reasoningEffort ?? null,
         mcpCredentialUpdates: event.payload.mcpCredentialUpdates ?? [],
@@ -2661,14 +2657,6 @@ function hasOwnProperty(value: unknown, key: string): boolean {
   return Boolean(
     value && typeof value === "object" && Object.prototype.hasOwnProperty.call(value, key),
   );
-}
-
-function userMessagePayloadHasOwnProperty(value: unknown, key: string): boolean {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  const payload = (value as { payload?: unknown }).payload;
-  return hasOwnProperty(payload, key);
 }
 
 /** Stable, value-free JSON errors for only the create-session boundary. */

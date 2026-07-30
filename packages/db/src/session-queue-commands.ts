@@ -367,13 +367,7 @@ async function normalizeQueuePositions(
 }
 
 function draftIsNonEmpty(draft: ComposerDraftRow): boolean {
-  return (
-    draft.text.length > 0 ||
-    draft.resources.length > 0 ||
-    draft.tools.length > 0 ||
-    draft.toolsProvided ||
-    draft.sourceTurnId !== null
-  );
+  return draft.text.length > 0 || draft.resources.length > 0 || draft.sourceTurnId !== null;
 }
 
 export async function getComposerDraftInTransaction(
@@ -410,8 +404,6 @@ export async function saveComposerDraftInTransaction(
     expectedRevision: number;
     text: string;
     resources: ResourceRef[];
-    tools: ToolRef[];
-    toolsProvided: boolean;
     model: string;
     reasoningEffort: ReasoningEffort;
   },
@@ -442,8 +434,8 @@ export async function saveComposerDraftInTransaction(
     revision,
     text: input.text,
     resources: input.resources,
-    tools: input.tools,
-    toolsProvided: input.toolsProvided,
+    tools: [],
+    toolsProvided: false,
     model: input.model,
     reasoningEffort: input.reasoningEffort,
     // A queue edit is still the same accepted work item. Preserve its frozen
@@ -814,8 +806,8 @@ export async function editQueuedTurnInTransaction(
     revision: nextDraftRevision,
     text: turn.prompt,
     resources: turn.resources,
-    tools: turn.tools,
-    toolsProvided: turn.toolsProvided,
+    tools: [],
+    toolsProvided: false,
     model: turn.model,
     reasoningEffort: turn.reasoningEffort,
     sourceTurnId: turn.id,
@@ -1131,8 +1123,6 @@ export async function submitHumanPromptInTransaction(
     text: string;
     turnInstructions?: string | null;
     resources: ResourceRef[];
-    tools: ToolRef[];
-    toolsProvided?: boolean;
     model?: string | null;
     reasoningEffort?: ReasoningEffort | null;
     reasoningEffortFallback: ReasoningEffort;
@@ -1163,8 +1153,6 @@ export async function submitHumanPromptInTransaction(
     text: input.text,
     turnInstructions: input.turnInstructions ?? null,
     resources: input.resources,
-    tools: input.tools,
-    toolsProvided: input.toolsProvided === true,
     model: input.model ?? null,
     reasoningEffort: input.reasoningEffort ?? null,
     source: input.source,
@@ -1272,16 +1260,12 @@ export async function submitHumanPromptInTransaction(
       canonicalSessionCommandHash({
         text: draft.text,
         resources: draft.resources,
-        tools: draft.tools,
-        toolsProvided: draft.toolsProvided,
         model: draft.model,
         reasoningEffort: draft.reasoningEffort,
       }) !==
         canonicalSessionCommandHash({
           text: input.text,
           resources: input.resources,
-          tools: input.tools,
-          toolsProvided: input.toolsProvided === true,
           model: input.model ?? session.model,
           reasoningEffort: input.reasoningEffort ?? input.reasoningEffortFallback,
         })
@@ -1401,11 +1385,6 @@ export async function submitHumanPromptInTransaction(
       payload: sanitizeEventPayload({
         text: input.text,
         ...(input.resources.length ? { resources: input.resources } : {}),
-        ...(input.toolsProvided === true
-          ? { tools: input.tools }
-          : input.tools.length
-            ? { tools: input.tools }
-            : {}),
         ...(input.model ? { model: input.model } : {}),
         ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
         delivery: input.delivery,
@@ -1433,8 +1412,8 @@ export async function submitHumanPromptInTransaction(
           ? editedSourceTurnInstructions
           : (input.turnInstructions ?? null),
       resources: input.resources,
-      tools: input.tools,
-      toolsProvided: input.toolsProvided === true,
+      tools: [],
+      toolsProvided: false,
       model: input.model ?? session.model,
       reasoningEffort: input.reasoningEffort ?? input.reasoningEffortFallback,
       sandboxBackend: session.sandboxBackend,
@@ -1578,9 +1557,7 @@ export async function submitHumanPromptInTransaction(
     .update(schema.sessions)
     .set({
       resources: mergeResourceRefs(session.resources as ResourceRef[], input.resources),
-      tools: sessionToolPolicyIsFixed(session.toolPolicy)
-        ? session.tools
-        : mergeToolRefs(session.tools as ToolRef[], input.tools),
+      tools: session.tools,
       activeTurnId: input.delivery === "steer" ? liveCurrentTurnId : session.activeTurnId,
       status: nextStatus,
       queueVersion,
@@ -1651,12 +1628,6 @@ export async function submitHumanPromptInTransaction(
     workspaceControlEventId: resumed.workspaceControlEventId,
     replay: false,
   };
-}
-
-function sessionToolPolicyIsFixed(value: unknown): boolean {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const mode = (value as Partial<SessionToolPolicy>).mode;
-  return mode === "workspace_default" || mode === "explicit" || mode === "inherited";
 }
 
 export async function sendAgentMessageInTransaction(
