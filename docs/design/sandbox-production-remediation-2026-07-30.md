@@ -30,6 +30,11 @@ It produced several independent defects:
 8. A durable `warm` lease was treated as provider-liveness proof. Modal could
    terminate the exact box while OpenGeni was idle, leaving a false-live pointer
    that was discovered only inside a later user operation.
+9. The private provisioning heartbeat was bound to the lifetime of an
+   unresolved provider promise rather than the authoritative turn attempt. A
+   workflow could close the attempt while that promise and timer remained
+   resident in the worker, indefinitely refreshing a holder for work that no
+   longer existed.
 
 These defects interact, but no single flag fixes all of them. The remediation
 draws four explicit boundaries:
@@ -130,6 +135,30 @@ exact `Sandbox.poll()` calls found only ten running. Six had already exited 124
 at the configured two-hour lifetime and one warming instance had exited 137.
 This is why a database lease can look available while Shell/Files/Terminal are
 not.
+
+All six exit-124 leases still had a `turn-attempt:<uuid>` holder whose
+`last_heartbeat_at` advanced every few seconds even though:
+
+- the owning attempt was `closed`;
+- the turn's `active_attempt_id` was null;
+- the session workflow had completed; and
+- the lease-level `expires_at` was already hours old.
+
+Temporal history for one representative session showed the workflow completing
+while the cancelled activity was still physically unwinding. The provider
+attach promise never settled, so `resumeBoxForTurn`'s private 10-second
+holder-liveness interval outlived the logical activity. That interval refreshed
+only the holder row, not the lease deadline, which explains the otherwise
+contradictory production state exactly.
+
+A follow-up read at 17:17 UTC applied the complete active-writer predicate
+rather than filtering by provider liveness and found nine stale canonical
+holders. The original six remained on warm leases pointing at terminal Modal
+instances. Three more were refreshing on leases already marked cold with no
+instance ID, including attempts whose durable outcome was `completed`. The
+cold cases prove that Modal's two-hour exit is not the cause of the holder
+leak: the missing ownership fence is. Migration coverage therefore proves both
+warm-to-draining repair and cold-state preservation while clearing counters.
 
 The repair probes the exact historical Modal sandbox ID. It settles only from a
 durable exit/loss proof and removes only the copied historical holder; it never
@@ -293,6 +322,33 @@ Ordinary lease supersession remains recoverable. Deadline rotation uses a
 workflow-visible delay so the next attempt does not hot-loop while the reaper is
 still draining the old instance.
 
+### Attempt-lifetime holder fencing
+
+Provider calls may be uninterruptible, but their database authority is not.
+Sandbox provisioning now receives a signal for the complete logical attempt
+lifetime. Finalizing the activity aborts that signal even when Temporal did not
+deliver cancellation to the SDK call. Abort synchronously:
+
+1. marks the local resume operation released;
+2. removes and stops its private holder-liveness interval; and
+3. releases the exact database holder.
+
+Every provider-return boundary checks that fence before it may publish or
+return a sandbox, so a late provider result cannot resurrect ownership.
+
+The database independently rejects both warmup touches and full lease
+heartbeats for canonical `turn-attempt:<uuid>` holders unless the complete
+attempt/turn chain is still the active writer: matching account, workspace,
+session, turn, execution generation, `active_attempt_id`, and a
+`claimed`/`running` attempt state. A rejected touch causes the in-memory resume
+operation to release itself. This is the authoritative backstop when an
+in-process signal is missed.
+
+Migration 0137 removes canonical turn holders whose ownership chain was already
+broken before rollout, recomputes only the affected leases' source-of-truth
+counters, and makes now-empty warm leases immediately drainable. It does not
+reclassify unrelated leases.
+
 ### Confined command framing
 
 Modal-like `execCommand` transports can combine command stdout with provider or
@@ -376,6 +432,8 @@ the migration and application rollout.
    - verify there are no `opengeni_app` sessions in `pg_stat_activity`;
    - keep only the migration identity/job available;
    - run with server statement/lock bounds;
+   - remove canonical turn holders whose exact attempt/turn writer chain is no
+     longer live, and recompute only their affected lease counters;
    - adds artifact/deadline/provider-binding state and privileged bounded
      operators;
    - marks existing live Modal identities immediately due for controlled

@@ -23608,6 +23608,59 @@ export async function releaseLeaseHolder(
   );
 }
 
+// Canonical production turn holders carry the exact UUID attempt identity.
+// Their in-memory timer is never authority by itself: the attempt and turn must
+// still form the current active-writer chain. The non-UUID branch exists only
+// for old synthetic fixtures/legacy diagnostic rows; runtime construction uses
+// `turn-attempt:<uuid>` exclusively, and migration 0137 removes canonical
+// orphan rows during the maintenance cutover.
+const LIVE_CANONICAL_TURN_HOLDER_PREDICATE = sql`
+  (
+    holder.kind <> 'turn'
+    or holder.holder_id !~* '^turn-attempt:[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+    or exists (
+      select 1
+      from session_turn_attempts attempt
+      join session_turns turn
+        on turn.account_id = attempt.account_id
+       and turn.workspace_id = attempt.workspace_id
+       and turn.session_id = attempt.session_id
+       and turn.id = attempt.turn_id
+       and turn.execution_generation = attempt.execution_generation
+       and turn.active_attempt_id = attempt.id
+      where holder.holder_id = ('turn-attempt:' || attempt.id::text)
+        and attempt.account_id = holder.account_id
+        and attempt.workspace_id = holder.workspace_id
+        and attempt.session_id = holder.subject_id
+        and attempt.state in ('claimed', 'running')
+    )
+  )
+`;
+
+async function touchLiveLeaseHolder(
+  tx: Database,
+  input: {
+    workspaceId: string;
+    sandboxGroupId: string;
+    kind: LeaseHolderKind;
+    holderId: string;
+  },
+): Promise<boolean> {
+  const updated = await tx.execute<{ id: string }>(sql`
+    update sandbox_lease_holders as holder set last_heartbeat_at = now()
+    where holder.lease_id = (
+      select id from sandbox_leases
+      where workspace_id = ${input.workspaceId}
+        and sandbox_group_id = ${input.sandboxGroupId}
+    )
+      and holder.kind = ${input.kind}
+      and holder.holder_id = ${input.holderId}
+      and ${LIVE_CANONICAL_TURN_HOLDER_PREDICATE}
+    returning holder.id
+  `);
+  return updated.length > 0;
+}
+
 // §4.5 — heartbeat. EPOCH-FENCED (the C1b fix — the real split-brain bug, on the
 // HEARTBEAT path): a stale (superseded) owner's lease refresh is rejected so it
 // self-evicts. Also liveness-guarded to warm/warming (C2) so a heartbeat can't
@@ -23631,14 +23684,13 @@ export async function heartbeatLeaseHolder(
     async (scopedDb) =>
       await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
-        const updated = await tx.execute<{ id: string }>(sql`
-        update sandbox_lease_holders set last_heartbeat_at = now()
-        where lease_id = (select id from sandbox_leases
-                          where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId})
-          and kind = ${input.kind} and holder_id = ${input.holderId}
-        returning id
-      `);
-        if (updated.length === 0) return false; // holder was reaped — caller re-acquires
+        const holderAlive = await touchLiveLeaseHolder(tx, {
+          workspaceId: input.workspaceId,
+          sandboxGroupId: input.sandboxGroupId,
+          kind: input.kind,
+          holderId: input.holderId,
+        });
+        if (!holderAlive) return false; // reaped or no longer the exact active attempt
         // Epoch-fenced, liveness-guarded lease TTL refresh: only a live-epoch
         // warm/warming lease is refreshed. A stale-epoch (split-brain) or draining
         // lease returns 0 rows -> false -> the stale holder drops its handle.
@@ -23663,8 +23715,9 @@ export async function heartbeatLeaseHolder(
  * display stack) can legitimately run for many minutes BEFORE the full turn
  * heartbeat (heartbeatLeaseHolder) starts, and the dead-worker turn-holder
  * reap judges liveness by this timestamp. Touching our own holder row needs no
- * epoch fence — supersession is handled by the fenced acquire/establish paths;
- * a reaped/released row returns false (row gone).
+ * lease-epoch fence — supersession is handled by the fenced
+ * acquire/establish paths. Canonical turn holders are still attempt-fenced;
+ * a closed/superseded attempt or a reaped/released row returns false.
  */
 export async function touchLeaseHolder(
   db: Database,
@@ -23681,14 +23734,12 @@ export async function touchLeaseHolder(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
-      const updated = await scopedDb.execute<{ id: string }>(sql`
-        update sandbox_lease_holders set last_heartbeat_at = now()
-        where lease_id = (select id from sandbox_leases
-                          where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId})
-          and kind = ${input.kind} and holder_id = ${input.holderId}
-        returning id
-      `);
-      return updated.length > 0;
+      return await touchLiveLeaseHolder(scopedDb, {
+        workspaceId: input.workspaceId,
+        sandboxGroupId: input.sandboxGroupId,
+        kind: input.kind,
+        holderId: input.holderId,
+      });
     },
   );
 }

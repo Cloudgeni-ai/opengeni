@@ -2096,6 +2096,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     } = await services();
     const activityContext = currentActivityContext();
     const cancellationSignal = activityContext?.cancellationSignal;
+    // Temporal cancellation is not the only way an activity loses ownership:
+    // a database attempt fence or workflow abandonment can finalize the logical
+    // turn while the SDK cancellation signal remains open. Bind sandbox
+    // provisioning to both lifetimes so an uninterruptible, late provider
+    // promise cannot resurrect a holder after this activity has finalized.
+    const sandboxResumeController = new AbortController();
+    const sandboxResumeSignal = cancellationSignal
+      ? AbortSignal.any([cancellationSignal, sandboxResumeController.signal])
+      : sandboxResumeController.signal;
     const sandboxRotationController = new AbortController();
     const runtimeCancellationSignal = cancellationSignal
       ? AbortSignal.any([cancellationSignal, sandboxRotationController.signal])
@@ -2400,6 +2409,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // runs it refreshes expires_at epoch-fenced so a legit multi-day turn is
     // never TTL-reaped. Cleared in finally. Only set when the flag resolved a box.
     let leaseHeartbeatTimer: ReturnType<typeof setInterval> | undefined;
+    const stopLeaseHeartbeat = (): void => {
+      if (!leaseHeartbeatTimer) return;
+      clearInterval(leaseHeartbeatTimer);
+      leaseHeartbeatTimer = undefined;
+    };
     let rotationInFlight: Promise<void> | null = null;
     // credential-renewal policy: the worker, not the model, owns renewal of run-scoped Git
     // credentials for a multi-day turn. The controller is attached only after
@@ -2583,6 +2597,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               rotatingLease.instanceId !== sandbox.established.instanceId ||
               rotatingLease.rotationRequestedAt === null
             ) {
+              // The holder was reaped, the exact attempt closed, the epoch was
+              // superseded, or the lease began draining. Do not leave a dead
+              // interval issuing DB writes and snapshot probes forever.
+              stopLeaseHeartbeat();
               return;
             }
             rotationInFlight = (async () => {
@@ -4999,6 +5017,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               {
                 db,
                 settings,
+                cancellationSignal: sandboxResumeSignal,
                 sandboxMetrics: runtimeMetricsHooksForObservability(observability),
                 onSandboxLost: publishSandboxLost,
               },
@@ -5035,7 +5054,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               "turn",
               managedOwnership!.holderId,
             ),
-            cancellationSignal,
+            sandboxResumeSignal,
             async (lateSandbox) => await lateSandbox.release(),
           );
           setupBoxSession = resolvedSandbox.established.session;
@@ -5392,6 +5411,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               {
                 db,
                 settings,
+                cancellationSignal: sandboxResumeSignal,
                 sandboxMetrics: runtimeMetricsHooksForObservability(observability),
                 onSandboxLost: publishSandboxLost,
               },
@@ -5479,7 +5499,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             return provisioned;
           },
           {
-            ...(activityContext ? { signal: activityContext.cancellationSignal } : {}),
+            signal: sandboxResumeSignal,
             onStarted: async () => {
               await publish?.(
                 [
@@ -5506,7 +5526,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 ],
                 true,
               );
-              throwIfTurnOperationCancelled(activityContext?.cancellationSignal);
+              throwIfTurnOperationCancelled(sandboxResumeSignal);
               startLeaseHeartbeat(provisioned, activeSandboxBackend ?? groupBoxBackend);
               setupBoxSession = provisioned.established.session;
               resolvedSandbox = provisioned;
@@ -7492,6 +7512,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       );
       return claimedResult({ status: "failed" });
     } finally {
+      // This is the logical ownership boundary. Abort before any fallible
+      // housekeeping so a still-pending provider establish releases its private
+      // holder/timer even when Temporal itself never delivered cancellation.
+      if (resolvedSandbox === null && !sandboxResumeController.signal.aborted) {
+        sandboxResumeController.abort(
+          cancellationSignal?.reason ?? new Error("TURN_ATTEMPT_FINALIZED"),
+        );
+      }
       const finalizationStarted = performance.now();
       let finalizationError: unknown;
       let physicalToolQuiescenceConfirmed = !acknowledgeQuiescence;
@@ -7743,8 +7771,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // (bounded) — capture and the warm snapshot both exec on the box, so
           // sequence them, exactly as the turn-end snapshot placement did.
           if (leaseHeartbeatTimer) {
-            clearInterval(leaseHeartbeatTimer);
-            leaseHeartbeatTimer = undefined;
+            stopLeaseHeartbeat();
           }
           if (snapshotInFlight) {
             await waitForWarmSnapshot(
@@ -7794,7 +7821,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // box rides the provider idle-timeout in the meantime. Best-effort: a
         // release failure must never mask the turn's real outcome.
         if (leaseHeartbeatTimer) {
-          clearInterval(leaseHeartbeatTimer);
+          stopLeaseHeartbeat();
         }
         if (rotationInFlight) {
           await waitForTurnFinalizerStep(rotationInFlight, finalizerSignal).catch(() => undefined);
@@ -7878,6 +7905,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           safeErrorDiagnostic(error, (value) => String(redact(value))),
         );
       } finally {
+        // If fallible finalization exited before the ordinary exact-holder
+        // release, the resume signal is the unconditional last line of defense.
+        // Normal finalization already removed its listener in release().
+        if (!sandboxResumeController.signal.aborted) {
+          sandboxResumeController.abort(
+            cancellationSignal?.reason ?? new Error("TURN_ATTEMPT_FINALIZED"),
+          );
+        }
         cancellationSignal?.removeEventListener("abort", noteCancellationRequested);
         const completedAt = performance.now();
         const durationSeconds = (completedAt - activityStarted) / 1000;

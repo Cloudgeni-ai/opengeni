@@ -73,10 +73,21 @@ describe("migration 0138 (checkpoint artifacts and finite provider deadlines)", 
       const [workspace] = await sql<{ id: string }[]>`
         insert into workspaces (account_id, name)
         values (${account!.id}, 'migration-0137-workspace') returning id`;
+      await sql`
+        insert into workspace_inference_controls (workspace_id, account_id)
+        values (${workspace!.id}, ${account!.id})`;
       const leaseId = crypto.randomUUID();
       const groupId = crypto.randomUUID();
       const secondLeaseId = crypto.randomUUID();
       const secondGroupId = crypto.randomUUID();
+      const coldOrphanLeaseId = crypto.randomUUID();
+      const coldOrphanGroupId = crypto.randomUUID();
+      const orphanSessionId = crypto.randomUUID();
+      const orphanTurnId = crypto.randomUUID();
+      const orphanAttemptId = crypto.randomUUID();
+      const liveSessionId = crypto.randomUUID();
+      const liveTurnId = crypto.randomUUID();
+      const liveAttemptId = crypto.randomUUID();
       const legacy = modalCheckpointFixture("im-legacy", 1_700_000_000_000);
       const descriptor = legacy.descriptor;
       await sql`
@@ -105,6 +116,84 @@ describe("migration 0138 (checkpoint artifacts and finite provider deadlines)", 
           (${account!.id}, ${workspace!.id}, ${leaseId}, 'direct', 'direct-1', now()),
           (${account!.id}, ${workspace!.id}, ${leaseId}, 'viewer', 'viewer-1', now())`;
       await sql`
+        insert into sessions (
+          id, account_id, workspace_id, status, initial_message, model,
+          sandbox_backend, sandbox_group_id, temporal_workflow_id, tool_policy
+        ) values
+          (
+            ${orphanSessionId}, ${account!.id}, ${workspace!.id}, 'failed',
+            'orphan holder fixture', 'test-model', 'modal', ${groupId},
+            ${`session-${orphanSessionId}`},
+            jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
+          ),
+          (
+            ${liveSessionId}, ${account!.id}, ${workspace!.id}, 'running',
+            'live holder fixture', 'test-model', 'modal', ${groupId},
+            ${`session-${liveSessionId}`},
+            jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
+          )`;
+      await sql`
+        insert into session_turns (
+          id, account_id, workspace_id, session_id, trigger_event_id,
+          temporal_workflow_id, status, source, position, prompt, resources,
+          tools, model, reasoning_effort, sandbox_backend, metadata, lineage,
+          execution_generation
+        ) values
+          (
+            ${orphanTurnId}, ${account!.id}, ${workspace!.id}, ${orphanSessionId},
+            ${crypto.randomUUID()}, ${`session-${orphanSessionId}`}, 'failed',
+            'user', 1, 'orphan holder fixture', '[]'::jsonb, '[]'::jsonb,
+            'test-model', 'low', 'modal', '{}'::jsonb, '{}'::jsonb, 1
+          ),
+          (
+            ${liveTurnId}, ${account!.id}, ${workspace!.id}, ${liveSessionId},
+            ${crypto.randomUUID()}, ${`session-${liveSessionId}`}, 'running',
+            'user', 1, 'live holder fixture', '[]'::jsonb, '[]'::jsonb,
+            'test-model', 'low', 'modal', '{}'::jsonb, '{}'::jsonb, 1
+          )`;
+      await sql`
+        insert into session_turn_attempts (
+          id, account_id, workspace_id, session_id, turn_id,
+          execution_generation, state, outcome, temporal_workflow_id,
+          temporal_workflow_run_id, temporal_activity_id,
+          verified_control_revision, mcp_approval_policies, closed_at,
+          quiesced_at
+        ) values
+          (
+            ${orphanAttemptId}, ${account!.id}, ${workspace!.id},
+            ${orphanSessionId}, ${orphanTurnId}, 1, 'closed',
+            'interrupted_recoverable', ${`session-${orphanSessionId}`},
+            ${crypto.randomUUID()}, '2', 0, '{}'::jsonb, now(), now()
+          ),
+          (
+            ${liveAttemptId}, ${account!.id}, ${workspace!.id},
+            ${liveSessionId}, ${liveTurnId}, 1, 'running', null,
+            ${`session-${liveSessionId}`}, ${crypto.randomUUID()}, '2',
+            0, '{}'::jsonb, null, null
+          )`;
+      await sql`
+        update session_turns set active_attempt_id = ${liveAttemptId}
+        where id = ${liveTurnId}`;
+      await sql.begin(async (tx) => {
+        await tx`
+          insert into sandbox_lease_holders (
+            account_id, workspace_id, lease_id, kind, holder_id, subject_id,
+            last_heartbeat_at
+          ) values
+            (
+              ${account!.id}, ${workspace!.id}, ${leaseId}, 'turn',
+              ${`turn-attempt:${orphanAttemptId}`}, ${orphanSessionId}, now()
+            ),
+            (
+              ${account!.id}, ${workspace!.id}, ${leaseId}, 'turn',
+              ${`turn-attempt:${liveAttemptId}`}, ${liveSessionId}, now()
+            )`;
+        await tx`
+          update sandbox_leases
+          set refcount = 5, turn_holders = 3
+          where id = ${leaseId}`;
+      });
+      await sql`
         insert into sandbox_leases (
           id, account_id, workspace_id, sandbox_group_id, liveness, refcount,
           turn_holders, viewer_holders, instance_id, backend, lease_epoch,
@@ -114,6 +203,25 @@ describe("migration 0138 (checkpoint artifacts and finite provider deadlines)", 
           ${secondLeaseId}, ${account!.id}, ${workspace!.id}, ${secondGroupId}, 'warm', 0,
           0, 0, 'sb-legacy-two', 'modal', 2, 0, 0, 'modal', null,
           now() + interval '1 hour'
+        )`;
+      await sql`
+        insert into sandbox_leases (
+          id, account_id, workspace_id, sandbox_group_id, liveness, refcount,
+          turn_holders, viewer_holders, instance_id, backend, lease_epoch,
+          workspace_generation, archive_generation, resume_backend_id,
+          resume_state, expires_at
+        ) values (
+          ${coldOrphanLeaseId}, ${account!.id}, ${workspace!.id},
+          ${coldOrphanGroupId}, 'cold', 1, 1, 0, null, 'modal', 8, 0, 0,
+          null, null, now() - interval '1 hour'
+        )`;
+      await sql`
+        insert into sandbox_lease_holders (
+          account_id, workspace_id, lease_id, kind, holder_id, subject_id,
+          last_heartbeat_at
+        ) values (
+          ${account!.id}, ${workspace!.id}, ${coldOrphanLeaseId}, 'turn',
+          ${`turn-attempt:${orphanAttemptId}`}, ${orphanSessionId}, now()
         )`;
 
       const migrationSql = await readFile(join(migrationsDir, migration), "utf8");
@@ -145,10 +253,21 @@ describe("migration 0138 (checkpoint artifacts and finite provider deadlines)", 
           legacySlots: number;
           retainedBindingColumns: number;
           terminalProviderProofAllowed: boolean;
+          orphanAttemptHolders: number;
+          liveAttemptHolders: number;
+          repairedLiveness: string;
+          repairedRefcount: number;
+          repairedTurnHolders: number;
+          coldOrphanLiveness: string;
+          coldOrphanRefcount: number;
+          coldOrphanTurnHolders: number;
         }>
       >`
         select
           provider_deadline_at <= now() as "deadlineDue",
+          liveness as "repairedLiveness",
+          refcount as "repairedRefcount",
+          turn_holders as "repairedTurnHolders",
           (select relrowsecurity from pg_class
             where oid = 'sandbox_checkpoint_artifacts'::regclass) as rls,
           (select relforcerowsecurity from pg_class
@@ -167,7 +286,21 @@ describe("migration 0138 (checkpoint artifacts and finite provider deadlines)", 
               where conrelid = 'sandbox_retained_processes'::regclass
                 and conname = 'sandbox_retained_processes_reconcile_proof_check'
             )
-          ) > 0 as "terminalProviderProofAllowed"
+          ) > 0 as "terminalProviderProofAllowed",
+          (select count(*)::int
+            from sandbox_lease_holders
+            where holder_id = ${`turn-attempt:${orphanAttemptId}`})
+            as "orphanAttemptHolders",
+          (select count(*)::int
+            from sandbox_lease_holders
+            where holder_id = ${`turn-attempt:${liveAttemptId}`})
+            as "liveAttemptHolders",
+          (select liveness from sandbox_leases where id = ${coldOrphanLeaseId})
+            as "coldOrphanLiveness",
+          (select refcount from sandbox_leases where id = ${coldOrphanLeaseId})
+            as "coldOrphanRefcount",
+          (select turn_holders from sandbox_leases where id = ${coldOrphanLeaseId})
+            as "coldOrphanTurnHolders"
         from sandbox_leases where id = ${leaseId}`;
       expect(migrated).toEqual({
         deadlineDue: true,
@@ -176,6 +309,14 @@ describe("migration 0138 (checkpoint artifacts and finite provider deadlines)", 
         legacySlots: 1,
         retainedBindingColumns: 2,
         terminalProviderProofAllowed: true,
+        orphanAttemptHolders: 0,
+        liveAttemptHolders: 1,
+        repairedLiveness: "warm",
+        repairedRefcount: 4,
+        repairedTurnHolders: 2,
+        coldOrphanLiveness: "cold",
+        coldOrphanRefcount: 0,
+        coldOrphanTurnHolders: 0,
       });
       const checkpointFunctions = [
         "validate_sandbox_checkpoint_refs",
@@ -463,7 +604,7 @@ describe("migration 0138 (checkpoint artifacts and finite provider deadlines)", 
       expect(secondRequested?.requested).toBe(1);
       const holders = await sql<Array<{ kind: string }>>`
         select kind from sandbox_lease_holders where lease_id = ${leaseId} order by kind`;
-      expect(holders.map((row) => row.kind)).toEqual(["direct", "turn"]);
+      expect(holders.map((row) => row.kind)).toEqual(["direct", "turn", "turn"]);
       const [rotating] = await sql<
         Array<{ reason: string; refcount: number; turnHolders: number; viewerHolders: number }>
       >`
@@ -472,8 +613,8 @@ describe("migration 0138 (checkpoint artifacts and finite provider deadlines)", 
         from sandbox_leases where id = ${leaseId}`;
       expect(rotating).toEqual({
         reason: "provider_deadline",
-        refcount: 2,
-        turnHolders: 1,
+        refcount: 3,
+        turnHolders: 2,
         viewerHolders: 0,
       });
       const inventory = await sql<Array<{ state: string; count: number }>>`

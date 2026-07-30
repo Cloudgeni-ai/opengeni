@@ -35,6 +35,8 @@ LOCK TABLE sandbox_lease_holders IN ACCESS EXCLUSIVE MODE;
 LOCK TABLE sandbox_pty_sessions IN ACCESS EXCLUSIVE MODE;
 LOCK TABLE sandbox_retained_processes IN ACCESS EXCLUSIVE MODE;
 LOCK TABLE sandbox_workspace_mutation_admissions IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE session_turn_attempts IN SHARE MODE;
+LOCK TABLE session_turns IN SHARE MODE;
 
 DO $maintenance_guard$
 BEGIN
@@ -53,6 +55,80 @@ BEGIN
   END IF;
 END
 $maintenance_guard$;
+
+-- A provider establish call can outlive an abandoned Temporal activity. Older
+-- workers kept touching the resulting holder from a private warmup timer even
+-- after the exact attempt had closed, so TTL cleanup could never observe it as
+-- stale. The maintenance fence makes this a race-free one-time reconciliation:
+-- retain only canonical turn holders whose complete attempt/turn ownership
+-- chain is still current, then restore the lease counters from source rows.
+WITH removed AS MATERIALIZED (
+  DELETE FROM sandbox_lease_holders holder
+  WHERE holder.kind = 'turn'
+    AND holder.holder_id
+      ~* '^turn-attempt:[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+    AND NOT EXISTS (
+      SELECT 1
+      FROM session_turn_attempts attempt
+      JOIN session_turns turn
+        ON turn.account_id = attempt.account_id
+       AND turn.workspace_id = attempt.workspace_id
+       AND turn.session_id = attempt.session_id
+       AND turn.id = attempt.turn_id
+       AND turn.execution_generation = attempt.execution_generation
+       AND turn.active_attempt_id = attempt.id
+      WHERE holder.holder_id = ('turn-attempt:' || attempt.id::text)
+        AND attempt.account_id = holder.account_id
+        AND attempt.workspace_id = holder.workspace_id
+        AND attempt.session_id = holder.subject_id
+        AND attempt.state IN ('claimed', 'running')
+    )
+  RETURNING holder.id AS holder_id, holder.lease_id
+),
+affected AS MATERIALIZED (
+  SELECT DISTINCT removed.lease_id AS id FROM removed
+),
+-- Data-modifying CTE siblings share one base-table snapshot in PostgreSQL.
+-- The physical DELETE is therefore not visible to these counts; subtract its
+-- exact RETURNING identities explicitly instead of silently retaining stale
+-- denormalized counters.
+counts AS MATERIALIZED (
+  SELECT affected.id,
+    (SELECT count(*) FROM sandbox_lease_holders holder
+      WHERE holder.lease_id = affected.id
+        AND NOT EXISTS (
+          SELECT 1 FROM removed WHERE removed.holder_id = holder.id
+        ))::integer AS total,
+    (SELECT count(*) FROM sandbox_lease_holders holder
+      WHERE holder.lease_id = affected.id
+        AND holder.kind = 'turn'
+        AND NOT EXISTS (
+          SELECT 1 FROM removed WHERE removed.holder_id = holder.id
+        ))::integer AS turns,
+    (SELECT count(*) FROM sandbox_lease_holders holder
+      WHERE holder.lease_id = affected.id
+        AND holder.kind = 'viewer'
+        AND NOT EXISTS (
+          SELECT 1 FROM removed WHERE removed.holder_id = holder.id
+        ))::integer AS viewers
+  FROM affected
+)
+UPDATE sandbox_leases lease SET
+  refcount = counts.total,
+  turn_holders = counts.turns,
+  viewer_holders = counts.viewers,
+  liveness = CASE
+    WHEN lease.liveness = 'warm' AND counts.total = 0 THEN 'draining'
+    ELSE lease.liveness
+  END,
+  expires_at = CASE
+    WHEN lease.liveness = 'warm' AND counts.total = 0
+    THEN now() - interval '1 millisecond'
+    ELSE lease.expires_at
+  END,
+  updated_at = now()
+FROM counts
+WHERE lease.id = counts.id;
 
 -- A provider instance may disappear after its lease row has already advanced
 -- to a successor identity. The reconciliation worker can still prove the exact

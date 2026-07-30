@@ -95,6 +95,12 @@ export type SandboxResumeServices = {
   db: Database;
   settings: Settings;
   sandboxMetrics?: RuntimeMetricsHooks;
+  /**
+   * The logical turn-attempt lifetime, not merely the provider request lifetime.
+   * Some provider SDK calls cannot be interrupted. Aborting this signal still
+   * releases the durable holder immediately and fences any late provider result.
+   */
+  cancellationSignal?: AbortSignal;
   /** Test seam for the attached/resumed path. Production uses the one runtime
    * resume primitive; callers must not use this to create a replacement box. */
   establishAttachedSandbox?: typeof establishSandboxSessionFromEnvelope;
@@ -701,18 +707,28 @@ export async function resumeBoxForTurn(
   const { db, settings } = services;
   const os = ids.os ?? "linux";
   const leaseTtlMs = settings.sandboxLeaseTtlMs;
+  const cancellationSignal = services.cancellationSignal;
 
   // The release closure is created eagerly so the caller can always release in
   // finally, even if establish/commit throws after the holder was registered.
+  // It is also bound directly to the logical attempt signal: an uninterruptible
+  // provider promise must never keep its private warmup timer and holder alive
+  // after Temporal has abandoned the activity.
   let released = false;
   let holderLivenessTimer: ReturnType<typeof setInterval> | undefined;
+  let cancellationListener: (() => void) | undefined;
   const release = async (): Promise<void> => {
     if (released) {
       return;
     }
     released = true;
+    if (cancellationListener) {
+      cancellationSignal?.removeEventListener("abort", cancellationListener);
+      cancellationListener = undefined;
+    }
     if (holderLivenessTimer) {
       clearInterval(holderLivenessTimer);
+      holderLivenessTimer = undefined;
     }
     await releaseLeaseHolder(db, {
       accountId: ids.accountId,
@@ -722,6 +738,15 @@ export async function resumeBoxForTurn(
       holderId,
       idleGraceMs: settings.sandboxIdleGraceMs,
     });
+  };
+  const cancellationError = (): Error =>
+    cancellationSignal?.reason instanceof Error
+      ? cancellationSignal.reason
+      : new Error("Sandbox resume was cancelled with its owning turn attempt");
+  const throwIfReleasedOrCancelled = (): void => {
+    if (released || cancellationSignal?.aborted) {
+      throw cancellationError();
+    }
   };
 
   const acquired = await acquireLease(db, {
@@ -746,6 +771,20 @@ export async function resumeBoxForTurn(
     warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,
   });
 
+  if (cancellationSignal) {
+    cancellationListener = () => {
+      // release() flips `released` and clears the timer synchronously before its
+      // first await. The detached rejection handler is intentional: the outer
+      // turn owns diagnostics, while this listener owns leak prevention.
+      void release().catch(() => undefined);
+    };
+    cancellationSignal.addEventListener("abort", cancellationListener, { once: true });
+  }
+  if (cancellationSignal?.aborted) {
+    await release();
+    throw cancellationError();
+  }
+
   // HOLDER-LIVENESS loop: touch OUR holder row every 10s from the moment it is
   // registered until release. The dead-worker turn-holder reap judges liveness
   // by last_heartbeat_at, and the full turn heartbeat (heartbeatLeaseHolder in
@@ -763,7 +802,16 @@ export async function resumeBoxForTurn(
       sandboxGroupId: ids.sandboxGroupId,
       kind,
       holderId,
-    }).catch(() => undefined);
+    })
+      .then((touched) => {
+        // A canonical turn holder is rejected once its exact attempt is no
+        // longer the active writer. Stop this otherwise-unbounded provider
+        // operation and idempotently drop any remaining holder state.
+        if (!touched) {
+          void release().catch(() => undefined);
+        }
+      })
+      .catch(() => undefined);
   }, 10_000);
   if ("unref" in holderLivenessTimer && typeof holderLivenessTimer.unref === "function") {
     holderLivenessTimer.unref();
@@ -890,6 +938,7 @@ export async function resumeBoxForTurn(
         ...(services.sandboxMetrics ? { metrics: services.sandboxMetrics } : {}),
         onSandboxCreated: async (created) => {
           createdEstablished = created;
+          throwIfReleasedOrCancelled();
           if (
             rematerialization &&
             (rematerialization.providerBindingKey || rematerialization.legacyCheckpoint)
@@ -966,6 +1015,7 @@ export async function resumeBoxForTurn(
               sandboxGroupId: ids.sandboxGroupId,
             }).catch(() => undefined);
           }
+          throwIfReleasedOrCancelled();
         },
         onWorkspaceRestoreVerifying: async (descriptor: WorkspaceArchiveDescriptor) => {
           if (!rematerialization || descriptor.revision !== rematerialization.selectedRevision) {
@@ -1014,11 +1064,13 @@ export async function resumeBoxForTurn(
         },
       });
       createdEstablished = established;
+      throwIfReleasedOrCancelled();
       // A sandbox handle is not sufficient evidence that Modal's command router
       // is live. Do not publish a warm lease until one bounded no-op exec works.
       // On timeout the catch below terminates the box and rolls warming -> cold,
       // so the next turn cold-creates instead of hanging forever on first use.
       await waitForSandboxExecReadiness(established);
+      throwIfReleasedOrCancelled();
       // Fold the LIVE box into a re-resumable envelope and persist it as the
       // lease's resume_state — exactly like the API-direct paths (channel-a.ts /
       // viewer.ts). Without this the turn committed the ORIGINAL session manifest
@@ -1040,6 +1092,7 @@ export async function resumeBoxForTurn(
         await serializeReplacementSandboxEnvelope(established, spawnEnvelope),
         established.backendId,
       );
+      throwIfReleasedOrCancelled();
       if (
         rematerialization &&
         established.restoredArchive?.revision !== rematerialization.selectedRevision
@@ -1090,6 +1143,7 @@ export async function resumeBoxForTurn(
         await release();
         throw new SandboxLeaseSupersededError(ids.sandboxGroupId, expectedEpoch);
       }
+      throwIfReleasedOrCancelled();
       return { established, leaseEpoch: committed.lease.leaseEpoch, release };
     } catch (error) {
       if (error instanceof SandboxLeaseSupersededError) {
@@ -1147,6 +1201,7 @@ export async function resumeBoxForTurn(
     if (acquired.lease.liveness === "warming") {
       leaseEpoch = (await waitForWarm(services, ids)).leaseEpoch;
     }
+    throwIfReleasedOrCancelled();
 
     // Prefer the lease's resume_state (the LIVE box the spawner committed) so we
     // re-attach to the SAME box by id, not cold-restore the original session
@@ -1171,12 +1226,14 @@ export async function resumeBoxForTurn(
         ...(ids.environment ? { environment: ids.environment } : {}),
         ...(services.sandboxMetrics ? { metrics: services.sandboxMetrics } : {}),
       });
+      throwIfReleasedOrCancelled();
       // A durable `warm` row is an ownership assertion, not provider liveness.
       // Modal may have ended the exact box at its finite timeout while OpenGeni
       // was idle. Prove the command router before handing the session to the
       // agent so terminal evidence enters the atomic warm->cold recovery path
       // below instead of surfacing inside a model-visible tool call.
       await (services.verifyAttachedSandboxReadiness ?? waitForSandboxExecReadiness)(established);
+      throwIfReleasedOrCancelled();
     } catch (error) {
       if (!isProviderSandboxNotFoundError(ids.backend, error)) {
         throw error;
@@ -1205,6 +1262,7 @@ export async function resumeBoxForTurn(
         marked.lease?.leaseEpoch ?? leaseEpoch,
       );
     }
+    throwIfReleasedOrCancelled();
     return { established, leaseEpoch, release };
   } catch (error) {
     await release();

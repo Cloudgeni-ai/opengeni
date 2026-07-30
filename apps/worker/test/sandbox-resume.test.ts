@@ -344,6 +344,72 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
     ).toBe(0);
   }, 60_000);
 
+  test("(2aa) logical attempt cancellation releases a holder while provider attach is still unresolved", async () => {
+    if (!available) return;
+    const settings = settingsFor(true);
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const keeper = await resumeBoxForTurn(
+      { db, settings },
+      {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        sessionId: groupId,
+        backend: "local",
+      },
+      "turn",
+      sandboxLeaseHolderIdForAttempt("cancellation-keeper"),
+    );
+    const cancelledHolderId = sandboxLeaseHolderIdForAttempt("cancelled-provider-attach");
+    const cancellation = new AbortController();
+    let resolveAttach: ((value: typeof keeper.established) => void) | undefined;
+    const attach = new Promise<typeof keeper.established>((resolve) => {
+      resolveAttach = resolve;
+    });
+    const pending = resumeBoxForTurn(
+      {
+        db,
+        settings,
+        cancellationSignal: cancellation.signal,
+        establishAttachedSandbox: async () => await attach,
+        verifyAttachedSandboxReadiness: async () => undefined,
+      },
+      {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        sessionId: groupId,
+        backend: "local",
+      },
+      "turn",
+      cancelledHolderId,
+    );
+
+    try {
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        if ((await holderCount(workspaceId, groupId, cancelledHolderId)) === 1) break;
+        await Bun.sleep(10);
+      }
+      expect(await holderCount(workspaceId, groupId, cancelledHolderId)).toBe(1);
+
+      cancellation.abort(new Error("TURN_ATTEMPT_FINALIZED"));
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        if ((await holderCount(workspaceId, groupId, cancelledHolderId)) === 0) break;
+        await Bun.sleep(10);
+      }
+      expect(await holderCount(workspaceId, groupId, cancelledHolderId)).toBe(0);
+
+      resolveAttach?.(keeper.established);
+      await expect(pending).rejects.toThrow("TURN_ATTEMPT_FINALIZED");
+      expect(await holderCount(workspaceId, groupId, cancelledHolderId)).toBe(0);
+    } finally {
+      resolveAttach?.(keeper.established);
+      await pending.catch(() => undefined);
+      await keeper.release();
+      await dropSession(keeper.established);
+    }
+  }, 60_000);
+
   test("(2b) concurrent observers of one missing warm instance elect exactly one replacement owner", async () => {
     if (!available) return;
     const settings = settingsFor(true);

@@ -25,6 +25,7 @@ import {
   reapStaleLeaseHoldersGlobal,
   reArmDrainingLease,
   releaseLeaseHolder,
+  touchLeaseHolder,
   SandboxCheckpointArtifactRegistrationConflictError,
   SandboxImageConflictError,
   SandboxRigConflictError,
@@ -1109,6 +1110,127 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       expectedEpoch: s2Epoch,
     });
     expect(freshAccepted).toBe(true);
+  }, 60_000);
+
+  test("(2a) canonical turn heartbeats stop when the exact attempt ownership closes", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const sessionId = crypto.randomUUID();
+    const turnId = crypto.randomUUID();
+    const attemptId = crypto.randomUUID();
+    const holderId = `turn-attempt:${attemptId}`;
+
+    await admin`
+      insert into sessions (
+        id, account_id, workspace_id, status, initial_message, model,
+        sandbox_backend, sandbox_group_id, temporal_workflow_id, tool_policy
+      ) values (
+        ${sessionId}, ${accountId}, ${workspaceId}, 'running',
+        'lease heartbeat fixture', 'test-model', 'modal', ${groupId},
+        ${`session-${sessionId}`},
+        jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
+      )`;
+    await admin`
+      insert into session_turns (
+        id, account_id, workspace_id, session_id, trigger_event_id,
+        temporal_workflow_id, status, source, position, prompt, resources,
+        tools, model, reasoning_effort, sandbox_backend, metadata, lineage,
+        execution_generation
+      ) values (
+        ${turnId}, ${accountId}, ${workspaceId}, ${sessionId},
+        ${crypto.randomUUID()}, ${`session-${sessionId}`}, 'running', 'user',
+        1, 'lease heartbeat fixture', '[]'::jsonb, '[]'::jsonb,
+        'test-model', 'low', 'modal', '{}'::jsonb, '{}'::jsonb, 1
+      )`;
+    await admin`
+      insert into session_turn_attempts (
+        id, account_id, workspace_id, session_id, turn_id,
+        execution_generation, state, temporal_workflow_id,
+        temporal_workflow_run_id, temporal_activity_id,
+        verified_control_revision, mcp_approval_policies
+      ) values (
+        ${attemptId}, ${accountId}, ${workspaceId}, ${sessionId}, ${turnId},
+        1, 'running', ${`session-${sessionId}`}, ${crypto.randomUUID()}, '2',
+        0, '{}'::jsonb
+      )`;
+    await admin`
+      update session_turns set active_attempt_id = ${attemptId}
+      where workspace_id = ${workspaceId} and id = ${turnId}`;
+
+    await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId,
+      subjectId: sessionId,
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    const committed = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 0,
+      instanceId: "box-exact-attempt",
+      leaseTtlMs: 45_000,
+    });
+    const epoch = committed.lease!.leaseEpoch;
+    expect(
+      await heartbeatLeaseHolder(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        kind: "turn",
+        holderId,
+        leaseTtlMs: 45_000,
+        expectedEpoch: epoch,
+      }),
+    ).toBe(true);
+
+    await admin.begin(async (tx) => {
+      await tx`
+        update session_turn_attempts set
+          state = 'closed', outcome = 'interrupted_recoverable',
+          closed_at = now(), quiesced_at = now(), updated_at = now()
+        where id = ${attemptId}`;
+      await tx`
+        update session_turns set
+          status = 'recovering', active_attempt_id = null, updated_at = now()
+        where workspace_id = ${workspaceId} and id = ${turnId}`;
+      await tx`
+        update sandbox_lease_holders set
+          last_heartbeat_at = now() - interval '1 hour'
+        where holder_id = ${holderId}`;
+    });
+    const [before] = await admin<{ heartbeat: Date }[]>`
+      select last_heartbeat_at as heartbeat
+      from sandbox_lease_holders where holder_id = ${holderId}`;
+
+    expect(
+      await touchLeaseHolder(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        kind: "turn",
+        holderId,
+      }),
+    ).toBe(false);
+    expect(
+      await heartbeatLeaseHolder(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        kind: "turn",
+        holderId,
+        leaseTtlMs: 45_000,
+        expectedEpoch: epoch,
+      }),
+    ).toBe(false);
+    const [after] = await admin<{ heartbeat: Date }[]>`
+      select last_heartbeat_at as heartbeat
+      from sandbox_lease_holders where holder_id = ${holderId}`;
+    expect(after?.heartbeat.getTime()).toBe(before?.heartbeat.getTime());
   }, 60_000);
 
   test("(2b) file materialization markers are keyed by warm box instance and epoch", async () => {
