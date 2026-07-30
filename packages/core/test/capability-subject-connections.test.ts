@@ -146,6 +146,22 @@ describe("subject-owned capability connection references", () => {
       workspaceId: workspace.workspaceId,
       settings,
     });
+    expect(catalog.items.find((item) => item.id === "mcp:personal-slack")).toMatchObject({
+      kind: "mcp",
+      source: "built_in",
+      endpointUrl: "https://mcp.slack.com/mcp",
+      mcpUrl: "https://mcp.slack.com/mcp",
+      providerDomain: "slack.com",
+      authKind: "oauth2",
+      runtime: {
+        available: true,
+        mcpServerId: "personal-slack",
+      },
+      metadata: {
+        subjectScope: "subject",
+        officialProvider: true,
+      },
+    });
     expect(catalog.items.find((item) => item.id === capabilityId)?.connectionRef).toEqual({
       providerDomain: "slack.com",
       kind: "oauth2",

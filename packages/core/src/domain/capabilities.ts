@@ -99,6 +99,7 @@ export async function buildCapabilityCatalog(input: {
     ...workspacePacks.map((pack) =>
       packCatalogItem(pack, builtInPackIds.has(pack.id) ? "built_in" : "manual"),
     ),
+    personalSlackMcpCatalogItem(),
     ...configuredMcpCatalogItems(input.settings),
     ...platformApiCatalogItems(),
     ...bundledSkills,
@@ -952,6 +953,43 @@ function configuredMcpCatalogItems(settings: Settings): CapabilityCatalogItem[] 
       },
     }),
   );
+}
+
+function personalSlackMcpCatalogItem(): CapabilityCatalogItem {
+  const mcpUrl = "https://mcp.slack.com/mcp";
+  return CapabilityCatalogItem.parse({
+    id: "mcp:personal-slack",
+    kind: "mcp",
+    source: "built_in",
+    name: "Personal Slack",
+    description:
+      "Use your own Slack access for participant-only files, private conversations, and other content the workspace bot cannot read.",
+    category: "communication",
+    tags: ["slack", "mcp", "personal", "files"],
+    homepageUrl: "https://docs.slack.dev/ai/slack-mcp-server/",
+    endpointUrl: mcpUrl,
+    authModel: "credential_ref",
+    providerDomain: "slack.com",
+    surfaceType: "mcp",
+    transport: "streamable-http",
+    mcpUrl,
+    authKind: "oauth2",
+    tier: "verified",
+    provenance: "Slack official hosted MCP server",
+    tools: [{ kind: "mcp", id: "personal-slack" }],
+    runtime: {
+      available: true,
+      mcpServerId: "personal-slack",
+      transport: "streamable-http",
+      notes:
+        "Connects separately for each OpenGeni user and acts only with that user's Slack access.",
+    },
+    metadata: {
+      mcpServerId: "personal-slack",
+      subjectScope: "subject",
+      officialProvider: true,
+    },
+  });
 }
 
 function platformApiCatalogItems(): CapabilityCatalogItem[] {
