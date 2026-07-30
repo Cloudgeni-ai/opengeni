@@ -1,5 +1,16 @@
 # @opengeni/api-router
 
+## 0.12.9
+
+### Patch Changes
+
+- 6908a7a: Resolve session existence and the latest workspace capture in one RLS-scoped query so capture metadata requests avoid loading the full session projection.
+- Updated dependencies [6908a7a]
+  - @opengeni/db@0.14.1
+  - @opengeni/core@0.12.8
+  - @opengeni/documents@0.2.43
+  - @opengeni/events@0.3.34
+
 ## 0.12.8
 
 ### Patch Changes
