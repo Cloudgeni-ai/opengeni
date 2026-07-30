@@ -1,5 +1,62 @@
 # @opengeni/github
 
+## 0.4.1
+
+### Patch Changes
+
+- Updated dependencies [ad0bdc3]
+  - @opengeni/contracts@0.23.1
+  - @opengeni/config@0.7.14
+
+## 0.4.0
+
+### Minor Changes
+
+- 33dc88f: Restore managed GitHub App installation with OAuth-first existing-installation
+  discovery, exact owner revalidation, and hosted/operator setup-mode separation.
+
+### Patch Changes
+
+- Updated dependencies [33dc88f]
+- Updated dependencies [36451c6]
+  - @opengeni/contracts@0.23.0
+  - @opengeni/config@0.7.13
+
+## 0.3.24
+
+### Patch Changes
+
+- Updated dependencies [1c4018e]
+  - @opengeni/config@0.7.12
+  - @opengeni/contracts@0.22.1
+
+## 0.3.23
+
+### Patch Changes
+
+- Updated dependencies [29ad09b]
+- Updated dependencies [b2e23f3]
+- Updated dependencies [dfc3235]
+  - @opengeni/contracts@0.22.0
+  - @opengeni/config@0.7.11
+
+## 0.3.22
+
+### Patch Changes
+
+- 519d93c: Add validated inline per-session skills and discover skills directly from already-materialized repository resources.
+- Updated dependencies [519d93c]
+  - @opengeni/contracts@0.21.0
+  - @opengeni/config@0.7.10
+
+## 0.3.21
+
+### Patch Changes
+
+- Updated dependencies [110bb77]
+  - @opengeni/config@0.7.9
+  - @opengeni/contracts@0.20.2
+
 ## 0.3.20
 
 ### Patch Changes

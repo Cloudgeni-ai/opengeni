@@ -10,10 +10,12 @@ import {
   createConnection,
   createDb,
   createScheduledTask,
+  deleteScheduledTask,
   getSession,
   listScheduledTaskRuns,
   listSessionEvents,
   revokeConnection,
+  recordUsageEvent,
   updateScheduledTask,
   type DbClient,
 } from "@opengeni/db";
@@ -84,13 +86,29 @@ async function botConnection(workspace: Awaited<ReturnType<typeof workspaceFixtu
   });
 }
 
-function activities() {
+async function personalSlackConnection(
+  workspace: Awaited<ReturnType<typeof workspaceFixture>>,
+  subjectId = "subject-a",
+) {
+  return await createConnection(client.db, {
+    ...workspace,
+    subjectId,
+    providerDomain: "slack.com",
+    kind: "oauth2",
+    credentialEncrypted: "fixture-personal-slack",
+    metadata: { mcpUrl: "https://mcp.slack.com/mcp" },
+    createdBySubjectId: subjectId,
+  });
+}
+
+function activities(settings: Parameters<typeof testSettings>[0] = {}) {
   return createScheduledTaskActivities(
     async () =>
       ({
         settings: testSettings({
           databaseUrl: shared!.appUrl,
           sandboxBackend: "none",
+          ...settings,
         }),
         db: client.db,
         bus: new MemoryEventBus(),
@@ -173,6 +191,51 @@ describe("scheduled OpenGeni Slack bot routing", () => {
     );
   });
 
+  test("rejects personal and cross-workspace connection IDs for scheduled shared-bot routing", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const personal = await personalSlackConnection(workspace);
+    const personalTask = await taskFixture(workspace, personal.id, "new_session_per_run");
+    const worker = activities();
+    await expect(
+      worker.dispatchScheduledTaskRun({
+        workspaceId: workspace.workspaceId,
+        taskId: personalTask.id,
+        triggerType: "scheduled",
+      }),
+    ).rejects.toThrow("OpenGeni Slack bot connection");
+
+    const otherWorkspace = await workspaceFixture();
+    const otherBot = await botConnection(otherWorkspace);
+    const crossWorkspaceTask = await taskFixture(workspace, otherBot.id, "new_session_per_run");
+    await expect(
+      worker.dispatchScheduledTaskRun({
+        workspaceId: workspace.workspaceId,
+        taskId: crossWorkspaceTask.id,
+        triggerType: "scheduled",
+      }),
+    ).rejects.toThrow("OpenGeni Slack bot connection");
+  });
+
+  test("a new bot installation never silently rebinds an existing scheduled task", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const original = await botConnection(workspace);
+    const task = await taskFixture(workspace, original.id, "new_session_per_run");
+    const separate = await botConnection(workspace);
+    expect(separate.id).not.toBe(original.id);
+
+    const dispatched = await activities().dispatchScheduledTaskRun({
+      workspaceId: workspace.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+    });
+    expect(dispatched.action).toBe("start");
+    const session = await getSession(client.db, workspace.workspaceId, dispatched.sessionId);
+    expect(session?.metadata[OPENGENI_SLACK_BOT_SESSION_METADATA_KEY]).toBe(original.id);
+    expect(session?.metadata[OPENGENI_SLACK_BOT_SESSION_METADATA_KEY]).not.toBe(separate.id);
+  });
+
   test("fails a reusable run when the durable task and session bindings diverge", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
@@ -202,5 +265,79 @@ describe("scheduled OpenGeni Slack bot routing", () => {
 
     const runs = await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10);
     expect(runs.map((run) => run.status).sort()).toEqual(["dispatched", "failed"]);
+  });
+
+  test("completes an already-fired workflow after its task was deleted", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const connection = await botConnection(workspace);
+    const task = await taskFixture(workspace, connection.id, "new_session_per_run");
+    await deleteScheduledTask(client.db, workspace.workspaceId, task.id);
+
+    expect(
+      await activities().dispatchScheduledTaskRun({
+        workspaceId: workspace.workspaceId,
+        taskId: task.id,
+        triggerType: "scheduled",
+      }),
+    ).toEqual({ action: "deleted" });
+  });
+
+  test("settles a replayed malformed manual trigger before usage or task lookup", async () => {
+    if (!available) return;
+    expect(
+      await activities().dispatchScheduledTaskRun({
+        workspaceId: crypto.randomUUID(),
+        taskId: crypto.randomUUID(),
+        triggerType: "manual",
+        agentRunUsageIdempotencyKey: "historical-missing-initiator",
+      } as never),
+    ).toEqual({ action: "blocked", reason: "malformed_manual_trigger" });
+  });
+
+  test("manual dispatch reuses the API charge identity without an idempotency conflict", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const connection = await botConnection(workspace);
+    const task = await taskFixture(workspace, connection.id, "new_session_per_run");
+    const idempotencyKey = `manual-trigger-${crypto.randomUUID()}`;
+    const initiator = { kind: "subject" as const, subjectId: "subject-a" };
+    await recordUsageEvent(client.db, {
+      ...workspace,
+      eventType: "agent_run.created",
+      quantity: 1,
+      unit: "run",
+      sourceResourceType: "scheduled_task",
+      sourceResourceId: task.id,
+      initiator,
+      idempotencyKey,
+    });
+
+    const result = await activities().dispatchScheduledTaskRun({
+      workspaceId: workspace.workspaceId,
+      taskId: task.id,
+      triggerType: "manual",
+      agentRunUsageIdempotencyKey: idempotencyKey,
+      initiator,
+    });
+    expect(result.action).toBe("start");
+  });
+
+  test("settles a permanently blocked schedule occurrence instead of retrying forever", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const connection = await botConnection(workspace);
+    const task = await taskFixture(workspace, connection.id, "new_session_per_run");
+
+    expect(
+      await activities({
+        billingMode: "stripe",
+        usageLimitsMode: "managed",
+      }).dispatchScheduledTaskRun({
+        workspaceId: workspace.workspaceId,
+        taskId: task.id,
+        triggerType: "scheduled",
+      }),
+    ).toEqual({ action: "blocked", reason: "insufficient_credits" });
   });
 });

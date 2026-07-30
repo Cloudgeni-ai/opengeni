@@ -3,10 +3,13 @@ import type { ComponentProps, ReactNode } from "react";
 import { cn } from "@/lib/utils";
 
 /**
- * Width- and overflow-safe page frame for workspace content surfaces.
+ * Width-, height-, and overflow-safe page frame for workspace content surfaces.
  *
  * The `min-w-0` chain is intentional: pages live inside a flex shell and must
  * be allowed to shrink before a long untrusted name can widen the viewport.
+ * The frame is also the intentional vertical scroll owner inside the fixed
+ * application canvas, so long pages remain reachable without changing the
+ * shell's sticky/navigation behavior.
  */
 export function ContentPage({
   className,
@@ -17,7 +20,7 @@ export function ContentPage({
     <div
       data-slot="content-page"
       className={cn(
-        "mx-auto flex w-full min-w-0 flex-1 flex-col px-4 py-5 sm:px-6 lg:px-8",
+        "mx-auto flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-x-hidden overflow-y-auto overscroll-y-contain px-4 py-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] sm:px-6 lg:px-8",
         width === "standard" ? "max-w-5xl" : "max-w-7xl",
         className,
       )}

@@ -122,10 +122,11 @@ async function seedCapacityWaiter(ws: Workspace): Promise<{
     await tx`
       insert into sessions (
         id, account_id, workspace_id, initial_message, model,
-        sandbox_backend, sandbox_group_id, status, temporal_workflow_id
+        sandbox_backend, sandbox_group_id, status, temporal_workflow_id, tool_policy
       ) values (
         ${sessionId}, ${ws.accountId}, ${ws.workspaceId}, 'Codex quota capacity wake',
-        'codex/gpt-5.6-sol', 'modal', ${sessionId}, 'idle', ${workflowId}
+        'codex/gpt-5.6-sol', 'modal', ${sessionId}, 'idle', ${workflowId},
+        jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
       )`;
     await tx`
       insert into session_turns (

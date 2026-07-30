@@ -33,7 +33,21 @@ function appWithProvider(
       githubAppPrivateKey: "test-private-key",
     }),
     githubStateSecret: stateSecret,
-    githubAppApi: provider,
+    githubAppApi: {
+      discoverInstallationBindingCandidates: async () => [
+        {
+          installation: {
+            installationId: 42,
+            accountId: 501,
+            accountLogin: "owner",
+            accountType: "User",
+            suspended: false,
+          },
+          authorityKind: "personal_owner",
+        },
+      ],
+      ...provider,
+    },
     db: new Proxy(
       {},
       {
@@ -71,14 +85,22 @@ async function startOAuth(app: Hono): Promise<{ state: string; browserHeader: st
     `http://test/v1/workspaces/${workspaceId}/github/connect?state=${encodeURIComponent(state)}`,
   );
   expect(connect.status).toBe(302);
-  const connectCookie = connect.headers.get("set-cookie")?.split(";", 1)[0];
-  expect(connectCookie).toBeTruthy();
-  const setup = await app.request(
-    `http://test/v1/github/setup?installation_id=42&setup_action=install&state=${encodeURIComponent(state)}`,
-    { headers: { cookie: connectCookie! } },
+  const discoveryLocation = new URL(connect.headers.get("location")!);
+  const discoveryState = discoveryLocation.searchParams.get("state");
+  const discoveryCookie = connect.headers.get("set-cookie")?.split(";", 1)[0];
+  expect(discoveryState).toBeTruthy();
+  expect(readSignedState(discoveryState!, stateSecret)).toMatchObject({
+    accountId,
+    workspaceId,
+    intent: "installation_authority_discovery",
+  });
+  expect(discoveryCookie).toBeTruthy();
+  const discovery = await app.request(
+    `http://test/v1/github/oauth/callback?code=discover&state=${encodeURIComponent(discoveryState!)}`,
+    { headers: { cookie: discoveryCookie! } },
   );
-  expect(setup.status).toBe(302);
-  const location = new URL(setup.headers.get("location")!);
+  expect(discovery.status).toBe(302);
+  const location = new URL(discovery.headers.get("location")!);
   const oauthState = location.searchParams.get("state");
   expect(oauthState).toBeTruthy();
   const payload = readSignedState(oauthState!, stateSecret);
@@ -88,9 +110,38 @@ async function startOAuth(app: Hono): Promise<{ state: string; browserHeader: st
     installationId: 42,
     intent: "installation_authority_oauth",
   });
-  const oauthCookie = setup.headers.get("set-cookie")?.split(";", 1)[0];
+  const oauthCookie = discovery.headers.get("set-cookie")?.split(";", 1)[0];
   expect(oauthCookie).toBeTruthy();
   return { state: oauthState!, browserHeader: oauthCookie! };
+}
+
+async function startInstall(app: Hono): Promise<{ state: string; browserHeader: string }> {
+  const state = managerState();
+  const connect = await app.request(
+    `http://test/v1/workspaces/${workspaceId}/github/connect?state=${encodeURIComponent(state)}`,
+  );
+  const discoveryLocation = new URL(connect.headers.get("location")!);
+  const discoveryState = discoveryLocation.searchParams.get("state")!;
+  const discoveryCookie = connect.headers.get("set-cookie")!.split(";", 1)[0]!;
+  const discovery = await app.request(
+    `http://test/v1/github/oauth/callback?code=discover&state=${encodeURIComponent(discoveryState)}`,
+    { headers: { cookie: discoveryCookie } },
+  );
+  expect(discovery.status).toBe(302);
+  const installLocation = new URL(discovery.headers.get("location")!);
+  expect(installLocation.origin + installLocation.pathname).toBe(
+    "https://github.com/apps/opengeni-test/installations/new",
+  );
+  const installState = installLocation.searchParams.get("state")!;
+  expect(readSignedState(installState, stateSecret)).toMatchObject({
+    accountId,
+    workspaceId,
+    intent: "installation_authority_install",
+  });
+  return {
+    state: installState,
+    browserHeader: discovery.headers.get("set-cookie")!.split(";", 1)[0]!,
+  };
 }
 
 describe("GitHub owner-authority binding routes", () => {
@@ -130,6 +181,7 @@ describe("GitHub owner-authority binding routes", () => {
       lifecycle: "active" as const,
       repositoryScope: "selected" as const,
       repositoryCount: 1,
+      configureUrl: null,
       createdAt: "2026-07-28T00:00:00.000Z",
       updatedAt: "2026-07-28T00:00:00.000Z",
     };
@@ -141,15 +193,125 @@ describe("GitHub owner-authority binding routes", () => {
     expect(githubBindingStatus(true, [binding])).toBe("bound");
   });
 
-  test("fresh install/configuration consent advances only to fresh GitHub OAuth", async () => {
+  test("existing owner installation discovery advances to exact fresh GitHub OAuth", async () => {
     const app = appWithProvider();
     await startOAuth(app);
+  });
+
+  test("no existing owner installation advances to GitHub installation", async () => {
+    const app = appWithProvider({ discoverInstallationBindingCandidates: async () => [] });
+    await startInstall(app);
+  });
+
+  test("multiple owner installations produce a bounded owner-only chooser", async () => {
+    const app = appWithProvider({
+      discoverInstallationBindingCandidates: async () => [
+        {
+          installation: {
+            installationId: 42,
+            accountId: 501,
+            accountLogin: "owner",
+            accountType: "User",
+            suspended: false,
+          },
+          authorityKind: "personal_owner",
+        },
+        {
+          installation: {
+            installationId: 43,
+            accountId: 502,
+            accountLogin: "owners-org",
+            accountType: "Organization",
+            suspended: false,
+          },
+          authorityKind: "organization_owner",
+        },
+      ],
+    });
+    const state = managerState();
+    const connect = await app.request(
+      `http://test/v1/workspaces/${workspaceId}/github/connect?state=${encodeURIComponent(state)}`,
+    );
+    const discoveryLocation = new URL(connect.headers.get("location")!);
+    const discoveryState = discoveryLocation.searchParams.get("state")!;
+    const discoveryCookie = connect.headers.get("set-cookie")!.split(";", 1)[0]!;
+    const response = await app.request(
+      `http://test/v1/github/oauth/callback?code=discover&state=${encodeURIComponent(discoveryState)}`,
+      { headers: { cookie: discoveryCookie } },
+    );
+    expect(response.status).toBe(200);
+    const html = await response.text();
+    expect(html).toContain("owner");
+    expect(html).toContain("owners-org");
+    expect(html).toContain(`/v1/workspaces/${workspaceId}/github/installations/select`);
+    expect(html).toContain('<form method="get"');
+    expect(html).toContain('value="new"');
+    const selectionState = html.match(/name="state" value="([^"]+)"/)?.[1];
+    expect(selectionState).toBeTruthy();
+    expect(readSignedState(selectionState!, stateSecret)).toMatchObject({
+      allowedInstallationIds: [42, 43],
+    });
+
+    const tampered = await app.request(
+      `http://test/v1/workspaces/${workspaceId}/github/installations/select?state=${encodeURIComponent(selectionState!)}&installation_id=99`,
+      {
+        headers: {
+          cookie: `opengeni_github_state=${selectionState}`,
+        },
+      },
+    );
+    expect(tampered.status).toBe(403);
+  });
+
+  test("repository updates recover signed workspace state from the browser cookie", async () => {
+    const app = appWithProvider();
+    const state = managerState({
+      intent: "installation_authority_install",
+      expectedInstallationId: 42,
+    });
+    const response = await app.request(
+      "http://test/v1/github/install/callback?setup_action=update&installation_id=42",
+      { headers: { cookie: `opengeni_github_state=${state}` } },
+    );
+    expect(response.status).toBe(302);
+    expect(new URL(response.headers.get("location")!).pathname).toBe("/login/oauth/authorize");
+
+    const mismatch = await app.request(
+      "http://test/v1/github/install/callback?setup_action=update&installation_id=43",
+      { headers: { cookie: `opengeni_github_state=${state}` } },
+    );
+    expect(mismatch.status).toBe(409);
+  });
+
+  test("managed deployments reject operator App creation surfaces", async () => {
+    const app = new Hono();
+    registerGitHubRoutes(app, {
+      settings: testSettings({ productAccessMode: "managed" }),
+      githubStateSecret: stateSecret,
+      db: {},
+    } as unknown as ApiRouteDeps);
+    expect(
+      (
+        await app.request(`http://test/v1/workspaces/${workspaceId}/github/app-manifest`, {
+          method: "POST",
+          body: "{}",
+        })
+      ).status,
+    ).toBe(404);
+    expect(
+      (
+        await app.request(
+          "http://test/v1/github/app-manifest/callback?code=must-not-convert&state=invalid",
+        )
+      ).status,
+    ).toBe(404);
   });
 
   test("owner approval requests are truthful and never reach provider or database", async () => {
     const calls = { provider: 0 };
     const app = appWithProvider(
       {
+        discoverInstallationBindingCandidates: async () => [],
         authorizeInstallationBinding: async () => {
           calls.provider += 1;
           throw new Error("provider must not be called");
@@ -157,14 +319,10 @@ describe("GitHub owner-authority binding routes", () => {
       },
       calls,
     );
-    const state = managerState();
-    const connect = await app.request(
-      `http://test/v1/workspaces/${workspaceId}/github/connect?state=${encodeURIComponent(state)}`,
-    );
-    const cookie = connect.headers.get("set-cookie")!.split(";", 1)[0]!;
+    const install = await startInstall(app);
     const response = await app.request(
-      `http://test/v1/github/setup?installation_id=42&setup_action=request&state=${encodeURIComponent(state)}`,
-      { headers: { cookie } },
+      `http://test/v1/github/setup?installation_id=42&setup_action=request&state=${encodeURIComponent(install.state)}`,
+      { headers: { cookie: install.browserHeader } },
     );
     expect(response.status).toBe(200);
     expect(await response.text()).toContain("has not created a workspace binding");
@@ -192,7 +350,7 @@ describe("GitHub owner-authority binding routes", () => {
   });
 
   test("missing provider authority proof fails closed", async () => {
-    const app = appWithProvider({});
+    const app = appWithProvider({ authorizeInstallationBinding: undefined });
     const oauth = await startOAuth(app);
     const response = await app.request(
       `http://test/v1/github/oauth/callback?code=fresh&state=${encodeURIComponent(oauth.state)}`,

@@ -10,6 +10,7 @@ import {
   createDb,
   createImportBatch,
   enableCapabilityInstallation,
+  findCompletedImportBatch,
   getCapabilityCatalogItem,
   listCapabilityCatalogItems,
   listEnabledMcpCapabilityServers,
@@ -50,6 +51,39 @@ afterAll(async () => {
 }, 180_000);
 
 describe("catalog import persistence", () => {
+  test("recognizes only a completed batch for an exact snapshot fingerprint", async () => {
+    if (!available) return;
+    const snapshotRef = `fixture@sha256:${"a".repeat(64)}`;
+    await createImportBatch(db, {
+      source: "integrations.sh",
+      snapshotDate: new Date("2026-07-28T00:00:00.000Z"),
+      snapshotRef,
+      attributionNote: "MIT attribution",
+    });
+    expect(
+      await findCompletedImportBatch(db, {
+        source: "integrations.sh",
+        snapshotRef,
+        importedCount: 6,
+      }),
+    ).toBeNull();
+
+    const completed = await createImportBatch(db, {
+      source: "integrations.sh",
+      snapshotDate: new Date("2026-07-28T00:00:00.000Z"),
+      snapshotRef,
+      attributionNote: "MIT attribution",
+      importedCount: 6,
+    });
+    expect(
+      await findCompletedImportBatch(db, {
+        source: "integrations.sh",
+        snapshotRef,
+        importedCount: 6,
+      }),
+    ).toMatchObject({ id: completed.id, importedCount: 6 });
+  }, 180_000);
+
   test("persists Mobbin's reviewed OAuth and official Registry contract", async () => {
     if (!available) return;
     const ws = await freshWorkspace();

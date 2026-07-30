@@ -3,7 +3,7 @@
 // state (model choice, repo selection, tool toggles). Everything below the
 // workspace shell consumes this through `useAppContext`.
 import { OpenGeniApiError, type OpenGeniClient } from "@opengeni/sdk";
-import type { SessionEventsConnectionState } from "@opengeni/react";
+import { composerSubmissionErrorMessage, type SessionEventsConnectionState } from "@opengeni/react";
 import { Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import { TanStackRouterDevtools } from "@tanstack/react-router-devtools";
 import { CheckIcon, Loader2Icon, LockIcon, RefreshCwIcon, UserIcon } from "lucide-react";
@@ -50,7 +50,7 @@ import {
 } from "@/lib/session-pins";
 import {
   buildResources,
-  buildTools,
+  buildOpenGeniUiTools,
   enabledWorkspaceCapabilityMcpServers,
   groupRepositories,
   initialReasoningEffort,
@@ -255,10 +255,9 @@ export function RootRouteComponent() {
   const [selectedCapabilityToolIds, setSelectedCapabilityToolIds] = useState<Set<string>>(
     () => new Set(),
   );
-  // Seed "docs" as already-seen so Document Search is not auto-selected on first
-  // load (it stays opt-in, as the old Docs toggle was). Every other tool server,
-  // including the first-party "opengeni", is auto-selected when it first appears.
-  const previousCapabilityToolIds = useRef<Set<string>>(new Set(["docs", "files"]));
+  // Every available tool is selected when it first appears. Explicit
+  // deselections survive subsequent catalog refreshes.
+  const previousCapabilityToolIds = useRef<Set<string>>(new Set());
   const githubRefreshId = useRef(0);
   const mcpRefreshId = useRef(0);
   // Stable CREATE idempotency key for the in-flight session create. Generated
@@ -737,7 +736,7 @@ export function RootRouteComponent() {
         });
         return null;
       }
-      const selectedTools = buildTools(submission.tools, [...selectedCapabilityToolIds]);
+      const selectedTools = buildOpenGeniUiTools(submission.tools, selectedCapabilityToolIds);
       const freshIdempotencyKey = crypto.randomUUID();
       const attempt = prepareCreateSessionAttempt({
         pending: pendingCreateAttempt.current,
@@ -753,10 +752,7 @@ export function RootRouteComponent() {
           defaultReasoningEffort: reasoningEffort,
           clientEventId: crypto.randomUUID(),
           idempotencyKey: freshIdempotencyKey,
-          workspaceDefaultMcpServerIds: [
-            "opengeni",
-            ...workspaceMcpServers.map((server) => server.id),
-          ],
+          workspaceDefaultMcpServerIds: ["files", ...toolMcpServers.map((server) => server.id)],
           workspaceMcpCatalogReady,
           targetSandboxId: options?.targetSandboxId,
           workingDir: options?.workingDir,
@@ -776,7 +772,7 @@ export function RootRouteComponent() {
       // Keep the attempt on failure. An exact retry dedups against a create that
       // may have landed server-side; an edited request acquires a fresh key.
       toast.error("Failed to start session", {
-        description: error instanceof Error ? error.message : String(error),
+        description: error instanceof Error ? composerSubmissionErrorMessage(error) : String(error),
       });
       return null;
     } finally {
@@ -1004,7 +1000,7 @@ export function RootRouteComponent() {
           selectedInstallationId,
           repositoryGroups,
           toolMcpServers,
-          workspaceDefaultToolIds: workspaceMcpServers.map((server) => server.id),
+          workspaceDefaultToolIds: toolMcpServers.map((server) => server.id),
           workspaceMcpCatalogReady,
           currentResources,
           addManualRepository: contextAddManualRepository,
@@ -1082,7 +1078,6 @@ export function RootRouteComponent() {
     setSession,
     toolMcpServers,
     workspaceMcpCatalogReady,
-    workspaceMcpServers,
     workspaces,
   ]);
 

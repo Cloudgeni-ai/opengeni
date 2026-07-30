@@ -28,7 +28,10 @@ import {
 } from "@/components/rail/rail-context";
 import { CollapsedSessionsButton, SessionList } from "@/components/rail/session-list";
 import { SwitcherBlock } from "@/components/rail/switcher-block";
-import { SessionSandboxSwitcher } from "@/components/session/sandbox-switcher";
+import {
+  SessionSandboxSwitcher,
+  sessionSupportsFleetSwitching,
+} from "@/components/session/sandbox-switcher";
 import { CodexAccountIndicator } from "@/components/session/codex-account-indicator";
 import { WorkspaceNav } from "@/components/rail/workspace-nav";
 import { Button } from "@/components/ui/button";
@@ -419,6 +422,7 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
       <SessionHeader
         session={session}
         ancestors={ancestors}
+        lineageLoading={lineage.loading}
         lineageError={lineage.error}
         connectionState={context.connectionState}
         status={session.status}
@@ -435,7 +439,9 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
         }
         leading={hamburger}
         sandboxSlot={
-          <SessionSandboxSwitcher workspaceId={session.workspaceId} sessionId={session.id} />
+          sessionSupportsFleetSwitching(session.sandboxBackend) ? (
+            <SessionSandboxSwitcher workspaceId={session.workspaceId} sessionId={session.id} />
+          ) : null
         }
         // Codex-prefix-gated inside the component: absent for host-credit sessions.
         codexSlot={

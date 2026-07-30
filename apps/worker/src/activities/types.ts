@@ -3,6 +3,7 @@ import type {
   ConnectionCredentialsPort,
   EntitlementsPort,
   ScheduledTaskTriggerType,
+  TurnInitiator,
 } from "@opengeni/contracts";
 import type { Database } from "@opengeni/db";
 import type { DocumentServices } from "@opengeni/documents";
@@ -51,6 +52,12 @@ export type SessionAttemptQuiescenceProof = {
 
 export type SignalSessionAttemptQuiesced = (input: SessionAttemptQuiescenceProof) => Promise<void>;
 
+export type InspectSessionAttemptActivity = (input: {
+  workflowId: string;
+  workflowRunId: string;
+  activityId: string;
+}) => Promise<"pending" | "settled">;
+
 export type ActivityServices = {
   settings: Settings;
   db: Database;
@@ -63,6 +70,9 @@ export type ActivityServices = {
   /** Durable signalWithStart fallback used only after the activity's direct
    * physical-quiescence receipt write exhausts its bounded DB retries. */
   signalSessionAttemptQuiesced: SignalSessionAttemptQuiesced | null;
+  /** Server-authoritative Temporal activity lease inspection used only to
+   * recover a missing quiescence receipt after the original activity vanished. */
+  inspectSessionAttemptActivity: InspectSessionAttemptActivity | null;
   /** Revision-carrying capacity nudge; generic outbox repair is also sufficient. */
   signalCodexCapacityWorkflow?: SignalCodexCapacityWorkflow | null;
   // §7.5 P3 — host-entitlements port, the WORKER half of the same seam the API
@@ -150,6 +160,18 @@ export type SettleSessionInterruptionsInput = {
 
 export type PersistSessionAttemptQuiescenceInput = SessionAttemptQuiescenceProof;
 
+export type ReconcileSessionAttemptQuiescenceInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  attemptId: string;
+  workflowId: string;
+};
+
+export type ReconcileSessionAttemptQuiescenceResult = {
+  action: "quiesced" | "pending" | "stale";
+};
+
 export type FailSessionAttemptInput = {
   accountId: string;
   workspaceId: string;
@@ -215,21 +237,41 @@ export type MaybeContinueGoalResult = {
 export type DispatchScheduledTaskRunInput = {
   workspaceId: string;
   taskId: string;
-  triggerType: ScheduledTaskTriggerType;
   /** Stable Temporal workflow identity; retries must reuse the same source row. */
   producerKey?: string;
-  agentRunUsageIdempotencyKey?: string;
-};
+} & (
+  | {
+      triggerType: Extract<ScheduledTaskTriggerType, "scheduled">;
+      agentRunUsageIdempotencyKey?: never;
+      initiator?: never;
+    }
+  | {
+      triggerType: Extract<ScheduledTaskTriggerType, "manual">;
+      agentRunUsageIdempotencyKey: string;
+      /** Exact identity used by the API-side charge for this same trigger. */
+      initiator: TurnInitiator;
+    }
+);
 
-export type DispatchScheduledTaskRunResult = {
-  action: "start" | "signal";
-  accountId: string;
-  workspaceId: string;
-  sessionId: string;
-  triggerEventId: string;
-  workflowId: string;
-  workflowWakeRevision: number | null;
-};
+export type DispatchScheduledTaskRunResult =
+  | { action: "deleted" }
+  | {
+      action: "blocked";
+      reason:
+        | "insufficient_credits"
+        | "monthly_model_cost_limit"
+        | "monthly_agent_run_limit"
+        | "malformed_manual_trigger";
+    }
+  | {
+      action: "start" | "signal";
+      accountId: string;
+      workspaceId: string;
+      sessionId: string;
+      triggerEventId: string;
+      workflowId: string;
+      workflowWakeRevision: number | null;
+    };
 
 export type IndexDocumentInput = {
   accountId: string;

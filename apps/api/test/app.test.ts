@@ -458,6 +458,7 @@ describe("API helpers", () => {
     expect(httpStatusForError(new McpPayloadTooLargeError("MCP tool list", 5, 4))).toBe(413);
     expect(httpStatusForError(new Error("boom"))).toBe(500);
     expect(errorCodeForStatus(401)).toBe("unauthenticated");
+    expect(errorCodeForStatus(402)).toBe("payment_required");
     expect(errorCodeForStatus(409)).toBe("conflict");
     expect(errorCodeForStatus(503)).toBe("upstream_unavailable");
   });
@@ -1115,6 +1116,28 @@ describe("catalog connectionRef exposure", () => {
     );
     expect(listed.enabled).toBe(true);
     expect(listed.connectionRef).toEqual(ref);
+  });
+
+  test("a subject binding lists only its generic provider/kind selector", () => {
+    const listed = applyCapabilityEnablement(
+      secureMcp(),
+      installation({
+        connectionRef: {
+          connectionId: "private-connection-must-not-leak",
+          providerDomain: "slack.com",
+          kind: "oauth2",
+          subjectScope: "subject",
+        },
+      }),
+      new Set(),
+    );
+    expect(listed.enabled).toBe(true);
+    expect(listed.connectionRef).toEqual({
+      providerDomain: "slack.com",
+      kind: "oauth2",
+      subjectScope: "subject",
+    });
+    expect(JSON.stringify(listed)).not.toContain("private-connection-must-not-leak");
   });
 
   test("an item enabled with credential headers (no connection) lists connectionRef null", () => {

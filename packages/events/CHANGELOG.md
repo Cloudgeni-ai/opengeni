@@ -1,5 +1,83 @@
 # @opengeni/events
 
+## 0.3.39
+
+### Patch Changes
+
+- Updated dependencies [2aca964]
+  - @opengeni/db@0.14.6
+
+## 0.3.38
+
+### Patch Changes
+
+- Updated dependencies [ad0bdc3]
+  - @opengeni/contracts@0.23.1
+  - @opengeni/db@0.14.5
+
+## 0.3.37
+
+### Patch Changes
+
+- Updated dependencies [ea38a4c]
+  - @opengeni/db@0.14.4
+
+## 0.3.36
+
+### Patch Changes
+
+- Updated dependencies [33dc88f]
+  - @opengeni/contracts@0.23.0
+  - @opengeni/db@0.14.3
+
+## 0.3.35
+
+### Patch Changes
+
+- Updated dependencies [1c4018e]
+  - @opengeni/contracts@0.22.1
+  - @opengeni/db@0.14.2
+
+## 0.3.34
+
+### Patch Changes
+
+- Updated dependencies [6908a7a]
+  - @opengeni/db@0.14.1
+
+## 0.3.33
+
+### Patch Changes
+
+- Updated dependencies [29ad09b]
+- Updated dependencies [dfc3235]
+  - @opengeni/contracts@0.22.0
+  - @opengeni/db@0.14.0
+
+## 0.3.32
+
+### Patch Changes
+
+- 519d93c: Add validated inline per-session skills and discover skills directly from already-materialized repository resources.
+- Updated dependencies [519d93c]
+  - @opengeni/contracts@0.21.0
+  - @opengeni/db@0.13.4
+
+## 0.3.31
+
+### Patch Changes
+
+- Updated dependencies [110bb77]
+  - @opengeni/contracts@0.20.2
+  - @opengeni/db@0.13.3
+
+## 0.3.30
+
+### Patch Changes
+
+- Updated dependencies [8b8545e]
+  - @opengeni/db@0.13.2
+
 ## 0.3.29
 
 ### Patch Changes

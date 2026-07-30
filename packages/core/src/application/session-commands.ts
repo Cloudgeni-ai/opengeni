@@ -7,6 +7,7 @@ import type {
   AccessGrant,
   SessionAuthorizationOperation,
   SessionAuthorizationPort,
+  SessionAuthorizationSurface,
   SessionCommandReceipt,
   SessionControlRequest,
   SessionControlResponse,
@@ -55,6 +56,8 @@ export type HumanSessionCommandContext = {
   workspaceId: string;
   sessionId: string;
   subjectId: string;
+  /** See AgentSessionCommandContext.authorizationSurface. */
+  authorizationSurface?: SessionAuthorizationSurface;
 };
 
 export type AgentSessionCommandContext = {
@@ -65,6 +68,13 @@ export type AgentSessionCommandContext = {
   callerTurnId: string;
   callerAttemptId: string;
   callerExecutionGeneration: number;
+  /**
+   * The trusted adapter surface that owns this command's one authorization
+   * decision. Direct core callers omit it and retain the canonical `core`
+   * surface; adapters that delegate the complete command set it explicitly so
+   * they do not authorize once at the edge and then repeat the host call here.
+   */
+  authorizationSurface?: SessionAuthorizationSurface;
 };
 
 type SessionAuthorizationCommandDeps = {
@@ -104,7 +114,7 @@ async function authorizeHumanSessionCommand(
   return await requireSessionAuthorization(deps, humanAccessGrant(context), {
     sessionId: context.sessionId,
     operation,
-    surface: "core",
+    surface: context.authorizationSurface ?? "core",
   });
 }
 
@@ -117,7 +127,7 @@ async function authorizeAgentSessionCommand(
   return await requireSessionAuthorization(deps, agentAccessGrant(context), {
     sessionId: targetSessionId,
     operation,
-    surface: "core",
+    surface: context.authorizationSurface ?? "core",
   });
 }
 
@@ -339,7 +349,12 @@ export async function controlAgentSessionWorkstream(
     reason?: string | null;
   },
 ) {
-  await authorizeAgentSessionCommand(deps, context, input.targetSessionId, "session.control");
+  const authorization = await authorizeAgentSessionCommand(
+    deps,
+    context,
+    input.targetSessionId,
+    "session.control",
+  );
   const result = await withWorkspaceRls(deps.db, context.workspaceId, (scoped) =>
     scoped.transaction((tx) =>
       mutateSessionControlInTransaction(tx as unknown as Database, {
@@ -358,7 +373,7 @@ export async function controlAgentSessionWorkstream(
   ]);
   await publishWorkspaceControlEvent(deps, context.workspaceId, result.workspaceControlEventId);
   await requestControlWakeDispatch(deps, result.wakeCount);
-  return result;
+  return { ...result, authorization };
 }
 
 function receipt(row: SessionCommandReceiptRow): SessionCommandReceipt {
@@ -384,8 +399,6 @@ function composerDraft(
     revision: row.revision,
     text: row.text,
     resources: row.resources as ComposerDraft["resources"],
-    tools: row.tools as ComposerDraft["tools"],
-    toolsProvided: row.toolsProvided,
     model: row.model,
     reasoningEffort: row.reasoningEffort as ComposerDraft["reasoningEffort"],
     sourceTurnId: row.sourceTurnId,
@@ -648,8 +661,6 @@ export async function getHumanComposerDraft(
     revision: 0,
     text: "",
     resources: [],
-    tools: [],
-    toolsProvided: false,
     model: session.model,
     reasoningEffort: reasoningEffortForMetadata(session.metadata, "medium"),
     sourceTurnId: null,

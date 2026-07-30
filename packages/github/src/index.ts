@@ -1,5 +1,6 @@
 import type { Settings } from "@opengeni/config";
 import type {
+  GitHubInstallationBindingCandidate,
   GitHubInstallationBindingProof,
   GitHubRepository,
   GitHubRepositoryPermissions,
@@ -103,7 +104,10 @@ export function buildGitHubAppManifest(input: {
     redirect_url: `${base}/v1/github/app-manifest/callback`,
     callback_urls: [`${base}/v1/github/oauth/callback`],
     public: input.public,
-    request_oauth_on_install: true,
+    // A setup URL and OAuth-on-install are mutually exclusive in GitHub's App
+    // contract. OpenGeni needs the setup callback to receive the installation
+    // id, then starts its own exact user-authorization flow.
+    request_oauth_on_install: !input.setupUrl,
     default_permissions: permissions,
   };
   if (input.setupUrl) {
@@ -383,6 +387,79 @@ export async function authorizeGitHubInstallationBinding(
     installation,
     repositories,
   };
+}
+
+/**
+ * Discover existing installations that the freshly authorized GitHub human
+ * can bind as an exact personal owner or active organization owner.
+ *
+ * `GET /user/installations` is discovery input only. Every candidate is
+ * cross-checked against the App's live installation inventory and an
+ * organization candidate requires a live `state=active, role=admin`
+ * membership proof. The later exact authorization still re-runs the complete
+ * proof immediately before the durable bind.
+ */
+export async function discoverGitHubInstallationBindingCandidates(
+  settings: Settings,
+  input: { code: string },
+): Promise<GitHubInstallationBindingCandidate[]> {
+  const userToken = await exchangeGitHubOAuthCodeForUserToken(settings, input.code);
+  const actor = await getAuthenticatedGitHubUser(userToken);
+  const visibleInstallations = await listUserAccessibleInstallations(userToken);
+  const jwt = await createGitHubAppJwt(settings);
+  const liveInstallations = new Map(
+    (await listInstallations(jwt)).map((payload) => {
+      const installation = installationSummaryFromPayload(payload);
+      return [installation.installationId, installation] as const;
+    }),
+  );
+  const candidates: GitHubInstallationBindingCandidate[] = [];
+
+  for (const visible of visibleInstallations) {
+    const installation = liveInstallations.get(visible.installationId);
+    if (
+      !installation ||
+      installation.suspended ||
+      installation.accountId !== visible.accountId ||
+      installation.accountLogin !== visible.accountLogin ||
+      installation.accountType !== visible.accountType
+    ) {
+      continue;
+    }
+    if (installation.accountType === "User" && actor.id === installation.accountId) {
+      candidates.push({ installation, authorityKind: "personal_owner" });
+      continue;
+    }
+    if (installation.accountType !== "Organization" || !installation.accountLogin) {
+      continue;
+    }
+    try {
+      await assertActiveOrganizationOwner(
+        userToken,
+        installation.accountId,
+        installation.accountLogin,
+      );
+      candidates.push({ installation, authorityKind: "organization_owner" });
+    } catch (error) {
+      if (
+        error instanceof GitHubInstallationAuthorityError &&
+        error.reason === "authority_unavailable"
+      ) {
+        continue;
+      }
+      if (
+        error instanceof GitHubInstallationAuthorityError &&
+        error.reason === "authority_denied"
+      ) {
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  return candidates.sort((left, right) =>
+    (left.installation.accountLogin ?? "").localeCompare(right.installation.accountLogin ?? ""),
+  );
 }
 
 export async function listGitHubAppRepositories(

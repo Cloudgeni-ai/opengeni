@@ -470,6 +470,7 @@ export function VariableSetCard(props: {
                         size="xs"
                         className="h-7 text-2xs pointer-coarse:min-h-10"
                         disabled={props.mutating}
+                        aria-label={`Rotate variable ${variable.name}`}
                         aria-expanded={rotatingName === variable.name}
                         onClick={() => {
                           setRotatingName((current) =>

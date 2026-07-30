@@ -369,11 +369,15 @@ export function buildConnectionTokenResolver(
   const load = async (
     input: CredentialLookupInput,
   ): Promise<ConnectionCredentialForBroker | null> => {
+    const subjectOwned = input.connectionRef.subjectScope === "subject";
+    if (subjectOwned && !input.subjectId) {
+      return null;
+    }
     const request: Parameters<typeof loadConnectionCredentialForBroker>[2] = {
       workspaceId: input.workspaceId,
       providerDomain: input.connectionRef.providerDomain,
-      // I1 deliberately accepts workspace-shared connections only at runtime.
-      allowSubjectOwned: false,
+      allowSubjectOwned: subjectOwned,
+      ...(subjectOwned ? { subjectId: input.subjectId! } : {}),
     };
     if (input.connectionRef.connectionId !== undefined) {
       request.connectionId = input.connectionRef.connectionId;
@@ -381,10 +385,12 @@ export function buildConnectionTokenResolver(
     if (input.connectionRef.kind !== undefined) {
       request.kind = input.connectionRef.kind;
     }
-    if (input.subjectId !== undefined) {
-      request.subjectId = input.subjectId;
+    const credential = await deps.loadCredential(db, settings, request);
+    if (!credential) return null;
+    if (subjectOwned) {
+      return credential.subjectId === input.subjectId ? credential : null;
     }
-    return deps.loadCredential(db, settings, request);
+    return credential.subjectId === null ? credential : null;
   };
 
   const snapshot = async (
@@ -428,7 +434,7 @@ export function buildConnectionTokenResolver(
           : {}),
       };
     }
-    await deps.recordUsed(db, cred.workspaceId, cred.id);
+    await deps.recordUsed(db, cred.workspaceId, cred.id, cred.subjectId);
     return {
       status: "ok",
       headers,
@@ -453,6 +459,7 @@ export function buildConnectionTokenResolver(
       credentialEncrypted: deps.encrypt(key, JSON.stringify(refreshed.credential)),
       expiresAt: refreshed.expiresAt,
       lastRefreshAt: deps.now(),
+      subjectId: cred.subjectId,
     };
     if (refreshed.grantedScopes !== undefined) {
       refreshRecord.grantedScopes = refreshed.grantedScopes;
@@ -462,6 +469,7 @@ export function buildConnectionTokenResolver(
       const current = await load({
         workspaceId: cred.workspaceId,
         connectionRef: { ...ref, connectionId: cred.id },
+        ...(cred.subjectId ? { subjectId: cred.subjectId } : {}),
       });
       if (current) {
         return current;
@@ -470,6 +478,7 @@ export function buildConnectionTokenResolver(
     const winner = await load({
       workspaceId: cred.workspaceId,
       connectionRef: { ...ref, connectionId: cred.id },
+      ...(cred.subjectId ? { subjectId: cred.subjectId } : {}),
     });
     if (winner?.status === "active") {
       return winner;
@@ -481,7 +490,7 @@ export function buildConnectionTokenResolver(
     cred: ConnectionCredentialForBroker,
     ref: McpServerConnectionRef,
   ): Promise<ConnectionCredentialForBroker> => {
-    const key = `${cred.id}:${cred.version}`;
+    const key = `${cred.subjectId ?? "workspace"}:${cred.id}:${cred.version}`;
     const existing = inflight.get(key);
     if (existing) {
       return existing;
@@ -538,6 +547,7 @@ export function buildConnectionTokenResolver(
               {
                 id: cred.id,
                 version: cred.version,
+                subjectId: cred.subjectId,
               },
             )
             .catch(() => undefined);

@@ -8,8 +8,13 @@
 //   @source "../node_modules/@opengeni/react/src";
 
 export type {
+  EmbeddedFileAttachmentClientLike,
+  EmbeddedGoalClientLike,
   EmbeddedHumanInputSessionClientLike,
+  EmbeddedSessionEventClientLike,
+  EmbeddedSessionLineageClientLike,
   EmbeddedSessionMcpApprovalPolicyClientLike,
+  EmbeddedSessionReadClientLike,
   EmbeddedSessionClientLike,
   SessionClientLike,
 } from "./client";
@@ -44,6 +49,7 @@ export {
   FILE_ONLY_MESSAGE_TEXT,
 } from "./hooks/use-composer";
 export type { ComposerSendExtras, ComposerState, UseComposerOptions } from "./hooks/use-composer";
+export { COMPOSER_PAYMENT_REQUIRED_MESSAGE, composerSubmissionErrorMessage } from "./lib/format";
 export {
   INITIAL_TRANSCRIPTION_CONTROL_STATE,
   appendFinalTranscript,
@@ -240,6 +246,8 @@ export type {
   AgentMessageItem,
   AuthNeededItem,
   GoalItem,
+  MachineInputBatchItem,
+  MachineInputMember,
   NoticeItem,
   ReasoningItem,
   SandboxItem,
@@ -281,6 +289,7 @@ export {
   TermBlock,
   Thumbnail,
   TurnSummary,
+  BUILT_IN_TURN_SUMMARY_FACET_IDS,
   useLightbox,
   useLightboxOptional,
 } from "./timeline";
@@ -288,7 +297,13 @@ export type {
   ActivityDisclosureProps,
   ActivityRailProps,
   DisclosureChip,
+  BuiltInTurnSummaryFacetId,
   TurnOutcome,
+  TurnSummaryContext,
+  TurnSummaryFacet,
+  TurnSummaryFacetConfiguration,
+  TurnSummaryFacetResult,
+  TurnSummaryOptions,
   TurnSummaryProps,
 } from "./timeline";
 

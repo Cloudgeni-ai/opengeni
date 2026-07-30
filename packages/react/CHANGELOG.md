@@ -1,5 +1,97 @@
 # @opengeni/react
 
+## 0.29.2
+
+### Patch Changes
+
+- ad0bdc3: Surface managed-credit admission rejections with actionable composer recovery guidance while preserving drafts and attachments, and canonicalize default attachment mounts across established-session draft admission and replay.
+  - @opengeni/sdk@0.29.0
+
+## 0.29.1
+
+### Patch Changes
+
+- 8478e60: Default workspace-tracking sessions to every configured MCP server while
+  preserving exact explicit API allow-lists. Keep OpenGeni's internal carrier and
+  default-on Files surface out of the web picker's visible choices and counts.
+  Settle provider-native web searches from their own terminal status, render each
+  web action truthfully, keep completed searches before the answer they informed,
+  and hide unresolved private citation handles from the human timeline.
+
+## 0.29.0
+
+### Patch Changes
+
+- Updated dependencies [33dc88f]
+  - @opengeni/sdk@0.29.0
+
+## 0.28.3
+
+### Patch Changes
+
+- 1c4018e: Replace one-turn tool overrides with one durable session tool policy, expose
+  OpenGeni-native tools in the same selection, default available tools on, and
+  render delivered machine inputs as compact typed timeline updates instead of
+  raw protocol JSON.
+- Updated dependencies [28c678d]
+- Updated dependencies [1c4018e]
+  - @opengeni/sdk@0.28.3
+
+## 0.28.2
+
+### Patch Changes
+
+- c1dcccc: Publish the current client surfaces from one exact reviewed source revision.
+- Updated dependencies [c1dcccc]
+  - @opengeni/sdk@0.28.2
+
+## 0.28.1
+
+### Patch Changes
+
+- 2ec6494: Publish the current client surfaces from one exact reviewed source revision.
+- Updated dependencies [2ec6494]
+  - @opengeni/sdk@0.28.1
+
+## 0.28.0
+
+### Minor Changes
+
+- 29ad09b: Persist typed machine inputs into canonical model history at turn claim, expose
+  authoritative pending-input queue projections and lifecycle events, render
+  delivered batches in the timeline, and preserve append-only prompt-cache
+  prefixes across tools, later turns, recovery, and explicit compaction.
+
+### Patch Changes
+
+- 8eaa377: Add per-timeline `add`, `remove`, and `replace` customization for collapsed turn summary facets while preserving the existing defaults.
+- 8eaa377: Expose transport-tolerant MCP output normalization from the SDK and reuse it in the React timeline parser.
+- Updated dependencies [29ad09b]
+- Updated dependencies [8eaa377]
+- Updated dependencies [dfc3235]
+  - @opengeni/sdk@0.28.0
+
+## 0.27.0
+
+### Patch Changes
+
+- 519d93c: Add validated inline per-session skills and discover skills directly from already-materialized repository resources.
+- Updated dependencies [519d93c]
+  - @opengeni/sdk@0.27.0
+
+## 0.26.3
+
+### Patch Changes
+
+- Updated dependencies [110bb77]
+  - @opengeni/sdk@0.26.3
+
+## 0.26.2
+
+### Patch Changes
+
+- f92af07: Give each session-only React hook an exact structural client contract so embedded hosts can use session reads, goals, lineage, file attachments, structured human input, and MCP approval policies without implementing unrelated composer, queue, workspace, or workbench APIs.
+
 ## 0.26.1
 
 ### Patch Changes

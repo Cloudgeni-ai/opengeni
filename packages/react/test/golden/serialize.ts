@@ -148,6 +148,15 @@ function serializeItem(item: TimelineItem): Record<string, unknown> {
         occurredAt: item.occurredAt,
         tone: item.tone,
         text: item.text,
+        details: stableValue(item.details),
+      };
+    case "machine-input-batch":
+      return {
+        kind: item.kind,
+        id: item.id,
+        turnId: item.turnId,
+        occurredAt: item.occurredAt,
+        members: stableValue(item.members),
       };
     case "auth-needed":
       return {

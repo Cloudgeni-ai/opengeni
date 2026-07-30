@@ -496,6 +496,13 @@ async function requireMcpAccessGrant(
   if (isToolspaceGrant(deps.settings, grant)) {
     return grant;
   }
+  // A worker-signed session-bound grant is allowed to reach the transport
+  // without inheriting broad workspace read access. The exact session
+  // authorization seam runs immediately after this gate, and tool registration
+  // still exposes only capabilities permitted by the delegated grant.
+  if (grant.metadata?.delegated === true && typeof grant.metadata.sessionId === "string") {
+    return grant;
+  }
   requirePermission(grant, "workspace:read");
   return grant;
 }
@@ -545,6 +552,7 @@ export function httpStatusForError(error: unknown): number {
 
 export function errorCodeForStatus(status: number): ErrorCode {
   if (status === 401) return "unauthenticated";
+  if (status === 402) return "payment_required";
   if (status === 403) return "forbidden";
   if (status === 404) return "not_found";
   if (status === 409) return "conflict";
@@ -705,6 +713,10 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/mcp\/docs$/,
     label: "/v1/workspaces/:workspaceId/mcp/docs",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/mcp\/files$/,
+    label: "/v1/workspaces/:workspaceId/mcp/files",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/default-rig$/,
@@ -887,6 +899,14 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
     label: "/v1/workspaces/:workspaceId/github/connect",
   },
   {
+    pattern: /^\/v1\/workspaces\/[^/]+\/github\/installations\/select$/,
+    label: "/v1/workspaces/:workspaceId/github/installations/select",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/github\/installations\/[^/]+\/configure$/,
+    label: "/v1/workspaces/:workspaceId/github/installations/:installationId/configure",
+  },
+  {
     pattern: /^\/v1\/workspaces\/[^/]+\/github\/installations$/,
     label: "/v1/workspaces/:workspaceId/github/installations",
   },
@@ -963,8 +983,8 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
     label: "/v1/workspaces/:workspaceId/connections/oauth/start",
   },
   {
-    pattern: /^\/v1\/workspaces\/[^/]+\/connections\/slack-bot$/,
-    label: "/v1/workspaces/:workspaceId/connections/slack-bot",
+    pattern: /^\/v1\/workspaces\/[^/]+\/connections\/slack-bot\/install$/,
+    label: "/v1/workspaces/:workspaceId/connections/slack-bot/install",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/connections\/[^/]+$/,
@@ -978,6 +998,10 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
   {
     pattern: /^\/v1\/integrations\/oauth\/client-metadata\.json$/,
     label: "/v1/integrations/oauth/client-metadata.json",
+  },
+  {
+    pattern: /^\/v1\/integrations\/slack\/callback$/,
+    label: "/v1/integrations/slack/callback",
   },
   {
     pattern: /^\/v1\/enrollments\/device\/start$/,

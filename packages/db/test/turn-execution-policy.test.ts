@@ -117,7 +117,6 @@ async function fixture(metadata: Record<string, unknown> = {}): Promise<Fixture>
           delivery: "send",
           text: "run with the accepted provider identity",
           resources: [],
-          tools: [],
           model: acceptedPolicy.productModelId,
           reasoningEffort: acceptedPolicy.reasoningEffort,
           reasoningEffortFallback: "high",

@@ -272,7 +272,7 @@ export type ToolRef = {
 };
 
 export type SessionToolPolicy = {
-  mode: "workspace_default" | "explicit" | "inherited" | "legacy";
+  mode: "workspace_default" | "explicit" | "inherited";
   inheritedFromSessionId: string | null;
 };
 
@@ -282,9 +282,9 @@ export type UpdateSessionToolPolicyRequest =
       expectedVersion: number;
     }
   | {
-      /** Omitted for compatibility with the original explicit-only API. */
-      mode?: "explicit" | undefined;
+      mode: "explicit";
       tools: ToolRef[];
+      firstPartyMcpTools: FirstPartyMcpToolName[];
       expectedVersion: number;
     };
 
@@ -408,11 +408,14 @@ export type CreateConnectionRequest = {
   metadata?: Record<string, unknown> | undefined;
 };
 
-export type ConnectOpenGeniSlackBotRequest = {
-  /** Write-only Slack bot token. It is never returned by the API. */
-  token: string;
+export type OpenGeniSlackBotInstallRequest = {
   /** Existing OpenGeni Slack bot connection to reinstall in place. */
   connectionId?: string | undefined;
+};
+
+export type OpenGeniSlackBotInstallStart = {
+  authorizationUrl: string;
+  expiresAt: string;
 };
 
 export type UpdateConnectionRequest = {
@@ -491,9 +494,10 @@ export type Session = {
   // the session carried none. Org-visible metadata, never a timeline event.
   instructions: string | null;
   resources: ResourceRef[];
+  skills: SessionSkill[];
   tools: ToolRef[];
-  toolPolicy?: SessionToolPolicy | undefined;
-  toolPolicyVersion?: number | undefined;
+  toolPolicy: SessionToolPolicy;
+  toolPolicyVersion: number;
   effectiveToolPolicy?: SessionEffectiveToolPolicy | undefined;
   metadata: Record<string, unknown>;
   /** Frozen creator fact; later turns carry their own independent initiator. */
@@ -513,6 +517,7 @@ export type Session = {
   rigId: string | null;
   rigVersionId: string | null;
   firstPartyMcpPermissions: string[] | null;
+  firstPartyMcpTools: FirstPartyMcpToolName[];
   mcpServers: SessionMcpServerMetadata[];
   parentSessionId: string | null;
   /** Immutable server-authored nested-agent lineage and policy snapshot. */
@@ -754,6 +759,9 @@ export const SESSION_EVENT_TYPES = [
   "goal.continuation",
   "system.update.pending",
   "system.update.delivered",
+  "system.update.superseded",
+  "system.update.cancelled",
+  "system.update.settled",
   "session.control.paused",
   "session.control.resumed",
   "session.control.steer_requested",
@@ -1560,6 +1568,8 @@ export type CreateSessionRequest = {
   // user-visible timeline. Trimmed, non-empty, max 32768 chars.
   instructions?: string | undefined;
   resources?: ResourceRef[] | undefined;
+  /** Inline skills fixed onto this session; omitted children inherit them. */
+  skills?: SessionSkill[] | undefined;
   tools?: ToolRef[] | undefined;
   metadata?: Record<string, unknown> | undefined;
   model?: string | undefined;
@@ -1588,6 +1598,7 @@ export type CreateSessionRequest = {
   expectedNewSessionDraftRevision?: number | undefined;
   maxNestedAgentDepth?: number | undefined;
   firstPartyMcpPermissions?: string[] | undefined;
+  firstPartyMcpTools?: FirstPartyMcpToolName[] | undefined;
   mcpServers?: SessionMcpServerInput[] | undefined;
   // Shared-sandbox placement (mirror of `@opengeni/contracts` CreateSessionRequest.sandbox,
   // addendum 05 §D.1). Three-way union; OMITTED ⇒ the context-dependent server default
@@ -1652,6 +1663,58 @@ export type KnownPermission = (typeof KNOWN_PERMISSIONS)[number];
  * can introduce permissions without breaking older SDK consumers.
  */
 export type Permission = KnownPermission | (string & {});
+
+export type FirstPartyMcpToolName =
+  | "set_session_title"
+  | "goal_set"
+  | "goal_update"
+  | "goal_complete"
+  | "goal_pause"
+  | "memory_search"
+  | "memory_save"
+  | "memory_correct"
+  | "sandboxes_list"
+  | "sandbox_attach"
+  | "sandbox_swap"
+  | "run_on"
+  | "sandbox_provision"
+  | "rig_list"
+  | "rig_get"
+  | "rig_propose_change"
+  | "rig_verify"
+  | "rig_promote"
+  | "sessions_list"
+  | "session_get"
+  | "session_events"
+  | "session_create"
+  | "session_send_message"
+  | "session_pause"
+  | "session_resume"
+  | "session_steer"
+  | "set_other_session_title"
+  | "variable_set_list"
+  | "environment_list"
+  | "variable_set_set_variable"
+  | "environment_set_variable"
+  | "github_connect_link"
+  | "github_token"
+  | "github_repositories_list"
+  | "social_connections_list"
+  | "social_posts_recent"
+  | "social_daily_analysis_context"
+  | "scheduled_tasks_list"
+  | "scheduled_tasks_get"
+  | "scheduled_tasks_create"
+  | "scheduled_tasks_update"
+  | "scheduled_tasks_pause"
+  | "scheduled_tasks_resume"
+  | "scheduled_tasks_trigger"
+  | "scheduled_tasks_delete"
+  | "scheduled_task_runs_list"
+  | "slack_bot_list_channels"
+  | "slack_bot_channel_history"
+  | "slack_bot_list_users"
+  | "slack_bot_post_message";
 
 export type ProductAccessMode = "local" | "configured" | "managed";
 
@@ -2326,9 +2389,6 @@ export type ComposerDraft = {
   revision: number;
   text: string;
   resources: ResourceRef[];
-  tools: ToolRef[];
-  /** False inherits the session policy; true preserves an explicit array. */
-  toolsProvided: boolean;
   model: string;
   reasoningEffort: ReasoningEffort;
   sourceTurnId: string | null;
@@ -2344,6 +2404,7 @@ export type NewSessionDraftOptions = {
   rigId?: string | undefined;
   goal?: GoalSpec | undefined;
   firstPartyMcpPermissions?: Permission[] | undefined;
+  firstPartyMcpTools?: FirstPartyMcpToolName[] | undefined;
 };
 
 export type NewSessionDraft = {
@@ -2365,7 +2426,19 @@ export type SessionQueueSnapshot = {
   /** The latest interrupted attempt has not yet durably proved physical quiescence. */
   stoppingPreviousAttempt: boolean;
   items: SessionTurn[];
+  /** Canonical pending machine inputs. Events only invalidate this snapshot. */
+  pendingInputs: SessionPendingInputPreview[];
+  /** Exact next bounded input batch that will join an already-waiting prompt. */
+  pendingInputAttachment: {
+    turnId: string;
+    inputIds: string[];
+  } | null;
 };
+
+export type SessionPendingInputPreview = Pick<
+  SessionSystemUpdate,
+  "id" | "sessionId" | "kind" | "classification" | "sourceId" | "summary" | "createdAt"
+>;
 
 export type SystemUpdateClassification = "success" | "failure" | "action_required" | "info";
 
@@ -2378,7 +2451,6 @@ export type SessionSystemUpdateKind =
 
 export type SessionSystemUpdateState =
   | "pending"
-  | "deferred"
   | "delivered"
   | "cancelled"
   | "superseded"
@@ -2396,6 +2468,7 @@ export type SessionSystemUpdate = {
   lineage: Record<string, unknown>;
   state: SessionSystemUpdateState;
   deliveredTurnId: string | null;
+  deliveredHistoryItemId: string | null;
   deliveredAt: string | null;
   createdAt: string;
 };
@@ -3125,6 +3198,8 @@ export type CapabilityPackSkill = {
   files: CapabilityPackSkillFile[];
 };
 
+export type SessionSkill = CapabilityPackSkill;
+
 export type CapabilityPackVariableSetSpec = {
   description: string;
   requiredVariables: string[];
@@ -3313,9 +3388,10 @@ export type CapabilityCatalogItem = {
   enabledReason: string | null;
   /** The connection backing this enabled installation, or null when none is involved. */
   connectionRef: {
-    connectionId: string;
+    connectionId?: string | undefined;
     providerDomain: string;
     kind: string;
+    subjectScope?: "subject" | "workspace" | undefined;
   } | null;
   metadata: Record<string, unknown>;
   createdAt?: string | undefined;
@@ -3400,6 +3476,8 @@ export type GitHubRepositoryScope = "all" | "selected";
 
 export type GitHubBindingStatus = "disabled" | "unbound" | "bound";
 
+export type GitHubAppSetupMode = "platform" | "operator";
+
 export type GitHubInstallationLifecycle = "active" | "suspended" | "deleted" | "unverified";
 
 export type GitHubInstallationBinding = {
@@ -3410,6 +3488,8 @@ export type GitHubInstallationBinding = {
   lifecycle: GitHubInstallationLifecycle;
   repositoryScope: GitHubRepositoryScope;
   repositoryCount: number;
+  /** OpenGeni-owned entry point for changing the installation's repository allowlist. */
+  configureUrl: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -3418,12 +3498,14 @@ export type GitHubAppInfo = {
   configured: boolean;
   /** Truthful workspace binding state; server App credentials alone are not a binding. */
   status: GitHubBindingStatus;
+  /** Platform deployments expose installation only; operator deployments may create an App. */
+  setupMode: GitHubAppSetupMode;
   appId: string | null;
   clientId: string | null;
   appSlug: string | null;
-  /** Fresh GitHub-controlled installation/configuration consent entry point. */
+  /** Fresh OAuth-first existing-installation discovery and install entry point. */
   installUrl: string | null;
-  /** Compatibility alias for installUrl; no repository-admin chooser is exposed. */
+  /** Compatibility alias for installUrl. */
   linkUrl: string | null;
   /** Installation bindings owned independently by this workspace. */
   installations: GitHubInstallationBinding[];
@@ -3538,7 +3620,6 @@ export type UserMessageEventInput = {
     text: string;
     turnInstructions?: string | undefined;
     resources?: ResourceRef[] | undefined;
-    tools?: ToolRef[] | undefined;
     model?: string | undefined;
     reasoningEffort?: ReasoningEffort | undefined;
     mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[] | undefined;

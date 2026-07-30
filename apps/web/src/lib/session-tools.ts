@@ -7,7 +7,12 @@ import type {
   Session,
   ToolRef,
 } from "@/types";
-import { defaultRepositoryMountPath, resourceMountPathCollisionKey } from "@opengeni/contracts";
+import {
+  FIRST_PARTY_MCP_TOOL_NAMES,
+  defaultRepositoryMountPath,
+  resourceMountPathCollisionKey,
+  type FirstPartyMcpToolName,
+} from "@opengeni/contracts";
 
 export type RepoDraft = { id: number; url: string; ref: string };
 // The composer's effort picker spans the FULL host enum, not a UI-only subset:
@@ -16,6 +21,39 @@ export type RepoDraft = { id: number; url: string; ref: string };
 // (billing impact — "low" beats the deployer's configured default server-side).
 export type IntelligenceEffort = ReasoningEffort;
 export type McpServerOption = { id: string; name: string };
+
+const NON_SELECTABLE_SESSION_MCP_SERVER_IDS = new Set(["opengeni", "files"]);
+
+/**
+ * Runtime infrastructure is not user policy:
+ * - `opengeni` is the mandatory carrier for the individually selected
+ *   first-party tools.
+ * - `files` is OpenGeni's hidden-on-by-default file/download capability.
+ *   The public API may still omit it from an explicit session policy.
+ */
+export function isSelectableSessionMcpServerId(id: string): boolean {
+  return !NON_SELECTABLE_SESSION_MCP_SERVER_IDS.has(id);
+}
+
+export function selectableSessionMcpServerIds(ids: Iterable<string>): Set<string> {
+  return new Set([...ids].filter(isSelectableSessionMcpServerId));
+}
+
+const FIRST_PARTY_ACTION_LABELS: Partial<Record<FirstPartyMcpToolName, string>> = {
+  set_session_title: "Rename this session",
+  set_other_session_title: "Rename another session",
+  run_on: "Choose where work runs",
+};
+
+export const firstPartySessionToolOptions = FIRST_PARTY_MCP_TOOL_NAMES.map((id) => ({
+  id,
+  name: FIRST_PARTY_ACTION_LABELS[id] ?? firstPartyToolLabel(id),
+}));
+
+function firstPartyToolLabel(id: FirstPartyMcpToolName): string {
+  const label = id.replaceAll("_", " ");
+  return label.slice(0, 1).toUpperCase() + label.slice(1);
+}
 
 // Canonical low→high ordering over the full enum; the picker renders efforts in
 // this order, filtered to whatever the host curates in `allowedReasoningEfforts`.
@@ -60,18 +98,25 @@ export function buildTools(
   mcpServerIds: string[] = [],
 ): ToolRef[] {
   const out = [...(existing ?? [])];
-  const ids = [...mcpServerIds];
-  // Document Search is one user-facing tool but needs its file-download helper
-  // ("files") alongside it; pull it in whenever "docs" is selected.
-  if (ids.includes("docs") && !ids.includes("files")) {
-    ids.push("files");
-  }
-  for (const id of ids) {
+  for (const id of mcpServerIds) {
     if (id && !out.some((tool) => tool.kind === "mcp" && tool.id === id)) {
       out.push({ kind: "mcp", id });
     }
   }
   return out;
+}
+
+/**
+ * OpenGeni's product UI keeps file access enabled without exposing an
+ * implementation-level Files checkbox. This is deliberately a UI default, not
+ * a server mandate: API and embedded clients can still submit an explicit
+ * policy without `files`.
+ */
+export function buildOpenGeniUiTools(
+  existing: ToolRef[] | undefined,
+  selectedMcpServerIds: Iterable<string>,
+): ToolRef[] {
+  return buildTools(existing, ["files", ...selectableSessionMcpServerIds(selectedMcpServerIds)]);
 }
 
 function canonicalToolIds(tools: ToolRef[]): string[] {
@@ -80,9 +125,9 @@ function canonicalToolIds(tools: ToolRef[]): string[] {
 
 /**
  * Materialize the picker's selection only when it narrows/pins the inherited
- * baseline. `undefined` is the wire-level omitted-tools contract; `[]` is an
- * intentional empty selection. Canonicalization includes hidden helpers such
- * as docs → files, so UI-only representation differences do not pin a turn.
+ * baseline. `undefined` is the wire-level omitted-tools contract. The product
+ * UI's hidden Files default is materialized when it writes an explicit policy;
+ * API clients that need a truly empty allow-list submit `[]` directly.
  */
 export function toolsForPolicySelection(input: {
   existing?: ToolRef[];
@@ -90,11 +135,11 @@ export function toolsForPolicySelection(input: {
   baselineMcpServerIds: Iterable<string>;
   forceExplicit?: boolean;
 }): ToolRef[] | undefined {
-  const selected = buildTools(input.existing, [...input.selectedMcpServerIds]);
+  const selected = buildOpenGeniUiTools(input.existing, input.selectedMcpServerIds);
   if (input.forceExplicit === true) {
     return selected;
   }
-  const baseline = buildTools(undefined, [...input.baselineMcpServerIds]);
+  const baseline = buildOpenGeniUiTools(undefined, input.baselineMcpServerIds);
   return canonicalToolIds(selected).join("\u0000") === canonicalToolIds(baseline).join("\u0000")
     ? undefined
     : selected;
@@ -108,8 +153,8 @@ export function newSessionDraftToolPolicy(input: {
   explicit: boolean;
 }): { tools: ToolRef[]; toolsProvided: boolean } {
   if (!input.catalogReady) return { tools: [], toolsProvided: false };
-  const selected = buildTools(undefined, [...input.selectedMcpServerIds]);
-  const baseline = buildTools(undefined, [...input.workspaceDefaultMcpServerIds]);
+  const selected = buildOpenGeniUiTools(undefined, input.selectedMcpServerIds);
+  const baseline = buildOpenGeniUiTools(undefined, input.workspaceDefaultMcpServerIds);
   const equal =
     canonicalToolIds(selected).join("\u0000") === canonicalToolIds(baseline).join("\u0000");
   return input.explicit || !equal
@@ -130,7 +175,7 @@ export function sessionPolicyPickerIds(
   workspaceDefaultIds: Iterable<string>,
 ): Set<string> {
   const selectable = new Set(selectableIds);
-  const mode = session.effectiveToolPolicy?.mode ?? session.toolPolicy?.mode ?? "legacy";
+  const mode = session.effectiveToolPolicy?.mode ?? session.toolPolicy.mode;
   const policyIds =
     mode === "workspace_default"
       ? [...workspaceDefaultIds]
@@ -332,12 +377,7 @@ export function selectableMcpServers(config: ClientConfig | null): McpServerOpti
   if (!config) {
     return [];
   }
-  // "files" is the document-search download helper, attached automatically with
-  // "docs" (see buildTools) — it is not a tool the user picks on its own, so
-  // hide it. Everything else, including the first-party "opengeni" and "docs",
-  // is selectable from the unified Tools dropdown.
-  const hidden = new Set(["files"]);
-  return config.mcpServers.filter((server) => !hidden.has(server.id));
+  return config.mcpServers.filter((server) => isSelectableSessionMcpServerId(server.id));
 }
 
 export function enabledWorkspaceCapabilityMcpServers(
@@ -352,7 +392,9 @@ export function enabledWorkspaceCapabilityMcpServers(
     ) {
       return [];
     }
-    return [{ id: item.runtime.mcpServerId, name: item.name }];
+    return isSelectableSessionMcpServerId(item.runtime.mcpServerId)
+      ? [{ id: item.runtime.mcpServerId, name: item.name }]
+      : [];
   });
 }
 

@@ -131,10 +131,11 @@ async function seedScenario(
   await admin`
     insert into sessions (
       id, account_id, workspace_id, initial_message, model,
-      sandbox_backend, sandbox_group_id, status, temporal_workflow_id
+      sandbox_backend, sandbox_group_id, status, temporal_workflow_id, tool_policy
     ) values (
       ${sessionId}, ${ws.accountId}, ${ws.workspaceId}, 'capacity test',
-      'codex/gpt-5.6-sol', 'modal', ${sessionId}, 'running', ${workflowId}
+      'codex/gpt-5.6-sol', 'modal', ${sessionId}, 'running', ${workflowId},
+      jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
     )`;
   await admin.begin(async (tx) => {
     await tx`
@@ -1067,7 +1068,6 @@ describe("durable Codex capacity waits", () => {
               delivery: "steer",
               text: "replace the blocked direction",
               resources: [],
-              tools: [],
               model: "codex/gpt-5.6-sol",
               reasoningEffort: "xhigh",
               reasoningEffortFallback: "xhigh",

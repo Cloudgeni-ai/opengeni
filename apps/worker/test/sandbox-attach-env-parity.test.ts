@@ -91,13 +91,14 @@ describe("attach-vs-turn manifest-environment parity (no repo attached)", () => 
     expect(attachEnv.HOME).toBe("/workspace");
   });
 
-  test("selfhosted stable env does not gain managed-sandbox git helper pointers", async () => {
+  test("selfhosted stable env preserves the machine HOME without managed-sandbox git helpers", async () => {
     const settings = testSettings({ sandboxBackend: "selfhosted" });
     const { environment: turnEnv } = await sandboxEnvironmentForRun(settings, [], {});
     const attachEnv = stableSandboxEnvironmentForRun(settings, {});
 
-    expect(turnEnv).toEqual({ HOME: "/" });
+    expect(turnEnv).toEqual({});
     expect(attachEnv).toEqual(turnEnv);
+    expect(turnEnv.HOME).toBeUndefined();
     expect(turnEnv.OPENGENI_GIT_CREDENTIALS_DIR).toBeUndefined();
     expect(turnEnv.OPENGENI_GIT_TOKEN_FILE).toBeUndefined();
     expect(turnEnv.OPENGENI_GIT_CLI_WRAPPER_DIR).toBeUndefined();

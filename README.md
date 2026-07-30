@@ -376,7 +376,8 @@ GitHub endpoints:
 - `GET /v1/workspaces/:workspaceId/github/connect`
 - `GET /v1/workspaces/:workspaceId/github/repositories`
 - `POST /v1/workspaces/:workspaceId/github/repositories/sync`
-- `POST /v1/workspaces/:workspaceId/github/installations`
+- `POST /v1/workspaces/:workspaceId/github/installations/select`
+- `POST /v1/workspaces/:workspaceId/github/installations` (legacy, `410 Gone`)
 - `DELETE /v1/workspaces/:workspaceId/github/installations/:installationId`
 - `POST /v1/workspaces/:workspaceId/github/app-manifest`
 - `GET /v1/github/app-manifest/callback`
@@ -455,7 +456,8 @@ The project license is Apache-2.0. Bundled HashiCorp Terraform-oriented agent sk
 
 - First-class `agents` and `environments` API resources.
 - Outbound webhooks for event delivery.
-- Client SDK for event streaming, timeline projection, rendering, approvals, and interrupts.
+- A provider-neutral stock repository picker; embedded hosts can already submit
+  mixed-provider, multi-binding `ResourceRef[]` through the current API.
 - More OpenAI Agents SDK-compatible sandbox backends.
 - Native mid-session file mounts for Docker sandboxes once the SDK supports privilege-safe late in-container mounts.
 - Deeper Temporal/OpenAI Agents SDK integration when the TypeScript SDK supports durable agent, tool, and sandbox boundaries cleanly.

@@ -48,7 +48,6 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     streamControlEnabled: false,
     toolspaceEnabled: false,
     toolspaceMaxCallsPerTurn: 200,
-    sessionTurnToolReplacementEnabled: true,
     environmentsEncryptionKey: undefined,
     integrationsEnabled: false,
     integrationsStateSecret: undefined,

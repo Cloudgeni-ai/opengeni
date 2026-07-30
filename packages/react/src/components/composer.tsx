@@ -43,7 +43,7 @@ import {
   type SlashCommandContext,
 } from "../hooks/use-slash-commands";
 import { cn } from "../lib/cn";
-import { formatBytes, formatRelativeTime } from "../lib/format";
+import { composerSubmissionErrorMessage, formatBytes, formatRelativeTime } from "../lib/format";
 import { CommandPalette as CommandPaletteView } from "./command-palette";
 import { ModelPicker as ModelPickerView } from "./model-picker";
 
@@ -470,7 +470,7 @@ export function useChatComposerController({
           tone: "error" as const,
           message: /control changed|paused while/i.test(delivery.error.message)
             ? messages.controlChangedError
-            : delivery.error.message || messages.sendFailedError,
+            : composerSubmissionErrorMessage(delivery.error) || messages.sendFailedError,
         }
       : null);
   useEffect(() => {

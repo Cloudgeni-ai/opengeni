@@ -72,6 +72,38 @@ describe("session-specific Toolspace token pointers", () => {
     );
   });
 
+  test("derives and expands Connected Machine pointers against the machine HOME", async () => {
+    const home = mkdtempSync(join(tmpdir(), "opengeni-toolspace-home-"));
+    try {
+      const manifestFile = "$HOME/.opengeni/toolspace-token";
+      const tokenFile = toolspaceTokenFileForSession(manifestFile, "session-a");
+      expect(tokenFile).toMatch(/^\$HOME\/\.opengeni\/toolspace-tokens\/[a-f0-9]{64}$/);
+      expect(() => toolspaceTokenFileForSession("$HOME/../escaped/token", "session-a")).toThrow(
+        "absolute or use the trusted $HOME/ prefix",
+      );
+      expect(() => toolspaceTokenFileForSession("$HOME/$(touch owned)/token", "session-a")).toThrow(
+        "absolute or use the trusted $HOME/ prefix",
+      );
+
+      const session = shellSession(home);
+      await runToolspaceTokenSeedHook(session as never, {
+        environment: { OPENGENI_TOOLSPACE_TOKEN_FILE: manifestFile },
+        toolspaceTokenSeed: "ogd_machine",
+        toolspaceTokenFile: tokenFile,
+      });
+
+      const selected = withToolspaceTokenSession(session, tokenFile);
+      const result = await selected.exec({
+        cmd: 'printf "%s:" "$OPENGENI_TOOLSPACE_TOKEN_FILE"; cat "$OPENGENI_TOOLSPACE_TOKEN_FILE"',
+      });
+      const expectedFile = tokenFile.replace("$HOME", home);
+      expect(result.stdout).toBe(`${expectedFile}:ogd_machine`);
+      expect(existsSync(join(home, ".opengeni", "toolspace-token"))).toBe(false);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   test("decorates client create/resume sessions and preserves lifecycle methods", async () => {
     const tokenFile = "/workspace/.opengeni/toolspace-tokens/" + "a".repeat(64);
     const commands: string[] = [];

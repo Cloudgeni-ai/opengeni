@@ -103,6 +103,27 @@ describe("createSandboxClient — per-backend matrix construction", () => {
     expect(client.options?.idleTimeoutMs).toBe(3_600_000);
   });
 
+  test("docker threads an explicit shared workspace base directory", () => {
+    const client = createSandboxClient(
+      testSettings({
+        sandboxBackend: "docker",
+        dockerWorkspaceBaseDir: "/var/lib/opengeni/docker-workspaces",
+      }),
+    ) as { options?: Record<string, unknown> };
+    expect(client.options?.workspaceBaseDir).toBe("/var/lib/opengeni/docker-workspaces");
+  });
+
+  test("docker rejects a relative workspace base directory", () => {
+    expect(() =>
+      createSandboxClient(
+        testSettings({
+          sandboxBackend: "docker",
+          dockerWorkspaceBaseDir: "relative/workspaces",
+        }),
+      ),
+    ).toThrow(SandboxConfigError);
+  });
+
   test("modal hard lifetime and create timeout derive from configured settings", () => {
     const settings = testSettings({
       sandboxBackend: "modal",

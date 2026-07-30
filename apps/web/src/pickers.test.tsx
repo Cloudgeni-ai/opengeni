@@ -1,9 +1,14 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { act, useEffect, useState } from "react";
+import type { FirstPartyMcpToolName } from "@opengeni/contracts";
+import { act, useState } from "react";
 import { createRoot } from "react-dom/client";
 
-import { EnabledMcpToolPicker } from "@/components/pickers";
+import {
+  SessionToolPicker,
+  visibleSessionToolSelection,
+  type SessionToolSelection,
+} from "@/components/pickers";
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -16,37 +21,31 @@ afterAll(() => {
   GlobalRegistrator.unregister();
 });
 
-const SERVERS = [
-  { id: "opengeni", name: "OpenGeni" },
-  { id: "linear", name: "Linear" },
+const FIRST_PARTY = [
+  { id: "session_get" as FirstPartyMcpToolName, name: "Get session" },
+  { id: "session_steer" as FirstPartyMcpToolName, name: "Steer session" },
 ];
 
-describe("session turn tool picker hydration fence", () => {
-  test("fences the Linear picker trigger until delayed draft hydration completes", async () => {
-    let releaseDraft!: () => void;
-    const draftHydrated = new Promise<void>((resolve) => {
-      releaseDraft = resolve;
-    });
-    let selected = new Set(["opengeni"]);
+describe("unified session tool picker", () => {
+  test("shows one durable selection for connected and OpenGeni tools", async () => {
+    let latest: SessionToolSelection = {
+      mcpServerIds: new Set(["linear"]),
+      firstPartyToolIds: new Set(FIRST_PARTY.map((tool) => tool.id)),
+    };
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
 
     function Harness() {
-      const [draftLoading, setDraftLoading] = useState(true);
-      const [selectedIds, setSelectedIds] = useState(() => new Set(selected));
-      useEffect(() => {
-        void draftHydrated.then(() => setDraftLoading(false));
-      }, []);
+      const [selection, setSelection] = useState(latest);
       return (
-        <EnabledMcpToolPicker
-          servers={SERVERS}
-          selectedIds={selectedIds}
-          disabled={draftLoading}
-          label="Tools for this turn"
+        <SessionToolPicker
+          servers={[{ id: "linear", name: "Linear" }]}
+          firstPartyTools={FIRST_PARTY}
+          selection={selection}
           onChange={(next) => {
-            selected = next;
-            setSelectedIds(next);
+            latest = next;
+            setSelection(next);
           }}
         />
       );
@@ -55,23 +54,55 @@ describe("session turn tool picker hydration fence", () => {
     try {
       await act(async () => root.render(<Harness />));
       const trigger = container.querySelector<HTMLButtonElement>(
-        'button[aria-label="Tools for this turn"]',
+        'button[aria-label="Session tools"]',
       );
-      expect(trigger).not.toBeNull();
-      expect(trigger!.disabled).toBe(true);
+      expect(trigger?.textContent).toContain("Tools · All");
 
-      await act(async () => {
-        trigger!.click();
+      expect(container.querySelectorAll('button[aria-label="Session tools"]')).toHaveLength(1);
+      expect(container.textContent).not.toContain("Tools for this turn");
+      expect(latest.mcpServerIds).toEqual(new Set(["linear"]));
+      expect(latest.firstPartyToolIds).toEqual(new Set(FIRST_PARTY.map((tool) => tool.id)));
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("never counts or preserves non-rendered runtime infrastructure", async () => {
+    let latest: SessionToolSelection = {
+      mcpServerIds: new Set(["docs", "opengeni", "files"]),
+      firstPartyToolIds: new Set(FIRST_PARTY.map((tool) => tool.id)),
+    };
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    function Harness() {
+      const [selection, setSelection] = useState(latest);
+      return (
+        <SessionToolPicker
+          servers={[{ id: "docs", name: "Document Search" }]}
+          firstPartyTools={FIRST_PARTY}
+          selection={selection}
+          onChange={(next) => {
+            latest = next;
+            setSelection(next);
+          }}
+        />
+      );
+    }
+
+    try {
+      await act(async () => root.render(<Harness />));
+      const trigger = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Session tools"]',
+      );
+      expect(trigger?.textContent).toContain("Tools · All");
+      expect(trigger?.textContent).not.toContain("5/3");
+      expect(visibleSessionToolSelection(latest, [{ id: "docs" }], FIRST_PARTY)).toEqual({
+        mcpServerIds: new Set(["docs"]),
+        firstPartyToolIds: new Set(FIRST_PARTY.map((tool) => tool.id)),
       });
-      expect(selected).toEqual(new Set(["opengeni"]));
-      expect(container.querySelector('[role="menu"]')).toBeNull();
-
-      await act(async () => releaseDraft());
-      expect(trigger!.disabled).toBe(false);
-      // The pending server response did not get an opportunity to replace a
-      // local picker edit: the trigger was fenced for the entire delay, and
-      // the controlled selection remains authoritative when it becomes usable.
-      expect(selected).toEqual(new Set(["opengeni"]));
     } finally {
       await act(async () => root.unmount());
       container.remove();

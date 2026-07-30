@@ -15,18 +15,24 @@ The catalog merges:
 
 Remote MCP capabilities with a streamable HTTP endpoint are executable. Enabling a remote MCP first performs an MCP initialize/list-tools probe. If the probe succeeds, OpenGeni stores a `capability_installations` row and the API/worker merge that row into the runtime MCP server list for new sessions, follow-ups, and scheduled tasks. Sessions and scheduled tasks created without an explicit `tools` key are attached to every enabled capability MCP server by default; an explicit tools list (even an empty one) is taken verbatim. If the probe fails, the API returns `422` and the capability stays disabled, so a stale, down, or auth-only endpoint never breaks agent turns at runtime.
 
-An existing-session follow-up may replace that turn's tools only while
-`OPENGENI_SESSION_TURN_TOOL_REPLACEMENT_ENABLED=true`. The flag defaults off as
-a rolling-deploy fence: an explicit follow-up `tools` key receives `503` until
-all workers understand durable `tools_provided` provenance, while an omitted key
-continues to inherit the session policy. Initial session creation remains safe
-and accepts explicit tools. Reusable scheduled runs synthesize inherited
-internal turns rather than follow-up replacement provenance, so they are not
-separately blocked. Follow the activation and rollback sequence in
-[deployment.md](deployment.md); never reinterpret legacy
-`tools_provided=false` rows globally as explicit replacements.
+Tool selection is durable session state. The session tool picker atomically
+updates connected MCP servers and individual OpenGeni tools under one version;
+the next attempt reads that selection. Follow-up Send and Steer requests do not
+carry a private one-turn tool list. OpenGeni's web picker hides its internal
+`opengeni` carrier and the default-on `files` server from the visible count.
+The public API remains exact: an explicit session policy may omit `files`.
+Provider-native web search remains available independently of this MCP policy.
+Its search, open-page, and find-in-page response items settle from their own
+provider status and render before the answer they informed; they do not wait for
+a separate function-tool output event.
 
 MCP tool refs are strict by default. A bare `{ "kind": "mcp", "id": "docs" }` must name a server configured for this deployment, and a runtime connect/list failure fails the turn. A client or pack can mark a ref `{ "kind": "mcp", "id": "context7", "optional": true }` to make it portable: if the deployment does not configure that server the ref is skipped during validation, and if the server is configured but unavailable at runtime it is skipped for that turn with a warning.
+
+The deployment-provided `codex_apps` registry follows the same durable policy
+when connected apps are enabled. Workspace-default sessions receive it as an
+optional MCP. Explicit and inherited fixed policies include it only when
+selected. Codex authentication is resolved separately and never widens the
+model-visible tool policy.
 
 ### Credential headers
 
@@ -140,11 +146,20 @@ The integrations catalog import pipeline is offline and reviewable. It never
 live-consumes integrations.sh at request time. The reviewed source of truth is
 the committed snapshot at `data/catalog/integrations-snapshot.json`. Updating it
 is a PR workflow: run `bun run catalog:refresh`, review the snapshot diff, then
-merge. Operators import that committed snapshot with `bun run catalog:import
---snapshot data/catalog/integrations-snapshot.json` (or the same path inside the
-application image). The importer writes global capability rows, records an
-`import_batches` provenance row with MIT attribution, and upserts registry
-entries by `(provider_domain, mcp_url)`.
+merge. Standard Helm installs and upgrades import that committed snapshot by
+default through the `catalogImport` hook Job; set `catalogImport.enabled=false`
+to opt out. The default `catalogImport.skipLogos=true` keeps deployment success
+independent of third-party logo hosts and uses generic monograms; set it to
+`false` to fetch, validate, and self-host the reviewed logos. `bun run dev` also
+imports metadata after migrations by default; set
+`OPENGENI_CATALOG_IMPORT_ENABLED=false` to opt out locally. Operators using a
+different deployment system should run `bun run catalog:import --snapshot
+data/catalog/integrations-snapshot.json --if-changed --skip-logos` after
+migrations. The
+fingerprinted `--if-changed` mode exits without database or object-storage
+writes when that exact snapshot already completed successfully. The importer
+writes global capability rows, records an `import_batches` provenance row with
+MIT attribution, and upserts registry entries by `(provider_domain, mcp_url)`.
 Rows removed from a later snapshot are marked `stale`, not deleted, and are
 excluded from default workspace catalog listings.
 

@@ -134,13 +134,17 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- define "opengeni.generatedRuntimeEnv" -}}
 {{- $root := . -}}
 {{- $objectStorageEndpoint := "" -}}
+{{- $includeDatabaseUrl := true -}}
 {{- if hasKey . "root" -}}
 {{- $root = .root -}}
 {{- $objectStorageEndpoint = .objectStorageEndpoint -}}
+{{- if hasKey . "includeDatabaseUrl" -}}
+{{- $includeDatabaseUrl = .includeDatabaseUrl -}}
+{{- end -}}
 {{- else if $root.Values.minio.enabled -}}
 {{- $objectStorageEndpoint = include "opengeni.minioEndpoint" $root -}}
 {{- end -}}
-{{- if $root.Values.postgres.enabled }}
+{{- if and $includeDatabaseUrl $root.Values.postgres.enabled }}
 {{- if $root.Values.postgres.runtime.existingSecret }}
 - name: OPENGENI_DATABASE_URL
   valueFrom:

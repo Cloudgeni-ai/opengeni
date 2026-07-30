@@ -6,6 +6,7 @@ import {
   authorizeGitHubInstallationBinding,
   createGitHubAppInstallationTokenWithExpiry,
   createSignedState,
+  discoverGitHubInstallationBindingCandidates,
   envLinesFromGitHubManifestConversion,
   githubAppBotIdentity,
   githubOAuthAuthorizeUrl,
@@ -46,6 +47,16 @@ describe("GitHub app manifest helpers", () => {
     expect(hosted.default_events).toBeUndefined();
     expect(hosted.request_oauth_on_install).toBe(true);
     expect(hosted.callback_urls).toEqual(["https://agents.example.com/v1/github/oauth/callback"]);
+
+    const setupCallback = buildGitHubAppManifest({
+      appName: "Hosted setup",
+      baseUrl: "https://agents.example.com",
+      public: false,
+      includeCiPermissions: true,
+      setupUrl: "https://agents.example.com/v1/github/setup",
+    });
+    expect(setupCallback.request_oauth_on_install).toBe(false);
+    expect(setupCallback.setup_on_update).toBe(true);
   });
 
   test("renders env lines with escaped private key", () => {
@@ -189,6 +200,56 @@ describe("GitHub app manifest helpers", () => {
         expect(requests.filter((url) => url.includes("/user/memberships/orgs/"))).toEqual([]);
       },
     );
+  });
+
+  test("discovers only existing installations with exact owner authority", async () => {
+    await withAuthorityGitHub(
+      { accountType: "Organization", membershipRole: "admin", membershipState: "active" },
+      async (requests) => {
+        const candidates = await discoverGitHubInstallationBindingCandidates(authoritySettings(), {
+          code: "fresh-code",
+        });
+        expect(candidates).toEqual([
+          {
+            authorityKind: "organization_owner",
+            installation: {
+              installationId: 42,
+              accountId: 700,
+              accountLogin: "acme",
+              accountType: "Organization",
+              suspended: false,
+            },
+          },
+        ]);
+        expect(
+          requests.filter((url) => url === "https://api.github.com/user/memberships/orgs/acme"),
+        ).toHaveLength(1);
+        expect(requests.some((url) => url.includes("/access_tokens"))).toBe(false);
+      },
+    );
+  });
+
+  test("does not treat repository visibility as organization ownership", async () => {
+    await withAuthorityGitHub(
+      { accountType: "Organization", membershipRole: "member", membershipState: "active" },
+      async () => {
+        expect(
+          await discoverGitHubInstallationBindingCandidates(authoritySettings(), {
+            code: "fresh-code",
+          }),
+        ).toEqual([]);
+      },
+    );
+  });
+
+  test("keeps hidden organization membership out of discovery without granting authority", async () => {
+    await withAuthorityGitHub({ accountType: "Organization", membershipStatus: 403 }, async () => {
+      expect(
+        await discoverGitHubInstallationBindingCandidates(authoritySettings(), {
+          code: "fresh-code",
+        }),
+      ).toEqual([]);
+    });
   });
 
   test("proves active organization ownership where GitHub exposes membership authority", async () => {

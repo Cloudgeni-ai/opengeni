@@ -69,7 +69,6 @@ config:
   OPENGENI_AUTH_REQUIRED: "false"
   OPENGENI_AUTH_ALLOW_HEALTH: "true"
   OPENGENI_AUTH_ALLOW_METRICS: "false"
-  OPENGENI_SESSION_TURN_TOOL_REPLACEMENT_ENABLED: "false"
   OPENGENI_WEB_ALLOWED_HOSTS: ""
   OPENGENI_PRODUCT_ACCESS_MODE: local
   OPENGENI_BILLING_MODE: disabled
@@ -89,7 +88,9 @@ secret:
   create: false
   existingSecret: opengeni-runtime
   # Provide OPENGENI_ACCESS_KEY for deployment shared-key access.
-  # Provide OPENGENI_DELEGATION_SECRET for configured/managed product access.
+  # Provide OPENGENI_DELEGATION_SECRET in every access mode. API and workers
+  # share it to preserve narrowed permissions and signed session/turn identity
+  # on first-party MCP requests, including in local mode.
   # Provide Better Auth, Resend, Stripe, GitHub App, model-provider, database,
   # NATS, Temporal, sandbox, and object-storage secrets through this secret or
   # an ExternalSecret. Never commit real secrets in values.
@@ -151,10 +152,10 @@ api:
   resources:
     requests:
       cpu: 250m
-      memory: 512Mi
+      memory: 1Gi
     limits:
       cpu: "1"
-      memory: 1Gi
+      memory: 2Gi
   podSecurityContext:
     runAsNonRoot: true
     runAsUser: 1000
@@ -536,6 +537,30 @@ migrations:
     helm.sh/hook: post-install,pre-upgrade
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
     helm.sh/hook-weight: "-5"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# Import the reviewed, committed integrations snapshot into the global
+# capability catalog after installs and upgrades. The importer fingerprints the
+# snapshot and exits without database or object-storage writes when that exact
+# revision has already completed successfully.
+catalogImport:
+  enabled: true
+  snapshotPath: /app/data/catalog/integrations-snapshot.json
+  # Keep deployment success independent of hundreds of third-party logo hosts.
+  # Set false to fetch, validate, and self-host logos during the import.
+  skipLogos: true
+  backoffLimit: 3
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    # Migrations use -5 and the disposable MinIO bucket initializer uses 5.
+    helm.sh/hook-weight: "10"
   resources:
     requests:
       cpu: 100m

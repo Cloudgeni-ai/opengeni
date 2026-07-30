@@ -1,5 +1,163 @@
 # @opengeni/core
 
+## 0.13.2
+
+### Patch Changes
+
+- Updated dependencies [2aca964]
+  - @opengeni/db@0.14.6
+  - @opengeni/documents@0.2.48
+  - @opengeni/events@0.3.39
+
+## 0.13.1
+
+### Patch Changes
+
+- Updated dependencies [ad0bdc3]
+  - @opengeni/contracts@0.23.1
+  - @opengeni/db@0.14.5
+  - @opengeni/config@0.7.14
+  - @opengeni/documents@0.2.47
+  - @opengeni/events@0.3.38
+  - @opengeni/runtime@0.14.5
+  - @opengeni/storage@0.2.38
+
+## 0.13.0
+
+### Minor Changes
+
+- 1973d2a: Treat provider-native web search as an always-on runtime capability whenever
+  the selected provider supports it. Session MCP selection no longer disables
+  native search.
+- 8478e60: Default workspace-tracking sessions to every configured MCP server while
+  preserving exact explicit API allow-lists. Keep OpenGeni's internal carrier and
+  default-on Files surface out of the web picker's visible choices and counts.
+  Settle provider-native web searches from their own terminal status, render each
+  web action truthfully, keep completed searches before the answer they informed,
+  and hide unresolved private citation handles from the human timeline.
+
+### Patch Changes
+
+- bcb50cf: Thread the configured Connected Machine control and exec deadlines through
+  `run_on`, and return truthful typed timeout/deadline command receipts without
+  replaying ambiguous execution.
+- Updated dependencies [ea38a4c]
+- Updated dependencies [39b1b84]
+- Updated dependencies [bcb50cf]
+  - @opengeni/db@0.14.4
+  - @opengeni/runtime@0.14.4
+  - @opengeni/documents@0.2.46
+  - @opengeni/events@0.3.37
+
+## 0.12.10
+
+### Patch Changes
+
+- Updated dependencies [33dc88f]
+- Updated dependencies [36451c6]
+  - @opengeni/contracts@0.23.0
+  - @opengeni/config@0.7.13
+  - @opengeni/runtime@0.14.3
+  - @opengeni/db@0.14.3
+  - @opengeni/documents@0.2.45
+  - @opengeni/events@0.3.36
+  - @opengeni/storage@0.2.37
+
+## 0.12.9
+
+### Patch Changes
+
+- 47a0927: Authorize first-party MCP Pause, Resume, and Agent Steer commands exactly once at the canonical command boundary instead of repeating the embedding host authorization call before persistence.
+- 1c4018e: Replace one-turn tool overrides with one durable session tool policy, expose
+  OpenGeni-native tools in the same selection, default available tools on, and
+  render delivered machine inputs as compact typed timeline updates instead of
+  raw protocol JSON.
+- Updated dependencies [1c4018e]
+  - @opengeni/config@0.7.12
+  - @opengeni/contracts@0.22.1
+  - @opengeni/db@0.14.2
+  - @opengeni/documents@0.2.44
+  - @opengeni/runtime@0.14.2
+  - @opengeni/storage@0.2.36
+  - @opengeni/events@0.3.35
+
+## 0.12.8
+
+### Patch Changes
+
+- Updated dependencies [6908a7a]
+  - @opengeni/db@0.14.1
+  - @opengeni/documents@0.2.43
+  - @opengeni/events@0.3.34
+
+## 0.12.7
+
+### Patch Changes
+
+- f2eebc8: Route Codex Apps through the durable per-session MCP tool policy so exact
+  allowlists cannot be widened by a runtime credential overlay.
+
+## 0.12.6
+
+### Patch Changes
+
+- dfc3235: Separate first-party MCP authorization from exact per-session tool visibility, add fail-closed registration policy, and isolate file download URLs on the files MCP surface.
+- Updated dependencies [29ad09b]
+- Updated dependencies [b2e23f3]
+- Updated dependencies [dfc3235]
+  - @opengeni/contracts@0.22.0
+  - @opengeni/db@0.14.0
+  - @opengeni/runtime@0.14.1
+  - @opengeni/config@0.7.11
+  - @opengeni/documents@0.2.42
+  - @opengeni/events@0.3.33
+  - @opengeni/storage@0.2.35
+
+## 0.12.5
+
+### Patch Changes
+
+- 519d93c: Add validated inline per-session skills and discover skills directly from already-materialized repository resources.
+- 7b962a6: Honor valid delegated worker access in local mode so signed session and turn metadata, along with narrowed permissions, reach first-party MCP tools.
+- Updated dependencies [519d93c]
+  - @opengeni/contracts@0.21.0
+  - @opengeni/runtime@0.14.0
+  - @opengeni/config@0.7.10
+  - @opengeni/db@0.13.4
+  - @opengeni/documents@0.2.41
+  - @opengeni/events@0.3.32
+  - @opengeni/storage@0.2.34
+
+## 0.12.4
+
+### Patch Changes
+
+- 110bb77: Enforce exact-subject ownership for personal OAuth capabilities and add secure direct OAuth installation for the separate workspace OpenGeni Slack bot.
+- Updated dependencies [110bb77]
+  - @opengeni/config@0.7.9
+  - @opengeni/contracts@0.20.2
+  - @opengeni/db@0.13.3
+  - @opengeni/runtime@0.13.14
+  - @opengeni/documents@0.2.40
+  - @opengeni/storage@0.2.33
+  - @opengeni/events@0.3.31
+
+## 0.12.3
+
+### Patch Changes
+
+- Updated dependencies [8b8545e]
+  - @opengeni/db@0.13.2
+  - @opengeni/documents@0.2.39
+  - @opengeni/events@0.3.30
+
+## 0.12.2
+
+### Patch Changes
+
+- Updated dependencies [f92af07]
+  - @opengeni/runtime@0.13.13
+
 ## 0.12.1
 
 ### Patch Changes

@@ -102,6 +102,7 @@ import {
   SessionContextBusyError,
   HumanInputResponseValidationError,
   latestWorkspaceCapture,
+  sessionLatestWorkspaceCapture,
   workspaceCaptureAtRevision,
   type AppendEventInput,
   type SandboxOpenPtySessionRow,
@@ -167,12 +168,17 @@ import {
 } from "@opengeni/core";
 import { assertSessionExists, boundedLimit } from "../http/common";
 import { sseSessionStream } from "../http/sse";
-import { serveWorkspaceCapture, serveWorkspaceCaptureFile } from "./workspace-capture";
+import {
+  serveWorkspaceCapture,
+  serveWorkspaceCaptureFile,
+  WorkspaceCaptureManifestCache,
+} from "./workspace-capture";
 
 type SessionRouteDeps = ApiRouteDeps & Pick<ViewerServices, "establishSandboxSession">;
 
 export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   const { settings, db, bus, workflowClient, objectStorage } = deps;
+  const workspaceCaptureManifestCache = new WorkspaceCaptureManifestCache();
   const ptyIdentity = (pty: SandboxOpenPtySessionRow): SandboxPtyProcessIdentity => ({
     leaseId: pty.leaseId,
     sandboxGroupId: pty.sandboxGroupId,
@@ -1276,8 +1282,6 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       text: payload.text,
       turnInstructions: payload.turnInstructions ?? null,
       resources: payload.resources,
-      tools: payload.tools,
-      toolsProvided: userMessagePayloadHasOwnProperty({ payload: raw }, "tools"),
       model: payload.model ?? null,
       reasoningEffort: payload.reasoningEffort ?? null,
       mcpCredentialUpdates: payload.mcpCredentialUpdates ?? [],
@@ -1320,8 +1324,6 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         text: event.payload.text,
         turnInstructions: event.payload.turnInstructions ?? null,
         resources: event.payload.resources ?? [],
-        tools: event.payload.tools ?? [],
-        toolsProvided: userMessagePayloadHasOwnProperty(rawEvent, "tools"),
         model: event.payload.model ?? null,
         reasoningEffort: event.payload.reasoningEffort ?? null,
         mcpCredentialUpdates: event.payload.mcpCredentialUpdates ?? [],
@@ -2120,16 +2122,17 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const workspaceId = c.req.param("workspaceId") ?? "";
     await requireAccessGrant(c, deps, workspaceId, "files:read");
     const sessionId = c.req.param("sessionId") ?? "";
-    const session = await getSession(db, workspaceId, sessionId);
-    if (!session) {
+    const lookup = await sessionLatestWorkspaceCapture(db, workspaceId, sessionId);
+    if (!lookup.sessionExists) {
       throw new HTTPException(404, { message: "session not found" });
     }
     if (!objectStorage) {
       // No storage configured → no captures can exist. Cold-fallback, not an error.
       return c.json({ available: false });
     }
-    const row = await latestWorkspaceCapture(db, workspaceId, sessionId);
-    return c.json(await serveWorkspaceCapture(row, objectStorage));
+    return c.json(
+      await serveWorkspaceCapture(lookup.capture, objectStorage, workspaceCaptureManifestCache),
+    );
   });
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/workspace/capture/file", async (c) => {
@@ -2648,20 +2651,6 @@ function optionalEventSequence(raw: string | undefined): number | undefined {
     return undefined;
   }
   return Math.floor(sequence);
-}
-
-function hasOwnProperty(value: unknown, key: string): boolean {
-  return Boolean(
-    value && typeof value === "object" && Object.prototype.hasOwnProperty.call(value, key),
-  );
-}
-
-function userMessagePayloadHasOwnProperty(value: unknown, key: string): boolean {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  const payload = (value as { payload?: unknown }).payload;
-  return hasOwnProperty(payload, key);
 }
 
 /** Stable, value-free JSON errors for only the create-session boundary. */

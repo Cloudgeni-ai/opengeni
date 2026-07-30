@@ -1022,6 +1022,24 @@ describe("OpenGeniClient connections", () => {
     });
   });
 
+  test("startOpenGeniSlackBotInstall POSTs the optional replacement connection", async () => {
+    const { client, requests } = makeClient(() =>
+      jsonResponse({
+        authorizationUrl: "https://slack.com/oauth/v2/authorize?state=signed",
+        expiresAt: "2026-06-12T00:10:00.000Z",
+      }),
+    );
+    const result = await client.startOpenGeniSlackBotInstall(WORKSPACE_ID, {
+      connectionId: "conn-1",
+    });
+    expect(result.authorizationUrl).toStartWith("https://slack.com/oauth/v2/authorize");
+    expect(requests[0]!.method).toBe("POST");
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/connections/slack-bot/install`,
+    );
+    expect(JSON.parse(requests[0]!.body!)).toEqual({ connectionId: "conn-1" });
+  });
+
   test("catalogAssetUrl builds a public v1 URL and is null-safe", () => {
     const { client } = makeClient(() => jsonResponse({}));
     expect(

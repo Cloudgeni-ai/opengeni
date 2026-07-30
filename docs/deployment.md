@@ -229,21 +229,45 @@ out of API and worker pods. Its default command serializes `db:migrate`,
 `helm upgrade` before workload replacement begins. Operators running without
 Helm must preserve the same order explicitly.
 
+After a successful install or upgrade, the default-on `catalogImport` hook Job
+imports the committed reviewed integrations snapshot. It receives the runtime
+Secret for object-storage configuration but overrides `OPENGENI_DATABASE_URL`
+from the migration-only Secret because global catalog and import-provenance
+tables are deliberately unavailable to the runtime role. The Job uses a SHA-256
+snapshot reference and performs no database, network, or logo-storage work when
+that exact revision already completed. Set `catalogImport.enabled=false` to opt
+out. Logo fetching is disabled by default so third-party availability cannot
+block a rollout; set `catalogImport.skipLogos=false` to opt into validated,
+self-hosted catalog logos.
+
 The provisioner converges `opengeni_app` to `LOGIN NOSUPERUSER NOBYPASSRLS
 NOCREATEROLE NOCREATEDB NOREPLICATION NOINHERIT`, refuses to guess through any
-role membership or ownership, revokes database/schema creation and all table
-privileges, then grants the exact current-ledger table contract: full CRUD on 81
-ordinary runtime tables, SELECT only on `nested_agent_depth_configuration`,
-SELECT + INSERT on append-only `session_spawn_denials`, and no direct table DML
-on the five FORCE-RLS host-export tables.
+privilege-bearing role membership or ownership, revokes database/schema creation
+and all table privileges, then grants the exact current-ledger table contract:
+full CRUD on 83 ordinary runtime tables, SELECT only on
+`nested_agent_depth_configuration`, SELECT + INSERT on the three append-only
+evidence/revision tables, and no direct table DML on the five FORCE-RLS
+host-export tables.
+PostgreSQL 16+ automatically records an ADMIN-only reverse membership when a
+non-superuser `CREATEROLE` principal creates the app role. Provisioning and
+posture checks accept only that exact creator-management edge when `SET=false`,
+`INHERIT=false`, and the grantor is a superuser. It cannot inherit the app
+role's privileges or activate them with `SET ROLE`; every outbound edge,
+privilege-bearing reverse edge, uncertain grantor, and PostgreSQL 15 edge is
+still rejected.
+When the provisioning principal is not a superuser, OpenGeni first proves
+`SUPERUSER`, `BYPASSRLS`, `CREATEDB`, and `REPLICATION` are already false, then
+converges only the role attributes PostgreSQL permits a `CREATEROLE`
+administrator to alter. An unsafe protected attribute fails with an explicit
+operator action instead of being left for runtime startup to discover.
 The runtime assertion connects through the runtime URL and checks, using only
 PostgreSQL catalogs in a repeatable-read/read-only transaction:
 
-- exact current/session role, attributes, zero role-graph edges, and
+- exact current/session role, attributes, zero privilege-bearing role-graph edges, and
   `row_security=on`;
 - no database/schema/relation/private-routine ownership and no database/schema
   CREATE;
-- exactly 77 declared tenant tables with ENABLE + FORCE + active RLS and at
+- exactly 81 declared tenant tables with ENABLE + FORCE + active RLS and at
   least one policy each;
 - exact SELECT/INSERT/UPDATE/DELETE grants for each declared privilege class,
   absence of TRUNCATE/REFERENCES/TRIGGER everywhere, and no privileges on any
@@ -414,9 +438,18 @@ Current profiles:
 
 ## Local Docker Compose
 
-`bun run dev` is the primary local Docker Compose path. It starts Postgres, NATS, Temporal, MinIO, migrations, the sandbox image build, API, both workers (control and turn), and web.
+`bun run dev` is the primary local Docker Compose path. It starts Postgres, NATS, Temporal, MinIO, migrations, imports the fingerprinted reviewed integrations catalog, builds the sandbox image, and starts the API, both workers (control and turn), and web. Set `OPENGENI_CATALOG_IMPORT_ENABLED=false` to omit the catalog import.
 
 When a common host port is already occupied, `bun run dev` auto-selects a nearby free port for Docker Compose and rewrites the in-memory runtime URLs for that run. Set `OPENGENI_POSTGRES_HOST_PORT`, `OPENGENI_NATS_HOST_PORT`, `OPENGENI_NATS_MONITOR_HOST_PORT`, `OPENGENI_TEMPORAL_HOST_PORT`, `OPENGENI_MINIO_HOST_PORT`, or `OPENGENI_MINIO_CONSOLE_HOST_PORT` in `.env` if you need fixed local port choices.
+
+When the turn worker itself runs in a container and controls the host Docker
+daemon through its socket, configure
+`OPENGENI_DOCKER_WORKSPACE_BASE_DIR` to an absolute host directory and
+bind-mount that directory into the worker at the exact same absolute path. The
+Agents SDK materializes repositories, resources, and lazy-loaded skills in that
+directory before the host daemon bind-mounts each workspace into its sandbox.
+Without the shared-path identity, the worker and sandbox see different
+filesystems even though Docker accepts the mount.
 
 ## Build Images
 
@@ -556,8 +589,8 @@ object with the top-level keys sorted in ascending ASCII order:
 `id` is the live positive release ID and `publishedAt` is the provider
 `published_at` value normalized through `new Date(value).toISOString()`. If an
 existing release differs from this identity after a retention check exists,
-sealing fails rather than creating a second proof; push a new head based on
-current `main`, let source admission pass, and seal that new head.
+sealing fails rather than creating a second proof; publish and seal a fresh
+exact head. Do not rebase an unchanged candidate solely because `main` moved.
 Trusted Version-PR admission publishes the same check. This gives downstream
 release operators a provider-owned proof of immutable source retention without
 requiring a credential that crosses repository boundaries. A tag and immutable
@@ -594,8 +627,19 @@ discontinuous range fails closed.
 
 The exact reviewed head must still resolve directly from its canonical
 `opengeni-release-head-<sha>` tag and have one successful GitHub Actions
-`Current-base source admission` check. The exact source must separately have
-one successful GitHub Actions result for each required candidate check:
+`Current-base source admission` check. The legacy context name is retained for
+the repository ruleset, but the check admits the immutable provider event head
+against the PR's provider merge-base tree; it does not require the event base
+to equal continuously moving `main`. The base-owned workflow/helper SHA must
+remain in protected `main` ancestry, and the provider base/head/repository,
+direct tree manifest, file projection, helper digest, read-only permissions,
+and terminal head identity remain fail-closed. Exact-head review stays bound to
+the candidate. The merge authority separately performs the fresh latest-main
+conflict, canonical patch-equivalence, protected-path, generated/migration,
+identity/manifest, security, and evidence checks immediately before merge.
+
+The exact source must separately have one successful GitHub Actions result for
+each required candidate check:
 `Typecheck and unit tests`, `Deployment artifacts`, and `Workload image
 builds`. Missing, moved, indirect, duplicated, failed, wrong-head, or
 foreign-app evidence is rejected. Check history is read with `filter=all`, and
@@ -978,38 +1022,6 @@ Sandbox file mount support is also backend-specific:
 | --- | --- | --- | --- | --- |
 | Docker/local in-container sandboxes | rclone mount | rclone mount | signed download materialization | signed download materialization |
 | Modal | SDK cloud bucket mount | signed download materialization | signed download materialization | signed download materialization |
-
-### Existing-session tool replacement rollout
-
-`OPENGENI_SESSION_TURN_TOOL_REPLACEMENT_ENABLED` defaults to `false`. This is a
-two-phase compatibility gate, not a permanent product default: older workers
-merge an explicit follow-up `tools` array with session tools, while current
-workers treat the accepted turn's `tools` plus `tools_provided` as exact
-provenance. Enabling replacement before old workers are gone can silently widen
-an explicit empty or narrowed turn.
-
-Activate in this order:
-
-1. Roll the provenance-aware API with the flag still `false`, and wait until no
-   old API instance serves traffic. Explicit `tools` on existing-session user
-   messages returns `503`; omitted tools continue to inherit normally.
-2. Let any explicit replacement turns admitted before the gate settle.
-3. Roll provenance-aware workers. Drain or terminate every old poller and prove
-   no old attempt remains active before continuing.
-4. Set `OPENGENI_SESSION_TURN_TOOL_REPLACEMENT_ENABLED=true` and roll the API
-   configuration. Existing-session explicit replacement is now admitted.
-
-Rollback is the reverse safety fence, not simply a worker image rollback:
-
-1. Disable the flag first so no new explicit replacement turn can be admitted.
-2. Drain every already-admitted replacement turn.
-3. Only then roll workers back.
-
-Initial session creation remains able to accept an explicit tool policy while
-the flag is off. Reusable scheduled runs synthesize inherited internal turns and
-are not separately blocked. Never rewrite or globally reinterpret historical
-`tools_provided=false` rows; their durable meaning remains “the accepted turn
-omitted tools and inherits its session policy.”
 
 ## Terraform Registry MCP Docs
 
@@ -1398,6 +1410,87 @@ Preview deployments should be private or maintainer-gated even when signup is
 enabled. The source repo may contain the contract, Helm values shape, and
 conformance scripts, but not provider secrets, kubeconfigs, Terraform state,
 preview tenant data, or unsanitized evidence.
+
+## Cold lost-provider blocker reconciliation
+
+`scripts/operator/reconcile-cold-lost-sandbox-blockers.ts` is the only
+supported exceptional repair for blocker rows left by an older provider-loss
+transition after the exact lease is already cold. It is not a provider repair,
+archive restore, workspace writer, or general-purpose lease editor. Normal
+provider-loss handling remains the automatic path described in
+[`run-lifecycle.md`](run-lifecycle.md).
+
+Always run the helper from the exact source deployed to the affected control
+plane. Its database connection must be the restricted `opengeni_app` role with
+row security enabled; preview additionally opens one `REPEATABLE READ, READ
+ONLY` transaction and verifies `FORCE ROW LEVEL SECURITY` on every table it
+reads. Preview has no provider dependency and makes no provider or apply call.
+The operator must obtain the provider observation separately and supply it as
+input. An observation is accepted only when its backend/object identity matches
+the selected archive reference, its timestamp is canonical UTC, and it is no
+more than five minutes old or 60 seconds ahead of the database snapshot.
+Missing, `unknown`, stale, future, malformed, or mismatched observations block.
+
+Build one private reviewed input packet containing every variable below. Use
+the exact literal `null` for supplied nullable values; omission means “not
+supplied” and blocks. Hashes are 64 lowercase hexadecimal characters and times
+are canonical ISO-8601 UTC strings.
+
+| Fence | Environment variables |
+| --- | --- |
+| Locator | `OPENGENI_RECOVERY_ACCOUNT_ID`, `OPENGENI_RECOVERY_WORKSPACE_ID`, `OPENGENI_RECOVERY_SESSION_ID`, `OPENGENI_RECOVERY_SANDBOX_GROUP_ID` |
+| Lease/loss | `OPENGENI_RECOVERY_LEASE_ID`, `OPENGENI_RECOVERY_BACKEND`, `OPENGENI_RECOVERY_CURRENT_EPOCH`, `OPENGENI_RECOVERY_LOST_EPOCH`, `OPENGENI_RECOVERY_LOST_INSTANCE_ID`, `OPENGENI_RECOVERY_REFCOUNT`, `OPENGENI_RECOVERY_PROVIDER_BACKEND` |
+| Route | `OPENGENI_RECOVERY_ROUTE_KIND`, `OPENGENI_RECOVERY_ROUTE_TARGET_ID`, `OPENGENI_RECOVERY_ROUTE_EPOCH` |
+| Workspace/restore | `OPENGENI_RECOVERY_WORKSPACE_GENERATION`, `OPENGENI_RECOVERY_WORKSPACE_STATUS`, `OPENGENI_RECOVERY_RESTORE_STATUS`, `OPENGENI_RECOVERY_RESTORE_FAILURE_CODE` |
+| Archive generation | `OPENGENI_RECOVERY_ARCHIVE_GENERATION`, `OPENGENI_RECOVERY_ARCHIVE_COMPLETE` |
+| Descriptor/object | `OPENGENI_RECOVERY_ARCHIVE_DESCRIPTOR_VERSION`, `OPENGENI_RECOVERY_ARCHIVE_REVISION`, `OPENGENI_RECOVERY_ARCHIVE_OBJECT_KIND`, `OPENGENI_RECOVERY_ARCHIVE_OBJECT_ID` |
+| Reference integrity | `OPENGENI_RECOVERY_ARCHIVE_DESCRIPTOR_REFERENCE_BYTES`, `OPENGENI_RECOVERY_ARCHIVE_DESCRIPTOR_REFERENCE_SHA256`, `OPENGENI_RECOVERY_ARCHIVE_REFERENCE_BYTES`, `OPENGENI_RECOVERY_ARCHIVE_REFERENCE_SHA256` |
+| Workspace tree | `OPENGENI_RECOVERY_ARCHIVE_TREE_FINGERPRINT_ALGORITHM`, `OPENGENI_RECOVERY_ARCHIVE_TREE_FINGERPRINT_SHA256`, `OPENGENI_RECOVERY_ARCHIVE_TREE_ENTRY_COUNT`, `OPENGENI_RECOVERY_ARCHIVE_TREE_FILE_COUNT`, `OPENGENI_RECOVERY_ARCHIVE_TOTAL_FILE_BYTES` |
+| Capture/verification | `OPENGENI_RECOVERY_ARCHIVE_CAPTURED_AT`, `OPENGENI_RECOVERY_ARCHIVE_VERIFICATION_STATE`, `OPENGENI_RECOVERY_ARCHIVE_VERIFIED_REVISION`, `OPENGENI_RECOVERY_ARCHIVE_VERIFIED_AT` |
+| External observation | `OPENGENI_RECOVERY_PROVIDER_OBJECT_KIND`, `OPENGENI_RECOVERY_PROVIDER_OBJECT_ID`, `OPENGENI_RECOVERY_PROVIDER_OBJECT_STATUS`, `OPENGENI_RECOVERY_PROVIDER_OBJECT_OBSERVED_AT` |
+
+The descriptor's `archiveBytes`/`archiveSha256` describe the opaque provider
+reference payload. Preview independently decodes `workspaceArchive` and
+recomputes that payload's bytes/SHA. `workspace.totalFileBytes` is the sum of
+file contents, while `workspace.sha256` is the deterministic GNU-tar full-tree
+fingerprint covering names, kinds, modes, symlink targets, and file bytes. They
+are distinct facts. `capturedAt` is never used as verification time;
+`verifiedAt` is authoritative only when workspace status is `ready`, the
+verified revision matches the selected descriptor, and the timestamp is valid.
+
+Run preview:
+
+```bash
+OPENGENI_COLD_LOST_LEASE_RECONCILE=preview \
+  bun scripts/operator/reconcile-cold-lost-sandbox-blockers.ts
+```
+
+The command emits one
+`OPENGENI_COLD_LOST_LEASE_RECONCILE_PREVIEW=<json>` receipt. Exit `0` means
+`eligible`; exit `2` means blocked. Keep the receipt as private operator
+evidence. It binds the complete expected and observed tuple, provider
+observation, and every process/admission/PTY/holder/interruption identity and
+linkage in a deterministic `clrp1:<sha256>` ID. A missing lease explicitly sets
+`inventoryComplete:false` and blocks rather than reporting an authoritative
+empty inventory.
+
+Only after independent review of that exact eligible receipt may an authorized
+operator rerun the **same input packet** with its preview ID:
+
+```bash
+OPENGENI_COLD_LOST_LEASE_RECONCILE=apply \
+OPENGENI_RECOVERY_PREVIEW_ID='clrp1:<reviewed-sha256>' \
+  bun scripts/operator/reconcile-cold-lost-sandbox-blockers.ts
+```
+
+Apply re-previews before locking, locks the exact blocker rows and lease,
+re-reads the complete receipt under those locks, and returns `stale` or
+`blocked` on any drift. A successful apply only marks exact active retained
+processes lost, rejects their exact unsettled admissions, closes exact open
+PTYs, deletes the matching process holders, and recomputes lease counters. It
+does not advance the epoch, modify archive/workspace generations or recovery
+truth, invoke a provider, terminate/create a sandbox, restore an archive, write
+the workspace, alter session control/queue/goal state, or replay an operation.
 
 ## Conformance
 

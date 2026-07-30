@@ -145,13 +145,28 @@ export type EmbeddedSessionClientLike = Pick<
   setWorkspaceInferenceState?: OpenGeniClient["setWorkspaceInferenceState"] | undefined;
 };
 
-/** Session client refinement required only by structured human-input hooks. */
-export type EmbeddedHumanInputSessionClientLike = EmbeddedSessionClientLike &
-  Pick<
-    OpenGeniClient,
-    "listHumanInputRequests" | "getHumanInputRequest" | "submitHumanInputResponse"
-  >;
+/** Event-read surface shared by hooks that optionally tail a session. */
+export type EmbeddedSessionEventClientLike = Pick<OpenGeniClient, "getSession" | "streamEvents">;
 
-/** Session client refinement required only by MCP approval-policy hooks. */
-export type EmbeddedSessionMcpApprovalPolicyClientLike = EmbeddedSessionClientLike &
+/** Exact client surface required by {@link useSession}. */
+export type EmbeddedSessionReadClientLike = EmbeddedSessionEventClientLike &
+  Pick<OpenGeniClient, "getSession" | "updateSession">;
+
+/** Exact client surface required by {@link useGoal}. */
+export type EmbeddedGoalClientLike = EmbeddedSessionEventClientLike &
+  Pick<OpenGeniClient, "getGoal" | "updateGoal" | "deleteGoal">;
+
+/** Exact client surface required by {@link useSessionLineage}. */
+export type EmbeddedSessionLineageClientLike = EmbeddedSessionEventClientLike &
+  Pick<OpenGeniClient, "getSessionLineage">;
+
+/** Exact client surface required by {@link useFileAttachments}. */
+export type EmbeddedFileAttachmentClientLike = Pick<OpenGeniClient, "uploadFile">;
+
+/** Exact client surface required by structured human-input hooks. */
+export type EmbeddedHumanInputSessionClientLike = EmbeddedSessionEventClientLike &
+  Pick<OpenGeniClient, "listHumanInputRequests" | "submitHumanInputResponse">;
+
+/** Exact client surface required by MCP approval-policy hooks. */
+export type EmbeddedSessionMcpApprovalPolicyClientLike = EmbeddedSessionEventClientLike &
   Pick<OpenGeniClient, "updateSessionMcpApprovalPolicy">;

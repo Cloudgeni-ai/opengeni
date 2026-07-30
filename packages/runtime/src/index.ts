@@ -15,6 +15,7 @@ import {
   approvalIdentifier,
   CAPABILITY_DESCRIPTORS,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+  DEFAULT_FIRST_PARTY_MCP_TOOLS,
   assertUniqueResourceMountPaths,
   gitCredentialBindingIdForRepository,
   gitCredentialProviderForRepository,
@@ -33,6 +34,7 @@ import {
   type HumanInputResponse,
   type McpServerConnectionRef,
   type Permission,
+  type FirstPartyMcpToolName,
   type ReasoningEffort,
   type ResourceRef,
   type SessionEventType,
@@ -177,6 +179,7 @@ import {
   type RunCredentialSessionReady,
 } from "./sandbox";
 import { runWithToolCallCorrelation } from "./sandbox/op-correlation";
+import { shellToolspacePath } from "./sandbox/toolspace-token";
 import {
   createTurnToolCancellationController,
   TurnSandboxCommandCancelledError,
@@ -187,6 +190,7 @@ import {
 } from "./sandbox/turn-tool-cancellation";
 import { computerUse, type ComputerToolMode } from "./sandbox-computer";
 import type { RuntimeMetricsHooks } from "./metrics";
+import { workspaceSkills, type WorkspaceSkillSearchPath } from "./workspace-skills";
 
 // The Agents SDK's debug namespaces can otherwise serialize complete model
 // inputs/outputs and tool arguments/results. These getters read process.env on
@@ -295,7 +299,6 @@ export {
   MAX_COMPACTION_THRESHOLD_RATIO,
   SUMMARY_BUFFER_TOKENS,
   SUMMARY_PREFIX,
-  isEphemeralInternalContext,
   USER_MESSAGE_TRUNCATION_MARKER,
 } from "./context-compaction";
 export type {
@@ -1260,7 +1263,7 @@ export type ToolspaceTokenWriterSession = SandboxSessionLike;
 export type EffectiveSkillSelection = Readonly<{
   id: string;
   name: string;
-  source: "bundled" | "library" | "pack";
+  source: "bundled" | "library" | "pack" | "session";
   version: string | null;
   contentSha256: string | null;
   reason: string;
@@ -1430,6 +1433,9 @@ export type BuildAgentOptions = {
   // skills in the sandbox skill index (mounted under .agents/) so
   // skills/<name> references resolve like any other indexed skill.
   packSkills?: PackSkill[];
+  // Inline skills fixed onto this session at creation. They use the SDK's lazy
+  // skill source and are materialized only when the model loads one.
+  sessionSkills?: PackSkill[];
   // Explicitly selected, immutable curated-library skill content. These are
   // separate from packSkills so repository-local/pack compatibility does not
   // turn a curated entry into a mutable override.
@@ -1460,7 +1466,7 @@ export type PackSkillFile = {
 
 export type PackSkill = {
   name: string;
-  description?: string | null;
+  description?: string | null | undefined;
   files: PackSkillFile[];
 };
 
@@ -1903,6 +1909,8 @@ export function buildOpenGeniAgent(
       ...(options.skillLibrarySkills?.length
         ? { skillLibrarySkills: options.skillLibrarySkills }
         : {}),
+      ...(options.sessionSkills?.length ? { sessionSkills: options.sessionSkills } : {}),
+      ...repositoryWorkspaceSkillPathsOption(resources),
       ...(options.structuredToolTransport !== undefined
         ? { structuredToolTransport: options.structuredToolTransport }
         : {}),
@@ -1925,6 +1933,7 @@ export function buildOpenGeniAgent(
         options.skillLibrarySelections ?? [],
         options.skillLibrarySkills ?? [],
         options.packSkills ?? [],
+        options.sessionSkills ?? [],
       ).map((selection) => Object.freeze(selection)),
     ),
   );
@@ -2240,6 +2249,8 @@ export function buildAgentCapabilities(
   packSkills: PackSkill[],
   options: {
     skillLibrarySkills?: PackSkill[];
+    sessionSkills?: PackSkill[];
+    workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];
     structuredToolTransport?: boolean;
     // EXPLICIT computer-use transport (see BuildAgentOptions.computerToolMode). When
     // present, computerUse() is handed the mode directly and its tools() obeys it
@@ -2276,11 +2287,29 @@ export function buildAgentCapabilities(
     filesystemCapability,
     shell({ ...(toolCancellation ? {} : { configureTools: withExecOpCorrelation }) }),
   ];
+  const sessionSkills = sessionSkillsForMaterialization(
+    packSkills,
+    options.skillLibrarySkills ?? [],
+    options.sessionSkills ?? [],
+  );
   caps.push(
     skills({
-      lazyFrom: lazySkillSourceWithPackSkills(packSkills, options.skillLibrarySkills ?? []),
+      lazyFrom: lazySkillSourceWithPackSkills(
+        [...packSkills, ...sessionSkills],
+        options.skillLibrarySkills ?? [],
+      ),
     }),
   );
+  if (options.workspaceSkillPaths?.length) {
+    caps.push(
+      workspaceSkills(options.workspaceSkillPaths, [
+        ...bundledSkillDirNames(bundledSkillsDir()),
+        ...(options.skillLibrarySkills ?? []).map((skill) => skill.name),
+        ...packSkills.map((skill) => skill.name),
+        ...sessionSkills.map((skill) => skill.name),
+      ]),
+    );
+  }
   // P4.3 computer-use: the agent drives the SAME :0 humans watch (xdotool/XTEST +
   // scrot), but only when the desktop tier is ON, computer-use is enabled, and the
   // backend is one whose image carries the X stack (descriptorgate — honest about
@@ -2373,10 +2402,16 @@ export type PrepareToolsOptions = {
   executionGeneration?: number;
   subjectId?: string;
   subjectLabel?: string;
+  // Immutable human authority used only for subject-owned connection lookup.
+  // This is intentionally separate from the worker's first-party MCP identity.
+  credentialSubjectId?: string;
   // Overrides the fixed first-party MCP permission set for this session's
   // delegated token (manager-style sessions). The caller is responsible for
   // having validated the set against the session creator's grant.
   firstPartyPermissions?: Permission[];
+  // Exact model-visible catalog selection for the broad first-party server.
+  // Permissions are signed separately and remain the authorization boundary.
+  firstPartyTools?: FirstPartyMcpToolName[];
   resolveCredential?: (
     input: ResolveConnectionCredentialInput,
   ) => Promise<ResolveConnectionCredentialResult>;
@@ -2465,6 +2500,14 @@ export async function prepareAgentTools(
     return { mcpServers: [], close: async () => {}, codexConnectorNamespaces };
   }
   const registry = new Map(settings.mcpServers.map((server) => [server.id, server]));
+  const subjectOwnedTool = tools.find(
+    (tool) => registry.get(tool.id)?.connectionRef?.subjectScope === "subject",
+  );
+  if (subjectOwnedTool && !options.credentialSubjectId) {
+    throw new Error(
+      `subject-owned connection for MCP server ${subjectOwnedTool.id} requires a human turn initiator`,
+    );
+  }
   const aggregateToolBudget = new McpAggregateToolListBudget();
   // npm Undici's dispatcher transport can hang indefinitely under Bun even
   // after an AbortSignal fires. Bun's native fetch is the supported runtime
@@ -2738,7 +2781,7 @@ async function resolveConnectionForRequest(
     destinationUrl,
     forceRefresh,
     ...(toolName ? { toolName } : {}),
-    ...(options.subjectId ? { subjectId: options.subjectId } : {}),
+    ...(options.credentialSubjectId ? { subjectId: options.credentialSubjectId } : {}),
   };
   try {
     return await options.resolveCredential(request);
@@ -2950,9 +2993,12 @@ function parseWwwAuthenticate(header: string | null): {
 // content, erasing the failure. A JSON-RPC error survives the shim as a thrown
 // McpError, which PrefixedMcpServer.callTool converts back into an MCP-shaped
 // `{ isError: true }` output for the model.
-const MCP_AUTH_NEEDED_ERROR_CODE = -32001;
-const MCP_AUTH_NEEDED_MESSAGE =
-  "Authentication required - a connection link was posted to the session.";
+const MCP_AUTH_NEEDED_ERROR = {
+  // OpenGeni application-defined JSON-RPC code. Keep this positive so it cannot
+  // collide with MCP SDK transport errors such as RequestTimeout (-32001).
+  code: 40_101,
+  message: "Authentication required - a connection link was posted to the session.",
+} as const;
 
 function mcpToolAuthNeededResponse(id: string | number | null | undefined): Response {
   return new Response(
@@ -2960,8 +3006,8 @@ function mcpToolAuthNeededResponse(id: string | number | null | undefined): Resp
       jsonrpc: "2.0",
       id: id ?? null,
       error: {
-        code: MCP_AUTH_NEEDED_ERROR_CODE,
-        message: MCP_AUTH_NEEDED_MESSAGE,
+        code: MCP_AUTH_NEEDED_ERROR.code,
+        message: MCP_AUTH_NEEDED_ERROR.message,
       },
     }),
     {
@@ -2976,7 +3022,11 @@ function isAuthNeededMcpError(error: unknown): boolean {
     return false;
   }
   const code = (error as { code?: unknown }).code;
-  return code === MCP_AUTH_NEEDED_ERROR_CODE || error.message.includes(MCP_AUTH_NEEDED_MESSAGE);
+  return (
+    code === MCP_AUTH_NEEDED_ERROR.code &&
+    (error.message === MCP_AUTH_NEEDED_ERROR.message ||
+      error.message === `MCP error ${MCP_AUTH_NEEDED_ERROR.code}: ${MCP_AUTH_NEEDED_ERROR.message}`)
+  );
 }
 
 // Model-facing text for a best-effort server whose tool call failed for a
@@ -3125,6 +3175,7 @@ async function signFirstPartyDelegatedBearer(
     subjectId: options.subjectId ?? "worker:first-party-mcp",
     ...(options.subjectLabel ? { subjectLabel: options.subjectLabel } : {}),
     permissions: options.firstPartyPermissions ?? [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS],
+    firstPartyMcpTools: options.firstPartyTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
     ...(options.sessionId ? { sessionId: options.sessionId } : {}),
     ...(options.turnId ? { turnId: options.turnId } : {}),
     ...(options.attemptId ? { attemptId: options.attemptId } : {}),
@@ -3425,7 +3476,7 @@ class PrefixedMcpServer implements MCPServer {
       if (isAuthNeededMcpError(error)) {
         return {
           isError: true,
-          content: [{ type: "text", text: MCP_AUTH_NEEDED_MESSAGE }],
+          content: [{ type: "text", text: MCP_AUTH_NEEDED_ERROR.message }],
         };
       }
       // Best-effort INVOCATION isolation (sibling to the listTools guard). When
@@ -5278,6 +5329,32 @@ export function buildManifest(
   });
 }
 
+export function repositoryWorkspaceSkillPathsOption(resources: readonly ResourceRef[]): {
+  workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];
+} {
+  const repositories = resources.filter(
+    (resource): resource is Extract<ResourceRef, { kind: "repository" }> =>
+      resource.kind === "repository",
+  );
+  if (repositories.length === 0) return {};
+
+  const paths = new Map<string, WorkspaceSkillSearchPath>();
+  const add = (path: string, source: string): void => {
+    if (!paths.has(path)) paths.set(path, { path, source });
+  };
+  // A Connected Machine maps /workspace to its configured working directory,
+  // which may itself be the selected repository. Managed sandboxes normally use
+  // the repository mount paths below. Checking both keeps the rule portable.
+  add(".agents/skills", "workspace .agents/skills");
+  add(".claude/skills", "workspace .claude/skills");
+  for (const repository of repositories) {
+    const mountPath = resourceMountPath(repository);
+    add(`${mountPath}/.agents/skills`, `${mountPath}/.agents/skills`);
+    add(`${mountPath}/.claude/skills`, `${mountPath}/.claude/skills`);
+  }
+  return { workspaceSkillPaths: [...paths.values()] };
+}
+
 function sandboxDownloadDirectory(download: SandboxFileDownload, mountPath: string): any {
   if (download.mountPath !== mountPath) {
     throw new Error(
@@ -6748,10 +6825,10 @@ export function toolspaceTokenSeedCommand(
     '  seed_umask="$(umask)"',
     "  umask 077",
     options.tokenFile
-      ? `  token_file=${shellQuote(options.tokenFile)}`
+      ? `  token_file=${shellToolspacePath(options.tokenFile)}`
       : '  token_file="${OPENGENI_TOOLSPACE_TOKEN_FILE:-$HOME/.opengeni/toolspace-token}"',
     options.legacyTokenFile
-      ? `  legacy_token_file=${shellQuote(options.legacyTokenFile)}`
+      ? `  legacy_token_file=${shellToolspacePath(options.legacyTokenFile)}`
       : '  legacy_token_file=""',
     '  mkdir -p "$(dirname "$token_file")"',
     '  printf \'%s\' "$OPENGENI_TOOLSPACE_TOKEN_SEED" > "$token_file.tmp.$$"',
@@ -7331,6 +7408,7 @@ function effectiveSkillSelections(
   librarySelections: readonly EffectiveSkillSelection[],
   librarySkills: readonly PackSkill[],
   packSkills: readonly PackSkill[],
+  sessionSkills: readonly PackSkill[],
 ): readonly EffectiveSkillSelection[] {
   const defaultSelections = bundledSkillDirNames(bundledSkillsDir()).map((name) => ({
     id: `bundled:${name}`,
@@ -7342,6 +7420,12 @@ function effectiveSkillSelections(
   }));
   const libraryNameKeys = new Set(librarySkills.map((skill) => skill.name.toLowerCase()));
   const packNameKeys = new Set(packSkills.map((skill) => skill.name.toLowerCase()));
+  const effectiveSessionSkills = sessionSkillsForMaterialization(
+    packSkills,
+    librarySkills,
+    sessionSkills,
+  );
+  const sessionNameKeys = new Set(effectiveSessionSkills.map((skill) => skill.name.toLowerCase()));
   const selected = librarySelections.filter((selection) =>
     libraryNameKeys.has(selection.name.toLowerCase()),
   );
@@ -7349,9 +7433,14 @@ function effectiveSkillSelections(
     ...defaultSelections.filter(
       (selection) =>
         !libraryNameKeys.has(selection.name.toLowerCase()) &&
-        !packNameKeys.has(selection.name.toLowerCase()),
+        !packNameKeys.has(selection.name.toLowerCase()) &&
+        !sessionNameKeys.has(selection.name.toLowerCase()),
     ),
-    ...selected.filter((selection) => !packNameKeys.has(selection.name.toLowerCase())),
+    ...selected.filter(
+      (selection) =>
+        !packNameKeys.has(selection.name.toLowerCase()) &&
+        !sessionNameKeys.has(selection.name.toLowerCase()),
+    ),
     ...packSkills.map((skill) => ({
       id: `pack:${skill.name}`,
       name: skill.name,
@@ -7360,7 +7449,54 @@ function effectiveSkillSelections(
       contentSha256: null,
       reason: "enabled capability pack",
     })),
+    ...effectiveSessionSkills.map((skill) => ({
+      id: `session:${skill.name}`,
+      name: skill.name,
+      source: "session" as const,
+      version: null,
+      contentSha256: null,
+      reason: "attached to session",
+    })),
   ];
+}
+
+function sessionSkillsForMaterialization(
+  packSkills: readonly PackSkill[],
+  librarySkills: readonly PackSkill[],
+  sessionSkills: readonly PackSkill[],
+): PackSkill[] {
+  const configured = new Map<string, PackSkill>();
+  for (const skill of [...librarySkills, ...packSkills]) {
+    configured.set(skill.name.toLowerCase(), skill);
+  }
+  const bundledNames = new Set(
+    bundledSkillDirNames(bundledSkillsDir()).map((name) => name.toLowerCase()),
+  );
+  const selected = new Map<string, PackSkill>();
+  for (const skill of sessionSkills) {
+    assertSafePackSkillName(skill.name);
+    const key = skill.name.toLowerCase();
+    if (bundledNames.has(key)) {
+      throw new Error(`Session skill "${skill.name}" conflicts with a bundled skill`);
+    }
+    const existing = selected.get(key) ?? configured.get(key);
+    if (existing) {
+      if (skillFingerprint(existing) !== skillFingerprint(skill)) {
+        throw new Error(`Conflicting skill definitions for "${skill.name}"`);
+      }
+      continue;
+    }
+    selected.set(key, skill);
+  }
+  return [...selected.values()];
+}
+
+function skillFingerprint(skill: PackSkill): string {
+  return JSON.stringify(
+    [...skill.files]
+      .sort((left, right) => left.path.localeCompare(right.path))
+      .map(({ path, content }) => ({ path, content })),
+  );
 }
 
 function removeSkillChildByNameKey(children: Record<string, Entry>, nameKey: string): void {

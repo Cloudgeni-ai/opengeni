@@ -64,6 +64,7 @@ export async function listWorkspaceGitHubInstallationBindings(
     ),
     repositoryScope: installation.repositoryScope,
     repositoryCount: installation.repositoryIds.length,
+    configureUrl: null,
     createdAt: installation.createdAt,
     updatedAt: installation.updatedAt,
   }));

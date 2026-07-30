@@ -3,7 +3,6 @@ import type * as activities from "../activities";
 
 type WorkflowControlActivities = Pick<
   typeof activities,
-  | "dispatchScheduledTaskRun"
   | "enqueueGoalRetryWake"
   | "expireSessionHumanInput"
   | "failSessionAttempt"
@@ -11,6 +10,7 @@ type WorkflowControlActivities = Pick<
   | "markSessionIdle"
   | "peekSessionWork"
   | "persistSessionAttemptQuiescence"
+  | "reconcileSessionAttemptQuiescence"
   | "reconcileCodexCapacityWait"
   | "recoverDispatch"
   | "settleSessionInterruptions"
@@ -31,6 +31,22 @@ export const activity = proxyActivities<WorkflowControlActivities>({
     initialInterval: "1 second",
     backoffCoefficient: 2,
     maximumInterval: "30 seconds",
+  },
+});
+
+/** One schedule occurrence is bounded. Transient control-plane failures get a
+ * short retry window, but a revoked binding or other permanent task error must
+ * not leave a Temporal activity retrying forever; the next scheduled occurrence
+ * is an independent workflow and will re-evaluate current state. */
+export const scheduledTaskActivity = proxyActivities<
+  Pick<typeof activities, "dispatchScheduledTaskRun">
+>({
+  startToCloseTimeout: "2 minutes",
+  retry: {
+    initialInterval: "1 second",
+    backoffCoefficient: 2,
+    maximumInterval: "30 seconds",
+    maximumAttempts: 5,
   },
 });
 

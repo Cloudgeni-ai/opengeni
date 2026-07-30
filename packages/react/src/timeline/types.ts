@@ -218,11 +218,36 @@ export type GoalItem = {
 export type NoticeItem = {
   kind: "notice";
   id: string;
-  tone: "waiting" | "cancelled" | "failed";
+  tone: "waiting" | "cancelled" | "failed" | "input";
   text: string;
   /** Optional evidence kept inspectable without overwhelming the main rail. */
   details?: { label: string; value: unknown };
   action?: { label: string; url: string };
+  occurredAt: string;
+};
+
+export type MachineInputMember = {
+  id: string;
+  kind:
+    | "scheduled_occurrence"
+    | "goal_continuation"
+    | "agent_message"
+    | "agent_steer_instruction"
+    | "child_terminal_result";
+  classification: "success" | "failure" | "action_required" | "info";
+  sourceId: string;
+  summary: string;
+};
+
+/**
+ * One or more durable non-human inputs that joined the following agent turn.
+ * This is communication, not a warning or a protocol-debug payload.
+ */
+export type MachineInputBatchItem = {
+  kind: "machine-input-batch";
+  id: string;
+  turnId: string | null;
+  members: MachineInputMember[];
   occurredAt: string;
 };
 
@@ -278,6 +303,7 @@ export type TimelineItem =
   | SessionStatusItem
   | GoalItem
   | NoticeItem
+  | MachineInputBatchItem
   | AuthNeededItem
   | MemoryItem
   | FleetDecisionItem

@@ -1228,7 +1228,22 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       if (!s.materializeEntry) {
         throw new RoutingUnsupportedError("materializeEntry", this.cached?.kind ?? "unknown");
       }
-      return s.materializeEntry(args);
+      await s.materializeEntry(args);
+
+      // The local Docker SDK materializes through a host path and then bind-mounts
+      // that path into the sandbox. A containerized worker using the host Docker
+      // socket can otherwise write into its own container layer while the sandbox
+      // sees a different, empty host directory. `pathExists()` and `readFile()` on
+      // that SDK session inspect the worker-side path, so only a command executed
+      // inside the actual sandbox proves the materialized path is usable by the
+      // agent. Never let lazy `load_skill` report success on a split workspace.
+      const path =
+        args && typeof args === "object" && typeof (args as { path?: unknown }).path === "string"
+          ? (args as { path: string }).path
+          : null;
+      if (path) {
+        await assertProviderCanSeeMaterializedPath(s, path);
+      }
     });
   }
 
@@ -1303,4 +1318,52 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   async prime(): Promise<ResolvedActiveBackend> {
     return this.resolve();
   }
+}
+
+const MATERIALIZED_PATH_MARKER = "__OPENGENI_MATERIALIZED_PATH_VISIBLE__";
+
+async function assertProviderCanSeeMaterializedPath(
+  session: RoutableBackendSession,
+  path: string,
+): Promise<void> {
+  const command = `test -e ${shellSingleQuote(path)} && printf %s ${shellSingleQuote(
+    MATERIALIZED_PATH_MARKER,
+  )}`;
+  const args = {
+    cmd: command,
+    workdir: providerManifestRoot(session) ?? "/workspace",
+    shell: "sh",
+    login: false,
+    tty: false,
+  };
+  let output: string;
+  if (session.execCommand) {
+    output = await session.execCommand(args);
+  } else if (session.exec) {
+    output = formatExecResult(await session.exec(args));
+  } else {
+    throw new RoutingUnsupportedError("materializeEntry.verify", "unknown");
+  }
+  if (!output.includes(MATERIALIZED_PATH_MARKER)) {
+    throw new Error(
+      `Sandbox materialization completed but the provider cannot read the destination path: ${path}`,
+    );
+  }
+}
+
+function providerManifestRoot(session: RoutableBackendSession): string | null {
+  const root = (
+    session.state as
+      | {
+          manifest?: {
+            root?: unknown;
+          };
+        }
+      | undefined
+  )?.manifest?.root;
+  return typeof root === "string" && root.length > 0 ? root : null;
+}
+
+function shellSingleQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
 }

@@ -9,5 +9,14 @@ export type {
 } from "./components/human-input-form";
 export { MessageTimeline, TimelineRow } from "./components/message-timeline";
 export type { MessageTimelineProps } from "./components/message-timeline";
+export { BUILT_IN_TURN_SUMMARY_FACET_IDS } from "./timeline/turn-summary";
+export type {
+  BuiltInTurnSummaryFacetId,
+  TurnSummaryContext,
+  TurnSummaryFacet,
+  TurnSummaryFacetConfiguration,
+  TurnSummaryFacetResult,
+  TurnSummaryOptions,
+} from "./timeline/turn-summary";
 export { QueueSurface } from "./components/queue-surface";
 export type { QueueSurfaceProps } from "./components/queue-surface";
