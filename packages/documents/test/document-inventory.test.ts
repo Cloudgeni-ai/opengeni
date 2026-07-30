@@ -29,8 +29,15 @@ describe("document inventory bounds", () => {
     expect(inventorySource).toContain(".limit(topicLimit + 1)");
     expect(inventorySource.match(/documentAccessConditions\(input\.access\)/g)).toHaveLength(2);
     expect(inventorySource).toContain(".where(documentWhere)");
-    expect(inventorySource).toContain(".where(and(documentWhere");
+    expect(inventorySource).toMatch(/\.where\(\s*and\(\s*documentWhere,/);
     expect(inventorySource).not.toContain(".select()");
     expect(inventorySource).not.toContain("mapDocument(");
+  });
+
+  test("retains JSON type and extracts only non-empty string topic elements", () => {
+    expect(inventorySource).toContain("jsonb_array_elements(${schema.documents.topics})");
+    expect(inventorySource).toContain("jsonb_typeof(topic.value) = 'string'");
+    expect(inventorySource).toContain("topic.value #>> '{}'");
+    expect(inventorySource).not.toContain("jsonb_array_elements_text");
   });
 });

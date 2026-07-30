@@ -1,14 +1,13 @@
 import {
   WORKSPACE_STATE_MAX_BASES,
   WORKSPACE_STATE_MAX_TOPICS,
-  WORKSPACE_STATE_MEMORY_SAMPLE_LIMIT,
   WORKSPACE_STATE_TOPIC_MAX_CHARS,
   WorkspaceStateResponse,
 } from "@opengeni/contracts";
 import { hasPermission, requireAccessGrant, type ApiRouteDeps } from "@opengeni/core";
 import {
   getWorkspace,
-  listKnowledgeMemories,
+  listWorkspaceStateMemoryRecords,
   listWorkspaceInstructionPolicyRevisions,
 } from "@opengeni/db";
 import { getDocumentInventory } from "@opengeni/documents";
@@ -36,9 +35,7 @@ export function registerWorkspaceStateRoutes(app: Hono, deps: ApiRouteDeps): voi
                 topicMaxChars: WORKSPACE_STATE_TOPIC_MAX_CHARS,
                 access: { viewerSubjectId: grant.subjectId },
               }),
-              listKnowledgeMemories(deps.db, workspaceId, {
-                limit: WORKSPACE_STATE_MEMORY_SAMPLE_LIMIT,
-              }),
+              listWorkspaceStateMemoryRecords(deps.db, workspaceId),
             ]);
             return { documents, memories };
           })()

@@ -690,16 +690,23 @@ export async function getDocumentInventory(
       .from(schema.documents)
       .where(documentWhere);
 
-    const topicName = sql<string>`left(regexp_replace(btrim(topic.value), '[[:space:]]+', ' ', 'g'), ${topicMaxChars})`;
+    const topicStringValue = sql<string>`topic.value #>> '{}'`;
+    const topicName = sql<string>`left(regexp_replace(btrim(${topicStringValue}), '[[:space:]]+', ' ', 'g'), ${topicMaxChars})`;
     const topicDocumentCount = sql<number>`count(distinct ${schema.documents.id})::int`;
     const topicRows = await scopedDb
       .select({ name: topicName, documentCount: topicDocumentCount })
       .from(schema.documents)
       .innerJoin(
-        sql`lateral jsonb_array_elements_text(${schema.documents.topics}) as topic(value)`,
+        sql`lateral jsonb_array_elements(${schema.documents.topics}) as topic(value)`,
         sql`true`,
       )
-      .where(and(documentWhere, sql`nullif(btrim(topic.value), '') is not null`))
+      .where(
+        and(
+          documentWhere,
+          sql`jsonb_typeof(topic.value) = 'string'`,
+          sql`nullif(btrim(${topicStringValue}), '') is not null`,
+        ),
+      )
       .groupBy(sql`1`)
       .orderBy(sql`2 desc`, sql`1 asc`)
       .limit(topicLimit + 1);

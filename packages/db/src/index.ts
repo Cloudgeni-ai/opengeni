@@ -98,6 +98,7 @@ import {
   approvalIdentifier,
   boundWorkspaceControlEvent,
   workspaceControlUtf8Bytes,
+  WORKSPACE_STATE_MEMORY_SAMPLE_LIMIT,
   SESSION_EVENT_RAW_DELTA_TYPES,
   SESSION_EVENT_CLIENT_EVENT_ID_MAX_BYTES,
   SESSION_EVENT_DUPLICATE_REASON_MAX_BYTES,
@@ -3108,6 +3109,18 @@ export type ListKnowledgeMemoryOptions = {
   limit?: number | undefined;
 };
 
+/**
+ * Sanitized row shape used only by Workspace State's bounded read-only
+ * inventory. The stable id is retained solely for deterministic ordering; no
+ * memory body, provenance, metadata, or vector field crosses this query seam.
+ */
+export type WorkspaceStateMemoryRecord = {
+  id: string;
+  status: KnowledgeMemoryStatus;
+  kind: KnowledgeMemoryKind;
+  updatedAt: string;
+};
+
 export type CreateSocialConnectionInput = {
   accountId: string;
   workspaceId: string;
@@ -5834,6 +5847,36 @@ export async function listKnowledgeMemories(
       .orderBy(desc(schema.knowledgeMemories.updatedAt))
       .limit(limit);
     return rows.map(mapKnowledgeMemory);
+  });
+}
+
+/**
+ * Return Workspace State's fixed-limit Memory projection without materializing
+ * general Memory rows. Equal timestamps use the stable UUID as a deterministic
+ * tie-breaker so repeated read-time projections are reproducible.
+ */
+export async function listWorkspaceStateMemoryRecords(
+  db: Database,
+  workspaceId: string,
+): Promise<WorkspaceStateMemoryRecord[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({
+        id: schema.knowledgeMemories.id,
+        status: schema.knowledgeMemories.status,
+        kind: schema.knowledgeMemories.kind,
+        updatedAt: schema.knowledgeMemories.updatedAt,
+      })
+      .from(schema.knowledgeMemories)
+      .where(eq(schema.knowledgeMemories.workspaceId, workspaceId))
+      .orderBy(desc(schema.knowledgeMemories.updatedAt), asc(schema.knowledgeMemories.id))
+      .limit(WORKSPACE_STATE_MEMORY_SAMPLE_LIMIT);
+    return rows.map((row) => ({
+      id: row.id,
+      status: row.status as KnowledgeMemoryStatus,
+      kind: row.kind as KnowledgeMemoryKind,
+      updatedAt: row.updatedAt.toISOString(),
+    }));
   });
 }
 

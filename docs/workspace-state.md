@@ -39,7 +39,7 @@ returns `Cache-Control: private, no-store`.
 Knowledge facts are independently gated by `documents:search`:
 
 - with the permission, the server computes subject-visible document aggregates,
-  a bounded base/topic projection, and the newest Memory sample;
+  a bounded base/topic projection, and a deterministic narrow Memory sample;
 - without it, `knowledge.availability` is `unavailable` and the response
   discloses no base, document, topic, source-kind, memory, freshness, or gap
   counts.
@@ -79,6 +79,13 @@ field `inspectedVisibleDocumentCount` is therefore an exact visible total, while
 base and topic rows remain bounded presentation lists. `baseCount` comes from a
 separate aggregate query, while `memorySample.recordCount` is a sample count,
 not a total.
+
+The Memory sample has its own Workspace-State-only SQL query. It selects exactly
+`id`, `status`, `kind`, and `updated_at`, orders by `updated_at DESC` plus stable
+`id ASC`, and applies the 100-row limit in SQL. The stable id is used only as a
+deterministic tie-breaker and is not exposed by the HTTP response. Memory text,
+source references, metadata, and embedding/vector columns are never selected or
+materialized for this surface.
 
 `generatedAt`, `latestDocumentUpdatedAt`, per-base `latestUpdatedAt`, and the
 Memory sample's `latestUpdatedAt` make freshness explicit.

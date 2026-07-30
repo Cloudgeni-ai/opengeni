@@ -4,10 +4,10 @@ import {
   WORKSPACE_STATE_MAX_BASES,
   WORKSPACE_STATE_MAX_TOPICS,
   WORKSPACE_STATE_MEMORY_SAMPLE_LIMIT,
-  type KnowledgeMemory,
   type WorkspaceInstructionPolicyHead,
   type WorkspaceInstructionPolicyListResponse,
 } from "@opengeni/contracts";
+import type { WorkspaceStateMemoryRecord } from "@opengeni/db";
 import type { DocumentInventory } from "@opengeni/documents";
 
 import { projectWorkspaceState } from "../src/workspace-state-projection";
@@ -35,28 +35,14 @@ function base(
   };
 }
 
-function memory(sequence: number, overrides: Partial<KnowledgeMemory> = {}): KnowledgeMemory {
+function memory(
+  sequence: number,
+  overrides: Partial<WorkspaceStateMemoryRecord> = {},
+): WorkspaceStateMemoryRecord {
   return {
     id: id(3_000 + sequence),
-    workspaceId: WORKSPACE_ID,
     status: "active",
     kind: "semantic",
-    scope: "workspace",
-    text: `secret memory text ${sequence}`,
-    sourceRefs: [{ kind: "external", id: "secret", uri: "https://secret.example" }],
-    confidence: 0.9,
-    metadata: { fixture: "private metadata" },
-    createdBySessionId: null,
-    reviewedBy: null,
-    reviewedAt: null,
-    pinned: false,
-    usageCount: 0,
-    lastUsedAt: null,
-    supersedesId: null,
-    supersededById: null,
-    validFrom: NOW,
-    validUntil: null,
-    createdAt: NOW,
     updatedAt: NOW,
     ...overrides,
   };
@@ -218,6 +204,6 @@ describe("workspace state projection", () => {
       "pending_memory_review",
       "partial_inventory",
     ]);
-    expect(JSON.stringify(projected)).not.toContain("secret memory text");
+    expect(JSON.stringify(projected)).not.toContain("sourceRefs");
   });
 });

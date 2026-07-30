@@ -15,6 +15,8 @@ import {
   updateWorkspace,
   type DbClient,
 } from "@opengeni/db";
+import { migrate } from "@opengeni/db/migrate";
+import { provisionRoles } from "@opengeni/db/provision-roles";
 import { addDocumentToBase, createDocumentBase, listDocumentBases } from "@opengeni/documents";
 import {
   acquireSharedTestDatabase,
@@ -22,6 +24,7 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { Hono } from "hono";
+import postgres from "postgres";
 
 import { registerWorkspaceStateRoutes } from "../src/routes/workspace-state";
 
@@ -35,9 +38,26 @@ let app: Hono;
 let grant: Grant;
 
 beforeAll(async () => {
-  const acquired = await acquireSharedTestDatabase("workspace-state");
-  if (!acquired) throw new Error("PostgreSQL test database unavailable");
-  shared = acquired;
+  const explicitAdminUrl = process.env.OPENGENI_WORKSPACE_STATE_TEST_ADMIN_URL;
+  const explicitAppUrl = process.env.OPENGENI_WORKSPACE_STATE_TEST_APP_URL;
+  if (explicitAdminUrl && explicitAppUrl) {
+    const explicitAppPassword = decodeURIComponent(new URL(explicitAppUrl).password);
+    await migrate(explicitAdminUrl);
+    await provisionRoles(explicitAdminUrl, { appPassword: explicitAppPassword });
+    const admin = postgres(explicitAdminUrl, { max: 4, prepare: false });
+    shared = {
+      admin,
+      adminUrl: explicitAdminUrl,
+      appUrl: explicitAppUrl,
+      release: async () => {
+        await admin.end();
+      },
+    };
+  } else {
+    const acquired = await acquireSharedTestDatabase("workspace-state");
+    if (!acquired) throw new Error("PostgreSQL test database unavailable");
+    shared = acquired;
+  }
   client = createDb(shared.appUrl);
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "test",
@@ -207,5 +227,100 @@ describe("workspace state API authorization", () => {
       severity: "info",
       relatedCount: null,
     });
+  });
+
+  test("counts and normalizes only string topic elements without leaking private topics", async () => {
+    const targetBase = (await listDocumentBases(client.db, grant.workspaceId))[0]!;
+    const malformedOnly = await addDocumentToBase(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      baseId: targetBase.id,
+      fileId: await readyFile("malformed-only-topics"),
+      title: "malformed only topics",
+      visibility: "workspace",
+      createdBy: grant.subjectId,
+    });
+    const mixed = await addDocumentToBase(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      baseId: targetBase.id,
+      fileId: await readyFile("mixed-topics"),
+      title: "mixed topics",
+      visibility: "workspace",
+      createdBy: grant.subjectId,
+    });
+    const hiddenPrivate = await addDocumentToBase(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      baseId: targetBase.id,
+      fileId: await readyFile("hidden-private-topics"),
+      title: "hidden private topics",
+      visibility: "private",
+      createdBy: "user:another-subject",
+    });
+    const malformedTopics: unknown[] = [{ label: "object-label" }, true, 7, ["nested-label"], null];
+    await shared.admin`
+      update documents
+      set status = 'ready', topics = ${shared.admin.json(malformedTopics)}::jsonb,
+          updated_at = now()
+      where id in (${malformedOnly.id}, ${mixed.id})
+    `;
+    await shared.admin`
+      update documents
+      set status = 'ready', topics = ${shared.admin.json(["private-hidden"])}::jsonb,
+          updated_at = now()
+      where id = ${hiddenPrivate.id}
+    `;
+
+    const malformedResponse = await request(["workspace:read", "documents:search"]);
+    expect(malformedResponse.status).toBe(200);
+    const malformedBody = WorkspaceStateResponse.parse(await malformedResponse.json());
+    expect(malformedBody.knowledge.availability).toBe("available");
+    if (malformedBody.knowledge.availability !== "available") {
+      throw new Error("expected inventory");
+    }
+    expect(malformedBody.knowledge.topics).toEqual([]);
+    expect(malformedBody.knowledge.documentStatusCounts.ready).toBe(2);
+    expect(malformedBody.knowledge.gaps).toContainEqual({
+      code: "missing_topic_coverage",
+      severity: "info",
+      relatedCount: 2,
+    });
+
+    const mixedTopics: unknown[] = [
+      "  Incident   Response  ",
+      "Incident Response",
+      "valid",
+      "",
+      "   ",
+      { label: "object-label" },
+      false,
+      42,
+      ["nested-label"],
+      null,
+    ];
+    await shared.admin`
+      update documents
+      set topics = ${shared.admin.json(mixedTopics)}::jsonb, updated_at = now()
+      where id = ${mixed.id}
+    `;
+
+    const mixedResponse = await request(["workspace:read", "documents:search"]);
+    expect(mixedResponse.status).toBe(200);
+    const mixedBody = WorkspaceStateResponse.parse(await mixedResponse.json());
+    expect(mixedBody.knowledge.availability).toBe("available");
+    if (mixedBody.knowledge.availability !== "available") throw new Error("expected inventory");
+    expect(mixedBody.knowledge.topics).toEqual([
+      { name: "Incident Response", documentCount: 1 },
+      { name: "valid", documentCount: 1 },
+    ]);
+    expect(mixedBody.knowledge.gaps.map((gap) => gap.code)).not.toContain("missing_topic_coverage");
+    const topicLabels = JSON.stringify(mixedBody.knowledge.topics);
+    expect(topicLabels).not.toContain("private-hidden");
+    expect(topicLabels).not.toContain("object-label");
+    expect(topicLabels).not.toContain("nested-label");
+    expect(topicLabels).not.toContain("false");
+    expect(topicLabels).not.toContain("42");
+    expect(topicLabels).not.toContain("null");
   });
 });

@@ -31,6 +31,12 @@ describe("workspace state route discipline", () => {
     expect(route).not.toContain("Promise.all(selectedBases.map");
   });
 
+  test("uses the narrow deterministic Workspace State Memory projection", () => {
+    expect(route).toContain("listWorkspaceStateMemoryRecords");
+    expect(route).not.toContain("listKnowledgeMemories");
+    expect(route).not.toContain("WORKSPACE_STATE_MEMORY_SAMPLE_LIMIT,");
+  });
+
   test("exposes only a no-store GET route with no mutation registration", () => {
     expect(route).toContain('app.get("/v1/workspaces/:workspaceId/workspace-state"');
     expect(route).toContain('context.header("cache-control", "private, no-store")');

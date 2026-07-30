@@ -9,18 +9,18 @@ import {
   WORKSPACE_STATE_MEMORY_SAMPLE_LIMIT,
   WORKSPACE_STATE_TOPIC_MAX_CHARS,
   WorkspaceStateResponse,
-  type KnowledgeMemory,
   type WorkspaceInstructionPolicyListResponse,
   type WorkspaceStateGap,
   type WorkspaceStateMemoryKindCounts,
   type WorkspaceStateMemoryStatusCounts,
   type WorkspaceStateResponse as WorkspaceStateResponseType,
 } from "@opengeni/contracts";
+import type { WorkspaceStateMemoryRecord } from "@opengeni/db";
 import type { DocumentInventory } from "@opengeni/documents";
 
 type KnowledgeProjectionInput = {
   documents: DocumentInventory;
-  memories: KnowledgeMemory[];
+  memories: WorkspaceStateMemoryRecord[];
 };
 
 export type WorkspaceStateProjectionInput = {
