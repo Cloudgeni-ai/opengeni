@@ -1,5 +1,12 @@
 # @opengeni/react
 
+## 0.29.2
+
+### Patch Changes
+
+- ad0bdc3: Surface managed-credit admission rejections with actionable composer recovery guidance while preserving drafts and attachments, and canonicalize default attachment mounts across established-session draft admission and replay.
+  - @opengeni/sdk@0.29.0
+
 ## 0.29.1
 
 ### Patch Changes
