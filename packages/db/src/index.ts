@@ -23612,7 +23612,7 @@ export async function releaseLeaseHolder(
 // Their in-memory timer is never authority by itself: the attempt and turn must
 // still form the current active-writer chain. The non-UUID branch exists only
 // for old synthetic fixtures/legacy diagnostic rows; runtime construction uses
-// `turn-attempt:<uuid>` exclusively, and migration 0137 removes canonical
+// `turn-attempt:<uuid>` exclusively, and migration 0138 removes canonical
 // orphan rows during the maintenance cutover.
 const LIVE_CANONICAL_TURN_HOLDER_PREDICATE = sql`
   (
