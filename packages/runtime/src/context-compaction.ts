@@ -211,10 +211,21 @@ function uint32BigEndian(bytes: Uint8Array, offset: number): number {
   );
 }
 
+function crc32(bytes: Uint8Array, start: number, end: number): number {
+  let crc = 0xffff_ffff;
+  for (let offset = start; offset < end; offset += 1) {
+    crc ^= bytes[offset] ?? 0;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc >>> 1) ^ (crc & 1 ? 0xedb8_8320 : 0);
+    }
+  }
+  return (crc ^ 0xffff_ffff) >>> 0;
+}
+
 function dimensionsFromImageBytes(bytes: Uint8Array): [number, number] | null {
-  // PNG IHDR: trust geometry only from a complete first IHDR chunk. Requiring
-  // the whole chunk (including its CRC bytes) prevents a partial signature or
-  // truncated/corrupt header from being mistaken for authoritative geometry.
+  // PNG IHDR: trust geometry only from a complete first IHDR chunk whose CRC32
+  // authenticates the 4-byte chunk type plus 13-byte data. This inspects exactly
+  // the bounded 33-byte prefix and never decodes the rest of the image.
   if (
     bytes.length >= 33 &&
     bytes[0] === 0x89 &&
@@ -229,7 +240,8 @@ function dimensionsFromImageBytes(bytes: Uint8Array): [number, number] | null {
     bytes[12] === 0x49 &&
     bytes[13] === 0x48 &&
     bytes[14] === 0x44 &&
-    bytes[15] === 0x52
+    bytes[15] === 0x52 &&
+    crc32(bytes, 12, 29) === uint32BigEndian(bytes, 29)
   ) {
     const width = uint32BigEndian(bytes, 16);
     const height = uint32BigEndian(bytes, 20);

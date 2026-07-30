@@ -167,7 +167,8 @@ then appends the summary; internal resume notices are never retained as user
 intent. Complete-input estimation detects typed image items before generic JSON
 serialization. It uses retained detail/dimensions or bounded PNG/GIF/WebP/JPEG
 byte-prefix geometry, charges unknown geometry through one conservative bounded
-fallback, and never counts typed inline image base64 as text. Ordinary textual
+fallback; PNG geometry additionally requires a valid complete IHDR CRC32. It
+never counts typed inline image base64 as text. Ordinary textual
 data URLs remain text. See [`context-compaction.md`](context-compaction.md).
 
 Outside the explicit durable compaction transition, model-visible history is
@@ -176,10 +177,10 @@ later provider request must reproduce that serialized filtered prefix exactly.
 Request-time filters may normalize computer calls, redact provider identities,
 or bound tool output deterministically; they may not remove or reorder an
 earlier `view_image` call/result pair. Computer-use tools are likewise exposed
-only when the resolved route has a proven visual transport: responses routes
+only when the caller supplies a proven visual transport: responses routes
 use hosted computer tools, Codex subscription routes return structured image
-results, and chat-wire routes receive no computer tools rather than screenshot
-data URLs encoded as text.
+results, and chat-wire or omitted/unproven public runtime routes receive no
+computer tools rather than screenshot data URLs encoded as text.
 
 Before model/tool work, a claimed turn inserts a first-class
 `session_turn_attempts` row containing its exact Temporal activity id, current

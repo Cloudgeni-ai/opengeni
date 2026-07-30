@@ -66,7 +66,8 @@ Typed `input_image`, `image_url`, structured `image`, and
 `computer_screenshot` objects are projected as native media before the generic
 JSON/text estimate. Explicit detail and dimensions are retained; when needed,
 a bounded byte prefix can recover PNG, GIF, WebP VP8X, or JPEG geometry. The
-dimension-aware estimate is capped, and unknown geometry uses one explicit
+PNG path accepts geometry only from a complete first IHDR chunk with a valid
+CRC32 over its type and 13-byte data. The dimension-aware estimate is capped, and unknown geometry uses one explicit
 conservative bounded fallback. Inline image bytes or data-URL base64 therefore
 do not grow the text estimate linearly. A data URL inside ordinary textual
 content is still text and receives ordinary text accounting.

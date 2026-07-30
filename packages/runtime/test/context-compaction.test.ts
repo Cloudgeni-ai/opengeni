@@ -314,6 +314,16 @@ describe("complete outgoing model-input accounting", () => {
     expect(estimate.totalTokens).toBeLessThan(estimateTextTokens(JSON.stringify(item)));
   });
 
+  test("trusts PNG geometry when the complete IHDR chunk has a valid CRC32", () => {
+    expect(
+      estimateNativeImageTokens({ source: pngDataUrl(pngIhdrPrefix(1280, 800)), detail: "high" }),
+    ).toMatchObject({
+      width: 1280,
+      height: 800,
+      reason: "dimensions",
+    });
+  });
+
   test("base64 length does not linearly change an image estimate with identical geometry/detail", () => {
     const short = pngDataUrl(pngIhdrPrefix(1280, 800));
     const long = pngDataUrl(pngIhdrPrefix(1280, 800, 700_000));
@@ -342,6 +352,18 @@ describe("complete outgoing model-input accounting", () => {
   test("uses the bounded fallback for a corrupt PNG IHDR chunk length", () => {
     const bytes = pngIhdrPrefix(1280, 800);
     bytes.writeUInt32BE(0xffff_ffff, 8);
+    expectBoundedPngFallback(bytes);
+  });
+
+  test("uses the bounded fallback for the reviewer's complete IHDR with a zero CRC", () => {
+    const bytes = pngIhdrPrefix(1280, 800);
+    bytes.writeUInt32BE(0, 29);
+    expectBoundedPngFallback(bytes);
+  });
+
+  test("uses the bounded fallback when an otherwise valid PNG IHDR fixture is corrupted", () => {
+    const bytes = pngIhdrPrefix(1280, 800);
+    bytes[16] = (bytes[16] ?? 0) ^ 0x01;
     expectBoundedPngFallback(bytes);
   });
 
