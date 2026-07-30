@@ -1,5 +1,11 @@
 # @opengeni/db
 
+## 0.14.6
+
+### Patch Changes
+
+- 2aca964: Allow PostgreSQL 16+ managed-service role provisioning to retain the exact non-runtime-bearing creator-management grant while continuing to reject every privilege-bearing role relationship.
+
 ## 0.14.5
 
 ### Patch Changes
