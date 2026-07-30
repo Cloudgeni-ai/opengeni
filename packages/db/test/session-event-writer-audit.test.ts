@@ -1,8 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { parse } from "@babel/parser";
-import * as babel from "@babel/types";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
+import * as t from "oxc-parser";
+
+type FunctionLikeDeclaration = t.Function | t.ArrowFunctionExpression;
+
+type SourceFile = {
+  program: t.Program;
+  source: string;
+};
 
 type LockContract = "canonical" | "turn_attempt_fence" | "owned_suffix";
 
@@ -13,6 +19,91 @@ type ExpectedWriter = {
 };
 
 const repoRoot = resolve(import.meta.dir, "../../..");
+const parentNodes = new WeakMap<t.Node, t.Node>();
+
+function nodeStart(node: t.Node): number {
+  return node.start;
+}
+
+function lineNumber(source: string, node: t.Node): number {
+  return source.slice(0, nodeStart(node)).split("\n").length;
+}
+
+function isNode(value: unknown): value is t.Node {
+  return (
+    typeof value === "object" && value !== null && "type" in value && typeof value.type === "string"
+  );
+}
+
+function isArrowFunctionExpression(node: t.Node | undefined): node is t.ArrowFunctionExpression {
+  return node?.type === "ArrowFunctionExpression";
+}
+
+function isCallExpression(node: t.Node | undefined): node is t.CallExpression {
+  return node?.type === "CallExpression";
+}
+
+function isFunctionDeclaration(node: t.Node | undefined): node is t.Function {
+  return node?.type === "FunctionDeclaration";
+}
+
+function isFunctionExpression(node: t.Node | undefined): node is t.Function {
+  return node?.type === "FunctionExpression";
+}
+
+function isIdentifier(node: t.Node | undefined): node is Extract<t.Node, { type: "Identifier" }> {
+  return node?.type === "Identifier";
+}
+
+function isMemberExpression(node: t.Node | undefined): node is t.MemberExpression {
+  return node?.type === "MemberExpression";
+}
+
+function isObjectExpression(node: t.Node | undefined): node is t.ObjectExpression {
+  return node?.type === "ObjectExpression";
+}
+
+function isObjectProperty(node: t.Node | undefined): node is t.ObjectProperty {
+  return node?.type === "Property";
+}
+
+function isStringLiteral(node: t.Node | undefined): node is t.StringLiteral {
+  return node?.type === "Literal" && typeof node.value === "string";
+}
+
+function isTaggedTemplateExpression(node: t.Node | undefined): node is t.TaggedTemplateExpression {
+  return node?.type === "TaggedTemplateExpression";
+}
+
+function isVariableDeclarator(node: t.Node | undefined): node is t.VariableDeclarator {
+  return node?.type === "VariableDeclarator";
+}
+
+function forEachChild(node: t.Node, visit: (child: t.Node) => void): void {
+  const record = node as unknown as Record<string, unknown>;
+  for (const key of t.visitorKeys[node.type] ?? []) {
+    const value = record[key];
+    const children = Array.isArray(value) ? value : [value];
+    for (const child of children) {
+      if (!isNode(child)) continue;
+      parentNodes.set(child, node);
+      visit(child);
+    }
+  }
+}
+
+function parseSourceFile(path: string, source: string): SourceFile {
+  const result = t.parseSync(path, source, { sourceType: "unambiguous" });
+  if (result.errors.length > 0) {
+    throw new Error(
+      `Could not parse ${path}: ${result.errors.map((error) => error.message).join("; ")}`,
+    );
+  }
+  return {
+    source,
+    program: result.program,
+  };
+}
 
 const expectedWriters: Record<string, ExpectedWriter> = {
   "packages/db/src/index.ts#armCodexCapacityWait": {
@@ -242,80 +333,20 @@ function productionTypeScriptFiles(): string[] {
   return files.sort();
 }
 
-type AstNode = babel.Node;
-type FunctionLike =
-  | babel.FunctionDeclaration
-  | babel.FunctionExpression
-  | babel.ArrowFunctionExpression;
-type ParsedSource = {
-  ast: babel.File;
-  source: string;
-};
-
-const parentNodes = new WeakMap<AstNode, AstNode>();
-
-function isAstNode(value: unknown): value is AstNode {
-  return Boolean(value && typeof value === "object" && "type" in value);
-}
-
-function forEachAstChild(node: AstNode, visit: (child: AstNode) => void): void {
-  for (const key of babel.VISITOR_KEYS[node.type] ?? []) {
-    const value = (node as unknown as Record<string, unknown>)[key];
-    if (Array.isArray(value)) {
-      for (const child of value) {
-        if (isAstNode(child)) visit(child);
-      }
-    } else if (isAstNode(value)) {
-      visit(value);
-    }
-  }
-}
-
-function walkAst(node: AstNode, visit: (node: AstNode) => void): void {
-  visit(node);
-  forEachAstChild(node, (child) => walkAst(child, visit));
-}
-
-function parseTypeScriptSource(source: string): ParsedSource {
-  const ast = parse(source, {
-    sourceType: "unambiguous",
-    plugins: ["typescript", "jsx", "decorators-legacy", "importAttributes"],
-  });
-  walkAst(ast, (node) => {
-    forEachAstChild(node, (child) => parentNodes.set(child, node));
-  });
-  return { ast, source };
-}
-
-function nodeStart(node: AstNode): number {
-  return node.start ?? 0;
-}
-
-function nodeLine(node: AstNode): number {
-  return node.loc?.start.line ?? 1;
-}
-
-function memberName(node: babel.MemberExpression | babel.OptionalMemberExpression): string | null {
-  if (!node.computed && babel.isIdentifier(node.property)) return node.property.name;
-  if (node.computed && babel.isStringLiteral(node.property)) return node.property.value;
-  return null;
-}
-
-function propertyName(node: babel.ObjectProperty | babel.ObjectMethod): string | null {
-  if (!node.computed && babel.isIdentifier(node.key)) return node.key.name;
-  if (babel.isStringLiteral(node.key)) return node.key.value;
-  return null;
-}
-
-function namedTopLevelFunction(node: AstNode): { name: string; node: FunctionLike } | null {
-  let current: AstNode | undefined = node;
-  let result: { name: string; node: FunctionLike } | null = null;
+function namedTopLevelFunction(
+  node: t.Node,
+): { name: string; node: FunctionLikeDeclaration } | null {
+  let current: t.Node | undefined = node;
+  let result: { name: string; node: FunctionLikeDeclaration } | null = null;
   while (current) {
-    if (babel.isFunctionDeclaration(current) && current.id) {
+    if (isFunctionDeclaration(current) && current.id) {
       result = { name: current.id.name, node: current };
-    } else if (babel.isArrowFunctionExpression(current) || babel.isFunctionExpression(current)) {
+    } else if (
+      (isArrowFunctionExpression(current) || isFunctionExpression(current)) &&
+      isVariableDeclarator(parentNodes.get(current))
+    ) {
       const parent = parentNodes.get(current);
-      if (babel.isVariableDeclarator(parent) && babel.isIdentifier(parent.id)) {
+      if (isVariableDeclarator(parent) && isIdentifier(parent.id)) {
         result = { name: parent.id.name, node: current };
       }
     }
@@ -324,115 +355,118 @@ function namedTopLevelFunction(node: AstNode): { name: string; node: FunctionLik
   return result;
 }
 
-function callName(node: babel.CallExpression): string | null {
-  if (babel.isIdentifier(node.callee)) return node.callee.name;
-  if (babel.isMemberExpression(node.callee) || babel.isOptionalMemberExpression(node.callee)) {
-    return memberName(node.callee);
+function callName(node: t.CallExpression): string | null {
+  if (isIdentifier(node.callee)) return node.callee.name;
+  if (isMemberExpression(node.callee) && isIdentifier(node.callee.property)) {
+    return node.callee.property.name;
   }
   return null;
 }
 
-function isNamedReference(node: babel.Node | null | undefined, expectedName: string): boolean {
-  return (
-    (babel.isIdentifier(node) && node.name === expectedName) ||
-    ((babel.isMemberExpression(node) || babel.isOptionalMemberExpression(node)) &&
-      memberName(node) === expectedName)
+function insertsSessionEvents(node: t.CallExpression): boolean {
+  if (!isMemberExpression(node.callee) || callName(node) !== "insert") {
+    return false;
+  }
+  const table = node.arguments[0];
+  return Boolean(
+    table &&
+    ((isMemberExpression(table) &&
+      isIdentifier(table.property) &&
+      table.property.name === "sessionEvents") ||
+      (isIdentifier(table) && table.name === "sessionEvents")),
   );
 }
 
-function insertsSessionEvents(node: babel.CallExpression): boolean {
-  if (
-    (!babel.isMemberExpression(node.callee) && !babel.isOptionalMemberExpression(node.callee)) ||
-    memberName(node.callee) !== "insert"
-  ) {
+function insertsSessionSystemUpdateOutbox(node: t.CallExpression): boolean {
+  if (!isMemberExpression(node.callee) || callName(node) !== "insert") {
     return false;
   }
-  return isNamedReference(node.arguments[0], "sessionEvents");
+  const table = node.arguments[0];
+  return Boolean(
+    table &&
+    ((isMemberExpression(table) &&
+      isIdentifier(table.property) &&
+      table.property.name === "sessionSystemUpdateOutbox") ||
+      (isIdentifier(table) && table.name === "sessionSystemUpdateOutbox")),
+  );
 }
 
-function insertsSessionSystemUpdateOutbox(node: babel.CallExpression): boolean {
-  if (
-    (!babel.isMemberExpression(node.callee) && !babel.isOptionalMemberExpression(node.callee)) ||
-    memberName(node.callee) !== "insert"
-  ) {
-    return false;
-  }
-  return isNamedReference(node.arguments[0], "sessionSystemUpdateOutbox");
-}
-
-function functionCalls(functionNode: FunctionLike, expectedName: string): boolean {
+function functionCalls(functionNode: FunctionLikeDeclaration, expectedName: string): boolean {
   let found = false;
-  forEachAstChild(functionNode, (child) =>
-    walkAst(child, (node) => {
-      if (babel.isCallExpression(node) && callName(node) === expectedName) found = true;
-    }),
-  );
+  const visit = (node: t.Node): void => {
+    if (isCallExpression(node) && callName(node) === expectedName) found = true;
+    if (!found) forEachChild(node, visit);
+  };
+  forEachChild(functionNode, visit);
   return found;
 }
 
-function callHasProperty(node: babel.CallExpression, expectedPropertyName: string): boolean {
+function callHasProperty(node: t.CallExpression, propertyName: string): boolean {
   return node.arguments.some(
     (argument) =>
-      babel.isObjectExpression(argument) &&
+      isObjectExpression(argument) &&
       argument.properties.some(
         (property) =>
-          babel.isObjectProperty(property) && propertyName(property) === expectedPropertyName,
+          isObjectProperty(property) &&
+          ((isIdentifier(property.key) && property.key.name === propertyName) ||
+            (isStringLiteral(property.key) && property.key.value === propertyName)),
       ),
   );
 }
 
 function callPositionsWithStringProperty(
-  functionNode: FunctionLike,
+  functionNode: FunctionLikeDeclaration,
   expectedName: string,
   expectedPropertyName: string,
   propertyValue: string,
 ): number[] {
   const positions: number[] = [];
-  forEachAstChild(functionNode, (child) =>
-    walkAst(child, (node) => {
-      if (
-        babel.isCallExpression(node) &&
-        callName(node) === expectedName &&
-        node.arguments.some(
-          (argument) =>
-            babel.isObjectExpression(argument) &&
-            argument.properties.some(
-              (property) =>
-                babel.isObjectProperty(property) &&
-                propertyName(property) === expectedPropertyName &&
-                babel.isStringLiteral(property.value) &&
-                property.value.value === propertyValue,
-            ),
-        )
-      ) {
-        positions.push(nodeStart(node));
-      }
-    }),
-  );
+  const visit = (node: t.Node): void => {
+    if (
+      isCallExpression(node) &&
+      callName(node) === expectedName &&
+      node.arguments.some(
+        (argument) =>
+          isObjectExpression(argument) &&
+          argument.properties.some(
+            (property) =>
+              isObjectProperty(property) &&
+              ((isIdentifier(property.key) && property.key.name === expectedPropertyName) ||
+                (isStringLiteral(property.key) && property.key.value === expectedPropertyName)) &&
+              isStringLiteral(property.value) &&
+              property.value.value === propertyValue,
+          ),
+      )
+    ) {
+      positions.push(nodeStart(node));
+    }
+    forEachChild(node, visit);
+  };
+  forEachChild(functionNode, visit);
   return positions.sort((left, right) => left - right);
 }
 
 function callPositionsWithStringArgument(
-  functionNode: FunctionLike,
+  functionNode: FunctionLikeDeclaration,
   expectedName: string,
   argumentIndex: number,
   argumentValue: string,
 ): number[] {
   const positions: number[] = [];
-  forEachAstChild(functionNode, (child) =>
-    walkAst(child, (node) => {
-      if (babel.isCallExpression(node) && callName(node) === expectedName) {
-        const argument = node.arguments[argumentIndex];
-        if (babel.isStringLiteral(argument) && argument.value === argumentValue) {
-          positions.push(nodeStart(node));
-        }
+  const visit = (node: t.Node): void => {
+    if (isCallExpression(node) && callName(node) === expectedName) {
+      const argument = node.arguments[argumentIndex];
+      if (argument !== undefined && isStringLiteral(argument) && argument.value === argumentValue) {
+        positions.push(nodeStart(node));
       }
-    }),
-  );
+    }
+    forEachChild(node, visit);
+  };
+  forEachChild(functionNode, visit);
   return positions.sort((left, right) => left - right);
 }
 
-function controlAwarePrefixPositions(functionNode: FunctionLike): number[] {
+function controlAwarePrefixPositions(functionNode: FunctionLikeDeclaration): number[] {
   return [
     ...callPositionsWithStringProperty(
       functionNode,
@@ -452,7 +486,7 @@ function controlAwarePrefixPositions(functionNode: FunctionLike): number[] {
   ].sort((left, right) => left - right);
 }
 
-function genericPrefixPositions(functionNode: FunctionLike): number[] {
+function genericPrefixPositions(functionNode: FunctionLikeDeclaration): number[] {
   return callPositionsWithStringProperty(
     functionNode,
     "lockSessionEventWriteRows",
@@ -461,27 +495,27 @@ function genericPrefixPositions(functionNode: FunctionLike): number[] {
   );
 }
 
-function callPositions(functionNode: FunctionLike, expectedName: string): number[] {
+function callPositions(functionNode: FunctionLikeDeclaration, expectedName: string): number[] {
   const positions: number[] = [];
-  forEachAstChild(functionNode, (child) =>
-    walkAst(child, (node) => {
-      if (babel.isCallExpression(node) && callName(node) === expectedName) {
-        positions.push(nodeStart(node));
-      }
-    }),
-  );
+  const visit = (node: t.Node): void => {
+    if (isCallExpression(node) && callName(node) === expectedName) {
+      positions.push(nodeStart(node));
+    }
+    forEachChild(node, visit);
+  };
+  forEachChild(functionNode, visit);
   return positions.sort((left, right) => left - right);
 }
 
-function insertPositions(functionNode: FunctionLike): number[] {
+function insertPositions(functionNode: FunctionLikeDeclaration): number[] {
   const positions: number[] = [];
-  forEachAstChild(functionNode, (child) =>
-    walkAst(child, (node) => {
-      if (babel.isCallExpression(node) && insertsSessionEvents(node)) {
-        positions.push(nodeStart(node));
-      }
-    }),
-  );
+  const visit = (node: t.Node): void => {
+    if (isCallExpression(node) && insertsSessionEvents(node)) {
+      positions.push(nodeStart(node));
+    }
+    forEachChild(node, visit);
+  };
+  forEachChild(functionNode, visit);
   return positions.sort((left, right) => left - right);
 }
 
@@ -489,20 +523,20 @@ describe("session_events writer inventory", () => {
   test("every production insert has an explicit canonical or caller-owned lock contract", () => {
     const writers = new Map<
       string,
-      { count: number; sourceFile: ParsedSource; functionNode: FunctionLike }
+      { count: number; sourceFile: SourceFile; functionNode: FunctionLikeDeclaration }
     >();
     const rawSqlWriters: string[] = [];
     const implicitControlLockCalls: string[] = [];
     const functionDefinitions = new Map<
       string,
-      Array<{ sourceFile: ParsedSource; functionNode: FunctionLike }>
+      Array<{ sourceFile: SourceFile; functionNode: FunctionLikeDeclaration }>
     >();
     const ownedSuffixCallers = new Map<string, Set<string>>(
       Object.keys(expectedOwnedSuffixCallers).map((name) => [name, new Set()]),
     );
     const outboxWriters = new Map<
       string,
-      { count: number; sourceFile: ParsedSource; functionNode: FunctionLike }
+      { count: number; sourceFile: SourceFile; functionNode: FunctionLikeDeclaration }
     >();
     const failedChildOutboxCallers = new Set<string>();
 
@@ -517,14 +551,14 @@ describe("session_events writer inventory", () => {
         continue;
       }
       const file = relative(repoRoot, path).replaceAll("\\", "/");
-      const sourceFile = parseTypeScriptSource(source);
-      const visit = (node: AstNode): void => {
-        if (babel.isFunctionDeclaration(node) && node.id) {
+      const sourceFile = parseSourceFile(path, source);
+      const visit = (node: t.Node): void => {
+        if (isFunctionDeclaration(node) && node.id) {
           const definitions = functionDefinitions.get(node.id.name) ?? [];
           definitions.push({ sourceFile, functionNode: node });
           functionDefinitions.set(node.id.name, definitions);
         }
-        if (babel.isCallExpression(node)) {
+        if (isCallExpression(node)) {
           const enclosing = namedTopLevelFunction(node);
           if (insertsSessionEvents(node)) {
             if (!enclosing) throw new Error(`Unnamed session_events writer in ${file}`);
@@ -549,7 +583,7 @@ describe("session_events writer inventory", () => {
           }
           const called = callName(node);
           if (called === "lockSessionEventWriteRows" && !callHasProperty(node, "controlLock")) {
-            implicitControlLockCalls.push(`${file}:${nodeLine(node)}`);
+            implicitControlLockCalls.push(`${file}:${lineNumber(sourceFile.source, node)}`);
           }
           if (called && ownedSuffixCallers.has(called) && enclosing) {
             ownedSuffixCallers.get(called)!.add(enclosing.name);
@@ -558,14 +592,15 @@ describe("session_events writer inventory", () => {
             failedChildOutboxCallers.add(enclosing.name);
           }
         }
-        if (babel.isTaggedTemplateExpression(node)) {
-          const sqlText = sourceFile.source.slice(node.quasi.start ?? 0, node.quasi.end ?? 0);
+        if (isTaggedTemplateExpression(node)) {
+          const sqlText = sourceFile.source.slice(nodeStart(node.quasi), node.quasi.end);
           if (/\binsert\s+into\s+(?:[a-z_]+\.)?session_events\b/i.test(sqlText)) {
-            rawSqlWriters.push(`${file}:${nodeLine(node)}`);
+            rawSqlWriters.push(`${file}:${lineNumber(sourceFile.source, node)}`);
           }
         }
+        forEachChild(node, visit);
       };
-      walkAst(sourceFile.ast, visit);
+      visit(sourceFile.program);
     }
 
     expect(rawSqlWriters).toEqual([]);
@@ -700,14 +735,15 @@ describe("session_events writer inventory", () => {
   test("generic append and Agent commands keep external effects outside bounded retry", () => {
     const definitionsFor = (relativePath: string) => {
       const path = join(repoRoot, relativePath);
-      const sourceFile = parseTypeScriptSource(readFileSync(path, "utf8"));
-      const definitions = new Map<string, babel.FunctionDeclaration>();
-      const visit = (node: AstNode): void => {
-        if (babel.isFunctionDeclaration(node) && node.id) {
+      const sourceFile = parseSourceFile(path, readFileSync(path, "utf8"));
+      const definitions = new Map<string, t.Function>();
+      const visit = (node: t.Node): void => {
+        if (isFunctionDeclaration(node) && node.id) {
           definitions.set(node.id.name, node);
         }
+        forEachChild(node, visit);
       };
-      walkAst(sourceFile.ast, visit);
+      visit(sourceFile.program);
       return definitions;
     };
 

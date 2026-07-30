@@ -151,12 +151,14 @@ describe("release schema contract", () => {
         (migrations.has("0134_session_first_party_mcp_tools.sql") ? 1 : 0) +
         (migrations.has("0135_durable_machine_input_batches.sql") ? 1 : 0) +
         (migrations.has("0136_unified_session_tool_policy.sql") ? 1 : 0) +
-        (migrations.has("0137_hierarchical_role_aware_memory.sql") ? 1 : 0),
+        (migrations.has("0137_preference_registry.sql") ? 1 : 0) +
+        (migrations.has("0138_sandbox_checkpoint_artifacts_and_deadlines.sql") ? 1 : 0) +
+        (migrations.has("0139_hierarchical_role_aware_memory.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "c29a70cf3f4bfc28ff59dece4973a8da3b5f3af20295218bf2ebd42bf22bcd3c",
+      "8d43f1c5b401697659bad8a1699381dbeb644d7a35fabd39a0369026768e08a9",
     );
-    expect(contract.latestMigration).toBe("0137_hierarchical_role_aware_memory.sql");
+    expect(contract.latestMigration).toBe("0139_hierarchical_role_aware_memory.sql");
     expect(migrations.get("0128_github_installation_authority.sql")).toMatchObject({
       sha256: "365793b2a204a70e214adb90298b522acbb6dcfae22a46681a58f41a6938e6f0",
       deploymentMode: "rolling",
@@ -177,7 +179,7 @@ describe("release schema contract", () => {
       sha256: "c2d642594077a74956fd2eaa64fee8fafcd748ad432d2c9c6f4450019970617c",
       deploymentMode: "maintenance",
     });
-    expect(migrations.get("0137_hierarchical_role_aware_memory.sql")).toMatchObject({
+    expect(migrations.get("0139_hierarchical_role_aware_memory.sql")).toMatchObject({
       sha256: "a24a50c234d34e964fa9f4f382f25d58d33489086f39cc398645d9ca2763b5e5",
       deploymentMode: "maintenance",
     });
@@ -206,7 +208,7 @@ describe("release schema contract", () => {
     expect(
       contract.migrations
         .map((migration) => migration.path)
-        .filter((path) => /^(?:010[3-9]|011[0-9]|012[0-9]|013[0-5])_/.test(path)),
+        .filter((path) => /^(?:010[3-9]|011[0-9]|012[0-9]|013[0-8])_/.test(path)),
     ).toEqual([
       "0103_host_export_root_session.sql",
       "0104_host_export_root_session_backfill.sql",
@@ -231,6 +233,9 @@ describe("release schema contract", () => {
       "0133_session_skills.sql",
       "0134_session_first_party_mcp_tools.sql",
       "0135_durable_machine_input_batches.sql",
+      "0136_unified_session_tool_policy.sql",
+      "0137_preference_registry.sql",
+      "0138_sandbox_checkpoint_artifacts_and_deadlines.sql",
     ]);
     expect(new Set(contract.migrations.map((migration) => migration.path)).size).toBe(
       contract.fileCount,
@@ -310,6 +315,18 @@ describe("release schema contract", () => {
     expect(migrations.get("0134_session_first_party_mcp_tools.sql")).toMatchObject({
       sha256: "7255a5dfea703b00e01aeab6d003728e60ad7ff78c87af2dc61bd8dda456391e",
       deploymentMode: "rolling",
+    });
+    expect(migrations.get("0136_unified_session_tool_policy.sql")).toMatchObject({
+      sha256: "8a12370895795b1e8e2ef193a65c97592bf793a410ef6fcae9cc21162561feee",
+      deploymentMode: "maintenance",
+    });
+    expect(migrations.get("0137_preference_registry.sql")).toMatchObject({
+      sha256: "8197520ec68e685e2658b2d33f8daf64e03d1d4922fa9c3ccd97c6f73849c5c5",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0138_sandbox_checkpoint_artifacts_and_deadlines.sql")).toMatchObject({
+      sha256: "c32c70ff47930c77f45482dc5f66b26b13dd444d440397837cca134f97c48e14",
+      deploymentMode: "maintenance",
     });
   });
 });

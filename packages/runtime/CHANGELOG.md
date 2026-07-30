@@ -1,5 +1,12 @@
 # @opengeni/runtime
 
+## 0.14.6
+
+### Patch Changes
+
+- 2a7900f: Make Channel-A Git capture hashing and descriptor confinement portable across Linux and stock macOS/BSD while preserving bounded, fail-closed repository-diff integrity.
+- 821f664: Seed shared session-event cursors from loaded history to prevent historical replay storms, and preserve the MCP SDK's exact request-timeout classification through safe transport-error sanitization.
+
 ## 0.14.5
 
 ### Patch Changes

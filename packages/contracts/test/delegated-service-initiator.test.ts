@@ -12,10 +12,16 @@ const BASE: DelegatedAccessTokenPayload = {
   workspaceId: "00000000-0000-4000-8000-000000000002",
   subjectId: "host:automation-gateway",
   permissions: ["sessions:create", "sessions:control"],
+  principalKind: "human_session",
   exp: 2_000_000_000,
 };
 
-function rawDelegatedToken(prefix: "ogd_" | "ogd2_", payload: DelegatedAccessTokenPayload): string {
+const SERVICE_BASE: DelegatedAccessTokenPayload = {
+  ...BASE,
+  principalKind: "service",
+};
+
+function rawDelegatedToken(prefix: "ogd_" | "ogd2_", payload: unknown): string {
   const encoded = Buffer.from(JSON.stringify(payload)).toString("base64url");
   const signed = prefix === "ogd2_" ? `${prefix}${encoded}` : encoded;
   const signature = createHmac("sha256", SECRET).update(signed).digest("base64url");
@@ -25,7 +31,7 @@ function rawDelegatedToken(prefix: "ogd_" | "ogd2_", payload: DelegatedAccessTok
 describe("delegated service initiator claims", () => {
   test("round-trips a signed causal service separately from the authorizing subject", async () => {
     const token = await signDelegatedAccessToken(SECRET, {
-      ...BASE,
+      ...SERVICE_BASE,
       serviceInitiator: {
         kind: "service",
         subjectId: "external-scheduler",
@@ -68,7 +74,7 @@ describe("delegated service initiator claims", () => {
       await verifyDelegatedAccessToken(
         SECRET,
         rawDelegatedToken("ogd_", {
-          ...BASE,
+          ...SERVICE_BASE,
           serviceInitiator: { kind: "service", subjectId: "external-scheduler" },
         }),
         1_900_000_000,
@@ -82,7 +88,7 @@ describe("delegated service initiator claims", () => {
   test("rejects human impersonation, orphan context, and exact-attempt replacement", async () => {
     await expect(
       signDelegatedAccessToken(SECRET, {
-        ...BASE,
+        ...SERVICE_BASE,
         serviceInitiator: {
           kind: "subject",
           subjectId: "user:impersonated",
@@ -92,14 +98,14 @@ describe("delegated service initiator claims", () => {
 
     await expect(
       signDelegatedAccessToken(SECRET, {
-        ...BASE,
+        ...SERVICE_BASE,
         serviceInitiatorContext: { occurrenceId: "orphan" },
       } as never),
     ).rejects.toThrow("serviceInitiatorContext requires serviceInitiator");
 
     await expect(
       signDelegatedAccessToken(SECRET, {
-        ...BASE,
+        ...SERVICE_BASE,
         serviceInitiator: {
           kind: "service",
           subjectId: "external-scheduler",
@@ -110,7 +116,7 @@ describe("delegated service initiator claims", () => {
 
     await expect(
       signDelegatedAccessToken(SECRET, {
-        ...BASE,
+        ...SERVICE_BASE,
         serviceInitiator: {
           kind: "service",
           subjectId: "unattributed-legacy",
@@ -120,7 +126,7 @@ describe("delegated service initiator claims", () => {
 
     await expect(
       signDelegatedAccessToken(SECRET, {
-        ...BASE,
+        ...SERVICE_BASE,
         serviceInitiator: {
           kind: "service",
           subjectId: "external-scheduler",
@@ -131,7 +137,7 @@ describe("delegated service initiator claims", () => {
 
     await expect(
       signDelegatedAccessToken(SECRET, {
-        ...BASE,
+        ...SERVICE_BASE,
         serviceInitiator: {
           kind: "service",
           subjectId: "external-scheduler",
@@ -142,7 +148,7 @@ describe("delegated service initiator claims", () => {
 
     await expect(
       signDelegatedAccessToken(SECRET, {
-        ...BASE,
+        ...SERVICE_BASE,
         serviceInitiator: {
           kind: "service",
           subjectId: "external-scheduler",
@@ -153,5 +159,30 @@ describe("delegated service initiator claims", () => {
         executionGeneration: 1,
       }),
     ).rejects.toThrow("serviceInitiator cannot replace an exact agent-attempt initiator");
+  });
+
+  test("requires a signed principal kind and rejects mismatched authority shapes", async () => {
+    const { principalKind: _principalKind, ...missingPrincipalKind } = BASE;
+    expect(
+      await verifyDelegatedAccessToken(
+        SECRET,
+        rawDelegatedToken("ogd_", missingPrincipalKind),
+        1_900_000_000,
+      ),
+    ).toBeNull();
+
+    await expect(
+      signDelegatedAccessToken(SECRET, {
+        ...BASE,
+        principalKind: "agent_attempt",
+      }),
+    ).rejects.toThrow("agent_attempt principal requires one exact signed attempt authority");
+    await expect(
+      signDelegatedAccessToken(SECRET, {
+        ...BASE,
+        principalKind: "human_session",
+        sessionId: "00000000-0000-4000-8000-000000000003",
+      }),
+    ).rejects.toThrow("human_session principal cannot carry machine authority claims");
   });
 });

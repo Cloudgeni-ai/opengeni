@@ -656,10 +656,10 @@ describe("MessageTimeline — settled turn folding", () => {
     await flush();
 
     const triggers = turnSummaryTriggers(r.container);
-    // One settled OUTER chip (check glyph present: chevron + check = 2 svgs);
-    // the final answer sits outside it.
+    // One settled OUTER chip. Successful summaries are intentionally quiet, so
+    // only the disclosure chevron remains; the final answer sits outside it.
     expect(triggers).toHaveLength(1);
-    expect(triggers[0]?.querySelectorAll("svg")).toHaveLength(2);
+    expect(triggers[0]?.querySelectorAll("svg")).toHaveLength(1);
     expect(r.container.textContent).toContain("All finished.");
 
     await r.unmount();

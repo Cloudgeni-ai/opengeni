@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/documents",
-  "version": "0.2.48",
+  "version": "0.2.49",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -26,7 +26,7 @@
     "provenance": true
   },
   "scripts": {
-    "build": "tsup",
+    "build": "bun ../../scripts/build-typescript-package.ts",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },

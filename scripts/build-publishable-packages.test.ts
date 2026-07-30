@@ -474,6 +474,29 @@ test("admits one builder when many waiters reclaim a dead-owner lock", async () 
   expect(readFileSync(outputPath(root), "utf8")).toBe("BASE|A|644\n");
 });
 
+test("does not reclaim a live requester after its build supervisor exits", async () => {
+  const root = createFixture();
+  const pausePath = join(root, "requester-publish-pause");
+  const countPath = join(root, "build-count.txt");
+  const environment = {
+    OPENGENI_BUILD_VARIANT: "BASE",
+    BUILD_FIXTURE_COUNT: countPath,
+    OPENGENI_BUILD_CACHE_PAUSE_BEFORE_REQUESTER_PUBLISH: pausePath,
+  };
+  const owner = startBuilder(root, environment);
+  expect(await waitForPath(`${pausePath}.ready`)).toBe(true);
+
+  const waiters = Array.from({ length: 12 }, () => runBuilder(root, environment));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  expect(readFileSync(countPath, "utf8").trim().split("\n")).toEqual(["BASE"]);
+
+  writeFileSync(`${pausePath}.release`, "release\n");
+  const results = await Promise.all([owner.result, ...waiters]);
+  expect(results.filter((result) => result.code !== 0)).toEqual([]);
+  expect(readFileSync(countPath, "utf8").trim().split("\n")).toEqual(["BASE"]);
+  expect(readFileSync(outputPath(root), "utf8")).toBe("BASE|A|644\n");
+});
+
 test("drains a killed builder's detached child before admitting its successor", async () => {
   const root = createFixture();
   const gate = join(root, "orphan-gate");

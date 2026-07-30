@@ -17,6 +17,8 @@ import { buildFilesMcpServer } from "../src/mcp/files";
 const accountId = crypto.randomUUID();
 const workspaceId = crypto.randomUUID();
 const sessionId = crypto.randomUUID();
+const turnId = crypto.randomUUID();
+const attemptId = crypto.randomUUID();
 
 function deps(): ApiRouteDeps {
   return {
@@ -45,8 +47,12 @@ function grant(
     workspaceId,
     subjectId: "worker:first-party-mcp",
     permissions,
+    principalKind: "agent_attempt",
     metadata: {
       sessionId,
+      turnId,
+      attemptId,
+      executionGeneration: 1,
       ...(firstPartyMcpTools !== undefined ? { firstPartyMcpTools } : {}),
     },
   };
@@ -61,7 +67,7 @@ function registeredToolNames(server: unknown): string[] {
 }
 
 describe("first-party MCP tool visibility policy", () => {
-  test("omission selects the complete catalog when the grant authorizes every tool", () => {
+  test("omission selects the complete default catalog when the grant authorizes every tool", () => {
     const server = buildOpenGeniMcpServer(deps(), grant([...Permission.options]), {
       workspaceMemoryEnabled: true,
     });

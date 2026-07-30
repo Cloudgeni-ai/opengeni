@@ -117,6 +117,16 @@ function busWithAgent(workspaceId: string, agentId: string, hostname: string): M
 function fakeGroupBox(marker: string): EstablishedSandboxSession {
   const session = {
     state: { instanceId: "group-box" },
+    modal: {
+      cpClient: {
+        workspaceNameLookup: async () => ({
+          workspaceName: "routing-test",
+          username: "routing-test",
+        }),
+      },
+      profile: { serverUrl: "https://modal.test" },
+      environmentName: (environment?: string) => environment ?? "",
+    },
     async exec(_args: unknown) {
       return { stdout: marker, exitCode: 0 };
     },

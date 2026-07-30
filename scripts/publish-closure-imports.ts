@@ -1,5 +1,4 @@
-import { parse } from "@babel/parser";
-import * as babel from "@babel/types";
+import * as t from "oxc-parser";
 
 export type RuntimeLoader = "js" | "jsx" | "ts" | "tsx";
 
@@ -14,50 +13,53 @@ export async function runtimeModuleSpecifiers(
 }
 
 export function declarationModuleSpecifiers(source: string, fileName: string): string[] {
-  const sourceFile = parse(source, {
-    sourceFilename: fileName,
-    sourceType: "unambiguous",
-    plugins: [["typescript", { dts: true }]],
-  });
+  const parsed = t.parseSync(fileName, source, { sourceType: "unambiguous" });
+  if (parsed.errors.length > 0) {
+    throw new Error(
+      `Could not parse ${fileName}: ${parsed.errors.map((error) => error.message).join("; ")}`,
+    );
+  }
   const specifiers = new Set<string>();
 
-  for (const match of source.matchAll(
-    /^\s*\/\/\/\s*<reference\s+types=(?:"([^"]+)"|'([^']+)')\s*\/?\s*>/gm,
-  )) {
-    specifiers.add(match[1] ?? match[2]!);
+  for (const comment of parsed.comments) {
+    if (comment.type !== "Line" || !/^\/\s*<reference\b/u.test(comment.value)) continue;
+    const directive = /\btypes\s*=\s*(["'])([^"']+)\1/u.exec(comment.value);
+    if (directive?.[2]) specifiers.add(directive[2]);
   }
 
-  function visit(node: babel.Node): void {
-    if (
-      (babel.isImportDeclaration(node) ||
-        babel.isExportNamedDeclaration(node) ||
-        babel.isExportAllDeclaration(node)) &&
-      babel.isStringLiteral(node.source)
-    ) {
-      specifiers.add(node.source.value);
-    } else if (
-      babel.isTSImportEqualsDeclaration(node) &&
-      babel.isTSExternalModuleReference(node.moduleReference) &&
-      babel.isStringLiteral(node.moduleReference.expression)
-    ) {
-      specifiers.add(node.moduleReference.expression.value);
-    } else if (babel.isTSImportType(node) && babel.isStringLiteral(node.argument)) {
-      specifiers.add(node.argument.value);
+  function visit(node: t.Node): void {
+    const record = node as unknown as Record<string, unknown>;
+    if (node.type === "ImportDeclaration" || node.type === "ExportNamedDeclaration") {
+      addStringLiteral(record.source);
+    } else if (node.type === "ExportAllDeclaration" || node.type === "TSImportType") {
+      addStringLiteral(record.source);
+    } else if (node.type === "TSImportEqualsDeclaration") {
+      const reference = record.moduleReference;
+      if (isNode(reference) && reference.type === "TSExternalModuleReference") {
+        addStringLiteral((reference as unknown as Record<string, unknown>).expression);
+      }
     }
-    for (const key of babel.VISITOR_KEYS[node.type] ?? []) {
-      const value = (node as unknown as Record<string, unknown>)[key];
-      if (Array.isArray(value)) {
-        for (const child of value) {
-          if (child && typeof child === "object" && "type" in child) {
-            visit(child as babel.Node);
-          }
-        }
-      } else if (value && typeof value === "object" && "type" in value) {
-        visit(value as babel.Node);
+
+    for (const key of t.visitorKeys[node.type] ?? []) {
+      const value = record[key];
+      for (const child of Array.isArray(value) ? value : [value]) {
+        if (isNode(child)) visit(child);
       }
     }
   }
 
-  visit(sourceFile);
+  function addStringLiteral(value: unknown): void {
+    if (isNode(value) && value.type === "Literal" && typeof value.value === "string") {
+      specifiers.add(value.value);
+    }
+  }
+
+  visit(parsed.program);
   return [...specifiers];
+}
+
+function isNode(value: unknown): value is t.Node {
+  return (
+    typeof value === "object" && value !== null && "type" in value && typeof value.type === "string"
+  );
 }

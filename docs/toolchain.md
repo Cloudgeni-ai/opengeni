@@ -5,8 +5,9 @@ The fast path for contributors: what runs typecheck, lint, and format, and why.
 ## Package manager & runtime
 
 **Bun** end to end — install, run, test, and script execution. There is no `npm`/`pnpm`/`yarn`
-lockfile in this repo; use `bun install`, `bun run <script>`, `bun test`. Libraries build with
-`tsup` (esbuild); `apps/web` builds with Vite.
+lockfile in this repo; use `bun install`, `bun run <script>`, `bun test`. Libraries build
+JavaScript with `tsup` (esbuild) and declarations with stable TypeScript 7 `tsc`; `apps/web`
+builds with Vite.
 
 The one intentional exception is the publish step: `bun run release:publish`
 (`scripts/release-publish.sh`) shells out to `npx changeset publish`, which falls back to
@@ -17,13 +18,16 @@ it exists.
 
 ## Typecheck: stable TypeScript 7
 
-Typecheck runs on the exact stable **TypeScript 7.0.2** release. `bun run typecheck` invokes
-`bun scripts/typecheck.ts`, which runs `tsc --noEmit` over every project's `tsconfig.json` through
-a bounded worker pool. This keeps verification fast while capping memory on constrained hosts.
+Typecheck runs on the exact pinned stable **TypeScript 7** `tsc`. `bun run typecheck` invokes
+`bun scripts/typecheck.ts`, which runs `tsc --noEmit` over every project's `tsconfig.json` with a
+bounded worker pool. Per-package `typecheck` scripts invoke the same compiler. Preview compiler
+packages and executables are not part of the toolchain.
 
-The same exact stable compiler is used by package scripts, publish-consumer proofs, and `tsup`'s
-`.d.ts` emitter. Preview, beta, development, nightly, and native-preview compilers are not part of
-the repository toolchain.
+Publishable packages use `scripts/build-typescript-package.ts`: `tsup` still creates JavaScript
+and source maps, then stable TypeScript 7 `tsc` emits declarations. This split is intentional;
+`tsup` 8's declaration bundler requires the legacy JavaScript compiler API, which stable
+TypeScript 7 no longer exports. The generated package declarations remain release-gated by the
+external-consumer and publish-closure tests.
 
 CI runs the same `bun run typecheck` step (`.github/workflows/ci.yml`), so there is nothing
 special to configure locally beyond `bun install`.

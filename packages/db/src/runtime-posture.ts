@@ -51,9 +51,14 @@ export const FORCE_RLS_TABLES = [
   "machine_metrics_series",
   "new_session_drafts",
   "pack_installations",
+  "preference_registry_events",
+  "preference_registry_preferences",
+  "preference_registry_revisions",
+  "preference_registry_snapshots",
   "rig_changes",
   "rig_versions",
   "rigs",
+  "sandbox_checkpoint_artifacts",
   "sandbox_lease_holders",
   "sandbox_leases",
   "sandbox_pty_sessions",
@@ -166,6 +171,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "rig_changes",
   "rig_versions",
   "rigs",
+  "sandbox_checkpoint_artifacts",
   "sandbox_lease_holders",
   "sandbox_leases",
   "sandbox_pty_sessions",
@@ -211,13 +217,19 @@ export const RUNTIME_FULL_DML_TABLES = [
   "workspaces",
 ] as const;
 
-/** Configuration is deployment-global and intentionally read-only at runtime. */
-export const RUNTIME_READ_ONLY_TABLES = ["nested_agent_depth_configuration"] as const;
+/** Configuration and lifecycle-owned audit rows are read-only at runtime. */
+export const RUNTIME_READ_ONLY_TABLES = [
+  "nested_agent_depth_configuration",
+  "preference_registry_events",
+  "preference_registry_snapshots",
+] as const;
 
 /** Append-only evidence/revision tables are insertable and queryable, never mutable. */
 export const RUNTIME_READ_INSERT_TABLES = [
   "knowledge_memory_deletion_audits",
   "knowledge_memory_export_audits",
+  "preference_registry_preferences",
+  "preference_registry_revisions",
   "session_spawn_denials",
   "workspace_instruction_policy_activation_events",
   "workspace_instruction_policy_revisions",

@@ -6,7 +6,7 @@
  * checks cannot catch a broken published exports map, missing CSS declaration,
  * cross-tarball declaration drift, or a client-only global reached during SSR.
  * This gate stages release-shaped tarballs, installs them twice (the second time
- * from the frozen Bun lock), typechecks with stable TypeScript, builds the root and session
+ * from the frozen Bun lock), typechecks with stable TypeScript 7, builds the root and session
  * subpaths through Vite, verifies the packed runtime skill-library subpath, and
  * server-renders populated embedded host surfaces without a DOM. A second
  * consumer installs only the session subpath's required peers.

@@ -6,7 +6,7 @@ import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/test
 import postgres from "postgres";
 
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
-const migrationName = "0137_hierarchical_role_aware_memory.sql";
+const migrationName = "0139_hierarchical_role_aware_memory.sql";
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
 async function applyFile(sql: postgres.Sql, file: string): Promise<void> {
@@ -17,11 +17,11 @@ let blank: BlankTestDatabase | null = null;
 let available = true;
 
 beforeAll(async () => {
-  blank = await acquireBlankTestDatabase("migration-0137-memory-provenance");
+  blank = await acquireBlankTestDatabase("migration-0139-memory-provenance");
   if (!blank) {
     if (requireRealDatabase) {
       throw new Error(
-        "[migration-0137-memory-provenance] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
+        "[migration-0139-memory-provenance] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
       );
     }
     available = false;
@@ -32,7 +32,7 @@ afterAll(async () => {
   await blank?.release();
 });
 
-describe("migration 0137 memory creator provenance (real PostgreSQL)", () => {
+describe("migration 0139 memory creator provenance (real PostgreSQL)", () => {
   test("retries cleanly and replaces the global creator FK with one workspace fence", async () => {
     if (!available || !blank) return;
     const admin = postgres(blank.databaseUrl, { max: 1 });
@@ -100,14 +100,14 @@ describe("migration 0137 memory creator provenance (real PostgreSQL)", () => {
       });
 
       const [account] = await admin<{ id: string }[]>`
-        insert into managed_accounts (name) values ('migration-0137-account') returning id`;
+        insert into managed_accounts (name) values ('migration-0139-account') returning id`;
       const workspaces = await admin<{ id: string; name: string }[]>`
         insert into workspaces (account_id, name) values
-          (${account!.id}, 'migration-0137-a'),
-          (${account!.id}, 'migration-0137-b')
+          (${account!.id}, 'migration-0139-a'),
+          (${account!.id}, 'migration-0139-b')
         returning id, name`;
-      const workspaceA = workspaces.find((row) => row.name === "migration-0137-a")!.id;
-      const workspaceB = workspaces.find((row) => row.name === "migration-0137-b")!.id;
+      const workspaceA = workspaces.find((row) => row.name === "migration-0139-a")!.id;
+      const workspaceB = workspaces.find((row) => row.name === "migration-0139-b")!.id;
       await admin`
         insert into workspace_inference_controls (workspace_id, account_id) values
           (${workspaceA}, ${account!.id}),

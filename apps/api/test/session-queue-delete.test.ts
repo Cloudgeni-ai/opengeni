@@ -96,6 +96,7 @@ async function bearer(
     workspaceId,
     subjectId,
     permissions: ["sessions:read", "sessions:control"],
+    principalKind: "human_session",
     exp: Math.floor(Date.now() / 1000) + 3_600,
   });
   return `Bearer ${token}`;

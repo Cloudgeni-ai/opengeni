@@ -16,8 +16,8 @@ bun run dev
 ## Toolchain
 
 Package manager is Bun everywhere (one intentional npm exception for release publishing).
-Typecheck runs on exact stable TypeScript 7.0.2. See [`docs/toolchain.md`](docs/toolchain.md) for
-what runs typecheck/lint/format and why.
+Typecheck runs on the pinned stable TypeScript 7 `tsc`. See
+[`docs/toolchain.md`](docs/toolchain.md) for what runs typecheck/lint/format and why.
 
 ## Checks
 

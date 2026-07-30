@@ -57,6 +57,37 @@ function customFacet(id: string, content: string, ariaLabel?: string): TurnSumma
 }
 
 describe("TurnSummary facets", () => {
+  test("keeps successful summaries quiet while preserving exceptional state indicators", async () => {
+    const successful = await renderComponent(
+      <TurnSummary items={[]} outcome="complete">
+        details
+      </TurnSummary>,
+    );
+    expect(successful.container.querySelector("svg.lucide-check")).toBeNull();
+    expect(successful.container.querySelectorAll("svg")).toHaveLength(1);
+    await successful.unmount();
+
+    const failed = await renderComponent(
+      <TurnSummary items={[]} outcome="failed">
+        details
+      </TurnSummary>,
+    );
+    expect(failed.container.querySelector("svg.lucide-triangle-alert")).not.toBeNull();
+    await failed.unmount();
+
+    const cancelled = await renderComponent(
+      <TurnSummary items={[]} outcome="cancelled">
+        details
+      </TurnSummary>,
+    );
+    expect(cancelled.container.querySelector("svg.lucide-circle-slash")).not.toBeNull();
+    await cancelled.unmount();
+
+    const active = await renderComponent(<TurnSummary items={[]}>details</TurnSummary>);
+    expect(active.container.querySelector(".animate-og-pulse")).not.toBeNull();
+    await active.unmount();
+  });
+
   test("omitted configuration preserves the exact built-in summary", async () => {
     const items = [toolCall("1", "exec_command"), memory("2")];
     const rendered = await renderComponent(

@@ -131,9 +131,9 @@ export class SessionSpawnDeniedError extends Error {
 
 /**
  * Resolve per-session first-party tool visibility without consulting
- * authorization. Top-level omission uses the minimal runtime default (stored
- * as null); child omission snapshots the parent's exact effective selection.
- * Explicit [] is authoritative and must never widen.
+ * authorization. Top-level omission snapshots the complete runtime default;
+ * child omission snapshots the parent's exact effective selection. Explicit
+ * [] is authoritative and must never widen.
  */
 export function resolveFirstPartyMcpToolsForCreate(
   requested: FirstPartyMcpToolName[] | undefined,

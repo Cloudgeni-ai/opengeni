@@ -838,19 +838,46 @@ async function verifySignedFileExpiry(
     throw new Error("refreshed capture bytes failed integrity check");
 }
 
+export async function waitForSandboxLiveness(
+  client: Pick<OpenGeniClient, "getStreamCapabilities">,
+  workspaceId: string,
+  sessionId: string,
+  accepted: ReadonlySet<string>,
+  timeoutMs: number,
+  pollIntervalMs = 2_000,
+  requestTimeoutMs = 10_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastTransportError: string | undefined;
+  while (Date.now() < deadline) {
+    const remainingMs = deadline - Date.now();
+    try {
+      const capabilities = await client.getStreamCapabilities(workspaceId, sessionId, {
+        signal: AbortSignal.timeout(Math.max(1, Math.min(requestTimeoutMs, remainingMs))),
+      });
+      lastTransportError = undefined;
+      if (accepted.has(capabilities.liveness)) return;
+    } catch (error) {
+      lastTransportError = sanitizeDiagnostic(
+        error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+      );
+    }
+    const sleepMs = Math.min(pollIntervalMs, Math.max(0, deadline - Date.now()));
+    if (sleepMs > 0) await Bun.sleep(sleepMs);
+  }
+  throw new Error(
+    `sandbox did not reach ${[...accepted].join("/")} before timeout` +
+      (lastTransportError ? ` (last transport error: ${lastTransportError})` : ""),
+  );
+}
+
 async function waitForCold(
   client: OpenGeniClient,
   workspaceId: string,
   sessionId: string,
   timeoutMs: number,
 ): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const capabilities = await client.getStreamCapabilities(workspaceId, sessionId);
-    if (capabilities.liveness === "cold") return;
-    await Bun.sleep(2_000);
-  }
-  throw new Error("real sandbox did not drain to cold before timeout");
+  await waitForSandboxLiveness(client, workspaceId, sessionId, new Set(["cold"]), timeoutMs);
 }
 
 async function waitForWarm(
@@ -859,13 +886,14 @@ async function waitForWarm(
   sessionId: string,
   timeoutMs = 90_000,
 ): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const capabilities = await client.getStreamCapabilities(workspaceId, sessionId);
-    if (capabilities.liveness === "warm" || capabilities.liveness === "draining") return;
-    await Bun.sleep(1_000);
-  }
-  throw new Error("explicit live intent did not warm the sandbox before timeout");
+  await waitForSandboxLiveness(
+    client,
+    workspaceId,
+    sessionId,
+    new Set(["warm", "draining"]),
+    timeoutMs,
+    1_000,
+  );
 }
 
 async function runLiveWorkspaceFlow(input: {

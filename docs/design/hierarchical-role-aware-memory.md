@@ -61,7 +61,7 @@ the audited SHA. These values are a point-in-time observation, not a live SLO.
 
 Implemented on the focused branch after the audited baseline:
 
-- maintenance/drain-only migration `0137_hierarchical_role_aware_memory.sql` consumes the existing
+- maintenance/drain-only migration `0139_hierarchical_role_aware_memory.sql` consumes the existing
   immutable session creator/turn-initiator contract and adds trusted session
   creator provenance, typed scopes, bounded labels, relationships, reversible
   maintenance operations, and text-free deletion/private-export audit tables;

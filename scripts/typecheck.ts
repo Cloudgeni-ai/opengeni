@@ -8,12 +8,12 @@ import { join } from "node:path";
 // rather than via project references (which would require `composite` +
 // declaration emit and fight `noEmit`).
 //
-// The projects are independent (no cross-project emit), so we run `tsc` through a bounded worker
-// pool instead of strictly one-at-a-time: wall time drops to roughly the
-// slowest project plus scheduling, while the concurrency cap keeps total RSS
-// bounded on memory-constrained hosts. Override the width with
-// OPENGENI_TYPECHECK_CONCURRENCY (defaults to ~half the available cores, min 2,
-// max 8). Keep this list in sync with the per-package `typecheck` scripts.
+// The projects are independent (no cross-project emit), so we run each project's
+// `tsc --noEmit` through a bounded worker pool instead of strictly one-at-a-time.
+// Wall time drops to roughly the slowest project plus scheduling, while the
+// concurrency cap keeps total RSS bounded on memory-constrained hosts. Override
+// the width with OPENGENI_TYPECHECK_CONCURRENCY (defaults to ~half the available
+// cores, min 2, max 8). Keep this list in sync with per-package typecheck scripts.
 const projects = [
   "packages/contracts",
   "packages/agent-proto",
@@ -40,7 +40,7 @@ const projects = [
   "scripts/release",
 ];
 
-const tsc = join(process.cwd(), "node_modules", ".bin", "tsc");
+const tsc = join(process.cwd(), "node_modules", "typescript", "bin", "tsc");
 
 function resolveConcurrency(): number {
   const override = Number.parseInt(process.env.OPENGENI_TYPECHECK_CONCURRENCY ?? "", 10);
@@ -56,14 +56,14 @@ type ProjectResult = { project: string; status: number; output: string };
 
 function typecheckProject(project: string): Promise<ProjectResult> {
   return new Promise((resolve) => {
-    const child = spawn(tsc, ["--noEmit", "-p", join(project, "tsconfig.json")], {
+    const child = spawn("node", [tsc, "--noEmit", "-p", join(project, "tsconfig.json")], {
       stdio: ["ignore", "pipe", "pipe"],
     });
     let output = "";
     child.stdout.on("data", (chunk) => (output += chunk));
     child.stderr.on("data", (chunk) => (output += chunk));
     child.on("error", (err) => {
-      output += `\n[typecheck] failed to spawn tsc: ${String(err)}\n`;
+      output += `\n[typecheck] failed to spawn TypeScript 7: ${String(err)}\n`;
       resolve({ project, status: 1, output });
     });
     child.on("close", (code) => resolve({ project, status: code ?? 1, output }));

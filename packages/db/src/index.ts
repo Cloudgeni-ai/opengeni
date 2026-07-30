@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type {
   AccessContext,
   AccessGrant,
+  AccessPrincipalKind,
   ApiKey,
   BillingBalance,
   CapabilityCatalogItem,
@@ -102,10 +103,19 @@ import type {
   RigChangeKind,
   RigChangeStatus,
   RigCheck,
+  NativeSnapshotDescriptor,
+  TarWorkspaceArchiveDescriptor,
+  WorkspaceArchiveDescriptor,
+  ModalCheckpointProviderBinding,
 } from "@opengeni/contracts";
 import {
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS,
+  backendForNativeSnapshotProvider,
+  canonicalModalCheckpointProviderBinding,
+  decodeNativeSnapshotRef,
+  parseWorkspaceArchiveDescriptor,
+  stableJson,
 } from "@opengeni/contracts";
 import {
   approvalIdentifier,
@@ -234,6 +244,7 @@ export * from "./session-control";
 export * from "./session-queue-commands";
 export * from "./new-session-drafts";
 export * from "./workspace-instruction-policies";
+export * from "./preference-registry";
 export { interruptedToolCallResult } from "./session-tool-call-settlement";
 export { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
 export {
@@ -1616,6 +1627,7 @@ export async function ensureManagedAccessForUser(
         subjectId,
         subjectLabel,
         permissions: row.membership.permissions as Permission[],
+        principalKind: "human_session",
       })),
       defaultAccountId: account.id,
       defaultWorkspaceId: defaultWorkspace.id,
@@ -1872,6 +1884,7 @@ export async function getWorkspaceGrant(
   db: Database,
   subjectId: string,
   workspaceId: string,
+  provenance?: { principalKind?: AccessPrincipalKind },
 ): Promise<AccessGrant | null> {
   const [row] = await db
     .select({
@@ -1894,6 +1907,7 @@ export async function getWorkspaceGrant(
         subjectId: row.membership.subjectId,
         ...(row.membership.subjectLabel ? { subjectLabel: row.membership.subjectLabel } : {}),
         permissions: row.membership.permissions as Permission[],
+        ...(provenance?.principalKind ? { principalKind: provenance.principalKind } : {}),
       }
     : null;
 }
@@ -2426,7 +2440,9 @@ export async function bindAuthorizedGitHubInstallationRepositories(
             expiresAt: input.authorityExpiresAt,
             usedAt: input.authorityCheckedAt,
           })
-          .onConflictDoNothing({ target: schema.integrationOauthStateNonces.nonce })
+          .onConflictDoNothing({
+            target: schema.integrationOauthStateNonces.nonce,
+          })
           .returning({ nonce: schema.integrationOauthStateNonces.nonce });
         if (consumed.length === 0) {
           return null;
@@ -5178,7 +5194,9 @@ async function withSlackBotLifecycleRls<T>(
 
 export async function createConnectionWithSlackBotSuccessAudit(
   db: Database,
-  input: SlackBotLifecycleSuccessAuditInput & { connection: CreateConnectionInput },
+  input: SlackBotLifecycleSuccessAuditInput & {
+    connection: CreateConnectionInput;
+  },
 ): Promise<ConnectionMetadataWithVerification> {
   if (
     input.connection.accountId !== input.accountId ||
@@ -5199,7 +5217,9 @@ export async function createConnectionWithSlackBotSuccessAudit(
 
 export async function updateConnectionWithSlackBotSuccessAudit(
   db: Database,
-  input: SlackBotLifecycleSuccessAuditInput & { connection: UpdateConnectionInput },
+  input: SlackBotLifecycleSuccessAuditInput & {
+    connection: UpdateConnectionInput;
+  },
 ): Promise<ConnectionMetadataWithVerification | null> {
   if (input.connection.workspaceId !== input.workspaceId) {
     throw new Error("Slack bot connection and lifecycle audit workspace must match");
@@ -5329,7 +5349,10 @@ export async function recordSlackBotInstallCallbackFailure(
 }
 
 export type ClaimSlackBotPostOperationResult =
-  | { kind: "claimed" | "in_progress" | "completed"; operation: SlackBotPostOperation }
+  | {
+      kind: "claimed" | "in_progress" | "completed";
+      operation: SlackBotPostOperation;
+    }
   | { kind: "conflict" | "connection_not_found" };
 
 /**
@@ -5398,7 +5421,10 @@ export async function claimSlackBotPostOperation(
           })
           .returning();
         if (created) {
-          return { kind: "claimed", operation: mapSlackBotPostOperation(created) } as const;
+          return {
+            kind: "claimed",
+            operation: mapSlackBotPostOperation(created),
+          } as const;
         }
 
         const [existing] = await tx
@@ -5424,7 +5450,10 @@ export async function claimSlackBotPostOperation(
           return { kind: "conflict" } as const;
         }
         if (existing.status === "completed") {
-          return { kind: "completed", operation: mapSlackBotPostOperation(existing) } as const;
+          return {
+            kind: "completed",
+            operation: mapSlackBotPostOperation(existing),
+          } as const;
         }
 
         const [reclaimed] = await tx
@@ -5447,8 +5476,14 @@ export async function claimSlackBotPostOperation(
           )
           .returning();
         return reclaimed
-          ? ({ kind: "claimed", operation: mapSlackBotPostOperation(reclaimed) } as const)
-          : ({ kind: "in_progress", operation: mapSlackBotPostOperation(existing) } as const);
+          ? ({
+              kind: "claimed",
+              operation: mapSlackBotPostOperation(reclaimed),
+            } as const)
+          : ({
+              kind: "in_progress",
+              operation: mapSlackBotPostOperation(existing),
+            } as const);
       }),
   );
 }
@@ -5492,7 +5527,11 @@ export async function releaseSlackBotPostOperationClaim(
 }
 
 export type CompleteSlackBotPostOperationResult =
-  | { kind: "completed"; operation: SlackBotPostOperation; newlyCompleted: boolean }
+  | {
+      kind: "completed";
+      operation: SlackBotPostOperation;
+      newlyCompleted: boolean;
+    }
   | { kind: "not_found" | "not_owned" };
 
 /** Completion and the single success audit receipt commit atomically. */
@@ -10797,7 +10836,11 @@ export async function upsertCodexSubscriptionCredential(
           )
           .limit(1);
         if (unresolved) {
-          return { kind: "unresolved_redemption", id: existing.id, isNew: false };
+          return {
+            kind: "unresolved_redemption",
+            id: existing.id,
+            isNew: false,
+          };
         }
       }
       const now = new Date();
@@ -13308,7 +13351,10 @@ export async function updateCodexAllocatorEligibility(
 ): Promise<CodexCapacityMutationResult<CodexAllocatorUpdateResult>> {
   return await withCodexCapacityMutation<CodexAllocatorUpdateResult>(
     db,
-    { workspaceId: input.workspaceId, reason: "codex_allocator_eligibility_changed" },
+    {
+      workspaceId: input.workspaceId,
+      reason: "codex_allocator_eligibility_changed",
+    },
     async (tx) => {
       const [row] = await tx
         .select({
@@ -13336,10 +13382,16 @@ export async function updateCodexAllocatorEligibility(
         allocatorUpdatedAt: codexMetadataDate(row.allocatorUpdatedAt),
       };
       if (row.allocatorEnabled === input.enabled) {
-        return { result: { kind: "unchanged", ...current } as const, changed: false };
+        return {
+          result: { kind: "unchanged", ...current } as const,
+          changed: false,
+        };
       }
       if (row.allocatorVersion !== input.expectedVersion) {
-        return { result: { kind: "conflict", ...current } as const, changed: false };
+        return {
+          result: { kind: "conflict", ...current } as const,
+          changed: false,
+        };
       }
 
       const changedAt = new Date();
@@ -13611,7 +13663,10 @@ export async function adoptCodexResetRedemptionAttempt(
           return { kind: "conflict" } as const;
         }
         if (attempt.browserSessionHash === input.browserSessionHash) {
-          return { kind: "current", attempt: mapCodexResetRedemptionAttempt(attempt) } as const;
+          return {
+            kind: "current",
+            attempt: mapCodexResetRedemptionAttempt(attempt),
+          } as const;
         }
         if (attempt.status !== "provider_started" && attempt.status !== "completed") {
           return { kind: "conflict" } as const;
@@ -13633,7 +13688,10 @@ export async function adoptCodexResetRedemptionAttempt(
           .where(eq(schema.codexResetRedemptionAttempts.id, input.attemptId))
           .returning();
         if (!adopted) throw new Error("Codex redemption adoption returned no row");
-        return { kind: "adopted", attempt: mapCodexResetRedemptionAttempt(adopted) } as const;
+        return {
+          kind: "adopted",
+          attempt: mapCodexResetRedemptionAttempt(adopted),
+        } as const;
       }),
   );
 }
@@ -13953,7 +14011,10 @@ export async function fenceCodexResetRedemptionSend(
             .where(eq(schema.codexResetRedemptionAttempts.id, input.attemptId))
             .returning();
           if (!ready) throw new Error("Codex redemption send fence returned no row");
-          return { kind: "ready", attempt: mapCodexResetRedemptionAttempt(ready) } as const;
+          return {
+            kind: "ready",
+            attempt: mapCodexResetRedemptionAttempt(ready),
+          } as const;
         }
 
         // Before provider_started it is safe to remove the false logical
@@ -14085,7 +14146,10 @@ export async function completeCodexResetRedemption(
         .limit(1);
       if (!current) return { result: null, changed: false };
       if (current.status === "completed") {
-        return { result: mapCodexResetRedemptionAttempt(current), changed: false };
+        return {
+          result: mapCodexResetRedemptionAttempt(current),
+          changed: false,
+        };
       }
       if (current.status !== "provider_started" || current.claimHolderId !== input.claimHolderId) {
         return { result: null, changed: false };
@@ -14789,7 +14853,9 @@ export async function disconnectCodexAccount(
       .for("update")
       .limit(1);
     const [settingsBefore] = await scopedDb
-      .select({ activeCredentialId: schema.codexRotationSettings.activeCredentialId })
+      .select({
+        activeCredentialId: schema.codexRotationSettings.activeCredentialId,
+      })
       .from(schema.codexRotationSettings)
       .where(eq(schema.codexRotationSettings.workspaceId, workspaceId))
       .limit(1);
@@ -14880,7 +14946,9 @@ export async function disconnectAllCodexAccounts(
       .for("update");
     if (credentials.length === 0) return { removed: 0, blockedCredentialIds: [] };
     const blocked = await scopedDb
-      .selectDistinct({ credentialId: schema.codexResetRedemptionAttempts.credentialId })
+      .selectDistinct({
+        credentialId: schema.codexResetRedemptionAttempts.credentialId,
+      })
       .from(schema.codexResetRedemptionAttempts)
       .where(
         and(
@@ -18373,7 +18441,10 @@ export async function listSessionEvents(
 
 export type ToolspaceCallReservation =
   | { reserved: true; count: number; turn: SessionTurnForExecution }
-  | { reserved: false; reason: TurnAttemptFenceRejectReason | "budget_exhausted" };
+  | {
+      reserved: false;
+      reason: TurnAttemptFenceRejectReason | "budget_exhausted";
+    };
 
 export type ToolspaceTurnAttemptClaims = {
   sessionId: string;
@@ -19660,7 +19731,9 @@ export async function recordPendingSessionToolCallResult(
         ) {
           await tx
             .update(schema.sessionPendingToolCalls)
-            .set({ modelToolOutputTruncationTokens: input.modelToolOutputTruncationTokens })
+            .set({
+              modelToolOutputTruncationTokens: input.modelToolOutputTruncationTokens,
+            })
             .where(eq(schema.sessionPendingToolCalls.id, pending.id));
         }
         const resultType = TOOL_RESULT_TYPE_BY_CALL_TYPE[pending.callType];
@@ -21140,20 +21213,9 @@ export type SandboxWorkspaceReadiness =
   | "degraded"
   | "unrecoverable";
 
-export type SandboxArchiveRevision = {
-  version: 1;
-  revision: string;
-  archiveSha256: string;
-  archiveBytes: number;
-  capturedAt: string;
-  workspace: {
-    algorithm: "sha256";
-    sha256: string;
-    entryCount: number;
-    fileCount: number;
-    totalFileBytes: number;
-  };
-};
+export type SandboxTarArchiveRevision = TarWorkspaceArchiveDescriptor;
+export type SandboxNativeSnapshotRevision = NativeSnapshotDescriptor;
+export type SandboxArchiveRevision = WorkspaceArchiveDescriptor;
 
 export type SandboxRecoveryState = {
   provider: {
@@ -21211,6 +21273,12 @@ type LeaseRow = {
   resume_state: Record<string, unknown> | null;
   last_meter_at: Date | string | null;
   last_meter_tick: number;
+  provider_created_at: Date | string | null;
+  provider_deadline_at: Date | string | null;
+  rotation_requested_at: Date | string | null;
+  rotation_reason: "provider_deadline" | "operator" | null;
+  current_checkpoint_artifact_id: string | null;
+  previous_checkpoint_artifact_id: string | null;
   expires_at: Date | string;
 } & Record<string, unknown>;
 
@@ -21252,6 +21320,17 @@ export interface LeaseSnapshot {
    * lease liveness and epoch fields above. Legacy envelopes project to
    * conservative unknown/unverified values. */
   recovery: SandboxRecoveryState;
+  /** Conservative provider creation clock. Modal's hard timeout is measured
+   * from this instant and cannot be extended by resume. */
+  providerCreatedAt: Date | null;
+  /** Durable deadline for replacing this physical provider instance. */
+  providerDeadlineAt: Date | null;
+  /** Once set, new holders and new filesystem mutations are fenced while the
+   * current holders quiesce and the reaper creates a successor. */
+  rotationRequestedAt: Date | null;
+  rotationReason: "provider_deadline" | "operator" | null;
+  currentCheckpointArtifactId: string | null;
+  previousCheckpointArtifactId: string | null;
   expiresAt: Date;
 }
 
@@ -21415,6 +21494,27 @@ function mapLeaseRow(row: LeaseRow): LeaseSnapshot {
     resumeBackendId: row.resume_backend_id,
     resumeState: row.resume_state,
     recovery,
+    providerCreatedAt:
+      row.provider_created_at === null
+        ? null
+        : row.provider_created_at instanceof Date
+          ? row.provider_created_at
+          : new Date(row.provider_created_at),
+    providerDeadlineAt:
+      row.provider_deadline_at === null
+        ? null
+        : row.provider_deadline_at instanceof Date
+          ? row.provider_deadline_at
+          : new Date(row.provider_deadline_at),
+    rotationRequestedAt:
+      row.rotation_requested_at === null
+        ? null
+        : row.rotation_requested_at instanceof Date
+          ? row.rotation_requested_at
+          : new Date(row.rotation_requested_at),
+    rotationReason: row.rotation_reason,
+    currentCheckpointArtifactId: row.current_checkpoint_artifact_id,
+    previousCheckpointArtifactId: row.previous_checkpoint_artifact_id,
     expiresAt: row.expires_at instanceof Date ? row.expires_at : new Date(row.expires_at),
   };
 }
@@ -21432,33 +21532,8 @@ function hasCompleteWorkspaceArchive(row: LeaseRow): boolean {
   );
 }
 
-const SHA256_HEX = /^[a-f0-9]{64}$/;
-const ARCHIVE_REVISION = /^wa1:[0-9]{13}:[a-f0-9]{64}$/;
-
 function parseArchiveRevision(value: unknown): SandboxArchiveRevision | null {
-  if (!value || typeof value !== "object") return null;
-  const input = value as Partial<SandboxArchiveRevision>;
-  const workspace = input.workspace as Partial<SandboxArchiveRevision["workspace"]> | undefined;
-  if (
-    input.version !== 1 ||
-    typeof input.revision !== "string" ||
-    !ARCHIVE_REVISION.test(input.revision) ||
-    typeof input.archiveSha256 !== "string" ||
-    !SHA256_HEX.test(input.archiveSha256) ||
-    !Number.isSafeInteger(input.archiveBytes) ||
-    (input.archiveBytes ?? 0) <= 0 ||
-    typeof input.capturedAt !== "string" ||
-    !Number.isFinite(Date.parse(input.capturedAt)) ||
-    workspace?.algorithm !== "sha256" ||
-    typeof workspace.sha256 !== "string" ||
-    !SHA256_HEX.test(workspace.sha256) ||
-    !Number.isSafeInteger(workspace.entryCount) ||
-    !Number.isSafeInteger(workspace.fileCount) ||
-    !Number.isSafeInteger(workspace.totalFileBytes)
-  ) {
-    return null;
-  }
-  return input as SandboxArchiveRevision;
+  return parseWorkspaceArchiveDescriptor(value);
 }
 
 function recoveryStateFromLeaseRow(row: LeaseRow): SandboxRecoveryState {
@@ -21772,6 +21847,14 @@ export async function acquireLease(
 
         let liveness = row.liveness;
 
+        // A finite-lifetime provider instance is already being replaced. Do not
+        // admit another holder onto the old box: the current holders own its
+        // quiescence, snapshot, and drain; every new arrival retries after the
+        // cold->warming successor election.
+        if (liveness !== "cold" && row.rotation_requested_at !== null) {
+          return { role: "fenced" as const, lease: mapLeaseRow(row) };
+        }
+
         // An expired DRAINING row is owned by the reaper's provider teardown,
         // not by a new arrival. In particular, do this before image/rig conflict
         // handling: a conflicting successor must not take the SOLO-recreate path
@@ -21838,7 +21921,10 @@ export async function acquireLease(
             ${rigVersionId !== null ? sql`rig_version_id = ${rigVersionId},` : sql``}
             instance_id = null,
             data_plane_url = null, terminal_data_plane_url = null,
-            resume_backend_id = null, resume_state = null, updated_at = now()
+            resume_backend_id = null, resume_state = null,
+            provider_created_at = null, provider_deadline_at = null,
+            rotation_requested_at = null, rotation_reason = null,
+            updated_at = now()
           where id = ${row.id}
         `);
           liveness = "cold";
@@ -21917,18 +22003,71 @@ export async function acquireLease(
   );
 }
 
+export type SandboxCheckpointRestoreArtifact = {
+  id: string;
+  providerBackend: string;
+  providerBindingKey: string;
+  providerBinding: Record<string, unknown>;
+  objectKind: "modal_filesystem_snapshot" | "modal_directory_snapshot";
+  objectId: string;
+  descriptorRevision: string;
+};
+
 export type BeginSandboxRematerializationResult =
-  | { status: "started"; lease: LeaseSnapshot }
+  | {
+      status: "started";
+      lease: LeaseSnapshot;
+      /** Null is the explicit compatibility path for a verified legacy archive
+       * that predates the checkpoint ledger. Newly published native snapshots
+       * always carry this exact provider-ownership receipt. */
+      checkpointArtifact: SandboxCheckpointRestoreArtifact | null;
+    }
   | {
       status: "blocked";
       code:
         | "archive_unavailable"
         | "archive_unverified"
         | "archive_generation_mismatch"
+        | "checkpoint_artifact_invalid"
         | "attempt_conflict"
         | "stale_epoch";
       lease: LeaseSnapshot | null;
     };
+
+function validatedLegacyNativeSnapshotAdoption(
+  value:
+    | {
+        archiveBase64: string;
+        descriptor: SandboxNativeSnapshotRevision;
+      }
+    | null
+    | undefined,
+): { archiveBase64: string; descriptor: SandboxNativeSnapshotRevision } | null {
+  if (!value || value.archiveBase64.length === 0 || value.archiveBase64.length % 4 !== 0) {
+    return null;
+  }
+  let bytes: Uint8Array;
+  try {
+    bytes = Uint8Array.from(Buffer.from(value.archiveBase64, "base64"));
+  } catch {
+    return null;
+  }
+  if (Buffer.from(bytes).toString("base64") !== value.archiveBase64) return null;
+  const descriptor = parseArchiveRevision(value.descriptor);
+  const native = decodeNativeSnapshotRef(bytes);
+  if (
+    descriptor?.version !== 2 ||
+    !native ||
+    descriptor.archiveBytes !== bytes.length ||
+    descriptor.archiveSha256 !== createHash("sha256").update(bytes).digest("hex") ||
+    descriptor.provider !== native.provider ||
+    descriptor.snapshotId !== native.snapshotId ||
+    descriptor.workspacePersistence !== native.workspacePersistence
+  ) {
+    return null;
+  }
+  return { archiveBase64: value.archiveBase64, descriptor };
+}
 
 /** Records the single cold->warming winner's exact restore attempt. The lease
  * election remains the sole spawner guard; this adds durable selected-revision
@@ -21946,8 +22085,18 @@ export async function beginSandboxRematerialization(
      *  restoration can never consume bytes that were not durably selected by
      *  the lease attempt. Provider/session state is never imported here. */
     archiveSource?: Record<string, unknown> | null;
+    /** One-time adoption of a native provider receipt written before the v2
+     * descriptor split. The runtime derives v2 identity from the exact opaque
+     * bytes. A metadata-less receipt is accepted only at generation zero; a v1
+     * descriptor is accepted only when its byte hash and archive generation are
+     * already current. Tar payloads and generation gaps remain ineligible. */
+    legacyNativeArchive?: {
+      archiveBase64: string;
+      descriptor: SandboxNativeSnapshotRevision;
+    } | null;
   },
 ): Promise<BeginSandboxRematerializationResult> {
+  const legacyNativeArchive = validatedLegacyNativeSnapshotAdoption(input.legacyNativeArchive);
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -21985,8 +22134,8 @@ export async function beginSandboxRematerialization(
             // lease acquired generation-aware ownership. Importing it is the
             // one-time protocol-v2 handoff: bind it to the currently locked
             // workspace generation in the same transaction that selects it.
-            // Runtime still byte/hash/fingerprint-verifies the selected archive
-            // before the warming lease may commit warm.
+            // Runtime still verifies the selected receipt/archive according to
+            // its kind before the warming lease may commit warm.
             if (current.archive.status === "available" && current.archive.current) {
               workingRow = {
                 ...workingRow,
@@ -21994,6 +22143,46 @@ export async function beginSandboxRematerialization(
               };
               importedArchiveGeneration = true;
             }
+          }
+        }
+        if (legacyNativeArchive) {
+          const sessionState =
+            workingResumeState?.sessionState && typeof workingResumeState.sessionState === "object"
+              ? (workingResumeState.sessionState as Record<string, unknown>)
+              : null;
+          const descriptor = legacyNativeArchive.descriptor;
+          const existingDescriptor = parseArchiveRevision(sessionState?.workspaceArchiveMeta);
+          const metadataLessGenerationZero =
+            current.archive.status === "unverified" &&
+            Number(workingRow.workspace_generation) === 0 &&
+            workingRow.archive_generation === null;
+          const v1DescriptorAlreadyCurrent =
+            existingDescriptor?.version === 1 &&
+            existingDescriptor.archiveBytes === descriptor.archiveBytes &&
+            existingDescriptor.archiveSha256 === descriptor.archiveSha256 &&
+            workingRow.archive_generation !== null &&
+            Number(workingRow.archive_generation) === Number(workingRow.workspace_generation);
+          if (
+            (metadataLessGenerationZero || v1DescriptorAlreadyCurrent) &&
+            backendForNativeSnapshotProvider(descriptor.provider) ===
+              (workingRow.resume_backend_id ?? workingRow.backend) &&
+            sessionState?.workspaceArchive === legacyNativeArchive.archiveBase64
+          ) {
+            const adoptedSessionState = {
+              ...sessionState,
+              workspaceArchiveMeta: descriptor,
+            };
+            workingResumeState = {
+              ...(workingResumeState ?? {}),
+              sessionState: adoptedSessionState,
+            };
+            workingRow = {
+              ...workingRow,
+              resume_state: workingResumeState,
+              archive_generation: workingRow.workspace_generation,
+            };
+            current = recoveryStateFromLeaseRow(workingRow);
+            importedArchiveGeneration = true;
           }
         }
         const archiveComplete = hasCompleteWorkspaceArchive(workingRow);
@@ -22054,6 +22243,132 @@ export async function beginSandboxRematerialization(
             lease: mapLeaseRow(workingRow),
           };
         }
+        let checkpointArtifact: SandboxCheckpointRestoreArtifact | null = null;
+        if (workingRow.current_checkpoint_artifact_id !== null) {
+          const artifactRows = await tx.execute<{
+            id: string;
+            account_id: string;
+            workspace_id: string;
+            sandbox_group_id: string;
+            source_lease_id: string;
+            source_workspace_generation: number | string | null;
+            provenance: "native_capture" | "legacy_provider_adopted";
+            provider_backend: string;
+            provider_binding_key: string;
+            provider_binding: Record<string, unknown>;
+            object_kind: string;
+            object_id: string;
+            archive_base64: string;
+            descriptor: unknown;
+            descriptor_revision: string;
+            state: string;
+          }>(sql`
+            select id, account_id, workspace_id, sandbox_group_id,
+              source_lease_id, source_workspace_generation, provenance, provider_backend,
+              provider_binding_key, provider_binding, object_kind, object_id,
+              archive_base64, descriptor, descriptor_revision, state
+            from sandbox_checkpoint_artifacts
+            where id = ${workingRow.current_checkpoint_artifact_id}
+            for share
+          `);
+          const artifact = artifactRows[0];
+          const descriptor = parseArchiveRevision(artifact?.descriptor);
+          const providerIdentity = canonicalModalCheckpointProviderBinding(
+            artifact?.provider_binding,
+          );
+          const sessionState =
+            workingResumeState?.sessionState && typeof workingResumeState.sessionState === "object"
+              ? (workingResumeState.sessionState as Record<string, unknown>)
+              : null;
+          const selected = current.archive.current;
+          const expectedObjectKind =
+            selected.version === 2 && selected.provider === "modal_snapshot_filesystem"
+              ? "modal_filesystem_snapshot"
+              : selected.version === 2 && selected.provider === "modal_snapshot_directory"
+                ? "modal_directory_snapshot"
+                : null;
+          const valid =
+            artifact !== undefined &&
+            selected.version === 2 &&
+            descriptor?.version === 2 &&
+            expectedObjectKind !== null &&
+            artifact.state === "current" &&
+            artifact.account_id === input.accountId &&
+            artifact.workspace_id === input.workspaceId &&
+            artifact.sandbox_group_id === input.sandboxGroupId &&
+            artifact.source_lease_id === workingRow.id &&
+            ((artifact.provenance === "native_capture" &&
+              artifact.source_workspace_generation !== null &&
+              Number(artifact.source_workspace_generation) ===
+                Number(workingRow.workspace_generation)) ||
+              (artifact.provenance === "legacy_provider_adopted" &&
+                artifact.source_workspace_generation === null)) &&
+            artifact.provider_backend === workingRow.backend &&
+            artifact.provider_backend === backendForNativeSnapshotProvider(selected.provider) &&
+            providerIdentity !== null &&
+            providerIdentity.key === artifact.provider_binding_key &&
+            artifact.object_kind === expectedObjectKind &&
+            artifact.object_id === selected.snapshotId &&
+            artifact.archive_base64 === sessionState?.workspaceArchive &&
+            artifact.descriptor_revision === selected.revision &&
+            descriptor.revision === selected.revision &&
+            descriptor.archiveSha256 === selected.archiveSha256 &&
+            descriptor.archiveBytes === selected.archiveBytes &&
+            descriptor.provider === selected.provider &&
+            descriptor.snapshotId === selected.snapshotId &&
+            descriptor.workspacePersistence === selected.workspacePersistence;
+          if (!valid) {
+            const failedAt = new Date().toISOString();
+            const degraded: SandboxRecoveryState = {
+              provider: {
+                status: "not_created",
+                instanceId: null,
+                observedAt: failedAt,
+              },
+              archive: current.archive,
+              restore: {
+                status: "degraded",
+                rematerializationId: null,
+                selectedRevision: null,
+                startedAt: null,
+                completedAt: failedAt,
+                failureCode: "checkpoint_artifact_invalid",
+                retryable: false,
+              },
+              workspace: {
+                status: "degraded",
+                verifiedRevision: null,
+                verifiedAt: null,
+              },
+            };
+            const degradedRows = await tx.execute<LeaseRow>(sql`
+              update sandbox_leases set
+                resume_state = ${JSON.stringify(
+                  resumeStateWithRecovery(workingResumeState, degraded),
+                )}::jsonb,
+                resume_backend_id = coalesce(resume_backend_id, backend),
+                updated_at = now()
+              where id = ${row.id}
+                and liveness = 'warming'
+                and lease_epoch = ${input.expectedEpoch}
+              returning *
+            `);
+            return {
+              status: "blocked" as const,
+              code: "checkpoint_artifact_invalid" as const,
+              lease: mapLeaseRow(degradedRows[0] ?? workingRow),
+            };
+          }
+          checkpointArtifact = {
+            id: artifact.id,
+            providerBackend: artifact.provider_backend,
+            providerBindingKey: artifact.provider_binding_key,
+            providerBinding: providerIdentity.binding,
+            objectKind: artifact.object_kind as SandboxCheckpointRestoreArtifact["objectKind"],
+            objectId: artifact.object_id,
+            descriptorRevision: artifact.descriptor_revision,
+          };
+        }
         if (
           (current.restore.status === "restoring" || current.restore.status === "verifying") &&
           current.restore.rematerializationId !== input.rematerializationId
@@ -22068,7 +22383,11 @@ export async function beginSandboxRematerialization(
           (current.restore.status === "restoring" || current.restore.status === "verifying") &&
           current.restore.rematerializationId === input.rematerializationId
         ) {
-          return { status: "started" as const, lease: mapLeaseRow(row) };
+          return {
+            status: "started" as const,
+            lease: mapLeaseRow(row),
+            checkpointArtifact,
+          };
         }
         const startedAt = new Date().toISOString();
         const recovery: SandboxRecoveryState = {
@@ -22105,7 +22424,11 @@ export async function beginSandboxRematerialization(
           returning *
         `);
         return updated[0]
-          ? { status: "started" as const, lease: mapLeaseRow(updated[0]) }
+          ? {
+              status: "started" as const,
+              lease: mapLeaseRow(updated[0]),
+              checkpointArtifact,
+            }
           : {
               status: "blocked" as const,
               code: "stale_epoch" as const,
@@ -22216,6 +22539,10 @@ export async function failSandboxRematerialization(
             terminal_data_plane_url = null,
             lease_epoch = lease_epoch + 1,
             resume_state = ${resumeStateJson}::jsonb,
+            provider_created_at = null,
+            provider_deadline_at = null,
+            rotation_requested_at = null,
+            rotation_reason = null,
             updated_at = now()
           where id = ${row.id}
             and liveness = 'warming'
@@ -22492,6 +22819,10 @@ export async function recordWarmingSandboxCreated(
     instanceId: string;
     resumeBackendId?: string | null;
     resumeState?: Record<string, unknown> | null;
+    /** Conservative provider-call start, not callback completion. Required as
+     * a pair for finite-lifetime providers such as Modal. */
+    providerCreatedAt?: Date | null;
+    providerDeadlineAt?: Date | null;
     leaseTtlMs: number;
     /** The still-WARMING lease must keep the warming budget after create() returns:
      *  provider manifest hydration and commitWarmingToWarm can exceed the 90s turn
@@ -22542,11 +22873,27 @@ export async function recordWarmingSandboxCreated(
         );
         const resumeStateJson = JSON.stringify(resumeStateWithRecovery(withArchives, recovery));
         const warmingTtlMs = input.warmingLeaseTtlMs ?? input.leaseTtlMs;
+        const providerCreatedAt = input.providerCreatedAt ?? null;
+        const providerDeadlineAt = input.providerDeadlineAt ?? null;
+        if ((providerCreatedAt === null) !== (providerDeadlineAt === null)) {
+          throw new Error("Provider creation and deadline timestamps must be supplied together");
+        }
+        if (
+          providerCreatedAt &&
+          providerDeadlineAt &&
+          providerDeadlineAt.getTime() <= providerCreatedAt.getTime()
+        ) {
+          throw new Error("Provider deadline must be later than provider creation");
+        }
         const updated = await tx.execute<LeaseRow>(sql`
           update sandbox_leases set
             instance_id       = ${input.instanceId},
             resume_backend_id = ${input.resumeBackendId ?? null},
             resume_state      = ${resumeStateJson}::jsonb,
+            provider_created_at = ${providerCreatedAt?.toISOString() ?? null}::timestamptz,
+            provider_deadline_at = ${providerDeadlineAt?.toISOString() ?? null}::timestamptz,
+            rotation_requested_at = null,
+            rotation_reason = null,
             expires_at        = now() + (${String(warmingTtlMs)} || ' milliseconds')::interval,
             updated_at        = now()
           where id = ${row.id}
@@ -22801,7 +23148,7 @@ export type ColdLostReconciliationPreview = {
   } | null;
   archive: {
     status: SandboxArchiveAvailability;
-    descriptorVersion: 1 | null;
+    descriptorVersion: 1 | 2 | null;
     revision: string | null;
     generation: number | null;
     objectKind: "modal_filesystem_snapshot" | "modal_directory_snapshot" | null;
@@ -23464,6 +23811,7 @@ function evaluateColdLostSnapshot(
   );
 
   const descriptor = recovery?.archive.current ?? null;
+  const treeDescriptor = descriptor?.version === 1 ? descriptor : null;
   const sessionState = archiveSessionState(row);
   const base64 = sessionState?.workspaceArchive;
   const bytes = decodeCanonicalBase64(base64);
@@ -23537,27 +23885,27 @@ function evaluateColdLostSnapshot(
   add(
     "archive_tree_fingerprint_algorithm_mismatch",
     input.expectedTreeFingerprintAlgorithm !== undefined &&
-      descriptor?.workspace.algorithm !== input.expectedTreeFingerprintAlgorithm,
+      treeDescriptor?.workspace.algorithm !== input.expectedTreeFingerprintAlgorithm,
   );
   add(
     "archive_tree_fingerprint_sha256_mismatch",
     input.expectedTreeFingerprintSha256 !== undefined &&
-      descriptor?.workspace.sha256 !== input.expectedTreeFingerprintSha256,
+      treeDescriptor?.workspace.sha256 !== input.expectedTreeFingerprintSha256,
   );
   add(
     "archive_tree_entry_count_mismatch",
     input.expectedTreeEntryCount !== undefined &&
-      descriptor?.workspace.entryCount !== input.expectedTreeEntryCount,
+      treeDescriptor?.workspace.entryCount !== input.expectedTreeEntryCount,
   );
   add(
     "archive_tree_file_count_mismatch",
     input.expectedTreeFileCount !== undefined &&
-      descriptor?.workspace.fileCount !== input.expectedTreeFileCount,
+      treeDescriptor?.workspace.fileCount !== input.expectedTreeFileCount,
   );
   add(
     "archive_total_file_bytes_mismatch",
     input.expectedTotalFileBytes !== undefined &&
-      descriptor?.workspace.totalFileBytes !== input.expectedTotalFileBytes,
+      treeDescriptor?.workspace.totalFileBytes !== input.expectedTotalFileBytes,
   );
   add(
     "archive_captured_at_mismatch",
@@ -23919,11 +24267,11 @@ function evaluateColdLostSnapshot(
       referenceBytes,
       referenceSha256,
       referenceVerified,
-      treeFingerprintAlgorithm: descriptor?.workspace.algorithm ?? null,
-      treeFingerprintSha256: descriptor?.workspace.sha256 ?? null,
-      entryCount: descriptor?.workspace.entryCount ?? null,
-      fileCount: descriptor?.workspace.fileCount ?? null,
-      totalFileBytes: descriptor?.workspace.totalFileBytes ?? null,
+      treeFingerprintAlgorithm: treeDescriptor?.workspace.algorithm ?? null,
+      treeFingerprintSha256: treeDescriptor?.workspace.sha256 ?? null,
+      entryCount: treeDescriptor?.workspace.entryCount ?? null,
+      fileCount: treeDescriptor?.workspace.fileCount ?? null,
+      totalFileBytes: treeDescriptor?.workspace.totalFileBytes ?? null,
       complete: archiveComplete,
       verificationState: archiveVerificationMatches ? "verified" : "unverified",
       capturedAt: descriptor?.capturedAt ?? null,
@@ -24356,6 +24704,10 @@ export async function markWarmLeaseInstanceLost(
             lease_epoch = lease_epoch + 1,
             resume_state = ${coldResumeStateJson}::jsonb,
             resume_backend_id = coalesce(resume_backend_id, backend),
+            provider_created_at = null,
+            provider_deadline_at = null,
+            rotation_requested_at = null,
+            rotation_reason = null,
             updated_at = now()
           where id = ${current.id}
           returning *
@@ -24364,7 +24716,11 @@ export async function markWarmLeaseInstanceLost(
         if (!updated) {
           throw new Error(`Warm sandbox lease vanished while retiring instance ${current.id}`);
         }
-        return { status: "marked" as const, lease: mapLeaseRow(updated), settlement };
+        return {
+          status: "marked" as const,
+          lease: mapLeaseRow(updated),
+          settlement,
+        };
       }),
   );
 }
@@ -24651,6 +25007,10 @@ export async function failWarmingToCold(
             lease_epoch = lease_epoch + 1,
             resume_state = ${resumeStateJson}::jsonb,
             resume_backend_id = case when ${hasArchive} then coalesce(resume_backend_id, backend) else null end,
+            provider_created_at = null,
+            provider_deadline_at = null,
+            rotation_requested_at = null,
+            rotation_reason = null,
             updated_at = now()
           where id = ${row.id}
             and liveness = 'warming'
@@ -24712,12 +25072,13 @@ export async function releaseLeaseHolder(
         // Release during warming decrements only, NEVER touches liveness (the
         // spawner owns warming->warm and re-checks refcount after committing).
         const enterDraining = row.liveness === "warm" && c.total === 0 && c.turns === 0;
+        const drainGraceMs = row.rotation_requested_at ? 0 : input.idleGraceMs;
         const updated = await tx.execute<LeaseRow>(sql`
         update sandbox_leases set
           refcount = ${c.total}, turn_holders = ${c.turns}, viewer_holders = ${c.viewers},
           ${
             enterDraining
-              ? sql`liveness = 'draining', expires_at = now() + (${String(input.idleGraceMs)} || ' milliseconds')::interval,`
+              ? sql`liveness = 'draining', expires_at = now() + (${String(drainGraceMs)} || ' milliseconds')::interval,`
               : sql``
           }
           updated_at = now()
@@ -24727,6 +25088,59 @@ export async function releaseLeaseHolder(
         return { liveness: updated[0]!.liveness, refcount: Number(c.total) };
       }),
   );
+}
+
+// Canonical production turn holders carry the exact UUID attempt identity.
+// Their in-memory timer is never authority by itself: the attempt and turn must
+// still form the current active-writer chain. The non-UUID branch exists only
+// for old synthetic fixtures/legacy diagnostic rows; runtime construction uses
+// `turn-attempt:<uuid>` exclusively, and migration 0138 removes canonical
+// orphan rows during the maintenance cutover.
+const LIVE_CANONICAL_TURN_HOLDER_PREDICATE = sql`
+  (
+    holder.kind <> 'turn'
+    or holder.holder_id !~* '^turn-attempt:[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+    or exists (
+      select 1
+      from session_turn_attempts attempt
+      join session_turns turn
+        on turn.account_id = attempt.account_id
+       and turn.workspace_id = attempt.workspace_id
+       and turn.session_id = attempt.session_id
+       and turn.id = attempt.turn_id
+       and turn.execution_generation = attempt.execution_generation
+       and turn.active_attempt_id = attempt.id
+      where holder.holder_id = ('turn-attempt:' || attempt.id::text)
+        and attempt.account_id = holder.account_id
+        and attempt.workspace_id = holder.workspace_id
+        and attempt.session_id = holder.subject_id
+        and attempt.state in ('claimed', 'running')
+    )
+  )
+`;
+
+async function touchLiveLeaseHolder(
+  tx: Database,
+  input: {
+    workspaceId: string;
+    sandboxGroupId: string;
+    kind: LeaseHolderKind;
+    holderId: string;
+  },
+): Promise<boolean> {
+  const updated = await tx.execute<{ id: string }>(sql`
+    update sandbox_lease_holders as holder set last_heartbeat_at = now()
+    where holder.lease_id = (
+      select id from sandbox_leases
+      where workspace_id = ${input.workspaceId}
+        and sandbox_group_id = ${input.sandboxGroupId}
+    )
+      and holder.kind = ${input.kind}
+      and holder.holder_id = ${input.holderId}
+      and ${LIVE_CANONICAL_TURN_HOLDER_PREDICATE}
+    returning holder.id
+  `);
+  return updated.length > 0;
 }
 
 // §4.5 — heartbeat. EPOCH-FENCED (the C1b fix — the real split-brain bug, on the
@@ -24752,14 +25166,13 @@ export async function heartbeatLeaseHolder(
     async (scopedDb) =>
       await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
-        const updated = await tx.execute<{ id: string }>(sql`
-        update sandbox_lease_holders set last_heartbeat_at = now()
-        where lease_id = (select id from sandbox_leases
-                          where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId})
-          and kind = ${input.kind} and holder_id = ${input.holderId}
-        returning id
-      `);
-        if (updated.length === 0) return false; // holder was reaped — caller re-acquires
+        const holderAlive = await touchLiveLeaseHolder(tx, {
+          workspaceId: input.workspaceId,
+          sandboxGroupId: input.sandboxGroupId,
+          kind: input.kind,
+          holderId: input.holderId,
+        });
+        if (!holderAlive) return false; // reaped or no longer the exact active attempt
         // Epoch-fenced, liveness-guarded lease TTL refresh: only a live-epoch
         // warm/warming lease is refreshed. A stale-epoch (split-brain) or draining
         // lease returns 0 rows -> false -> the stale holder drops its handle.
@@ -24770,6 +25183,7 @@ export async function heartbeatLeaseHolder(
         where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
           and lease_epoch = ${input.expectedEpoch}
           and liveness in ('warm','warming')
+          and rotation_requested_at is null
         returning id
       `);
         return leaseRows.length > 0;
@@ -24783,8 +25197,9 @@ export async function heartbeatLeaseHolder(
  * display stack) can legitimately run for many minutes BEFORE the full turn
  * heartbeat (heartbeatLeaseHolder) starts, and the dead-worker turn-holder
  * reap judges liveness by this timestamp. Touching our own holder row needs no
- * epoch fence — supersession is handled by the fenced acquire/establish paths;
- * a reaped/released row returns false (row gone).
+ * lease-epoch fence — supersession is handled by the fenced
+ * acquire/establish paths. Canonical turn holders are still attempt-fenced;
+ * a closed/superseded attempt or a reaped/released row returns false.
  */
 export async function touchLeaseHolder(
   db: Database,
@@ -24801,14 +25216,12 @@ export async function touchLeaseHolder(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
-      const updated = await scopedDb.execute<{ id: string }>(sql`
-        update sandbox_lease_holders set last_heartbeat_at = now()
-        where lease_id = (select id from sandbox_leases
-                          where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId})
-          and kind = ${input.kind} and holder_id = ${input.holderId}
-        returning id
-      `);
-      return updated.length > 0;
+      return await touchLiveLeaseHolder(scopedDb, {
+        workspaceId: input.workspaceId,
+        sandboxGroupId: input.sandboxGroupId,
+        kind: input.kind,
+        holderId: input.holderId,
+      });
     },
   );
 }
@@ -24935,7 +25348,11 @@ export async function reapStaleLeaseHolders(
             current.archive.status === "available" ? "pending" : "degraded";
           const resetResumeState = hasArchive
             ? archiveOnlyResumeState(row, {
-                provider: { status: "not_created", instanceId: null, observedAt: resetAt },
+                provider: {
+                  status: "not_created",
+                  instanceId: null,
+                  observedAt: resetAt,
+                },
                 archive: current.archive,
                 restore: {
                   status: restoreStatus,
@@ -24960,7 +25377,9 @@ export async function reapStaleLeaseHolders(
             lease_epoch = lease_epoch + 1,
             resume_backend_id = case when ${hasArchive} then coalesce(resume_backend_id, backend) else null end,
             resume_state = ${resetResumeState ? JSON.stringify(resetResumeState) : null}::jsonb,
-            data_plane_url = null, terminal_data_plane_url = null, updated_at = now()
+            data_plane_url = null, terminal_data_plane_url = null,
+            provider_created_at = null, provider_deadline_at = null,
+            rotation_requested_at = null, rotation_reason = null, updated_at = now()
           where id = ${row.id}
             and liveness = 'warming'
             and lease_epoch = ${Number(row.lease_epoch)}
@@ -25378,6 +25797,10 @@ export async function confirmDrainCold(
           lease_epoch = lease_epoch + 1,
           resume_state = ${resumeStateJson}::jsonb,
           resume_backend_id = case when ${preserveRecovery} then coalesce(resume_backend_id, backend) else null end,
+          provider_created_at = null,
+          provider_deadline_at = null,
+          rotation_requested_at = null,
+          rotation_reason = null,
           updated_at = now()
         where id = ${row.id}
           and liveness = 'draining'
@@ -25407,12 +25830,9 @@ export async function confirmDrainCold(
 // re-arm raced an external action, but it does not itself license deleting a
 // resumable cloud box without a verified capture.
 //
-// Returns `{ wrote, priorArchiveForGc }`:
-//   - wrote:false  -> the CAS missed (re-armed / newer epoch / vanished); the
-//                     caller must NOT terminate (the box is wanted again). No GC.
-//   - priorArchiveForGc -> the one archive made unreachable by this rotation,
-//                     so the caller can best-effort delete it. The last
-//                     restore/tree-verified revision is deliberately retained.
+// Returns `wrote:false` when the CAS missed (re-armed / newer epoch / vanished);
+// the caller must NOT terminate because the box is wanted again. Provider-native
+// object deletion is never returned to this caller: artifact-ledger GC owns it.
 // The fence is the split-brain guard: a stale-epoch reaper writes ZERO rows and
 // is told not to terminate.
 export class SandboxWorkspaceMutationFencedError extends Error {
@@ -25473,6 +25893,8 @@ export type SandboxRetainedProcess = {
   leaseEpoch: number;
   providerBackend: string;
   providerInstanceId: string;
+  providerBindingKey: string | null;
+  providerBinding: ModalCheckpointProviderBinding | null;
   routeKind: "home" | "active";
   routeTargetId: string | null;
   routeEpoch: number;
@@ -25493,6 +25915,7 @@ export type SandboxRetainedProcess = {
     | "provider_exit_banner"
     | "provider_session_lost_banner"
     | "provider_instance_not_found"
+    | "provider_instance_terminated"
     | null;
   reconcileProofObservedAt: string | null;
 };
@@ -25502,7 +25925,10 @@ export type RetainedProcessProviderProof =
   | {
       outcome: "lost";
       exitCode: null;
-      reason: "provider_session_lost_banner" | "provider_instance_not_found";
+      reason:
+        | "provider_session_lost_banner"
+        | "provider_instance_not_found"
+        | "provider_instance_terminated";
     };
 
 export type SandboxRetainedProcessIdentity = Pick<
@@ -25574,7 +26000,8 @@ export function retainedProcessReconciliationProof(
   if (
     process.reconcileProofOutcome === "lost" &&
     (process.reconcileProofReason === "provider_session_lost_banner" ||
-      process.reconcileProofReason === "provider_instance_not_found")
+      process.reconcileProofReason === "provider_instance_not_found" ||
+      process.reconcileProofReason === "provider_instance_terminated")
   ) {
     return {
       outcome: "lost",
@@ -25787,6 +26214,10 @@ function mapRetainedProcess(
     leaseEpoch: row.leaseEpoch,
     providerBackend: row.providerBackend,
     providerInstanceId: row.providerInstanceId,
+    providerBindingKey: row.providerBindingKey ?? null,
+    providerBinding: row.providerBinding
+      ? (canonicalModalCheckpointProviderBinding(row.providerBinding)?.binding ?? null)
+      : null,
     routeKind: row.routeKind as "home" | "active",
     routeTargetId: row.routeTargetId ?? null,
     routeEpoch: row.routeEpoch,
@@ -26049,6 +26480,7 @@ async function advanceWorkspaceGenerationForAuthority(
               and lease.workspace_id = ${locked.workspaceId}
               and lease.sandbox_group_id = ${locked.sandboxGroupId}
               and lease.liveness = 'warm'
+              and lease.rotation_requested_at is null
               and lease.lease_epoch = ${locked.expectedEpoch}
               and lease.instance_id = ${locked.expectedInstanceId}
               and (${locked.expectedLeaseId}::uuid is null or lease.id = ${locked.expectedLeaseId}::uuid)
@@ -26094,6 +26526,7 @@ async function advanceWorkspaceGenerationForAuthority(
               (
                 lease.account_id = ${locked.accountId}
                 and lease.liveness = 'warm'
+                and lease.rotation_requested_at is null
                 and lease.lease_epoch = ${locked.expectedEpoch}
                 and lease.instance_id = ${locked.expectedInstanceId}
                 and (${locked.expectedLeaseId}::uuid is null or lease.id = ${locked.expectedLeaseId}::uuid)
@@ -26485,7 +26918,10 @@ async function verifyWorkspaceMutationSettlementForAuthority(
   const operation = normalizeWorkspaceMutationOperation(input.operation);
   const settlement: SandboxWorkspaceMutationSettlementResult = await withRlsContext(
     db,
-    { accountId: authorityInput.accountId, workspaceId: authorityInput.workspaceId },
+    {
+      accountId: authorityInput.accountId,
+      workspaceId: authorityInput.workspaceId,
+    },
     async (scopedDb) =>
       await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
@@ -26652,6 +27088,10 @@ export async function retainWorkspaceMutationProcess(
     admissionId: string;
     admittedWorkspaceGeneration: number;
     operation: string;
+    providerBinding: {
+      key: string;
+      binding: ModalCheckpointProviderBinding;
+    } | null;
     owner:
       | {
           kind: "turn";
@@ -26685,6 +27125,15 @@ export async function retainWorkspaceMutationProcess(
     );
   }
   const operation = normalizeWorkspaceMutationOperation(input.operation);
+  const providerBinding = input.providerBinding
+    ? canonicalModalCheckpointProviderBinding(input.providerBinding.binding)
+    : null;
+  if (input.providerBinding && providerBinding?.key !== input.providerBinding.key) {
+    throw new SandboxWorkspaceMutationFencedError(
+      "process_fenced",
+      "Retained process provider binding is not canonical",
+    );
+  }
   const authorityInput: TurnWorkspaceMutationAuthority | DirectWorkspaceMutationAuthority =
     input.owner.kind === "turn"
       ? {
@@ -26745,6 +27194,18 @@ export async function retainWorkspaceMutationProcess(
             "Retained process did not match its exact parent admission",
           );
         }
+        if (admission.provider_backend === "modal" && !providerBinding) {
+          throw new SandboxWorkspaceMutationFencedError(
+            "process_fenced",
+            "Modal retained process requires its exact authenticated provider binding",
+          );
+        }
+        if (admission.provider_backend !== "modal" && providerBinding) {
+          throw new SandboxWorkspaceMutationFencedError(
+            "process_fenced",
+            "Only Modal retained processes may carry a Modal provider binding",
+          );
+        }
         const [existing] = await tx
           .select()
           .from(schema.sandboxRetainedProcesses)
@@ -26754,7 +27215,9 @@ export async function retainWorkspaceMutationProcess(
           if (
             existing.id !== input.processId ||
             existing.providerSessionId !== input.providerSessionId ||
-            existing.state !== "active"
+            existing.state !== "active" ||
+            (existing.providerBindingKey !== null &&
+              existing.providerBindingKey !== (providerBinding?.key ?? null))
           ) {
             throw new SandboxWorkspaceMutationFencedError(
               "process_fenced",
@@ -26763,6 +27226,30 @@ export async function retainWorkspaceMutationProcess(
           }
         }
         let process = existing;
+        if (process?.providerBindingKey === null && providerBinding) {
+          const [bound] = await tx
+            .update(schema.sandboxRetainedProcesses)
+            .set({
+              providerBindingKey: providerBinding.key,
+              providerBinding: providerBinding.binding,
+            })
+            .where(
+              and(
+                eq(schema.sandboxRetainedProcesses.id, process.id),
+                eq(schema.sandboxRetainedProcesses.state, "active"),
+                isNull(schema.sandboxRetainedProcesses.providerBindingKey),
+                isNull(schema.sandboxRetainedProcesses.providerBinding),
+              ),
+            )
+            .returning();
+          if (!bound) {
+            throw new SandboxWorkspaceMutationFencedError(
+              "process_fenced",
+              "Retained process changed while binding its provider namespace",
+            );
+          }
+          process = bound;
+        }
         if (!process) {
           if (admission.provider_outcome !== null || admission.settled_at !== null) {
             throw new SandboxWorkspaceMutationFencedError(
@@ -26801,6 +27288,8 @@ export async function retainWorkspaceMutationProcess(
               leaseEpoch: Number(admission.lease_epoch),
               providerBackend: admission.provider_backend,
               providerInstanceId: admission.provider_instance_id,
+              providerBindingKey: providerBinding?.key ?? null,
+              providerBinding: providerBinding?.binding ?? null,
               routeKind: admission.route_kind,
               routeTargetId: admission.route_target_id,
               routeEpoch: Number(admission.route_epoch),
@@ -26938,6 +27427,106 @@ export async function claimTerminalRetainedProcesses(
     });
   }
   return claims;
+}
+
+/**
+ * Adopt the provider namespace for one legacy retained process only after a
+ * positive lookup of its exact historical Modal sandbox. A NotFound response
+ * is deliberately insufficient: without a pre-existing binding it cannot
+ * distinguish deletion from a credential/workspace change.
+ */
+export async function bindRetainedProcessProviderIdentity(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    processId: string;
+    expected: SandboxRetainedProcessIdentity;
+    claimId: string;
+    providerBindingKey: string;
+    providerBinding: ModalCheckpointProviderBinding;
+  },
+): Promise<SandboxRetainedProcess> {
+  const binding = canonicalModalCheckpointProviderBinding(input.providerBinding);
+  if (!binding || binding.key !== input.providerBindingKey) {
+    throw new SandboxWorkspaceMutationFencedError(
+      "process_fenced",
+      "Retained process provider binding is not canonical",
+    );
+  }
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        const [process] = await tx
+          .select()
+          .from(schema.sandboxRetainedProcesses)
+          .where(
+            and(
+              eq(schema.sandboxRetainedProcesses.accountId, input.accountId),
+              eq(schema.sandboxRetainedProcesses.workspaceId, input.workspaceId),
+              eq(schema.sandboxRetainedProcesses.sessionId, input.sessionId),
+              eq(schema.sandboxRetainedProcesses.id, input.processId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (
+          !process ||
+          process.state !== "active" ||
+          process.providerBackend !== "modal" ||
+          !retainedProcessMatchesSettlementIdentity(process, input.expected)
+        ) {
+          throw new SandboxWorkspaceMutationFencedError(
+            "process_fenced",
+            "Retained process binding did not match an active copied Modal identity",
+          );
+        }
+        if (process.reconcileClaimId !== input.claimId) {
+          throw new SandboxWorkspaceMutationFencedError(
+            "process_fenced",
+            "Retained process binding claim was lost or superseded",
+          );
+        }
+        if (process.providerBindingKey !== null || process.providerBinding !== null) {
+          const existing = canonicalModalCheckpointProviderBinding(process.providerBinding);
+          if (!existing || existing.key !== binding.key) {
+            throw new SandboxWorkspaceMutationFencedError(
+              "process_fenced",
+              "Retained process already belongs to a different provider namespace",
+            );
+          }
+          return mapRetainedProcess(process);
+        }
+        const [updated] = await tx
+          .update(schema.sandboxRetainedProcesses)
+          .set({
+            providerBindingKey: binding.key,
+            providerBinding: binding.binding,
+            lastReconcileOutcome: "provider_binding_adopted",
+          })
+          .where(
+            and(
+              eq(schema.sandboxRetainedProcesses.id, process.id),
+              eq(schema.sandboxRetainedProcesses.state, "active"),
+              eq(schema.sandboxRetainedProcesses.reconcileClaimId, input.claimId),
+              isNull(schema.sandboxRetainedProcesses.providerBindingKey),
+              isNull(schema.sandboxRetainedProcesses.providerBinding),
+            ),
+          )
+          .returning();
+        if (!updated) {
+          throw new SandboxWorkspaceMutationFencedError(
+            "process_fenced",
+            "Retained process changed while adopting its provider namespace",
+          );
+        }
+        return mapRetainedProcess(updated);
+      }),
+  );
 }
 
 /** Durably checkpoint exact provider exit/loss proof before canonical
@@ -27297,15 +27886,31 @@ export async function settleRetainedProcess(
             and account_id = ${input.accountId}
             and workspace_id = ${input.workspaceId}
             and sandbox_group_id = ${process.sandboxGroupId}
-            and lease_epoch = ${process.leaseEpoch}
-            and backend = ${process.providerBackend}
-            and instance_id = ${process.providerInstanceId}
           for update
         `);
-        if (!leases[0]) {
+        const lease = leases[0];
+        if (!lease) {
           throw new SandboxWorkspaceMutationFencedError(
             "lease_fenced",
-            "Retained process settlement cannot mutate a successor lease identity",
+            "Retained process settlement lease no longer exists",
+          );
+        }
+        const processOwnsCurrentLease =
+          Number(lease.lease_epoch) === process.leaseEpoch &&
+          lease.backend === process.providerBackend &&
+          lease.instance_id === process.providerInstanceId;
+        // A successor lease may inherit stale process-holder rows from the old
+        // provider identity. Removing those rows is necessary, but only a
+        // reconciliation claim carrying durable provider exit/loss proof may
+        // cross that identity boundary. A late owner callback without such a
+        // proof remains fenced.
+        if (
+          !processOwnsCurrentLease &&
+          (input.reconciliationClaimId === undefined || durableProof === null)
+        ) {
+          throw new SandboxWorkspaceMutationFencedError(
+            "lease_fenced",
+            "Superseded retained process settlement requires durable provider proof",
           );
         }
         await tx
@@ -27368,7 +27973,7 @@ export async function settleRetainedProcess(
             count(*) filter (where kind = 'viewer')::int as viewers
           from sandbox_lease_holders where lease_id = ${process.leaseId}
         `);
-        const enterDraining = (counts?.total ?? 0) === 0;
+        const enterDraining = processOwnsCurrentLease && (counts?.total ?? 0) === 0;
         await tx.execute(sql`
           update sandbox_leases set
             refcount = ${counts?.total ?? 0},
@@ -27378,16 +27983,16 @@ export async function settleRetainedProcess(
               enterDraining
                 ? sql`liveness = case when liveness = 'warm' then 'draining' else liveness end,
                       expires_at = case when liveness = 'warm'
-                        then now() + (${String(input.idleGraceMs)} || ' milliseconds')::interval
+                        then case when rotation_requested_at is not null
+                          then now()
+                          else now() + (${String(input.idleGraceMs)} || ' milliseconds')::interval
+                        end
                         else expires_at end,`
                 : sql``
             }
             updated_at = now()
           where id = ${process.leaseId}
             and sandbox_group_id = ${process.sandboxGroupId}
-            and lease_epoch = ${process.leaseEpoch}
-            and backend = ${process.providerBackend}
-            and instance_id = ${process.providerInstanceId}
         `);
         return { settled: true, process: mapRetainedProcess(updated) };
       }),
@@ -27436,6 +28041,9 @@ export async function readWorkspaceArchiveCapturePreflight(
              and attempt.execution_generation = admission.execution_generation
              and admission.actor_kind = 'turn'
             where admission.lease_id = lease.id
+              and admission.lease_epoch = lease.lease_epoch
+              and admission.provider_backend = lease.backend
+              and admission.provider_instance_id = lease.instance_id
               and admission.workspace_generation <= lease.workspace_generation
               and admission.settled_at is null
               and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
@@ -27454,6 +28062,657 @@ export async function readWorkspaceArchiveCapturePreflight(
   );
 }
 
+export type SandboxCheckpointArtifactState =
+  | "candidate"
+  | "current"
+  | "previous"
+  | "delete_pending"
+  | "deleting"
+  | "delete_failed"
+  | "deleted";
+
+export type SandboxCheckpointArtifactRegistration = {
+  id: string;
+  state: SandboxCheckpointArtifactState;
+  objectId: string;
+};
+
+export class SandboxCheckpointArtifactRegistrationConflictError extends Error {
+  readonly name = "SandboxCheckpointArtifactRegistrationConflictError";
+}
+
+function validatedModalCheckpoint(input: {
+  workspaceArchive: string;
+  workspaceArchiveMeta: SandboxArchiveRevision;
+}): {
+  bytes: Uint8Array;
+  descriptor: SandboxNativeSnapshotRevision;
+  objectKind: "modal_filesystem_snapshot" | "modal_directory_snapshot";
+} {
+  const descriptor = parseArchiveRevision(input.workspaceArchiveMeta);
+  if (
+    descriptor?.version !== 2 ||
+    (descriptor.provider !== "modal_snapshot_filesystem" &&
+      descriptor.provider !== "modal_snapshot_directory")
+  ) {
+    throw new Error("Checkpoint artifact registration requires a verified Modal snapshot");
+  }
+  let bytes: Uint8Array;
+  try {
+    bytes = Uint8Array.from(Buffer.from(input.workspaceArchive, "base64"));
+  } catch {
+    throw new Error("Checkpoint artifact archive is not valid base64");
+  }
+  if (Buffer.from(bytes).toString("base64") !== input.workspaceArchive) {
+    throw new Error("Checkpoint artifact archive is not canonical base64");
+  }
+  const native = decodeNativeSnapshotRef(bytes);
+  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  if (
+    !native ||
+    native.provider !== descriptor.provider ||
+    native.snapshotId !== descriptor.snapshotId ||
+    native.workspacePersistence !== descriptor.workspacePersistence ||
+    descriptor.archiveBytes !== bytes.length ||
+    descriptor.archiveSha256 !== sha256
+  ) {
+    throw new Error("Checkpoint artifact receipt does not match its verified descriptor");
+  }
+  return {
+    bytes,
+    descriptor,
+    objectKind:
+      descriptor.provider === "modal_snapshot_filesystem"
+        ? "modal_filesystem_snapshot"
+        : "modal_directory_snapshot",
+  };
+}
+
+/**
+ * Register the provider object immediately after snapshot creation returns,
+ * before trying to publish it onto a lease. A failed/superseded publication can
+ * therefore durably hand the object to GC instead of leaking it.
+ */
+export async function registerSandboxCheckpointArtifact(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    sourceLeaseId: string;
+    sourceLeaseEpoch: number;
+    sourceInstanceId: string;
+    sourceWorkspaceGeneration: number;
+    providerBindingKey: string;
+    providerBinding: Record<string, unknown>;
+    workspaceArchive: string;
+    workspaceArchiveMeta: SandboxArchiveRevision;
+  },
+): Promise<SandboxCheckpointArtifactRegistration> {
+  const verified = validatedModalCheckpoint(input);
+  const providerIdentity = canonicalModalCheckpointProviderBinding(input.providerBinding);
+  if (!providerIdentity || providerIdentity.key !== input.providerBindingKey) {
+    throw new Error("Modal checkpoint provider binding key is invalid");
+  }
+  // The provider object already exists. Retry this idempotent transaction so
+  // an unknown commit outcome is reconciled by reading the immutable row on the
+  // next attempt. A true identity collision is authoritative and never retried.
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return await withRlsContext(
+        db,
+        { accountId: input.accountId, workspaceId: input.workspaceId },
+        async (scopedDb) => {
+          const inserted = await scopedDb.execute<{
+            id: string;
+            state: SandboxCheckpointArtifactState;
+            object_id: string;
+          }>(sql`
+        insert into sandbox_checkpoint_artifacts (
+          account_id, workspace_id, sandbox_group_id, source_lease_id,
+          source_lease_epoch, source_instance_id, source_workspace_generation,
+          provenance, provider_backend, provider_binding_key, provider_binding,
+          object_kind, object_id, archive_base64, archive_sha256, archive_bytes,
+          descriptor, descriptor_revision
+        ) values (
+          ${input.accountId}, ${input.workspaceId}, ${input.sandboxGroupId},
+          ${input.sourceLeaseId}, ${input.sourceLeaseEpoch}, ${input.sourceInstanceId},
+          ${input.sourceWorkspaceGeneration}, 'native_capture', 'modal', ${providerIdentity.key},
+          ${JSON.stringify(providerIdentity.binding)}::jsonb, ${verified.objectKind},
+          ${verified.descriptor.snapshotId}, ${input.workspaceArchive},
+          ${verified.descriptor.archiveSha256}, ${verified.bytes.length},
+          ${JSON.stringify(verified.descriptor)}::jsonb, ${verified.descriptor.revision}
+        )
+        on conflict (provider_backend, provider_binding_key, object_id)
+          do nothing
+        returning id, state, object_id
+      `);
+          const row =
+            inserted[0] ??
+            (
+              await scopedDb.execute<{
+                id: string;
+                state: SandboxCheckpointArtifactState;
+                object_id: string;
+                account_id: string;
+                workspace_id: string;
+                sandbox_group_id: string;
+                source_lease_id: string;
+                source_lease_epoch: number | string;
+                source_instance_id: string | null;
+                source_workspace_generation: number | string | null;
+                provenance: string;
+                archive_base64: string;
+                archive_sha256: string;
+                descriptor: unknown;
+                descriptor_revision: string;
+                object_kind: string;
+                provider_binding: unknown;
+              }>(sql`
+            select id, state, object_id, account_id, workspace_id,
+              sandbox_group_id, source_lease_id, source_lease_epoch,
+              source_instance_id, source_workspace_generation, provenance,
+              archive_base64, archive_sha256, descriptor, descriptor_revision,
+              object_kind, provider_binding
+            from sandbox_checkpoint_artifacts
+            where provider_backend = 'modal'
+              and provider_binding_key = ${providerIdentity.key}
+              and object_id = ${verified.descriptor.snapshotId}
+            limit 1
+            for update
+          `)
+            )[0];
+          if (
+            !row ||
+            ("account_id" in row &&
+              (row.account_id !== input.accountId ||
+                row.workspace_id !== input.workspaceId ||
+                row.sandbox_group_id !== input.sandboxGroupId ||
+                row.source_lease_id !== input.sourceLeaseId ||
+                Number(row.source_lease_epoch) !== input.sourceLeaseEpoch ||
+                row.source_instance_id !== input.sourceInstanceId ||
+                row.source_workspace_generation === null ||
+                Number(row.source_workspace_generation) !== input.sourceWorkspaceGeneration ||
+                row.provenance !== "native_capture" ||
+                row.archive_base64 !== input.workspaceArchive ||
+                row.archive_sha256 !== verified.descriptor.archiveSha256 ||
+                stableJson(row.descriptor) !== stableJson(verified.descriptor) ||
+                row.descriptor_revision !== verified.descriptor.revision ||
+                row.object_kind !== verified.objectKind ||
+                canonicalModalCheckpointProviderBinding(row.provider_binding)?.key !==
+                  providerIdentity.key))
+          ) {
+            throw new SandboxCheckpointArtifactRegistrationConflictError(
+              "Modal checkpoint object identity collision",
+            );
+          }
+          if (row.state === "deleted") {
+            throw new SandboxCheckpointArtifactRegistrationConflictError(
+              "Modal checkpoint object was already deleted",
+            );
+          }
+          return { id: row.id, state: row.state, objectId: row.object_id };
+        },
+      );
+    } catch (error) {
+      if (error instanceof SandboxCheckpointArtifactRegistrationConflictError) {
+        throw error;
+      }
+      lastError = error;
+    }
+  }
+  throw lastError;
+}
+
+/** Hand an unpublished candidate to asynchronous GC. Referenced artifacts are
+ * protected both here and by the global claim function. */
+export async function markSandboxCheckpointArtifactDeletePending(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    artifactId: string;
+    reason?: string;
+  },
+): Promise<boolean> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb.execute<{ id: string }>(sql`
+        update sandbox_checkpoint_artifacts artifact set
+          state = 'delete_pending',
+          delete_after = now(),
+          last_delete_error = ${input.reason?.slice(0, 4000) ?? null},
+          updated_at = now()
+        where artifact.id = ${input.artifactId}
+          and artifact.state in ('candidate', 'delete_failed')
+          and not exists (
+            select 1 from sandbox_leases lease
+            where lease.current_checkpoint_artifact_id = artifact.id
+               or lease.previous_checkpoint_artifact_id = artifact.id
+          )
+        returning artifact.id
+      `);
+      return rows.length > 0;
+    },
+  );
+}
+
+export type SandboxCheckpointArtifactGcClaim = {
+  id: string;
+  providerBackend: string;
+  providerBindingKey: string;
+  providerBinding: Record<string, unknown>;
+  objectKind: "modal_filesystem_snapshot" | "modal_directory_snapshot";
+  objectId: string;
+  deleteAttempts: number;
+};
+
+export async function claimSandboxCheckpointArtifactsForGc(
+  db: Database,
+  input: { claimId: string; limit: number; claimTtlMs: number },
+): Promise<SandboxCheckpointArtifactGcClaim[]> {
+  const rows = await rawRows<{
+    id: string;
+    provider_backend: string;
+    provider_binding_key: string;
+    provider_binding: Record<string, unknown>;
+    object_kind: "modal_filesystem_snapshot" | "modal_directory_snapshot";
+    object_id: string;
+    delete_attempts: number | string;
+  }>(
+    db,
+    sql`select * from opengeni_private.claim_sandbox_checkpoint_artifacts(
+      ${input.claimId}::uuid, ${input.limit}, ${input.claimTtlMs}
+    )`,
+  );
+  return rows.map((row) => ({
+    id: row.id,
+    providerBackend: row.provider_backend,
+    providerBindingKey: row.provider_binding_key,
+    providerBinding: row.provider_binding,
+    objectKind: row.object_kind,
+    objectId: row.object_id,
+    deleteAttempts: Number(row.delete_attempts),
+  }));
+}
+
+export async function settleSandboxCheckpointArtifactGc(
+  db: Database,
+  input: {
+    artifactId: string;
+    claimId: string;
+    deleted: boolean;
+    error?: string | null;
+    retryAfterMs: number;
+  },
+): Promise<boolean> {
+  const rows = await rawRows<{ settled: boolean }>(
+    db,
+    sql`select opengeni_private.settle_sandbox_checkpoint_artifact(
+      ${input.artifactId}::uuid, ${input.claimId}::uuid, ${input.deleted},
+      ${input.error?.slice(0, 4000) ?? null}, ${input.retryAfterMs}
+    ) as settled`,
+  );
+  return rows[0]?.settled === true;
+}
+
+export async function pruneDeletedSandboxCheckpointArtifacts(
+  db: Database,
+  retentionMs: number,
+  limit: number,
+): Promise<number> {
+  const rows = await rawRows<{ pruned: number | string }>(
+    db,
+    sql`select opengeni_private.prune_deleted_sandbox_checkpoint_artifacts(
+      ${retentionMs}, ${limit}
+    ) as pruned`,
+  );
+  return Number(rows[0]?.pruned ?? 0);
+}
+
+export async function requestDueSandboxRotationsGlobal(
+  db: Database,
+  leadMs: number,
+  limit: number,
+): Promise<number> {
+  const rows = await rawRows<{ requested: number | string }>(
+    db,
+    sql`select opengeni_private.request_due_sandbox_rotations(
+      ${leadMs}, ${limit}
+    ) as requested`,
+  );
+  return Number(rows[0]?.requested ?? 0);
+}
+
+export const SANDBOX_CHECKPOINT_ARTIFACT_STATES = [
+  "candidate",
+  "current",
+  "previous",
+  "delete_pending",
+  "deleting",
+  "delete_failed",
+  "deleted",
+] as const satisfies readonly SandboxCheckpointArtifactState[];
+
+export async function countSandboxCheckpointArtifactsByState(
+  db: Database,
+): Promise<Record<SandboxCheckpointArtifactState, number>> {
+  const counts = Object.fromEntries(
+    SANDBOX_CHECKPOINT_ARTIFACT_STATES.map((state) => [state, 0]),
+  ) as Record<SandboxCheckpointArtifactState, number>;
+  const rows = await rawRows<{ state: string; count: number | string }>(
+    db,
+    sql`select state, count
+        from opengeni_private.sandbox_checkpoint_artifact_inventory()`,
+  );
+  for (const row of rows) {
+    if ((SANDBOX_CHECKPOINT_ARTIFACT_STATES as readonly string[]).includes(row.state)) {
+      counts[row.state as SandboxCheckpointArtifactState] = Number(row.count);
+    }
+  }
+  return counts;
+}
+
+export type SandboxRotationBacklog = {
+  requested: number;
+  overdue: number;
+  turnBlocked: number;
+  directBlocked: number;
+  processBlocked: number;
+};
+
+export async function readSandboxRotationBacklog(db: Database): Promise<SandboxRotationBacklog> {
+  const rows = await rawRows<{
+    requested: number | string;
+    overdue: number | string;
+    turn_blocked: number | string;
+    direct_blocked: number | string;
+    process_blocked: number | string;
+  }>(db, sql`select * from opengeni_private.sandbox_rotation_backlog()`);
+  const row = rows[0];
+  return {
+    requested: Number(row?.requested ?? 0),
+    overdue: Number(row?.overdue ?? 0),
+    turnBlocked: Number(row?.turn_blocked ?? 0),
+    directBlocked: Number(row?.direct_blocked ?? 0),
+    processBlocked: Number(row?.process_blocked ?? 0),
+  };
+}
+
+export type LegacyModalCheckpointSlot = {
+  accountId: string;
+  workspaceId: string;
+  sandboxGroupId: string;
+  leaseId: string;
+  leaseEpoch: number;
+  instanceId: string;
+  workspaceGeneration: number;
+  slot: "current" | "previous";
+  archiveBase64: string;
+  descriptor: SandboxNativeSnapshotRevision;
+};
+
+export async function listLegacyModalCheckpointSlots(
+  db: Database,
+  limit = 100,
+): Promise<LegacyModalCheckpointSlot[]> {
+  const rows = await rawRows<{
+    account_id: string;
+    workspace_id: string;
+    sandbox_group_id: string;
+    lease_id: string;
+    lease_epoch: number | string;
+    instance_id: string;
+    workspace_generation: number | string;
+    slot: "current" | "previous";
+    archive_base64: string;
+    descriptor: unknown;
+  }>(db, sql`select * from opengeni_private.list_legacy_modal_checkpoint_slots(${limit})`);
+  return rows.flatMap((row) => {
+    const descriptor = parseArchiveRevision(row.descriptor);
+    return descriptor?.version === 2
+      ? [
+          {
+            accountId: row.account_id,
+            workspaceId: row.workspace_id,
+            sandboxGroupId: row.sandbox_group_id,
+            leaseId: row.lease_id,
+            leaseEpoch: Number(row.lease_epoch),
+            instanceId: row.instance_id,
+            workspaceGeneration: Number(row.workspace_generation),
+            slot: row.slot,
+            archiveBase64: row.archive_base64,
+            descriptor,
+          },
+        ]
+      : [];
+  });
+}
+
+export type LegacyModalCheckpointAdoptionTarget = Omit<LegacyModalCheckpointSlot, "instanceId"> & {
+  providerBindingKey: string;
+  providerBinding: Record<string, unknown>;
+  /** A cold restore may adopt only while this exact rematerialization still
+   * owns the warming lease. Live-lease migration leaves this unset. */
+  rematerializationId?: string;
+};
+
+/** Atomically register and attach an exact historical Modal archive slot.
+ *
+ * Legacy receipts have no trustworthy capture-instance or capture-generation
+ * metadata, so their immutable row records typed unknown provenance instead of
+ * inventing those values. The lease lock, object insert, slot reference, and
+ * artifact state transition commit together: a fenced adoption can never leave
+ * an unreferenced candidate that GC might delete while the legacy slot still
+ * depends on that provider object. */
+export async function adoptLegacyModalCheckpointArtifact(
+  db: Database,
+  input: LegacyModalCheckpointAdoptionTarget,
+): Promise<boolean> {
+  const verified = validatedModalCheckpoint({
+    workspaceArchive: input.archiveBase64,
+    workspaceArchiveMeta: input.descriptor,
+  });
+  const providerIdentity = canonicalModalCheckpointProviderBinding(input.providerBinding);
+  if (!providerIdentity || providerIdentity.key !== input.providerBindingKey) {
+    throw new Error("Modal checkpoint provider binding key is invalid");
+  }
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const leaseRows = await scopedDb.execute<{
+        id: string;
+        current_checkpoint_artifact_id: string | null;
+        previous_checkpoint_artifact_id: string | null;
+      }>(sql`
+        select lease.id, lease.current_checkpoint_artifact_id,
+          lease.previous_checkpoint_artifact_id
+        from sandbox_leases lease
+        where lease.id = ${input.leaseId}::uuid
+          and lease.account_id = ${input.accountId}::uuid
+          and lease.workspace_id = ${input.workspaceId}::uuid
+          and lease.sandbox_group_id = ${input.sandboxGroupId}::uuid
+          and lease.lease_epoch = ${input.leaseEpoch}
+          and lease.workspace_generation = ${input.workspaceGeneration}
+          and lease.backend = 'modal'
+          and lease.liveness in ('warming', 'warm', 'draining')
+          ${
+            input.rematerializationId
+              ? sql`and lease.liveness = 'warming'
+                    and lease.resume_state #>> '{opengeniRecovery,restore,rematerializationId}' =
+                      ${input.rematerializationId}
+                    and lease.resume_state #>> '{opengeniRecovery,restore,status}' in
+                      ('restoring', 'verifying')`
+              : sql``
+          }
+          and ${
+            input.slot === "current"
+              ? sql`lease.archive_generation = lease.workspace_generation
+                    and lease.resume_state #>> '{sessionState,workspaceArchive}' =
+                      ${input.archiveBase64}
+                    and lease.resume_state #> '{sessionState,workspaceArchiveMeta}' =
+                      ${JSON.stringify(input.descriptor)}::jsonb`
+              : sql`lease.resume_state #>> '{sessionState,workspaceArchivePrev}' =
+                      ${input.archiveBase64}
+                    and lease.resume_state #> '{sessionState,workspaceArchivePrevMeta}' =
+                      ${JSON.stringify(input.descriptor)}::jsonb`
+          }
+        for update
+      `);
+      const lease = leaseRows[0];
+      if (!lease) return false;
+      const existingReference =
+        input.slot === "current"
+          ? lease.current_checkpoint_artifact_id
+          : lease.previous_checkpoint_artifact_id;
+      if (existingReference !== null) {
+        const exact = await scopedDb.execute<{ id: string }>(sql`
+          select artifact.id
+          from sandbox_checkpoint_artifacts artifact
+          where artifact.id = ${existingReference}::uuid
+            and artifact.account_id = ${input.accountId}::uuid
+            and artifact.workspace_id = ${input.workspaceId}::uuid
+            and artifact.sandbox_group_id = ${input.sandboxGroupId}::uuid
+            and artifact.source_lease_id = ${input.leaseId}::uuid
+            and artifact.source_lease_epoch = ${input.leaseEpoch}
+            and artifact.source_instance_id is null
+            and artifact.source_workspace_generation is null
+            and artifact.provenance = 'legacy_provider_adopted'
+            and artifact.provider_backend = 'modal'
+            and artifact.provider_binding_key = ${providerIdentity.key}
+            and artifact.object_kind = ${verified.objectKind}
+            and artifact.object_id = ${verified.descriptor.snapshotId}
+            and artifact.archive_base64 = ${input.archiveBase64}
+            and artifact.archive_sha256 = ${verified.descriptor.archiveSha256}
+            and artifact.descriptor = ${JSON.stringify(verified.descriptor)}::jsonb
+            and artifact.descriptor_revision = ${verified.descriptor.revision}
+            and artifact.state = ${input.slot}
+        `);
+        return exact.length === 1;
+      }
+
+      const inserted = await scopedDb.execute<{
+        id: string;
+        state: SandboxCheckpointArtifactState;
+      }>(sql`
+        insert into sandbox_checkpoint_artifacts (
+          account_id, workspace_id, sandbox_group_id, source_lease_id,
+          source_lease_epoch, source_instance_id, source_workspace_generation,
+          provenance, provider_backend, provider_binding_key, provider_binding,
+          object_kind, object_id, archive_base64, archive_sha256, archive_bytes,
+          descriptor, descriptor_revision
+        ) values (
+          ${input.accountId}, ${input.workspaceId}, ${input.sandboxGroupId},
+          ${input.leaseId}, ${input.leaseEpoch}, null, null,
+          'legacy_provider_adopted', 'modal', ${providerIdentity.key},
+          ${JSON.stringify(providerIdentity.binding)}::jsonb, ${verified.objectKind},
+          ${verified.descriptor.snapshotId}, ${input.archiveBase64},
+          ${verified.descriptor.archiveSha256}, ${verified.bytes.length},
+          ${JSON.stringify(verified.descriptor)}::jsonb, ${verified.descriptor.revision}
+        )
+        on conflict (provider_backend, provider_binding_key, object_id)
+          do nothing
+        returning id, state
+      `);
+
+      const artifact =
+        inserted[0] ??
+        (
+          await scopedDb.execute<{
+            id: string;
+            state: SandboxCheckpointArtifactState;
+            account_id: string;
+            workspace_id: string;
+            sandbox_group_id: string;
+            source_lease_id: string;
+            source_lease_epoch: number | string;
+            source_instance_id: string | null;
+            source_workspace_generation: number | string | null;
+            provenance: string;
+            archive_base64: string;
+            archive_sha256: string;
+            descriptor: unknown;
+            descriptor_revision: string;
+            object_kind: string;
+          }>(sql`
+            select id, state, account_id, workspace_id, sandbox_group_id,
+              source_lease_id, source_lease_epoch, source_instance_id,
+              source_workspace_generation, provenance, archive_base64,
+              archive_sha256, descriptor, descriptor_revision, object_kind
+            from sandbox_checkpoint_artifacts
+            where provider_backend = 'modal'
+              and provider_binding_key = ${providerIdentity.key}
+              and object_id = ${verified.descriptor.snapshotId}
+            limit 1
+            for update
+          `)
+        )[0];
+      const exactExisting =
+        artifact !== undefined &&
+        (!("account_id" in artifact) ||
+          (artifact.account_id === input.accountId &&
+            artifact.workspace_id === input.workspaceId &&
+            artifact.sandbox_group_id === input.sandboxGroupId &&
+            artifact.source_lease_id === input.leaseId &&
+            Number(artifact.source_lease_epoch) === input.leaseEpoch &&
+            artifact.source_instance_id === null &&
+            artifact.source_workspace_generation === null &&
+            artifact.provenance === "legacy_provider_adopted" &&
+            artifact.archive_base64 === input.archiveBase64 &&
+            artifact.archive_sha256 === verified.descriptor.archiveSha256 &&
+            stableJson(artifact.descriptor) === stableJson(verified.descriptor) &&
+            artifact.descriptor_revision === verified.descriptor.revision &&
+            artifact.object_kind === verified.objectKind));
+      if (!artifact || !exactExisting || artifact.state === "deleted") {
+        throw new SandboxCheckpointArtifactRegistrationConflictError(
+          "Modal checkpoint object identity collision",
+        );
+      }
+
+      if (artifact.state !== "candidate") {
+        throw new SandboxCheckpointArtifactRegistrationConflictError(
+          "Legacy Modal checkpoint is already owned by another archive slot",
+        );
+      }
+
+      const published = await scopedDb.execute<{ id: string }>(sql`
+        update sandbox_checkpoint_artifacts set
+          state = ${input.slot}, published_at = coalesce(published_at, now()),
+          delete_after = null, last_delete_error = null, updated_at = now()
+        where id = ${artifact.id}::uuid and state = 'candidate'
+        returning id
+      `);
+      if (published.length !== 1) {
+        throw new Error("Legacy Modal checkpoint adoption lost its locked provider object");
+      }
+      const attached = await scopedDb.execute<{ id: string }>(sql`
+        update sandbox_leases lease set
+          ${
+            input.slot === "current"
+              ? sql`current_checkpoint_artifact_id = ${artifact.id}::uuid`
+              : sql`previous_checkpoint_artifact_id = ${artifact.id}::uuid`
+          },
+          updated_at = now()
+        where lease.id = ${input.leaseId}::uuid
+          and ${
+            input.slot === "current"
+              ? sql`lease.current_checkpoint_artifact_id is null`
+              : sql`lease.previous_checkpoint_artifact_id is null`
+          }
+        returning lease.id
+      `);
+      if (attached.length !== 1) {
+        throw new Error("Legacy Modal checkpoint adoption lost its locked archive slot");
+      }
+      return true;
+    },
+  );
+}
+
 export async function persistDrainSnapshot(
   db: Database,
   input: {
@@ -27463,25 +28722,38 @@ export async function persistDrainSnapshot(
     expectedEpoch: number;
     expectedInstanceId: string;
     expectedWorkspaceGeneration: number;
-    /** base64 of the provider snapshot-ref / tar archive from persistWorkspace().
-     *  Pass null only to CAS-check without writing; this does not certify that
-     *  provider termination is lossless. */
-    workspaceArchive: string | null;
-    /** Exact verified archive/tree descriptor produced by the runtime capture.
-     *  Omission is accepted only for legacy callers and remains unverified. */
-    workspaceArchiveMeta?: SandboxArchiveRevision;
-  },
+  } & (
+    | {
+        /** Null performs only the epoch/instance/generation CAS check. */
+        workspaceArchive: null;
+        workspaceArchiveMeta?: never;
+        checkpointArtifactId?: never;
+      }
+    | {
+        /** Base64 provider receipt or tar archive from the verified runtime capture. */
+        workspaceArchive: string;
+        /** Exact descriptor is mandatory for every new publication. */
+        workspaceArchiveMeta: SandboxArchiveRevision;
+        /** Required for Modal-native descriptors; absent for actual tar archives. */
+        checkpointArtifactId?: string | null;
+      }
+  ),
 ): Promise<{
   wrote: boolean;
-  priorArchiveForGc: string | null;
   archiveRevision: string | null;
 }> {
   const workspaceArchiveMeta =
-    input.workspaceArchiveMeta === undefined
-      ? null
-      : parseArchiveRevision(input.workspaceArchiveMeta);
-  if (input.workspaceArchiveMeta !== undefined && !workspaceArchiveMeta) {
+    input.workspaceArchive === null ? null : parseArchiveRevision(input.workspaceArchiveMeta);
+  if (input.workspaceArchive !== null && !workspaceArchiveMeta) {
     throw new Error("Invalid verified workspace archive descriptor");
+  }
+  if (
+    workspaceArchiveMeta?.version === 2 &&
+    (workspaceArchiveMeta.provider === "modal_snapshot_filesystem" ||
+      workspaceArchiveMeta.provider === "modal_snapshot_directory") &&
+    !input.checkpointArtifactId
+  ) {
+    throw new Error("Modal native checkpoint publication requires a registered artifact");
   }
   // withRlsContext already runs `fn` inside ONE transaction with the RLS GUCs set,
   // so the SELECT...FOR UPDATE + UPDATE below are atomic (one snapshot, one lock)
@@ -27497,12 +28769,16 @@ export async function persistDrainSnapshot(
       const guard = await scopedDb.execute<{
         prior_archive: string | null;
         prior_archive_prev: string | null;
+        current_checkpoint_artifact_id: string | null;
+        previous_checkpoint_artifact_id: string | null;
         resume_state: Record<string, unknown> | null;
         workspace_generation: number | string;
       }>(sql`
         select
           resume_state #>> '{sessionState,workspaceArchive}' as prior_archive,
           resume_state #>> '{sessionState,workspaceArchivePrev}' as prior_archive_prev,
+          current_checkpoint_artifact_id,
+          previous_checkpoint_artifact_id,
           resume_state,
           workspace_generation
         from sandbox_leases as lease
@@ -27525,6 +28801,9 @@ export async function persistDrainSnapshot(
              and attempt.execution_generation = admission.execution_generation
              and admission.actor_kind = 'turn'
             where admission.lease_id = lease.id
+              and admission.lease_epoch = lease.lease_epoch
+              and admission.provider_backend = lease.backend
+              and admission.provider_instance_id = lease.instance_id
               and admission.workspace_generation <= ${input.expectedWorkspaceGeneration}
               and admission.settled_at is null
               and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
@@ -27534,7 +28813,6 @@ export async function persistDrainSnapshot(
       if (guard.length === 0) {
         return {
           wrote: false,
-          priorArchiveForGc: null,
           archiveRevision: null,
         };
       }
@@ -27545,7 +28823,6 @@ export async function persistDrainSnapshot(
       if (input.workspaceArchive === null) {
         return {
           wrote: true,
-          priorArchiveForGc: null,
           archiveRevision: null,
         };
       }
@@ -27554,6 +28831,12 @@ export async function persistDrainSnapshot(
         priorCurrentArchive: priorArchive,
         priorPreviousArchive: priorArchivePrev,
       });
+      const previousCheckpointArtifactId =
+        rotation.previousArchive === priorArchive
+          ? guard[0]!.current_checkpoint_artifact_id
+          : rotation.previousArchive === priorArchivePrev
+            ? guard[0]!.previous_checkpoint_artifact_id
+            : null;
       const folded = await foldWorkspaceArchiveOntoLease(scopedDb, {
         workspaceId: input.workspaceId,
         sandboxGroupId: input.sandboxGroupId,
@@ -27566,17 +28849,19 @@ export async function persistDrainSnapshot(
         livenessGuard: "draining",
         previousArchive: rotation.previousArchive,
         previousArchiveMeta: rotation.previousArchiveMeta,
+        checkpointArtifactId: input.checkpointArtifactId ?? null,
+        previousCheckpointArtifactId,
+        priorCurrentCheckpointArtifactId: guard[0]!.current_checkpoint_artifact_id,
+        priorPreviousCheckpointArtifactId: guard[0]!.previous_checkpoint_artifact_id,
       });
       if (!folded) {
         return {
           wrote: false,
-          priorArchiveForGc: null,
           archiveRevision: null,
         };
       }
       return {
         wrote: true,
-        priorArchiveForGc: rotation.priorArchiveForGc,
         archiveRevision: workspaceArchiveMeta?.revision ?? null,
       };
     },
@@ -27608,7 +28893,6 @@ export function rotateWorkspaceArchives(input: {
 }): {
   previousArchive: string | null;
   previousArchiveMeta: SandboxArchiveRevision | null;
-  priorArchiveForGc: string | null;
 } {
   const sessionState =
     input.resumeState?.sessionState && typeof input.resumeState.sessionState === "object"
@@ -27634,12 +28918,10 @@ export function rotateWorkspaceArchives(input: {
     ? {
         previousArchive: input.priorPreviousArchive,
         previousArchiveMeta: previousMeta,
-        priorArchiveForGc: input.priorCurrentArchive,
       }
     : {
         previousArchive: input.priorCurrentArchive,
         previousArchiveMeta: parseArchiveRevision(sessionState.workspaceArchiveMeta),
-        priorArchiveForGc: input.priorPreviousArchive,
       };
 }
 
@@ -27657,6 +28939,10 @@ async function foldWorkspaceArchiveOntoLease(
     livenessGuard: "draining" | "warm";
     previousArchive: string | null;
     previousArchiveMeta: SandboxArchiveRevision | null;
+    checkpointArtifactId: string | null;
+    previousCheckpointArtifactId: string | null;
+    priorCurrentCheckpointArtifactId: string | null;
+    priorPreviousCheckpointArtifactId: string | null;
     /** The wall-clock (ISO) this archive's capture STARTED. Stamped as
      *  workspaceArchiveAt so warm-snapshot ordering is by capture-initiation, not
      *  land time — a late, older capture is superseded (persistWarmSnapshot's
@@ -27709,6 +28995,8 @@ async function foldWorkspaceArchiveOntoLease(
     update sandbox_leases as lease set
       resume_state = ${foldedJson}::jsonb,
       archive_generation = ${input.expectedWorkspaceGeneration},
+      current_checkpoint_artifact_id = ${input.checkpointArtifactId}::uuid,
+      previous_checkpoint_artifact_id = ${input.previousCheckpointArtifactId}::uuid,
       updated_at = now()
     where lease.workspace_id = ${input.workspaceId}
       and lease.sandbox_group_id = ${input.sandboxGroupId}
@@ -27716,6 +29004,26 @@ async function foldWorkspaceArchiveOntoLease(
       and lease.lease_epoch = ${input.expectedEpoch}
       and lease.instance_id = ${input.expectedInstanceId}
       and lease.workspace_generation = ${input.expectedWorkspaceGeneration}
+      and (
+        ${input.checkpointArtifactId}::uuid is null
+        or exists (
+          select 1
+          from sandbox_checkpoint_artifacts artifact
+          where artifact.id = ${input.checkpointArtifactId}::uuid
+            and artifact.account_id = lease.account_id
+            and artifact.workspace_id = lease.workspace_id
+            and artifact.sandbox_group_id = lease.sandbox_group_id
+            and artifact.source_lease_id = lease.id
+            and artifact.source_lease_epoch = lease.lease_epoch
+            and artifact.source_instance_id = lease.instance_id
+            and artifact.source_workspace_generation = lease.workspace_generation
+            and artifact.provenance = 'native_capture'
+            and artifact.archive_base64 = ${input.workspaceArchive}
+            and artifact.descriptor_revision =
+              coalesce(${input.workspaceArchiveMeta?.revision ?? null}, '')
+            and artifact.state = 'candidate'
+        )
+      )
       and not exists (
         select 1
         from sandbox_workspace_mutation_admissions as admission
@@ -27728,13 +29036,56 @@ async function foldWorkspaceArchiveOntoLease(
          and attempt.execution_generation = admission.execution_generation
          and admission.actor_kind = 'turn'
         where admission.lease_id = lease.id
+          and admission.lease_epoch = lease.lease_epoch
+          and admission.provider_backend = lease.backend
+          and admission.provider_instance_id = lease.instance_id
           and admission.workspace_generation <= ${input.expectedWorkspaceGeneration}
           and admission.settled_at is null
           and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
       )
     returning lease.id
   `);
-  return rows.length > 0;
+  if (rows.length === 0) return false;
+
+  if (input.checkpointArtifactId) {
+    await scopedDb.execute(sql`
+      update sandbox_checkpoint_artifacts set
+        state = 'current', published_at = coalesce(published_at, now()),
+        delete_after = null, last_delete_error = null, updated_at = now()
+      where id = ${input.checkpointArtifactId}::uuid and state = 'candidate'
+    `);
+  }
+  if (
+    input.previousCheckpointArtifactId &&
+    input.previousCheckpointArtifactId !== input.checkpointArtifactId
+  ) {
+    await scopedDb.execute(sql`
+      update sandbox_checkpoint_artifacts set
+        state = 'previous', delete_after = null, last_delete_error = null,
+        updated_at = now()
+      where id = ${input.previousCheckpointArtifactId}::uuid
+        and state in ('current', 'previous')
+    `);
+  }
+  const evictedArtifactIds = [
+    input.priorCurrentCheckpointArtifactId,
+    input.priorPreviousCheckpointArtifactId,
+  ].filter(
+    (id): id is string =>
+      id !== null && id !== input.checkpointArtifactId && id !== input.previousCheckpointArtifactId,
+  );
+  if (evictedArtifactIds.length > 0) {
+    await scopedDb.execute(sql`
+      update sandbox_checkpoint_artifacts set
+        state = 'delete_pending', delete_after = now(), updated_at = now()
+      where id in (${sql.join(
+        evictedArtifactIds.map((id) => sql`${id}::uuid`),
+        sql`, `,
+      )})
+        and state in ('current', 'previous', 'candidate', 'delete_failed')
+    `);
+  }
+  return true;
 }
 
 /**
@@ -27762,9 +29113,9 @@ export async function persistWarmSnapshot(
     expectedWorkspaceGeneration: number;
     /** base64 of the provider snapshot-ref / tar archive from persistWorkspace(). */
     workspaceArchive: string;
-    /** Exact verified archive/tree descriptor produced by the runtime capture.
-     *  Omission is accepted only for legacy callers and remains unverified. */
-    workspaceArchiveMeta?: SandboxArchiveRevision;
+    /** Exact verified archive/tree descriptor produced by the runtime capture. */
+    workspaceArchiveMeta: SandboxArchiveRevision;
+    checkpointArtifactId?: string | null;
     /** Snapshots newer than this many ms are kept (throttle); 0 = always write. */
     minIntervalMs: number;
     /** Wall-clock (ms) this capture STARTED. Ordering is by capture-initiation,
@@ -27778,16 +29129,20 @@ export async function persistWarmSnapshot(
   wrote: boolean;
   throttled: boolean;
   superseded: boolean;
-  priorArchiveForGc: string | null;
   archiveRevision: string | null;
 }> {
   const capturedAtMs = input.capturedAtMs ?? Date.now();
-  const workspaceArchiveMeta =
-    input.workspaceArchiveMeta === undefined
-      ? null
-      : parseArchiveRevision(input.workspaceArchiveMeta);
-  if (input.workspaceArchiveMeta !== undefined && !workspaceArchiveMeta) {
+  const workspaceArchiveMeta = parseArchiveRevision(input.workspaceArchiveMeta);
+  if (!workspaceArchiveMeta) {
     throw new Error("Invalid verified workspace archive descriptor");
+  }
+  if (
+    workspaceArchiveMeta?.version === 2 &&
+    (workspaceArchiveMeta.provider === "modal_snapshot_filesystem" ||
+      workspaceArchiveMeta.provider === "modal_snapshot_directory") &&
+    !input.checkpointArtifactId
+  ) {
+    throw new Error("Modal native checkpoint publication requires a registered artifact");
   }
   return await withRlsContext(
     db,
@@ -27854,7 +29209,6 @@ export async function persistWarmSnapshot(
           wrote: false,
           throttled: false,
           superseded: true,
-          priorArchiveForGc: null,
           archiveRevision: null,
         };
       }
@@ -27862,6 +29216,8 @@ export async function persistWarmSnapshot(
         prior_archive: string | null;
         prior_archive_prev: string | null;
         prior_archive_at: string | null;
+        current_checkpoint_artifact_id: string | null;
+        previous_checkpoint_artifact_id: string | null;
         archive_generation: number | string | null;
         resume_state: Record<string, unknown> | null;
       }>(sql`
@@ -27869,6 +29225,8 @@ export async function persistWarmSnapshot(
           resume_state #>> '{sessionState,workspaceArchive}' as prior_archive,
           resume_state #>> '{sessionState,workspaceArchivePrev}' as prior_archive_prev,
           resume_state #>> '{sessionState,workspaceArchiveAt}' as prior_archive_at,
+          current_checkpoint_artifact_id,
+          previous_checkpoint_artifact_id,
           archive_generation,
           resume_state
         from sandbox_leases as lease
@@ -27890,6 +29248,9 @@ export async function persistWarmSnapshot(
              and attempt.execution_generation = admission.execution_generation
              and admission.actor_kind = 'turn'
             where admission.lease_id = lease.id
+              and admission.lease_epoch = lease.lease_epoch
+              and admission.provider_backend = lease.backend
+              and admission.provider_instance_id = lease.instance_id
               and admission.workspace_generation <= ${input.expectedWorkspaceGeneration}
               and admission.settled_at is null
               and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
@@ -27901,7 +29262,6 @@ export async function persistWarmSnapshot(
           wrote: false,
           throttled: false,
           superseded: false,
-          priorArchiveForGc: null,
           archiveRevision: null,
         };
       }
@@ -27922,7 +29282,6 @@ export async function persistWarmSnapshot(
           wrote: false,
           throttled: false,
           superseded: true,
-          priorArchiveForGc: null,
           archiveRevision: null,
         };
       }
@@ -27936,7 +29295,6 @@ export async function persistWarmSnapshot(
           wrote: false,
           throttled: true,
           superseded: false,
-          priorArchiveForGc: null,
           archiveRevision: null,
         };
       }
@@ -27945,6 +29303,12 @@ export async function persistWarmSnapshot(
         priorCurrentArchive: priorArchive,
         priorPreviousArchive: priorArchivePrev,
       });
+      const previousCheckpointArtifactId =
+        rotation.previousArchive === priorArchive
+          ? guard[0]!.current_checkpoint_artifact_id
+          : rotation.previousArchive === priorArchivePrev
+            ? guard[0]!.previous_checkpoint_artifact_id
+            : null;
       const folded = await foldWorkspaceArchiveOntoLease(scopedDb, {
         workspaceId: input.workspaceId,
         sandboxGroupId: input.sandboxGroupId,
@@ -27957,14 +29321,17 @@ export async function persistWarmSnapshot(
         livenessGuard: "warm",
         previousArchive: rotation.previousArchive,
         previousArchiveMeta: rotation.previousArchiveMeta,
-        archiveAtIso: workspaceArchiveMeta?.capturedAt ?? new Date(capturedAtMs).toISOString(),
+        checkpointArtifactId: input.checkpointArtifactId ?? null,
+        previousCheckpointArtifactId,
+        priorCurrentCheckpointArtifactId: guard[0]!.current_checkpoint_artifact_id,
+        priorPreviousCheckpointArtifactId: guard[0]!.previous_checkpoint_artifact_id,
+        archiveAtIso: workspaceArchiveMeta.capturedAt,
       });
       if (!folded) {
         return {
           wrote: false,
           throttled: false,
           superseded: false,
-          priorArchiveForGc: null,
           archiveRevision: null,
         };
       }
@@ -27972,8 +29339,7 @@ export async function persistWarmSnapshot(
         wrote: true,
         throttled: false,
         superseded: false,
-        priorArchiveForGc: rotation.priorArchiveForGc,
-        archiveRevision: workspaceArchiveMeta?.revision ?? null,
+        archiveRevision: workspaceArchiveMeta.revision,
       };
     },
   );
@@ -30864,13 +32230,29 @@ export async function getSessionGoalWithContinuation(
       if (goal.status !== "active") {
         continuation = { state: "inactive", reason: "goal_inactive", ...base };
       } else if (effectiveControl.state !== "active") {
-        continuation = { state: "blocked", reason: "workstream_paused", ...base };
+        continuation = {
+          state: "blocked",
+          reason: "workstream_paused",
+          ...base,
+        };
       } else if (session.status === "cancelled") {
-        continuation = { state: "blocked", reason: "session_cancelled", ...base };
+        continuation = {
+          state: "blocked",
+          reason: "session_cancelled",
+          ...base,
+        };
       } else if (capacityWait || turn?.status === "waiting_capacity") {
-        continuation = { state: "blocked", reason: "provider_backpressure", ...base };
+        continuation = {
+          state: "blocked",
+          reason: "provider_backpressure",
+          ...base,
+        };
       } else if (turn?.status === "requires_action") {
-        continuation = { state: "blocked", reason: "approval_required", ...base };
+        continuation = {
+          state: "blocked",
+          reason: "approval_required",
+          ...base,
+        };
       } else if (turn && ["user", "api"].includes(turn.source)) {
         // Human/API work is authoritative, but it is not an autonomous goal
         // continuation. A live human turn blocks continuation; queued or
@@ -30892,13 +32274,25 @@ export async function getSessionGoalWithContinuation(
           ...base,
         };
       } else if (continuationUpdate) {
-        continuation = { state: "scheduled", reason: "continuation_pending", ...base };
+        continuation = {
+          state: "scheduled",
+          reason: "continuation_pending",
+          ...base,
+        };
       } else if (goal.continuationWakeRevision > goal.continuationObservedRevision) {
         continuation = { state: "scheduled", reason: "wake_pending", ...base };
       } else if (session.status === "queued") {
-        continuation = { state: "scheduled", reason: "system_work_pending", ...base };
+        continuation = {
+          state: "scheduled",
+          reason: "system_work_pending",
+          ...base,
+        };
       } else {
-        continuation = { state: "invariant_broken", reason: "missing_obligation", ...base };
+        continuation = {
+          state: "invariant_broken",
+          reason: "missing_obligation",
+          ...base,
+        };
       }
       return { ...mapSessionGoal(goal), continuation };
     },
@@ -32182,7 +33576,9 @@ export async function materializeGoalContinuation(
               updatedAt: new Date(),
             })
             .where(eq(schema.sessionGoals.id, goalRead.id))
-            .returning({ revision: schema.sessionGoals.continuationWakeRevision });
+            .returning({
+              revision: schema.sessionGoals.continuationWakeRevision,
+            });
           if (!repaired) throw new Error(`Session goal not found: ${input.sessionId}`);
           goalWakeRevision = repaired.revision;
         }
@@ -32222,7 +33618,10 @@ export async function materializeGoalContinuation(
           if (!event) throw new Error("Failed to append goal.paused event");
           await tx
             .update(schema.sessionGoals)
-            .set({ continuationObservedRevision: goalWakeRevision, updatedAt: now })
+            .set({
+              continuationObservedRevision: goalWakeRevision,
+              updatedAt: now,
+            })
             .where(eq(schema.sessionGoals.id, decision.goal.id));
           await tx
             .update(schema.sessions)
@@ -32324,7 +33723,10 @@ export async function materializeGoalContinuation(
         }
         await tx
           .update(schema.sessionGoals)
-          .set({ continuationObservedRevision: goalWakeRevision, updatedAt: now })
+          .set({
+            continuationObservedRevision: goalWakeRevision,
+            updatedAt: now,
+          })
           .where(eq(schema.sessionGoals.id, decision.goal.id));
         const wake = await registerInternalUpdateWakeInTransaction(tx, {
           accountId: session.accountId,
@@ -33323,7 +34725,10 @@ export async function claimSessionWorkForAttempt(
             parsedDispatch.attempt?.id === input.dispatchId
           ) {
             await registerAttempt(activeTurn);
-            return { action: "claimed", turn: mapSessionTurnForExecution(activeTurn) };
+            return {
+              action: "claimed",
+              turn: mapSessionTurnForExecution(activeTurn),
+            };
           }
           if (activeTurn?.status === "requires_action") {
             if (input.trigger.kind !== "approval") {
@@ -33371,7 +34776,10 @@ export async function claimSessionWorkForAttempt(
               .set({ status: "running", updatedAt: now })
               .where(eq(schema.sessions.id, sessionId));
             await registerAttempt(resumed);
-            return { action: "claimed", turn: mapSessionTurnForExecution(resumed) };
+            return {
+              action: "claimed",
+              turn: mapSessionTurnForExecution(resumed),
+            };
           }
           if (activeTurn?.status === "recovering" || activeTurn?.status === "waiting_capacity") {
             if (input.trigger.kind !== "next") {
@@ -33425,7 +34833,10 @@ export async function claimSessionWorkForAttempt(
               })
               .where(eq(schema.sessions.id, sessionId));
             await registerAttempt(resumed);
-            return { action: "claimed", turn: mapSessionTurnForExecution(resumed) };
+            return {
+              action: "claimed",
+              turn: mapSessionTurnForExecution(resumed),
+            };
           }
           if (activeTurn?.status === "running") {
             return { action: "unclaimed", reason: "no-work" };
@@ -33676,7 +35087,10 @@ export async function claimSessionWorkForAttempt(
                   eq(schema.sessions.id, sessionId),
                 ),
               );
-            return { action: "claimed", turn: mapSessionTurnForExecution(compactionTurn) };
+            return {
+              action: "claimed",
+              turn: mapSessionTurnForExecution(compactionTurn),
+            };
           }
 
           if (
@@ -33963,7 +35377,10 @@ export async function claimSessionWorkForAttempt(
             .where(
               and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
             );
-          return { action: "claimed", turn: mapSessionTurnForExecution(internalTurn) };
+          return {
+            action: "claimed",
+            turn: mapSessionTurnForExecution(internalTurn),
+          };
         }
         const predecessorAttemptId = queuedSteerReplacementAttemptId(queuedTurn.metadata);
         if (predecessorAttemptId) {
@@ -37751,7 +39168,10 @@ export async function markSessionWorkflowWakeDelivered(
             )
             .limit(1);
           if (pendingAgentSteer) {
-            return { action: "pending_admission", blocker: "pending_agent_steer" } as const;
+            return {
+              action: "pending_admission",
+              blocker: "pending_agent_steer",
+            } as const;
           }
           const [pendingQuiescence] = await tx
             .select({ id: schema.sessionTurnAttempts.id })
@@ -37780,7 +39200,10 @@ export async function markSessionWorkflowWakeDelivered(
             )
             .limit(1);
           if (pendingQuiescence) {
-            return { action: "pending_admission", blocker: "pending_quiescence" } as const;
+            return {
+              action: "pending_admission",
+              blocker: "pending_quiescence",
+            } as const;
           }
         }
         const [row] = await tx
