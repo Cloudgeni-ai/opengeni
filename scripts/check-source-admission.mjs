@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 
 export const CONTRACT = Object.freeze({
-  action: "verify_current_base_head",
+  action: "verify_immutable_pr_head",
   apiUrl: "https://api.github.com",
   serverUrl: "https://github.com",
   repository: "Cloudgeni-ai/opengeni",
@@ -349,8 +349,9 @@ function assertFileProjection(files, manifest, expectedCount) {
   );
 }
 
-function assertComparison(value, baseSha, headSha) {
-  invariant(value?.base_commit?.sha === baseSha, "comparison base differs from current main");
+function assertComparison(value, eventBaseSha, headSha) {
+  invariant(value?.base_commit?.sha === eventBaseSha, "comparison base differs from event base");
+  const mergeBaseSha = assertSha(value?.merge_base_commit?.sha, "comparison merge-base SHA");
   invariant(
     Array.isArray(value?.commits) && value.commits.length > 0,
     "comparison commits are missing",
@@ -359,6 +360,24 @@ function assertComparison(value, baseSha, headSha) {
   invariant(
     Number.isSafeInteger(value?.ahead_by) && value.ahead_by > 0,
     "candidate head has no admitted commits",
+  );
+  return mergeBaseSha;
+}
+
+async function assertWorkflowRetainedByCurrentMain(api, workflowSha, currentMainSha) {
+  if (currentMainSha === workflowSha) return;
+  const value = await api(
+    `/repos/${CONTRACT.repository}/compare/${workflowSha}...${currentMainSha}`,
+  );
+  invariant(
+    value?.status === "ahead" &&
+      value?.base_commit?.sha === workflowSha &&
+      value?.merge_base_commit?.sha === workflowSha &&
+      Number.isSafeInteger(value?.ahead_by) &&
+      value.ahead_by > 0 &&
+      value?.behind_by === 0 &&
+      value?.total_commits === value.ahead_by,
+    "current main no longer retains the base-owned workflow SHA",
   );
 }
 
@@ -369,59 +388,58 @@ export async function verifySourceAdmission(options = {}) {
   const api = apiClient(options.fetchImpl ?? globalThis.fetch, context.token);
   const expectedRef = `refs/heads/${CONTRACT.defaultBranch}`;
 
-  const [repository, initialMainRef, initialPull] = await Promise.all([
+  const [repository, initialPull] = await Promise.all([
     api(`/repos/${CONTRACT.repository}`),
-    api(`/repos/${CONTRACT.repository}/git/ref/heads/${CONTRACT.defaultBranch}`),
     api(`/repos/${CONTRACT.repository}/pulls/${context.number}`),
   ]);
   assertRepository(repository);
-  const baseSha = assertRef(initialMainRef, expectedRef, "default branch");
-  invariant(
-    baseSha === context.workflowSha,
-    "current main differs from the base-owned workflow SHA",
-  );
-  invariant(context.eventBaseSha === baseSha, "event base SHA differs from current main");
   const headRef = assertString(context.event.pull_request.head.ref, "event head ref");
   assertPullRequest(initialPull, {
     number: context.number,
-    baseSha,
+    baseSha: context.eventBaseSha,
     headRef,
     headRepository: context.headRepository,
     headSha: context.eventHeadSha,
   });
 
-  const [baseCommit, headCommit, comparison, files] = await Promise.all([
-    api(`/repos/${CONTRACT.repository}/git/commits/${baseSha}`),
+  const [eventBaseCommit, headCommit, comparison, files] = await Promise.all([
+    api(`/repos/${CONTRACT.repository}/git/commits/${context.eventBaseSha}`),
     api(`/repos/${CONTRACT.repository}/git/commits/${context.eventHeadSha}`),
-    api(`/repos/${CONTRACT.repository}/compare/${baseSha}...${context.eventHeadSha}`),
+    api(`/repos/${CONTRACT.repository}/compare/${context.eventBaseSha}...${context.eventHeadSha}`),
     listPullRequestFiles(api, context.number),
   ]);
-  const baseTreeSha = assertCommit(baseCommit, baseSha, "current main commit");
+  const eventBaseTreeSha = assertCommit(eventBaseCommit, context.eventBaseSha, "event base commit");
   const headTreeSha = assertCommit(headCommit, context.eventHeadSha, "candidate head commit");
-  assertComparison(comparison, baseSha, context.eventHeadSha);
+  const patchBaseSha = assertComparison(comparison, context.eventBaseSha, context.eventHeadSha);
+  const baseTreeSha =
+    patchBaseSha === context.eventBaseSha
+      ? eventBaseTreeSha
+      : assertCommit(
+          await api(`/repos/${CONTRACT.repository}/git/commits/${patchBaseSha}`),
+          patchBaseSha,
+          "pull-request merge-base commit",
+        );
 
   const [baseTree, headTree] = await Promise.all([
     api(`/repos/${CONTRACT.repository}/git/trees/${baseTreeSha}?recursive=1`),
     api(`/repos/${CONTRACT.repository}/git/trees/${headTreeSha}?recursive=1`),
   ]);
   const manifest = directTreeManifest(
-    canonicalLeafMap(baseTree, baseTreeSha, "current main tree"),
+    canonicalLeafMap(baseTree, baseTreeSha, "pull-request merge-base tree"),
     canonicalLeafMap(headTree, headTreeSha, "candidate head tree"),
   );
-  invariant(manifest.length > 0, "candidate tree does not differ from current main");
+  invariant(manifest.length > 0, "candidate tree does not differ from its merge base");
   assertFileProjection(files, manifest, initialPull.changed_files);
 
   const [terminalMainRef, terminalPull] = await Promise.all([
     api(`/repos/${CONTRACT.repository}/git/ref/heads/${CONTRACT.defaultBranch}`),
     api(`/repos/${CONTRACT.repository}/pulls/${context.number}`),
   ]);
-  invariant(
-    assertRef(terminalMainRef, expectedRef, "terminal default branch") === baseSha,
-    "default branch drifted during admission",
-  );
+  const currentMainSha = assertRef(terminalMainRef, expectedRef, "terminal default branch");
+  await assertWorkflowRetainedByCurrentMain(api, context.workflowSha, currentMainSha);
   assertPullRequest(terminalPull, {
     number: context.number,
-    baseSha,
+    baseSha: context.eventBaseSha,
     headRef,
     headRepository: context.headRepository,
     headSha: context.eventHeadSha,
@@ -434,14 +452,19 @@ export async function verifySourceAdmission(options = {}) {
   const manifestText = `${manifest.map(({ line }) => line).join("\n")}\n`;
   const manifestSha256 = createHash("sha256").update(manifestText).digest("hex");
   logger.log(
-    `Source admission verified ${context.eventHeadSha} on current main ${baseSha}: ` +
+    `Source admission verified ${context.eventHeadSha} from event base ${context.eventBaseSha} ` +
+      `at patch merge base ${patchBaseSha}; base-owned workflow ${context.workflowSha} ` +
+      `remains retained by current main ${currentMainSha}: ` +
       `${manifest.length} direct tree paths, manifest sha256 ${manifestSha256}.`,
   );
   return {
-    baseSha,
+    baseSha: context.eventBaseSha,
     headSha: context.eventHeadSha,
     baseTreeSha,
     headTreeSha,
+    workflowSha: context.workflowSha,
+    currentMainSha,
+    patchBaseSha,
     manifest,
     manifestSha256,
   };

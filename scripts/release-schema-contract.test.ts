@@ -150,12 +150,13 @@ describe("release schema contract", () => {
         (migrations.has("0133_session_skills.sql") ? 1 : 0) +
         (migrations.has("0134_session_first_party_mcp_tools.sql") ? 1 : 0) +
         (migrations.has("0135_durable_machine_input_batches.sql") ? 1 : 0) +
-        (migrations.has("0136_unified_session_tool_policy.sql") ? 1 : 0),
+        (migrations.has("0136_unified_session_tool_policy.sql") ? 1 : 0) +
+        (migrations.has("0137_hierarchical_role_aware_memory.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "a422f332b21e3478afb9d4ff7c78cfcff6c1b9a0d08b407bd7ca584a9e329824",
+      "c29a70cf3f4bfc28ff59dece4973a8da3b5f3af20295218bf2ebd42bf22bcd3c",
     );
-    expect(contract.latestMigration).toBe("0136_unified_session_tool_policy.sql");
+    expect(contract.latestMigration).toBe("0137_hierarchical_role_aware_memory.sql");
     expect(migrations.get("0128_github_installation_authority.sql")).toMatchObject({
       sha256: "365793b2a204a70e214adb90298b522acbb6dcfae22a46681a58f41a6938e6f0",
       deploymentMode: "rolling",
@@ -174,6 +175,10 @@ describe("release schema contract", () => {
     });
     expect(migrations.get("0135_durable_machine_input_batches.sql")).toMatchObject({
       sha256: "c2d642594077a74956fd2eaa64fee8fafcd748ad432d2c9c6f4450019970617c",
+      deploymentMode: "maintenance",
+    });
+    expect(migrations.get("0137_hierarchical_role_aware_memory.sql")).toMatchObject({
+      sha256: "a24a50c234d34e964fa9f4f382f25d58d33489086f39cc398645d9ca2763b5e5",
       deploymentMode: "maintenance",
     });
     expect(migrations.get("0122_codex_capacity_same_turn.sql")).toMatchObject({

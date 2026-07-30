@@ -60,6 +60,50 @@ describe("Helm database upgrade contract", () => {
     }
   });
 
+  test("imports the reviewed capability catalog by default with an explicit opt-out", async () => {
+    const values = await source("deploy/helm/opengeni/values.yaml");
+    const job = await source("deploy/helm/opengeni/templates/catalog-import-job.yaml");
+    const dependencyPolicy = await source(
+      "deploy/helm/opengeni/templates/dependency-networkpolicy.yaml",
+    );
+
+    expect(values).toContain("catalogImport:\n  enabled: true");
+    expect(values).toContain("skipLogos: true");
+    expect(values).toContain("helm.sh/hook: post-install,post-upgrade");
+    expect(job).toContain("--if-changed");
+    expect(job).toContain("--skip-logos");
+    expect(job).toContain("key: OPENGENI_MIGRATIONS_DATABASE_URL");
+    expect(job).toContain("app.kubernetes.io/component: catalog-import");
+    expect(dependencyPolicy.match(/app\.kubernetes\.io\/component: catalog-import/g)).toHaveLength(
+      2,
+    );
+  });
+
+  test("keeps the selected migration-owner URL authoritative for local catalog import", async () => {
+    const devStack = await source("scripts/dev-stack.sh");
+
+    expect(devStack).toContain('OPENGENI_DATABASE_URL="$OPENGENI_MIGRATIONS_DATABASE_URL"');
+    expect(devStack).toContain("bun scripts/import-integrations-catalog.ts");
+    expect(devStack).not.toContain("bun run catalog:import");
+
+    const probe = Bun.spawnSync(
+      [
+        "bash",
+        "-c",
+        'OPENGENI_DATABASE_URL="$OPENGENI_MIGRATIONS_DATABASE_URL" bash -c \'printf %s "$OPENGENI_DATABASE_URL"\'',
+      ],
+      {
+        env: {
+          ...process.env,
+          OPENGENI_DATABASE_URL: "postgres://runtime-role/runtime",
+          OPENGENI_MIGRATIONS_DATABASE_URL: "postgres://migration-owner/owner",
+        },
+      },
+    );
+    expect(probe.exitCode).toBe(0);
+    expect(probe.stdout.toString()).toBe("postgres://migration-owner/owner");
+  });
+
   test("ships a non-HA single-node profile with narrow private-edge services", async () => {
     const values = await source("deploy/helm/opengeni/values.single-node.example.yaml");
     const defaults = await source("deploy/helm/opengeni/values.yaml");
