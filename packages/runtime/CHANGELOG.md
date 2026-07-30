@@ -1,5 +1,14 @@
 # @opengeni/runtime
 
+## 0.14.4
+
+### Patch Changes
+
+- 39b1b84: Keep MCP request timeouts distinct from recoverable connection authentication errors.
+- bcb50cf: Thread the configured Connected Machine control and exec deadlines through
+  `run_on`, and return truthful typed timeout/deadline command receipts without
+  replaying ambiguous execution.
+
 ## 0.14.3
 
 ### Patch Changes
