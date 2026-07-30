@@ -782,6 +782,56 @@ describe("buildTimeline", () => {
     expect(second.output).toBe("resource {}");
   });
 
+  test("a completed hosted web-search item settles without a separate output event", () => {
+    reset();
+    const items = buildTimeline([
+      event("agent.toolCall.created", {
+        id: "ws-1",
+        name: "web_search_call",
+        raw: {
+          type: "hosted_tool_call",
+          status: "completed",
+          providerData: {
+            action: { type: "search", query: "OpenAI official website" },
+          },
+        },
+      }),
+    ]);
+
+    expect((items[0] as ToolCallItem).status).toBe("complete");
+  });
+
+  test("completed message ordering follows intervening hosted search activity", () => {
+    reset();
+    const items = buildTimeline([
+      event("agent.message.delta", { text: "Answer" }),
+      event("agent.toolCall.created", {
+        id: "ws-1",
+        name: "web_search_call",
+        raw: {
+          type: "hosted_tool_call",
+          status: "completed",
+          providerData: { action: { type: "search", query: "source" } },
+        },
+      }),
+      event("agent.message.completed", { text: "Answer with sources." }),
+    ]);
+
+    expect(items.map((item) => item.kind)).toEqual(["tool-call", "agent-message"]);
+    expect((items[1] as AgentMessageItem).text).toBe("Answer with sources.");
+  });
+
+  test("removes unresolved private citation handles from timeline text", () => {
+    reset();
+    const items = buildTimeline([
+      event("agent.message.completed", {
+        text: "OpenAI docs. citeturn1search3turn2view0",
+      }),
+    ]);
+
+    expect((items[0] as AgentMessageItem).text).toBe("OpenAI docs.");
+  });
+
   test("session_create becomes a worker item with prompt and spawned session id from MCP output", () => {
     reset();
     const worker = {

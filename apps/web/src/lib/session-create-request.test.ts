@@ -25,7 +25,7 @@ function build(
   return buildCreateSessionRequest({
     currentResources,
     submission: { text: "start", resources: submissionResources },
-    selectedTools: [{ kind: "mcp", id: "opengeni" }],
+    selectedTools: [],
     defaultModel: "gpt-5.4",
     defaultReasoningEffort: "medium",
     clientEventId: "event-1",
@@ -115,12 +115,8 @@ describe("buildCreateSessionRequest", () => {
 
   test("omits tools only when the ready catalog selection equals workspace defaults", () => {
     const result = build([], [], {
-      selectedTools: [
-        { kind: "mcp", id: "opengeni" },
-        { kind: "mcp", id: "docs" },
-        { kind: "mcp", id: "files" },
-      ],
-      workspaceDefaultMcpServerIds: ["files", "docs", "opengeni"],
+      selectedTools: [{ kind: "mcp", id: "docs" }],
+      workspaceDefaultMcpServerIds: ["docs"],
       workspaceMcpCatalogReady: true,
     });
 
@@ -129,7 +125,7 @@ describe("buildCreateSessionRequest", () => {
 
   test("keeps explicit empty, subset, and partially hydrated selections on the wire", () => {
     const common = {
-      workspaceDefaultMcpServerIds: ["docs", "opengeni"],
+      workspaceDefaultMcpServerIds: ["docs"],
       workspaceMcpCatalogReady: true,
     };
     expect(
@@ -141,24 +137,16 @@ describe("buildCreateSessionRequest", () => {
     expect(
       build([], [], {
         ...common,
-        selectedTools: [{ kind: "mcp", id: "opengeni" }],
+        selectedTools: [{ kind: "mcp", id: "linear" }],
       }).tools,
-    ).toEqual([{ kind: "mcp", id: "opengeni" }]);
+    ).toEqual([{ kind: "mcp", id: "linear" }]);
     expect(
       build([], [], {
         ...common,
-        selectedTools: [
-          { kind: "mcp", id: "opengeni" },
-          { kind: "mcp", id: "docs" },
-          { kind: "mcp", id: "files" },
-        ],
+        selectedTools: [{ kind: "mcp", id: "docs" }],
         workspaceMcpCatalogReady: false,
       }).tools,
-    ).toEqual([
-      { kind: "mcp", id: "opengeni" },
-      { kind: "mcp", id: "docs" },
-      { kind: "mcp", id: "files" },
-    ]);
+    ).toEqual([{ kind: "mcp", id: "docs" }]);
   });
 
   test("omits workspace resources for a connected machine but keeps attachments", () => {

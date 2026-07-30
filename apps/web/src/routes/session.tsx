@@ -578,10 +578,7 @@ function SessionChatPane(props: {
   // the workspaceId, so the hook needs no positional argument.
   const attachments = useFileAttachments();
   const { reasoningEffort } = context;
-  const selectableSessionMcpServers = useMemo(
-    () => context.toolMcpServers.filter((server) => server.id !== "opengeni"),
-    [context.toolMcpServers],
-  );
+  const selectableSessionMcpServers = context.toolMcpServers;
   const selectableToolIds = useMemo(
     () => selectableSessionMcpServers.map((server) => server.id),
     [selectableSessionMcpServers],

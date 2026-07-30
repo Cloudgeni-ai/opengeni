@@ -465,7 +465,7 @@ creation; later deployment-default changes do not rewrite existing sessions.
 
 Model-visible first-party tool selection is a separate field:
 `CreateSessionRequest.firstPartyMcpTools`. It accepts only names from
-`FIRST_PARTY_MCP_TOOL_NAMES`; omission uses the minimal self-management default,
+`FIRST_PARTY_MCP_TOOL_NAMES`; omission uses the complete catalog,
 while explicit `[]` remains empty. A child omission snapshots its parent's exact
 effective selection. Tool selection never grants a permission, and permissions
 never implicitly select a tool. This separation lets a host keep a broad
@@ -475,7 +475,9 @@ one embedded session.
 Resources are unaffected by that selection. File/document/repository
 attachments still materialize when `firstPartyMcpTools` is empty or contains
 only `set_session_title`; the dedicated `files` and `docs` MCP servers are
-selected independently through `tools`.
+selected independently through `tools`. Omitted top-level `tools` policy keeps
+Files enabled by default; an explicit list, including `[]`, is exact and can
+disable it for embedded products that require a narrower model-visible surface.
 
 ### Child execution context
 

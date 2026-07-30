@@ -165,12 +165,17 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         // Reconcile the most recent same-turn agent message — even when
         // activity (tool calls, reasoning) landed after its deltas — so the
         // completed text never duplicates the streamed one.
-        const open = [...items]
-          .reverse()
-          .find(
-            (item): item is AgentMessageItem =>
-              item.kind === "agent-message" && item.turnId === turnId,
-          );
+        let openIndex = -1;
+        for (let index = items.length - 1; index >= 0; index -= 1) {
+          const candidate = items[index];
+          if (candidate?.kind === "agent-message" && candidate.turnId === turnId) {
+            openIndex = index;
+            break;
+          }
+        }
+        const candidate = openIndex >= 0 ? items[openIndex] : undefined;
+        const open: AgentMessageItem | undefined =
+          candidate?.kind === "agent-message" ? candidate : undefined;
         if (
           open &&
           (open.streaming || !open.text || text === open.text || text.startsWith(open.text))
@@ -180,6 +185,15 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
             open.text = text || open.text;
           }
           open.streaming = false;
+          // The SDK can emit a hosted-tool item only after its provider-native
+          // operation has completed, even though answer deltas were already
+          // streamed. The completed message event is the durable ordering
+          // authority, so move the reconciled row after any intervening tool
+          // activity instead of leaving completed web searches below the answer.
+          if (openIndex < items.length - 1) {
+            items.splice(openIndex, 1);
+            items.push(open);
+          }
           break;
         }
         if (text) {
@@ -247,7 +261,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           // The provider-native item drives the per-tool renderers (apply_patch
           // operation, computer_call action, web_search providerData, …).
           raw: payload.raw,
-          status: "running",
+          status: providerNativeToolStatus(payload.raw),
           occurredAt: event.occurredAt,
         });
         break;
@@ -607,7 +621,40 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
     }
   }
 
+  for (const item of items) {
+    if (item.kind === "agent-message") {
+      item.text = stripOpaqueCitationTokens(item.text);
+    }
+  }
   return items;
+}
+
+function providerNativeToolStatus(rawValue: unknown): ToolCallItem["status"] {
+  const raw = asRecord(rawValue);
+  if (raw.type !== "hosted_tool_call") {
+    return "running";
+  }
+  switch (raw.status) {
+    case "completed":
+      return "complete";
+    case "failed":
+    case "incomplete":
+      return "failed";
+    case "cancelled":
+      return "cancelled";
+    default:
+      return "running";
+  }
+}
+
+/**
+ * Codex subscription web search can return private citation handles without
+ * the URL annotation table that would make them resolvable. Keep the canonical
+ * model-history item untouched, but never expose those unusable handles in the
+ * human timeline. Ordinary markdown links and structured URL citations remain.
+ */
+export function stripOpaqueCitationTokens(text: string): string {
+  return text.replace(/\s*cite(?:[^]+)+/gu, "");
 }
 
 /** The turn-end payload shape, as `isCreditExhaustion` wants it. */

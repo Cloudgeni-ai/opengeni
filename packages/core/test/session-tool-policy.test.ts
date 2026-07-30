@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  defaultSessionMcpServerIds,
   resolveSessionToolPolicy,
   type SessionToolPolicyInput,
 } from "../src/domain/session-tool-policy";
@@ -15,32 +16,44 @@ function resolve(overrides: Partial<SessionToolPolicyInput> = {}) {
   return resolveSessionToolPolicy({
     toolPolicy: { mode: "workspace_default", inheritedFromSessionId: null },
     sessionTools: [],
-    availableMcpServerIds: ["opengeni", "cap-docs", "static-configured"],
-    defaultMcpServerIds: ["cap-docs"],
+    availableMcpServerIds: ["opengeni", "files", "cap-docs", "static-configured"],
+    defaultMcpServerIds: ["cap-docs", "files"],
     ...overrides,
   });
 }
 
 describe("session tool policy resolution", () => {
-  test("workspace defaults are capability-only and add the mandatory first-party server", () => {
+  test("workspace defaults add mandatory first-party and default file infrastructure", () => {
     const result = resolve();
 
-    expect(result.toolRefs).toEqual([mcp("cap-docs", true), mcp("opengeni")]);
+    expect(result.toolRefs).toEqual([mcp("cap-docs", true), mcp("files", true), mcp("opengeni")]);
     expect(result.effectivePolicy.selectedIds).toEqual([]);
-    expect(result.effectivePolicy.effectiveIds).toEqual(["cap-docs", "opengeni"]);
+    expect(result.effectivePolicy.effectiveIds).toEqual(["cap-docs", "files", "opengeni"]);
     expect(result.effectivePolicy.mandatoryIds).toEqual(["opengeni"]);
     expect(result.effectivePolicy.lazyRouter).toEqual({
       state: "required",
-      deferredIds: ["cap-docs"],
+      deferredIds: ["cap-docs", "files"],
     });
     expect(result.effectivePolicy.counts).toEqual({
       selected: 0,
-      effective: 2,
+      effective: 3,
       mandatory: 1,
-      deferred: 1,
-      configured: 2,
+      deferred: 2,
+      configured: 3,
       dropped: 0,
     });
+  });
+
+  test("defaults every configured server except the mandatory carrier", () => {
+    expect(
+      defaultSessionMcpServerIds([
+        { id: "linear" },
+        { id: "files" },
+        { id: "opengeni" },
+        { id: "docs" },
+        { id: "linear" },
+      ]),
+    ).toEqual(["docs", "files", "linear"]);
   });
 
   test("does not infer static MCPs when the capability default set is omitted", () => {
@@ -56,7 +69,7 @@ describe("session tool policy resolution", () => {
       const result = resolve({
         toolPolicy: { mode, inheritedFromSessionId: null },
         sessionTools: [mcp("cap-selected")],
-        availableMcpServerIds: ["opengeni", "cap-selected"],
+        availableMcpServerIds: ["opengeni", "files", "cap-selected"],
       });
       expect(result.toolRefs).toEqual([mcp("cap-selected"), mcp("opengeni")]);
       expect(result.effectivePolicy.effectiveIds).toEqual(["cap-selected", "opengeni"]);
