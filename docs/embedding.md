@@ -463,13 +463,29 @@ session tree while top-level omissions continue to use the deployment's normal
 standalone worker defaults. The inherited set is frozen on the child at
 creation; later deployment-default changes do not rewrite existing sessions.
 
+Model-visible first-party tool selection is a separate field:
+`CreateSessionRequest.firstPartyMcpTools`. It accepts only names from
+`FIRST_PARTY_MCP_TOOL_NAMES`; omission uses the complete catalog,
+while explicit `[]` remains empty. A child omission snapshots its parent's exact
+effective selection. Tool selection never grants a permission, and permissions
+never implicitly select a tool. This separation lets a host keep a broad
+delegated authorization envelope while exposing only the tools appropriate to
+one embedded session.
+
+Resources are unaffected by that selection. File/document/repository
+attachments still materialize when `firstPartyMcpTools` is empty or contains
+only `set_session_title`; the dedicated `files` and `docs` MCP servers are
+selected independently through `tools`. Omitted top-level `tools` policy keeps
+Files enabled by default; an explicit list, including `[]`, is exact and can
+disable it for embedded products that require a narrower model-visible surface.
+
 ### Child execution context
 
 An agent-created child normally needs the same working context as its manager,
 even when the two conversations are separate. When the creating grant carries
 the worker-signed parent `sessionId`, `createSessionForRequest` treats omitted
-`resources`, `tools`, and `mcpServers` as inheritance from that trusted immediate
-parent. The snapshot preserves mixed GitHub, GitLab, and Azure DevOps repository
+`resources`, `skills`, `tools`, and `mcpServers` as inheritance from that trusted immediate
+parent. The snapshot preserves inline session skills, mixed GitHub, GitLab, and Azure DevOps repository
 resources, multiple credential bindings for one provider, selected MCP tool
 refs, full per-session MCP policy, connection refs, and static credential
 headers. Static header values move only as encrypted database ciphertext and
@@ -485,7 +501,7 @@ array—including `[]`—replaces that field instead of inheriting it. If an exp
 MCP-server replacement makes an inherited strict tool ref invalid, the create
 fails validation; replace `tools` in the same request rather than silently
 dropping a strict tool. A top-level create has no parent snapshot: omitted
-resources and MCP servers remain empty, while omitted tools continue to receive
+resources, skills, and MCP servers remain empty, while omitted tools continue to receive
 workspace-default capability MCP refs. Variable sets, rigs, model selection,
 persona instructions, goals, and sandbox placement retain their own existing
 resolution rules and are not part of this context snapshot.
@@ -715,6 +731,37 @@ API and worker must share the same broker-backed EventBus binding. The productio
 Do not replace this with an in-memory bus in an embedded deployment. In-memory fanout only reaches subscribers in the same process and would make worker -> API live SSE silently disappear; clients would only recover on replay/gap backfill.
 
 For embedded UIs that page historical timelines, prefer `GET .../events?compact=1` (or SDK `listEvents(..., { compact: true })`) for windowed replay. It coalesces consecutive delta fragments in the page while preserving first-member `sequence`; use `payload.coalescedUntil` as the resume cursor for the live SSE stream. Streaming/gap backfill should keep using raw sequence replay.
+
+## Host-owned product UI
+
+Embedding does not require the host to copy its product model into OpenGeni.
+The host may keep its own session header, repository/integration picker,
+sharing controls, linked entities, billing presentation, and domain-specific
+tabs while composing OpenGeni's session hooks and workbench surfaces below
+them.
+
+`@opengeni/react/session` is the headless composition boundary. Its baseline
+`SessionClientLike` covers session events, composer, queue, control, and
+approvals. Hooks outside that baseline export exact structural refinements:
+`SessionReadClientLike`, `GoalClientLike`, `SessionLineageClientLike`, and
+`FileAttachmentClientLike`. A host proxy therefore implements only the methods
+used by the mounted hooks; it does not stub workspace administration, billing,
+rig, connected-machine, or unrelated workbench APIs.
+
+Repository selection is also host-composable. `CreateSessionRequest.resources`
+accepts the canonical provider-qualified `ResourceRef[]`, including several
+providers, repositories, and credential bindings in one session. The stock web
+picker is currently GitHub-oriented, but that is a stock-client limitation—not
+an engine, API, or embedding restriction. Embedded hosts can retain their own
+provider catalog and picker and submit the canonical resources once at launch.
+OpenGeni then owns their runtime materialization and credential routing; the host
+does not maintain a synchronized repository model.
+
+The styled workbench is independently filterable. Hosts can mount Changes,
+Files, and Terminal while omitting Desktop, or render a completely custom
+timeline/composer from the session-only hooks and pure projection. Product
+metadata should remain in host slots/components rather than being added to
+OpenGeni contracts solely for one embedding.
 
 ## Trust model
 

@@ -33,6 +33,7 @@ import {
   type BackendUnresolvableCode,
   type ControlRpc,
   type NatsRequestConnection,
+  type SelfhostedRelayConfig,
 } from "@opengeni/runtime/sandbox";
 import { HTTPException } from "hono/http-exception";
 import { relayConfigFromSettings } from "./routing";
@@ -512,10 +513,93 @@ export type RunOnResult = {
   stdout?: string;
   stderr?: string;
   exitCode?: number | null;
+  /** Exec only: whether the machine killed the child at its process deadline. */
+  timedOut?: boolean;
+  /** Exec only: the effective clamped process deadline enforced by the machine. */
+  deadlineMs?: number;
   content?: string;
   bytesWritten?: number;
   reason?: string;
 };
+
+export type RunOnSelfhostedMachine = {
+  workspaceId: string;
+  agentId: string;
+  controlRpc: ControlRpc;
+  relay: SelfhostedRelayConfig;
+  /** Short request/reply deadline for read/write and other control operations. */
+  controlTimeoutMs: number;
+  /** Longer agent-side process deadline for exec. */
+  execTimeoutMs: number;
+};
+
+/**
+ * Execute the one-off machine operation once the workspace/enrollment lookup has
+ * succeeded. Kept separate from {@link runOnSandbox} so the command/deadline
+ * contract is deterministic against an in-memory ControlRpc without weakening
+ * the production ownership lookup or requiring a real machine.
+ */
+export async function executeRunOnSelfhostedMachine(
+  machine: RunOnSelfhostedMachine,
+  target: string,
+  op: RunOnOp,
+): Promise<RunOnResult> {
+  const session = new SelfhostedSession({
+    workspaceId: machine.workspaceId,
+    agentId: machine.agentId,
+    controlRpc: machine.controlRpc,
+    relay: machine.relay,
+    timeoutMs: machine.controlTimeoutMs,
+    execTimeoutMs: machine.execTimeoutMs,
+  });
+
+  try {
+    if (op.kind === "exec") {
+      const deadlineMs = session.effectiveExecDeadlineMs;
+      const res = await session.exec({
+        cmd: op.cmd,
+        ...(op.workdir ? { workdir: op.workdir } : {}),
+      });
+      const timedOut = res.timedOut === true;
+      const hasTerminalExit = res.exitCode !== null;
+      return {
+        target,
+        kind: "exec",
+        // `ok` means the one-off operation reached a terminal response. Preserve
+        // the established non-zero-exit behavior, but never claim success when
+        // the machine killed the child or returned no terminal exit proof.
+        ok: !timedOut && hasTerminalExit,
+        stdout: res.stdout,
+        stderr: res.stderr,
+        exitCode: res.exitCode,
+        timedOut,
+        deadlineMs,
+        ...(timedOut
+          ? { reason: `command exceeded the ${deadlineMs} ms execution deadline` }
+          : !hasTerminalExit
+            ? { reason: "machine returned no terminal exit code" }
+            : {}),
+      };
+    }
+    if (op.kind === "read") {
+      const bytes = await session.readFile({ path: op.path });
+      return { target, kind: "read", ok: true, content: new TextDecoder().decode(bytes) };
+    }
+    const bytesWritten = await session.writeFile({ path: op.path, content: op.content });
+    return { target, kind: "write", ok: true, bytesWritten };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    return {
+      target,
+      kind: op.kind,
+      ok: false,
+      reason,
+      // A transport failure is not evidence that the process itself timed out,
+      // so leave `timedOut` absent while still reporting the enforced deadline.
+      ...(op.kind === "exec" ? { deadlineMs: session.effectiveExecDeadlineMs } : {}),
+    };
+  }
+}
 
 /**
  * Run a ONE-OFF op against a SPECIFIC target WITHOUT changing the active pointer
@@ -554,39 +638,18 @@ export async function runOnSandbox(
     return { target, kind: op.kind, ok: false, reason: `sandbox ${target} is not enrolled/active` };
   }
 
-  const session = new SelfhostedSession({
-    workspaceId: ctx.workspaceId,
-    agentId: sandbox.enrollmentId,
-    controlRpc: controlRpc(services.bus),
-    relay: relayConfigFromSettings(services.settings),
-  });
-
-  try {
-    if (op.kind === "exec") {
-      const res = await session.exec({
-        cmd: op.cmd,
-        ...(op.workdir ? { workdir: op.workdir } : {}),
-      });
-      return {
-        target,
-        kind: "exec",
-        ok: true,
-        stdout: res.stdout,
-        stderr: res.stderr,
-        exitCode: res.exitCode,
-      };
-    }
-    if (op.kind === "read") {
-      const bytes = await session.readFile({ path: op.path });
-      return { target, kind: "read", ok: true, content: new TextDecoder().decode(bytes) };
-    }
-    // write
-    const bytesWritten = await session.writeFile({ path: op.path, content: op.content });
-    return { target, kind: "write", ok: true, bytesWritten };
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
-    return { target, kind: op.kind, ok: false, reason };
-  }
+  return executeRunOnSelfhostedMachine(
+    {
+      workspaceId: ctx.workspaceId,
+      agentId: sandbox.enrollmentId,
+      controlRpc: controlRpc(services.bus),
+      relay: relayConfigFromSettings(services.settings),
+      controlTimeoutMs: services.settings.sandboxSelfhostedControlTimeoutMs,
+      execTimeoutMs: services.settings.sandboxSelfhostedExecTimeoutMs,
+    },
+    target,
+    op,
+  );
 }
 
 export type ProvisionResult =

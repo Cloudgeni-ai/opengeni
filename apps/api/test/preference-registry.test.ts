@@ -7,6 +7,8 @@ import {
   createDb,
   createSession,
   deleteWorkspace,
+  ensureManagedAccessForUser,
+  getWorkspaceGrant,
   withWorkspaceSubjectRls,
   type DbClient,
 } from "@opengeni/db";
@@ -340,6 +342,126 @@ async function expectDatabaseFailure(operation: Promise<unknown>, pattern: RegEx
 }
 
 describe("structured preference registry API and PostgreSQL authority", () => {
+  test("authorizes normal hosted humans while generic and machine grants stay fail-closed", async () => {
+    const suffix = crypto.randomUUID();
+    const user = {
+      id: `hosted-${suffix}`,
+      email: `hosted-${suffix}@example.test`,
+      name: "Hosted preference owner",
+    };
+    const hostedAccess = await ensureManagedAccessForUser(client.db, {
+      userId: user.id,
+      email: user.email,
+      name: user.name,
+    });
+    const hostedGrant = hostedAccess.workspaceGrants[0]!;
+    expect(hostedAccess.mode).toBe("managed");
+    expect(hostedAccess.workspaceGrants.length).toBeGreaterThan(0);
+    expect(
+      hostedAccess.workspaceGrants.every((grant) => grant.principalKind === "human_session"),
+    ).toBe(true);
+
+    const genericAccess = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "preference-generic",
+      accountExternalId: `account-${suffix}`,
+      accountName: "Generic preference account",
+      workspaceExternalSource: "preference-generic",
+      workspaceExternalId: `workspace-${suffix}`,
+      workspaceName: "Generic preference workspace",
+      subjectId: `user:generic-${suffix}`,
+    });
+    expect(genericAccess.workspaceGrants[0]?.principalKind).toBeUndefined();
+    expect(
+      (await getWorkspaceGrant(client.db, hostedGrant.subjectId, hostedGrant.workspaceId))
+        ?.principalKind,
+    ).toBeUndefined();
+    expect(
+      (
+        await getWorkspaceGrant(client.db, hostedGrant.subjectId, hostedGrant.workspaceId, {
+          principalKind: "human_session",
+        })
+      )?.principalKind,
+    ).toBe("human_session");
+
+    const hostedApp = new Hono();
+    registerPreferenceRegistryRoutes(hostedApp, {
+      settings: testSettings({ productAccessMode: "managed", delegationSecret: SECRET }),
+      db: client.db,
+      managedAuth: {
+        api: {
+          getSession: async () => ({ user }),
+        },
+      },
+    } as unknown as ApiRouteDeps);
+    const hostedProposalResponse = await hostedApp.request(
+      `http://x/v1/workspaces/${hostedGrant.workspaceId}/preferences/proposals`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          stableKey: `hosted-${suffix}`,
+          scope: "workspace",
+          title: "Hosted preference",
+          description: "Created through a normal Better Auth session",
+          content: "Hosted humans can govern preferences",
+        }),
+      },
+    );
+    expect(hostedProposalResponse.status).toBe(201);
+    const hostedProposal = (await hostedProposalResponse.json()) as Json;
+    const hostedDetailResponse = await hostedApp.request(
+      `http://x/v1/workspaces/${hostedGrant.workspaceId}/preferences/${hostedProposal.id}`,
+    );
+    expect(hostedDetailResponse.status).toBe(200);
+    const hostedDetail = (await hostedDetailResponse.json()) as Json;
+    const hostedRevisionId = hostedDetail.revisions[0].id as string;
+
+    const deniedAgent = await request(hostedGrant, `/${hostedProposal.id}/activate`, {
+      method: "POST",
+      permissions: WORKSPACE_ADMIN,
+      subjectId: "worker:hosted-denial",
+      principalKind: "agent_attempt",
+      attempt: await seedAttempt(hostedGrant, {
+        kind: "subject",
+        subjectId: hostedGrant.subjectId,
+      }),
+      body: {
+        revisionId: hostedRevisionId,
+        expectedCurrentRevisionId: null,
+        expectedScopeVersion: hostedProposal.scopeVersion,
+        reason: "Agent attempts cannot govern preferences",
+      },
+    });
+    expect(deniedAgent.status).toBe(403);
+
+    const deniedService = await request(hostedGrant, `/${hostedProposal.id}/activate`, {
+      method: "POST",
+      permissions: WORKSPACE_ADMIN,
+      subjectId: "service:hosted-denial",
+      principalKind: "service",
+      body: {
+        revisionId: hostedRevisionId,
+        expectedCurrentRevisionId: null,
+        expectedScopeVersion: hostedProposal.scopeVersion,
+        reason: "Services cannot govern preferences",
+      },
+    });
+    expect(deniedService.status).toBe(403);
+
+    const deniedApiKey = await request(hostedGrant, `/${hostedProposal.id}/activate`, {
+      method: "POST",
+      permissions: WORKSPACE_ADMIN,
+      subjectId: `api_key:${suffix}`,
+      body: {
+        revisionId: hostedRevisionId,
+        expectedCurrentRevisionId: null,
+        expectedScopeVersion: hostedProposal.scopeVersion,
+        reason: "API keys cannot govern preferences",
+      },
+    });
+    expect(deniedApiKey.status).toBe(403);
+  }, 180_000);
+
   test("enforces layered lifecycle, initiating-human snapshots, isolation, and FORCE RLS", async () => {
     const suffix = crypto.randomUUID();
     const accessA = await bootstrapWorkspace(client.db, {
@@ -638,11 +760,13 @@ describe("structured preference registry API and PostgreSQL authority", () => {
       workspaceId: alice.workspaceId,
       subjectId: "worker:attempt-alice",
       permissions: ["workspace:read"],
+      principalKind: "agent_attempt",
       metadata: {
         sessionId: aliceAttempt.sessionId,
         turnId: aliceAttempt.turnId,
         attemptId: aliceAttempt.attemptId,
         executionGeneration: aliceAttempt.executionGeneration,
+        firstPartyMcpTools: ["preference_registry_summary", "preference_registry_get"],
       },
     };
     const mcpServer = buildOpenGeniMcpServer(

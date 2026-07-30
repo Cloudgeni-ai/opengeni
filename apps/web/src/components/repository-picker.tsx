@@ -1,6 +1,7 @@
 import {
   CheckIcon,
   ChevronDownIcon,
+  ExternalLinkIcon,
   GitBranchIcon,
   GitPullRequestIcon,
   Loader2Icon,
@@ -34,6 +35,7 @@ import {
 } from "@/lib/session-tools";
 import { cn } from "@/lib/utils";
 import type {
+  GitHubAppSetupMode,
   GitHubBindingStatus,
   GitHubInstallationBinding,
   GitHubRepository,
@@ -43,6 +45,7 @@ import type {
 export function repositoryBindingPresentation(
   status: GitHubBindingStatus,
   installUrl: string | null,
+  setupMode: GitHubAppSetupMode = "operator",
 ): {
   setupDescription: string;
   emptyDescription: string;
@@ -54,11 +57,16 @@ export function repositoryBindingPresentation(
   if (status === "bound") {
     return {
       setupDescription:
-        "This workspace has a live GitHub App binding with an explicit repository allowlist.",
+        setupMode === "platform"
+          ? "This workspace is connected to OpenGeni's managed GitHub App."
+          : "This workspace has a live GitHub App binding with an explicit repository allowlist.",
       emptyDescription:
         "This workspace has an active GitHub App binding, but none of its explicitly allowed repositories are currently shared by GitHub. Reconfigure the installation or refresh after policy approval.",
       connectUrl: installUrl,
-      connectLabel: "Configure another installation",
+      connectLabel:
+        setupMode === "platform"
+          ? "Connect another GitHub account"
+          : "Configure another installation",
       healthy: true,
       canRefresh: true,
     };
@@ -66,20 +74,28 @@ export function repositoryBindingPresentation(
   if (status === "unbound") {
     return {
       setupDescription:
-        "GitHub App server credentials are configured, but this workspace has no usable installation binding.",
+        setupMode === "platform"
+          ? "Install OpenGeni on a GitHub account you own, or connect an existing installation."
+          : "GitHub App server credentials are configured, but this workspace has no usable installation binding.",
       emptyDescription:
-        "GitHub App server credentials exist, but this workspace has no active installation binding. Connect as the personal owner or an organization owner; repository administrators and collaborators cannot bind.",
+        setupMode === "platform"
+          ? "Connect as the personal account owner or an organization owner. GitHub repository administrators and collaborators cannot connect an installation."
+          : "GitHub App server credentials exist, but this workspace has no active installation binding. Connect as the personal owner or an organization owner; repository administrators and collaborators cannot bind.",
       connectUrl: installUrl,
-      connectLabel: "Connect GitHub",
+      connectLabel: setupMode === "platform" ? "Install or connect GitHub" : "Connect GitHub",
       healthy: false,
       canRefresh: false,
     };
   }
   return {
     setupDescription:
-      "Create a prefilled app, add the generated values to your .env, then restart the API and worker.",
+      setupMode === "platform"
+        ? "GitHub is temporarily unavailable for this OpenGeni deployment."
+        : "Create a prefilled app, add the generated values to your .env, then restart the API and worker.",
     emptyDescription:
-      "GitHub App server credentials are not configured. App registration alone does not connect repositories.",
+      setupMode === "platform"
+        ? "GitHub integration is unavailable for this OpenGeni deployment."
+        : "GitHub App server credentials are not configured. App registration alone does not connect repositories.",
     connectUrl: null,
     connectLabel: "Connect GitHub",
     healthy: false,
@@ -88,6 +104,7 @@ export function repositoryBindingPresentation(
 }
 
 export function RepositoryContextPicker(props: {
+  setupMode: GitHubAppSetupMode;
   configured: boolean;
   status: GitHubBindingStatus;
   installUrl: string | null;
@@ -121,7 +138,11 @@ export function RepositoryContextPicker(props: {
   const manualCount = props.manualRepos.filter((repo) => repo.url.trim().length > 0).length;
   const selectedCount = selectedInstalledCount + manualCount;
   const hasRepos = props.repositories.length > 0;
-  const bindingPresentation = repositoryBindingPresentation(props.status, props.installUrl);
+  const bindingPresentation = repositoryBindingPresentation(
+    props.status,
+    props.installUrl,
+    props.setupMode,
+  );
   // Two-step inline confirm for removing a manual repo, so a stray click in a
   // dense picker doesn't drop a repo the user typed out.
   const [confirmRemoveId, setConfirmRemoveId] = useState<number | null>(null);
@@ -129,15 +150,13 @@ export function RepositoryContextPicker(props: {
     number | null
   >(null);
 
-  // The GitHub App manifest form — org login plus the install/create actions.
-  // Rendered inline (open) in the first-run empty state so setup is never hidden
-  // behind a disclosure, and demoted into a quiet "GitHub app settings"
-  // disclosure once repositories are connected.
+  // Platform deployments expose only installation/connection. Operator
+  // deployments additionally expose App registration and environment setup.
   const setupForm = (
     <div className="space-y-3">
       <p className="text-xs leading-5 text-fg-muted">{bindingPresentation.setupDescription}</p>
       <div className="space-y-2">
-        {!props.configured ? (
+        {props.setupMode === "operator" && !props.configured ? (
           <div className="min-w-0">
             <Label htmlFor="github-org-menu" className="text-2xs text-fg-subtle">
               Organization
@@ -153,7 +172,7 @@ export function RepositoryContextPicker(props: {
           </div>
         ) : null}
         <div className="flex flex-wrap items-center gap-1.5">
-          {!props.configured ? (
+          {props.setupMode === "operator" && !props.configured ? (
             <Button
               type="button"
               size="sm"
@@ -224,15 +243,27 @@ export function RepositoryContextPicker(props: {
                     </Button>
                   </div>
                 ) : (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon-xs"
-                    aria-label={`Unlink ${installation.accountLogin ?? installation.installationId}`}
-                    onClick={() => setConfirmDisconnectInstallationId(installation.installationId)}
-                  >
-                    <Trash2Icon className="size-3.5" />
-                  </Button>
+                  <div className="flex items-center gap-1">
+                    {installation.configureUrl ? (
+                      <Button asChild type="button" variant="ghost" size="xs">
+                        <a href={installation.configureUrl}>
+                          Repositories
+                          <ExternalLinkIcon className="size-3" />
+                        </a>
+                      </Button>
+                    ) : null}
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-xs"
+                      aria-label={`Unlink ${installation.accountLogin ?? installation.installationId}`}
+                      onClick={() =>
+                        setConfirmDisconnectInstallationId(installation.installationId)
+                      }
+                    >
+                      <Trash2Icon className="size-3.5" />
+                    </Button>
+                  </div>
                 )}
               </div>
             );
@@ -258,7 +289,9 @@ export function RepositoryContextPicker(props: {
                 props.githubAppOpen && "rotate-180",
               )}
             />
-            <span className="truncate">GitHub app settings</span>
+            <span className="truncate">
+              {props.setupMode === "platform" ? "Connected GitHub accounts" : "GitHub app settings"}
+            </span>
           </button>
         </CollapsibleTrigger>
         <CollapsibleContent>
@@ -350,7 +383,11 @@ export function RepositoryContextPicker(props: {
                     title="No repositories connected"
                     description={bindingPresentation.emptyDescription}
                   />
-                  {settingsDisclosure}
+                  {props.setupMode === "platform" ? (
+                    <div className="px-1 pt-1">{setupForm}</div>
+                  ) : (
+                    settingsDisclosure
+                  )}
                 </div>
               ) : (
                 <>

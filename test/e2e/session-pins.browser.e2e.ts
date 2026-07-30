@@ -355,10 +355,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     for (const theme of ["light", "dark"] as const) {
       await setTheme(pageB, theme);
       await expectNoPageOverflow(pageB);
-      await expectNoAxeViolations(pageB, [
-        "[data-sessionpin-session-header]",
-        "[data-sessionpin-session-list]",
-      ]);
+      await expectNoAxeViolations(pageB, ["header", "[data-sessionpin-session-list]"]);
       await pageB.screenshot({
         path: `/tmp/sessionpin-session-pin-desktop-${theme}.png`,
         fullPage: true,
@@ -1193,10 +1190,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         await expectTouchTarget(navigation.getByRole("searchbox", { name: "Search sessions" }));
         await expectContainedInViewport(navigation, viewport.width);
         await expectNoPageOverflow(page);
-        await expectNoAxeViolations(page, [
-          "[data-sessionpin-session-header]",
-          "[data-sessionpin-session-list]",
-        ]);
+        await expectNoAxeViolations(page, ["header", "[data-sessionpin-session-list]"]);
         await page.screenshot({
           path: `/tmp/sessionpin-session-pin-mobile${viewport.artifactSuffix}-${theme}.png`,
           fullPage: true,

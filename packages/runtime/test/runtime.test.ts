@@ -20,12 +20,17 @@ import {
   invalidateServerToolsCache,
 } from "@openai/agents";
 import { Usage } from "@openai/agents-core";
+import { ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import {
   AGENT_INSTRUCTIONS_CORE_PLACEHOLDER,
   DEFAULT_AGENT_INSTRUCTIONS,
   getSettings,
 } from "@opengeni/config";
-import { CLEARED_RUN_STATE_BLOB, verifyDelegatedAccessToken } from "@opengeni/contracts";
+import {
+  CLEARED_RUN_STATE_BLOB,
+  sessionSystemUpdateBatchHistoryItem,
+  verifyDelegatedAccessToken,
+} from "@opengeni/contracts";
 import {
   applyMissingManifestEntries,
   pinProvidedSessionManifestEnvironment,
@@ -1330,6 +1335,49 @@ describe("runtime event normalization", () => {
       },
     );
     expect(prepared.input).toEqual(historyItems);
+  });
+
+  test("keeps a durable machine-input batch as an exact prefix on later model requests", async () => {
+    const batch = sessionSystemUpdateBatchHistoryItem([
+      {
+        id: "11111111-1111-4111-8111-111111111111",
+        kind: "agent_message",
+        classification: "info",
+        sourceId: "verification-agent",
+        summary: "Keep this direction across tool calls.",
+        payload: {
+          type: "agent_message",
+          text: "Keep this direction across tool calls.",
+          operationId: "22222222-2222-4222-8222-222222222222",
+        },
+        lineage: { callerSessionId: "verification-agent" },
+      },
+    ]);
+    const firstHistory = [
+      { type: "message", role: "user", content: "Original request" },
+      batch,
+    ] as any;
+    const first = await prepareRunInput(
+      buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []),
+      { kind: "message", historyItems: firstHistory },
+    );
+    const secondHistory = [
+      ...firstHistory,
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "Working." }] },
+      { type: "function_call", callId: "call-1", name: "inspect", arguments: "{}" },
+      { type: "function_call_result", callId: "call-1", output: "done" },
+    ] as any;
+    const second = await prepareRunInput(
+      buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []),
+      { kind: "message", historyItems: secondHistory },
+    );
+
+    expect(Array.isArray(first.input)).toBe(true);
+    expect(Array.isArray(second.input)).toBe(true);
+    expect((second.input as unknown[]).slice(0, (first.input as unknown[]).length)).toEqual(
+      first.input,
+    );
+    expect(JSON.stringify(second.input)).toContain("Keep this direction across tool calls.");
   });
 
   test("delivers platform recovery context as ephemeral system input", async () => {
@@ -3335,6 +3383,51 @@ describe("runtime event normalization", () => {
     }
   });
 
+  test("signs an explicit empty first-party tool selection without default widening", async () => {
+    const seenSelections: unknown[] = [];
+    const seenPrincipalKinds: unknown[] = [];
+    const mcp = startTestMcpServer({
+      validateAuthorization: async (authorization) => {
+        if (!authorization?.startsWith("Bearer ")) return false;
+        const payload = await verifyDelegatedAccessToken(
+          "test-delegation-secret",
+          authorization.slice("Bearer ".length),
+        );
+        if (!payload) return false;
+        seenSelections.push(payload.firstPartyMcpTools);
+        seenPrincipalKinds.push(payload.principalKind);
+        return true;
+      },
+    });
+    const prepared = await prepareAgentTools(
+      testSettings({
+        mcpServers: [
+          {
+            id: "opengeni",
+            name: "OpenGeni",
+            url: `${mcp.url}?ws={workspaceId}`,
+            cacheToolsList: false,
+          },
+        ],
+      }),
+      [{ kind: "mcp", id: "opengeni" }],
+      {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        firstPartyTools: [],
+      },
+    );
+    try {
+      await prepared.mcpServers[0]!.listTools();
+      expect(seenSelections.length).toBeGreaterThan(0);
+      expect(seenSelections.every((selection) => JSON.stringify(selection) === "[]")).toBe(true);
+      expect(seenPrincipalKinds.every((kind) => kind === "service")).toBe(true);
+    } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
   test("a genuinely-broken first-party bearer still fails loud (no masking, no retry loop)", async () => {
     // The dynamic refresh must NOT mask a real breakage: if the endpoint rejects
     // every bearer (e.g. a server-side secret mismatch), the required first-party
@@ -3368,6 +3461,38 @@ describe("runtime event normalization", () => {
     } finally {
       mcp.close();
     }
+  });
+
+  test("rejects subject-owned MCP use without a human initiator before resolver or transport", async () => {
+    let resolverCalls = 0;
+    await expect(
+      prepareAgentTools(
+        testSettings({
+          mcpServers: [
+            {
+              id: "personal-slack",
+              name: "Personal Slack",
+              url: "https://mcp.slack.com/mcp",
+              connectionRef: {
+                providerDomain: "slack.com",
+                kind: "oauth2",
+                subjectScope: "subject",
+              },
+              cacheToolsList: false,
+            },
+          ],
+        }),
+        [{ kind: "mcp", id: "personal-slack" }],
+        {
+          workspaceId: "22222222-2222-4222-8222-222222222222",
+          resolveCredential: async () => {
+            resolverCalls += 1;
+            throw new Error("resolver must not run for a service turn");
+          },
+        },
+      ),
+    ).rejects.toThrow("requires a human turn initiator");
+    expect(resolverCalls).toBe(0);
   });
 
   test("sends configured credential headers to third-party MCP servers", async () => {
@@ -3674,8 +3799,15 @@ describe("runtime event normalization", () => {
       const result = await prepared.mcpServers[0]!.callTool("cap-auth-needed__search_documents", {
         query: "auth",
       });
-      expect(result).toMatchObject({ isError: true });
-      expect(JSON.stringify(result)).toContain("Authentication required");
+      expect(result).toMatchObject({
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: "Authentication required - a connection link was posted to the session.",
+          },
+        ],
+      });
       expect(mcp.calls).toEqual([]);
       expect(authNeeded).toContainEqual(
         expect.objectContaining({
@@ -3690,6 +3822,66 @@ describe("runtime event normalization", () => {
       mcp.close();
     }
   });
+
+  test("never classifies the MCP SDK request-timeout code as connection auth", async () => {
+    let markStarted: (() => void) | null = null;
+    let releaseCall: (() => void) | null = null;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      releaseCall = resolve;
+    });
+    const mcp = startTestMcpServer({
+      beforeToolCall: async () => {
+        markStarted?.();
+        await gate;
+      },
+    });
+    const authNeeded: unknown[] = [];
+    const prepared = await prepareAgentTools(
+      testSettings({
+        mcpServers: [
+          {
+            id: "request-timeout",
+            name: "Request timeout",
+            url: mcp.url,
+            cacheToolsList: false,
+            timeoutMs: 1_000,
+          },
+        ],
+      }),
+      [{ kind: "mcp", id: "request-timeout" }],
+      {
+        onAuthNeeded: (payload) => {
+          authNeeded.push(payload);
+        },
+      },
+    );
+    try {
+      await prepared.mcpServers[0]!.listTools();
+      const pending = prepared.mcpServers[0]!.callTool("request-timeout__search_documents", {
+        query: "wait",
+      });
+      await started;
+      let failure: unknown;
+      try {
+        await pending;
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toBeInstanceOf(Error);
+      expect(failure).toMatchObject({ code: ErrorCode.RequestTimeout });
+      expect((failure as Error).message).toBe(
+        `MCP error ${ErrorCode.RequestTimeout}: Request timed out`,
+      );
+      expect(authNeeded).toEqual([]);
+    } finally {
+      releaseCall?.();
+      await prepared.close();
+      mcp.close();
+    }
+  }, 10_000);
 
   test("skips brokered MCP servers at connect time when auth is missing and emits auth-needed", async () => {
     const authNeeded: unknown[] = [];

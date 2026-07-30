@@ -1,5 +1,5 @@
 -- deployment-mode: rolling
--- OPE-122: additive, backend-only structured preference registry. No prompt
+-- Additive, backend-only structured preference registry. No prompt
 -- composition, document ingestion, knowledge-memory mutation, or backfill.
 
 SET lock_timeout = '5s';

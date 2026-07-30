@@ -98,7 +98,10 @@ describe("rig MCP tools", () => {
       createdBy: "user:mcp",
       initialVersion: { setupScript: "mkdir -p /opt/mcp", changelog: "v1" },
     });
-    const server = buildOpenGeniMcpServer(deps(workflow), grant(["rigs:use"], { sessionId }));
+    const server = buildOpenGeniMcpServer(
+      deps(workflow),
+      grant(["rigs:use"], { sessionId, firstPartyMcpTools: ["rig_propose_change"] }),
+    );
     const proposed = await callMcpTool<{
       change: { id: string; status: string };
       verificationStarted: boolean;

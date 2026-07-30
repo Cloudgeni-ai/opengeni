@@ -1,6 +1,8 @@
+import { createHash } from "node:crypto";
 import type {
   AccessContext,
   AccessGrant,
+  AccessPrincipalKind,
   ApiKey,
   BillingBalance,
   CapabilityCatalogItem,
@@ -16,6 +18,7 @@ import type {
   FileAsset,
   FileStatus,
   FileUploadStatus,
+  FirstPartyMcpToolName,
   HumanInputAnswer,
   HumanInputQuestion,
   HumanInputResponse,
@@ -59,6 +62,7 @@ import type {
   SessionHumanInputRequest,
   LineageNode,
   SessionMcpApprovalPolicy,
+  SessionSkill,
   SessionMcpServerMetadata,
   SessionStatus,
   SessionToolPolicy,
@@ -93,7 +97,10 @@ import type {
   RigChangeStatus,
   RigCheck,
 } from "@opengeni/contracts";
-import { SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS } from "@opengeni/contracts";
+import {
+  DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS,
+} from "@opengeni/contracts";
 import {
   approvalIdentifier,
   boundWorkspaceControlEvent,
@@ -112,6 +119,7 @@ import {
   RigChange as RigChangeContract,
   SessionGoal as SessionGoalContract,
   SessionSystemUpdatePayload,
+  sessionSystemUpdateBatchHistoryItem,
   HostEventExport as HostEventExportContract,
   HostEventExportBatch as HostEventExportBatchContract,
   HostExportConsumerId,
@@ -1339,6 +1347,24 @@ export async function bootstrapWorkspace(
         })
         .where(eq(schema.workspaceMemberships.id, membership.id));
     }
+    // Access refreshes must retain workspaces created or granted after the
+    // default workspace. Restore account-scoped RLS before listing them.
+    await setRlsContext(tx as unknown as Database, {
+      accountId: workspace.accountId,
+      workspaceId: null,
+    });
+    const memberships = await tx
+      .select({
+        membership: schema.workspaceMemberships,
+        workspace: schema.workspaces,
+      })
+      .from(schema.workspaceMemberships)
+      .innerJoin(
+        schema.workspaces,
+        eq(schema.workspaceMemberships.workspaceId, schema.workspaces.id),
+      )
+      .where(eq(schema.workspaceMemberships.subjectId, input.subjectId))
+      .orderBy(desc(schema.workspaces.createdAt));
     return {
       mode: input.accountExternalSource === "opengeni:local" ? "local" : "configured",
       subjectId: input.subjectId,
@@ -1352,15 +1378,13 @@ export async function bootstrapWorkspace(
           permissions: input.accountPermissions ?? allAccountPermissions,
         },
       ],
-      workspaceGrants: [
-        {
-          workspaceId: workspace.id,
-          accountId: account.id,
-          subjectId: input.subjectId,
-          ...(input.subjectLabel ? { subjectLabel: input.subjectLabel } : {}),
-          permissions: workspacePermissions,
-        },
-      ],
+      workspaceGrants: memberships.map((row) => ({
+        workspaceId: row.workspace.id,
+        accountId: row.workspace.accountId,
+        subjectId: input.subjectId,
+        ...(input.subjectLabel ? { subjectLabel: input.subjectLabel } : {}),
+        permissions: row.membership.permissions as Permission[],
+      })),
       defaultAccountId: account.id,
       defaultWorkspaceId: workspace.id,
     };
@@ -1549,6 +1573,7 @@ export async function ensureManagedAccessForUser(
         subjectId,
         subjectLabel,
         permissions: row.membership.permissions as Permission[],
+        principalKind: "human_session",
       })),
       defaultAccountId: account.id,
       defaultWorkspaceId: defaultWorkspace.id,
@@ -1805,6 +1830,7 @@ export async function getWorkspaceGrant(
   db: Database,
   subjectId: string,
   workspaceId: string,
+  provenance?: { principalKind?: AccessPrincipalKind },
 ): Promise<AccessGrant | null> {
   const [row] = await db
     .select({
@@ -1827,6 +1853,7 @@ export async function getWorkspaceGrant(
         subjectId: row.membership.subjectId,
         ...(row.membership.subjectLabel ? { subjectLabel: row.membership.subjectLabel } : {}),
         permissions: row.membership.permissions as Permission[],
+        ...(provenance?.principalKind ? { principalKind: provenance.principalKind } : {}),
       }
     : null;
 }
@@ -4773,6 +4800,52 @@ function connectionSubjectVisibility(subjectId?: string | null): SQL {
     : isNull(schema.connections.subjectId);
 }
 
+function connectionExactSubject(subjectId?: string | null): SQL {
+  return subjectId
+    ? eq(schema.connections.subjectId, subjectId)
+    : isNull(schema.connections.subjectId);
+}
+
+async function withConnectionSubjectRls<T>(
+  db: Database,
+  workspaceId: string,
+  subjectId: string | null | undefined,
+  fn: (db: Database) => Promise<T>,
+): Promise<T> {
+  return subjectId
+    ? await withWorkspaceSubjectRls(db, workspaceId, subjectId, fn)
+    : await withWorkspaceRls(db, workspaceId, fn);
+}
+
+async function createConnectionInScope(
+  db: Database,
+  input: CreateConnectionInput,
+): Promise<ConnectionMetadataWithVerification> {
+  const [row] = await db
+    .insert(schema.connections)
+    .values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      subjectId: input.subjectId ?? null,
+      providerDomain: input.providerDomain,
+      kind: input.kind,
+      status: input.status ?? "active",
+      credentialEncrypted: input.credentialEncrypted,
+      grantedScopes: input.grantedScopes ?? [],
+      expiresAt: input.expiresAt ?? null,
+      verifiedInstallAt: input.verifiedInstallAt ?? null,
+      verifiedInstallVersion: input.verifiedInstallVersion ?? null,
+      metadata: input.metadata ?? {},
+      createdBySubjectId: input.createdBySubjectId ?? null,
+      updatedBySubjectId: input.updatedBySubjectId ?? input.createdBySubjectId ?? null,
+    })
+    .returning(connectionMetadataColumns);
+  if (!row) {
+    throw new Error("Failed to create connection");
+  }
+  return mapConnectionMetadata(row);
+}
+
 export async function createConnection(
   db: Database,
   input: CreateConnectionInput,
@@ -4781,29 +4854,10 @@ export async function createConnection(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
-      const [row] = await scopedDb
-        .insert(schema.connections)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          subjectId: input.subjectId ?? null,
-          providerDomain: input.providerDomain,
-          kind: input.kind,
-          status: input.status ?? "active",
-          credentialEncrypted: input.credentialEncrypted,
-          grantedScopes: input.grantedScopes ?? [],
-          expiresAt: input.expiresAt ?? null,
-          verifiedInstallAt: input.verifiedInstallAt ?? null,
-          verifiedInstallVersion: input.verifiedInstallVersion ?? null,
-          metadata: input.metadata ?? {},
-          createdBySubjectId: input.createdBySubjectId ?? null,
-          updatedBySubjectId: input.updatedBySubjectId ?? input.createdBySubjectId ?? null,
-        })
-        .returning(connectionMetadataColumns);
-      if (!row) {
-        throw new Error("Failed to create connection");
+      if (input.subjectId) {
+        await setSubjectRlsContext(scopedDb, input.subjectId);
       }
-      return mapConnectionMetadata(row);
+      return await createConnectionInScope(scopedDb, input);
     },
   );
 }
@@ -4813,7 +4867,7 @@ export async function listConnectionsMetadata(
   workspaceId: string,
   subjectId?: string | null,
 ): Promise<ConnectionMetadataWithVerification[]> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+  return await withConnectionSubjectRls(db, workspaceId, subjectId, async (scopedDb) => {
     const rows = await scopedDb
       .select(connectionMetadataColumns)
       .from(schema.connections)
@@ -4834,7 +4888,7 @@ export async function getConnectionMetadata(
   connectionId: string,
   subjectId?: string | null,
 ): Promise<ConnectionMetadataWithVerification | null> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+  return await withConnectionSubjectRls(db, workspaceId, subjectId, async (scopedDb) => {
     const [row] = await scopedDb
       .select(connectionMetadataColumns)
       .from(schema.connections)
@@ -4850,53 +4904,102 @@ export async function getConnectionMetadata(
   });
 }
 
+async function updateConnectionInScope(
+  db: Database,
+  input: UpdateConnectionInput,
+): Promise<ConnectionMetadataWithVerification | null> {
+  const set = {
+    updatedAt: new Date(),
+    ...(input.providerDomain !== undefined ? { providerDomain: input.providerDomain } : {}),
+    ...(input.subjectId !== undefined ? { subjectId: input.subjectId } : {}),
+    ...(input.kind !== undefined ? { kind: input.kind } : {}),
+    ...(input.status !== undefined ? { status: input.status } : {}),
+    ...(input.credentialEncrypted !== undefined
+      ? {
+          credentialEncrypted: input.credentialEncrypted,
+          version: sql`${schema.connections.version} + 1`,
+          lastError: null,
+        }
+      : {}),
+    ...(input.grantedScopes !== undefined ? { grantedScopes: input.grantedScopes } : {}),
+    ...(input.expiresAt !== undefined ? { expiresAt: input.expiresAt } : {}),
+    ...(input.verifiedInstallAt !== undefined
+      ? { verifiedInstallAt: input.verifiedInstallAt }
+      : {}),
+    ...(input.verifiedInstallVersion !== undefined
+      ? { verifiedInstallVersion: input.verifiedInstallVersion }
+      : {}),
+    ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+    ...(input.updatedBySubjectId !== undefined
+      ? { updatedBySubjectId: input.updatedBySubjectId }
+      : {}),
+  };
+  const [row] = await db
+    .update(schema.connections)
+    .set(set)
+    .where(
+      and(
+        eq(schema.connections.workspaceId, input.workspaceId),
+        eq(schema.connections.id, input.connectionId),
+        connectionSubjectVisibility(input.visibleToSubjectId),
+        ...(input.expectedVersion !== undefined
+          ? [eq(schema.connections.version, input.expectedVersion)]
+          : []),
+      ),
+    )
+    .returning(connectionMetadataColumns);
+  return row ? mapConnectionMetadata(row) : null;
+}
+
 export async function updateConnection(
   db: Database,
   input: UpdateConnectionInput,
 ): Promise<ConnectionMetadataWithVerification | null> {
-  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
-    const set = {
+  return await withConnectionSubjectRls(
+    db,
+    input.workspaceId,
+    input.visibleToSubjectId,
+    async (scopedDb) => await updateConnectionInScope(scopedDb, input),
+  );
+}
+
+async function revokeConnectionInScope(
+  db: Database,
+  workspaceId: string,
+  connectionId: string,
+  updatedBySubjectId?: string | null,
+  expectedVersion?: number,
+): Promise<ConnectionMetadataWithVerification | null> {
+  const [row] = await db
+    .update(schema.connections)
+    .set({
+      status: "revoked",
+      // The version bump invalidates any in-flight refresh's (id, version) CAS,
+      // so a racing refresh cannot commit and flip the row back to active.
+      version: sql`${schema.connections.version} + 1`,
+      // Status-only revocation does not replace the verified credential or bot
+      // identity. Carry the marker to the same new CAS version so the dedicated
+      // reinstall path can still recognize (but not use) the inactive row.
+      verifiedInstallVersion: sql`case
+        when ${schema.connections.verifiedInstallAt} is null then null
+        else ${schema.connections.version} + 1
+      end`,
+      updatedBySubjectId: updatedBySubjectId ?? null,
       updatedAt: new Date(),
-      ...(input.providerDomain !== undefined ? { providerDomain: input.providerDomain } : {}),
-      ...(input.subjectId !== undefined ? { subjectId: input.subjectId } : {}),
-      ...(input.kind !== undefined ? { kind: input.kind } : {}),
-      ...(input.status !== undefined ? { status: input.status } : {}),
-      ...(input.credentialEncrypted !== undefined
-        ? {
-            credentialEncrypted: input.credentialEncrypted,
-            version: sql`${schema.connections.version} + 1`,
-            lastError: null,
-          }
-        : {}),
-      ...(input.grantedScopes !== undefined ? { grantedScopes: input.grantedScopes } : {}),
-      ...(input.expiresAt !== undefined ? { expiresAt: input.expiresAt } : {}),
-      ...(input.verifiedInstallAt !== undefined
-        ? { verifiedInstallAt: input.verifiedInstallAt }
-        : {}),
-      ...(input.verifiedInstallVersion !== undefined
-        ? { verifiedInstallVersion: input.verifiedInstallVersion }
-        : {}),
-      ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
-      ...(input.updatedBySubjectId !== undefined
-        ? { updatedBySubjectId: input.updatedBySubjectId }
-        : {}),
-    };
-    const [row] = await scopedDb
-      .update(schema.connections)
-      .set(set)
-      .where(
-        and(
-          eq(schema.connections.workspaceId, input.workspaceId),
-          eq(schema.connections.id, input.connectionId),
-          connectionSubjectVisibility(input.visibleToSubjectId),
-          ...(input.expectedVersion !== undefined
-            ? [eq(schema.connections.version, input.expectedVersion)]
-            : []),
-        ),
-      )
-      .returning(connectionMetadataColumns);
-    return row ? mapConnectionMetadata(row) : null;
-  });
+    })
+    .where(
+      and(
+        eq(schema.connections.workspaceId, workspaceId),
+        eq(schema.connections.id, connectionId),
+        // Same visibility rule as get/update: shared rows plus the caller's own
+        // subject rows. Cross-subject revocation (admin janitorial) arrives with
+        // the subject-connections UX in I5, deliberately not before.
+        connectionSubjectVisibility(updatedBySubjectId),
+        ...(expectedVersion !== undefined ? [eq(schema.connections.version, expectedVersion)] : []),
+      ),
+    )
+    .returning(connectionMetadataColumns);
+  return row ? mapConnectionMetadata(row) : null;
 }
 
 export async function revokeConnection(
@@ -4905,37 +5008,242 @@ export async function revokeConnection(
   connectionId: string,
   updatedBySubjectId?: string | null,
 ): Promise<ConnectionMetadataWithVerification | null> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .update(schema.connections)
-      .set({
-        status: "revoked",
-        // The version bump invalidates any in-flight refresh's (id, version) CAS,
-        // so a racing refresh cannot commit and flip the row back to active.
-        version: sql`${schema.connections.version} + 1`,
-        // Status-only revocation does not replace the verified credential or bot
-        // identity. Carry the marker to the same new CAS version so the dedicated
-        // reinstall path can still recognize (but not use) the inactive row.
-        verifiedInstallVersion: sql`case
-          when ${schema.connections.verifiedInstallAt} is null then null
-          else ${schema.connections.version} + 1
-        end`,
-        updatedBySubjectId: updatedBySubjectId ?? null,
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(schema.connections.workspaceId, workspaceId),
-          eq(schema.connections.id, connectionId),
-          // Same visibility rule as get/update: shared rows plus the caller's own
-          // subject rows. Cross-subject revocation (admin janitorial) arrives with
-          // the subject-connections UX in I5, deliberately not before.
-          connectionSubjectVisibility(updatedBySubjectId),
-        ),
-      )
-      .returning(connectionMetadataColumns);
-    return row ? mapConnectionMetadata(row) : null;
+  return await withConnectionSubjectRls(
+    db,
+    workspaceId,
+    updatedBySubjectId,
+    async (scopedDb) =>
+      await revokeConnectionInScope(scopedDb, workspaceId, connectionId, updatedBySubjectId),
+  );
+}
+
+export class SlackBotLifecycleSuccessAuditError extends Error {
+  constructor() {
+    super("OpenGeni Slack bot lifecycle success audit failed");
+    this.name = "SlackBotLifecycleSuccessAuditError";
+  }
+}
+
+type SlackBotLifecycleSuccessAuditInput = {
+  accountId: string;
+  workspaceId: string;
+  subjectId: string;
+  credentialRole: string;
+  credentialLabel: string;
+  slackTeamId: string;
+};
+
+async function insertSlackBotLifecycleSuccessAuditInScope(
+  db: Database,
+  input: SlackBotLifecycleSuccessAuditInput & {
+    action: "slack_bot.connected" | "slack_bot.reinstalled" | "slack_bot.disconnected";
+    connectionId: string;
+  },
+): Promise<void> {
+  try {
+    await db.insert(schema.auditEvents).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      subjectId: input.subjectId,
+      action: input.action,
+      targetType: "connection",
+      targetId: input.connectionId,
+      metadata: {
+        credentialRole: input.credentialRole,
+        credentialLabel: input.credentialLabel,
+        connectionId: input.connectionId,
+        slackTeamId: input.slackTeamId,
+        outcome: "succeeded",
+      },
+    });
+  } catch {
+    // Do not leak a provider/database payload through the callback. Throwing from
+    // the RLS transaction is what rolls the paired connection mutation back.
+    throw new SlackBotLifecycleSuccessAuditError();
+  }
+}
+
+async function assertWorkspaceAccountPairInScope(
+  db: Database,
+  accountId: string,
+  workspaceId: string,
+): Promise<void> {
+  const [workspace] = await db
+    .select({ id: schema.workspaces.id })
+    .from(schema.workspaces)
+    .where(and(eq(schema.workspaces.id, workspaceId), eq(schema.workspaces.accountId, accountId)))
+    .limit(1);
+  if (!workspace) {
+    throw new Error("Workspace does not belong to the expected account");
+  }
+}
+
+async function withSlackBotLifecycleRls<T>(
+  db: Database,
+  input: Pick<SlackBotLifecycleSuccessAuditInput, "accountId" | "workspaceId" | "subjectId">,
+  fn: (db: Database) => Promise<T>,
+): Promise<T> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, input.subjectId);
+      await assertWorkspaceAccountPairInScope(scopedDb, input.accountId, input.workspaceId);
+      return await fn(scopedDb);
+    },
+  );
+}
+
+export async function createConnectionWithSlackBotSuccessAudit(
+  db: Database,
+  input: SlackBotLifecycleSuccessAuditInput & { connection: CreateConnectionInput },
+): Promise<ConnectionMetadataWithVerification> {
+  if (
+    input.connection.accountId !== input.accountId ||
+    input.connection.workspaceId !== input.workspaceId
+  ) {
+    throw new Error("Slack bot connection and lifecycle audit tenant must match");
+  }
+  return await withSlackBotLifecycleRls(db, input, async (scopedDb) => {
+    const connection = await createConnectionInScope(scopedDb, input.connection);
+    await insertSlackBotLifecycleSuccessAuditInScope(scopedDb, {
+      ...input,
+      action: "slack_bot.connected",
+      connectionId: connection.id,
+    });
+    return connection;
   });
+}
+
+export async function updateConnectionWithSlackBotSuccessAudit(
+  db: Database,
+  input: SlackBotLifecycleSuccessAuditInput & { connection: UpdateConnectionInput },
+): Promise<ConnectionMetadataWithVerification | null> {
+  if (input.connection.workspaceId !== input.workspaceId) {
+    throw new Error("Slack bot connection and lifecycle audit workspace must match");
+  }
+  return await withSlackBotLifecycleRls(db, input, async (scopedDb) => {
+    const connection = await updateConnectionInScope(scopedDb, input.connection);
+    if (!connection) return null;
+    if (connection.accountId !== input.accountId) {
+      throw new Error("Slack bot connection and lifecycle audit account must match");
+    }
+    await insertSlackBotLifecycleSuccessAuditInScope(scopedDb, {
+      ...input,
+      action: "slack_bot.reinstalled",
+      connectionId: connection.id,
+    });
+    return connection;
+  });
+}
+
+export async function revokeConnectionWithSlackBotSuccessAudit(
+  db: Database,
+  input: SlackBotLifecycleSuccessAuditInput & {
+    connectionId: string;
+    expectedVersion: number;
+  },
+): Promise<ConnectionMetadataWithVerification | null> {
+  return await withSlackBotLifecycleRls(db, input, async (scopedDb) => {
+    const connection = await revokeConnectionInScope(
+      scopedDb,
+      input.workspaceId,
+      input.connectionId,
+      input.subjectId,
+      input.expectedVersion,
+    );
+    if (!connection) return null;
+    if (connection.accountId !== input.accountId) {
+      throw new Error("Slack bot connection and lifecycle audit account must match");
+    }
+    await insertSlackBotLifecycleSuccessAuditInScope(scopedDb, {
+      ...input,
+      action: "slack_bot.disconnected",
+      connectionId: connection.id,
+    });
+    return connection;
+  });
+}
+
+export type SlackBotInstallCallbackFailureStage =
+  | "permission_check"
+  | "nonce_consume"
+  | "provider_denial"
+  | "code_exchange"
+  | "credential_verification"
+  | "permission_recheck"
+  | "principal_validation"
+  | "persistence";
+
+export type SlackBotInstallCallbackFailureReason =
+  | "permission_lost"
+  | "state_replayed"
+  | "provider_denied"
+  | "missing_code"
+  | "exchange_failed"
+  | "scope_mismatch"
+  | "identity_mismatch"
+  | "credential_verification_failed"
+  | "connection_conflict"
+  | "principal_mismatch"
+  | "persistence_failed"
+  | "success_audit_failed";
+
+export async function recordSlackBotInstallCallbackFailure(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+    callbackDigest: string;
+    installMode: "connect" | "reinstall";
+    stage: SlackBotInstallCallbackFailureStage;
+    reason: SlackBotInstallCallbackFailureReason;
+  },
+): Promise<boolean> {
+  if (!/^[a-f0-9]{64}$/.test(input.callbackDigest)) {
+    throw new Error("Slack callback digest must be a lowercase SHA-256 value");
+  }
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, input.subjectId);
+      await assertWorkspaceAccountPairInScope(scopedDb, input.accountId, input.workspaceId);
+      await scopedDb.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`slack-callback-failure:${input.workspaceId}:${input.callbackDigest}`}, 0))`,
+      );
+      const [existing] = await scopedDb
+        .select({ id: schema.auditEvents.id })
+        .from(schema.auditEvents)
+        .where(
+          and(
+            eq(schema.auditEvents.accountId, input.accountId),
+            eq(schema.auditEvents.workspaceId, input.workspaceId),
+            eq(schema.auditEvents.action, "slack_bot.install.callback.failed"),
+            eq(schema.auditEvents.targetType, "slack_oauth_callback"),
+            eq(schema.auditEvents.targetId, input.callbackDigest),
+          ),
+        )
+        .limit(1);
+      if (existing) return false;
+      await scopedDb.insert(schema.auditEvents).values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId,
+        action: "slack_bot.install.callback.failed",
+        targetType: "slack_oauth_callback",
+        targetId: input.callbackDigest,
+        metadata: {
+          outcome: "failed",
+          installMode: input.installMode,
+          stage: input.stage,
+          reason: input.reason,
+        },
+      });
+      return true;
+    },
+  );
 }
 
 export type ClaimSlackBotPostOperationResult =
@@ -5216,6 +5524,9 @@ export async function loadConnectionCredentialForBroker(
     allowSubjectOwned?: boolean;
   },
 ): Promise<ConnectionCredentialForBroker | null> {
+  if (input.allowSubjectOwned && !input.subjectId) {
+    return null;
+  }
   const key = environmentsEncryptionKeyBytes(settings);
   if (!key) {
     throw new Error(
@@ -5223,7 +5534,7 @@ export async function loadConnectionCredentialForBroker(
     );
   }
   const subjectPredicate = input.allowSubjectOwned
-    ? connectionSubjectVisibility(input.subjectId)
+    ? connectionExactSubject(input.subjectId)
     : isNull(schema.connections.subjectId);
   const conditions: SQL[] = [
     eq(schema.connections.workspaceId, input.workspaceId),
@@ -5237,49 +5548,54 @@ export async function loadConnectionCredentialForBroker(
       conditions.push(eq(schema.connections.kind, input.kind));
     }
   }
-  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
-    // Prefer active rows: a revoke bumps updatedAt, so recency alone would let a
-    // freshly revoked connection shadow an active replacement for the provider.
-    const [row] = await scopedDb
-      .select()
-      .from(schema.connections)
-      .where(and(...conditions))
-      .orderBy(
-        desc(sql`(${schema.connections.status} = 'active')`),
-        desc(schema.connections.updatedAt),
-      )
-      .limit(1);
-    if (!row) {
-      return null;
-    }
-    let credential: unknown;
-    try {
-      credential = JSON.parse(decryptEnvironmentValue(key, row.credentialEncrypted));
-    } catch (error) {
-      throw new Error(
-        `connection credential could not be decrypted for ${row.id}: ${error instanceof Error ? error.message : String(error)}`,
-        { cause: error },
-      );
-    }
-    if (!credential || typeof credential !== "object" || Array.isArray(credential)) {
-      throw new Error(`connection credential bundle for ${row.id} is not a JSON object`);
-    }
-    return {
-      id: row.id,
-      accountId: row.accountId,
-      workspaceId: row.workspaceId,
-      subjectId: row.subjectId,
-      providerDomain: row.providerDomain,
-      kind: row.kind as ConnectionKind,
-      status: row.status as ConnectionStatus,
-      credential: credential as Record<string, unknown>,
-      grantedScopes: row.grantedScopes,
-      expiresAt: row.expiresAt,
-      lastRefreshAt: row.lastRefreshAt,
-      version: row.version,
-      metadata: row.metadata,
-    };
-  });
+  return await withConnectionSubjectRls(
+    db,
+    input.workspaceId,
+    input.allowSubjectOwned ? input.subjectId : null,
+    async (scopedDb) => {
+      // Prefer active rows: a revoke bumps updatedAt, so recency alone would let a
+      // freshly revoked connection shadow an active replacement for the provider.
+      const [row] = await scopedDb
+        .select()
+        .from(schema.connections)
+        .where(and(...conditions))
+        .orderBy(
+          desc(sql`(${schema.connections.status} = 'active')`),
+          desc(schema.connections.updatedAt),
+        )
+        .limit(1);
+      if (!row) {
+        return null;
+      }
+      let credential: unknown;
+      try {
+        credential = JSON.parse(decryptEnvironmentValue(key, row.credentialEncrypted));
+      } catch (error) {
+        throw new Error(
+          `connection credential could not be decrypted for ${row.id}: ${error instanceof Error ? error.message : String(error)}`,
+          { cause: error },
+        );
+      }
+      if (!credential || typeof credential !== "object" || Array.isArray(credential)) {
+        throw new Error(`connection credential bundle for ${row.id} is not a JSON object`);
+      }
+      return {
+        id: row.id,
+        accountId: row.accountId,
+        workspaceId: row.workspaceId,
+        subjectId: row.subjectId,
+        providerDomain: row.providerDomain,
+        kind: row.kind as ConnectionKind,
+        status: row.status as ConnectionStatus,
+        credential: credential as Record<string, unknown>,
+        grantedScopes: row.grantedScopes,
+        expiresAt: row.expiresAt,
+        lastRefreshAt: row.lastRefreshAt,
+        version: row.version,
+        metadata: row.metadata,
+      };
+    },
+  );
 }
 
 export async function recordConnectionTokenRefresh(
@@ -5292,35 +5608,42 @@ export async function recordConnectionTokenRefresh(
     expiresAt: Date | null;
     grantedScopes?: string[];
     lastRefreshAt: Date;
+    subjectId?: string | null;
   },
 ): Promise<boolean> {
-  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
-    const set = {
-      credentialEncrypted: input.credentialEncrypted,
-      expiresAt: input.expiresAt,
-      lastRefreshAt: input.lastRefreshAt,
-      status: "active",
-      lastError: null,
-      version: sql`${schema.connections.version} + 1`,
-      updatedAt: new Date(),
-      ...(input.grantedScopes !== undefined ? { grantedScopes: input.grantedScopes } : {}),
-    };
-    const updated = await scopedDb
-      .update(schema.connections)
-      .set(set)
-      .where(
-        and(
-          eq(schema.connections.id, input.id),
-          eq(schema.connections.workspaceId, input.workspaceId),
-          eq(schema.connections.version, input.version),
-          // A refresh may only ever renew a live credential; revoked/errored rows
-          // stay dead even if a status change somewhere forgot to bump version.
-          eq(schema.connections.status, "active"),
-        ),
-      )
-      .returning({ id: schema.connections.id });
-    return updated.length > 0;
-  });
+  return await withConnectionSubjectRls(
+    db,
+    input.workspaceId,
+    input.subjectId,
+    async (scopedDb) => {
+      const set = {
+        credentialEncrypted: input.credentialEncrypted,
+        expiresAt: input.expiresAt,
+        lastRefreshAt: input.lastRefreshAt,
+        status: "active",
+        lastError: null,
+        version: sql`${schema.connections.version} + 1`,
+        updatedAt: new Date(),
+        ...(input.grantedScopes !== undefined ? { grantedScopes: input.grantedScopes } : {}),
+      };
+      const updated = await scopedDb
+        .update(schema.connections)
+        .set(set)
+        .where(
+          and(
+            eq(schema.connections.id, input.id),
+            eq(schema.connections.workspaceId, input.workspaceId),
+            eq(schema.connections.version, input.version),
+            connectionExactSubject(input.subjectId),
+            // A refresh may only ever renew a live credential; revoked/errored rows
+            // stay dead even if a status change somewhere forgot to bump version.
+            eq(schema.connections.status, "active"),
+          ),
+        )
+        .returning({ id: schema.connections.id });
+      return updated.length > 0;
+    },
+  );
 }
 
 export async function setConnectionStatus(
@@ -5328,9 +5651,9 @@ export async function setConnectionStatus(
   workspaceId: string,
   status: ConnectionStatus,
   lastError: string | null,
-  guard: { id: string; version: number },
+  guard: { id: string; version: number; subjectId?: string | null },
 ): Promise<boolean> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+  return await withConnectionSubjectRls(db, workspaceId, guard.subjectId, async (scopedDb) => {
     const updated = await scopedDb
       .update(schema.connections)
       .set({
@@ -5348,6 +5671,7 @@ export async function setConnectionStatus(
           eq(schema.connections.workspaceId, workspaceId),
           eq(schema.connections.id, guard.id),
           eq(schema.connections.version, guard.version),
+          connectionExactSubject(guard.subjectId),
         ),
       )
       .returning({ id: schema.connections.id });
@@ -5359,8 +5683,9 @@ export async function recordConnectionUsed(
   db: Database,
   workspaceId: string,
   connectionId: string,
+  subjectId?: string | null,
 ): Promise<void> {
-  await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+  await withConnectionSubjectRls(db, workspaceId, subjectId, async (scopedDb) => {
     await scopedDb
       .update(schema.connections)
       .set({
@@ -5371,6 +5696,7 @@ export async function recordConnectionUsed(
         and(
           eq(schema.connections.workspaceId, workspaceId),
           eq(schema.connections.id, connectionId),
+          connectionExactSubject(subjectId),
         ),
       );
   });
@@ -13560,8 +13886,9 @@ export type SessionCreateInput = {
   initialMessage: string;
   initialTurnInstructions?: string | null;
   resources: ResourceRef[];
+  skills?: SessionSkill[];
   tools?: ToolRef[];
-  toolPolicy?: SessionToolPolicy | null;
+  toolPolicy?: SessionToolPolicy;
   metadata: Record<string, unknown>;
   createdBy?: TurnInitiator;
   createdByContext?: TurnInitiatorContext;
@@ -13572,6 +13899,7 @@ export type SessionCreateInput = {
   rigId?: string | null;
   rigVersionId?: string | null;
   firstPartyMcpPermissions?: Permission[] | null;
+  firstPartyMcpTools?: FirstPartyMcpToolName[];
   instructions?: string | null;
   parentSessionId?: string | null;
   createIdempotencyKey?: string | null;
@@ -13959,8 +14287,12 @@ async function createSessionInTransaction(
       initialMessage: input.initialMessage,
       initialTurnInstructions: input.initialTurnInstructions ?? null,
       resources: input.resources,
+      skills: input.skills ?? [],
       tools: input.tools ?? [],
-      toolPolicy: input.toolPolicy ?? null,
+      toolPolicy: input.toolPolicy ?? {
+        mode: "explicit",
+        inheritedFromSessionId: input.parentSessionId ?? null,
+      },
       metadata: input.metadata,
       ...creatorColumns(frozenCreator),
       model: input.model,
@@ -13971,6 +14303,7 @@ async function createSessionInTransaction(
       rigId: input.rigId ?? null,
       rigVersionId: input.rigVersionId ?? null,
       firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
+      firstPartyMcpTools: input.firstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
       instructions: input.instructions ?? null,
       parentSessionId: input.parentSessionId ?? null,
       createIdempotencyKey,
@@ -15972,13 +16305,16 @@ type LineageIdRow = {
   parentSessionId: string | null;
   depth: number;
   path: string[];
+  cycle: boolean;
 };
 
 /**
  * Read the full lineage slice around a session. Every recursive step carries
  * workspace_id as a hard predicate; a foreign parent/child id is invisible even
- * before RLS is considered. Ancestors are capped at 10 and returned root-first.
- * Descendants are capped at depth 5 and 200 total rows, returned as a nested tree.
+ * before RLS is considered. Up to 63 ancestors are returned root-first; an
+ * invalid, cyclic, foreign, or deeper chain fails closed instead of presenting
+ * a partial path as if it were rooted. Descendants are capped at depth 5 and
+ * 200 total rows, returned as a nested tree.
  */
 export async function getSessionLineage(
   db: Database,
@@ -16000,25 +16336,39 @@ export async function getSessionLineage(
       return null;
     }
 
-    const ancestorRows = (await scopedDb.execute(sql<LineageIdRow>`
-      with recursive ancestors(id, parent_session_id, depth, path) as (
-        select ${schema.sessions.id}, ${schema.sessions.parentSessionId}, 0, array[${schema.sessions.id}]
+    const ancestorLineageRows = (await scopedDb.execute(sql<LineageIdRow>`
+      with recursive ancestors(id, parent_session_id, depth, path, cycle) as (
+        select ${schema.sessions.id}, ${schema.sessions.parentSessionId}, 0, array[${schema.sessions.id}], false
         from ${schema.sessions}
         where ${schema.sessions.workspaceId} = ${workspaceId}
           and ${schema.sessions.id} = ${sessionId}
         union all
-        select parent.id, parent.parent_session_id, ancestors.depth + 1, ancestors.path || parent.id
+        select
+          parent.id,
+          parent.parent_session_id,
+          ancestors.depth + 1,
+          ancestors.path || parent.id,
+          parent.id = any(ancestors.path)
         from ${schema.sessions} parent
         join ancestors on ancestors.parent_session_id = parent.id
         where parent.workspace_id = ${workspaceId}
-          and ancestors.depth < 10
-          and not parent.id = any(ancestors.path)
+          and not ancestors.cycle
+          and ancestors.depth < 64
       )
-      select id, parent_session_id as "parentSessionId", depth, path
+      select id, parent_session_id as "parentSessionId", depth, path, cycle
       from ancestors
-      where depth > 0
       order by depth desc
     `)) as LineageIdRow[];
+    const frontier = ancestorLineageRows[0];
+    if (
+      !frontier ||
+      frontier.cycle ||
+      frontier.parentSessionId !== null ||
+      Number(frontier.depth) >= 64
+    ) {
+      throw new Error(`session lineage for ${sessionId} has no valid workspace root`);
+    }
+    const ancestorRows = ancestorLineageRows.filter((row) => row.depth > 0);
 
     const childRows = (await scopedDb.execute(sql<LineageIdRow>`
       with recursive descendants(id, parent_session_id, depth, path) as (
@@ -16034,7 +16384,7 @@ export async function getSessionLineage(
           and descendants.depth < 5
           and not child.id = any(descendants.path)
       )
-      select id, parent_session_id as "parentSessionId", depth, path
+      select id, parent_session_id as "parentSessionId", depth, path, false as cycle
       from descendants
       order by path
       limit ${descendantLimit + 1}
@@ -20722,6 +21072,1479 @@ export type LostProviderWorkspaceSettlement = {
   processHoldersDeleted: number;
 };
 
+export type ColdLostProviderObjectObservation = {
+  providerBackend: string | null;
+  objectKind: "modal_filesystem_snapshot" | "modal_directory_snapshot" | null;
+  objectId: string | null;
+  status: "exists" | "missing" | "unknown";
+  observedAt: string | null;
+};
+
+export type PreviewColdLostLeaseInstanceBlockersInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  sandboxGroupId: string;
+  expectedLeaseId?: string;
+  expectedBackend?: string;
+  expectedCurrentEpoch?: number;
+  expectedLostEpoch?: number;
+  expectedLostInstanceId?: string;
+  expectedRefcount?: number;
+  expectedProviderBackend?: string;
+  expectedRouteKind?: "home" | "active";
+  expectedRouteTargetId?: string | null;
+  expectedRouteEpoch?: number;
+  expectedWorkspaceGeneration?: number;
+  expectedWorkspaceStatus?: SandboxWorkspaceReadiness;
+  expectedRestoreStatus?: SandboxRestoreStatus;
+  expectedRestoreFailureCode?: string | null;
+  expectedArchiveGeneration?: number | null;
+  expectedArchiveComplete?: boolean;
+  expectedArchiveDescriptorVersion?: 1;
+  expectedArchiveRevision?: string;
+  expectedArchiveObjectKind?: "modal_filesystem_snapshot" | "modal_directory_snapshot";
+  expectedArchiveObjectId?: string;
+  expectedDescriptorReferenceBytes?: number;
+  expectedDescriptorReferenceSha256?: string;
+  expectedReferenceBytes?: number;
+  expectedReferenceSha256?: string;
+  expectedTreeFingerprintAlgorithm?: "sha256";
+  expectedTreeFingerprintSha256?: string;
+  expectedTreeEntryCount?: number;
+  expectedTreeFileCount?: number;
+  expectedTotalFileBytes?: number;
+  expectedArchiveCapturedAt?: string;
+  expectedArchiveVerificationState?: "verified" | "unverified";
+  expectedArchiveVerifiedRevision?: string | null;
+  expectedArchiveVerifiedAt?: string | null;
+  providerObject: ColdLostProviderObjectObservation;
+};
+
+export type ColdLostReconciliationBlockerCode =
+  | "database_transaction_not_read_only"
+  | "database_row_security_disabled"
+  | "database_role_is_superuser"
+  | "database_role_bypasses_rls"
+  | "database_force_rls_unverified"
+  | "expected_lease_id_missing"
+  | "expected_backend_missing"
+  | "expected_current_epoch_missing"
+  | "expected_lost_epoch_missing"
+  | "expected_lost_instance_missing"
+  | "expected_refcount_missing"
+  | "expected_provider_backend_missing"
+  | "expected_route_kind_missing"
+  | "expected_route_target_missing"
+  | "expected_route_epoch_missing"
+  | "expected_workspace_generation_missing"
+  | "expected_workspace_status_missing"
+  | "expected_restore_status_missing"
+  | "expected_restore_failure_missing"
+  | "expected_archive_generation_missing"
+  | "expected_archive_complete_missing"
+  | "expected_archive_descriptor_version_missing"
+  | "expected_archive_revision_missing"
+  | "expected_archive_object_kind_missing"
+  | "expected_archive_object_id_missing"
+  | "expected_descriptor_reference_bytes_missing"
+  | "expected_descriptor_reference_sha256_missing"
+  | "expected_reference_bytes_missing"
+  | "expected_reference_sha256_missing"
+  | "expected_tree_fingerprint_algorithm_missing"
+  | "expected_tree_fingerprint_sha256_missing"
+  | "expected_tree_entry_count_missing"
+  | "expected_tree_file_count_missing"
+  | "expected_total_file_bytes_missing"
+  | "expected_archive_captured_at_missing"
+  | "expected_archive_verification_state_missing"
+  | "expected_archive_verified_revision_missing"
+  | "expected_archive_verified_at_missing"
+  | "epoch_relation_invalid"
+  | "session_not_found"
+  | "session_group_mismatch"
+  | "lease_not_found"
+  | "lease_id_mismatch"
+  | "lease_backend_mismatch"
+  | "lost_provider_backend_mismatch"
+  | "lease_not_cold"
+  | "lease_instance_present"
+  | "current_epoch_mismatch"
+  | "refcount_mismatch"
+  | "workspace_generation_mismatch"
+  | "workspace_status_mismatch"
+  | "restore_status_mismatch"
+  | "restore_failure_mismatch"
+  | "archive_generation_mismatch"
+  | "archive_completeness_mismatch"
+  | "lost_provider_recovery_unverified"
+  | "archive_descriptor_missing"
+  | "archive_generation_incomplete"
+  | "archive_base64_invalid"
+  | "archive_bytes_mismatch"
+  | "archive_descriptor_version_mismatch"
+  | "archive_revision_mismatch"
+  | "archive_object_kind_mismatch"
+  | "archive_object_id_mismatch"
+  | "archive_descriptor_reference_bytes_mismatch"
+  | "archive_descriptor_reference_sha256_mismatch"
+  | "archive_reference_bytes_mismatch"
+  | "archive_reference_sha256_mismatch"
+  | "archive_tree_fingerprint_algorithm_mismatch"
+  | "archive_tree_fingerprint_sha256_mismatch"
+  | "archive_tree_entry_count_mismatch"
+  | "archive_tree_file_count_mismatch"
+  | "archive_total_file_bytes_mismatch"
+  | "archive_captured_at_mismatch"
+  | "archive_verification_state_mismatch"
+  | "archive_verified_revision_mismatch"
+  | "archive_verified_at_mismatch"
+  | "archive_verification_unavailable"
+  | "archive_provider_object_identity_unavailable"
+  | "provider_object_observation_missing"
+  | "provider_object_identity_mismatch"
+  | "provider_object_missing"
+  | "provider_object_status_unknown"
+  | "provider_object_observation_time_invalid"
+  | "exact_route_mismatch"
+  | "unmatched_active_processes"
+  | "unmatched_unsettled_admissions"
+  | "unmatched_open_ptys"
+  | "unmatched_process_holders"
+  | "active_direct_holders"
+  | "active_turn_writer_possible"
+  | "turn_holder_attempt_linkage_unknown"
+  | "unsettled_interruptions"
+  | "blocker_inventory_incomplete";
+
+export type ColdLostReconciliationPreview = {
+  version: 1;
+  status: "eligible" | "blocked";
+  previewId: string;
+  snapshotAt: string;
+  database: {
+    role: string;
+    roleSuperuser: boolean;
+    roleBypassRls: boolean;
+    transactionReadOnly: boolean;
+    rowSecurity: boolean;
+    forceRls: boolean;
+    accountId: string;
+    workspaceId: string;
+  } | null;
+  locator: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    sandboxGroupId: string;
+  };
+  expected: {
+    leaseId: string | null;
+    backend: string | null;
+    currentEpoch: number | null;
+    lostEpoch: number | null;
+    lostInstanceId: string | null;
+    refcount: number | null;
+    providerBackend: string | null;
+    routeKind: "home" | "active" | null;
+    routeTargetId: string | null;
+    routeTargetSupplied: boolean;
+    routeEpoch: number | null;
+    workspaceGeneration: number | null;
+    workspaceStatus: SandboxWorkspaceReadiness | null;
+    restoreStatus: SandboxRestoreStatus | null;
+    restoreFailureCode: string | null;
+    restoreFailureSupplied: boolean;
+    archiveGeneration: number | null;
+    archiveGenerationSupplied: boolean;
+    archiveComplete: boolean | null;
+    archiveDescriptorVersion: 1 | null;
+    archiveRevision: string | null;
+    archiveObjectKind: "modal_filesystem_snapshot" | "modal_directory_snapshot" | null;
+    archiveObjectId: string | null;
+    descriptorReferenceBytes: number | null;
+    descriptorReferenceSha256: string | null;
+    referenceBytes: number | null;
+    referenceSha256: string | null;
+    treeFingerprintAlgorithm: "sha256" | null;
+    treeFingerprintSha256: string | null;
+    treeEntryCount: number | null;
+    treeFileCount: number | null;
+    totalFileBytes: number | null;
+    archiveCapturedAt: string | null;
+    archiveVerificationState: "verified" | "unverified" | null;
+    archiveVerifiedRevision: string | null;
+    archiveVerifiedRevisionSupplied: boolean;
+    archiveVerifiedAt: string | null;
+    archiveVerifiedAtSupplied: boolean;
+  };
+  session: {
+    id: string;
+    status: string;
+    sandboxGroupId: string;
+    activeSandboxId: string | null;
+    activeEpoch: number;
+  } | null;
+  lease: {
+    id: string;
+    liveness: SandboxLeaseLiveness;
+    instanceId: string | null;
+    backend: string;
+    leaseEpoch: number;
+    workspaceGeneration: number;
+    archiveGeneration: number | null;
+    archiveComplete: boolean;
+    refcount: number;
+    turnHolders: number;
+    viewerHolders: number;
+    recoveryProviderStatus: SandboxProviderExistence;
+    recoveryProviderInstanceId: string | null;
+    workspaceStatus: SandboxWorkspaceReadiness;
+    restoreStatus: SandboxRestoreStatus;
+    restoreFailureCode: string | null;
+  } | null;
+  archive: {
+    status: SandboxArchiveAvailability;
+    descriptorVersion: 1 | null;
+    revision: string | null;
+    generation: number | null;
+    objectKind: "modal_filesystem_snapshot" | "modal_directory_snapshot" | null;
+    objectId: string | null;
+    descriptorReferenceBytes: number | null;
+    descriptorReferenceSha256: string | null;
+    referenceBytes: number | null;
+    referenceSha256: string | null;
+    referenceVerified: boolean;
+    treeFingerprintAlgorithm: "sha256" | null;
+    treeFingerprintSha256: string | null;
+    entryCount: number | null;
+    fileCount: number | null;
+    totalFileBytes: number | null;
+    complete: boolean;
+    verificationState: "verified" | "unverified";
+    capturedAt: string | null;
+    verifiedRevision: string | null;
+    verifiedAt: string | null;
+    providerObservation: {
+      providerBackend: string | null;
+      objectKind: "modal_filesystem_snapshot" | "modal_directory_snapshot" | null;
+      objectId: string | null;
+      status: "exists" | "missing" | "unknown";
+      observedAt: string | null;
+    };
+  };
+  active: {
+    exactProcesses: number;
+    exactAdmissions: number;
+    exactPtys: number;
+    exactProcessHolders: number;
+    unmatchedProcesses: number;
+    unmatchedAdmissions: number;
+    unmatchedPtys: number;
+    unmatchedProcessHolders: number;
+    directHolders: number;
+    possibleWriterTurnHolders: number;
+    unknownTurnHolderLinks: number;
+    unsettledInterruptions: number;
+    turnHolders: number;
+    viewerHolders: number;
+    inventoryComplete: boolean;
+  };
+  identities: {
+    processes: ColdLostProcessRow[];
+    admissions: ColdLostAdmissionRow[];
+    ptys: ColdLostPtyRow[];
+    holders: ColdLostHolderRow[];
+    interruptions: ColdLostInterruptionRow[];
+  };
+  settlement: LostProviderWorkspaceSettlement;
+  blockerSetHash: string;
+  blockers: ColdLostReconciliationBlockerCode[];
+};
+
+type ColdLostProcessRow = {
+  id: string;
+  sessionId: string;
+  parentAdmissionId: string;
+  holder_id: string;
+  ownerActorKind: string;
+  ownerActorId: string;
+  ownerTurnId: string | null;
+  ownerAttemptId: string | null;
+  ownerExecutionGeneration: number | null;
+  lease_epoch: number | string;
+  providerBackend: string;
+  provider_instance_id: string;
+  routeKind: "home" | "active";
+  routeTargetId: string | null;
+  routeEpoch: number;
+  providerSessionId: number;
+  state: string;
+};
+
+type ColdLostAdmissionRow = {
+  id: string;
+  sessionId: string;
+  actorKind: string;
+  actorId: string;
+  turnId: string | null;
+  attemptId: string | null;
+  executionGeneration: number | null;
+  holderKind: string;
+  holderId: string;
+  lease_epoch: number | string;
+  providerBackend: string;
+  provider_instance_id: string;
+  routeKind: "home" | "active";
+  routeTargetId: string | null;
+  routeEpoch: number;
+  workspaceGeneration: number;
+  operation: string;
+  providerOutcome: string | null;
+  settled_at: Date | string | null;
+};
+
+type ColdLostPtyRow = {
+  id: string;
+  sessionId: string;
+  retainedProcessId: string | null;
+  openAdmissionId: string | null;
+  execSessionId: number | null;
+  lease_epoch: number | string;
+  providerBackend: string | null;
+  provider_instance_id: string | null;
+  routeKind: "home" | "active" | null;
+  routeTargetId: string | null;
+  routeEpoch: number | null;
+  status: string;
+};
+
+type ColdLostHolderRow = {
+  id: string;
+  kind: string;
+  holder_id: string;
+  subjectId: string | null;
+  turnId: string | null;
+  attemptId: string | null;
+  attemptExecutionGeneration: number | null;
+  attemptState: string | null;
+  attemptOutcome: string | null;
+  attemptQuiescedAt: string | null;
+};
+
+type ColdLostInterruptionRow = {
+  id: string;
+  sessionId: string;
+  operationId: string;
+  attemptId: string;
+  turnId: string;
+  attemptExecutionGeneration: number;
+  attemptState: string;
+  attemptOutcome: string | null;
+  attemptQuiescedAt: string | null;
+  kind: string;
+  state: string;
+  requestedAt: string;
+};
+
+type ColdLostSessionRow = {
+  id: string;
+  status: string;
+  sandbox_group_id: string;
+  active_sandbox_id: string | null;
+  active_epoch: number | string;
+};
+
+type ColdLostDatabasePosture = NonNullable<ColdLostReconciliationPreview["database"]>;
+
+type ColdLostSnapshotRows = {
+  snapshotAt: string;
+  inventoryComplete: boolean;
+  session: ColdLostSessionRow | null;
+  lease: LeaseRow | null;
+  processes: ColdLostProcessRow[];
+  admissions: ColdLostAdmissionRow[];
+  ptys: ColdLostPtyRow[];
+  holders: ColdLostHolderRow[];
+  interruptions: ColdLostInterruptionRow[];
+};
+
+const MODAL_ARCHIVE_PREFIXES = [
+  "MODAL_SANDBOX_FS_SNAPSHOT_V1\n",
+  "MODAL_SANDBOX_DIR_SNAPSHOT_V1\n",
+] as const;
+const COLD_LOST_PROVIDER_OBSERVATION_MAX_AGE_MS = 5 * 60 * 1_000;
+const COLD_LOST_PROVIDER_OBSERVATION_MAX_FUTURE_MS = 60 * 1_000;
+
+function sha256String(value: string | Uint8Array): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function decodeCanonicalBase64(value: unknown): Uint8Array | null {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length % 4 !== 0 ||
+    !/^[A-Za-z0-9+/]+={0,2}$/.test(value)
+  ) {
+    return null;
+  }
+  const bytes = Uint8Array.from(Buffer.from(value, "base64"));
+  return Buffer.from(bytes).toString("base64") === value ? bytes : null;
+}
+
+function modalProviderObject(bytes: Uint8Array | null): {
+  kind: "modal_filesystem_snapshot" | "modal_directory_snapshot";
+  id: string;
+} | null {
+  if (!bytes) return null;
+  const text = new TextDecoder().decode(bytes);
+  for (const prefix of MODAL_ARCHIVE_PREFIXES) {
+    if (!text.startsWith(prefix)) continue;
+    try {
+      const parsed = JSON.parse(text.slice(prefix.length)) as {
+        snapshot_id?: unknown;
+      };
+      if (typeof parsed.snapshot_id !== "string" || parsed.snapshot_id.length === 0) {
+        return null;
+      }
+      return {
+        kind:
+          prefix === MODAL_ARCHIVE_PREFIXES[0]
+            ? "modal_filesystem_snapshot"
+            : "modal_directory_snapshot",
+        id: parsed.snapshot_id,
+      };
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function stableSetHash(value: unknown): string {
+  return sha256String(JSON.stringify(value));
+}
+
+function isFreshCanonicalProviderObservationTime(
+  observedAt: string | null,
+  snapshotAt: string,
+): boolean {
+  if (observedAt === null) return false;
+  const observedAtMs = Date.parse(observedAt);
+  const snapshotAtMs = Date.parse(snapshotAt);
+  return (
+    Number.isFinite(observedAtMs) &&
+    Number.isFinite(snapshotAtMs) &&
+    new Date(observedAtMs).toISOString() === observedAt &&
+    observedAtMs >= snapshotAtMs - COLD_LOST_PROVIDER_OBSERVATION_MAX_AGE_MS &&
+    observedAtMs <= snapshotAtMs + COLD_LOST_PROVIDER_OBSERVATION_MAX_FUTURE_MS
+  );
+}
+
+function isExactLostScope(
+  row: {
+    lease_epoch: number | string;
+    providerBackend: string | null;
+    provider_instance_id: string | null;
+    routeKind: "home" | "active" | null;
+    routeTargetId: string | null;
+    routeEpoch: number | null;
+  },
+  input: PreviewColdLostLeaseInstanceBlockersInput,
+): boolean {
+  return (
+    input.expectedLostEpoch !== undefined &&
+    input.expectedLostInstanceId !== undefined &&
+    input.expectedProviderBackend !== undefined &&
+    input.expectedRouteKind !== undefined &&
+    input.expectedRouteTargetId !== undefined &&
+    input.expectedRouteEpoch !== undefined &&
+    Number(row.lease_epoch) === input.expectedLostEpoch &&
+    row.providerBackend === input.expectedProviderBackend &&
+    row.provider_instance_id === input.expectedLostInstanceId &&
+    row.routeKind === input.expectedRouteKind &&
+    row.routeTargetId === input.expectedRouteTargetId &&
+    row.routeEpoch === input.expectedRouteEpoch
+  );
+}
+
+function archiveSessionState(row: LeaseRow | null): Record<string, unknown> | null {
+  const resume = row?.resume_state;
+  if (!resume || typeof resume !== "object") return null;
+  const sessionState = resume.sessionState;
+  return sessionState && typeof sessionState === "object"
+    ? (sessionState as Record<string, unknown>)
+    : null;
+}
+
+async function readColdLostSnapshotRowsTx(
+  tx: Database,
+  input: PreviewColdLostLeaseInstanceBlockersInput,
+): Promise<ColdLostSnapshotRows> {
+  const timestampRows = await tx.execute<{ snapshot_at: Date | string }>(sql`
+    select transaction_timestamp() as snapshot_at
+  `);
+  const [sessionRows, leaseRows] = await Promise.all([
+    tx.execute<ColdLostSessionRow>(sql`
+      select id, status, sandbox_group_id, active_sandbox_id, active_epoch
+      from sessions
+      where account_id = ${input.accountId}
+        and workspace_id = ${input.workspaceId}
+        and id = ${input.sessionId}
+    `),
+    tx.execute<LeaseRow>(sql`
+      select * from sandbox_leases
+      where account_id = ${input.accountId}
+        and workspace_id = ${input.workspaceId}
+        and sandbox_group_id = ${input.sandboxGroupId}
+    `),
+  ]);
+  const session = sessionRows[0] ?? null;
+  const lease = leaseRows[0] ?? null;
+  if (!lease) {
+    const snapshotAt = timestampRows[0]?.snapshot_at;
+    return {
+      snapshotAt:
+        snapshotAt instanceof Date
+          ? snapshotAt.toISOString()
+          : new Date(snapshotAt ?? Date.now()).toISOString(),
+      inventoryComplete: false,
+      session,
+      lease: null,
+      processes: [],
+      admissions: [],
+      ptys: [],
+      holders: [],
+      interruptions: [],
+    };
+  }
+  const [processes, admissions, ptys, holders, interruptions] = await Promise.all([
+    tx.execute<ColdLostProcessRow>(sql`
+      select id,
+        session_id as "sessionId",
+        parent_admission_id as "parentAdmissionId",
+        holder_id,
+        owner_actor_kind as "ownerActorKind",
+        owner_actor_id as "ownerActorId",
+        owner_turn_id as "ownerTurnId",
+        owner_attempt_id as "ownerAttemptId",
+        owner_execution_generation as "ownerExecutionGeneration",
+        lease_epoch,
+        provider_backend as "providerBackend",
+        provider_instance_id,
+        route_kind as "routeKind",
+        route_target_id as "routeTargetId",
+        route_epoch as "routeEpoch",
+        provider_session_id as "providerSessionId",
+        state
+      from sandbox_retained_processes
+      where account_id = ${input.accountId}
+        and workspace_id = ${input.workspaceId}
+        and lease_id = ${lease.id}
+        and sandbox_group_id = ${input.sandboxGroupId}
+        and (state = 'active' or (
+          lease_epoch = ${input.expectedLostEpoch ?? -1}
+          and provider_backend = ${input.expectedProviderBackend ?? ""}
+          and provider_instance_id = ${input.expectedLostInstanceId ?? ""}
+          and route_kind = ${input.expectedRouteKind ?? "home"}
+          and route_target_id is not distinct from ${input.expectedRouteTargetId ?? null}
+          and route_epoch = ${input.expectedRouteEpoch ?? -1}
+        ))
+      order by id
+    `),
+    tx.execute<ColdLostAdmissionRow>(sql`
+      select id,
+        session_id as "sessionId",
+        actor_kind as "actorKind",
+        actor_id as "actorId",
+        turn_id as "turnId",
+        attempt_id as "attemptId",
+        execution_generation as "executionGeneration",
+        holder_kind as "holderKind",
+        holder_id as "holderId",
+        lease_epoch,
+        provider_backend as "providerBackend",
+        provider_instance_id,
+        route_kind as "routeKind",
+        route_target_id as "routeTargetId",
+        route_epoch as "routeEpoch",
+        workspace_generation as "workspaceGeneration",
+        operation,
+        provider_outcome as "providerOutcome",
+        settled_at
+      from sandbox_workspace_mutation_admissions
+      where account_id = ${input.accountId}
+        and workspace_id = ${input.workspaceId}
+        and lease_id = ${lease.id}
+        and sandbox_group_id = ${input.sandboxGroupId}
+        and (settled_at is null or (
+          lease_epoch = ${input.expectedLostEpoch ?? -1}
+          and provider_backend = ${input.expectedProviderBackend ?? ""}
+          and provider_instance_id = ${input.expectedLostInstanceId ?? ""}
+          and route_kind = ${input.expectedRouteKind ?? "home"}
+          and route_target_id is not distinct from ${input.expectedRouteTargetId ?? null}
+          and route_epoch = ${input.expectedRouteEpoch ?? -1}
+        ))
+      order by id
+    `),
+    tx.execute<ColdLostPtyRow>(sql`
+      select id,
+        session_id as "sessionId",
+        retained_process_id as "retainedProcessId",
+        open_admission_id as "openAdmissionId",
+        exec_session_id as "execSessionId",
+        lease_epoch,
+        provider_backend as "providerBackend",
+        provider_instance_id,
+        route_kind as "routeKind",
+        route_target_id as "routeTargetId",
+        route_epoch as "routeEpoch",
+        status
+      from sandbox_pty_sessions
+      where account_id = ${input.accountId}
+        and workspace_id = ${input.workspaceId}
+        and lease_id = ${lease.id}
+        and sandbox_group_id = ${input.sandboxGroupId}
+        and (status = 'open' or (
+          lease_epoch = ${input.expectedLostEpoch ?? -1}
+          and provider_backend = ${input.expectedProviderBackend ?? ""}
+          and provider_instance_id = ${input.expectedLostInstanceId ?? ""}
+          and route_kind = ${input.expectedRouteKind ?? "home"}
+          and route_target_id is not distinct from ${input.expectedRouteTargetId ?? null}
+          and route_epoch = ${input.expectedRouteEpoch ?? -1}
+        ))
+      order by id
+    `),
+    tx.execute<ColdLostHolderRow>(sql`
+      select holder.id,
+        holder.kind,
+        holder.holder_id,
+        holder.subject_id as "subjectId",
+        attempt.turn_id as "turnId",
+        attempt.id as "attemptId",
+        attempt.execution_generation as "attemptExecutionGeneration",
+        attempt.state as "attemptState",
+        attempt.outcome as "attemptOutcome",
+        attempt.quiesced_at as "attemptQuiescedAt"
+      from sandbox_lease_holders holder
+      left join session_turn_attempts attempt
+        on holder.kind = 'turn'
+       and holder.holder_id = ('turn-attempt:' || attempt.id::text)
+       and attempt.account_id = holder.account_id
+       and attempt.workspace_id = holder.workspace_id
+      where holder.account_id = ${input.accountId}
+        and holder.workspace_id = ${input.workspaceId}
+        and holder.lease_id = ${lease.id}
+      order by holder.kind, holder.holder_id
+    `),
+    tx.execute<ColdLostInterruptionRow>(sql`
+      select interruption.id,
+        interruption.session_id as "sessionId",
+        interruption.operation_id as "operationId",
+        interruption.attempt_id as "attemptId",
+        attempt.turn_id as "turnId",
+        attempt.execution_generation as "attemptExecutionGeneration",
+        attempt.state as "attemptState",
+        attempt.outcome as "attemptOutcome",
+        attempt.quiesced_at as "attemptQuiescedAt",
+        interruption.kind,
+        interruption.state,
+        interruption.requested_at as "requestedAt"
+      from session_attempt_interruptions interruption
+      join sessions session
+        on session.workspace_id = interruption.workspace_id
+       and session.id = interruption.session_id
+       and session.sandbox_group_id = ${input.sandboxGroupId}
+      join session_turn_attempts attempt
+        on attempt.workspace_id = interruption.workspace_id
+       and attempt.id = interruption.attempt_id
+      where interruption.account_id = ${input.accountId}
+        and interruption.workspace_id = ${input.workspaceId}
+        and interruption.state in ('pending', 'delivered', 'acknowledged')
+      order by interruption.id
+    `),
+  ]);
+  const snapshotAt = timestampRows[0]?.snapshot_at;
+  return {
+    snapshotAt:
+      snapshotAt instanceof Date
+        ? snapshotAt.toISOString()
+        : new Date(snapshotAt ?? Date.now()).toISOString(),
+    inventoryComplete: true,
+    session,
+    lease,
+    processes,
+    admissions,
+    ptys,
+    holders,
+    interruptions,
+  };
+}
+
+function evaluateColdLostSnapshot(
+  input: PreviewColdLostLeaseInstanceBlockersInput,
+  rows: ColdLostSnapshotRows,
+  database: ColdLostDatabasePosture | null,
+  options: { requireReadOnly: boolean } = { requireReadOnly: true },
+): ColdLostReconciliationPreview {
+  const blockers: ColdLostReconciliationBlockerCode[] = [];
+  const add = (code: ColdLostReconciliationBlockerCode, blocked: boolean): void => {
+    if (blocked && !blockers.includes(code)) blockers.push(code);
+  };
+  if (database) {
+    add(
+      "database_transaction_not_read_only",
+      options.requireReadOnly && !database.transactionReadOnly,
+    );
+    add("database_row_security_disabled", !database.rowSecurity);
+    add("database_role_is_superuser", database.roleSuperuser);
+    add("database_role_bypasses_rls", database.roleBypassRls);
+    add("database_force_rls_unverified", !database.forceRls);
+  } else {
+    add("database_force_rls_unverified", true);
+  }
+  add("expected_lease_id_missing", input.expectedLeaseId === undefined);
+  add("expected_backend_missing", input.expectedBackend === undefined);
+  add("expected_current_epoch_missing", input.expectedCurrentEpoch === undefined);
+  add("expected_lost_epoch_missing", input.expectedLostEpoch === undefined);
+  add("expected_lost_instance_missing", input.expectedLostInstanceId === undefined);
+  add("expected_refcount_missing", input.expectedRefcount === undefined);
+  add("expected_provider_backend_missing", input.expectedProviderBackend === undefined);
+  add("expected_route_kind_missing", input.expectedRouteKind === undefined);
+  add("expected_route_target_missing", input.expectedRouteTargetId === undefined);
+  add("expected_route_epoch_missing", input.expectedRouteEpoch === undefined);
+  add("expected_workspace_generation_missing", input.expectedWorkspaceGeneration === undefined);
+  add("expected_workspace_status_missing", input.expectedWorkspaceStatus === undefined);
+  add("expected_restore_status_missing", input.expectedRestoreStatus === undefined);
+  add("expected_restore_failure_missing", input.expectedRestoreFailureCode === undefined);
+  add("expected_archive_generation_missing", input.expectedArchiveGeneration === undefined);
+  add("expected_archive_complete_missing", input.expectedArchiveComplete === undefined);
+  add(
+    "expected_archive_descriptor_version_missing",
+    input.expectedArchiveDescriptorVersion === undefined,
+  );
+  add("expected_archive_revision_missing", input.expectedArchiveRevision === undefined);
+  add("expected_archive_object_kind_missing", input.expectedArchiveObjectKind === undefined);
+  add("expected_archive_object_id_missing", input.expectedArchiveObjectId === undefined);
+  add(
+    "expected_descriptor_reference_bytes_missing",
+    input.expectedDescriptorReferenceBytes === undefined,
+  );
+  add(
+    "expected_descriptor_reference_sha256_missing",
+    input.expectedDescriptorReferenceSha256 === undefined,
+  );
+  add("expected_reference_bytes_missing", input.expectedReferenceBytes === undefined);
+  add("expected_reference_sha256_missing", input.expectedReferenceSha256 === undefined);
+  add(
+    "expected_tree_fingerprint_algorithm_missing",
+    input.expectedTreeFingerprintAlgorithm === undefined,
+  );
+  add(
+    "expected_tree_fingerprint_sha256_missing",
+    input.expectedTreeFingerprintSha256 === undefined,
+  );
+  add("expected_tree_entry_count_missing", input.expectedTreeEntryCount === undefined);
+  add("expected_tree_file_count_missing", input.expectedTreeFileCount === undefined);
+  add("expected_total_file_bytes_missing", input.expectedTotalFileBytes === undefined);
+  add("expected_archive_captured_at_missing", input.expectedArchiveCapturedAt === undefined);
+  add(
+    "expected_archive_verification_state_missing",
+    input.expectedArchiveVerificationState === undefined,
+  );
+  add(
+    "expected_archive_verified_revision_missing",
+    input.expectedArchiveVerifiedRevision === undefined,
+  );
+  add("expected_archive_verified_at_missing", input.expectedArchiveVerifiedAt === undefined);
+  add(
+    "epoch_relation_invalid",
+    input.expectedCurrentEpoch !== undefined &&
+      input.expectedLostEpoch !== undefined &&
+      input.expectedCurrentEpoch !== input.expectedLostEpoch + 1,
+  );
+
+  const session = rows.session;
+  add("blocker_inventory_incomplete", !rows.inventoryComplete);
+  add("session_not_found", session === null);
+  add(
+    "session_group_mismatch",
+    session !== null && session.sandbox_group_id !== input.sandboxGroupId,
+  );
+  const row = rows.lease;
+  const lease = row ? mapLeaseRow(row) : null;
+  const recovery = row ? recoveryStateFromLeaseRow(row) : null;
+  add("lease_not_found", row === null);
+  add(
+    "lease_id_mismatch",
+    row !== null && input.expectedLeaseId !== undefined && row.id !== input.expectedLeaseId,
+  );
+  add(
+    "lease_backend_mismatch",
+    row !== null && input.expectedBackend !== undefined && row.backend !== input.expectedBackend,
+  );
+  add(
+    "lost_provider_backend_mismatch",
+    row !== null &&
+      input.expectedProviderBackend !== undefined &&
+      row.backend !== input.expectedProviderBackend,
+  );
+  add("lease_not_cold", row !== null && row.liveness !== "cold");
+  add("lease_instance_present", row !== null && row.instance_id !== null);
+  add(
+    "current_epoch_mismatch",
+    row !== null &&
+      input.expectedCurrentEpoch !== undefined &&
+      Number(row.lease_epoch) !== input.expectedCurrentEpoch,
+  );
+  add(
+    "refcount_mismatch",
+    row !== null &&
+      input.expectedRefcount !== undefined &&
+      Number(row.refcount) !== input.expectedRefcount,
+  );
+  add(
+    "workspace_generation_mismatch",
+    row !== null &&
+      input.expectedWorkspaceGeneration !== undefined &&
+      Number(row.workspace_generation) !== input.expectedWorkspaceGeneration,
+  );
+  add(
+    "workspace_status_mismatch",
+    recovery !== null &&
+      input.expectedWorkspaceStatus !== undefined &&
+      recovery.workspace.status !== input.expectedWorkspaceStatus,
+  );
+  add(
+    "restore_status_mismatch",
+    recovery !== null &&
+      input.expectedRestoreStatus !== undefined &&
+      recovery.restore.status !== input.expectedRestoreStatus,
+  );
+  add(
+    "restore_failure_mismatch",
+    recovery !== null &&
+      input.expectedRestoreFailureCode !== undefined &&
+      (recovery.restore.failureCode ?? null) !== input.expectedRestoreFailureCode,
+  );
+  const archiveGeneration = row
+    ? row.archive_generation === null
+      ? null
+      : Number(row.archive_generation)
+    : null;
+  add(
+    "archive_generation_mismatch",
+    row !== null &&
+      input.expectedArchiveGeneration !== undefined &&
+      archiveGeneration !== input.expectedArchiveGeneration,
+  );
+  const archiveComplete = row ? hasCompleteWorkspaceArchive(row) : false;
+  add(
+    "archive_completeness_mismatch",
+    row !== null &&
+      input.expectedArchiveComplete !== undefined &&
+      archiveComplete !== input.expectedArchiveComplete,
+  );
+  add(
+    "lost_provider_recovery_unverified",
+    row !== null &&
+      (recovery?.provider.status !== "missing" ||
+        input.expectedLostInstanceId === undefined ||
+        recovery.provider.instanceId !== input.expectedLostInstanceId),
+  );
+  add(
+    "exact_route_mismatch",
+    (input.expectedRouteKind === "home" &&
+      input.expectedRouteTargetId !== undefined &&
+      input.expectedRouteEpoch !== undefined &&
+      (input.expectedRouteTargetId !== null || input.expectedRouteEpoch !== 0)) ||
+      (input.expectedRouteKind === "active" &&
+        session !== null &&
+        input.expectedRouteTargetId !== undefined &&
+        input.expectedRouteEpoch !== undefined &&
+        (session.active_sandbox_id !== input.expectedRouteTargetId ||
+          Number(session.active_epoch) !== input.expectedRouteEpoch)),
+  );
+
+  const descriptor = recovery?.archive.current ?? null;
+  const sessionState = archiveSessionState(row);
+  const base64 = sessionState?.workspaceArchive;
+  const bytes = decodeCanonicalBase64(base64);
+  const referenceBytes = bytes?.length ?? null;
+  const referenceSha256 = bytes ? sha256String(bytes) : null;
+  const referenceVerified =
+    descriptor !== null &&
+    referenceBytes === descriptor.archiveBytes &&
+    referenceSha256 === descriptor.archiveSha256;
+  const archiveObject = modalProviderObject(bytes);
+  const archiveVerificationMatches =
+    descriptor !== null &&
+    recovery?.workspace.status === "ready" &&
+    recovery.workspace.verifiedRevision === descriptor.revision &&
+    recovery.workspace.verifiedAt !== null &&
+    Number.isFinite(Date.parse(recovery.workspace.verifiedAt));
+  const archiveVerificationState = archiveVerificationMatches
+    ? ("verified" as const)
+    : ("unverified" as const);
+  const verifiedRevision = recovery?.workspace.verifiedRevision ?? null;
+  const verifiedAt = archiveVerificationMatches ? recovery!.workspace.verifiedAt : null;
+  add("archive_descriptor_missing", descriptor === null);
+  add(
+    "archive_generation_incomplete",
+    row !== null &&
+      (archiveGeneration === null ||
+        archiveGeneration !== Number(row.workspace_generation) ||
+        !archiveComplete),
+  );
+  add("archive_base64_invalid", row !== null && bytes === null);
+  add("archive_bytes_mismatch", descriptor !== null && !referenceVerified);
+  add(
+    "archive_descriptor_version_mismatch",
+    input.expectedArchiveDescriptorVersion !== undefined &&
+      descriptor?.version !== input.expectedArchiveDescriptorVersion,
+  );
+  add(
+    "archive_revision_mismatch",
+    input.expectedArchiveRevision !== undefined &&
+      descriptor?.revision !== input.expectedArchiveRevision,
+  );
+  add(
+    "archive_object_kind_mismatch",
+    input.expectedArchiveObjectKind !== undefined &&
+      archiveObject?.kind !== input.expectedArchiveObjectKind,
+  );
+  add(
+    "archive_object_id_mismatch",
+    input.expectedArchiveObjectId !== undefined &&
+      archiveObject?.id !== input.expectedArchiveObjectId,
+  );
+  add(
+    "archive_descriptor_reference_bytes_mismatch",
+    input.expectedDescriptorReferenceBytes !== undefined &&
+      descriptor?.archiveBytes !== input.expectedDescriptorReferenceBytes,
+  );
+  add(
+    "archive_descriptor_reference_sha256_mismatch",
+    input.expectedDescriptorReferenceSha256 !== undefined &&
+      descriptor?.archiveSha256 !== input.expectedDescriptorReferenceSha256,
+  );
+  add(
+    "archive_reference_bytes_mismatch",
+    input.expectedReferenceBytes !== undefined && referenceBytes !== input.expectedReferenceBytes,
+  );
+  add(
+    "archive_reference_sha256_mismatch",
+    input.expectedReferenceSha256 !== undefined &&
+      referenceSha256 !== input.expectedReferenceSha256,
+  );
+  add(
+    "archive_tree_fingerprint_algorithm_mismatch",
+    input.expectedTreeFingerprintAlgorithm !== undefined &&
+      descriptor?.workspace.algorithm !== input.expectedTreeFingerprintAlgorithm,
+  );
+  add(
+    "archive_tree_fingerprint_sha256_mismatch",
+    input.expectedTreeFingerprintSha256 !== undefined &&
+      descriptor?.workspace.sha256 !== input.expectedTreeFingerprintSha256,
+  );
+  add(
+    "archive_tree_entry_count_mismatch",
+    input.expectedTreeEntryCount !== undefined &&
+      descriptor?.workspace.entryCount !== input.expectedTreeEntryCount,
+  );
+  add(
+    "archive_tree_file_count_mismatch",
+    input.expectedTreeFileCount !== undefined &&
+      descriptor?.workspace.fileCount !== input.expectedTreeFileCount,
+  );
+  add(
+    "archive_total_file_bytes_mismatch",
+    input.expectedTotalFileBytes !== undefined &&
+      descriptor?.workspace.totalFileBytes !== input.expectedTotalFileBytes,
+  );
+  add(
+    "archive_captured_at_mismatch",
+    input.expectedArchiveCapturedAt !== undefined &&
+      descriptor?.capturedAt !== input.expectedArchiveCapturedAt,
+  );
+  add(
+    "archive_verification_state_mismatch",
+    input.expectedArchiveVerificationState !== undefined &&
+      archiveVerificationState !== input.expectedArchiveVerificationState,
+  );
+  add(
+    "archive_verified_revision_mismatch",
+    input.expectedArchiveVerifiedRevision !== undefined &&
+      verifiedRevision !== input.expectedArchiveVerifiedRevision,
+  );
+  add(
+    "archive_verified_at_mismatch",
+    input.expectedArchiveVerifiedAt !== undefined && verifiedAt !== input.expectedArchiveVerifiedAt,
+  );
+  add("archive_verification_unavailable", descriptor !== null && !archiveVerificationMatches);
+  add("archive_provider_object_identity_unavailable", row !== null && archiveObject === null);
+  add(
+    "provider_object_observation_missing",
+    input.providerObject.providerBackend === null ||
+      input.providerObject.objectKind === null ||
+      input.providerObject.objectId === null,
+  );
+  add(
+    "provider_object_identity_mismatch",
+    archiveObject !== null &&
+      (input.providerObject.providerBackend !== row?.backend ||
+        input.providerObject.providerBackend !== input.expectedProviderBackend ||
+        input.providerObject.objectKind !== archiveObject.kind ||
+        input.providerObject.objectId !== archiveObject.id),
+  );
+  add("provider_object_missing", input.providerObject.status === "missing");
+  add("provider_object_status_unknown", input.providerObject.status === "unknown");
+  add(
+    "provider_object_observation_time_invalid",
+    !isFreshCanonicalProviderObservationTime(input.providerObject.observedAt, rows.snapshotAt),
+  );
+
+  const exactProcesses = rows.processes.filter((process) => isExactLostScope(process, input));
+  const exactAdmissions = rows.admissions.filter((admission) => isExactLostScope(admission, input));
+  const exactPtys = rows.ptys.filter((pty) => isExactLostScope(pty, input));
+  const activeExactProcesses = exactProcesses.filter((process) => process.state === "active");
+  const activeExactAdmissions = exactAdmissions.filter(
+    (admission) => admission.settled_at === null,
+  );
+  const activeExactPtys = exactPtys.filter((pty) => pty.status === "open");
+  const activeExactProcessHolderIds = new Set(
+    activeExactProcesses.map((process) => process.holder_id),
+  );
+  const exactProcessHolders = rows.holders.filter(
+    (holder) => holder.kind === "process" && activeExactProcessHolderIds.has(holder.holder_id),
+  );
+  const unmatchedProcesses = rows.processes.filter(
+    (process) => process.state === "active" && !isExactLostScope(process, input),
+  );
+  const unmatchedAdmissions = rows.admissions.filter(
+    (admission) => admission.settled_at === null && !isExactLostScope(admission, input),
+  );
+  const unmatchedPtys = rows.ptys.filter(
+    (pty) => pty.status === "open" && !isExactLostScope(pty, input),
+  );
+  const unmatchedProcessHolders = rows.holders.filter(
+    (holder) => holder.kind === "process" && !activeExactProcessHolderIds.has(holder.holder_id),
+  );
+  add("unmatched_active_processes", unmatchedProcesses.length > 0);
+  add("unmatched_unsettled_admissions", unmatchedAdmissions.length > 0);
+  add("unmatched_open_ptys", unmatchedPtys.length > 0);
+  add("unmatched_process_holders", unmatchedProcessHolders.length > 0);
+
+  const directHolders = rows.holders.filter((holder) => holder.kind === "direct");
+  const turnHoldersWithUnknownAttempt = rows.holders.filter(
+    (holder) => holder.kind === "turn" && holder.attemptId === null,
+  );
+  const possibleWriterTurnHolders = rows.holders.filter(
+    (holder) =>
+      holder.kind === "turn" &&
+      (holder.attemptState === "claimed" || holder.attemptState === "running") &&
+      holder.attemptQuiescedAt === null,
+  );
+  const unsettledInterruptions = rows.interruptions;
+  add("active_direct_holders", directHolders.length > 0);
+  add("turn_holder_attempt_linkage_unknown", turnHoldersWithUnknownAttempt.length > 0);
+  add("active_turn_writer_possible", possibleWriterTurnHolders.length > 0);
+  add("unsettled_interruptions", unsettledInterruptions.length > 0);
+
+  const exactIdentity = {
+    processes: exactProcesses.map((process) => ({
+      id: process.id,
+      sessionId: process.sessionId,
+      parentAdmissionId: process.parentAdmissionId,
+      holderId: process.holder_id,
+      ownerActorKind: process.ownerActorKind,
+      ownerActorId: process.ownerActorId,
+      ownerTurnId: process.ownerTurnId,
+      ownerAttemptId: process.ownerAttemptId,
+      ownerExecutionGeneration: process.ownerExecutionGeneration,
+      leaseEpoch: Number(process.lease_epoch),
+      providerBackend: process.providerBackend,
+      providerInstanceId: process.provider_instance_id,
+      routeKind: process.routeKind,
+      routeTargetId: process.routeTargetId,
+      routeEpoch: process.routeEpoch,
+      providerSessionId: process.providerSessionId,
+    })),
+    admissions: exactAdmissions.map((admission) => ({
+      id: admission.id,
+      sessionId: admission.sessionId,
+      actorKind: admission.actorKind,
+      actorId: admission.actorId,
+      turnId: admission.turnId,
+      attemptId: admission.attemptId,
+      executionGeneration: admission.executionGeneration,
+      holderKind: admission.holderKind,
+      holderId: admission.holderId,
+      leaseEpoch: Number(admission.lease_epoch),
+      providerBackend: admission.providerBackend,
+      providerInstanceId: admission.provider_instance_id,
+      routeKind: admission.routeKind,
+      routeTargetId: admission.routeTargetId,
+      routeEpoch: admission.routeEpoch,
+      workspaceGeneration: admission.workspaceGeneration,
+      operation: admission.operation,
+    })),
+    ptys: exactPtys.map((pty) => ({
+      id: pty.id,
+      sessionId: pty.sessionId,
+      retainedProcessId: pty.retainedProcessId,
+      openAdmissionId: pty.openAdmissionId,
+      execSessionId: pty.execSessionId,
+      leaseEpoch: Number(pty.lease_epoch),
+      providerBackend: pty.providerBackend,
+      providerInstanceId: pty.provider_instance_id,
+      routeKind: pty.routeKind,
+      routeTargetId: pty.routeTargetId,
+      routeEpoch: pty.routeEpoch,
+    })),
+  };
+  const unmatchedIdentity = {
+    processes: unmatchedProcesses,
+    admissions: unmatchedAdmissions,
+    ptys: unmatchedPtys,
+    processHolders: unmatchedProcessHolders,
+    directHolders,
+    possibleWriterTurnHolders,
+    unknownTurnHolderLinks: turnHoldersWithUnknownAttempt,
+    interruptions: unsettledInterruptions,
+  };
+  const blockerSetHash = stableSetHash({
+    exactIdentity,
+    exactCounts: {
+      processes: exactProcesses.length,
+      admissions: exactAdmissions.length,
+      ptys: exactPtys.length,
+      processHolders: exactProcessHolders.length,
+    },
+    unmatchedIdentity,
+  });
+  const previewIdentity = {
+    version: 1,
+    locator: {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      sandboxGroupId: input.sandboxGroupId,
+    },
+    expected: {
+      leaseId: input.expectedLeaseId ?? null,
+      backend: input.expectedBackend ?? null,
+      currentEpoch: input.expectedCurrentEpoch ?? null,
+      lostEpoch: input.expectedLostEpoch ?? null,
+      lostInstanceId: input.expectedLostInstanceId ?? null,
+      refcount: input.expectedRefcount ?? null,
+      providerBackend: input.expectedProviderBackend ?? null,
+      routeKind: input.expectedRouteKind ?? null,
+      routeTargetId:
+        input.expectedRouteTargetId === undefined ? "missing" : input.expectedRouteTargetId,
+      routeEpoch: input.expectedRouteEpoch ?? null,
+      workspaceGeneration: input.expectedWorkspaceGeneration ?? null,
+      workspaceStatus: input.expectedWorkspaceStatus ?? null,
+      restoreStatus: input.expectedRestoreStatus ?? null,
+      restoreFailureCode:
+        input.expectedRestoreFailureCode === undefined
+          ? "missing"
+          : input.expectedRestoreFailureCode,
+      archiveGeneration:
+        input.expectedArchiveGeneration === undefined ? "missing" : input.expectedArchiveGeneration,
+      archiveComplete: input.expectedArchiveComplete ?? null,
+      archiveDescriptorVersion: input.expectedArchiveDescriptorVersion ?? null,
+      archiveRevision: input.expectedArchiveRevision ?? null,
+      archiveObjectKind: input.expectedArchiveObjectKind ?? null,
+      archiveObjectId: input.expectedArchiveObjectId ?? null,
+      descriptorReferenceBytes: input.expectedDescriptorReferenceBytes ?? null,
+      descriptorReferenceSha256: input.expectedDescriptorReferenceSha256 ?? null,
+      referenceBytes: input.expectedReferenceBytes ?? null,
+      referenceSha256: input.expectedReferenceSha256 ?? null,
+      treeFingerprintAlgorithm: input.expectedTreeFingerprintAlgorithm ?? null,
+      treeFingerprintSha256: input.expectedTreeFingerprintSha256 ?? null,
+      treeEntryCount: input.expectedTreeEntryCount ?? null,
+      treeFileCount: input.expectedTreeFileCount ?? null,
+      totalFileBytes: input.expectedTotalFileBytes ?? null,
+      archiveCapturedAt: input.expectedArchiveCapturedAt ?? null,
+      archiveVerificationState: input.expectedArchiveVerificationState ?? null,
+      archiveVerifiedRevision:
+        input.expectedArchiveVerifiedRevision === undefined
+          ? "missing"
+          : input.expectedArchiveVerifiedRevision,
+      archiveVerifiedAt:
+        input.expectedArchiveVerifiedAt === undefined ? "missing" : input.expectedArchiveVerifiedAt,
+    },
+    session: session
+      ? {
+          id: session.id,
+          status: session.status,
+          sandboxGroupId: session.sandbox_group_id,
+          activeSandboxId: session.active_sandbox_id,
+          activeEpoch: Number(session.active_epoch),
+        }
+      : null,
+    lease: row
+      ? {
+          id: row.id,
+          liveness: row.liveness,
+          instanceId: row.instance_id,
+          backend: row.backend,
+          leaseEpoch: Number(row.lease_epoch),
+          refcount: Number(row.refcount),
+          turnHolders: Number(row.turn_holders),
+          viewerHolders: Number(row.viewer_holders),
+          workspaceGeneration: Number(row.workspace_generation),
+          archiveGeneration,
+          archiveComplete,
+          recoveryProviderStatus: recovery!.provider.status,
+          recoveryProviderInstanceId: recovery!.provider.instanceId,
+          workspaceStatus: recovery!.workspace.status,
+          restoreStatus: recovery!.restore.status,
+          restoreFailureCode: recovery!.restore.failureCode ?? null,
+        }
+      : null,
+    archive: {
+      descriptor,
+      referenceBytes,
+      referenceSha256,
+      referenceVerified,
+      object: archiveObject,
+      verificationState: archiveVerificationMatches ? "verified" : "unverified",
+      capturedAt: descriptor?.capturedAt ?? null,
+      verifiedAt: archiveVerificationMatches ? recovery!.workspace.verifiedAt : null,
+      providerObservation: input.providerObject,
+    },
+    inventoryComplete: rows.inventoryComplete,
+    identities: {
+      processes: rows.processes,
+      admissions: rows.admissions,
+      ptys: rows.ptys,
+      holders: rows.holders,
+      interruptions: rows.interruptions,
+    },
+    blockerSetHash,
+  };
+  const previewId = `clrp1:${stableSetHash(previewIdentity)}`;
+  const turnHolders = rows.holders.filter((holder) => holder.kind === "turn").length;
+  const viewerHolders = rows.holders.filter((holder) => holder.kind === "viewer").length;
+
+  return {
+    version: 1,
+    status: blockers.length === 0 ? "eligible" : "blocked",
+    previewId,
+    snapshotAt: rows.snapshotAt,
+    database,
+    locator: {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      sandboxGroupId: input.sandboxGroupId,
+    },
+    expected: {
+      leaseId: input.expectedLeaseId ?? null,
+      backend: input.expectedBackend ?? null,
+      currentEpoch: input.expectedCurrentEpoch ?? null,
+      lostEpoch: input.expectedLostEpoch ?? null,
+      lostInstanceId: input.expectedLostInstanceId ?? null,
+      refcount: input.expectedRefcount ?? null,
+      providerBackend: input.expectedProviderBackend ?? null,
+      routeKind: input.expectedRouteKind ?? null,
+      routeTargetId: input.expectedRouteTargetId ?? null,
+      routeTargetSupplied: input.expectedRouteTargetId !== undefined,
+      routeEpoch: input.expectedRouteEpoch ?? null,
+      workspaceGeneration: input.expectedWorkspaceGeneration ?? null,
+      workspaceStatus: input.expectedWorkspaceStatus ?? null,
+      restoreStatus: input.expectedRestoreStatus ?? null,
+      restoreFailureCode: input.expectedRestoreFailureCode ?? null,
+      restoreFailureSupplied: input.expectedRestoreFailureCode !== undefined,
+      archiveGeneration: input.expectedArchiveGeneration ?? null,
+      archiveGenerationSupplied: input.expectedArchiveGeneration !== undefined,
+      archiveComplete: input.expectedArchiveComplete ?? null,
+      archiveDescriptorVersion: input.expectedArchiveDescriptorVersion ?? null,
+      archiveRevision: input.expectedArchiveRevision ?? null,
+      archiveObjectKind: input.expectedArchiveObjectKind ?? null,
+      archiveObjectId: input.expectedArchiveObjectId ?? null,
+      descriptorReferenceBytes: input.expectedDescriptorReferenceBytes ?? null,
+      descriptorReferenceSha256: input.expectedDescriptorReferenceSha256 ?? null,
+      referenceBytes: input.expectedReferenceBytes ?? null,
+      referenceSha256: input.expectedReferenceSha256 ?? null,
+      treeFingerprintAlgorithm: input.expectedTreeFingerprintAlgorithm ?? null,
+      treeFingerprintSha256: input.expectedTreeFingerprintSha256 ?? null,
+      treeEntryCount: input.expectedTreeEntryCount ?? null,
+      treeFileCount: input.expectedTreeFileCount ?? null,
+      totalFileBytes: input.expectedTotalFileBytes ?? null,
+      archiveCapturedAt: input.expectedArchiveCapturedAt ?? null,
+      archiveVerificationState: input.expectedArchiveVerificationState ?? null,
+      archiveVerifiedRevision: input.expectedArchiveVerifiedRevision ?? null,
+      archiveVerifiedRevisionSupplied: input.expectedArchiveVerifiedRevision !== undefined,
+      archiveVerifiedAt: input.expectedArchiveVerifiedAt ?? null,
+      archiveVerifiedAtSupplied: input.expectedArchiveVerifiedAt !== undefined,
+    },
+    session: session
+      ? {
+          id: session.id,
+          status: session.status,
+          sandboxGroupId: session.sandbox_group_id,
+          activeSandboxId: session.active_sandbox_id,
+          activeEpoch: Number(session.active_epoch),
+        }
+      : null,
+    lease: lease
+      ? {
+          id: lease.id,
+          liveness: lease.liveness,
+          instanceId: lease.instanceId,
+          backend: lease.backend,
+          leaseEpoch: lease.leaseEpoch,
+          workspaceGeneration: lease.workspaceGeneration,
+          archiveGeneration: lease.archiveGeneration,
+          archiveComplete: lease.archiveComplete,
+          refcount: lease.refcount,
+          turnHolders: lease.turnHolders,
+          viewerHolders: lease.viewerHolders,
+          recoveryProviderStatus: lease.recovery.provider.status,
+          recoveryProviderInstanceId: lease.recovery.provider.instanceId,
+          workspaceStatus: lease.recovery.workspace.status,
+          restoreStatus: lease.recovery.restore.status,
+          restoreFailureCode: lease.recovery.restore.failureCode ?? null,
+        }
+      : null,
+    archive: {
+      status: recovery?.archive.status ?? "none",
+      descriptorVersion: descriptor?.version ?? null,
+      revision: descriptor?.revision ?? null,
+      generation: archiveGeneration,
+      objectKind: archiveObject?.kind ?? null,
+      objectId: archiveObject?.id ?? null,
+      descriptorReferenceBytes: descriptor?.archiveBytes ?? null,
+      descriptorReferenceSha256: descriptor?.archiveSha256 ?? null,
+      referenceBytes,
+      referenceSha256,
+      referenceVerified,
+      treeFingerprintAlgorithm: descriptor?.workspace.algorithm ?? null,
+      treeFingerprintSha256: descriptor?.workspace.sha256 ?? null,
+      entryCount: descriptor?.workspace.entryCount ?? null,
+      fileCount: descriptor?.workspace.fileCount ?? null,
+      totalFileBytes: descriptor?.workspace.totalFileBytes ?? null,
+      complete: archiveComplete,
+      verificationState: archiveVerificationMatches ? "verified" : "unverified",
+      capturedAt: descriptor?.capturedAt ?? null,
+      verifiedRevision,
+      verifiedAt: archiveVerificationMatches ? recovery!.workspace.verifiedAt : null,
+      providerObservation: {
+        providerBackend: input.providerObject.providerBackend,
+        objectKind: input.providerObject.objectKind,
+        objectId: input.providerObject.objectId,
+        status: input.providerObject.status,
+        observedAt: input.providerObject.observedAt,
+      },
+    },
+    active: {
+      exactProcesses: activeExactProcesses.length,
+      exactAdmissions: activeExactAdmissions.length,
+      exactPtys: activeExactPtys.length,
+      exactProcessHolders: exactProcessHolders.length,
+      unmatchedProcesses: unmatchedProcesses.length,
+      unmatchedAdmissions: unmatchedAdmissions.length,
+      unmatchedPtys: unmatchedPtys.length,
+      unmatchedProcessHolders: unmatchedProcessHolders.length,
+      directHolders: directHolders.length,
+      possibleWriterTurnHolders: possibleWriterTurnHolders.length,
+      unknownTurnHolderLinks: turnHoldersWithUnknownAttempt.length,
+      unsettledInterruptions: unsettledInterruptions.length,
+      turnHolders,
+      viewerHolders,
+      inventoryComplete: rows.inventoryComplete,
+    },
+    identities: {
+      processes: rows.processes,
+      admissions: rows.admissions,
+      ptys: rows.ptys,
+      holders: rows.holders,
+      interruptions: rows.interruptions,
+    },
+    settlement: {
+      processesLost: activeExactProcesses.length,
+      admissionsRejected: activeExactAdmissions.length,
+      ptysClosed: activeExactPtys.length,
+      processHoldersDeleted: exactProcessHolders.length,
+    },
+    blockerSetHash,
+    blockers,
+  };
+}
+
+async function readColdLostDatabasePostureTx(tx: Database): Promise<ColdLostDatabasePosture> {
+  const postureRows = await tx.execute<{
+    role: string;
+    role_superuser: boolean;
+    role_bypass_rls: boolean;
+    transaction_read_only: string;
+    row_security: string;
+    account_id: string;
+    workspace_id: string;
+    force_rls: boolean;
+  }>(sql`
+    select current_user as role,
+      coalesce((select rolsuper from pg_roles where rolname = current_user), true) as role_superuser,
+      coalesce((select rolbypassrls from pg_roles where rolname = current_user), true) as role_bypass_rls,
+      current_setting('transaction_read_only') as transaction_read_only,
+      current_setting('row_security') as row_security,
+      current_setting('opengeni.account_id', true) as account_id,
+      current_setting('opengeni.workspace_id', true) as workspace_id,
+      coalesce((
+        select bool_and(c.relrowsecurity and c.relforcerowsecurity)
+        from pg_class c
+        where c.oid = any(array[
+          'sessions'::regclass,
+          'session_turns'::regclass,
+          'session_turn_attempts'::regclass,
+          'session_attempt_interruptions'::regclass,
+          'sandbox_leases'::regclass,
+          'sandbox_lease_holders'::regclass,
+          'sandbox_retained_processes'::regclass,
+          'sandbox_workspace_mutation_admissions'::regclass,
+          'sandbox_pty_sessions'::regclass
+        ])
+      ), false) as force_rls
+  `);
+  const posture = postureRows[0];
+  if (!posture) throw new Error("Cold lost-provider preview could not read database posture");
+  return {
+    role: posture.role,
+    roleSuperuser: posture.role_superuser,
+    roleBypassRls: posture.role_bypass_rls,
+    transactionReadOnly: posture.transaction_read_only === "on",
+    rowSecurity: posture.row_security === "on",
+    forceRls: posture.force_rls,
+    accountId: posture.account_id,
+    workspaceId: posture.workspace_id,
+  };
+}
+
+/**
+ * Build the official structurally non-mutating recovery preview. The transaction
+ * is repeatable-read/read-only, RLS context is verified on the same backend, and
+ * no row lock, provider operation, or state transition is performed.
+ */
+export async function previewColdLostLeaseInstanceBlockers(
+  db: Database,
+  input: PreviewColdLostLeaseInstanceBlockersInput,
+): Promise<ColdLostReconciliationPreview> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const posture = await readColdLostDatabasePostureTx(scopedDb);
+      const rows = await readColdLostSnapshotRowsTx(scopedDb, input);
+      return evaluateColdLostSnapshot(input, rows, posture);
+    },
+    { isolationLevel: "repeatable read", accessMode: "read only" },
+  );
+}
+
 export type MarkWarmLeaseInstanceLostResult =
   | {
       status: "marked";
@@ -21056,7 +22879,8 @@ export type ReconcileColdLostLeaseInstanceBlockersResult =
       lease: LeaseSnapshot;
       settlement: LostProviderWorkspaceSettlement;
     }
-  | { status: "stale"; lease: LeaseSnapshot | null };
+  | { status: "blocked"; preview: ColdLostReconciliationPreview }
+  | { status: "stale"; preview: ColdLostReconciliationPreview };
 
 /**
  * Settle blockers left by a provider-loss transition that predates exact loss
@@ -21071,13 +22895,43 @@ export async function reconcileColdLostLeaseInstanceBlockers(
   input: {
     accountId: string;
     workspaceId: string;
+    sessionId: string;
     sandboxGroupId: string;
+    expectedLeaseId: string;
+    expectedBackend: string;
     expectedCurrentEpoch: number;
     expectedLostEpoch: number;
     expectedLostInstanceId: string;
+    expectedRefcount: number;
+    expectedProviderBackend: string;
+    expectedRouteKind: "home" | "active";
+    expectedRouteTargetId: string | null;
+    expectedRouteEpoch: number;
     expectedWorkspaceGeneration: number;
+    expectedWorkspaceStatus: SandboxWorkspaceReadiness;
+    expectedRestoreStatus: SandboxRestoreStatus;
+    expectedRestoreFailureCode: string | null;
     expectedArchiveGeneration: number | null;
     expectedArchiveComplete: boolean;
+    expectedArchiveDescriptorVersion: 1;
+    expectedArchiveRevision: string;
+    expectedArchiveObjectKind: "modal_filesystem_snapshot" | "modal_directory_snapshot";
+    expectedArchiveObjectId: string;
+    expectedDescriptorReferenceBytes: number;
+    expectedDescriptorReferenceSha256: string;
+    expectedReferenceBytes: number;
+    expectedReferenceSha256: string;
+    expectedTreeFingerprintAlgorithm: "sha256";
+    expectedTreeFingerprintSha256: string;
+    expectedTreeEntryCount: number;
+    expectedTreeFileCount: number;
+    expectedTotalFileBytes: number;
+    expectedArchiveCapturedAt: string;
+    expectedArchiveVerificationState: "verified" | "unverified";
+    expectedArchiveVerifiedRevision: string | null;
+    expectedArchiveVerifiedAt: string | null;
+    providerObject: ColdLostProviderObjectObservation;
+    expectedPreviewId: string;
   },
 ): Promise<ReconcileColdLostLeaseInstanceBlockersResult> {
   if (
@@ -21087,36 +22941,67 @@ export async function reconcileColdLostLeaseInstanceBlockers(
   ) {
     throw new Error("Cold lost-provider reconciliation requires currentEpoch = lostEpoch + 1");
   }
+  if (!/^clrp1:[a-f0-9]{64}$/.test(input.expectedPreviewId)) {
+    throw new Error("Cold lost-provider reconciliation requires an exact clrp1 preview id");
+  }
+  const previewInput: PreviewColdLostLeaseInstanceBlockersInput = {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    sandboxGroupId: input.sandboxGroupId,
+    expectedLeaseId: input.expectedLeaseId,
+    expectedBackend: input.expectedBackend,
+    expectedCurrentEpoch: input.expectedCurrentEpoch,
+    expectedLostEpoch: input.expectedLostEpoch,
+    expectedLostInstanceId: input.expectedLostInstanceId,
+    expectedRefcount: input.expectedRefcount,
+    expectedProviderBackend: input.expectedProviderBackend,
+    expectedRouteKind: input.expectedRouteKind,
+    expectedRouteTargetId: input.expectedRouteTargetId,
+    expectedRouteEpoch: input.expectedRouteEpoch,
+    expectedWorkspaceGeneration: input.expectedWorkspaceGeneration,
+    expectedWorkspaceStatus: input.expectedWorkspaceStatus,
+    expectedRestoreStatus: input.expectedRestoreStatus,
+    expectedRestoreFailureCode: input.expectedRestoreFailureCode,
+    expectedArchiveGeneration: input.expectedArchiveGeneration,
+    expectedArchiveComplete: input.expectedArchiveComplete,
+    expectedArchiveDescriptorVersion: input.expectedArchiveDescriptorVersion,
+    expectedArchiveRevision: input.expectedArchiveRevision,
+    expectedArchiveObjectKind: input.expectedArchiveObjectKind,
+    expectedArchiveObjectId: input.expectedArchiveObjectId,
+    expectedDescriptorReferenceBytes: input.expectedDescriptorReferenceBytes,
+    expectedDescriptorReferenceSha256: input.expectedDescriptorReferenceSha256,
+    expectedReferenceBytes: input.expectedReferenceBytes,
+    expectedReferenceSha256: input.expectedReferenceSha256,
+    expectedTreeFingerprintAlgorithm: input.expectedTreeFingerprintAlgorithm,
+    expectedTreeFingerprintSha256: input.expectedTreeFingerprintSha256,
+    expectedTreeEntryCount: input.expectedTreeEntryCount,
+    expectedTreeFileCount: input.expectedTreeFileCount,
+    expectedTotalFileBytes: input.expectedTotalFileBytes,
+    expectedArchiveCapturedAt: input.expectedArchiveCapturedAt,
+    expectedArchiveVerificationState: input.expectedArchiveVerificationState,
+    expectedArchiveVerifiedRevision: input.expectedArchiveVerifiedRevision,
+    expectedArchiveVerifiedAt: input.expectedArchiveVerifiedAt,
+    providerObject: input.providerObject,
+  };
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
-        const observedRows = await tx.execute<LeaseRow>(sql`
-          select * from sandbox_leases
-          where workspace_id = ${input.workspaceId}
-            and sandbox_group_id = ${input.sandboxGroupId}
-        `);
-        const observed = observedRows[0];
-        const observedRecovery = observed ? recoveryStateFromLeaseRow(observed) : null;
-        if (
-          !observed ||
-          observed.liveness !== "cold" ||
-          observed.instance_id !== null ||
-          Number(observed.lease_epoch) !== input.expectedCurrentEpoch ||
-          Number(observed.workspace_generation) !== input.expectedWorkspaceGeneration ||
-          (observed.archive_generation === null ? null : Number(observed.archive_generation)) !==
-            input.expectedArchiveGeneration ||
-          hasCompleteWorkspaceArchive(observed) !== input.expectedArchiveComplete ||
-          observedRecovery?.provider.status !== "missing" ||
-          observedRecovery.provider.instanceId !== input.expectedLostInstanceId
-        ) {
-          return {
-            status: "stale" as const,
-            lease: observed ? mapLeaseRow(observed) : null,
-          };
+        const database = await readColdLostDatabasePostureTx(tx);
+        const observedRows = await readColdLostSnapshotRowsTx(tx, previewInput);
+        const observedPreview = evaluateColdLostSnapshot(previewInput, observedRows, database, {
+          requireReadOnly: false,
+        });
+        if (observedPreview.previewId !== input.expectedPreviewId) {
+          return { status: "stale" as const, preview: observedPreview };
         }
+        if (observedPreview.status !== "eligible") {
+          return { status: "blocked" as const, preview: observedPreview };
+        }
+        const observed = observedRows.lease!;
 
         const blockerScope = {
           accountId: input.accountId,
@@ -21134,24 +23019,27 @@ export async function reconcileColdLostLeaseInstanceBlockers(
           for update
         `);
         const current = currentRows[0];
-        const recovery = current ? recoveryStateFromLeaseRow(current) : null;
-        if (
-          !current ||
-          current.id !== observed.id ||
-          current.liveness !== "cold" ||
-          current.instance_id !== null ||
-          Number(current.lease_epoch) !== input.expectedCurrentEpoch ||
-          Number(current.workspace_generation) !== input.expectedWorkspaceGeneration ||
-          (current.archive_generation === null ? null : Number(current.archive_generation)) !==
-            input.expectedArchiveGeneration ||
-          hasCompleteWorkspaceArchive(current) !== input.expectedArchiveComplete ||
-          recovery?.provider.status !== "missing" ||
-          recovery.provider.instanceId !== input.expectedLostInstanceId
-        ) {
+        if (!current || current.id !== observed.id) {
+          const currentSnapshotRows = await readColdLostSnapshotRowsTx(tx, previewInput);
           return {
             status: "stale" as const,
-            lease: current ? mapLeaseRow(current) : null,
+            preview: evaluateColdLostSnapshot(previewInput, currentSnapshotRows, database, {
+              requireReadOnly: false,
+            }),
           };
+        }
+        const currentSnapshotRows = await readColdLostSnapshotRowsTx(tx, previewInput);
+        const currentPreview = evaluateColdLostSnapshot(
+          previewInput,
+          currentSnapshotRows,
+          database,
+          { requireReadOnly: false },
+        );
+        if (currentPreview.previewId !== input.expectedPreviewId) {
+          return { status: "stale" as const, preview: currentPreview };
+        }
+        if (currentPreview.status !== "eligible") {
+          return { status: "blocked" as const, preview: currentPreview };
         }
 
         const settlement = await settleExactLostProviderWorkspaceBlockersTx(tx, blockerScope);
@@ -25009,6 +26897,89 @@ export async function latestWorkspaceCapture(
   });
 }
 
+export type SessionWorkspaceCaptureLookup = {
+  sessionExists: boolean;
+  capture: WorkspaceCaptureRow | null;
+};
+
+/**
+ * Resolve session existence and its newest capture in one RLS-scoped query.
+ *
+ * The capture metadata endpoint only needs existence for its 404 contract. Using
+ * `getSession` there mapped the complete session, MCP metadata, and control
+ * projection before issuing a second transaction for the capture. A lateral
+ * lookup preserves the exact absent-session / absent-capture distinction without
+ * loading unrelated session state or adding another database round trip.
+ */
+export async function sessionLatestWorkspaceCapture(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<SessionWorkspaceCaptureLookup> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.execute<{
+      found_session_id: string;
+      capture_id: string | null;
+      capture_session_id: string | null;
+      capture_turn_id: string | null;
+      capture_revision: number | string | null;
+      capture_lease_epoch: number | string | null;
+      capture_state: string | null;
+      capture_manifest_key: string | null;
+      capture_tree_index_key: string | null;
+      capture_blob_keys: unknown;
+      capture_size_bytes: number | string | null;
+      capture_stats: unknown;
+      capture_captured_at: string | Date | null;
+    }>(sql`
+      select
+        sessions.id as found_session_id,
+        capture.id as capture_id,
+        capture.session_id as capture_session_id,
+        capture.turn_id as capture_turn_id,
+        capture.revision as capture_revision,
+        capture.lease_epoch as capture_lease_epoch,
+        capture.state as capture_state,
+        capture.manifest_key as capture_manifest_key,
+        capture.tree_index_key as capture_tree_index_key,
+        capture.blob_keys as capture_blob_keys,
+        capture.size_bytes as capture_size_bytes,
+        capture.stats as capture_stats,
+        capture.captured_at as capture_captured_at
+      from sessions
+      left join lateral (
+        select ${WORKSPACE_CAPTURE_COLUMNS}
+        from workspace_captures
+        where workspace_captures.session_id = sessions.id
+        order by workspace_captures.revision desc
+        limit 1
+      ) capture on true
+      where sessions.workspace_id = ${workspaceId} and sessions.id = ${sessionId}
+      limit 1
+    `);
+    const row = rows[0];
+    if (!row) return { sessionExists: false, capture: null };
+    if (!row.capture_id) return { sessionExists: true, capture: null };
+    return {
+      sessionExists: true,
+      capture: mapWorkspaceCaptureRow({
+        id: row.capture_id,
+        session_id: row.capture_session_id!,
+        turn_id: row.capture_turn_id,
+        revision: row.capture_revision!,
+        lease_epoch: row.capture_lease_epoch!,
+        state: row.capture_state!,
+        manifest_key: row.capture_manifest_key,
+        tree_index_key: row.capture_tree_index_key,
+        blob_keys: row.capture_blob_keys,
+        size_bytes: row.capture_size_bytes,
+        stats: row.capture_stats,
+        captured_at: row.capture_captured_at!,
+      }),
+    };
+  });
+}
+
 /** A specific capture revision for a session (the M2 file route with an explicit
  *  `?revision=`), or null if that revision was never captured / already GC'd. */
 export async function workspaceCaptureAtRevision(
@@ -28651,7 +30622,7 @@ export async function materializeGoalContinuation(
               eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
               eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
               eq(schema.sessionSystemUpdates.kind, "agent_steer_instruction"),
-              inArray(schema.sessionSystemUpdates.state, ["pending", "deferred"]),
+              eq(schema.sessionSystemUpdates.state, "pending"),
             ),
           )
           .limit(1);
@@ -28814,6 +30785,7 @@ export async function materializeGoalContinuation(
           })
           .onConflictDoNothing({ target: schema.usageEvents.idempotencyKey });
 
+        const eventPreview = internalUpdateEventMember(update);
         const insertedEvents = await tx
           .insert(schema.sessionEvents)
           .values([
@@ -28824,11 +30796,13 @@ export async function materializeGoalContinuation(
               sequence: session.lastSequence + 1,
               type: "system.update.pending",
               payload: sanitizeEventPayload({
-                updateId: update.id,
-                kind: update.kind,
-                classification: update.classification,
-                sourceId: update.sourceId,
-                summary: update.summary,
+                updateId: eventPreview.id,
+                kind: eventPreview.kind,
+                classification: eventPreview.classification,
+                sourceId: eventPreview.sourceId,
+                sourceIdTruncated: eventPreview.sourceIdTruncated,
+                summary: eventPreview.summary,
+                summaryTruncated: eventPreview.summaryTruncated,
               }),
               occurredAt: now,
             },
@@ -29329,6 +31303,79 @@ export type SessionWorkTrigger = { kind: "next" } | { kind: "approval"; triggerE
 export const MAX_INTERNAL_UPDATE_BYTES = 64 * 1024;
 export const MAX_INTERNAL_UPDATE_BATCH_MEMBERS = 100;
 export const MAX_INTERNAL_UPDATE_BATCH_BYTES = 256 * 1024;
+const MAX_INTERNAL_UPDATE_EVENT_SUMMARY_BYTES = 512;
+const MAX_INTERNAL_UPDATE_EVENT_SOURCE_BYTES = 256;
+
+type BoundedSystemUpdate = Pick<
+  typeof schema.sessionSystemUpdates.$inferSelect,
+  "id" | "kind" | "classification" | "sourceId" | "summary" | "payload" | "lineage"
+>;
+
+function boundedInternalUpdateEventText(
+  value: string,
+  maxBytes: number,
+): {
+  text: string;
+  truncated: boolean;
+} {
+  if (Buffer.byteLength(value) <= maxBytes) return { text: value, truncated: false };
+  const suffix = "…";
+  const bodyBudget = maxBytes - Buffer.byteLength(suffix);
+  const bytes = Buffer.from(value);
+  let text = bytes.subarray(0, bodyBudget).toString("utf8");
+  if (text.endsWith("\uFFFD")) text = text.slice(0, -1);
+  return { text: `${text}${suffix}`, truncated: true };
+}
+
+function internalUpdateEventMember(update: BoundedSystemUpdate) {
+  const summary = boundedInternalUpdateEventText(
+    update.summary,
+    MAX_INTERNAL_UPDATE_EVENT_SUMMARY_BYTES,
+  );
+  const source = boundedInternalUpdateEventText(
+    update.sourceId,
+    MAX_INTERNAL_UPDATE_EVENT_SOURCE_BYTES,
+  );
+  return {
+    id: update.id,
+    kind: update.kind,
+    classification: update.classification,
+    sourceId: source.text,
+    sourceIdTruncated: source.truncated,
+    summary: summary.text,
+    summaryTruncated: summary.truncated,
+  };
+}
+
+function selectBoundedSystemUpdateBatch<T extends BoundedSystemUpdate>(updates: readonly T[]): T[] {
+  const selected: T[] = [];
+  let selectedBytes = 0;
+  for (const update of updates) {
+    const updateBytes = Buffer.byteLength(
+      JSON.stringify({
+        id: update.id,
+        kind: update.kind,
+        classification: update.classification,
+        sourceId: update.sourceId,
+        summary: update.summary,
+        payload: update.payload,
+        lineage: update.lineage,
+      }),
+    );
+    if (
+      selected.length >= MAX_INTERNAL_UPDATE_BATCH_MEMBERS ||
+      // One individually large canonical input must still make progress. The
+      // model/context boundary may reject it explicitly, but the queue cannot
+      // wedge forever merely because the coalescing target is smaller.
+      (selected.length > 0 && selectedBytes + updateBytes > MAX_INTERNAL_UPDATE_BATCH_BYTES)
+    ) {
+      break;
+    }
+    selected.push(update);
+    selectedBytes += updateBytes;
+  }
+  return selected;
+}
 
 export type ClaimSessionWorkForAttemptInput = {
   sessionId: string;
@@ -29374,7 +31421,10 @@ export async function claimSessionWorkForAttempt(
           count: number;
           lastSequence: number;
           triggerEventId: string | null;
+          historyItemId: string | null;
+          historyItem: Record<string, unknown> | null;
           updates: Array<typeof schema.sessionSystemUpdates.$inferSelect>;
+          events: Array<typeof schema.sessionEvents.$inferInsert>;
           event: typeof schema.sessionEvents.$inferInsert | null;
         }> => {
           const [agentSteer] = await tx
@@ -29384,7 +31434,7 @@ export async function claimSessionWorkForAttempt(
               and(
                 eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
                 eq(schema.sessionSystemUpdates.sessionId, sessionId),
-                inArray(schema.sessionSystemUpdates.state, ["pending", "deferred"]),
+                eq(schema.sessionSystemUpdates.state, "pending"),
                 eq(schema.sessionSystemUpdates.kind, "agent_steer_instruction"),
               ),
             )
@@ -29394,20 +31444,6 @@ export async function claimSessionWorkForAttempt(
             )
             .limit(1)
             .for("update");
-          if (agentSteer) {
-            await tx
-              .update(schema.sessionSystemUpdates)
-              .set({ state: "superseded" })
-              .where(
-                and(
-                  eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
-                  eq(schema.sessionSystemUpdates.sessionId, sessionId),
-                  eq(schema.sessionSystemUpdates.kind, "agent_steer_instruction"),
-                  inArray(schema.sessionSystemUpdates.state, ["pending", "deferred"]),
-                  ne(schema.sessionSystemUpdates.id, agentSteer.id),
-                ),
-              );
-          }
           const ordinary = await tx
             .select()
             .from(schema.sessionSystemUpdates)
@@ -29415,7 +31451,7 @@ export async function claimSessionWorkForAttempt(
               and(
                 eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
                 eq(schema.sessionSystemUpdates.sessionId, sessionId),
-                inArray(schema.sessionSystemUpdates.state, ["pending", "deferred"]),
+                eq(schema.sessionSystemUpdates.state, "pending"),
                 ne(schema.sessionSystemUpdates.kind, "agent_steer_instruction"),
               ),
             )
@@ -29431,12 +31467,15 @@ export async function claimSessionWorkForAttempt(
               count: 0,
               lastSequence: nextSequence - 1,
               triggerEventId: null,
+              historyItemId: null,
+              historyItem: null,
               updates: [],
+              events: [],
               event: null,
             };
           }
-          const deliverable: typeof updates = [];
-          let deliveredBytes = 0;
+          const validUpdates: typeof updates = [];
+          const cancelledUpdateIds: string[] = [];
           for (const update of updates) {
             const payload = update.payload;
             if (payload.type === "goal_continuation") {
@@ -29465,43 +31504,66 @@ export async function claimSessionWorkForAttempt(
                   .update(schema.sessionSystemUpdates)
                   .set({ state: "cancelled" })
                   .where(eq(schema.sessionSystemUpdates.id, update.id));
+                cancelledUpdateIds.push(update.id);
                 continue;
               }
             }
-            const updateBytes = Buffer.byteLength(
-              JSON.stringify({
-                id: update.id,
-                kind: update.kind,
-                classification: update.classification,
-                sourceId: update.sourceId,
-                summary: update.summary,
-                payload: update.payload,
-                lineage: update.lineage,
-              }),
-            );
-            if (
-              deliverable.length >= MAX_INTERNAL_UPDATE_BATCH_MEMBERS ||
-              deliveredBytes + updateBytes > MAX_INTERNAL_UPDATE_BATCH_BYTES
-            ) {
-              break;
-            }
-            deliverable.push(update);
-            deliveredBytes += updateBytes;
+            validUpdates.push(update);
           }
+          const deliverable = selectBoundedSystemUpdateBatch(validUpdates);
           if (deliverable.length === 0) {
+            const cancellationEvent =
+              cancelledUpdateIds.length > 0
+                ? {
+                    accountId,
+                    workspaceId,
+                    sessionId,
+                    // No receiving turn exists when every candidate was
+                    // cancelled before a model batch could be persisted.
+                    turnId: null,
+                    turnGeneration: null,
+                    turnAttemptId: null,
+                    turnAssociation: null,
+                    sequence: nextSequence,
+                    type: "system.update.cancelled" as const,
+                    payload: sanitizeEventPayload({
+                      updateIds: cancelledUpdateIds,
+                      count: cancelledUpdateIds.length,
+                      reason: "stale_goal_continuation",
+                    }),
+                    occurredAt,
+                  }
+                : null;
             return {
               count: 0,
-              lastSequence: nextSequence - 1,
+              lastSequence: cancellationEvent ? nextSequence : nextSequence - 1,
               triggerEventId: null,
+              historyItemId: null,
+              historyItem: null,
               updates: [],
+              events: cancellationEvent ? [cancellationEvent] : [],
               event: null,
             };
           }
+          // Inclusion gives the newest Steer first refusal on the bounded
+          // batch. Model ordering is deliberately the opposite: ordinary
+          // updates establish context, then the authoritative replacement
+          // direction is last so it cannot be overridden by an older goal or
+          // lifecycle notice.
+          const modelOrdered = [
+            ...deliverable.filter((update) => update.kind !== "agent_steer_instruction"),
+            ...deliverable.filter((update) => update.kind === "agent_steer_instruction"),
+          ];
+          const historyItemId = crypto.randomUUID();
+          const historyItem = sessionSystemUpdateBatchHistoryItem(
+            modelOrdered.map((update) => mapSessionSystemUpdate(update)),
+          ) as Record<string, unknown>;
           await tx
             .update(schema.sessionSystemUpdates)
             .set({
               state: "delivered",
               deliveredTurnId: turnId,
+              deliveredHistoryItemId: historyItemId,
               deliveredAt: occurredAt,
             })
             .where(
@@ -29515,6 +31577,27 @@ export async function claimSessionWorkForAttempt(
               ),
             );
           const eventId = triggerEventId ?? crypto.randomUUID();
+          let sequence = nextSequence - 1;
+          const events: Array<typeof schema.sessionEvents.$inferInsert> = [];
+          if (cancelledUpdateIds.length > 0) {
+            events.push({
+              accountId,
+              workspaceId,
+              sessionId,
+              turnId,
+              turnGeneration,
+              turnAttemptId: input.attemptId,
+              turnAssociation: "current",
+              sequence: ++sequence,
+              type: "system.update.cancelled",
+              payload: sanitizeEventPayload({
+                updateIds: cancelledUpdateIds,
+                count: cancelledUpdateIds.length,
+                reason: "stale_goal_continuation",
+              }),
+              occurredAt,
+            });
+          }
           const event: typeof schema.sessionEvents.$inferInsert = {
             id: eventId,
             accountId,
@@ -29524,22 +31607,62 @@ export async function claimSessionWorkForAttempt(
             turnGeneration,
             turnAttemptId: input.attemptId,
             turnAssociation: "current",
-            sequence: nextSequence,
+            sequence: ++sequence,
             type: "system.update.delivered",
             payload: sanitizeEventPayload({
               updateIds: deliverable.map((update) => update.id),
+              historyItemId,
               count: deliverable.length,
               classifications: [...new Set(deliverable.map((update) => update.classification))],
+              members: modelOrdered.map(internalUpdateEventMember),
             }),
             occurredAt,
           };
+          events.push(event);
           return {
             count: deliverable.length,
-            lastSequence: nextSequence,
+            lastSequence: sequence,
             triggerEventId: eventId,
+            historyItemId,
+            historyItem,
             updates: deliverable,
+            events,
             event,
           };
+        };
+
+        const persistDeliveredUpdateBatch = async (
+          delivered: Awaited<ReturnType<typeof deliverPendingUpdates>>,
+          accountId: string,
+          turnId: string,
+        ): Promise<void> => {
+          if (!delivered.historyItemId || !delivered.historyItem) {
+            if (delivered.count !== 0) {
+              throw new Error("Delivered machine-input batch has no model-memory item");
+            }
+            return;
+          }
+          const [{ position } = { position: 0 }] = await tx
+            .select({
+              position: sql<number>`coalesce(max(${schema.sessionHistoryItems.position}), -1) + 1`,
+            })
+            .from(schema.sessionHistoryItems)
+            .where(
+              and(
+                eq(schema.sessionHistoryItems.workspaceId, workspaceId),
+                eq(schema.sessionHistoryItems.sessionId, sessionId),
+              ),
+            );
+          await tx.insert(schema.sessionHistoryItems).values({
+            id: delivered.historyItemId,
+            accountId,
+            workspaceId,
+            sessionId,
+            turnId,
+            position: Number(position),
+            item: sanitizeModelPayload(delivered.historyItem),
+            producerCodexCredentialId: null,
+          });
         };
 
         // Capacity settlement and resume use session -> turn after their
@@ -29877,7 +32000,7 @@ export async function claimSessionWorkForAttempt(
               eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
               eq(schema.sessionSystemUpdates.sessionId, sessionId),
               eq(schema.sessionSystemUpdates.kind, "agent_steer_instruction"),
-              inArray(schema.sessionSystemUpdates.state, ["pending", "deferred"]),
+              eq(schema.sessionSystemUpdates.state, "pending"),
             ),
           )
           .orderBy(
@@ -30114,6 +32237,22 @@ export async function claimSessionWorkForAttempt(
             triggerEventId,
           );
           if (delivered.count === 0) {
+            if (delivered.events.length > 0) {
+              await tx.insert(schema.sessionEvents).values(delivered.events);
+              await tx
+                .update(schema.sessions)
+                .set({
+                  status: "idle",
+                  lastSequence: delivered.lastSequence,
+                  updatedAt: now,
+                })
+                .where(
+                  and(
+                    eq(schema.sessions.workspaceId, workspaceId),
+                    eq(schema.sessions.id, sessionId),
+                  ),
+                );
+            }
             return { action: "unclaimed", reason: "no-work" };
           }
           const goalUpdate = delivered.updates.find(
@@ -30300,9 +32439,10 @@ export async function claimSessionWorkForAttempt(
             })
             .returning();
           if (!internalTurn) throw new Error("Failed to create internal update inference");
+          await persistDeliveredUpdateBatch(delivered, session.accountId, internalTurn.id);
           await registerAttempt(internalTurn);
           if (!delivered.event) throw new Error("Delivered update batch has no durable event");
-          await tx.insert(schema.sessionEvents).values(delivered.event);
+          await tx.insert(schema.sessionEvents).values(delivered.events);
           if (goalUpdate && typeof goalUpdate.payload.goalId === "string") {
             await tx
               .update(schema.sessionGoals)
@@ -30419,8 +32559,9 @@ export async function claimSessionWorkForAttempt(
           session.lastSequence + 1,
           now,
         );
-        if (delivered.event) {
-          await tx.insert(schema.sessionEvents).values(delivered.event);
+        await persistDeliveredUpdateBatch(delivered, session.accountId, row.id);
+        if (delivered.events.length > 0) {
+          await tx.insert(schema.sessionEvents).values(delivered.events);
         }
         await tx
           .update(schema.sessions)
@@ -30664,6 +32805,196 @@ export async function markSessionAttemptQuiesced(
   });
 }
 
+export type ReconcileSessionAttemptQuiescenceResult =
+  | { action: "quiesced"; events: SessionEvent[] }
+  | { action: "pending"; events: [] }
+  | { action: "stale"; events: [] };
+
+export type SessionAttemptActivityRef = {
+  workflowId: string;
+  workflowRunId: string;
+  activityId: string;
+  quiesced: boolean;
+};
+
+export async function getSessionAttemptActivityRef(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    attemptId: string;
+    temporalWorkflowId: string;
+  },
+): Promise<SessionAttemptActivityRef | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [attempt] = await scopedDb
+        .select({
+          workflowId: schema.sessionTurnAttempts.temporalWorkflowId,
+          workflowRunId: schema.sessionTurnAttempts.temporalWorkflowRunId,
+          activityId: schema.sessionTurnAttempts.temporalActivityId,
+          quiescedAt: schema.sessionTurnAttempts.quiescedAt,
+        })
+        .from(schema.sessionTurnAttempts)
+        .where(
+          and(
+            eq(schema.sessionTurnAttempts.accountId, input.accountId),
+            eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
+            eq(schema.sessionTurnAttempts.sessionId, input.sessionId),
+            eq(schema.sessionTurnAttempts.id, input.attemptId),
+            eq(schema.sessionTurnAttempts.temporalWorkflowId, input.temporalWorkflowId),
+          ),
+        )
+        .limit(1);
+      return attempt
+        ? {
+            workflowId: attempt.workflowId,
+            workflowRunId: attempt.workflowRunId,
+            activityId: attempt.activityId,
+            quiesced: attempt.quiescedAt !== null,
+          }
+        : null;
+    },
+  );
+}
+
+/**
+ * Recover the quiescence receipt when the original activity disappeared after
+ * its attempt was durably interrupted. The caller first proves through
+ * Temporal that the exact activity is absent or its server-owned heartbeat
+ * lease expired. The closed attempt then cannot admit another workspace writer,
+ * and every writer it did admit (including retained-process child writes) must
+ * carry a physical settlement before the ordinary receipt transaction is
+ * allowed to run.
+ */
+export async function reconcileSessionAttemptQuiescence(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    attemptId: string;
+    temporalWorkflowId: string;
+    temporalWorkflowRunId: string;
+    temporalActivityId: string;
+    activitySettled: boolean;
+  },
+): Promise<ReconcileSessionAttemptQuiescenceResult> {
+  const eligibility = await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb.execute<{
+        account_id: string;
+        state: string;
+        quiesced_at: Date | string | null;
+        temporal_workflow_id: string;
+        temporal_workflow_run_id: string;
+        temporal_activity_id: string;
+        interruption_settled: boolean;
+        interruption_pending: boolean;
+        writer_pending: boolean;
+      }>(sql`
+        select
+          attempt.account_id,
+          attempt.state,
+          attempt.quiesced_at,
+          attempt.temporal_workflow_id,
+          attempt.temporal_workflow_run_id,
+          attempt.temporal_activity_id,
+          exists (
+            select 1
+            from session_attempt_interruptions interruption
+            where interruption.workspace_id = attempt.workspace_id
+              and interruption.session_id = attempt.session_id
+              and interruption.attempt_id = attempt.id
+              and interruption.state in ('settled', 'rejected_stale')
+          ) as interruption_settled,
+          exists (
+            select 1
+            from session_attempt_interruptions interruption
+            where interruption.workspace_id = attempt.workspace_id
+              and interruption.session_id = attempt.session_id
+              and interruption.attempt_id = attempt.id
+              and interruption.state in ('pending', 'delivered', 'acknowledged')
+          ) as interruption_pending,
+          (
+            exists (
+              select 1
+              from sandbox_workspace_mutation_admissions admission
+              where admission.account_id = attempt.account_id
+                and admission.workspace_id = attempt.workspace_id
+                and admission.session_id = attempt.session_id
+                and admission.settled_at is null
+                and (
+                  admission.attempt_id = attempt.id
+                  or (
+                    admission.actor_kind = 'process'
+                    and exists (
+                      select 1
+                      from sandbox_retained_processes process
+                      where process.account_id = attempt.account_id
+                        and process.workspace_id = attempt.workspace_id
+                        and process.session_id = attempt.session_id
+                        and process.id = admission.actor_id
+                        and process.owner_attempt_id = attempt.id
+                    )
+                  )
+                )
+            )
+            or exists (
+              select 1
+              from sandbox_retained_processes process
+              where process.account_id = attempt.account_id
+                and process.workspace_id = attempt.workspace_id
+                and process.session_id = attempt.session_id
+                and process.owner_attempt_id = attempt.id
+                and process.state = 'active'
+            )
+          ) as writer_pending
+        from session_turn_attempts attempt
+        where attempt.account_id = ${input.accountId}
+          and attempt.workspace_id = ${input.workspaceId}
+          and attempt.session_id = ${input.sessionId}
+          and attempt.id = ${input.attemptId}
+        limit 1
+      `);
+      return rows[0] ?? null;
+    },
+  );
+  if (
+    !eligibility ||
+    eligibility.account_id !== input.accountId ||
+    eligibility.temporal_workflow_id !== input.temporalWorkflowId ||
+    eligibility.temporal_workflow_run_id !== input.temporalWorkflowRunId ||
+    eligibility.temporal_activity_id !== input.temporalActivityId ||
+    eligibility.state !== "closed" ||
+    !eligibility.interruption_settled ||
+    eligibility.interruption_pending
+  ) {
+    return { action: "stale", events: [] };
+  }
+  if (eligibility.quiesced_at) {
+    return { action: "quiesced", events: [] };
+  }
+  if (!input.activitySettled || eligibility.writer_pending) {
+    return { action: "pending", events: [] };
+  }
+  const events = await markSessionAttemptQuiesced(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    attemptId: input.attemptId,
+    temporalWorkflowId: input.temporalWorkflowId,
+    temporalWorkflowRunId: input.temporalWorkflowRunId,
+    temporalActivityId: input.temporalActivityId,
+  });
+  return { action: "quiesced", events };
+}
+
 /**
  * Settle every durable interruption cause for one exact first-class attempt.
  * Steer wins the logical-turn fate when causes coexist; effective control after
@@ -30834,13 +33165,6 @@ export async function settleSessionAttemptInterruptions(
         outcome,
         closedAt: now,
       });
-      await requeueInterruptedSessionSystemUpdatesForTurnTx(
-        tx as unknown as Database,
-        workspaceId,
-        sessionId,
-        turn.id,
-      );
-
       const eventValues: Array<typeof schema.sessionEvents.$inferInsert> = steer
         ? [
             {
@@ -32125,10 +34449,45 @@ export async function applySessionTurnSettlement(
           },
         }),
       );
+      const settledMachineInputs = ["completed", "failed", "cancelled", "superseded"].includes(
+        input.turnStatus,
+      )
+        ? await tx
+            .select({
+              id: schema.sessionSystemUpdates.id,
+              historyItemId: schema.sessionSystemUpdates.deliveredHistoryItemId,
+            })
+            .from(schema.sessionSystemUpdates)
+            .where(
+              and(
+                eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
+                eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+                eq(schema.sessionSystemUpdates.deliveredTurnId, input.turnId),
+                eq(schema.sessionSystemUpdates.state, "delivered"),
+              ),
+            )
+            .orderBy(
+              asc(schema.sessionSystemUpdates.createdAt),
+              asc(schema.sessionSystemUpdates.id),
+            )
+        : [];
+      const machineInputSettlementEvent: AppendEventInput | null =
+        settledMachineInputs.length > 0
+          ? {
+              type: "system.update.settled",
+              payload: {
+                updateIds: settledMachineInputs.map((update) => update.id),
+                count: settledMachineInputs.length,
+                historyItemId: settledMachineInputs[0]!.historyItemId,
+                outcome: input.turnStatus,
+              },
+            }
+          : null;
       const settlementEvents = [
         ...(recordingEvent ? [recordingEvent] : []),
         ...(compactionRequestEvent ? [compactionRequestEvent] : []),
         ...terminalHumanInputEvents,
+        ...(machineInputSettlementEvent ? [machineInputSettlementEvent] : []),
         ...input.events,
       ];
       const values = settlementEvents.map((event) => {
@@ -32209,21 +34568,6 @@ export async function applySessionTurnSettlement(
           workspaceId,
           session,
           turn,
-        );
-      }
-      if (input.turnStatus === "failed") {
-        await deferFailedSessionSystemUpdatesForTurnTx(
-          tx as unknown as Database,
-          workspaceId,
-          input.sessionId,
-          input.turnId,
-        );
-      } else if (["cancelled", "superseded"].includes(input.turnStatus)) {
-        await requeueInterruptedSessionSystemUpdatesForTurnTx(
-          tx as unknown as Database,
-          workspaceId,
-          input.sessionId,
-          input.turnId,
         );
       }
       await tx
@@ -32509,14 +34853,6 @@ export async function settleCodexCredentialLeaseLoss(
               eq(schema.sessions.activeTurnId, input.turnId),
             ),
           );
-        if (!input.checkpointDurable) {
-          await deferFailedSessionSystemUpdatesForTurnTx(
-            tx as unknown as Database,
-            input.workspaceId,
-            input.sessionId,
-            input.turnId,
-          );
-        }
         await tx.execute(sql`
           delete from codex_credential_leases
           where account_id = ${input.accountId}
@@ -33460,11 +35796,34 @@ export async function getSessionQueueSnapshot(
         ),
       )
       .orderBy(asc(schema.sessionTurns.position), asc(schema.sessionTurns.createdAt));
+    const pendingInputs = await scopedDb
+      .select()
+      .from(schema.sessionSystemUpdates)
+      .where(
+        and(
+          eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
+          eq(schema.sessionSystemUpdates.sessionId, sessionId),
+          eq(schema.sessionSystemUpdates.state, "pending"),
+        ),
+      )
+      .orderBy(
+        sql`case when ${schema.sessionSystemUpdates.kind} = 'agent_steer_instruction' then 0 else 1 end`,
+        asc(schema.sessionSystemUpdates.createdAt),
+        asc(schema.sessionSystemUpdates.id),
+      );
     const latestInterruption = await latestSessionAttemptInterruption(
       scopedDb,
       workspaceId,
       sessionId,
     );
+    const items = rows.map(mapSessionTurn);
+    const nextInputBatch = selectBoundedSystemUpdateBatch(pendingInputs);
+    const hasPendingAgentSteer = pendingInputs.some(
+      (update) => update.kind === "agent_steer_instruction",
+    );
+    const attachmentTurn = hasPendingAgentSteer
+      ? items.find((turn) => turn.metadata.delivery === "steer")
+      : items[0];
     return {
       version: session.queueVersion,
       effectiveControl: serializeEffectiveSessionControl(effectiveControl),
@@ -33472,7 +35831,26 @@ export async function getSessionQueueSnapshot(
         latestInterruption !== null &&
         latestInterruption.interruptionState !== "rejected_stale" &&
         latestInterruption.quiescedAt === null,
-      items: rows.map(mapSessionTurn),
+      items,
+      pendingInputs: pendingInputs.map((update) => {
+        const canonical = mapSessionSystemUpdate(update);
+        return {
+          id: canonical.id,
+          sessionId: canonical.sessionId,
+          kind: canonical.kind,
+          classification: canonical.classification,
+          sourceId: boundedInternalUpdateEventText(canonical.sourceId, 256).text,
+          summary: boundedInternalUpdateEventText(canonical.summary, 512).text,
+          createdAt: canonical.createdAt,
+        };
+      }),
+      pendingInputAttachment:
+        attachmentTurn && nextInputBatch.length > 0
+          ? {
+              turnId: attachmentTurn.id,
+              inputIds: nextInputBatch.map((update) => update.id),
+            }
+          : null,
     };
   });
 }
@@ -33821,12 +36199,13 @@ export async function claimPendingSessionWorkflowWakes(
 
 /**
  * Acknowledge an immediate post-commit signal only after it cannot strand an
- * accepted Agent Steer. Temporal accepting a signal is transport evidence, not
- * proof that a closing workflow observed Postgres or admitted its pending
- * direction. While active control still has an actionable Agent Steer, retain
- * the revision so the bounded outbox dispatcher retries signalWithStart. The
- * attempt-fenced claim consumes the update once; a real Pause is the typed
- * blocker and may acknowledge this revision because Resume commits a new one.
+ * accepted direction or an interrupted attempt awaiting writer-set proof.
+ * Temporal accepting a signal is transport evidence, not proof that a closing
+ * workflow observed Postgres. While active control still has an actionable
+ * Agent Steer or pending quiescence, retain the revision so the bounded outbox
+ * dispatcher retries signalWithStart. The attempt-fenced claim consumes an
+ * Agent Steer once; a real Pause is the typed blocker and may acknowledge this
+ * revision because Resume commits a new one.
  *
  * An older sender may advance only its own revision; it cannot clear a claim or
  * failure state belonging to a newer revision. The control -> workspace ->
@@ -33835,7 +36214,10 @@ export async function claimPendingSessionWorkflowWakes(
  */
 export type SessionWorkflowWakeDeliveryResult =
   | { action: "acknowledged" }
-  | { action: "pending_admission"; blocker: "pending_agent_steer" };
+  | {
+      action: "pending_admission";
+      blocker: "pending_agent_steer" | "pending_quiescence";
+    };
 
 export async function markSessionWorkflowWakeDelivered(
   db: Database,
@@ -33874,6 +36256,35 @@ export async function markSessionWorkflowWakeDelivered(
             .limit(1);
           if (pendingAgentSteer) {
             return { action: "pending_admission", blocker: "pending_agent_steer" } as const;
+          }
+          const [pendingQuiescence] = await tx
+            .select({ id: schema.sessionTurnAttempts.id })
+            .from(schema.sessionTurnAttempts)
+            .innerJoin(
+              schema.sessionAttemptInterruptions,
+              and(
+                eq(
+                  schema.sessionAttemptInterruptions.workspaceId,
+                  schema.sessionTurnAttempts.workspaceId,
+                ),
+                eq(
+                  schema.sessionAttemptInterruptions.sessionId,
+                  schema.sessionTurnAttempts.sessionId,
+                ),
+                eq(schema.sessionAttemptInterruptions.attemptId, schema.sessionTurnAttempts.id),
+              ),
+            )
+            .where(
+              and(
+                eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
+                eq(schema.sessionTurnAttempts.sessionId, input.sessionId),
+                isNull(schema.sessionTurnAttempts.quiescedAt),
+                inArray(schema.sessionAttemptInterruptions.state, ["settled", "rejected_stale"]),
+              ),
+            )
+            .limit(1);
+          if (pendingQuiescence) {
+            return { action: "pending_admission", blocker: "pending_quiescence" } as const;
           }
         }
         const [row] = await tx
@@ -34109,55 +36520,6 @@ export async function addSessionSystemUpdate(
   return await addSessionSystemUpdateWithSourceMutation(db, input, async () => undefined);
 }
 
-async function requeueInterruptedSessionSystemUpdatesForTurnTx(
-  tx: Database,
-  workspaceId: string,
-  sessionId: string,
-  turnId: string,
-): Promise<void> {
-  await tx
-    .update(schema.sessionSystemUpdates)
-    .set({ state: "pending", deliveredTurnId: null, deliveredAt: null })
-    .where(
-      and(
-        eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
-        eq(schema.sessionSystemUpdates.sessionId, sessionId),
-        eq(schema.sessionSystemUpdates.deliveredTurnId, turnId),
-        eq(schema.sessionSystemUpdates.state, "delivered"),
-      ),
-    );
-}
-
-/**
- * A failed internal-only inference must not manufacture another inference by
- * making its inputs immediately runnable again. Preserve ordinary internal
- * updates as deferred input for the next real prompt/new update. Goal
- * continuation notices are derivable from the durable goal and become terminal
- * so the goal evaluator can pause or synthesize the next valid continuation.
- */
-async function deferFailedSessionSystemUpdatesForTurnTx(
-  tx: Database,
-  workspaceId: string,
-  sessionId: string,
-  turnId: string,
-): Promise<void> {
-  await tx
-    .update(schema.sessionSystemUpdates)
-    .set({
-      state: sql`case when ${schema.sessionSystemUpdates.payload} ->> 'type' = 'goal_continuation' then 'failed' else 'deferred' end`,
-      deliveredTurnId: null,
-      deliveredAt: null,
-    })
-    .where(
-      and(
-        eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
-        eq(schema.sessionSystemUpdates.sessionId, sessionId),
-        eq(schema.sessionSystemUpdates.deliveredTurnId, turnId),
-        eq(schema.sessionSystemUpdates.state, "delivered"),
-      ),
-    );
-}
-
 /**
  * Persist one internal update without fabricating a user prompt or queue row.
  * Dedupe and any producer/outbox mutation commit in the same transaction.
@@ -34259,6 +36621,7 @@ export async function addSessionSystemUpdateWithSourceMutation(
         }
 
         const now = new Date();
+        const eventPreview = internalUpdateEventMember(inserted);
         const [event] = await tx
           .insert(schema.sessionEvents)
           .values({
@@ -34268,11 +36631,13 @@ export async function addSessionSystemUpdateWithSourceMutation(
             sequence: session.lastSequence + 1,
             type: "system.update.pending",
             payload: sanitizeEventPayload({
-              updateId: inserted.id,
-              kind: input.kind,
-              classification: input.classification,
-              sourceId: input.sourceId,
-              summary: input.summary,
+              updateId: eventPreview.id,
+              kind: eventPreview.kind,
+              classification: eventPreview.classification,
+              sourceId: eventPreview.sourceId,
+              sourceIdTruncated: eventPreview.sourceIdTruncated,
+              summary: eventPreview.summary,
+              summaryTruncated: eventPreview.summaryTruncated,
             }),
             occurredAt: now,
           })
@@ -34323,7 +36688,7 @@ export async function listOutstandingSessionSystemUpdates(
         and(
           eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
           eq(schema.sessionSystemUpdates.sessionId, sessionId),
-          inArray(schema.sessionSystemUpdates.state, ["pending", "deferred"]),
+          eq(schema.sessionSystemUpdates.state, "pending"),
         ),
       )
       .orderBy(asc(schema.sessionSystemUpdates.createdAt), asc(schema.sessionSystemUpdates.id));
@@ -34379,6 +36744,7 @@ function mapSessionSystemUpdate(
     lineage: row.lineage,
     state: row.state as SessionSystemUpdateState,
     deliveredTurnId: row.deliveredTurnId,
+    deliveredHistoryItemId: row.deliveredHistoryItemId,
     deliveredAt: row.deliveredAt?.toISOString() ?? null,
     createdAt: row.createdAt.toISOString(),
   };
@@ -34396,6 +36762,7 @@ function sessionEventTypesAdvanceActivity(inputs: ReadonlyArray<{ type: string }
 function sessionMutationAdvancesActivity(update: {
   resources?: ResourceRef[];
   tools?: ToolRef[];
+  firstPartyMcpTools?: FirstPartyMcpToolName[];
   toolPolicy?: SessionToolPolicy;
   toolPolicyVersion?: number;
   expectedToolPolicyVersion?: number;
@@ -34995,6 +37362,7 @@ type LockedSessionUpdateResult = {
   update?: {
     resources?: ResourceRef[];
     tools?: ToolRef[];
+    firstPartyMcpTools?: FirstPartyMcpToolName[];
     toolPolicy?: SessionToolPolicy;
     toolPolicyVersion?: number;
     expectedToolPolicyVersion?: number;
@@ -35139,6 +37507,9 @@ export async function appendSessionEventsWithLockedSessionUpdate(
             lastSequence: sequence,
             ...(update.resources !== undefined ? { resources: update.resources } : {}),
             ...(update.tools !== undefined ? { tools: update.tools } : {}),
+            ...(update.firstPartyMcpTools !== undefined
+              ? { firstPartyMcpTools: update.firstPartyMcpTools }
+              : {}),
             ...(update.toolPolicy !== undefined ? { toolPolicy: update.toolPolicy } : {}),
             ...(update.toolPolicyVersion !== undefined
               ? { toolPolicyVersion: update.toolPolicyVersion }
@@ -35226,12 +37597,10 @@ function mapSession(
     titleSource: (row.titleSource as "user" | "agent" | null) ?? null,
     instructions: row.instructions ?? null,
     resources: row.resources as ResourceRef[],
+    skills: (row.skills as SessionSkill[]) ?? [],
     tools: row.tools as ToolRef[],
-    toolPolicy: (row.toolPolicy as SessionToolPolicy | null) ?? {
-      mode: "legacy",
-      inheritedFromSessionId: null,
-    },
-    toolPolicyVersion: Number(row.toolPolicyVersion ?? 1),
+    toolPolicy: row.toolPolicy as SessionToolPolicy,
+    toolPolicyVersion: Number(row.toolPolicyVersion),
     metadata: row.metadata,
     createdBy: initiatorFromStorage(
       row.createdByKind,
@@ -35255,6 +37624,7 @@ function mapSession(
     rigId: row.rigId ?? null,
     rigVersionId: row.rigVersionId ?? null,
     firstPartyMcpPermissions: (row.firstPartyMcpPermissions as Permission[] | null) ?? null,
+    firstPartyMcpTools: row.firstPartyMcpTools as FirstPartyMcpToolName[],
     mcpServers,
     parentSessionId: row.parentSessionId ?? null,
     rootSessionId: row.rootSessionId,

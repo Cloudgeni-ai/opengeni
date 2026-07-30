@@ -168,6 +168,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
   // order and workflow-side idempotent fallback. Keep that exact replay path;
   // every new run records v2 and uses the activity-owned receipt contract.
   const receiptGatedCancellation = patched("session-attempt-quiescence-v2");
+  const writerSetQuiescenceRecovery = patched("session-attempt-writer-set-quiescence-v1");
   const turnActivity = turnActivityForTaskQueue(workflowInfo().taskQueue, receiptGatedCancellation);
   let approvalWakeups = 0;
   let interruptionWakeups = 0;
@@ -393,6 +394,16 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       continue;
     }
     if (peek.kind === "cancellation-wait") {
+      if (writerSetQuiescenceRecovery) {
+        const reconciliation = await activity.reconcileSessionAttemptQuiescence({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          attemptId: peek.attemptId,
+          workflowId,
+        });
+        if (reconciliation.action === "quiesced") continue;
+      }
       // Logical settlement is complete, but the exact predecessor activity has
       // not yet durably proved sandbox/tool quiescence. Wait only briefly for
       // its transactional queueChanged wake. If provider/tool cancellation is

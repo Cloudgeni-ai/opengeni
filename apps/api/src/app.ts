@@ -707,6 +707,10 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
     label: "/v1/workspaces/:workspaceId/mcp/docs",
   },
   {
+    pattern: /^\/v1\/workspaces\/[^/]+\/mcp\/files$/,
+    label: "/v1/workspaces/:workspaceId/mcp/files",
+  },
+  {
     pattern: /^\/v1\/workspaces\/[^/]+\/default-rig$/,
     label: "/v1/workspaces/:workspaceId/default-rig",
   },
@@ -887,6 +891,14 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
     label: "/v1/workspaces/:workspaceId/github/connect",
   },
   {
+    pattern: /^\/v1\/workspaces\/[^/]+\/github\/installations\/select$/,
+    label: "/v1/workspaces/:workspaceId/github/installations/select",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/github\/installations\/[^/]+\/configure$/,
+    label: "/v1/workspaces/:workspaceId/github/installations/:installationId/configure",
+  },
+  {
     pattern: /^\/v1\/workspaces\/[^/]+\/github\/installations$/,
     label: "/v1/workspaces/:workspaceId/github/installations",
   },
@@ -963,8 +975,8 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
     label: "/v1/workspaces/:workspaceId/connections/oauth/start",
   },
   {
-    pattern: /^\/v1\/workspaces\/[^/]+\/connections\/slack-bot$/,
-    label: "/v1/workspaces/:workspaceId/connections/slack-bot",
+    pattern: /^\/v1\/workspaces\/[^/]+\/connections\/slack-bot\/install$/,
+    label: "/v1/workspaces/:workspaceId/connections/slack-bot/install",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/connections\/[^/]+$/,
@@ -978,6 +990,10 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
   {
     pattern: /^\/v1\/integrations\/oauth\/client-metadata\.json$/,
     label: "/v1/integrations/oauth/client-metadata.json",
+  },
+  {
+    pattern: /^\/v1\/integrations\/slack\/callback$/,
+    label: "/v1/integrations/slack/callback",
   },
   {
     pattern: /^\/v1\/enrollments\/device\/start$/,

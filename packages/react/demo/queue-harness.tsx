@@ -187,6 +187,8 @@ function QueueHarness() {
     () => ({
       snapshot: null,
       queue: turns,
+      pendingInputs: [],
+      pendingInputAttachment: null,
       effectiveControl: null,
       stoppingPreviousAttempt: false,
       loading,

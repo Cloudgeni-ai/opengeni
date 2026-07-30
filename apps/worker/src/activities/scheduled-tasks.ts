@@ -16,12 +16,12 @@ import {
   createSessionGoal,
   enqueueSessionWorkflowWakeIfRunnable,
   getBillingBalance,
+  getScheduledTask,
   getRig,
   getVariableSet,
   isCodexBilledTurn,
   markScheduledTaskRunFailedIfQueued,
   recordUsageEvent,
-  requireScheduledTask,
   requireSession,
   setTemporalWorkflowId,
   settleScheduledTaskRunInTransaction,
@@ -50,7 +50,19 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
       input: DispatchScheduledTaskRunInput,
     ): Promise<DispatchScheduledTaskRunResult> => {
       const { settings, db, bus, wakeSessionWorkflow } = await services();
-      const task = await requireScheduledTask(db, input.workspaceId, input.taskId);
+      // Histories created before the manual-initiator workflow patch already
+      // contain this activity command. Reject their incomplete wire input here
+      // so replay consumes the recorded command and the retry loop settles.
+      if (input.triggerType === "manual" && !input.initiator) {
+        return { action: "blocked", reason: "malformed_manual_trigger" };
+      }
+      const task = await getScheduledTask(db, input.workspaceId, input.taskId);
+      // Deleting a schedule is authoritative. A fire workflow that was already
+      // created may still start afterward; completing it as a no-op prevents an
+      // unbounded retry loop for work that no longer exists.
+      if (!task) {
+        return { action: "deleted" };
+      }
       // A scheduled bot selection was authorized when the task was written,
       // but connection status and tenant/role binding are mutable. Revalidate
       // before any session/model cost and never fall back to a personal Slack
@@ -79,7 +91,7 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
         workspaceId: task.workspaceId,
         model,
       });
-      await ensureScheduledRunAllowed(
+      const admissionDenial = await scheduledRunAdmissionDenial(
         settings,
         db,
         task.accountId,
@@ -87,6 +99,9 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
         input.agentRunUsageIdempotencyKey ? 0 : 1,
         isCodexRun,
       );
+      if (admissionDenial) {
+        return { action: "blocked", reason: admissionDenial };
+      }
       const run = await createScheduledTaskRun(db, {
         workspaceId: task.workspaceId,
         taskId: task.id,
@@ -105,7 +120,7 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
         unit: "run",
         sourceResourceType: "scheduled_task_run",
         sourceResourceId: run.id,
-        initiator: { kind: "service", subjectId: "scheduler" },
+        initiator: input.initiator ?? { kind: "service", subjectId: "scheduler" },
         initiatorContext: { scheduledTaskId: task.id, scheduledTaskRunId: run.id },
         origin: "scheduled_task",
         idempotencyKey: `usage:scheduled_task.fired:${run.id}`,
@@ -120,7 +135,7 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
           sourceResourceType: "scheduled_task_run",
           sourceResourceId: run.id,
           sessionId: run.sessionId,
-          initiator: { kind: "service", subjectId: "scheduler" },
+          initiator: input.initiator ?? { kind: "service", subjectId: "scheduler" },
           initiatorContext: { scheduledTaskId: task.id, scheduledTaskRunId: run.id },
           origin: "scheduled_task",
           idempotencyKey:
@@ -159,8 +174,8 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
         const reasoningEffort = task.agentConfig.reasoningEffort ?? settings.openaiReasoningEffort;
         const sandboxBackend = task.agentConfig.sandboxBackend ?? settings.sandboxBackend;
         const goalSpec = task.agentConfig.goal ?? null;
-        // Every dispatch carries the first-party MCP server (set_session_title,
-        // goal tools, and the permission-gated tools), matching the API path.
+        // Every dispatch carries the first-party MCP server; runtime visibility
+        // still follows the session's exact selection and authorization.
         const taskTools = withFirstPartyTools(settings, task.agentConfig.tools);
         if (task.runMode === "new_session_per_run" || !task.reusableSessionId) {
           // The FK on scheduled_tasks.variable_set_id is ON DELETE RESTRICT, so
@@ -475,7 +490,7 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
         sourceResourceType: "scheduled_task_run",
         sourceResourceId: run.id,
         sessionId: result.sessionId,
-        initiator: { kind: "service", subjectId: "scheduler" },
+        initiator: input.initiator ?? { kind: "service", subjectId: "scheduler" },
         initiatorContext: { scheduledTaskId: task.id, scheduledTaskRunId: run.id },
         origin: "scheduled_task",
         idempotencyKey:
@@ -495,14 +510,14 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
   };
 }
 
-async function ensureScheduledRunAllowed(
+async function scheduledRunAdmissionDenial(
   settings: Settings,
   db: ActivityServices["db"],
   accountId: string,
   workspaceId: string,
   requestedAgentRuns: number,
   isCodexRun: boolean,
-): Promise<void> {
+): Promise<"insufficient_credits" | "monthly_model_cost_limit" | "monthly_agent_run_limit" | null> {
   // Codex-billed runs are paid by the user's ChatGPT/Codex plan: skip the
   // credit-balance gate and the monthly model-cost cap. The agent-run COUNT cap
   // below is a volume quota (not a credit/cost gate) and is intentionally kept.
@@ -512,7 +527,7 @@ async function ensureScheduledRunAllowed(
   ) {
     const balance = await getBillingBalance(db, accountId);
     if (balance.balanceMicros <= 0) {
-      throw new Error("insufficient OpenGeni credits");
+      return "insufficient_credits";
     }
   }
   if (settings.usageLimitsMode === "static" || settings.usageLimitsMode === "managed") {
@@ -524,9 +539,7 @@ async function ensureScheduledRunAllowed(
         since: startOfUtcMonth(),
       });
       if (used >= limits.maxMonthlyCostMicrosPerAccount) {
-        throw new Error(
-          `monthly model cost limit reached (${limits.maxMonthlyCostMicrosPerAccount} micros)`,
-        );
+        return "monthly_model_cost_limit";
       }
     }
     if (limits.maxMonthlyAgentRunsPerWorkspace) {
@@ -536,12 +549,11 @@ async function ensureScheduledRunAllowed(
         since: startOfUtcMonth(),
       });
       if (used + requestedAgentRuns > limits.maxMonthlyAgentRunsPerWorkspace) {
-        throw new Error(
-          `monthly agent run limit reached (${limits.maxMonthlyAgentRunsPerWorkspace})`,
-        );
+        return "monthly_agent_run_limit";
       }
     }
   }
+  return null;
 }
 
 function startOfUtcMonth(): Date {

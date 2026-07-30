@@ -36,6 +36,7 @@ import {
   type ActivityDependencies,
 } from "./activities";
 import type {
+  InspectSessionAttemptActivity,
   SignalCodexCapacityWorkflow,
   SignalSessionAttemptQuiesced,
   WakeSessionWorkflowSignal,
@@ -97,6 +98,34 @@ export type WorkerOptions = {
   /** Override the release-coherent workflow artifact. Most hosts should omit this. */
   workflowBundle?: WorkflowBundleOption;
 };
+
+type TemporalActivityLease = {
+  lastHeartbeatTime?: { seconds?: unknown; nanos?: number | null } | null;
+  lastStartedTime?: { seconds?: unknown; nanos?: number | null } | null;
+  activityOptions?: {
+    heartbeatTimeout?: { seconds?: unknown; nanos?: number | null } | null;
+  } | null;
+};
+
+function temporalTimeMs(
+  value: { seconds?: unknown; nanos?: number | null } | null | undefined,
+): number | null {
+  if (value?.seconds === undefined || value.seconds === null) return null;
+  return Number(String(value.seconds)) * 1_000 + Math.floor((value.nanos ?? 0) / 1_000_000);
+}
+
+export function temporalActivityLeaseSettled(
+  pending: TemporalActivityLease | null | undefined,
+  nowMs = Date.now(),
+): boolean {
+  if (!pending) return true;
+  const heartbeatAt =
+    temporalTimeMs(pending.lastHeartbeatTime) ?? temporalTimeMs(pending.lastStartedTime);
+  const heartbeatTimeoutMs = temporalTimeMs(pending.activityOptions?.heartbeatTimeout);
+  return (
+    heartbeatAt !== null && heartbeatTimeoutMs !== null && nowMs >= heartbeatAt + heartbeatTimeoutMs
+  );
+}
 
 type WorkerWorkflowDefinition =
   | { workflowBundle: WorkflowBundleOption }
@@ -220,6 +249,7 @@ export async function createWorkerWorkflowSignaler(
 ): Promise<{
   wakeSessionWorkflow: WakeSessionWorkflowSignal;
   signalSessionAttemptQuiesced: SignalSessionAttemptQuiesced;
+  inspectSessionAttemptActivity: InspectSessionAttemptActivity;
   signalCodexCapacityWorkflow: SignalCodexCapacityWorkflow;
   check: () => Promise<void>;
   close: () => Promise<void>;
@@ -279,6 +309,16 @@ export async function createWorkerWorkflowSignaler(
       // No wake-outbox row exists yet: the direct receipt transaction failed.
       // The signalled workflow's DB-only control activity owns committing the
       // receipt and its exact wake revision atomically.
+    },
+    inspectSessionAttemptActivity: async ({ workflowId, workflowRunId, activityId }) => {
+      const description = await connection.workflowService.describeWorkflowExecution({
+        namespace: settings.temporalNamespace,
+        execution: { workflowId, runId: workflowRunId },
+      });
+      const pending = description.pendingActivities?.find(
+        (activity) => activity.activityId === activityId,
+      );
+      return temporalActivityLeaseSettled(pending) ? "settled" : "pending";
     },
     signalCodexCapacityWorkflow: async ({
       accountId,
@@ -534,6 +574,7 @@ export async function createOpenGeniWorkerService(
     const needsSignaler =
       !options.activityDependencies.wakeSessionWorkflow ||
       !options.activityDependencies.signalSessionAttemptQuiesced ||
+      !options.activityDependencies.inspectSessionAttemptActivity ||
       !options.activityDependencies.signalCodexCapacityWorkflow;
     if (needsSignaler) {
       signaler = await retryStartupDependency(
@@ -547,10 +588,18 @@ export async function createOpenGeniWorkerService(
     const signalSessionAttemptQuiesced =
       options.activityDependencies.signalSessionAttemptQuiesced ??
       signaler?.signalSessionAttemptQuiesced;
+    const inspectSessionAttemptActivity =
+      options.activityDependencies.inspectSessionAttemptActivity ??
+      signaler?.inspectSessionAttemptActivity;
     const signalCodexCapacityWorkflow =
       options.activityDependencies.signalCodexCapacityWorkflow ??
       signaler?.signalCodexCapacityWorkflow;
-    if (!wakeSessionWorkflow || !signalSessionAttemptQuiesced || !signalCodexCapacityWorkflow) {
+    if (
+      !wakeSessionWorkflow ||
+      !signalSessionAttemptQuiesced ||
+      !inspectSessionAttemptActivity ||
+      !signalCodexCapacityWorkflow
+    ) {
       throw new Error("OpenGeni worker lifecycle could not resolve its workflow signalers");
     }
     workerBundle = await createOpenGeniWorker({
@@ -564,6 +613,7 @@ export async function createOpenGeniWorkerService(
         observability,
         wakeSessionWorkflow,
         signalSessionAttemptQuiesced,
+        inspectSessionAttemptActivity,
         signalCodexCapacityWorkflow,
       },
     });

@@ -82,7 +82,6 @@ import {
   normalizeModelCallUsage,
   normalizeSdkEvent,
   sanitizeHistoryItemsForModel,
-  isEphemeralInternalContext,
   appendPersistentSessionSettings,
   appendSessionInstructions,
   appendWorkspaceMemory,
@@ -184,11 +183,7 @@ import {
   type CodexUsageHeaderSnapshot,
 } from "@opengeni/codex";
 import { mergeResourceRefs } from "./common";
-import {
-  enabledCapabilityMcpToolRefs,
-  resolveSessionToolPolicy,
-  sessionToolPolicyAllowsDefaultNativeTools,
-} from "@opengeni/core";
+import { defaultSessionMcpServerIds, resolveSessionToolPolicy } from "@opengeni/core";
 import { maybeCompactContext } from "./context-compaction";
 import { TurnAttemptFencedError } from "./turn-attempt-fenced";
 import {
@@ -222,7 +217,7 @@ import {
   runCredentialAuthNeededPayloads,
   runCredentialModelNote,
 } from "./run-credentials";
-import { withCodexAppsTool, withFirstPartyTools } from "./goals";
+import { withFirstPartyTools } from "./goals";
 import {
   mergeRigDefaultVariableSetEnvironment,
   resolveWorkspaceAgentInstructions,
@@ -297,6 +292,7 @@ import {
 } from "@opengeni/runtime";
 import {
   CAPABILITY_DESCRIPTORS,
+  DEFAULT_FIRST_PARTY_MCP_TOOLS,
   evaluateWorkspaceModelPolicy,
   readTurnExecutionPolicyV1,
   type ResourceRef,
@@ -305,6 +301,7 @@ import {
   type SessionStatus,
   type SessionTurn,
   type TurnExecutionPolicyV1,
+  type TurnInitiator,
 } from "@opengeni/contracts";
 import { createHash, randomUUID } from "node:crypto";
 
@@ -313,6 +310,13 @@ import { createHash, randomUUID } from "node:crypto";
 // throttling is minute-granular; anything shorter mostly burns continuation
 // budget against the same window.
 export const PROVIDER_BACKPRESSURE_DELAY_MS = 60_000;
+
+/** Personal connection authority follows the immutable human turn initiator, never the worker. */
+export function credentialSubjectIdForTurnInitiator(
+  initiator: Pick<TurnInitiator, "kind" | "subjectId">,
+): string | undefined {
+  return initiator.kind === "subject" ? initiator.subjectId : undefined;
+}
 
 export function turnExecutionPolicyBillingIdentity(policy: TurnExecutionPolicyV1): {
   externallyBilled: boolean;
@@ -754,7 +758,7 @@ export function classifyContextWindowOverflowError(
  * next-loop transport work can reject the stream iterator after a prior tool
  * output was already published. That is transient external backpressure, not a
  * terminal session error. Match MCP-qualified timeout text only: an unrelated
- * sandbox/model timeout and MCP's `-32001 Authentication required` signal must
+ * sandbox/model timeout and MCP's application-defined Authentication required signal must
  * retain their existing semantics.
  */
 export function classifyMcpTransportTimeoutError(
@@ -1292,16 +1296,26 @@ export function historyRowsToAppend(
   nextWatermark: number;
   nextPosition: number;
 } {
-  const sanitized = sanitizeHistoryItemsForModel(rawHistory, toolOutputTruncationTokens)
-    .filter((item) => !isEphemeralInternalContext(item))
-    .map((item) => redactValue(item) as Record<string, unknown>);
+  const sanitized = sanitizeHistoryItemsForModel(rawHistory, toolOutputTruncationTokens).map(
+    (item) => redactValue(item) as Record<string, unknown>,
+  );
   if (sanitized.length <= persistedHistoryCount) {
     return { rows: [], nextWatermark: persistedHistoryCount, nextPosition };
   }
-  const rows = sanitized.slice(persistedHistoryCount).map((item, offset) => ({
-    position: nextPosition + offset,
-    item: item as Record<string, unknown>,
-  }));
+  // Canonical model-facing inputs (including machine-input batches) are
+  // persisted before inference and therefore live inside the prefix represented
+  // by persistedHistoryCount. System messages synthesized only for this
+  // attempt—recovery diagnostics, credential notices, attachment materialization
+  // notes—must not accidentally become conversation memory during reconciliation.
+  // Advance the in-memory watermark past them, but only allocate durable
+  // positions to actual model/tool output.
+  const rows = sanitized
+    .slice(persistedHistoryCount)
+    .filter((item) => !(item.type === "message" && item.role === "system"))
+    .map((item, offset) => ({
+      position: nextPosition + offset,
+      item: item as Record<string, unknown>,
+    }));
   return {
     rows,
     nextWatermark: sanitized.length,
@@ -1660,18 +1674,16 @@ export function computerToolModeForTurn(
 }
 
 /**
- * Native web search requires two independent grants: the resolved provider
- * must advertise runnable support, and the immutable session/turn policy must
- * still track workspace defaults. The null model is the legacy built-in
- * Responses path, whose deployment flag is its provider capability gate.
- * There is deliberately no cross-provider or sandbox/curl fallback.
+ * Native web search is a runtime capability, not part of the session's MCP
+ * allow-list. Attach it whenever the resolved provider advertises runnable
+ * support. The null model is the legacy built-in Responses path, whose
+ * deployment flag is its provider capability gate. There is deliberately no
+ * cross-provider or sandbox/curl fallback.
  */
 export function hostedWebSearchForTurn(
   resolvedModel: { configured: { hostedWebSearch: boolean } } | null,
   deploymentWebSearchEnabled: boolean,
-  defaultNativeToolsAllowed: boolean,
 ): boolean {
-  if (!defaultNativeToolsAllowed) return false;
   return resolvedModel?.configured.hostedWebSearch ?? deploymentWebSearchEnabled;
 }
 
@@ -2360,10 +2372,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       await current?.flush().catch(() => undefined);
     };
     let preparedTools: Awaited<ReturnType<OpenGeniRuntime["prepareTools"]>> | null = null;
-    // Resolved with the MCP policy at the immutable turn boundary. Provider
-    // capability is checked separately when buildAgent is called; this flag is
-    // only the durable omission/narrowing entitlement.
-    let defaultNativeToolsAllowed = false;
     const toolCancellationFenceRef: {
       current: TurnToolCancellationFence | null;
     } = {
@@ -2902,7 +2910,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           producerSeq,
         });
         if (immediate) {
-          await Bun.sleep(0);
+          await new Promise<void>((resolve) => setTimeout(resolve, 0));
         }
         return appended;
       };
@@ -4062,37 +4070,21 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const turnResources = mergeResourceRefs(session.resources, turn.resources);
       // Attach the first-party MCP server to EVERY turn, regardless of how/when
       // the session was created (API, scheduled task, or a pre-existing session
-      // whose stored tools predate this) — so set_session_title and the rest are
-      // always reachable. Idempotent: mergeToolRefs dedupes if already present.
-      // Attach codex_apps (the ChatGPT/Codex connectors MCP) when the codex
-      // overlay injected it into runSettings.mcpServers (active subscription +
-      // connector scopes); no-op for every other turn. Its refreshing bearer is
-      // resolved at connect time from the codex ALS (see the withCodex-wrapped
-      // prepareTools call below).
+      // whose stored tools predate this). The server registration is then
+      // narrowed by the session's exact firstPartyMcpTools selection and
+      // authorization. Idempotent: mergeToolRefs dedupes if already present.
       // Resolve the durable policy at the turn boundary. Workspace-default
-      // sessions may discover newly enabled capability MCPs, while explicit,
-      // inherited-fixed, and legacy sessions remain narrowed to their stored
-      // materialized allow-list. `withCodexAppsTool` below keeps the existing
-      // single Codex lazy router/connector overlay; it is not a second policy
-      // or discovery path.
+      // sessions follow the current configured MCP set,
+      // while explicit, inherited-fixed, and legacy sessions remain narrowed
+      // to their stored materialized allow-list.
       const resolvedToolPolicy = resolveSessionToolPolicy({
-        ...(session.toolPolicy ? { toolPolicy: session.toolPolicy } : {}),
+        toolPolicy: session.toolPolicy,
         sessionTools: session.tools,
-        turnTools: turn.tools,
-        ...(turn.toolsProvided !== undefined ? { turnToolsProvided: turn.toolsProvided } : {}),
         availableMcpServerIds: runSettings.mcpServers.map((server) => server.id),
-        defaultMcpServerIds: enabledCapabilityMcpToolRefs(settings, mcpSettings).map(
-          (tool) => tool.id,
-        ),
+        defaultMcpServerIds: defaultSessionMcpServerIds(capabilitySettings.mcpServers),
       });
       const effectivePolicyTools = resolvedToolPolicy.toolRefs;
-      defaultNativeToolsAllowed = sessionToolPolicyAllowsDefaultNativeTools(
-        resolvedToolPolicy.effectivePolicy,
-      );
-      const turnTools = withCodexAppsTool(
-        runSettings,
-        withFirstPartyTools(runSettings, effectivePolicyTools),
-      );
+      const turnTools = withFirstPartyTools(runSettings, effectivePolicyTools);
       // §7.6 connection-credential provider — load (and decrypt) the variable set via the host
       // `sandboxSecrets` provider when bound; unset → today's local decrypt.
       const connectionScope = {
@@ -4970,6 +4962,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         }
         return result;
       };
+      const credentialSubjectId = credentialSubjectIdForTurnInitiator(turn.initiator);
       preparedTools = await waitForTurnOperation(
         withCodex(() =>
           runtime.prepareTools(runSettings, turnTools, {
@@ -4984,6 +4977,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             executionGeneration,
             subjectId: "worker:first-party-mcp",
             subjectLabel: "OpenGeni worker",
+            ...(credentialSubjectId ? { credentialSubjectId } : {}),
             resolveCredential,
             onAuthNeeded: async (payload) => {
               await publish!([{ type: "tool.auth_needed", payload }], true);
@@ -4993,6 +4987,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             ...(session.firstPartyMcpPermissions?.length
               ? { firstPartyPermissions: session.firstPartyMcpPermissions }
               : {}),
+            firstPartyTools: session.firstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
           }),
         ),
         cancellationSignal,
@@ -5035,11 +5030,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               },
             }
           : {};
-      const hostedWebSearch = hostedWebSearchForTurn(
-        resolvedModel,
-        runSettings.webSearchEnabled,
-        defaultNativeToolsAllowed,
-      );
+      const hostedWebSearch = hostedWebSearchForTurn(resolvedModel, runSettings.webSearchEnabled);
       const agent = runtime.buildAgent(modelRunSettings, turnResources, {
         reasoningEffort: turn.reasoningEffort,
         ...(humanInputResume ? { humanInputResponse: humanInputResume } : {}),
@@ -5099,9 +5090,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // store/compaction follow the provider's compaction mode (registry
         // providers resolve to "client"); encrypted reasoning is only
         // round-tripped on the Responses wire API; hosted web search is attached
-        // only when BOTH the model opts in and this immutable turn still tracks
-        // workspace defaults (an explicit session/turn remains narrowed); the
-        // effective context window drives the compaction threshold.
+        // whenever the provider declares it runnable and is independent of the
+        // session's MCP allow-list; the effective context window drives the
+        // compaction threshold.
         hostedWebSearch,
         ...(resolvedModel
           ? {
@@ -5149,6 +5140,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           await maybeStartOnTurnRecording(resolvedSandbox, activeSandboxBackend);
         },
         ...(packRuntime.skills.length > 0 ? { packSkills: packRuntime.skills } : {}),
+        ...(session.skills.length > 0 ? { sessionSkills: session.skills } : {}),
         ...(skillLibraryRuntime.skillLibrarySkills.length > 0
           ? {
               skillLibrarySkills: skillLibraryRuntime.skillLibrarySkills,

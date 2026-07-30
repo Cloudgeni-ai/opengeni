@@ -38,6 +38,97 @@ export type CaptureStoragePort = {
   }) => Promise<{ url: string; expiresAt: Date }>;
 };
 
+type LoadedManifest = {
+  manifest: WorkspaceCaptureManifest;
+  byteLength: number;
+  stats: WorkspaceCaptureStats;
+};
+
+type ManifestCacheEntry = LoadedManifest & {
+  identity: string;
+  inlineResponse?: Extract<GetWorkspaceCaptureResponse, { available: true }>;
+};
+
+/**
+ * Process-local cache for immutable capture manifests. Capture rows point at a
+ * revision-specific object key, so a successfully validated blob is safe to
+ * reuse as long as the row identity still matches. Both entry count and bytes
+ * are bounded; large signed-manifest responses bypass the cache.
+ */
+export class WorkspaceCaptureManifestCache {
+  readonly #entries = new Map<string, ManifestCacheEntry>();
+  #retainedBytes = 0;
+
+  constructor(
+    readonly maxEntries = 64,
+    readonly maxBytes = 16 * 1024 * 1024,
+  ) {}
+
+  get(row: WorkspaceCaptureRow): LoadedManifest | null {
+    const key = row.manifestKey;
+    if (!key) return null;
+    const entry = this.#entries.get(key);
+    if (!entry || entry.identity !== manifestIdentity(row)) return null;
+    this.#entries.delete(key);
+    this.#entries.set(key, entry);
+    return entry;
+  }
+
+  getInlineResponse(
+    row: WorkspaceCaptureRow,
+  ): Extract<GetWorkspaceCaptureResponse, { available: true }> | null {
+    const key = row.manifestKey;
+    if (!key) return null;
+    const entry = this.#entries.get(key);
+    if (!entry || entry.identity !== manifestIdentity(row) || !entry.inlineResponse) return null;
+    this.#entries.delete(key);
+    this.#entries.set(key, entry);
+    return entry.inlineResponse;
+  }
+
+  setInlineResponse(
+    row: WorkspaceCaptureRow,
+    response: Extract<GetWorkspaceCaptureResponse, { available: true }>,
+  ): void {
+    const key = row.manifestKey;
+    if (!key) return;
+    const entry = this.#entries.get(key);
+    if (!entry || entry.identity !== manifestIdentity(row)) return;
+    entry.inlineResponse = response;
+  }
+
+  set(row: WorkspaceCaptureRow, loaded: LoadedManifest): void {
+    const key = row.manifestKey;
+    if (
+      !key ||
+      this.maxEntries <= 0 ||
+      this.maxBytes <= 0 ||
+      loaded.byteLength > CAPTURE_INLINE_MANIFEST_MAX_BYTES ||
+      loaded.byteLength > this.maxBytes
+    ) {
+      return;
+    }
+    const previous = this.#entries.get(key);
+    if (previous) {
+      this.#retainedBytes -= previous.byteLength;
+      this.#entries.delete(key);
+    }
+    this.#entries.set(key, { ...loaded, identity: manifestIdentity(row) });
+    this.#retainedBytes += loaded.byteLength;
+    while (this.#entries.size > this.maxEntries || this.#retainedBytes > this.maxBytes) {
+      const oldestKey = this.#entries.keys().next().value;
+      if (oldestKey === undefined) break;
+      const oldest = this.#entries.get(oldestKey);
+      this.#entries.delete(oldestKey);
+      if (oldest) this.#retainedBytes -= oldest.byteLength;
+    }
+  }
+}
+
+function manifestIdentity(row: WorkspaceCaptureRow): string {
+  return `${row.sessionId}\0${row.turnId}\0${row.revision}\0${row.leaseEpoch}\0${row.capturedAt}`;
+}
+
 function signedUrl(signed: { url: string; expiresAt: Date }): { url: string; expiresAt: string } {
   return { url: signed.url, expiresAt: signed.expiresAt.toISOString() };
 }
@@ -51,12 +142,11 @@ function signedUrl(signed: { url: string; expiresAt: Date }): { url: string; exp
 async function loadManifest(
   row: WorkspaceCaptureRow,
   storage: CaptureStoragePort,
-): Promise<{
-  manifest: WorkspaceCaptureManifest;
-  byteLength: number;
-  stats: WorkspaceCaptureStats;
-} | null> {
+  cache?: WorkspaceCaptureManifestCache,
+): Promise<LoadedManifest | null> {
   if (!row.manifestKey) return null;
+  const cached = cache?.get(row);
+  if (cached) return cached;
   const stats = WorkspaceCaptureStats.safeParse(row.stats);
   if (!stats.success) {
     console.warn(
@@ -114,7 +204,9 @@ async function loadManifest(
     );
     return null;
   }
-  return { manifest, byteLength: blob.bytes.byteLength, stats: servedStats };
+  const loaded = { manifest, byteLength: blob.bytes.byteLength, stats: servedStats };
+  cache?.set(row, loaded);
+  return loaded;
 }
 
 /**
@@ -126,6 +218,7 @@ async function loadManifest(
 export async function serveWorkspaceCapture(
   row: WorkspaceCaptureRow | null,
   storage: CaptureStoragePort,
+  cache?: WorkspaceCaptureManifestCache,
 ): Promise<GetWorkspaceCaptureResponse> {
   if (!row) {
     return { available: false };
@@ -148,11 +241,13 @@ export async function serveWorkspaceCapture(
     });
   }
   if (row.state !== "available" || !row.manifestKey) return { available: false };
+  const cachedResponse = cache?.getInlineResponse(row);
+  if (cachedResponse) return cachedResponse;
   // Validate every manifest before serving it, including the rare >2MB signed
   // path. Previously that branch signed arbitrary bytes merely because they
   // exceeded the inline cap, allowing a poison/mis-keyed blob to bypass both the
   // schema and row-identity checks.
-  const loaded = await loadManifest(row, storage);
+  const loaded = await loadManifest(row, storage, cache);
   if (!loaded) return { available: false };
   const meta = {
     available: true as const,
@@ -164,11 +259,16 @@ export async function serveWorkspaceCapture(
     stats: loaded.stats,
   };
   if (loaded.byteLength <= CAPTURE_INLINE_MANIFEST_MAX_BYTES) {
-    return GetWorkspaceCaptureResponse.parse({
+    const response = GetWorkspaceCaptureResponse.parse({
       ...meta,
       manifest: loaded.manifest,
       manifestUrl: null,
     });
+    if (!response.available) {
+      throw new Error("validated inline capture response lost its available discriminator");
+    }
+    cache?.setInlineResponse(row, response);
+    return response;
   }
   const signed = await storage.createGetUrl({
     key: row.manifestKey,

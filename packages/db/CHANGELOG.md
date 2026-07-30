@@ -1,5 +1,74 @@
 # @opengeni/db
 
+## 0.14.3
+
+### Patch Changes
+
+- Updated dependencies [33dc88f]
+- Updated dependencies [36451c6]
+  - @opengeni/contracts@0.23.0
+  - @opengeni/config@0.7.13
+
+## 0.14.2
+
+### Patch Changes
+
+- 1c4018e: Replace one-turn tool overrides with one durable session tool policy, expose
+  OpenGeni-native tools in the same selection, default available tools on, and
+  render delivered machine inputs as compact typed timeline updates instead of
+  raw protocol JSON.
+- Updated dependencies [1c4018e]
+  - @opengeni/config@0.7.12
+  - @opengeni/contracts@0.22.1
+
+## 0.14.1
+
+### Patch Changes
+
+- 6908a7a: Resolve session existence and the latest workspace capture in one RLS-scoped query so capture metadata requests avoid loading the full session projection.
+
+## 0.14.0
+
+### Minor Changes
+
+- 29ad09b: Persist typed machine inputs into canonical model history at turn claim, expose
+  authoritative pending-input queue projections and lifecycle events, render
+  delivered batches in the timeline, and preserve append-only prompt-cache
+  prefixes across tools, later turns, recovery, and explicit compaction.
+
+### Patch Changes
+
+- dfc3235: Separate first-party MCP authorization from exact per-session tool visibility, add fail-closed registration policy, and isolate file download URLs on the files MCP surface.
+- Updated dependencies [29ad09b]
+- Updated dependencies [b2e23f3]
+- Updated dependencies [dfc3235]
+  - @opengeni/contracts@0.22.0
+  - @opengeni/config@0.7.11
+
+## 0.13.4
+
+### Patch Changes
+
+- 519d93c: Add validated inline per-session skills and discover skills directly from already-materialized repository resources.
+- Updated dependencies [519d93c]
+  - @opengeni/contracts@0.21.0
+  - @opengeni/config@0.7.10
+
+## 0.13.3
+
+### Patch Changes
+
+- 110bb77: Enforce exact-subject ownership for personal OAuth capabilities and add secure direct OAuth installation for the separate workspace OpenGeni Slack bot.
+- Updated dependencies [110bb77]
+  - @opengeni/config@0.7.9
+  - @opengeni/contracts@0.20.2
+
+## 0.13.2
+
+### Patch Changes
+
+- 8b8545e: Keep every account-scoped workspace grant in bootstrapped access contexts so newly created workspaces remain available after an access refresh.
+
 ## 0.13.1
 
 ### Patch Changes

@@ -8,8 +8,13 @@
 //   @source "../node_modules/@opengeni/react/src";
 
 export type {
+  EmbeddedFileAttachmentClientLike,
+  EmbeddedGoalClientLike,
   EmbeddedHumanInputSessionClientLike,
+  EmbeddedSessionEventClientLike,
+  EmbeddedSessionLineageClientLike,
   EmbeddedSessionMcpApprovalPolicyClientLike,
+  EmbeddedSessionReadClientLike,
   EmbeddedSessionClientLike,
   SessionClientLike,
 } from "./client";
@@ -240,6 +245,8 @@ export type {
   AgentMessageItem,
   AuthNeededItem,
   GoalItem,
+  MachineInputBatchItem,
+  MachineInputMember,
   NoticeItem,
   ReasoningItem,
   SandboxItem,
@@ -281,6 +288,7 @@ export {
   TermBlock,
   Thumbnail,
   TurnSummary,
+  BUILT_IN_TURN_SUMMARY_FACET_IDS,
   useLightbox,
   useLightboxOptional,
 } from "./timeline";
@@ -288,7 +296,13 @@ export type {
   ActivityDisclosureProps,
   ActivityRailProps,
   DisclosureChip,
+  BuiltInTurnSummaryFacetId,
   TurnOutcome,
+  TurnSummaryContext,
+  TurnSummaryFacet,
+  TurnSummaryFacetConfiguration,
+  TurnSummaryFacetResult,
+  TurnSummaryOptions,
   TurnSummaryProps,
 } from "./timeline";
 

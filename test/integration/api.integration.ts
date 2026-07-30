@@ -1080,6 +1080,101 @@ describe("API component integration", () => {
     expect(deniedOtherAccountBilling.status).toBe(403);
   });
 
+  test("local access preserves valid worker delegation and falls back for ordinary requests", async () => {
+    const delegationSecret = "test-local-delegation-secret";
+    const settings = testSettings({
+      databaseUrl: services.databaseUrl,
+      productAccessMode: "local",
+      delegationSecret,
+    });
+    const app = createApp({
+      settings,
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const delegatedWorkspace = await bootstrapWorkspace(dbClient.db, {
+      accountExternalSource: "test:local-delegation",
+      accountExternalId: crypto.randomUUID(),
+      accountName: "Local delegation test",
+      workspaceExternalSource: "test:local-delegation",
+      workspaceExternalId: crypto.randomUUID(),
+      workspaceName: "Local delegation workspace",
+      subjectId: `test:local-delegation:${crypto.randomUUID()}`,
+    });
+    const sessionId = crypto.randomUUID();
+    const token = await signDelegatedAccessToken(delegationSecret, {
+      accountId: delegatedWorkspace.defaultAccountId!,
+      workspaceId: delegatedWorkspace.defaultWorkspaceId!,
+      subjectId: "test:local-delegated-worker",
+      permissions: ["workspace:read"],
+      sessionId,
+      exp: Math.floor(Date.now() / 1000) + 60,
+    });
+
+    const delegatedResponse = await app.request("/v1/access/me", {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(delegatedResponse.status).toBe(200);
+    const delegated = (await delegatedResponse.json()) as AccessContext;
+    expect(delegated).toMatchObject({
+      mode: "local",
+      subjectId: "test:local-delegated-worker",
+      defaultAccountId: delegatedWorkspace.defaultAccountId,
+      defaultWorkspaceId: delegatedWorkspace.defaultWorkspaceId,
+    });
+    expect(delegated.workspaceGrants).toEqual([
+      expect.objectContaining({
+        permissions: ["workspace:read"],
+        metadata: expect.objectContaining({ delegated: true, sessionId }),
+      }),
+    ]);
+
+    const fallbackResponse = await app.request("/v1/access/me", {
+      headers: { authorization: "Bearer invalid-token" },
+    });
+    expect(fallbackResponse.status).toBe(200);
+    const fallback = (await fallbackResponse.json()) as AccessContext;
+    expect(fallback.mode).toBe("local");
+    expect(fallback.subjectId).toBe("dev");
+    expect(fallback.workspaceGrants[0]?.metadata).toBeUndefined();
+
+    const server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch: app.fetch,
+    });
+    let prepared: Awaited<ReturnType<typeof prepareAgentTools>> | null = null;
+    try {
+      prepared = await prepareAgentTools(
+        {
+          ...settings,
+          mcpServers: [
+            {
+              id: "opengeni",
+              name: "OpenGeni",
+              url: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
+              timeoutMs: undefined,
+              cacheToolsList: false,
+            },
+          ],
+        },
+        [{ kind: "mcp", id: "opengeni" }],
+        {
+          accountId: delegatedWorkspace.defaultAccountId!,
+          workspaceId: delegatedWorkspace.defaultWorkspaceId!,
+          sessionId,
+        },
+      );
+      const toolNames = (await prepared.mcpServers[0]!.listTools()).map((tool) => tool.name);
+      expect(toolNames).toContain("opengeni__set_session_title");
+      expect(toolNames).toContain("opengeni__goal_set");
+    } finally {
+      await prepared?.close().catch(() => undefined);
+      server.stop(true);
+    }
+  });
+
   test("managed session cookie still authenticates when an invalid bearer header is present", async () => {
     const userId = `managed-user-${crypto.randomUUID()}`;
     const email = `managed-cookie-${crypto.randomUUID()}@example.com`;
@@ -4838,7 +4933,7 @@ describe("API component integration", () => {
       },
       {
         ...workspaceGrant!,
-        metadata: { sessionId: connected.id },
+        metadata: { sessionId: connected.id, firstPartyMcpTools: ["github_token"] },
       },
     );
     const originalFetch = globalThis.fetch;
@@ -6274,7 +6369,7 @@ describe("API component integration", () => {
         {
           id: "files",
           name: "Files",
-          url: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
+          url: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp/files`,
           allowedTools: ["files_get_download_url"],
           timeoutMs: undefined,
           cacheToolsList: false,
@@ -6492,6 +6587,7 @@ describe("API component integration", () => {
         workspaceId,
         sessionId: session.id,
         subjectId: "test:mcp-memory-disabled",
+        firstPartyTools: ["memory_search", "memory_save", "memory_correct"],
       });
       expect((await prepared.mcpServers[0]!.listTools()).map((tool) => tool.name)).toEqual([]);
       await prepared.close();
@@ -6515,6 +6611,7 @@ describe("API component integration", () => {
         workspaceId,
         sessionId: session.id,
         subjectId: "test:mcp-memory-enabled",
+        firstPartyTools: ["memory_search", "memory_save", "memory_correct"],
       });
       const memoryTools = (await prepared.mcpServers[0]!.listTools())
         .map((tool) => tool.name)
@@ -7368,6 +7465,7 @@ describe("API component integration", () => {
         turnId: callerClaim.turn.id,
         attemptId: callerAttemptId,
         executionGeneration: callerClaim.turn.executionGeneration,
+        firstPartyMcpTools: ["session_send_message"],
       },
     });
     const beforeInternalTurnIds = (
@@ -7670,7 +7768,7 @@ describe("API component integration", () => {
       // Delegated permission arrays are semantically sets. Inheritance stores
       // one canonical copy even if an issuer supplied a duplicate.
       permissions: [...managerGrant.permissions, "sessions:read"],
-      metadata: { sessionId: managerSession.id },
+      metadata: { sessionId: managerSession.id, firstPartyMcpTools: ["session_create"] },
     });
     const inheritedChild = await callMcpTool<{
       id: string;
@@ -7682,7 +7780,11 @@ describe("API component integration", () => {
       sandboxBackend: "none",
     });
     expect(inheritedChild.parentSessionId).toBe(managerSession.id);
-    expect(inheritedChild.firstPartyMcpPermissions).toEqual(managerGrant.permissions);
+    expect(inheritedChild.firstPartyMcpPermissions).toEqual([
+      "workspace:read",
+      "sessions:read",
+      "sessions:create",
+    ]);
 
     // The delegated token the runtime mints for a session's first-party MCP
     // connection carries the session's permission set, which gates manager
@@ -7720,6 +7822,7 @@ describe("API component integration", () => {
             "sessions:create",
             "goals:manage",
           ],
+          firstPartyTools: ["sessions_list", "session_create", "environment_set_variable"],
         },
       );
       const managerTools = (await managerPrepared.mcpServers[0]!.listTools()).map(
@@ -7738,11 +7841,13 @@ describe("API component integration", () => {
       const workerTools = (await workerPrepared.mcpServers[0]!.listTools()).map(
         (tool) => tool.name,
       );
-      expect(workerTools).toContain("opengeni__sessions_list");
-      expect(workerTools).toContain("opengeni__session_create");
+      expect(workerTools).toContain("opengeni__set_session_title");
+      expect(workerTools).toContain("opengeni__goal_set");
+      expect(workerTools).not.toContain("opengeni__sessions_list");
+      expect(workerTools).not.toContain("opengeni__session_create");
       expect(workerTools).not.toContain("opengeni__set_child_notifications_mode");
-      expect(workerTools).toContain("opengeni__environment_set_variable");
-      expect(workerTools).toContain("opengeni__scheduled_tasks_list");
+      expect(workerTools).not.toContain("opengeni__environment_set_variable");
+      expect(workerTools).not.toContain("opengeni__scheduled_tasks_list");
       expect(workerTools).not.toContain("opengeni__mcp_servers_attach");
     } finally {
       await managerPrepared?.close().catch(() => undefined);
@@ -8613,7 +8718,10 @@ describe("API component integration", () => {
     const managerGrant = {
       ...grant,
       permissions: ["workspace:read", "sessions:create", "sessions:read"] as Permission[],
-      metadata: { sessionId: plainSession.id },
+      metadata: {
+        sessionId: plainSession.id,
+        firstPartyMcpTools: ["session_create", "goal_update", "goal_complete", "goal_pause"],
+      },
     };
     const managerMcp = buildOpenGeniMcpServer(mcpDeps, managerGrant);
 
@@ -9119,7 +9227,7 @@ describe("API component integration", () => {
         {
           id: "files",
           name: "Files",
-          url: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
+          url: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp/files`,
           allowedTools: ["files_get_download_url"],
           timeoutMs: undefined,
           cacheToolsList: false,

@@ -773,14 +773,8 @@ export function useComposer(
         // The wire contract requires non-empty text (z.string().min(1)) and the
         // worker rejects whitespace-only text; a file-only message therefore
         // carries a minimal default so the attachments still get delivered.
-        const acknowledgedDraft = draftRef.current;
-        const sendExtras =
-          acknowledgedDraft?.toolsProvided === true &&
-          !Object.prototype.hasOwnProperty.call(extras, "tools")
-            ? { ...extras, tools: acknowledgedDraft.tools }
-            : extras;
         pendingClientEventId.current ??= generateClientEventId();
-        const input = composeSendInput(sendText, pendingClientEventId.current, sendExtras, {
+        const input = composeSendInput(sendText, pendingClientEventId.current, extras, {
           ...(options.effectiveControl?.controlEtag
             ? { controlEtag: options.effectiveControl.controlEtag }
             : {}),
@@ -1033,13 +1027,10 @@ export function useComposer(
   const hasDraftContent = useCallback((): boolean => {
     const current = draftRef.current;
     const extras = resolveSendExtras(sendExtrasRef.current);
-    const toolsProvidedByHost = Object.prototype.hasOwnProperty.call(extras, "tools");
-    const tools = toolsProvidedByHost ? (extras.tools ?? []) : (current?.tools ?? []);
     return (
       valueRef.current.length > 0 ||
       restoredResourcesRef.current.length > 0 ||
       (extras.resources?.length ?? 0) > 0 ||
-      tools.length > 0 ||
       (current?.sourceTurnId !== null && current?.sourceTurnId !== undefined)
     );
   }, []);
@@ -1201,8 +1192,6 @@ function draftPayload(draft: ComposerDraft): SaveComposerDraftRequest {
     expectedRevision: draft.revision,
     text: draft.text,
     resources: draft.resources,
-    tools: draft.tools,
-    toolsProvided: draft.toolsProvided,
     model: draft.model,
     reasoningEffort: draft.reasoningEffort,
   };
@@ -1214,13 +1203,10 @@ function composerDraftPayload(
   restoredResources: ResourceRef[],
   extras: ComposerSendExtras,
 ): SaveComposerDraftRequest {
-  const toolsProvidedByHost = Object.prototype.hasOwnProperty.call(extras, "tools");
   return {
     expectedRevision: base.revision,
     text,
     resources: mergeResources(restoredResources, extras.resources ?? []),
-    tools: toolsProvidedByHost ? (extras.tools ?? []) : base.tools,
-    toolsProvided: toolsProvidedByHost ? true : base.toolsProvided,
     model: extras.model ?? base.model,
     reasoningEffort: extras.reasoningEffort ?? base.reasoningEffort,
   };

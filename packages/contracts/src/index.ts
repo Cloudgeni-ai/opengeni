@@ -626,6 +626,79 @@ export const DEFAULT_FIRST_PARTY_MCP_PERMISSIONS = [
   "github:use",
 ] as const satisfies readonly Permission[];
 
+/**
+ * Exact public catalog for tools served by the broad first-party `opengeni`
+ * MCP server. Adding a registration does not make it model-visible: the name
+ * must be admitted here and selected by the session policy.
+ *
+ * `files_get_download_url` intentionally is not in this catalog. It belongs to
+ * the dedicated `files` MCP server.
+ */
+export const FIRST_PARTY_MCP_TOOL_NAMES = [
+  "set_session_title",
+  "goal_set",
+  "goal_update",
+  "goal_complete",
+  "goal_pause",
+  "memory_search",
+  "memory_save",
+  "memory_correct",
+  "preference_registry_summary",
+  "preference_registry_get",
+  "sandboxes_list",
+  "sandbox_attach",
+  "sandbox_swap",
+  "run_on",
+  "sandbox_provision",
+  "rig_list",
+  "rig_get",
+  "rig_propose_change",
+  "rig_verify",
+  "rig_promote",
+  "sessions_list",
+  "session_get",
+  "session_events",
+  "session_create",
+  "session_send_message",
+  "session_pause",
+  "session_resume",
+  "session_steer",
+  "set_other_session_title",
+  "variable_set_list",
+  "environment_list",
+  "variable_set_set_variable",
+  "environment_set_variable",
+  "github_connect_link",
+  "github_token",
+  "github_repositories_list",
+  "social_connections_list",
+  "social_posts_recent",
+  "social_daily_analysis_context",
+  "scheduled_tasks_list",
+  "scheduled_tasks_get",
+  "scheduled_tasks_create",
+  "scheduled_tasks_update",
+  "scheduled_tasks_pause",
+  "scheduled_tasks_resume",
+  "scheduled_tasks_trigger",
+  "scheduled_tasks_delete",
+  "scheduled_task_runs_list",
+  "slack_bot_list_channels",
+  "slack_bot_channel_history",
+  "slack_bot_list_users",
+  "slack_bot_post_message",
+] as const;
+export const FirstPartyMcpToolName = z.enum(FIRST_PARTY_MCP_TOOL_NAMES);
+export type FirstPartyMcpToolName = z.infer<typeof FirstPartyMcpToolName>;
+
+/**
+ * Every catalogued OpenGeni tool is selected by default. Registration-time
+ * authorization remains the independent access boundary; an explicit session
+ * policy may narrow this model-visible set.
+ */
+export const DEFAULT_FIRST_PARTY_MCP_TOOLS =
+  FIRST_PARTY_MCP_TOOL_NAMES satisfies readonly FirstPartyMcpToolName[];
+
 export function prefixedMcpToolName(registryId: string, toolName: string): string {
   return `${registryId}__${toolName}`;
 }
@@ -1156,6 +1229,9 @@ export const DelegatedAccessTokenPayload = z
     // Worker-asserted session scope for first-party MCP calls (HMAC-signed, not
     // agent-controlled); enables session-scoped tools such as goal management.
     sessionId: z.string().uuid().optional(),
+    // Model-visible first-party tool selection for a worker-bound session.
+    // This is visibility only; permissions remain the authorization boundary.
+    firstPartyMcpTools: z.array(FirstPartyMcpToolName).optional(),
     // The turn making the call (the caller's identity), HMAC-signed by the worker
     // at turn setup. Lets a tool classify WHO is calling from the token itself,
     // instead of racily re-reading the session's live active_turn_id — e.g. the
@@ -2250,6 +2326,11 @@ export type GitHubInstallationSummary = {
 
 export type GitHubInstallationAuthorityKind = "personal_owner" | "organization_owner";
 
+export interface GitHubInstallationBindingCandidate {
+  installation: GitHubInstallationSummary;
+  authorityKind: GitHubInstallationAuthorityKind;
+}
+
 export interface GitHubInstallationBindingProof {
   actorId: number;
   actorLogin: string;
@@ -2287,6 +2368,15 @@ export type GitHubAppApiPort = {
     code: string;
     installationId: number;
   }) => Promise<GitHubInstallationBindingProof>;
+  /**
+   * Exchange one fresh GitHub user-authorization code and return only existing
+   * App installations for which that exact human is the personal owner or an
+   * active organization owner. Visibility and repository permissions alone
+   * must never produce a candidate.
+   */
+  discoverInstallationBindingCandidates?: (input: {
+    code: string;
+  }) => Promise<GitHubInstallationBindingCandidate[]>;
   authorizeUser?: (input: { code: string }) => Promise<GitHubUserInstallationAccess[]>;
   verifyInstallationAccessForUser?: (input: {
     code: string;
@@ -2885,12 +2975,9 @@ const registryId = /^[A-Za-z0-9_-]+$/;
 export const SessionMcpServerId = z.string().min(1).regex(registryId);
 export type SessionMcpServerId = z.infer<typeof SessionMcpServerId>;
 
-// How a session's persisted `tools` snapshot was selected. `legacy` is
-// reserved for rows written before this descriptor existed; those rows must
-// keep their materialized historical allow-list rather than being guessed to
-// mean either omitted or explicitly empty.
+// How a session's persisted tool selection was chosen.
 export const SessionToolPolicy = z.object({
-  mode: z.enum(["workspace_default", "explicit", "inherited", "legacy"]),
+  mode: z.enum(["workspace_default", "explicit", "inherited"]),
   inheritedFromSessionId: z.string().uuid().nullable(),
 });
 export type SessionToolPolicy = z.infer<typeof SessionToolPolicy>;
@@ -2912,7 +2999,7 @@ const SessionEffectiveToolPolicyIds = z
 // counts remain exact and idsTruncated makes that explicit to clients.
 export const SessionEffectiveToolPolicy = z
   .object({
-    mode: z.enum(["workspace_default", "explicit", "inherited", "legacy"]),
+    mode: z.enum(["workspace_default", "explicit", "inherited"]),
     inheritedFromSessionId: z.string().uuid().nullable(),
     selectedIds: SessionEffectiveToolPolicyIds,
     effectiveIds: SessionEffectiveToolPolicyIds,
@@ -3290,10 +3377,9 @@ export const UpdateSessionRequest = z.object({
 export type UpdateSessionRequest = z.infer<typeof UpdateSessionRequest>;
 
 /**
- * Replace an existing session's durable tool policy, or explicitly opt back in
- * to the current workspace defaults. The mode-less explicit shape is retained
- * for compatibility with clients released before workspace-default adoption
- * was supported.
+ * Replace the complete durable session tool policy, or explicitly opt back in
+ * to current workspace defaults. MCP servers and individual OpenGeni tools
+ * advance atomically under one policy version.
  */
 export const UpdateSessionToolPolicyRequest = z.union([
   z
@@ -3304,8 +3390,9 @@ export const UpdateSessionToolPolicyRequest = z.union([
     .strict(),
   z
     .object({
-      mode: z.literal("explicit").optional(),
+      mode: z.literal("explicit"),
       tools: z.array(ToolRef).max(64),
+      firstPartyMcpTools: z.array(FirstPartyMcpToolName),
       expectedVersion: z.number().int().positive(),
     })
     .strict(),
@@ -3660,10 +3747,6 @@ export const ComposerDraft = z.object({
   revision: z.number().int().nonnegative(),
   text: z.string(),
   resources: z.array(ResourceRef),
-  tools: z.array(ToolRef),
-  // False means the draft inherits the session policy. True preserves an
-  // explicit array, including [], across autosave/reload and queue checkout.
-  toolsProvided: z.boolean().default(false),
   model: z.string().min(1),
   reasoningEffort: ReasoningEffort,
   sourceTurnId: z.string().uuid().nullable(),
@@ -3671,21 +3754,6 @@ export const ComposerDraft = z.object({
   updatedAt: z.string().nullable(),
 });
 export type ComposerDraft = z.infer<typeof ComposerDraft>;
-
-export const SessionQueueSnapshot = z.object({
-  version: z.number().int().nonnegative(),
-  effectiveControl: EffectiveSessionControl,
-  /**
-   * True while the latest attempt is interrupted but has not durably proved
-   * quiescence: no more inference, user-visible output, or workspace-persistence
-   * authority. Temporal cancellation/terminalization is not that proof. This is
-   * distinct from ordinary capacity queueing, remains accurate with an empty
-   * visible queue, and is independent of Steer-row metadata or withdrawal.
-   */
-  stoppingPreviousAttempt: z.boolean(),
-  items: z.array(SessionTurn),
-});
-export type SessionQueueSnapshot = z.infer<typeof SessionQueueSnapshot>;
 
 export const MoveSessionQueueItemRequest = z.object({
   clientEventId: SessionOperationKey,
@@ -3719,8 +3787,6 @@ export type DeleteSessionQueueItemRequest = z.infer<typeof DeleteSessionQueueIte
 export const SaveComposerDraftRequest = ComposerDraft.pick({
   text: true,
   resources: true,
-  tools: true,
-  toolsProvided: true,
   model: true,
   reasoningEffort: true,
 }).extend({ expectedRevision: z.number().int().nonnegative() });
@@ -3739,6 +3805,7 @@ export const NewSessionDraftOptions = z.object({
   rigId: z.string().uuid().optional(),
   goal: GoalSpec.optional(),
   firstPartyMcpPermissions: z.array(Permission).optional(),
+  firstPartyMcpTools: z.array(FirstPartyMcpToolName).optional(),
 });
 export type NewSessionDraftOptions = z.infer<typeof NewSessionDraftOptions>;
 
@@ -4038,7 +4105,6 @@ export type SessionSystemUpdatePayload = z.infer<typeof SessionSystemUpdatePaylo
 
 export const SessionSystemUpdateState = z.enum([
   "pending",
-  "deferred",
   "delivered",
   "cancelled",
   "superseded",
@@ -4058,10 +4124,103 @@ export const SessionSystemUpdate = z.object({
   lineage: z.record(z.string(), z.unknown()),
   state: SessionSystemUpdateState,
   deliveredTurnId: z.string().uuid().nullable(),
+  /**
+   * The exact durable model-memory row containing the coalesced batch that
+   * delivered this update. Null until claim; every member of one batch shares
+   * the same id.
+   */
+  deliveredHistoryItemId: z.string().uuid().nullable(),
   deliveredAt: z.string().nullable(),
   createdAt: z.string(),
 });
 export type SessionSystemUpdate = z.infer<typeof SessionSystemUpdate>;
+
+/**
+ * Bounded queue projection of a canonical pending machine input. Full payload,
+ * lineage, and dedupe data remain in canonical storage and never inflate the
+ * hot queue response.
+ */
+export const SessionPendingInputPreview = SessionSystemUpdate.pick({
+  id: true,
+  sessionId: true,
+  kind: true,
+  classification: true,
+  sourceId: true,
+  summary: true,
+  createdAt: true,
+});
+export type SessionPendingInputPreview = z.infer<typeof SessionPendingInputPreview>;
+
+export const SessionQueueSnapshot = z.object({
+  version: z.number().int().nonnegative(),
+  effectiveControl: EffectiveSessionControl,
+  /**
+   * True while the latest attempt is interrupted but has not durably proved
+   * quiescence: no more inference, user-visible output, or workspace-persistence
+   * authority. Temporal cancellation/terminalization is not that proof. This is
+   * distinct from ordinary capacity queueing, remains accurate with an empty
+   * visible queue, and is independent of Steer-row metadata or withdrawal.
+   */
+  stoppingPreviousAttempt: z.boolean(),
+  items: z.array(SessionTurn),
+  /** Canonical bounded previews; never reconstructed from session events. */
+  pendingInputs: z.array(SessionPendingInputPreview),
+  /**
+   * Exact members of the next bounded machine-input batch that will join an
+   * already-waiting human/API prompt. Null means the next machine-input claim
+   * is standalone. This is a projection of canonical rows, not queue state.
+   */
+  pendingInputAttachment: z
+    .object({
+      turnId: z.string().uuid(),
+      inputIds: z.array(z.string().uuid()).min(1),
+    })
+    .nullable(),
+});
+export type SessionQueueSnapshot = z.infer<typeof SessionQueueSnapshot>;
+
+/**
+ * Deterministic, protocol-safe model representation of one claimed machine
+ * input batch. This exact string is persisted before inference and replayed on
+ * every later turn; callers must not synthesize an equivalent transient copy.
+ */
+export function renderSessionSystemUpdateBatch(
+  updates: ReadonlyArray<
+    Pick<
+      SessionSystemUpdate,
+      "id" | "kind" | "classification" | "sourceId" | "summary" | "payload" | "lineage"
+    >
+  >,
+): string {
+  if (updates.length === 0) {
+    throw new TypeError("A durable machine-input batch requires at least one update");
+  }
+  return [
+    "[OpenGeni internal updates]",
+    "These platform updates were delivered together for this inference. They are not human prompts.",
+    JSON.stringify({
+      updates: updates.map((update) => ({
+        id: update.id,
+        kind: update.kind,
+        classification: update.classification,
+        sourceId: update.sourceId,
+        summary: update.summary,
+        payload: update.payload,
+        lineage: update.lineage,
+      })),
+    }),
+  ].join("\n");
+}
+
+export function sessionSystemUpdateBatchHistoryItem(
+  updates: Parameters<typeof renderSessionSystemUpdateBatch>[0],
+): { type: "message"; role: "system"; content: string } {
+  return {
+    type: "message",
+    role: "system",
+    content: renderSessionSystemUpdateBatch(updates),
+  };
+}
 
 export const VariableSetVariableName = z
   .string()
@@ -4528,6 +4687,41 @@ export const CapabilityPackSkill = z
   });
 export type CapabilityPackSkill = z.infer<typeof CapabilityPackSkill>;
 
+// Inline skill content fixed onto one session at creation. It intentionally
+// uses the exact same validated directory shape as a pack skill, but has a
+// different semantic owner and lifecycle. Session readers can inspect it; it
+// is configuration, never a secret store.
+export const SessionSkill = CapabilityPackSkill;
+export type SessionSkill = z.infer<typeof SessionSkill>;
+
+export const SessionSkills = z
+  .array(SessionSkill)
+  .max(32)
+  .transform((skills, ctx) => {
+    const selected = new Map<string, { fingerprint: string; skill: SessionSkill }>();
+    for (const skill of skills) {
+      const key = skill.name.toLowerCase();
+      const fingerprint = JSON.stringify({
+        description: skill.description ?? null,
+        files: [...skill.files]
+          .sort((left, right) => left.path.localeCompare(right.path))
+          .map(({ path, content }) => ({ path, content })),
+      });
+      const existing = selected.get(key);
+      if (!existing) {
+        selected.set(key, { fingerprint, skill });
+        continue;
+      }
+      if (existing.fingerprint !== fingerprint) {
+        ctx.addIssue({
+          code: "custom",
+          message: `conflicting session skill definitions: ${skill.name}`,
+        });
+      }
+    }
+    return [...selected.values()].map(({ skill }) => skill);
+  });
+
 function isSafePackSkillRelativePath(path: string): boolean {
   if (path.startsWith("/") || path.includes("\\")) {
     return false;
@@ -4791,15 +4985,16 @@ export const CreateConnectionRequest = z.object({
 });
 export type CreateConnectionRequest = z.infer<typeof CreateConnectionRequest>;
 
-/**
- * Write-only Slack bot installation input. `token` is accepted only by the
- * dedicated validated endpoint and is never represented in a response schema.
- */
-export const ConnectOpenGeniSlackBotRequest = z.object({
-  token: z.string().trim().startsWith("xoxb-").max(8192),
+export const OpenGeniSlackBotInstallRequest = z.object({
   connectionId: z.string().uuid().optional(),
 });
-export type ConnectOpenGeniSlackBotRequest = z.infer<typeof ConnectOpenGeniSlackBotRequest>;
+export type OpenGeniSlackBotInstallRequest = z.infer<typeof OpenGeniSlackBotInstallRequest>;
+
+export const OpenGeniSlackBotInstallStart = z.object({
+  authorizationUrl: z.string().url(),
+  expiresAt: z.string().datetime({ offset: true }),
+});
+export type OpenGeniSlackBotInstallStart = z.infer<typeof OpenGeniSlackBotInstallStart>;
 
 export const UpdateConnectionRequest = z.object({
   providerDomain: z.string().min(1).optional(),
@@ -4951,15 +5146,15 @@ export const CapabilityCatalogItem = z.object({
   runtime: CapabilityRuntime.default({ available: false, notes: null }),
   enabled: z.boolean().default(false),
   enabledReason: z.string().nullable().default(null),
-  // The connection backing this enabled installation, when the enable-time
-  // connectionRef resolved to one (null for header/credential-free items —
-  // that means "no connection involved", not "broken"). Lets the UI match
-  // connection health by id instead of guessing from providerDomain alone.
+  // The non-secret connection binding stored with an enabled installation.
+  // Workspace refs retain an exact row id. Subject refs deliberately omit it:
+  // each caller resolves their own visible row by provider/kind at runtime.
   connectionRef: z
     .object({
-      connectionId: z.string().min(1),
+      connectionId: z.string().min(1).optional(),
       providerDomain: z.string().min(1),
       kind: z.string().min(1),
+      subjectScope: z.enum(["workspace", "subject"]).optional(),
     })
     .nullable()
     .default(null),
@@ -5075,14 +5270,11 @@ export const Session = z.object({
   // null when the session carried none.
   instructions: z.string().nullable(),
   resources: z.array(ResourceRef),
+  skills: SessionSkills.default([]),
   tools: z.array(ToolRef),
-  // Origin of the persisted tool allow-list. Optional for rolling client
-  // compatibility; current servers emit it and legacy rows map to `legacy`.
-  toolPolicy: SessionToolPolicy.optional(),
-  // Optimistic-concurrency fence for durable policy mutations. Optional for
-  // older clients/fixtures; current servers always emit the authoritative
-  // value.
-  toolPolicyVersion: z.number().int().positive().optional(),
+  // Origin and optimistic-concurrency fence for the durable session policy.
+  toolPolicy: SessionToolPolicy,
+  toolPolicyVersion: z.number().int().positive(),
   // Secret-safe current resolution, computed at an API/read or execution
   // boundary from IDs only. Optional because internal DB readers need not load
   // the workspace runtime registry.
@@ -5119,6 +5311,9 @@ export const Session = z.object({
   // Non-default first-party MCP token permissions (manager-style sessions);
   // null means the fixed worker default set.
   firstPartyMcpPermissions: z.array(Permission).nullable(),
+  // Exact model-visible OpenGeni selection. All catalogued tools are selected
+  // by default; [] intentionally selects none.
+  firstPartyMcpTools: z.array(FirstPartyMcpToolName),
   // Per-session third-party MCP servers, metadata only. Credential values are
   // write-only and never appear here.
   mcpServers: z.array(SessionMcpServerMetadata).default([]),
@@ -5291,6 +5486,9 @@ export const SessionEventType = z.enum([
   "goal.continuation",
   "system.update.pending",
   "system.update.delivered",
+  "system.update.superseded",
+  "system.update.cancelled",
+  "system.update.settled",
   "session.control.paused",
   "session.control.resumed",
   "session.control.steer_requested",
@@ -5491,6 +5689,9 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "goal.continuation",
     "system.update.pending",
     "system.update.delivered",
+    "system.update.superseded",
+    "system.update.cancelled",
+    "system.update.settled",
     "session.control.paused",
     "session.control.resumed",
     "session.control.steer_requested",
@@ -7349,6 +7550,9 @@ export const CreateSessionRequest = withVariableSetIdAlias({
   // authoritative. Top-level omission remains []. Presence is resolved from
   // the raw request because this Zod default erases absent-vs-empty.
   resources: z.array(ResourceRef).default([]),
+  // Inline skills are fixed onto the session. Child omission inherits the
+  // trusted parent's selection; an explicit array, including [], wins.
+  skills: SessionSkills.default([]),
   // The same child omission rule applies to selected MCP tool refs. Top-level
   // omission still applies workspace-default capability MCP tools; explicit []
   // suppresses those defaults (the first-party OpenGeni server remains added).
@@ -7401,6 +7605,10 @@ export const CreateSessionRequest = withVariableSetIdAlias({
   // A goal-bearing session whose explicit/effective set omits goals:manage is
   // rejected; creation never silently expands a child beyond that set.
   firstPartyMcpPermissions: z.array(Permission).optional(),
+  // Exact model-visible selection from the broad first-party OpenGeni MCP
+  // catalog. Omission selects the full catalog; [] intentionally exposes none.
+  // This does not grant authority: every registered tool is permission-gated.
+  firstPartyMcpTools: z.array(FirstPartyMcpToolName).optional(),
   // Third-party MCP servers attached only to this session. For an agent-created
   // child, omission snapshots its trusted immediate parent's server definitions,
   // policies, connection refs, and encrypted credentials. Explicit arrays,
@@ -7612,21 +7820,22 @@ export const ClientSessionEvent = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("user.message"),
     clientEventId: SessionOperationKey.optional(),
-    payload: z.object({
-      text: z.string().min(1),
-      // System-level host context for this exact turn only. Persisted on the
-      // turn for retry/recovery, never copied into the visible user message.
-      turnInstructions: z.string().trim().min(1).max(32768).optional(),
-      resources: z.array(ResourceRef).default([]),
-      tools: z.array(ToolRef).default([]),
-      model: z.string().min(1).optional(),
-      reasoningEffort: ReasoningEffort.optional(),
-      controlEtag: z.string().min(1).optional(),
-      expectedDraftRevision: z.number().int().nonnegative().optional(),
-      // Header-value rotation only. URL/name/tool settings are immutable after
-      // session create; persisted events expose metadata, never header values.
-      mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
-    }),
+    payload: z
+      .object({
+        text: z.string().min(1),
+        // System-level host context for this exact turn only. Persisted on the
+        // turn for retry/recovery, never copied into the visible user message.
+        turnInstructions: z.string().trim().min(1).max(32768).optional(),
+        resources: z.array(ResourceRef).default([]),
+        model: z.string().min(1).optional(),
+        reasoningEffort: ReasoningEffort.optional(),
+        controlEtag: z.string().min(1).optional(),
+        expectedDraftRevision: z.number().int().nonnegative().optional(),
+        // Header-value rotation only. URL/name/tool settings are immutable after
+        // session create; persisted events expose metadata, never header values.
+        mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
+      })
+      .strict(),
   }),
   z.object({
     type: z.literal("user.approvalDecision"),
@@ -7648,19 +7857,20 @@ export const ClientSessionEvent = z.discriminatedUnion("type", [
 ]);
 export type ClientSessionEvent = z.infer<typeof ClientSessionEvent>;
 
-export const SteerSessionMessageRequest = z.object({
-  text: z.string().min(1),
-  // Same per-turn system-level context as a queued user.message.
-  turnInstructions: z.string().trim().min(1).max(32768).optional(),
-  resources: z.array(ResourceRef).default([]),
-  tools: z.array(ToolRef).default([]),
-  model: z.string().min(1).optional(),
-  reasoningEffort: ReasoningEffort.optional(),
-  clientEventId: SessionOperationKey.optional(),
-  controlEtag: z.string().min(1).optional(),
-  expectedDraftRevision: z.number().int().nonnegative().optional(),
-  mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
-});
+export const SteerSessionMessageRequest = z
+  .object({
+    text: z.string().min(1),
+    // Same per-turn system-level context as a queued user.message.
+    turnInstructions: z.string().trim().min(1).max(32768).optional(),
+    resources: z.array(ResourceRef).default([]),
+    model: z.string().min(1).optional(),
+    reasoningEffort: ReasoningEffort.optional(),
+    clientEventId: SessionOperationKey.optional(),
+    controlEtag: z.string().min(1).optional(),
+    expectedDraftRevision: z.number().int().nonnegative().optional(),
+    mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
+  })
+  .strict();
 export type SteerSessionMessageRequest = z.infer<typeof SteerSessionMessageRequest>;
 
 export const SteerSessionMessageResponse = z.object({
@@ -7704,6 +7914,9 @@ export type GitHubRepositoryScope = z.infer<typeof GitHubRepositoryScope>;
 export const GitHubBindingStatus = z.enum(["disabled", "unbound", "bound"]);
 export type GitHubBindingStatus = z.infer<typeof GitHubBindingStatus>;
 
+export const GitHubAppSetupMode = z.enum(["platform", "operator"]);
+export type GitHubAppSetupMode = z.infer<typeof GitHubAppSetupMode>;
+
 export const GitHubInstallationLifecycle = z.enum(["active", "suspended", "deleted", "unverified"]);
 export type GitHubInstallationLifecycle = z.infer<typeof GitHubInstallationLifecycle>;
 
@@ -7715,6 +7928,7 @@ export const GitHubInstallationBinding = z.object({
   lifecycle: GitHubInstallationLifecycle,
   repositoryScope: GitHubRepositoryScope,
   repositoryCount: z.number().int().nonnegative(),
+  configureUrl: z.string().url().nullable(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -7723,6 +7937,7 @@ export type GitHubInstallationBinding = z.infer<typeof GitHubInstallationBinding
 export const GitHubAppInfo = z.object({
   configured: z.boolean(),
   status: GitHubBindingStatus,
+  setupMode: GitHubAppSetupMode,
   appId: z.string().nullable(),
   clientId: z.string().nullable(),
   appSlug: z.string().nullable(),

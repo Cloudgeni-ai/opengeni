@@ -401,6 +401,9 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     });
     expect(exec.ok).toBe(true);
     expect(exec.stdout?.trim()).toBe("runon-vm");
+    expect(exec.exitCode).toBe(0);
+    expect(exec.timedOut).toBe(false);
+    expect(exec.deadlineMs).toBe(settings.sandboxSelfhostedExecTimeoutMs);
 
     // The active pointer is UNCHANGED (run_on is a side-channel, not a swap).
     const after = (await readActiveSandbox(db, ctx.workspaceId, ctx.sessionId))!;

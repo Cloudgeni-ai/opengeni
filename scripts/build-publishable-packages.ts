@@ -15,7 +15,9 @@ import {
   renameSync,
   unlinkSync,
   writeFileSync,
+  type Dirent,
   type FSWatcher,
+  type Stats,
 } from "node:fs";
 import { arch, platform } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
@@ -108,7 +110,11 @@ type PackageLock = {
 
 type InputMutationMonitor = {
   changed: () => boolean;
-  finish: () => Promise<{ changed: boolean; inputSha256: string }>;
+  finish: () => Promise<{
+    changed: boolean;
+    inputSha256: string;
+    reasons: string[];
+  }>;
 };
 
 function packageCachePath(pkg: WorkspacePackage): string {
@@ -731,6 +737,26 @@ function inputEntry(path: string): BuildInput {
   throw new Error(`Unsupported build input type at ${relativePath}`);
 }
 
+function inputChildStats(entry: Dirent, path: string): Stats | null {
+  const isExcludedDirectory = entry.isDirectory() && INPUT_EXCLUDED_DIRECTORY_NAMES.has(entry.name);
+  if (isExcludedDirectory) {
+    pauseForFailureInjection("OPENGENI_BUILD_CACHE_PAUSE_BEFORE_EXCLUDED_ENTRY_STAT");
+  }
+  try {
+    return lstatSync(path);
+  } catch (error) {
+    // A build legitimately removes/recreates an excluded directory such as
+    // dist after readdir() has returned its Dirent. Treat only that exact
+    // stale-directory ENOENT as excluded-output churn. A missing ordinary
+    // input, or an excluded path replaced by a symlink/file, remains
+    // visible/fail-closed.
+    if (isExcludedDirectory && (error as NodeJS.ErrnoException).code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+}
+
 function inputEntriesUnder(directory: string): BuildInput[] {
   let rootEntry: BuildInput;
   try {
@@ -754,7 +780,10 @@ function inputEntriesUnder(directory: string): BuildInput[] {
   const visit = (current: string): void => {
     for (const entry of readdirSync(current, { withFileTypes: true })) {
       const path = join(current, entry.name);
-      const stats = lstatSync(path);
+      const stats = inputChildStats(entry, path);
+      if (!stats) {
+        continue;
+      }
       if (stats.isDirectory() && INPUT_EXCLUDED_DIRECTORY_NAMES.has(entry.name)) {
         continue;
       }
@@ -832,7 +861,10 @@ function inputGenerationEntriesUnder(directory: string): BuildInputGeneration[] 
   const visit = (current: string): void => {
     for (const entry of readdirSync(current, { withFileTypes: true })) {
       const path = join(current, entry.name);
-      const stats = lstatSync(path);
+      const stats = inputChildStats(entry, path);
+      if (!stats) {
+        continue;
+      }
       if (stats.isDirectory() && INPUT_EXCLUDED_DIRECTORY_NAMES.has(entry.name)) {
         continue;
       }
@@ -1017,8 +1049,16 @@ function startInputMutationMonitor(
 ): InputMutationMonitor {
   let dirty = false;
   let checking = false;
+  const reasons = new Set<string>();
   const initialInputGenerationSha256 = packageInputGenerationSha256(pkg);
   const watchers: FSWatcher[] = [];
+  const markDirty = (reason: string): void => {
+    dirty = true;
+    reasons.add(reason);
+  };
+  const observeUnattributedNotification = (): void => {
+    markDirty("watch:unattributed-notification");
+  };
   const watchDirectories = inputWatchDirectories(pkg);
   for (const directory of watchDirectories) {
     try {
@@ -1034,7 +1074,12 @@ function startInputMutationMonitor(
           // the queued notification still proves the build did not observe one
           // stable input generation.
           if (!filename) {
-            dirty = true;
+            // A transient input can be created and deleted between content /
+            // generation snapshots, while parent-directory timestamps are
+            // intentionally excluded to tolerate dist churn. With no path we
+            // cannot prove the notification belongs to an excluded output, so
+            // preserve it as fail-closed generation evidence.
+            observeUnattributedNotification();
             return;
           }
           const changedPath = join(directory, filename.toString());
@@ -1052,13 +1097,13 @@ function startInputMutationMonitor(
           if (!isBuildInputPath(pkg, changedPath)) {
             return;
           }
-          dirty = true;
+          markDirty(`watch:${changedRelativePath}`);
         }),
       );
     } catch {
       // A source directory that disappears while the build is running is a
       // mutation. Fail closed rather than publishing an unobserved key.
-      dirty = true;
+      markDirty(`watch-unavailable:${relative(repoRoot, directory)}`);
     }
   }
 
@@ -1072,15 +1117,18 @@ function startInputMutationMonitor(
         packageInputGenerationSha256(pkg) !== initialInputGenerationSha256 ||
         packageInputSha256(pkg) !== initialInputSha256
       ) {
-        dirty = true;
+        markDirty("poll:input-state-changed");
       }
     } catch {
-      dirty = true;
+      markDirty("poll:input-state-unreadable");
     } finally {
       checking = false;
     }
   }, BUILD_SOURCE_POLL_MS);
   pauseForFailureInjection("OPENGENI_BUILD_CACHE_PAUSE_AFTER_INPUT_MONITOR_START");
+  if (process.env.OPENGENI_BUILD_CACHE_INJECT_UNATTRIBUTED_EVENT === "1") {
+    observeUnattributedNotification();
+  }
 
   return {
     changed: () => dirty,
@@ -1097,16 +1145,16 @@ function startInputMutationMonitor(
       let inputSha256 = initialInputSha256;
       try {
         if (packageInputGenerationSha256(pkg) !== initialInputGenerationSha256) {
-          dirty = true;
+          markDirty("finish:input-generation-changed");
         }
         inputSha256 = packageInputSha256(pkg);
       } catch {
-        dirty = true;
+        markDirty("finish:input-state-unreadable");
       }
       if (inputSha256 !== initialInputSha256) {
-        dirty = true;
+        markDirty("finish:input-content-changed");
       }
-      return { changed: dirty, inputSha256 };
+      return { changed: dirty, inputSha256, reasons: [...reasons].sort() };
     },
   };
 }
@@ -1303,13 +1351,17 @@ async function main(): Promise<void> {
             if (recorded) {
               removeCacheRecordIfMatches(pkg, inputSha256);
             }
+            const reason =
+              observation.reasons.length > 0
+                ? ` (${observation.reasons.join(", ")})`
+                : " (input hash changed during cache publication)";
             if (attempt === MAX_SOURCE_MUTATION_RETRIES) {
               throw new Error(
-                `Build inputs changed during ${pkg.name} build; refusing to publish a cache record`,
+                `Build inputs changed during ${pkg.name} build${reason}; refusing to publish a cache record`,
               );
             }
             process.stdout.write(
-              `[build:packages] source changed during ${pkg.name}; retrying (${attempt}/${MAX_SOURCE_MUTATION_RETRIES})\n`,
+              `[build:packages] source changed during ${pkg.name}${reason}; retrying (${attempt}/${MAX_SOURCE_MUTATION_RETRIES})\n`,
             );
             continue;
           }

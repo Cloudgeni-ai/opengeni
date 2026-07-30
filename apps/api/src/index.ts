@@ -171,13 +171,17 @@ export async function createTemporalWorkflowClient(
         .delete()
         .catch(() => undefined);
     },
-    triggerScheduledTask: async ({ task, agentRunUsageIdempotencyKey, triggerWorkflowId }) => {
+    triggerScheduledTask: async ({
+      task,
+      agentRunUsageIdempotencyKey,
+      triggerWorkflowId,
+      initiator,
+    }) => {
       // Deterministic workflowId (derived from the trigger token by the
       // caller) + REJECT_DUPLICATE makes a retried manual trigger idempotent:
       // the second start collides on the id and is rejected instead of
       // spawning a second run. The shared idempotency key dedupes the charge.
-      const workflowId =
-        triggerWorkflowId ?? `scheduled-task-${task.id}-manual-${crypto.randomUUID()}`;
+      const workflowId = triggerWorkflowId;
       try {
         await temporal.workflow.start("scheduledTaskFireWorkflow", {
           taskQueue: settings.temporalTaskQueue,
@@ -190,6 +194,7 @@ export async function createTemporalWorkflowClient(
               taskId: task.id,
               triggerType: "manual",
               agentRunUsageIdempotencyKey,
+              initiator,
             },
           ],
         });

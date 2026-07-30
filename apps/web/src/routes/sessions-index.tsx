@@ -42,7 +42,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 
 import { ConsoleComposer, useDraftAttachments } from "@/components/Composer";
 import { PermissionGroupPicker } from "@/components/permission-picker";
-import { EnabledMcpToolPicker, ModelPicker } from "@/components/pickers";
+import { ModelPicker, SessionToolPicker, type SessionToolSelection } from "@/components/pickers";
 import { RepositoryContextPicker } from "@/components/repository-picker";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
@@ -68,6 +68,8 @@ import {
   type SessionDraft,
 } from "@/lib/session-create";
 import {
+  firstPartySessionToolOptions,
+  selectableSessionMcpServerIds,
   newSessionDraftToolPolicy,
   rehydrateRepositoryResources,
   repositorySelectionFromResources,
@@ -110,23 +112,19 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
   }, [resetSessionView, workspaceId]);
 
   const computeReady = isSessionDraftComputeReady(draft);
-  const workspaceDefaultToolIds = useMemo(
-    () => ["opengeni", ...context.workspaceDefaultToolIds],
-    [context.workspaceDefaultToolIds],
-  );
   const persistedToolPolicy = useMemo(
     () =>
       newSessionDraftToolPolicy({
         selectedMcpServerIds: context.selectedCapabilityToolIds,
-        workspaceDefaultMcpServerIds: workspaceDefaultToolIds,
+        workspaceDefaultMcpServerIds: context.workspaceDefaultToolIds,
         catalogReady: context.workspaceMcpCatalogReady,
         explicit: toolSelectionExplicit,
       }),
     [
       context.selectedCapabilityToolIds,
       context.workspaceMcpCatalogReady,
+      context.workspaceDefaultToolIds,
       toolSelectionExplicit,
-      workspaceDefaultToolIds,
     ],
   );
   const persistedValue = useMemo(
@@ -170,12 +168,9 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
       const selected = new Set(
         remote.toolsProvided
           ? remote.tools.map((tool) => tool.id)
-          : ["opengeni", ...workspaceDefaultToolIdsForHydration],
+          : workspaceDefaultToolIdsForHydration,
       );
-      // `files` is the hidden download helper automatically paired with the
-      // visible Document Search selection, not a standalone picker choice.
-      if (selected.has("docs")) selected.delete("files");
-      setSelectedCapabilityToolIds(selected);
+      setSelectedCapabilityToolIds(selectableSessionMcpServerIds(selected));
       const repositorySelection = repositorySelectionFromResources(remote.resources, githubRepos);
       setManualRepos(repositorySelection.manualRepos);
       setSelectedRepoIds(repositorySelection.selectedRepoIds);
@@ -360,9 +355,17 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
               <SessionControlStrip
                 workspaceId={workspaceId}
                 disabled={busy || newSessionDraft.loading}
-                onToolSelectionChange={(ids) => {
+                selection={{
+                  mcpServerIds: context.selectedCapabilityToolIds,
+                  firstPartyToolIds: draft.firstPartyMcpTools,
+                }}
+                onToolSelectionChange={(selection) => {
                   setToolSelectionExplicit(true);
-                  context.setSelectedCapabilityToolIds(ids);
+                  context.setSelectedCapabilityToolIds(selection.mcpServerIds);
+                  setDraft((current) => ({
+                    ...current,
+                    firstPartyMcpTools: selection.firstPartyToolIds,
+                  }));
                 }}
               />
             }
@@ -484,11 +487,13 @@ function RecentSessionRow({ workspaceId, session }: { workspaceId: string; sessi
 function SessionControlStrip({
   workspaceId,
   disabled,
+  selection,
   onToolSelectionChange,
 }: {
   workspaceId: string;
   disabled: boolean;
-  onToolSelectionChange: (ids: Set<string>) => void;
+  selection: SessionToolSelection;
+  onToolSelectionChange: (selection: SessionToolSelection) => void;
 }) {
   const context = useAppContext();
   const codexModels = useCodexModels(workspaceId);
@@ -503,9 +508,10 @@ function SessionControlStrip({
         onModelChange={context.setModel}
         onEffortChange={context.setReasoningEffort}
       />
-      <EnabledMcpToolPicker
+      <SessionToolPicker
         servers={context.toolMcpServers}
-        selectedIds={context.selectedCapabilityToolIds}
+        firstPartyTools={firstPartySessionToolOptions}
+        selection={selection}
         disabled={disabled}
         onChange={onToolSelectionChange}
       />
@@ -526,6 +532,10 @@ function WorkspaceRepositoryPicker({
   const context = useAppContext();
   return (
     <RepositoryContextPicker
+      setupMode={
+        context.githubStatus?.setupMode ??
+        (context.clientConfig.productAccessMode === "managed" ? "platform" : "operator")
+      }
       configured={context.githubStatus?.configured === true}
       status={context.githubStatus?.status ?? "disabled"}
       installUrl={context.githubStatus?.installUrl ?? null}

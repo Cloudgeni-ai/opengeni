@@ -40,9 +40,15 @@ export async function requireAccessGrant(
   permission?: Permission,
 ): Promise<AccessGrant> {
   const context = await requireAccessContext(c, deps);
+  const principalKind = hostedHumanSessionPrincipalKind(context);
   const grant =
     context.workspaceGrants.find((candidate) => candidate.workspaceId === workspaceId) ??
-    (await getWorkspaceGrant(deps.db, context.subjectId, workspaceId));
+    (await getWorkspaceGrant(
+      deps.db,
+      context.subjectId,
+      workspaceId,
+      principalKind ? { principalKind } : undefined,
+    ));
   if (!grant) {
     const workspace = await requireWorkspace(deps.db, workspaceId).catch(() => null);
     if (!workspace) {
@@ -54,6 +60,20 @@ export async function requireAccessGrant(
     requirePermission(grant, permission);
   }
   return grant;
+}
+
+function hostedHumanSessionPrincipalKind(context: AccessContext): "human_session" | undefined {
+  if (context.mode !== "managed" || context.workspaceGrants.length === 0) {
+    return undefined;
+  }
+  return context.workspaceGrants.every(
+    (grant) =>
+      grant.principalKind === "human_session" &&
+      grant.metadata?.delegated !== true &&
+      !grant.serviceInitiator,
+  )
+    ? "human_session"
+    : undefined;
 }
 
 export function requirePermission(grant: AccessGrant, permission: Permission): void {
@@ -86,6 +106,10 @@ export function hasPermission(permissions: Permission[], permission: Permission)
 
 async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<AccessContext | null> {
   if (deps.settings.productAccessMode === "local") {
+    const delegated = await delegatedAccessContext(c, deps, "local");
+    if (delegated) {
+      return delegated;
+    }
     return await bootstrapWorkspace(deps.db, {
       accountExternalSource: "opengeni:local",
       accountExternalId: "default",
@@ -199,7 +223,7 @@ async function apiKeyAccessContext(
 async function delegatedAccessContext(
   c: Context,
   deps: AccessDeps,
-  mode: "configured" | "managed",
+  mode: "local" | "configured" | "managed",
   token = bearerToken(c),
 ): Promise<AccessContext | null> {
   if (!token || !deps.settings.delegationSecret) {
@@ -234,6 +258,9 @@ async function delegatedAccessContext(
         metadata: {
           delegated: true,
           ...(payload.sessionId ? { sessionId: payload.sessionId } : {}),
+          ...(payload.firstPartyMcpTools !== undefined
+            ? { firstPartyMcpTools: payload.firstPartyMcpTools }
+            : {}),
           // Caller identity: the turn that minted this token. Tools classify the
           // CALLER from this instead of re-reading the live active pointer.
           ...(payload.turnId ? { turnId: payload.turnId } : {}),

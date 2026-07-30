@@ -536,14 +536,14 @@ function withDockerNetwork(client: SandboxClient, network: string | undefined): 
 }
 
 async function connectDockerNetwork(network: string, containerId: string): Promise<void> {
-  const result = Bun.spawnSync(["docker", "network", "connect", network, containerId], {
-    stdout: "pipe",
-    stderr: "pipe",
+  const { spawnSync } = await import("node:child_process");
+  const result = spawnSync("docker", ["network", "connect", network, containerId], {
+    encoding: "utf8",
   });
-  if (result.exitCode === 0) {
+  if (result.status === 0) {
     return;
   }
-  const stderr = new TextDecoder().decode(result.stderr);
+  const stderr = result.stderr ?? result.error?.message ?? "";
   if (stderr.includes("already exists")) {
     return;
   }

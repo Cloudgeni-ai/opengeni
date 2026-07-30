@@ -170,7 +170,15 @@ function grant(workspace: Workspace, subjectId: string, sessionId?: string): Acc
     workspaceId: workspace.workspaceId,
     subjectId,
     permissions: ["workspace:read", "sessions:create", "sessions:read"],
-    ...(sessionId ? { metadata: { delegated: true, sessionId } } : {}),
+    ...(sessionId
+      ? {
+          metadata: {
+            delegated: true,
+            sessionId,
+            firstPartyMcpTools: ["session_create"],
+          },
+        }
+      : {}),
   };
 }
 

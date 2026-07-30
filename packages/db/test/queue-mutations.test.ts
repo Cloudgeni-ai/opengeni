@@ -306,8 +306,6 @@ describe("canonical queue commands", () => {
             expectedRevision: edited.draft.revision,
             text: "edited prompt with replacement content",
             resources: [],
-            tools: [],
-            toolsProvided: false,
             model: "edited-model",
             reasoningEffort: "medium",
           }),
@@ -410,7 +408,6 @@ describe("canonical queue commands", () => {
             text: "direct prompt",
             turnInstructions: "direct explicit context",
             resources: [],
-            tools: [],
             reasoningEffortFallback: "medium",
             source: "user",
           }),
@@ -464,7 +461,6 @@ describe("canonical queue commands", () => {
             expectedDraftRevision: edited.draft.revision,
             text: edited.draft.text,
             resources: edited.draft.resources as ResourceRef[],
-            tools: edited.draft.tools as ToolRef[],
             model: edited.draft.model,
             reasoningEffort: edited.draft.reasoningEffort as ReasoningEffort,
             reasoningEffortFallback: "medium",
@@ -919,7 +915,7 @@ describe("canonical queue commands", () => {
     expect(replay).toMatchObject({ replay: true, turnId: submitted.turnId });
   });
 
-  test("Send preserves omitted versus explicit turn tool provenance without mutating a fixed policy", async () => {
+  test("Send stores no private turn tools and never mutates the session policy", async () => {
     const value = await fixture(1);
     const workspaceId = value.grant.workspaceId!;
     const selected = [{ kind: "mcp" as const, id: "cap-docs" }];
@@ -933,8 +929,11 @@ describe("canonical queue commands", () => {
         .where(eq(schema.sessions.id, value.session.id)),
     );
 
-    const submit = async (tools: typeof selected, toolsProvided: boolean) =>
-      await withWorkspaceSubjectRls(client.db, workspaceId, value.grant.subjectId, (db) =>
+    const submitted = await withWorkspaceSubjectRls(
+      client.db,
+      workspaceId,
+      value.grant.subjectId,
+      (db) =>
         db.transaction((tx) =>
           submitHumanPromptInTransaction(tx as typeof db, {
             accountId: value.grant.accountId,
@@ -944,23 +943,17 @@ describe("canonical queue commands", () => {
             actor: value.actor,
             operationKey: crypto.randomUUID(),
             delivery: "send",
-            text: toolsProvided ? "explicit tools" : "inherited tools",
+            text: "inherits the durable session tools",
             resources: [],
-            tools,
-            toolsProvided,
             model: "scripted-model",
             reasoningEffort: "low",
             reasoningEffortFallback: "medium",
             source: "user",
           }),
         ),
-      );
+    );
 
-    const omitted = await submit([], false);
-    const explicitEmpty = await submit([], true);
-    const explicitSubset = await submit(selected, true);
-
-    const turns = await withWorkspaceRls(client.db, workspaceId, (db) =>
+    const [turn] = await withWorkspaceRls(client.db, workspaceId, (db) =>
       db
         .select({
           id: schema.sessionTurns.id,
@@ -968,33 +961,12 @@ describe("canonical queue commands", () => {
           toolsProvided: schema.sessionTurns.toolsProvided,
         })
         .from(schema.sessionTurns)
-        .where(
-          inArray(schema.sessionTurns.id, [
-            omitted.turnId,
-            explicitEmpty.turnId,
-            explicitSubset.turnId,
-          ]),
-        ),
+        .where(eq(schema.sessionTurns.id, submitted.turnId)),
     );
-    expect(turns).toEqual(
-      expect.arrayContaining([
-        { id: omitted.turnId, tools: [], toolsProvided: false },
-        { id: explicitEmpty.turnId, tools: [], toolsProvided: true },
-        { id: explicitSubset.turnId, tools: selected, toolsProvided: true },
-      ]),
-    );
+    expect(turn).toEqual({ id: submitted.turnId, tools: [], toolsProvided: false });
 
-    const events = await storedEvents(workspaceId, [
-      omitted.acceptedEventId,
-      explicitEmpty.acceptedEventId,
-      explicitSubset.acceptedEventId,
-    ]);
-    const omittedPayload = events.find((event) => event.id === omitted.acceptedEventId)!
-      .payload as Record<string, unknown>;
-    const emptyPayload = events.find((event) => event.id === explicitEmpty.acceptedEventId)!
-      .payload as Record<string, unknown>;
-    expect(Object.hasOwn(omittedPayload, "tools")).toBe(false);
-    expect(emptyPayload.tools).toEqual([]);
+    const [event] = await storedEvents(workspaceId, [submitted.acceptedEventId]);
+    expect(Object.hasOwn(event!.payload as object, "tools")).toBe(false);
 
     const [storedSession] = await withWorkspaceRls(client.db, workspaceId, (db) =>
       db
@@ -1006,41 +978,6 @@ describe("canonical queue commands", () => {
       tools: selected,
       toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
     });
-  });
-
-  test("legacy sessions retain the historical follow-up merge behavior", async () => {
-    const value = await fixture(1);
-    const workspaceId = value.grant.workspaceId!;
-    const selected = [{ kind: "mcp" as const, id: "legacy-added" }];
-    await withWorkspaceSubjectRls(client.db, workspaceId, value.grant.subjectId, (db) =>
-      db.transaction((tx) =>
-        submitHumanPromptInTransaction(tx as typeof db, {
-          accountId: value.grant.accountId,
-          workspaceId,
-          sessionId: value.session.id,
-          subjectId: value.grant.subjectId,
-          actor: value.actor,
-          operationKey: crypto.randomUUID(),
-          delivery: "send",
-          text: "legacy merge",
-          resources: [],
-          tools: selected,
-          toolsProvided: true,
-          model: "scripted-model",
-          reasoningEffort: "low",
-          reasoningEffortFallback: "medium",
-          source: "user",
-        }),
-      ),
-    );
-
-    const [storedSession] = await withWorkspaceRls(client.db, workspaceId, (db) =>
-      db
-        .select({ tools: schema.sessions.tools, toolPolicy: schema.sessions.toolPolicy })
-        .from(schema.sessions)
-        .where(eq(schema.sessions.id, value.session.id)),
-    );
-    expect(storedSession).toEqual({ tools: selected, toolPolicy: null });
   });
 
   test("Send and Steer persist canonical execution identity and replay its original evidence", async () => {
@@ -1173,7 +1110,6 @@ describe("canonical queue commands", () => {
           revision: 1,
           text: "preserve me",
           resources: [],
-          tools: [],
           model: "scripted-model",
           reasoningEffort: "low",
         }),
@@ -1205,7 +1141,6 @@ describe("canonical queue commands", () => {
             expectedDraftRevision: 1,
             text: "preserve me",
             resources: [],
-            tools: [],
             model: "scripted-model",
             reasoningEffort: "low",
             reasoningEffortFallback: "medium",

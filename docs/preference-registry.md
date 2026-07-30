@@ -7,13 +7,13 @@ deliberately separate from:
 - Documents/RAG and imported source content;
 - `knowledge_memories` and its retrieval/ranking lifecycle;
 - Skills content, materialization, activation, or editing;
-- workspace instruction-policy charters and their OPE-106 authority;
+- workspace instruction-policy charters and their separate authority;
 - model, tool, connector, or prompt-composition policy.
 
 This backend slice provides storage, service operations, HTTP and first-party
 MCP retrieval, SDK types, and isolation guarantees. It does **not** invoke
 preference snapshots during a turn or compose descriptors or full content into
-a model prompt. That runtime-composition boundary belongs to the later OPE-107
+a model prompt. That runtime-composition boundary belongs to a later delivery
 lane. It also adds no UI, connector, or source/fact schema.
 
 ## Scope and identity
@@ -52,7 +52,7 @@ authority.
 
 ## Immutable revisions and lifecycle
 
-Migration `0132_preference_registry.sql` adds four dedicated FORCE-RLS tables:
+Migration `0137_preference_registry.sql` adds four dedicated FORCE-RLS tables:
 
 - `preference_registry_preferences` holds stable identity, target, status,
   active revision/hash, scope version, and activation version;
@@ -171,7 +171,7 @@ Canonical implementation:
 - `packages/contracts/src/preference-registry.ts`;
 - `packages/db/src/preference-registry-schema.ts`;
 - `packages/db/src/preference-registry.ts`;
-- `packages/db/drizzle/0132_preference_registry.sql`;
+- `packages/db/drizzle/0137_preference_registry.sql`;
 - `apps/api/src/routes/preference-registry.ts`;
 - `apps/api/src/mcp/server.ts`;
 - `packages/sdk/src/preference-registry.ts`.

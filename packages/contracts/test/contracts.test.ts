@@ -44,6 +44,7 @@ import {
   SESSION_MCP_SERVERS_MAX,
   SessionGoal,
   SessionMcpServerMetadata,
+  SteerSessionMessageRequest,
   SubmitHumanInputResponseRequest,
   TerminalPtyExitedPayload,
   UpdateSessionMcpApprovalPolicyRequest,
@@ -451,8 +452,51 @@ describe("contracts", () => {
   test("accepts create session defaults", () => {
     const payload = CreateSessionRequest.parse({ initialMessage: "inspect repo" });
     expect(payload.resources).toEqual([]);
+    expect(payload.skills).toEqual([]);
     expect(payload.tools).toEqual([]);
     expect(payload.metadata).toEqual({});
+  });
+
+  test("accepts validated inline session skills", () => {
+    const parsed = CreateSessionRequest.parse({
+      initialMessage: "prepare release",
+      skills: [
+        {
+          name: "release",
+          files: [
+            {
+              path: "SKILL.md",
+              content: "---\nname: release\ndescription: Prepare a release.\n---\n",
+            },
+          ],
+        },
+        {
+          name: "RELEASE",
+          files: [
+            {
+              path: "SKILL.md",
+              content: "---\nname: release\ndescription: Prepare a release.\n---\n",
+            },
+          ],
+        },
+      ],
+    });
+    expect(parsed.skills).toHaveLength(1);
+    expect(() =>
+      CreateSessionRequest.parse({
+        initialMessage: "prepare release",
+        skills: [{ name: "release", files: [{ path: "../SKILL.md", content: "bad" }] }],
+      }),
+    ).toThrow();
+    expect(() =>
+      CreateSessionRequest.parse({
+        initialMessage: "prepare release",
+        skills: [
+          { name: "release", files: [{ path: "SKILL.md", content: "# One\n" }] },
+          { name: "RELEASE", files: [{ path: "SKILL.md", content: "# Two\n" }] },
+        ],
+      }),
+    ).toThrow("conflicting session skill definitions");
   });
 
   test("accepts only a UUID as a caller-preallocated session id", () => {
@@ -1244,7 +1288,7 @@ describe("contracts", () => {
     ).toThrow();
   });
 
-  test("accepts per-turn resources, tools, and model settings on user messages", () => {
+  test("accepts per-turn resources and model settings on user messages", () => {
     const fileId = "00000000-0000-4000-8000-000000000010";
     const payload = ClientSessionEvent.parse({
       type: "user.message",
@@ -1252,7 +1296,6 @@ describe("contracts", () => {
         text: "use this too",
         turnInstructions: "  Current host context: record 42 is selected.  ",
         resources: [{ kind: "file", fileId }],
-        tools: [{ kind: "mcp", id: "docs" }],
         model: "gpt-5.6-sol",
         reasoningEffort: "xhigh",
       },
@@ -1260,7 +1303,6 @@ describe("contracts", () => {
     expect(payload.type).toBe("user.message");
     if (payload.type !== "user.message") throw new Error("expected user.message");
     expect(payload.payload.resources).toEqual([{ kind: "file", fileId }]);
-    expect(payload.payload.tools).toEqual([{ kind: "mcp", id: "docs" }]);
     expect(payload.payload.model).toBe("gpt-5.6-sol");
     expect(payload.payload.reasoningEffort).toBe("xhigh");
     expect(payload.payload.turnInstructions).toBe("Current host context: record 42 is selected.");
@@ -1274,7 +1316,21 @@ describe("contracts", () => {
     expect(payload.type).toBe("user.message");
     if (payload.type !== "user.message") throw new Error("expected user.message");
     expect(payload.payload.resources).toEqual([]);
-    expect(payload.payload.tools).toEqual([]);
+  });
+
+  test("rejects the removed one-turn tool override on Send and Steer", () => {
+    expect(
+      ClientSessionEvent.safeParse({
+        type: "user.message",
+        payload: { text: "send", tools: [] },
+      }).success,
+    ).toBe(false);
+    expect(
+      SteerSessionMessageRequest.safeParse({
+        text: "steer",
+        tools: [],
+      }).success,
+    ).toBe(false);
   });
 
   test("accepts full realtime bus messages", () => {

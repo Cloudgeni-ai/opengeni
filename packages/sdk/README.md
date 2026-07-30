@@ -21,6 +21,8 @@ const client = new OpenGeniClient({
 const session = await client.createSession(workspaceId, {
   initialMessage: "Investigate the failing deploy on staging",
   resources: [{ kind: "repository", uri: "https://github.com/acme/app.git", ref: "main" }],
+  // Exact model-visible first-party surface; permissions remain independent.
+  firstPartyMcpTools: ["set_session_title"],
 });
 
 for await (const event of client.streamEvents(workspaceId, session.id)) {
@@ -29,6 +31,32 @@ for await (const event of client.streamEvents(workspaceId, session.id)) {
   }
 }
 ```
+
+Omit `firstPartyMcpTools` for the complete OpenGeni tool catalog. An explicit
+`[]` exposes no broad first-party tools; attached resources and separately
+selected `files`/`docs` MCP servers are unaffected.
+
+## MCP tool output normalization
+
+MCP transports and event stores can represent the same tool result as a direct
+object, JSON text, a text content block, or nested `result`,
+`structuredContent`, and `content` envelopes. Use the shared zero-dependency
+normalizer when an embedding host needs one stable interpretation:
+
+```ts
+import { normalizeMcpOutput } from "@opengeni/sdk";
+
+const normalized = normalizeMcpOutput(toolOutput);
+
+normalized.value; // canonical machine-readable value
+normalized.text; // presentation text
+normalized.isError; // preserved across recognized nested envelopes
+normalized.raw; // original evidence
+```
+
+Malformed text and unknown objects pass through without throwing. Envelope
+recognition is deliberately conservative: an ordinary domain object is not
+unwrapped merely because it has a field named `result`.
 
 ## Error handling
 
@@ -182,9 +210,12 @@ await client.sendApprovalDecision(workspaceId, sessionId, { approvalId, decision
 ## Session tool policy and native web search
 
 Omitting `tools` when creating a top-level session selects the current
-workspace-default capability policy. Supported Responses providers can then
-attach their native bounded web-search tool without requiring a sandbox.
-Passing `tools`, including `[]`, is an intentional fixed narrowing.
+workspace-default capability policy, including the built-in `files` server.
+Passing `tools`, including `[]`, is an intentional fixed narrowing and can
+therefore disable file-download access for that session. OpenGeni's own web UI
+keeps `files` enabled as a hidden default, while API and embedded clients retain
+exact control over the explicit list. Supported Responses providers attach
+their native bounded web-search tool independently of this MCP policy.
 
 Existing explicit sessions are not widened when a new default capability is
 introduced. Opt one in explicitly with the current optimistic-concurrency
@@ -194,14 +225,25 @@ version; the audited change takes effect on its next attempt:
 const session = await client.getSession(workspaceId, sessionId);
 const updated = await client.updateSessionToolPolicy(workspaceId, sessionId, {
   mode: "workspace_default",
-  expectedVersion: session.toolPolicyVersion ?? 1,
+  expectedVersion: session.toolPolicyVersion,
 });
 ```
 
-To keep a fixed MCP allow-list instead, use the backward-compatible explicit
-shape `{ tools, expectedVersion }`. `tool_search` discovers deferred MCP
-schemas; it is not public web search. Unsupported providers do not receive a
-cross-provider, MCP, or sandbox fallback.
+To keep a fixed allow-list, replace both connected MCP servers and individual
+OpenGeni tools atomically:
+
+```ts
+await client.updateSessionToolPolicy(workspaceId, sessionId, {
+  mode: "explicit",
+  tools,
+  firstPartyMcpTools,
+  expectedVersion: session.toolPolicyVersion,
+});
+```
+
+Follow-up Send and Steer requests inherit this session policy and cannot carry
+a private one-turn tool override. `tool_search` discovers deferred MCP schemas;
+it is not public web search.
 
 ## Goals
 

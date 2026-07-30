@@ -1,0 +1,149 @@
+import { describe, expect, test } from "bun:test";
+import {
+  DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+  DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  FIRST_PARTY_MCP_TOOL_NAMES,
+  Permission,
+  type AccessGrant,
+  type FirstPartyMcpToolName,
+} from "@opengeni/contracts";
+import { MemoryEventBus, testSettings } from "@opengeni/testing";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import type { ApiRouteDeps } from "@opengeni/core";
+import { buildOpenGeniMcpServer } from "../src/mcp/server";
+import { buildFilesMcpServer } from "../src/mcp/files";
+
+const accountId = crypto.randomUUID();
+const workspaceId = crypto.randomUUID();
+const sessionId = crypto.randomUUID();
+const turnId = crypto.randomUUID();
+const attemptId = crypto.randomUUID();
+
+function deps(): ApiRouteDeps {
+  return {
+    settings: testSettings({ sandboxSelfhostedEnabled: true }),
+    db: {},
+    bus: new MemoryEventBus(),
+    workflowClient: {},
+    objectStorage: null,
+    githubStateSecret: "test-state-secret",
+    documentIndexer: { indexDocument: async () => undefined },
+    getDocumentServices: () => {
+      throw new Error("document services not used");
+    },
+    resumeBoxById: async () => {
+      throw new Error("resumeBoxById not used");
+    },
+  } as ApiRouteDeps;
+}
+
+function grant(
+  permissions: AccessGrant["permissions"],
+  firstPartyMcpTools?: FirstPartyMcpToolName[],
+): AccessGrant {
+  return {
+    accountId,
+    workspaceId,
+    subjectId: "worker:first-party-mcp",
+    permissions,
+    principalKind: "agent_attempt",
+    metadata: {
+      sessionId,
+      turnId,
+      attemptId,
+      executionGeneration: 1,
+      ...(firstPartyMcpTools !== undefined ? { firstPartyMcpTools } : {}),
+    },
+  };
+}
+
+function registeredToolNames(server: unknown): string[] {
+  return Object.keys(
+    (server as { _registeredTools?: Record<string, unknown> })._registeredTools ?? {},
+  )
+    .filter((name) => !name.startsWith("__opengeni_empty_"))
+    .sort();
+}
+
+describe("first-party MCP tool visibility policy", () => {
+  test("omission selects the complete default catalog when authorization allows it", () => {
+    const server = buildOpenGeniMcpServer(deps(), grant([...Permission.options]), {
+      workspaceMemoryEnabled: true,
+    });
+
+    expect(registeredToolNames(server)).toEqual([...DEFAULT_FIRST_PARTY_MCP_TOOLS].sort());
+  });
+
+  test("an explicit title-only selection does not widen to other authorized tools", () => {
+    const server = buildOpenGeniMcpServer(
+      deps(),
+      grant([...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS], ["set_session_title"]),
+      { workspaceMemoryEnabled: true },
+    );
+
+    expect(registeredToolNames(server)).toEqual(["set_session_title"]);
+  });
+
+  test("visibility never substitutes for authorization", () => {
+    const denied = buildOpenGeniMcpServer(deps(), grant(["sessions:read"], ["session_create"]));
+    expect(registeredToolNames(denied)).toEqual([]);
+
+    const admitted = buildOpenGeniMcpServer(deps(), grant(["sessions:create"], ["session_create"]));
+    expect(registeredToolNames(admitted)).toEqual(["session_create"]);
+  });
+
+  test("the catalog and explicit authorization table cover every broad-server tool", () => {
+    const server = buildOpenGeniMcpServer(
+      deps(),
+      grant([...Permission.options], [...FIRST_PARTY_MCP_TOOL_NAMES]),
+      { workspaceMemoryEnabled: true },
+    );
+
+    expect(registeredToolNames(server)).toEqual([...FIRST_PARTY_MCP_TOOL_NAMES].sort());
+    expect(registeredToolNames(server)).not.toContain("files_get_download_url");
+  });
+
+  test("the download URL tool exists only on the dedicated files MCP server", () => {
+    const broad = buildOpenGeniMcpServer(
+      deps(),
+      grant([...Permission.options], [...FIRST_PARTY_MCP_TOOL_NAMES]),
+    );
+    const files = buildFilesMcpServer(deps(), {
+      accountId,
+      workspaceId,
+      subjectId: "worker:first-party-mcp",
+      permissions: ["files:read"],
+    });
+
+    expect(registeredToolNames(broad)).not.toContain("files_get_download_url");
+    expect(registeredToolNames(files)).toEqual(["files_get_download_url"]);
+  });
+
+  test("the dedicated files tool is also permission-gated at registration", () => {
+    const files = buildFilesMcpServer(deps(), {
+      accountId,
+      workspaceId,
+      subjectId: "worker:first-party-mcp",
+      permissions: ["workspace:read"],
+    });
+
+    expect(registeredToolNames(files)).toEqual([]);
+  });
+
+  test("an explicit empty selection returns a valid empty tools/list", async () => {
+    const server = buildOpenGeniMcpServer(
+      deps(),
+      grant([...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS], []),
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "empty-first-party-policy-test", version: "1" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      expect((await client.listTools()).tools).toEqual([]);
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
+  });
+});
