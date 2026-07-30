@@ -2294,14 +2294,16 @@ function registerGitHubConnectTool(
       const { settings } = deps;
       const missing = githubAppMissingSettings(settings);
       const slug = settings.githubAppSlug?.trim() || null;
+      const setupMode = settings.productAccessMode === "managed" ? "platform" : "operator";
       if (missing.length > 0 || !slug) {
         return json({
           configured: false,
           status: "disabled",
-          appSlug: slug,
+          setupMode,
+          appSlug: setupMode === "operator" ? slug : null,
           installUrl: null,
           linkUrl: null,
-          missing,
+          missing: setupMode === "operator" ? missing : [],
         });
       }
       const installations = await listWorkspaceGitHubInstallationBindings(deps, grant.workspaceId);
@@ -2319,13 +2321,21 @@ function registerGitHubConnectTool(
       const connectUrl = state
         ? `${baseUrl}/v1/workspaces/${grant.workspaceId}/github/connect?state=${encodeURIComponent(state)}`
         : null;
+      const installationViews = installations.map((installation) => ({
+        ...installation,
+        configureUrl:
+          state && baseUrl
+            ? `${baseUrl}/v1/workspaces/${grant.workspaceId}/github/installations/${installation.installationId}/configure?state=${encodeURIComponent(state)}`
+            : null,
+      }));
       return json({
         configured: true,
         status,
-        appSlug: slug,
+        setupMode,
+        appSlug: setupMode === "operator" ? slug : null,
         installUrl: connectUrl,
         linkUrl: connectUrl,
-        installations,
+        installations: installationViews,
         missing: [],
       });
     },

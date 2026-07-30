@@ -240,6 +240,7 @@ export type {
   FirstPartyMcpToolName,
   GetPackResponse,
   GitHubAppInfo,
+  GitHubAppSetupMode,
   GitHubBindingStatus,
   GitHubInstallationBinding,
   GitHubInstallationLifecycle,

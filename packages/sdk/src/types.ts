@@ -3476,6 +3476,8 @@ export type GitHubRepositoryScope = "all" | "selected";
 
 export type GitHubBindingStatus = "disabled" | "unbound" | "bound";
 
+export type GitHubAppSetupMode = "platform" | "operator";
+
 export type GitHubInstallationLifecycle = "active" | "suspended" | "deleted" | "unverified";
 
 export type GitHubInstallationBinding = {
@@ -3486,6 +3488,8 @@ export type GitHubInstallationBinding = {
   lifecycle: GitHubInstallationLifecycle;
   repositoryScope: GitHubRepositoryScope;
   repositoryCount: number;
+  /** OpenGeni-owned entry point for changing the installation's repository allowlist. */
+  configureUrl: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -3494,12 +3498,14 @@ export type GitHubAppInfo = {
   configured: boolean;
   /** Truthful workspace binding state; server App credentials alone are not a binding. */
   status: GitHubBindingStatus;
+  /** Platform deployments expose installation only; operator deployments may create an App. */
+  setupMode: GitHubAppSetupMode;
   appId: string | null;
   clientId: string | null;
   appSlug: string | null;
-  /** Fresh GitHub-controlled installation/configuration consent entry point. */
+  /** Fresh OAuth-first existing-installation discovery and install entry point. */
   installUrl: string | null;
-  /** Compatibility alias for installUrl; no repository-admin chooser is exposed. */
+  /** Compatibility alias for installUrl. */
   linkUrl: string | null;
   /** Installation bindings owned independently by this workspace. */
   installations: GitHubInstallationBinding[];
