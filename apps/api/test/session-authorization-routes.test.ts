@@ -683,6 +683,7 @@ describe("embedding host session authorization routes", () => {
       accountId: value.grant.accountId,
       workspaceId: value.grant.workspaceId,
       subjectId: value.grant.subjectId,
+      principalKind: "service",
       permissions: ["sessions:control"],
       exp: Math.floor(Date.now() / 1000) + 3_600,
     });
