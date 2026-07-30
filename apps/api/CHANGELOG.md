@@ -1,5 +1,21 @@
 # @opengeni/api-router
 
+## 0.12.14
+
+### Patch Changes
+
+- ad0bdc3: Surface managed-credit admission rejections with actionable composer recovery guidance while preserving drafts and attachments, and canonicalize default attachment mounts across established-session draft admission and replay.
+- Updated dependencies [ad0bdc3]
+  - @opengeni/contracts@0.23.1
+  - @opengeni/db@0.14.5
+  - @opengeni/config@0.7.14
+  - @opengeni/core@0.13.1
+  - @opengeni/documents@0.2.47
+  - @opengeni/events@0.3.38
+  - @opengeni/github@0.4.1
+  - @opengeni/runtime@0.14.5
+  - @opengeni/storage@0.2.38
+
 ## 0.12.13
 
 ### Patch Changes

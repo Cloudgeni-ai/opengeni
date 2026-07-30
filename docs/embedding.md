@@ -548,6 +548,13 @@ Standalone uses `createDb(settings.databaseUrl)` and no search-path override. Em
 - `createDb(databaseUrl, { searchPath, rlsStrategy, userLookup, max })` for postgres-js handles.
 - `registerDbBinding(db, { rlsStrategy, userLookup })` for an externally constructed Drizzle handle.
 
+For `rlsStrategy: "force"`, role provisioning rejects every privilege-bearing
+role relationship. PostgreSQL 16+ managed services may retain the automatic
+ADMIN-only reverse grant from `opengeni_app` to the non-superuser `CREATEROLE`
+principal that created it; OpenGeni accepts only the exact non-inheritable,
+non-settable, superuser-granted management edge. PostgreSQL 15 and every
+uncertain or privilege-bearing edge remain fail-closed.
+
 Dedicated-schema deployments use a search path shaped like `<schema>,opengeni_private,public`; `public` stays last so pgcrypto/pgvector symbols resolve. `rlsStrategy: "force"` is the standalone posture: OpenGeni connects as a non-owner role and FORCE RLS applies. `rlsStrategy: "scoped"` is the embedded owner-role posture: the host owns the isolation boundary, but OpenGeni still emits the `opengeni.account_id` / `opengeni.workspace_id` GUCs on scoped queries.
 
 ### Worker
