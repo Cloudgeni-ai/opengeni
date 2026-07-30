@@ -69,7 +69,6 @@ config:
   OPENGENI_AUTH_REQUIRED: "false"
   OPENGENI_AUTH_ALLOW_HEALTH: "true"
   OPENGENI_AUTH_ALLOW_METRICS: "false"
-  OPENGENI_SESSION_TURN_TOOL_REPLACEMENT_ENABLED: "false"
   OPENGENI_WEB_ALLOWED_HOSTS: ""
   OPENGENI_PRODUCT_ACCESS_MODE: local
   OPENGENI_BILLING_MODE: disabled
@@ -89,7 +88,9 @@ secret:
   create: false
   existingSecret: opengeni-runtime
   # Provide OPENGENI_ACCESS_KEY for deployment shared-key access.
-  # Provide OPENGENI_DELEGATION_SECRET for configured/managed product access.
+  # Provide OPENGENI_DELEGATION_SECRET in every access mode. API and workers
+  # share it to preserve narrowed permissions and signed session/turn identity
+  # on first-party MCP requests, including in local mode.
   # Provide Better Auth, Resend, Stripe, GitHub App, model-provider, database,
   # NATS, Temporal, sandbox, and object-storage secrets through this secret or
   # an ExternalSecret. Never commit real secrets in values.

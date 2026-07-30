@@ -108,6 +108,7 @@ export async function generateSingleNodeSecretFiles(
             database: databaseName,
           }),
           OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: environmentsEncryptionKey,
+          OPENGENI_DELEGATION_SECRET: secret(),
           OPENGENI_ENROLLMENT_SIGNING_SECRET: enrollmentSigningSecret,
           OPENGENI_STREAM_TOKEN_SECRET: streamTokenSecret,
           OPENGENI_SELFHOSTED_RELAY_TOKEN_SECRET: streamTokenSecret,

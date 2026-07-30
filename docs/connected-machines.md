@@ -42,7 +42,10 @@ workspace/session, and expires after one hour; the worker renews it while an
 attempt is active. Every request resolves the session's current active turn and
 uses that turn's exact attempt fence and budget, so the same session bearer can
 serve later turns without authorizing work while no turn is running. Platform
-git and model credentials remain excluded.
+git and model credentials remain excluded. The stable manifest pointer is
+`$HOME/.opengeni/toolspace-token`: seed, renewal, and session commands expand it
+in the machine's own shell. OpenGeni never substitutes the Connected Machine
+descriptor root (`/`) for the user's home.
 
 ## Create a session on a machine
 

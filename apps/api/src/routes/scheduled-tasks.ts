@@ -131,6 +131,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       task,
       agentRunUsageIdempotencyKey,
       triggerWorkflowId,
+      initiator: { kind: "subject", subjectId: grant.subjectId },
     });
     await recordWorkspaceUsage(deps, {
       accountId: grant.accountId,

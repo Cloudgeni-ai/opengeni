@@ -1,13 +1,10 @@
 import {
   metadataWithTurnExecutionPolicyV1,
   mergeResourceRefs,
-  mergeToolRefs,
   ResourceRef,
   resourceMountPath,
   turnExecutionPolicyAuditMetadata,
   type ReasoningEffort,
-  type SessionToolPolicy,
-  type ToolRef,
   type TurnExecutionPolicyV1,
 } from "@opengeni/contracts";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
@@ -280,17 +277,6 @@ export async function supersedeSessionCurrentDirectionInTransaction(
       updatedAt: now,
     })
     .where(eq(schema.sessionTurns.id, current.id));
-  await db
-    .update(schema.sessionSystemUpdates)
-    .set({ state: "pending", deliveredTurnId: null, deliveredAt: null })
-    .where(
-      and(
-        eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
-        eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
-        eq(schema.sessionSystemUpdates.deliveredTurnId, current.id),
-        eq(schema.sessionSystemUpdates.state, "delivered"),
-      ),
-    );
   if (current.status === "waiting_capacity") {
     await db
       .update(schema.codexCapacityWaiters)
@@ -379,13 +365,7 @@ async function normalizeQueuePositions(
 }
 
 function draftIsNonEmpty(draft: ComposerDraftRow): boolean {
-  return (
-    draft.text.length > 0 ||
-    draft.resources.length > 0 ||
-    draft.tools.length > 0 ||
-    draft.toolsProvided ||
-    draft.sourceTurnId !== null
-  );
+  return draft.text.length > 0 || draft.resources.length > 0 || draft.sourceTurnId !== null;
 }
 
 function withCanonicalResourceMountPaths(resources: readonly unknown[]): unknown[] {
@@ -433,8 +413,6 @@ export async function saveComposerDraftInTransaction(
     expectedRevision: number;
     text: string;
     resources: ResourceRef[];
-    tools: ToolRef[];
-    toolsProvided: boolean;
     model: string;
     reasoningEffort: ReasoningEffort;
   },
@@ -465,8 +443,8 @@ export async function saveComposerDraftInTransaction(
     revision,
     text: input.text,
     resources: withCanonicalResourceMountPaths(input.resources),
-    tools: input.tools,
-    toolsProvided: input.toolsProvided,
+    tools: [],
+    toolsProvided: false,
     model: input.model,
     reasoningEffort: input.reasoningEffort,
     // A queue edit is still the same accepted work item. Preserve its frozen
@@ -837,8 +815,8 @@ export async function editQueuedTurnInTransaction(
     revision: nextDraftRevision,
     text: turn.prompt,
     resources: withCanonicalResourceMountPaths(turn.resources),
-    tools: turn.tools,
-    toolsProvided: turn.toolsProvided,
+    tools: [],
+    toolsProvided: false,
     model: turn.model,
     reasoningEffort: turn.reasoningEffort,
     sourceTurnId: turn.id,
@@ -1154,8 +1132,6 @@ export async function submitHumanPromptInTransaction(
     text: string;
     turnInstructions?: string | null;
     resources: ResourceRef[];
-    tools: ToolRef[];
-    toolsProvided?: boolean;
     model?: string | null;
     reasoningEffort?: ReasoningEffort | null;
     reasoningEffortFallback: ReasoningEffort;
@@ -1186,8 +1162,6 @@ export async function submitHumanPromptInTransaction(
     text: input.text,
     turnInstructions: input.turnInstructions ?? null,
     resources: withCanonicalResourceMountPaths(input.resources),
-    tools: input.tools,
-    toolsProvided: input.toolsProvided === true,
     model: input.model ?? null,
     reasoningEffort: input.reasoningEffort ?? null,
     source: input.source,
@@ -1295,16 +1269,12 @@ export async function submitHumanPromptInTransaction(
       canonicalSessionCommandHash({
         text: draft.text,
         resources: withCanonicalResourceMountPaths(draft.resources),
-        tools: draft.tools,
-        toolsProvided: draft.toolsProvided,
         model: draft.model,
         reasoningEffort: draft.reasoningEffort,
       }) !==
         canonicalSessionCommandHash({
           text: input.text,
           resources: withCanonicalResourceMountPaths(input.resources),
-          tools: input.tools,
-          toolsProvided: input.toolsProvided === true,
           model: input.model ?? session.model,
           reasoningEffort: input.reasoningEffort ?? input.reasoningEffortFallback,
         })
@@ -1424,11 +1394,6 @@ export async function submitHumanPromptInTransaction(
       payload: sanitizeEventPayload({
         text: input.text,
         ...(input.resources.length ? { resources: input.resources } : {}),
-        ...(input.toolsProvided === true
-          ? { tools: input.tools }
-          : input.tools.length
-            ? { tools: input.tools }
-            : {}),
         ...(input.model ? { model: input.model } : {}),
         ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
         delivery: input.delivery,
@@ -1456,8 +1421,8 @@ export async function submitHumanPromptInTransaction(
           ? editedSourceTurnInstructions
           : (input.turnInstructions ?? null),
       resources: input.resources,
-      tools: input.tools,
-      toolsProvided: input.toolsProvided === true,
+      tools: [],
+      toolsProvided: false,
       model: input.model ?? session.model,
       reasoningEffort: input.reasoningEffort ?? input.reasoningEffortFallback,
       sandboxBackend: session.sandboxBackend,
@@ -1601,9 +1566,7 @@ export async function submitHumanPromptInTransaction(
     .update(schema.sessions)
     .set({
       resources: mergeResourceRefs(session.resources as ResourceRef[], input.resources),
-      tools: sessionToolPolicyIsFixed(session.toolPolicy)
-        ? session.tools
-        : mergeToolRefs(session.tools as ToolRef[], input.tools),
+      tools: session.tools,
       activeTurnId: input.delivery === "steer" ? liveCurrentTurnId : session.activeTurnId,
       status: nextStatus,
       queueVersion,
@@ -1674,12 +1637,6 @@ export async function submitHumanPromptInTransaction(
     workspaceControlEventId: resumed.workspaceControlEventId,
     replay: false,
   };
-}
-
-function sessionToolPolicyIsFixed(value: unknown): boolean {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const mode = (value as Partial<SessionToolPolicy>).mode;
-  return mode === "workspace_default" || mode === "explicit" || mode === "inherited";
 }
 
 export async function sendAgentMessageInTransaction(
@@ -1939,7 +1896,7 @@ export async function steerAgentSessionInTransaction(
     controlRevision: resumed.revision,
     lastSequence: session.lastSequence,
   });
-  await db
+  const supersededUpdates = await db
     .update(schema.sessionSystemUpdates)
     .set({ state: "superseded" })
     .where(
@@ -1947,9 +1904,10 @@ export async function steerAgentSessionInTransaction(
         eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
         eq(schema.sessionSystemUpdates.sessionId, input.targetSessionId),
         eq(schema.sessionSystemUpdates.kind, "agent_steer_instruction"),
-        inArray(schema.sessionSystemUpdates.state, ["pending", "deferred"]),
+        eq(schema.sessionSystemUpdates.state, "pending"),
       ),
-    );
+    )
+    .returning({ id: schema.sessionSystemUpdates.id });
   const now = new Date();
   const [update] = await db
     .insert(schema.sessionSystemUpdates)
@@ -2011,6 +1969,24 @@ export async function steerAgentSessionInTransaction(
       },
       occurredAt: now,
     },
+    ...(supersededUpdates.length > 0
+      ? [
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.targetSessionId,
+            sequence: ++sequence,
+            type: "system.update.superseded" as const,
+            payload: {
+              updateIds: supersededUpdates.map((entry) => entry.id),
+              count: supersededUpdates.length,
+              replacementUpdateId: update.id,
+              reason: "newer_agent_steer",
+            },
+            occurredAt: now,
+          },
+        ]
+      : []),
     {
       accountId: input.accountId,
       workspaceId: input.workspaceId,

@@ -76,9 +76,12 @@ type McpTool = {
 };
 
 const APPROVAL_REQUIRED_MESSAGE = "requires approval - invoke via the agent";
-const TOOLSPACE_AUTH_NEEDED_ERROR_CODE = -32001;
-const TOOLSPACE_AUTH_NEEDED_MESSAGE =
-  "Authentication required - a connection link was posted to the session.";
+const TOOLSPACE_AUTH_NEEDED_ERROR = {
+  // OpenGeni application-defined JSON-RPC code. Keep this positive so it cannot
+  // collide with MCP SDK transport errors such as RequestTimeout (-32001).
+  code: 40_101,
+  message: "Authentication required - a connection link was posted to the session.",
+} as const;
 const TOOLSPACE_NO_ACTIVE_TURN_MESSAGE =
   "no active turn - toolspace calls require an in-flight turn";
 // First-party OpenGeni MCP proxies (files/docs) route back through the same
@@ -721,7 +724,7 @@ async function callRemoteTool(
       return mcpError("upstream tool result exceeded the safety limit");
     }
     if (isToolspaceAuthNeededError(error)) {
-      return mcpError(TOOLSPACE_AUTH_NEEDED_MESSAGE);
+      return mcpError(TOOLSPACE_AUTH_NEEDED_ERROR.message);
     }
     // The raw upstream error can carry provider-specific detail; log it
     // server-side and return only a generic result to the sandbox so no header
@@ -885,8 +888,17 @@ export function connectionBrokerFetch(
   if (!connectionRef) {
     return baseFetch;
   }
-  const resolveCredential = input.deps.connectionCredentials?.mcpCredentials
-    ? buildHostConnectionTokenResolver(input.deps.connectionCredentials.mcpCredentials, {
+  const credentialSubjectId =
+    input.turn.initiator.kind === "subject" ? input.turn.initiator.subjectId : undefined;
+  if (connectionRef.subjectScope === "subject" && !credentialSubjectId) {
+    throw new Error(
+      `subject-owned connection for MCP server ${input.config.id} requires a human turn initiator`,
+    );
+  }
+  const hostCredentialPort = input.deps.connectionCredentials?.mcpCredentials;
+  const resolverSubjectId = hostCredentialPort ? input.grant.subjectId : credentialSubjectId;
+  const resolveCredential = hostCredentialPort
+    ? buildHostConnectionTokenResolver(hostCredentialPort, {
         accountId: input.grant.accountId,
         workspaceId: input.grant.workspaceId,
         sessionId: input.sessionId,
@@ -909,7 +921,7 @@ export function connectionBrokerFetch(
       destinationUrl,
       forceRefresh: false,
       ...(request.toolName ? { toolName: request.toolName } : {}),
-      subjectId: input.grant.subjectId,
+      ...(resolverSubjectId ? { subjectId: resolverSubjectId } : {}),
     });
     if (first.status === "auth_needed") {
       return await authNeededFetchResponse(input, request, first);
@@ -927,7 +939,7 @@ export function connectionBrokerFetch(
         destinationUrl,
         forceRefresh: true,
         ...(request.toolName ? { toolName: request.toolName } : {}),
-        subjectId: input.grant.subjectId,
+        ...(resolverSubjectId ? { subjectId: resolverSubjectId } : {}),
       });
       if (refreshed.status === "auth_needed") {
         return await authNeededFetchResponse(input, request, refreshed);
@@ -1028,8 +1040,8 @@ async function authNeededFetchResponse(
         jsonrpc: "2.0",
         id: request.id ?? null,
         error: {
-          code: TOOLSPACE_AUTH_NEEDED_ERROR_CODE,
-          message: TOOLSPACE_AUTH_NEEDED_MESSAGE,
+          code: TOOLSPACE_AUTH_NEEDED_ERROR.code,
+          message: TOOLSPACE_AUTH_NEEDED_ERROR.message,
         },
       }),
       {
@@ -1101,9 +1113,14 @@ function fetchInputForAttempt(input: string | URL | Request): string | URL | Req
 }
 
 function isToolspaceAuthNeededError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const code = (error as { code?: unknown }).code;
   return (
-    error instanceof Error &&
-    ((error as { code?: unknown }).code === TOOLSPACE_AUTH_NEEDED_ERROR_CODE ||
-      error.message.includes(TOOLSPACE_AUTH_NEEDED_MESSAGE))
+    code === TOOLSPACE_AUTH_NEEDED_ERROR.code &&
+    (error.message === TOOLSPACE_AUTH_NEEDED_ERROR.message ||
+      error.message ===
+        `MCP error ${TOOLSPACE_AUTH_NEEDED_ERROR.code}: ${TOOLSPACE_AUTH_NEEDED_ERROR.message}`)
   );
 }

@@ -255,10 +255,9 @@ export function RootRouteComponent() {
   const [selectedCapabilityToolIds, setSelectedCapabilityToolIds] = useState<Set<string>>(
     () => new Set(),
   );
-  // Seed "docs" as already-seen so Document Search is not auto-selected on first
-  // load (it stays opt-in, as the old Docs toggle was). Every other tool server,
-  // including the first-party "opengeni", is auto-selected when it first appears.
-  const previousCapabilityToolIds = useRef<Set<string>>(new Set(["docs", "files"]));
+  // Every available tool is selected when it first appears. Explicit
+  // deselections survive subsequent catalog refreshes.
+  const previousCapabilityToolIds = useRef<Set<string>>(new Set());
   const githubRefreshId = useRef(0);
   const mcpRefreshId = useRef(0);
   // Stable CREATE idempotency key for the in-flight session create. Generated

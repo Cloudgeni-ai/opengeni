@@ -1,5 +1,60 @@
 # @opengeni/sdk
 
+## 0.29.0
+
+### Minor Changes
+
+- 33dc88f: Restore managed GitHub App installation with OAuth-first existing-installation
+  discovery, exact owner revalidation, and hosted/operator setup-mode separation.
+
+## 0.28.3
+
+### Patch Changes
+
+- 28c678d: Publish the current session first-party MCP tool selection types under a new SDK version.
+- 1c4018e: Replace one-turn tool overrides with one durable session tool policy, expose
+  OpenGeni-native tools in the same selection, default available tools on, and
+  render delivered machine inputs as compact typed timeline updates instead of
+  raw protocol JSON.
+
+## 0.28.2
+
+### Patch Changes
+
+- c1dcccc: Publish the current client surfaces from one exact reviewed source revision.
+
+## 0.28.1
+
+### Patch Changes
+
+- 2ec6494: Publish the current client surfaces from one exact reviewed source revision.
+
+## 0.28.0
+
+### Minor Changes
+
+- 29ad09b: Persist typed machine inputs into canonical model history at turn claim, expose
+  authoritative pending-input queue projections and lifecycle events, render
+  delivered batches in the timeline, and preserve append-only prompt-cache
+  prefixes across tools, later turns, recovery, and explicit compaction.
+
+### Patch Changes
+
+- 8eaa377: Expose transport-tolerant MCP output normalization from the SDK and reuse it in the React timeline parser.
+- dfc3235: Separate first-party MCP authorization from exact per-session tool visibility, add fail-closed registration policy, and isolate file download URLs on the files MCP surface.
+
+## 0.27.0
+
+### Minor Changes
+
+- 519d93c: Add validated inline per-session skills and discover skills directly from already-materialized repository resources.
+
+## 0.26.3
+
+### Patch Changes
+
+- 110bb77: Enforce exact-subject ownership for personal OAuth capabilities and add secure direct OAuth installation for the separate workspace OpenGeni Slack bot.
+
 ## 0.26.1
 
 ### Patch Changes

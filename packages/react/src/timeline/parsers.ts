@@ -1,4 +1,4 @@
-import type { GitFileDiff } from "@opengeni/sdk";
+import { normalizeMcpOutput, type GitFileDiff } from "@opengeni/sdk";
 import { tryParseJson } from "../lib/format";
 
 /* ----------------------------------------------------------------------------
@@ -288,36 +288,8 @@ export function unwrapMcpOutput(output: unknown): {
   text: string;
   isError: boolean;
 } {
-  // Managed MCP events persist a normalized single text part as
-  // `{ type: "text", text }`; accept it alongside the SDK-native content array.
-  if (
-    output &&
-    typeof output === "object" &&
-    (output as { type?: unknown }).type === "text" &&
-    typeof (output as { text?: unknown }).text === "string"
-  ) {
-    const record = output as { text: string; isError?: unknown };
-    return { text: record.text, isError: Boolean(record.isError) };
-  }
-  if (output && typeof output === "object" && "content" in output) {
-    const record = output as { content?: unknown; isError?: unknown };
-    const isError = Boolean(record.isError);
-    if (Array.isArray(record.content)) {
-      const textPart = record.content.find(
-        (part): part is { type: string; text: string } =>
-          !!part && typeof part === "object" && (part as { type?: unknown }).type === "text",
-      );
-      return {
-        text: textPart ? String(textPart.text) : JSON.stringify(output),
-        isError,
-      };
-    }
-    return { text: JSON.stringify(output), isError };
-  }
-  return {
-    text: typeof output === "string" ? output : output == null ? "" : JSON.stringify(output),
-    isError: false,
-  };
+  const normalized = normalizeMcpOutput(output);
+  return { text: normalized.text, isError: normalized.isError };
 }
 
 /* --- computer-use screenshot extraction ------------------------------------- */

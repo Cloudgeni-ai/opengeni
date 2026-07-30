@@ -13,10 +13,12 @@
 // the gating change.
 import {
   CAPABILITY_DESCRIPTORS,
+  FIRST_PARTY_MCP_TOOL_NAMES,
   mergeResourceRefs,
   Permission,
   stableJson,
   type CapabilityDescriptor,
+  type FirstPartyMcpToolName,
   type MachineView,
 } from "@opengeni/contracts";
 import type { CreateSessionRequest, NewSessionDraftOptions } from "@opengeni/sdk";
@@ -71,6 +73,7 @@ export type SessionDraft = {
   goalMaxAutoContinuations: string;
   customMcpPermissions: boolean;
   mcpPermissions: Set<string>;
+  firstPartyMcpTools: Set<FirstPartyMcpToolName>;
 };
 
 export function emptySessionDraft(): SessionDraft {
@@ -83,7 +86,18 @@ export function emptySessionDraft(): SessionDraft {
     goalMaxAutoContinuations: "",
     customMcpPermissions: false,
     mcpPermissions: new Set(sessionMcpPermissionGroups.flatMap((group) => group.permissions)),
+    firstPartyMcpTools: new Set(FIRST_PARTY_MCP_TOOL_NAMES),
   };
+}
+
+function explicitFirstPartyTools(draft: SessionDraft): {
+  firstPartyMcpTools?: FirstPartyMcpToolName[];
+} {
+  const selected = [...draft.firstPartyMcpTools];
+  return selected.length === FIRST_PARTY_MCP_TOOL_NAMES.length &&
+    FIRST_PARTY_MCP_TOOL_NAMES.every((tool) => draft.firstPartyMcpTools.has(tool))
+    ? {}
+    : { firstPartyMcpTools: selected };
 }
 
 /** True once the draft can be submitted: a connected machine needs a picked
@@ -176,6 +190,9 @@ export function buildCreateSessionRequest(
     ...(input.submission.firstPartyMcpPermissions
       ? { firstPartyMcpPermissions: input.submission.firstPartyMcpPermissions }
       : {}),
+    ...(input.submission.firstPartyMcpTools
+      ? { firstPartyMcpTools: input.submission.firstPartyMcpTools }
+      : {}),
     ...(input.targetSandboxId ? { targetSandboxId: input.targetSandboxId } : {}),
     ...(input.workingDir ? { workingDir: input.workingDir } : {}),
     ...(input.expectedNewSessionDraftRevision !== undefined
@@ -229,6 +246,7 @@ export function submissionFromSessionDraft(draft: SessionDraft): SessionDraftSub
   const mcp = draft.customMcpPermissions
     ? { firstPartyMcpPermissions: [...draft.mcpPermissions] }
     : {};
+  const visibleTools = explicitFirstPartyTools(draft);
 
   if (draft.compute.kind === "machine") {
     return {
@@ -237,6 +255,7 @@ export function submissionFromSessionDraft(draft: SessionDraft): SessionDraftSub
       extras: {
         ...(goal ? { goal } : {}),
         ...mcp,
+        ...visibleTools,
       },
       options: {
         targetSandboxId: draft.compute.sandboxId,
@@ -253,6 +272,7 @@ export function submissionFromSessionDraft(draft: SessionDraft): SessionDraftSub
       ...(draft.rigId ? { rigId: draft.rigId } : {}),
       ...(goal ? { goal } : {}),
       ...mcp,
+      ...visibleTools,
     },
     options: { targetSandboxId: null, workingDir: null },
     omitWorkspaceResources: false,
@@ -275,6 +295,7 @@ export function newSessionDraftOptionsFromSessionDraft(
         ),
       }
     : {};
+  const visibleTools = explicitFirstPartyTools(draft);
 
   if (draft.compute.kind === "machine") {
     const workingDir = workingDirFromFolder(draft.compute.folder);
@@ -283,6 +304,7 @@ export function newSessionDraftOptionsFromSessionDraft(
       ...(workingDir ? { workingDir } : {}),
       ...(goal ? { goal } : {}),
       ...permissions,
+      ...visibleTools,
     };
   }
 
@@ -292,6 +314,7 @@ export function newSessionDraftOptionsFromSessionDraft(
     ...(draft.rigId ? { rigId: draft.rigId } : {}),
     ...(goal ? { goal } : {}),
     ...permissions,
+    ...visibleTools,
   };
 }
 
@@ -330,6 +353,10 @@ export function sessionDraftFromNewSessionDraftOptions(
       options.firstPartyMcpPermissions === undefined
         ? base.mcpPermissions
         : new Set(options.firstPartyMcpPermissions),
+    firstPartyMcpTools:
+      options.firstPartyMcpTools === undefined
+        ? base.firstPartyMcpTools
+        : new Set(options.firstPartyMcpTools),
   };
 }
 

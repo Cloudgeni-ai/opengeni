@@ -71,6 +71,46 @@ describe("provider MCP unavailable rendering", () => {
   });
 });
 
+describe("durable machine-input timeline", () => {
+  test("renders a delivered coalesced batch with source and typed members", async () => {
+    resetTimelineEvents();
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          timelineEvent("system.update.delivered", {
+            historyItemId: "history-1",
+            count: 2,
+            members: [
+              {
+                id: "update-1",
+                kind: "agent_message",
+                classification: "info",
+                sourceId: "verification-agent",
+                summary: "Cache verification completed.",
+              },
+              {
+                id: "update-2",
+                kind: "child_terminal_result",
+                classification: "success",
+                sourceId: "child-session",
+                summary: "Child session finished.",
+              },
+            ],
+          }),
+        ]}
+      />,
+    );
+    await flush();
+    expect(r.container.textContent).toContain("2 updates joined this turn");
+    expect(r.container.textContent).not.toContain("Input batch");
+    expect(r.container.textContent).not.toContain('"sourceId"');
+    expect(r.container.textContent).toContain("verification-agent");
+    expect(r.container.textContent).toContain("Cache verification completed.");
+    expect(r.container.textContent).toContain("Agent finished");
+    await r.unmount();
+  });
+});
+
 function resetTimelineEvents(): void {
   timelineSequence = 0;
 }

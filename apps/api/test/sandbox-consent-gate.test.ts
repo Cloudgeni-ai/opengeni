@@ -400,7 +400,9 @@ describe("P3.2 consent gate — shared-exposure (group >1 session)", () => {
       workspaceId,
       subjectId: "spawner",
       permissions: ["sessions:create", "sessions:read"] as Permission[],
-      ...(fromSessionId ? { metadata: { sessionId: fromSessionId } } : {}),
+      ...(fromSessionId
+        ? { metadata: { sessionId: fromSessionId, firstPartyMcpTools: ["session_create"] } }
+        : {}),
     });
     const a = await createSessionForRequest(deps(), grant(), workspaceId, {
       initialMessage: "founder",

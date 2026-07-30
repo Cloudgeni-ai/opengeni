@@ -66,23 +66,10 @@ export function openGeniSlackBotConnectionLabel(connection: ConnectionMetadata):
   return metadata ? `${metadata.slackTeamName} · OpenGeni · ${connection.id}` : null;
 }
 
-/** A different immutable bot principal must mint a new row, never overwrite the old one. */
-export function openGeniSlackBotConnectInput(
-  token: string,
+/** Reinstall the exact selected principal unless the user explicitly asks for another install. */
+export function openGeniSlackBotInstallInput(
   reinstallTarget: ConnectionMetadata | null,
   createNewConnection: boolean,
-): { token: string; connectionId?: string } {
-  return {
-    token,
-    ...(!createNewConnection && reinstallTarget ? { connectionId: reinstallTarget.id } : {}),
-  };
-}
-
-export function isDifferentSlackBotPrincipalError(error: unknown): boolean {
-  return (
-    error instanceof Error &&
-    error.message.includes(
-      "a different Slack bot requires a new connection and explicit scheduled-task rebinding",
-    )
-  );
+): { connectionId?: string } {
+  return !createNewConnection && reinstallTarget ? { connectionId: reinstallTarget.id } : {};
 }

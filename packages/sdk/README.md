@@ -21,6 +21,8 @@ const client = new OpenGeniClient({
 const session = await client.createSession(workspaceId, {
   initialMessage: "Investigate the failing deploy on staging",
   resources: [{ kind: "repository", uri: "https://github.com/acme/app.git", ref: "main" }],
+  // Exact model-visible first-party surface; permissions remain independent.
+  firstPartyMcpTools: ["set_session_title"],
 });
 
 for await (const event of client.streamEvents(workspaceId, session.id)) {
@@ -29,6 +31,32 @@ for await (const event of client.streamEvents(workspaceId, session.id)) {
   }
 }
 ```
+
+Omit `firstPartyMcpTools` for the minimal self-management default. An explicit
+`[]` exposes no broad first-party tools; attached resources and separately
+selected `files`/`docs` MCP servers are unaffected.
+
+## MCP tool output normalization
+
+MCP transports and event stores can represent the same tool result as a direct
+object, JSON text, a text content block, or nested `result`,
+`structuredContent`, and `content` envelopes. Use the shared zero-dependency
+normalizer when an embedding host needs one stable interpretation:
+
+```ts
+import { normalizeMcpOutput } from "@opengeni/sdk";
+
+const normalized = normalizeMcpOutput(toolOutput);
+
+normalized.value; // canonical machine-readable value
+normalized.text; // presentation text
+normalized.isError; // preserved across recognized nested envelopes
+normalized.raw; // original evidence
+```
+
+Malformed text and unknown objects pass through without throwing. Envelope
+recognition is deliberately conservative: an ordinary domain object is not
+unwrapped merely because it has a field named `result`.
 
 ## Error handling
 
@@ -194,14 +222,25 @@ version; the audited change takes effect on its next attempt:
 const session = await client.getSession(workspaceId, sessionId);
 const updated = await client.updateSessionToolPolicy(workspaceId, sessionId, {
   mode: "workspace_default",
-  expectedVersion: session.toolPolicyVersion ?? 1,
+  expectedVersion: session.toolPolicyVersion,
 });
 ```
 
-To keep a fixed MCP allow-list instead, use the backward-compatible explicit
-shape `{ tools, expectedVersion }`. `tool_search` discovers deferred MCP
-schemas; it is not public web search. Unsupported providers do not receive a
-cross-provider, MCP, or sandbox fallback.
+To keep a fixed allow-list, replace both connected MCP servers and individual
+OpenGeni tools atomically:
+
+```ts
+await client.updateSessionToolPolicy(workspaceId, sessionId, {
+  mode: "explicit",
+  tools,
+  firstPartyMcpTools,
+  expectedVersion: session.toolPolicyVersion,
+});
+```
+
+Follow-up Send and Steer requests inherit this session policy and cannot carry
+a private one-turn tool override. `tool_search` discovers deferred MCP schemas;
+it is not public web search.
 
 ## Goals
 

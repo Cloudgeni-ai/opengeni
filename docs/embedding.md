@@ -463,13 +463,27 @@ session tree while top-level omissions continue to use the deployment's normal
 standalone worker defaults. The inherited set is frozen on the child at
 creation; later deployment-default changes do not rewrite existing sessions.
 
+Model-visible first-party tool selection is a separate field:
+`CreateSessionRequest.firstPartyMcpTools`. It accepts only names from
+`FIRST_PARTY_MCP_TOOL_NAMES`; omission uses the minimal self-management default,
+while explicit `[]` remains empty. A child omission snapshots its parent's exact
+effective selection. Tool selection never grants a permission, and permissions
+never implicitly select a tool. This separation lets a host keep a broad
+delegated authorization envelope while exposing only the tools appropriate to
+one embedded session.
+
+Resources are unaffected by that selection. File/document/repository
+attachments still materialize when `firstPartyMcpTools` is empty or contains
+only `set_session_title`; the dedicated `files` and `docs` MCP servers are
+selected independently through `tools`.
+
 ### Child execution context
 
 An agent-created child normally needs the same working context as its manager,
 even when the two conversations are separate. When the creating grant carries
 the worker-signed parent `sessionId`, `createSessionForRequest` treats omitted
-`resources`, `tools`, and `mcpServers` as inheritance from that trusted immediate
-parent. The snapshot preserves mixed GitHub, GitLab, and Azure DevOps repository
+`resources`, `skills`, `tools`, and `mcpServers` as inheritance from that trusted immediate
+parent. The snapshot preserves inline session skills, mixed GitHub, GitLab, and Azure DevOps repository
 resources, multiple credential bindings for one provider, selected MCP tool
 refs, full per-session MCP policy, connection refs, and static credential
 headers. Static header values move only as encrypted database ciphertext and
@@ -485,7 +499,7 @@ array—including `[]`—replaces that field instead of inheriting it. If an exp
 MCP-server replacement makes an inherited strict tool ref invalid, the create
 fails validation; replace `tools` in the same request rather than silently
 dropping a strict tool. A top-level create has no parent snapshot: omitted
-resources and MCP servers remain empty, while omitted tools continue to receive
+resources, skills, and MCP servers remain empty, while omitted tools continue to receive
 workspace-default capability MCP refs. Variable sets, rigs, model selection,
 persona instructions, goals, and sandbox placement retain their own existing
 resolution rules and are not part of this context snapshot.

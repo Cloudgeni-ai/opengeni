@@ -419,6 +419,7 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
       <SessionHeader
         session={session}
         ancestors={ancestors}
+        lineageLoading={lineage.loading}
         lineageError={lineage.error}
         connectionState={context.connectionState}
         status={session.status}

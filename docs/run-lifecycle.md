@@ -11,9 +11,11 @@ over this doc; the canonical sources are `apps/worker/src/workflows/session.ts`,
 A **turn** is one logical unit of agent work inside a session: a waiting
 human/API prompt, an approval or structured-input response, or one coalesced
 internal-update batch is processed until the agent reaches a natural stopping
-point. The visible queue contains only waiting human/API prompts; goals,
-schedules, child results, and lifecycle notices are typed internal updates, not
-queue rows. Codex capacity recovery preserves the current logical turn directly
+point. Human/API prompts remain the only reorderable prompt rows. The same
+compact queue surface also projects canonical pending machine inputs, attached
+to the prompt they will join or grouped as standalone incoming updates. Goals,
+schedules, child results, and lifecycle notices never impersonate human
+messages. Codex capacity recovery preserves the current logical turn directly
 and is neither a queue row nor an internal update. One execution attempt runs as
 one non-retryable Temporal `runAgentTurn` activity. Inside the activity the
 OpenAI Agents SDK loop makes as many model calls and tool calls as the work
@@ -48,7 +50,9 @@ ownership aligned after an explicit per-turn switch and excludes turns rejected
 during admission, whose `started_at` claim timestamp alone is not proof that
 their policy ran. Spawned-child terminal results enter the parent's bounded
 typed internal-update batch without injecting a synthetic `user.message` or a
-human queue row.
+human queue row. Claim persists the exact deterministic batch in
+`session_history_items` before inference and links every member to that row.
+Recovery reuses it; later reconciliation never filters it from model memory.
 
 Immediately after claim, the exact owning attempt installs or reads the
 logical turn's accepted execution policy before credit admission, credential
@@ -146,12 +150,13 @@ A no-shrink result publishes a clear recovery message and leaves the session
 `idle`, so zero-progress churn cannot loop. Exhausted, empty-summary, or
 otherwise failed compaction identifies compaction summarization or the provider
 failure, never installs a mechanical summary, and preserves active history. A
-failed same-turn recovery atomically settles the exact turn, defers ordinary
-internal updates, terminalizes a delivered goal-continuation receipt, and ends
-that workflow run. Without a newer actionable work wake, the workflow cannot
-synthesize another goal continuation from unchanged history. Ordinary machine
-updates remain pending; a later human/API prompt, Steer, or explicitly requested
-Compact may create newer truth and make one new attempt.
+failed same-turn recovery atomically settles the exact turn and ends that
+workflow run. Every input already visible to the model remains delivered in
+durable history; it is never requeued or terminalized. Newly arriving machine
+updates remain pending. Without a newer actionable work wake, the workflow
+cannot synthesize another goal continuation from unchanged history. A later
+human/API prompt, Steer, explicitly requested Compact, or genuinely new machine
+input may create newer truth and make one new attempt.
 
 Resolved model context metadata is authoritative on every model-facing path.
 For the Codex subscription catalog this means a 272,000-token raw window, a
@@ -170,6 +175,16 @@ re-dispatch creates a new attempt and captures the then-current policy. Every
 event, model-history write, run-state write, compaction transition, tool receipt,
 and terminal settlement must match that attempt. A typed schedule-to-start
 timeout is the only no-attempt recovery case because its activity never ran.
+
+Session creation persists skill selection but never starts a sandbox. At turn
+execution, bundled, curated, pack, and inline session skills remain SDK-lazy:
+only a selected skill directory is materialized when `load_skill` is called.
+If repository resources are attached, ordinary repository setup first makes
+their existing checkout available; runtime then indexes canonical
+`.agents/skills` and compatible `.claude/skills` directories through the bound
+sandbox session before the first model call. This performs no second clone,
+copy, or manifest materialization. With no repository resource, that workspace
+discovery capability is absent and cannot force provisioning.
 
 One model response's parallel tool calls are tracked as an in-memory settlement
 batch while its stream is active; batch identity is not durable schema. A
@@ -332,6 +347,19 @@ other epoch/provider remain untouched. During idle drain, a resumable cloud box
 is deleted only after a verified workspace capture is durably folded onto the
 fenced lease. Definitive `NOT_FOUND` before capture preserves any existing
 archive or records typed unrecoverable truth when no durable revision exists.
+
+An older deployment may have committed the cold/advanced-epoch transition
+before settling the exact lost-provider blocker rows. The exceptional operator
+path is blocker-first: one DB-only, repeatable-read/read-only preview binds the
+full account/workspace/session/group, lease/epoch/provider/route,
+workspace/archive/verification tuple, fresh externally supplied provider-object
+observation, and every process/admission/PTY/holder/interruption identity into a
+`clrp1:` receipt. Unknown, incomplete, possible-writer, or mismatched truth
+blocks. Apply accepts only that exact reviewed receipt, re-previews before and
+under row locks, and settles the same narrow rows as the automatic loss
+transaction. It never calls a provider, changes epoch/archive/recovery truth,
+writes `/workspace`, or replays an ambiguous operation. The exact runbook is in
+[`deployment.md`](deployment.md#cold-lost-provider-blocker-reconciliation).
 
 Every operation that may mutate a persistable `/workspace` first enters one
 lease-scoped turn/direct/process admission ledger. In one transaction, admission

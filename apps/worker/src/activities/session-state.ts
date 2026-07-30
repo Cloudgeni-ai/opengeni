@@ -2,8 +2,10 @@ import {
   settleSessionAttemptInterruptions,
   applySessionTurnSettlement,
   recoverSessionDispatch,
+  reconcileSessionAttemptQuiescence,
   peekSessionWork as peekSessionWorkDb,
   countQueuedTurns,
+  getSessionAttemptActivityRef,
   getSessionEvent,
   getSessionTurnForAttempt,
   expireSessionHumanInputRequest,
@@ -23,6 +25,8 @@ import type {
   SettleSessionInterruptionsInput,
   MarkSessionIdleInput,
   PersistSessionAttemptQuiescenceInput,
+  ReconcileSessionAttemptQuiescenceInput,
+  ReconcileSessionAttemptQuiescenceResult,
   RecoverDispatchInput,
   RecoverDispatchResult,
 } from "./types";
@@ -31,8 +35,10 @@ export type SessionStateActivityOverrides = Partial<{
   settleSessionAttemptInterruptions: typeof settleSessionAttemptInterruptions;
   applySessionTurnSettlement: typeof applySessionTurnSettlement;
   recoverSessionDispatch: typeof recoverSessionDispatch;
+  reconcileSessionAttemptQuiescence: typeof reconcileSessionAttemptQuiescence;
   peekSessionWork: typeof peekSessionWorkDb;
   countQueuedTurns: typeof countQueuedTurns;
+  getSessionAttemptActivityRef: typeof getSessionAttemptActivityRef;
   getSessionEvent: typeof getSessionEvent;
   getSessionTurnForAttempt: typeof getSessionTurnForAttempt;
   expireSessionHumanInputRequest: typeof expireSessionHumanInputRequest;
@@ -60,8 +66,12 @@ export function createSessionStateActivities(
   const applySessionTurnSettlementFn =
     overrides.applySessionTurnSettlement ?? applySessionTurnSettlement;
   const recoverSessionDispatchFn = overrides.recoverSessionDispatch ?? recoverSessionDispatch;
+  const reconcileSessionAttemptQuiescenceFn =
+    overrides.reconcileSessionAttemptQuiescence ?? reconcileSessionAttemptQuiescence;
   const peekSessionWorkFn = overrides.peekSessionWork ?? peekSessionWorkDb;
   const countQueuedTurnsFn = overrides.countQueuedTurns ?? countQueuedTurns;
+  const getSessionAttemptActivityRefFn =
+    overrides.getSessionAttemptActivityRef ?? getSessionAttemptActivityRef;
   const getSessionEventFn = overrides.getSessionEvent ?? getSessionEvent;
   const getSessionTurnForAttemptFn = overrides.getSessionTurnForAttempt ?? getSessionTurnForAttempt;
   const expireSessionHumanInputRequestFn =
@@ -186,6 +196,41 @@ export function createSessionStateActivities(
     }
   }
 
+  async function reconcileSessionAttemptQuiescenceActivity(
+    input: ReconcileSessionAttemptQuiescenceInput,
+  ): Promise<ReconcileSessionAttemptQuiescenceResult> {
+    const { db, bus, inspectSessionAttemptActivity } = await services();
+    const activityRef = await getSessionAttemptActivityRefFn(db, {
+      ...input,
+      temporalWorkflowId: input.workflowId,
+    });
+    if (!activityRef) return { action: "stale" };
+    if (!activityRef.quiesced) {
+      if (!inspectSessionAttemptActivity) return { action: "pending" };
+      const state = await inspectSessionAttemptActivity(activityRef);
+      if (state === "pending") return { action: "pending" };
+    }
+    const result = await reconcileSessionAttemptQuiescenceFn(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      attemptId: input.attemptId,
+      temporalWorkflowId: input.workflowId,
+      temporalWorkflowRunId: activityRef.workflowRunId,
+      temporalActivityId: activityRef.activityId,
+      activitySettled: true,
+    });
+    if (result.events.length > 0) {
+      await publishDurableSessionEventsFn(
+        bus,
+        input.workspaceId,
+        input.sessionId,
+        result.events,
+      ).catch(() => undefined);
+    }
+    return { action: result.action };
+  }
+
   /**
    * Recover the same current inference when its worker dies without completing
    * a graceful checkpoint (heartbeat timeout, SIGKILL, OOM, or node loss).
@@ -278,6 +323,7 @@ export function createSessionStateActivities(
     failSessionAttempt,
     settleSessionInterruptions,
     persistSessionAttemptQuiescence,
+    reconcileSessionAttemptQuiescence: reconcileSessionAttemptQuiescenceActivity,
     recoverDispatch,
     peekSessionWork,
     expireSessionHumanInput,

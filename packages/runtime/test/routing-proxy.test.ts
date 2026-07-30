@@ -113,6 +113,57 @@ function mutablePointer(initial: ActivePointer = { activeSandboxId: null, active
 }
 
 describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () => {
+  test("materializeEntry verifies the destination from inside the provider", async () => {
+    const calls: string[] = [];
+    const backend: RoutableBackendSession = {
+      async materializeEntry() {
+        calls.push("materialize");
+      },
+      async execCommand(args) {
+        calls.push("verify");
+        return String((args as { cmd?: string }).cmd ?? "");
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({
+        session: backend,
+        sandboxId: null,
+        kind: "docker",
+        leaseEpoch: 1,
+        providerInstanceId: "container-1",
+      }),
+    });
+
+    await expect(
+      proxy.materializeEntry({ path: ".agents/example", entry: {} }),
+    ).resolves.toBeUndefined();
+    expect(calls).toEqual(["materialize", "verify"]);
+  });
+
+  test("materializeEntry fails when the provider cannot see the written path", async () => {
+    const backend: RoutableBackendSession = {
+      async materializeEntry() {},
+      async execCommand() {
+        return "";
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({
+        session: backend,
+        sandboxId: null,
+        kind: "docker",
+        leaseEpoch: 1,
+        providerInstanceId: "container-1",
+      }),
+    });
+
+    await expect(proxy.materializeEntry({ path: ".agents/example", entry: {} })).rejects.toThrow(
+      "provider cannot read the destination path",
+    );
+  });
+
   test("mutation admission runs after exact route resolution and before the provider", async () => {
     const events: string[] = [];
     const backend: RoutableBackendSession = {

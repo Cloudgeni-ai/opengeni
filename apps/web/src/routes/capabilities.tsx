@@ -29,7 +29,6 @@ import { LoadErrorState, PageHeader } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
-import { Notice } from "@/components/ui/notice";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
 import {
@@ -47,6 +46,7 @@ import {
   normalizeProviderDomain,
   oauthResumeAction,
   registryResultsForQuery,
+  subjectOAuthConnectionRef,
   resolveSheetItem,
   type CapabilityFilter,
   type CapabilityFormState,
@@ -55,8 +55,8 @@ import {
 } from "@/lib/capabilities";
 import { listViewState } from "@/lib/load-state";
 import {
-  isDifferentSlackBotPrincipalError,
-  openGeniSlackBotConnectInput,
+  openGeniSlackBotConnections,
+  openGeniSlackBotInstallInput,
   openGeniSlackBotUiMetadata,
   preferredOpenGeniSlackBotConnection,
 } from "@/lib/slack-bot";
@@ -88,12 +88,7 @@ export function CapabilitiesRoute({
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<Error | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
-  const [slackBotToken, setSlackBotToken] = useState("");
   const [slackBotBusy, setSlackBotBusy] = useState(false);
-  const [slackBotInstallMode, setSlackBotInstallMode] = useState<"reinstall" | "new">("reinstall");
-  const [slackBotRecoveryConnectionId, setSlackBotRecoveryConnectionId] = useState<string | null>(
-    null,
-  );
 
   const [filter, setFilter] = useState<CapabilityFilter>(
     initialSection === "packs" ? "pack" : "all",
@@ -132,7 +127,8 @@ export function CapabilitiesRoute({
   const enabledItems = useMemo(() => filtered.filter((item) => item.enabled), [filtered]);
   const browseItems = useMemo(() => filtered.filter((item) => !item.enabled), [filtered]);
   const visibleBrowse = browseItems.slice(0, visibleCount);
-  const slackBotConnection = preferredOpenGeniSlackBotConnection(connections ?? []);
+  const slackBotConnections = openGeniSlackBotConnections(connections ?? []);
+  const slackBotConnection = preferredOpenGeniSlackBotConnection(slackBotConnections);
   const slackBotMetadata = slackBotConnection
     ? openGeniSlackBotUiMetadata(slackBotConnection)
     : null;
@@ -159,6 +155,25 @@ export function CapabilitiesRoute({
 
   useEffect(() => {
     void refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceId]);
+
+  const slackInstallHandled = useRef(false);
+  useEffect(() => {
+    if (slackInstallHandled.current) return;
+    const params = new URLSearchParams(window.location.search);
+    const outcome = params.get("slack");
+    if (!outcome) return;
+    slackInstallHandled.current = true;
+    window.history.replaceState(null, "", window.location.pathname);
+    if (outcome === "connected") {
+      void refresh();
+      toast.success("OpenGeni installed in Slack");
+    } else {
+      toast.error("Couldn't install OpenGeni in Slack", {
+        description: "Try again, or install another Slack workspace/bot as a new connection.",
+      });
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId]);
 
@@ -217,44 +232,18 @@ export function CapabilitiesRoute({
     void packs.refresh();
   }
 
-  async function connectSlackBot() {
-    if (!slackBotToken) return;
+  async function installSlackBot(createNewConnection = false) {
     setSlackBotBusy(true);
-    const createNewConnection = slackBotInstallMode === "new";
     try {
-      const connection = await client.connectOpenGeniSlackBot(
+      const installation = await client.startOpenGeniSlackBotInstall(
         workspaceId,
-        openGeniSlackBotConnectInput(slackBotToken, slackBotConnection, createNewConnection),
+        openGeniSlackBotInstallInput(slackBotConnection, createNewConnection),
       );
-      setSlackBotToken("");
-      await refresh();
-      setSlackBotInstallMode("reinstall");
-      if (createNewConnection && slackBotConnection) {
-        setSlackBotRecoveryConnectionId(connection.id);
-        toast.success("New OpenGeni Slack bot connection created", {
-          description: "Scheduled tasks were not changed and must be rebound explicitly.",
-        });
-      } else {
-        setSlackBotRecoveryConnectionId(null);
-        toast.success(
-          slackBotConnection ? "OpenGeni Slack bot reinstalled" : "OpenGeni Slack bot connected",
-        );
-      }
+      window.location.assign(installation.authorizationUrl);
     } catch (error) {
-      setSlackBotToken("");
-      if (isDifferentSlackBotPrincipalError(error)) {
-        setSlackBotInstallMode("new");
-        setSlackBotRecoveryConnectionId(null);
-        toast.error("This token belongs to a different Slack bot", {
-          description:
-            "Re-enter it below to create a new connection, then explicitly rebind scheduled tasks.",
-        });
-      } else {
-        toast.error("Couldn't connect the OpenGeni Slack bot", {
-          description: error instanceof Error ? error.message : String(error),
-        });
-      }
-    } finally {
+      toast.error("Couldn't start the OpenGeni Slack installation", {
+        description: error instanceof Error ? error.message : String(error),
+      });
       setSlackBotBusy(false);
     }
   }
@@ -265,8 +254,6 @@ export function CapabilitiesRoute({
     try {
       await client.deleteConnection(workspaceId, slackBotConnection.id);
       await refresh();
-      setSlackBotInstallMode("new");
-      setSlackBotRecoveryConnectionId(null);
       toast.success("OpenGeni Slack bot disconnected");
     } catch (error) {
       toast.error("Couldn't disconnect the OpenGeni Slack bot", {
@@ -397,7 +384,6 @@ export function CapabilitiesRoute({
         const response = await client.startConnectionOAuth(workspaceId, {
           ...(plan.mcpUrl ? { mcpUrl: plan.mcpUrl } : {}),
           ...(plan.providerDomain ? { providerDomain: plan.providerDomain } : {}),
-          ...(action.oauthClient ? { oauthClient: action.oauthClient } : {}),
           returnPath,
         });
         if (!response.authorizationUrl) {
@@ -582,7 +568,7 @@ export function CapabilitiesRoute({
         return;
       }
       await client.enableCapability(workspaceId, item!.id, {
-        connectionRef: { connectionId: connectionId!, providerDomain: refDomain, kind: "oauth2" },
+        connectionRef: subjectOAuthConnectionRef(refDomain),
       });
       await refresh();
       onRuntimeChanged();
@@ -817,15 +803,14 @@ export function CapabilitiesRoute({
                 </div>
               </div>
               <p className="mt-3 max-w-3xl text-xs text-fg-muted">
-                Install the Slack app named and displayed exactly <strong>OpenGeni</strong>, then
-                enter its bot token here. The credential is sent once to the server, encrypted, and
-                never returned. This is separate from your subject-owned hosted Slack OAuth
-                connection.
+                Install <strong>OpenGeni</strong> in your Slack workspace. Slack will show the
+                permissions before approval, then return you here automatically. The workspace bot
+                token is exchanged server-side, encrypted, and never shown in the browser.
               </p>
               <p className="mt-2 max-w-3xl text-2xs text-fg-subtle">
                 Required bot scopes: chat:write, im:write, channels:read, channels:history,
-                groups:read, groups:history, users:read. Socket Mode, Event Subscriptions, token
-                rotation, channels:join, and chat:write.public must remain off.
+                groups:read, groups:history, users:read. This workspace-shared app is separate from
+                personal Slack OAuth connections.
               </p>
               {slackBotConnection && slackBotMetadata ? (
                 <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
@@ -836,94 +821,73 @@ export function CapabilitiesRoute({
                     {slackBotConnection.status === "active" ? "Connected" : "Needs reinstall"}
                   </span>
                   <span className="font-mono text-2xs text-fg-subtle">{slackBotConnection.id}</span>
+                  {slackBotConnections.length > 1 ? (
+                    <span className="text-2xs text-fg-subtle">
+                      {slackBotConnections.length} explicit Slack bot connections
+                    </span>
+                  ) : null}
                 </div>
               ) : null}
             </div>
-            <div className="flex flex-wrap items-center gap-2">
-              {slackBotConnection ? (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  disabled={slackBotBusy}
-                  onClick={() => {
-                    setSlackBotInstallMode((mode) => (mode === "new" ? "reinstall" : "new"));
-                    setSlackBotRecoveryConnectionId(null);
-                  }}
-                >
-                  {slackBotInstallMode === "new"
-                    ? "Reinstall existing bot"
-                    : "Connect a different bot"}
-                </Button>
-              ) : null}
-              {slackBotConnection?.status === "active" ? (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  disabled={slackBotBusy}
-                  onClick={() => void disconnectSlackBot()}
-                >
-                  Disconnect
-                </Button>
-              ) : null}
-            </div>
+            {slackBotConnection?.status === "active" ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                disabled={slackBotBusy}
+                onClick={() => void disconnectSlackBot()}
+              >
+                Disconnect
+              </Button>
+            ) : null}
           </div>
-          {slackBotInstallMode === "new" && slackBotConnection ? (
-            <Notice tone="waiting" title="Create a separate bot connection" className="mt-4">
-              A different Slack bot cannot replace connection {slackBotConnection.id}. This action
-              creates a new connection; existing scheduled tasks stay bound to the old connection
-              until you explicitly update them in Scheduled tasks.
-            </Notice>
-          ) : null}
-          {slackBotRecoveryConnectionId ? (
-            <Notice
-              tone="success"
-              title="New bot connection ready"
-              className="mt-4"
-              action={
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  onClick={() =>
-                    void window.location.assign(`/workspaces/${workspaceId}/schedules`)
-                  }
-                >
-                  Review scheduled tasks
-                </Button>
+          <div className="mt-4 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              aria-busy={slackBotBusy}
+              aria-label={
+                slackBotConnection ? "Reinstall OpenGeni in Slack" : "Install OpenGeni in Slack"
               }
+              data-opengeni-slack-install
+              className="relative inline-flex h-10 w-[139px] items-center justify-center overflow-hidden rounded-md outline-none ring-focus transition-opacity focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-bg disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={slackBotBusy}
+              onClick={() => void installSlackBot(false)}
             >
-              Connection {slackBotRecoveryConnectionId} was created. Existing task bindings were not
-              changed; select this connection explicitly on each task that should use it.
-            </Notice>
+              <img
+                src="https://platform.slack-edge.com/img/add_to_slack.png"
+                srcSet="https://platform.slack-edge.com/img/add_to_slack@2x.png 2x"
+                alt=""
+                aria-hidden="true"
+                width={139}
+                height={40}
+                className="h-10 w-[139px]"
+              />
+              {slackBotBusy ? (
+                <span
+                  className="absolute inset-0 grid place-items-center bg-bg/75"
+                  aria-hidden="true"
+                >
+                  <Loader2Icon className="animate-spin" />
+                </span>
+              ) : null}
+            </button>
+            {slackBotConnection ? (
+              <Button
+                type="button"
+                variant="outline"
+                disabled={slackBotBusy}
+                onClick={() => void installSlackBot(true)}
+              >
+                Install another Slack workspace/bot
+              </Button>
+            ) : null}
+          </div>
+          {slackBotConnection ? (
+            <p className="mt-2 text-2xs text-fg-subtle">
+              A new installation creates a separate connection. Existing scheduled tasks stay bound
+              to their current Slack workspace/bot until explicitly changed.
+            </p>
           ) : null}
-          <form
-            className="mt-4 flex flex-col gap-2 sm:flex-row"
-            onSubmit={(event) => {
-              event.preventDefault();
-              void connectSlackBot();
-            }}
-          >
-            <Input
-              type="password"
-              value={slackBotToken}
-              onChange={(event) => setSlackBotToken(event.target.value)}
-              placeholder="Slack bot token"
-              aria-label="Slack bot token"
-              autoComplete="off"
-              spellCheck={false}
-              className="sm:max-w-md"
-            />
-            <Button type="submit" disabled={slackBotBusy || !slackBotToken}>
-              {slackBotBusy ? <Loader2Icon className="animate-spin" /> : <PlugIcon />}
-              {slackBotInstallMode === "new" && slackBotConnection
-                ? "Validate and create new connection"
-                : slackBotConnection
-                  ? "Validate and reinstall"
-                  : "Validate and connect"}
-            </Button>
-          </form>
         </section>
 
         {/* Primary search — front and center. */}

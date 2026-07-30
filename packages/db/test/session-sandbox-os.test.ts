@@ -45,6 +45,7 @@ function baseSession() {
     activeEpoch: 0,
     environmentId: null,
     firstPartyMcpPermissions: null,
+    firstPartyMcpTools: null,
     parentSessionId: null,
     createIdempotencyKey: null,
     temporalWorkflowId: null,

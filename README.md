@@ -376,7 +376,8 @@ GitHub endpoints:
 - `GET /v1/workspaces/:workspaceId/github/connect`
 - `GET /v1/workspaces/:workspaceId/github/repositories`
 - `POST /v1/workspaces/:workspaceId/github/repositories/sync`
-- `POST /v1/workspaces/:workspaceId/github/installations`
+- `POST /v1/workspaces/:workspaceId/github/installations/select`
+- `POST /v1/workspaces/:workspaceId/github/installations` (legacy, `410 Gone`)
 - `DELETE /v1/workspaces/:workspaceId/github/installations/:installationId`
 - `POST /v1/workspaces/:workspaceId/github/app-manifest`
 - `GET /v1/github/app-manifest/callback`

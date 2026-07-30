@@ -194,14 +194,40 @@ export function SubagentsLabel({ count }: { count: number }) {
 
 export function SessionAncestryBreadcrumb({
   workspaceId,
+  parentSessionId,
   ancestors,
+  loading,
   error,
 }: {
   workspaceId: string;
+  /** Known from the current session even before the lineage request settles. */
+  parentSessionId: string | null;
   /** Root-to-direct-parent order. */
   ancestors: SessionSummary[];
+  loading?: boolean;
   error?: Error | null;
 }): ReactNode {
+  if (parentSessionId && (loading || error)) {
+    const state = error ? "unavailable" : "loading";
+    return (
+      <nav
+        aria-label="Session ancestry"
+        className="flex min-w-0 items-center text-2xs text-fg-muted"
+      >
+        <Link
+          to="/workspaces/$workspaceId/sessions/$sessionId"
+          params={{ workspaceId, sessionId: parentSessionId }}
+          aria-label={`Back to parent session; ancestry ${state}`}
+          className="inline-flex min-w-0 max-w-full items-center gap-1 outline-none transition-colors hover:text-fg focus-visible:text-fg"
+        >
+          <ChevronRightIcon className="size-3 shrink-0 rotate-180" />
+          <span className={error ? "truncate text-status-failed" : "truncate"}>
+            Back · Parent {state}
+          </span>
+        </Link>
+      </nav>
+    );
+  }
   if (error) {
     return <span className="text-2xs text-status-failed">Session ancestry unavailable</span>;
   }
@@ -209,17 +235,21 @@ export function SessionAncestryBreadcrumb({
     return null;
   }
   const parent = ancestors.at(-1)!;
+  const parentLabel = lineageLabel(parent);
   const middle = ancestors.slice(1, -1);
   return (
     <nav aria-label="Session ancestry" className="flex min-w-0 items-center text-2xs text-fg-muted">
       <Link
         to="/workspaces/$workspaceId/sessions/$sessionId"
         params={{ workspaceId, sessionId: parent.id }}
-        title={`Back to ${lineageLabel(parent)}`}
-        className="inline-flex min-w-0 items-center gap-1 outline-none transition-colors hover:text-fg focus-visible:text-fg sm:hidden"
+        aria-label={`Back to ${parentLabel}`}
+        className="inline-flex min-w-0 max-w-full items-center gap-1 outline-none transition-colors hover:text-fg focus-visible:text-fg sm:hidden"
       >
         <ChevronRightIcon className="size-3 shrink-0 rotate-180" />
-        <span className="truncate">{lineageLabel(parent)}</span>
+        <span className="shrink-0 font-medium text-fg">Back ·</span>
+        <bdi dir="auto" className="min-w-0 truncate">
+          {parentLabel}
+        </bdi>
       </Link>
       <div className="hidden min-w-0 items-center sm:flex">
         <BreadcrumbLink workspaceId={workspaceId} session={ancestors[0]!} />
@@ -242,9 +272,10 @@ export function SessionAncestryBreadcrumb({
                     <Link
                       to="/workspaces/$workspaceId/sessions/$sessionId"
                       params={{ workspaceId, sessionId: session.id }}
+                      dir="auto"
                       className="min-w-0"
                     >
-                      <span className="truncate">{lineageLabel(session)}</span>
+                      {lineageLabel(session)}
                     </Link>
                   </DropdownMenuItem>
                 ))}
@@ -270,14 +301,16 @@ function BreadcrumbLink({
   workspaceId: string;
   session: SessionSummary;
 }) {
+  const label = lineageLabel(session);
   return (
     <Link
       to="/workspaces/$workspaceId/sessions/$sessionId"
       params={{ workspaceId, sessionId: session.id }}
-      title={lineageLabel(session)}
+      title={label}
+      dir="auto"
       className="max-w-40 truncate outline-none transition-colors hover:text-fg focus-visible:text-fg"
     >
-      {lineageLabel(session)}
+      {label}
     </Link>
   );
 }
