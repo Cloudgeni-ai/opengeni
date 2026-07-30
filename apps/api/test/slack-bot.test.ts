@@ -125,6 +125,7 @@ function fakeSlack(
     botId?: string;
     loseFirstPostResponse?: boolean;
     transcriptRequiresUserSession?: boolean;
+    transcriptInFileInfo?: boolean;
   } = {},
 ) {
   const calls: SlackCall[] = [];
@@ -315,6 +316,23 @@ function fakeSlack(
           groups: transcript ? ["C_CANVAS"] : [],
           canvas_metadata: transcript ? undefined : { originating_huddle_id: "H_FIXTURE" },
           huddle_transcript_file_id: transcript ? undefined : "FTRANSCRIPT",
+          huddle_transcription:
+            options.transcriptInFileInfo && transcript
+              ? {
+                  channel_id: "C_MEMBER",
+                  date_start: 1_785_141_690,
+                  date_end: 1_785_141_750,
+                  lines: [
+                    {
+                      user_id: "U_MEMBER",
+                      start_time_ms: 0,
+                      contents: "A transcript returned directly by files.info.",
+                    },
+                  ],
+                  blocks: [],
+                  transcription_time_ranges: [],
+                }
+              : undefined,
           url_private_download: transcript
             ? "https://files.slack.com/files-pri/T_OPEN_GENI-FTRANSCRIPT/download/huddle-transcript"
             : "https://files.slack.com/files-pri/T_OPEN_GENI-F_CANVAS/download/meeting-notes.html",
@@ -1660,6 +1678,26 @@ describe("OpenGeni Slack bot connection", () => {
       }),
     ).rejects.toThrow("huddle_transcript_requires_participant_access");
     expect(participantOnlySlack.calls.some((call) => call.query.includes("redir="))).toBe(false);
+    const inlineTranscriptSlack = fakeSlack({
+      transcriptRequiresUserSession: true,
+      transcriptInFileInfo: true,
+    });
+    const inlineTranscriptBot = createOpenGeniSlackBotClient(
+      { db: client.db, settings, slackFetch: inlineTranscriptSlack.fetch },
+      resolved,
+    );
+    const inlineTranscript = await inlineTranscriptBot.fileContent({
+      channelId: "C_MEMBER",
+      fileId: "FTRANSCRIPT",
+      parentFileId: "F_CANVAS",
+    });
+    expect(inlineTranscript).toMatchObject({
+      contentType: "application/json",
+      content: expect.stringContaining("A transcript returned directly by files.info."),
+      nextOffset: null,
+      truncated: false,
+    });
+    expect(inlineTranscriptSlack.calls.some((call) => call.query.includes("redir="))).toBe(false);
     const operationId = crypto.randomUUID();
     const posted = await bot.postMessage({
       operationId,

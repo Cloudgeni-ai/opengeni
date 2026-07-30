@@ -407,15 +407,14 @@ export class OpenGeniSlackBotClient {
   }) {
     return await this.withAudit("file.content.read", async (headers) => {
       const info = await this.requireMemberChannel(headers, input.channelId);
-      const { fileRecord, file } = await this.requireFileForChannel(
+      const { fileRecord, file, parentFileRecord } = await this.requireFileForChannel(
         headers,
         "file.content.read",
         input,
       );
-      const { contentType, content } = await this.readPrivateFileText(
-        fileRecord,
-        "file.content.read",
-      );
+      const embeddedTranscript = embeddedHuddleTranscription(fileRecord, parentFileRecord);
+      const { contentType, content } =
+        embeddedTranscript ?? (await this.readPrivateFileText(fileRecord, "file.content.read"));
       const offset =
         typeof input.offset === "number" && Number.isInteger(input.offset) && input.offset >= 0
           ? input.offset
@@ -561,7 +560,7 @@ export class OpenGeniSlackBotClient {
       throw new SlackBotProviderError("file_not_found");
     }
     if (fileIsSharedToChannel(fileRecord, input.channelId)) {
-      return { fileRecord, file };
+      return { fileRecord, file, parentFileRecord: null };
     }
     if (!input.parentFileId || input.parentFileId === input.fileId) {
       throw new SlackBotProviderError("file_not_found");
@@ -574,13 +573,13 @@ export class OpenGeniSlackBotClient {
       throw new SlackBotProviderError("file_not_found");
     }
     if (parentReferencesSlackFile(parentRecord, input.fileId)) {
-      return { fileRecord, file };
+      return { fileRecord, file, parentFileRecord: parentRecord };
     }
     const parent = await this.readPrivateFileText(parentRecord, operation);
     if (!embeddedSlackFileIds(parent.content).has(input.fileId)) {
       throw new SlackBotProviderError("file_not_found");
     }
-    return { fileRecord, file };
+    return { fileRecord, file, parentFileRecord: parentRecord };
   }
 
   private async readPrivateFileText(
@@ -1051,6 +1050,22 @@ function isSupportedSlackTextContentType(value: string): boolean {
     value === "application/vnd.slack-docs" ||
     value === "application/vnd.slack-huddle-transcript"
   );
+}
+
+function embeddedHuddleTranscription(
+  fileRecord: Record<string, unknown>,
+  parentFileRecord: Record<string, unknown> | null,
+): { contentType: string; content: string } | null {
+  for (const record of [fileRecord, parentFileRecord]) {
+    if (!record) continue;
+    const transcription = slackRecord(record.huddle_transcription);
+    if (!transcription) continue;
+    const content = JSON.stringify(transcription);
+    if (content !== "{}") {
+      return { contentType: "application/json", content };
+    }
+  }
+  return null;
 }
 
 function embeddedSlackFileIds(content: string): Set<string> {
