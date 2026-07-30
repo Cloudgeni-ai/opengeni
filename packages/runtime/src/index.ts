@@ -148,7 +148,6 @@ import { fileURLToPath } from "node:url";
 
 import {
   computerCallNormalizingFetch,
-  elideSupersededViewImagePairs,
   normalizeComputerCallActions,
   sanitizeHistoryItemsForModel,
 } from "./history-sanitizer";
@@ -254,7 +253,6 @@ setSelfhostedApplyDiff(
 );
 
 export {
-  elideSupersededViewImagePairs,
   sanitizeHistoryItemsForModel,
   stripReasoningEncryptedContent,
   stripReasoningIdentityFromSerializedRunState,
@@ -286,7 +284,10 @@ export {
   prepareCompactionPromptInput,
   isUserMessage,
   estimateTokens,
+  estimateTokensBreakdown,
   estimateItemTokens,
+  estimateItemTokenBreakdown,
+  estimateNativeImageTokens,
   estimateCompleteModelInput,
   estimateSerializedValueTokens,
   hasModelGeneratedItem,
@@ -300,9 +301,14 @@ export {
   SUMMARY_BUFFER_TOKENS,
   SUMMARY_PREFIX,
   USER_MESSAGE_TRUNCATION_MARKER,
+  UNKNOWN_IMAGE_TOKENS,
+  MAX_NATIVE_IMAGE_TOKENS,
 } from "./context-compaction";
 export type {
   CompactionDecision,
+  ModelInputTokenBreakdown,
+  NativeImageEstimateReason,
+  NativeImageTokenEstimate,
   CompactionItem,
   PreparedCompactionPromptInput,
 } from "./context-compaction";
@@ -3806,18 +3812,6 @@ export const normalizeComputerCallsFilter: CallModelInputFilter = ({ modelData }
 });
 
 /**
- * Per-call state compaction for local image inspection. Re-opening the same
- * path supersedes its prior base64 result; carrying both provides no newer
- * information and can otherwise balloon every following model request.
- */
-export const elideSupersededViewImagesFilter: CallModelInputFilter = ({ modelData }) => ({
-  ...modelData,
-  input: elideSupersededViewImagePairs(
-    modelData.input as unknown as Array<Record<string, unknown>>,
-  ) as unknown as AgentInputItem[],
-});
-
-/**
  * Canonical Codex-style tool-result bound at the final model-input seam. The
  * identical pure normalizer also runs before conversation rows are persisted,
  * so this is a live-turn defense rather than a request-only alternate history.
@@ -3943,7 +3937,6 @@ export function callModelInputFilterForSettings(
 ): CallModelInputFilter | undefined {
   const filters: CallModelInputFilter[] = [
     normalizeComputerCallsFilter,
-    elideSupersededViewImagesFilter,
     boundModelToolOutputsFilterForSettings(settings),
   ];
   if (settings.openaiProviderItemIds === "strip") {

@@ -118,21 +118,425 @@ export function estimateTextTokens(text: string): number {
   return nonAsciiCodeUnits + Math.ceil(asciiCodeUnits / 4);
 }
 
-/** Serialized-item estimate for pre-call accounting and retained user budgets. */
-export function estimateItemTokens(item: CompactionItem): number {
+const IMAGE_LOW_DETAIL_TOKENS = 85;
+const IMAGE_HIGH_DETAIL_BASE_TOKENS = 85;
+const IMAGE_HIGH_DETAIL_TILE_TOKENS = 170;
+const IMAGE_HIGH_DETAIL_TILE_SIZE = 512;
+const IMAGE_HIGH_DETAIL_MAX_SIDE = 2_048;
+const IMAGE_HIGH_DETAIL_TARGET_SHORT_SIDE = 768;
+export const UNKNOWN_IMAGE_TOKENS = 4_096;
+export const MAX_NATIVE_IMAGE_TOKENS = 8_192;
+
+export type NativeImageEstimateReason = "dimensions" | "bounded_fallback";
+export type NativeImageTokenEstimate = {
+  tokens: number;
+  width: number | null;
+  height: number | null;
+  detail: string;
+  reason: NativeImageEstimateReason;
+};
+
+export type ModelInputTokenBreakdown = {
+  totalTokens: number;
+  textTokens: number;
+  imageTokens: number;
+  imageCount: number;
+  imageFallbackCount: number;
+};
+
+type ImageDescriptor = {
+  source: unknown;
+  detail: string;
+  width: number | null;
+  height: number | null;
+};
+
+type NativeImageProjection = {
+  value: unknown;
+  imageTokens: number;
+  imageCount: number;
+  imageFallbackCount: number;
+};
+
+function finitePositiveInteger(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : null;
+}
+
+function dimensionsFromRecord(record: Record<string, unknown>): [number, number] | null {
+  const width = finitePositiveInteger(record.width);
+  const height = finitePositiveInteger(record.height);
+  if (width && height) return [width, height];
+  if (Array.isArray(record.dimensions) && record.dimensions.length >= 2) {
+    const dimensionsWidth = finitePositiveInteger(record.dimensions[0]);
+    const dimensionsHeight = finitePositiveInteger(record.dimensions[1]);
+    if (dimensionsWidth && dimensionsHeight) return [dimensionsWidth, dimensionsHeight];
+  }
+  return null;
+}
+
+function dataUrlBytesPrefix(value: string, maxBytes = 262_144): Uint8Array | null {
+  const match = /^data:image\/[a-z0-9.+-]+;base64,([a-z0-9+/=\r\n]+)$/i.exec(value);
+  if (!match) return null;
+  try {
+    const maxBase64CodeUnits = Math.ceil(maxBytes / 3) * 4;
+    return new Uint8Array(Buffer.from(match[1]!.slice(0, maxBase64CodeUnits), "base64"));
+  } catch {
+    return null;
+  }
+}
+
+function base64BytesPrefix(value: string, maxBytes = 262_144): Uint8Array | null {
+  if (!/^[a-z0-9+/=\r\n]+$/i.test(value)) return null;
+  try {
+    const maxBase64CodeUnits = Math.ceil(maxBytes / 3) * 4;
+    return new Uint8Array(Buffer.from(value.slice(0, maxBase64CodeUnits), "base64"));
+  } catch {
+    return null;
+  }
+}
+
+function uint16BigEndian(bytes: Uint8Array, offset: number): number {
+  return ((bytes[offset] ?? 0) << 8) | (bytes[offset + 1] ?? 0);
+}
+
+function uint32BigEndian(bytes: Uint8Array, offset: number): number {
+  return (
+    ((bytes[offset] ?? 0) * 0x1000000 +
+      ((bytes[offset + 1] ?? 0) << 16) +
+      ((bytes[offset + 2] ?? 0) << 8) +
+      (bytes[offset + 3] ?? 0)) >>>
+    0
+  );
+}
+
+function dimensionsFromImageBytes(bytes: Uint8Array): [number, number] | null {
+  // PNG IHDR: width/height are the first two big-endian uint32 values.
+  if (
+    bytes.length >= 24 &&
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47
+  ) {
+    const width = uint32BigEndian(bytes, 16);
+    const height = uint32BigEndian(bytes, 20);
+    return width > 0 && height > 0 ? [width, height] : null;
+  }
+  // GIF logical screen descriptor.
+  if (
+    bytes.length >= 10 &&
+    bytes[0] === 0x47 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x38
+  ) {
+    const width = (bytes[6] ?? 0) | ((bytes[7] ?? 0) << 8);
+    const height = (bytes[8] ?? 0) | ((bytes[9] ?? 0) << 8);
+    return width > 0 && height > 0 ? [width, height] : null;
+  }
+  // WebP VP8X canvas size (24-bit little-endian, stored minus one).
+  if (
+    bytes.length >= 30 &&
+    bytes[0] === 0x52 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x46 &&
+    bytes[8] === 0x57 &&
+    bytes[9] === 0x45 &&
+    bytes[10] === 0x42 &&
+    bytes[11] === 0x50 &&
+    bytes[12] === 0x56 &&
+    bytes[13] === 0x50 &&
+    bytes[14] === 0x38 &&
+    bytes[15] === 0x58
+  ) {
+    const width = 1 + (bytes[24] ?? 0) + ((bytes[25] ?? 0) << 8) + ((bytes[26] ?? 0) << 16);
+    const height = 1 + (bytes[27] ?? 0) + ((bytes[28] ?? 0) << 8) + ((bytes[29] ?? 0) << 16);
+    return width > 0 && height > 0 ? [width, height] : null;
+  }
+  // JPEG SOF markers can appear after variable-length metadata segments.
+  if (bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8) {
+    let offset = 2;
+    while (offset + 8 < bytes.length) {
+      if (bytes[offset] !== 0xff) {
+        offset += 1;
+        continue;
+      }
+      const marker = bytes[offset + 1] ?? 0;
+      offset += 2;
+      if (marker === 0xd8 || marker === 0xd9 || marker === 0x01) continue;
+      if (marker >= 0xd0 && marker <= 0xd7) continue;
+      if (offset + 2 > bytes.length) break;
+      const segmentLength = uint16BigEndian(bytes, offset);
+      if (segmentLength < 2 || offset + segmentLength > bytes.length) break;
+      const isStartOfFrame =
+        (marker >= 0xc0 && marker <= 0xc3) ||
+        (marker >= 0xc5 && marker <= 0xc7) ||
+        (marker >= 0xc9 && marker <= 0xcb) ||
+        (marker >= 0xcd && marker <= 0xcf);
+      if (isStartOfFrame && segmentLength >= 7) {
+        const height = uint16BigEndian(bytes, offset + 3);
+        const width = uint16BigEndian(bytes, offset + 5);
+        return width > 0 && height > 0 ? [width, height] : null;
+      }
+      offset += segmentLength;
+    }
+  }
+  return null;
+}
+
+function dimensionsFromImageSource(source: unknown): [number, number] | null {
+  if (source instanceof Uint8Array) {
+    return dimensionsFromImageBytes(source);
+  }
+  if (typeof source === "string") {
+    const bytes = dataUrlBytesPrefix(source);
+    return bytes ? dimensionsFromImageBytes(bytes) : null;
+  }
+  if (!source || typeof source !== "object") return null;
+  const record = source as Record<string, unknown>;
+  const rawData = record.data;
+  const mediaType = record.mediaType ?? record.media_type;
+  const rawDataDimensions =
+    rawData instanceof Uint8Array
+      ? dimensionsFromImageBytes(rawData)
+      : typeof rawData === "string" &&
+          typeof mediaType === "string" &&
+          mediaType.toLowerCase().startsWith("image/")
+        ? dimensionsFromImageBytes(base64BytesPrefix(rawData) ?? new Uint8Array())
+        : null;
+  return (
+    dimensionsFromRecord(record) ??
+    rawDataDimensions ??
+    dimensionsFromImageSource(record.url) ??
+    dimensionsFromImageSource(rawData)
+  );
+}
+
+function highDetailImageTokens(width: number, height: number): number {
+  let scaledWidth = width;
+  let scaledHeight = height;
+  const longest = Math.max(scaledWidth, scaledHeight);
+  if (longest > IMAGE_HIGH_DETAIL_MAX_SIDE) {
+    const scale = IMAGE_HIGH_DETAIL_MAX_SIDE / longest;
+    scaledWidth *= scale;
+    scaledHeight *= scale;
+  }
+  const shortest = Math.min(scaledWidth, scaledHeight);
+  if (shortest > IMAGE_HIGH_DETAIL_TARGET_SHORT_SIDE) {
+    const scale = IMAGE_HIGH_DETAIL_TARGET_SHORT_SIDE / shortest;
+    scaledWidth *= scale;
+    scaledHeight *= scale;
+  }
+  const tiles =
+    Math.ceil(scaledWidth / IMAGE_HIGH_DETAIL_TILE_SIZE) *
+    Math.ceil(scaledHeight / IMAGE_HIGH_DETAIL_TILE_SIZE);
+  return Math.min(
+    MAX_NATIVE_IMAGE_TOKENS,
+    IMAGE_HIGH_DETAIL_BASE_TOKENS + IMAGE_HIGH_DETAIL_TILE_TOKENS * Math.max(1, tiles),
+  );
+}
+
+/**
+ * Provider-neutral local estimate for one native image. Inline bytes are used
+ * only to recover dimensions; their base64 length never becomes text tokens.
+ */
+export function estimateNativeImageTokens(input: {
+  source?: unknown;
+  width?: number | null;
+  height?: number | null;
+  detail?: unknown;
+}): NativeImageTokenEstimate {
+  const explicitWidth = finitePositiveInteger(input.width);
+  const explicitHeight = finitePositiveInteger(input.height);
+  const sourceDimensions = dimensionsFromImageSource(input.source);
+  const width = explicitWidth ?? sourceDimensions?.[0] ?? null;
+  const height = explicitHeight ?? sourceDimensions?.[1] ?? null;
+  const detail =
+    typeof input.detail === "string" && input.detail.length > 0 ? input.detail : "auto";
+  if (detail === "low") {
+    return { tokens: IMAGE_LOW_DETAIL_TOKENS, width, height, detail, reason: "dimensions" };
+  }
+  if (!width || !height) {
+    return {
+      tokens: UNKNOWN_IMAGE_TOKENS,
+      width: null,
+      height: null,
+      detail,
+      reason: "bounded_fallback",
+    };
+  }
+  return {
+    tokens: highDetailImageTokens(width, height),
+    width,
+    height,
+    detail,
+    reason: "dimensions",
+  };
+}
+
+function imageDescriptor(record: Record<string, unknown>): ImageDescriptor | null {
+  const type = typeof record.type === "string" ? record.type : "";
+  if (!new Set(["input_image", "image_url", "image", "computer_screenshot"]).has(type)) {
+    return null;
+  }
+  const imageUrl = record.image_url;
+  const nestedImageUrl =
+    imageUrl && typeof imageUrl === "object" ? (imageUrl as Record<string, unknown>).url : imageUrl;
+  const source =
+    record.image ??
+    record.imageUrl ??
+    nestedImageUrl ??
+    record.data ??
+    record.url ??
+    record.fileId ??
+    record.file_id ??
+    record.artifact ??
+    record.artifactReference;
+  const nestedDetail =
+    imageUrl && typeof imageUrl === "object"
+      ? (imageUrl as Record<string, unknown>).detail
+      : undefined;
+  const dimensions =
+    dimensionsFromRecord(record) ??
+    (source && typeof source === "object"
+      ? dimensionsFromRecord(source as Record<string, unknown>)
+      : null);
+  return {
+    source,
+    detail:
+      typeof record.detail === "string"
+        ? record.detail
+        : typeof nestedDetail === "string"
+          ? nestedDetail
+          : "auto",
+    width: dimensions?.[0] ?? null,
+    height: dimensions?.[1] ?? null,
+  };
+}
+
+function projectNativeImages(value: unknown, seen: WeakSet<object>): NativeImageProjection {
+  if (!value || typeof value !== "object") {
+    return { value, imageTokens: 0, imageCount: 0, imageFallbackCount: 0 };
+  }
+  if (seen.has(value)) {
+    return { value: "[circular]", imageTokens: 0, imageCount: 0, imageFallbackCount: 0 };
+  }
+  seen.add(value);
+  if (Array.isArray(value)) {
+    let imageTokens = 0;
+    let imageCount = 0;
+    let imageFallbackCount = 0;
+    const projected = value.map((entry) => {
+      const result = projectNativeImages(entry, seen);
+      imageTokens += result.imageTokens;
+      imageCount += result.imageCount;
+      imageFallbackCount += result.imageFallbackCount;
+      return result.value;
+    });
+    seen.delete(value);
+    return { value: projected, imageTokens, imageCount, imageFallbackCount };
+  }
+
+  const record = value as Record<string, unknown>;
+  const descriptor = imageDescriptor(record);
+  if (descriptor) {
+    const estimate = estimateNativeImageTokens(descriptor);
+    const projected: Record<string, unknown> = {};
+    const payloadKeys = new Set([
+      "image",
+      "image_url",
+      "imageUrl",
+      "data",
+      "url",
+      "fileId",
+      "file_id",
+      "artifact",
+      "artifactReference",
+    ]);
+    for (const [key, entry] of Object.entries(record)) {
+      projected[key] = payloadKeys.has(key) ? "[native image]" : entry;
+    }
+    projected.image_estimate = {
+      width: estimate.width,
+      height: estimate.height,
+      detail: estimate.detail,
+      reason: estimate.reason,
+    };
+    seen.delete(value);
+    return {
+      value: projected,
+      imageTokens: estimate.tokens,
+      imageCount: 1,
+      imageFallbackCount: estimate.reason === "bounded_fallback" ? 1 : 0,
+    };
+  }
+
+  let imageTokens = 0;
+  let imageCount = 0;
+  let imageFallbackCount = 0;
+  const projected: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(record)) {
+    const result = projectNativeImages(entry, seen);
+    projected[key] = result.value;
+    imageTokens += result.imageTokens;
+    imageCount += result.imageCount;
+    imageFallbackCount += result.imageFallbackCount;
+  }
+  seen.delete(value);
+  return { value: projected, imageTokens, imageCount, imageFallbackCount };
+}
+
+/** Native-image-aware item estimate for pre-call accounting and retained budgets. */
+export function estimateItemTokenBreakdown(item: CompactionItem): ModelInputTokenBreakdown {
+  const projected = projectNativeImages(item, new WeakSet<object>());
   let text: string;
   try {
-    text = JSON.stringify(item);
+    text = JSON.stringify(projected.value);
   } catch {
-    text = String(item);
+    text = String(projected.value);
   }
-  return estimateTextTokens(text);
+  const textTokens = estimateTextTokens(text);
+  return {
+    totalTokens: textTokens + projected.imageTokens,
+    textTokens,
+    imageTokens: projected.imageTokens,
+    imageCount: projected.imageCount,
+    imageFallbackCount: projected.imageFallbackCount,
+  };
+}
+
+export function estimateItemTokens(item: CompactionItem): number {
+  return estimateItemTokenBreakdown(item).totalTokens;
 }
 
 export function estimateTokens(items: readonly CompactionItem[]): number {
   let total = 0;
   for (const item of items) {
     total += estimateItemTokens(item);
+  }
+  return total;
+}
+
+export function estimateTokensBreakdown(
+  items: readonly CompactionItem[],
+): ModelInputTokenBreakdown {
+  const total: ModelInputTokenBreakdown = {
+    totalTokens: 0,
+    textTokens: 0,
+    imageTokens: 0,
+    imageCount: 0,
+    imageFallbackCount: 0,
+  };
+  for (const item of items) {
+    const estimate = estimateItemTokenBreakdown(item);
+    total.totalTokens += estimate.totalTokens;
+    total.textTokens += estimate.textTokens;
+    total.imageTokens += estimate.imageTokens;
+    total.imageCount += estimate.imageCount;
+    total.imageFallbackCount += estimate.imageFallbackCount;
   }
   return total;
 }
@@ -164,6 +568,10 @@ export type CompleteModelInputEstimate = {
   tokens: number;
   source: "complete_estimate" | "provider_plus_local";
   inputTokens: number;
+  inputTextTokens: number;
+  inputImageTokens: number;
+  inputImageCount: number;
+  inputImageFallbackCount: number;
   instructionsTokens: number;
   toolSchemaTokens: number;
   appendedAfterModelTokens: number;
@@ -182,7 +590,8 @@ export function estimateCompleteModelInput(input: {
   provider?: ProviderContextTokenSignal | null;
   providerRequestFootprint?: CompleteModelInputFootprint | null;
 }): CompleteModelInputEstimate {
-  const inputTokens = estimateTokens(input.current.input);
+  const inputEstimate = estimateTokensBreakdown(input.current.input);
+  const inputTokens = inputEstimate.totalTokens;
   const instructionsTokens = input.current.instructionsTokens;
   const toolSchemaTokens = input.current.toolSchemaTokens;
   if (!input.provider || !input.providerRequestFootprint || input.provider.totalTokens <= 0) {
@@ -190,6 +599,10 @@ export function estimateCompleteModelInput(input: {
       tokens: inputTokens + instructionsTokens + toolSchemaTokens,
       source: "complete_estimate",
       inputTokens,
+      inputTextTokens: inputEstimate.textTokens,
+      inputImageTokens: inputEstimate.imageTokens,
+      inputImageCount: inputEstimate.imageCount,
+      inputImageFallbackCount: inputEstimate.imageFallbackCount,
       instructionsTokens,
       toolSchemaTokens,
       appendedAfterModelTokens: 0,
@@ -211,6 +624,10 @@ export function estimateCompleteModelInput(input: {
       input.provider.totalTokens + appendedAfterModelTokens + instructionGrowth + toolSchemaGrowth,
     source: "provider_plus_local",
     inputTokens,
+    inputTextTokens: inputEstimate.textTokens,
+    inputImageTokens: inputEstimate.imageTokens,
+    inputImageCount: inputEstimate.imageCount,
+    inputImageFallbackCount: inputEstimate.imageFallbackCount,
     instructionsTokens,
     toolSchemaTokens,
     appendedAfterModelTokens,

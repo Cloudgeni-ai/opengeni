@@ -802,7 +802,7 @@ describe("ComputerUseCapability transport-aware seam", () => {
 });
 
 // ── HARDENING: EXPLICIT toolMode overrides the constructor-name sniff ─────────
-// The refactor adds `toolMode: "hosted" | "function-image" | "function-text"` so
+// The refactor adds an explicit hosted/function-image/disabled tool mode so
 // tool selection is decided by the caller that knows the provider's true wire
 // identity (the worker), NOT inferred from the bound model instance's constructor
 // name (which a wrapped/proxied/minified instance would defeat). When toolMode is
@@ -810,7 +810,6 @@ describe("ComputerUseCapability transport-aware seam", () => {
 // when ABSENT, the legacy sniff behaviour is preserved byte-for-byte.
 describe("ComputerUseCapability explicit toolMode (hardening — sniff not consulted)", () => {
   const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-  const PNG_DATA_URL = `data:image/png;base64,${Buffer.from(PNG).toString("base64")}`;
 
   test('toolMode "hosted" → the single HOSTED tool EVEN when a ChatCompletions model is bound', () => {
     const { session } = makeMockSession();
@@ -839,17 +838,19 @@ describe("ComputerUseCapability explicit toolMode (hardening — sniff not consu
     expect(out.image?.mediaType).toBe("image/png");
   });
 
-  test('toolMode "function-text" → the 8 FUNCTION tools; screenshot is a text data-URL string', async () => {
+  test('toolMode "function-text" fails closed with no computer tools', () => {
     const { session } = makeMockSession({ pngBytes: PNG });
     const cap = computerUse({ toolMode: "function-text" });
     cap.bind(session as never).bindModel("responses", structuredModel());
     const tools = cap.tools();
-    expect(tools.map((t) => (t as { name?: string }).name)).toEqual(FUNCTION_TOOL_NAMES);
-    // function-text renders the screenshot as a `data:…;base64` STRING (chat-completions
-    // providers can't read structured image tool results) — NOT a {type:'image'} object.
-    const shot = toolsByName(tools).computer_screenshot;
-    const out = await invokeTool(shot, {});
-    expect(out).toBe(PNG_DATA_URL);
+    expect(tools).toEqual([]);
+  });
+
+  test('toolMode "disabled" fails closed with no computer tools', () => {
+    const { session } = makeMockSession({ pngBytes: PNG });
+    const cap = computerUse({ toolMode: "disabled" });
+    cap.bind(session as never).bindModel("responses", structuredModel());
+    expect(cap.tools()).toEqual([]);
   });
 
   test("REGRESSION: ABSENT toolMode preserves the sniff byte-for-byte (structured→hosted, chat→function)", () => {
@@ -1140,8 +1141,8 @@ describe("buildAgentCapabilities computer-use gating (P4.3)", () => {
     expect(hostedTools.length).toBe(1);
     expect((hostedTools[0] as { type?: string }).type).toBe("computer");
 
-    // "function-text" → the FUNCTION tools EVEN with a structured model bound, and the
-    // screenshot renders as a text data-URL (imageFunctionResults=false).
+    // "function-text" is a deprecated fail-closed alias: providers without a proven
+    // visual image transport receive no computer capability.
     const textCaps = buildAgentCapabilities(desktopOn, [], { computerToolMode: "function-text" });
     const textCap = textCaps.find(
       (c) => (c as { type?: string }).type === "computer-use",
@@ -1150,11 +1151,7 @@ describe("buildAgentCapabilities computer-use gating (P4.3)", () => {
     const { session: s2 } = makeMockSession({ pngBytes: png });
     textCap.bind(s2 as never).bindModel("responses", structuredModel());
     const textTools = textCap.tools();
-    expect(textTools.map((t) => (t as { name?: string }).name)).toEqual(FUNCTION_TOOL_NAMES);
-    const shot = toolsByName(textTools).computer_screenshot;
-    expect(await invokeTool(shot, {})).toBe(
-      `data:image/png;base64,${Buffer.from(png).toString("base64")}`,
-    );
+    expect(textTools).toEqual([]);
 
     // "function-image" → the FUNCTION tools with a STRUCTURED image screenshot.
     const imgCaps = buildAgentCapabilities(desktopOn, [], { computerToolMode: "function-image" });

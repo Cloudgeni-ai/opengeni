@@ -5412,6 +5412,55 @@ describe("provider item id stripping", () => {
     expect(JSON.stringify(replayed.input[0])).toBe(serializedProviderItem);
   });
 
+  test("final model-input filtering preserves an established view_image prefix exactly", async () => {
+    const filter = callModelInputFilterForSettings(testSettings())!;
+    const firstInput = [
+      { type: "message", role: "user", content: "inspect it twice" },
+      {
+        type: "function_call",
+        callId: "view-old",
+        name: "view_image",
+        arguments: JSON.stringify({ path: "/tmp/a.png" }),
+      },
+      {
+        type: "function_call_result",
+        callId: "view-old",
+        output: [{ type: "input_image", image: "data:image/png;base64,AAAA" }],
+      },
+    ] as any;
+    const first = await filter({
+      modelData: { input: firstInput },
+      agent: {} as any,
+      context: undefined,
+    });
+    const second = await filter({
+      modelData: {
+        input: [
+          ...firstInput,
+          {
+            type: "function_call",
+            callId: "view-new",
+            name: "view_image",
+            arguments: JSON.stringify({ path: "/tmp/a.png" }),
+          },
+          {
+            type: "function_call_result",
+            callId: "view-new",
+            output: [{ type: "input_image", image: "data:image/png;base64,BBBB" }],
+          },
+        ] as any,
+      },
+      agent: {} as any,
+      context: undefined,
+    });
+
+    expect(second.input.slice(0, first.input.length)).toEqual(first.input);
+    expect(JSON.stringify(second.input.slice(0, first.input.length))).toBe(
+      JSON.stringify(first.input),
+    );
+    expect(second.input).toHaveLength(first.input.length + 2);
+  });
+
   test("same-run provider totals add the complete trailing tool result before the next call", async () => {
     let signal: { revision: number; totalTokens: number } | null = null;
     const filter = contextRobustnessFilterForSettings(

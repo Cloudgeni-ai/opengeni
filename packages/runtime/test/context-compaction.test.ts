@@ -24,7 +24,9 @@ import {
   clampCompactionThresholdRatio,
   decideCompaction,
   estimateCompleteModelInput,
+  estimateItemTokenBreakdown,
   estimateItemTokens,
+  estimateNativeImageTokens,
   estimateSerializedValueTokens,
   estimateTextTokens,
   findCompactionNeededError,
@@ -255,6 +257,66 @@ describe("complete outgoing model-input accounting", () => {
     expect(estimate.tokens).toBe(
       estimate.inputTokens + estimate.instructionsTokens + estimate.toolSchemaTokens,
     );
+  });
+
+  test("counts a 1280x800 typed PNG as a native image instead of base64 text", () => {
+    const header = Buffer.alloc(24);
+    Buffer.from([0x89, 0x50, 0x4e, 0x47]).copy(header, 0);
+    header.writeUInt32BE(1280, 16);
+    header.writeUInt32BE(800, 20);
+    const image = `data:image/png;base64,${Buffer.concat([header, Buffer.alloc(700_000)]).toString("base64")}`;
+    const item = {
+      type: "function_call_result",
+      callId: "shot-1",
+      output: [{ type: "input_image", image, detail: "high" }],
+    };
+
+    const estimate = estimateItemTokenBreakdown(item);
+    expect(estimate.imageCount).toBe(1);
+    expect(estimate.imageFallbackCount).toBe(0);
+    expect(estimate.imageTokens).toBeGreaterThan(500);
+    expect(estimate.imageTokens).toBeLessThan(5_000);
+    expect(estimate.totalTokens).toBeLessThan(5_500);
+    expect(estimate.totalTokens).toBeLessThan(estimateTextTokens(JSON.stringify(item)));
+  });
+
+  test("base64 length does not linearly change an image estimate with identical geometry/detail", () => {
+    const header = Buffer.alloc(24);
+    Buffer.from([0x89, 0x50, 0x4e, 0x47]).copy(header, 0);
+    header.writeUInt32BE(1280, 16);
+    header.writeUInt32BE(800, 20);
+    const short = `data:image/png;base64,${header.toString("base64")}`;
+    const long = `data:image/png;base64,${Buffer.concat([header, Buffer.alloc(700_000)]).toString("base64")}`;
+    const shortEstimate = estimateItemTokens({ type: "input_image", image: short, detail: "high" });
+    const longEstimate = estimateItemTokens({ type: "input_image", image: long, detail: "high" });
+
+    expect(longEstimate).toBe(shortEstimate);
+  });
+
+  test("uses an explicit bounded fallback for typed image references without geometry", () => {
+    expect(estimateNativeImageTokens({ source: { id: "file_123" }, detail: "auto" })).toMatchObject(
+      {
+        tokens: 4_096,
+        width: null,
+        height: null,
+        detail: "auto",
+        reason: "bounded_fallback",
+      },
+    );
+  });
+
+  test("continues to count a data URL as text outside a typed image context", () => {
+    const short = estimateItemTokens({
+      type: "message",
+      role: "user",
+      content: "data:image/png;base64,AAAA",
+    });
+    const long = estimateItemTokens({
+      type: "message",
+      role: "user",
+      content: `data:image/png;base64,${"A".repeat(100_000)}`,
+    });
+    expect(long).toBeGreaterThan(short + 20_000);
   });
 
   test("anchors to provider total tokens and adds every item after the last model output", () => {

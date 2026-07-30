@@ -3039,8 +3039,8 @@ describe("computerToolModeForTurn (explicit computer-use transport derivation)",
     expect(computerToolModeForTurn(resolved("codex-subscription", "chat"))).toBe("function-image");
   });
 
-  test("a chat-wire (OpenAIChatCompletionsModel) provider → function-text", () => {
-    expect(computerToolModeForTurn(resolved("api-key", "chat"))).toBe("function-text");
+  test("a chat-wire provider without proven visual image transport → disabled", () => {
+    expect(computerToolModeForTurn(resolved("api-key", "chat"))).toBe("disabled");
   });
 
   test("a registry responses provider → hosted", () => {

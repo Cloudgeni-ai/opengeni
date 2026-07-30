@@ -1203,11 +1203,11 @@ export function computerFunctionTools(
  *   • "function-image" → the FUNCTION `computer_*` tools with screenshots delivered as a
  *                        structured `{type:'image'}` output (the codex/ChatGPT backend,
  *                        which rejects hosted tool types but SEES structured image results).
- *   • "function-text"  → the FUNCTION tools with screenshots rendered as a text
- *                        `data:…;base64` URL (chat-completions providers, which can't read
- *                        structured image tool results).
+ *   • "disabled"       → no computer tools. Providers without a proven visual image
+ *                        transport fail closed instead of receiving base64 as text.
+ *   • "function-text"  → deprecated fail-closed alias retained for source compatibility.
  */
-export type ComputerToolMode = "hosted" | "function-image" | "function-text";
+export type ComputerToolMode = "hosted" | "function-image" | "disabled" | "function-text";
 
 export type ComputerUseArgs = {
   dimensions?: [number, number];
@@ -1304,13 +1304,13 @@ export class ComputerUseCapability extends Capability {
           this.args.needsApproval,
           true,
         );
+      case "disabled":
       case "function-text":
-        return computerFunctionTools(
-          computer,
-          this.args.readOnly ?? false,
-          this.args.needsApproval,
-          false,
-        );
+        // A text data URL is not a visual observation for the provider and can
+        // consume hundreds of thousands of apparent text tokens. Disable the
+        // entire coordinate-dependent capability: action tools without a usable
+        // screenshot would be blind and unsafe.
+        return [];
       case undefined:
         break; // fall through to the legacy sniff (back-compat), preserved byte-for-byte
     }

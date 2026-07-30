@@ -62,6 +62,15 @@ the provider excludes them from context until a bounded `tool_search_output`
 discloses a match. The disclosed definition is then ordinary structured history
 and is counted there.
 
+Typed `input_image`, `image_url`, structured `image`, and
+`computer_screenshot` objects are projected as native media before the generic
+JSON/text estimate. Explicit detail and dimensions are retained; when needed,
+a bounded byte prefix can recover PNG, GIF, WebP VP8X, or JPEG geometry. The
+dimension-aware estimate is capped, and unknown geometry uses one explicit
+conservative bounded fallback. Inline image bytes or data-URL base64 therefore
+do not grow the text estimate linearly. A data URL inside ordinary textual
+content is still text and receives ordinary text accounting.
+
 ## Model-facing tool output
 
 Every resolved model carries a textual tool-output policy. The Codex catalog's
@@ -76,6 +85,13 @@ seam. Raw pending tool-call receipts remain out-of-band until settlement so
 Pause, Steer, failure, and deploy recovery can still reconcile the real outcome.
 UI/audit events are a separate projection and are never used to reconstruct
 model history.
+
+The final request-time filter is not a compaction boundary. For an unchanged
+canonical prefix and settings, a later provider request must reproduce the
+earlier serialized filtered prefix exactly. Deterministic normalization,
+redaction, and output bounding are allowed; deleting or reordering an earlier
+`view_image` call/result pair is not. Only the fenced durable replacement below
+may remove active history.
 
 ## What the summarizer sees
 
