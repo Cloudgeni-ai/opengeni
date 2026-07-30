@@ -439,11 +439,12 @@ describe("prepareToolspaceMcpSurface", () => {
     }
   });
 
-  test("uses the host MCP credential port with the active turn's frozen initiator", async () => {
+  test("uses host MCP credentials and preserves legitimate auth-needed results", async () => {
     if (!available) return;
     const server = startTestMcpServer({ requiredAuthorization: "Bearer cloud-connection" });
     const connectionId = crypto.randomUUID();
     const requests: McpCredentialsRequest[] = [];
+    let authRequired = false;
     const settings = testSettings({
       toolspaceEnabled: true,
       toolspaceMaxCallsPerTurn: 200,
@@ -477,6 +478,24 @@ describe("prepareToolspaceMcpSurface", () => {
       connectionCredentials: {
         mcpCredentials: async (request: McpCredentialsRequest) => {
           requests.push(request);
+          if (authRequired && request.toolName) {
+            return {
+              status: "auth_needed" as const,
+              accountId: request.accountId,
+              workspaceId: request.workspaceId,
+              sessionId: request.sessionId,
+              reason: "missing_connection" as const,
+              connectionId,
+              providerDomain: request.connectionRef.providerDomain,
+              ...(request.connectionRef.provider
+                ? { provider: request.connectionRef.provider }
+                : {}),
+              ...(request.connectionRef.selectedResources
+                ? { selectedResources: request.connectionRef.selectedResources }
+                : {}),
+              authorizationUrl: "https://example.com/connect",
+            };
+          }
           return {
             status: "ok" as const,
             accountId: request.accountId,
@@ -503,6 +522,31 @@ describe("prepareToolspaceMcpSurface", () => {
     expect(tool).toBeDefined();
     const result = await tool!.call({ query: "host credential" });
     expect(result.isError).toBeFalsy();
+    authRequired = true;
+    const authResult = await tool!.call({ query: "reauthenticate" });
+    expect(authResult).toMatchObject({
+      isError: true,
+      content: [
+        {
+          type: "text",
+          text: "Authentication required - a connection link was posted to the session.",
+        },
+      ],
+    });
+    expect(server.calls).toHaveLength(1);
+    const events = await listSessionEvents(db, seeded.workspaceId, seeded.sessionId, 0, 100);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "tool.auth_needed",
+        payload: expect.objectContaining({
+          serverId: "host-github",
+          toolName: "search_documents",
+          reason: "missing_connection",
+          connectionId,
+          authorizationUrl: "https://example.com/connect",
+        }),
+      }),
+    );
     expect(requests.length).toBeGreaterThan(0);
     expect(requests.every((request) => request.surface === "toolspace")).toBe(true);
     expect(requests.every((request) => request.accountId === seeded.accountId)).toBe(true);
@@ -792,5 +836,68 @@ describe("prepareToolspaceMcpSurface", () => {
     const text = (result.content?.[0] as { text?: string } | undefined)?.text;
     expect(text).toBe("upstream tool failed: flaky__search_documents");
     await surface!.close();
+  }, 60_000);
+
+  test("never turns an MCP request timeout into a connection-auth result", async () => {
+    if (!available) return;
+    let markStarted: (() => void) | null = null;
+    let releaseCall: (() => void) | null = null;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      releaseCall = resolve;
+    });
+    const server = startTestMcpServer({
+      beforeToolCall: async () => {
+        markStarted?.();
+        await gate;
+      },
+    });
+    const deps = {
+      settings: testSettings({
+        toolspaceEnabled: true,
+        toolspaceMaxCallsPerTurn: 200,
+        mcpServers: [
+          {
+            id: "timeout",
+            url: server.url,
+            cacheToolsList: false,
+            timeoutMs: 1_000,
+          },
+        ],
+      }),
+      db,
+      bus: new MemoryEventBus(),
+      observability,
+    } as unknown as ApiRouteDeps;
+    const seeded = await seedSession({
+      selects: ["timeout"],
+      withActiveTurn: true,
+    });
+    let surface: ToolspaceMcpSurface | null = null;
+    try {
+      surface = await prepareToolspaceMcpSurface({
+        deps,
+        grant: grantFor(seeded),
+      });
+      const tool = surface!.tools.find(
+        (candidate) => candidate.name === "timeout__search_documents",
+      );
+      expect(tool).toBeDefined();
+      const pending = tool!.call({ query: "wait" });
+      await started;
+      const result = await pending;
+      expect(result).toMatchObject({
+        isError: true,
+        content: [{ type: "text", text: "upstream tool failed: timeout__search_documents" }],
+      });
+      const events = await listSessionEvents(db, seeded.workspaceId, seeded.sessionId, 0, 100);
+      expect(events.some((event) => event.type === "tool.auth_needed")).toBe(false);
+    } finally {
+      releaseCall?.();
+      await surface?.close();
+      server.close();
+    }
   }, 60_000);
 });
