@@ -94,6 +94,7 @@ export async function mintSandboxToolspaceToken(
     subjectLabel: "sandbox toolspace",
     permissions: ["toolspace:call"],
     sessionId: authority.sessionId,
+    principalKind: "service",
     exp: expiresAtSeconds,
   });
   return { token, expiresAt: new Date(expiresAtSeconds * 1000) };

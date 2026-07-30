@@ -1240,6 +1240,7 @@ describe("API component integration", () => {
       workspaceId,
       subjectId: grant.subjectId,
       permissions: [...grant.permissions, "billing:read"],
+      principalKind: "human_session",
       exp: Math.floor(Date.now() / 1000) + 60,
     });
     const authHeaders = { authorization: `Bearer ${token}` };
@@ -1329,6 +1330,7 @@ describe("API component integration", () => {
         workspaceId: ownerWorkspaceId,
         subjectId: owner.subjectId,
         permissions: [...allAccountPermissions, ...allWorkspacePermissions],
+        principalKind: "human_session",
         exp: Math.floor(Date.now() / 1000) + 60,
       })}`,
     };
@@ -1338,6 +1340,7 @@ describe("API component integration", () => {
         workspaceId: otherWorkspaceId,
         subjectId: otherTenant.subjectId,
         permissions: [...allAccountPermissions, ...allWorkspacePermissions],
+        principalKind: "human_session",
         exp: Math.floor(Date.now() / 1000) + 60,
       })}`,
     };
@@ -1482,6 +1485,7 @@ describe("API component integration", () => {
       workspaceId,
       subjectId: access.subjectId,
       permissions: [...allAccountPermissions, ...allWorkspacePermissions],
+      principalKind: "human_session",
       exp: Math.floor(Date.now() / 1000) + 60,
     });
     const headers = { authorization: `Bearer ${token}` };
@@ -1537,6 +1541,7 @@ describe("API component integration", () => {
       workspaceId,
       subjectId: access.subjectId,
       permissions: [...allAccountPermissions, ...allWorkspacePermissions],
+      principalKind: "human_session",
       exp: Math.floor(Date.now() / 1000) + 60,
     });
     const headers = { authorization: `Bearer ${token}` };
@@ -1600,6 +1605,7 @@ describe("API component integration", () => {
       workspaceId,
       subjectId: access.subjectId,
       permissions: [...allAccountPermissions, ...allWorkspacePermissions],
+      principalKind: "human_session",
       exp: Math.floor(Date.now() / 1000) + 60,
     });
     const authHeaders = { authorization: `Bearer ${token}` };
@@ -1697,6 +1703,7 @@ describe("API component integration", () => {
       workspaceId,
       subjectId: access.subjectId,
       permissions: [...allAccountPermissions, ...allWorkspacePermissions],
+      principalKind: "human_session",
       exp: Math.floor(Date.now() / 1000) + 60,
     });
 
@@ -6991,6 +6998,7 @@ describe("API component integration", () => {
         workspaceId: grant.workspaceId,
         subjectId: grant.subjectId,
         permissions,
+        principalKind: "human_session",
         exp: Math.floor(Date.now() / 1000) + 3600,
       })}`;
     const adminAuth = {
@@ -7626,6 +7634,7 @@ describe("API component integration", () => {
         workspaceId: grant.workspaceId,
         subjectId: "test:first-party-mcp-permissions",
         permissions,
+        principalKind: "human_session",
         exp: Math.floor(Date.now() / 1000) + 300,
       });
 
@@ -7869,6 +7878,7 @@ describe("API component integration", () => {
         workspaceId: grant.workspaceId,
         subjectId: "test:session-mcp-servers",
         permissions,
+        principalKind: "human_session",
         exp: Math.floor(Date.now() / 1000) + 300,
       })}`;
     const attachAuth = await signToken([
@@ -8524,6 +8534,7 @@ describe("API component integration", () => {
         "sessions:control",
         "mcp_servers:attach",
       ],
+      principalKind: "human_session",
       exp: Math.floor(Date.now() / 1000) + 300,
     })}`;
 
@@ -8644,6 +8655,7 @@ describe("API component integration", () => {
       workspaceId: grant.workspaceId,
       subjectId: "test:goal-first-party-permissions",
       permissions: ["workspace:read", "sessions:create", "sessions:read"],
+      principalKind: "human_session",
       exp: Math.floor(Date.now() / 1000) + 300,
     });
 
@@ -9448,6 +9460,7 @@ async function signDelegatedBearer(
     ...(input.turnId ? { turnId: input.turnId } : {}),
     ...(input.attemptId ? { attemptId: input.attemptId } : {}),
     ...(input.executionGeneration ? { executionGeneration: input.executionGeneration } : {}),
+    principalKind: "agent_attempt",
     exp: Math.floor(Date.now() / 1000) + 300,
   })}`;
 }

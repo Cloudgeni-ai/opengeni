@@ -3209,17 +3209,33 @@ async function signFirstPartyDelegatedBearer(
   if (!settings.delegationSecret || !options.accountId || !options.workspaceId) {
     return null;
   }
+  const attemptClaims = [
+    options.sessionId,
+    options.turnId,
+    options.attemptId,
+    options.executionGeneration,
+  ];
+  const hasAnyAttemptClaim = attemptClaims.some((claim) => claim !== undefined);
+  const hasExactAttemptClaims = attemptClaims.every((claim) => claim !== undefined);
+  if (hasAnyAttemptClaim && !hasExactAttemptClaims) {
+    return null;
+  }
   return await signDelegatedAccessToken(settings.delegationSecret, {
     accountId: options.accountId,
     workspaceId: options.workspaceId,
     subjectId: options.subjectId ?? "worker:first-party-mcp",
     ...(options.subjectLabel ? { subjectLabel: options.subjectLabel } : {}),
     permissions: options.firstPartyPermissions ?? [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS],
+    principalKind: hasExactAttemptClaims ? "agent_attempt" : "service",
     firstPartyMcpTools: options.firstPartyTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
-    ...(options.sessionId ? { sessionId: options.sessionId } : {}),
-    ...(options.turnId ? { turnId: options.turnId } : {}),
-    ...(options.attemptId ? { attemptId: options.attemptId } : {}),
-    ...(options.executionGeneration ? { executionGeneration: options.executionGeneration } : {}),
+    ...(hasExactAttemptClaims
+      ? {
+          sessionId: options.sessionId!,
+          turnId: options.turnId!,
+          attemptId: options.attemptId!,
+          executionGeneration: options.executionGeneration!,
+        }
+      : {}),
     exp: Math.floor(Date.now() / 1000) + 60 * 60,
   });
 }

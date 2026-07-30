@@ -93,6 +93,7 @@ async function bearer(
     subjectLabel: subjectId,
     permissions,
     ...(sessionId ? { sessionId } : {}),
+    principalKind: "service",
     exp: Math.floor(Date.now() / 1000) + 3_600,
   });
   return `Bearer ${token}`;

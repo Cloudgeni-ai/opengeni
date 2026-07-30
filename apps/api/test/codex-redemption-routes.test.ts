@@ -594,6 +594,7 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
       workspaceId,
       subjectId: `user:${OWNER_USER_ID}`,
       permissions: ["workspace:admin"],
+      principalKind: "human_session",
       exp: Math.floor(Date.now() / 1000) + 60,
     });
     const delegatedAttempt = await prepare(

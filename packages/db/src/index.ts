@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type {
   AccessContext,
   AccessGrant,
+  AccessPrincipalKind,
   ApiKey,
   BillingBalance,
   CapabilityCatalogItem,
@@ -222,6 +223,7 @@ export * from "./session-control";
 export * from "./session-queue-commands";
 export * from "./new-session-drafts";
 export * from "./workspace-instruction-policies";
+export * from "./preference-registry";
 export { interruptedToolCallResult } from "./session-tool-call-settlement";
 export { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
 export {
@@ -1571,6 +1573,7 @@ export async function ensureManagedAccessForUser(
         subjectId,
         subjectLabel,
         permissions: row.membership.permissions as Permission[],
+        principalKind: "human_session",
       })),
       defaultAccountId: account.id,
       defaultWorkspaceId: defaultWorkspace.id,
@@ -1827,6 +1830,7 @@ export async function getWorkspaceGrant(
   db: Database,
   subjectId: string,
   workspaceId: string,
+  provenance?: { principalKind?: AccessPrincipalKind },
 ): Promise<AccessGrant | null> {
   const [row] = await db
     .select({
@@ -1849,6 +1853,7 @@ export async function getWorkspaceGrant(
         subjectId: row.membership.subjectId,
         ...(row.membership.subjectLabel ? { subjectLabel: row.membership.subjectLabel } : {}),
         permissions: row.membership.permissions as Permission[],
+        ...(provenance?.principalKind ? { principalKind: provenance.principalKind } : {}),
       }
     : null;
 }

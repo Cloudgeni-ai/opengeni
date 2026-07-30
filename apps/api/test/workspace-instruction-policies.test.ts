@@ -104,6 +104,7 @@ async function bearerFor(grant: Grant, permissions: Permission[]): Promise<strin
     workspaceId: grant.workspaceId,
     subjectId: grant.subjectId,
     permissions,
+    principalKind: "human_session",
     exp: Math.floor(Date.now() / 1000) + 3_600,
   })}`;
 }

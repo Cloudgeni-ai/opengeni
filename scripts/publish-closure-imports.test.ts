@@ -21,6 +21,7 @@ describe("publish closure import discovery", () => {
   test("finds every dependency-bearing declaration form", () => {
     const source = `
       /// <reference types="@opengeni/reference" />
+      /// <reference preserve="true" types='@opengeni/reference-extra' />
       import type { A } from "@opengeni/imported";
       export type { B } from "@opengeni/exported";
       import C = require("@opengeni/import-equals");
@@ -33,6 +34,13 @@ describe("publish closure import discovery", () => {
       "@opengeni/import-type",
       "@opengeni/imported",
       "@opengeni/reference",
+      "@opengeni/reference-extra",
     ]);
+  });
+
+  test("rejects malformed declarations instead of returning an incomplete closure", () => {
+    expect(() =>
+      declarationModuleSpecifiers('import type { A } from "unterminated', "bad.d.ts"),
+    ).toThrow("Could not parse bad.d.ts");
   });
 });

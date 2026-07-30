@@ -1257,6 +1257,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         workspaceId,
         subjectId: raceSubject,
         permissions: ["sessions:read"],
+        principalKind: "human_session",
         exp: Math.floor(Date.now() / 1000) + 3600,
       });
 
@@ -1373,6 +1374,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         workspaceId,
         subjectId: raceSubject,
         permissions: ["sessions:read"],
+        principalKind: "human_session",
         exp: Math.floor(Date.now() / 1000) + 3600,
       });
 

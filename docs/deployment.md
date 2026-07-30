@@ -244,10 +244,12 @@ The provisioner converges `opengeni_app` to `LOGIN NOSUPERUSER NOBYPASSRLS
 NOCREATEROLE NOCREATEDB NOREPLICATION NOINHERIT`, refuses to guess through any
 privilege-bearing role membership or ownership, revokes database/schema creation
 and all table privileges, then grants the exact current-ledger table contract:
-full CRUD on 83 ordinary runtime tables, SELECT only on
-`nested_agent_depth_configuration`, SELECT + INSERT on the three append-only
-evidence/revision tables, and no direct table DML on the five FORCE-RLS
-host-export tables.
+full CRUD on 83 ordinary runtime tables; SELECT only on
+`nested_agent_depth_configuration`, preference lifecycle events, and preference
+snapshots; SELECT + INSERT on five append-only/proposal/revision tables; and no
+direct table DML on the five FORCE-RLS host-export tables. Preference head
+UPDATE/DELETE is available only through target-schema-local SECURITY DEFINER
+lock/lifecycle functions, which migrate-then-provision explicitly regrants.
 PostgreSQL 16+ automatically records an ADMIN-only reverse membership when a
 non-superuser `CREATEROLE` principal creates the app role. Provisioning and
 posture checks accept only that exact creator-management edge when `SET=false`,
@@ -267,7 +269,7 @@ PostgreSQL catalogs in a repeatable-read/read-only transaction:
   `row_security=on`;
 - no database/schema/relation/private-routine ownership and no database/schema
   CREATE;
-- exactly 81 declared tenant tables with ENABLE + FORCE + active RLS and at
+- exactly 85 declared tenant tables with ENABLE + FORCE + active RLS and at
   least one policy each;
 - exact SELECT/INSERT/UPDATE/DELETE grants for each declared privilege class,
   absence of TRUNCATE/REFERENCES/TRIGGER everywhere, and no privileges on any
