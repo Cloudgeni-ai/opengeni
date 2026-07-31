@@ -24,6 +24,7 @@ import {
   hasGitCredentialRepositorySelection,
   hasGitHubRepositorySelection,
   resolveStreamTokenSecret,
+  sandboxArchiveCaptureTimeoutMs,
   stableSandboxEnvironmentForRun,
 } from "@opengeni/config";
 import type { Settings } from "@opengeni/config";
@@ -206,6 +207,7 @@ export async function attachViewer(
     os: session.sandboxOs,
     leaseTtlMs,
     warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,
+    captureWaitMs: sandboxArchiveCaptureTimeoutMs(settings),
   });
 
   // FENCED: a newer epoch re-established the box. Release our just-registered

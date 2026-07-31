@@ -1,5 +1,46 @@
 # @opengeni/worker-bundle
 
+## 0.12.20
+
+### Patch Changes
+
+- 710b081: Keep sessions usable when a previously selected MCP capability is disconnected or removed. Unavailable historical refs remain visible in effective policy but are omitted from executable tools, and the agent receives a bounded turn-level warning not to claim access to the missing source.
+- b7df541: Prevent provider-native checkpoint capture from racing sandbox operations while
+  the provider has paused the source box. Capture now owns a durable
+  lease/epoch/instance/generation claim, blocks new holders and mutations, drains
+  provider-local reads before entering the exclusive snapshot call, and retains
+  ownership through late provider settlement and exact stale-claim recovery.
+  Modal's typed completed-exec stdin race is also normalized into a side-effect-free
+  terminal poll, so an exec that exits between local lookup and the provider write
+  settles its retained process instead of failing the enclosing turn.
+- Updated dependencies [710b081]
+- Updated dependencies [b7df541]
+  - @opengeni/core@0.13.9
+  - @opengeni/contracts@0.24.3
+  - @opengeni/config@0.7.19
+  - @opengeni/db@0.15.5
+  - @opengeni/runtime@0.14.11
+  - @opengeni/documents@0.2.55
+  - @opengeni/events@0.3.46
+  - @opengeni/github@0.4.6
+  - @opengeni/storage@0.2.43
+
+## 0.12.19
+
+### Patch Changes
+
+- Updated dependencies [84fb671]
+- Updated dependencies [96eb64b]
+  - @opengeni/db@0.15.4
+  - @opengeni/config@0.7.18
+  - @opengeni/contracts@0.24.2
+  - @opengeni/github@0.4.5
+  - @opengeni/runtime@0.14.10
+  - @opengeni/storage@0.2.42
+  - @opengeni/core@0.13.8
+  - @opengeni/documents@0.2.54
+  - @opengeni/events@0.3.45
+
 ## 0.12.18
 
 ### Patch Changes

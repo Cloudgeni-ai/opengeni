@@ -70,7 +70,7 @@ Default URLs:
 - NATS monitor: `http://127.0.0.1:8222`
 - Temporal gRPC: `127.0.0.1:7233`
 
-`bun run dev` may auto-select alternate Docker Compose host ports when defaults are already in use; it wires those selected ports into the API and worker variable set for that run.
+`bun run dev` is per-worktree: Compose project = directory basename (main checkout dir `opengeni` → `opengeni-main`; override with `OPENGENI_COMPOSE_PROJECT`), free host ports (ignore copied `.env` port pins unless `OPENGENI_PIN_PORTS=1`), rewrite loopback URLs including `nats://`, write `.env.runtime`. `bun run dev:*` / `db:*` source `.env` then `.env.runtime`. Do not reuse another worktree’s host ports. Sandbox image build skips when `OPENGENI_SANDBOX_BACKEND=none`.
 
 MinIO is the local S3-compatible object storage default for Docker Compose and optional self-contained Kubernetes smoke tests. Production deployments should use provider-native storage instead of deploying MinIO manually: `azure-blob` for Azure Blob, `aws-s3` for AWS S3, and `gcs` for Google Cloud Storage.
 

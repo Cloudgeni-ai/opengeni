@@ -1,5 +1,23 @@
 # @opengeni/github
 
+## 0.4.6
+
+### Patch Changes
+
+- Updated dependencies [710b081]
+- Updated dependencies [b7df541]
+  - @opengeni/contracts@0.24.3
+  - @opengeni/config@0.7.19
+
+## 0.4.5
+
+### Patch Changes
+
+- 96eb64b: Advance the reviewed knowledge release package graph to fresh publishable identities after the previous version projection was invalidated. This changes release metadata only and does not alter runtime behavior.
+- Updated dependencies [96eb64b]
+  - @opengeni/config@0.7.18
+  - @opengeni/contracts@0.24.2
+
 ## 0.4.4
 
 ### Patch Changes

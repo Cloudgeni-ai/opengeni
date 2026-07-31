@@ -5,7 +5,7 @@
 // spine (OAuth redirect or an API-key form) in a right-hand detail sheet, never
 // by hand-editing enable headers. Packs keep their first-class register/enable/
 // disable/unregister surface, restyled flat.
-import { OPENGENI_SLACK_BOT_REQUIRED_SCOPES } from "@opengeni/contracts";
+import { OPENGENI_SLACK_BOT_REQUIRED_SCOPES } from "@opengeni/contracts/slack-bot-scopes";
 import { usePacks, useVariableSets } from "@opengeni/react";
 import {
   Building2Icon,
@@ -18,7 +18,7 @@ import {
   RefreshCwIcon,
   SearchIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { AddCustomDialog } from "@/components/capabilities/add-custom-dialog";
@@ -74,6 +74,11 @@ import {
   preferredOpenGeniSlackBotConnection,
 } from "@/lib/slack-bot";
 import { cn } from "@/lib/utils";
+
+const GoogleDriveConnectorCard = lazy(async () => {
+  const module = await import("@/components/capabilities/google-drive-connector-card");
+  return { default: module.GoogleDriveConnectorCard };
+});
 import type {
   AccessContext,
   CapabilityCatalogItem,
@@ -934,6 +939,10 @@ export function CapabilitiesRoute({
             </>
           }
         />
+
+        <Suspense fallback={<Skeleton className="mt-6 h-40 w-full rounded-xl" />}>
+          <GoogleDriveConnectorCard workspaceId={workspaceId} />
+        </Suspense>
 
         <section className="mt-6" aria-labelledby="slack-connections-heading">
           <div>

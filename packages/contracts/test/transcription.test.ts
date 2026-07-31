@@ -1,9 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import {
+  ClientConfig,
+  ClientVoiceInputConfig,
+  OPENGENI_API_CONTRACT_REVISION,
+  resolveWorkspaceVoiceInputEnabled,
+  TranscribeAudioResponse,
   TranscriptionEvent,
   TranscriptionResultMetadata,
   UpdateWorkspaceSettingsRequest,
+  VOICE_INPUT_MAX_DURATION_SECONDS,
   WorkspaceTranscriptionPolicy,
+  WorkspaceVoiceInputSettings,
   type WorkspaceTranscriptionTarget,
 } from "../src";
 
@@ -176,5 +183,87 @@ describe("workspace transcription contracts", () => {
     });
     expect(azureByok.primary?.credentialMode).toBe("byok");
     expect(azureByok.primary?.credentialConnectionId).toBe("22222222-2222-4222-8222-222222222222");
+  });
+});
+
+describe("native voice input contracts", () => {
+  test("accepts a simple workspace voiceInput toggle", () => {
+    expect(WorkspaceVoiceInputSettings.safeParse({ enabled: true }).success).toBe(true);
+    expect(WorkspaceVoiceInputSettings.safeParse({ enabled: false }).success).toBe(true);
+    expect(
+      WorkspaceVoiceInputSettings.safeParse({ enabled: true, provider: "openai" }).success,
+    ).toBe(false);
+    expect(UpdateWorkspaceSettingsRequest.safeParse({ voiceInput: { enabled: false } }).success).toBe(
+      true,
+    );
+  });
+
+  test("maps legacy transcription.enabled when voiceInput is absent", () => {
+    expect(resolveWorkspaceVoiceInputEnabled({ voiceInput: { enabled: false } })).toBe(false);
+    expect(resolveWorkspaceVoiceInputEnabled({ voiceInput: { enabled: true } })).toBe(true);
+    expect(resolveWorkspaceVoiceInputEnabled({ transcription: acceptedPolicy })).toBe(true);
+    expect(
+      resolveWorkspaceVoiceInputEnabled({
+        transcription: { ...acceptedPolicy, enabled: false },
+      }),
+    ).toBe(false);
+    expect(resolveWorkspaceVoiceInputEnabled({})).toBeNull();
+    expect(
+      resolveWorkspaceVoiceInputEnabled({
+        voiceInput: { enabled: false },
+        transcription: acceptedPolicy,
+      }),
+    ).toBe(false);
+  });
+
+  test("projects client-safe voiceInput capability without provider secrets", () => {
+    const capability = ClientVoiceInputConfig.parse({
+      available: true,
+      maxDurationSeconds: VOICE_INPUT_MAX_DURATION_SECONDS,
+      maxSizeBytes: 25 * 1024 * 1024,
+      acceptedMimeTypes: ["audio/webm", "audio/mp4"],
+    });
+    expect(capability.available).toBe(true);
+    expect(capability.maxDurationSeconds).toBe(60);
+    expect(
+      ClientVoiceInputConfig.safeParse({
+        available: true,
+        maxDurationSeconds: 60,
+        maxSizeBytes: 1,
+        acceptedMimeTypes: ["audio/webm"],
+        apiKey: "secret",
+      }).success,
+    ).toBe(false);
+
+    const config = ClientConfig.parse({
+      deploymentRevision: "dev",
+      apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
+      defaultModel: "gpt-5.6-sol",
+      allowedModels: ["gpt-5.6-sol"],
+      defaultReasoningEffort: "low",
+      allowedReasoningEfforts: ["low"],
+      fileUploads: { enabled: false, maxSizeBytes: 1 },
+      productAccessMode: "local",
+      voiceInput: capability,
+    });
+    expect(config.voiceInput.available).toBe(true);
+  });
+
+  test("keeps transcription response text-only", () => {
+    expect(TranscribeAudioResponse.parse({ text: "hello", languages: ["en"] })).toEqual({
+      text: "hello",
+      languages: ["en"],
+    });
+    expect(TranscribeAudioResponse.parse({ text: "hello" })).toEqual({
+      text: "hello",
+      languages: [],
+    });
+    expect(
+      TranscribeAudioResponse.safeParse({
+        text: "hello",
+        languages: [],
+        provider: "openai",
+      }).success,
+    ).toBe(false);
   });
 });

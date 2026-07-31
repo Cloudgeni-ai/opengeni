@@ -1,5 +1,25 @@
 # @opengeni/react
 
+## Unreleased
+
+- Copy affordances: fenced code + tables in `Markdown`, hover copy on user/assistant messages, and "Copy turn" on settled turn chips (includes the lifted final answer).
+- Session timeline history navigation: `loadOldest` / `loadNewer` / `jumpToLatest` on `useSessionEvents`, plus Jump to start / Jump to latest chrome on `MessageTimeline` (bounded windows; no middle gap walk).
+- Add `SessionChrome` — production/embed session-signal dock (incoming / queue / goal / agents) with token overrides (`--og-session-chrome-*`), token tooltips, crossfade panel switches, and queue hover actions wired to `UseTurnQueueResult`. Replaces stacked `QueueSurface` + host goal/agents chrome in the web session route.
+- Export shared `Tooltip*` primitives used by SessionChrome (portal-token aware).
+- Fix SessionChrome tooltips: inverted tip surface uses inline fg/bg so `.og-root` cannot blank the text; tip only icon actions; Steer copy matches QueueSurface (`Make this the next direction`).
+- Light ChatComposer spacing/token freshen (quieter focus border, tighter footer/input padding).
+- Replace host-adapter composer transcription with native MediaRecorder capture and immediate server transcription.
+- Compact composer voice chrome: live/fallback waveform, separate cancel vs stop-and-transcribe actions, and a quieter transcribing state.
+
+## 0.30.2
+
+### Patch Changes
+
+- 84fb671: Prevent a ready file restored during reconnect from being counted twice across the durable composer draft and the still-live attachment card. Canonical duplicate refs are removed before draft persistence and composer submission while custom mounts and exact draft revision/content conflict protection remain intact.
+- 96eb64b: Advance the reviewed knowledge release package graph to fresh publishable identities after the previous version projection was invalidated. This changes release metadata only and does not alter runtime behavior.
+- Updated dependencies [96eb64b]
+  - @opengeni/sdk@0.30.2
+
 ## 0.30.1
 
 ### Patch Changes

@@ -86,6 +86,7 @@ export type SessionClientLike = Pick<
   | "updateWorkspace"
   | "setWorkspaceInferenceState"
   | "getWorkspace"
+  | "getWorkspaceModelCatalog"
   | "listWorkspaceControlEvents"
   | "streamWorkspaceControlEvents"
   | "getBillingUsage"

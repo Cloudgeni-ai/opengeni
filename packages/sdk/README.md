@@ -258,6 +258,11 @@ await client.resumeGoal(workspaceId, sessionId); // resets counters, re-arms con
 `uploadFile` wraps the three-step flow (begin → signed PUT → complete) in one
 call; the lower-level steps are exported for resumable/custom flows.
 
+Browser hosts need no storage credentials or per-application registration.
+OpenGeni authorizes the workspace request and returns a short-lived,
+object-scoped signed URL; operators must configure the private object store to
+allow CORS from `*` so any product embedding the SDK can use that URL.
+
 ```ts
 const file = await client.uploadFile(workspaceId, {
   filename: "incident-notes.md",

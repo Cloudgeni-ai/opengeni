@@ -14,8 +14,6 @@ import {
   encryptEnvironmentValue,
   getConnectionMetadata,
   loadConnectionCredentialForBroker,
-  loadIntegrationOAuthClient,
-  replaceIntegrationOAuthClient,
   type DbClient,
 } from "@opengeni/db";
 import { createSignedState, readSignedState } from "@opengeni/github";
@@ -1421,7 +1419,7 @@ describe("connections routes", () => {
     expect(nonOfficialResourceText).toContain("https://mcp.slack.com/mcp");
   });
 
-  test("oauth start uses CIMD for Linear when CIMD is advertised", async () => {
+  test("oauth start prefers DCR for Linear when DCR and CIMD are advertised", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const as = startFakeAuthorizationServer({
@@ -1454,18 +1452,14 @@ describe("connections routes", () => {
       expect(response.status).toBe(200);
       const body = (await response.json()) as { state: string; authorizationUrl: string };
       const authUrl = new URL(body.authorizationUrl);
-      expect(authUrl.searchParams.get("client_id")).toBe(
-        "https://api.opengeni.test/v1/integrations/oauth/client-metadata.json",
-      );
+      expect(authUrl.searchParams.get("client_id")).toBe(`${as.url}/registered-client/1`);
       expect(authUrl.searchParams.get("resource")).toBe("urn:test:mcp");
       expect(authUrl.searchParams.get("scope")).toBe("read write");
-      expect(as.registrations).toHaveLength(0);
+      expect(as.registrations).toHaveLength(1);
 
       const state = readSignedState(body.state, STATE_SECRET) as Record<string, unknown> | null;
-      expect(state?.clientRegistrationMethod).toBe("cimd");
-      expect(state?.clientId).toBe(
-        "https://api.opengeni.test/v1/integrations/oauth/client-metadata.json",
-      );
+      expect(state?.clientRegistrationMethod).toBe("dcr");
+      expect(state?.clientId).toBe(`${as.url}/registered-client/1`);
 
       const callback = await publicApp(client.db).request(
         `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(body.state)}`,
@@ -1473,82 +1467,10 @@ describe("connections routes", () => {
       expect(callback.status).toBe(302);
       expect(callback.headers.get("location")).toContain("integration_oauth=success");
       expect(as.tokenRequests).toHaveLength(1);
-      expect(as.tokenRequests[0]!.get("client_id")).toBe(
-        "https://api.opengeni.test/v1/integrations/oauth/client-metadata.json",
-      );
+      expect(as.tokenRequests[0]!.get("client_id")).toBe(`${as.url}/registered-client/1`);
       expect(as.tokenRequests[0]!.has("client_secret")).toBe(false);
       expect(as.tokenRequestAuthHeaders[0]).toBeNull();
       expect(as.tokenRequests[0]!.get("resource")).toBe("urn:test:mcp");
-
-      const loadedClient = await loadIntegrationOAuthClient(
-        client.db,
-        settings,
-        "https://mcp.linear.app",
-      );
-      expect(loadedClient).toBeNull();
-    } finally {
-      mcp.close();
-      as.close();
-    }
-  });
-
-  test("oauth start ignores stored Linear DCR client when CIMD is advertised", async () => {
-    if (!available) return;
-    const workspace = await freshWorkspace();
-    await replaceIntegrationOAuthClient(client.db, {
-      issuer: "https://mcp.linear.app",
-      authorizationServer: "https://mcp.linear.app",
-      clientId: "public-linear-client",
-      tokenEndpointAuthMethod: "none",
-      metadata: {
-        registrationEndpoint: "https://mcp.linear.app/register",
-        registeredAt: "2026-01-01T00:00:00.000Z",
-      },
-    });
-    const as = startFakeAuthorizationServer({
-      issuer: "https://mcp.linear.app",
-      clientIdMetadataDocumentSupported: true,
-      dcr: true,
-      scopesSupported: ["read", "write"],
-      tokenEndpointAuthMethodsSupported: ["client_secret_basic", "client_secret_post", "none"],
-    });
-    const mcp = startTestMcpServer({
-      requiredAuthorization: "Bearer mcp-access-token",
-      unauthorizedAuthenticateHeader: `Bearer resource_metadata="${as.url}/.well-known/oauth-protected-resource", scope="read write"`,
-    });
-    try {
-      const response = await app().request(
-        `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
-        {
-          method: "POST",
-          headers: {
-            authorization: await bearer(workspace, "subject-a", ["connections:write"]),
-            "content-type": "application/json",
-          },
-          body: JSON.stringify({
-            providerDomain: "linear.app",
-            mcpUrl: mcp.url,
-            returnPath: "/integrations?connect_item=linear",
-          }),
-        },
-      );
-      expect(response.status).toBe(200);
-      const body = (await response.json()) as { authorizationUrl: string };
-      expect(new URL(body.authorizationUrl).searchParams.get("client_id")).toBe(
-        "https://api.opengeni.test/v1/integrations/oauth/client-metadata.json",
-      );
-      expect(as.registrations).toHaveLength(0);
-
-      const loadedClient = await loadIntegrationOAuthClient(
-        client.db,
-        settings,
-        "https://mcp.linear.app",
-      );
-      expect(loadedClient).toMatchObject({
-        clientId: "public-linear-client",
-        clientSecret: null,
-        tokenEndpointAuthMethod: "none",
-      });
     } finally {
       mcp.close();
       as.close();

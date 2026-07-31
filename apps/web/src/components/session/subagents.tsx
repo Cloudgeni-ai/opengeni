@@ -2,10 +2,8 @@
 // spawned workers. It is deliberately DECOUPLED from goals — a session's agent
 // tree is orthogonal to whether it carries a goal. One compact tree component
 // ({@link SubagentTree}) backs its single home:
-//   - ComposerAgentsPill (./composer-agents-pill.tsx) — the floating "N agents"
-//     pill above the composer that EXPANDS upward into the lineage popover (the
-//     glanceable, front-and-center hero); reuses {@link SubagentTree} +
-//     {@link SubagentsLabel} from here.
+//   - SessionChrome agents segment (production) — host passes SubagentTree as
+//     `agentsPanel`; the dock chip opens that panel in-place.
 // SpawnedByBreadcrumb is the inverse link a child session shows back to the
 // manager that spawned it.
 //

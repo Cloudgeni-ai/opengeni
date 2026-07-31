@@ -1,5 +1,15 @@
 # @opengeni/sdk
 
+## Unreleased
+
+- Add native voice-input configuration mirrors, workspace toggle resolution, and one-shot multipart `transcribeAudio` uploads.
+
+## 0.30.2
+
+### Patch Changes
+
+- 96eb64b: Advance the reviewed knowledge release package graph to fresh publishable identities after the previous version projection was invalidated. This changes release metadata only and does not alter runtime behavior.
+
 ## 0.30.1
 
 ### Patch Changes

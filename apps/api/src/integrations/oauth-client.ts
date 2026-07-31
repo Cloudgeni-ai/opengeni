@@ -588,6 +588,12 @@ async function registerOAuthClient(
   if (operator) {
     return operator;
   }
+  // Linear currently advertises CIMD but rejects its client metadata URL at
+  // the authorization endpoint. Its documented interactive setup uses DCR,
+  // so prefer the simultaneously advertised registration endpoint.
+  if (prefersDynamicClientRegistration(as)) {
+    return await getOrCreateDynamicClientRegistration(db, settings, as, redirectUri, scopes);
+  }
   if (as.clientIdMetadataDocumentSupported) {
     return {
       method: "cimd",
@@ -611,6 +617,12 @@ async function registerOAuthClient(
     };
   }
   return await getOrCreateDynamicClientRegistration(db, settings, as, redirectUri, scopes);
+}
+
+function prefersDynamicClientRegistration(as: AuthorizationServerMetadata): boolean {
+  return Boolean(
+    as.registrationEndpoint && normalizedIssuerKey(as.issuer) === "https://mcp.linear.app",
+  );
 }
 
 async function getOrCreateDynamicClientRegistration(

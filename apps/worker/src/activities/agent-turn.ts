@@ -133,6 +133,7 @@ import {
   calculateModelUsageCostMicros,
   configuredModelPricing,
   configuredStaticUsageLimits,
+  sandboxArchiveCaptureTimeoutMs,
   sandboxWarmRateMicrosPerSecond,
   settingsWithResolvedModelContext,
   resolveTurnExecutionPolicyV1,
@@ -409,6 +410,27 @@ export function providerRecoveryResult(): {
     status: "recovering",
     continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS,
   };
+}
+
+/**
+ * Tell the model when durable MCP policy references are unavailable for this
+ * exact turn. The policy projection already bounds and validates these ids;
+ * this notice prevents a graceful runtime drop from becoming a silent source-
+ * of-truth substitution or a false claim that the disconnected system was read.
+ */
+export function unavailableMcpTurnInstructions(input: {
+  droppedIds: readonly string[];
+  droppedCount: number;
+}): string | undefined {
+  if (input.droppedCount <= 0) {
+    return undefined;
+  }
+  const omittedCount = Math.max(0, input.droppedCount - input.droppedIds.length);
+  const listed = input.droppedIds.map((id) => `"${id}"`).join(", ");
+  const inventory = listed
+    ? `${listed}${omittedCount > 0 ? `, plus ${omittedCount} additional unavailable server(s)` : ""}`
+    : `${input.droppedCount} unavailable server(s)`;
+  return `MCP capability availability for this turn: the following session-selected server(s) are disconnected or no longer registered and were skipped: ${inventory}. Do not claim to have read or updated those systems. If the task depends on one as a source of truth, explain the limitation and ask the user to reconnect it or select another authoritative source; continue with unaffected work only when safe.`;
 }
 
 /**
@@ -2405,6 +2427,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         expectedEpoch: sandbox.leaseEpoch,
         expectedInstanceId: sandbox.established.instanceId,
         operation,
+        captureWaitMs: sandboxArchiveCaptureTimeoutMs(settings),
       };
       const admission = await advanceWorkspaceGeneration(db, identity);
       let result: T;
@@ -4313,6 +4336,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         availableMcpServerIds: runSettings.mcpServers.map((server) => server.id),
         defaultMcpServerIds: defaultSessionMcpServerIds(capabilitySettings.mcpServers),
       });
+      const mcpAvailabilityInstructions = unavailableMcpTurnInstructions({
+        droppedIds: resolvedToolPolicy.effectivePolicy.droppedIds,
+        droppedCount: resolvedToolPolicy.effectivePolicy.counts.dropped,
+      });
       const effectivePolicyTools = resolvedToolPolicy.toolRefs;
       const turnTools = withFirstPartyTools(runSettings, effectivePolicyTools);
       // §7.6 connection-credential provider — load (and decrypt) the variable set via the host
@@ -5389,7 +5416,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         ...(session.instructions ? { sessionInstructions: session.instructions } : {}),
         // Exact host context captured when this turn was accepted. It is
         // system-level and disappears with the turn rather than entering chat.
-        ...(turn.turnInstructions ? { turnInstructions: turn.turnInstructions } : {}),
+        ...(turn.turnInstructions || mcpAvailabilityInstructions
+          ? {
+              turnInstructions: [turn.turnInstructions, mcpAvailabilityInstructions]
+                .filter((value): value is string => Boolean(value))
+                .join(" "),
+            }
+          : {}),
         ...workspaceEnvironmentOption,
         // RIG RUNTIME (M3): the doctrine block, the setup-script hook (only when
         // the frozen version carries a non-empty script), and the rig credential

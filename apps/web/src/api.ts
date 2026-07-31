@@ -1,6 +1,6 @@
-// The console's only bespoke HTTP surface: client config bootstrap and the
-// Better Auth (managed session) endpoints, which sit outside the public API
-// the SDK covers. Everything else goes through `@opengeni/sdk`.
+// The console primarily uses `@opengeni/sdk`. Bootstrap, managed-session,
+// and optional connector routes share this authenticated request helper so
+// connector-only code does not increase the core session bundle.
 import {
   OpenGeniApiError,
   OpenGeniClient,
@@ -103,7 +103,7 @@ function authHeaders(): Record<string, string> {
   return authHeadersForAccessKey(getStoredAccessKey());
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${apiBaseUrl}${path}`, {
     ...init,
     credentials: "include",

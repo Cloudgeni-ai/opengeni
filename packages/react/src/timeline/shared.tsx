@@ -164,7 +164,7 @@ export function ActivityDisclosure({
   const inner = (
     <>
       {hasBody ? (
-        <ChevronRightIcon className="size-3.5 shrink-0 text-og-fg-subtle transition-transform duration-150 ease-og-in-out group-data-[state=open]/disclosure:rotate-90" />
+        <ChevronRightIcon className="size-3.5 shrink-0 text-og-fg-subtle transition-transform duration-[var(--og-duration-disclose)] ease-og-in-out group-data-[state=open]/disclosure:rotate-90" />
       ) : (
         <span className="size-3.5 shrink-0" />
       )}

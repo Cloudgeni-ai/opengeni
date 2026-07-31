@@ -32,6 +32,7 @@ import { SelfhostedControlError } from "../selfhosted/control-rpc";
 import { renderSelfhostedFault } from "../selfhosted/fault-rendering";
 import { isExecSessionLostBanner } from "../channel-a";
 import { parseExecBannerExitCode, parseExecBannerSessionId } from "../exec-banner";
+import { withSandboxProviderOperation } from "../provider-operation-gate";
 
 /** The per-session active-sandbox pointer the proxy re-reads on every op. Mirror
  *  of `@opengeni/db`'s `ActiveSandboxPointer` (structural, so the leaf does not
@@ -794,7 +795,9 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     if (!write) throw new RoutingUnsupportedError(op, record.backend.kind);
     let result: string;
     try {
-      result = await write.call(record.backend.session, args);
+      result = await withSandboxProviderOperation(record.backend.session, () =>
+        write.call(record.backend.session, args),
+      );
     } catch (error) {
       if (this.deps.afterProcessMutation) {
         const pending: PendingProcessMutationSettlement = {
@@ -856,7 +859,9 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     await this.ensureParentPromotion(record);
     const write = record.backend.session.writeStdin;
     if (!write) throw new RoutingUnsupportedError("writeStdin", record.backend.kind);
-    const result = await write.call(record.backend.session, args);
+    const result = await withSandboxProviderOperation(record.backend.session, () =>
+      write.call(record.backend.session, args),
+    );
     const proof = retainedProcessTerminalProof(result, providerSessionId);
     if (proof) await this.settleRetainedProcess(record, proof, result);
     return result;
@@ -890,7 +895,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         : undefined;
       let result: T;
       try {
-        result = await fn(backend.session);
+        result = await withSandboxProviderOperation(backend.session, () => fn(backend.session));
       } catch (error) {
         if (mutatesWorkspace && this.deps.afterMutation) {
           try {
@@ -1162,11 +1167,19 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       return terminal.result;
     }
     await this.ensureParentPromotion(record);
-    if (record.backend.session.execCommand) {
-      return await record.backend.session.execCommand(args);
+    const execCommand = record.backend.session.execCommand;
+    if (execCommand) {
+      return await withSandboxProviderOperation(record.backend.session, () =>
+        execCommand.call(record.backend.session, args),
+      );
     }
-    if (record.backend.session.exec) {
-      return formatExecResult(await record.backend.session.exec(args));
+    const exec = record.backend.session.exec;
+    if (exec) {
+      return formatExecResult(
+        await withSandboxProviderOperation(record.backend.session, () =>
+          exec.call(record.backend.session, args),
+        ),
+      );
     }
     throw new RoutingUnsupportedError("execCommand", record.backend.kind);
   }

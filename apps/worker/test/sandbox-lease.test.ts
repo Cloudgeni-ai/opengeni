@@ -34,6 +34,7 @@ import { getSettings, type Settings } from "@opengeni/config";
 import {
   acquireLease,
   advanceWorkspaceGeneration,
+  claimWorkspaceArchiveCapture,
   claimSessionWorkForAttempt,
   createSession,
   createDb,
@@ -42,11 +43,14 @@ import {
   mutateSessionControlInTransaction,
   listLiveModalSandboxLeaseAttributions,
   markWarmLeaseInstanceLost,
-  persistDrainSnapshot,
-  persistWarmSnapshot,
+  persistDrainSnapshot as persistDrainSnapshotRaw,
+  persistWarmSnapshot as persistWarmSnapshotRaw,
   previewColdLostLeaseInstanceBlockers,
   readWorkspaceArchiveCapturePreflight,
   recordWarmingSandboxCreated,
+  releaseLeaseHolder,
+  releaseWorkspaceArchiveCapture,
+  replaceExpiredWorkspaceArchiveCapture,
   readLease,
   reconcileColdLostLeaseInstanceBlockers,
   retainWorkspaceMutationProcess,
@@ -61,6 +65,7 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { createObservability } from "@opengeni/observability";
+import { RoutingSandboxSession } from "@opengeni/runtime";
 import {
   acquireSharedTestDatabase,
   type SharedTestDatabase,
@@ -71,7 +76,10 @@ import {
   type SweepModalOrphansFn,
   type TerminateBoxFn,
 } from "../src/activities/sandbox-lease";
-import { sandboxLeaseHolderIdForAttempt } from "../src/sandbox-resume";
+import {
+  maybePersistWarmWorkspaceSnapshot,
+  sandboxLeaseHolderIdForAttempt,
+} from "../src/sandbox-resume";
 import type { ActivityServices } from "../src/activities/types";
 
 const MODAL_PROVIDER_BINDING = {
@@ -305,6 +313,111 @@ function archiveDescriptor(archive: string, capturedAtMs: number) {
   };
 }
 
+async function persistDrainSnapshot(
+  _db: Database,
+  input: Omit<Parameters<typeof persistDrainSnapshotRaw>[1], "captureId">,
+): ReturnType<typeof persistDrainSnapshotRaw> {
+  const captureId = crypto.randomUUID();
+  const claimed = await claimWorkspaceArchiveCapture(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sandboxGroupId: input.sandboxGroupId,
+    captureId,
+    expectedEpoch: input.expectedEpoch,
+    expectedInstanceId: input.expectedInstanceId,
+    liveness: "draining",
+    captureTimeoutMs: 60_000,
+    minIntervalMs: 0,
+  });
+  if (claimed.status !== "claimed") {
+    throw new Error(`Drain capture fixture was not admitted: ${claimed.status}`);
+  }
+  try {
+    return await persistDrainSnapshotRaw(db, { ...input, captureId } as Parameters<
+      typeof persistDrainSnapshotRaw
+    >[1]);
+  } finally {
+    await releaseWorkspaceArchiveCapture(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sandboxGroupId: input.sandboxGroupId,
+      captureId,
+      expectedEpoch: input.expectedEpoch,
+      expectedInstanceId: input.expectedInstanceId,
+    });
+  }
+}
+
+async function persistWarmSnapshot(
+  _db: Database,
+  input: Omit<Parameters<typeof persistWarmSnapshotRaw>[1], "captureId"> & {
+    holderId: string;
+  },
+): ReturnType<typeof persistWarmSnapshotRaw> {
+  const [lease] = await admin<{ id: string }[]>`
+    select id from sandbox_leases
+    where workspace_id = ${input.workspaceId}
+      and sandbox_group_id = ${input.sandboxGroupId}`;
+  if (!lease) throw new Error("Warm capture fixture lease is missing");
+  const [existingHolder] = await admin<{ present: boolean }[]>`
+    select exists (
+      select 1 from sandbox_lease_holders
+      where lease_id = ${lease.id}
+        and kind = 'turn'
+        and holder_id = ${input.holderId}
+    ) as present`;
+  await admin`
+    insert into sandbox_lease_holders (
+      account_id, lease_id, workspace_id, kind, holder_id, subject_id, last_heartbeat_at
+    ) values (
+      ${input.accountId}, ${lease.id}, ${input.workspaceId}, 'turn',
+      ${input.holderId}, ${input.sessionId}, now()
+    )
+    on conflict (lease_id, kind, holder_id)
+      do update set last_heartbeat_at = now()`;
+  const captureId = crypto.randomUUID();
+  const claimed = await claimWorkspaceArchiveCapture(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sandboxGroupId: input.sandboxGroupId,
+    captureId,
+    expectedEpoch: input.expectedEpoch,
+    expectedInstanceId: input.expectedInstanceId,
+    liveness: "warm",
+    captureTimeoutMs: 60_000,
+    minIntervalMs: 0,
+    warmAttempt: {
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      attemptId: input.attemptId,
+      holderId: input.holderId,
+    },
+  });
+  if (claimed.status !== "claimed") {
+    throw new Error(`Warm capture fixture was not admitted: ${claimed.status}`);
+  }
+  const { holderId: _holderId, ...persistInput } = input;
+  try {
+    return await persistWarmSnapshotRaw(db, { ...persistInput, captureId });
+  } finally {
+    await releaseWorkspaceArchiveCapture(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sandboxGroupId: input.sandboxGroupId,
+      captureId,
+      expectedEpoch: input.expectedEpoch,
+      expectedInstanceId: input.expectedInstanceId,
+    });
+    if (!existingHolder?.present) {
+      await admin`
+        delete from sandbox_lease_holders
+        where lease_id = ${lease.id}
+          and kind = 'turn'
+          and holder_id = ${input.holderId}`;
+    }
+  }
+}
+
 async function readRow(workspaceId: string, groupId: string) {
   const [r] = await admin`
     select liveness, refcount, turn_holders, viewer_holders, lease_epoch, instance_id
@@ -512,13 +625,14 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
 
     // Epoch fence: a stale-epoch persist writes ZERO rows (wrote:false) so the
     // reaper leaves the (re-armed/superseded) box RUNNING — never terminates it.
-    const r3 = await persistDrainSnapshot(db, {
+    const r3 = await persistDrainSnapshotRaw(db, {
       accountId: ids.accountId,
       workspaceId: ids.workspaceId,
       sandboxGroupId: ids.groupId,
       expectedEpoch: 999,
       expectedInstanceId: "box-persist",
       expectedWorkspaceGeneration: 0,
+      captureId: crypto.randomUUID(),
       workspaceArchive: archive2,
       workspaceArchiveMeta: archiveDescriptor(archive2, 1_900_000_001_000),
     });
@@ -669,7 +783,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(ss3b.workspaceArchivePrev).toBe(archive2);
 
     // Epoch fence: a stale-epoch persist writes ZERO rows.
-    const r4 = await persistWarmSnapshot(db, {
+    const r4 = await persistWarmSnapshotRaw(db, {
       accountId: ids.accountId,
       workspaceId: ids.workspaceId,
       ...attempt,
@@ -677,6 +791,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       expectedEpoch: 999,
       expectedInstanceId: "box-warm-persist",
       expectedWorkspaceGeneration: 0,
+      captureId: crypto.randomUUID(),
       workspaceArchive: archive1,
       workspaceArchiveMeta: archiveDescriptor(archive1, t0 + 4_000),
       minIntervalMs: 0,
@@ -688,7 +803,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     // Liveness guard: a draining lease is the REAPER's to persist (drain seam),
     // never the warm path's — zero rows written.
     await admin`update sandbox_leases set liveness = 'draining', refcount = 0, turn_holders = 0 where sandbox_group_id = ${ids.groupId}`;
-    const r5 = await persistWarmSnapshot(db, {
+    const r5 = await persistWarmSnapshotRaw(db, {
       accountId: ids.accountId,
       workspaceId: ids.workspaceId,
       ...attempt,
@@ -696,6 +811,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       expectedEpoch: 5,
       expectedInstanceId: "box-warm-persist",
       expectedWorkspaceGeneration: 0,
+      captureId: crypto.randomUUID(),
       workspaceArchive: archive1,
       workspaceArchiveMeta: archiveDescriptor(archive1, t0 + 5_000),
       minIntervalMs: 0,
@@ -735,7 +851,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     );
     expect(paused.interruptionCount).toBe(1);
 
-    const fenced = await persistWarmSnapshot(db, {
+    const fenced = await persistWarmSnapshotRaw(db, {
       accountId: ids.accountId,
       workspaceId: ids.workspaceId,
       ...attempt,
@@ -743,6 +859,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       expectedEpoch: 6,
       expectedInstanceId: "box-warm-control-fence",
       expectedWorkspaceGeneration: 0,
+      captureId: crypto.randomUUID(),
       workspaceArchive: Buffer.from("must-not-land").toString("base64"),
       workspaceArchiveMeta: archiveDescriptor(
         Buffer.from("must-not-land").toString("base64"),
@@ -809,14 +926,8 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(missingHolder).toBeInstanceOf(SandboxWorkspaceMutationFencedError);
     expect((missingHolder as SandboxWorkspaceMutationFencedError).code).toBe("holder_fenced");
 
-    await insertHolder(
-      ids,
-      leaseId,
-      "turn",
-      sandboxLeaseHolderIdForAttempt(crypto.randomUUID()),
-      0,
-      attempt.sessionId,
-    );
+    const wrongHolderId = sandboxLeaseHolderIdForAttempt(crypto.randomUUID());
+    await insertHolder(ids, leaseId, "turn", wrongHolderId, 0, attempt.sessionId);
     const wrongHolder = await advanceWorkspaceGeneration(db, {
       accountId: ids.accountId,
       workspaceId: ids.workspaceId,
@@ -828,6 +939,11 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     }).catch((error) => error);
     expect(wrongHolder).toBeInstanceOf(SandboxWorkspaceMutationFencedError);
     expect((wrongHolder as SandboxWorkspaceMutationFencedError).code).toBe("holder_fenced");
+    await admin`
+      delete from sandbox_lease_holders
+      where lease_id = ${leaseId}
+        and kind = 'turn'
+        and holder_id = ${wrongHolderId}`;
     await insertHolder(ids, leaseId, "turn", attempt.holderId, 0, attempt.sessionId);
 
     const wrongGroup = await advanceWorkspaceGeneration(db, {
@@ -866,7 +982,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
 
     // This capture read generation 0 before the mutation was admitted. Its fold
     // must lose the generation CAS even though epoch/provider still match.
-    const stale = await persistWarmSnapshot(db, {
+    const stale = await persistWarmSnapshotRaw(db, {
       accountId: ids.accountId,
       workspaceId: ids.workspaceId,
       ...attempt,
@@ -874,6 +990,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       expectedEpoch: 9,
       expectedInstanceId: "box-generation",
       expectedWorkspaceGeneration: 0,
+      captureId: crypto.randomUUID(),
       workspaceArchive: Buffer.from("stale-capture").toString("base64"),
       workspaceArchiveMeta: archiveDescriptor(
         Buffer.from("stale-capture").toString("base64"),
@@ -884,7 +1001,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     });
     expect(stale).toMatchObject({ wrote: false, throttled: false });
 
-    const blockedInFlight = await persistWarmSnapshot(db, {
+    const blockedInFlight = await persistWarmSnapshotRaw(db, {
       accountId: ids.accountId,
       workspaceId: ids.workspaceId,
       ...attempt,
@@ -892,6 +1009,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       expectedEpoch: 9,
       expectedInstanceId: "box-generation",
       expectedWorkspaceGeneration: 1,
+      captureId: crypto.randomUUID(),
       workspaceArchive: Buffer.from("in-flight-capture").toString("base64"),
       workspaceArchiveMeta: archiveDescriptor(
         Buffer.from("in-flight-capture").toString("base64"),
@@ -947,6 +1065,557 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       archiveGeneration: 1,
       archiveComplete: true,
     });
+  }, 60_000);
+
+  test("(1b-capture-gate) provider capture durably fences holders and mutations until exact publication", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    const attempt = await freshWarmSnapshotAttempt(ids);
+    ids.groupId = attempt.sandboxGroupId;
+    const leaseId = await insertLease(ids, {
+      liveness: "warm",
+      refcount: 1,
+      turnHolders: 1,
+      leaseEpoch: 14,
+      expiresInMs: 600_000,
+      instanceId: "box-capture-gate",
+      backend: "modal",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "box-capture-gate" } },
+      },
+    });
+    await insertHolder(ids, leaseId, "turn", attempt.holderId, 0, attempt.sessionId);
+
+    await insertHolder(ids, leaseId, "viewer", "competing-holder", 0);
+    expect(
+      await claimWorkspaceArchiveCapture(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: ids.groupId,
+        captureId: crypto.randomUUID(),
+        expectedEpoch: 14,
+        expectedInstanceId: "box-capture-gate",
+        liveness: "warm",
+        captureTimeoutMs: 60_000,
+        minIntervalMs: 0,
+        warmAttempt: {
+          sessionId: attempt.sessionId,
+          turnId: attempt.turnId,
+          attemptId: attempt.attemptId,
+          holderId: attempt.holderId,
+        },
+      }),
+    ).toEqual({ status: "holder_in_progress" });
+    // A viewer owns a potentially interactive noVNC/PTY tunnel. The capture
+    // claim must preserve its row and refuse to pause/snapshot behind that
+    // still-valid data plane.
+    expect(await readLease(db, ids.workspaceId, ids.groupId)).toMatchObject({
+      archiveCapture: null,
+    });
+    const [preservedViewer] = await admin<{ count: number }[]>`
+      select count(*)::integer as count
+      from sandbox_lease_holders
+      where lease_id = ${leaseId}
+        and kind = 'viewer'
+        and holder_id = 'competing-holder'`;
+    expect(preservedViewer?.count).toBe(1);
+    await admin`
+      delete from sandbox_lease_holders
+      where lease_id = ${leaseId}
+        and kind = 'viewer'
+        and holder_id = 'competing-holder'`;
+
+    await insertHolder(ids, leaseId, "turn", "competing-turn-holder", 0);
+    expect(
+      await claimWorkspaceArchiveCapture(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: ids.groupId,
+        captureId: crypto.randomUUID(),
+        expectedEpoch: 14,
+        expectedInstanceId: "box-capture-gate",
+        liveness: "warm",
+        captureTimeoutMs: 60_000,
+        minIntervalMs: 0,
+        warmAttempt: {
+          sessionId: attempt.sessionId,
+          turnId: attempt.turnId,
+          attemptId: attempt.attemptId,
+          holderId: attempt.holderId,
+        },
+      }),
+    ).toEqual({ status: "holder_in_progress" });
+    await admin`
+      delete from sandbox_lease_holders
+      where lease_id = ${leaseId}
+        and kind = 'turn'
+        and holder_id = 'competing-turn-holder'`;
+
+    const captureId = crypto.randomUUID();
+    const claim = await claimWorkspaceArchiveCapture(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+      captureId,
+      expectedEpoch: 14,
+      expectedInstanceId: "box-capture-gate",
+      liveness: "warm",
+      captureTimeoutMs: 60_000,
+      minIntervalMs: 0,
+      warmAttempt: {
+        sessionId: attempt.sessionId,
+        turnId: attempt.turnId,
+        attemptId: attempt.attemptId,
+        holderId: attempt.holderId,
+      },
+    });
+    expect(claim).toMatchObject({
+      status: "claimed",
+      claim: { id: captureId, workspaceGeneration: 0 },
+    });
+
+    const immediate = await advanceWorkspaceGeneration(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      ...attempt,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 14,
+      expectedInstanceId: "box-capture-gate",
+      operation: "mustWaitForCapture",
+      captureWaitMs: 0,
+    }).catch((error) => error);
+    expect(immediate).toBeInstanceOf(SandboxWorkspaceMutationFencedError);
+    expect((immediate as SandboxWorkspaceMutationFencedError).code).toBe("capture_in_progress");
+
+    const blockedAcquire = await acquireLease(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+      kind: "viewer",
+      holderId: "viewer-during-provider-pause",
+      backend: "modal",
+      leaseTtlMs: 60_000,
+    });
+    expect(blockedAcquire.role).toBe("fenced");
+    let acquireWaitSettled = false;
+    const waitingAcquire = acquireLease(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+      kind: "viewer",
+      holderId: "viewer-waits-for-provider-pause",
+      backend: "modal",
+      leaseTtlMs: 60_000,
+      captureWaitMs: 1_000,
+    }).finally(() => {
+      acquireWaitSettled = true;
+    });
+    const [duringCapture] = await admin<
+      { workspaceGeneration: number; refcount: number; viewerPresent: boolean }[]
+    >`
+      select
+        lease.workspace_generation as "workspaceGeneration",
+        lease.refcount,
+        exists (
+          select 1 from sandbox_lease_holders holder
+          where holder.lease_id = lease.id
+            and holder.kind = 'viewer'
+            and holder.holder_id = 'viewer-during-provider-pause'
+        ) as "viewerPresent"
+      from sandbox_leases lease
+      where lease.id = ${leaseId}`;
+    expect(duringCapture).toMatchObject({
+      workspaceGeneration: 0,
+      refcount: 1,
+      viewerPresent: false,
+    });
+
+    let waitSettled = false;
+    const waitingAdmission = advanceWorkspaceGeneration(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      ...attempt,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 14,
+      expectedInstanceId: "box-capture-gate",
+      operation: "waitsForExactCapture",
+      captureWaitMs: 1_000,
+    }).finally(() => {
+      waitSettled = true;
+    });
+    await Bun.sleep(50);
+    expect(waitSettled).toBe(false);
+    expect(acquireWaitSettled).toBe(false);
+    expect(
+      await releaseWorkspaceArchiveCapture(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: ids.groupId,
+        captureId: crypto.randomUUID(),
+        expectedEpoch: 14,
+        expectedInstanceId: "box-capture-gate",
+      }),
+    ).toBe(false);
+    expect(waitSettled).toBe(false);
+    expect(
+      await releaseWorkspaceArchiveCapture(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: ids.groupId,
+        captureId,
+        expectedEpoch: 14,
+        expectedInstanceId: "box-capture-gate",
+      }),
+    ).toBe(true);
+    const admission = await waitingAdmission;
+    expect(admission.workspaceGeneration).toBe(1);
+    const acquiredAfterCapture = await waitingAcquire;
+    expect(acquiredAfterCapture.role).toBe("attached");
+    await releaseLeaseHolder(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+      kind: "viewer",
+      holderId: "viewer-waits-for-provider-pause",
+      idleGraceMs: 60_000,
+    });
+
+    const captureDuringMutation = await claimWorkspaceArchiveCapture(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+      captureId: crypto.randomUUID(),
+      expectedEpoch: 14,
+      expectedInstanceId: "box-capture-gate",
+      liveness: "warm",
+      captureTimeoutMs: 60_000,
+      minIntervalMs: 0,
+      warmAttempt: {
+        sessionId: attempt.sessionId,
+        turnId: attempt.turnId,
+        attemptId: attempt.attemptId,
+        holderId: attempt.holderId,
+      },
+    });
+    expect(captureDuringMutation).toEqual({ status: "mutation_in_progress" });
+    await verifyWorkspaceMutationSettlement(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      ...attempt,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 14,
+      expectedInstanceId: "box-capture-gate",
+      admission,
+      operation: "waitsForExactCapture",
+      outcome: "resolved",
+    });
+
+    const publishCaptureId = crypto.randomUUID();
+    const publishClaim = await claimWorkspaceArchiveCapture(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+      captureId: publishCaptureId,
+      expectedEpoch: 14,
+      expectedInstanceId: "box-capture-gate",
+      liveness: "warm",
+      captureTimeoutMs: 60_000,
+      minIntervalMs: 0,
+      warmAttempt: {
+        sessionId: attempt.sessionId,
+        turnId: attempt.turnId,
+        attemptId: attempt.attemptId,
+        holderId: attempt.holderId,
+      },
+    });
+    expect(publishClaim.status).toBe("claimed");
+
+    let rawGenerationError: unknown;
+    try {
+      await admin`
+        update sandbox_leases
+        set workspace_generation = workspace_generation + 1
+        where id = ${leaseId}`;
+    } catch (error) {
+      rawGenerationError = error;
+    }
+    expect((rawGenerationError as { code?: string } | undefined)?.code).toBe("23514");
+
+    const archive = Buffer.from("capture-gate-current").toString("base64");
+    const wrongPublisher = await persistWarmSnapshotRaw(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      ...attempt,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 14,
+      expectedInstanceId: "box-capture-gate",
+      expectedWorkspaceGeneration: 1,
+      captureId: crypto.randomUUID(),
+      workspaceArchive: archive,
+      workspaceArchiveMeta: archiveDescriptor(archive, Date.now()),
+      minIntervalMs: 0,
+    });
+    expect(wrongPublisher.wrote).toBe(false);
+    expect((await readLease(db, ids.workspaceId, ids.groupId))?.archiveCapture?.id).toBe(
+      publishCaptureId,
+    );
+
+    const published = await persistWarmSnapshotRaw(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      ...attempt,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 14,
+      expectedInstanceId: "box-capture-gate",
+      expectedWorkspaceGeneration: 1,
+      captureId: publishCaptureId,
+      workspaceArchive: archive,
+      workspaceArchiveMeta: archiveDescriptor(archive, Date.now() + 1),
+      minIntervalMs: 0,
+    });
+    expect(published.wrote).toBe(true);
+    expect(await readLease(db, ids.workspaceId, ids.groupId)).toMatchObject({
+      workspaceGeneration: 1,
+      archiveGeneration: 1,
+      archiveComplete: true,
+      archiveCapture: null,
+    });
+  }, 60_000);
+
+  test("(1b-capture-provider-race) a command cannot reach the provider while its checkpoint promise is paused", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    const attempt = await freshWarmSnapshotAttempt(ids);
+    ids.groupId = attempt.sandboxGroupId;
+    const leaseId = await insertLease(ids, {
+      liveness: "warm",
+      refcount: 1,
+      turnHolders: 1,
+      leaseEpoch: 16,
+      expiresInMs: 600_000,
+      instanceId: "box-provider-pause",
+      backend: "modal",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "box-provider-pause" } },
+      },
+    });
+    await insertHolder(ids, leaseId, "turn", attempt.holderId, 0, attempt.sessionId);
+
+    let persistStartedResolve: (() => void) | undefined;
+    const persistStarted = new Promise<void>((resolve) => {
+      persistStartedResolve = resolve;
+    });
+    let finishPersist: ((bytes: Uint8Array) => void) | undefined;
+    const persistedBytes = new Promise<Uint8Array>((resolve) => {
+      finishPersist = resolve;
+    });
+    const fingerprint = `OPENGENI_WORKSPACE_FINGERPRINT_V1 ${"a".repeat(64)} 1 1 7\n`;
+    let providerReadCalls = 0;
+    const mockSession = {
+      state: { workspacePersistence: "tar" },
+      exec: async () => ({ stdout: fingerprint, exitCode: 0 }),
+      readFile: async () => {
+        providerReadCalls += 1;
+        return "read-after-capture";
+      },
+      persistWorkspace: async () => {
+        persistStartedResolve?.();
+        return await persistedBytes;
+      },
+    };
+    const routed = new RoutingSandboxSession({
+      defaultResolved: {
+        session: mockSession,
+        sandboxId: null,
+        kind: "modal",
+        leaseEpoch: 16,
+        providerInstanceId: "box-provider-pause",
+      },
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({
+        session: mockSession,
+        sandboxId: null,
+        kind: "modal",
+        leaseEpoch: 16,
+        providerInstanceId: "box-provider-pause",
+      }),
+    });
+    const settings = testSettings({
+      sandboxSnapshotIntervalMs: 1,
+      sandboxSnapshotTimeoutMs: 5_000,
+    });
+    const capture = maybePersistWarmWorkspaceSnapshot(
+      { db, settings },
+      {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sessionId: attempt.sessionId,
+        turnId: attempt.turnId,
+        attemptId: attempt.attemptId,
+        sandboxGroupId: ids.groupId,
+      },
+      mockSession,
+      16,
+    );
+    await persistStarted;
+    expect((await readLease(db, ids.workspaceId, ids.groupId))?.archiveCapture).not.toBeNull();
+    const read = routed.readFile({ path: "/workspace/repository-state" });
+
+    let providerCommandCalls = 0;
+    const command = (async () => {
+      const admission = await advanceWorkspaceGeneration(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        ...attempt,
+        sandboxGroupId: ids.groupId,
+        expectedEpoch: 16,
+        expectedInstanceId: "box-provider-pause",
+        operation: "readGitHubDuringCheckpoint",
+        captureWaitMs: 5_000,
+      });
+      providerCommandCalls += 1;
+      await verifyWorkspaceMutationSettlement(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        ...attempt,
+        sandboxGroupId: ids.groupId,
+        expectedEpoch: 16,
+        expectedInstanceId: "box-provider-pause",
+        admission,
+        operation: "readGitHubDuringCheckpoint",
+        outcome: "resolved",
+      });
+      return admission;
+    })();
+    await Bun.sleep(75);
+    expect(providerReadCalls).toBe(0);
+    expect(providerCommandCalls).toBe(0);
+
+    finishPersist?.(new TextEncoder().encode("tar-test-archive"));
+    expect(await capture).toBe(true);
+    expect(await read).toBe("read-after-capture");
+    expect(providerReadCalls).toBe(1);
+    const admission = await command;
+    expect(providerCommandCalls).toBe(1);
+    expect(admission.workspaceGeneration).toBe(1);
+    expect(await readLease(db, ids.workspaceId, ids.groupId)).toMatchObject({
+      workspaceGeneration: 1,
+      archiveGeneration: 0,
+      archiveComplete: false,
+      archiveCapture: null,
+    });
+  }, 60_000);
+
+  test("(1b-capture-recovery) an expired drain claim is replaced only under its exact zero-holder identity", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    const leaseId = await insertLease(ids, {
+      liveness: "draining",
+      refcount: 0,
+      turnHolders: 0,
+      leaseEpoch: 15,
+      expiresInMs: 600_000,
+      instanceId: "box-expired-capture",
+      backend: "modal",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "box-expired-capture" } },
+      },
+    });
+    const priorCaptureId = crypto.randomUUID();
+    const claimed = await claimWorkspaceArchiveCapture(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+      captureId: priorCaptureId,
+      expectedEpoch: 15,
+      expectedInstanceId: "box-expired-capture",
+      liveness: "draining",
+      captureTimeoutMs: 60_000,
+      minIntervalMs: 0,
+    });
+    expect(claimed.status).toBe("claimed");
+    await admin`
+      update sandbox_leases
+      set archive_capture_started_at = now() - interval '2 minutes',
+          archive_capture_deadline_at = now() - interval '1 minute'
+      where id = ${leaseId}`;
+    await insertHolder(ids, leaseId, "viewer", "late-holder", 0);
+
+    expect(
+      await replaceExpiredWorkspaceArchiveCapture(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: ids.groupId,
+        priorCaptureId,
+        captureId: crypto.randomUUID(),
+        expectedEpoch: 15,
+        expectedInstanceId: "box-expired-capture",
+        captureTimeoutMs: 60_000,
+      }),
+    ).toBeNull();
+    await admin`
+      delete from sandbox_lease_holders
+      where lease_id = ${leaseId} and holder_id = 'late-holder'`;
+
+    const successorCaptureId = crypto.randomUUID();
+    expect(
+      await replaceExpiredWorkspaceArchiveCapture(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: ids.groupId,
+        priorCaptureId: crypto.randomUUID(),
+        captureId: successorCaptureId,
+        expectedEpoch: 15,
+        expectedInstanceId: "box-expired-capture",
+        captureTimeoutMs: 60_000,
+      }),
+    ).toBeNull();
+    const replacement = await replaceExpiredWorkspaceArchiveCapture(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+      priorCaptureId,
+      captureId: successorCaptureId,
+      expectedEpoch: 15,
+      expectedInstanceId: "box-expired-capture",
+      captureTimeoutMs: 60_000,
+    });
+    expect(replacement).toMatchObject({
+      id: successorCaptureId,
+      leaseId,
+      leaseEpoch: 15,
+      instanceId: "box-expired-capture",
+      workspaceGeneration: 0,
+    });
+    expect((await readLease(db, ids.workspaceId, ids.groupId))?.archiveCapture?.id).toBe(
+      successorCaptureId,
+    );
+    expect(
+      await releaseWorkspaceArchiveCapture(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: ids.groupId,
+        captureId: priorCaptureId,
+        expectedEpoch: 15,
+        expectedInstanceId: "box-expired-capture",
+      }),
+    ).toBe(false);
+    expect(
+      await releaseWorkspaceArchiveCapture(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: ids.groupId,
+        captureId: successorCaptureId,
+        expectedEpoch: 15,
+        expectedInstanceId: "box-expired-capture",
+      }),
+    ).toBe(true);
   }, 60_000);
 
   test("(1b-settlement) rejected promises unblock capture and abandoned admissions require exact quiescence", async () => {

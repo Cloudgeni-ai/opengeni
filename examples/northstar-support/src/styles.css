@@ -61,3 +61,34 @@ body {
   outline: 2px solid color-mix(in oklch, var(--og-color-accent) 65%, white);
   outline-offset: 2px;
 }
+
+/* The embedded agent is deliberately denser than OpenGeni's full-page UI.
+   These are host-owned presentation choices; behavior stays in the SDK. */
+.northstar-agent-timeline > div:first-child {
+  padding: 18px 20px;
+}
+
+.northstar-agent-timeline > div:first-child > div {
+  gap: 14px;
+}
+
+.northstar-agent-copy {
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.northstar-agent-copy p,
+.northstar-agent-copy li {
+  line-height: 1.6;
+}
+
+.northstar-agent-copy p,
+.northstar-agent-copy ul,
+.northstar-agent-copy ol {
+  margin-top: 7px;
+  margin-bottom: 7px;
+}
+
+.northstar-agent-composer textarea:focus-visible {
+  outline: none;
+}

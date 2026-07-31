@@ -698,6 +698,37 @@ function ComputerCallRenderer({ item }: ToolRendererProps) {
 
 type WebSearchResult = { title: string; domain: string; snippet: string };
 
+/** Pull a search string from tool-call arguments when providerData.action is sparse. */
+function webSearchQueryFromArguments(args: unknown): string | null {
+  if (typeof args === "string") {
+    const trimmed = args.trim();
+    if (!trimmed) {
+      return null;
+    }
+    try {
+      return webSearchQueryFromArguments(JSON.parse(trimmed));
+    } catch {
+      return trimmed;
+    }
+  }
+  if (!args || typeof args !== "object") {
+    return null;
+  }
+  const record = args as Record<string, unknown>;
+  if (typeof record.query === "string" && record.query.trim().length > 0) {
+    return record.query;
+  }
+  if (Array.isArray(record.queries)) {
+    const first = record.queries.find(
+      (value): value is string => typeof value === "string" && value.trim().length > 0,
+    );
+    if (first) {
+      return first;
+    }
+  }
+  return null;
+}
+
 function WebSearchRenderer({ item }: ToolRendererProps) {
   const raw = (item.raw ?? {}) as {
     providerData?: {
@@ -712,6 +743,18 @@ function WebSearchRenderer({ item }: ToolRendererProps) {
   };
   const action = raw.providerData?.action ?? {};
   const actionType = action.type ?? "search";
+  // Responses API deprecated singular `query` in favor of `queries[]`.
+  // Codex/current OpenAI often only populate the array.
+  const queries = (action.queries ?? []).filter(
+    (value): value is string => typeof value === "string" && value.trim().length > 0,
+  );
+  const searchQuery =
+    (typeof action.query === "string" && action.query.trim().length > 0
+      ? action.query
+      : null) ??
+    queries[0] ??
+    webSearchQueryFromArguments(item.arguments);
+  const running = item.status === "running";
   const query =
     actionType === "open_page"
       ? (action.url ?? "(page unavailable)")
@@ -719,10 +762,10 @@ function WebSearchRenderer({ item }: ToolRendererProps) {
         ? action.pattern && action.url
           ? `"${action.pattern}" in ${action.url}`
           : (action.pattern ?? action.url ?? "(page unavailable)")
-        : (action.query ?? "(query unavailable)");
-  const queries = action.queries ?? [];
+        : // Codex often emits the live card before action.query/queries land;
+          // don't flash the scary unavailable copy while still searching.
+          (searchQuery ?? (running ? "…" : "(query unavailable)"));
   const variants = queries.length > 1 ? ` +${queries.length - 1} variants` : "";
-  const running = item.status === "running";
   const runningTitle =
     actionType === "open_page"
       ? "Opening web page"

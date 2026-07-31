@@ -178,6 +178,26 @@ export class MockOpenGeniClient implements SessionClientLike {
     return CLIENT_CONFIG;
   }
 
+  async getWorkspaceModelCatalog(_workspaceId: string) {
+    return {
+      models: (CLIENT_CONFIG.models ?? []).map((model) => ({
+        ...model,
+        credentialReadiness: {
+          status: "ready" as const,
+          reason: null,
+          basis: "configuration" as const,
+          checkedAt: null,
+        },
+        availability: {
+          status: "available" as const,
+          selectable: true,
+          reason: null,
+          checkedAt: null,
+        },
+      })),
+    };
+  }
+
   async getSession(_workspaceId: string, sessionId: string): Promise<Session> {
     return this.fabricateSession(
       sessionId,

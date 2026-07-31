@@ -1,5 +1,31 @@
 # @opengeni/db
 
+## 0.15.5
+
+### Patch Changes
+
+- b7df541: Prevent provider-native checkpoint capture from racing sandbox operations while
+  the provider has paused the source box. Capture now owns a durable
+  lease/epoch/instance/generation claim, blocks new holders and mutations, drains
+  provider-local reads before entering the exclusive snapshot call, and retains
+  ownership through late provider settlement and exact stale-claim recovery.
+  Modal's typed completed-exec stdin race is also normalized into a side-effect-free
+  terminal poll, so an exec that exits between local lookup and the provider write
+  settles its retained process instead of failing the enclosing turn.
+- Updated dependencies [710b081]
+- Updated dependencies [b7df541]
+  - @opengeni/contracts@0.24.3
+  - @opengeni/config@0.7.19
+
+## 0.15.4
+
+### Patch Changes
+
+- 84fb671: Prevent a ready file restored during reconnect from being counted twice across the durable composer draft and the still-live attachment card. Canonical duplicate refs are removed before draft persistence and composer submission while custom mounts and exact draft revision/content conflict protection remain intact.
+- Updated dependencies [96eb64b]
+  - @opengeni/config@0.7.18
+  - @opengeni/contracts@0.24.2
+
 ## 0.15.3
 
 ### Patch Changes

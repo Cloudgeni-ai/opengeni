@@ -20,6 +20,7 @@ import {
   resolveStreamTokenSecret,
   retryStartupDependency,
   SANDBOX_REQUIRED_ENV,
+  sandboxArchiveCaptureTimeoutMs,
   sandboxEnvironmentVariableNames,
   sandboxLifecycleHookIds,
   stableSandboxEnvironmentForRun,
@@ -52,6 +53,40 @@ describe(".env.example", () => {
     }
 
     expect(() => withEnv(sourcedEnv, () => getSettings())).not.toThrow();
+  });
+});
+
+describe("Google Drive integration settings", () => {
+  test("loads the split localhost browser and API origins", () => {
+    const settings = withEnv(
+      {
+        OPENGENI_ENVIRONMENT: "local",
+        OPENGENI_INTEGRATIONS_ENABLED: "true",
+        OPENGENI_PUBLIC_BASE_URL: "http://127.0.0.1:8000",
+        OPENGENI_WEB_BASE_URL: "http://127.0.0.1:3000",
+        OPENGENI_INTEGRATIONS_STATE_SECRET: "state-secret",
+        OPENGENI_GOOGLE_DRIVE_CLIENT_ID: "client.apps.googleusercontent.com",
+        OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET: "client-secret",
+      },
+      () => getSettings(),
+    );
+    expect(settings.publicBaseUrl).toBe("http://127.0.0.1:8000");
+    expect(settings.webBaseUrl).toBe("http://127.0.0.1:3000");
+    expect(settings.googleDriveClientId).toBe("client.apps.googleusercontent.com");
+    expect(settings.googleDriveClientSecret).toBe("client-secret");
+  });
+
+  test("requires the Google OAuth client id and secret together", () => {
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_GOOGLE_DRIVE_CLIENT_ID: "client.apps.googleusercontent.com",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow(
+      "OPENGENI_GOOGLE_DRIVE_CLIENT_ID and OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET must be configured together",
+    );
   });
 });
 
@@ -1285,6 +1320,12 @@ describe("backend-gated sandbox required-credential validation", () => {
 });
 
 describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)", () => {
+  test("the durable capture gate outlives provider snapshot settlement but remains bounded", () => {
+    expect(sandboxArchiveCaptureTimeoutMs({ sandboxSnapshotTimeoutMs: 10_000 })).toBe(40_000);
+    expect(sandboxArchiveCaptureTimeoutMs({ sandboxSnapshotTimeoutMs: 40_000 })).toBe(80_000);
+    expect(sandboxArchiveCaptureTimeoutMs({ sandboxSnapshotTimeoutMs: 3_590_000 })).toBe(3_600_000);
+  });
+
   test("idle timeout defaults to the hard lifetime and the default cadence passes boot", () => {
     const settings = withEnv({}, () => getSettings());
     // Default config: idleGrace 900s + reaper 30s = 930s warm window must fit under

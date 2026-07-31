@@ -49,6 +49,12 @@ export {
   FILE_ONLY_MESSAGE_TEXT,
 } from "./hooks/use-composer";
 export type { ComposerSendExtras, ComposerState, UseComposerOptions } from "./hooks/use-composer";
+export { useVoiceInput } from "./hooks/use-voice-input";
+export type {
+  UseVoiceInputOptions,
+  UseVoiceInputResult,
+  VoiceInputStatus,
+} from "./hooks/use-voice-input";
 export { COMPOSER_PAYMENT_REQUIRED_MESSAGE, composerSubmissionErrorMessage } from "./lib/format";
 export {
   INITIAL_TRANSCRIPTION_CONTROL_STATE,
@@ -75,8 +81,30 @@ export type {
   UseTurnQueueOptions,
   UseTurnQueueResult,
 } from "./hooks/use-turn-queue";
+export {
+  useLastStartedTurnPolicy,
+  isLastStartedTurnPolicyEvent,
+} from "./hooks/use-last-started-turn-policy";
+export type {
+  LastStartedTurnPolicy,
+  UseLastStartedTurnPolicyOptions,
+  UseLastStartedTurnPolicyResult,
+} from "./hooks/use-last-started-turn-policy";
 export { QueueSurface } from "./components/queue-surface";
 export type { QueueSurfaceProps } from "./components/queue-surface";
+export { SessionChrome, sessionChromeGoalPillState } from "./components/session-chrome";
+export type {
+  SessionChromeAgentsSignal,
+  SessionChromeProps,
+  SessionChromeSignalId,
+  SessionChromeSignalTone,
+} from "./components/session-chrome";
+export {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "./components/tooltip";
 export { OPEN_WORKSTREAM_CONTROL_EVENT } from "./components/chat-composer";
 export { useGoal, isGoalEvent } from "./hooks/use-goal";
 export type { UseGoalOptions, UseGoalResult } from "./hooks/use-goal";
@@ -132,10 +160,12 @@ export { useWorkspaces } from "./hooks/use-workspaces";
 export type { UseWorkspacesOptions, UseWorkspacesResult } from "./hooks/use-workspaces";
 export { useBillingUsage } from "./hooks/use-billing-usage";
 export type { UseBillingUsageOptions, UseBillingUsageResult } from "./hooks/use-billing-usage";
-export { useAvailableModels } from "./hooks/use-available-models";
+export { useAvailableModels, useWorkspaceModelCatalog } from "./hooks/use-available-models";
 export type {
   UseAvailableModelsOptions,
   UseAvailableModelsResult,
+  UseWorkspaceModelCatalogOptions,
+  UseWorkspaceModelCatalogResult,
 } from "./hooks/use-available-models";
 
 // Sandbox surfacing (Phase 5): capability negotiation + terminal/files/diff/desktop
@@ -367,9 +397,29 @@ export { defaultChatComposerMessages } from "./components/composer";
 export type { ChatComposerMessages } from "./components/composer";
 export { ModelPicker } from "./components/model-picker";
 export type { ModelPickerProps } from "./components/model-picker";
+export {
+  advancedSourceSummary,
+  availabilityReasonLabel,
+  billingClassForModel,
+  billingClassLabel,
+  coerceReasoningEffortForModel,
+  defaultEffortForModel,
+  effortOptionsForModel,
+  ensureSelectedModelRow,
+  findPickerRow,
+  groupPickerRowsByBillingClass,
+  labelLatencyMode,
+  payerSummaryForModel,
+  projectPickerRows,
+  runnableLatencyModesForModel,
+  sortPickerRows,
+} from "./model-policy";
+export type { LatencyModeId, PickerBillingClass, PickerModelRow } from "./model-policy";
 export { MessageTimeline, TimelineRow } from "./components/message-timeline";
 export type { MessageTimelineProps } from "./components/message-timeline";
 export { Markdown } from "./components/markdown";
+export { CopyButton, CopyHoverFrame } from "./components/copy-button";
+export { copyTextToClipboard, tableElementToTsv } from "./lib/clipboard";
 export type { MarkdownProps } from "./components/markdown";
 export { SessionStatus, StatusDot, SESSION_STATUS_META } from "./components/session-status";
 export type {
