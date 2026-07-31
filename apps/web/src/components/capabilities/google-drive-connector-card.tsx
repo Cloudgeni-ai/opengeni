@@ -1,9 +1,9 @@
-import { GoogleDriveConnectionMetadata } from "@opengeni/contracts";
-import { FolderIcon, FolderOpenIcon, HardDriveIcon, Loader2Icon } from "lucide-react";
+import { FolderOpenIcon, HardDriveIcon, Loader2Icon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
+import { request as apiRequest } from "@/api";
 import {
   Dialog,
   DialogContent,
@@ -20,7 +20,9 @@ import { hasWorkspacePermission } from "@/lib/permissions";
 import type {
   ConnectionMetadata,
   GoogleDriveBrowseItem,
+  GoogleDriveBrowseResponse,
   GoogleDriveConnectionMetadata as GoogleDriveMetadata,
+  GoogleDriveOAuthStartResponse,
   GoogleDriveReadPolicy,
   GoogleDriveSyncCadence,
   GoogleDriveTargetScope,
@@ -63,7 +65,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
           candidate.kind === "oauth2" &&
           candidate.status !== "revoked" &&
           candidate.subjectId !== null &&
-          GoogleDriveConnectionMetadata.safeParse(candidate.metadata).success,
+          googleDriveMetadata(candidate.metadata) !== undefined,
       ) ?? null,
     [connections],
   );
@@ -118,9 +120,13 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
     if (!canWrite) return;
     setBusy(true);
     try {
-      const start = await client.startGoogleDriveConnection(workspaceId, {
-        ...(reconnect && connection ? { connectionId: connection.id } : {}),
-      });
+      const start = await apiRequest<GoogleDriveOAuthStartResponse>(
+        `/v1/workspaces/${workspaceId}/connections/google-drive/install`,
+        {
+          method: "POST",
+          body: JSON.stringify(reconnect && connection ? { connectionId: connection.id } : {}),
+        },
+      );
       window.location.assign(start.authorizationUrl);
     } catch (error) {
       toast.error("Google Drive connection could not start", {
@@ -155,10 +161,13 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
     if (!connection) return null;
     setBrowseBusy(true);
     try {
-      const response = await client.browseGoogleDrive(workspaceId, connection.id, {
+      const query = new URLSearchParams({
         parentId: folder.id,
         ...(pageToken ? { pageToken } : {}),
       });
+      const response = await apiRequest<GoogleDriveBrowseResponse>(
+        `/v1/workspaces/${workspaceId}/connections/google-drive/${connection.id}/browse?${query}`,
+      );
       setItems((current) => (mode === "append" ? [...current, ...response.items] : response.items));
       setNextPageToken(response.nextPageToken);
       if (mode === "replace") {
@@ -266,17 +275,23 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
     if (!connection || !canWrite) return;
     setBusy(true);
     try {
-      const updated = await client.saveGoogleDriveSource(workspaceId, connection.id, {
-        sources: selectedSources.map((selected) => ({
-          id: selected.id,
-          name: selected.name,
-          mimeType: selected.mimeType,
-          driveId: selected.driveId,
-        })),
-        targetScope,
-        syncCadence,
-        readPolicy,
-      });
+      const { connection: updated } = await apiRequest<{ connection: ConnectionMetadata }>(
+        `/v1/workspaces/${workspaceId}/connections/google-drive/${connection.id}/source`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            sources: selectedSources.map((selected) => ({
+              id: selected.id,
+              name: selected.name,
+              mimeType: selected.mimeType,
+              driveId: selected.driveId,
+            })),
+            targetScope,
+            syncCadence,
+            readPolicy,
+          }),
+        },
+      );
       setConnections((current) => current.map((item) => (item.id === updated.id ? updated : item)));
       setBrowseOpen(false);
       toast.success("Google Drive folders saved", {
@@ -426,7 +441,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
                       key={source.id}
                       className="inline-flex max-w-full items-center gap-1 rounded-md border border-border bg-surface-2 px-2 py-1 text-xs text-fg"
                     >
-                      <FolderIcon className="size-3 shrink-0 text-brand" />
+                      <FolderOpenIcon className="size-3 shrink-0 text-brand" />
                       <span className="max-w-56 truncate">{googleDriveBoundaryLabel(source)}</span>
                       <button
                         type="button"
@@ -528,7 +543,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
                           }
                           onChange={() => toggleSource(item)}
                         />
-                        <FolderIcon className="size-4 shrink-0 text-brand" />
+                        <FolderOpenIcon className="size-4 shrink-0 text-brand" />
                         <button
                           type="button"
                           className="flex min-w-0 flex-1 items-center gap-2 text-left text-xs text-fg hover:text-brand"
@@ -712,6 +727,13 @@ function googleDriveFailureMessage(reason: string | null): string {
 }
 
 function googleDriveMetadata(value: Record<string, unknown>): GoogleDriveMetadata | undefined {
-  const parsed = GoogleDriveConnectionMetadata.safeParse(value);
-  return parsed.success ? parsed.data : undefined;
+  if (
+    value.credentialRole !== "google_drive_metadata" ||
+    typeof value.googlePermissionId !== "string" ||
+    typeof value.googleEmail !== "string" ||
+    (value.accessMode !== "metadata_readonly" && value.accessMode !== "readonly")
+  ) {
+    return undefined;
+  }
+  return value as GoogleDriveMetadata;
 }

@@ -46,6 +46,7 @@ export type {
   GoogleDriveBrowseItem,
   GoogleDriveBrowseResponse,
   GoogleDriveConnectionMetadata,
+  GoogleDriveOAuthStartResponse,
   GoogleDriveReadPolicy,
   GoogleDriveSelectedSource,
   GoogleDriveSyncCadence,
