@@ -80,6 +80,26 @@
      glow is now purely the diffuse outer halo. */
   --og-shadow-glow: 0 0 24px color-mix(in oklch, var(--og-color-accent) 18%, transparent);
 
+  /* Morph session chrome — override on `.og-morph` (or an ancestor) to rebrand.
+     Defaults stay quiet: soft surface, short motion, no gold shout. */
+  --og-morph-surface: color-mix(in oklch, var(--og-color-surface-2) 82%, transparent);
+  --og-morph-surface-open: color-mix(in oklch, var(--og-color-surface-2) 92%, transparent);
+  --og-morph-border: color-mix(in oklch, var(--og-color-border) 85%, transparent);
+  --og-morph-border-open: var(--og-color-border);
+  --og-morph-highlight: color-mix(in oklch, var(--og-color-bg) 72%, transparent);
+  --og-morph-shadow: 0 6px 22px -14px oklch(0 0 0 / 0.42);
+  --og-morph-shadow-open: 0 10px 28px -16px oklch(0 0 0 / 0.5);
+  --og-morph-radius: var(--og-radius-lg);
+  --og-morph-chip-min-height: 1.75rem;
+  --og-morph-chip-pad-x: 0.5rem;
+  --og-morph-chip-gap: 0.125rem;
+  --og-morph-rail-pad: 0.2rem;
+  --og-morph-panel-pad-x: 0.5rem;
+  --og-morph-panel-pad-y: 0.4rem;
+  --og-morph-duration: 220ms;
+  --og-morph-ease: var(--og-ease-out);
+  --og-morph-row-hover: color-mix(in oklch, var(--og-color-surface-3) 55%, transparent);
+
   color-scheme: dark;
 }
 
@@ -119,6 +139,15 @@
   --og-shadow-md: 0 2px 8px oklch(0.2 0.02 260 / 0.09), 0 1px 2px oklch(0.2 0.02 260 / 0.06);
   --og-shadow-lg: 0 8px 28px oklch(0.2 0.02 260 / 0.13), 0 2px 8px oklch(0.2 0.02 260 / 0.07);
   --og-shadow-glow: 0 0 20px color-mix(in oklch, var(--og-color-accent) 14%, transparent);
+
+  --og-morph-surface: color-mix(in oklch, var(--og-color-surface-2) 88%, transparent);
+  --og-morph-surface-open: var(--og-color-surface-2);
+  --og-morph-border: color-mix(in oklch, var(--og-color-border) 90%, transparent);
+  --og-morph-border-open: var(--og-color-border);
+  --og-morph-highlight: color-mix(in oklch, var(--og-color-surface-1) 88%, transparent);
+  --og-morph-shadow: 0 4px 16px -10px oklch(0.2 0.02 260 / 0.14);
+  --og-morph-shadow-open: 0 8px 22px -12px oklch(0.2 0.02 260 / 0.18);
+  --og-morph-row-hover: color-mix(in oklch, var(--og-color-surface-3) 70%, transparent);
 
   color-scheme: light;
 }

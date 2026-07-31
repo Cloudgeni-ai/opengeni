@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add `MorphSessionChrome` — opt-in compact session-signal dock (incoming / queue / goal / agents) with token overrides (`--og-morph-*`) and queue hover actions wired to `UseTurnQueueResult`.
+- Light ChatComposer spacing/token freshen (quieter focus border, tighter footer/input padding).
 - Replace host-adapter composer transcription with native MediaRecorder capture and immediate server transcription.
 - Compact composer voice chrome: live/fallback waveform, separate cancel vs stop-and-transcribe actions, and a quieter transcribing state.
 

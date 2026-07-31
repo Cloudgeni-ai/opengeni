@@ -701,9 +701,9 @@ export const Surface = forwardRef<HTMLDivElement, ComposerSurfaceProps>(function
       onDragLeave={controller.attachments ? controller.handleDragLeave : undefined}
       onDrop={controller.attachments ? controller.handleDrop : undefined}
       className={cn(
-        "relative rounded-og-lg border border-og-border bg-og-surface-1 shadow-og-sm",
-        "transition-[border-color,box-shadow] duration-200",
-        "focus-within:border-og-accent/60 focus-within:shadow-og-glow",
+        "relative rounded-og-lg border border-og-border/90 bg-og-surface-1 shadow-og-sm",
+        "transition-[border-color,box-shadow] duration-200 ease-og-out",
+        "focus-within:border-og-accent/50 focus-within:shadow-og-glow",
         controller.dragging && "border-dashed border-og-accent",
         className,
       )}
@@ -817,7 +817,7 @@ export const Input = forwardRef<HTMLTextAreaElement, ComposerInputProps>(functio
         paletteOpen ? `${controller.listboxId}-option-${controller.palette.highlight}` : undefined
       }
       className={cn(
-        "block w-full resize-none bg-transparent px-4 pt-3.5 pb-1 text-base leading-6 md:text-og-md",
+        "block w-full resize-none bg-transparent px-3.5 pt-3 pb-1 text-base leading-6 md:px-4 md:text-og-md",
         "text-og-fg placeholder:text-og-fg-subtle focus:outline-none focus-visible:outline-none",
         "disabled:cursor-not-allowed disabled:opacity-60",
         className,
@@ -851,7 +851,7 @@ export const Footer = forwardRef<HTMLDivElement, ComposerFooterProps>(function C
     <div
       {...props}
       ref={ref}
-      className={cn("flex items-end gap-2 px-2.5 pb-2.5 pt-1", className)}
+      className={cn("flex items-end gap-1.5 px-2 pb-2 pt-0.5 sm:px-2.5 sm:pb-2.5", className)}
     />
   );
 });

@@ -92,6 +92,13 @@ export type {
 } from "./hooks/use-last-started-turn-policy";
 export { QueueSurface } from "./components/queue-surface";
 export type { QueueSurfaceProps } from "./components/queue-surface";
+export { MorphSessionChrome, morphGoalPillState } from "./components/morph-session-chrome";
+export type {
+  MorphAgentsSignal,
+  MorphSessionChromeProps,
+  MorphSignalId,
+  MorphSignalTone,
+} from "./components/morph-session-chrome";
 export { OPEN_WORKSTREAM_CONTROL_EVENT } from "./components/chat-composer";
 export { useGoal, isGoalEvent } from "./hooks/use-goal";
 export type { UseGoalOptions, UseGoalResult } from "./hooks/use-goal";

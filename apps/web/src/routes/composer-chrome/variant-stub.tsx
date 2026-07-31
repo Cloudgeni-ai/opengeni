@@ -1,5 +1,5 @@
-// Thin placeholder for reserved gallery tabs (compact 1–5, motion/glass 6–10).
-// Shows the full scenario matrix with production ChatComposer; chrome redesign TBD.
+// Thin placeholder for reserved gallery tabs (compact 2–5).
+// Intentionally reuses production ScenarioMatrix / Baseline chrome until a compact redesign lands.
 import { useMemo } from "react";
 
 import { idleComposer } from "@/dev/composer-chrome-fixtures";
@@ -18,9 +18,21 @@ export function VariantStub({ meta, note = DEFAULT_NOTE }: { meta: VariantMeta; 
     <ScenarioMatrixPanel
       composer={composer}
       intro={
-        <div className="rounded-xl border border-dashed border-border bg-surface-2/40 px-4 py-5">
-          <p className="text-sm font-medium text-fg">{tabLabel(meta)} — awaiting next iteration</p>
-          <p className="mt-1.5 text-xs leading-relaxed text-fg-muted">{note}</p>
+        <div
+          role="status"
+          className="rounded-xl border-2 border-amber-500/50 bg-amber-500/10 px-4 py-4 sm:px-5"
+        >
+          <p className="text-2xs font-semibold uppercase tracking-[0.14em] text-amber-700 dark:text-amber-300">
+            Placeholder · not a failed variant
+          </p>
+          <p className="mt-1.5 text-sm font-semibold text-fg">
+            {tabLabel(meta)} — awaiting compact iteration
+          </p>
+          <p className="mt-1 text-sm leading-relaxed text-fg">
+            Same chrome as Baseline for now. Scenarios below are production chrome reused as a
+            reserved slot until a real Compact design lands.
+          </p>
+          <p className="mt-2 text-xs leading-relaxed text-fg-muted">{note}</p>
         </div>
       }
     />

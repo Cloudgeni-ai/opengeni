@@ -46,13 +46,9 @@ export function ComposerChromeGalleryRoute() {
           </p>
           <h1 className="text-xl font-semibold tracking-tight">Session chrome gallery</h1>
           <p className="text-sm leading-relaxed text-fg-muted">
-            Tabbed harness for production chrome (Baseline), reserved compact slots (tabs 1–5), and
-            motion / liquid-glass / merge explorations (tabs 6–10). Every tab shows the full scenario
-            matrix by default. ChatComposer stays the real production control.
-          </p>
-          <p className="text-sm leading-relaxed text-fg-muted">
-            Tabs 1–5 stay compact-reserved. Tabs 6–10 explore clean+sleek motion, liquid glass, and
-            merge treatments — not theatrical / CRT / sonar / stacked-instrument theater.
+            Tabbed harness for production chrome (Baseline), compact / morph explorations, and
+            reserved slots. Every tab shows the full scenario matrix by default. ChatComposer stays
+            the real production control.
           </p>
           <code className="block rounded-lg border border-border bg-surface-2/60 px-3 py-2 font-mono text-xs text-fg-muted">
             http://127.0.0.1:3000/dev/composer-chrome
