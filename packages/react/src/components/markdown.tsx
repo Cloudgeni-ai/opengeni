@@ -164,9 +164,7 @@ const components: Components = {
   // Fenced code — bordered mono block with language chip + copy.
   pre: ({ children }) => <MarkdownCodeBlock>{children}</MarkdownCodeBlock>,
   // Tables stay unboxed (hairline rules); hover reveals a TSV copy control.
-  table: ({ children, ...props }) => (
-    <MarkdownTable {...props}>{children}</MarkdownTable>
-  ),
+  table: ({ children, ...props }) => <MarkdownTable {...props}>{children}</MarkdownTable>,
   thead: ({ children, ...props }) => <thead {...props}>{children}</thead>,
   th: ({ children, ...props }) => (
     <th
@@ -378,7 +376,11 @@ function MarkdownImpl({ children, className, streaming = false }: MarkdownProps)
         className,
       )}
     >
-      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={rehypePlugins} components={components}>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        rehypePlugins={rehypePlugins}
+        components={components}
+      >
         {parseText}
       </ReactMarkdown>
     </div>

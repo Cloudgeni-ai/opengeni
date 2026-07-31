@@ -1140,9 +1140,7 @@ function ComposerAnnouncements() {
           {controller.activeNotice.message}
         </p>
       ) : null}
-      {controller.draftConflict ? (
-        <p role="alert">{controller.messages.draftConflict}</p>
-      ) : null}
+      {controller.draftConflict ? <p role="alert">{controller.messages.draftConflict}</p> : null}
     </div>
   );
 }

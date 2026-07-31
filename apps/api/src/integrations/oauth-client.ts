@@ -2,7 +2,11 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { parseIntegrationsOauthClientsJson, type Settings } from "@opengeni/config";
-import { OAuthStartResponse, type OAuthStartRequest } from "@opengeni/contracts";
+import {
+  OPENGENI_PERSONAL_SLACK_MCP_URL,
+  OAuthStartResponse,
+  type OAuthStartRequest,
+} from "@opengeni/contracts";
 import { hasPermission, requireEnvironmentEncryption } from "@opengeni/core";
 import type { Observability } from "@opengeni/observability";
 import {
@@ -34,7 +38,7 @@ import { HTTPException } from "hono/http-exception";
 import { canonicalProviderDomain } from "./provider-domain";
 
 export const oauthStateTtlMs = 10 * 60 * 1000;
-export const OFFICIAL_SLACK_MCP_URL = "https://mcp.slack.com/mcp";
+export const OFFICIAL_SLACK_MCP_URL = OPENGENI_PERSONAL_SLACK_MCP_URL;
 const SLACK_OAUTH_ORIGIN = "https://slack.com";
 const SLACK_MCP_ORIGIN = "https://mcp.slack.com";
 export { OAUTH_MAX_RESPONSE_BYTES } from "@opengeni/network";

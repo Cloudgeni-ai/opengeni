@@ -1,10 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { WorkspaceModelCatalogModel } from "@opengeni/sdk";
-import {
-  ensureSelectedModelRow,
-  projectPickerRows,
-  sortPickerRows,
-} from "@opengeni/react";
+import { ensureSelectedModelRow, projectPickerRows, sortPickerRows } from "@opengeni/react";
 
 function catalogModel(id: string): WorkspaceModelCatalogModel {
   return {
@@ -31,10 +27,7 @@ function catalogModel(id: string): WorkspaceModelCatalogModel {
 describe("workspace model catalog projection", () => {
   test("does not duplicate the same model id in projected rows", () => {
     const rows = sortPickerRows(
-      projectPickerRows([
-        catalogModel("gpt-5.6-sol"),
-        catalogModel("gpt-5.6-terra"),
-      ]),
+      projectPickerRows([catalogModel("gpt-5.6-sol"), catalogModel("gpt-5.6-terra")]),
     );
     expect(new Set(rows.map((row) => row.id)).size).toBe(2);
   });

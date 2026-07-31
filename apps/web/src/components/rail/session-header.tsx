@@ -25,11 +25,7 @@ import {
   useInlineRename,
 } from "@/lib/session-rename";
 import { pinLiveAnnouncement } from "@/lib/pin-live-announcement";
-import {
-  isIntelligenceEffort,
-  labelEffort,
-  type IntelligenceEffort,
-} from "@/lib/session-tools";
+import { isIntelligenceEffort, labelEffort, type IntelligenceEffort } from "@/lib/session-tools";
 import type { Session } from "@/types";
 
 export function SessionHeader({
@@ -81,8 +77,7 @@ export function SessionHeader({
   const displayModel = lastStartedModel?.trim() || session.model;
   const sessionEffort = session.metadata.reasoningEffort;
   const displayEffort: IntelligenceEffort =
-    lastStartedReasoningEffort ??
-    (isIntelligenceEffort(sessionEffort) ? sessionEffort : "low");
+    lastStartedReasoningEffort ?? (isIntelligenceEffort(sessionEffort) ? sessionEffort : "low");
   return (
     // An elevated band, not just canvas-with-a-hairline: reading as a real top
     // bar was the light-theme fix — a near-white header on a near-white canvas
@@ -109,10 +104,7 @@ export function SessionHeader({
         <div className="hidden min-w-0 items-center gap-2 overflow-hidden text-2xs leading-4 text-fg-muted sm:flex">
           <span className="min-w-0 shrink truncate font-medium text-fg-muted">
             {displayModel}
-            <span className="font-normal text-fg-muted">
-              {" "}
-              · {labelEffort(displayEffort)}
-            </span>
+            <span className="font-normal text-fg-muted"> · {labelEffort(displayEffort)}</span>
           </span>
           {sandboxSlot}
           {codexSlot}

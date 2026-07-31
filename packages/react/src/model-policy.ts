@@ -1,8 +1,4 @@
-import type {
-  ClientModel,
-  ReasoningEffort,
-  WorkspaceModelCatalogModel,
-} from "@opengeni/sdk";
+import type { ClientModel, ReasoningEffort, WorkspaceModelCatalogModel } from "@opengeni/sdk";
 
 export type PickerBillingClass = "opengeni_credits" | "codex_subscription" | "byok";
 
@@ -76,14 +72,7 @@ export function effortOptionsForModel(model: ClientModel): ReasoningEffort[] {
   if (!efforts || efforts.length === 0) {
     return ["low"];
   }
-  const order: ReasoningEffort[] = [
-    "none",
-    "minimal",
-    "low",
-    "medium",
-    "high",
-    "xhigh",
-  ];
+  const order: ReasoningEffort[] = ["none", "minimal", "low", "medium", "high", "xhigh"];
   return order.filter((effort) => efforts.includes(effort));
 }
 
@@ -109,9 +98,7 @@ export function coerceReasoningEffortForModel(
 
 export function runnableLatencyModesForModel(model: ClientModel): LatencyModeId[] {
   const modes = model.capabilities?.latencyModes ?? [];
-  return modes
-    .filter((mode) => mode.runnable)
-    .map((mode) => mode.id);
+  return modes.filter((mode) => mode.runnable).map((mode) => mode.id);
 }
 
 export function labelLatencyMode(mode: LatencyModeId): string {
@@ -160,9 +147,7 @@ export function advancedSourceSummary(model: ClientModel): string | null {
   return null;
 }
 
-export function projectPickerRows(
-  models: WorkspaceModelCatalogModel[],
-): PickerModelRow[] {
+export function projectPickerRows(models: WorkspaceModelCatalogModel[]): PickerModelRow[] {
   return models.map((catalog) => {
     const billingClass = billingClassForModel(catalog);
     return {
@@ -196,10 +181,7 @@ export function sortPickerRows(rows: PickerModelRow[]): PickerModelRow[] {
   });
 }
 
-export function findPickerRow(
-  rows: PickerModelRow[],
-  modelId: string,
-): PickerModelRow | null {
+export function findPickerRow(rows: PickerModelRow[], modelId: string): PickerModelRow | null {
   return rows.find((row) => row.id === modelId) ?? null;
 }
 

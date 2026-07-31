@@ -572,11 +572,10 @@ function SessionChatPane(props: {
           : pausedAgents > 0
             ? `${pausedAgents} paused`
             : "Idle",
-      tone: (runningAgents > 0
-        ? "running"
-        : pausedAgents > 0
-          ? "waiting"
-          : "neutral") as "running" | "waiting" | "neutral",
+      tone: (runningAgents > 0 ? "running" : pausedAgents > 0 ? "waiting" : "neutral") as
+        | "running"
+        | "waiting"
+        | "neutral",
     };
   }, [props.agentNodes]);
   // Per-approval decision state: an in-flight decision disables both buttons for
@@ -646,12 +645,8 @@ function SessionChatPane(props: {
   // back to the deployment default), so a switch here doesn't bleed into others.
   const model = context.modelForSession(props.session.id);
   const reasoningEffort = effortForSession(props.session.id);
-  const {
-    setModelForSession,
-    setEffortForSession,
-    ensureModelForSession,
-    ensureEffortForSession,
-  } = context;
+  const { setModelForSession, setEffortForSession, ensureModelForSession, ensureEffortForSession } =
+    context;
   // Once the operator touches the picker, draft reloads must not stomp it.
   const pickerTouchedRef = useRef(false);
   useEffect(() => {
@@ -683,13 +678,7 @@ function SessionChatPane(props: {
     if (coerced !== reasoningEffort) {
       setEffortForSession(props.session.id, coerced);
     }
-  }, [
-    model,
-    modelCatalog.rows,
-    props.session.id,
-    reasoningEffort,
-    setEffortForSession,
-  ]);
+  }, [model, modelCatalog.rows, props.session.id, reasoningEffort, setEffortForSession]);
   useEffect(() => {
     if (durableToolsSessionId.current !== props.session.id) {
       durableToolsSessionId.current = props.session.id;

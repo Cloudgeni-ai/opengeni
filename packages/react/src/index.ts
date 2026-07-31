@@ -99,12 +99,7 @@ export type {
   SessionChromeSignalId,
   SessionChromeSignalTone,
 } from "./components/session-chrome";
-export {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "./components/tooltip";
+export { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./components/tooltip";
 export { OPEN_WORKSTREAM_CONTROL_EVENT } from "./components/chat-composer";
 export { useGoal, isGoalEvent } from "./hooks/use-goal";
 export type { UseGoalOptions, UseGoalResult } from "./hooks/use-goal";

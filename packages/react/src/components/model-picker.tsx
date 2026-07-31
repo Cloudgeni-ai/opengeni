@@ -1,10 +1,7 @@
 import type { ClientModel } from "@opengeni/sdk";
 import { ChevronDownIcon } from "lucide-react";
 import { useId, useMemo } from "react";
-import {
-  groupPickerRowsByBillingClass,
-  type PickerModelRow,
-} from "../model-policy";
+import { groupPickerRowsByBillingClass, type PickerModelRow } from "../model-policy";
 import { cn } from "../lib/cn";
 
 export type ModelPickerProps = {
@@ -18,6 +15,8 @@ export type ModelPickerProps = {
   className?: string | undefined;
   label?: string | undefined;
 };
+
+const EMPTY_CLIENT_MODELS: ClientModel[] = [];
 
 function providerGroups(models: ClientModel[]) {
   const byProvider = new Map<string, { label: string; models: ClientModel[] }>();
@@ -33,7 +32,7 @@ function providerGroups(models: ClientModel[]) {
 }
 
 export function ModelPicker({
-  models = [],
+  models = EMPTY_CLIENT_MODELS,
   rows,
   value,
   onChange,

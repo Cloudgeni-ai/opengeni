@@ -35,14 +35,7 @@ export type StreamCtx = {
 };
 
 /** Named pacing presets — resolved against OPENGENI_SEED_STREAM_TOKEN_MS. */
-export type StreamPacingPreset =
-  | "fast"
-  | "normal"
-  | "slow"
-  | "crawl"
-  | "laggy"
-  | "burst"
-  | "yank";
+export type StreamPacingPreset = "fast" | "normal" | "slow" | "crawl" | "laggy" | "burst" | "yank";
 
 export type StreamPacing = {
   /** Delay between token deltas (ms). */
@@ -114,15 +107,31 @@ export function resolveStreamPacing(
   switch (input) {
     case "fast":
       // Fast model: large chunks, short gaps.
-      return { tokenMs: Math.max(8, Math.floor(baselineTokenMs * 0.35)), chunkChars: 28, jitter: 0.1 };
+      return {
+        tokenMs: Math.max(8, Math.floor(baselineTokenMs * 0.35)),
+        chunkChars: 28,
+        jitter: 0.1,
+      };
     case "yank":
       // Tiny tokens, slightly uneven — soft word reveal under stress.
-      return { tokenMs: Math.max(10, Math.floor(baselineTokenMs * 0.55)), chunkChars: 3, jitter: 0.35 };
+      return {
+        tokenMs: Math.max(10, Math.floor(baselineTokenMs * 0.55)),
+        chunkChars: 3,
+        jitter: 0.35,
+      };
     case "slow":
-      return { tokenMs: Math.max(48, Math.floor(baselineTokenMs * 1.7)), chunkChars: 10, jitter: 0.2 };
+      return {
+        tokenMs: Math.max(48, Math.floor(baselineTokenMs * 1.7)),
+        chunkChars: 10,
+        jitter: 0.2,
+      };
     case "crawl":
       // Still slow enough to watch structure land, but not glacial.
-      return { tokenMs: Math.max(72, Math.floor(baselineTokenMs * 2.4)), chunkChars: 6, jitter: 0.22 };
+      return {
+        tokenMs: Math.max(72, Math.floor(baselineTokenMs * 2.4)),
+        chunkChars: 6,
+        jitter: 0.22,
+      };
     case "laggy":
       // Provider hiccups: normal-ish tokens with periodic multi-second stalls.
       return {
@@ -411,9 +420,7 @@ function marathonTools(ctx: StreamCtx, n: number): ToolSpec[] {
     "git diff --stat",
     "ls -la artifacts",
   ];
-  return Array.from({ length: n }, (_, i) =>
-    execOk(ctx.id(`m-${i}`), cmds[i % cmds.length]!),
-  );
+  return Array.from({ length: n }, (_, i) => execOk(ctx.id(`m-${i}`), cmds[i % cmds.length]!));
 }
 
 function mixedToolTour(ctx: StreamCtx): ToolSpec[] {
@@ -485,7 +492,10 @@ export const STREAM_SCENARIOS: StreamScenario[] = [
     userText: () =>
       "Scenario: stream an ASCII architecture diagram slowly, then finish with laggy stalls.",
     phases: [
-      { kind: "reason", text: "Draw the box diagram fence first; stalls later simulate provider lag." },
+      {
+        kind: "reason",
+        text: "Draw the box diagram fence first; stalls later simulate provider lag.",
+      },
       { kind: "sleep", ms: 300 },
       { kind: "message", text: MARKDOWN_SLOW_DIAGRAM, stream: true, pacing: "crawl" },
       { kind: "sleep", ms: 700 },
@@ -506,8 +516,7 @@ export const STREAM_SCENARIOS: StreamScenario[] = [
   {
     id: "laggy-burst-narration",
     title: "Laggy stalls + burst think pauses",
-    userText: () =>
-      "Scenario: simulate a lagging provider (stalls) then a bursty think-stream.",
+    userText: () => "Scenario: simulate a lagging provider (stalls) then a bursty think-stream.",
     phases: [
       { kind: "reason", text: "Tokens arrive in uneven waves — stalls then catch-up bursts." },
       { kind: "sleep", ms: 400 },
@@ -547,8 +556,7 @@ export const STREAM_SCENARIOS: StreamScenario[] = [
       { kind: "sleep", ms: 500 },
       {
         kind: "message",
-        text:
-          "All ten checks passed. The activity cluster above should settle into a quiet summary chip while this reply streams in.\n\n",
+        text: "All ten checks passed. The activity cluster above should settle into a quiet summary chip while this reply streams in.\n\n",
         stream: true,
         pacing: "yank",
       },
@@ -580,8 +588,7 @@ export const STREAM_SCENARIOS: StreamScenario[] = [
       },
       {
         kind: "message",
-        text:
-          "First pass looks good — cookie path updated. Starting a second verification cluster now.\n\n",
+        text: "First pass looks good — cookie path updated. Starting a second verification cluster now.\n\n",
         stream: true,
         pacing: "burst",
       },
@@ -601,8 +608,7 @@ export const STREAM_SCENARIOS: StreamScenario[] = [
       },
       {
         kind: "message",
-        text:
-          "Second cluster done (one expected DNS miss, recovered). Ready for your next instruction.\n",
+        text: "Second cluster done (one expected DNS miss, recovered). Ready for your next instruction.\n",
         stream: true,
         pacing: "slow",
       },
@@ -618,8 +624,7 @@ export const STREAM_SCENARIOS: StreamScenario[] = [
       { kind: "tools", settleMs: 260, tools: mixedToolTour },
       {
         kind: "message",
-        text:
-          "Catalog pass complete — you should have seen terminal, patch, search, screenshot, MCP, secret, image, issue, generic, and stdin rows.\n",
+        text: "Catalog pass complete — you should have seen terminal, patch, search, screenshot, MCP, secret, image, issue, generic, and stdin rows.\n",
         stream: true,
         pacing: "fast",
       },
@@ -628,8 +633,7 @@ export const STREAM_SCENARIOS: StreamScenario[] = [
   {
     id: "failures-and-recovery",
     title: "Failures, interrupted rows, then recovery",
-    userText: () =>
-      "Scenario: show failed tools, a bad patch, MCP error, then recover cleanly.",
+    userText: () => "Scenario: show failed tools, a bad patch, MCP error, then recover cleanly.",
     phases: [
       { kind: "reason", text: "Expect a few failures; recover without hiding them." },
       {
@@ -658,8 +662,7 @@ export const STREAM_SCENARIOS: StreamScenario[] = [
   {
     id: "memory-and-goal",
     title: "Memory save/correct + goal lifecycle",
-    userText: () =>
-      "Scenario: save memories, correct one, and exercise a short goal lifecycle.",
+    userText: () => "Scenario: save memories, correct one, and exercise a short goal lifecycle.",
     phases: [
       { kind: "reason", text: "Capture preferences, then set a short goal." },
       {
@@ -690,8 +693,7 @@ export const STREAM_SCENARIOS: StreamScenario[] = [
       { kind: "goal-update", text: "Cookie hardened; capturing dashboard proof" },
       {
         kind: "message",
-        text:
-          "Memories saved/corrected and the goal advanced. The goal pill above the composer should reflect the update.\n",
+        text: "Memories saved/corrected and the goal advanced. The goal pill above the composer should reflect the update.\n",
         stream: true,
         pacing: "normal",
       },
@@ -700,8 +702,7 @@ export const STREAM_SCENARIOS: StreamScenario[] = [
   {
     id: "sandbox-ops",
     title: "Sandbox ops + fat exec output",
-    userText: () =>
-      "Scenario: sandbox warm/exec noise plus a huge command output row.",
+    userText: () => "Scenario: sandbox warm/exec noise plus a huge command output row.",
     phases: [
       { kind: "reason", text: "Warm the sandbox, run a noisy install, then summarize." },
       {
@@ -733,8 +734,7 @@ export const STREAM_SCENARIOS: StreamScenario[] = [
       },
       {
         kind: "message",
-        text:
-          "Sandbox ops mixed with a truncated fat log. Expand the huge exec row to stress disclosure height animation.\n",
+        text: "Sandbox ops mixed with a truncated fat log. Expand the huge exec row to stress disclosure height animation.\n",
         stream: true,
         pacing: "burst",
       },
@@ -743,8 +743,7 @@ export const STREAM_SCENARIOS: StreamScenario[] = [
   {
     id: "worker-spawn",
     title: "Spawn worker + send message",
-    userText: () =>
-      "Scenario: spawn a child session worker and send it a follow-up.",
+    userText: () => "Scenario: spawn a child session worker and send it a follow-up.",
     phases: [
       { kind: "reason", text: "Delegate the e2e assertion pass to a worker." },
       {
@@ -761,8 +760,7 @@ export const STREAM_SCENARIOS: StreamScenario[] = [
       },
       {
         kind: "message",
-        text:
-          "Worker spawned. The worker row should deep-link; parent narration continues here.\n",
+        text: "Worker spawned. The worker row should deep-link; parent narration continues here.\n",
         stream: true,
         pacing: "yank",
       },
@@ -789,8 +787,7 @@ export const STREAM_SCENARIOS: StreamScenario[] = [
       },
       {
         kind: "message",
-        text:
-          "## Visual pass\n\nDashboard and login captured. The error screenshot is attached via `view_image`.\n\n![error](artifacts/login-error.png)\n",
+        text: "## Visual pass\n\nDashboard and login captured. The error screenshot is attached via `view_image`.\n\n![error](artifacts/login-error.png)\n",
         stream: true,
         pacing: "slow",
       },
@@ -809,8 +806,7 @@ export const STREAM_SCENARIOS: StreamScenario[] = [
       { kind: "tools", settleMs: 160, tools: (ctx) => marathonTools(ctx, 10) },
       {
         kind: "message",
-        text:
-          "### Mid-turn checkpoint\n\nFirst ten tools settled. Watching the cluster fold while this paragraph streams…\n\n- soft row entrance\n- settle beat\n- slow collapse\n\n",
+        text: "### Mid-turn checkpoint\n\nFirst ten tools settled. Watching the cluster fold while this paragraph streams…\n\n- soft row entrance\n- settle beat\n- slow collapse\n\n",
         stream: true,
         pacing: "crawl",
       },

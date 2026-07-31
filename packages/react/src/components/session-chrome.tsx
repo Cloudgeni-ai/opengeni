@@ -149,7 +149,11 @@ function formatCoarseElapsed(ms: number): string {
   return `${seconds}s`;
 }
 
-function useLiveElapsed(startIso: string | null | undefined, live: boolean, endIso?: string | null) {
+function useLiveElapsed(
+  startIso: string | null | undefined,
+  live: boolean,
+  endIso?: string | null,
+) {
   const start = startIso ? Date.parse(startIso) : Number.NaN;
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -461,9 +465,15 @@ export function SessionChrome({
           )}
           style={{
             borderRadius: "var(--og-session-chrome-radius)",
-            background: open ? "var(--og-session-chrome-surface-open)" : "var(--og-session-chrome-surface)",
-            borderColor: open ? "var(--og-session-chrome-border-open)" : "var(--og-session-chrome-border)",
-            boxShadow: open ? "var(--og-session-chrome-shadow-open)" : "var(--og-session-chrome-shadow)",
+            background: open
+              ? "var(--og-session-chrome-surface-open)"
+              : "var(--og-session-chrome-surface)",
+            borderColor: open
+              ? "var(--og-session-chrome-border-open)"
+              : "var(--og-session-chrome-border)",
+            boxShadow: open
+              ? "var(--og-session-chrome-shadow-open)"
+              : "var(--og-session-chrome-shadow)",
             transitionDuration: "var(--og-session-chrome-duration)",
             transitionTimingFunction: "var(--og-session-chrome-ease)",
           }}
@@ -613,7 +623,11 @@ function IncomingPanel({
   onDismiss?: ((inputId: string) => void) | undefined;
 }) {
   return (
-    <ul className="flex flex-col gap-0.5" aria-label="Incoming updates" data-og-session-chrome-panel="incoming">
+    <ul
+      className="flex flex-col gap-0.5"
+      aria-label="Incoming updates"
+      data-og-session-chrome-panel="incoming"
+    >
       {inputs.map((input) => (
         <li
           key={input.id}

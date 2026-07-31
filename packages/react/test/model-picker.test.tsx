@@ -203,11 +203,10 @@ describe("ModelPicker", () => {
     );
     const select = picker(container)!;
     const groups = [...select.querySelectorAll("optgroup")];
-    expect(groups.map((group) => group.label)).toEqual([
-      "OpenGeni credits",
-      "Bring your own key",
-    ]);
-    const blocked = [...select.querySelectorAll("option")].find((option) => option.value === "blocked");
+    expect(groups.map((group) => group.label)).toEqual(["OpenGeni credits", "Bring your own key"]);
+    const blocked = [...select.querySelectorAll("option")].find(
+      (option) => option.value === "blocked",
+    );
     expect(blocked?.disabled).toBe(true);
     expect(blocked?.textContent).toContain("Blocked by workspace policy");
   });

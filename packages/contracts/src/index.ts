@@ -5031,6 +5031,8 @@ export type ConnectionKind = z.infer<typeof ConnectionKind>;
 export const ConnectionStatus = z.enum(["active", "needs_reauth", "revoked", "error"]);
 export type ConnectionStatus = z.infer<typeof ConnectionStatus>;
 
+export const OPENGENI_PERSONAL_SLACK_MCP_URL = "https://mcp.slack.com/mcp" as const;
+
 export const OPENGENI_SLACK_BOT_CREDENTIAL_ROLE = "opengeni_slack_bot" as const;
 export const OPENGENI_SLACK_BOT_CREDENTIAL_LABEL = "OpenGeni Slack bot" as const;
 export const OPENGENI_SLACK_BOT_SESSION_METADATA_KEY = "opengeniSlackBotConnectionId" as const;

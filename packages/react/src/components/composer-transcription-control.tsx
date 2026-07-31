@@ -65,6 +65,10 @@ export type ComposerTranscriptionControlProps = {
 };
 
 const WAVEFORM_BARS = 18;
+const WAVEFORM_BAR_KEYS = Array.from(
+  { length: WAVEFORM_BARS },
+  (_, index) => `voice-waveform-bar-${index + 1}`,
+);
 
 /** One provider-neutral microphone control for the nearest editable composer. */
 export function ComposerTranscriptionControl({
@@ -95,8 +99,7 @@ export function ComposerTranscriptionControl({
     : !capability?.available || !workspaceEnabled
       ? messages.unavailable
       : null;
-  const idleLabel =
-    unavailableMessage ?? (status === "error" ? messages.retry : messages.start);
+  const idleLabel = unavailableMessage ?? (status === "error" ? messages.retry : messages.start);
   const errorMessage = transcription.error
     ? transcriptionErrorMessage(transcription.error, messages)
     : null;
@@ -310,21 +313,24 @@ function VoiceWaveform({
       data-voice-waveform={live ? "live" : "fallback"}
       className="flex h-4 w-[3.75rem] items-center justify-center gap-px"
     >
-      {levels.map((level, index) => (
-        <span
-          key={index}
-          className={cn(
-            "w-0.5 rounded-full bg-og-fg-muted/90 origin-center",
-            !live && "animate-og-waveform motion-reduce:animate-none",
-            mode === "transcribing" && "opacity-45",
-          )}
-          style={{
-            height: live ? `${Math.max(3, Math.round(level * 14))}px` : "14px",
-            animationDelay: live ? undefined : `${(index % 9) * 0.07}s`,
-            opacity: live ? 0.55 + level * 0.45 : undefined,
-          }}
-        />
-      ))}
+      {WAVEFORM_BAR_KEYS.map((key, index) => {
+        const level = levels[index] ?? 0;
+        return (
+          <span
+            key={key}
+            className={cn(
+              "w-0.5 rounded-full bg-og-fg-muted/90 origin-center",
+              !live && "animate-og-waveform motion-reduce:animate-none",
+              mode === "transcribing" && "opacity-45",
+            )}
+            style={{
+              height: live ? `${Math.max(3, Math.round(level * 14))}px` : "14px",
+              animationDelay: live ? undefined : `${(index % 9) * 0.07}s`,
+              opacity: live ? 0.55 + level * 0.45 : undefined,
+            }}
+          />
+        );
+      })}
     </span>
   );
 }

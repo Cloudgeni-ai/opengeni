@@ -42,10 +42,7 @@ export const MARKDOWN_CRYSTALLIZE_VT_TYPE = "og-md-crystallize";
  * between them — the platform "morph" primitive React's experimental
  * `<ViewTransition>` wraps. Falls back to a synchronous update.
  */
-export function runViewTransition(
-  update: () => void,
-  options?: { types?: string[] },
-): void {
+export function runViewTransition(update: () => void, options?: { types?: string[] }): void {
   if (prefersReducedMotion()) {
     update();
     return;
@@ -62,18 +59,22 @@ export function runViewTransition(
   const types = options?.types;
   if (types && types.length > 0) {
     try {
-      start.call(doc, {
-        update: () => {
-          flushSync(update);
+      Reflect.apply(start, doc, [
+        {
+          update: () => {
+            flushSync(update);
+          },
+          types,
         },
-        types,
-      });
+      ]);
       return;
     } catch {
       // Older engines only accept the callback form.
     }
   }
-  start.call(doc, () => {
-    flushSync(update);
-  });
+  Reflect.apply(start, doc, [
+    () => {
+      flushSync(update);
+    },
+  ]);
 }

@@ -251,8 +251,8 @@ export function TurnSummary({
   // Capture once: after a settle choreography the chip is already on screen.
   // Re-applying `animate-og-enter` when `settling` clears was the post-collapse
   // flash (opacity replay on the summary row).
-  const [allowEnterAnimation] = useState(
-    () => Boolean(enter && !bare && !initialSettle && !restingOpen),
+  const [allowEnterAnimation] = useState(() =>
+    Boolean(enter && !bare && !initialSettle && !restingOpen),
   );
   // Hold duration (and its "· 8s" insertion) until settle choreography finishes.
   // Surfacing it mid-beat or on the activity→turn remount made the chip text
@@ -301,134 +301,136 @@ export function TurnSummary({
 
   return (
     <TurnSettleChromeContext.Provider value={settleChrome}>
-    <div className={cn(copyable && "group/copy relative")}>
-    <Collapsible.Root
-      open={open}
-      onOpenChange={onOpenChange}
-      // History-only entrance. Never toggle this on after mount — see
-      // allowEnterAnimation. Settle uses animate-og-settle-chip on the trigger.
-      className={allowEnterAnimation && !liveShell ? "animate-og-enter" : undefined}
-    >
-      <Collapsible.Trigger
-        className={cn(
-          settling && "animate-og-settle-chip",
-          // Top-level turn fold and (when used) nested cluster folds render as
-          // FLAT rail rows — chevron + glyph + facets on the page background, no
-          // border, no fill. Only a hover tint hints the row is expandable, so a
-          // collapsed turn never reads as a boxed card. The top-level row is a
-          // touch larger (base text, size-5 glyph, wider gap) so it still reads
-          // as a turn landmark above any nested cluster rows it groups.
-          "group flex w-full items-center rounded-og-sm text-left transition-colors",
-          // A folded turn is a touch target on coarse pointers: grow the row so it
-          // clears the 40px minimum without disturbing the calm desktop rhythm.
-          "pointer-coarse:py-2.5",
-          bare
-            ? "gap-2 px-1.5 py-1.5 text-og-sm text-og-fg-muted"
-            : "-mx-2 gap-2.5 px-2 py-1.5 text-og-base text-og-fg-muted",
-          // A failed fold keeps its red accent (glyph + inline reason below) and a
-          // faint red hover wash so attention still lands there; every other
-          // outcome gets the neutral surface hover.
-          outcome === "failed"
-            ? "hover:bg-og-status-failed/[0.06] hover:text-og-fg"
-            : "hover:bg-og-surface-1 hover:text-og-fg",
-          liveShell && "pointer-events-none text-og-fg-subtle",
-        )}
-      >
-        {/* Disclosure grammar matches the rows: chevron leads (far left), then any
-            exceptional or active state, then the facets — one expand affordance
-            side everywhere. */}
-        <ChevronRightIcon
-          className={cn(
-            "size-3.5 shrink-0 text-og-fg-subtle transition-transform ease-og-in-out group-data-[state=open]:rotate-90",
-            settlePhase
-              ? "duration-[var(--og-duration-disclose-settle)]"
-              : "duration-[var(--og-duration-disclose)]",
-          )}
-        />
-        {/* Completion is the quiet default and needs no repeated glyph. Failed,
-            cancelled, and still-running folds retain a visible state marker. */}
-        {outcome === "complete" ? null : (
-          <span
+      <div className={cn(copyable && "group/copy relative")}>
+        <Collapsible.Root
+          open={open}
+          onOpenChange={onOpenChange}
+          // History-only entrance. Never toggle this on after mount — see
+          // allowEnterAnimation. Settle uses animate-og-settle-chip on the trigger.
+          className={allowEnterAnimation && !liveShell ? "animate-og-enter" : undefined}
+        >
+          <Collapsible.Trigger
             className={cn(
-              "inline-flex shrink-0 items-center justify-center",
-              bare ? "size-3.5" : "size-5",
-              outcome === "failed" ? "text-og-status-failed" : "text-og-fg-subtle",
+              settling && "animate-og-settle-chip",
+              // Top-level turn fold and (when used) nested cluster folds render as
+              // FLAT rail rows — chevron + glyph + facets on the page background, no
+              // border, no fill. Only a hover tint hints the row is expandable, so a
+              // collapsed turn never reads as a boxed card. The top-level row is a
+              // touch larger (base text, size-5 glyph, wider gap) so it still reads
+              // as a turn landmark above any nested cluster rows it groups.
+              "group flex w-full items-center rounded-og-sm text-left transition-colors",
+              // A folded turn is a touch target on coarse pointers: grow the row so it
+              // clears the 40px minimum without disturbing the calm desktop rhythm.
+              "pointer-coarse:py-2.5",
+              bare
+                ? "gap-2 px-1.5 py-1.5 text-og-sm text-og-fg-muted"
+                : "-mx-2 gap-2.5 px-2 py-1.5 text-og-base text-og-fg-muted",
+              // A failed fold keeps its red accent (glyph + inline reason below) and a
+              // faint red hover wash so attention still lands there; every other
+              // outcome gets the neutral surface hover.
+              outcome === "failed"
+                ? "hover:bg-og-status-failed/[0.06] hover:text-og-fg"
+                : "hover:bg-og-surface-1 hover:text-og-fg",
+              liveShell && "pointer-events-none text-og-fg-subtle",
             )}
           >
-            {outcome === "failed" ? (
-              <TriangleAlertIcon className="size-3" />
-            ) : outcome === "cancelled" ? (
-              <CircleSlashIcon className="size-3" />
-            ) : (
-              <span className="size-1.5 animate-og-pulse rounded-full bg-og-fg-subtle" />
+            {/* Disclosure grammar matches the rows: chevron leads (far left), then any
+            exceptional or active state, then the facets — one expand affordance
+            side everywhere. */}
+            <ChevronRightIcon
+              className={cn(
+                "size-3.5 shrink-0 text-og-fg-subtle transition-transform ease-og-in-out group-data-[state=open]:rotate-90",
+                settlePhase
+                  ? "duration-[var(--og-duration-disclose-settle)]"
+                  : "duration-[var(--og-duration-disclose)]",
+              )}
+            />
+            {/* Completion is the quiet default and needs no repeated glyph. Failed,
+            cancelled, and still-running folds retain a visible state marker. */}
+            {outcome === "complete" ? null : (
+              <span
+                className={cn(
+                  "inline-flex shrink-0 items-center justify-center",
+                  bare ? "size-3.5" : "size-5",
+                  outcome === "failed" ? "text-og-status-failed" : "text-og-fg-subtle",
+                )}
+              >
+                {outcome === "failed" ? (
+                  <TriangleAlertIcon className="size-3" />
+                ) : outcome === "cancelled" ? (
+                  <CircleSlashIcon className="size-3" />
+                ) : (
+                  <span className="size-1.5 animate-og-pulse rounded-full bg-og-fg-subtle" />
+                )}
+              </span>
             )}
-          </span>
-        )}
-        <span className={cn("min-w-0 flex-1 truncate", bare ? "text-og-sm" : "text-og-fg-muted")}>
-          {facets.map(({ facet, result }, index) => (
-            <FacetRenderBoundary key={facet.id}>
-              <>
-                {index > 0 ? " · " : null}
-                <span aria-label={result.ariaLabel} title={result.title}>
-                  {result.icon ? (
-                    <span aria-hidden className="mr-1 inline-flex align-[-0.125em]">
-                      {result.icon}
+            <span
+              className={cn("min-w-0 flex-1 truncate", bare ? "text-og-sm" : "text-og-fg-muted")}
+            >
+              {facets.map(({ facet, result }, index) => (
+                <FacetRenderBoundary key={facet.id}>
+                  <>
+                    {index > 0 ? " · " : null}
+                    <span aria-label={result.ariaLabel} title={result.title}>
+                      {result.icon ? (
+                        <span aria-hidden className="mr-1 inline-flex align-[-0.125em]">
+                          {result.icon}
+                        </span>
+                      ) : null}
+                      {result.content}
                     </span>
-                  ) : null}
-                  {result.content}
-                </span>
-              </>
-            </FacetRenderBoundary>
-          ))}
-          {outcome === "failed" && failureText ? (
-            <span className="text-og-status-failed"> · {failureText}</span>
-          ) : null}
-          {outcome === "cancelled" ? (
-            <span className="text-og-fg-subtle"> · interrupted</span>
-          ) : null}
-        </span>
-        {/* The disclosure hint. Calm at rest on fine pointers (revealed on hover
+                  </>
+                </FacetRenderBoundary>
+              ))}
+              {outcome === "failed" && failureText ? (
+                <span className="text-og-status-failed"> · {failureText}</span>
+              ) : null}
+              {outcome === "cancelled" ? (
+                <span className="text-og-fg-subtle"> · interrupted</span>
+              ) : null}
+            </span>
+            {/* The disclosure hint. Calm at rest on fine pointers (revealed on hover
             and keyboard focus), but always present on coarse pointers where there
             is no hover to lean on — so the fold never reads as a static status
             line. Purely visual: the trigger's aria-expanded already conveys state
             to assistive tech, so the hint is hidden from the accessible name. */}
-        <span
-          aria-hidden
-          className={cn(
-            "ml-auto shrink-0 pl-2 text-og-xs text-og-fg-subtle transition-opacity duration-150",
-            // Leave a sliver so a collapsed-chip copy icon can sit outside.
-            copyable ? "pr-8" : null,
-            "opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100",
-            "pointer-coarse:opacity-100",
-          )}
-        >
-          {open ? "hide steps" : "show steps"}
-        </span>
-      </Collapsible.Trigger>
-      <Collapsible.Content
-        data-og-fold-content=""
-        className={cn(
-          "overflow-hidden",
-          expandReady && "data-[state=open]:animate-og-expand",
-          // Auto-close: slow settle. Manual close (settlePhase cleared): fast.
-          settlePhase
-            ? "data-[state=closed]:animate-og-settle-collapse"
-            : "data-[state=closed]:animate-og-collapse",
-        )}
-      >
-        {/* A nested node indents its revealed rows under the glyph (thread nesting
+            <span
+              aria-hidden
+              className={cn(
+                "ml-auto shrink-0 pl-2 text-og-xs text-og-fg-subtle transition-opacity duration-150",
+                // Leave a sliver so a collapsed-chip copy icon can sit outside.
+                copyable ? "pr-8" : null,
+                "opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100",
+                "pointer-coarse:opacity-100",
+              )}
+            >
+              {open ? "hide steps" : "show steps"}
+            </span>
+          </Collapsible.Trigger>
+          <Collapsible.Content
+            data-og-fold-content=""
+            className={cn(
+              "overflow-hidden",
+              expandReady && "data-[state=open]:animate-og-expand",
+              // Auto-close: slow settle. Manual close (settlePhase cleared): fast.
+              settlePhase
+                ? "data-[state=closed]:animate-og-settle-collapse"
+                : "data-[state=closed]:animate-og-collapse",
+            )}
+          >
+            {/* A nested node indents its revealed rows under the glyph (thread nesting
             off the parent rail); the top-level turn body owns its own rail. */}
-        <div className={bare ? "pt-1 pl-5" : "pt-2"}>{children}</div>
-      </Collapsible.Content>
-    </Collapsible.Root>
-    {copyable ? (
-      <div className="pointer-events-none absolute top-1.5 right-0 z-10">
-        <div className="pointer-events-auto">
-          <CopyButton text={copyText!} label="Copy turn" reveal="group-hover" />
-        </div>
+            <div className={bare ? "pt-1 pl-5" : "pt-2"}>{children}</div>
+          </Collapsible.Content>
+        </Collapsible.Root>
+        {copyable ? (
+          <div className="pointer-events-none absolute top-1.5 right-0 z-10">
+            <div className="pointer-events-auto">
+              <CopyButton text={copyText!} label="Copy turn" reveal="group-hover" />
+            </div>
+          </div>
+        ) : null}
       </div>
-    ) : null}
-    </div>
     </TurnSettleChromeContext.Provider>
   );
 }

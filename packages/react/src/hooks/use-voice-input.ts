@@ -1,5 +1,5 @@
 import type { ClientVoiceInputConfig, OpenGeniClient } from "@opengeni/sdk";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { appendFinalTranscript } from "./use-transcription";
 
 export type VoiceInputStatus =
@@ -56,16 +56,16 @@ export function useVoiceInput({
   const valueRef = useRef(value);
   valueRef.current = value;
 
-  const clearRuntime = () => {
+  const clearRuntime = useCallback(() => {
     if (timerRef.current) clearTimeout(timerRef.current);
     timerRef.current = null;
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
     recorderRef.current = null;
     setStream(null);
-  };
+  }, []);
 
-  const cancel = () => {
+  const cancel = useCallback(() => {
     generationRef.current += 1;
     controllerRef.current?.abort();
     controllerRef.current = null;
@@ -75,7 +75,7 @@ export function useVoiceInput({
     setStatus("idle");
     setError(null);
     focusInput();
-  };
+  }, [clearRuntime, focusInput]);
 
   const stop = () => {
     const recorder = recorderRef.current;
@@ -182,7 +182,7 @@ export function useVoiceInput({
     };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [status]);
+  }, [cancel, status]);
 
   useEffect(
     () => () => {
@@ -192,7 +192,7 @@ export function useVoiceInput({
       clearRuntime();
       if (recorder && recorder.state !== "inactive") recorder.stop();
     },
-    [],
+    [clearRuntime],
   );
 
   return {

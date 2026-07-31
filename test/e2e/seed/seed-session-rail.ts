@@ -44,8 +44,7 @@ async function resolveIdentity(): Promise<{
   accountId: string;
   subjectId: string;
 }> {
-  const workspaceId =
-    process.env.OPENGENI_SEED_WORKSPACE_ID ?? (await resolveWorkspaceId());
+  const workspaceId = process.env.OPENGENI_SEED_WORKSPACE_ID ?? (await resolveWorkspaceId());
   const envAccount = process.env.OPENGENI_SEED_ACCOUNT_ID;
   if (envAccount && SUBJECT) {
     return { workspaceId, accountId: envAccount, subjectId: SUBJECT };
@@ -319,9 +318,7 @@ async function main(): Promise<void> {
   console.log(
     `[seed:session-rail] DONE created=${created.length} roots=${roots} nested=${nested} pinned=5 batch=${BATCH}`,
   );
-  console.log(
-    `[seed:session-rail] open: ${WEB_URL}/workspaces/${workspaceId}/sessions`,
-  );
+  console.log(`[seed:session-rail] open: ${WEB_URL}/workspaces/${workspaceId}/sessions`);
   console.log(
     `[seed:session-rail] tip: expand Wide/Bush/Deep managers; nested pins should surface in Pinned.`,
   );

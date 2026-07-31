@@ -112,9 +112,8 @@ describe("native composer voice-input browser acceptance", () => {
             micCount: document.querySelectorAll('button[aria-label="Start voice input"]').length,
             micWidth: rect?.width ?? 0,
             micHeight: rect?.height ?? 0,
-            providerConfigurationVisible: /gpt-transcribe|api key|BYOK|provider ID|azure-openai/i.test(
-              document.body.innerText,
-            ),
+            providerConfigurationVisible:
+              /gpt-transcribe|api key|BYOK|provider ID|azure-openai/i.test(document.body.innerText),
             colorScheme: surface ? getComputedStyle(surface).colorScheme : "",
           };
         });
@@ -208,7 +207,9 @@ describe("native composer voice-input browser acceptance", () => {
     await page.getByRole("button", { name: "Stop and transcribe" }).waitFor();
     // Recording chrome uses stop/cancel icons, not a spinner; assert no forced spin remains.
     const animationName = await page
-      .locator('[data-transcription-status="recording"] button[aria-label="Stop and transcribe"] svg')
+      .locator(
+        '[data-transcription-status="recording"] button[aria-label="Stop and transcribe"] svg',
+      )
       .evaluate((element) => getComputedStyle(element).animationName);
     expect(animationName === "none" || animationName === "").toBe(true);
     await context.close();

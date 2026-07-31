@@ -82,9 +82,7 @@ export function useWorkspaceModelCatalog(workspaceId: string | null): WorkspaceM
   const rows = useMemo(() => sortPickerRows(projectPickerRows(models)), [models]);
   const rowsForSelection = useCallback(
     (selectedModelId: string) =>
-      sortPickerRows(
-        ensureSelectedModelRow(rows, selectedModelId, displayModel(selectedModelId)),
-      ),
+      sortPickerRows(ensureSelectedModelRow(rows, selectedModelId, displayModel(selectedModelId))),
     [rows],
   );
 

@@ -22,7 +22,7 @@ describe("softenStreamingMarkdown", () => {
   });
 
   test("does not invent closers inside a finished fence", () => {
-    const text = "```ts\nconst star = \"**\"\n```\n";
+    const text = '```ts\nconst star = "**"\n```\n';
     expect(softenStreamingMarkdown(text)).toBe(text);
   });
 

@@ -193,9 +193,9 @@ describe("native voice input contracts", () => {
     expect(
       WorkspaceVoiceInputSettings.safeParse({ enabled: true, provider: "openai" }).success,
     ).toBe(false);
-    expect(UpdateWorkspaceSettingsRequest.safeParse({ voiceInput: { enabled: false } }).success).toBe(
-      true,
-    );
+    expect(
+      UpdateWorkspaceSettingsRequest.safeParse({ voiceInput: { enabled: false } }).success,
+    ).toBe(true);
   });
 
   test("maps legacy transcription.enabled when voiceInput is absent", () => {

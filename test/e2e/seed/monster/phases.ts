@@ -11,7 +11,6 @@ import {
   fatText,
   mcpError,
   mcpIssue,
-  mcpOk,
   sessionCreate,
   sessionCreateRunning,
   sessionSendMessage,
@@ -85,7 +84,11 @@ export const TIMELINE_DENSE_TYPES = new Set([
   "sandbox.command.output.delta",
 ]);
 
-export function tipReserve(target: number, remaining: number, shares: PhaseShares = DEFAULT_SHARES): number {
+export function tipReserve(
+  target: number,
+  remaining: number,
+  shares: PhaseShares = DEFAULT_SHARES,
+): number {
   const fromShare = phaseCap(target, shares.coda);
   const desired = Math.max(fromShare, Math.min(TIP_PAGE_EVENTS, Math.floor(target * 0.15)));
   return Math.min(remaining, desired);
@@ -119,7 +122,10 @@ export function phaseSoloMarathon(
   budget.endTurn(turnId);
 }
 
-export function phaseToolTour(budget: EventBudget, opts: { fat: boolean; target: number; shares: PhaseShares }): void {
+export function phaseToolTour(
+  budget: EventBudget,
+  opts: { fat: boolean; target: number; shares: PhaseShares },
+): void {
   const turnId = budget.nextTurnId();
   if (
     budget.beginTurn(
@@ -220,7 +226,10 @@ export function phaseWorkersGoalsMemory(budget: EventBudget, children: string[])
       );
     }
     if (children[1]) {
-      budget.tool(sessionCreateRunning(budget.nextCallId("wk-run"), "migrate billing service"), turnId);
+      budget.tool(
+        sessionCreateRunning(budget.nextCallId("wk-run"), "migrate billing service"),
+        turnId,
+      );
       budget.tool(
         sessionCreate(budget.nextCallId("wk2"), children[1], "migrate billing service"),
         turnId,

@@ -205,7 +205,10 @@ export function createApp(deps: AppDependencies): Hono {
   app.use(
     "*",
     bodyLimit({
-      maxSize: Math.max(API_MAX_REQUEST_BODY_BYTES, deps.settings.voiceInputMaxSizeBytes + 64 * 1024),
+      maxSize: Math.max(
+        API_MAX_REQUEST_BODY_BYTES,
+        deps.settings.voiceInputMaxSizeBytes + 64 * 1024,
+      ),
       onError: (c) =>
         c.json({ code: "PAYLOAD_TOO_LARGE", message: "Request body is too large." }, 413),
     }),

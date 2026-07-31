@@ -95,10 +95,7 @@ describe("voice input provider registry", () => {
         voiceInputProviderOrder: "openai,azure-openai,codex-subscription",
       }),
     );
-    expect(providers.map((provider) => provider.id)).toEqual([
-      "openai",
-      "codex-subscription",
-    ]);
+    expect(providers.map((provider) => provider.id)).toEqual(["openai", "codex-subscription"]);
   });
 
   test("honors provider order and skips disabled openai", () => {

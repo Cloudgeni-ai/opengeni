@@ -171,11 +171,7 @@ export class EventBudget {
     return this.push("turn.completed", {}, turnId);
   }
 
-  fillActivity(
-    turnId: string,
-    cap: number,
-    mode: "dense" | "sparse" | "fat" = "dense",
-  ): number {
+  fillActivity(turnId: string, cap: number, mode: "dense" | "sparse" | "fat" = "dense"): number {
     let added = 0;
     while (added < cap && !this.full()) {
       const roll = this.rng();
@@ -197,7 +193,11 @@ export class EventBudget {
         }
       } else if (roll < 0.4) {
         if (
-          this.push("agent.message.delta", { text: `Working through item ${this.callSeq}…` }, turnId)
+          this.push(
+            "agent.message.delta",
+            { text: `Working through item ${this.callSeq}…` },
+            turnId,
+          )
         ) {
           added += 1;
         }

@@ -31,11 +31,7 @@ import {
   type AppendEventInput,
   type Database,
 } from "@opengeni/db";
-import {
-  createNatsEventBus,
-  publishDurableSessionEvents,
-  type EventBus,
-} from "@opengeni/events";
+import { createNatsEventBus, publishDurableSessionEvents, type EventBus } from "@opengeni/events";
 import { BASE_URL, WEB_URL } from "./harness";
 import {
   SCENARIO_COUNT,
@@ -416,16 +412,7 @@ async function streamScenario(
 
   for (const phase of scenario.phases) {
     if (signal.aborted) return published;
-    published += await playPhase(
-      db,
-      bus,
-      workspaceId,
-      sessionId,
-      ctx,
-      phase,
-      signal,
-      messageAcc,
-    );
+    published += await playPhase(db, bus, workspaceId, sessionId, ctx, phase, signal, messageAcc);
   }
 
   if (signal.aborted) return published;
@@ -456,7 +443,9 @@ async function main(): Promise<void> {
   }
 
   const link = `${WEB_URL}/workspaces/${workspaceId}/sessions/${sessionId}`;
-  console.log(`[stream] api=${BASE_URL} db=${databaseUrl.replace(/:[^:@/]+@/, ":***@")} nats=${natsUrl}`);
+  console.log(
+    `[stream] api=${BASE_URL} db=${databaseUrl.replace(/:[^:@/]+@/, ":***@")} nats=${natsUrl}`,
+  );
   console.log(`[stream] workspace=${workspaceId}`);
   console.log(`[stream] session=${sessionId} status=${session.status}`);
   console.log(`[stream] open: ${link}`);
@@ -491,7 +480,9 @@ async function main(): Promise<void> {
         ac.signal,
       );
       total += n;
-      console.log(`[stream] ✓ turn=${turnIndex} scenario=${scenario.id} +${n} events (total=${total})`);
+      console.log(
+        `[stream] ✓ turn=${turnIndex} scenario=${scenario.id} +${n} events (total=${total})`,
+      );
       await sleep(TURN_MS, ac.signal);
     }
   } finally {

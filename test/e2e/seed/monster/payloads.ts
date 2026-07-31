@@ -89,7 +89,8 @@ export function writeStdin(id: string): ToolSpec {
     name: "write_stdin",
     id,
     arguments: { session_id: 1, chars: "\u0003" },
-    output: "Chunk ID: ccc333\nWall time: 1.0010 seconds\nProcess exited with code 130\nOutput:\n^C\n",
+    output:
+      "Chunk ID: ccc333\nWall time: 1.0010 seconds\nProcess exited with code 130\nOutput:\n^C\n",
   };
 }
 
@@ -386,7 +387,7 @@ export function toolTourSpecs(id: (label: string) => string): ToolSpec[] {
           {
             type: "update_file",
             path: "src/routes/login.tsx",
-            diff: "@@ -1,3 +1,4 @@\n import { sessionApi } from \"../auth/session\";\n+import { redirect } from \"../router\";\n",
+            diff: '@@ -1,3 +1,4 @@\n import { sessionApi } from "../auth/session";\n+import { redirect } from "../router";\n',
           },
           { type: "delete_file", path: "src/auth/legacy-token.ts", diff: "" },
         ],

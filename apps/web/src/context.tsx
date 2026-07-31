@@ -297,8 +297,7 @@ export function RootRouteComponent() {
   // Public surfaces render ahead of auth/config gates. `/reset-password` is
   // always public; the SessionChrome DEV harness is public and needs no session.
   const isPublicAuthRoute =
-    pathname === "/reset-password" ||
-    (import.meta.env.DEV && pathname === "/dev/composer-chrome");
+    pathname === "/reset-password" || (import.meta.env.DEV && pathname === "/dev/composer-chrome");
   // The @opengeni/sdk client behind every console API call and hook. Auth
   // headers are read per request; a new identity per key version makes the
   // hooks re-fetch and the event streams reconnect with the new credentials.
@@ -946,9 +945,7 @@ export function RootRouteComponent() {
   }, []);
   const effortForSession = useCallback(
     (sessionId: string): IntelligenceEffort =>
-      reasoningEffortBySession[sessionId] ??
-      clientConfig?.defaultReasoningEffort ??
-      "low",
+      reasoningEffortBySession[sessionId] ?? clientConfig?.defaultReasoningEffort ?? "low",
     [clientConfig?.defaultReasoningEffort, reasoningEffortBySession],
   );
   const setEffortForSession = useCallback((sessionId: string, value: IntelligenceEffort): void => {
