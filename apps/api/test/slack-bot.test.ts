@@ -1213,7 +1213,11 @@ describe("OpenGeni Slack bot connection", () => {
       metadata: { ...original.metadata },
       createdBySubjectId: "subject-a",
     });
-    expect(ordered.some((connection) => connection.id === crossTenant.id)).toBe(false);
+    expect(
+      (await listConnectionsMetadata(client.db, workspace.workspaceId, null)).some(
+        (connection) => connection.id === crossTenant.id,
+      ),
+    ).toBe(false);
 
     await createConnection(client.db, {
       accountId: workspace.accountId,
