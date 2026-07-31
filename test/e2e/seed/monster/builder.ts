@@ -3,13 +3,7 @@
  */
 
 import type { AppendEventInput } from "@opengeni/db";
-import {
-  createRng,
-  EventBudget,
-  hashHistogram,
-  histogramOf,
-  uuidFromRng,
-} from "./budget.ts";
+import { createRng, EventBudget, hashHistogram, histogramOf } from "./budget.ts";
 import { DEFAULT_SHARES, phaseTipChat, runAllPhases } from "./phases.ts";
 
 export type MonsterProfile = "ui" | "monster" | "stress" | "payload-heavy";
@@ -38,13 +32,7 @@ export type MonsterBuildResult = {
   seed: number;
 };
 
-export {
-  createRng,
-  EventBudget,
-  hashHistogram,
-  histogramOf,
-  uuidFromRng,
-} from "./budget.ts";
+export { createRng, EventBudget, hashHistogram, histogramOf, uuidFromRng } from "./budget.ts";
 export { DEFAULT_SHARES } from "./phases.ts";
 
 export function resolveProfile(raw: string | undefined): MonsterProfile {

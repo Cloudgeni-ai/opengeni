@@ -244,7 +244,9 @@ describe("MessageTimeline pagination affordances", () => {
 
     const initial = [
       reasoningItem("activity-a", "activity A"),
-      ...Array.from({ length: 14 }, (_, index) => userItem(`u${index + 1}`, `message U${index + 1}`)),
+      ...Array.from({ length: 14 }, (_, index) =>
+        userItem(`u${index + 1}`, `message U${index + 1}`),
+      ),
     ];
     const renderMessageText = (text: string, item: TimelineItem) => (
       <span data-message-id={item.id}>{text}</span>
@@ -615,12 +617,7 @@ describe("MessageTimeline pagination affordances", () => {
 
     // A following tip append must still stick to bottom.
     layout.setContentHeight(1580);
-    await r.rerender(
-      <MessageTimeline
-        events={[...initial, event(21)]}
-        status="running"
-      />,
-    );
+    await r.rerender(<MessageTimeline events={[...initial, event(21)]} status="running" />);
     await drainFrames(frames);
     await flush();
     expect(r.container.textContent).not.toContain("Jump to latest");
@@ -783,7 +780,7 @@ function mockScrollerLayout(
     },
   });
 
-  const originalElementRect = Element.prototype.getBoundingClientRect;
+  const scrollerElementRect = Element.prototype.getBoundingClientRect;
   Element.prototype.getBoundingClientRect = function (this: Element): DOMRect {
     if (this === scroller) {
       return {
@@ -816,7 +813,7 @@ function mockScrollerLayout(
         },
       } as DOMRect;
     }
-    return originalElementRect.call(this);
+    return scrollerElementRect.call(this);
   };
 
   const originalStyle = window.getComputedStyle;
@@ -857,7 +854,7 @@ function mockScrollerLayout(
       return Math.abs(tipRect.bottom - (nodeRect.bottom - options.paddingBottom));
     },
     restore() {
-      Element.prototype.getBoundingClientRect = originalElementRect;
+      Element.prototype.getBoundingClientRect = scrollerElementRect;
       window.getComputedStyle = originalStyle;
     },
   };

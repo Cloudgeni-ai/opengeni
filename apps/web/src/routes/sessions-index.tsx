@@ -508,6 +508,7 @@ function SessionControlStrip({
       context.setReasoningEffort(coerced);
     }
   }, [
+    context,
     context.model,
     context.reasoningEffort,
     context.setReasoningEffort,

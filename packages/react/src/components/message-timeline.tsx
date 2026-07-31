@@ -338,9 +338,7 @@ export function MessageTimeline({
     }
     const nowTs = typeof performance !== "undefined" ? performance.now() : Date.now();
     const dt =
-      glideLastTsRef.current === 0
-        ? 16
-        : Math.min(64, Math.max(8, nowTs - glideLastTsRef.current));
+      glideLastTsRef.current === 0 ? 16 : Math.min(64, Math.max(8, nowTs - glideLastTsRef.current));
     glideLastTsRef.current = nowTs;
     // Decay velocity while gliding without new growth so catch-up eases out.
     const tracker = growthTrackerRef.current;
@@ -375,7 +373,11 @@ export function MessageTimeline({
       // Glide only for ordinary streaming-scale growth after the first paint.
       // The initial reveal, session switches, and layout jumps larger than a
       // viewport-ish distance snap — animating those would feel like lag.
-      if (revealedRef.current && Math.abs(delta) <= GLIDE_MAX_DISTANCE_PX && !prefersReducedMotion()) {
+      if (
+        revealedRef.current &&
+        Math.abs(delta) <= GLIDE_MAX_DISTANCE_PX &&
+        !prefersReducedMotion()
+      ) {
         startGlide();
       } else {
         stopGlide();
@@ -387,6 +389,7 @@ export function MessageTimeline({
 
   // The single post-commit scroll authority. Runs after EVERY commit (no dep
   // list): any commit may change content height, and the decision is cheap.
+  // oxlint-disable-next-line react-hooks/exhaustive-deps -- Deliberately runs after every commit.
   useLayoutEffect(() => {
     const node = scrollRef.current;
     if (!node) {
@@ -756,9 +759,7 @@ export function MessageTimeline({
             </div>
           </div>
           <AnimatePresence>
-            {loadingOlder ||
-            loadingOldest ||
-            (hasOlder && onJumpToStart && olderPrefetchArmed) ? (
+            {loadingOlder || loadingOldest || (hasOlder && onJumpToStart && olderPrefetchArmed) ? (
               // Floating over the scroller (not a timeline row) so showing and
               // hiding it never reflows history under the reader.
               <motion.div
@@ -905,11 +906,7 @@ function useStableTimelineGroupKeys(allGroups: TimelineGroup[]): KeyedTimelineGr
         // Retain only same-kind matches. Activity → turn wrap must NOT keep the
         // activity chip's React key: that reused a collapsed TurnSummary and
         // skipped the settle beat (insta-collapse / content flash).
-        if (
-          previous &&
-          previous.group.kind === group.kind &&
-          !usedKeys.has(previous.key)
-        ) {
+        if (previous && previous.group.kind === group.kind && !usedKeys.has(previous.key)) {
           retainedKey = previous.key;
           break;
         }
@@ -1012,9 +1009,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
   const liveActivitySettle = useLiveSettleFold(activityShouldFold && !insideTurn);
   const turnDefaultOpen = !insideTurn && group.kind === "turn" && group.outcome === "failed";
   const settleFold =
-    group.kind === "turn"
-      ? Boolean(enter && !insideTurn && !turnDefaultOpen)
-      : liveActivitySettle;
+    group.kind === "turn" ? Boolean(enter && !insideTurn && !turnDefaultOpen) : liveActivitySettle;
   switch (group.kind) {
     case "activity":
       if (insideTurn) {
@@ -1059,9 +1054,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
           items={group.items}
           outcome={group.outcome}
           failureText={group.failureText}
-          defaultOpen={
-            !activityShouldFold || group.outcome === "failed" ? true : undefined
-          }
+          defaultOpen={!activityShouldFold || group.outcome === "failed" ? true : undefined}
           facets={turnSummary?.facets}
           settleFold={settleFold}
         >
