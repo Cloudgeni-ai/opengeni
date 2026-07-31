@@ -126,6 +126,24 @@ describe("release image workflow contract", () => {
     expect(candidate).not.toContain('existing_tag_sha="$(gh api');
   });
 
+  test("main CI publishes exact-SHA dogfood images without granting PR publication", async () => {
+    const ci = await workflow("ci.yml");
+    const images = ci.slice(ci.indexOf("\n  images:\n"), ci.indexOf("\n  automation-report:\n"));
+
+    expect(() => Bun.YAML.parse(ci)).not.toThrow();
+    expect(images).toContain("packages: write");
+    expect(images.match(/push: \$\{\{ github\.event_name == 'push' \}\}/g)).toHaveLength(5);
+    expect(images.match(/:sha-\{0\}', github\.sha\)/g)).toHaveLength(5);
+    expect(images.match(/OPENGENI_SERVER_VERSION=sha-\$\{\{ github\.sha \}\}/g)).toHaveLength(3);
+    expect(images).toContain("OPENGENI_DEPLOYMENT_REVISION=${{ github.sha }}");
+    expect(images).toContain("Write exact-main-SHA dogfood receipt");
+    expect(images).toContain("Upload exact-main-SHA dogfood receipt");
+    expect(images).toContain("dogfood-images-${{ github.sha }}");
+    expect(images).toContain("dogfood-images.sha256");
+    expect(images).toContain("'^sha256:[0-9a-f]{64}$'");
+    expect(images).not.toMatch(/:latest(?:['"}\s]|$)/);
+  });
+
   test("final release promotes accepted manifests and has no image build boundary", async () => {
     const release = await workflow("release.yml");
     const finalJob = release.slice(release.indexOf("\n  images:\n"));
