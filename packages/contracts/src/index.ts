@@ -9,6 +9,28 @@ import {
 export * from "./slack-bot-scopes";
 
 export {
+  CreateWorkspaceArtifactRequest,
+  PublishWorkspaceArtifactVersionRequest,
+  RollbackWorkspaceArtifactRequest,
+  WorkspaceArtifact,
+  WorkspaceArtifactContentResponse,
+  WorkspaceArtifactDetailResponse,
+  WorkspaceArtifactEvent,
+  WorkspaceArtifactEventType,
+  WorkspaceArtifactHtml,
+  WorkspaceArtifactListResponse,
+  WorkspaceArtifactMutationResponse,
+  WorkspaceArtifactSlug,
+  WorkspaceArtifactStatus,
+  WorkspaceArtifactVersion,
+  WORKSPACE_ARTIFACT_DESCRIPTION_MAX_CHARS,
+  WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES,
+  WORKSPACE_ARTIFACT_LIST_MAX,
+  WORKSPACE_ARTIFACT_TITLE_MAX_CHARS,
+  normalizeWorkspaceArtifactSlug,
+} from "./artifacts";
+
+export {
   SESSION_EVENT_PAYLOAD_MAX_BYTES,
   approximateSessionEventTokens,
   boundSessionEventPayload,
@@ -622,6 +644,10 @@ export const Permission = z.enum([
   // super-wildcard over both.
   "rigs:use",
   "rigs:manage",
+  // Workspace-published HTML artifacts. Read permits listing/source retrieval;
+  // publish permits create, version publication, and rollback.
+  "artifacts:read",
+  "artifacts:publish",
 ]);
 export type Permission = z.infer<typeof Permission>;
 
@@ -647,6 +673,8 @@ export const DEFAULT_FIRST_PARTY_MCP_PERMISSIONS = [
   "variable-sets:manage",
   "rigs:use",
   "github:use",
+  "artifacts:read",
+  "artifacts:publish",
 ] as const satisfies readonly Permission[];
 
 /**
@@ -715,6 +743,11 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "slack_bot_file_content",
   "slack_bot_post_message",
   "slack_bot_delete_message",
+  "artifacts_list",
+  "artifacts_get_source",
+  "artifacts_create",
+  "artifacts_publish",
+  "artifacts_rollback",
 ] as const;
 export const FirstPartyMcpToolName = z.enum(FIRST_PARTY_MCP_TOOL_NAMES);
 export type FirstPartyMcpToolName = z.infer<typeof FirstPartyMcpToolName>;
@@ -9053,7 +9086,7 @@ export type WorkspaceModelCatalogResponse = z.infer<typeof WorkspaceModelCatalog
  * that rollout boundary. Mutating clients send this value in
  * `x-opengeni-api-contract`; the API rejects any other value before routing.
  */
-export const OPENGENI_API_CONTRACT_REVISION = "2026-07-turn-instructions-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-07-workspace-artifacts-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;

@@ -1,4 +1,7 @@
-import type { Settings } from "@opengeni/config";
+import {
+  resolveFirstPartyDelegationSecret,
+  type Settings,
+} from "@opengeni/config";
 import {
   verifyDelegatedAccessToken,
   type AccountGrant,
@@ -26,7 +29,10 @@ export type AccessDeps = {
   managedAuth?: ManagedAuth | null;
 };
 
-export async function requireAccessContext(c: Context, deps: AccessDeps): Promise<AccessContext> {
+export async function requireAccessContext(
+  c: Context,
+  deps: AccessDeps,
+): Promise<AccessContext> {
   const context = await resolveAccessContext(c, deps);
   if (!context) {
     throw new HTTPException(401, { message: "authentication required" });
@@ -40,7 +46,9 @@ export async function requireAccessGrant(
   workspaceId: string,
   permission?: Permission,
 ): Promise<AccessGrant> {
-  return (await requireAccessGrantAuthorization(c, deps, workspaceId, permission)).grant;
+  return (
+    await requireAccessGrantAuthorization(c, deps, workspaceId, permission)
+  ).grant;
 }
 
 export type AccessGrantAuthorization = {
@@ -60,14 +68,18 @@ export function accessGrantAuthorizationFromContext(
   const delegated = grant.metadata?.delegated === true;
   const contextIntegrity =
     context.subjectId === grant.subjectId &&
-    context.accountGrants.every((candidate) => candidate.subjectId === context.subjectId) &&
+    context.accountGrants.every(
+      (candidate) => candidate.subjectId === context.subjectId,
+    ) &&
     context.workspaceGrants.every(
       (candidate) =>
         candidate.subjectId === context.subjectId &&
         candidate.principalKind === grant.principalKind &&
         (candidate.metadata?.delegated === true) === delegated &&
-        Boolean(candidate.serviceInitiator) === Boolean(grant.serviceInitiator) &&
-        Boolean(candidate.serviceInitiatorContext) === Boolean(grant.serviceInitiatorContext) &&
+        Boolean(candidate.serviceInitiator) ===
+          Boolean(grant.serviceInitiator) &&
+        Boolean(candidate.serviceInitiatorContext) ===
+          Boolean(grant.serviceInitiatorContext) &&
         context.accountGrants.filter(
           (accountGrant) => accountGrant.accountId === candidate.accountId,
         ).length === 1,
@@ -91,7 +103,9 @@ export async function requireAccessGrantAuthorization(
   const context = await requireAccessContext(c, deps);
   const principalKind = hostedHumanSessionPrincipalKind(context);
   const grant =
-    context.workspaceGrants.find((candidate) => candidate.workspaceId === workspaceId) ??
+    context.workspaceGrants.find(
+      (candidate) => candidate.workspaceId === workspaceId,
+    ) ??
     (await getWorkspaceGrant(
       deps.db,
       context.subjectId,
@@ -99,7 +113,9 @@ export async function requireAccessGrantAuthorization(
       principalKind ? { principalKind } : undefined,
     ));
   if (!grant) {
-    const workspace = await requireWorkspace(deps.db, workspaceId).catch(() => null);
+    const workspace = await requireWorkspace(deps.db, workspaceId).catch(
+      () => null,
+    );
     if (!workspace) {
       throw new HTTPException(404, { message: "workspace not found" });
     }
@@ -111,7 +127,9 @@ export async function requireAccessGrantAuthorization(
   return accessGrantAuthorizationFromContext(context, grant);
 }
 
-function hostedHumanSessionPrincipalKind(context: AccessContext): "human_session" | undefined {
+function hostedHumanSessionPrincipalKind(
+  context: AccessContext,
+): "human_session" | undefined {
   if (context.mode !== "managed" || context.workspaceGrants.length === 0) {
     return undefined;
   }
@@ -125,35 +143,49 @@ function hostedHumanSessionPrincipalKind(context: AccessContext): "human_session
     : undefined;
 }
 
-export function requirePermission(grant: AccessGrant, permission: Permission): void {
+export function requirePermission(
+  grant: AccessGrant,
+  permission: Permission,
+): void {
   if (!hasPermission(grant.permissions, permission)) {
     if (permission === "variable-sets:use") {
       throw new HTTPException(403, {
-        message: "missing permission: variable-sets:use (deprecated alias: environments:use)",
+        message:
+          "missing permission: variable-sets:use (deprecated alias: environments:use)",
       });
     }
     if (permission === "variable-sets:manage") {
       throw new HTTPException(403, {
-        message: "missing permission: variable-sets:manage (deprecated alias: environments:manage)",
+        message:
+          "missing permission: variable-sets:manage (deprecated alias: environments:manage)",
       });
     }
-    throw new HTTPException(403, { message: `missing permission: ${permission}` });
+    throw new HTTPException(403, {
+      message: `missing permission: ${permission}`,
+    });
   }
 }
 
-export function hasPermission(permissions: Permission[], permission: Permission): boolean {
+export function hasPermission(
+  permissions: Permission[],
+  permission: Permission,
+): boolean {
   const aliases: Partial<Record<Permission, Permission[]>> = {
     "variable-sets:use": ["environments:use" as Permission],
     "variable-sets:manage": ["environments:manage" as Permission],
   };
   return (
     permissions.includes(permission) ||
-    (aliases[permission]?.some((alias) => permissions.includes(alias)) ?? false) ||
+    (aliases[permission]?.some((alias) => permissions.includes(alias)) ??
+      false) ||
     permissions.includes("workspace:admin")
   );
 }
 
-async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<AccessContext | null> {
+async function resolveAccessContext(
+  c: Context,
+  deps: AccessDeps,
+): Promise<AccessContext | null> {
   if (deps.settings.productAccessMode === "local") {
     const delegated = await delegatedAccessContext(c, deps, "local");
     if (delegated) {
@@ -208,7 +240,9 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
   }
 
   if (deps.managedAuth) {
-    const session = await deps.managedAuth.api.getSession({ headers: c.req.raw.headers });
+    const session = await deps.managedAuth.api.getSession({
+      headers: c.req.raw.headers,
+    });
     if (session?.user) {
       return await ensureManagedAccessForUser(deps.db, {
         userId: session.user.id,
@@ -237,7 +271,8 @@ async function apiKeyAccessContext(
   const subjectId = `api_key:${apiKey.id}`;
   const accountPermissions = apiKey.workspaceId
     ? apiKey.permissions.filter(
-        (permission) => permission === "billing:read" || permission === "billing:manage",
+        (permission) =>
+          permission === "billing:read" || permission === "billing:manage",
       )
     : apiKey.permissions;
   return {
@@ -275,10 +310,11 @@ async function delegatedAccessContext(
   mode: "local" | "configured" | "managed",
   token = bearerToken(c),
 ): Promise<AccessContext | null> {
-  if (!token || !deps.settings.delegationSecret) {
+  const delegationSecret = resolveFirstPartyDelegationSecret(deps.settings);
+  if (!token || !delegationSecret) {
     return null;
   }
-  const payload = await verifyDelegatedAccessToken(deps.settings.delegationSecret, token);
+  const payload = await verifyDelegatedAccessToken(delegationSecret, token);
   if (!payload) {
     return null;
   }
@@ -318,7 +354,9 @@ async function delegatedAccessContext(
             ? { executionGeneration: payload.executionGeneration }
             : {}),
         },
-        ...(payload.serviceInitiator ? { serviceInitiator: payload.serviceInitiator } : {}),
+        ...(payload.serviceInitiator
+          ? { serviceInitiator: payload.serviceInitiator }
+          : {}),
         ...(payload.serviceInitiatorContext
           ? { serviceInitiatorContext: payload.serviceInitiatorContext }
           : {}),
@@ -331,16 +369,23 @@ async function delegatedAccessContext(
 
 function configuredSubject(c: Context): string {
   const header = c.req.header("x-opengeni-subject");
-  return header && header.trim().length > 0 ? `configured:${header.trim()}` : "configured:key";
+  return header && header.trim().length > 0
+    ? `configured:${header.trim()}`
+    : "configured:key";
 }
 
 function bearerToken(c: Context): string | null {
   const authorization = c.req.header("authorization");
-  return authorization?.startsWith(bearerPrefix) ? authorization.slice(bearerPrefix.length) : null;
+  return authorization?.startsWith(bearerPrefix)
+    ? authorization.slice(bearerPrefix.length)
+    : null;
 }
 
 async function sha256Hex(value: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(value),
+  );
   return Array.from(new Uint8Array(digest))
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");

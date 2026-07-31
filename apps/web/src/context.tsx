@@ -3,10 +3,19 @@
 // state (model choice, repo selection, tool toggles). Everything below the
 // workspace shell consumes this through `useAppContext`.
 import { OpenGeniApiError, type OpenGeniClient } from "@opengeni/sdk";
-import { composerSubmissionErrorMessage, type SessionEventsConnectionState } from "@opengeni/react";
+import {
+  composerSubmissionErrorMessage,
+  type SessionEventsConnectionState,
+} from "@opengeni/react";
 import { Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import { TanStackRouterDevtools } from "@tanstack/react-router-devtools";
-import { CheckIcon, Loader2Icon, LockIcon, RefreshCwIcon, UserIcon } from "lucide-react";
+import {
+  CheckIcon,
+  Loader2Icon,
+  LockIcon,
+  RefreshCwIcon,
+  UserIcon,
+} from "lucide-react";
 import {
   createContext,
   type Dispatch,
@@ -39,6 +48,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { sameSessionForContext } from "@/lib/session-context";
 import {
+  applyNewSessionModelPreference,
   buildCreateSessionRequest,
   prepareCreateSessionAttempt,
   type PendingCreateAttempt,
@@ -73,6 +83,7 @@ import type {
   GitHubRepository,
   ResourceRef,
   Session,
+  ToolRef,
   TurnSubmission,
   UpdateWorkspaceSettingsRequest,
   Workspace,
@@ -144,9 +155,17 @@ export type AppContextValue = {
   addManualRepository: () => void;
   forgetAccessKey: () => void;
   handleManagedSignOut: () => Promise<void>;
-  createWorkspace: (request: CreateWorkspaceRequest) => Promise<Workspace | null>;
-  renameWorkspace: (workspaceId: string, name: string) => Promise<Workspace | null>;
-  setWorkspaceInferenceControl: (workspaceId: string, action: "pause" | "resume") => Promise<void>;
+  createWorkspace: (
+    request: CreateWorkspaceRequest,
+  ) => Promise<Workspace | null>;
+  renameWorkspace: (
+    workspaceId: string,
+    name: string,
+  ) => Promise<Workspace | null>;
+  setWorkspaceInferenceControl: (
+    workspaceId: string,
+    action: "pause" | "resume",
+  ) => Promise<void>;
   refreshWorkspace: (workspaceId: string) => Promise<void>;
   updateWorkspaceSettings: (
     workspaceId: string,
@@ -155,7 +174,10 @@ export type AppContextValue = {
   /** Set (or clear, with `null`) the workspace's default rig — used by session
    * create fallback. Upserts the returned workspace so the "Default" badge and
    * any default-derived UI reflect it without a reload. */
-  setWorkspaceDefaultRig: (workspaceId: string, rigId: string | null) => Promise<Workspace | null>;
+  setWorkspaceDefaultRig: (
+    workspaceId: string,
+    rigId: string | null,
+  ) => Promise<Workspace | null>;
   updateSessionTitle: (
     workspaceId: string,
     sessionId: string,
@@ -174,14 +196,25 @@ export type AppContextValue = {
     signal?: AbortSignal,
     options?: { sync?: boolean },
   ) => Promise<void>;
-  refreshWorkspaceMcpServers: (workspaceId: string, signal?: AbortSignal) => Promise<void>;
+  refreshWorkspaceMcpServers: (
+    workspaceId: string,
+    signal?: AbortSignal,
+  ) => Promise<void>;
   startGitHubAppManifestFlow: (workspaceId: string) => Promise<void>;
-  disconnectGitHubInstallation: (workspaceId: string, installationId: number) => Promise<void>;
+  disconnectGitHubInstallation: (
+    workspaceId: string,
+    installationId: number,
+  ) => Promise<void>;
   toggleGitHubRepository: (repo: GitHubRepository) => void;
   startSession: (
     workspaceId: string,
     submission: TurnSubmission,
     options?: {
+      instructions?: string;
+      /** Exact session MCP policy. Omit to use the product UI's workspace selection. */
+      sessionTools?: ToolRef[];
+      /** Use this actor's durable new-session model/provider preference. */
+      usePersistedModelPreference?: boolean;
       targetSandboxId?: string | null;
       workingDir?: string | null;
       omitWorkspaceResources?: boolean;
@@ -215,8 +248,12 @@ export function useAppContext(): AppContextValue {
   return value;
 }
 
-export function workspaceLabel(workspace: Workspace, workspaces: Workspace[]): string {
-  const hasMultipleAccounts = new Set(workspaces.map((candidate) => candidate.accountId)).size > 1;
+export function workspaceLabel(
+  workspace: Workspace,
+  workspaces: Workspace[],
+): string {
+  const hasMultipleAccounts =
+    new Set(workspaces.map((candidate) => candidate.accountId)).size > 1;
   if (!hasMultipleAccounts) {
     return workspace.name;
   }
@@ -227,8 +264,12 @@ export function RootRouteComponent() {
   const [session, setSessionState] = useState<Session | null>(null);
   const [clientConfig, setClientConfig] = useState<ClientConfig | null>(null);
   const [configError, setConfigError] = useState<string | null>(null);
-  const [authSession, setAuthSession] = useState<AuthSession | null | undefined>(undefined);
-  const [accessContext, setAccessContext] = useState<AccessContext | null>(null);
+  const [authSession, setAuthSession] = useState<
+    AuthSession | null | undefined
+  >(undefined);
+  const [accessContext, setAccessContext] = useState<AccessContext | null>(
+    null,
+  );
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [accessLoading, setAccessLoading] = useState(false);
   const [accessError, setAccessError] = useState<string | null>(null);
@@ -248,18 +289,25 @@ export function RootRouteComponent() {
   const [manualRepos, setManualRepos] = useState<RepoDraft[]>([]);
   const [manualReposOpen, setManualReposOpen] = useState(false);
   const [nextRepoId, setNextRepoId] = useState(1);
-  const [selectedRepoIds, setSelectedRepoIds] = useState<Set<number>>(() => new Set());
-  const [selectedRepoRefs, setSelectedRepoRefs] = useState<Record<number, string>>({});
+  const [selectedRepoIds, setSelectedRepoIds] = useState<Set<number>>(
+    () => new Set(),
+  );
+  const [selectedRepoRefs, setSelectedRepoRefs] = useState<
+    Record<number, string>
+  >({});
   const [githubRepos, setGithubRepos] = useState<GitHubRepository[]>([]);
   const [githubStatus, setGithubStatus] = useState<GitHubAppInfo | null>(null);
   const [githubCatalogReady, setGithubCatalogReady] = useState(false);
   const [githubAppOpen, setGithubAppOpen] = useState(false);
   const [githubOrg, setGithubOrg] = useState("");
-  const [workspaceMcpServers, setWorkspaceMcpServers] = useState<McpServerOption[]>([]);
-  const [workspaceMcpCatalogReady, setWorkspaceMcpCatalogReady] = useState(false);
-  const [selectedCapabilityToolIds, setSelectedCapabilityToolIds] = useState<Set<string>>(
-    () => new Set(),
-  );
+  const [workspaceMcpServers, setWorkspaceMcpServers] = useState<
+    McpServerOption[]
+  >([]);
+  const [workspaceMcpCatalogReady, setWorkspaceMcpCatalogReady] =
+    useState(false);
+  const [selectedCapabilityToolIds, setSelectedCapabilityToolIds] = useState<
+    Set<string>
+  >(() => new Set());
   // Every available tool is selected when it first appears. Explicit
   // deselections survive subsequent catalog refreshes.
   const previousCapabilityToolIds = useRef<Set<string>>(new Set());
@@ -275,11 +323,14 @@ export function RootRouteComponent() {
   const [busy, setBusy] = useState(false);
   const [repoBusy, setRepoBusy] = useState(false);
   const [githubAppBusy, setGithubAppBusy] = useState(false);
-  const [hasAccessKey, setHasAccessKey] = useState(() => getStoredAccessKey() !== null);
+  const [hasAccessKey, setHasAccessKey] = useState(
+    () => getStoredAccessKey() !== null,
+  );
   const [accessKeyDraft, setAccessKeyDraft] = useState("");
   const [accessKeyVersion, setAccessKeyVersion] = useState(0);
   const keyAuthRequired =
-    clientConfig?.auth.mode === "deploymentKey" || clientConfig?.auth.mode === "configuredToken";
+    clientConfig?.auth.mode === "deploymentKey" ||
+    clientConfig?.auth.mode === "configuredToken";
   const managedAuthRequired = clientConfig?.auth.mode === "managedSession";
   const keyAuthReady = !keyAuthRequired || hasAccessKey;
   const managedAuthReady = !managedAuthRequired || Boolean(authSession);
@@ -307,15 +358,18 @@ export function RootRouteComponent() {
     void accessKeyVersion;
     return createOpenGeniClient();
   }, [accessKeyVersion]);
-  const setSession = useCallback<Dispatch<SetStateAction<Session | null>>>((value) => {
-    setSessionState((current) => {
-      const next =
-        typeof value === "function"
-          ? (value as (previous: Session | null) => Session | null)(current)
-          : value;
-      return sameSessionForContext(current, next) ? current : next;
-    });
-  }, []);
+  const setSession = useCallback<Dispatch<SetStateAction<Session | null>>>(
+    (value) => {
+      setSessionState((current) => {
+        const next =
+          typeof value === "function"
+            ? (value as (previous: Session | null) => Session | null)(current)
+            : value;
+        return sameSessionForContext(current, next) ? current : next;
+      });
+    },
+    [],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -395,7 +449,9 @@ export function RootRouteComponent() {
         if (cancelled) {
           return;
         }
-        toast.error("Failed to load workspace access", { description: String(error) });
+        toast.error("Failed to load workspace access", {
+          description: String(error),
+        });
         setAccessContext(null);
         setWorkspaces([]);
         setAccessError(error instanceof Error ? error.message : String(error));
@@ -410,15 +466,31 @@ export function RootRouteComponent() {
     };
   }, [clientConfig, authReady, client]);
 
-  const selectedInstalledRepositories = githubRepos.filter((repo) => selectedRepoIds.has(repo.id));
-  const selectedInstallationId = selectedInstalledRepositories[0]?.installationId ?? null;
-  const repositoryGroups = useMemo(() => groupRepositories(githubRepos), [githubRepos]);
+  const selectedInstalledRepositories = githubRepos.filter((repo) =>
+    selectedRepoIds.has(repo.id),
+  );
+  const selectedInstallationId =
+    selectedInstalledRepositories[0]?.installationId ?? null;
+  const repositoryGroups = useMemo(
+    () => groupRepositories(githubRepos),
+    [githubRepos],
+  );
   const toolMcpServers = useMemo(
-    () => mergeMcpServerOptions(selectableMcpServers(clientConfig), workspaceMcpServers),
+    () =>
+      mergeMcpServerOptions(
+        selectableMcpServers(clientConfig),
+        workspaceMcpServers,
+      ),
     [clientConfig, workspaceMcpServers],
   );
   const currentResources = useMemo(
-    () => buildResources(manualRepos, githubRepos, selectedRepoIds, selectedRepoRefs),
+    () =>
+      buildResources(
+        manualRepos,
+        githubRepos,
+        selectedRepoIds,
+        selectedRepoRefs,
+      ),
     [manualRepos, githubRepos, selectedRepoIds, selectedRepoRefs],
   );
 
@@ -428,14 +500,20 @@ export function RootRouteComponent() {
     }
     const availableIds = toolMcpServers.map((server) => server.id);
     setSelectedCapabilityToolIds((current) =>
-      selectedAvailableCapabilityToolIds(current, availableIds, previousCapabilityToolIds.current),
+      selectedAvailableCapabilityToolIds(
+        current,
+        availableIds,
+        previousCapabilityToolIds.current,
+      ),
     );
     previousCapabilityToolIds.current = new Set(availableIds);
   }, [clientConfig, toolMcpServers]);
 
   // Workspace create/rename keep the cached `workspaces` list and the access
   // context (the create grants the caller an owner grant) in sync.
-  async function createWorkspace(request: CreateWorkspaceRequest): Promise<Workspace | null> {
+  async function createWorkspace(
+    request: CreateWorkspaceRequest,
+  ): Promise<Workspace | null> {
     let created: Workspace;
     try {
       created = await client.createWorkspace(request);
@@ -460,7 +538,10 @@ export function RootRouteComponent() {
     return created;
   }
 
-  async function renameWorkspace(workspaceId: string, name: string): Promise<Workspace | null> {
+  async function renameWorkspace(
+    workspaceId: string,
+    name: string,
+  ): Promise<Workspace | null> {
     try {
       const updated = await client.updateWorkspace(workspaceId, { name });
       setWorkspaces((current) => upsertWorkspace(current, updated));
@@ -477,11 +558,15 @@ export function RootRouteComponent() {
     workspaceId: string,
     action: "pause" | "resume",
   ): Promise<void> {
-    const current = workspaces.find((workspace) => workspace.id === workspaceId);
+    const current = workspaces.find(
+      (workspace) => workspace.id === workspaceId,
+    );
     const response = await client.setWorkspaceInferenceState(workspaceId, {
       action,
       clientEventId: crypto.randomUUID(),
-      ...(current ? { expectedRevision: current.inferenceControl.revision } : {}),
+      ...(current
+        ? { expectedRevision: current.inferenceControl.revision }
+        : {}),
     });
     setWorkspaces((all) =>
       all.map((workspace) =>
@@ -517,7 +602,10 @@ export function RootRouteComponent() {
     settings: UpdateWorkspaceSettingsRequest,
   ): Promise<Workspace | null> {
     try {
-      const updated = await client.updateWorkspaceSettings(workspaceId, settings);
+      const updated = await client.updateWorkspaceSettings(
+        workspaceId,
+        settings,
+      );
       setWorkspaces((current) => upsertWorkspace(current, updated));
       return updated;
     } catch (error) {
@@ -533,7 +621,9 @@ export function RootRouteComponent() {
     rigId: string | null,
   ): Promise<Workspace | null> {
     try {
-      const updated = await client.setWorkspaceDefaultRig(workspaceId, { rigId });
+      const updated = await client.setWorkspaceDefaultRig(workspaceId, {
+        rigId,
+      });
       setWorkspaces((current) => upsertWorkspace(current, updated));
       return updated;
     } catch (error) {
@@ -554,10 +644,16 @@ export function RootRouteComponent() {
     title: string,
   ): Promise<Session | null> {
     try {
-      const updated = await client.updateSession(workspaceId, sessionId, { title });
+      const updated = await client.updateSession(workspaceId, sessionId, {
+        title,
+      });
       setSession((current) =>
         current && current.id === updated.id
-          ? { ...current, title: updated.title, titleSource: updated.titleSource }
+          ? {
+              ...current,
+              title: updated.title,
+              titleSource: updated.titleSource,
+            }
           : current,
       );
       return updated;
@@ -608,9 +704,13 @@ export function RootRouteComponent() {
       // Re-read on every failure, not only OCC conflicts. A transport failure
       // may have happened after the server committed; blindly restoring
       // `before` would temporarily lie and could overwrite a newer device.
-      const authoritative = await client.getSession(workspaceId, sessionId).catch(() => null);
+      const authoritative = await client
+        .getSession(workspaceId, sessionId)
+        .catch(() => null);
       if (authoritative) {
-        setSession((current) => reconcileFailedSessionPin(current, optimistic, authoritative));
+        setSession((current) =>
+          reconcileFailedSessionPin(current, optimistic, authoritative),
+        );
         notifySessionPinChanged(workspaceId, sessionId);
         // A lost response after commit is a successful desired-state mutation,
         // not a failed pin. Returning the point-read result keeps the UI
@@ -654,7 +754,9 @@ export function RootRouteComponent() {
       });
       return false;
     }
-    setWorkspaces((current) => current.filter((workspace) => workspace.id !== workspaceId));
+    setWorkspaces((current) =>
+      current.filter((workspace) => workspace.id !== workspaceId),
+    );
     await client
       .getAccessContext()
       .then(setAccessContext)
@@ -667,7 +769,11 @@ export function RootRouteComponent() {
   }
 
   const refreshGitHub = useCallback(
-    async (workspaceId: string, signal?: AbortSignal, options?: { sync?: boolean }) => {
+    async (
+      workspaceId: string,
+      signal?: AbortSignal,
+      options?: { sync?: boolean },
+    ) => {
       const refreshId = githubRefreshId.current + 1;
       githubRefreshId.current = refreshId;
       setRepoBusy(true);
@@ -695,14 +801,20 @@ export function RootRouteComponent() {
           setGithubCatalogReady(true);
         }
       } catch (error) {
-        if (isAbortError(error) || signal?.aborted || githubRefreshId.current !== refreshId) {
+        if (
+          isAbortError(error) ||
+          signal?.aborted ||
+          githubRefreshId.current !== refreshId
+        ) {
           return;
         }
         // A failed status/catalog request is unavailable/unknown, not proof
         // that the last-known installation or repository identities vanished.
         // Keep the last successful snapshot and readiness fence so draft
         // hydration cannot project it to [] and autosave destructive loss.
-        toast.error("GitHub status unavailable", { description: String(error) });
+        toast.error("GitHub status unavailable", {
+          description: String(error),
+        });
       } finally {
         if (githubRefreshId.current === refreshId) {
           setRepoBusy(false);
@@ -720,7 +832,9 @@ export function RootRouteComponent() {
       if (signal?.aborted || mcpRefreshId.current !== refreshId) {
         return;
       }
-      setWorkspaceMcpServers(enabledWorkspaceCapabilityMcpServers(catalog.items));
+      setWorkspaceMcpServers(
+        enabledWorkspaceCapabilityMcpServers(catalog.items),
+      );
       setWorkspaceMcpCatalogReady(true);
     },
     [client],
@@ -730,6 +844,11 @@ export function RootRouteComponent() {
     workspaceId: string,
     submission: TurnSubmission,
     options?: {
+      instructions?: string;
+      /** Exact session MCP policy. Omit to use the product UI's workspace selection. */
+      sessionTools?: ToolRef[];
+      /** Use this actor's durable new-session model/provider preference. */
+      usePersistedModelPreference?: boolean;
       targetSandboxId?: string | null;
       workingDir?: string | null;
       omitWorkspaceResources?: boolean;
@@ -738,13 +857,25 @@ export function RootRouteComponent() {
   ): Promise<Session | null> {
     setBusy(true);
     try {
-      if (!workspaceMcpCatalogReady) {
+      if (!workspaceMcpCatalogReady && options?.sessionTools === undefined) {
         toast.error("Tools are still loading", {
-          description: "Wait for the workspace tool catalog to finish loading, then try again.",
+          description:
+            "Wait for the workspace tool catalog to finish loading, then try again.",
         });
         return null;
       }
-      const selectedTools = buildOpenGeniUiTools(submission.tools, selectedCapabilityToolIds);
+      const effectiveSubmission = options?.usePersistedModelPreference
+        ? await client
+            .getNewSessionDraft(workspaceId)
+            .then((draft) => applyNewSessionModelPreference(submission, draft))
+            .catch(() => submission)
+        : submission;
+      const selectedTools = options?.sessionTools
+        ? [...options.sessionTools]
+        : buildOpenGeniUiTools(
+            effectiveSubmission.tools,
+            selectedCapabilityToolIds,
+          );
       const freshIdempotencyKey = crypto.randomUUID();
       const attempt = prepareCreateSessionAttempt({
         pending: pendingCreateAttempt.current,
@@ -753,24 +884,32 @@ export function RootRouteComponent() {
         freshIdempotencyKey,
         request: buildCreateSessionRequest({
           currentResources,
-          submission,
+          submission: effectiveSubmission,
+          instructions: options?.instructions,
           omitWorkspaceResources: options?.omitWorkspaceResources,
           selectedTools,
           defaultModel: model,
           defaultReasoningEffort: reasoningEffort,
           clientEventId: crypto.randomUUID(),
           idempotencyKey: freshIdempotencyKey,
-          workspaceDefaultMcpServerIds: ["files", ...toolMcpServers.map((server) => server.id)],
+          workspaceDefaultMcpServerIds: [
+            "files",
+            ...toolMcpServers.map((server) => server.id),
+          ],
           workspaceMcpCatalogReady,
           targetSandboxId: options?.targetSandboxId,
           workingDir: options?.workingDir,
-          expectedNewSessionDraftRevision: options?.expectedNewSessionDraftRevision,
+          expectedNewSessionDraftRevision:
+            options?.expectedNewSessionDraftRevision,
         }),
       });
       pendingCreateAttempt.current = attempt.pending;
       const created = await client.createSession(workspaceId, attempt.request);
       // Do not clear a newer concurrent attempt that replaced this one.
-      if (pendingCreateAttempt.current?.idempotencyKey === attempt.pending.idempotencyKey) {
+      if (
+        pendingCreateAttempt.current?.idempotencyKey ===
+        attempt.pending.idempotencyKey
+      ) {
         pendingCreateAttempt.current = null;
       }
       setSession(created);
@@ -780,7 +919,10 @@ export function RootRouteComponent() {
       // Keep the attempt on failure. An exact retry dedups against a create that
       // may have landed server-side; an edited request acquires a fresh key.
       toast.error("Failed to start session", {
-        description: error instanceof Error ? composerSubmissionErrorMessage(error) : String(error),
+        description:
+          error instanceof Error
+            ? composerSubmissionErrorMessage(error)
+            : String(error),
       });
       return null;
     } finally {
@@ -818,7 +960,11 @@ export function RootRouteComponent() {
       );
       setSelectedRepoIds(
         (current) =>
-          new Set([...current].filter((repositoryId) => !removedRepositoryIds.has(repositoryId))),
+          new Set(
+            [...current].filter(
+              (repositoryId) => !removedRepositoryIds.has(repositoryId),
+            ),
+          ),
       );
       setSelectedRepoRefs((current) =>
         Object.fromEntries(
@@ -843,7 +989,8 @@ export function RootRouteComponent() {
       !selectedRepoIds.has(repo.id)
     ) {
       toast.info("This session uses one GitHub token", {
-        description: "Clear selected repositories to choose repositories from another account.",
+        description:
+          "Clear selected repositories to choose repositories from another account.",
       });
       return;
     }
@@ -863,7 +1010,10 @@ export function RootRouteComponent() {
   }
 
   function addManualRepository() {
-    setManualRepos((current) => [...current, { id: nextRepoId, url: "", ref: "main" }]);
+    setManualRepos((current) => [
+      ...current,
+      { id: nextRepoId, url: "", ref: "main" },
+    ]);
     setNextRepoId((value) => value + 1);
     setManualReposOpen(true);
   }
@@ -898,7 +1048,11 @@ export function RootRouteComponent() {
     if (mode === "signup") {
       await signUpEmail(input);
     } else {
-      await signInEmail({ email: input.email, password: input.password, rememberMe: true });
+      await signInEmail({
+        email: input.email,
+        password: input.password,
+        rememberMe: true,
+      });
     }
     const nextSession = await fetchAuthSession();
     setAuthSession(nextSession);
@@ -981,15 +1135,27 @@ export function RootRouteComponent() {
   const contextHandleManagedSignOut = useLatestCallback(handleManagedSignOut);
   const contextCreateWorkspace = useLatestCallback(createWorkspace);
   const contextRenameWorkspace = useLatestCallback(renameWorkspace);
-  const contextSetWorkspaceInferenceControl = useLatestCallback(setWorkspaceInferenceControl);
-  const contextUpdateWorkspaceSettings = useLatestCallback(updateWorkspaceSettings);
-  const contextSetWorkspaceDefaultRig = useLatestCallback(setWorkspaceDefaultRig);
+  const contextSetWorkspaceInferenceControl = useLatestCallback(
+    setWorkspaceInferenceControl,
+  );
+  const contextUpdateWorkspaceSettings = useLatestCallback(
+    updateWorkspaceSettings,
+  );
+  const contextSetWorkspaceDefaultRig = useLatestCallback(
+    setWorkspaceDefaultRig,
+  );
   const contextUpdateSessionTitle = useLatestCallback(updateSessionTitle);
   const contextUpdateSessionPin = useLatestCallback(updateSessionPin);
   const contextDeleteWorkspace = useLatestCallback(deleteWorkspace);
-  const contextStartGitHubAppManifestFlow = useLatestCallback(startGitHubAppManifestFlow);
-  const contextDisconnectGitHubInstallation = useLatestCallback(disconnectGitHubInstallation);
-  const contextToggleGitHubRepository = useLatestCallback(toggleGitHubRepository);
+  const contextStartGitHubAppManifestFlow = useLatestCallback(
+    startGitHubAppManifestFlow,
+  );
+  const contextDisconnectGitHubInstallation = useLatestCallback(
+    disconnectGitHubInstallation,
+  );
+  const contextToggleGitHubRepository = useLatestCallback(
+    toggleGitHubRepository,
+  );
   const contextStartSession = useLatestCallback(startSession);
 
   const appContext = useMemo<AppContextValue | null>(() => {
@@ -1137,7 +1303,10 @@ export function RootRouteComponent() {
       ) : !clientConfig && !configError ? (
         <LoadingPanel label="Loading OpenGeni" />
       ) : configError ? (
-        <ProblemPanel title="Client configuration unavailable" description={configError} />
+        <ProblemPanel
+          title="Client configuration unavailable"
+          description={configError}
+        />
       ) : keyAuthRequired && !hasAccessKey ? (
         <AccessKeyPanel
           authMode={clientConfig?.auth.mode}
@@ -1173,14 +1342,19 @@ export function RootRouteComponent() {
       ) : (
         <AppContext.Provider value={appContext}>
           <Outlet />
-          {import.meta.env.DEV ? <TanStackRouterDevtools position="bottom-right" /> : null}
+          {import.meta.env.DEV ? (
+            <TanStackRouterDevtools position="bottom-right" />
+          ) : null}
         </AppContext.Provider>
       )}
     </main>
   );
 }
 
-function submitGitHubManifest(actionUrl: string, manifest: Record<string, unknown>): void {
+function submitGitHubManifest(
+  actionUrl: string,
+  manifest: Record<string, unknown>,
+): void {
   const form = document.createElement("form");
   form.method = "POST";
   form.action = actionUrl;
@@ -1220,7 +1394,9 @@ function AccessKeyPanel(props: {
             <h1 className="text-base font-semibold">Access key required</h1>
             <p className="text-sm text-fg-subtle">
               Enter the{" "}
-              {props.authMode === "configuredToken" ? "configured bearer token" : "deployment key"}{" "}
+              {props.authMode === "configuredToken"
+                ? "configured bearer token"
+                : "deployment key"}{" "}
               for this OpenGeni instance.
             </p>
           </div>
@@ -1262,7 +1438,11 @@ function ManagedAuthPanel(props: {
   const [resendBusy, setResendBusy] = useState(false);
 
   async function submit() {
-    if (!email.trim() || password.length < 8 || (mode === "signup" && !name.trim())) {
+    if (
+      !email.trim() ||
+      password.length < 8 ||
+      (mode === "signup" && !name.trim())
+    ) {
       toast.error("Enter valid account details");
       return;
     }
@@ -1372,7 +1552,9 @@ function ManagedAuthPanel(props: {
             type="password"
             value={password}
             onChange={(event) => setPassword(event.target.value)}
-            autoComplete={mode === "signin" ? "current-password" : "new-password"}
+            autoComplete={
+              mode === "signin" ? "current-password" : "new-password"
+            }
             className="mt-2"
           />
         </div>

@@ -157,12 +157,17 @@ describe("release schema contract", () => {
         (migrations.has("0140_sandbox_restore_and_reaper_fences.sql") ? 1 : 0) +
         (migrations.has("0141_slack_bot_delete_idempotency.sql") ? 1 : 0) +
         (migrations.has("0142_sandbox_archive_capture_gate.sql") ? 1 : 0) +
-        (migrations.has("0143_session_codex_compaction_mode.sql") ? 1 : 0),
+        (migrations.has("0143_session_codex_compaction_mode.sql") ? 1 : 0) +
+        (migrations.has("0144_workspace_artifacts.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "f6bc325f1a5905963f1695a639b8c06b5443f9d5604ba4f3cd99b29821784b87",
+      "REPLACE_AFTER_REBASE",
     );
-    expect(contract.latestMigration).toBe("0143_session_codex_compaction_mode.sql");
+    expect(contract.latestMigration).toBe("0144_workspace_artifacts.sql");
+    expect(migrations.get("0144_workspace_artifacts.sql")).toMatchObject({
+      sha256: "2b2bc7a2ed6735ea6f3e6c86eac864193a710279b312c0946c368fd50f91c30c",
+      deploymentMode: "maintenance",
+    });
     expect(migrations.get("0128_github_installation_authority.sql")).toMatchObject({
       sha256: "365793b2a204a70e214adb90298b522acbb6dcfae22a46681a58f41a6938e6f0",
       deploymentMode: "rolling",

@@ -10,6 +10,7 @@ import {
   FileSearchIcon,
   LaptopIcon,
   MapIcon,
+  PanelsTopLeftIcon,
   PlugIcon,
   ServerCogIcon,
   SettingsIcon,
@@ -30,6 +31,7 @@ type NavTarget =
   | "/workspaces/$workspaceId/documents"
   | "/workspaces/$workspaceId/memory"
   | "/workspaces/$workspaceId/state"
+  | "/workspaces/$workspaceId/artifacts"
   | "/workspaces/$workspaceId/settings";
 
 const CONFIG_ITEMS: Array<{ to: NavTarget; icon: LucideIcon; label: string; description: string }> =
@@ -75,6 +77,12 @@ const CONFIG_ITEMS: Array<{ to: NavTarget; icon: LucideIcon; label: string; desc
       icon: BrainCircuitIcon,
       label: "Memory",
       description: "Durable facts agents carry across sessions",
+    },
+    {
+      to: "/workspaces/$workspaceId/artifacts",
+      icon: PanelsTopLeftIcon,
+      label: "Artifacts",
+      description: "Live pages and tools built with Geni",
     },
     {
       to: "/workspaces/$workspaceId/state",

@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { ResourceRefConflictError, type ResourceRef } from "@opengeni/contracts";
+import {
+  ResourceRefConflictError,
+  type ResourceRef,
+} from "@opengeni/contracts";
 import {
   buildCreateSessionRequest,
+  applyNewSessionModelPreference,
   emptySessionDraft,
   newSessionDraftOptionsFromSessionDraft,
   prepareCreateSessionAttempt,
@@ -80,7 +84,13 @@ describe("buildCreateSessionRequest", () => {
     expect(() =>
       build(
         [repository],
-        [{ ...repository, ref: "feature", mountPath: "repos/alternate-opengeni" }],
+        [
+          {
+            ...repository,
+            ref: "feature",
+            mountPath: "repos/alternate-opengeni",
+          },
+        ],
       ),
     ).toThrow("resource is already attached with different settings");
   });
@@ -94,6 +104,7 @@ describe("buildCreateSessionRequest", () => {
     const submissionBefore = structuredClone(submissionResources);
     const tools = [{ kind: "mcp" as const, id: "opengeni" }];
     const result = build(currentResources, submissionResources, {
+      instructions: "Hidden session guidance",
       selectedTools: tools,
       targetSandboxId: "00000000-0000-4000-8000-0000000000c3",
       workingDir: "/workspace/opengeni",
@@ -104,6 +115,7 @@ describe("buildCreateSessionRequest", () => {
     expect(submissionResources).toEqual(submissionBefore);
     expect(result).toMatchObject({
       resources: [...currentBefore, ...submissionBefore],
+      instructions: "Hidden session guidance",
       tools,
       targetSandboxId: "00000000-0000-4000-8000-0000000000c3",
       workingDir: "/workspace/opengeni",
@@ -155,9 +167,10 @@ describe("buildCreateSessionRequest", () => {
       fileId: fileA,
       mountPath: `files/${fileA}`,
     };
-    expect(build([repository], [attachment], { omitWorkspaceResources: true }).resources).toEqual([
-      attachment,
-    ]);
+    expect(
+      build([repository], [attachment], { omitWorkspaceResources: true })
+        .resources,
+    ).toEqual([attachment]);
   });
 
   test("reuses create keys only for the same client, workspace, and logical request", () => {
@@ -197,8 +210,16 @@ describe("buildCreateSessionRequest", () => {
         workspaceId: "workspace-a",
         request: { ...firstRequest, initialMessage: "edited" },
       },
-      { client: firstClient, workspaceId: "workspace-b", request: firstRequest },
-      { client: secondClient, workspaceId: "workspace-a", request: firstRequest },
+      {
+        client: firstClient,
+        workspaceId: "workspace-b",
+        request: firstRequest,
+      },
+      {
+        client: secondClient,
+        workspaceId: "workspace-a",
+        request: firstRequest,
+      },
     ]) {
       const next = prepareCreateSessionAttempt({
         pending: first.pending,
@@ -207,6 +228,36 @@ describe("buildCreateSessionRequest", () => {
       });
       expect(next.request.idempotencyKey).toBe("fresh-changed");
     }
+  });
+});
+
+describe("applyNewSessionModelPreference", () => {
+  test("uses the durable provider choice for programmatic new sessions", () => {
+    expect(
+      applyNewSessionModelPreference(
+        { text: "Edit this artifact" },
+        { model: "codex/gpt-5.6-sol", reasoningEffort: "medium" },
+      ),
+    ).toMatchObject({
+      model: "codex/gpt-5.6-sol",
+      reasoningEffort: "medium",
+    });
+  });
+
+  test("preserves an explicit caller selection", () => {
+    expect(
+      applyNewSessionModelPreference(
+        {
+          text: "Edit this artifact",
+          model: "azure/gpt-5.6-terra",
+          reasoningEffort: "high",
+        },
+        { model: "codex/gpt-5.6-sol", reasoningEffort: "medium" },
+      ),
+    ).toMatchObject({
+      model: "azure/gpt-5.6-terra",
+      reasoningEffort: "high",
+    });
   });
 });
 

@@ -213,6 +213,15 @@ import type {
 } from "./workspace-instruction-policies";
 import type { WorkspaceStateResponse } from "./workspace-state";
 import type {
+  CreateWorkspaceArtifactRequest,
+  PublishWorkspaceArtifactVersionRequest,
+  RollbackWorkspaceArtifactRequest,
+  WorkspaceArtifactContentResponse,
+  WorkspaceArtifactDetailResponse,
+  WorkspaceArtifactListResponse,
+  WorkspaceArtifactMutationResponse,
+} from "./workspace-artifacts";
+import type {
   ActivatePreferenceRegistryRevisionRequest,
   ChangePreferenceRegistryScopeRequest,
   CorrectPreferenceRegistryRequest,
@@ -1714,6 +1723,70 @@ export class OpenGeniClient {
     return await this.requestJson<WorkspaceStateResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/workspace-state`,
+    );
+  }
+
+  async listWorkspaceArtifacts(workspaceId: string): Promise<WorkspaceArtifactListResponse> {
+    return await this.requestJson<WorkspaceArtifactListResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/published-artifacts`,
+    );
+  }
+
+  async getWorkspaceArtifact(
+    workspaceId: string,
+    artifactId: string,
+  ): Promise<WorkspaceArtifactDetailResponse> {
+    return await this.requestJson<WorkspaceArtifactDetailResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/published-artifacts/${encodeURIComponent(artifactId)}`,
+    );
+  }
+
+  async getWorkspaceArtifactContent(
+    workspaceId: string,
+    artifactId: string,
+    versionId?: string,
+  ): Promise<WorkspaceArtifactContentResponse> {
+    const query = versionId ? `?versionId=${encodeURIComponent(versionId)}` : "";
+    return await this.requestJson<WorkspaceArtifactContentResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/published-artifacts/${encodeURIComponent(artifactId)}/content${query}`,
+    );
+  }
+
+  async createWorkspaceArtifact(
+    workspaceId: string,
+    request: CreateWorkspaceArtifactRequest,
+  ): Promise<WorkspaceArtifactMutationResponse> {
+    return await this.requestJson<WorkspaceArtifactMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/published-artifacts`,
+      request,
+    );
+  }
+
+  async publishWorkspaceArtifactVersion(
+    workspaceId: string,
+    artifactId: string,
+    request: PublishWorkspaceArtifactVersionRequest,
+  ): Promise<WorkspaceArtifactMutationResponse> {
+    return await this.requestJson<WorkspaceArtifactMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/published-artifacts/${encodeURIComponent(artifactId)}/versions`,
+      request,
+    );
+  }
+
+  async rollbackWorkspaceArtifact(
+    workspaceId: string,
+    artifactId: string,
+    request: RollbackWorkspaceArtifactRequest,
+  ): Promise<WorkspaceArtifactMutationResponse> {
+    return await this.requestJson<WorkspaceArtifactMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/published-artifacts/${encodeURIComponent(artifactId)}/rollback`,
+      request,
     );
   }
 

@@ -16,7 +16,7 @@ const accountId = "00000000-0000-4000-8000-000000000218";
 const botConnectionId = "00000000-0000-4000-8000-000000000219";
 const personalConnectionId = "00000000-0000-4000-8000-000000000220";
 const personalSlackCapabilityId = "mcp:slack-personal-browser-fixture";
-const apiContractRevision = "2026-07-turn-instructions-v1";
+const apiContractRevision = "2026-07-workspace-artifacts-v1";
 const slackAuthorizationUrl =
   "https://slack.com/oauth/v2/authorize?client_id=browser-fixture&scope=chat%3Awrite&state=server-signed-browser-fixture";
 

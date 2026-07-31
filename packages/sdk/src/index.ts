@@ -56,6 +56,18 @@ export type {
 } from "./stream";
 export { streamWorkspaceControlEvents } from "./workspace-control-stream";
 export type { WorkspaceControlStreamTransport } from "./workspace-control-stream";
+export type {
+  CreateWorkspaceArtifactRequest,
+  PublishWorkspaceArtifactVersionRequest,
+  RollbackWorkspaceArtifactRequest,
+  WorkspaceArtifact,
+  WorkspaceArtifactContentResponse,
+  WorkspaceArtifactDetailResponse,
+  WorkspaceArtifactEvent,
+  WorkspaceArtifactListResponse,
+  WorkspaceArtifactMutationResponse,
+  WorkspaceArtifactVersion,
+} from "./workspace-artifacts";
 export { normalizeWorkspaceInstructionPolicyRoleKey } from "./workspace-instruction-policies";
 export type {
   ActivateWorkspaceInstructionPolicyRequest,

@@ -664,6 +664,7 @@ describe("api key permission options", () => {
       "GitHub",
       "Goals",
       "Rigs",
+      "Artifacts",
       "Admin & account",
     ]);
   });
@@ -1252,7 +1253,7 @@ describe("composer reasoning-effort picker (full host enum)", () => {
   function clientConfig(patch: Partial<ClientConfig> = {}): ClientConfig {
     return {
       deploymentRevision: "rev-1",
-      apiContractRevision: "2026-07-turn-instructions-v1",
+      apiContractRevision: "2026-07-workspace-artifacts-v1",
       defaultModel: "gpt-5.6-sol",
       allowedModels: ["gpt-5.6-sol"],
       models: [],
