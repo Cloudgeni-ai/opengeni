@@ -1,5 +1,15 @@
 # @opengeni/example-northstar-support
 
+## 0.0.36
+
+### Patch Changes
+
+- 218cac3: Redesign the Northstar example as a functional multi-ticket support product with a clear manual workflow, an explicit OpenGeni embedding switch, and live MCP-driven product updates.
+- Updated dependencies [84fb671]
+- Updated dependencies [96eb64b]
+  - @opengeni/react@0.30.2
+  - @opengeni/sdk@0.30.2
+
 ## 0.0.35
 
 ### Patch Changes
