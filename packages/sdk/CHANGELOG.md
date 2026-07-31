@@ -1,5 +1,11 @@
 # @opengeni/sdk
 
+## 0.30.1
+
+### Patch Changes
+
+- bbcbef5: Allow callers to cancel MCP OAuth-start requests so capability activation can fail visibly instead of spinning forever when browser transport stalls.
+
 ## 0.30.0
 
 ### Minor Changes
