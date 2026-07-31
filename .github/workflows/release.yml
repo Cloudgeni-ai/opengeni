@@ -52,8 +52,13 @@ on:
         type: boolean
 
 concurrency:
-  group: release-${{ github.event_name }}
-  cancel-in-progress: false
+  # Version-PR generation is a latest-main projection, not an immutable release
+  # phase. Rapid pushes therefore collapse to one run; the surviving run
+  # deterministically resets the Changesets branch from its exact main SHA.
+  # Explicit publication is immutable source work and must never be cancelled
+  # by a later push or a different source.
+  group: ${{ github.event_name == 'push' && 'release-version-latest-main' || format('release-publish-{0}', inputs.source_sha) }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
 
 permissions:
   contents: read
@@ -84,25 +89,11 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      # ---- Version-PR gate. This job has no npm publication command. ----
-      - name: Typecheck
-        run: bun run typecheck
-
-      - name: Build publishable packages
-        run: bun run build:packages
-
-      - name: SDK contract-parity test
-        run: cd packages/sdk && bun test test/contract-parity.test.ts
-
-      - name: Publish closure guard
-        run: bun scripts/publish-closure-guard.ts
-
-      - name: Runtime embedding consumer
-        run: bun run test:runtime-embedding-consumer
-
-      - name: Portable ogtool package
-        run: bun run test:ogtool-package
-
+      # This job only projects mutable main into the one Changesets Version PR.
+      # The exact generated head immediately enters ci.yml, which owns every
+      # expensive correctness/build/consumer gate. Duplicating those gates here
+      # would make the projection stale under rapid merges and then rerun the
+      # same work against a head that is already obsolete.
       - name: Detect versionable changesets
         id: release_plan
         shell: bash

@@ -29,8 +29,12 @@ on:
         type: string
 
 concurrency:
-  group: ${{ github.event_name == 'workflow_dispatch' && format('ci-automation-{0}-{1}', inputs.automation_pr_number, inputs.automation_head_sha) || format('ci-{0}', github.run_id) }}
-  cancel-in-progress: false
+  # A Version PR has one authoritative latest head. When a newer main push
+  # regenerates that head, continuing to build the superseded head can only
+  # waste capacity and produce a predictably stale terminal-main failure.
+  # Ordinary push/PR CI remains independent and is never cancelled here.
+  group: ${{ github.event_name == 'workflow_dispatch' && format('ci-automation-{0}', inputs.automation_pr_number) || format('ci-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
 
 permissions:
   contents: read

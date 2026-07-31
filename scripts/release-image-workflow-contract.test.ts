@@ -33,6 +33,36 @@ function ghApiCommands(source: string): string[] {
 }
 
 describe("release image workflow contract", () => {
+  test("coalesces mutable Version-PR work without cancelling immutable publication", async () => {
+    const [release, ci] = await Promise.all([workflow("release.yml"), workflow("ci.yml")]);
+    const versionProjection = release.slice(
+      release.indexOf("\n  version:\n"),
+      release.indexOf("\n  publish:\n"),
+    );
+
+    expect(release).toContain(
+      "github.event_name == 'push' && 'release-version-latest-main' || format('release-publish-{0}', inputs.source_sha)",
+    );
+    expect(release).toContain("cancel-in-progress: ${{ github.event_name == 'push' }}");
+    expect(ci).toContain(
+      "github.event_name == 'workflow_dispatch' && format('ci-automation-{0}', inputs.automation_pr_number)",
+    );
+    expect(ci).toContain("cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}");
+    expect(ci).not.toContain(
+      "format('ci-automation-{0}-{1}', inputs.automation_pr_number, inputs.automation_head_sha)",
+    );
+    for (const duplicatedGate of [
+      "bun run typecheck",
+      "bun run build:packages",
+      "bun scripts/publish-closure-guard.ts",
+      "bun run test:runtime-embedding-consumer",
+      "bun run test:ogtool-package",
+    ]) {
+      expect(versionProjection).not.toContain(duplicatedGate);
+      expect(ci).toContain(duplicatedGate);
+    }
+  });
+
   test("downloads artifact ZIPs through portable gh api stdout redirection", async () => {
     const workflows = await Promise.all(
       ["release-acceptance.yml", "release.yml", "release-embedded.yml"].map(workflow),
@@ -90,6 +120,8 @@ describe("release image workflow contract", () => {
     expect(candidate).toContain("Refuse to rerun a completed immutable candidate");
     expect(candidate).toContain("use its original successful producer run ID");
     expect(candidate).toContain("bun scripts/resolve-github-release-state.ts");
+    expect(candidate).toContain('git merge-base --is-ancestor "$SOURCE_SHA" origin/main');
+    expect(candidate).not.toContain('[ "$(git rev-parse origin/main)" = "$SOURCE_SHA" ]');
     expect(candidate).not.toContain('gh release view "$tag"');
     expect(candidate).not.toContain('existing_tag_sha="$(gh api');
   });
