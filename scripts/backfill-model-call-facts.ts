@@ -32,9 +32,9 @@ async function main(): Promise<void> {
 
   const workspaceIds = workspaceFilter
     ? [workspaceFilter]
-    : (
-        await db.execute<{ id: string }>(sql`select id from workspaces order by created_at`)
-      ).map((row) => row.id);
+    : (await db.execute<{ id: string }>(sql`select id from workspaces order by created_at`)).map(
+        (row) => row.id,
+      );
 
   let totalUpserted = 0;
   let totalConsidered = 0;

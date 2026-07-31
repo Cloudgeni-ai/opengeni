@@ -12,12 +12,7 @@ import {
 } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
 
-import {
-  formatTokens,
-  formatUsd,
-  type InsightsSnapshot,
-  type TraceTarget,
-} from "./mock-data";
+import { formatTokens, formatUsd, type InsightsSnapshot, type TraceTarget } from "./mock-data";
 
 const STEPS = ["Window", "Driver", "Act"] as const;
 
@@ -34,9 +29,7 @@ export function CausalSheet(props: {
   const cachedTokens = snap.models.reduce((n, m) => n + m.cachedTokens, 0);
   const cachePct = inputTokens > 0 ? Math.round((cachedTokens / inputTokens) * 100) : 0;
   const driver =
-    snap.drivers.find((d) => d.id === props.target?.driverId) ??
-    snap.drivers[0] ??
-    null;
+    snap.drivers.find((d) => d.id === props.target?.driverId) ?? snap.drivers[0] ?? null;
 
   return (
     <Sheet
@@ -113,9 +106,7 @@ export function CausalSheet(props: {
                 <Block
                   title="Selected driver"
                   body={
-                    driver
-                      ? `Grouped by ${driver.groupBy}`
-                      : "No credit drivers in this window."
+                    driver ? `Grouped by ${driver.groupBy}` : "No credit drivers in this window."
                   }
                 >
                   {driver ? (
@@ -133,10 +124,7 @@ export function CausalSheet(props: {
                 </Block>
               ) : null}
               {step === 2 ? (
-                <Block
-                  title="Next moves"
-                  body="Use existing session, goal, and schedule controls."
-                >
+                <Block title="Next moves" body="Use existing session, goal, and schedule controls.">
                   <div className="grid gap-2">
                     {[
                       {

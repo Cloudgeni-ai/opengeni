@@ -382,9 +382,7 @@ export async function getWorkspaceInsights(
     until: window.until,
     taskIds: tasks.map((task) => task.id),
   });
-  const scheduleFactById = new Map(
-    scheduleFacts.map((row) => [row.scheduledTaskId, row] as const),
-  );
+  const scheduleFactById = new Map(scheduleFacts.map((row) => [row.scheduledTaskId, row] as const));
   const schedules = tasks.map((task) => {
     const fact = scheduleFactById.get(task.id);
     return {

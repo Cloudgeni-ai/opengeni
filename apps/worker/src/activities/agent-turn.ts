@@ -6358,8 +6358,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   sourceKey: aggregateSourceKey,
                   observability,
                 });
-                const aggregateProvider =
-                  resolvedModel?.provider.id ?? settings.openaiProvider;
+                const aggregateProvider = resolvedModel?.provider.id ?? settings.openaiProvider;
                 const aggregateProviderApi = resolvedModel?.provider.api ?? "responses";
                 aggregateAuthoritative = await emitModelCallUsage({
                   observability,

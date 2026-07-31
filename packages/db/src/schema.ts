@@ -4191,9 +4191,7 @@ export const modelCallFacts = pgTable(
       table.sessionId,
       table.occurredAt,
     ),
-    workspaceScheduledTaskOccurred: index(
-      "model_call_facts_workspace_scheduled_task_occurred_idx",
-    )
+    workspaceScheduledTaskOccurred: index("model_call_facts_workspace_scheduled_task_occurred_idx")
       .on(table.workspaceId, table.scheduledTaskId, table.occurredAt)
       .where(sql`${table.scheduledTaskId} is not null`),
     workspaceAccount: foreignKey({

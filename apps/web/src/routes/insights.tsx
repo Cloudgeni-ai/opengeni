@@ -126,9 +126,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
   const floor = (snap?.floor ?? []).filter((session) => {
     if (floorFilter === "active") {
       return (
-        session.state === "running" ||
-        session.state === "compacting" ||
-        session.state === "waiting"
+        session.state === "running" || session.state === "compacting" || session.state === "waiting"
       );
     }
     return true;
@@ -269,9 +267,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
           <div className="rounded-lg border border-border bg-surface/35 p-4">
             <div className="flex flex-wrap items-baseline justify-between gap-2">
               <h3 className="text-sm font-medium text-fg">{snap.cacheSeriesLabel}</h3>
-              <p className="font-mono text-xs tabular-nums text-fg-muted">
-                {totals.cacheHitPct}%
-              </p>
+              <p className="font-mono text-xs tabular-nums text-fg-muted">{totals.cacheHitPct}%</p>
             </div>
             <AreaChart
               key={`cache-${range}-${filters.provider}-${filters.model}`}
@@ -440,7 +436,9 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
       {/* 5. Sandbox usage — warm seconds (pricing later) */}
       <Section title="Sandbox usage">
         {snap.modelFilterActive ? (
-          <p className="mb-2 text-2xs text-fg-subtle">Workspace-wide — not affected by model filter.</p>
+          <p className="mb-2 text-2xs text-fg-subtle">
+            Workspace-wide — not affected by model filter.
+          </p>
         ) : null}
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <Metric
@@ -493,7 +491,9 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
 
           <div className="rounded-lg border border-border bg-surface/35 p-4">
             <h3 className="text-sm font-medium text-fg">Warm share</h3>
-            <p className="mt-0.5 text-2xs text-fg-subtle">Top groups only · center matches slices</p>
+            <p className="mt-0.5 text-2xs text-fg-subtle">
+              Top groups only · center matches slices
+            </p>
             <DonutChart
               key={`warm-donut-${range}`}
               className="mt-3"
@@ -651,7 +651,8 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
       {/* 6. Live */}
       <Section title="Live now">
         <p className="mb-2 text-2xs text-fg-subtle">
-          Current sessions{filters.model !== "all" ? ` · model ${filters.model}` : " · workspace-wide"}
+          Current sessions
+          {filters.model !== "all" ? ` · model ${filters.model}` : " · workspace-wide"}
           {filters.provider !== "all" && filters.model === "all"
             ? " (provider filter needs a model to narrow this list)"
             : ""}
@@ -712,9 +713,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
                     <td className="px-3 py-2.5 font-mono text-2xs text-fg-muted">
                       {session.model ?? "—"}
                     </td>
-                    <td className="px-3 py-2.5 text-fg-muted">
-                      {backendLabel(session.route)}
-                    </td>
+                    <td className="px-3 py-2.5 text-fg-muted">{backendLabel(session.route)}</td>
                     <td className="px-3 py-2.5">
                       <StatePill state={session.state} />
                     </td>
@@ -735,9 +734,9 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
       {/* 7. Schedules */}
       <Section title="Schedules">
         <p className="mb-2 text-2xs text-fg-subtle">
-          Credit $ covers turns whose initiator carried a scheduled run id (usually the first
-          wake of a fire). Goal continuations without that lineage show as session spend, not
-          schedule spend.
+          Credit $ covers turns whose initiator carried a scheduled run id (usually the first wake
+          of a fire). Goal continuations without that lineage show as session spend, not schedule
+          spend.
         </p>
         <div className="overflow-hidden rounded-lg border border-border">
           <table className="min-w-full text-left text-xs">
@@ -779,8 +778,8 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
       <Section title="Caps">
         <p className="text-2xs text-fg-subtle">
           Credits-path billable tokens and agent runs since the start of this UTC month
-          {snap.modelFilterActive ? " · workspace-wide (not model-filtered)" : ""}.
-          Codex/external usage is omitted from the token meter.
+          {snap.modelFilterActive ? " · workspace-wide (not model-filtered)" : ""}. Codex/external
+          usage is omitted from the token meter.
         </p>
         <div className="grid gap-4 rounded-lg border border-border bg-surface/35 p-4 sm:grid-cols-2">
           {snap.billableTokenCap != null ? (
@@ -899,10 +898,7 @@ function hit(cached: number, input: number): number {
   return Math.round((cached / input) * 100);
 }
 
-function RangeControl(props: {
-  value: InsightsRange;
-  onChange: (range: InsightsRange) => void;
-}) {
+function RangeControl(props: { value: InsightsRange; onChange: (range: InsightsRange) => void }) {
   return (
     <div
       role="tablist"

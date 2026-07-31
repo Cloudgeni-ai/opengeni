@@ -116,9 +116,7 @@ export function AreaChart(props: {
   };
 
   const activeX =
-    active == null
-      ? null
-      : padL + (active / Math.max(props.labels.length - 1, 1)) * innerW;
+    active == null ? null : padL + (active / Math.max(props.labels.length - 1, 1)) * innerW;
 
   const ticks = [0, 0.5, 1];
 
@@ -368,7 +366,12 @@ export function DonutChart(props: {
   const active = arcs.find((a) => a.slice.id === hover) ?? null;
 
   return (
-    <div className={cn("flex flex-col items-stretch gap-4 sm:flex-row sm:items-center", props.className)}>
+    <div
+      className={cn(
+        "flex flex-col items-stretch gap-4 sm:flex-row sm:items-center",
+        props.className,
+      )}
+    >
       <div className="relative mx-auto shrink-0" style={{ width: size, height: size }}>
         <svg viewBox={`0 0 ${size} ${size}`} className="h-full w-full overflow-visible" role="img">
           {total <= 0 ? (
@@ -430,7 +433,9 @@ export function DonutChart(props: {
                 hover === arc.slice.id ? "bg-surface-2/80" : "hover:bg-surface-2/50",
               )}
             >
-              <span className={cn("size-2 shrink-0 rounded-full bg-current", arc.slice.toneClass)} />
+              <span
+                className={cn("size-2 shrink-0 rounded-full bg-current", arc.slice.toneClass)}
+              />
               <span className="min-w-0 flex-1 truncate text-xs text-fg">{arc.slice.label}</span>
               <span className="shrink-0 font-mono text-2xs tabular-nums text-fg-muted">
                 {format(arc.slice.value)}

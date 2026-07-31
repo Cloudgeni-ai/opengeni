@@ -4,8 +4,7 @@ import type { Database } from "./index";
 import { rlsContextForWorkspace, withRlsContext } from "./index";
 import * as schema from "./schema";
 
-const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export type InsightsTimeWindow = {
   since: Date;
@@ -216,7 +215,9 @@ export async function aggregateModelCallFactsByDay(
     provider?: string | null;
     model?: string | null;
   },
-): Promise<Map<string, { costMicros: number; inputTokens: number; cachedTokens: number; calls: number }>> {
+): Promise<
+  Map<string, { costMicros: number; inputTokens: number; cachedTokens: number; calls: number }>
+> {
   const context = await rlsContextForWorkspace(db, input.workspaceId);
   return await withRlsContext(db, context, async (scopedDb) => {
     const clauses = [
@@ -371,9 +372,7 @@ export async function aggregateRootSessionDrivers(
       lt(schema.modelCallFacts.occurredAt, input.until),
       ...(input.provider ? [eq(schema.modelCallFacts.provider, input.provider)] : []),
       ...(input.model ? [eq(schema.modelCallFacts.model, input.model)] : []),
-      ...(input.rootSessionIds
-        ? [inArray(childSessions.rootSessionId, input.rootSessionIds)]
-        : []),
+      ...(input.rootSessionIds ? [inArray(childSessions.rootSessionId, input.rootSessionIds)] : []),
     ];
     const query = scopedDb
       .select({
@@ -401,9 +400,7 @@ export async function aggregateRootSessionDrivers(
       .where(and(...clauses))
       .groupBy(childSessions.rootSessionId, rootSessions.title)
       .orderBy(sql`coalesce(sum(${schema.modelCallFacts.pricedCostMicros}), 0) desc`);
-    const rows = input.rootSessionIds
-      ? await query
-      : await query.limit(input.limit ?? 8);
+    const rows = input.rootSessionIds ? await query : await query.limit(input.limit ?? 8);
     return rows.map((row) => ({
       rootSessionId: row.rootSessionId,
       title: row.title,
@@ -742,9 +739,7 @@ export async function backfillModelCallFactsFromSessionEvents(
         // Credits turns with totalTokens=0 write neither — keep those as credits.
         const pricedCostMicros = cost ? Number(cost.quantity) : 0;
         const billingPath =
-          cost != null && pricedCostMicros === 0 && !tokenRow
-            ? "external"
-            : "opengeni_credits";
+          cost != null && pricedCostMicros === 0 && !tokenRow ? "external" : "opengeni_credits";
 
         const [turn] = await scopedDb
           .select({
