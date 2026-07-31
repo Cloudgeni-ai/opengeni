@@ -67,12 +67,14 @@ export function resolveSessionToolPolicy(input: SessionToolPolicyInput): Resolve
   const selectedRefs = mergeToolRefs([], input.sessionTools);
   const tracksWorkspaceDefaults = policy.mode === "workspace_default";
 
-  // Optional capability refs are a historical materialization of a
-  // workspace-default selection. They may outlive an installation or its
-  // credentials; do not hand an unavailable optional ref to runtime, where it
-  // would otherwise be an unknown MCP id. Strict historical refs intentionally
-  // remain so their fail-loud compatibility contract is preserved.
-  let toolRefs = selectedRefs.filter((tool) => tool.optional !== true || availableIds.has(tool.id));
+  // Persisted refs may outlive a capability installation, deployment config,
+  // or its credentials. Admission remains strict for newly requested refs, but
+  // turn-time materialization must not hand any no-longer-registered id to the
+  // runtime router: doing so fails before the model can respond and traps the
+  // session in an "Unknown MCP server id" loop. Keep the stale selection in the
+  // effective-policy projection below, while executable refs contain only the
+  // registry that is available for this exact turn.
+  let toolRefs = selectedRefs.filter((tool) => availableIds.has(tool.id));
   if (tracksWorkspaceDefaults) {
     toolRefs = mergeToolRefs(
       toolRefs,

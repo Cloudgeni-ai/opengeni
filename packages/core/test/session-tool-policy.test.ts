@@ -125,6 +125,37 @@ describe("session tool policy resolution", () => {
     });
   });
 
+  test("drops an unavailable explicit selection without trapping future turns", () => {
+    const linearId = "cap-integrations-sh-linear-app-retired";
+    const result = resolve({
+      toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+      sessionTools: [mcp(linearId)],
+      availableMcpServerIds: ["opengeni"],
+      defaultMcpServerIds: [],
+    });
+
+    expect(result.toolRefs).toEqual([mcp("opengeni")]);
+    expect(result.effectivePolicy.selectedIds).toEqual([linearId]);
+    expect(result.effectivePolicy.effectiveIds).toEqual([linearId, "opengeni"]);
+    expect(result.effectivePolicy.configuredIds).toEqual(["opengeni"]);
+    expect(result.effectivePolicy.droppedIds).toEqual([linearId]);
+    expect(result.effectivePolicy.counts).toMatchObject({
+      selected: 1,
+      effective: 2,
+      configured: 1,
+      dropped: 1,
+    });
+
+    const reconnected = resolve({
+      toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+      sessionTools: [mcp(linearId)],
+      availableMcpServerIds: ["opengeni", linearId],
+      defaultMcpServerIds: [],
+    });
+    expect(reconnected.toolRefs).toEqual([mcp(linearId), mcp("opengeni")]);
+    expect(reconnected.effectivePolicy.droppedIds).toEqual([]);
+  });
+
   test("normalizes stable ordering and keeps strict selection over optional selection", () => {
     const result = resolve({
       sessionTools: [mcp("z-server", true), mcp("a-server"), mcp("z-server")],
