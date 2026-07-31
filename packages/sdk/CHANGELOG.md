@@ -1,5 +1,14 @@
 # @opengeni/sdk
 
+## 0.32.0
+
+### Minor Changes
+
+- f413e6c: Add real Workspace Insights: durable `model_call_facts` after authoritative
+  `agent.model.usage`, a `workspace:admin` insights API over usage_events + facts +
+  live joins, SDK client, and a web console that drops mock rollups for honest
+  UTC credit/token/cache/warm/caps reporting.
+
 ## 0.31.0
 
 ### Minor Changes
