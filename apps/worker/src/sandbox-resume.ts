@@ -140,17 +140,18 @@ export type ResumeBoxIds = {
   /**
    * IMAGE IS SHARED STATE (B3): the container image this run resolves (Modal image ref
    * / docker image). Threaded to acquireLease, which stamps it on the cold-create and
-   * conflicts on a live box already running a DIFFERENT image (solo holder recreates;
-   * N-holders throw SandboxImageConflictError). Omitted -> image is not enforced (the
-   * selfhosted path never passes it; a legacy/null-image box never conflicts).
+   * conflicts on a live box already running a DIFFERENT image (a solo holder requests
+   * capture-and-drain rotation; N-holders throw SandboxImageConflictError). Omitted ->
+   * image is not enforced (the selfhosted path never passes it; a legacy/null-image box
+   * never conflicts).
    */
   image?: string;
   /**
    * RIG IS SHARED STATE (M3): the frozen rig version this run rides. Threaded to
    * acquireLease, which stamps it on the cold-create and conflicts on a live box
-   * set up under a DIFFERENT rig version (solo holder recreates cold on the new
-   * rig; N-holders throw SandboxRigConflictError). Omitted for a rig-less session
-   * -> rig is never stamped or enforced (shares exactly as today).
+   * set up under a DIFFERENT rig version (a solo holder requests capture-and-drain
+   * rotation; N-holders throw SandboxRigConflictError). Omitted for a rig-less
+   * session -> rig is never stamped or enforced (shares exactly as today).
    */
   rigVersionId?: string;
 };
@@ -759,13 +760,15 @@ export async function resumeBoxForTurn(
     backend: ids.backend,
     os,
     // IMAGE IS SHARED STATE (B3): thread the resolved image so the lease stamps it +
-    // conflicts on a live box already running a different image. A SandboxImageConflictError
-    // propagates to the turn activity (an actionable error); a solo image change is handled
-    // by acquireLease recreating the box cold on the new image.
+    // conflicts on a live box already running a different image. A
+    // SandboxImageConflictError propagates while another holder is active; a
+    // solo change requests a capture-and-drain rotation and this attempt retries
+    // after the cold successor can safely stamp the new image.
     ...(ids.image ? { image: ids.image } : {}),
     // RIG IS SHARED STATE (M3): thread the frozen rig version so the lease stamps it
     // + conflicts on a live box under a different rig. A SandboxRigConflictError
-    // propagates to the turn activity (actionable); a solo rig change recreates cold.
+    // propagates while another holder is active; a solo change uses the same
+    // durable capture-and-drain rotation as an image change.
     ...(ids.rigVersionId ? { rigVersionId: ids.rigVersionId } : {}),
     leaseTtlMs,
     warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,

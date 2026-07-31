@@ -5039,9 +5039,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 environment: sandboxEnvironment,
                 // IMAGE IS SHARED STATE (B3, Modal warm-box path only): the container image
                 // this run resolves. The lease stamps it + conflicts on a live shared box
-                // running a DIFFERENT image (solo → recreate on the new image; N-holders →
-                // SandboxImageConflictError surfaced as an actionable turn error). Prefer the
-                // explicit Modal image ref, else the docker image. The selfhosted branch
+                // running a DIFFERENT image (solo → durable rotation; N-holders →
+                // SandboxImageConflictError surfaced as an actionable turn error). Prefer
+                // the explicit Modal image ref, else the docker image. The selfhosted branch
                 // (establishSelfhostedTurnSession) NEVER passes
                 // an image — B3 lives only on this Modal else-branch.
                 ...((runSettings.modalImageRef ?? runSettings.dockerImage)
@@ -5051,8 +5051,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   : {}),
                 // RIG IS SHARED STATE (M3): stamp the frozen rig version so the lease
                 // conflicts on a live shared box set up under a different rig (solo
-                // recreate / N-holders SandboxRigConflictError). Omitted for a rig-less
-                // turn -> never stamped or enforced (shares exactly as today).
+                // durable rotation / N-holders SandboxRigConflictError). Omitted for a
+                // rig-less turn -> never stamped or enforced (shares exactly as today).
                 ...(rigVersion ? { rigVersionId: rigVersion.id } : {}),
               },
               "turn",
@@ -6569,7 +6569,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const fencedLease = await readLease(db, input.workspaceId, error.sandboxGroupId).catch(
             () => null,
           );
-          const deadlineRotationPending = fencedLease?.rotationRequestedAt != null;
+          const rotationPending = fencedLease?.rotationRequestedAt != null;
+          const deadlineRotationPending =
+            rotationPending && fencedLease?.rotationReason === "provider_deadline";
           const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
             sessionId: input.sessionId,
             turnId: recoveryTurnId,
@@ -6578,11 +6580,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             reason: deadlineRotationPending
               ? "sandbox_deadline_rotation"
               : "sandbox_lease_superseded",
-            ...(deadlineRotationPending
+            ...(rotationPending
               ? {
                   detail: {
                     sandboxGroupId: error.sandboxGroupId,
                     leaseEpoch: error.leaseEpoch,
+                    rotationReason: fencedLease?.rotationReason ?? "operator",
                   },
                 }
               : {}),
@@ -6603,7 +6606,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           turnMetricOutcome = "recovering";
           return claimedResult({
             status: "recovering",
-            ...(deadlineRotationPending
+            ...(rotationPending
               ? {
                   continueDelayMs: sandboxDeadlineRotationRecoveryDelayMs(settings),
                 }
