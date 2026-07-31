@@ -250,7 +250,7 @@ export function AreaChart(props: {
             />
             {points.map((point, i) => (
               <circle
-                key={`${series.id}-${i}`}
+                key={`${series.id}-x${point.x}`}
                 cx={point.x}
                 cy={point.y}
                 r={active === i ? 4.5 : 2.25}
@@ -280,7 +280,7 @@ export function AreaChart(props: {
       <div className="mt-1 flex justify-between pl-9 pr-1">
         {props.labels.map((label, index) => (
           <button
-            key={`${label}-${index}`}
+            key={label}
             type="button"
             onMouseEnter={() => setActive(index)}
             className={cn(

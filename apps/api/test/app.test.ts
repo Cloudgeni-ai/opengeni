@@ -603,8 +603,15 @@ describe("API helpers", () => {
   });
 
   test("rejects oversized streamed request bodies before route parsing", async () => {
+    const settings = testSettings();
+    // Global bodyLimit is raised for voice multipart (see createApp); overflow
+    // must exceed that effective ceiling, not only API_MAX_REQUEST_BODY_BYTES.
+    const maxBodyBytes = Math.max(
+      API_MAX_REQUEST_BODY_BYTES,
+      settings.voiceInputMaxSizeBytes + 64 * 1024,
+    );
     const app = createApp({
-      settings: testSettings(),
+      settings,
       db: {} as never,
       bus: {} as never,
       workflowClient: {} as never,
@@ -612,7 +619,7 @@ describe("API helpers", () => {
     });
     const body = new ReadableStream<Uint8Array>({
       start(controller) {
-        controller.enqueue(new Uint8Array(API_MAX_REQUEST_BODY_BYTES));
+        controller.enqueue(new Uint8Array(maxBodyBytes));
         controller.enqueue(new Uint8Array([0x20]));
         controller.close();
       },
