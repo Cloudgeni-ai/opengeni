@@ -2633,7 +2633,13 @@ describe("workflow contracts", () => {
     });
     expect(ciText).not.toContain("pull-requests: write");
     expect(ciText).not.toMatch(/pulls\/.+\/reviews/);
-    for (const jobName of ["test", "deployment", "images"])
+    for (const jobName of [
+      "source-contracts",
+      "test-suite",
+      "package-contracts",
+      "deployment",
+      "images",
+    ])
       expect(
         ci.jobs[jobName].steps.find((step: any) => step.uses === "actions/checkout@v6").with.ref,
       ).toContain("inputs.automation_head_sha");
@@ -2667,6 +2673,79 @@ describe("workflow contracts", () => {
         .filter((step: any) => step.env?.GITHUB_TOKEN)
         .map((step: any) => [step.name, step.env.GITHUB_TOKEN]),
     ).toEqual([["Complete exact-head automation CI check", "${{ github.token }}"]]);
+  });
+
+  test("runs preserved source, test, and package gates in parallel behind a fail-closed aggregate", () => {
+    const laneNames = ["source-contracts", "test-suite", "package-contracts"];
+    const expectedGateNames = {
+      "source-contracts": [
+        "Validate changeset release plan",
+        "Generated font manifest freshness",
+        "Typecheck",
+        "Lint",
+        "Format check",
+        "Workspace auth/billing static guard",
+        "Docs reference freshness guard",
+        "Public repository hygiene guard",
+      ],
+      "test-suite": [
+        "Test",
+        "React warning-free test gate",
+        "Install pinned Playwright Chromium runtime",
+        "Codex quota Codex quota and entitlement browser acceptance",
+        "Queue surface browser acceptance",
+        "Session pin browser acceptance",
+        "Responsive knowledge surfaces browser acceptance",
+        "Workbench browser acceptance",
+        "Real workspace capture acceptance",
+        "Upload session pin visual evidence",
+        "Upload Codex quota visual evidence",
+        "Upload responsive knowledge-surface evidence",
+        "Upload workbench visual evidence",
+        "Recovery integration regressions",
+      ],
+      "package-contracts": [
+        "Build client packages (contracts + SDK + React)",
+        "Publish closure guard",
+        "Clean published consumer",
+        "Runtime embedding consumer",
+        "Portable ogtool package",
+        "Build React demo harness",
+        "Web bundle budget",
+      ],
+    } as const;
+    const allLaneSteps = laneNames.flatMap((jobName) =>
+      ci.jobs[jobName].steps.map((step: any) => step.name).filter(Boolean),
+    );
+
+    for (const [jobName, gateNames] of Object.entries(expectedGateNames)) {
+      expect(ci.jobs[jobName].needs).toBe("automation-admission");
+      expect(ci.jobs[jobName].if).toContain("always()");
+      for (const gateName of gateNames) {
+        expect(ci.jobs[jobName].steps.some((step: any) => step.name === gateName)).toBe(true);
+        expect(allLaneSteps.filter((stepName) => stepName === gateName)).toHaveLength(1);
+      }
+    }
+
+    const aggregate = ci.jobs.test;
+    expect(aggregate.name).toBe("Typecheck and unit tests");
+    expect(aggregate.needs).toEqual(laneNames);
+    expect(aggregate.if).toBe("${{ always() }}");
+    const requireLanes = aggregate.steps.find(
+      (step: any) => step.name === "Require every split CI lane",
+    );
+    expect(requireLanes.env).toEqual({
+      SOURCE_CONTRACTS_RESULT: "${{ needs.source-contracts.result }}",
+      TEST_SUITE_RESULT: "${{ needs.test-suite.result }}",
+      PACKAGE_CONTRACTS_RESULT: "${{ needs.package-contracts.result }}",
+    });
+    expect(requireLanes.run).toContain('if [ "$result" != "success" ]');
+    expect(ci.jobs["automation-report"].needs).toEqual([
+      "automation-admission",
+      "test",
+      "deployment",
+      "images",
+    ]);
   });
 
   test("keeps release-head retention base-owned, explicit, and narrowly authorized", () => {
