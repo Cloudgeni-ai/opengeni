@@ -153,6 +153,7 @@ async function bearer(
     workspaceId: workspace.workspaceId,
     subjectId,
     permissions,
+    principalKind: "human_session",
     exp: Math.floor(Date.now() / 1000) + 3600,
   });
   return `Bearer ${token}`;
@@ -280,6 +281,20 @@ describe("personal Slack OAuth origin binding", () => {
       assertSlackAuthorizationServer({
         ...slack,
         tokenEndpoint: "https://attacker.example/token",
+      } as never),
+    ).toThrow("did not remain bound to slack.com");
+    expect(() =>
+      assertSlackAuthorizationServer({
+        ...slack,
+        issuer: "https://mcp.slack.com",
+        authorizationServer: "https://mcp.slack.com",
+      } as never),
+    ).not.toThrow();
+    expect(() =>
+      assertSlackAuthorizationServer({
+        ...slack,
+        issuer: "https://mcp-slack.example",
+        authorizationServer: "https://mcp-slack.example",
       } as never),
     ).toThrow("did not remain bound to slack.com");
   });
@@ -1202,7 +1217,7 @@ describe("connections routes", () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const as = startFakeAuthorizationServer({
-      issuer: "https://slack.com",
+      issuer: "https://slack.com/mcp",
       clientIdMetadataDocumentSupported: false,
       tokenEndpointAuthMethodsSupported: ["client_secret_post"],
       scopesSupported: ["search:read.public", "chat:write"],

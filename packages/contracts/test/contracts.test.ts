@@ -1407,13 +1407,13 @@ describe("contracts", () => {
     expect(
       DocumentSearchRequest.parse({
         query: "network policy",
-        limit: 20,
+        limit: 50,
         mode: "hybrid",
         sourceKinds: ["repository"],
       }),
     ).toEqual({
       query: "network policy",
-      limit: 20,
+      limit: 50,
       mode: "hybrid",
       sourceKinds: ["repository"],
     });
@@ -1445,6 +1445,7 @@ describe("contracts", () => {
     expect(() => CreateDocumentBaseRequest.parse({ name: "" })).toThrow();
     expect(() => AddDocumentRequest.parse({ fileId: "not-a-uuid" })).toThrow();
     expect(() => DocumentSearchRequest.parse({ query: "" })).toThrow();
+    expect(() => DocumentSearchRequest.parse({ query: "boundary", limit: 51 })).toThrow();
     expect(() => CreateKnowledgeMemoryRequest.parse({ text: "", confidence: 1.1 })).toThrow();
   });
 

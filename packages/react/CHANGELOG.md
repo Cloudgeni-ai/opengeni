@@ -1,5 +1,27 @@
 # @opengeni/react
 
+## 0.30.1
+
+### Patch Changes
+
+- Updated dependencies [bbcbef5]
+- Updated dependencies [ddff8db]
+  - @opengeni/sdk@0.30.1
+
+## 0.30.0
+
+### Patch Changes
+
+- Updated dependencies [1f6f13f]
+  - @opengeni/sdk@0.30.0
+
+## 0.29.3
+
+### Patch Changes
+
+- 8dca209: Remove redundant success glyphs from collapsed turn summaries while preserving failed, cancelled, and active state indicators.
+- 821f664: Seed shared session-event cursors from loaded history to prevent historical replay storms, and preserve the MCP SDK's exact request-timeout classification through safe transport-error sanitization.
+
 ## 0.29.2
 
 ### Patch Changes

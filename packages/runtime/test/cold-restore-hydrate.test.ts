@@ -8,18 +8,23 @@
 //       sessionState.workspaceArchive, replay it via session.hydrateWorkspace(bytes)
 //       on the freshly-created session so /workspace is restored.
 //
-// The modal SDK client (`ModalSandboxClient`) is mock.module-replaced with a
-// Modal-shaped fake: resume() throws NotFound; create() ASSERTS it is never handed
-// a `snapshot` arg (mirroring assertCoreSnapshotUnsupported); the created session
-// records hydrateWorkspace calls. This drives the REAL
-// establishSandboxSessionFromEnvelope (which builds its client from the registry)
-// end to end without a live provider.
+// A per-call client factory supplies a Modal-shaped fake: resume() throws
+// NotFound; create() ASSERTS it is never handed a `snapshot` arg (mirroring
+// assertCoreSnapshotUnsupported); the created session records hydrateWorkspace
+// calls. The explicit factory avoids process-global module mocks whose result
+// depends on which test imported the provider first.
 
-import { afterAll, describe, expect, mock, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import {
+  decodeModalSnapshotId,
+  describeNativeSnapshotArchive,
+  establishSandboxSessionFromEnvelope as establishRuntimeSandboxSessionFromEnvelope,
+  readWorkspaceArchiveFromEnvelopeSessionState,
+  SandboxResumeStateUnavailableError,
+} from "@opengeni/runtime";
+import { testSettings } from "@opengeni/testing";
 
-// Mock the modal SDK BEFORE importing the runtime (so the modal provider's
-// `new ModalSandboxClient(...)` constructs our fake).
 const hydrateCalls: Uint8Array[] = [];
 const createArgs: Array<{ manifest?: unknown; snapshot?: unknown }> = [];
 // Controls for hydrateWorkspace-throw + delete tracking.
@@ -75,23 +80,16 @@ class FakeModalSandboxClient {
   }
 }
 
-const realModal = await import("@openai/agents-extensions/sandbox/modal");
-mock.module("@openai/agents-extensions/sandbox/modal", () => ({
-  ...realModal,
-  ModalSandboxClient: FakeModalSandboxClient,
-}));
-
-const {
-  establishSandboxSessionFromEnvelope,
-  readWorkspaceArchiveFromEnvelopeSessionState,
-  decodeModalSnapshotId,
-  SandboxResumeStateUnavailableError,
-} = await import("@opengeni/runtime");
-const { testSettings } = await import("@opengeni/testing");
-
-afterAll(() => {
-  mock.restore();
-});
+function establishSandboxSessionFromEnvelope(
+  settings: Parameters<typeof establishRuntimeSandboxSessionFromEnvelope>[0],
+  envelope: Parameters<typeof establishRuntimeSandboxSessionFromEnvelope>[1],
+  opts: Parameters<typeof establishRuntimeSandboxSessionFromEnvelope>[2],
+) {
+  return establishRuntimeSandboxSessionFromEnvelope(settings, envelope, {
+    ...opts,
+    clientFactory: () => new FakeModalSandboxClient(undefined),
+  });
+}
 
 const SNAPSHOT_REF =
   'MODAL_SANDBOX_FS_SNAPSHOT_V1\n{"snapshot_id":"im-snap-abc","workspace_persistence":"snapshot_filesystem"}';
@@ -102,6 +100,8 @@ const SNAPSHOT_PREV_REF =
 const SNAPSHOT_PREV_B64 = Buffer.from(new TextEncoder().encode(SNAPSHOT_PREV_REF)).toString(
   "base64",
 );
+const TAR_BYTES = new TextEncoder().encode("PK-opengeni-test-tar");
+const TAR_B64 = Buffer.from(TAR_BYTES).toString("base64");
 
 function envelopeWithArchive(archiveB64: string | undefined) {
   const sessionState: Record<string, unknown> = {
@@ -113,7 +113,7 @@ function envelopeWithArchive(archiveB64: string | undefined) {
     sessionState.workspaceArchive = archiveB64;
     const bytes = Buffer.from(archiveB64, "base64");
     const archiveSha256 = createHash("sha256").update(bytes).digest("hex");
-    sessionState.workspaceArchiveMeta = {
+    sessionState.workspaceArchiveMeta = describeNativeSnapshotArchive(bytes, 1_700_000_000_000) ?? {
       version: 1,
       revision: `wa1:1700000000000:${archiveSha256}`,
       archiveSha256,
@@ -240,7 +240,6 @@ describe("cold-restore archive+hydrate (sandbox-file-persistence)", () => {
         "hydrate",
         "attributed:sb-restored",
         "restore-verifying",
-        "fingerprint-exec",
       ]);
       expect(established.instanceId).toBe("sb-restored");
     } finally {
@@ -316,7 +315,7 @@ describe("cold-restore archive+hydrate (sandbox-file-persistence)", () => {
     observedWorkspaceSha = "b".repeat(64);
     try {
       await expect(
-        establishSandboxSessionFromEnvelope(modalSettings(), envelopeWithArchive(SNAPSHOT_B64), {
+        establishSandboxSessionFromEnvelope(modalSettings(), envelopeWithArchive(TAR_B64), {
           sessionId: "sess-partial-restore",
           recovery: "create-or-restore",
           environment: {},

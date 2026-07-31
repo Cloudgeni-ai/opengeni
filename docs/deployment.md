@@ -229,14 +229,27 @@ out of API and worker pods. Its default command serializes `db:migrate`,
 `helm upgrade` before workload replacement begins. Operators running without
 Helm must preserve the same order explicitly.
 
+After a successful install or upgrade, the default-on `catalogImport` hook Job
+imports the committed reviewed integrations snapshot. It receives the runtime
+Secret for object-storage configuration but overrides `OPENGENI_DATABASE_URL`
+from the migration-only Secret because global catalog and import-provenance
+tables are deliberately unavailable to the runtime role. The Job uses a SHA-256
+snapshot reference and performs no database, network, or logo-storage work when
+that exact revision already completed. Set `catalogImport.enabled=false` to opt
+out. Logo fetching is disabled by default so third-party availability cannot
+block a rollout; set `catalogImport.skipLogos=false` to opt into validated,
+self-hosted catalog logos.
+
 The provisioner converges `opengeni_app` to `LOGIN NOSUPERUSER NOBYPASSRLS
 NOCREATEROLE NOCREATEDB NOREPLICATION NOINHERIT`, refuses to guess through any
 privilege-bearing role membership or ownership, revokes database/schema creation
 and all table privileges, then grants the exact current-ledger table contract:
-full CRUD on 83 ordinary runtime tables, SELECT only on
-`nested_agent_depth_configuration`, SELECT + INSERT on the three append-only
-evidence/revision tables, and no direct table DML on the five FORCE-RLS
-host-export tables.
+full CRUD on 83 ordinary runtime tables; SELECT only on
+`nested_agent_depth_configuration`, preference lifecycle events, and preference
+snapshots; SELECT + INSERT on five append-only/proposal/revision tables; and no
+direct table DML on the five FORCE-RLS host-export tables. Preference head
+UPDATE/DELETE is available only through target-schema-local SECURITY DEFINER
+lock/lifecycle functions, which migrate-then-provision explicitly regrants.
 PostgreSQL 16+ automatically records an ADMIN-only reverse membership when a
 non-superuser `CREATEROLE` principal creates the app role. Provisioning and
 posture checks accept only that exact creator-management edge when `SET=false`,
@@ -256,7 +269,7 @@ PostgreSQL catalogs in a repeatable-read/read-only transaction:
   `row_security=on`;
 - no database/schema/relation/private-routine ownership and no database/schema
   CREATE;
-- exactly 81 declared tenant tables with ENABLE + FORCE + active RLS and at
+- exactly 86 declared tenant tables with ENABLE + FORCE + active RLS and at
   least one policy each;
 - exact SELECT/INSERT/UPDATE/DELETE grants for each declared privilege class,
   absence of TRUNCATE/REFERENCES/TRIGGER everywhere, and no privileges on any
@@ -281,6 +294,28 @@ probe from that exact Secret, then start only the posture-gated runtime. A
 rollback may restore a compatible image digest, but must never restore the old
 broad database URL or role attributes. If an older image cannot run through the
 restricted role, remain in maintenance and fix forward.
+
+Migration `0138_sandbox_checkpoint_artifacts_and_deadlines.sql` is also a
+maintenance-only protocol cutover. Old workers do not stamp provider deadlines
+or honor rotation admission fences, so a rolling/mixed-version application
+deployment would create permanently unrotatable leases after the one-time
+backfill. The required sequence is:
+
+1. bind and verify the exact production subscription, cluster context,
+   namespace, release, database, and image digests;
+2. stop the API, control-worker, and turn-worker Deployments while preserving
+   the migration-only secret and Job identity;
+3. query `pg_stat_activity` through the migration connection and prove zero
+   other sessions with `usename = 'opengeni_app'`;
+4. run the new digest's migration Job and require 0138 to appear in
+   `schema_migrations`;
+5. start only the same new digest's API and workers, then require startup/readiness
+   posture checks before reopening traffic.
+
+The migration repeats the `opengeni_app` guard before and after taking exclusive
+lease-lifecycle table locks, so a missed live application fails with SQLSTATE
+`55000` and leaves the prior schema intact. After 0138 commits, rollback to an
+older application image is forbidden; stop admission and fix forward.
 
 For Azure managed Blob storage, the artifact generator can consume the
 sensitive Terraform output `object_storage_azure_connection_string` into the
@@ -347,6 +382,14 @@ the signed `PUT`. Managed and external buckets must allow direct upload CORS
 for the deployed web origin. Prefer exact HTTPS origins in production; use `*`
 only for disposable private evaluation stacks where signed URLs and the
 OpenGeni access key are the real access boundaries.
+
+For S3-compatible storage on a split network, keep
+`OPENGENI_OBJECT_STORAGE_ENDPOINT` browser-reachable and set
+`OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT` to the private address reachable
+from the API and workers. Signed URLs retain the public host while authenticated
+server-side completion checks and object operations use the internal address.
+`OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT` is separate and only describes the
+address reachable from agent sandboxes.
 
 Do not treat a successful presign as storage acceptance. Release conformance
 must exercise the provider-native `OPTIONS` + signed browser `PUT`, API finalize
@@ -427,7 +470,7 @@ Current profiles:
 
 ## Local Docker Compose
 
-`bun run dev` is the primary local Docker Compose path. It starts Postgres, NATS, Temporal, MinIO, migrations, the sandbox image build, API, both workers (control and turn), and web.
+`bun run dev` is the primary local Docker Compose path. It starts Postgres, NATS, Temporal, MinIO, migrations, imports the fingerprinted reviewed integrations catalog, builds the sandbox image, and starts the API, both workers (control and turn), and web. Set `OPENGENI_CATALOG_IMPORT_ENABLED=false` to omit the catalog import.
 
 When a common host port is already occupied, `bun run dev` auto-selects a nearby free port for Docker Compose and rewrites the in-memory runtime URLs for that run. Set `OPENGENI_POSTGRES_HOST_PORT`, `OPENGENI_NATS_HOST_PORT`, `OPENGENI_NATS_MONITOR_HOST_PORT`, `OPENGENI_TEMPORAL_HOST_PORT`, `OPENGENI_MINIO_HOST_PORT`, or `OPENGENI_MINIO_CONSOLE_HOST_PORT` in `.env` if you need fixed local port choices.
 
@@ -475,6 +518,16 @@ Candidate or operator admission must fail closed when those provider identities
 do not match; do not weaken the provenance check or recreate approval from a
 comment, commit message, or local record.
 
+GitHub account identity is authoritative by the provider's positive numeric
+account ID plus account type (`User` or `Bot`). The provider login is still
+required as a non-empty audit snapshot, but login spelling, case normalization,
+or an account rename does not replace that stable identity. A changed numeric
+ID, changed account type, or missing identity field fails closed. The legacy v3
+structured admin-PASS `reviewerLogin` field is likewise an informational login
+snapshot: the native provider review actor's configured numeric ID and account
+type provide reviewer authority, while every other v3 field and the canonical
+body continue to bind the exact base/head verdict.
+
 For a single-maintainer source PR, generate the exact structured review body
 before merging. Submit the result as a native `COMMENTED` pull-request review;
 the formatter can also print the canonical SHA-256 needed by an external
@@ -513,15 +566,27 @@ provider response must identify the GitHub Actions bot as author and report the
 published prerelease as `immutable: true`, or sealing fails closed. GitHub then
 locks the tag and emits its native release attestation.
 
-If a seal creates and publishes that immutable tag/release but is interrupted
-before its source-admission and retention checks complete, dispatch the same
-workflow from current `main` with `merged_source_sha` set to the exact accepted
-PR merge source. This is recovery, not a late seal: it refuses to create either
-retained artifact. Before the first check mutation it reconstructs the complete
-historical base-to-head tree/file admission, proves the original PR
-base/head/merge and tree, re-reads the unchanged GitHub Actions-owned immutable
-release, and proves the merged source's ancestry into current `main`. It then
-idempotently restores only whichever exact provider checks are absent.
+If a seal fails before merge or is interrupted and the reviewed PR has since
+merged, dispatch the same workflow from current `main` with `merged_source_sha`
+set to the exact accepted PR merge source. Before its first mutation, recovery
+reconstructs the complete historical base-to-head tree/file admission, proves
+the original PR base/head/merge and tree, proves the merged source's ancestry
+into current `main`, and reads the retained tag/release as one paired state. It
+accepts either an unchanged GitHub Actions-owned immutable pair or a pair that
+is still completely absent through the pre-mutation fence. In the absent case,
+there must also be no pre-existing retention check; recovery then creates the
+exact tag and immutable prerelease before restoring checks. A partial pair,
+preclaimed check, non-404 provider read error, identity drift, or evidence
+movement fails before mutation. A create conflict or provider error is never
+normalized or followed by takeover of the competing state. Recovery pins the
+first provider read's PR-author numeric ID/account type and exact head
+branch/repository across its pre-mutation and terminal reads; it supports both
+Version and explicitly sealed non-Version release PRs without substituting a
+hard-coded author or branch. Successful replay reuses the exact immutable pair
+and always upserts one deterministic historical source-admission receipt before
+restoring retention. Original pull-request workflow checks are historical
+evidence only: a normal draft-to-ready lifecycle may leave more than one, while
+the deterministic recovery receipt remains unique and authoritative.
 
 Before the first seal, a repository administrator must enable the provider
 feature with the API version that introduced its management endpoint:
@@ -578,17 +643,23 @@ object with the top-level keys sorted in ascending ASCII order:
 `id` is the live positive release ID and `publishedAt` is the provider
 `published_at` value normalized through `new Date(value).toISOString()`. If an
 existing release differs from this identity after a retention check exists,
-sealing fails rather than creating a second proof; push a new head based on
-current `main`, let source admission pass, and seal that new head.
+sealing fails rather than creating a second proof; publish and seal a fresh
+exact head. Do not rebase an unchanged candidate solely because `main` moved.
+The live immutable-release author is authenticated by numeric account ID and
+account type. `authorLogin` remains the canonical contract snapshot shown above
+so existing v2 retention-check digests and release manifests remain
+byte-compatible when GitHub normalizes or renames the same bot login; no schema
+or evidence migration is required. A different author ID or account type still
+fails closed.
 Trusted Version-PR admission publishes the same check. This gives downstream
 release operators a provider-owned proof of immutable source retention without
 requiring a credential that crosses repository boundaries. A tag and immutable
 prerelease are retention evidence, not approval: the native pre-merge review
 and every later source/acceptance gate remain mandatory. A missing, moved,
-indirect, mutable, non-provider-authored, or post-hoc substitute fails release
-provenance. Retained-head prereleases and their tags intentionally accumulate
-for the lifetime of their release evidence; never include them in routine
-release or tag cleanup.
+indirect, mutable, non-provider-authored, or post-hoc substitute outside the
+fenced merged-source recovery above fails release provenance. Retained-head
+prereleases and their tags intentionally accumulate for the lifetime of their
+release evidence; never include them in routine release or tag cleanup.
 
 Release admission derives the merge outcome exclusively from GitHub records; a
 workflow caller cannot assert a merge method. The exact current `main` SHA is
@@ -616,8 +687,19 @@ discontinuous range fails closed.
 
 The exact reviewed head must still resolve directly from its canonical
 `opengeni-release-head-<sha>` tag and have one successful GitHub Actions
-`Current-base source admission` check. The exact source must separately have
-one successful GitHub Actions result for each required candidate check:
+`Current-base source admission` check. The legacy context name is retained for
+the repository ruleset, but the check admits the immutable provider event head
+against the PR's provider merge-base tree; it does not require the event base
+to equal continuously moving `main`. The base-owned workflow/helper SHA must
+remain in protected `main` ancestry, and the provider base/head/repository,
+direct tree manifest, file projection, helper digest, read-only permissions,
+and terminal head identity remain fail-closed. Exact-head review stays bound to
+the candidate. The merge authority separately performs the fresh latest-main
+conflict, canonical patch-equivalence, protected-path, generated/migration,
+identity/manifest, security, and evidence checks immediately before merge.
+
+The exact source must separately have one successful GitHub Actions result for
+each required candidate check:
 `Typecheck and unit tests`, `Deployment artifacts`, and `Workload image
 builds`. Missing, moved, indirect, duplicated, failed, wrong-head, or
 foreign-app evidence is rejected. Check history is read with `filter=all`, and
@@ -626,9 +708,10 @@ Actions app identity (`github-actions`, app ID `15368`). This admission
 metadata does not alter the reproducible schema-v2 candidate receipt or any
 chart, manifest, SBOM, provenance, or workload digest.
 
-That workflow requires the exact current `main` SHA, no pending changesets, and
-the exact expected package set (for example, `@opengeni/react@0.15.0`). It
-builds API, worker, web, relay, and stock headless-sandbox images under
+That workflow requires the exact current `main` SHA and no pending changesets.
+It derives every unpublished publishable workspace package directly from the
+exact checkout and npm registry, so a caller-maintained list cannot omit a
+package. It builds API, worker, web, relay, and stock headless-sandbox images under
 full-source-SHA candidate tags. Migrations explicitly reuse the API manifest.
 Each manifest is built at most once; retries reuse existing partial results.
 Before acceptance, the same workflow packages the Helm chart twice through the
@@ -723,8 +806,9 @@ GitHub API and requires the canonical repository/workflow, a completed
 successful `workflow_dispatch` run, exact commit/tree SHA and run attempt, one
 owned unexpired Actions artifact with its provider digest, and the expected
 artifact name. URLs and archive digests are derived only after those checks. The
-same exact expected package set (including an empty set for an application-only
-release) and an explicit zero-gap confirmation are still required. The product
+exact package set is carried from the immutable candidate receipt and
+re-derived from registry state immediately before publication; the dispatch
+caller cannot add or omit packages. An explicit zero-gap confirmation is still required. The product
 release identity comes from the exact SemVer `version`/`appVersion` pair
 committed in `deploy/helm/opengeni/Chart.yaml`; it is independent of whichever
 npm packages changed. The selected dispatch ref, `source_sha`, checked-out
@@ -1224,7 +1308,7 @@ helm upgrade --install opengeni deploy/helm/opengeni \
   --set secret.existingSecret=opengeni-runtime
 ```
 
-`ServiceMonitor` and `PrometheusRule` templates render only when `monitoring.coreos.com/v1` CRDs are installed. The starter rules cover stuck turns (`opengeni_turn_oldest_inflight_age_seconds > 900`), sandbox create failure ratio, orphan sandbox growth, and scraped target availability. The chart-managed OpenTelemetry Collector remains optional and is for traces/logs forwarding, not scraped metrics.
+`ServiceMonitor` and `PrometheusRule` templates render only when `monitoring.coreos.com/v1` CRDs are installed. The starter rules cover stuck turns (`opengeni_turn_oldest_inflight_age_seconds > 900`), sandbox create failure ratio, orphan sandbox growth, overdue finite-lifetime rotation, checkpoint deletion failures, terminal-owner retained-process backlog, expired drains, and scraped target availability. The chart-managed OpenTelemetry Collector remains optional and is for traces/logs forwarding, not scraped metrics.
 
 Minimum production dashboards should cover:
 

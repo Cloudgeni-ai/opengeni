@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/sdk",
-  "version": "0.29.0",
+  "version": "0.30.1",
   "description": "Framework-agnostic TypeScript SDK for the OpenGeni API: typed client, session lifecycle, SSE event streaming with reconnect + replay-by-sequence, and proxy re-streaming helpers.",
   "license": "Apache-2.0",
   "repository": {
@@ -28,15 +28,15 @@
     "provenance": true
   },
   "scripts": {
-    "typecheck": "tsgo --noEmit",
-    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "build": "bun ../../scripts/build-typescript-package.ts",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "devDependencies": {
     "@opengeni/contracts": "workspace:*",
     "@opengeni/deployment": "workspace:*",
     "tsup": "^8.5.0",
-    "typescript": "^6.0.3",
+    "typescript": "7.0.2",
     "zod": "^4.2.1"
   },
   "engines": {

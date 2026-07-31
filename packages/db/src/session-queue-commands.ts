@@ -3,6 +3,7 @@ import {
   mergeResourceRefs,
   ResourceRef,
   resourceMountPath,
+  stableJson,
   turnExecutionPolicyAuditMetadata,
   type ReasoningEffort,
   type TurnExecutionPolicyV1,
@@ -369,14 +370,24 @@ function draftIsNonEmpty(draft: ComposerDraftRow): boolean {
 }
 
 function withCanonicalResourceMountPaths(resources: readonly unknown[]): unknown[] {
-  return resources.map((value) => {
+  const seen = new Set<string>();
+  const canonical: unknown[] = [];
+  for (const value of resources) {
     const parsed = ResourceRef.safeParse(value);
-    if (!parsed.success) return value;
-    return {
+    if (!parsed.success) {
+      canonical.push(value);
+      continue;
+    }
+    const normalized = {
       ...(value as Record<string, unknown>),
       mountPath: resourceMountPath(parsed.data),
     };
-  });
+    const key = stableJson(normalized);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    canonical.push(normalized);
+  }
+  return canonical;
 }
 
 export async function getComposerDraftInTransaction(

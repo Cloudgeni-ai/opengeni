@@ -101,6 +101,7 @@ async function fixture(): Promise<{
     workspaceId: grant.workspaceId,
     subjectId: grant.subjectId,
     permissions: ["sessions:read"],
+    principalKind: "human_session",
     exp: Math.floor(Date.now() / 1000) + 3_600,
   })}`;
   return {

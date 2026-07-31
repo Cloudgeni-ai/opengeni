@@ -46,6 +46,25 @@ export {
   type RetainedOutputResolvedRange,
 } from "./retained-output";
 
+export {
+  NATIVE_SNAPSHOT_PREFIXES,
+  WORKSPACE_ARCHIVE_DESCRIPTOR_VERSION,
+  backendForNativeSnapshotProvider,
+  decodeNativeSnapshotRef,
+  parseWorkspaceArchiveDescriptor,
+  type NativeSnapshotDescriptor,
+  type NativeSnapshotProvider,
+  type NativeSnapshotRef,
+  type TarWorkspaceArchiveDescriptor,
+  type WorkspaceArchiveDescriptor,
+  type WorkspaceTreeFingerprint,
+} from "./sandbox-snapshots";
+
+export {
+  canonicalModalCheckpointProviderBinding,
+  type ModalCheckpointProviderBinding,
+} from "./checkpoint-provider-bindings";
+
 export const SessionStatus = z.enum([
   "queued",
   "running",
@@ -644,6 +663,8 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "memory_search",
   "memory_save",
   "memory_correct",
+  "preference_registry_summary",
+  "preference_registry_get",
   "sandboxes_list",
   "sandbox_attach",
   "sandbox_swap",
@@ -684,7 +705,11 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "scheduled_task_runs_list",
   "slack_bot_list_channels",
   "slack_bot_channel_history",
+  "slack_bot_thread_replies",
   "slack_bot_list_users",
+  "slack_bot_list_files",
+  "slack_bot_file_info",
+  "slack_bot_file_content",
   "slack_bot_post_message",
 ] as const;
 export const FirstPartyMcpToolName = z.enum(FIRST_PARTY_MCP_TOOL_NAMES);
@@ -1161,6 +1186,16 @@ export const ServiceTurnInitiatorContext = TurnInitiatorContext.superRefine((val
 });
 export type ServiceTurnInitiatorContext = z.infer<typeof ServiceTurnInitiatorContext>;
 
+export const DelegatedAccessPrincipalKind = z.enum(["human_session", "agent_attempt", "service"]);
+export type DelegatedAccessPrincipalKind = z.infer<typeof DelegatedAccessPrincipalKind>;
+
+export const AccessPrincipalKind = z.enum([
+  ...DelegatedAccessPrincipalKind.options,
+  "api_key",
+  "configured_key",
+]);
+export type AccessPrincipalKind = z.infer<typeof AccessPrincipalKind>;
+
 export const AccountGrant = z.object({
   accountId: z.string().uuid(),
   subjectId: z.string().min(1),
@@ -1177,6 +1212,9 @@ export const AccessGrant = z.object({
   subjectId: z.string().min(1),
   subjectLabel: z.string().optional(),
   permissions: z.array(Permission),
+  // Trusted principal provenance. Delegated grants copy this from the signed
+  // token claim; managed/local grants derive it from their authenticated path.
+  principalKind: AccessPrincipalKind.optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
   // Optional trusted causal principal for a command submitted by an embedding
   // host. Authorization still uses subjectId + permissions above.
@@ -1203,6 +1241,10 @@ export const DelegatedAccessTokenPayload = z
     subjectId: z.string().min(1),
     subjectLabel: z.string().optional(),
     permissions: z.array(Permission).min(1),
+    // Required and covered by the token HMAC. Authorization must positively
+    // select a principal kind instead of inferring "human" from absent machine
+    // markers.
+    principalKind: DelegatedAccessPrincipalKind,
     // Trusted embedding hosts can sign a causal service principal separately
     // from the grant subject that authorizes the request. The claim is consumed
     // only when a command creates a new session/turn.
@@ -1227,6 +1269,53 @@ export const DelegatedAccessTokenPayload = z
     exp: z.number().int().positive(),
   })
   .superRefine((payload, ctx) => {
+    const exactAttemptClaims = [
+      payload.sessionId,
+      payload.turnId,
+      payload.attemptId,
+      payload.executionGeneration,
+    ];
+    const exactAttemptClaimCount = exactAttemptClaims.filter((value) => value !== undefined).length;
+    if (
+      payload.principalKind === "human_session" &&
+      (exactAttemptClaimCount !== 0 || payload.serviceInitiator !== undefined)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["principalKind"],
+        message: "human_session principal cannot carry machine authority claims",
+      });
+    }
+    if (
+      payload.principalKind === "agent_attempt" &&
+      (exactAttemptClaimCount !== exactAttemptClaims.length ||
+        payload.serviceInitiator !== undefined)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["principalKind"],
+        message: "agent_attempt principal requires one exact signed attempt authority",
+      });
+    }
+    if (
+      payload.principalKind === "service" &&
+      (payload.turnId !== undefined ||
+        payload.attemptId !== undefined ||
+        payload.executionGeneration !== undefined)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["principalKind"],
+        message: "service principal cannot carry exact agent-attempt authority",
+      });
+    }
+    if (payload.serviceInitiator && payload.principalKind !== "service") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["principalKind"],
+        message: "serviceInitiator requires a service principal",
+      });
+    }
     if (payload.serviceInitiatorContext && !payload.serviceInitiator) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -4858,12 +4947,18 @@ export const OPENGENI_SLACK_BOT_CREDENTIAL_ROLE = "opengeni_slack_bot" as const;
 export const OPENGENI_SLACK_BOT_CREDENTIAL_LABEL = "OpenGeni Slack bot" as const;
 export const OPENGENI_SLACK_BOT_SESSION_METADATA_KEY = "opengeniSlackBotConnectionId" as const;
 export const OPENGENI_SLACK_BOT_REQUIRED_SCOPES = [
-  "chat:write",
-  "im:write",
-  "channels:read",
+  "canvases:read",
   "channels:history",
-  "groups:read",
+  "channels:read",
+  "chat:write",
+  "files:read",
   "groups:history",
+  "groups:read",
+  "im:history",
+  "im:read",
+  "im:write",
+  "mpim:history",
+  "mpim:read",
   "users:read",
 ] as const;
 export const OPENGENI_SLACK_BOT_FORBIDDEN_SCOPES = ["channels:join", "chat:write.public"] as const;
@@ -9013,3 +9108,5 @@ export function evaluateWorkspaceModelPolicy(
 export * from "./codex-fleet-policy";
 export * from "./secret-redaction";
 export * from "./workspace-instruction-policies";
+export * from "./workspace-state";
+export * from "./preference-registry";

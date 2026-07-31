@@ -1,5 +1,30 @@
 # @opengeni/sdk
 
+## 0.30.1
+
+### Patch Changes
+
+- bbcbef5: Allow callers to cancel MCP OAuth-start requests so capability activation can fail visibly instead of spinning forever when browser transport stalls.
+- ddff8db: Add the read-only Workspace State inventory with bounded, authorization-scoped
+  Documents aggregates and a deterministic metadata-only Memory projection. The
+  projection explicitly labels legacy `knowledge_memories` preference-kind counts
+  as non-authoritative observations while preserving the structured preference
+  registry as the sole active preference authority.
+
+## 0.30.0
+
+### Minor Changes
+
+- 1f6f13f: Add the isolated, versioned organization/workspace/user preference registry,
+  including audited proposal and activation flows, deterministic attempt-bound
+  descriptors, authorized full-content retrieval, REST/MCP tools, and SDK types.
+  Attempt reads revalidate current generation and immutable-human authority in one
+  locked transaction; lifecycle writes use scope-version CAS and database-owned
+  audit functions that prevent direct head mutation or history erasure. Snapshot
+  creation is database-canonical and lifecycle governance requires a signed
+  `human_session` principal; expiry filtering and supersession are transactionally
+  enforced before bounds or terminal mutation.
+
 ## 0.29.0
 
 ### Minor Changes

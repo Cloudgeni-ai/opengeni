@@ -73,6 +73,10 @@ const LazyWorkspaceSettingsRoute = lazyRouteComponent(
   () => import("@/routes/workspace-settings"),
   "WorkspaceSettingsRoute",
 );
+const LazyWorkspaceStateRoute = lazyRouteComponent(
+  () => import("@/routes/workspace-state"),
+  "WorkspaceStateRoute",
+);
 const LazyWorkspaceShellRoute = lazyRouteComponent(
   () => import("@/routes/workspace"),
   "WorkspaceShellRoute",
@@ -225,6 +229,11 @@ const workspaceSettingsRoute = createRoute({
   path: "settings",
   component: WorkspaceSettings,
 });
+const workspaceStateRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "state",
+  component: WorkspaceState,
+});
 const workspaceOrganizationRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "organization",
@@ -268,6 +277,7 @@ const routeTree = rootRoute.addChildren([
     workspaceSchedulesRoute,
     workspaceDocumentsRoute,
     workspaceMemoryRoute,
+    workspaceStateRoute,
     workspaceSettingsRoute,
     workspaceOrganizationRoute,
     workspaceAccountRoute,
@@ -400,6 +410,11 @@ function Memory() {
 function WorkspaceSettings() {
   const { workspaceId } = workspaceSettingsRoute.useParams();
   return <LazyWorkspaceSettingsRoute workspaceId={workspaceId} />;
+}
+
+function WorkspaceState() {
+  const { workspaceId } = workspaceStateRoute.useParams();
+  return <LazyWorkspaceStateRoute workspaceId={workspaceId} />;
 }
 
 function Organization() {

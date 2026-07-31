@@ -1,4 +1,4 @@
-import ts from "typescript";
+import * as t from "oxc-parser";
 
 export type RuntimeLoader = "js" | "jsx" | "ts" | "tsx";
 
@@ -13,43 +13,53 @@ export async function runtimeModuleSpecifiers(
 }
 
 export function declarationModuleSpecifiers(source: string, fileName: string): string[] {
-  const sourceFile = ts.createSourceFile(
-    fileName,
-    source,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.TS,
-  );
+  const parsed = t.parseSync(fileName, source, { sourceType: "unambiguous" });
+  if (parsed.errors.length > 0) {
+    throw new Error(
+      `Could not parse ${fileName}: ${parsed.errors.map((error) => error.message).join("; ")}`,
+    );
+  }
   const specifiers = new Set<string>();
 
-  for (const directive of sourceFile.typeReferenceDirectives) {
-    specifiers.add(directive.fileName);
+  for (const comment of parsed.comments) {
+    if (comment.type !== "Line" || !/^\/\s*<reference\b/u.test(comment.value)) continue;
+    const directive = /\btypes\s*=\s*(["'])([^"']+)\1/u.exec(comment.value);
+    if (directive?.[2]) specifiers.add(directive[2]);
   }
 
-  function visit(node: ts.Node): void {
-    if (
-      (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
-      node.moduleSpecifier &&
-      ts.isStringLiteralLike(node.moduleSpecifier)
-    ) {
-      specifiers.add(node.moduleSpecifier.text);
-    } else if (
-      ts.isImportEqualsDeclaration(node) &&
-      ts.isExternalModuleReference(node.moduleReference) &&
-      node.moduleReference.expression &&
-      ts.isStringLiteralLike(node.moduleReference.expression)
-    ) {
-      specifiers.add(node.moduleReference.expression.text);
-    } else if (
-      ts.isImportTypeNode(node) &&
-      ts.isLiteralTypeNode(node.argument) &&
-      ts.isStringLiteralLike(node.argument.literal)
-    ) {
-      specifiers.add(node.argument.literal.text);
+  function visit(node: t.Node): void {
+    const record = node as unknown as Record<string, unknown>;
+    if (node.type === "ImportDeclaration" || node.type === "ExportNamedDeclaration") {
+      addStringLiteral(record.source);
+    } else if (node.type === "ExportAllDeclaration" || node.type === "TSImportType") {
+      addStringLiteral(record.source);
+    } else if (node.type === "TSImportEqualsDeclaration") {
+      const reference = record.moduleReference;
+      if (isNode(reference) && reference.type === "TSExternalModuleReference") {
+        addStringLiteral((reference as unknown as Record<string, unknown>).expression);
+      }
     }
-    ts.forEachChild(node, visit);
+
+    for (const key of t.visitorKeys[node.type] ?? []) {
+      const value = record[key];
+      for (const child of Array.isArray(value) ? value : [value]) {
+        if (isNode(child)) visit(child);
+      }
+    }
   }
 
-  visit(sourceFile);
+  function addStringLiteral(value: unknown): void {
+    if (isNode(value) && value.type === "Literal" && typeof value.value === "string") {
+      specifiers.add(value.value);
+    }
+  }
+
+  visit(parsed.program);
   return [...specifiers];
+}
+
+function isNode(value: unknown): value is t.Node {
+  return (
+    typeof value === "object" && value !== null && "type" in value && typeof value.type === "string"
+  );
 }

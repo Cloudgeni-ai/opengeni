@@ -34,6 +34,7 @@ import {
   classifyRetainedProcessPollResult,
   createSandboxLeaseActivities,
   probeRetainedProcessAtProvider,
+  type HistoricalModalSandboxLifecycleProbeFn,
   type RetainedProcessProbeFn,
 } from "../src/activities/sandbox-lease";
 import {
@@ -52,6 +53,15 @@ const SETTINGS = testSettings({
   sandboxIdleGraceMs: 45_000,
   sandboxLeaseReaperPeriodMs: 30_000,
 });
+const MODAL_PROVIDER_BINDING = {
+  key: '{"version":1,"serverUrl":"https://modal.test","workspaceName":"opengeni-test","environment":"test"}',
+  binding: {
+    version: 1 as const,
+    serverUrl: "https://modal.test",
+    workspaceName: "opengeni-test",
+    environment: "test",
+  },
+};
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let available = true;
@@ -243,6 +253,7 @@ async function promoteTurnProcess(
     admissionId: admission.id,
     admittedWorkspaceGeneration: admission.workspaceGeneration,
     operation,
+    providerBinding: MODAL_PROVIDER_BINDING,
     owner: {
       kind: "turn",
       turnId: attempt.turnId,
@@ -309,6 +320,7 @@ async function promoteDirectProcess(): Promise<ProcessFixture> {
     admissionId: admission.id,
     admittedWorkspaceGeneration: admission.workspaceGeneration,
     operation,
+    providerBinding: MODAL_PROVIDER_BINDING,
     owner: {
       kind: "direct",
       requestId,
@@ -351,12 +363,16 @@ function reaperServices(observability: Observability): () => Promise<ActivitySer
   });
 }
 
-async function runReaper(probe: RetainedProcessProbeFn): Promise<Observability> {
+async function runReaper(
+  probe: RetainedProcessProbeFn,
+  inspectHistoricalModalSandbox?: HistoricalModalSandboxLifecycleProbeFn,
+): Promise<Observability> {
   const observability = createObservability(SETTINGS, {
     component: "worker-retained-process-test",
   });
   const activities = createSandboxLeaseActivities(reaperServices(observability), {
     probeRetainedProcess: probe,
+    ...(inspectHistoricalModalSandbox ? { inspectHistoricalModalSandbox } : {}),
     terminateBox: async () => {
       throw new Error("retained-process reconciliation must not terminate a provider instance");
     },
@@ -431,7 +447,7 @@ afterEach(async () => {
     await admin`delete from workspaces where id = ${ids.workspaceId}`;
     await admin`delete from managed_accounts where id = ${ids.accountId}`;
   }
-});
+}, 180_000);
 
 afterAll(async () => {
   try {
@@ -506,6 +522,184 @@ describe("retained-process terminal-owner reconciliation", () => {
       processHolders: 1,
     });
   });
+
+  test("a terminal current Modal box binds and settles an unbound legacy process", async () => {
+    if (!available) return;
+    const fixture = await promoteTurnProcess({ outcome: "completed" });
+    await admin`
+      update sandbox_retained_processes
+      set provider_binding_key = null, provider_binding = null
+      where id = ${fixture.process.id}`;
+
+    let currentLeaseProbes = 0;
+    let lifecycleProbes = 0;
+    await runReaper(
+      async () => {
+        currentLeaseProbes += 1;
+        throw new Error("a terminal lifecycle observation must settle without polling the process");
+      },
+      async (_settings, sandboxId, expectedProviderBindingKey) => {
+        lifecycleProbes += 1;
+        expect(sandboxId).toBe(fixture.process.providerInstanceId);
+        expect(expectedProviderBindingKey).toBeNull();
+        return {
+          status: "terminated",
+          exitCode: 137,
+          providerBindingKey: MODAL_PROVIDER_BINDING.key,
+          providerBinding: MODAL_PROVIDER_BINDING.binding,
+        };
+      },
+    );
+
+    expect(currentLeaseProbes).toBe(0);
+    expect(lifecycleProbes).toBe(1);
+    expect(await settlementProjection(fixture)).toMatchObject({
+      processState: "lost",
+      processReason: "provider_instance_terminated",
+      admissionOutcome: "rejected",
+      admissionSettled: true,
+      processHolders: 0,
+      refcount: 0,
+      leaseEpoch: fixture.process.leaseEpoch,
+      instanceId: fixture.process.providerInstanceId,
+    });
+    expect(await durableProcess(fixture)).toMatchObject({
+      providerBindingKey: MODAL_PROVIDER_BINDING.key,
+      providerBinding: MODAL_PROVIDER_BINDING.binding,
+    });
+  }, 60_000);
+
+  test("a terminal historical Modal box settles its stale process holder after lease succession", async () => {
+    if (!available) return;
+    const fixture = await promoteTurnProcess({ outcome: "completed" });
+    await admin`
+      update sandbox_leases set
+        lease_epoch = lease_epoch + 1,
+        instance_id = 'successor-modal-sandbox'
+      where id = ${fixture.leaseId}`;
+    await admin`
+      update sandbox_retained_processes
+      set provider_binding_key = null, provider_binding = null
+      where id = ${fixture.process.id}`;
+
+    let currentLeaseProbes = 0;
+    let historicalProbes = 0;
+    const observability = await runReaper(
+      async () => {
+        currentLeaseProbes += 1;
+        return { status: "deferred", reason: "provider_unknown" };
+      },
+      async (_settings, sandboxId) => {
+        historicalProbes += 1;
+        expect(sandboxId).toBe(fixture.process.providerInstanceId);
+        return {
+          status: "terminated",
+          exitCode: 137,
+          providerBindingKey: MODAL_PROVIDER_BINDING.key,
+          providerBinding: MODAL_PROVIDER_BINDING.binding,
+        };
+      },
+    );
+
+    expect(currentLeaseProbes).toBe(0);
+    expect(historicalProbes).toBe(1);
+    expect(await observability.prometheusMetrics()).toMatch(
+      /opengeni_retained_process_reconciliation_total\{[^}]*outcome="settled_lost"[^}]*\} 1/,
+    );
+    expect(await settlementProjection(fixture)).toMatchObject({
+      processState: "lost",
+      processReason: "provider_instance_terminated",
+      admissionOutcome: "rejected",
+      admissionSettled: true,
+      processHolders: 0,
+      refcount: 0,
+      leaseEpoch: fixture.process.leaseEpoch + 1,
+      instanceId: "successor-modal-sandbox",
+    });
+    expect(await durableProcess(fixture)).toMatchObject({
+      providerBindingKey: MODAL_PROVIDER_BINDING.key,
+      providerBinding: MODAL_PROVIDER_BINDING.binding,
+    });
+  }, 60_000);
+
+  test("a still-running historical Modal box remains unsettled after lease succession", async () => {
+    if (!available) return;
+    const fixture = await promoteTurnProcess({ outcome: "completed" });
+    await admin`
+      update sandbox_leases set
+        lease_epoch = lease_epoch + 1,
+        instance_id = 'successor-modal-sandbox'
+      where id = ${fixture.leaseId}`;
+    await admin`
+      update sandbox_retained_processes
+      set provider_binding_key = null, provider_binding = null
+      where id = ${fixture.process.id}`;
+
+    await runReaper(
+      async () => {
+        throw new Error("current successor lease must not probe the historical process");
+      },
+      async () => ({
+        status: "running",
+        providerBindingKey: MODAL_PROVIDER_BINDING.key,
+        providerBinding: MODAL_PROVIDER_BINDING.binding,
+      }),
+    );
+
+    expect(await settlementProjection(fixture)).toMatchObject({
+      processState: "active",
+      admissionOutcome: "retained",
+      admissionSettled: false,
+      processHolders: 1,
+      refcount: 1,
+      leaseEpoch: fixture.process.leaseEpoch + 1,
+      instanceId: "successor-modal-sandbox",
+    });
+    expect(await durableProcess(fixture)).toMatchObject({
+      providerBindingKey: MODAL_PROVIDER_BINDING.key,
+      providerBinding: MODAL_PROVIDER_BINDING.binding,
+    });
+  }, 60_000);
+
+  test("NotFound cannot assign a Modal namespace to an unbound legacy process", async () => {
+    if (!available) return;
+    const fixture = await promoteTurnProcess({ outcome: "completed" });
+    await admin`
+      update sandbox_leases set
+        lease_epoch = lease_epoch + 1,
+        instance_id = 'successor-modal-sandbox'
+      where id = ${fixture.leaseId}`;
+    await admin`
+      update sandbox_retained_processes
+      set provider_binding_key = null, provider_binding = null
+      where id = ${fixture.process.id}`;
+
+    await runReaper(
+      async () => {
+        throw new Error("current successor lease must not probe the historical process");
+      },
+      async () => ({
+        status: "not_found",
+        providerBindingKey: MODAL_PROVIDER_BINDING.key,
+        providerBinding: MODAL_PROVIDER_BINDING.binding,
+      }),
+    );
+
+    expect(await settlementProjection(fixture)).toMatchObject({
+      processState: "active",
+      admissionOutcome: "retained",
+      admissionSettled: false,
+      processHolders: 1,
+      refcount: 1,
+      leaseEpoch: fixture.process.leaseEpoch + 1,
+      instanceId: "successor-modal-sandbox",
+    });
+    expect(await durableProcess(fixture)).toMatchObject({
+      providerBindingKey: null,
+      providerBinding: null,
+      lastReconcileOutcome: "provider_binding_missing",
+    });
+  }, 60_000);
 
   test("claims every closed terminal/recovery attempt and direct owner, but not a live attempt", async () => {
     if (!available) return;
@@ -744,7 +938,9 @@ describe("retained-process terminal-owner reconciliation", () => {
     expect(candidatePlan).toContain("sandbox_retained_processes_reconcile_due_idx");
     expect(candidatePlan).toContain('"Node Type":"Limit"');
     expect(candidatePlan).toContain('"Actual Rows":7');
-    expect(candidatePlan).toMatch(/session_turn_attempts_(?:workspace_id_uq|pkey)/);
+    expect(candidatePlan).toMatch(
+      /session_turn_attempts_(?:workspace_id_uq|pkey|latest_session_idx)/,
+    );
     expect(candidatePlan).not.toContain('"Actual Loops":128');
     expect(JSON.stringify(plans.retainedInventory)).toContain(
       "sandbox_retained_processes_active_inventory_idx",
@@ -877,7 +1073,7 @@ describe("retained-process terminal-owner reconciliation", () => {
     );
   }, 60_000);
 
-  test("full copied identity, claim, admission, and successor lease fences reject without partial writes", async () => {
+  test("copied identity, claim, and admission fences reject; durable proof safely removes a superseded holder", async () => {
     if (!available) return;
     const fixture = await promoteTurnProcess({ outcome: "superseded" });
     const claimId = crypto.randomUUID();
@@ -969,23 +1165,24 @@ describe("retained-process terminal-owner reconciliation", () => {
       update sandbox_leases set lease_epoch = lease_epoch + 1,
         instance_id = 'retained-process-successor'
       where id = ${fixture.leaseId}`;
-    await expect(
-      settleRetainedProcess(db, {
-        accountId: fixture.accountId,
-        workspaceId: fixture.workspaceId,
-        sessionId: fixture.sessionId,
-        processId: fixture.process.id,
-        expected,
-        reconciliationClaimId: claimId,
-        ...proof,
-        idleGraceMs: SETTINGS.sandboxIdleGraceMs,
-      }),
-    ).rejects.toBeInstanceOf(SandboxWorkspaceMutationFencedError);
+    await settleRetainedProcess(db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.sessionId,
+      processId: fixture.process.id,
+      expected,
+      reconciliationClaimId: claimId,
+      ...proof,
+      idleGraceMs: SETTINGS.sandboxIdleGraceMs,
+    });
     const successor = await settlementProjection(fixture);
     expect(successor).toMatchObject({
-      processState: "active",
-      admissionOutcome: "retained",
-      processHolders: 1,
+      processState: "lost",
+      processReason: "provider_instance_not_found",
+      admissionOutcome: "rejected",
+      admissionSettled: true,
+      processHolders: 0,
+      refcount: 0,
       leaseEpoch: expected.leaseEpoch + 1,
       instanceId: "retained-process-successor",
     });

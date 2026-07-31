@@ -12,6 +12,7 @@ import {
   parseLiveAcceptanceArgs,
   parseProtectedEmails,
   sanitizeDiagnostic,
+  waitForSandboxLiveness,
 } from "./workbench-live-acceptance";
 
 describe("workbench live acceptance preflight", () => {
@@ -86,6 +87,36 @@ describe("workbench live acceptance preflight", () => {
     expect(controlCancellationDurationMs(1_000, 1_125)).toBe(125);
     expect(() => controlCancellationDurationMs(1_000, 999)).toThrow("before its control commit");
     expect(() => controlCancellationDurationMs(Number.NaN, 1_000)).toThrow("must be finite");
+  });
+
+  test("liveness polling bounds and retries a transient transport failure", async () => {
+    const signals: AbortSignal[] = [];
+    let calls = 0;
+    const client = {
+      async getStreamCapabilities(
+        _workspaceId: string,
+        _sessionId: string,
+        options: { signal?: AbortSignal } = {},
+      ) {
+        if (options.signal) signals.push(options.signal);
+        calls += 1;
+        if (calls === 1) throw new DOMException("request timed out", "TimeoutError");
+        return { liveness: "cold" } as never;
+      },
+    };
+
+    await waitForSandboxLiveness(
+      client,
+      "10000000-0000-4000-8000-000000000001",
+      "20000000-0000-4000-8000-000000000002",
+      new Set(["cold"]),
+      1_000,
+      0,
+      50,
+    );
+
+    expect(calls).toBe(2);
+    expect(signals).toHaveLength(2);
   });
 
   test("requires interactive scopes only from the dedicated canary principal", () => {

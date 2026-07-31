@@ -78,6 +78,42 @@ export type {
   WorkspaceInstructionPolicyScope,
   WorkspaceInstructionPolicyTarget,
 } from "./workspace-instruction-policies";
+export type {
+  WorkspaceStateDocumentStatusCounts,
+  WorkspaceStateGapCode,
+  WorkspaceStateMemoryKindCounts,
+  WorkspaceStateMemoryStatusCounts,
+  WorkspaceStateResponse,
+  WorkspaceStateSourceKindCounts,
+} from "./workspace-state";
+export { normalizePreferenceRegistryStableKey } from "./preference-registry";
+export type {
+  ActivatePreferenceRegistryRevisionRequest,
+  ChangePreferenceRegistryScopeRequest,
+  CorrectPreferenceRegistryRequest,
+  CreatePreferenceRegistryProposalRequest,
+  DeactivatePreferenceRegistryRequest,
+  PreferenceRegistryConflictStrategy,
+  PreferenceRegistryDescriptor,
+  PreferenceRegistryDescriptorProvenance,
+  PreferenceRegistryDetailResponse,
+  PreferenceRegistryEvent,
+  PreferenceRegistryFullContent,
+  PreferenceRegistryListOptions,
+  PreferenceRegistryListResponse,
+  PreferenceRegistryMutationResponse,
+  PreferenceRegistryPrecedence,
+  PreferenceRegistryProvenanceSource,
+  PreferenceRegistryRecord,
+  PreferenceRegistryRevisionSummary,
+  PreferenceRegistryScope,
+  PreferenceRegistryScopeTarget,
+  PreferenceRegistrySnapshot,
+  PreferenceRegistryStatus,
+  PreferenceRegistryTrust,
+  RejectPreferenceRegistryProposalRequest,
+  SupersedePreferenceRegistryRequest,
+} from "./preference-registry";
 export {
   DEFAULT_WORKSPACE_TRANSCRIPTION_POLICY,
   authorizeTranscriptionAdapter,

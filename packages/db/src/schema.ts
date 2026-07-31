@@ -2322,6 +2322,14 @@ export const agentRunStates = pgTable("agent_run_states", {
   // correct either way). NULL on both sides (non-codex freeze + non-codex
   // resume) is a no-op, so single-account and non-codex sessions are unchanged.
   frozenCodexCredentialId: uuid("frozen_codex_credential_id"),
+  // Exact provider rejection invalidates only the opaque reasoning identity
+  // inside this frozen state. The serialized receipt remains durable and
+  // auditable; the resume path neutralizes its provider-bound identity.
+  providerArtifactInvalidatedAt: timestamp("provider_artifact_invalidated_at", {
+    withTimezone: true,
+  }),
+  providerArtifactInvalidationReason: text("provider_artifact_invalidation_reason"),
+  providerArtifactInvalidatedByAttemptId: uuid("provider_artifact_invalidated_by_attempt_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -2451,6 +2459,16 @@ export const sessionHistoryItems = pgTable(
     // (an ON DELETE SET NULL would erase the tag, and a stale-but-null tag still
     // mismatches a live codex id so the strip stays correct either way).
     producerCodexCredentialId: uuid("producer_codex_credential_id"),
+    // An exact provider 400 can prove that an otherwise same-credential opaque
+    // reasoning artifact is no longer decryptable. Keep the original item and
+    // producer provenance immutable, but record the attempt-fenced rejection so
+    // later model reads omit only the provider-bound identity. No FK: the receipt
+    // must outlive operational attempt retention just like producer provenance.
+    providerArtifactInvalidatedAt: timestamp("provider_artifact_invalidated_at", {
+      withTimezone: true,
+    }),
+    providerArtifactInvalidationReason: text("provider_artifact_invalidation_reason"),
+    providerArtifactInvalidatedByAttemptId: uuid("provider_artifact_invalidated_by_attempt_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
@@ -2543,6 +2561,134 @@ export const sandboxSessionEnvelopes = pgTable(
   }),
 );
 
+export const sandboxCheckpointArtifactStateValues = [
+  "candidate",
+  "current",
+  "previous",
+  "delete_pending",
+  "deleting",
+  "delete_failed",
+  "deleted",
+] as const;
+
+/**
+ * Durable ownership ledger for provider-native workspace checkpoints. These
+ * rows intentionally have no cascading parent FK: a workspace/lease can vanish
+ * before the provider object is deleted, and global GC still needs the exact
+ * non-secret provider binding and object id after that deletion.
+ */
+export const sandboxCheckpointArtifacts = pgTable(
+  "sandbox_checkpoint_artifacts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sandboxGroupId: uuid("sandbox_group_id").notNull(),
+    sourceLeaseId: uuid("source_lease_id").notNull(),
+    sourceLeaseEpoch: integer("source_lease_epoch").notNull(),
+    sourceInstanceId: text("source_instance_id"),
+    sourceWorkspaceGeneration: integer("source_workspace_generation"),
+    provenance: text("provenance", {
+      enum: ["native_capture", "legacy_provider_adopted"],
+    }).notNull(),
+    providerBackend: text("provider_backend").notNull(),
+    providerBindingKey: text("provider_binding_key").notNull(),
+    providerBinding: jsonb("provider_binding").$type<Record<string, unknown>>().notNull(),
+    objectKind: text("object_kind", {
+      enum: ["modal_filesystem_snapshot", "modal_directory_snapshot"],
+    }).notNull(),
+    objectId: text("object_id").notNull(),
+    archiveBase64: text("archive_base64").notNull(),
+    archiveSha256: text("archive_sha256").notNull(),
+    archiveBytes: integer("archive_bytes").notNull(),
+    descriptor: jsonb("descriptor").$type<Record<string, unknown>>().notNull(),
+    descriptorRevision: text("descriptor_revision").notNull(),
+    state: text("state", { enum: sandboxCheckpointArtifactStateValues })
+      .notNull()
+      .default("candidate"),
+    deleteAfter: timestamp("delete_after", { withTimezone: true }),
+    deleteAttempts: integer("delete_attempts").notNull().default(0),
+    deleteClaimId: uuid("delete_claim_id"),
+    deleteClaimedAt: timestamp("delete_claimed_at", { withTimezone: true }),
+    lastDeleteError: text("last_delete_error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    publishedAt: timestamp("published_at", { withTimezone: true }),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    providerObject: uniqueIndex("sandbox_checkpoint_artifacts_provider_object_uq").on(
+      table.providerBackend,
+      table.providerBindingKey,
+      table.objectId,
+    ),
+    gc: index("sandbox_checkpoint_artifacts_gc_idx")
+      .on(table.deleteAfter, table.createdAt, table.id)
+      .where(
+        sql`${table.state} in (
+          'candidate', 'current', 'previous',
+          'delete_pending', 'delete_failed', 'deleting'
+        )`,
+      ),
+    source: index("sandbox_checkpoint_artifacts_source_idx").on(
+      table.workspaceId,
+      table.sandboxGroupId,
+      table.sourceLeaseId,
+    ),
+    sourceValid: check(
+      "sandbox_checkpoint_artifacts_source_check",
+      sql`${table.sourceLeaseEpoch} >= 0
+        and (
+          (
+            ${table.provenance} = 'native_capture'
+            and ${table.sourceWorkspaceGeneration} is not null
+            and ${table.sourceWorkspaceGeneration} >= 0
+            and ${table.sourceInstanceId} is not null
+            and octet_length(${table.sourceInstanceId}) between 1 and 512
+          )
+          or (
+            ${table.provenance} = 'legacy_provider_adopted'
+            and ${table.sourceWorkspaceGeneration} is null
+            and ${table.sourceInstanceId} is null
+          )
+        )`,
+    ),
+    providerValid: check(
+      "sandbox_checkpoint_artifacts_provider_check",
+      sql`${table.providerBackend} = 'modal'
+        and octet_length(${table.providerBindingKey}) between 1 and 1024
+        and jsonb_typeof(${table.providerBinding}) = 'object'
+        and ${table.providerBindingKey}::jsonb = ${table.providerBinding}
+        and ${table.objectKind} in ('modal_filesystem_snapshot', 'modal_directory_snapshot')
+        and octet_length(${table.objectId}) between 1 and 1024`,
+    ),
+    archiveValid: check(
+      "sandbox_checkpoint_artifacts_archive_check",
+      sql`${table.archiveBytes} > 0
+        and octet_length(${table.archiveBase64}) > 0
+        and ${table.archiveSha256} ~ '^[0-9a-f]{64}$'
+        and jsonb_typeof(${table.descriptor}) = 'object'
+        and octet_length(${table.descriptorRevision}) between 1 and 256`,
+    ),
+    stateValid: check(
+      "sandbox_checkpoint_artifacts_state_check",
+      sql`${table.state} in (
+        'candidate', 'current', 'previous', 'delete_pending',
+        'deleting', 'delete_failed', 'deleted'
+      )`,
+    ),
+    deleteClaimValid: check(
+      "sandbox_checkpoint_artifacts_delete_claim_check",
+      sql`(${table.state} = 'deleting'
+          and ${table.deleteClaimId} is not null
+          and ${table.deleteClaimedAt} is not null)
+        or (${table.state} <> 'deleting'
+          and ${table.deleteClaimId} is null
+          and ${table.deleteClaimedAt} is null)`,
+    ),
+  }),
+);
+
 // The 4 liveness states of the singleton lease. Exported so the query layer and
 // the stateless resume-by-id path share one source of truth for the domain.
 export const sandboxLeaseLivenessValues = ["cold", "warming", "warm", "draining"] as const;
@@ -2578,14 +2724,14 @@ export const sandboxLeases = pgTable(
     // The container IMAGE the group box runs (Modal image ref / docker image). A shared
     // box is SHARED STATE: all its sessions run the SAME filesystem, so they must run the
     // same image. This column stamps the image the live box was created with; a resume
-    // whose resolved image DIFFERS is a conflict (B3): a solo holder recreates the box on
-    // the new image, N-holders are rejected (SandboxImageConflictError). Nullable — a
+    // whose resolved image DIFFERS is a conflict (B3): a solo holder requests a
+    // capture-and-drain rotation; N-holders are rejected (SandboxImageConflictError). Nullable — a
     // legacy/cold row reads NULL = "image unknown", which never conflicts.
     image: text("image"),
     // The frozen rig version the live box was created under (M3). Like `image`,
     // this is SHARED STATE: all the box's sessions run the same rig-baked setup,
-    // so a resume resolving a DIFFERENT rig_version_id conflicts (solo holder
-    // recreates cold on the new rig; N-holders throw SandboxRigConflictError).
+    // so a resume resolving a DIFFERENT rig_version_id conflicts (a solo holder
+    // requests capture-and-drain rotation; N-holders throw SandboxRigConflictError).
     // Nullable — a legacy/cold row or a rig-less session reads NULL = "rig
     // unknown", which never conflicts. No FK (symmetric with sandbox_group_id's
     // bare-uuid rationale: this lease outlives no single rig_versions row's RLS).
@@ -2623,6 +2769,18 @@ export const sandboxLeases = pgTable(
     lastMeterAt: timestamp("last_meter_at", { withTimezone: true }),
     lastMeterTick: integer("last_meter_tick").notNull().default(0),
 
+    providerCreatedAt: timestamp("provider_created_at", { withTimezone: true }),
+    providerDeadlineAt: timestamp("provider_deadline_at", { withTimezone: true }),
+    rotationRequestedAt: timestamp("rotation_requested_at", { withTimezone: true }),
+    rotationReason: text("rotation_reason", {
+      enum: ["provider_deadline", "operator"],
+    }),
+    // The SQL migration owns the two DEFERRABLE foreign keys and deferred
+    // scope/state constraint triggers. Drizzle does not model deferrability, so
+    // these remain bare UUIDs here rather than generating a stricter wrong FK.
+    currentCheckpointArtifactId: uuid("current_checkpoint_artifact_id"),
+    previousCheckpointArtifactId: uuid("previous_checkpoint_artifact_id"),
+
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -2646,6 +2804,13 @@ export const sandboxLeases = pgTable(
     expiredDrainingInventory: index("sandbox_leases_expired_draining_inventory_idx")
       .on(table.expiresAt, table.backend)
       .where(sql`${table.liveness} = 'draining'`),
+    providerDeadline: index("sandbox_leases_provider_deadline_idx")
+      .on(table.providerDeadlineAt, table.id)
+      .where(
+        sql`${table.backend} = 'modal'
+          and ${table.liveness} in ('warming', 'warm')
+          and ${table.rotationRequestedAt} is null`,
+      ),
     workspaceGenerationValid: check(
       "sandbox_leases_workspace_generation_check",
       sql`${table.workspaceGeneration} >= 0`,
@@ -2655,6 +2820,25 @@ export const sandboxLeases = pgTable(
       sql`${table.archiveGeneration} is null
         or (${table.archiveGeneration} >= 0
           and ${table.archiveGeneration} <= ${table.workspaceGeneration})`,
+    ),
+    providerDeadlineValid: check(
+      "sandbox_leases_provider_deadline_check",
+      sql`(${table.providerCreatedAt} is null and ${table.providerDeadlineAt} is null)
+        or (${table.providerCreatedAt} is not null
+          and ${table.providerDeadlineAt} is not null
+          and ${table.providerDeadlineAt} > ${table.providerCreatedAt})`,
+    ),
+    rotationValid: check(
+      "sandbox_leases_rotation_check",
+      sql`(${table.rotationRequestedAt} is null and ${table.rotationReason} is null)
+        or (${table.rotationRequestedAt} is not null
+          and ${table.rotationReason} in ('provider_deadline', 'operator'))`,
+    ),
+    checkpointDistinct: check(
+      "sandbox_leases_checkpoint_distinct_check",
+      sql`${table.currentCheckpointArtifactId} is null
+        or ${table.previousCheckpointArtifactId} is null
+        or ${table.currentCheckpointArtifactId} <> ${table.previousCheckpointArtifactId}`,
     ),
   }),
 );
@@ -2874,6 +3058,11 @@ export const sandboxRetainedProcesses = pgTable(
     leaseEpoch: integer("lease_epoch").notNull(),
     providerBackend: text("provider_backend").notNull(),
     providerInstanceId: text("provider_instance_id").notNull(),
+    // Provider object ids are namespace-scoped. New Modal processes bind the
+    // exact authenticated workspace before execution; legacy rows remain null
+    // until a positive lookup proves which namespace owns the historical box.
+    providerBindingKey: text("provider_binding_key"),
+    providerBinding: jsonb("provider_binding").$type<Record<string, unknown>>(),
     routeKind: text("route_kind", { enum: ["home", "active"] }).notNull(),
     routeTargetId: uuid("route_target_id"),
     routeEpoch: integer("route_epoch").notNull(),
@@ -2990,6 +3179,33 @@ export const sandboxRetainedProcesses = pgTable(
       sql`${table.settlementReason} is null
         or octet_length(${table.settlementReason}) between 1 and 512`,
     ),
+    providerBindingValid: check(
+      "sandbox_retained_processes_provider_binding_check",
+      sql`(
+          ${table.providerBindingKey} is null
+          and ${table.providerBinding} is null
+        ) or (
+          ${table.providerBackend} = 'modal'
+          and octet_length(${table.providerBindingKey}) between 1 and 1024
+          and jsonb_typeof(${table.providerBinding}) = 'object'
+          and ${table.providerBindingKey}::jsonb = ${table.providerBinding}
+          and ${table.providerBindingKey} = format(
+            '{"version":1,"serverUrl":%s,"workspaceName":%s,"environment":%s}',
+            to_jsonb(${table.providerBinding} ->> 'serverUrl')::text,
+            to_jsonb(${table.providerBinding} ->> 'workspaceName')::text,
+            to_jsonb(${table.providerBinding} ->> 'environment')::text
+          )
+          and ${table.providerBinding} = jsonb_build_object(
+            'version', 1,
+            'serverUrl', ${table.providerBinding} ->> 'serverUrl',
+            'workspaceName', ${table.providerBinding} ->> 'workspaceName',
+            'environment', ${table.providerBinding} ->> 'environment'
+          )
+          and coalesce(octet_length(${table.providerBinding} ->> 'serverUrl'), 0) > 0
+          and coalesce(octet_length(${table.providerBinding} ->> 'workspaceName'), 0) > 0
+          and ${table.providerBinding} ->> 'environment' is not null
+        )`,
+    ),
     reconcileClaimValid: check(
       "sandbox_retained_processes_reconcile_claim_check",
       sql`(${table.reconcileClaimId} is null and ${table.reconcileClaimedAt} is null)
@@ -3020,7 +3236,8 @@ export const sandboxRetainedProcesses = pgTable(
           ${table.reconcileProofOutcome} = 'lost'
           and ${table.reconcileProofExitCode} is null
           and ${table.reconcileProofReason} in (
-            'provider_session_lost_banner', 'provider_instance_not_found'
+            'provider_session_lost_banner', 'provider_instance_not_found',
+            'provider_instance_terminated'
           )
           and ${table.reconcileProofObservedAt} is not null
         )`,
@@ -4439,3 +4656,4 @@ export const rigChanges = pgTable(
 );
 
 export * from "./workspace-instruction-policies-schema";
+export * from "./preference-registry-schema";

@@ -1,5 +1,54 @@
 # @opengeni/runtime
 
+## 0.14.9
+
+### Patch Changes
+
+- 3450ee5: Estimate typed images as bounded native media only after validating PNG IHDR CRCs, preserve exact model-history prefixes across requests, and fail closed for computer use whenever hosted or structured-image transport is omitted or unproven so screenshots cannot become base64 function text.
+- Updated dependencies [ddff8db]
+- Updated dependencies [0a9a6eb]
+  - @opengeni/contracts@0.24.1
+  - @opengeni/config@0.7.17
+
+## 0.14.8
+
+### Patch Changes
+
+- Updated dependencies [6d167f4]
+  - @opengeni/codex@0.2.8
+  - @opengeni/config@0.7.16
+
+## 0.14.7
+
+### Patch Changes
+
+- a19971e: Treat native provider snapshot receipts as typed opaque artifacts instead of tar
+  trees; track every Modal Image in a provider-bound, crash-safe checkpoint ledger;
+  garbage-collect displaced and publication-losing Images; adopt only provable
+  legacy ownership; bind retained processes to their exact Modal namespace and
+  reconcile historical terminal boxes without touching successors; rotate finite
+  Modal boxes through the canonical checkpoint/drain/rematerialization path before
+  their persisted deadline without checkpointing across an active direct API
+  mutation; memoize terminal recovery failures; and use Modal's
+  documented 24-hour maximum as the default hard box lifetime. Frame confined
+  filesystem/Git command output at both boundaries with a fresh attempt nonce and
+  strict exit-status parsing so provider diagnostics, truncation, or delayed
+  retries cannot corrupt Modal-like `execCommand` control records. Upgrade the
+  Modal JavaScript SDK to 0.9.0 and explicitly retain native checkpoint Images
+  until the provider-bound artifact ledger proves that their exact ids are safe
+  to garbage-collect.
+- Updated dependencies [a19971e]
+- Updated dependencies [1f6f13f]
+  - @opengeni/config@0.7.15
+  - @opengeni/contracts@0.24.0
+
+## 0.14.6
+
+### Patch Changes
+
+- 2a7900f: Make Channel-A Git capture hashing and descriptor confinement portable across Linux and stock macOS/BSD while preserving bounded, fail-closed repository-diff integrity.
+- 821f664: Seed shared session-event cursors from loaded history to prevent historical replay storms, and preserve the MCP SDK's exact request-timeout classification through safe transport-error sanitization.
+
 ## 0.14.5
 
 ### Patch Changes

@@ -2,19 +2,18 @@ import { spawn } from "node:child_process";
 import { availableParallelism } from "node:os";
 import { join } from "node:path";
 
-// Typecheck the whole workspace with tsgo (TypeScript 7 native compiler). Each
+// Typecheck the whole workspace with the stable TypeScript 7 compiler. Each
 // package/app carries its own tsconfig with the per-package compilerOptions
 // (jsx, types, standalone web config, ...), so we drive them individually
 // rather than via project references (which would require `composite` +
 // declaration emit and fight `noEmit`).
 //
-// tsgo replaced the old 18x sequential `tsc --noEmit` chain. The projects are
-// independent (no cross-project emit), so we run them through a bounded worker
-// pool instead of strictly one-at-a-time: wall time drops to roughly the
-// slowest project plus scheduling, while the concurrency cap keeps total RSS
-// bounded on memory-constrained hosts. Override the width with
-// OPENGENI_TYPECHECK_CONCURRENCY (defaults to ~half the available cores, min 2,
-// max 8). Keep this list in sync with the per-package `typecheck` scripts.
+// The projects are independent (no cross-project emit), so we run each project's
+// `tsc --noEmit` through a bounded worker pool instead of strictly one-at-a-time.
+// Wall time drops to roughly the slowest project plus scheduling, while the
+// concurrency cap keeps total RSS bounded on memory-constrained hosts. Override
+// the width with OPENGENI_TYPECHECK_CONCURRENCY (defaults to ~half the available
+// cores, min 2, max 8). Keep this list in sync with per-package typecheck scripts.
 const projects = [
   "packages/contracts",
   "packages/agent-proto",
@@ -41,7 +40,7 @@ const projects = [
   "scripts/release",
 ];
 
-const tsgo = join(process.cwd(), "node_modules", ".bin", "tsgo");
+const tsc = join(process.cwd(), "node_modules", "typescript", "bin", "tsc");
 
 function resolveConcurrency(): number {
   const override = Number.parseInt(process.env.OPENGENI_TYPECHECK_CONCURRENCY ?? "", 10);
@@ -57,14 +56,14 @@ type ProjectResult = { project: string; status: number; output: string };
 
 function typecheckProject(project: string): Promise<ProjectResult> {
   return new Promise((resolve) => {
-    const child = spawn(tsgo, ["--noEmit", "-p", join(project, "tsconfig.json")], {
+    const child = spawn("node", [tsc, "--noEmit", "-p", join(project, "tsconfig.json")], {
       stdio: ["ignore", "pipe", "pipe"],
     });
     let output = "";
     child.stdout.on("data", (chunk) => (output += chunk));
     child.stderr.on("data", (chunk) => (output += chunk));
     child.on("error", (err) => {
-      output += `\n[typecheck] failed to spawn tsgo: ${String(err)}\n`;
+      output += `\n[typecheck] failed to spawn TypeScript 7: ${String(err)}\n`;
       resolve({ project, status: 1, output });
     });
     child.on("close", (code) => resolve({ project, status: code ?? 1, output }));

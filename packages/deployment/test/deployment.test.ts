@@ -9,6 +9,7 @@ import {
   preflightChecksFor,
   requiredRuntimeEnvVars,
   SANDBOX_REQUIRED_ENV,
+  SANDBOX_LIFECYCLE_PASSTHROUGH_ENV,
   stackPlanFor,
 } from "../src/index";
 
@@ -960,6 +961,24 @@ describe("deployment contract", () => {
       "OPENGENI_MODAL_TOKEN_SECRET",
       "OPENGENI_MODAL_TIMEOUT_SECONDS",
     ]);
+    expect(SANDBOX_REQUIRED_ENV.modal.optional).toEqual(
+      expect.arrayContaining([
+        "OPENGENI_MODAL_IMAGE_REGISTRY_SECRET",
+        "OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS",
+        "OPENGENI_MODAL_WORKSPACE_PERSISTENCE",
+        "OPENGENI_SANDBOX_ROTATION_LEAD_MS",
+        "OPENGENI_SANDBOX_ROTATION_BATCH_SIZE",
+      ]),
+    );
+    expect(SANDBOX_LIFECYCLE_PASSTHROUGH_ENV).toEqual(
+      expect.arrayContaining([
+        "OPENGENI_SANDBOX_IDLE_GRACE_MS",
+        "OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS",
+        "OPENGENI_SANDBOX_SNAPSHOT_INTERVAL_MS",
+        "OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS",
+        "OPENGENI_SANDBOX_WARMING_TIMEOUT_MS",
+      ]),
+    );
     expect(SANDBOX_REQUIRED_ENV.daytona.required).toEqual(["OPENGENI_DAYTONA_API_KEY"]);
     expect(SANDBOX_REQUIRED_ENV.docker.required).toEqual([]);
     expect(SANDBOX_REQUIRED_ENV.none.required).toEqual([]);

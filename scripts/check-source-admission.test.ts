@@ -15,6 +15,11 @@ const readmeBaseBlob = "1".repeat(40);
 const readmeHeadBlob = "2".repeat(40);
 const helperBlob = "3".repeat(40);
 const pullNumber = 7;
+const staleEventBaseSha = "8".repeat(40);
+const staleMergeBaseSha = "7".repeat(40);
+const staleEventBaseTreeSha = "6".repeat(40);
+const staleMergeBaseTreeSha = "5".repeat(40);
+const advancedMainSha = "9".repeat(40);
 
 type FixtureOptions = {
   apiBaseSha?: string;
@@ -24,13 +29,18 @@ type FixtureOptions = {
   comparisonMergeBaseSha?: string;
   comparisonBehindBy?: number;
   comparisonStatus?: string;
+  currentMainComparisonBehindBy?: number;
+  currentMainComparisonMergeBaseSha?: string;
+  currentMainComparisonStatus?: string;
   eventBaseSha?: string;
+  eventBaseTreeSha?: string;
   eventHeadSha?: string;
   fileRows?: Array<Record<string, unknown>>;
   headTreeTruncated?: boolean;
-  terminalBaseSha?: string;
+  mergeBaseTreeSha?: string;
   terminalHeadSha?: string;
   terminalHeadRepository?: string;
+  terminalMainSha?: string;
 };
 
 function event(overrides: Record<string, unknown> = {}): Record<string, any> {
@@ -75,13 +85,19 @@ function context(overrides: Record<string, string> = {}): Record<string, string>
 }
 
 function fixture(options: FixtureOptions = {}) {
-  let mainReads = 0;
   let pullReads = 0;
   const methods: string[] = [];
   const requestedPaths: string[] = [];
   const logs: string[] = [];
   const apiBaseSha = options.apiBaseSha ?? baseSha;
   const apiHeadSha = options.apiHeadSha ?? headSha;
+  const patchBaseSha = options.comparisonMergeBaseSha ?? apiBaseSha;
+  const eventBaseCommitTreeSha =
+    options.eventBaseTreeSha ?? (apiBaseSha === baseSha ? baseTreeSha : staleEventBaseTreeSha);
+  const patchBaseTreeSha =
+    options.mergeBaseTreeSha ??
+    (patchBaseSha === apiBaseSha ? eventBaseCommitTreeSha : staleMergeBaseTreeSha);
+  const terminalMainSha = options.terminalMainSha ?? baseSha;
   const rows =
     options.fileRows ??
     ([
@@ -90,7 +106,7 @@ function fixture(options: FixtureOptions = {}) {
     ] satisfies Array<Record<string, unknown>>);
 
   const baseTree = {
-    sha: baseTreeSha,
+    sha: patchBaseTreeSha,
     truncated: false,
     tree: [{ path: "README.md", mode: "100644", type: "blob", sha: readmeBaseBlob }],
   };
@@ -143,12 +159,11 @@ function fixture(options: FixtureOptions = {}) {
         private: false,
       };
     } else if (path === `/repos/${CONTRACT.repository}/git/ref/heads/${CONTRACT.defaultBranch}`) {
-      mainReads += 1;
       value = {
         ref: `refs/heads/${CONTRACT.defaultBranch}`,
         object: {
           type: "commit",
-          sha: mainReads > 1 ? (options.terminalBaseSha ?? baseSha) : baseSha,
+          sha: terminalMainSha,
         },
       };
     } else if (path === `/repos/${CONTRACT.repository}/pulls/${pullNumber}`) {
@@ -159,32 +174,56 @@ function fixture(options: FixtureOptions = {}) {
           ? (options.terminalHeadRepository ?? "contributor/opengeni")
           : "contributor/opengeni",
       );
-    } else if (path === `/repos/${CONTRACT.repository}/git/commits/${baseSha}`) {
+    } else if (path === `/repos/${CONTRACT.repository}/git/commits/${apiBaseSha}`) {
       value = {
-        sha: baseSha,
-        tree: { sha: baseTreeSha },
+        sha: apiBaseSha,
+        tree: { sha: eventBaseCommitTreeSha },
         parents: [{ sha: "a".repeat(40) }],
       };
-    } else if (path === `/repos/${CONTRACT.repository}/git/commits/${headSha}`) {
+    } else if (path === `/repos/${CONTRACT.repository}/git/commits/${apiHeadSha}`) {
       value = {
-        sha: headSha,
+        sha: apiHeadSha,
         tree: { sha: headTreeSha },
-        parents: [{ sha: baseSha }],
+        parents: [{ sha: patchBaseSha }],
       };
-    } else if (path === `/repos/${CONTRACT.repository}/compare/${baseSha}...${headSha}`) {
+    } else if (
+      patchBaseSha !== apiBaseSha &&
+      path === `/repos/${CONTRACT.repository}/git/commits/${patchBaseSha}`
+    ) {
+      value = {
+        sha: patchBaseSha,
+        tree: { sha: patchBaseTreeSha },
+        parents: [{ sha: "4".repeat(40) }],
+      };
+    } else if (path === `/repos/${CONTRACT.repository}/compare/${apiBaseSha}...${apiHeadSha}`) {
       value = {
         status: options.comparisonStatus ?? "ahead",
-        base_commit: { sha: options.comparisonBaseSha ?? baseSha },
-        merge_base_commit: { sha: options.comparisonMergeBaseSha ?? baseSha },
-        commits: [{ sha: options.comparisonHeadSha ?? headSha }],
+        base_commit: { sha: options.comparisonBaseSha ?? apiBaseSha },
+        merge_base_commit: { sha: patchBaseSha },
+        commits: [{ sha: options.comparisonHeadSha ?? apiHeadSha }],
         behind_by: options.comparisonBehindBy ?? 0,
         ahead_by: 1,
+      };
+    } else if (
+      terminalMainSha !== baseSha &&
+      path === `/repos/${CONTRACT.repository}/compare/${baseSha}...${terminalMainSha}`
+    ) {
+      value = {
+        status: options.currentMainComparisonStatus ?? "ahead",
+        base_commit: { sha: baseSha },
+        merge_base_commit: {
+          sha: options.currentMainComparisonMergeBaseSha ?? baseSha,
+        },
+        commits: [{ sha: terminalMainSha }],
+        behind_by: options.currentMainComparisonBehindBy ?? 0,
+        ahead_by: 1,
+        total_commits: 1,
       };
     } else if (
       path === `/repos/${CONTRACT.repository}/pulls/${pullNumber}/files?per_page=100&page=1`
     ) {
       value = rows;
-    } else if (path === `/repos/${CONTRACT.repository}/git/trees/${baseTreeSha}?recursive=1`) {
+    } else if (path === `/repos/${CONTRACT.repository}/git/trees/${patchBaseTreeSha}?recursive=1`) {
       value = baseTree;
     } else if (path === `/repos/${CONTRACT.repository}/git/trees/${headTreeSha}?recursive=1`) {
       value = headTree;
@@ -208,7 +247,7 @@ function fixture(options: FixtureOptions = {}) {
 }
 
 describe("source admission", () => {
-  test("admits one exact current-base head and emits a deterministic direct-tree manifest", async () => {
+  test("admits one immutable head and emits a deterministic merge-base manifest", async () => {
     const api = fixture();
     const result = await verifySourceAdmission({
       env: context(),
@@ -222,12 +261,15 @@ describe("source admission", () => {
       headSha,
       baseTreeSha,
       headTreeSha,
+      workflowSha: baseSha,
+      currentMainSha: baseSha,
+      patchBaseSha: baseSha,
     });
     expect(result.manifest.map(({ path }) => path)).toEqual(["README.md", CONTRACT.helperPath]);
     expect(result.manifestSha256).toMatch(/^[0-9a-f]{64}$/);
     expect(api.methods.every((method) => method === "GET")).toBe(true);
     expect(api.logs).toEqual([
-      `Source admission verified ${headSha} on current main ${baseSha}: 2 direct tree paths, manifest sha256 ${result.manifestSha256}.`,
+      `Source admission verified ${headSha} from event base ${baseSha} at patch merge base ${baseSha}; base-owned workflow ${baseSha} remains retained by current main ${baseSha}: 2 direct tree paths, manifest sha256 ${result.manifestSha256}.`,
     ]);
   });
 
@@ -271,10 +313,10 @@ describe("source admission", () => {
     expect(api.requestedPaths).toEqual([]);
   });
 
-  test("rejects an event base that is not the exact current main", async () => {
+  test("rejects an event base that differs from the provider pull identity", async () => {
     const api = fixture();
     const stale = event();
-    stale.pull_request.base.sha = "8".repeat(40);
+    stale.pull_request.base.sha = staleEventBaseSha;
     await expect(
       verifySourceAdmission({
         env: context(),
@@ -282,7 +324,7 @@ describe("source admission", () => {
         fetchImpl: api.fetchImpl,
         logger: api.logger,
       }),
-    ).rejects.toThrow("event base SHA differs from current main");
+    ).rejects.toThrow("pull-request base SHA changed");
   });
 
   test("rejects a provider head that moved after the event", async () => {
@@ -297,20 +339,68 @@ describe("source admission", () => {
     ).rejects.toThrow("pull-request head SHA changed");
   });
 
-  test("admits a genuinely behind and diverged candidate head", async () => {
+  test("admits a stale event base and roots a diverged candidate manifest at its merge base", async () => {
     const api = fixture({
-      comparisonBehindBy: 2,
-      comparisonMergeBaseSha: "8".repeat(40),
+      apiBaseSha: staleEventBaseSha,
+      comparisonBaseSha: staleEventBaseSha,
+      comparisonBehindBy: 42,
+      comparisonMergeBaseSha: staleMergeBaseSha,
       comparisonStatus: "diverged",
+      eventBaseTreeSha: staleEventBaseTreeSha,
+      mergeBaseTreeSha: staleMergeBaseTreeSha,
+      terminalMainSha: advancedMainSha,
     });
+    const stale = event();
+    stale.pull_request.base.sha = staleEventBaseSha;
     const result = await verifySourceAdmission({
       env: context(),
-      event: event(),
+      event: stale,
       fetchImpl: api.fetchImpl,
       logger: api.logger,
     });
 
+    expect(result).toMatchObject({
+      baseSha: staleEventBaseSha,
+      baseTreeSha: staleMergeBaseTreeSha,
+      currentMainSha: advancedMainSha,
+      patchBaseSha: staleMergeBaseSha,
+      workflowSha: baseSha,
+    });
     expect(result.manifest.map(({ path }) => path)).toEqual(["README.md", CONTRACT.helperPath]);
+    expect(api.requestedPaths).toContain(
+      `/repos/${CONTRACT.repository}/compare/${baseSha}...${advancedMainSha}`,
+    );
+  });
+
+  test("admits many stale-event heads concurrently while protected main advances", async () => {
+    const results = await Promise.all(
+      Array.from({ length: 32 }, async () => {
+        const api = fixture({
+          apiBaseSha: staleEventBaseSha,
+          comparisonBaseSha: staleEventBaseSha,
+          comparisonBehindBy: 42,
+          comparisonMergeBaseSha: staleMergeBaseSha,
+          comparisonStatus: "diverged",
+          eventBaseTreeSha: staleEventBaseTreeSha,
+          mergeBaseTreeSha: staleMergeBaseTreeSha,
+          terminalMainSha: advancedMainSha,
+        });
+        const stale = event();
+        stale.pull_request.base.sha = staleEventBaseSha;
+        const result = await verifySourceAdmission({
+          env: context(),
+          event: stale,
+          fetchImpl: api.fetchImpl,
+          logger: api.logger,
+        });
+        expect(api.methods.every((method) => method === "GET")).toBe(true);
+        return result;
+      }),
+    );
+
+    expect(results).toHaveLength(32);
+    expect(results.every((result) => result.currentMainSha === advancedMainSha)).toBe(true);
+    expect(results.every((result) => result.patchBaseSha === staleMergeBaseSha)).toBe(true);
   });
 
   test("rejects truncated recursive trees", async () => {
@@ -339,8 +429,13 @@ describe("source admission", () => {
     ).rejects.toThrow("provider file projection differs from the direct tree delta");
   });
 
-  test("rejects terminal main movement", async () => {
-    const api = fixture({ terminalBaseSha: "8".repeat(40) });
+  test("rejects a current main rewrite that no longer retains the base-owned workflow", async () => {
+    const api = fixture({
+      currentMainComparisonBehindBy: 1,
+      currentMainComparisonMergeBaseSha: staleMergeBaseSha,
+      currentMainComparisonStatus: "diverged",
+      terminalMainSha: advancedMainSha,
+    });
     await expect(
       verifySourceAdmission({
         env: context(),
@@ -348,7 +443,7 @@ describe("source admission", () => {
         fetchImpl: api.fetchImpl,
         logger: api.logger,
       }),
-    ).rejects.toThrow("default branch drifted during admission");
+    ).rejects.toThrow("current main no longer retains the base-owned workflow SHA");
   });
 
   test("rejects terminal head movement", async () => {

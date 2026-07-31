@@ -1673,6 +1673,8 @@ export type FirstPartyMcpToolName =
   | "memory_search"
   | "memory_save"
   | "memory_correct"
+  | "preference_registry_summary"
+  | "preference_registry_get"
   | "sandboxes_list"
   | "sandbox_attach"
   | "sandbox_swap"
@@ -1713,7 +1715,11 @@ export type FirstPartyMcpToolName =
   | "scheduled_task_runs_list"
   | "slack_bot_list_channels"
   | "slack_bot_channel_history"
+  | "slack_bot_thread_replies"
   | "slack_bot_list_users"
+  | "slack_bot_list_files"
+  | "slack_bot_file_info"
+  | "slack_bot_file_content"
   | "slack_bot_post_message";
 
 export type ProductAccessMode = "local" | "configured" | "managed";
@@ -2125,6 +2131,13 @@ export type ClientConfig = {
 
 export type AccountRole = "owner" | "admin" | "member";
 
+export type AccessPrincipalKind =
+  | "human_session"
+  | "agent_attempt"
+  | "service"
+  | "api_key"
+  | "configured_key";
+
 export type AccountGrant = {
   accountId: string;
   subjectId: string;
@@ -2140,6 +2153,7 @@ export type AccessGrant = {
   subjectId: string;
   subjectLabel?: string | undefined;
   permissions: Permission[];
+  principalKind?: AccessPrincipalKind | undefined;
   metadata?: Record<string, unknown> | undefined;
   serviceInitiator?: ServiceTurnInitiator | undefined;
   serviceInitiatorContext?: ServiceTurnInitiatorContext | undefined;

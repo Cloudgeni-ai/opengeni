@@ -148,7 +148,6 @@ import { fileURLToPath } from "node:url";
 
 import {
   computerCallNormalizingFetch,
-  elideSupersededViewImagePairs,
   normalizeComputerCallActions,
   sanitizeHistoryItemsForModel,
 } from "./history-sanitizer";
@@ -286,7 +285,10 @@ export {
   prepareCompactionPromptInput,
   isUserMessage,
   estimateTokens,
+  estimateTokensBreakdown,
   estimateItemTokens,
+  estimateItemTokenBreakdown,
+  estimateNativeImageTokens,
   estimateCompleteModelInput,
   estimateSerializedValueTokens,
   hasModelGeneratedItem,
@@ -300,9 +302,14 @@ export {
   SUMMARY_BUFFER_TOKENS,
   SUMMARY_PREFIX,
   USER_MESSAGE_TRUNCATION_MARKER,
+  UNKNOWN_IMAGE_TOKENS,
+  MAX_NATIVE_IMAGE_TOKENS,
 } from "./context-compaction";
 export type {
   CompactionDecision,
+  ModelInputTokenBreakdown,
+  NativeImageEstimateReason,
+  NativeImageTokenEstimate,
   CompactionItem,
   PreparedCompactionPromptInput,
 } from "./context-compaction";
@@ -1323,8 +1330,7 @@ export type BuildAgentOptions = {
   // EXPLICIT computer-use tool transport, decided where provider identity is
   // authoritative (the worker's model resolution — agent-turn.ts). Threaded into
   // buildAgentCapabilities → computerUse({toolMode}) so tool selection never rests
-  // on the SDK's constructor-name sniff. When omitted, the legacy sniff +
-  // `structuredToolTransport` neutralize path is preserved byte-for-byte.
+  // on the SDK's constructor-name sniff. Omitted means disabled/fail-closed.
   computerToolMode?: ComputerToolMode;
   /**
    * Invoked once, immediately before the first real computer action and after
@@ -2252,10 +2258,8 @@ export function buildAgentCapabilities(
     sessionSkills?: PackSkill[];
     workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];
     structuredToolTransport?: boolean;
-    // EXPLICIT computer-use transport (see BuildAgentOptions.computerToolMode). When
-    // present, computerUse() is handed the mode directly and its tools() obeys it
-    // without the constructor-name sniff. When absent, the legacy neutralize +
-    // imageFunctionResults path (driven by structuredToolTransport) is unchanged.
+    // EXPLICIT computer-use transport (see BuildAgentOptions.computerToolMode).
+    // Omitted/unproven transport fails closed with no computer tools.
     computerToolMode?: ComputerToolMode;
     onComputerUseReady?: (session: SandboxSessionLike) => Promise<void>;
     turnCancellationSignal?: AbortSignal;
@@ -2328,37 +2332,14 @@ export function buildAgentCapabilities(
     // FUNCTION `computer_*` tools on the text transport. The ChatGPT/Codex backend
     // rejects hosted tool types (only function/custom/web_search accepted).
     //
-    // HARDENING: when the caller declares an EXPLICIT `computerToolMode` (the worker
-    // does, from its authoritative model resolution), thread it straight through —
-    // tool selection then never depends on the SDK's model-instance constructor-name
-    // sniff (which a wrapped/proxied model would defeat, silently 400ing a
-    // chat-completions provider handed the hosted tool). When ABSENT, the legacy path
-    // is preserved byte-for-byte: on the codex path (structuredToolTransport === false)
-    // we set imageFunctionResults and neutralize the capability's model binding — the
-    // SAME trick used for filesystem above — so `tools()` sees no model instance and
-    // emits the function tools the backend can call, instead of suppressing the tier.
-    const explicitMode = options.computerToolMode;
+    // The worker declares an explicit mode from authoritative provider resolution.
+    // Exported/public callers that omit it are unproven and therefore disabled.
     const computerCapability = computerUse({
       dimensions: [settings.streamResolutionWidth, settings.streamResolutionHeight],
       readOnly: settings.computerUseReadOnly,
       ...(options.onComputerUseReady ? { onReady: options.onComputerUseReady } : {}),
-      ...(explicitMode
-        ? { toolMode: explicitMode }
-        : // Legacy (no explicit mode): on the codex path the function tools deliver
-          // screenshots as a real image the model can see. The ChatGPT/Codex backend
-          // rejects HOSTED tool types but DOES accept `input_image` content items inside a
-          // `function_call_output` (proven by openai/codex codex-rs, whose view_image tool
-          // ships exactly that shape) — so a structured image tool result is seen, where a
-          // text data-URL would be unreadable.
-          options.structuredToolTransport === false
-          ? { imageFunctionResults: true }
-          : {}),
+      toolMode: options.computerToolMode ?? "disabled",
     });
-    // Neutralize ONLY on the legacy sniff path. With an explicit toolMode the mode
-    // already forces the function tools, so the constructor-name override is moot.
-    if (!explicitMode && options.structuredToolTransport === false) {
-      neutralizeStructuredToolTransport(computerCapability);
-    }
     caps.push(computerCapability as unknown as ReturnType<typeof Capabilities.default>[number]);
   }
   if (toolCancellation) {
@@ -3060,18 +3041,58 @@ function safeMcpErrorFields(error: unknown): {
   return { errorClass, status };
 }
 
-function safeMcpTransportError(error: unknown): Error & { status?: number; code?: number } {
+type SafeMcpTransportError = Error & {
+  status?: number;
+  code?: number;
+  mcpTransportFailureKind?: "request_timeout";
+};
+
+/**
+ * Preserve the MCP SDK's exact request-timeout meaning without retaining or
+ * exposing a raw HTTP response body. The numeric code is not sufficient:
+ * Streamable HTTP also uses -32001 for "Session not found" and arbitrary
+ * AbortSignal reasons, so only the SDK's two owned timeout messages qualify.
+ */
+export function isMcpRequestTimeoutError(error: unknown, seen = new WeakSet<object>()): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  if (seen.has(error)) {
+    return false;
+  }
+  seen.add(error);
+  const record = error as Record<string, unknown>;
+  if (record.mcpTransportFailureKind === "request_timeout") {
+    return true;
+  }
+  const code = typeof record.code === "number" ? record.code : record.status;
+  const message = typeof record.message === "string" ? record.message : "";
+  const sdkTimeoutMessages = new Set([
+    "Request timed out",
+    "MCP error -32001: Request timed out",
+    "Maximum total timeout exceeded",
+    "MCP error -32001: Maximum total timeout exceeded",
+  ]);
+  if (code === -32_001 && sdkTimeoutMessages.has(message)) {
+    return true;
+  }
+  return ["error", "cause", "response", "data"].some((key) =>
+    isMcpRequestTimeoutError(record[key], seen),
+  );
+}
+
+export function safeMcpTransportError(error: unknown): SafeMcpTransportError {
   const fields = safeMcpErrorFields(error);
   const safeError = new Error(
     `MCP transport operation failed (${mcpErrorReason(fields)})`,
-  ) as Error & {
-    status?: number;
-    code?: number;
-  };
+  ) as SafeMcpTransportError;
   safeError.name = "McpTransportError";
   if (fields.status !== undefined) {
     safeError.status = fields.status;
     safeError.code = fields.status;
+  }
+  if (isMcpRequestTimeoutError(error)) {
+    safeError.mcpTransportFailureKind = "request_timeout";
   }
   return safeError;
 }
@@ -3169,17 +3190,33 @@ async function signFirstPartyDelegatedBearer(
   if (!settings.delegationSecret || !options.accountId || !options.workspaceId) {
     return null;
   }
+  const attemptClaims = [
+    options.sessionId,
+    options.turnId,
+    options.attemptId,
+    options.executionGeneration,
+  ];
+  const hasAnyAttemptClaim = attemptClaims.some((claim) => claim !== undefined);
+  const hasExactAttemptClaims = attemptClaims.every((claim) => claim !== undefined);
+  if (hasAnyAttemptClaim && !hasExactAttemptClaims) {
+    return null;
+  }
   return await signDelegatedAccessToken(settings.delegationSecret, {
     accountId: options.accountId,
     workspaceId: options.workspaceId,
     subjectId: options.subjectId ?? "worker:first-party-mcp",
     ...(options.subjectLabel ? { subjectLabel: options.subjectLabel } : {}),
     permissions: options.firstPartyPermissions ?? [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS],
+    principalKind: hasExactAttemptClaims ? "agent_attempt" : "service",
     firstPartyMcpTools: options.firstPartyTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
-    ...(options.sessionId ? { sessionId: options.sessionId } : {}),
-    ...(options.turnId ? { turnId: options.turnId } : {}),
-    ...(options.attemptId ? { attemptId: options.attemptId } : {}),
-    ...(options.executionGeneration ? { executionGeneration: options.executionGeneration } : {}),
+    ...(hasExactAttemptClaims
+      ? {
+          sessionId: options.sessionId!,
+          turnId: options.turnId!,
+          attemptId: options.attemptId!,
+          executionGeneration: options.executionGeneration!,
+        }
+      : {}),
     exp: Math.floor(Date.now() / 1000) + 60 * 60,
   });
 }
@@ -3806,18 +3843,6 @@ export const normalizeComputerCallsFilter: CallModelInputFilter = ({ modelData }
 });
 
 /**
- * Per-call state compaction for local image inspection. Re-opening the same
- * path supersedes its prior base64 result; carrying both provides no newer
- * information and can otherwise balloon every following model request.
- */
-export const elideSupersededViewImagesFilter: CallModelInputFilter = ({ modelData }) => ({
-  ...modelData,
-  input: elideSupersededViewImagePairs(
-    modelData.input as unknown as Array<Record<string, unknown>>,
-  ) as unknown as AgentInputItem[],
-});
-
-/**
  * Canonical Codex-style tool-result bound at the final model-input seam. The
  * identical pure normalizer also runs before conversation rows are persisted,
  * so this is a live-turn defense rather than a request-only alternate history.
@@ -3943,7 +3968,6 @@ export function callModelInputFilterForSettings(
 ): CallModelInputFilter | undefined {
   const filters: CallModelInputFilter[] = [
     normalizeComputerCallsFilter,
-    elideSupersededViewImagesFilter,
     boundModelToolOutputsFilterForSettings(settings),
   ];
   if (settings.openaiProviderItemIds === "strip") {

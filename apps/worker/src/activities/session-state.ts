@@ -1,6 +1,7 @@
 import {
   settleSessionAttemptInterruptions,
   applySessionTurnSettlement,
+  requestSessionTurnRecovery,
   recoverSessionDispatch,
   reconcileSessionAttemptQuiescence,
   peekSessionWork as peekSessionWorkDb,
@@ -29,11 +30,14 @@ import type {
   ReconcileSessionAttemptQuiescenceResult,
   RecoverDispatchInput,
   RecoverDispatchResult,
+  RecoverEscapedMcpTimeoutInput,
+  RecoverEscapedMcpTimeoutResult,
 } from "./types";
 
 export type SessionStateActivityOverrides = Partial<{
   settleSessionAttemptInterruptions: typeof settleSessionAttemptInterruptions;
   applySessionTurnSettlement: typeof applySessionTurnSettlement;
+  requestSessionTurnRecovery: typeof requestSessionTurnRecovery;
   recoverSessionDispatch: typeof recoverSessionDispatch;
   reconcileSessionAttemptQuiescence: typeof reconcileSessionAttemptQuiescence;
   peekSessionWork: typeof peekSessionWorkDb;
@@ -65,6 +69,8 @@ export function createSessionStateActivities(
     overrides.settleSessionAttemptInterruptions ?? settleSessionAttemptInterruptions;
   const applySessionTurnSettlementFn =
     overrides.applySessionTurnSettlement ?? applySessionTurnSettlement;
+  const requestSessionTurnRecoveryFn =
+    overrides.requestSessionTurnRecovery ?? requestSessionTurnRecovery;
   const recoverSessionDispatchFn = overrides.recoverSessionDispatch ?? recoverSessionDispatch;
   const reconcileSessionAttemptQuiescenceFn =
     overrides.reconcileSessionAttemptQuiescence ?? reconcileSessionAttemptQuiescence;
@@ -271,6 +277,55 @@ export function createSessionStateActivities(
     };
   }
 
+  /**
+   * Finish a retryable MCP timeout checkpoint that escaped a recovered turn's
+   * activity before any model request. Temporal carries the immutable turn
+   * identity in ApplicationFailure details; this activity re-reads and fences
+   * every field before mutating the exact still-owned attempt. A checkpoint
+   * that committed before event fanout failed is already recovering and
+   * therefore returns stale without another event or child callback.
+   */
+  async function recoverEscapedMcpTimeout(
+    input: RecoverEscapedMcpTimeoutInput,
+  ): Promise<RecoverEscapedMcpTimeoutResult> {
+    const { db, bus, observability } = await services();
+    const turn = await getSessionTurnForAttemptFn(
+      db,
+      input.workspaceId,
+      input.sessionId,
+      input.attemptId,
+    );
+    if (!turn) return { action: "stale" };
+    if (
+      turn.id !== input.turnId ||
+      turn.triggerEventId !== input.triggerEventId ||
+      turn.executionGeneration !== input.executionGeneration ||
+      input.executionGeneration <= 1
+    ) {
+      return { action: "ineligible" };
+    }
+    const recovery = await requestSessionTurnRecoveryFn(db, input.workspaceId, {
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      triggerEventId: input.triggerEventId,
+      attemptId: input.attemptId,
+      reason: "mcp_transport_timeout",
+      detail: {
+        code: "mcp_transport_timeout",
+        retryable: true,
+        continueDelayMs: 60_000,
+        recoverySource: "workflow_activity_failure",
+      },
+      fromStatuses: ["running"],
+    });
+    if (recovery.action !== "recovering") {
+      return { action: "stale" };
+    }
+    await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, recovery.events);
+    await refreshQueuedTurnsGauge(db, observability, countQueuedTurnsFn, recordTurnsQueuedGaugeFn);
+    return { action: "recovering" };
+  }
+
   async function peekSessionWork(input: PeekSessionWorkInput) {
     const { db, observability } = await services();
     const peek = await peekSessionWorkFn(db, input.workspaceId, input.sessionId);
@@ -325,6 +380,7 @@ export function createSessionStateActivities(
     persistSessionAttemptQuiescence,
     reconcileSessionAttemptQuiescence: reconcileSessionAttemptQuiescenceActivity,
     recoverDispatch,
+    recoverEscapedMcpTimeout,
     peekSessionWork,
     expireSessionHumanInput,
     markSessionIdle,

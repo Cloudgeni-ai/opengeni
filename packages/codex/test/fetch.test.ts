@@ -7,6 +7,7 @@ import {
   type CodexTokenSnapshot,
   type CodexUsageHeaderSnapshot,
   type FetchLike,
+  classifyCodexEncryptedArtifactRejection,
   classifyCodexUsageLimitError,
   classifyCodexResponseTimeoutError,
   codexRequestStorage,
@@ -59,6 +60,43 @@ function ctx(overrides: Partial<CodexRequestContext> = {}): CodexRequestContext 
     ...overrides,
   };
 }
+
+describe("Codex encrypted artifact rejection classifier", () => {
+  const markedError = (message: string, status = 400) => ({
+    status,
+    headers: new Headers({ [CODEX_TRANSPORT_ERROR_HEADER]: "1" }),
+    error: { type: "invalid_request_error", message },
+  });
+
+  test.each([
+    "Encrypted content could not be decrypted",
+    "The reasoning encrypted_content could not be parsed",
+    "The encrypted reasoning artifact failed to parse",
+  ])("accepts the exact provider-bound 400 family: %s", (message) => {
+    expect(classifyCodexEncryptedArtifactRejection(markedError(message))).toEqual({
+      status: 400,
+      kind: "encrypted_content_rejected",
+    });
+  });
+
+  test.each([
+    markedError("Encrypted content could not be decrypted", 500),
+    markedError("Input JSON could not be parsed"),
+    markedError("Invalid tool output"),
+    markedError(
+      "Invalid value: 'reasoning.encrypted_content'. Supported values are: 'message' and 'reasoning'.",
+    ),
+    markedError("Unsupported field reasoning.encrypted_content"),
+    markedError("Invalid encrypted reasoning artifact"),
+    {
+      status: 400,
+      headers: new Headers(),
+      error: { message: "Encrypted content could not be decrypted" },
+    },
+  ])("rejects unrelated or unproven errors", (error) => {
+    expect(classifyCodexEncryptedArtifactRejection(error)).toBeNull();
+  });
+});
 
 describe("codexSubscriptionFetch", () => {
   test("rewrites /responses, swaps headers, normalizes the body", async () => {
@@ -251,7 +289,10 @@ describe("codexSubscriptionFetch", () => {
     const response = await codexRequestStorage.run(ctx(), () =>
       codexSubscriptionFetch(async () => {
         calls += 1;
-        return new Response(failure, { status: 200, headers: { "x-request-id": "req_failed" } });
+        return new Response(failure, {
+          status: 200,
+          headers: { "x-request-id": "req_failed" },
+        });
       })("https://chatgpt.com/backend-api/responses", {
         method: "POST",
         body: JSON.stringify({ stream: false }),
@@ -275,7 +316,12 @@ describe("codexSubscriptionFetch", () => {
 
   test("non-streaming top-level error and response.error terminal forms do not become empty success", async () => {
     for (const event of [
-      { type: "error", code: "server_error", message: "backend unavailable", param: null },
+      {
+        type: "error",
+        code: "server_error",
+        message: "backend unavailable",
+        param: null,
+      },
       {
         type: "response.error",
         error: { code: "server_error", message: "backend unavailable" },
@@ -628,7 +674,9 @@ describe("codexSubscriptionFetch", () => {
       () =>
         codexSubscriptionFetch(async () => {
           calls += 1;
-          return new Response(new ReadableStream<Uint8Array>({}), { status: 200 });
+          return new Response(new ReadableStream<Uint8Array>({}), {
+            status: 200,
+          });
         })("https://chatgpt.com/backend-api/responses", {
           method: "POST",
           signal: controller.signal,
@@ -1007,11 +1055,18 @@ describe("codexSubscriptionFetch", () => {
           calls += 1;
           return new Response(`data: ${JSON.stringify(event)}\n\n`, {
             status: 200,
-            headers: { "content-type": "text/event-stream", "x-request-id": "req-stream" },
+            headers: {
+              "content-type": "text/event-stream",
+              "x-request-id": "req-stream",
+            },
           });
         })("https://chatgpt.com/backend-api/responses", {
           method: "POST",
-          body: JSON.stringify({ model: "gpt-5.6-sol", stream: true, input: [] }),
+          body: JSON.stringify({
+            model: "gpt-5.6-sol",
+            stream: true,
+            input: [],
+          }),
         }),
       );
 
@@ -1055,7 +1110,10 @@ describe("codexSubscriptionFetch", () => {
     } catch (error) {
       observed = error;
     }
-    expect(observed).toMatchObject({ status: 502, code: "invalid_sse_terminal" });
+    expect(observed).toMatchObject({
+      status: 502,
+      code: "invalid_sse_terminal",
+    });
     expect(isCodexTransportError(observed)).toBe(true);
     expect(calls).toBe(1);
   });
@@ -1081,7 +1139,10 @@ describe("codexSubscriptionFetch", () => {
     } catch (error) {
       observed = error;
     }
-    expect(observed).toMatchObject({ status: 502, code: "invalid_sse_terminal" });
+    expect(observed).toMatchObject({
+      status: 502,
+      code: "invalid_sse_terminal",
+    });
     expect(isCodexTransportError(observed)).toBe(true);
     expect(calls).toBe(1);
   });

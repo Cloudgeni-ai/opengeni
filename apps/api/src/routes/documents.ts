@@ -37,7 +37,7 @@ import {
   searchDocuments,
 } from "@opengeni/documents";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import type { Hono } from "hono";
+import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { requireAccessGrant } from "@opengeni/core";
 import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
@@ -252,7 +252,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/knowledge/search", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "documents:search");
-    const payload = DocumentSearchRequest.parse(await c.req.json());
+    const payload = await parseDocumentSearchRequest(c, "invalid knowledge search request");
     return c.json({
       results: await searchDocuments(
         db,
@@ -565,6 +565,17 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     await server.connect(transport);
     return await transport.handleRequest(c.req.raw);
   });
+}
+
+async function parseDocumentSearchRequest(
+  context: Context,
+  message: string,
+): Promise<DocumentSearchRequest> {
+  const parsed = DocumentSearchRequest.safeParse(await context.req.json().catch(() => null));
+  if (!parsed.success) {
+    throw new HTTPException(422, { message });
+  }
+  return parsed.data;
 }
 
 /** Derive a .txt filename for a raw-text drop from its optional title/filename. */

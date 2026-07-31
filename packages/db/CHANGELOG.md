@@ -1,5 +1,78 @@
 # @opengeni/db
 
+## 0.15.3
+
+### Patch Changes
+
+- 510eae3: Keep restored Modal checkpoints valid across live workspace writes, serialize
+  lease reaping with concurrent acquisition, and rotate image or rig changes
+  through durable checkpoint capture instead of discarding provider ownership.
+
+## 0.15.2
+
+### Patch Changes
+
+- ddff8db: Add the read-only Workspace State inventory with bounded, authorization-scoped
+  Documents aggregates and a deterministic metadata-only Memory projection. The
+  projection explicitly labels legacy `knowledge_memories` preference-kind counts
+  as non-authoritative observations while preserving the structured preference
+  registry as the sole active preference authority.
+- Updated dependencies [ddff8db]
+- Updated dependencies [0a9a6eb]
+  - @opengeni/contracts@0.24.1
+  - @opengeni/config@0.7.17
+
+## 0.15.1
+
+### Patch Changes
+
+- 6d167f4: Recover exact Codex encrypted-artifact rejections without deleting durable conversation truth, and make maintenance migration protocol activation part of the canonical migration transaction.
+- Updated dependencies [6d167f4]
+  - @opengeni/codex@0.2.8
+  - @opengeni/config@0.7.16
+
+## 0.15.0
+
+### Minor Changes
+
+- 1f6f13f: Add the isolated, versioned organization/workspace/user preference registry,
+  including audited proposal and activation flows, deterministic attempt-bound
+  descriptors, authorized full-content retrieval, REST/MCP tools, and SDK types.
+  Attempt reads revalidate current generation and immutable-human authority in one
+  locked transaction; lifecycle writes use scope-version CAS and database-owned
+  audit functions that prevent direct head mutation or history erasure. Snapshot
+  creation is database-canonical and lifecycle governance requires a signed
+  `human_session` principal; expiry filtering and supersession are transactionally
+  enforced before bounds or terminal mutation.
+
+### Patch Changes
+
+- a19971e: Treat native provider snapshot receipts as typed opaque artifacts instead of tar
+  trees; track every Modal Image in a provider-bound, crash-safe checkpoint ledger;
+  garbage-collect displaced and publication-losing Images; adopt only provable
+  legacy ownership; bind retained processes to their exact Modal namespace and
+  reconcile historical terminal boxes without touching successors; rotate finite
+  Modal boxes through the canonical checkpoint/drain/rematerialization path before
+  their persisted deadline without checkpointing across an active direct API
+  mutation; memoize terminal recovery failures; and use Modal's
+  documented 24-hour maximum as the default hard box lifetime. Frame confined
+  filesystem/Git command output at both boundaries with a fresh attempt nonce and
+  strict exit-status parsing so provider diagnostics, truncation, or delayed
+  retries cannot corrupt Modal-like `execCommand` control records. Upgrade the
+  Modal JavaScript SDK to 0.9.0 and explicitly retain native checkpoint Images
+  until the provider-bound artifact ledger proves that their exact ids are safe
+  to garbage-collect.
+- Updated dependencies [a19971e]
+- Updated dependencies [1f6f13f]
+  - @opengeni/config@0.7.15
+  - @opengeni/contracts@0.24.0
+
+## 0.14.7
+
+### Patch Changes
+
+- 848287f: Seed the reviewed integrations capability catalog by default in Helm and local deployments while skipping unchanged snapshots.
+
 ## 0.14.6
 
 ### Patch Changes

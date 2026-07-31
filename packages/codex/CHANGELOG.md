@@ -1,5 +1,11 @@
 # @opengeni/codex
 
+## 0.2.8
+
+### Patch Changes
+
+- 6d167f4: Recover exact Codex encrypted-artifact rejections without deleting durable conversation truth, and make maintenance migration protocol activation part of the canonical migration transaction.
+
 ## 0.2.7
 
 ### Patch Changes

@@ -163,6 +163,7 @@ async function frozenFixture() {
     workspaceId: grant.workspaceId!,
     subjectId,
     permissions: ["sessions:read", "sessions:control"],
+    principalKind: "human_session",
     exp: Math.floor(Date.now() / 1_000) + 3_600,
   });
   return {

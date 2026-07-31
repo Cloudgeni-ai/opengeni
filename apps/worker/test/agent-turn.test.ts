@@ -1,5 +1,5 @@
 import { describe, expect, mock, spyOn, test } from "bun:test";
-import { CancelledFailure } from "@temporalio/activity";
+import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
 import { RunRawModelStreamEvent, Usage } from "@openai/agents-core";
 import { ModelItem } from "@openai/agents-core/types";
 import type { Settings } from "@opengeni/config";
@@ -15,6 +15,7 @@ import {
   interruptedToolCallResult,
   runIdempotentPersistenceTransaction,
   SandboxImageConflictError,
+  SandboxLeaseRecoveryBlockedError,
   SandboxLeaseSupersededError,
   SessionEventPersistenceError,
 } from "@opengeni/db";
@@ -25,6 +26,7 @@ import {
   WorkspaceArchiveIntegrityError,
   contextRobustnessFilterForSettings,
   modelResponseUsageFromResponse,
+  safeMcpTransportError,
   sanitizeHistoryItemsForModel,
 } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing";
@@ -44,6 +46,7 @@ import {
   drainAttemptOwnedSandboxWriters,
   emitModelCallUsage,
   ensureTurnModalRegistryImage,
+  escapedMcpTimeoutRecoveryFailure,
   filterUnmaterializedSandboxFileDownloads,
   headerSecretRedactions,
   historyRowsToAppend,
@@ -65,6 +68,7 @@ import {
   providerRecoveryResult,
   resolveActiveSandboxBackend,
   safeErrorDiagnostic,
+  sandboxDeadlineRotationRecoveryDelayMs,
   secretRedactionModelInputFilter,
   shouldRecoverCompactionProviderFailure,
   shouldStartOnTurnRecording,
@@ -2008,6 +2012,15 @@ describe("on-turn recording gate (selfhosted machines have no in-box capture plu
 });
 
 describe("lazy sandbox provisioner single-flight", () => {
+  test("deadline rotation paces recovery for one capture and two reaper periods", () => {
+    expect(
+      sandboxDeadlineRotationRecoveryDelayMs({
+        sandboxLeaseReaperPeriodMs: 30_000,
+        sandboxSnapshotTimeoutMs: 60_000,
+      }),
+    ).toBe(120_000);
+  });
+
   test("concurrent callers share one establish promise", async () => {
     let establishes = 0;
     const provisioner = createTurnSandboxProvisioner(async () => {
@@ -2023,19 +2036,51 @@ describe("lazy sandbox provisioner single-flight", () => {
     expect(results[0]).toEqual({ ok: true, attempt: 1 });
   });
 
-  test("final failure rejects all waiters and resets the memo for the next op", async () => {
+  test("terminal failure rejects all waiters once and remains memoized for the turn", async () => {
     let establishes = 0;
-    const provisioner = createTurnSandboxProvisioner(async () => {
-      establishes += 1;
-      throw new SandboxImageConflictError("group-1", "old", "new");
-    });
+    let failures = 0;
+    const provisioner = createTurnSandboxProvisioner(
+      async () => {
+        establishes += 1;
+        throw new SandboxImageConflictError("group-1", "old", "new");
+      },
+      {
+        onFailed: () => {
+          failures += 1;
+        },
+      },
+    );
 
     const first = await Promise.allSettled(Array.from({ length: 5 }, () => provisioner.get()));
     expect(first.every((result) => result.status === "rejected")).toBe(true);
     expect(establishes).toBe(1);
+    expect(failures).toBe(1);
 
     await expect(provisioner.get()).rejects.toThrow(SandboxImageConflictError);
+    expect(establishes).toBe(1);
+    expect(failures).toBe(1);
+  });
+
+  test("exhausted retryable failure releases the memo for a later operation", async () => {
+    let establishes = 0;
+    let failures = 0;
+    const provisioner = createTurnSandboxProvisioner(
+      async () => {
+        establishes += 1;
+        throw new SandboxLeaseSupersededError("group-1", establishes);
+      },
+      {
+        maxRetries: 0,
+        onFailed: () => {
+          failures += 1;
+        },
+      },
+    );
+
+    await expect(provisioner.get()).rejects.toThrow(SandboxLeaseSupersededError);
+    await expect(provisioner.get()).rejects.toThrow(SandboxLeaseSupersededError);
     expect(establishes).toBe(2);
+    expect(failures).toBe(2);
   });
 
   test("transient supersession retries inside the single-flight", async () => {
@@ -2058,6 +2103,16 @@ describe("lazy sandbox provisioner single-flight", () => {
   test("image conflict is actionable and not retried", async () => {
     expect(
       isLazySandboxProvisionRetryable(new SandboxImageConflictError("group-1", "old", "new")),
+    ).toBe(false);
+    expect(
+      isLazySandboxProvisionRetryable(
+        new SandboxLeaseRecoveryBlockedError(
+          "group-1",
+          1,
+          "restore_degraded",
+          {} as ConstructorParameters<typeof SandboxLeaseRecoveryBlockedError>[3],
+        ),
+      ),
     ).toBe(false);
     expect(isLazySandboxProvisionRetryable(new SandboxLeaseSupersededError("group-1", 1))).toBe(
       true,
@@ -2564,6 +2619,29 @@ describe("escaped MCP transport timeout classifier", () => {
     const exact = new Error("MCP error -32001: Request timed out");
     expect(classifyMcpTransportTimeoutError(exact)?.message).toBe(exact.message);
 
+    const sdkTimeoutMessages = [
+      "Request timed out",
+      "MCP error -32001: Request timed out",
+      "Maximum total timeout exceeded",
+      "MCP error -32001: Maximum total timeout exceeded",
+    ];
+    for (const message of sdkTimeoutMessages) {
+      const sanitized = safeMcpTransportError(
+        Object.assign(new Error(message), {
+          name: "McpError",
+          code: -32_001,
+        }),
+      );
+      expect(classifyMcpTransportTimeoutError(sanitized)?.message).toBe(sanitized.message);
+      expect(agentRunFailurePayload(sanitized)).toEqual({
+        error:
+          "An MCP server request timed out. Any completed tool output was checkpointed; the session can continue safely.",
+        code: "mcp_transport_timeout",
+        retryable: true,
+        detail: sanitized.message,
+      });
+    }
+
     const nested = {
       error: { message: "MCP transport request timeout while listing tools" },
     };
@@ -2576,6 +2654,19 @@ describe("escaped MCP transport timeout classifier", () => {
       retryable: true,
       detail: exact.message,
     });
+
+    for (const message of [
+      "MCP error -32001: Session not found",
+      "MCP error -32001: operator cancelled this request",
+    ]) {
+      const ambiguous = safeMcpTransportError(
+        Object.assign(new Error(message), {
+          name: "McpError",
+          code: -32_001,
+        }),
+      );
+      expect(classifyMcpTransportTimeoutError(ambiguous)).toBeNull();
+    }
   });
 
   test("does not absorb auth-needed or unrelated timeout failures", () => {
@@ -2586,6 +2677,47 @@ describe("escaped MCP transport timeout classifier", () => {
     ).toBeNull();
     expect(classifyMcpTransportTimeoutError(new Error("sandbox creation timed out"))).toBeNull();
     expect(classifyMcpTransportTimeoutError(new Error("Too Many Requests"))).toBeNull();
+  });
+
+  test("emits a typed workflow recovery obligation only before a generation-2 model request", () => {
+    const detail = {
+      turnId: "turn-2",
+      triggerEventId: "trigger-1",
+      executionGeneration: 2,
+    };
+    const escaped = escapedMcpTimeoutRecoveryFailure({
+      failureCode: "mcp_transport_timeout",
+      modelRequestStarted: false,
+      detail,
+    });
+    expect(escaped).toBeInstanceOf(ApplicationFailure);
+    expect(escaped).toMatchObject({
+      type: "EscapedMcpTimeoutRecoveryFailure",
+      nonRetryable: true,
+      details: [detail],
+    });
+
+    expect(
+      escapedMcpTimeoutRecoveryFailure({
+        failureCode: "mcp_transport_timeout",
+        modelRequestStarted: false,
+        detail: { ...detail, executionGeneration: 1 },
+      }),
+    ).toBeNull();
+    expect(
+      escapedMcpTimeoutRecoveryFailure({
+        failureCode: "mcp_transport_timeout",
+        modelRequestStarted: true,
+        detail,
+      }),
+    ).toBeNull();
+    expect(
+      escapedMcpTimeoutRecoveryFailure({
+        failureCode: "provider_unavailable",
+        modelRequestStarted: false,
+        detail,
+      }),
+    ).toBeNull();
   });
 });
 
@@ -3039,8 +3171,8 @@ describe("computerToolModeForTurn (explicit computer-use transport derivation)",
     expect(computerToolModeForTurn(resolved("codex-subscription", "chat"))).toBe("function-image");
   });
 
-  test("a chat-wire (OpenAIChatCompletionsModel) provider → function-text", () => {
-    expect(computerToolModeForTurn(resolved("api-key", "chat"))).toBe("function-text");
+  test("a chat-wire provider without proven visual image transport → disabled", () => {
+    expect(computerToolModeForTurn(resolved("api-key", "chat"))).toBe("disabled");
   });
 
   test("a registry responses provider → hosted", () => {

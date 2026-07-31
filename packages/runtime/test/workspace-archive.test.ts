@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   captureVerifiedWorkspaceArchive,
+  describeNativeSnapshotArchive,
   parseWorkspaceArchiveDescriptor,
   readVerifiedWorkspaceArchive,
   verifyRestoredWorkspace,
@@ -19,15 +23,21 @@ function fingerprintLine(fingerprint: WorkspaceTreeFingerprint): string {
   ].join(" ");
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
 function sessionWithFingerprints(
   fingerprints: WorkspaceTreeFingerprint[],
   archive = new TextEncoder().encode("durable-workspace-archive"),
 ) {
   let probes = 0;
   let captures = 0;
+  const commands: string[] = [];
   return {
     session: {
-      async exec() {
+      async exec(input: { cmd: string }) {
+        commands.push(input.cmd);
         const fingerprint = fingerprints[Math.min(probes, fingerprints.length - 1)]!;
         probes += 1;
         return { stdout: `${fingerprintLine(fingerprint)}\n`, exitCode: 0 };
@@ -38,6 +48,7 @@ function sessionWithFingerprints(
       },
     },
     counts: () => ({ probes, captures }),
+    commands: () => commands,
   };
 }
 
@@ -67,9 +78,171 @@ describe("verified workspace archives", () => {
       capturedAt: new Date(capturedAt).toISOString(),
       workspace: stableTree,
     });
+    expect(verified.kind).toBe("tar");
     expect(parseWorkspaceArchiveDescriptor(verified.descriptor)).toEqual(verified.descriptor);
     expect(readVerifiedWorkspaceArchive(verified.base64, verified.descriptor)).toEqual(verified);
     expect(fake.counts()).toEqual({ probes: 2, captures: 1 });
+  });
+
+  test("native provider receipts bypass tar tree probes and retain exact provider identity", async () => {
+    const nativeBytes = new TextEncoder().encode(
+      'MODAL_SANDBOX_FS_SNAPSHOT_V1\n{"snapshot_id":"im-123","workspace_persistence":"snapshot_filesystem"}',
+    );
+    let probes = 0;
+    const session = {
+      state: { workspacePersistence: "snapshot_filesystem" },
+      async exec() {
+        probes += 1;
+        throw new Error("native receipt capture must not run a tar fingerprint");
+      },
+      async persistWorkspace() {
+        return nativeBytes;
+      },
+    };
+
+    const verified = await captureVerifiedWorkspaceArchive(session, 1_900_000_000_005);
+
+    expect(probes).toBe(0);
+    expect(verified.kind).toBe("provider_snapshot");
+    expect(verified.nativeSnapshot).toEqual({
+      provider: "modal_snapshot_filesystem",
+      snapshotId: "im-123",
+      workspacePersistence: "snapshot_filesystem",
+    });
+    expect(verified.descriptor).toEqual(
+      describeNativeSnapshotArchive(nativeBytes, 1_900_000_000_005),
+    );
+    expect(parseWorkspaceArchiveDescriptor(verified.descriptor)).toEqual(verified.descriptor);
+    expect(readVerifiedWorkspaceArchive(verified.base64, verified.descriptor)).toEqual(verified);
+    await expect(verifyRestoredWorkspace(session, verified.descriptor)).resolves.toBeNull();
+    expect(probes).toBe(0);
+  });
+
+  test("legacy v1 metadata around a native receipt must be durably upgraded before restore", () => {
+    const nativeBytes = new TextEncoder().encode(
+      'MODAL_SANDBOX_FS_SNAPSHOT_V1\n{"snapshot_id":"im-legacy","workspace_persistence":"snapshot_filesystem"}',
+    );
+    const archiveSha256 = createHash("sha256").update(nativeBytes).digest("hex");
+    const legacy = {
+      version: 1 as const,
+      revision: `wa1:1900000000006:${archiveSha256}`,
+      archiveSha256,
+      archiveBytes: nativeBytes.length,
+      capturedAt: new Date(1_900_000_000_006).toISOString(),
+      workspace: stableTree,
+    };
+
+    let error: unknown;
+    try {
+      readVerifiedWorkspaceArchive(Buffer.from(nativeBytes).toString("base64"), legacy);
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(WorkspaceArchiveIntegrityError);
+    expect(error).toMatchObject({
+      code: "native_snapshot_reference_invalid",
+      retryable: false,
+    });
+  });
+
+  test("a native mode that silently falls back to tar is rejected instead of mislabeled", async () => {
+    const fake = {
+      state: { workspacePersistence: "snapshot_filesystem" },
+      async persistWorkspace() {
+        return new TextEncoder().encode("not-a-native-receipt");
+      },
+    };
+
+    const error = await captureVerifiedWorkspaceArchive(fake).catch((caught) => caught);
+    expect(error).toMatchObject({
+      code: "native_snapshot_fallback_unverified",
+      retryable: false,
+    });
+  });
+
+  test("an explicit SDK mount fallback retains the real tar verification path", async () => {
+    const archive = new TextEncoder().encode("verified-mounted-workspace-tar");
+    const fake = sessionWithFingerprints([stableTree, stableTree], archive);
+    const excludedPath = "mount weird'quote";
+    const session = {
+      ...fake.session,
+      state: {
+        workspacePersistence: "snapshot_filesystem",
+        manifest: {
+          ephemeralPersistencePaths: () => new Set([excludedPath]),
+        },
+      },
+    };
+
+    const verified = await captureVerifiedWorkspaceArchive(session, 1_900_000_000_009);
+    expect(verified.kind).toBe("tar");
+    expect(verified.descriptor.version).toBe(1);
+    expect(fake.counts()).toEqual({ probes: 2, captures: 1 });
+    expect(fake.commands()).toHaveLength(2);
+
+    const root = mkdtempSync(join(tmpdir(), "opengeni-fingerprint-"));
+    try {
+      mkdirSync(join(root, excludedPath), { recursive: true });
+      writeFileSync(join(root, "retained.txt"), "retained-one");
+      writeFileSync(join(root, excludedPath, "ephemeral.txt"), "ephemeral-one");
+      const command = fake.commands()[0]!.replace("cd /workspace", `cd ${shellQuote(root)}`);
+      const run = () => {
+        const result = Bun.spawnSync(["/bin/bash", "-c", command], {
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        expect(result.exitCode).toBe(0);
+        return Buffer.from(result.stdout).toString("utf8");
+      };
+      const before = run();
+      writeFileSync(join(root, excludedPath, "ephemeral.txt"), "ephemeral-two");
+      expect(run()).toBe(before);
+      writeFileSync(join(root, "retained.txt"), "retained-two");
+      expect(run()).not.toBe(before);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("tar verification ignores provider-specific hardlink inode topology", async () => {
+    const commands: string[] = [];
+    const session = {
+      async exec(input: { cmd: string }) {
+        commands.push(input.cmd);
+        return { stdout: `${fingerprintLine(stableTree)}\n`, exitCode: 0 };
+      },
+      async persistWorkspace() {
+        return new TextEncoder().encode("tar-with-content-equivalent-hardlinks");
+      },
+    };
+
+    await captureVerifiedWorkspaceArchive(session, 1_900_000_000_012);
+
+    expect(commands).toHaveLength(2);
+    expect(commands.every((command) => command.includes("--hard-dereference"))).toBe(true);
+  });
+
+  test("descriptor revision hash and timestamp must match their common fields", () => {
+    const archive = new TextEncoder().encode("descriptor-consistency");
+    const descriptor = describeNativeSnapshotArchive(
+      new TextEncoder().encode(
+        'MODAL_SANDBOX_FS_SNAPSHOT_V1\n{"snapshot_id":"im-consistent","workspace_persistence":"snapshot_filesystem"}',
+      ),
+      1_900_000_000_010,
+    )!;
+
+    expect(
+      parseWorkspaceArchiveDescriptor({
+        ...descriptor,
+        archiveSha256: createHash("sha256").update(archive).digest("hex"),
+      }),
+    ).toBeNull();
+    expect(
+      parseWorkspaceArchiveDescriptor({
+        ...descriptor,
+        capturedAt: new Date(1_900_000_000_011).toISOString(),
+      }),
+    ).toBeNull();
   });
 
   test("accepts Modal execCommand output wrapped in the provider response banner", async () => {

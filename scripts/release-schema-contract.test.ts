@@ -150,12 +150,16 @@ describe("release schema contract", () => {
         (migrations.has("0133_session_skills.sql") ? 1 : 0) +
         (migrations.has("0134_session_first_party_mcp_tools.sql") ? 1 : 0) +
         (migrations.has("0135_durable_machine_input_batches.sql") ? 1 : 0) +
-        (migrations.has("0136_unified_session_tool_policy.sql") ? 1 : 0),
+        (migrations.has("0136_unified_session_tool_policy.sql") ? 1 : 0) +
+        (migrations.has("0137_preference_registry.sql") ? 1 : 0) +
+        (migrations.has("0138_sandbox_checkpoint_artifacts_and_deadlines.sql") ? 1 : 0) +
+        (migrations.has("0139_codex_provider_artifact_invalidations.sql") ? 1 : 0) +
+        (migrations.has("0140_sandbox_restore_and_reaper_fences.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "a422f332b21e3478afb9d4ff7c78cfcff6c1b9a0d08b407bd7ca584a9e329824",
+      "16ed02416256aab8a0f53aed67c9de49155acbd1cbbba0f822a291333b584c7e",
     );
-    expect(contract.latestMigration).toBe("0136_unified_session_tool_policy.sql");
+    expect(contract.latestMigration).toBe("0140_sandbox_restore_and_reaper_fences.sql");
     expect(migrations.get("0128_github_installation_authority.sql")).toMatchObject({
       sha256: "365793b2a204a70e214adb90298b522acbb6dcfae22a46681a58f41a6938e6f0",
       deploymentMode: "rolling",
@@ -201,7 +205,7 @@ describe("release schema contract", () => {
     expect(
       contract.migrations
         .map((migration) => migration.path)
-        .filter((path) => /^(?:010[3-9]|011[0-9]|012[0-9]|013[0-5])_/.test(path)),
+        .filter((path) => /^(?:010[3-9]|011[0-9]|012[0-9]|013[0-9])_/.test(path)),
     ).toEqual([
       "0103_host_export_root_session.sql",
       "0104_host_export_root_session_backfill.sql",
@@ -226,6 +230,10 @@ describe("release schema contract", () => {
       "0133_session_skills.sql",
       "0134_session_first_party_mcp_tools.sql",
       "0135_durable_machine_input_batches.sql",
+      "0136_unified_session_tool_policy.sql",
+      "0137_preference_registry.sql",
+      "0138_sandbox_checkpoint_artifacts_and_deadlines.sql",
+      "0139_codex_provider_artifact_invalidations.sql",
     ]);
     expect(new Set(contract.migrations.map((migration) => migration.path)).size).toBe(
       contract.fileCount,
@@ -304,6 +312,26 @@ describe("release schema contract", () => {
     });
     expect(migrations.get("0134_session_first_party_mcp_tools.sql")).toMatchObject({
       sha256: "7255a5dfea703b00e01aeab6d003728e60ad7ff78c87af2dc61bd8dda456391e",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0136_unified_session_tool_policy.sql")).toMatchObject({
+      sha256: "8a12370895795b1e8e2ef193a65c97592bf793a410ef6fcae9cc21162561feee",
+      deploymentMode: "maintenance",
+    });
+    expect(migrations.get("0137_preference_registry.sql")).toMatchObject({
+      sha256: "8197520ec68e685e2658b2d33f8daf64e03d1d4922fa9c3ccd97c6f73849c5c5",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0138_sandbox_checkpoint_artifacts_and_deadlines.sql")).toMatchObject({
+      sha256: "c32c70ff47930c77f45482dc5f66b26b13dd444d440397837cca134f97c48e14",
+      deploymentMode: "maintenance",
+    });
+    expect(migrations.get("0139_codex_provider_artifact_invalidations.sql")).toMatchObject({
+      sha256: "977c161505854ef352ade74d396e3c2205e8d3391789fb3535973bd0d20f953b",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0140_sandbox_restore_and_reaper_fences.sql")).toMatchObject({
+      sha256: "fe8441b669fd99fa0463378c34dd75ceca3077af7529c85c552a534c530828d8",
       deploymentMode: "rolling",
     });
   });

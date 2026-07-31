@@ -1698,6 +1698,77 @@ describe("useComposer queue-vs-steer", () => {
 });
 
 describe("useComposer durable draft and control binding", () => {
+  test("historical feed hydration reconciles once without replaying every old event", async () => {
+    let reads = 0;
+    const client = fakeClient({
+      getComposerDraft: async () => {
+        reads += 1;
+        return {
+          revision: reads,
+          text: `read-${reads}`,
+          resources: [],
+          model: "model-x",
+          reasoningEffort: "medium",
+          sourceTurnId: null,
+          sourceTurnVersion: null,
+          updatedAt: new Date().toISOString(),
+        } satisfies ComposerDraft;
+      },
+    });
+    const historical = Array.from({ length: 1_000 }, (_, index) =>
+      makeEvent(index + 1, "session.queue.changed", { operation: "edit" }),
+    );
+    const hook = await renderHook(
+      (events: SessionEvent[]) =>
+        useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+      noEvents,
+    );
+    await flush();
+    expect(reads).toBe(1);
+
+    await hook.rerender(historical);
+    await flush();
+    expect(reads).toBe(2);
+
+    await hook.rerender([
+      ...historical,
+      makeEvent(1_001, "session.queue.changed", { operation: "edit" }),
+    ]);
+    await flush();
+    expect(reads).toBe(3);
+    await hook.unmount();
+  });
+
+  test("history already present at mount is treated as a projection, not live traffic", async () => {
+    let reads = 0;
+    const client = fakeClient({
+      getComposerDraft: async () => {
+        reads += 1;
+        return {
+          revision: reads,
+          text: `read-${reads}`,
+          resources: [],
+          model: "model-x",
+          reasoningEffort: "medium",
+          sourceTurnId: null,
+          sourceTurnVersion: null,
+          updatedAt: new Date().toISOString(),
+        } satisfies ComposerDraft;
+      },
+    });
+    const historical = Array.from({ length: 1_000 }, (_, index) =>
+      makeEvent(index + 1, "session.queue.changed", { operation: "edit" }),
+    );
+    const hook = await renderHook(
+      (events: SessionEvent[]) =>
+        useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+      historical,
+    );
+    await flush();
+    expect(reads).toBe(1);
+    await hook.unmount();
+  });
+
   test("callback churn does not reload drafts outside target, explicit, or event triggers", async () => {
     const sessionB: string = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
     const reads: string[] = [];
@@ -1859,6 +1930,118 @@ describe("useComposer durable draft and control binding", () => {
       text: "edited locally",
       expectedDraftRevision: 5,
       controlEtag: "control-3",
+    });
+    await hook.unmount();
+  });
+
+  test("a reconnect does not duplicate a ready file across the durable draft and live attachment", async () => {
+    const fileId = "33333333-3333-4333-8333-333333333333";
+    const canonicalFile = {
+      kind: "file" as const,
+      mountPath: `files/${fileId}`,
+      fileId,
+    };
+    let serverDraft: ComposerDraft = {
+      revision: 0,
+      text: "",
+      resources: [],
+      model: "model-x",
+      reasoningEffort: "medium",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: null,
+    };
+    const canonicalizeResources = (
+      resources: ComposerDraft["resources"],
+    ): ComposerDraft["resources"] =>
+      resources.map((resource) =>
+        resource.kind === "file"
+          ? {
+              kind: "file" as const,
+              mountPath: resource.mountPath ?? `files/${resource.fileId}`,
+              fileId: resource.fileId,
+            }
+          : resource,
+      );
+    const admissionMismatches: string[] = [];
+    const client = fakeClient({
+      getComposerDraft: async () => serverDraft,
+      saveComposerDraft: async (_workspaceId, _sessionId, request) => {
+        expect(request.expectedRevision).toBe(serverDraft.revision);
+        serverDraft = {
+          ...serverDraft,
+          ...request,
+          revision: serverDraft.revision + 1,
+          resources: canonicalizeResources(request.resources),
+          updatedAt: new Date().toISOString(),
+        };
+        return serverDraft;
+      },
+      sendMessage: async (_workspaceId, _sessionId, input) => {
+        const submitted = input as SendMessageInput;
+        const normalizedResources = canonicalizeResources(submitted.resources ?? []).filter(
+          (resource, index, resources) =>
+            resources.findIndex(
+              (candidate) => JSON.stringify(candidate) === JSON.stringify(resource),
+            ) === index,
+        );
+        const savedContent = JSON.stringify({
+          text: serverDraft.text,
+          resources: serverDraft.resources,
+          model: serverDraft.model,
+          reasoningEffort: serverDraft.reasoningEffort,
+        });
+        const submittedContent = JSON.stringify({
+          text: submitted.text,
+          resources: normalizedResources,
+          model: submitted.model ?? "model-x",
+          reasoningEffort: submitted.reasoningEffort ?? "medium",
+        });
+        if (
+          submitted.expectedDraftRevision === serverDraft.revision &&
+          savedContent !== submittedContent
+        ) {
+          admissionMismatches.push("Submitted content is not the saved draft");
+          throw new Error("Submitted content is not the saved draft");
+        }
+        return makeEvent(1, "user.message");
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          sendExtras: () => ({
+            resources: [{ kind: "file", fileId }],
+            model: "model-x",
+            reasoningEffort: "medium",
+          }),
+        }),
+      undefined,
+    );
+    await flush();
+
+    await flushing(() => hook.result.current.setValue("Inspect the attached image."));
+    await flush(600);
+    expect(serverDraft).toMatchObject({
+      revision: 1,
+      resources: [canonicalFile],
+    });
+
+    // Reconnect reconciliation reloads the canonical server resource while
+    // the browser-local ready attachment card still supplies its bare ref.
+    await flushing(async () => await hook.result.current.reloadDraft());
+    expect(hook.result.current.restoredResources).toEqual([canonicalFile]);
+
+    let accepted = false;
+    await flushing(async () => {
+      accepted = await hook.result.current.send();
+    });
+
+    expect({ accepted, admissionMismatches }).toEqual({
+      accepted: true,
+      admissionMismatches: [],
     });
     await hook.unmount();
   });

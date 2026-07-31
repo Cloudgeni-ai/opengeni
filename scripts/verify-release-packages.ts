@@ -46,6 +46,36 @@ export function parseExpectedPackages(value: string): PublishablePackage[] {
   });
 }
 
+export function deriveExpectedReleasePackages(
+  publishable: PublishablePackage[],
+  registry: Map<string, RegistryPackage | null>,
+): PublishablePackage[] {
+  return publishable.filter((pkg) => {
+    const remote = registry.get(pkg.name);
+    if (remote === undefined) {
+      throw new Error(`registry state was not loaded for ${pkg.name}`);
+    }
+    return remote === null;
+  });
+}
+
+export function resolveExpectedReleasePackages(options: {
+  phase: "plan" | "verify";
+  deriveExpected: boolean;
+  declaredExpected: PublishablePackage[];
+  publishable: PublishablePackage[];
+  registry: Map<string, RegistryPackage | null>;
+}): PublishablePackage[] {
+  if (!options.deriveExpected) return options.declaredExpected;
+  if (options.phase !== "plan") {
+    throw new Error("automatic package derivation is valid only during planning");
+  }
+  if (options.declaredExpected.length !== 0) {
+    throw new Error("automatic package derivation cannot be combined with a declared package set");
+  }
+  return deriveExpectedReleasePackages(options.publishable, options.registry);
+}
+
 export function reconcileReleasePackages(options: {
   sourceSha: string;
   phase: "plan" | "verify";
@@ -215,14 +245,18 @@ async function readRegistryPackage(
 async function main(): Promise<void> {
   const root = resolve(import.meta.dir, "..");
   const sourceSha = process.env.OPENGENI_RELEASE_SOURCE_SHA ?? "";
-  const expected = parseExpectedPackages(process.env.OPENGENI_EXPECTED_PACKAGES ?? "");
   const phaseValue = process.env.OPENGENI_RELEASE_PACKAGE_PHASE ?? "";
   if (phaseValue !== "plan" && phaseValue !== "verify") {
     throw new Error("OPENGENI_RELEASE_PACKAGE_PHASE must be plan or verify");
   }
 
   const publishable = loadPublishablePackages();
-  const expectedNames = new Set(expected.map((pkg) => pkg.name));
+  const declaredExpected = parseExpectedPackages(process.env.OPENGENI_EXPECTED_PACKAGES ?? "");
+  const deriveExpectedValue = process.env.OPENGENI_RELEASE_PACKAGE_DERIVE_EXPECTED ?? "";
+  if (deriveExpectedValue !== "" && deriveExpectedValue !== "true") {
+    throw new Error("OPENGENI_RELEASE_PACKAGE_DERIVE_EXPECTED must be true or unset");
+  }
+  const expectedNames = new Set(declaredExpected.map((pkg) => pkg.name));
   const registryEntries = await Promise.all(
     publishable.map(
       async (pkg) =>
@@ -232,12 +266,20 @@ async function main(): Promise<void> {
         ] as const,
     ),
   );
+  const registry = new Map(registryEntries);
+  const expected = resolveExpectedReleasePackages({
+    phase: phaseValue,
+    deriveExpected: deriveExpectedValue === "true",
+    declaredExpected,
+    publishable,
+    registry,
+  });
   const result = reconcileReleasePackages({
     sourceSha,
     phase: phaseValue,
     publishable,
     expected,
-    registry: new Map(registryEntries),
+    registry,
   });
 
   const receipt = {

@@ -7,7 +7,7 @@
     "dev": "vite dev --port 3000 --host 0.0.0.0",
     "build": "vite build && bun ../../scripts/check-web-bundle-budget.ts",
     "start": "vite preview --port 3000 --host 0.0.0.0",
-    "typecheck": "tsgo --noEmit"
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@fontsource-variable/inter": "^5.2.8",
@@ -44,7 +44,7 @@
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.1",
-    "typescript": "^6.0.3",
+    "typescript": "7.0.2",
     "vite": "^8.0.9"
   }
 }

@@ -66,12 +66,18 @@ oauth_config:
     - https://app.opengeni.ai/v1/integrations/slack/callback
   scopes:
     bot:
-      - chat:write
-      - im:write
-      - channels:read
+      - canvases:read
       - channels:history
-      - groups:read
+      - channels:read
+      - chat:write
+      - files:read
       - groups:history
+      - groups:read
+      - im:history
+      - im:read
+      - im:write
+      - mpim:history
+      - mpim:read
       - users:read
 settings:
   org_deploy_enabled: false
@@ -79,7 +85,7 @@ settings:
   token_rotation_enabled: false
 ```
 
-Self-hosted deployments replace `https://app.opengeni.ai` with their stable HTTPS `OPENGENI_PUBLIC_BASE_URL`. Keep bot `user_scope` empty. Event Subscriptions are disabled by omission. Do not enable Socket Mode, Event Subscriptions, token rotation, or add `channels:join`, `chat:write.public`, or other scopes. OpenGeni rejects an installation whose reported bot scopes do not exactly match the manifest.
+Self-hosted deployments replace `https://app.opengeni.ai` with their stable HTTPS `OPENGENI_PUBLIC_BASE_URL`. Keep bot `user_scope` empty. The manifest requests only the scopes required by the shipped workspace-bot tools; it does not pre-authorize future mention, slash-command, canvas/file mutation, or reaction-mutation behavior. Event Subscriptions remain disabled because no event handlers are shipped. Do not enable Socket Mode, token rotation, or add `app_mentions:read`, `commands`, `canvases:write`, `files:write`, `reactions:write`, `channels:join`, `chat:write.public`, `chat:write.customize`, `users:read.email`, channel-management, administrative, or enterprise-search scopes. OpenGeni rejects an installation whose reported bot scopes do not exactly match the manifest.
 
 ## Install and connect the workspace bot
 
@@ -100,8 +106,12 @@ The bot connection is a workspace-shared `app_install` row (`subjectId = null`) 
 - A private channel is visible and usable only after a Slack member invites the bot.
 - OpenGeni never auto-joins a channel and does not request `channels:join` or `chat:write.public`.
 - Direct messages use `im:write` to open a DM, then post as the bot.
+- Thread replies are read through their top-level message timestamp and may be posted by supplying that same timestamp.
+- File and canvas reads are limited to channels where the bot is already a member. Results expose bounded file metadata and text content, never Slack private-file URLs or credentials.
 
-The first-party tools are `slack_bot_list_channels`, `slack_bot_channel_history`, `slack_bot_list_users`, and `slack_bot_post_message`. Outside a scheduled session, calls require an explicit active bot connection ID and `connections:read`. A scheduled session can use only its immutable selected bot connection ID.
+The first-party tools are `slack_bot_list_channels`, `slack_bot_channel_history`, `slack_bot_thread_replies`, `slack_bot_list_users`, `slack_bot_list_files`, `slack_bot_file_info`, `slack_bot_file_content`, and `slack_bot_post_message`. Outside a scheduled session, calls require `connections:read`; the connection ID is optional when exactly one eligible active OpenGeni bot is installed, and required when multiple eligible bots exist. A scheduled session can use only its immutable selected bot connection ID.
+
+Slack AI huddle notes are canvases. Sharing that canvas into a channel where the bot is a member lets OpenGeni read the notes and exposes the associated `huddleTranscriptFileId`. For transcript content, OpenGeni requests the expanded `files.info` projection with `include_transcription=true` and reads the returned `huddle_transcription` object from the transcript or parent canvas. If Slack omits that projection and redirects the private download to an interactive user page, OpenGeni reports `huddle_transcript_requires_participant_access` and never treats Slack web-client HTML as transcript content.
 
 Each post requires an `operationId` UUID. Generate one per intended message and reuse the same UUID for every timeout or unknown-outcome retry. OpenGeni binds it to the connection, target, and protected request digest and sends it as Slack `client_msg_id`; reusing it for different content or a different target is rejected.
 
@@ -119,4 +129,4 @@ Slack authentication errors that prove invalid, inactive, expired, or revoked cr
 
 ## Audit evidence
 
-Connect, reinstall, disconnect, list, history, user-list, and post operations write connection-targeted audit events. Receipts identify the non-secret credential role, connection UUID, Slack team ID, operation, outcome, and applicable task/session IDs. Post receipts include the non-secret operation/client-message UUID. They never include tokens, authorization headers, posted text, channel history, protected request digests, or raw provider responses.
+Connect, reinstall, disconnect, channel-list, history, thread-reply, user-list, file-list, file-info, file-content, and post operations write connection-targeted audit events. Receipts identify the non-secret credential role, connection UUID, Slack team ID, operation, outcome, and applicable task/session IDs. Post receipts include the non-secret operation/client-message UUID. They never include tokens, authorization headers, posted text, channel history, file contents, private-file URLs, protected request digests, or raw provider responses.

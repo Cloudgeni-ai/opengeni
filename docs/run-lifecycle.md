@@ -164,7 +164,23 @@ For the Codex subscription catalog this means a 272,000-token raw window, a
 244,800 tokens (90%, reached with `>=`). Local checkpoint replacement retains
 only the newest real user messages that fit one cumulative 20,000-token budget,
 then appends the summary; internal resume notices are never retained as user
-intent. See [`context-compaction.md`](context-compaction.md).
+intent. Complete-input estimation detects typed image items before generic JSON
+serialization. It uses retained detail/dimensions or bounded PNG/GIF/WebP/JPEG
+byte-prefix geometry, charges unknown geometry through one conservative bounded
+fallback; PNG geometry additionally requires a valid complete IHDR CRC32. It
+never counts typed inline image base64 as text. Ordinary textual
+data URLs remain text. See [`context-compaction.md`](context-compaction.md).
+
+Outside the explicit durable compaction transition, model-visible history is
+append-only. Given an unchanged canonical prefix and runtime settings, every
+later provider request must reproduce that serialized filtered prefix exactly.
+Request-time filters may normalize computer calls, redact provider identities,
+or bound tool output deterministically; they may not remove or reorder an
+earlier `view_image` call/result pair. Computer-use tools are likewise exposed
+only when the caller supplies a proven visual transport: responses routes
+use hosted computer tools, Codex subscription routes return structured image
+results, and chat-wire or omitted/unproven public runtime routes receive no
+computer tools rather than screenshot data URLs encoded as text.
 
 Before model/tool work, a claimed turn inserts a first-class
 `session_turn_attempts` row containing its exact Temporal activity id, current
@@ -326,15 +342,19 @@ bounded command probe before reporting success. A legacy `warm` row projects to
 retires only the exact `(lease_epoch, instance_id)` and advances the epoch once.
 
 A lost provider is rematerialized by one cold-to-warming winner. Under the lease
-row lock it selects one versioned archive revision containing archive byte/hash
-metadata and a deterministic workspace-tree fingerprint. Repeated starts with
-the same rematerialization id are idempotent; rivals and stale progress/commit
-writes are fenced. The runtime verifies archive bytes before hydration and the
-restored tree before `warm` publication. A partial hydrate or fingerprint
-mismatch terminates the unpublished box and leaves typed degraded/unrecoverable
-state; it never publishes a clean replacement, a previous revision, or a mixed
-snapshot. A legacy per-session archive can participate only after its archive
-fields—never provider identity—are imported and selected under that same lock.
+row lock it selects one versioned archive revision. A native Modal revision must
+match its immutable current artifact receipt, source mutation generation, and
+canonical provider-workspace binding; the exact authenticated client embedded
+in the created session must match that binding before hydration. A real tar
+revision instead carries byte/hash plus deterministic content-tree metadata.
+Repeated starts with the same rematerialization id are idempotent; rivals and
+stale progress/commit writes are fenced. Native restore trusts Modal's snapshot
+semantics and verifies receipt/readiness; only tar restore verifies the restored
+tree. A partial hydrate or failed verification terminates the unpublished box
+and leaves typed degraded/unrecoverable state; it never publishes a clean
+replacement, a previous revision, or a mixed snapshot. A legacy per-session
+archive can participate only after its archive fields—never provider identity—
+are imported and selected under that same lock.
 
 Concurrent routed calls may all discover the same missing provider. Exactly one
 observer wins the lease-loss transition; the others receive typed `superseded`
@@ -525,7 +545,9 @@ wrong one is the classic mistake.
    input is built from this store. It is dual-written as the agent streams
    (reconciled after every model response and at every turn-end path) so a crash
    loses at most the single in-flight model call. Ordinary inference has no
-   second conversation-memory read path.
+   second conversation-memory read path. Historical inline image and screenshot
+   items remain backward-compatible model history; `computer_screenshot` does
+   not yet create a retained artifact receipt or browser-rendering lifecycle.
 2. **`agent_run_states` — requires-action resume only.** The serialized SDK `RunState`
    blob is an opaque, SDK-version-gated process checkpoint. Its one legitimate
    job is resuming a turn that paused mid-flight for a human approval or
@@ -638,7 +660,11 @@ authoritative provider/archive/restore/workspace projection and epoch;
 `sandbox_session_envelopes` stores the small per-session provider/manifest
 descriptor used to reattach and can supply a legacy archive only through the
 lease's atomic revision-selection step. Both are decoupled from the RunState
-blob.
+blob. The current artifact's `archive_generation` remains the immutable capture
+boundary while later tool admissions advance `workspace_generation`. Global
+holder reconciliation claims a bounded lease-first `SKIP LOCKED` batch before
+it deletes stale holders or recomputes counts, so an in-flight acquire is
+deferred to the next sweep rather than overwritten from a pre-wait snapshot.
 
 See issue #35 for the rationale and the dual-write → flagged-read → default-flip
 migration history.
@@ -653,3 +679,12 @@ strips provider item ids from every model-call input by default
 `reasoning.encrypted_content` instead
 (`OPENGENI_OPENAI_REASONING_ENCRYPTED_CONTENT=true`), so requests are
 self-contained and reasoning continuity does not hinge on provider storage.
+If Codex nevertheless rejects that exact opaque artifact with its recognized
+HTTP-400 encrypted-content family, the current attempt atomically marks only
+the same-credential active reasoning/compaction rows and the current turn's
+latest frozen RunState as provider-invalid. Their durable rows, summaries,
+messages, provenance, and timeline truth remain intact. Recovery then reclaims
+the same logical turn with a new attempt and omits or neutralizes only the
+rejected provider-bound identity. A generic 400, a different provider error, or
+a rejection that invalidates no matching artifact is terminal rather than an
+equivalent retry loop.

@@ -1,5 +1,68 @@
 # @opengeni/core
 
+## 0.13.7
+
+### Patch Changes
+
+- Updated dependencies [510eae3]
+  - @opengeni/db@0.15.3
+  - @opengeni/documents@0.2.53
+  - @opengeni/events@0.3.44
+
+## 0.13.6
+
+### Patch Changes
+
+- Updated dependencies [3450ee5]
+- Updated dependencies [ddff8db]
+- Updated dependencies [0a9a6eb]
+  - @opengeni/runtime@0.14.9
+  - @opengeni/contracts@0.24.1
+  - @opengeni/db@0.15.2
+  - @opengeni/documents@0.2.52
+  - @opengeni/config@0.7.17
+  - @opengeni/storage@0.2.41
+  - @opengeni/events@0.3.43
+
+## 0.13.5
+
+### Patch Changes
+
+- Updated dependencies [6d167f4]
+  - @opengeni/codex@0.2.8
+  - @opengeni/db@0.15.1
+  - @opengeni/config@0.7.16
+  - @opengeni/runtime@0.14.8
+  - @opengeni/documents@0.2.51
+  - @opengeni/events@0.3.42
+  - @opengeni/storage@0.2.40
+
+## 0.13.4
+
+### Patch Changes
+
+- Updated dependencies [a19971e]
+- Updated dependencies [1f6f13f]
+  - @opengeni/config@0.7.15
+  - @opengeni/contracts@0.24.0
+  - @opengeni/db@0.15.0
+  - @opengeni/runtime@0.14.7
+  - @opengeni/documents@0.2.50
+  - @opengeni/storage@0.2.39
+  - @opengeni/events@0.3.41
+
+## 0.13.3
+
+### Patch Changes
+
+- Updated dependencies [848287f]
+- Updated dependencies [2a7900f]
+- Updated dependencies [821f664]
+  - @opengeni/db@0.14.7
+  - @opengeni/runtime@0.14.6
+  - @opengeni/documents@0.2.49
+  - @opengeni/events@0.3.40
+
 ## 0.13.2
 
 ### Patch Changes

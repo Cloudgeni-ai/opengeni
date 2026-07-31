@@ -438,17 +438,17 @@ const SettingsSchema = z.object({
   // the named Secret and builds the image via `fromRegistry(tag, secret)` before the
   // first sandbox is created. Knob: OPENGENI_MODAL_IMAGE_REGISTRY_SECRET.
   modalImageRegistrySecret: z.string().optional(),
-  // Modal's hard sandbox lifetime (timeoutMs = this * 1000), counted from each
-  // create/resume — it is the BACKSTOP that reclaims a box if the reaper/worker is
-  // down, NOT the warm-window controller (that's sandboxIdleGraceMs). It must
-  // comfortably exceed reaperPeriod + idleGrace so the reaper terminates a
-  // genuinely-idle box FIRST; the boot invariant below enforces that. Default 1h
-  // (was 900s/15min): the 15-min drain grace counts from the user's LAST release,
-  // but Modal's clock starts at the preceding turn's resume — so a 15-min grace on
-  // top of a 900s lifetime would let Modal kill the box mid-warm-window. 3600s
-  // leaves ~45min of headroom for the active turn before the warm window opens.
+  // Modal's hard sandbox lifetime (timeoutMs = this * 1000), counted from box
+  // creation. A resume-by-id does NOT reset that provider clock. It is the
+  // BACKSTOP that reclaims a box if the reaper/worker is down, NOT the warm-window
+  // controller (that's sandboxIdleGraceMs). It must comfortably exceed
+  // reaperPeriod + idleGrace so the reaper terminates a genuinely-idle box FIRST;
+  // the boot invariant below enforces that. Default 24h, Modal's documented
+  // maximum, to reduce premature active-box loss and leave headroom for the
+  // deadline-aware snapshot/rematerialization transition. The transition—not a
+  // larger timeout—is what lets a session outlive one finite provider box.
   // Knob: OPENGENI_MODAL_TIMEOUT_SECONDS.
-  modalTimeoutSeconds: z.coerce.number().int().positive().default(3600),
+  modalTimeoutSeconds: z.coerce.number().int().positive().max(86_400).default(86_400),
   modalTokenId: z.string().optional(),
   modalTokenSecret: z.string().optional(),
   modalEnvironment: z.string().optional(),
@@ -481,13 +481,6 @@ const SettingsSchema = z.object({
   modalWorkspacePersistence: z
     .enum(["tar", "snapshot_filesystem", "snapshot_directory"])
     .default("snapshot_filesystem"),
-  // Snapshot GC backstop (sandbox-file-persistence): the reaper keeps ONE latest
-  // filesystem snapshot per lease (delete-prior-on-supersede + delete-on-teardown).
-  // This is the TTL retention floor for the periodic orphan sweep — a snapshot
-  // whose lease is cold and older than this is best-effort deleted so a crashed
-  // persist-then-no-restore never leaks a Modal image. 0 disables the TTL sweep
-  // (delete-on-supersede/teardown still run). Default 7 days.
-  modalSnapshotRetentionSeconds: z.coerce.number().int().nonnegative().default(604_800),
   // Shared desktop toggle: this module reads it for the 6080 port-merge; the
   // owner module (P4.x) acts on it to launch the display stack.
   sandboxDesktopEnabled: EnvBoolean.default(false),
@@ -706,8 +699,9 @@ const SettingsSchema = z.object({
   // this whole window so a "glanced away then came back" re-arms the SAME warm box
   // (acquireLease re-arms draining->warm; the reaper's BEFORE-terminate re-read
   // skips a re-armed box). Default 15min so a brief detour never cold-creates a
-  // fresh EMPTY box; lower it to trade warm cost for a snappier reclaim. Knob:
-  // OPENGENI_SANDBOX_IDLE_GRACE_MS.
+  // fresh EMPTY box; lower it to trade warm cost for a snappier reclaim.
+  // getSettings caps the default at half a shorter configured Modal lifetime so
+  // the entire reaper window always fits. Knob: OPENGENI_SANDBOX_IDLE_GRACE_MS.
   sandboxIdleGraceMs: z.coerce.number().int().positive().default(900_000),
   // MID-SESSION /workspace snapshot cadence (sandbox-file-persistence). The
   // reaper's drain-persist only protects boxes the reaper itself kills; a box
@@ -725,6 +719,22 @@ const SettingsSchema = z.object({
   // treated exactly like a failed best-effort snapshot. Knob:
   // OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS. Default 60s.
   sandboxSnapshotTimeoutMs: z.coerce.number().int().positive().default(60_000),
+  // Begin a controlled snapshot/quiesce/drain/rematerialize transition this far
+  // ahead of a finite provider deadline. Modal's 24h creation clock cannot be
+  // extended; the logical sandbox outlives it by moving to one successor box.
+  // getSettings derives the actual default as min(1h, half the configured
+  // provider lifetime) so short-lived test/canary boxes remain bootable without
+  // an extra coupled environment override. An explicit value may be larger when
+  // an operator deliberately wants more rotation headroom; the boot invariant
+  // still requires it to remain below the provider lifetime.
+  sandboxRotationLeadMs: z.coerce.number().int().positive().default(3_600_000),
+  // Bound each global reaper pass so a rollout that discovers many legacy boxes
+  // with unknown creation clocks cannot create a provider/API thundering herd.
+  // One is the safe admission default: the reaper services provider transitions
+  // sequentially, so claiming a wider batch would fence boxes before the same
+  // sweep can service them. Larger fleets may raise this only as an explicit,
+  // observed deployment choice.
+  sandboxRotationBatchSize: z.coerce.number().int().positive().max(500).default(1),
   // expires_at refresh window for a held lease (>> the turn 10s heartbeat so a
   // single missed heartbeat never TTL-reaps a live turn). The warming TTL is the
   // window a cold->warming spawner has to commit warm before a reaper resets it.
@@ -753,6 +763,7 @@ const SettingsSchema = z.object({
   sandboxPreparationProfiles: z.string().default("none"),
   sandboxEnvAllowlist: z.string().default(""),
   objectStorageEndpoint: z.string().url().optional(),
+  objectStorageInternalEndpoint: z.string().url().optional(),
   objectStorageSandboxEndpoint: z.string().url().optional(),
   objectStorageBackend: z
     .enum(["s3-compatible", "aws-s3", "azure-blob", "gcs"])
@@ -1453,7 +1464,6 @@ export function getSettings(): Settings {
     modalEnvironment: optional("OPENGENI_MODAL_ENVIRONMENT"),
     modalIdleTimeoutSeconds: optional("OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS"),
     modalWorkspacePersistence: optional("OPENGENI_MODAL_WORKSPACE_PERSISTENCE"),
-    modalSnapshotRetentionSeconds: optional("OPENGENI_MODAL_SNAPSHOT_RETENTION_SECONDS"),
     sandboxDesktopEnabled: optional("OPENGENI_SANDBOX_DESKTOP_ENABLED"),
     sandboxDesktopInteractive: optional("OPENGENI_SANDBOX_DESKTOP_INTERACTIVE"),
     sandboxTerminalEnabled: optional("OPENGENI_SANDBOX_TERMINAL_ENABLED"),
@@ -1526,6 +1536,8 @@ export function getSettings(): Settings {
     sandboxIdleGraceMs: optional("OPENGENI_SANDBOX_IDLE_GRACE_MS"),
     sandboxSnapshotIntervalMs: optional("OPENGENI_SANDBOX_SNAPSHOT_INTERVAL_MS"),
     sandboxSnapshotTimeoutMs: optional("OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS"),
+    sandboxRotationLeadMs: optional("OPENGENI_SANDBOX_ROTATION_LEAD_MS"),
+    sandboxRotationBatchSize: optional("OPENGENI_SANDBOX_ROTATION_BATCH_SIZE"),
     sandboxLeaseTtlMs: optional("OPENGENI_SANDBOX_LEASE_TTL_MS"),
     sandboxLeaseWarmingTtlMs: optional("OPENGENI_SANDBOX_LEASE_WARMING_TTL_MS"),
     sandboxWarmingTimeoutMs: optional("OPENGENI_SANDBOX_WARMING_TIMEOUT_MS"),
@@ -1537,6 +1549,7 @@ export function getSettings(): Settings {
     sandboxPreparationProfiles: optional("OPENGENI_SANDBOX_PREPARATION_PROFILES"),
     sandboxEnvAllowlist: optional("OPENGENI_SANDBOX_ENV_ALLOWLIST"),
     objectStorageEndpoint: optional("OPENGENI_OBJECT_STORAGE_ENDPOINT"),
+    objectStorageInternalEndpoint: optional("OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT"),
     objectStorageSandboxEndpoint: optional("OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT"),
     objectStorageBackend: optional("OPENGENI_OBJECT_STORAGE_BACKEND"),
     objectStorageBucket: optional("OPENGENI_OBJECT_STORAGE_BUCKET"),
@@ -1592,6 +1605,14 @@ export function getSettings(): Settings {
   const parsed = SettingsSchema.parse(raw);
   const settings = {
     ...parsed,
+    sandboxIdleGraceMs:
+      raw.sandboxIdleGraceMs === undefined
+        ? Math.min(900_000, Math.floor((parsed.modalTimeoutSeconds * 1000) / 2))
+        : parsed.sandboxIdleGraceMs,
+    sandboxRotationLeadMs:
+      raw.sandboxRotationLeadMs === undefined
+        ? Math.min(3_600_000, Math.floor((parsed.modalTimeoutSeconds * 1000) / 2))
+        : parsed.sandboxRotationLeadMs,
     mcpServers: ensureBuiltInMcpServers(parsed),
   };
   validateSettings(settings);
@@ -3554,7 +3575,9 @@ function validateSettings(settings: Settings): void {
     }
     if (
       settings.objectStorageBackend === "s3-compatible" &&
-      (settings.objectStorageEndpoint || settings.objectStorageSandboxEndpoint) &&
+      (settings.objectStorageEndpoint ||
+        settings.objectStorageInternalEndpoint ||
+        settings.objectStorageSandboxEndpoint) &&
       (!settings.objectStorageAccessKeyId || !settings.objectStorageSecretAccessKey)
     ) {
       throw new Error(
@@ -3584,6 +3607,7 @@ function validateSettings(settings: Settings): void {
   } else if (settings.objectStorageBackend === "azure-blob") {
     if (
       settings.objectStorageEndpoint ||
+      settings.objectStorageInternalEndpoint ||
       settings.objectStorageSandboxEndpoint ||
       settings.objectStorageAccessKeyId ||
       settings.objectStorageSecretAccessKey
@@ -3614,6 +3638,7 @@ function validateSettings(settings: Settings): void {
   } else {
     if (
       settings.objectStorageEndpoint ||
+      settings.objectStorageInternalEndpoint ||
       settings.objectStorageSandboxEndpoint ||
       settings.objectStorageAccessKeyId ||
       settings.objectStorageSecretAccessKey
@@ -3662,12 +3687,13 @@ function validateSettings(settings: Settings): void {
   //     out from under us — the provider lifetime is the backstop, not the
   //     warm-window controller. idleGrace counts from the user's last release;
   //     the provider clock counts from the preceding resume, so we leave the
-  //     active-turn headroom in modalTimeoutSeconds (default 3600s).
+  //     active-turn headroom in modalTimeoutSeconds (default 86400s).
   {
     const reaperPeriod = settings.sandboxLeaseReaperPeriodMs;
     const viewerTtl = settings.sandboxViewerHolderTtlMs;
     const idleGraceMs = settings.sandboxIdleGraceMs;
     const providerLifetimeMs = settings.modalTimeoutSeconds * 1000;
+    const rotationLeadMs = settings.sandboxRotationLeadMs;
     // The EFFECTIVE box lifetime when it sits idle between turns is the Modal IDLE
     // timeout, NOT the hard lifetime (sandbox-file-persistence): a box with no
     // active connection is idle-reaped at idleTimeout. effectiveModalIdleTimeout
@@ -3688,6 +3714,18 @@ function validateSettings(settings: Settings): void {
         `OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS*1000 (${idleTimeoutMs}) must not exceed the hard provider ` +
           `lifetime (OPENGENI_MODAL_TIMEOUT_SECONDS*1000 = ${providerLifetimeMs}): the idle timeout is a ` +
           `floor under the hard lifetime, not above it.`,
+      );
+    }
+    if (!(rotationLeadMs < providerLifetimeMs)) {
+      throw new Error(
+        `OPENGENI_SANDBOX_ROTATION_LEAD_MS (${rotationLeadMs}) must be strictly less than ` +
+          `OPENGENI_MODAL_TIMEOUT_SECONDS*1000 (${providerLifetimeMs}).`,
+      );
+    }
+    if (!(rotationLeadMs > settings.sandboxSnapshotTimeoutMs + 2 * reaperPeriod)) {
+      throw new Error(
+        `OPENGENI_SANDBOX_ROTATION_LEAD_MS (${rotationLeadMs}) must exceed the snapshot timeout ` +
+          `plus two reaper periods (${settings.sandboxSnapshotTimeoutMs + 2 * reaperPeriod}).`,
       );
     }
     if (!(viewerTtl < idleTimeoutMs)) {

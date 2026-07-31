@@ -168,6 +168,7 @@ async function fixture() {
     workspaceId: grant.workspaceId,
     subjectId: grant.subjectId,
     permissions: ["sessions:read", "sessions:control"],
+    principalKind: "human_session",
     exp: Math.floor(Date.now() / 1000) + 3_600,
   })}`;
   return { grant, root, child, hidden, authorization };
@@ -633,6 +634,7 @@ describe("embedding host session authorization routes", () => {
       subjectId: value.grant.subjectId,
       permissions: ["sessions:control"],
       sessionId: value.child.id,
+      principalKind: "service",
       exp: Math.floor(Date.now() / 1000) + 3_600,
     });
     const response = await fullAppWith(port).request(
@@ -681,6 +683,7 @@ describe("embedding host session authorization routes", () => {
       accountId: value.grant.accountId,
       workspaceId: value.grant.workspaceId,
       subjectId: value.grant.subjectId,
+      principalKind: "service",
       permissions: ["sessions:control"],
       exp: Math.floor(Date.now() / 1000) + 3_600,
     });
@@ -938,6 +941,7 @@ describe("embedding host session authorization routes", () => {
       turnId: claimed.turn.id,
       attemptId,
       executionGeneration: claimed.turn.executionGeneration,
+      principalKind: "agent_attempt",
       exp: Math.floor(Date.now() / 1000) + 3_600,
     });
     const headers = { authorization: `Bearer ${token}` };

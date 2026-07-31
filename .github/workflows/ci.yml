@@ -29,8 +29,12 @@ on:
         type: string
 
 concurrency:
-  group: ${{ github.event_name == 'workflow_dispatch' && format('ci-automation-{0}-{1}', inputs.automation_pr_number, inputs.automation_head_sha) || format('ci-{0}', github.run_id) }}
-  cancel-in-progress: false
+  # A Version PR has one authoritative latest head. When a newer main push
+  # regenerates that head, continuing to build the superseded head can only
+  # waste capacity and produce a predictably stale terminal-main failure.
+  # Ordinary push/PR CI remains independent and is never cancelled here.
+  group: ${{ github.event_name == 'workflow_dispatch' && format('ci-automation-{0}', inputs.automation_pr_number) || format('ci-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
 
 permissions:
   contents: read
@@ -122,8 +126,8 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: node scripts/check-release-pr-automation.mjs complete-version-check
 
-  test:
-    name: Typecheck and unit tests
+  source-contracts:
+    name: Source and type contracts
     needs: automation-admission
     if: ${{ always() && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
@@ -216,6 +220,44 @@ jobs:
 
       - name: Format check
         run: bun run format:check
+
+      - name: Workspace auth/billing static guard
+        run: bun scripts/check-workspace-billing-static.ts
+
+      - name: Docs reference freshness guard
+        run: bun scripts/check-docs-refs.ts
+
+      - name: Public repository hygiene guard
+        run: bun run check:public-hygiene
+
+  test-suite:
+    name: Real tests and browser acceptance
+    needs: automation-admission
+    if: ${{ always() && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Cache Bun dependencies
+        uses: actions/cache@v6.1.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            bun-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
 
       - name: Test
         env:
@@ -353,14 +395,34 @@ jobs:
             'forced overflow compaction proves shrink against active history, not stale input tokens' \
             ./apps/worker/test/context-compaction-activity.test.ts
 
-      - name: Workspace auth/billing static guard
-        run: bun scripts/check-workspace-billing-static.ts
+  package-contracts:
+    name: Package and bundle contracts
+    needs: automation-admission
+    if: ${{ always() && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
 
-      - name: Docs reference freshness guard
-        run: bun scripts/check-docs-refs.ts
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
 
-      - name: Public repository hygiene guard
-        run: bun run check:public-hygiene
+      - name: Cache Bun dependencies
+        uses: actions/cache@v6.1.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            bun-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
 
       - name: Build client packages (contracts + SDK + React)
         run: bun run build:packages
@@ -382,6 +444,31 @@ jobs:
 
       - name: Web bundle budget
         run: bun run --cwd apps/web build
+
+  test:
+    name: Typecheck and unit tests
+    needs: [source-contracts, test-suite, package-contracts]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every split CI lane
+        env:
+          SOURCE_CONTRACTS_RESULT: ${{ needs.source-contracts.result }}
+          TEST_SUITE_RESULT: ${{ needs.test-suite.result }}
+          PACKAGE_CONTRACTS_RESULT: ${{ needs.package-contracts.result }}
+        run: |
+          set -euo pipefail
+          failed=0
+          for lane in SOURCE_CONTRACTS TEST_SUITE PACKAGE_CONTRACTS; do
+            result_variable="${lane}_RESULT"
+            result="${!result_variable}"
+            printf '%s=%s\n' "${lane,,}" "$result"
+            if [ "$result" != "success" ]; then
+              echo "::error::${lane,,} concluded $result"
+              failed=1
+            fi
+          done
+          exit "$failed"
 
   deployment:
     name: Deployment artifacts
@@ -536,7 +623,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: read
+      packages: write # push immutable exact-main-SHA dogfood images; PR and automation runs remain build-only
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -558,52 +645,134 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build API image
+        id: api_image
         uses: docker/build-push-action@v7.3.0
         with:
           context: .
           file: docker/opengeni.Dockerfile
           target: api
           platforms: linux/amd64,linux/arm64
-          push: false
-          tags: opengeni-api:ci
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ github.event_name == 'push' && format('ghcr.io/cloudgeni-ai/opengeni-api:sha-{0}', github.sha) || 'opengeni-api:ci' }}
+          build-args: |
+            OPENGENI_SERVER_VERSION=sha-${{ github.sha }}
 
       - name: Build worker image
+        id: worker_image
         uses: docker/build-push-action@v7.3.0
         with:
           context: .
           file: docker/opengeni.Dockerfile
           target: worker
           platforms: linux/amd64,linux/arm64
-          push: false
-          tags: opengeni-worker:ci
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ github.event_name == 'push' && format('ghcr.io/cloudgeni-ai/opengeni-worker:sha-{0}', github.sha) || 'opengeni-worker:ci' }}
+          build-args: |
+            OPENGENI_SERVER_VERSION=sha-${{ github.sha }}
 
       - name: Build web image
+        id: web_image
         uses: docker/build-push-action@v7.3.0
         with:
           context: .
           file: docker/opengeni.Dockerfile
           target: web
           platforms: linux/amd64,linux/arm64
-          push: false
-          tags: opengeni-web:ci
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ github.event_name == 'push' && format('ghcr.io/cloudgeni-ai/opengeni-web:sha-{0}', github.sha) || 'opengeni-web:ci' }}
+          build-args: |
+            OPENGENI_SERVER_VERSION=sha-${{ github.sha }}
+            OPENGENI_DEPLOYMENT_REVISION=${{ github.sha }}
 
       - name: Build headless sandbox image
+        id: sandbox_image
         uses: docker/build-push-action@v7.3.0
         with:
           context: .
           file: docker/sandbox.Dockerfile
           platforms: linux/amd64,linux/arm64
-          push: false
-          tags: opengeni-sandbox:ci
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ github.event_name == 'push' && format('ghcr.io/cloudgeni-ai/opengeni-sandbox:sha-{0}', github.sha) || 'opengeni-sandbox:ci' }}
 
       - name: Build relay image
+        id: relay_image
         uses: docker/build-push-action@v7.3.0
         with:
           context: agent
           file: agent/crates/opengeni-relay/Dockerfile
           platforms: linux/amd64,linux/arm64
-          push: false
-          tags: opengeni-relay:ci
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ github.event_name == 'push' && format('ghcr.io/cloudgeni-ai/opengeni-relay:sha-{0}', github.sha) || 'opengeni-relay:ci' }}
+
+      - name: Write exact-main-SHA dogfood receipt
+        if: ${{ github.event_name == 'push' }}
+        env:
+          API_DIGEST: ${{ steps.api_image.outputs.digest }}
+          WORKER_DIGEST: ${{ steps.worker_image.outputs.digest }}
+          WEB_DIGEST: ${{ steps.web_image.outputs.digest }}
+          SANDBOX_DIGEST: ${{ steps.sandbox_image.outputs.digest }}
+          RELAY_DIGEST: ${{ steps.relay_image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          for digest in \
+            "$API_DIGEST" \
+            "$WORKER_DIGEST" \
+            "$WEB_DIGEST" \
+            "$SANDBOX_DIGEST" \
+            "$RELAY_DIGEST"; do
+            printf '%s\n' "$digest" \
+              | grep -Eq '^sha256:[0-9a-f]{64}$'
+          done
+
+          chart_version="$(awk '$1 == "version:" { print $2 }' deploy/helm/opengeni/Chart.yaml)"
+          test -n "$chart_version"
+          jq -n \
+            --arg sourceSha "${GITHUB_SHA}" \
+            --arg sourceRef "${GITHUB_REF}" \
+            --arg sourceRepository "${GITHUB_REPOSITORY}" \
+            --arg runId "${GITHUB_RUN_ID}" \
+            --arg runAttempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg chartVersion "$chart_version" \
+            --arg tag "sha-${GITHUB_SHA}" \
+            --arg apiDigest "$API_DIGEST" \
+            --arg workerDigest "$WORKER_DIGEST" \
+            --arg webDigest "$WEB_DIGEST" \
+            --arg sandboxDigest "$SANDBOX_DIGEST" \
+            --arg relayDigest "$RELAY_DIGEST" \
+            '{
+              schemaVersion: 1,
+              source: {
+                repository: $sourceRepository,
+                ref: $sourceRef,
+                sha: $sourceSha
+              },
+              producer: {
+                workflow: ".github/workflows/ci.yml",
+                runId: $runId,
+                runAttempt: $runAttempt
+              },
+              chartVersion: $chartVersion,
+              imageTag: $tag,
+              images: {
+                api: { repository: "ghcr.io/cloudgeni-ai/opengeni-api", digest: $apiDigest },
+                worker: { repository: "ghcr.io/cloudgeni-ai/opengeni-worker", digest: $workerDigest },
+                web: { repository: "ghcr.io/cloudgeni-ai/opengeni-web", digest: $webDigest },
+                sandbox: { repository: "ghcr.io/cloudgeni-ai/opengeni-sandbox", digest: $sandboxDigest },
+                relay: { repository: "ghcr.io/cloudgeni-ai/opengeni-relay", digest: $relayDigest }
+              }
+            }' > dogfood-images.json
+          sha256sum dogfood-images.json > dogfood-images.sha256
+
+      - name: Upload exact-main-SHA dogfood receipt
+        if: ${{ github.event_name == 'push' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: dogfood-images-${{ github.sha }}
+          path: |
+            dogfood-images.json
+            dogfood-images.sha256
+          if-no-files-found: error
+          retention-days: 30
 
   automation-report:
     name: Report exact-head automation CI

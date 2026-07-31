@@ -24,7 +24,9 @@ import {
   clampCompactionThresholdRatio,
   decideCompaction,
   estimateCompleteModelInput,
+  estimateItemTokenBreakdown,
   estimateItemTokens,
+  estimateNativeImageTokens,
   estimateSerializedValueTokens,
   estimateTextTokens,
   findCompactionNeededError,
@@ -86,6 +88,44 @@ function hasLoneSurrogate(text: string): boolean {
     }
   }
   return false;
+}
+
+function crc32(bytes: Uint8Array): number {
+  let crc = 0xffff_ffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc >>> 1) ^ (crc & 1 ? 0xedb8_8320 : 0);
+    }
+  }
+  return (crc ^ 0xffff_ffff) >>> 0;
+}
+
+function pngIhdrPrefix(width: number, height: number, trailingBytes = 0): Buffer {
+  const bytes = Buffer.alloc(33 + trailingBytes);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(bytes, 0);
+  bytes.writeUInt32BE(13, 8);
+  bytes.write("IHDR", 12, 4, "ascii");
+  bytes.writeUInt32BE(width, 16);
+  bytes.writeUInt32BE(height, 20);
+  bytes[24] = 8;
+  bytes[25] = 6;
+  bytes.writeUInt32BE(crc32(bytes.subarray(12, 29)), 29);
+  return bytes;
+}
+
+function pngDataUrl(bytes: Uint8Array): string {
+  return `data:image/png;base64,${Buffer.from(bytes).toString("base64")}`;
+}
+
+function expectBoundedPngFallback(bytes: Uint8Array): void {
+  expect(estimateNativeImageTokens({ source: pngDataUrl(bytes), detail: "high" })).toMatchObject({
+    tokens: 4_096,
+    width: null,
+    height: null,
+    detail: "high",
+    reason: "bounded_fallback",
+  });
 }
 
 const WINDOW = 1_050_000;
@@ -255,6 +295,102 @@ describe("complete outgoing model-input accounting", () => {
     expect(estimate.tokens).toBe(
       estimate.inputTokens + estimate.instructionsTokens + estimate.toolSchemaTokens,
     );
+  });
+
+  test("counts a 1280x800 typed PNG as a native image instead of base64 text", () => {
+    const image = pngDataUrl(pngIhdrPrefix(1280, 800, 700_000));
+    const item = {
+      type: "function_call_result",
+      callId: "shot-1",
+      output: [{ type: "input_image", image, detail: "high" }],
+    };
+
+    const estimate = estimateItemTokenBreakdown(item);
+    expect(estimate.imageCount).toBe(1);
+    expect(estimate.imageFallbackCount).toBe(0);
+    expect(estimate.imageTokens).toBeGreaterThan(500);
+    expect(estimate.imageTokens).toBeLessThan(5_000);
+    expect(estimate.totalTokens).toBeLessThan(5_500);
+    expect(estimate.totalTokens).toBeLessThan(estimateTextTokens(JSON.stringify(item)));
+  });
+
+  test("trusts PNG geometry when the complete IHDR chunk has a valid CRC32", () => {
+    expect(
+      estimateNativeImageTokens({ source: pngDataUrl(pngIhdrPrefix(1280, 800)), detail: "high" }),
+    ).toMatchObject({
+      width: 1280,
+      height: 800,
+      reason: "dimensions",
+    });
+  });
+
+  test("base64 length does not linearly change an image estimate with identical geometry/detail", () => {
+    const short = pngDataUrl(pngIhdrPrefix(1280, 800));
+    const long = pngDataUrl(pngIhdrPrefix(1280, 800, 700_000));
+    const shortEstimate = estimateItemTokens({ type: "input_image", image: short, detail: "high" });
+    const longEstimate = estimateItemTokens({ type: "input_image", image: long, detail: "high" });
+
+    expect(longEstimate).toBe(shortEstimate);
+  });
+
+  test("uses the bounded fallback for a PNG with only a partial signature", () => {
+    const bytes = pngIhdrPrefix(1280, 800);
+    bytes.fill(0, 4, 8);
+    expectBoundedPngFallback(bytes);
+  });
+
+  test("uses the bounded fallback when the first PNG chunk is not IHDR", () => {
+    const bytes = pngIhdrPrefix(1280, 800);
+    bytes.write("IDAT", 12, 4, "ascii");
+    expectBoundedPngFallback(bytes);
+  });
+
+  test("uses the bounded fallback for a truncated PNG IHDR chunk", () => {
+    expectBoundedPngFallback(pngIhdrPrefix(1280, 800).subarray(0, 32));
+  });
+
+  test("uses the bounded fallback for a corrupt PNG IHDR chunk length", () => {
+    const bytes = pngIhdrPrefix(1280, 800);
+    bytes.writeUInt32BE(0xffff_ffff, 8);
+    expectBoundedPngFallback(bytes);
+  });
+
+  test("uses the bounded fallback for the reviewer's complete IHDR with a zero CRC", () => {
+    const bytes = pngIhdrPrefix(1280, 800);
+    bytes.writeUInt32BE(0, 29);
+    expectBoundedPngFallback(bytes);
+  });
+
+  test("uses the bounded fallback when an otherwise valid PNG IHDR fixture is corrupted", () => {
+    const bytes = pngIhdrPrefix(1280, 800);
+    bytes[16] = (bytes[16] ?? 0) ^ 0x01;
+    expectBoundedPngFallback(bytes);
+  });
+
+  test("uses an explicit bounded fallback for typed image references without geometry", () => {
+    expect(estimateNativeImageTokens({ source: { id: "file_123" }, detail: "auto" })).toMatchObject(
+      {
+        tokens: 4_096,
+        width: null,
+        height: null,
+        detail: "auto",
+        reason: "bounded_fallback",
+      },
+    );
+  });
+
+  test("continues to count a data URL as text outside a typed image context", () => {
+    const short = estimateItemTokens({
+      type: "message",
+      role: "user",
+      content: "data:image/png;base64,AAAA",
+    });
+    const long = estimateItemTokens({
+      type: "message",
+      role: "user",
+      content: `data:image/png;base64,${"A".repeat(100_000)}`,
+    });
+    expect(long).toBeGreaterThan(short + 20_000);
   });
 
   test("anchors to provider total tokens and adds every item after the last model output", () => {

@@ -56,6 +56,7 @@ import {
   loadSkillLibrarySkill,
   deserializeSandboxSessionStateEnvelope,
   ensureReadableStreamFrom,
+  elideSupersededViewImagePairs,
   materializeSandboxFileDownloads,
   repositoryCloneCommand,
   repositoryUsesSandboxClone,
@@ -3352,6 +3353,10 @@ describe("runtime event normalization", () => {
         {
           accountId: "11111111-1111-4111-8111-111111111111",
           workspaceId: "22222222-2222-4222-8222-222222222222",
+          sessionId: "33333333-3333-4333-8333-333333333333",
+          turnId: "44444444-4444-4444-8444-444444444444",
+          attemptId: "55555555-5555-4555-8555-555555555555",
+          executionGeneration: 1,
         },
       );
       try {
@@ -3381,6 +3386,7 @@ describe("runtime event normalization", () => {
 
   test("signs an explicit empty first-party tool selection without default widening", async () => {
     const seenSelections: unknown[] = [];
+    const seenPrincipalKinds: unknown[] = [];
     const mcp = startTestMcpServer({
       validateAuthorization: async (authorization) => {
         if (!authorization?.startsWith("Bearer ")) return false;
@@ -3390,6 +3396,7 @@ describe("runtime event normalization", () => {
         );
         if (!payload) return false;
         seenSelections.push(payload.firstPartyMcpTools);
+        seenPrincipalKinds.push(payload.principalKind);
         return true;
       },
     });
@@ -3415,6 +3422,7 @@ describe("runtime event normalization", () => {
       await prepared.mcpServers[0]!.listTools();
       expect(seenSelections.length).toBeGreaterThan(0);
       expect(seenSelections.every((selection) => JSON.stringify(selection) === "[]")).toBe(true);
+      expect(seenPrincipalKinds.every((kind) => kind === "service")).toBe(true);
     } finally {
       await prepared.close();
       mcp.close();
@@ -3444,6 +3452,10 @@ describe("runtime event normalization", () => {
           {
             accountId: "11111111-1111-4111-8111-111111111111",
             workspaceId: "22222222-2222-4222-8222-222222222222",
+            sessionId: "33333333-3333-4333-8333-333333333333",
+            turnId: "44444444-4444-4444-8444-444444444444",
+            attemptId: "55555555-5555-4555-8555-555555555555",
+            executionGeneration: 1,
           },
         ),
       ).rejects.toThrow();
@@ -5259,6 +5271,28 @@ describe("provider item id stripping", () => {
     expect(preserved.id).toBe("cu_abc");
   });
 
+  test("exports the deprecated view_image elision helper as an identity no-op", () => {
+    const prefix = [
+      { type: "message", role: "user", content: "inspect twice" },
+      {
+        type: "function_call",
+        callId: "view-old",
+        name: "view_image",
+        arguments: JSON.stringify({ path: "/tmp/a.png" }),
+      },
+      { type: "function_call_result", callId: "view-old", output: "old" },
+      {
+        type: "function_call",
+        callId: "view-new",
+        name: "view_image",
+        arguments: JSON.stringify({ path: "/tmp/a.png" }),
+      },
+      { type: "function_call_result", callId: "view-new", output: "new" },
+    ];
+
+    expect(elideSupersededViewImagePairs(prefix)).toBe(prefix);
+  });
+
   test("callModelInputFilterForSettings preserves screenshot history prefixes across successive calls", async () => {
     const filter = callModelInputFilterForSettings(
       testSettings({
@@ -5410,6 +5444,57 @@ describe("provider item id stripping", () => {
     });
     expect(replayed.input).toEqual(result.input);
     expect(JSON.stringify(replayed.input[0])).toBe(serializedProviderItem);
+  });
+
+  test("final model-input filtering preserves an established view_image prefix exactly", async () => {
+    const filter = callModelInputFilterForSettings(testSettings())!;
+    const firstInput = [
+      { type: "message", role: "user", content: "inspect it twice" },
+      {
+        type: "function_call",
+        callId: "view-old",
+        name: "view_image",
+        arguments: JSON.stringify({ path: "/tmp/a.png" }),
+      },
+      {
+        type: "function_call_result",
+        callId: "view-old",
+        output: [{ type: "input_image", image: "data:image/png;base64,AAAA" }],
+      },
+    ] as any;
+    const firstInputSerialized = JSON.stringify(firstInput);
+    const first = await filter({
+      modelData: { input: firstInput },
+      agent: {} as any,
+      context: undefined,
+    });
+    const secondInput = [
+      ...firstInput,
+      {
+        type: "function_call",
+        callId: "view-new",
+        name: "view_image",
+        arguments: JSON.stringify({ path: "/tmp/a.png" }),
+      },
+      {
+        type: "function_call_result",
+        callId: "view-new",
+        output: [{ type: "input_image", image: "data:image/png;base64,BBBB" }],
+      },
+    ] as any;
+    const secondInputSerialized = JSON.stringify(secondInput);
+    const second = await filter({
+      modelData: { input: secondInput },
+      agent: {} as any,
+      context: undefined,
+    });
+
+    expect(JSON.stringify(first.input)).toBe(firstInputSerialized);
+    expect(second.input.slice(0, first.input.length)).toEqual(first.input);
+    expect(JSON.stringify(second.input.slice(0, first.input.length))).toBe(firstInputSerialized);
+    expect(second.input).toHaveLength(first.input.length + 2);
+    expect(JSON.stringify(firstInput)).toBe(firstInputSerialized);
+    expect(JSON.stringify(secondInput)).toBe(secondInputSerialized);
   });
 
   test("same-run provider totals add the complete trailing tool result before the next call", async () => {
