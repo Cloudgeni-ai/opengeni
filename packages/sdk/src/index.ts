@@ -78,6 +78,14 @@ export type {
   WorkspaceInstructionPolicyScope,
   WorkspaceInstructionPolicyTarget,
 } from "./workspace-instruction-policies";
+export type {
+  WorkspaceStateDocumentStatusCounts,
+  WorkspaceStateGapCode,
+  WorkspaceStateMemoryKindCounts,
+  WorkspaceStateMemoryStatusCounts,
+  WorkspaceStateResponse,
+  WorkspaceStateSourceKindCounts,
+} from "./workspace-state";
 export { normalizePreferenceRegistryStableKey } from "./preference-registry";
 export type {
   ActivatePreferenceRegistryRevisionRequest,
