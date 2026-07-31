@@ -1,5 +1,16 @@
 # @opengeni/worker-bundle
 
+## 0.13.1
+
+### Patch Changes
+
+- 02fb98c: Reconcile expired draining sandboxes after their exact provider instance has disappeared.
+- Updated dependencies [02fb98c]
+  - @opengeni/db@0.16.1
+  - @opengeni/core@0.14.1
+  - @opengeni/documents@0.2.58
+  - @opengeni/events@0.3.49
+
 ## 0.13.0
 
 ### Minor Changes
