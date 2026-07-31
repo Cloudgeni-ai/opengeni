@@ -419,6 +419,8 @@ export type OpenGeniSlackBotInstallStart = {
 };
 
 export type GoogleDriveTargetScope = "user" | "workspace" | "organization";
+export type GoogleDriveSyncCadence = "manual" | "hourly" | "daily";
+export type GoogleDriveReadPolicy = "allow" | "ask" | "block";
 
 export type GoogleDriveSelectedSource = {
   id: string;
@@ -426,6 +428,8 @@ export type GoogleDriveSelectedSource = {
   mimeType: string;
   driveId: string | null;
   targetScope: GoogleDriveTargetScope;
+  syncCadence: GoogleDriveSyncCadence;
+  readPolicy: GoogleDriveReadPolicy;
   selectedAt: string;
 };
 
@@ -464,6 +468,7 @@ export type GoogleDriveBrowseItem = {
 export type GoogleDriveBrowseResponse = {
   connection: ConnectionMetadata;
   parentId: string;
+  current: GoogleDriveBrowseItem | null;
   items: GoogleDriveBrowseItem[];
   nextPageToken: string | null;
   incompleteSearch: boolean;
@@ -472,6 +477,8 @@ export type GoogleDriveBrowseResponse = {
 export type SaveGoogleDriveSourceRequest = {
   source: Pick<GoogleDriveBrowseItem, "id" | "name" | "mimeType" | "driveId">;
   targetScope: GoogleDriveTargetScope;
+  syncCadence: GoogleDriveSyncCadence;
+  readPolicy: GoogleDriveReadPolicy;
 };
 
 export type UpdateConnectionRequest = {

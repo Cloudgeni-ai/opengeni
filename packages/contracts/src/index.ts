@@ -4972,12 +4972,20 @@ export const GOOGLE_DRIVE_CREDENTIAL_LABEL = "Google Drive metadata browser" as 
 export const GoogleDriveTargetScope = z.enum(["user", "workspace", "organization"]);
 export type GoogleDriveTargetScope = z.infer<typeof GoogleDriveTargetScope>;
 
+export const GoogleDriveSyncCadence = z.enum(["manual", "hourly", "daily"]);
+export type GoogleDriveSyncCadence = z.infer<typeof GoogleDriveSyncCadence>;
+
+export const GoogleDriveReadPolicy = z.enum(["allow", "ask", "block"]);
+export type GoogleDriveReadPolicy = z.infer<typeof GoogleDriveReadPolicy>;
+
 export const GoogleDriveSelectedSource = z.object({
   id: z.string().min(1).max(256),
   name: z.string().min(1).max(1024),
   mimeType: z.string().min(1).max(256),
   driveId: z.string().min(1).max(256).nullable().default(null),
   targetScope: GoogleDriveTargetScope,
+  syncCadence: GoogleDriveSyncCadence.default("hourly"),
+  readPolicy: GoogleDriveReadPolicy.default("allow"),
   selectedAt: z.string().datetime({ offset: true }),
 });
 export type GoogleDriveSelectedSource = z.infer<typeof GoogleDriveSelectedSource>;
@@ -5022,6 +5030,7 @@ export type GoogleDriveBrowseItem = z.infer<typeof GoogleDriveBrowseItem>;
 export const GoogleDriveBrowseResponse = z.object({
   connection: z.lazy(() => ConnectionMetadata),
   parentId: z.string().min(1).max(256),
+  current: GoogleDriveBrowseItem.nullable(),
   items: z.array(GoogleDriveBrowseItem),
   nextPageToken: z.string().min(1).max(4096).nullable(),
   incompleteSearch: z.boolean(),
@@ -5036,6 +5045,8 @@ export const SaveGoogleDriveSourceRequest = z.object({
     driveId: true,
   }),
   targetScope: GoogleDriveTargetScope,
+  syncCadence: GoogleDriveSyncCadence.default("hourly"),
+  readPolicy: GoogleDriveReadPolicy.default("allow"),
 });
 export type SaveGoogleDriveSourceRequest = z.infer<typeof SaveGoogleDriveSourceRequest>;
 

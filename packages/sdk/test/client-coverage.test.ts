@@ -1053,6 +1053,7 @@ describe("OpenGeniClient connections", () => {
         return jsonResponse({
           connection,
           parentId: "root",
+          current: item,
           items: [item],
           nextPageToken: null,
           incompleteSearch: false,
@@ -1066,6 +1067,7 @@ describe("OpenGeniClient connections", () => {
     const browsed = await client.browseGoogleDrive(WORKSPACE_ID, connection.id, {
       parentId: "root",
     });
+    expect(browsed.current).toEqual(item);
     expect(browsed.items).toEqual([item]);
     const saved = await client.saveGoogleDriveSource(WORKSPACE_ID, connection.id, {
       source: {
@@ -1075,6 +1077,8 @@ describe("OpenGeniClient connections", () => {
         driveId: item.driveId,
       },
       targetScope: "workspace",
+      syncCadence: "hourly",
+      readPolicy: "allow",
     });
     expect(saved).toEqual(connection);
     expect(
@@ -1095,6 +1099,8 @@ describe("OpenGeniClient connections", () => {
         driveId: null,
       },
       targetScope: "workspace",
+      syncCadence: "hourly",
+      readPolicy: "allow",
     });
   });
 

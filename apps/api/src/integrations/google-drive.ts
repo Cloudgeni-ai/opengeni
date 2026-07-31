@@ -5,11 +5,11 @@ import {
   GOOGLE_DRIVE_CREDENTIAL_ROLE,
   GOOGLE_DRIVE_METADATA_READONLY_SCOPE,
   GOOGLE_DRIVE_PROVIDER_DOMAIN,
+  GoogleDriveBrowseItem,
   GoogleDriveBrowseResponse,
   GoogleDriveConnectionMetadata,
   GoogleDriveOAuthStartResponse,
   SaveGoogleDriveSourceRequest,
-  type GoogleDriveBrowseItem,
   type GoogleDriveOAuthStartRequest,
 } from "@opengeni/contracts";
 import { hasPermission, requireEnvironmentEncryption } from "@opengeni/core";
@@ -301,6 +301,12 @@ export async function browseGoogleDrive(
   }
   requireGoogleDriveConnection(connection, input.subjectId);
   const parentId = validDriveId(input.parentId, "parentId");
+  const currentItem = await resolveGoogleDriveBoundaryItem(deps, {
+    workspaceId: input.workspaceId,
+    subjectId: input.subjectId,
+    connectionId: input.connectionId,
+    sourceId: parentId,
+  });
   const url = new URL(`${GOOGLE_DRIVE_API_BASE}/files`);
   url.searchParams.set("q", `'${parentId}' in parents and trashed = false`);
   url.searchParams.set("pageSize", String(GOOGLE_DRIVE_PAGE_SIZE));
@@ -338,6 +344,7 @@ export async function browseGoogleDrive(
   return GoogleDriveBrowseResponse.parse({
     connection: current,
     parentId,
+    current: currentItem,
     items,
     nextPageToken: optionalString(record.nextPageToken),
     incompleteSearch: record.incompleteSearch === true,
@@ -369,23 +376,12 @@ export async function saveGoogleDriveSource(
   }
   requireGoogleDriveConnection(existing, input.subjectId);
   const sourceId = validDriveId(payload.source.id, "source.id");
-  const url = new URL(`${GOOGLE_DRIVE_API_BASE}/files/${encodeURIComponent(sourceId)}`);
-  url.searchParams.set("supportsAllDrives", "true");
-  url.searchParams.set("fields", "id,name,mimeType,modifiedTime,driveId,size,webViewLink");
-  const verified = parseDriveItem(
-    objectRecord(
-      await googleDriveApiRequest(deps, {
-        workspaceId: input.workspaceId,
-        subjectId: input.subjectId,
-        connectionId: input.connectionId,
-        url,
-        label: "Google Drive source metadata",
-      }),
-    ),
-  );
-  if (!verified) {
-    throw new HTTPException(502, { message: "Google Drive returned invalid source metadata" });
-  }
+  const verified = await resolveGoogleDriveBoundaryItem(deps, {
+    workspaceId: input.workspaceId,
+    subjectId: input.subjectId,
+    connectionId: input.connectionId,
+    sourceId,
+  });
   if (
     verified.name !== payload.source.name ||
     verified.mimeType !== payload.source.mimeType ||
@@ -416,6 +412,8 @@ export async function saveGoogleDriveSource(
         mimeType: verified.mimeType,
         driveId: verified.driveId,
         targetScope: payload.targetScope,
+        syncCadence: payload.syncCadence,
+        readPolicy: payload.readPolicy,
         selectedAt: new Date().toISOString(),
       },
     }),
@@ -425,6 +423,85 @@ export async function saveGoogleDriveSource(
     throw new HTTPException(409, { message: "Google Drive connection changed; try again" });
   }
   return updated;
+}
+
+function googleDriveFileMetadataUrl(fileId: string): URL {
+  const url = new URL(`${GOOGLE_DRIVE_API_BASE}/files/${encodeURIComponent(fileId)}`);
+  url.searchParams.set("supportsAllDrives", "true");
+  url.searchParams.set("fields", "id,name,mimeType,modifiedTime,driveId,size,webViewLink");
+  return url;
+}
+
+async function resolveGoogleDriveBoundaryItem(
+  deps: ApiRouteDeps,
+  input: {
+    workspaceId: string;
+    subjectId: string;
+    connectionId: string;
+    sourceId: string;
+  },
+): Promise<GoogleDriveBrowseItem> {
+  if (input.sourceId === "root") {
+    return GoogleDriveBrowseItem.parse({
+      id: "root",
+      name: "My Drive",
+      mimeType: "application/vnd.google-apps.folder",
+      kind: "folder",
+      driveId: null,
+      modifiedTime: null,
+      size: null,
+      webViewLink: "https://drive.google.com/drive/my-drive",
+    });
+  }
+  const fileItem = parseDriveItem(
+    objectRecord(
+      await googleDriveApiRequest(deps, {
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId,
+        connectionId: input.connectionId,
+        url: googleDriveFileMetadataUrl(input.sourceId),
+        label: "Google Drive source metadata",
+      }),
+    ),
+  );
+  if (!fileItem) {
+    throw new HTTPException(502, { message: "Google Drive returned invalid source metadata" });
+  }
+  if (fileItem.kind !== "folder") {
+    throw new HTTPException(400, { message: "Google Drive source must be a Drive or folder" });
+  }
+  if (fileItem.driveId !== fileItem.id) return fileItem;
+
+  const driveUrl = new URL(
+    `${GOOGLE_DRIVE_API_BASE}/drives/${encodeURIComponent(fileItem.driveId)}`,
+  );
+  driveUrl.searchParams.set("fields", "id,name");
+  let drive: Record<string, unknown>;
+  try {
+    drive = objectRecord(
+      await googleDriveApiRequest(deps, {
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId,
+        connectionId: input.connectionId,
+        url: driveUrl,
+        label: "Google Shared Drive metadata",
+      }),
+    );
+  } catch (error) {
+    if (error instanceof HTTPException && error.status === 403) return fileItem;
+    throw error;
+  }
+  const driveName = optionalString(drive.name);
+  if (optionalString(drive.id) !== fileItem.id || !driveName) {
+    throw new HTTPException(502, {
+      message: "Google Drive returned invalid Shared Drive metadata",
+    });
+  }
+  return GoogleDriveBrowseItem.parse({
+    ...fileItem,
+    name: driveName,
+    webViewLink: `https://drive.google.com/drive/folders/${encodeURIComponent(fileItem.id)}`,
+  });
 }
 
 function requireGoogleDriveSettings(settings: Settings): {

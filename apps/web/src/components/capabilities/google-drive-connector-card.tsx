@@ -26,11 +26,12 @@ import { Notice } from "@/components/ui/notice";
 import { Select } from "@/components/ui/select";
 import { useAppContext } from "@/context";
 import { hasWorkspacePermission } from "@/lib/permissions";
-import { cn } from "@/lib/utils";
 import type {
   ConnectionMetadata,
   GoogleDriveBrowseItem,
   GoogleDriveConnectionMetadata as GoogleDriveMetadata,
+  GoogleDriveReadPolicy,
+  GoogleDriveSyncCadence,
   GoogleDriveTargetScope,
 } from "@/types";
 
@@ -54,6 +55,8 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
   const [selected, setSelected] = useState<GoogleDriveBrowseItem | null>(null);
   const [targetScope, setTargetScope] = useState<GoogleDriveTargetScope>("workspace");
   const [folderIdDraft, setFolderIdDraft] = useState("");
+  const [syncCadence, setSyncCadence] = useState<GoogleDriveSyncCadence>("hourly");
+  const [readPolicy, setReadPolicy] = useState<GoogleDriveReadPolicy>("allow");
 
   const connection = useMemo(
     () =>
@@ -97,7 +100,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
     if (!status) return;
     if (status === "connected") {
       toast.success("Google Drive connected", {
-        description: "Choose a file or folder to complete the local metadata-only test.",
+        description: "Choose a Shared Drive or folder boundary and configure incremental sync.",
       });
       void refreshConnections();
     } else {
@@ -158,7 +161,17 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
       });
       setItems((current) => (mode === "append" ? [...current, ...response.items] : response.items));
       setNextPageToken(response.nextPageToken);
-      if (mode === "replace") setSelected(null);
+      if (mode === "replace") {
+        setSelected(response.current);
+        setCrumbs((current) => {
+          const last = current[current.length - 1];
+          if (!last || !response.current) return current;
+          return [
+            ...current.slice(0, -1),
+            { id: response.current.id, name: googleDriveBoundaryLabel(response.current) },
+          ];
+        });
+      }
       if (response.incompleteSearch) {
         toast.warning("Google returned a partial Drive listing");
       }
@@ -179,6 +192,9 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
     setItems([]);
     setSelected(null);
     setNextPageToken(null);
+    setTargetScope(metadata?.selectedSource?.targetScope ?? "workspace");
+    setSyncCadence(metadata?.selectedSource?.syncCadence ?? "hourly");
+    setReadPolicy(metadata?.selectedSource?.readPolicy ?? "allow");
     setBrowseOpen(true);
     void loadFolder({ id: "root", name: "My Drive" });
   }
@@ -216,14 +232,17 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
           driveId: selected.driveId,
         },
         targetScope,
+        syncCadence,
+        readPolicy,
       });
       setConnections((current) => current.map((item) => (item.id === updated.id ? updated : item)));
       setBrowseOpen(false);
-      toast.success("Google Drive source saved", {
-        description: "The connector configuration is ready. No content was ingested.",
+      toast.success("Google Drive sync configured", {
+        description:
+          "The boundary and recurring policy are saved. Content ingestion is not running yet.",
       });
     } catch (error) {
-      toast.error("Google Drive source could not be saved", {
+      toast.error("Google Drive sync could not be saved", {
         description: error instanceof Error ? error.message : String(error),
       });
     } finally {
@@ -246,8 +265,8 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
             <div className="min-w-0">
               <div className="text-sm font-medium">Google Drive</div>
               <p className="mt-0.5 text-xs leading-5 text-fg-muted">
-                Connect an account and choose a knowledge source. This local preview can see file
-                and folder metadata, but cannot download or ingest content yet.
+                Connect once, choose a Shared Drive or folder boundary, and configure how OpenGeni
+                should check for new and changed documents.
               </p>
             </div>
           </div>
@@ -266,7 +285,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
                   onClick={openBrowser}
                 >
                   <FolderOpenIcon className="size-3.5" />
-                  Choose source
+                  Configure sync
                 </Button>
                 <Button
                   type="button"
@@ -308,7 +327,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
         </div>
 
         {connection && metadata ? (
-          <div className="mt-3 grid gap-2 border-t border-border/70 pt-3 text-xs sm:grid-cols-2">
+          <div className="mt-3 grid gap-2 border-t border-border/70 pt-3 text-xs sm:grid-cols-2 lg:grid-cols-4">
             <div>
               <span className="text-fg-subtle">Account</span>
               <div className="mt-0.5 truncate text-fg">
@@ -318,30 +337,45 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
               </div>
             </div>
             <div>
-              <span className="text-fg-subtle">Selected source</span>
+              <span className="text-fg-subtle">Sync boundary</span>
               <div className="mt-0.5 truncate text-fg">
                 {metadata.selectedSource
-                  ? `${metadata.selectedSource.name} · ${scopeLabel(metadata.selectedSource.targetScope)}`
-                  : "None yet"}
+                  ? googleDriveBoundaryLabel(metadata.selectedSource)
+                  : "Not configured"}
+              </div>
+            </div>
+            <div>
+              <span className="text-fg-subtle">Knowledge scope</span>
+              <div className="mt-0.5 truncate text-fg">
+                {metadata.selectedSource
+                  ? scopeLabel(metadata.selectedSource.targetScope)
+                  : "Not configured"}
+              </div>
+            </div>
+            <div>
+              <span className="text-fg-subtle">Incremental sync</span>
+              <div className="mt-0.5 truncate text-fg">
+                {metadata.selectedSource
+                  ? `${cadenceLabel(metadata.selectedSource.syncCadence)} · ${readPolicyLabel(metadata.selectedSource.readPolicy)}`
+                  : "Not configured"}
               </div>
             </div>
           </div>
         ) : null}
 
         <Notice tone="waiting" className="mt-3">
-          Google classifies Drive-wide metadata access as a restricted OAuth scope. The local test
-          is explicit about that permission and keeps tokens server-side in the encrypted connection
-          vault.
+          This local slice saves the Drive boundary and recurring incremental-sync policy. It does
+          not download documents or run the knowledge ingestion worker yet.
         </Notice>
       </section>
 
       <Dialog open={browseOpen} onOpenChange={setBrowseOpen}>
         <DialogContent className="max-h-[85vh] max-w-3xl overflow-hidden">
           <DialogHeader>
-            <DialogTitle>Choose a Google Drive source</DialogTitle>
+            <DialogTitle>Configure Google Drive sync</DialogTitle>
             <DialogDescription>
-              This saves connector configuration only. It does not create a knowledge source or
-              ingest documents.
+              Choose a whole Shared Drive or folder once. Files shown below are included as a
+              preview—you do not select them individually.
             </DialogDescription>
           </DialogHeader>
 
@@ -382,6 +416,20 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
               </Button>
             </div>
 
+            {selected ? (
+              <div className="flex items-center gap-3 rounded-lg border border-brand/30 bg-brand/5 px-3 py-2.5">
+                <FolderOpenIcon className="size-4 shrink-0 text-brand" />
+                <div className="min-w-0 flex-1">
+                  <div className="text-2xs font-medium uppercase tracking-wide text-fg-subtle">
+                    Everything inside this boundary
+                  </div>
+                  <div className="truncate text-sm font-medium text-fg">
+                    {googleDriveBoundaryLabel(selected)}
+                  </div>
+                </div>
+              </div>
+            ) : null}
+
             <div className="max-h-[45vh] min-h-52 overflow-y-auto rounded-lg border border-border">
               {browseBusy && items.length === 0 ? (
                 <div className="flex h-52 items-center justify-center gap-2 text-xs text-fg-muted">
@@ -395,26 +443,18 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
               ) : (
                 <div className="divide-y divide-border/70">
                   {items.map((item) => (
-                    <div
-                      key={item.id}
-                      className={cn(
-                        "flex items-center gap-2 px-3 py-2",
-                        selected?.id === item.id && "bg-brand/8",
-                      )}
-                    >
+                    <div key={item.id} className="flex items-center gap-2 px-3 py-2">
                       {item.kind === "folder" ? (
                         <FolderIcon className="size-4 shrink-0 text-brand" />
                       ) : (
                         <FileIcon className="size-4 shrink-0 text-fg-subtle" />
                       )}
-                      <button
-                        type="button"
+                      <div
                         className="min-w-0 flex-1 truncate text-left text-xs text-fg"
-                        onClick={() => setSelected(item)}
                         title={item.name}
                       >
                         {item.name}
-                      </button>
+                      </div>
                       {item.kind === "folder" ? (
                         <Button
                           type="button"
@@ -426,15 +466,9 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
                           Open
                         </Button>
                       ) : null}
-                      <Button
-                        type="button"
-                        variant={selected?.id === item.id ? "secondary" : "ghost"}
-                        size="sm"
-                        className="h-7"
-                        onClick={() => setSelected(item)}
-                      >
-                        {selected?.id === item.id ? "Selected" : "Select"}
-                      </Button>
+                      {item.kind === "file" ? (
+                        <span className="text-2xs text-fg-subtle">Included</span>
+                      ) : null}
                     </div>
                   ))}
                 </div>
@@ -461,15 +495,9 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
               ) : null}
             </div>
 
-            <div className="grid gap-1.5 sm:grid-cols-[minmax(0,1fr)_14rem] sm:items-end">
-              <div className="min-w-0">
-                <div className="text-xs text-fg-subtle">Selected</div>
-                <div className="mt-0.5 truncate text-sm text-fg">
-                  {selected?.name ?? "Choose a file or folder above"}
-                </div>
-              </div>
+            <div className="grid gap-2 sm:grid-cols-3">
               <label className="grid gap-1 text-xs text-fg-muted">
-                Knowledge scope after ingestion exists
+                Knowledge scope
                 <Select
                   value={targetScope}
                   onChange={(event) => setTargetScope(event.target.value as GoogleDriveTargetScope)}
@@ -477,6 +505,28 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
                   <option value="user">Only me</option>
                   <option value="workspace">This workspace</option>
                   <option value="organization">Company</option>
+                </Select>
+              </label>
+              <label className="grid gap-1 text-xs text-fg-muted">
+                Check for changes
+                <Select
+                  value={syncCadence}
+                  onChange={(event) => setSyncCadence(event.target.value as GoogleDriveSyncCadence)}
+                >
+                  <option value="hourly">Every hour</option>
+                  <option value="daily">Every day</option>
+                  <option value="manual">Only when triggered</option>
+                </Select>
+              </label>
+              <label className="grid gap-1 text-xs text-fg-muted">
+                Read access
+                <Select
+                  value={readPolicy}
+                  onChange={(event) => setReadPolicy(event.target.value as GoogleDriveReadPolicy)}
+                >
+                  <option value="allow">Allow automatically</option>
+                  <option value="ask">Ask before each run</option>
+                  <option value="block">Block</option>
                 </Select>
               </label>
             </div>
@@ -492,13 +542,34 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
               onClick={() => void saveSelection()}
             >
               {busy ? <Loader2Icon className="size-3.5 animate-spin" /> : null}
-              Save source
+              Save sync setup
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
     </>
   );
+}
+
+function cadenceLabel(cadence: GoogleDriveSyncCadence): string {
+  if (cadence === "manual") return "On demand";
+  if (cadence === "daily") return "Daily";
+  return "Hourly";
+}
+
+function readPolicyLabel(policy: GoogleDriveReadPolicy): string {
+  if (policy === "ask") return "Ask";
+  if (policy === "block") return "Blocked";
+  return "Automatic";
+}
+
+function googleDriveBoundaryLabel(source: {
+  id: string;
+  name: string;
+  driveId: string | null;
+}): string {
+  if (source.id === source.driveId && source.name.trim() === "Drive") return "Shared Drive";
+  return source.name.trim();
 }
 
 function scopeLabel(scope: GoogleDriveTargetScope): string {

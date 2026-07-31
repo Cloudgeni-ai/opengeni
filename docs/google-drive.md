@@ -1,7 +1,8 @@
-# Google Drive source preview
+# Google Drive connection and sync preview
 
-OpenGeni can connect a Google account and browse Drive metadata from the
-Capabilities page. This first slice is intentionally a connector preview:
+OpenGeni can connect a Google account once, choose an entire Shared Drive or
+folder boundary, and configure recurring incremental sync from the Capabilities
+page. This first slice is intentionally a connector preview:
 
 - OAuth and refresh tokens are server-side only and encrypted in the existing
   connection vault.
@@ -9,9 +10,11 @@ Capabilities page. This first slice is intentionally a connector preview:
   `https://www.googleapis.com/auth/drive.metadata.readonly`.
 - The browser can see names, types, timestamps, folder structure, and links. It
   cannot download file content.
-- Selecting a file or folder stores connector configuration on the connection.
-  It does not create a knowledge source, download a file, run a backfill, or
-  update workspace memory.
+- Selecting a Shared Drive or folder stores its boundary, future knowledge
+  scope, sync cadence, and read policy on the connection. Files in the browser
+  are an included-content preview, not individually selected sources.
+- The saved schedule and policy do not yet create a knowledge source, download
+  files, run a backfill, or update workspace memory.
 
 Google currently classifies `drive.metadata.readonly` as a restricted scope.
 Keep the OAuth app in Testing with explicit test users for local development.
@@ -52,18 +55,24 @@ The dev stack can select another API or web port if the defaults are occupied.
 If that happens, update both base URLs and the Google authorized redirect URI
 to the exact ports printed by the dev stack.
 
-## Source selection behavior
+## Sync configuration behavior
 
-The browser starts at **My Drive**. A Shared Drive or shared folder can be
-tested by pasting its full `https://drive.google.com/.../folders/...` URL or
-its folder ID. Enumerating all Shared Drives by name requires the broader
-`drive.readonly` scope, so the metadata-only preview does not silently request
-it.
+The browser starts at **My Drive**. The current location—not a child document—is
+the sync boundary. A Shared Drive or shared folder can be tested by pasting its
+full `https://drive.google.com/.../folders/...` URL or its folder ID. The user
+chooses that boundary once; subsequent runs are intended to use a durable cursor
+to process new, changed, moved, or deleted documents incrementally.
+
+Enumerating all Shared Drives by name requires the broader `drive.readonly`
+scope, so the metadata-only preview does not silently request it.
 
 The **Only me**, **This workspace**, and **Company** options record the intended
-future knowledge scope. They are not ingestion or authorization controls yet.
-Durable source rows, content ingestion, backfill, sync, ACL projection, and
-memory updates remain blocked on the common source/fact foundation.
+future knowledge scope. **Hourly**, **Daily**, and **On demand** record the
+intended cadence, while **Allow**, **Ask**, and **Block** record the connector
+read policy. They are configuration only in this slice. Durable scheduler
+dispatch, source rows, content ingestion, backfill, cursor processing, ACL
+projection, and memory updates remain blocked on the common source/fact
+foundation.
 
 Disconnecting revokes the OpenGeni connection locally. It deliberately does not
 call Google's project-wide token revocation endpoint, which can invalidate

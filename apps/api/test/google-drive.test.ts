@@ -159,6 +159,22 @@ function googleFixture(options: { permissionId?: string; omitRefreshToken?: bool
         webViewLink: "https://drive.google.com/drive/folders/folder-1",
       });
     }
+    if (url.pathname === "/drive/v3/files/0AF9DylqqXWK2Uk9PVA") {
+      return Response.json({
+        id: "0AF9DylqqXWK2Uk9PVA",
+        name: "Test google drive",
+        mimeType: "application/vnd.google-apps.folder",
+        driveId: "0AF9DylqqXWK2Uk9PVA",
+        modifiedTime: "2026-07-31T06:00:00.000Z",
+        webViewLink: "https://drive.google.com/drive/folders/0AF9DylqqXWK2Uk9PVA",
+      });
+    }
+    if (url.pathname === "/drive/v3/drives/0AF9DylqqXWK2Uk9PVA") {
+      return Response.json({
+        id: "0AF9DylqqXWK2Uk9PVA",
+        name: "Test google drive",
+      });
+    }
     return new Response("not found", { status: 404 });
   };
   return { fetch, tokenRequests, apiAuthorizationHeaders, fileListQueries };
@@ -312,8 +328,10 @@ describe("Google Drive local source preview", () => {
     );
     expect(browse.status).toBe(200);
     const listed = (await browse.json()) as {
+      current: { id: string; kind: string };
       items: Array<{ id: string; kind: string }>;
     };
+    expect(listed.current).toEqual(expect.objectContaining({ id: "root", kind: "folder" }));
     expect(listed.items).toEqual([
       expect.objectContaining({ id: "folder-1", kind: "folder" }),
       expect.objectContaining({ id: "file-1", kind: "file" }),
@@ -337,6 +355,8 @@ describe("Google Drive local source preview", () => {
             driveId: null,
           },
           targetScope: "workspace",
+          syncCadence: "hourly",
+          readPolicy: "allow",
         }),
       },
     );
@@ -352,6 +372,8 @@ describe("Google Drive local source preview", () => {
         id: "folder-1",
         name: "Product",
         targetScope: "workspace",
+        syncCadence: "hourly",
+        readPolicy: "allow",
       },
     });
     expect(
@@ -379,7 +401,15 @@ describe("Google Drive local source preview", () => {
       },
     );
     expect(browse.status).toBe(200);
-    expect(await browse.json()).toMatchObject({ parentId: sharedDriveId });
+    expect(await browse.json()).toMatchObject({
+      parentId: sharedDriveId,
+      current: {
+        id: sharedDriveId,
+        name: "Test google drive",
+        kind: "folder",
+        driveId: sharedDriveId,
+      },
+    });
     expect(google.fileListQueries).toEqual([`'${sharedDriveId}' in parents and trashed = false`]);
 
     const lookalike = await app(google.fetch).request(
