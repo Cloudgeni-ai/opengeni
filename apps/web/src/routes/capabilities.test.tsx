@@ -4,7 +4,11 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 
 import type { AccessContext } from "@/types";
-import { canInstallOpenGeniSlackBot, SlackBotInstallControls } from "./capabilities";
+import {
+  canInstallOpenGeniSlackBot,
+  canWriteWorkspaceConnections,
+  SlackBotInstallControls,
+} from "./capabilities";
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -74,6 +78,9 @@ describe("OpenGeni Slack bot install controls", () => {
       true,
     );
     expect(canInstallOpenGeniSlackBot(accessContext(["workspace:admin"]), "workspace-a")).toBe(
+      true,
+    );
+    expect(canWriteWorkspaceConnections(accessContext(["connections:write"]), "workspace-a")).toBe(
       true,
     );
   });

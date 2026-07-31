@@ -581,6 +581,75 @@ describe("connections routes", () => {
     ).toMatchObject({ status: "active", subjectId: "subject-b" });
   });
 
+  test("personal Slack status and disconnect stay exact-subject and separate from workspace rows", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const credentialEncrypted = ["opaque", "fixture"].join("-");
+    const alice = await createConnection(client.db, {
+      ...workspace,
+      subjectId: "subject-a",
+      providerDomain: "slack.com",
+      kind: "oauth2",
+      credentialEncrypted,
+      grantedScopes: ["search:read.public", "chat:write"],
+      expiresAt: new Date(Date.now() - 60_000),
+      metadata: { mcpUrl: "https://mcp.slack.com/mcp" },
+      createdBySubjectId: "subject-a",
+    });
+    const bob = await createConnection(client.db, {
+      ...workspace,
+      subjectId: "subject-b",
+      providerDomain: "slack.com",
+      kind: "oauth2",
+      credentialEncrypted,
+      metadata: { mcpUrl: "https://mcp.slack.com/mcp" },
+      createdBySubjectId: "subject-b",
+    });
+    const workspaceRow = await createConnection(client.db, {
+      ...workspace,
+      subjectId: null,
+      providerDomain: "slack.com",
+      kind: "app_install",
+      credentialEncrypted,
+      metadata: { role: "workspace-fixture" },
+      createdBySubjectId: "subject-a",
+    });
+
+    const listed = await app().request(`/v1/workspaces/${workspace.workspaceId}/connections`, {
+      headers: { authorization: await bearer(workspace, "subject-a", ["connections:read"]) },
+    });
+    expect(listed.status).toBe(200);
+    const listedBody = (await listed.json()) as {
+      connections: Array<Record<string, unknown> & { id: string; subjectId: string | null }>;
+    };
+    expect(listedBody.connections.map((connection) => connection.id).sort()).toEqual(
+      [alice.id, workspaceRow.id].sort(),
+    );
+    expect(listedBody.connections.map((connection) => connection.id)).not.toContain(bob.id);
+    expect(listedBody.connections.every((connection) => !("credential" in connection))).toBe(true);
+    expect(
+      listedBody.connections.every((connection) => !("credentialEncrypted" in connection)),
+    ).toBe(true);
+
+    const disconnected = await app().request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/${alice.id}`,
+      {
+        method: "DELETE",
+        headers: { authorization: await bearer(workspace, "subject-a", ["connections:write"]) },
+      },
+    );
+    expect(disconnected.status).toBe(200);
+    expect((await disconnected.json()) as unknown).toMatchObject({
+      connection: { id: alice.id, subjectId: "subject-a", status: "revoked" },
+    });
+    expect(
+      await getConnectionMetadata(client.db, workspace.workspaceId, bob.id, "subject-b"),
+    ).toMatchObject({ status: "active", subjectId: "subject-b" });
+    expect(
+      await getConnectionMetadata(client.db, workspace.workspaceId, workspaceRow.id, "subject-a"),
+    ).toMatchObject({ status: "active", subjectId: null, kind: "app_install" });
+  });
+
   test("personal Slack oauth2 rows cannot be created or converted through generic credential routes", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
