@@ -1,5 +1,18 @@
 # @opengeni/runtime
 
+## 0.14.12
+
+### Patch Changes
+
+- 42428a2: Add per-session Codex remote compaction v2 (`remote_v2` / `portable`), with UI landmarks, Codex-only model locking, and opaque token accounting aligned to Codex CLI.
+- b2e975f: Advance the merged knowledge release train to fresh publication identities without changing runtime behavior. This corrective source is derived from current main and does not reuse generated release output.
+- Updated dependencies [0199108]
+- Updated dependencies [42428a2]
+- Updated dependencies [b2e975f]
+- Updated dependencies [9f3b931]
+  - @opengeni/contracts@0.25.0
+  - @opengeni/config@0.7.20
+
 ## 0.14.11
 
 ### Patch Changes
