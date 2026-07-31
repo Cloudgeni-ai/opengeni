@@ -331,8 +331,6 @@ export async function getWorkspaceInsights(
 
   const creditMicros = modelRows.reduce((sum, row) => sum + row.pricedCostMicros, 0);
   const priorCreditMicros = priorModelRows.reduce((sum, row) => sum + row.pricedCostMicros, 0);
-  const inputTokens = modelRows.reduce((sum, row) => sum + row.inputTokens, 0);
-  const cachedTokens = modelRows.reduce((sum, row) => sum + row.cachedTokens, 0);
   const priorInputTokens = priorModelRows.reduce((sum, row) => sum + row.inputTokens, 0);
   const priorCachedTokens = priorModelRows.reduce((sum, row) => sum + row.cachedTokens, 0);
   const priorCalls = priorModelRows.reduce((sum, row) => sum + row.calls, 0);
