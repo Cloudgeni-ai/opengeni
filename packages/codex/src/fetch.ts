@@ -474,6 +474,15 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
       }
       headers.delete("OpenAI-Beta"); // omit on SSE (spec §1.2); fallback: "responses=experimental" if backend 400s
       headers.delete("x-api-key");
+      // Codex CLI advertises betas via x-codex-beta-features (not OpenAI-Beta).
+      if (ctx.betaFeatures && ctx.betaFeatures.length > 0) {
+        headers.set("x-codex-beta-features", ctx.betaFeatures.join(","));
+      }
+      // Turn analytics / request_kind live in x-codex-turn-metadata — body
+      // metadata is stripped by normalizeCodexRequestBody and rejected upstream.
+      if (ctx.turnMetadata && Object.keys(ctx.turnMetadata).length > 0) {
+        headers.set("x-codex-turn-metadata", JSON.stringify(ctx.turnMetadata));
+      }
 
       // The backend is streaming-only; force stream=true on the wire but remember
       // the caller's intent so a non-streaming caller (e.g. the compaction

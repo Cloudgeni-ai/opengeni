@@ -30,26 +30,35 @@ import type { ClientConfig, ClientModel } from "@/types";
  */
 type ModelChoice = { id: string; label: string; providerLabel: string | null };
 
+function isCodexModelChoice(id: string, provider?: string | null): boolean {
+  return id.startsWith("codex/") || provider === "codex-subscription";
+}
+
 function modelChoices(
   config: ClientConfig | null,
   selected: string,
   extraModels: ClientModel[] = [],
+  codexOnly = false,
 ): ModelChoice[] {
   // extraModels are workspace-scoped (e.g. a connected Codex subscription's models)
   // appended to the host's deployment list; provider grouping keeps them distinct.
   const rich = [...(config?.models ?? []), ...extraModels];
   const choices: ModelChoice[] =
     rich.length > 0
-      ? rich.map((model) => ({
-          id: model.id,
-          label: model.label,
-          providerLabel: model.providerLabel,
-        }))
-      : (config?.allowedModels ?? [selected]).map((id) => ({
-          id,
-          label: displayModel(id),
-          providerLabel: null,
-        }));
+      ? rich
+          .filter((model) => !codexOnly || isCodexModelChoice(model.id, model.provider))
+          .map((model) => ({
+            id: model.id,
+            label: model.label,
+            providerLabel: model.providerLabel,
+          }))
+      : (config?.allowedModels ?? [selected])
+          .filter((id) => !codexOnly || isCodexModelChoice(id))
+          .map((id) => ({
+            id,
+            label: displayModel(id),
+            providerLabel: null,
+          }));
   // Guarantee the active selection is always offered, even if the host has since
   // curated it out of the exposed list (mirrors the old `[props.model]` fallback).
   if (!choices.some((choice) => choice.id === selected)) {
@@ -69,13 +78,20 @@ export function ModelPicker(props: {
   effort: IntelligenceEffort;
   disabled?: boolean;
   extraModels?: ClientModel[];
+  /** When true, only Codex subscription models are offered (remote_v2 sessions). */
+  codexOnly?: boolean;
   onModelChange: (value: string) => void;
   onEffortChange: (value: IntelligenceEffort) => void;
 }) {
   // Host-curated effort allow-list, canonically ordered, full enum — mirrors how
   // the model picker is driven by config.allowedModels (no lossy UI filter).
   const effortOptions = effortOptionsFor(props.config);
-  const choices = modelChoices(props.config, props.model, props.extraModels ?? []);
+  const choices = modelChoices(
+    props.config,
+    props.model,
+    props.extraModels ?? [],
+    props.codexOnly === true,
+  );
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -117,6 +133,11 @@ export function ModelPicker(props: {
         <DropdownMenuLabel className="px-2 pt-0 pb-1 text-xs font-normal text-fg-subtle">
           Model
         </DropdownMenuLabel>
+        {props.codexOnly ? (
+          <p className="px-2 pb-1 text-2xs leading-snug text-fg-subtle">
+            This session uses Codex remote compaction — only Codex models are available.
+          </p>
+        ) : null}
         {choices.map((choice, index) => (
           <ModelChoiceRow
             key={choice.id}

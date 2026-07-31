@@ -1605,6 +1605,7 @@ export class MockOpenGeniClient implements SessionClientLike {
       queueTailPosition: 0,
       effectiveControl: this.effectiveControl(sessionId),
       lastSequence: this.bus(sessionId).events.length,
+      codexCompactionMode: "portable",
       pinned: false,
       pinnedAt: null,
       pinVersion: 0,

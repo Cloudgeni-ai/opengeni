@@ -6,6 +6,7 @@ import {
   acquireLease,
   adoptLegacyModalCheckpointArtifact,
   beginSandboxRematerialization,
+  claimWorkspaceArchiveCapture,
   commitWarmingToWarm,
   confirmDrainCold,
   createDb,
@@ -17,13 +18,14 @@ import {
   markSandboxRestoreVerifying,
   markWarmLeaseInstanceLost,
   claimSandboxCheckpointArtifactsForGc,
-  persistDrainSnapshot,
+  persistDrainSnapshot as persistDrainSnapshotRaw,
   readLease,
   recordWarmingSandboxCreated,
   registerSandboxCheckpointArtifact,
   reapStaleLeaseHolders,
   reapStaleLeaseHoldersGlobal,
   reArmDrainingLease,
+  releaseWorkspaceArchiveCapture,
   releaseLeaseHolder,
   touchLeaseHolder,
   SandboxCheckpointArtifactRegistrationConflictError,
@@ -79,6 +81,41 @@ function archiveDescriptor(archive: string, capturedAtMs: number) {
       totalFileBytes: bytes.length,
     },
   };
+}
+
+async function persistDrainSnapshot(
+  _db: Database,
+  input: Omit<Parameters<typeof persistDrainSnapshotRaw>[1], "captureId">,
+): ReturnType<typeof persistDrainSnapshotRaw> {
+  const captureId = crypto.randomUUID();
+  const claimed = await claimWorkspaceArchiveCapture(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sandboxGroupId: input.sandboxGroupId,
+    captureId,
+    expectedEpoch: input.expectedEpoch,
+    expectedInstanceId: input.expectedInstanceId,
+    liveness: "draining",
+    captureTimeoutMs: 60_000,
+    minIntervalMs: 0,
+  });
+  if (claimed.status !== "claimed") {
+    throw new Error(`Drain capture fixture was not admitted: ${claimed.status}`);
+  }
+  try {
+    return await persistDrainSnapshotRaw(db, { ...input, captureId } as Parameters<
+      typeof persistDrainSnapshotRaw
+    >[1]);
+  } finally {
+    await releaseWorkspaceArchiveCapture(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sandboxGroupId: input.sandboxGroupId,
+      captureId,
+      expectedEpoch: input.expectedEpoch,
+      expectedInstanceId: input.expectedInstanceId,
+    });
+  }
 }
 
 // Seed a fresh (account, workspace) as the superuser (bypasses RLS) and return

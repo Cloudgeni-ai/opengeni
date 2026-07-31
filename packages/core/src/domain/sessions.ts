@@ -1,4 +1,4 @@
-import { CODEX_MODEL_ID_PREFIX } from "@opengeni/codex";
+import { CODEX_MODEL_ID_PREFIX, isCodexBilledModel } from "@opengeni/codex";
 import {
   canonicalizeConfiguredModelId,
   configuredAllowedModels,
@@ -834,6 +834,36 @@ export function assertConfiguredModel(settings: Settings, model: string | null |
   canonicalConfiguredModel(settings, model);
 }
 
+export const CODEX_COMPACTION_V2_PROVIDER_LOCKED = "codex_compaction_v2_provider_locked" as const;
+
+/** Session is frozen on Codex remote compaction v2; non-Codex models are refused. */
+export class CodexCompactionV2ProviderLockedError extends Error {
+  readonly code = CODEX_COMPACTION_V2_PROVIDER_LOCKED;
+  readonly productModelId: string;
+
+  constructor(productModelId: string) {
+    super(
+      `session is locked to Codex remote compaction v2; model "${productModelId}" is not a Codex subscription model`,
+    );
+    this.name = "CodexCompactionV2ProviderLockedError";
+    this.productModelId = productModelId;
+  }
+}
+
+/**
+ * Fail closed when a remote_v2 session would run a non-Codex product model.
+ * Portable sessions and non-Codex sessions keep free mid-session provider swap.
+ */
+export function assertSessionAllowsProductModel(
+  session: Pick<Session, "codexCompactionMode">,
+  productModelId: string | null | undefined,
+): void {
+  if (productModelId === null || productModelId === undefined) return;
+  if (session.codexCompactionMode !== "remote_v2") return;
+  if (isCodexBilledModel(productModelId)) return;
+  throw new CodexCompactionV2ProviderLockedError(productModelId);
+}
+
 /**
  * Reject a model the WORKSPACE's model policy blocks, at the same choke points
  * as assertConfiguredModel — a 422 at the edge instead of a queued turn the
@@ -941,6 +971,16 @@ export async function postUserMessageTurn(input: {
   // model inherits the session's model downstream (always a configured id).
   assertConfiguredModel(settings, requestedModel);
   await assertWorkspaceModelPolicyAllows(db, settings, workspaceId, requestedModel);
+  const sessionForModelGate = await requireSession(db, workspaceId, sessionId);
+  const effectiveModelForGate = requestedModel ?? sessionForModelGate.model;
+  try {
+    assertSessionAllowsProductModel(sessionForModelGate, effectiveModelForGate);
+  } catch (error) {
+    if (error instanceof CodexCompactionV2ProviderLockedError) {
+      throw new HTTPException(422, { message: error.message, cause: error });
+    }
+    throw error;
+  }
   const operationKey = input.clientEventId ?? crypto.randomUUID();
   let result;
   try {
@@ -1667,6 +1707,14 @@ export async function acceptSessionUserMessage(
     canonicalConfiguredModel(settings, requestedModel ?? existingSession.model) ?? null;
   if (effectiveModel === null) {
     throw new Error("effective follow-up model unexpectedly resolved to null");
+  }
+  try {
+    assertSessionAllowsProductModel(existingSession, effectiveModel);
+  } catch (error) {
+    if (error instanceof CodexCompactionV2ProviderLockedError) {
+      throw new HTTPException(422, { message: error.message, cause: error });
+    }
+    throw error;
   }
   const sessionReasoningEffort = reasoningEffortForSession(
     existingSession.metadata,

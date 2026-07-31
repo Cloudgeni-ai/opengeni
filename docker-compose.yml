@@ -1,4 +1,6 @@
-name: opengeni
+# Project name comes from COMPOSE_PROJECT_NAME (set by scripts/dev-stack.sh per
+# worktree). Do not hardcode `name:` here — that forces every checkout to share
+# one Postgres/NATS/Temporal/MinIO volume set.
 
 services:
   postgres:

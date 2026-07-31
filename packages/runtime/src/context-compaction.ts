@@ -27,6 +27,10 @@ export const SUMMARY_BUFFER_TOKENS = 20_000;
 // A single cumulative budget for all retained real user messages, matching
 // Codex core's build_compacted_history_with_limit (not a per-message allowance).
 export const COMPACT_USER_MESSAGE_MAX_TOKENS = 20_000;
+/** Codex CLI remote compaction v2 retained-message budget (codex-rs). */
+export const REMOTE_V2_RETAINED_MESSAGE_TOKEN_BUDGET = 64_000;
+export const REMOTE_COMPACTION_V2_IMPLEMENTATION = "responses_compaction_v2" as const;
+export const REMOTE_COMPACTION_V2_BETA_FEATURE = "remote_compaction_v2" as const;
 // 0.9: compact as LATE as possible — retained context is worth more than early
 // headroom now that declared per-model windows are honest. Model-catalog
 // explicit limits take precedence; the ratio is used for models without one.
@@ -989,6 +993,97 @@ export function buildCompactionReplacementHistory(
   const history = retainedReversed.reverse();
   history.push(buildSummaryItem(summaryBody));
   return history;
+}
+
+/** True for a Codex remote-compaction output item with opaque encrypted content. */
+export function isRemoteCompactionItem(item: unknown): item is CompactionItem {
+  if (!item || typeof item !== "object") return false;
+  const record = item as Record<string, unknown>;
+  return (
+    record.type === "compaction" &&
+    typeof record.encrypted_content === "string" &&
+    record.encrypted_content.length > 0
+  );
+}
+
+/** Messages retained beside a remote v2 compaction blob (user + developer). */
+export function isRetainedRemoteV2Message(item: unknown): boolean {
+  if (isCompactionSummary(item) || itemType(item) === "compaction") return false;
+  const role = itemRole(item);
+  return itemType(item) === "message" && (role === "user" || role === "developer");
+}
+
+/**
+ * Build the active history after Codex remote compaction v2:
+ * newest retained user/developer messages within the CLI 64k budget plus the
+ * opaque `{ type: "compaction", encrypted_content }` item.
+ */
+export function buildRemoteV2ReplacementHistory(
+  items: readonly CompactionItem[],
+  compactionItem: CompactionItem,
+): CompactionItem[] {
+  if (!isRemoteCompactionItem(compactionItem)) {
+    throw new EmptyCompactionSummaryError({ stage: "remote_v2_compaction_item" });
+  }
+  const retainedReversed: CompactionItem[] = [];
+  let remaining = REMOTE_V2_RETAINED_MESSAGE_TOKEN_BUDGET;
+  for (let index = items.length - 1; index >= 0 && remaining > 0; index -= 1) {
+    const item = items[index]!;
+    if (!isRetainedRemoteV2Message(item)) continue;
+    const textTokens = estimateTextTokens(messageText(item));
+    retainedReversed.push(compactMessageToTokenBudget(item, remaining));
+    if (textTokens > remaining) {
+      remaining = 0;
+      break;
+    }
+    remaining -= textTokens;
+  }
+  const history = retainedReversed.reverse();
+  history.push({
+    type: "compaction",
+    encrypted_content: compactionItem.encrypted_content,
+    ...(typeof compactionItem.summary === "string" ? { summary: compactionItem.summary } : {}),
+  });
+  return history;
+}
+
+/**
+ * Append the transient compaction_trigger used only for the remote v2 request.
+ *
+ * The OpenAI Agents SDK's Responses converter rejects a bare
+ * `{ type: "compaction_trigger" }` (`UserError: Unsupported item`). It does
+ * accept `type: "unknown"` and forwards `providerData` onto the wire, which is
+ * how we deliver the Codex-only trigger through CompactionResponsesModel into
+ * the Codex fetch normalizer (which allowlists top-level `compaction_trigger`).
+ */
+export function buildRemoteCompactionV2PromptInput(
+  items: readonly CompactionItem[],
+): CompactionItem[] {
+  return [
+    ...items,
+    {
+      type: "unknown",
+      providerData: { type: "compaction_trigger" },
+    },
+  ];
+}
+
+/** Extract exactly one compaction output item from a Responses payload. */
+export function extractRemoteCompactionV2OutputItem(response: unknown): CompactionItem {
+  if (!response || typeof response !== "object") {
+    throw new EmptyCompactionSummaryError({ stage: "remote_v2_extract", reason: "no_response" });
+  }
+  const record = response as Record<string, unknown>;
+  const output = Array.isArray(record.output) ? record.output : [];
+  const compactionItems = output.filter(isRemoteCompactionItem);
+  if (compactionItems.length !== 1) {
+    throw new EmptyCompactionSummaryError({
+      stage: "remote_v2_extract",
+      reason: "expected_exactly_one_compaction",
+      found: compactionItems.length,
+    });
+  }
+  return compactionItems[0]!;
 }
 
 export function compactionReplacementFingerprint(items: readonly CompactionItem[]): string {

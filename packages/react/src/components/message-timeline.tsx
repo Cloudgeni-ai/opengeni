@@ -11,6 +11,7 @@ import {
   PencilLineIcon,
   PlayIcon,
   RefreshCwIcon,
+  ShrinkIcon,
   TargetIcon,
   Trash2Icon,
   TriangleAlertIcon,
@@ -41,6 +42,7 @@ import {
   type ActivityItem,
   type AgentMessageItem,
   type AuthNeededItem,
+  type ContextCompactionItem,
   type GoalItem,
   type MachineInputBatchItem,
   type NoticeItem,
@@ -409,21 +411,36 @@ export function MessageTimeline({
                   <span className="og-shimmer-text font-medium">Loading earlier activity…</span>
                 </div>
               ) : null}
-              {groups.map(({ group, key }, index) => (
-                <div key={key} data-og-timeline-group-anchor="">
-                  <TimelineGroupView
-                    group={group}
-                    renderMessageText={renderMessageText}
-                    onOpenSession={onOpenSession}
-                    onMemoryClick={onMemoryClick}
-                    onReconnect={onReconnect}
-                    resolveProviderLogo={resolveProviderLogo}
-                    toolRegistry={toolRegistry}
-                    turnSummary={turnSummary}
-                    foldLiveCluster={isAgentProgress(groups[index + 1]?.group)}
-                  />
-                </div>
-              ))}
+              {groups.map(({ group, key }, index) => {
+                const next = groups[index + 1]?.group;
+                const contextCompactionCount =
+                  group.kind === "turn"
+                    ? (group.contextCompactionCount ?? 0)
+                    : group.kind === "activity" &&
+                        next?.kind === "item" &&
+                        next.item.kind === "context-compaction" &&
+                        next.item.phase === "compacted"
+                      ? 1
+                      : 0;
+                return (
+                  <div key={key} data-og-timeline-group-anchor="">
+                    <TimelineGroupView
+                      group={group}
+                      renderMessageText={renderMessageText}
+                      onOpenSession={onOpenSession}
+                      onMemoryClick={onMemoryClick}
+                      onReconnect={onReconnect}
+                      resolveProviderLogo={resolveProviderLogo}
+                      toolRegistry={toolRegistry}
+                      turnSummary={turnSummary}
+                      foldLiveCluster={isAgentProgress(next)}
+                      contextCompactionCount={
+                        contextCompactionCount > 0 ? contextCompactionCount : undefined
+                      }
+                    />
+                  </div>
+                );
+              })}
               {working ? (
                 <div className="flex items-center gap-2 text-sm">
                   <span className="og-shimmer-text font-medium">Working…</span>
@@ -630,6 +647,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
   turnSummary,
   insideTurn = false,
   foldLiveCluster = false,
+  contextCompactionCount,
 }: {
   group: TimelineGroup;
   renderMessageText?:
@@ -649,6 +667,8 @@ const TimelineGroupView = memo(function TimelineGroupView({
       failure surface, so nested chips stay tinted but quiet (no repeated
       failure text, no auto-open) — one loud error, N calm sub-expands. */
   insideTurn?: boolean;
+  /** Secondary chip facet when this fold sits next to a compaction landmark. */
+  contextCompactionCount?: number | undefined;
 }) {
   switch (group.kind) {
     case "activity":
@@ -660,6 +680,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
           defaultOpen={!insideTurn && group.outcome === "failed" ? true : undefined}
           bare={insideTurn}
           facets={turnSummary?.facets}
+          contextCompactionCount={contextCompactionCount}
         >
           <ActivityRail
             items={group.items}
@@ -708,6 +729,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
           defaultOpen={!insideTurn && group.outcome === "failed" ? true : undefined}
           bare={insideTurn}
           facets={turnSummary?.facets}
+          contextCompactionCount={contextCompactionCount ?? group.contextCompactionCount}
         >
           {insideTurn ? (
             // A nested turn is already on an ancestor rail — its body just stacks
@@ -848,6 +870,8 @@ export function TimelineRow({
       return <MachineInputBatchRow item={item} />;
     case "notice":
       return <NoticeRow item={item} />;
+    case "context-compaction":
+      return <CompactionRow item={item} />;
     case "auth-needed":
       return (
         <AuthNeededRow
@@ -1166,6 +1190,91 @@ function GoalRow({ item }: { item: GoalItem }) {
       </span>
     </div>
   );
+}
+
+const COMPACTION_TRIGGER_LABEL: Record<
+  NonNullable<ContextCompactionItem["trigger"]>,
+  string
+> = {
+  auto: "Auto",
+  operator: "Manual",
+  proactive: "Auto",
+  overflow: "Overflow",
+};
+
+function CompactionRow({ item }: { item: ContextCompactionItem }) {
+  const enter = useEntranceAnimation();
+  const trigger =
+    item.trigger && item.phase !== "started" ? COMPACTION_TRIGGER_LABEL[item.trigger] : null;
+  const before =
+    item.estimatedTokensBefore !== null
+      ? Math.round(item.estimatedTokensBefore).toLocaleString("en-US")
+      : null;
+  const after =
+    item.estimatedTokensAfter !== null
+      ? Math.round(item.estimatedTokensAfter).toLocaleString("en-US")
+      : null;
+  const title =
+    item.phase === "started"
+      ? "Compacting conversation memory…"
+      : item.phase === "compacted"
+        ? before && after
+          ? `Conversation memory compacted · ~${before} → ~${after} tokens`
+          : "Conversation memory compacted"
+        : compactionSkipTitle(item.skipReason);
+  const subtitle =
+    item.phase === "compacted"
+      ? "Chat history above is unchanged"
+      : item.phase === "skipped"
+        ? compactionSkipSubtitle(item.skipReason)
+        : null;
+  const pill =
+    item.phase === "skipped" && item.skipReason === "summarization_failed"
+      ? "border-og-status-failed/35 bg-og-status-failed/10 text-og-status-failed"
+      : item.phase === "started"
+        ? "border-og-status-waiting/35 bg-og-status-waiting/10 text-og-status-waiting"
+        : "border-og-border bg-og-surface-1 text-og-fg-muted";
+  return (
+    <div className={cn(enter && "animate-og-enter", "flex justify-center")}>
+      <div
+        className={cn(
+          "inline-flex max-w-full flex-col items-center gap-0.5 rounded-full border px-3 py-1.5 text-og-sm",
+          pill,
+        )}
+        role="status"
+      >
+        <span className="inline-flex max-w-full items-center gap-1.5">
+          <ShrinkIcon className="size-3.5 shrink-0" />
+          <span className="truncate">
+            {title}
+            {trigger ? ` · ${trigger}` : ""}
+          </span>
+        </span>
+        {subtitle ? (
+          <span className="truncate text-og-xs opacity-80">{subtitle}</span>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function compactionSkipTitle(_reason: string | null): string {
+  return "Couldn’t compact conversation memory";
+}
+
+function compactionSkipSubtitle(reason: string | null): string {
+  switch (reason) {
+    case "no_history":
+      return "No active history to compact";
+    case "replacement_not_smaller":
+      return "Checkpoint would not reduce memory size";
+    case "replacement_unchanged":
+      return "Checkpoint made no progress";
+    case "summarization_failed":
+      return "Request it again to retry. Chat history is unchanged.";
+    default:
+      return "Compaction was not needed. Chat history is unchanged.";
+  }
 }
 
 const MACHINE_INPUT_META: Record<MachineInputBatchItem["members"][number]["kind"], string> = {

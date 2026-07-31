@@ -83,6 +83,7 @@ function session(patch: Partial<Session> = {}): Session {
       override: null,
       settlement: null,
     },
+    codexCompactionMode: patch.codexCompactionMode ?? "portable",
   };
 }
 

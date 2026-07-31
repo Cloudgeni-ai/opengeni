@@ -19,7 +19,11 @@ import {
   USER_MESSAGE_TRUNCATION_MARKER,
   buildCompactionPromptInput,
   buildCompactionReplacementHistory,
+  buildRemoteCompactionV2PromptInput,
+  buildRemoteV2ReplacementHistory,
   buildSummaryItem,
+  extractRemoteCompactionV2OutputItem,
+  isRemoteCompactionItem,
   compactionThresholdTokens,
   clampCompactionThresholdRatio,
   decideCompaction,
@@ -1078,5 +1082,61 @@ describe("extractResponseOutputText", () => {
   test("returns empty string for unknown shapes", () => {
     expect(extractResponseOutputText(null)).toBe("");
     expect(extractResponseOutputText({})).toBe("");
+  });
+});
+
+describe("Codex remote compaction v2 helpers", () => {
+  test("appends compaction_trigger via SDK-passthrough unknown item", () => {
+    const input = buildRemoteCompactionV2PromptInput([user("a"), assistant("b")]);
+    expect(input.at(-1)).toEqual({
+      type: "unknown",
+      providerData: { type: "compaction_trigger" },
+    });
+    expect(input.slice(0, -1)).toEqual([user("a"), assistant("b")]);
+  });
+
+  test("extracts exactly one compaction output item", () => {
+    const item = extractRemoteCompactionV2OutputItem({
+      output: [
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: "x" }] },
+        { type: "compaction", encrypted_content: "opaque-blob" },
+      ],
+    });
+    expect(isRemoteCompactionItem(item)).toBe(true);
+    expect(item.encrypted_content).toBe("opaque-blob");
+  });
+
+  test("rejects missing or multiple compaction items", () => {
+    expect(() => extractRemoteCompactionV2OutputItem({ output: [] })).toThrow(
+      EmptyCompactionSummaryError,
+    );
+    expect(() =>
+      extractRemoteCompactionV2OutputItem({
+        output: [
+          { type: "compaction", encrypted_content: "a" },
+          { type: "compaction", encrypted_content: "b" },
+        ],
+      }),
+    ).toThrow(EmptyCompactionSummaryError);
+  });
+
+  test("builds replacement from retained messages plus compaction item", () => {
+    const history = buildRemoteV2ReplacementHistory(
+      [
+        user("old"),
+        { type: "message", role: "developer", content: "dev" },
+        assistant("drop-me"),
+        user("keep"),
+      ],
+      { type: "compaction", encrypted_content: "blob", summary: "optional" },
+    );
+    expect(history.at(-1)).toEqual({
+      type: "compaction",
+      encrypted_content: "blob",
+      summary: "optional",
+    });
+    expect(history.some((item) => item.role === "assistant")).toBe(false);
+    expect(history.some((item) => item.role === "user" && item.content === "keep")).toBe(true);
+    expect(history.some((item) => item.role === "developer")).toBe(true);
   });
 });

@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Full local OpenGeni stack for one checkout / git worktree.
+# Isolates Docker Compose project + host ports so parallel worktrees do not share
+# Postgres/NATS/Temporal/MinIO or race on :8000/:3000.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -12,6 +15,26 @@ set -a
 # shellcheck disable=SC1091
 . ./.env
 set +a
+
+slugify() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//; s/-+/-/g'
+}
+
+# Compose project identity: directory basename (unique per linked worktree path).
+# Ignore ambient COMPOSE_PROJECT_NAME from the parent shell — a prior export of
+# `opengeni` would otherwise collapse every worktree onto one project. Override
+# only via OPENGENI_COMPOSE_PROJECT in .env / the environment.
+if [ -n "${OPENGENI_COMPOSE_PROJECT:-}" ]; then
+  COMPOSE_PROJECT_NAME="$(slugify "$OPENGENI_COMPOSE_PROJECT")"
+else
+  COMPOSE_PROJECT_NAME="$(slugify "$(basename "$(pwd)")")"
+  # Bare main-checkout directory name only — never rewrite an explicit override
+  # (operators may still want COMPOSE project `opengeni` for legacy volumes).
+  if [ "$COMPOSE_PROJECT_NAME" = "opengeni" ]; then
+    COMPOSE_PROJECT_NAME="opengeni-main"
+  fi
+fi
+export COMPOSE_PROJECT_NAME
 
 port_available() {
   if command -v lsof >/dev/null 2>&1; then
@@ -29,28 +52,87 @@ port_available() {
   ! (echo >"/dev/tcp/127.0.0.1/$1") >/dev/null 2>&1
 }
 
+# Ports already claimed by this run (avoids MinIO data/console sharing one bind).
+DECLARED_PORTS=()
+
+port_claimed() {
+  local candidate="$1"
+  local claimed
+  for claimed in "${DECLARED_PORTS[@]+"${DECLARED_PORTS[@]}"}"; do
+    [ "$claimed" = "$candidate" ] && return 0
+  done
+  return 1
+}
+
+claim_port() {
+  DECLARED_PORTS+=("$1")
+}
+
+# Prefer the default port when free. Otherwise scan nearby ports.
+# Host-port values from a copied .env are ignored unless OPENGENI_PIN_PORTS=1,
+# so parallel worktrees do not sticky-collide on another checkout's ports.
 choose_port() {
   local var_name="$1"
   local default_port="$2"
-  local current_value="${!var_name:-}"
-  if [ -n "$current_value" ] && [ "$current_value" != "$default_port" ]; then
-    export "$var_name=$current_value"
-    return
+  local pinned="${!var_name:-}"
+
+  if [ "${OPENGENI_PIN_PORTS:-0}" = "1" ] && [ -n "$pinned" ]; then
+    if ! port_claimed "$pinned" && port_available "$pinned"; then
+      export "$var_name=$pinned"
+      claim_port "$pinned"
+      return
+    fi
+    echo "Pinned ${var_name}=${pinned} is busy; selecting a free port instead." >&2
   fi
-  if port_available "$default_port"; then
+
+  if ! port_claimed "$default_port" && port_available "$default_port"; then
     export "$var_name=$default_port"
+    claim_port "$default_port"
     return
   fi
+  # Prefer default+1000… when defaults are taken. Window is wide so many
+  # parallel worktrees can each grab distinct host ports; still capped so we
+  # do not walk the whole ephemeral range on failure.
   local port
-  for port in $(seq $((default_port + 1000)) $((default_port + 1099))); do
-    if port_available "$port"; then
+  local scan_start=$((default_port + 1000))
+  local scan_end=$((default_port + 2999))
+  if [ "$scan_end" -gt 65535 ]; then
+    scan_end=65535
+  fi
+  for port in $(seq "$scan_start" "$scan_end"); do
+    if ! port_claimed "$port" && port_available "$port"; then
       export "$var_name=$port"
-      echo "Port ${default_port} is in use; using ${var_name}=${port} for this dev stack run."
+      claim_port "$port"
+      echo "Port ${default_port} is in use; using ${var_name}=${port} for this worktree stack."
       return
     fi
   done
-  echo "Could not find a free host port for ${var_name} near ${default_port}." >&2
+  echo "Could not find a free host port for ${var_name} in ${scan_start}-${scan_end}." >&2
   exit 1
+}
+
+# Rewrite the port on loopback URLs/hosts so a copied .env cannot point this
+# worktree at another stack's infra. Non-loopback URLs are left alone.
+# Handles postgres://user@host:port/db, nats://host:port, http(s)://host:port,
+# and bare host:port (Temporal).
+rewrite_loopback_port() {
+  local value="$1"
+  local new_port="$2"
+  if [[ "$value" =~ @127\.0\.0\.1:[0-9]+ ]] || [[ "$value" =~ @localhost:[0-9]+ ]]; then
+    printf '%s' "$value" | sed -E "s/@(127\.0\.0\.1|localhost):[0-9]+/@\1:${new_port}/"
+    return
+  fi
+  # Any URI scheme on loopback (nats://, http://, https://, …).
+  if [[ "$value" =~ ^[a-zA-Z][a-zA-Z0-9+.-]*://127\.0\.0\.1:[0-9]+ ]] ||
+    [[ "$value" =~ ^[a-zA-Z][a-zA-Z0-9+.-]*://localhost:[0-9]+ ]]; then
+    printf '%s' "$value" | sed -E "s#^([a-zA-Z][a-zA-Z0-9+.-]*://)(127\.0\.0\.1|localhost):[0-9]+#\1\2:${new_port}#"
+    return
+  fi
+  if [[ "$value" =~ ^127\.0\.0\.1:[0-9]+$ ]] || [[ "$value" =~ ^localhost:[0-9]+$ ]]; then
+    printf '%s' "$value" | sed -E "s/^(127\.0\.0\.1|localhost):[0-9]+/\1:${new_port}/"
+    return
+  fi
+  printf '%s' "$value"
 }
 
 choose_port OPENGENI_POSTGRES_HOST_PORT 5432
@@ -65,43 +147,86 @@ choose_port OPENGENI_TURN_WORKER_HTTP_PORT 8002
 choose_port OPENGENI_WEB_PORT 3000
 
 default_database_url="postgres://opengeni_app:opengeni_app@127.0.0.1:5432/opengeni"
-if [ "${OPENGENI_DATABASE_URL:-$default_database_url}" = "$default_database_url" ]; then
+if [ -z "${OPENGENI_DATABASE_URL:-}" ] || [ "${OPENGENI_DATABASE_URL}" = "$default_database_url" ]; then
   export OPENGENI_DATABASE_URL="postgres://opengeni_app:opengeni_app@127.0.0.1:${OPENGENI_POSTGRES_HOST_PORT}/opengeni"
+else
+  export OPENGENI_DATABASE_URL="$(rewrite_loopback_port "$OPENGENI_DATABASE_URL" "$OPENGENI_POSTGRES_HOST_PORT")"
 fi
 
 default_migrations_database_url="postgres://opengeni:opengeni@127.0.0.1:5432/opengeni"
-if [ "${OPENGENI_MIGRATIONS_DATABASE_URL:-$default_migrations_database_url}" = "$default_migrations_database_url" ]; then
+if [ -z "${OPENGENI_MIGRATIONS_DATABASE_URL:-}" ] || [ "${OPENGENI_MIGRATIONS_DATABASE_URL}" = "$default_migrations_database_url" ]; then
   export OPENGENI_MIGRATIONS_DATABASE_URL="postgres://opengeni:opengeni@127.0.0.1:${OPENGENI_POSTGRES_HOST_PORT}/opengeni"
+else
+  export OPENGENI_MIGRATIONS_DATABASE_URL="$(rewrite_loopback_port "$OPENGENI_MIGRATIONS_DATABASE_URL" "$OPENGENI_POSTGRES_HOST_PORT")"
 fi
 
 default_nats_url="nats://127.0.0.1:4222"
-if [ "${OPENGENI_NATS_URL:-$default_nats_url}" = "$default_nats_url" ]; then
+if [ -z "${OPENGENI_NATS_URL:-}" ] || [ "${OPENGENI_NATS_URL}" = "$default_nats_url" ]; then
   export OPENGENI_NATS_URL="nats://127.0.0.1:${OPENGENI_NATS_HOST_PORT}"
+else
+  export OPENGENI_NATS_URL="$(rewrite_loopback_port "$OPENGENI_NATS_URL" "$OPENGENI_NATS_HOST_PORT")"
 fi
 
 default_temporal_host="127.0.0.1:7233"
-if [ "${OPENGENI_TEMPORAL_HOST:-$default_temporal_host}" = "$default_temporal_host" ]; then
+if [ -z "${OPENGENI_TEMPORAL_HOST:-}" ] || [ "${OPENGENI_TEMPORAL_HOST}" = "$default_temporal_host" ]; then
   export OPENGENI_TEMPORAL_HOST="127.0.0.1:${OPENGENI_TEMPORAL_HOST_PORT}"
+else
+  export OPENGENI_TEMPORAL_HOST="$(rewrite_loopback_port "$OPENGENI_TEMPORAL_HOST" "$OPENGENI_TEMPORAL_HOST_PORT")"
 fi
 
 default_object_endpoint="http://127.0.0.1:9000"
-if [ "${OPENGENI_OBJECT_STORAGE_ENDPOINT:-$default_object_endpoint}" = "$default_object_endpoint" ]; then
+if [ -z "${OPENGENI_OBJECT_STORAGE_ENDPOINT:-}" ] || [ "${OPENGENI_OBJECT_STORAGE_ENDPOINT}" = "$default_object_endpoint" ]; then
   export OPENGENI_OBJECT_STORAGE_ENDPOINT="http://127.0.0.1:${OPENGENI_MINIO_HOST_PORT}"
+else
+  export OPENGENI_OBJECT_STORAGE_ENDPOINT="$(rewrite_loopback_port "$OPENGENI_OBJECT_STORAGE_ENDPOINT" "$OPENGENI_MINIO_HOST_PORT")"
 fi
 
 default_sandbox_object_endpoint="http://host.docker.internal:9000"
-if [ "${OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT:-$default_sandbox_object_endpoint}" = "$default_sandbox_object_endpoint" ]; then
+if [ -z "${OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT:-}" ] || [ "${OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT}" = "$default_sandbox_object_endpoint" ]; then
+  # In-compose DNS; host port mapping is irrelevant inside the docker network.
   export OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT="http://minio:9000"
 fi
 
-if [ -z "${OPENGENI_DOCKER_NETWORK:-}" ]; then
-  export OPENGENI_DOCKER_NETWORK="opengeni_default"
-fi
+# Sandbox containers must join *this* worktree's compose network.
+export OPENGENI_DOCKER_NETWORK="${COMPOSE_PROJECT_NAME}_default"
 
 default_vite_api_base_url="http://127.0.0.1:8000"
-if [ "${VITE_API_BASE_URL:-$default_vite_api_base_url}" = "$default_vite_api_base_url" ]; then
+if [ -z "${VITE_API_BASE_URL:-}" ] || [ "${VITE_API_BASE_URL}" = "$default_vite_api_base_url" ]; then
   export VITE_API_BASE_URL="http://127.0.0.1:${OPENGENI_API_PORT}"
+else
+  export VITE_API_BASE_URL="$(rewrite_loopback_port "$VITE_API_BASE_URL" "$OPENGENI_API_PORT")"
 fi
+
+# Sibling shells / `bun run dev:*` source this after `.env`. Use printf so URL
+# passwords containing `$` / backticks cannot break the file via heredoc expansion.
+{
+  printf '%s\n' "# Generated by scripts/dev-stack.sh for worktree stack ${COMPOSE_PROJECT_NAME}. Do not commit."
+  printf 'COMPOSE_PROJECT_NAME=%s\n' "${COMPOSE_PROJECT_NAME}"
+  printf 'OPENGENI_DOCKER_NETWORK=%s\n' "${OPENGENI_DOCKER_NETWORK}"
+  printf 'OPENGENI_POSTGRES_HOST_PORT=%s\n' "${OPENGENI_POSTGRES_HOST_PORT}"
+  printf 'OPENGENI_NATS_HOST_PORT=%s\n' "${OPENGENI_NATS_HOST_PORT}"
+  printf 'OPENGENI_NATS_MONITOR_HOST_PORT=%s\n' "${OPENGENI_NATS_MONITOR_HOST_PORT}"
+  printf 'OPENGENI_TEMPORAL_HOST_PORT=%s\n' "${OPENGENI_TEMPORAL_HOST_PORT}"
+  printf 'OPENGENI_MINIO_HOST_PORT=%s\n' "${OPENGENI_MINIO_HOST_PORT}"
+  printf 'OPENGENI_MINIO_CONSOLE_HOST_PORT=%s\n' "${OPENGENI_MINIO_CONSOLE_HOST_PORT}"
+  printf 'OPENGENI_API_PORT=%s\n' "${OPENGENI_API_PORT}"
+  printf 'OPENGENI_WORKER_HTTP_PORT=%s\n' "${OPENGENI_WORKER_HTTP_PORT}"
+  printf 'OPENGENI_TURN_WORKER_HTTP_PORT=%s\n' "${OPENGENI_TURN_WORKER_HTTP_PORT}"
+  printf 'OPENGENI_WEB_PORT=%s\n' "${OPENGENI_WEB_PORT}"
+  printf 'OPENGENI_DATABASE_URL=%s\n' "${OPENGENI_DATABASE_URL}"
+  printf 'OPENGENI_MIGRATIONS_DATABASE_URL=%s\n' "${OPENGENI_MIGRATIONS_DATABASE_URL}"
+  printf 'OPENGENI_NATS_URL=%s\n' "${OPENGENI_NATS_URL}"
+  printf 'OPENGENI_TEMPORAL_HOST=%s\n' "${OPENGENI_TEMPORAL_HOST}"
+  printf 'OPENGENI_OBJECT_STORAGE_ENDPOINT=%s\n' "${OPENGENI_OBJECT_STORAGE_ENDPOINT}"
+  printf 'OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT=%s\n' "${OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT}"
+  printf 'VITE_API_BASE_URL=%s\n' "${VITE_API_BASE_URL}"
+} >.env.runtime
+
+echo "OpenGeni worktree stack: compose project=${COMPOSE_PROJECT_NAME}"
+echo "  api=${VITE_API_BASE_URL}  web=http://127.0.0.1:${OPENGENI_WEB_PORT}"
+echo "  postgres=127.0.0.1:${OPENGENI_POSTGRES_HOST_PORT}  nats=${OPENGENI_NATS_URL}"
+echo "  temporal=${OPENGENI_TEMPORAL_HOST}  minio=${OPENGENI_OBJECT_STORAGE_ENDPOINT}"
+echo "  Wrote .env.runtime (source it in sibling shells)."
 
 bun install
 docker compose up -d postgres nats temporal minio minio-init
@@ -112,7 +237,11 @@ if [ "${OPENGENI_CATALOG_IMPORT_ENABLED:-true}" = "true" ]; then
     bun scripts/import-integrations-catalog.ts \
       --snapshot data/catalog/integrations-snapshot.json --if-changed --skip-logos
 fi
-docker build -f docker/sandbox.Dockerfile -t opengeni-sandbox:local .
+if [ "${OPENGENI_SANDBOX_BACKEND:-docker}" != "none" ]; then
+  docker build -f docker/sandbox.Dockerfile -t opengeni-sandbox:local .
+else
+  echo "Skipping sandbox image build (OPENGENI_SANDBOX_BACKEND=none)."
+fi
 
 pids=()
 cleanup() {

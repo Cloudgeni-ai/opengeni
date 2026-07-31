@@ -2,11 +2,14 @@ import {
   applyContextCompaction,
   getActiveSessionHistoryItems,
   recordSkippedContextCompaction,
+  recordStartedContextCompaction,
   type Database,
 } from "@opengeni/db";
 import {
+  REMOTE_COMPACTION_V2_IMPLEMENTATION,
   SUMMARY_BUFFER_TOKENS,
   buildCompactionReplacementHistory,
+  buildRemoteV2ReplacementHistory,
   compactionReplacementFingerprint,
   decideCompaction,
   estimateTokens,
@@ -41,24 +44,22 @@ export type MaybeCompactResult =
     };
 
 /**
- * Durable portable context compaction, following Codex CLI's local path.
+ * Durable context compaction.
  *
- * Runs before a fresh model call and on a same-turn compaction recovery.
- * Reads the active history rows + the most recent provider-reported input
- * tokens, applies the single Codex-parity threshold, and - when it should -
- * summarizes the active history with the Codex checkpoint prompt. The write
- * supersedes the old active rows and inserts replacement active rows:
- * all real user messages plus one summary.
+ * Portable path: Codex CLI local plaintext checkpoint for every provider and
+ * for Codex sessions frozen on `portable`.
  *
- * Before sampling, a temporary copy is fitted by minimizing old tool outputs
- * and then removing whole oldest work units if necessary. One authoritative
- * provider overflow permits one smaller refit. Other failures propagate. There
- * is no non-model fallback or mutation of canonical history before success.
- *
- * There is no kept assistant/tool tail. Assistant messages,
- * tool calls/results, reasoning, and images stay only in inactive audit rows.
+ * Remote v2 path: when the session is frozen on `remote_v2` and the turn is
+ * Codex, call Codex `/codex/responses` with `compaction_trigger` and persist the
+ * opaque compaction item. Fail closed — never silently fall back to portable.
  */
 export type CompactionSummarizer = (settings: Settings, input: CompactionItem[]) => Promise<string>;
+
+/** Returns the opaque Codex remote compaction v2 item. */
+export type RemoteCompactionV2Requester = (
+  settings: Settings,
+  input: CompactionItem[],
+) => Promise<CompactionItem>;
 
 export async function maybeCompactContext(
   db: Database,
@@ -84,8 +85,31 @@ export async function maybeCompactContext(
     clearRequestedCompaction?: boolean;
     trigger?: "auto" | "operator" | "proactive" | "overflow";
     codexAccount?: TurnCodexAccount;
+    /** Frozen session mode; remote_v2 selects the Codex opaque path. */
+    codexCompactionMode?: "remote_v2" | "portable";
+    /** True when this turn's resolved provider is codex-subscription. */
+    isCodexSubscriptionTurn?: boolean;
+    /** Injected remote requester; required for the remote_v2 branch. */
+    requestRemoteCompactionV2?: RemoteCompactionV2Requester;
+    /** Tag persisted history with the Codex credential that produced it. */
+    producerCodexCredentialId?: string | null;
+    /**
+     * Live fanout for the attempt-fenced `compaction.started` event so the
+     * timeline can show progress before the provider call returns. Must never
+     * append again — the event is already durable.
+     */
+    publishLiveEvents?: (events: SessionEvent[]) => Promise<void>;
   } = {},
 ): Promise<MaybeCompactResult> {
+  if (options.codexCompactionMode === "remote_v2" && options.isCodexSubscriptionTurn !== true) {
+    // Fail closed: a V2-locked session must never silently take the portable path
+    // (mixed history shapes). Admission should have blocked this already.
+    throw new Error(
+      "session is locked to Codex remote compaction v2 but this turn is not a Codex subscription turn",
+    );
+  }
+  const useRemoteV2 = options.codexCompactionMode === "remote_v2";
+
   const active = await getActiveSessionHistoryItems(db, scope.workspaceId, scope.sessionId);
   if (active.length === 0) {
     let requestConsumed = false;
@@ -138,6 +162,141 @@ export async function maybeCompactContext(
     };
   }
 
+  const trigger = options.trigger ?? "auto";
+  const estimatedTokensBefore = estimateTokens(items);
+  const started = await recordStartedContextCompaction(db, {
+    ...scope,
+    expectedExecutionGeneration: scope.executionGeneration,
+    expectedAttemptId: scope.attemptId,
+    trigger,
+    estimatedTokensBefore,
+    ...(useRemoteV2 ? { implementation: REMOTE_COMPACTION_V2_IMPLEMENTATION } : {}),
+  });
+  if (!started.recorded) {
+    throw new TurnAttemptFencedError(
+      `turn attempt was fenced while recording context compaction start: ${started.reason}`,
+    );
+  }
+  await options.publishLiveEvents?.(started.events);
+
+  if (useRemoteV2) {
+    const outcome = await compactContextRemoteV2(db, settings, scope, items, decision, options);
+    return prependCompactionEvents(started.events, outcome);
+  }
+
+  const outcome = await compactContextPortable(
+    db,
+    settings,
+    scope,
+    items,
+    decision,
+    summarize,
+    options,
+  );
+  return prependCompactionEvents(started.events, outcome);
+}
+
+function prependCompactionEvents(
+  prefix: SessionEvent[],
+  outcome: MaybeCompactResult,
+): MaybeCompactResult {
+  if (prefix.length === 0) return outcome;
+  return { ...outcome, events: [...prefix, ...outcome.events] };
+}
+
+async function compactContextRemoteV2(
+  db: Database,
+  settings: Settings,
+  scope: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    executionGeneration: number;
+    attemptId: string;
+  },
+  items: CompactionItem[],
+  decision: { signalTokens: number; thresholdTokens: number },
+  options: {
+    clearRequestedCompaction?: boolean;
+    trigger?: "auto" | "operator" | "proactive" | "overflow";
+    requestRemoteCompactionV2?: RemoteCompactionV2Requester;
+    producerCodexCredentialId?: string | null;
+  },
+): Promise<MaybeCompactResult> {
+  if (!options.requestRemoteCompactionV2) {
+    throw new Error(
+      "remote compaction v2 requested but no requestRemoteCompactionV2 requester was provided",
+    );
+  }
+  const estimatedTokensBefore = estimateTokens(items);
+  // Fail closed: any provider/extract failure propagates — no portable fallback.
+  const compactionItem = await options.requestRemoteCompactionV2(settings, items);
+  const replacementHistory = buildRemoteV2ReplacementHistory(items, compactionItem);
+  const estimatedTokensAfter = estimateTokens(replacementHistory);
+  const replacementFingerprint = compactionReplacementFingerprint(replacementHistory);
+  const tailItem = replacementHistory.at(-1);
+  if (!tailItem) {
+    throw new Error("remote compaction v2 produced no replacement history");
+  }
+  const applied = await applyContextCompaction(db, {
+    accountId: scope.accountId,
+    workspaceId: scope.workspaceId,
+    sessionId: scope.sessionId,
+    turnId: scope.turnId,
+    expectedExecutionGeneration: scope.executionGeneration,
+    expectedAttemptId: scope.attemptId,
+    replacementItems: replacementHistory.slice(0, -1),
+    summaryItem: tailItem as Record<string, unknown>,
+    replacementInputTokens: estimatedTokensAfter,
+    ...(options.clearRequestedCompaction ? { clearRequestedCompaction: true } : {}),
+    ...(options.producerCodexCredentialId
+      ? { producerCodexCredentialId: options.producerCodexCredentialId }
+      : {}),
+    eventPayload: {
+      trigger: options.trigger ?? "auto",
+      implementation: REMOTE_COMPACTION_V2_IMPLEMENTATION,
+      estimatedTokensBefore,
+      estimatedTokensAfter,
+    },
+  });
+  if (!applied.applied) {
+    throw new TurnAttemptFencedError(
+      `turn attempt was fenced during remote context compaction: ${applied.reason}`,
+    );
+  }
+  return {
+    compacted: true,
+    supersededFrom: applied.supersededFrom,
+    summaryPosition: applied.summaryPosition,
+    signalTokens: decision.signalTokens,
+    thresholdTokens: decision.thresholdTokens,
+    estimatedTokensBefore,
+    estimatedTokensAfter,
+    replacementFingerprint,
+    events: applied.events,
+  };
+}
+
+async function compactContextPortable(
+  db: Database,
+  settings: Settings,
+  scope: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    executionGeneration: number;
+    attemptId: string;
+  },
+  items: CompactionItem[],
+  decision: { signalTokens: number; thresholdTokens: number },
+  summarize: CompactionSummarizer,
+  options: {
+    clearRequestedCompaction?: boolean;
+    trigger?: "auto" | "operator" | "proactive" | "overflow";
+  },
+): Promise<MaybeCompactResult> {
   const estimatedTokensBefore = estimateTokens(items);
   const summarized = await summarizeWithCodexOverflowTrimming(summarize, settings, items);
   const summaryBody = summarized.summaryBody;

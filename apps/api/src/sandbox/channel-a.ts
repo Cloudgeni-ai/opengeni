@@ -21,6 +21,7 @@ import {
   applyGitAuthPointerEnvironment,
   hasGitCredentialRepositorySelection,
   hasGitHubRepositorySelection,
+  sandboxArchiveCaptureTimeoutMs,
   stableSandboxEnvironmentForRun,
   type Settings,
 } from "@opengeni/config";
@@ -247,6 +248,7 @@ export async function withChannelA<T>(
     os: session.sandboxOs,
     leaseTtlMs,
     warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,
+    captureWaitMs: sandboxArchiveCaptureTimeoutMs(settings),
   });
 
   if (acquired.role === "blocked") {
