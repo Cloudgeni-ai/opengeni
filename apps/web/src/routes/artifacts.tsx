@@ -88,7 +88,7 @@ export function ArtifactsRoute({ workspaceId }: { workspaceId: string }) {
       <PageHeader
         icon={<PanelsTopLeftIcon className="size-4" />}
         title="Artifacts"
-        description="Live pages, tools, visualizations, and other experiences created in this workspace."
+        description="Pages, visualizations, and other HTML/CSS experiences created in this workspace."
         actions={
           <Button onClick={() => void createWithGeni()} disabled={context.busy}>
             <SparklesIcon className="mr-2 size-4" />
@@ -235,7 +235,7 @@ export function ArtifactDetailRoute({
       <PageHeader
         icon={<PanelsTopLeftIcon className="size-4" />}
         title={detail?.artifact.title ?? "Artifact"}
-        description={detail?.artifact.description ?? "A live workspace artifact."}
+        description={detail?.artifact.description ?? "A workspace HTML/CSS artifact."}
         actions={
           <Button onClick={() => void editWithGeni()} disabled={!detail || context.busy}>
             <SparklesIcon className="mr-2 size-4" />

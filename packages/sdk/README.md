@@ -39,6 +39,11 @@ assign product types such as app, page, dashboard, or gallery. List pages are
 bounded and expose both `truncated` and an opaque `nextCursor` so callers never
 mistake a partial page for the complete workspace catalog.
 
+The initial web renderer supports semantic HTML, inline CSS, CSS-only
+interactions, and inline SVG. It removes JavaScript, event handlers, forms,
+embeds, external URLs, and other active or navigation-capable markup before
+rendering. Executable artifacts require a later, stronger isolation boundary.
+
 ```ts
 let cursor: string | undefined;
 do {

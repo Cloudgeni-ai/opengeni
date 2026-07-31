@@ -27,7 +27,7 @@ export const ARTIFACT_EDIT_TOOLS = [
   "artifacts_publish",
 ] as const satisfies readonly FirstPartyMcpToolName[];
 
-const ARTIFACT_RUNTIME_CONTRACT = `The artifact runs as untrusted code in a scripts-only, opaque-origin sandbox. Inline JavaScript and DOM interactivity work. Network requests, external assets, form submission, downloads, browser storage, OpenGeni credentials, parent-page access, and workspace APIs are unavailable. Do not add controls that depend on those blocked capabilities. Use inline CSS and JavaScript only.`;
+const ARTIFACT_RUNTIME_CONTRACT = `For this MVP, artifacts render as static HTML and inline CSS only. JavaScript, event handlers, forms, embeds, navigation-capable markup, network requests, external assets, downloads, browser storage, OpenGeni credentials, parent-page access, and workspace APIs are removed or blocked. Do not include scripts or controls that require JavaScript. Use semantic HTML and inline CSS only; CSS-only interactions and responsive layouts are supported.`;
 
 export function artifactCreateOpeningMessage(): string {
   return "Help me create a workspace artifact.";

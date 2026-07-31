@@ -1399,7 +1399,7 @@ function registerWorkspaceArtifactTools(
     "artifacts_create",
     {
       description:
-        "Create and publish a generic workspace artifact from a complete, self-contained HTML document.",
+        "Create and publish a generic static workspace artifact from a complete, self-contained HTML document with inline CSS. JavaScript and active or navigation-capable markup do not render in the MVP.",
       inputSchema: {
         title: z4.string().min(1).max(120),
         description: z4.string().max(2000).nullable().optional(),
@@ -1434,7 +1434,7 @@ function registerWorkspaceArtifactTools(
     "artifacts_publish",
     {
       description:
-        "Publish a new immutable HTML version. First read the current source and pass its version id for optimistic concurrency.",
+        "Publish a new immutable static HTML/CSS version. JavaScript and active or navigation-capable markup do not render in the MVP. First read the current source and pass its version id for optimistic concurrency.",
       inputSchema: {
         artifactId: z4.string().uuid(),
         expectedCurrentVersionId: z4.string().uuid(),

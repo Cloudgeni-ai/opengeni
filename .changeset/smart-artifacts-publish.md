@@ -9,4 +9,4 @@
 "@opengeni/runtime": minor
 ---
 
-Add generic, versioned workspace artifacts with content-addressed HTML storage, safe rendering APIs, rollback history, and first-party agent publishing tools.
+Add generic, versioned workspace artifacts with content-addressed HTML storage, a static HTML/CSS renderer, rollback history, and first-party agent publishing tools. JavaScript and active or navigation-capable markup are removed from the initial renderer until executable artifacts have a stronger isolation boundary.
