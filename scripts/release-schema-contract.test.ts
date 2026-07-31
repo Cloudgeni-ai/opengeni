@@ -161,7 +161,7 @@ describe("release schema contract", () => {
         (migrations.has("0144_workspace_artifacts.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "0186569f49e4567e7e28e42ab01b8fb2563858d2ca4f8958afdb894d9481c9e9",
+      "f72d3aff924a5a3253e56653b91bc78d4345652a9eb8cb194cb110c8fcd9b856",
     );
     expect(contract.latestMigration).toBe("0144_workspace_artifacts.sql");
     expect(migrations.get("0144_workspace_artifacts.sql")).toMatchObject({

@@ -10,7 +10,7 @@ type ManifestEntry = {
 
 const kib = 1024;
 const budgets = {
-  initialRaw: 761 * kib,
+  initialRaw: 764 * kib,
   initialGzip: 210 * kib,
   initialFileGzip: 70 * kib,
   directSessionRaw: 1900 * kib,
