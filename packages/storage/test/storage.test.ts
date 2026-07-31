@@ -26,6 +26,71 @@ describe("object storage adapters", () => {
     expect(new URL(put.url).searchParams.get("x-amz-meta-sha256")).toBe("checksum");
   });
 
+  test("keeps signed URLs public while server requests use the internal endpoint", async () => {
+    const requests: Array<{ method: string; pathname: string }> = [];
+    const internal = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        const url = new URL(request.url);
+        requests.push({ method: request.method, pathname: url.pathname });
+        return new Response(null, {
+          status: 200,
+          headers: {
+            "content-length": "4",
+            "content-type": "image/png",
+            "x-amz-meta-sha256": "a".repeat(64),
+          },
+        });
+      },
+    });
+    try {
+      const storage = withEnv(
+        {
+          OPENGENI_OBJECT_STORAGE_BACKEND: "s3-compatible",
+          OPENGENI_OBJECT_STORAGE_ENDPOINT: "https://storage.example.com",
+          OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT: `http://127.0.0.1:${internal.port}`,
+          OPENGENI_OBJECT_STORAGE_BUCKET: "test-bucket",
+          OPENGENI_OBJECT_STORAGE_FORCE_PATH_STYLE: "true",
+          OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID: "test",
+          OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY: "test",
+        },
+        () => createObjectStorage(getSettings()),
+      )!;
+      const put = await storage.createPutUrl({
+        key: "files/file-id/original/image.png",
+        contentType: "image/png",
+      });
+      const get = await storage.createGetUrl({ key: "files/file-id/original/image.png" });
+      expect(new URL(put.url).host).toBe("storage.example.com");
+      expect(new URL(get.url).host).toBe("storage.example.com");
+
+      const head = await storage.headFile({
+        id: "33333333-3333-4333-8333-333333333333",
+        workspaceId: "11111111-1111-4111-8111-111111111111",
+        status: "ready",
+        filename: "image.png",
+        safeFilename: "image.png",
+        contentType: "image/png",
+        sizeBytes: 4,
+        sha256: "a".repeat(64),
+        bucket: "test-bucket",
+        objectKey: "files/file-id/original/image.png",
+        createdAt: "2026-07-31T00:00:00.000Z",
+        updatedAt: "2026-07-31T00:00:00.000Z",
+      });
+      expect(head.ContentLength).toBe(4);
+      expect(requests).toEqual([
+        {
+          method: "HEAD",
+          pathname: "/test-bucket/files/file-id/original/image.png",
+        },
+      ]);
+    } finally {
+      internal.stop(true);
+    }
+  });
+
   test("creates Azure Blob storage and signs upload/download URLs", async () => {
     const storage = withEnv(
       {

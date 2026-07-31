@@ -751,6 +751,7 @@ const SettingsSchema = z.object({
   sandboxPreparationProfiles: z.string().default("none"),
   sandboxEnvAllowlist: z.string().default(""),
   objectStorageEndpoint: z.string().url().optional(),
+  objectStorageInternalEndpoint: z.string().url().optional(),
   objectStorageSandboxEndpoint: z.string().url().optional(),
   objectStorageBackend: z
     .enum(["s3-compatible", "aws-s3", "azure-blob", "gcs"])
@@ -1530,6 +1531,7 @@ export function getSettings(): Settings {
     sandboxPreparationProfiles: optional("OPENGENI_SANDBOX_PREPARATION_PROFILES"),
     sandboxEnvAllowlist: optional("OPENGENI_SANDBOX_ENV_ALLOWLIST"),
     objectStorageEndpoint: optional("OPENGENI_OBJECT_STORAGE_ENDPOINT"),
+    objectStorageInternalEndpoint: optional("OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT"),
     objectStorageSandboxEndpoint: optional("OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT"),
     objectStorageBackend: optional("OPENGENI_OBJECT_STORAGE_BACKEND"),
     objectStorageBucket: optional("OPENGENI_OBJECT_STORAGE_BUCKET"),
@@ -3555,7 +3557,9 @@ function validateSettings(settings: Settings): void {
     }
     if (
       settings.objectStorageBackend === "s3-compatible" &&
-      (settings.objectStorageEndpoint || settings.objectStorageSandboxEndpoint) &&
+      (settings.objectStorageEndpoint ||
+        settings.objectStorageInternalEndpoint ||
+        settings.objectStorageSandboxEndpoint) &&
       (!settings.objectStorageAccessKeyId || !settings.objectStorageSecretAccessKey)
     ) {
       throw new Error(
@@ -3585,6 +3589,7 @@ function validateSettings(settings: Settings): void {
   } else if (settings.objectStorageBackend === "azure-blob") {
     if (
       settings.objectStorageEndpoint ||
+      settings.objectStorageInternalEndpoint ||
       settings.objectStorageSandboxEndpoint ||
       settings.objectStorageAccessKeyId ||
       settings.objectStorageSecretAccessKey
@@ -3615,6 +3620,7 @@ function validateSettings(settings: Settings): void {
   } else {
     if (
       settings.objectStorageEndpoint ||
+      settings.objectStorageInternalEndpoint ||
       settings.objectStorageSandboxEndpoint ||
       settings.objectStorageAccessKeyId ||
       settings.objectStorageSecretAccessKey

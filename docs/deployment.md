@@ -383,6 +383,14 @@ for the deployed web origin. Prefer exact HTTPS origins in production; use `*`
 only for disposable private evaluation stacks where signed URLs and the
 OpenGeni access key are the real access boundaries.
 
+For S3-compatible storage on a split network, keep
+`OPENGENI_OBJECT_STORAGE_ENDPOINT` browser-reachable and set
+`OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT` to the private address reachable
+from the API and workers. Signed URLs retain the public host while authenticated
+server-side completion checks and object operations use the internal address.
+`OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT` is separate and only describes the
+address reachable from agent sandboxes.
+
 Do not treat a successful presign as storage acceptance. Release conformance
 must exercise the provider-native `OPTIONS` + signed browser `PUT`, API finalize
 (which performs authenticated `HEAD`), signed `GET`, and tenant-negative read.
