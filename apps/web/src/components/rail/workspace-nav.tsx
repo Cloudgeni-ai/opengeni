@@ -1,13 +1,14 @@
-// Workspace configuration nav: the four config surfaces (Variable sets,
-// Capabilities, Schedules, Documents, Memory) as individual items, then a slightly
-// separated Settings (Workspace settings). Collapsed → centered icons with
-// tooltips. Active route gets a left accent bar + subtle surface tint.
+// Workspace configuration nav: Insights plus config surfaces (Variable sets,
+// Capabilities, Schedules, Documents, Memory, …) as individual items, then a
+// slightly separated Settings. Collapsed → centered icons with tooltips.
+// Active route gets a left accent bar + subtle surface tint.
 import { Link } from "@tanstack/react-router";
 import {
   BoxIcon,
   BrainCircuitIcon,
   CalendarClockIcon,
   FileSearchIcon,
+  GaugeIcon,
   LaptopIcon,
   MapIcon,
   PlugIcon,
@@ -22,6 +23,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { cn } from "@/lib/utils";
 
 type NavTarget =
+  | "/workspaces/$workspaceId/insights"
   | "/workspaces/$workspaceId/variable-sets"
   | "/workspaces/$workspaceId/rigs"
   | "/workspaces/$workspaceId/machines"
@@ -34,6 +36,12 @@ type NavTarget =
 
 const CONFIG_ITEMS: Array<{ to: NavTarget; icon: LucideIcon; label: string; description: string }> =
   [
+    {
+      to: "/workspaces/$workspaceId/insights",
+      icon: GaugeIcon,
+      label: "Insights",
+      description: "Spend, blockers, automation, and outcomes",
+    },
     {
       to: "/workspaces/$workspaceId/variable-sets",
       icon: BoxIcon,
