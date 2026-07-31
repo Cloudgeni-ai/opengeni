@@ -241,14 +241,9 @@ export function RootRouteComponent() {
     Record<string, IntelligenceEffort>
   >({});
   const [reasoningEffort, setReasoningEffort] = useState<IntelligenceEffort>("low");
-  // The dock is open by default on desktop, but on narrow viewports (<1024px)
-  // the dock renders as a full-screen overlay — so it must start CLOSED there or
-  // a phone opening a session would land with the overlay covering the
-  // transcript. Only the initial default is viewport-aware; the user's later
-  // toggles are never overridden.
-  const [inspectorOpen, setInspectorOpen] = useState<boolean>(() =>
-    typeof window === "undefined" ? true : !window.matchMedia("(max-width: 1023px)").matches,
-  );
+  // Changes/Files dock starts collapsed; user opens via the session-panel toggle.
+  // No localStorage — only an in-memory default (toggle still works for the session).
+  const [inspectorOpen, setInspectorOpen] = useState(false);
   const [connectionState, setConnectionState] = useState<SessionEventsConnectionState>("idle");
   const [manualRepos, setManualRepos] = useState<RepoDraft[]>([]);
   const [manualReposOpen, setManualReposOpen] = useState(false);
@@ -299,7 +294,11 @@ export function RootRouteComponent() {
   // password reset is signed out by definition, so `/reset-password` must never
   // be intercepted by the sign-in panel or workspace-access loading.
   const pathname = useRouterState({ select: (state) => state.location.pathname });
-  const isPublicAuthRoute = pathname === "/reset-password";
+  // Public surfaces render ahead of auth/config gates. `/reset-password` is
+  // always public; the composer-chrome gallery is DEV-only and needs no session.
+  const isPublicAuthRoute =
+    pathname === "/reset-password" ||
+    (import.meta.env.DEV && pathname === "/dev/composer-chrome");
   // The @opengeni/sdk client behind every console API call and hook. Auth
   // headers are read per request; a new identity per key version makes the
   // hooks re-fetch and the event streams reconnect with the new credentials.

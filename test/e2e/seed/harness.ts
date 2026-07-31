@@ -17,7 +17,22 @@
 //   OPENGENI_SEED_WEB_URL        default http://127.0.0.1:3000  (for printed links)
 //
 // Session-rail UI forest (DB nested inserts, no agent turns):
-//   OPENGENI_DATABASE_URL=... bun test/e2e/seed/seed-session-rail.ts
+//   OPENGENI_DATABASE_URL=postgres://opengeni_app:opengeni_app@127.0.0.1:6432/opengeni \
+//     bun --env-file=/dev/null test/e2e/seed/seed-session-rail.ts
+//
+// Monster chat timeline (token-free synthetic events via appendSessionEvents;
+// no LLM / Temporal). Profiles: ui≈10k, monster≈50k (default), stress≈100k,
+// payload-heavy≈8k fat events. Prefer --env-file=/dev/null so a stale .env
+// :5432 URL cannot override the remapped compose port:
+//   OPENGENI_DATABASE_URL=postgres://opengeni_app:opengeni_app@127.0.0.1:6432/opengeni \
+//     OPENGENI_SEED_MONSTER_PROFILE=monster \
+//     bun --env-file=/dev/null test/e2e/seed/seed-monster-chat.ts
+// Env (optional): OPENGENI_SEED_MONSTER_SEED (default 1), OPENGENI_SEED_MONSTER_CHUNK
+//
+// Continuous live stream into an existing session (DB append + NATS/SSE fanout):
+//   OPENGENI_DATABASE_URL=postgres://opengeni_app:opengeni_app@127.0.0.1:6432/opengeni \
+//     bun --env-file=/dev/null test/e2e/seed/stream-session-events.ts
+// Optional: --workspace UUID --session UUID (defaults to the current UI test session).
 import { OpenGeniClient, type Session } from "@opengeni/sdk";
 
 export const BASE_URL = process.env.OPENGENI_SEED_BASE_URL ?? "http://127.0.0.1:8000";

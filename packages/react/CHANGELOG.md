@@ -1,5 +1,10 @@
 # @opengeni/react
 
+## Unreleased
+
+- Replace host-adapter composer transcription with native MediaRecorder capture and immediate server transcription.
+- Compact composer voice chrome: live/fallback waveform, separate cancel vs stop-and-transcribe actions, and a quieter transcribing state.
+
 ## 0.30.0
 
 ### Patch Changes

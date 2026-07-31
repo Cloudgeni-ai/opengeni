@@ -19,6 +19,7 @@
 //   /workspaces/:id/account                  → legacy redirect to /organization
 //   /billing?checkout=success|cancelled      → Stripe return → default organization
 //   /device?user_code=…                      → self-hosted enrollment approve page
+//   /dev/composer-chrome                     → DEV-only session chrome gallery (mocked)
 import {
   Navigate,
   RouterProvider,
@@ -81,6 +82,10 @@ const LazyWorkspaceShellRoute = lazyRouteComponent(
   () => import("@/routes/workspace"),
   "WorkspaceShellRoute",
 );
+const LazyComposerChromeGalleryRoute = lazyRouteComponent(
+  () => import("@/routes/composer-chrome"),
+  "ComposerChromeGalleryRoute",
+);
 
 const rootRoute = createRootRoute({
   component: RootRouteComponent,
@@ -130,6 +135,14 @@ const resetPasswordRoute = createRoute({
   validateSearch: (search: Record<string, unknown>): { token?: string } =>
     typeof search.token === "string" && search.token ? { token: search.token } : {},
   component: ResetPassword,
+});
+// DEV-only visual harness for the Session composer chrome stack (queue / goal /
+// agents / composer). Public so it needs no live auth or session; omitted from
+// production route trees.
+const composerChromeGalleryRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "dev/composer-chrome",
+  component: ComposerChromeGallery,
 });
 const workspaceRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -262,6 +275,7 @@ const routeTree = rootRoute.addChildren([
   billingReturnRoute,
   deviceRoute,
   resetPasswordRoute,
+  ...(import.meta.env.DEV ? [composerChromeGalleryRoute] : []),
   workspaceRoute.addChildren([
     workspaceIndexRoute,
     workspaceAgentRoute,
@@ -444,6 +458,10 @@ function Device() {
 function ResetPassword() {
   const { token } = resetPasswordRoute.useSearch();
   return <LazyResetPasswordRoute token={token} />;
+}
+
+function ComposerChromeGallery() {
+  return <LazyComposerChromeGalleryRoute />;
 }
 
 function BillingReturnRoute() {

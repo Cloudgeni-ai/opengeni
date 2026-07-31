@@ -75,6 +75,7 @@
   --animate-og-blink: og-blink 1s steps(2, start) infinite;
   --animate-og-shimmer: og-shimmer 2.2s linear infinite;
   --animate-og-spin: og-spin 0.9s linear infinite;
+  --animate-og-waveform: og-waveform 1.15s var(--og-ease-in-out) infinite;
   --animate-og-expand: og-expand var(--og-duration-fast) var(--og-ease-in-out);
   --animate-og-collapse: og-collapse var(--og-duration-fast) var(--og-ease-in-out);
 }
@@ -162,6 +163,19 @@
 @keyframes og-spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+/* Composer voice waveform — calm bar motion when AnalyserNode levels are unavailable. */
+@keyframes og-waveform {
+  0%,
+  100% {
+    transform: scaleY(0.28);
+    opacity: 0.45;
+  }
+  50% {
+    transform: scaleY(1);
+    opacity: 0.95;
   }
 }
 

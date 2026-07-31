@@ -35,6 +35,7 @@ export * from "./workflow-wake-contract";
 // structural TYPES live here.
 export * from "./sandbox-types";
 export * from "./managed-auth-type";
+export * from "./transcription";
 
 // Sandbox fleet/routing service — the closure of `domain/sessions.ts`
 // (`swapActiveSandbox` + `FleetContext`). apps/api re-imports these for its MCP

@@ -12,6 +12,7 @@ import {
   OPENGENI_API_CONTRACT_REVISION,
   OPENGENI_CORRELATION_HEADER,
   resolveWorkspaceMemoryEnabled,
+  VOICE_INPUT_ACCEPTED_MIME_TYPES,
   type AccessGrant,
   type ErrorCode,
 } from "@opengeni/contracts";
@@ -67,7 +68,9 @@ import { registerWorkspaceRoutes } from "./routes/workspaces";
 import { registerWorkspaceInstructionPolicyRoutes } from "./routes/workspace-instruction-policies";
 import { registerWorkspaceStateRoutes } from "./routes/workspace-state";
 import { registerPreferenceRegistryRoutes } from "./routes/preference-registry";
+import { registerTranscriptionRoutes } from "./routes/transcriptions";
 import { projectClientModel } from "./model-catalog";
+import { createTranscriptionService } from "./transcription/service";
 
 export type {
   ApiRouteDeps,
@@ -144,6 +147,14 @@ export function createApp(deps: AppDependencies): Hono {
   const resumeBoxById = deps.resumeBoxById ?? makeResumeBoxById(sandboxClient);
   const observability =
     deps.observability ?? createObservability(deps.settings, { component: "api" });
+  const transcription =
+    deps.transcription === undefined
+      ? createTranscriptionService({
+          settings: deps.settings,
+          db: deps.db,
+          ...(deps.codexFetch ? { codexFetch: deps.codexFetch } : {}),
+        })
+      : deps.transcription;
   const routeDeps: ApiRouteDeps = {
     ...deps,
     observability,
@@ -153,6 +164,7 @@ export function createApp(deps: AppDependencies): Hono {
     objectStorage,
     documentIndexer,
     getDocumentServices,
+    transcription,
     ...(sandboxClient ? { sandboxClient } : {}),
     resumeBoxById,
   };
@@ -193,7 +205,7 @@ export function createApp(deps: AppDependencies): Hono {
   app.use(
     "*",
     bodyLimit({
-      maxSize: API_MAX_REQUEST_BODY_BYTES,
+      maxSize: Math.max(API_MAX_REQUEST_BODY_BYTES, deps.settings.voiceInputMaxSizeBytes + 64 * 1024),
       onError: (c) =>
         c.json({ code: "PAYLOAD_TOO_LARGE", message: "Request body is too large." }, 413),
     }),
@@ -323,7 +335,7 @@ export function createApp(deps: AppDependencies): Hono {
     }),
   );
 
-  app.get("/v1/config/client", (c) => {
+  app.get("/v1/config/client", async (c) => {
     c.header("cache-control", "no-store");
     const catalogSettings = deps.settings.codexSubscriptionEnabled
       ? withCodexCatalogProvider(deps.settings)
@@ -349,6 +361,12 @@ export function createApp(deps: AppDependencies): Hono {
         fileUploads: {
           enabled: objectStorage !== null,
           maxSizeBytes: objectStorage?.maxSinglePutSizeBytes ?? 5_000_000_000,
+        },
+        voiceInput: {
+          available: (await transcription?.available()) ?? false,
+          maxDurationSeconds: deps.settings.voiceInputMaxDurationSeconds,
+          maxSizeBytes: deps.settings.voiceInputMaxSizeBytes,
+          acceptedMimeTypes: [...VOICE_INPUT_ACCEPTED_MIME_TYPES],
         },
         productAccessMode: deps.settings.productAccessMode,
         auth: clientAuthConfig(deps.settings),
@@ -445,6 +463,7 @@ export function createApp(deps: AppDependencies): Hono {
   registerSessionRoutes(app, routeDeps);
   registerScheduledTaskRoutes(app, routeDeps);
   registerCodexRoutes(app, routeDeps);
+  registerTranscriptionRoutes(app, routeDeps);
 
   app.notFound((c) => {
     if (!new URL(c.req.url).pathname.startsWith("/v1/")) return c.text("Not Found", 404);

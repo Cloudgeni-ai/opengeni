@@ -113,7 +113,14 @@ export type MessageTimelineProps = {
   className?: string | undefined;
 };
 
-const INITIAL_MOUNTED_GROUPS = 1;
+/** Tip window: enough newest groups to fill a typical chat viewport. */
+const INITIAL_MOUNTED_GROUPS = 12;
+/**
+ * When the reader scrolls up, reveal already-fetched older groups in batches so
+ * Markdown/layout work stays frame-budgeted. Never auto-run while pinned at the
+ * tip — that scrollHeight churn was the open/load flash.
+ */
+const GROUPS_PER_FRAME = 4;
 
 /**
  * The session timeline: chat messages with streaming deltas, collapsed
@@ -142,14 +149,23 @@ export function MessageTimeline({
   const resolvedItems = useMemo(() => items ?? buildTimeline(events ?? []), [items, events]);
   const allGroups = useMemo(() => groupTimeline(resolvedItems), [resolvedItems]);
   const keyedGroups = useStableTimelineGroupKeys(allGroups);
-  const { mountedGroups: groups, mountingOlderGroups } = useProgressivelyMountedGroups(keyedGroups);
-  const firstGroupKey = allGroups[0] ? timelineGroupKey(allGroups[0]) : null;
-
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const topSentinelRef = useRef<HTMLDivElement | null>(null);
   const previousBulkFirstKeyRef = useRef<string | null | undefined>(undefined);
   const [pinned, setPinned] = useState(true);
   const [bulkActive, setBulkActive] = useState(true);
+  // Older history (DB prefetch + in-memory mount expansion) is user-driven: a
+  // short or non-rendering-dense newest window would keep the top sentinel
+  // inside the 1600px rootMargin while pinned at the tip and auto-fetch forever,
+  // and auto-mounting older groups while tip-pinned caused stick-to-bottom
+  // scrollHeight thrash (visible flash). Arm only after the reader scrolls up.
+  const olderPrefetchArmedRef = useRef(false);
+  const [olderPrefetchArmed, setOlderPrefetchArmed] = useState(false);
+  const { mountedGroups: groups, mountingOlderGroups } = useProgressivelyMountedGroups(
+    keyedGroups,
+    olderPrefetchArmed,
+  );
+  const firstGroupKey = allGroups[0] ? timelineGroupKey(allGroups[0]) : null;
   // Content stays invisible until its first bottom-anchored frame, so a flash
   // of the window's TOP while a large timeline lays out across commits is
   // structurally impossible — the reader only ever sees it already at the
@@ -240,6 +256,39 @@ export function MessageTimeline({
   const restoreAnchor = useCallback(
     (node: HTMLElement) => {
       if (autoFollow && pinnedRef.current) {
+        // Align the last non-chrome child's bottom to the scroller padding edge.
+        // Prefer the tip box over raw scrollHeight: estimated/offscreen sizes
+        // above the tip must not invent trailing empty space mid-viewport.
+        const inner = node.firstElementChild;
+        let tip: HTMLElement | null = null;
+        if (inner) {
+          for (
+            let child = inner.lastElementChild;
+            child;
+            child = child.previousElementSibling
+          ) {
+            if (
+              child instanceof HTMLElement &&
+              child.dataset.ogTimelineChrome === undefined
+            ) {
+              tip = child;
+              break;
+            }
+          }
+        }
+        if (tip) {
+          const nodeRect = node.getBoundingClientRect();
+          const tipRect = tip.getBoundingClientRect();
+          if (nodeRect.height > 0 && tipRect.height > 0) {
+            const paddingBottom =
+              Number.parseFloat(getComputedStyle(node).paddingBottom) || 0;
+            const delta = tipRect.bottom - (nodeRect.bottom - paddingBottom);
+            if (Math.abs(delta) > 0.5) {
+              assignScrollTop(node, node.scrollTop + delta);
+            }
+            return;
+          }
+        }
         assignScrollTop(node, node.scrollHeight);
         return;
       }
@@ -275,6 +324,10 @@ export function MessageTimeline({
     if (allGroups.length === 0 && revealed) {
       setRevealed(false);
     }
+    if (allGroups.length === 0 && olderPrefetchArmedRef.current) {
+      olderPrefetchArmedRef.current = false;
+      setOlderPrefetchArmed(false);
+    }
   }, [allGroups.length, revealed]);
 
   // Clear the bulk-paint marker a frame after it renders, so rows appended
@@ -295,16 +348,16 @@ export function MessageTimeline({
     return () => cancelFrame(frame);
   }, [bulkRender, firstGroupKey, mountingOlderGroups]);
 
-  // Prefetch older history well before the reader reaches the top: the
-  // sentinel sits above the first group and trips 1600px early, so backfill
-  // is usually rendered (and anchored by the ResizeObserver below) before the
-  // top of the window ever becomes visible.
+  // Prefetch older history only after the reader scrolls up from the tip.
+  // Once armed, the sentinel trips 1600px early so backfill is usually
+  // rendered (and anchored) before the top of the window becomes visible.
   useEffect(() => {
     const root = scrollRef.current;
     const target = topSentinelRef.current;
     if (
       !root ||
       !target ||
+      !olderPrefetchArmed ||
       mountingOlderGroups ||
       !hasOlder ||
       loadingOlder ||
@@ -323,7 +376,14 @@ export function MessageTimeline({
     );
     observer.observe(target);
     return () => observer.disconnect();
-  }, [hasOlder, loadingOlder, onLoadOlder, firstGroupKey, mountingOlderGroups]);
+  }, [
+    olderPrefetchArmed,
+    hasOlder,
+    loadingOlder,
+    onLoadOlder,
+    firstGroupKey,
+    mountingOlderGroups,
+  ]);
 
   // Scroll anchoring: when the content reflows (a fold expands/collapses, a
   // stream appends), keep following the bottom if pinned; otherwise pin the
@@ -369,6 +429,12 @@ export function MessageTimeline({
       pinnedRef.current = nextPinned;
       setPinned(nextPinned);
     }
+    // Arm older-history prefetch on a real upward scroll — never while the
+    // programmatic tip-anchor keeps the reader pinned at the bottom.
+    if (!programmatic && !nextPinned && !olderPrefetchArmedRef.current) {
+      olderPrefetchArmedRef.current = true;
+      setOlderPrefetchArmed(true);
+    }
     // The assignment site already captured the corrected anchor. Recapturing
     // it from a delayed echo can observe the next prepended row before that
     // row's ResizeObserver correction and make the viewport walk up the page.
@@ -395,7 +461,7 @@ export function MessageTimeline({
                     <p className="py-10 text-center text-sm text-og-fg-subtle">No activity yet.</p>
                   ))
                 : null}
-              {hasOlder && !mountingOlderGroups ? (
+              {hasOlder && olderPrefetchArmed && !mountingOlderGroups ? (
                 <div
                   ref={topSentinelRef}
                   data-og-top-sentinel=""
@@ -526,19 +592,21 @@ function useStableTimelineGroupKeys(allGroups: TimelineGroup[]): KeyedTimelineGr
 
 /**
  * Bulk history is already projected into its authoritative order before this
- * hook runs. Mount its newest group first, then prepend one older group per
- * animation frame so low-end browsers can paint and service input between
- * React/Markdown commits instead of doing the entire tail in one long task.
+ * hook runs. While the reader stays tip-pinned, mount only a newest suffix —
+ * never auto-hydrate older in-memory groups (that was the tip flash: each
+ * batch grew scrollHeight and stick-to-bottom corrected after paint).
  *
- * A live append does not move the first mounted key, so it is included
- * immediately in the mounted suffix. A history prepend moves that key deeper
- * in the array; shifting `visibleStart` by that exact prefix keeps every
- * existing row mounted while the new prefix is revealed. If projection
- * coalesces the seam item itself away, the earliest surviving mounted key
- * provides the same anchor. Replacements with no shared mounted key (for
- * example a session switch or clear-view) start a fresh suffix.
+ * After the reader scrolls up (`hydrateOlderGroups`), reveal the older prefix
+ * in small per-frame batches so Markdown/layout stays frame-budgeted. A live
+ * tip append while still tip-locked slides the suffix forward (newest N only).
+ * A history prepend while hydrating shifts `visibleStart` by the retained
+ * first mounted key so existing rows stay mounted. Replacements with no shared
+ * mounted key (session switch / clear) start a fresh tip suffix.
  */
-function useProgressivelyMountedGroups(allGroups: KeyedTimelineGroup[]): {
+function useProgressivelyMountedGroups(
+  allGroups: KeyedTimelineGroup[],
+  hydrateOlderGroups: boolean,
+): {
   mountedGroups: KeyedTimelineGroup[];
   mountingOlderGroups: boolean;
 } {
@@ -562,17 +630,22 @@ function useProgressivelyMountedGroups(allGroups: KeyedTimelineGroup[]): {
   const lastPossibleStart = Math.max(0, allGroups.length - INITIAL_MOUNTED_GROUPS);
   let visibleStart = 0;
   if (allGroups.length > 0) {
-    const currentIndexByKey = new Map(groupKeys.map((key, index) => [key, index]));
-    let retainedStart: number | undefined;
-    for (const key of window.groupKeys.slice(window.visibleStart)) {
-      const index = currentIndexByKey.get(key);
-      if (index !== undefined) {
-        retainedStart = index;
-        break;
+    if (!hydrateOlderGroups) {
+      // Tip-locked: keep the DOM to the newest suffix only.
+      visibleStart = lastPossibleStart;
+    } else {
+      const currentIndexByKey = new Map(groupKeys.map((key, index) => [key, index]));
+      let retainedStart: number | undefined;
+      for (const key of window.groupKeys.slice(window.visibleStart)) {
+        const index = currentIndexByKey.get(key);
+        if (index !== undefined) {
+          retainedStart = index;
+          break;
+        }
       }
+      visibleStart =
+        retainedStart === undefined ? lastPossibleStart : Math.min(retainedStart, lastPossibleStart);
     }
-    visibleStart =
-      retainedStart === undefined ? lastPossibleStart : Math.min(retainedStart, lastPossibleStart);
   }
 
   useEffect(() => {
@@ -581,22 +654,29 @@ function useProgressivelyMountedGroups(allGroups: KeyedTimelineGroup[]): {
       setWindow({ groupKeys, visibleStart });
       return;
     }
-    if (visibleStart === 0) {
+    // Tip-locked: do not schedule older-prefix reveal frames.
+    if (!hydrateOlderGroups || visibleStart === 0) {
       return;
     }
     const frame = requestFrame(() => {
-      setWindow((current) =>
-        current.groupKeys === groupKeys && current.visibleStart > 0
-          ? { ...current, visibleStart: current.visibleStart - 1 }
-          : current,
-      );
+      setWindow((current) => {
+        if (current.groupKeys !== groupKeys || current.visibleStart <= 0) {
+          return current;
+        }
+        return {
+          ...current,
+          visibleStart: Math.max(0, current.visibleStart - GROUPS_PER_FRAME),
+        };
+      });
     });
     return () => cancelFrame(frame);
-  }, [groupKeys, visibleStart, window.groupKeys, window.visibleStart]);
+  }, [groupKeys, hydrateOlderGroups, visibleStart, window.groupKeys, window.visibleStart]);
 
   return {
     mountedGroups: allGroups.slice(visibleStart),
-    mountingOlderGroups: visibleStart > 0,
+    // Only the scroll-up hydration path is "mounting older"; tip-locked suffix
+    // is the steady tip window, not an in-progress bulk paint.
+    mountingOlderGroups: hydrateOlderGroups && visibleStart > 0,
   };
 }
 

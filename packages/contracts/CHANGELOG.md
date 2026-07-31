@@ -1,5 +1,14 @@
 # @opengeni/contracts
 
+## Unreleased
+
+### Minor Changes
+
+- Add native voice-input contracts: `ClientConfig.voiceInput`, `WorkspaceVoiceInputSettings`,
+  `TranscribeAudioResponse`, MIME/duration/size ceilings, and
+  `resolveWorkspaceVoiceInputEnabled` (maps legacy `transcription.enabled` for one release).
+  Expand transcription error codes with `unavailable` / `too_large` / `invalid_audio`.
+
 ## 0.24.0
 
 ### Minor Changes

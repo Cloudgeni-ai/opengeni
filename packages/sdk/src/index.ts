@@ -5,6 +5,7 @@ export type {
   OpenGeniRequestOptions,
   SendMessageInput,
   SteerMessageResult,
+  TranscribeAudioInput,
   WorkspaceControlEventPage,
 } from "./client";
 export {
@@ -118,6 +119,7 @@ export {
   DEFAULT_WORKSPACE_TRANSCRIPTION_POLICY,
   authorizeTranscriptionAdapter,
   createTranscriptionSessionRequest,
+  resolveWorkspaceVoiceInputEnabled,
   resolveWorkspaceTranscriptionPolicy,
 } from "./transcription";
 export type {
@@ -185,6 +187,7 @@ export type {
   CapabilitySource,
   CapabilityUnavailableReason,
   ClientConfig,
+  ClientVoiceInputConfig,
   ClientModel,
   ModelAvailabilityV1,
   ModelBillingAttributionV1,
@@ -491,6 +494,7 @@ export type {
   UpdateWorkspaceMemberRequest,
   UpdateWorkspaceRequest,
   UpdateWorkspaceSettingsRequest,
+  TranscribeAudioResponse,
   UploadFileInput,
   UsageEvent,
   UsageEventType,
@@ -522,6 +526,7 @@ export type {
   WorkspaceMemorySearchResult,
   WorkspaceMemorySearchResponse,
   WorkspaceSettings,
+  WorkspaceVoiceInputSettings,
   WorkspaceRegisteredPack,
   // Bring-your-own-compute: Machines dashboard + per-machine metrics (M10).
   MetricSample,

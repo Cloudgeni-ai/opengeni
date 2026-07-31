@@ -49,6 +49,12 @@ export {
   FILE_ONLY_MESSAGE_TEXT,
 } from "./hooks/use-composer";
 export type { ComposerSendExtras, ComposerState, UseComposerOptions } from "./hooks/use-composer";
+export { useVoiceInput } from "./hooks/use-voice-input";
+export type {
+  UseVoiceInputOptions,
+  UseVoiceInputResult,
+  VoiceInputStatus,
+} from "./hooks/use-voice-input";
 export { COMPOSER_PAYMENT_REQUIRED_MESSAGE, composerSubmissionErrorMessage } from "./lib/format";
 export {
   INITIAL_TRANSCRIPTION_CONTROL_STATE,
