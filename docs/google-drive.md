@@ -55,9 +55,10 @@ to the exact ports printed by the dev stack.
 ## Source selection behavior
 
 The browser starts at **My Drive**. A Shared Drive or shared folder can be
-tested by pasting its folder ID from the Google Drive URL. Enumerating all
-Shared Drives by name requires the broader `drive.readonly` scope, so the
-metadata-only preview does not silently request it.
+tested by pasting its full `https://drive.google.com/.../folders/...` URL or
+its folder ID. Enumerating all Shared Drives by name requires the broader
+`drive.readonly` scope, so the metadata-only preview does not silently request
+it.
 
 The **Only me**, **This workspace**, and **Company** options record the intended
 future knowledge scope. They are not ingestion or authorization controls yet.

@@ -700,8 +700,20 @@ function parseDriveItem(value: unknown): GoogleDriveBrowseItem | null {
 }
 
 function validDriveId(value: string, label: string): string {
-  if (value === "root" || /^[A-Za-z0-9_-]{1,256}$/.test(value)) {
-    return value;
+  const candidate = value.trim();
+  if (candidate === "root" || /^[A-Za-z0-9_-]{1,256}$/.test(candidate)) {
+    return candidate;
+  }
+  try {
+    const url = new URL(candidate);
+    if (url.protocol === "https:" && url.hostname === "drive.google.com") {
+      const folderId = url.pathname.match(/(?:^|\/)folders\/([A-Za-z0-9_-]{1,256})(?:\/|$)/)?.[1];
+      if (folderId) {
+        return folderId;
+      }
+    }
+  } catch {
+    // Fall through to the bounded public error below.
   }
   throw new HTTPException(400, { message: `${label} is invalid` });
 }

@@ -365,7 +365,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
               <Input
                 value={folderIdDraft}
                 onChange={(event) => setFolderIdDraft(event.target.value)}
-                placeholder="Optional: paste a folder ID from a shared Drive link"
+                placeholder="Optional: paste a Google Drive folder link or folder ID"
                 className="h-8 text-xs"
                 onKeyDown={(event) => {
                   if (event.key === "Enter") openFolderId();

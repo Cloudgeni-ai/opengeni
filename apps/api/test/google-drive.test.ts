@@ -101,6 +101,7 @@ async function bearer(
 function googleFixture(options: { permissionId?: string; omitRefreshToken?: boolean } = {}) {
   const tokenRequests: URLSearchParams[] = [];
   const apiAuthorizationHeaders: string[] = [];
+  const fileListQueries: string[] = [];
   const fetch: typeof globalThis.fetch = async (input, init) => {
     const url = new URL(input instanceof Request ? input.url : input.toString());
     if (url.href === "https://oauth2.googleapis.com/token") {
@@ -128,7 +129,7 @@ function googleFixture(options: { permissionId?: string; omitRefreshToken?: bool
       });
     }
     if (url.pathname === "/drive/v3/files") {
-      expect(url.searchParams.get("q")).toBe("'root' in parents and trashed = false");
+      fileListQueries.push(url.searchParams.get("q") ?? "");
       return Response.json({
         incompleteSearch: false,
         files: [
@@ -160,7 +161,7 @@ function googleFixture(options: { permissionId?: string; omitRefreshToken?: bool
     }
     return new Response("not found", { status: 404 });
   };
-  return { fetch, tokenRequests, apiAuthorizationHeaders };
+  return { fetch, tokenRequests, apiAuthorizationHeaders, fileListQueries };
 }
 
 function app(googleDriveFetch: typeof globalThis.fetch, overrides: Partial<Settings> = {}) {
@@ -317,6 +318,7 @@ describe("Google Drive local source preview", () => {
       expect.objectContaining({ id: "folder-1", kind: "folder" }),
       expect.objectContaining({ id: "file-1", kind: "file" }),
     ]);
+    expect(google.fileListQueries).toEqual(["'root' in parents and trashed = false"]);
 
     const save = await app(google.fetch).request(
       `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/${connected.connection.id}/source`,
@@ -357,6 +359,39 @@ describe("Google Drive local source preview", () => {
       select id from documents where workspace_id = ${workspace.workspaceId}
     `,
     ).toHaveLength(0);
+  });
+
+  test("accepts a pasted Google Drive folder link and rejects lookalike hosts", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const google = googleFixture();
+    const connected = await connect(workspace, google);
+    const authorization = await bearer(workspace, "subject-a", ["connections:read"]);
+    const sharedDriveId = "0AF9DylqqXWK2Uk9PVA";
+    const sharedDriveUrl = `https://drive.google.com/drive/u/0/folders/${sharedDriveId}`;
+    const browse = await app(google.fetch).request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/${connected.connection.id}/browse?parentId=${encodeURIComponent(sharedDriveUrl)}`,
+      {
+        headers: {
+          authorization,
+          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+        },
+      },
+    );
+    expect(browse.status).toBe(200);
+    expect(await browse.json()).toMatchObject({ parentId: sharedDriveId });
+    expect(google.fileListQueries).toEqual([`'${sharedDriveId}' in parents and trashed = false`]);
+
+    const lookalike = await app(google.fetch).request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/${connected.connection.id}/browse?parentId=${encodeURIComponent(`https://example.com/drive/folders/${sharedDriveId}`)}`,
+      {
+        headers: {
+          authorization,
+          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+        },
+      },
+    );
+    expect(lookalike.status).toBe(400);
   });
 
   test("fails closed on account switching and generic credential writes", async () => {
