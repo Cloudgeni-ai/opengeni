@@ -232,6 +232,9 @@ export type SandboxLeaseActivityOptions = {
   /** Observe a historical Modal box after its lease row has advanced to a
    * successor identity. Lifecycle-only; a live box remains ambiguous. */
   inspectHistoricalModalSandbox?: HistoricalModalSandboxLifecycleProbeFn;
+  /** Override the read-only exact-instance readiness probe used before the
+   * reaper settles blockers for a provider that has definitively vanished. */
+  probeDrainableProvider?: DrainableProviderProbeFn;
 };
 
 export type RetainedProcessProbeResult =
@@ -263,6 +266,11 @@ export type RetainedProcessProbeFn = (
 
 export type HistoricalModalSandboxLifecycleProbeFn = typeof inspectModalSandboxLifecycle;
 
+export type DrainableProviderProbeFn = (
+  settings: ActivityServices["settings"],
+  lease: LeaseSnapshot,
+) => Promise<"ready" | "missing">;
+
 export const RETAINED_PROCESS_RECONCILIATION_LIMIT = 20;
 export const RETAINED_PROCESS_RECONCILIATION_CLAIM_TTL_MS = 5 * 60_000;
 export const RETAINED_PROCESS_PROVIDER_PROBE_TIMEOUT_MS = 5_000;
@@ -275,6 +283,7 @@ export function createSandboxLeaseActivities(
   const sweepModalOrphans: SweepModalOrphansFn =
     options.sweepModalOrphans ?? sweepModalOrphansForConfiguredBackend;
   const probeRetainedProcess = options.probeRetainedProcess ?? probeRetainedProcessAtProvider;
+  const probeDrainableProvider = options.probeDrainableProvider ?? probeDrainableProviderReadiness;
   /**
    * The one global reaper sweep. Idempotent; concurrency-safe with itself.
    * Gated by the caller (the Schedule is only registered when
@@ -409,6 +418,7 @@ export function createSandboxLeaseActivities(
           row,
           observability,
           terminateBox,
+          probeDrainableProvider,
         );
         if (drainedCold) {
           terminated += 1;
@@ -1387,7 +1397,7 @@ async function sweepModalOrphansForConfiguredBackend(
  * missing provider is returned as typed loss; every ambiguous error preserves
  * the old claim for the next sweep.
  */
-async function probeExpiredArchiveCaptureProvider(
+async function probeDrainableProviderReadiness(
   settings: ActivityServices["settings"],
   lease: LeaseSnapshot,
 ): Promise<"ready" | "missing"> {
@@ -1473,6 +1483,7 @@ async function terminateDrainableBox(
   row: ReapDrainable,
   observability: ActivityServices["observability"],
   terminateBox: TerminateBoxFn,
+  probeDrainableProvider: DrainableProviderProbeFn,
 ): Promise<boolean> {
   // Resolve the account for the RLS-scoped confirmDrainCold (the global sweep
   // returns no account_id; the workspace->account map is the bootstrap read).
@@ -1513,7 +1524,7 @@ async function terminateDrainableBox(
       // stopped. Without an exact resume envelope there is no safe way to prove
       // the attributed provider is command-ready, so preserve the gate.
       if (!lease.resumeState) return false;
-      const providerState = await probeExpiredArchiveCaptureProvider(settings, lease);
+      const providerState = await probeDrainableProvider(settings, lease);
       if (providerState === "missing") {
         providerMissingBeforeCapture = true;
         captureClaim = {
@@ -1550,8 +1561,21 @@ async function terminateDrainableBox(
         captureTimeoutMs,
         minIntervalMs: 0,
       });
-      if (claimed.status !== "claimed") return false;
-      captureClaim = claimed.claim;
+      if (claimed.status === "claimed") {
+        captureClaim = claimed.claim;
+      } else if (claimed.status === "mutation_in_progress") {
+        // An admission is normally authoritative proof that a provider
+        // operation may still be running. It cannot, however, pin a draining
+        // lease forever after the exact provider has disappeared. Probe the
+        // attributed instance without replacement. Only typed NotFound permits
+        // the cold commit to reject the exact stale admissions; a live or
+        // ambiguous provider remains fenced for a later sweep.
+        const providerState = await probeDrainableProvider(settings, lease);
+        if (providerState !== "missing") return false;
+        providerMissingBeforeCapture = true;
+      } else {
+        return false;
+      }
     }
   }
 
