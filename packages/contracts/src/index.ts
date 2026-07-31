@@ -4862,25 +4862,18 @@ export const OPENGENI_SLACK_BOT_CREDENTIAL_ROLE = "opengeni_slack_bot" as const;
 export const OPENGENI_SLACK_BOT_CREDENTIAL_LABEL = "OpenGeni Slack bot" as const;
 export const OPENGENI_SLACK_BOT_SESSION_METADATA_KEY = "opengeniSlackBotConnectionId" as const;
 export const OPENGENI_SLACK_BOT_REQUIRED_SCOPES = [
-  "bookmarks:read",
   "canvases:read",
   "channels:history",
   "channels:read",
   "chat:write",
-  "emoji:read",
   "files:read",
   "groups:history",
   "groups:read",
   "im:history",
   "im:read",
   "im:write",
-  "lists:read",
   "mpim:history",
   "mpim:read",
-  "pins:read",
-  "reactions:read",
-  "team:read",
-  "usergroups:read",
   "users:read",
 ] as const;
 export const OPENGENI_SLACK_BOT_FORBIDDEN_SCOPES = ["channels:join", "chat:write.public"] as const;

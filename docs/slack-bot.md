@@ -66,25 +66,18 @@ oauth_config:
     - https://app.opengeni.ai/v1/integrations/slack/callback
   scopes:
     bot:
-      - bookmarks:read
       - canvases:read
       - channels:history
       - channels:read
       - chat:write
-      - emoji:read
       - files:read
       - groups:history
       - groups:read
       - im:history
       - im:read
       - im:write
-      - lists:read
       - mpim:history
       - mpim:read
-      - pins:read
-      - reactions:read
-      - team:read
-      - usergroups:read
       - users:read
 settings:
   org_deploy_enabled: false
@@ -119,8 +112,6 @@ The bot connection is a workspace-shared `app_install` row (`subjectId = null`) 
 The first-party tools are `slack_bot_list_channels`, `slack_bot_channel_history`, `slack_bot_thread_replies`, `slack_bot_list_users`, `slack_bot_list_files`, `slack_bot_file_info`, `slack_bot_file_content`, and `slack_bot_post_message`. Outside a scheduled session, calls require `connections:read`; the connection ID is optional when exactly one eligible active OpenGeni bot is installed, and required when multiple eligible bots exist. A scheduled session can use only its immutable selected bot connection ID.
 
 Slack AI huddle notes are canvases. Sharing that canvas into a channel where the bot is a member lets OpenGeni read the notes and exposes the associated `huddleTranscriptFileId`. For transcript content, OpenGeni requests the expanded `files.info` projection with `include_transcription=true` and reads the returned `huddle_transcription` object from the transcript or parent canvas. If Slack omits that projection and redirects the private download to an interactive user page, OpenGeni reports `huddle_transcript_requires_participant_access` and never treats Slack web-client HTML as transcript content.
-
-The built-in **Personal Slack** capability connects the requesting participant to Slack's official hosted MCP server. Its Read files tool can retrieve content using that participant's own Slack access. This is deliberately separate from the workspace-shared bot: the OAuth connection is subject-owned, other OpenGeni users cannot resolve it, and OpenGeni never silently substitutes it for the bot. After enabling Personal Slack, start a new agent session so its frozen tool surface includes the newly connected MCP tools.
 
 Each post requires an `operationId` UUID. Generate one per intended message and reuse the same UUID for every timeout or unknown-outcome retry. OpenGeni binds it to the connection, target, and protected request digest and sends it as Slack `client_msg_id`; reusing it for different content or a different target is rejected.
 

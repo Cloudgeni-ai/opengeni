@@ -92,6 +92,12 @@ async function createMcpCapability(
 }
 
 describe("subject-owned capability connection references", () => {
+  test("does not publish Personal Slack as a built-in catalog capability", async () => {
+    const source = await Bun.file(new URL("../src/domain/capabilities.ts", import.meta.url)).text();
+    expect(source).not.toContain('id: "mcp:personal-slack"');
+    expect(source).not.toContain("personalSlackMcpCatalogItem");
+  });
+
   test("resolves Alice's generic ref and never persists or projects a personal UUID", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -146,22 +152,7 @@ describe("subject-owned capability connection references", () => {
       workspaceId: workspace.workspaceId,
       settings,
     });
-    expect(catalog.items.find((item) => item.id === "mcp:personal-slack")).toMatchObject({
-      kind: "mcp",
-      source: "built_in",
-      endpointUrl: "https://mcp.slack.com/mcp",
-      mcpUrl: "https://mcp.slack.com/mcp",
-      providerDomain: "slack.com",
-      authKind: "oauth2",
-      runtime: {
-        available: true,
-        mcpServerId: "personal-slack",
-      },
-      metadata: {
-        subjectScope: "subject",
-        officialProvider: true,
-      },
-    });
+    expect(catalog.items.find((item) => item.id === "mcp:personal-slack")).toBeUndefined();
     expect(catalog.items.find((item) => item.id === capabilityId)?.connectionRef).toEqual({
       providerDomain: "slack.com",
       kind: "oauth2",

@@ -556,25 +556,18 @@ describe("OpenGeni Slack bot credential verification", () => {
 
   test("accepts only the exact bot identity and scope set", async () => {
     expect(OPENGENI_SLACK_BOT_REQUIRED_SCOPES).toEqual([
-      "bookmarks:read",
       "canvases:read",
       "channels:history",
       "channels:read",
       "chat:write",
-      "emoji:read",
       "files:read",
       "groups:history",
       "groups:read",
       "im:history",
       "im:read",
       "im:write",
-      "lists:read",
       "mpim:history",
       "mpim:read",
-      "pins:read",
-      "reactions:read",
-      "team:read",
-      "usergroups:read",
       "users:read",
     ]);
     const exact = fakeSlack();
