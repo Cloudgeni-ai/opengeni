@@ -1,5 +1,18 @@
 # @opengeni/worker-bundle
 
+## 0.12.18
+
+### Patch Changes
+
+- 510eae3: Keep restored Modal checkpoints valid across live workspace writes, serialize
+  lease reaping with concurrent acquisition, and rotate image or rig changes
+  through durable checkpoint capture instead of discarding provider ownership.
+- Updated dependencies [510eae3]
+  - @opengeni/db@0.15.3
+  - @opengeni/core@0.13.7
+  - @opengeni/documents@0.2.53
+  - @opengeni/events@0.3.44
+
 ## 0.12.17
 
 ### Patch Changes

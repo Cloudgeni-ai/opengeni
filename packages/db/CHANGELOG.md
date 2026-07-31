@@ -1,5 +1,13 @@
 # @opengeni/db
 
+## 0.15.3
+
+### Patch Changes
+
+- 510eae3: Keep restored Modal checkpoints valid across live workspace writes, serialize
+  lease reaping with concurrent acquisition, and rotate image or rig changes
+  through durable checkpoint capture instead of discarding provider ownership.
+
 ## 0.15.2
 
 ### Patch Changes
