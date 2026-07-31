@@ -1,15 +1,5 @@
 import { GoogleDriveConnectionMetadata } from "@opengeni/contracts";
-import {
-  ArrowLeftIcon,
-  ChevronRightIcon,
-  FolderIcon,
-  FolderOpenIcon,
-  HardDriveIcon,
-  Loader2Icon,
-  LogOutIcon,
-  RefreshCwIcon,
-  XIcon,
-} from "lucide-react";
+import { FolderIcon, FolderOpenIcon, HardDriveIcon, Loader2Icon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
@@ -344,7 +334,6 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
                   disabled={busy || !canWrite}
                   onClick={() => void connect(true)}
                 >
-                  <RefreshCwIcon className="size-3.5" />
                   Reconnect
                 </Button>
                 <Button
@@ -354,7 +343,6 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
                   disabled={busy || !canWrite}
                   onClick={() => void disconnect()}
                 >
-                  <LogOutIcon className="size-3.5" />
                   Disconnect
                 </Button>
               </>
@@ -446,7 +434,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
                         aria-label={`Remove ${googleDriveBoundaryLabel(source)}`}
                         onClick={() => removeSource(source.id)}
                       >
-                        <XIcon className="size-3" />
+                        <span aria-hidden="true">×</span>
                       </button>
                     </span>
                   ))}
@@ -466,12 +454,12 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
                   onClick={goBack}
                   aria-label="Back one folder"
                 >
-                  <ArrowLeftIcon className="size-3.5" />
+                  <span aria-hidden="true">←</span>
                 </Button>
                 <div className="flex min-w-0 items-center gap-0.5 text-xs text-fg-muted">
                   {crumbs.map((crumb, index) => (
                     <div key={crumb.id} className="flex min-w-0 items-center gap-0.5">
-                      {index > 0 ? <ChevronRightIcon className="size-3 shrink-0" /> : null}
+                      {index > 0 ? <span aria-hidden="true">›</span> : null}
                       <button
                         type="button"
                         className="max-w-32 truncate rounded px-1.5 py-1 hover:bg-surface-2 hover:text-fg"
@@ -547,7 +535,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
                           onClick={() => openFolder(item)}
                         >
                           <span className="min-w-0 flex-1 truncate">{item.name}</span>
-                          <ChevronRightIcon className="size-3.5 shrink-0" />
+                          <span aria-hidden="true">›</span>
                         </button>
                       </div>
                     ))}
