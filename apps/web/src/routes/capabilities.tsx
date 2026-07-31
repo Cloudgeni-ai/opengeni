@@ -25,6 +25,7 @@ import {
   CapabilityDetailSheet,
   type ConnectAction,
 } from "@/components/capabilities/capability-detail-sheet";
+import { GoogleDriveConnectorCard } from "@/components/capabilities/google-drive-connector-card";
 import { CapabilityLogo } from "@/components/capabilities/capability-logo";
 import { CapabilityTile } from "@/components/capabilities/capability-tile";
 import { PacksSection } from "@/components/capabilities/packs-section";
@@ -865,6 +866,8 @@ export function CapabilitiesRoute({
             </>
           }
         />
+
+        <GoogleDriveConnectorCard workspaceId={workspaceId} />
 
         <section
           className="mt-6 rounded-xl border border-border bg-surface p-4"

@@ -41,7 +41,7 @@ const GOOGLE_DRIVE_FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
 const GOOGLE_RESPONSE_MAX_BYTES = 2 * 1024 * 1024;
 const GOOGLE_REQUEST_TIMEOUT_MS = 10_000;
 const GOOGLE_DRIVE_PAGE_SIZE = 100;
-const GOOGLE_DRIVE_RETURN_PATH = (workspaceId: string) => `/workspaces/${workspaceId}/documents`;
+const GOOGLE_DRIVE_RETURN_PATH = (workspaceId: string) => `/workspaces/${workspaceId}/capabilities`;
 
 type GoogleDriveOAuthState = {
   accountId: string;

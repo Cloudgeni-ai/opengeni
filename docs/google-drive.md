@@ -1,7 +1,7 @@
 # Google Drive source preview
 
 OpenGeni can connect a Google account and browse Drive metadata from the
-Documents page. This first slice is intentionally a connector preview:
+Capabilities page. This first slice is intentionally a connector preview:
 
 - OAuth and refresh tokens are server-side only and encrypted in the existing
   connection vault.
@@ -45,7 +45,7 @@ Production use requires Google's applicable verification and security review.
    Generate the encryption key with `openssl rand -base64 32` and the state
    secret with `openssl rand -hex 32`.
 
-6. Run `bun run dev`, open `http://127.0.0.1:3000`, go to **Documents**, and
+6. Run `bun run dev`, open `http://127.0.0.1:3000`, go to **Capabilities**, and
    choose **Connect Google Drive**.
 
 The dev stack can select another API or web port if the defaults are occupied.

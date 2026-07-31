@@ -38,7 +38,7 @@ const GOOGLE_DRIVE_PROVIDER_DOMAIN = "googleapis.com";
 
 type FolderCrumb = { id: string; name: string };
 
-export function GoogleDriveSourceCard({ workspaceId }: { workspaceId: string }) {
+export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
   const client = context.client;
   const canRead = hasWorkspacePermission(context.accessContext, workspaceId, "connections:read");
@@ -244,10 +244,10 @@ export function GoogleDriveSourceCard({ workspaceId }: { workspaceId: string }) 
               <HardDriveIcon className="size-4" />
             </div>
             <div className="min-w-0">
-              <div className="text-sm font-medium">Google Drive source preview</div>
+              <div className="text-sm font-medium">Google Drive</div>
               <p className="mt-0.5 text-xs leading-5 text-fg-muted">
-                Test OAuth and choose a source locally. OpenGeni can see file and folder metadata,
-                but cannot download or ingest content in this slice.
+                Connect an account and choose a knowledge source. This local preview can see file
+                and folder metadata, but cannot download or ingest content yet.
               </p>
             </div>
           </div>
