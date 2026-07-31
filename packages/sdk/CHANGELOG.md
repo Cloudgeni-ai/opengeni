@@ -1,5 +1,16 @@
 # @opengeni/sdk
 
+## 0.31.0
+
+### Minor Changes
+
+- 42428a2: Add per-session Codex remote compaction v2 (`remote_v2` / `portable`), with UI landmarks, Codex-only model locking, and opaque token accounting aligned to Codex CLI.
+
+### Patch Changes
+
+- 0199108: Harden the workspace Slack bot with one fail-closed scope policy, deterministic legacy connection selection, and durable replay-safe message deletion operation identities.
+- b2e975f: Advance the merged knowledge release train to fresh publication identities without changing runtime behavior. This corrective source is derived from current main and does not reuse generated release output.
+
 ## Unreleased
 
 - Add native voice-input configuration mirrors, workspace toggle resolution, and one-shot multipart `transcribeAudio` uploads.

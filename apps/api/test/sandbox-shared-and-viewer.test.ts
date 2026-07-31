@@ -15,6 +15,7 @@ import {
   commitWarmingToWarm,
   createDb,
   createSession,
+  forceDrainOverLimitViewerOnlyBoxes,
   getSession,
   listSessionMcpServersForRun,
   listSessionTurns,
@@ -39,6 +40,7 @@ import {
 } from "../src/sandbox/viewer";
 import { withChannelA } from "../src/sandbox/channel-a";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
+import { HTTPException } from "hono/http-exception";
 
 // P1.4 — the shared-sandbox MCP surface (create-session resolution) + the
 // API-direct viewer-holder lifecycle, driven through the REAL packages/db lease
@@ -1168,6 +1170,54 @@ describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => 
     const lease1 = await readLease(db, workspaceId, sandboxGroupId);
     expect(lease1?.liveness).toBe("warm");
     expect(lease1?.viewerHolders).toBe(1);
+  }, 60_000);
+
+  test("an over-limit viewer receives the typed billing response and cannot re-arm until a fresh evaluation clears the gate", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const { sandboxGroupId, sessionId } = await seedWarmBox(accountId, workspaceId);
+    const session = await getSession(db, workspaceId, sessionId);
+
+    await forceDrainOverLimitViewerOnlyBoxes(db, {
+      workspaceId,
+      balanceMicros: 0,
+      enforceBalance: true,
+      maxWarmSecondsPerWorkspace: 0,
+      idleGraceMs: settings.sandboxIdleGraceMs,
+    });
+
+    let blocked: unknown;
+    try {
+      await attachViewer({ db, settings }, { accountId, workspaceId, session: session! });
+    } catch (error) {
+      blocked = error;
+    }
+    expect(blocked).toBeInstanceOf(HTTPException);
+    expect((blocked as HTTPException).status).toBe(402);
+    expect((blocked as Error).message).toContain("insufficient OpenGeni credits");
+    expect(await readLease(db, workspaceId, sandboxGroupId)).toMatchObject({
+      liveness: "draining",
+      refcount: 0,
+      viewerHolders: 0,
+    });
+
+    await forceDrainOverLimitViewerOnlyBoxes(db, {
+      workspaceId,
+      balanceMicros: 1,
+      enforceBalance: true,
+      maxWarmSecondsPerWorkspace: 0,
+      idleGraceMs: settings.sandboxIdleGraceMs,
+    });
+    const attached = await attachViewer(
+      { db, settings },
+      { accountId, workspaceId, session: session! },
+    );
+    expect(attached.liveness).toBe("warm");
+    expect(await readLease(db, workspaceId, sandboxGroupId)).toMatchObject({
+      liveness: "warm",
+      refcount: 1,
+      viewerHolders: 1,
+    });
   }, 60_000);
 
   test("fleet readiness returns a live viewer hold until its route owner releases it", async () => {

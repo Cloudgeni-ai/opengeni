@@ -52,6 +52,7 @@ import {
   listLegacyModalCheckpointSlots,
   listLiveModalSandboxLeaseAttributions,
   listMeterableWarmLeases,
+  listSandboxViewerForceDrainWorkspaceIds,
   markSandboxCheckpointArtifactDeletePending,
   persistDrainSnapshot,
   pruneDeletedSandboxCheckpointArtifacts,
@@ -339,10 +340,29 @@ export function createSandboxLeaseActivities(
     // workspace at 0 balance / over its warm cap force-drains its VIEWER-ONLY
     // boxes (guarded turn_holders=0 — a paying turn is NEVER killed). The newly
     // draining rows are caught by the same sweep's terminate below.
+    const forceDrainWorkspaceIds = new Set<string>();
+    if (
+      settings.billingMode === "stripe" ||
+      settings.usageLimitsMode === "managed" ||
+      settings.sandboxMaxWarmSecondsPerWorkspace > 0
+    ) {
+      for (const workspaceId of metered.workspaceIds) {
+        forceDrainWorkspaceIds.add(workspaceId);
+      }
+    }
+    try {
+      for (const workspaceId of await listSandboxViewerForceDrainWorkspaceIds(db)) {
+        forceDrainWorkspaceIds.add(workspaceId);
+      }
+    } catch (error) {
+      observability.warn("sandbox reaper: viewer force-drain workspace read failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
     const forceDrained = await forceDrainOverLimitWorkspaces(
       db,
       settings,
-      metered.workspaceIds,
+      forceDrainWorkspaceIds,
       observability,
     );
 
@@ -1257,10 +1277,6 @@ async function forceDrainOverLimitWorkspaces(
   const enforceBalance =
     settings.billingMode === "stripe" || settings.usageLimitsMode === "managed";
   const cap = settings.sandboxMaxWarmSecondsPerWorkspace;
-  // Nothing to enforce → skip the whole pass (no lock churn).
-  if (!enforceBalance && cap <= 0) {
-    return 0;
-  }
   let forceDrained = 0;
   for (const workspaceId of workspaceIds) {
     try {
