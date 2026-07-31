@@ -1,6 +1,5 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
-import { Button } from "@/components/ui/button";
 import {
   analyticsHasProviders,
   persistAnalyticsConsent,
@@ -9,13 +8,39 @@ import {
 } from "@/lib/analytics-consent";
 import type { ClientConfig } from "@/types";
 
-export function AnalyticsConsentBanner({ config }: { config: ClientConfig["analytics"] }) {
+const BUTTON_CLASS =
+  "inline-flex h-9 cursor-pointer items-center justify-center rounded-md px-4 py-2 text-sm font-medium transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-2 focus-visible:ring-offset-bg";
+
+export function AnalyticsManager({
+  config,
+  hasSearchParameters,
+  isPublicAuthRoute,
+  pathname,
+}: {
+  config: ClientConfig["analytics"];
+  hasSearchParameters: boolean;
+  isPublicAuthRoute: boolean;
+  pathname: string;
+}) {
   const [choice, setChoice] = useState<AnalyticsConsent | null>(() => storedAnalyticsConsent());
   const [editing, setEditing] = useState(choice === null);
 
-  if (!config.consentRequired || !analyticsHasProviders(config)) {
-    return null;
-  }
+  useEffect(() => {
+    let cancelled = false;
+    void import("@/lib/analytics").then(({ suspendAnalytics, syncAnalytics }) => {
+      if (cancelled) return;
+      if (isPublicAuthRoute || hasSearchParameters) {
+        suspendAnalytics();
+        return;
+      }
+      syncAnalytics(config, pathname);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [config, hasSearchParameters, isPublicAuthRoute, pathname]);
+
+  const showPreferences = config.consentRequired && analyticsHasProviders(config);
 
   const choose = (nextChoice: AnalyticsConsent) => {
     persistAnalyticsConsent(nextChoice);
@@ -26,16 +51,17 @@ export function AnalyticsConsentBanner({ config }: { config: ClientConfig["analy
     });
   };
 
+  if (!showPreferences || isPublicAuthRoute) return null;
+
   if (!editing) {
     return (
-      <Button
+      <button
         type="button"
-        variant="secondary"
-        className="fixed bottom-3 left-3 z-40 h-8 px-2 text-xs"
+        className={`${BUTTON_CLASS} fixed bottom-3 left-3 z-40 h-8 bg-secondary px-2 text-xs text-secondary-foreground hover:bg-secondary/80`}
         onClick={() => setEditing(true)}
       >
         Analytics preferences
-      </Button>
+      </button>
     );
   }
 
@@ -52,16 +78,28 @@ export function AnalyticsConsentBanner({ config }: { config: ClientConfig["analy
       </p>
       <div className="mt-3 flex justify-end gap-2">
         {choice !== null ? (
-          <Button type="button" variant="ghost" onClick={() => setEditing(false)}>
+          <button
+            type="button"
+            className={`${BUTTON_CLASS} hover:bg-accent hover:text-accent-foreground`}
+            onClick={() => setEditing(false)}
+          >
             Cancel
-          </Button>
+          </button>
         ) : null}
-        <Button type="button" variant="secondary" onClick={() => choose("denied")}>
+        <button
+          type="button"
+          className={`${BUTTON_CLASS} bg-secondary text-secondary-foreground hover:bg-secondary/80`}
+          onClick={() => choose("denied")}
+        >
           Decline
-        </Button>
-        <Button type="button" onClick={() => choose("granted")}>
+        </button>
+        <button
+          type="button"
+          className={`${BUTTON_CLASS} bg-primary text-primary-foreground hover:bg-primary/90`}
+          onClick={() => choose("granted")}
+        >
           Allow analytics
-        </Button>
+        </button>
       </div>
     </section>
   );

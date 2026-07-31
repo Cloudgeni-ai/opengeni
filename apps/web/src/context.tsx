@@ -80,9 +80,9 @@ import type {
   Workspace,
 } from "@/types";
 
-const AnalyticsConsentBanner = lazy(() =>
+const AnalyticsManager = lazy(() =>
   import("@/components/analytics-consent").then((module) => ({
-    default: module.AnalyticsConsentBanner,
+    default: module.AnalyticsManager,
   })),
 );
 
@@ -348,26 +348,6 @@ export function RootRouteComponent() {
       cancelled = true;
     };
   }, []);
-
-  useEffect(() => {
-    if (!clientConfig) {
-      return;
-    }
-    let cancelled = false;
-    void import("@/lib/analytics").then(({ suspendAnalytics, syncAnalytics }) => {
-      if (cancelled) {
-        return;
-      }
-      if (isPublicAuthRoute || hasSearchParameters) {
-        suspendAnalytics();
-        return;
-      }
-      syncAnalytics(clientConfig.analytics, pathname);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [clientConfig, hasSearchParameters, isPublicAuthRoute, pathname]);
 
   useEffect(() => {
     if (!clientConfig) {
@@ -1115,9 +1095,14 @@ export function RootRouteComponent() {
   return (
     <main className="flex h-dvh min-h-screen flex-col overflow-x-hidden bg-bg text-fg">
       <Toaster richColors theme="dark" />
-      {clientConfig && !isPublicAuthRoute ? (
+      {clientConfig ? (
         <Suspense fallback={null}>
-          <AnalyticsConsentBanner config={clientConfig.analytics} />
+          <AnalyticsManager
+            config={clientConfig.analytics}
+            hasSearchParameters={hasSearchParameters}
+            isPublicAuthRoute={isPublicAuthRoute}
+            pathname={pathname}
+          />
         </Suspense>
       ) : null}
       {isPublicAuthRoute ? (
