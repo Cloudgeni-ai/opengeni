@@ -14,8 +14,6 @@ import {
   encryptEnvironmentValue,
   getConnectionMetadata,
   loadConnectionCredentialForBroker,
-  loadIntegrationOAuthClient,
-  replaceIntegrationOAuthClient,
   type DbClient,
 } from "@opengeni/db";
 import { createSignedState, readSignedState } from "@opengeni/github";
