@@ -197,9 +197,13 @@ export function MessageTimeline({
   // reader's place by scrollHeight delta — not tip-follow and not a live
   // element-anchor chase. The loading shimmer + per-frame prepends otherwise
   // fight ResizeObserver/layout corrections and wobble ~1px near the top.
+  // Keep a short post-settle cooldown so Markdown/layout RO chatter right after
+  // the last batch cannot flip into element-anchor micro-corrections.
   const settlingOlder = loadingOlder || mountingOlderGroups;
-  const settlingOlderRef = useRef(settlingOlder);
-  settlingOlderRef.current = settlingOlder;
+  const [olderSettleCooldown, setOlderSettleCooldown] = useState(false);
+  const freezeOlderScroll = settlingOlder || olderSettleCooldown;
+  const freezeOlderScrollRef = useRef(freezeOlderScroll);
+  freezeOlderScrollRef.current = freezeOlderScroll;
   const previousScrollHeightRef = useRef(0);
   // The reader's visual anchor: the topmost still-visible timeline element and
   // its offset from the viewport top. Recaptured on scroll and after every
@@ -265,14 +269,15 @@ export function MessageTimeline({
     (node: HTMLElement) => {
       const nextHeight = node.scrollHeight;
       const previousHeight = previousScrollHeightRef.current;
-      // Older fetch/mount: keep the viewport locked via height delta only.
-      // Tip-follow would yank a near-top reader; element-anchor + RO would
-      // micro-correct against shimmer/batch inserts and wobble.
-      if (settlingOlderRef.current && !(autoFollow && pinnedRef.current)) {
+      // Older fetch/mount (+ brief cooldown): keep the viewport locked via
+      // height delta only. Tip-follow would yank a near-top reader;
+      // element-anchor + RO would micro-correct against shimmer/batch inserts.
+      if (freezeOlderScrollRef.current && !(autoFollow && pinnedRef.current)) {
         if (previousHeight > 0) {
           const heightDelta = nextHeight - previousHeight;
-          if (Math.abs(heightDelta) > 0.5) {
-            assignScrollTop(node, node.scrollTop + heightDelta);
+          // Integer px only — sub-pixel height chatter was the 1mm wobble.
+          if (Math.abs(heightDelta) >= 1) {
+            assignScrollTop(node, Math.round(node.scrollTop + heightDelta));
           }
         }
         previousScrollHeightRef.current = node.scrollHeight;
@@ -344,16 +349,50 @@ export function MessageTimeline({
     if (!revealed && groups.length > 0) {
       setRevealed(true);
     }
-  }, [resolvedItems, working, revealed, groups.length, loadingOlder, mountingOlderGroups, restoreAnchor]);
+  }, [
+    resolvedItems,
+    working,
+    revealed,
+    groups.length,
+    loadingOlder,
+    mountingOlderGroups,
+    olderSettleCooldown,
+    restoreAnchor,
+  ]);
 
-  // After older hydration settles, re-seed the element-anchor from the stable
-  // viewport. Capture was frozen during settling so height-delta could own it.
+  // After older hydration settles, hold height-delta mode for a couple of
+  // frames, then re-seed the element-anchor from the stable viewport.
   const wasSettlingOlderRef = useRef(false);
+  const settlingOlderLiveRef = useRef(settlingOlder);
+  settlingOlderLiveRef.current = settlingOlder;
   useLayoutEffect(() => {
-    if (wasSettlingOlderRef.current && !settlingOlder) {
-      captureAnchor();
+    if (settlingOlder) {
+      wasSettlingOlderRef.current = true;
+      setOlderSettleCooldown(false);
+      return undefined;
     }
-    wasSettlingOlderRef.current = settlingOlder;
+    if (!wasSettlingOlderRef.current) {
+      return undefined;
+    }
+    wasSettlingOlderRef.current = false;
+    setOlderSettleCooldown(true);
+    let frame2 = 0;
+    const frame1 = requestFrame(() => {
+      frame2 = requestFrame(() => {
+        // A new older fetch may have started during the cooldown.
+        if (settlingOlderLiveRef.current) {
+          return;
+        }
+        setOlderSettleCooldown(false);
+        captureAnchor();
+      });
+    });
+    return () => {
+      cancelFrame(frame1);
+      if (frame2) {
+        cancelFrame(frame2);
+      }
+    };
   }, [settlingOlder, captureAnchor]);
 
   // A cleared timeline (stream identity change) re-arms the reveal so the next
@@ -442,6 +481,11 @@ export function MessageTimeline({
       if (!current) {
         return;
       }
+      // Layout-effect owns scroll during older settle/cooldown. RO callbacks
+      // from Markdown/batch inserts were the continuous near-top wobble.
+      if (freezeOlderScrollRef.current) {
+        return;
+      }
       restoreAnchor(current);
     });
     observer.observe(inner);
@@ -475,10 +519,10 @@ export function MessageTimeline({
       olderPrefetchArmedRef.current = true;
       setOlderPrefetchArmed(true);
     }
-    // Freeze the element-anchor while older history is settling: height-delta
-    // owns that window. Recapturing mid-prepend (or from a delayed echo) lets
-    // the viewport walk / wobble near the top.
-    if (!programmatic && !settlingOlderRef.current) {
+    // Freeze the element-anchor while older history is settling/cooling down:
+    // height-delta owns that window. Recapturing mid-prepend (or from a delayed
+    // echo) lets the viewport walk / wobble near the top.
+    if (!programmatic && !freezeOlderScrollRef.current) {
       captureAnchor();
     }
   };
@@ -501,7 +545,7 @@ export function MessageTimeline({
                     <p className="py-10 text-center text-sm text-og-fg-subtle">No activity yet.</p>
                   ))
                 : null}
-              {hasOlder && olderPrefetchArmed && !mountingOlderGroups ? (
+              {hasOlder && olderPrefetchArmed ? (
                 <div
                   ref={topSentinelRef}
                   data-og-top-sentinel=""
