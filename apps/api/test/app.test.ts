@@ -604,7 +604,9 @@ describe("API helpers", () => {
 
   test("rejects oversized streamed request bodies before route parsing", async () => {
     const app = createApp({
-      settings: testSettings(),
+      settings: testSettings({
+        voiceInputMaxSizeBytes: API_MAX_REQUEST_BODY_BYTES - 64 * 1024,
+      }),
       db: {} as never,
       bus: {} as never,
       workflowClient: {} as never,
