@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       source_sha:
-        description: Exact current versioned main SHA; dispatch this workflow from that same ref.
+        description: Exact retained versioned-main SHA; dispatch this workflow from that same ref.
         required: true
         type: string
 
@@ -42,7 +42,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Validate exact versioned main source
+      - name: Validate exact retained versioned main source
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
@@ -60,8 +60,8 @@ jobs:
             exit 1
           }
           git fetch --no-tags origin main
-          [ "$(git rev-parse origin/main)" = "$SOURCE_SHA" ] || {
-            echo "release candidates must start from the current main head" >&2
+          git merge-base --is-ancestor "$SOURCE_SHA" origin/main || {
+            echo "release candidate source must remain in current main ancestry" >&2
             exit 1
           }
           if find .changeset -maxdepth 1 -type f -name '*.md' ! -name README.md -print -quit | grep -q .; then
