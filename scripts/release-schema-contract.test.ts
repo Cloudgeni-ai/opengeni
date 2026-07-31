@@ -154,12 +154,14 @@ describe("release schema contract", () => {
         (migrations.has("0137_preference_registry.sql") ? 1 : 0) +
         (migrations.has("0138_sandbox_checkpoint_artifacts_and_deadlines.sql") ? 1 : 0) +
         (migrations.has("0139_codex_provider_artifact_invalidations.sql") ? 1 : 0) +
-        (migrations.has("0140_sandbox_restore_and_reaper_fences.sql") ? 1 : 0),
+        (migrations.has("0140_sandbox_restore_and_reaper_fences.sql") ? 1 : 0) +
+        (migrations.has("0141_social_connection_credentials.sql") ? 1 : 0) +
+        (migrations.has("0142_sandbox_archive_capture_gate.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "16ed02416256aab8a0f53aed67c9de49155acbd1cbbba0f822a291333b584c7e",
+      "38d9619f4d095f11e6d001e6e2b8d13a877d398dcff446e2ceaea2c6e68b2bfd",
     );
-    expect(contract.latestMigration).toBe("0140_sandbox_restore_and_reaper_fences.sql");
+    expect(contract.latestMigration).toBe("0142_sandbox_archive_capture_gate.sql");
     expect(migrations.get("0128_github_installation_authority.sql")).toMatchObject({
       sha256: "365793b2a204a70e214adb90298b522acbb6dcfae22a46681a58f41a6938e6f0",
       deploymentMode: "rolling",
@@ -205,7 +207,7 @@ describe("release schema contract", () => {
     expect(
       contract.migrations
         .map((migration) => migration.path)
-        .filter((path) => /^(?:010[3-9]|011[0-9]|012[0-9]|013[0-9])_/.test(path)),
+        .filter((path) => /^(?:010[3-9]|011[0-9]|012[0-9]|013[0-9]|014[0-9])_/.test(path)),
     ).toEqual([
       "0103_host_export_root_session.sql",
       "0104_host_export_root_session_backfill.sql",
@@ -234,6 +236,11 @@ describe("release schema contract", () => {
       "0137_preference_registry.sql",
       "0138_sandbox_checkpoint_artifacts_and_deadlines.sql",
       "0139_codex_provider_artifact_invalidations.sql",
+      "0140_sandbox_restore_and_reaper_fences.sql",
+      ...(migrations.has("0141_social_connection_credentials.sql")
+        ? ["0141_social_connection_credentials.sql"]
+        : []),
+      "0142_sandbox_archive_capture_gate.sql",
     ]);
     expect(new Set(contract.migrations.map((migration) => migration.path)).size).toBe(
       contract.fileCount,
@@ -333,6 +340,10 @@ describe("release schema contract", () => {
     expect(migrations.get("0140_sandbox_restore_and_reaper_fences.sql")).toMatchObject({
       sha256: "fe8441b669fd99fa0463378c34dd75ceca3077af7529c85c552a534c530828d8",
       deploymentMode: "rolling",
+    });
+    expect(migrations.get("0142_sandbox_archive_capture_gate.sql")).toMatchObject({
+      sha256: "48546fe4f106da0b36edf8a47da56e35b123fd0a63dc9c2eaed887756d35144f",
+      deploymentMode: "maintenance",
     });
   });
 });

@@ -1616,6 +1616,23 @@ export function effectiveModalIdleTimeoutSeconds(settings: Settings): number {
   return settings.modalIdleTimeoutSeconds ?? settings.modalTimeoutSeconds;
 }
 
+/**
+ * One shared upper bound for the durable provider-capture claim and for command
+ * admission waiting behind it. The SDK request itself is bounded by
+ * sandboxSnapshotTimeoutMs; the extra window lets a non-cancellable provider
+ * response settle and release its exact claim without turning a normal
+ * checkpoint into a visible command failure. Database validation caps both
+ * consumers at one hour.
+ */
+export function sandboxArchiveCaptureTimeoutMs(
+  settings: Pick<Settings, "sandboxSnapshotTimeoutMs">,
+): number {
+  return Math.min(
+    60 * 60_000,
+    Math.max(settings.sandboxSnapshotTimeoutMs + 30_000, settings.sandboxSnapshotTimeoutMs * 2),
+  );
+}
+
 export function collectSandboxEnvironment(
   settings: Settings,
   source: NodeJS.ProcessEnv = process.env,

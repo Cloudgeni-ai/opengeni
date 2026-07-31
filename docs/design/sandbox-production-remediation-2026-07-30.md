@@ -1,8 +1,8 @@
 # Sandbox production remediation — 2026-07-30
 
-Status: canonical implementation and rollout contract. Migration 0138 is a
-maintenance-only protocol cutover; operators must verify the deployed schema
-and exact application image before assuming this contract is active.
+Status: canonical implementation and rollout contract. Migrations 0138 and
+0142 are maintenance-only protocol cutovers; operators must verify the deployed
+schema and exact application image before assuming this contract is active.
 
 ## Executive conclusion
 
@@ -47,6 +47,12 @@ It produced several independent defects:
     identity, resume envelope, and checkpoint state directly in `acquireLease`.
     That could both leak the old provider box and discard the only durable
     recovery path.
+13. A native Modal checkpoint pauses the source box while the provider creates
+    its Image. OpenGeni fenced publication with a generation compare-and-swap
+    but did not fence new provider operations during that pause. A newly
+    admitted command could therefore reach Modal and fail with `state paused`;
+    rejecting the now-stale checkpoint afterward protected recovery truth but
+    did not protect the user operation.
 
 These defects interact, but no single flag fixes all of them. The remediation
 draws four explicit boundaries:
@@ -301,6 +307,45 @@ generation, so its archive generation is bound once when the pointer is
 attached and cannot be rewritten while that pointer remains current; live
 workspace generation may advance independently.
 
+### Provider-pause admission gate
+
+A provider-native checkpoint is an exclusive operation on the source box, not a
+read-only observation. Before asking Modal to capture an Image, OpenGeni now
+claims the exact lease, epoch, instance, and workspace generation durably. A
+claim is admitted only for the exact live turn as the sole holder (or for a
+zero-holder drain) with no unsettled mutation admission. A viewer holder may own
+an interactive noVNC or PTY tunnel, so it blocks capture and remains attached.
+If that skips a periodic turn-end checkpoint, the zero-holder drain path captures
+after the viewer detaches or its stale holder is reaped. While the claim exists:
+
+- new lease holders wait outside the transaction and re-read every ownership
+  fence until the exact claim releases or the bounded capture budget expires;
+- every workspace mutation admission waits for its exact release, rechecking
+  attempt and lease ownership on each bounded retry; and
+- the in-process provider-operation gate drains ordinary reads, runs the native
+  capture exclusively, and withholds later reads until Modal resumes the box.
+
+The local gate is necessary because provider-native reads such as Files probes
+can execute commands inside Modal without advancing `workspace_generation`.
+The durable sole-holder claim ensures no other normal worker can hold a second
+session handle while the exclusive provider operation begins.
+
+Publication must present the exact capture UUID and source generation and clears
+the claim in the same transaction that installs the checkpoint. Failure clears
+only that exact claim. A caller timeout does not abandon the provider promise:
+the owned capture continues to a durable artifact registration/publication or
+delete-pending handoff before releasing the gate. The stored deadline is
+diagnostic and a recovery threshold, never permission to clear ownership.
+Recovery may replace an expired drain claim only after proving zero holders,
+zero unsettled admissions, the same provider identity, and either exact command
+readiness or definitive provider loss; paused, missing-envelope, timeout, and
+ambiguous observations preserve the gate.
+
+Migration 0142 installs this protocol under an exclusive lease-table lock after
+all old application writers stop. Its database constraint makes a raw
+workspace-generation advance impossible while a capture claim is present, so a
+missed application caller fails closed rather than reintroducing the race.
+
 ### Lock-first lease reconciliation
 
 Every holder-creating or holder-removing path serializes in the order
@@ -329,9 +374,8 @@ The implemented handoff deliberately reuses the existing cold-rematerialization
 state machine instead of inventing a second overlapping-box allocator:
 
 1. set `rotation_requested_at`; this fences new mutation admission;
-2. evict passive viewer holders, which may reconnect; direct API operations
-   remain stable-checkpoint blockers until normal release or the existing TTL
-   reaper proves the holder stale;
+2. attached viewer and direct API holders remain stable-checkpoint blockers
+   until normal release or the existing TTL reaper proves a holder stale;
 3. a live turn captures an exact stable checkpoint and ends as
    `sandbox_deadline_rotation`;
 4. process reconciliation polls and, after the admission fence, may send
@@ -525,10 +569,17 @@ data rewrite. Production verification must prove 0140 recorded, the exact
 function bodies installed, no stale active holders, and a cold→restore→shell
 mutation→drain→restore cycle before the release is terminal.
 
-Rollback may stop requesting new rotations, but must not remove migration 0138
-or discard artifact/process ownership rows. Old application code is not
-protocol-compatible after the maintenance cutover; fix forward with a compatible
-new image. Deleting the ledger would orphan provider resources.
+Migration 0142 is a second maintenance-only boundary because the capture claim
+changes both lease shape and write-admission semantics. Stop every old
+API/control/turn writer, reject any remaining `opengeni_app` database session,
+apply and verify the migration with the owner identity, reprovision runtime
+roles, and only then start the matching application image. Verify the constraint
+and partial deadline index from the catalog before traffic resumes.
+
+Rollback may stop requesting new rotations, but must not remove migrations 0138
+or 0142 or discard artifact/process/capture ownership rows. Old application code
+is not protocol-compatible after either maintenance cutover; fix forward with a
+compatible new image. Deleting the ledger would orphan provider resources.
 
 ## Alert contract
 
@@ -552,8 +603,9 @@ The underlying fixed-label metrics also expose:
 - formatting, lint, diff hygiene, and Ultimate Bug Scanner;
 - runtime native/tar/legacy restore suites;
 - worker routing, turn recovery, reaper, metrics, and retained-process suites;
-- real PostgreSQL migrations 0138 and 0140, lease/RLS, acquire-vs-reaper
-  concurrency, and dedicated-schema replay;
+- real PostgreSQL migrations 0138, 0140, and 0142, lease/RLS,
+  acquire-vs-reaper concurrency, checkpoint-capture-vs-command concurrency, and
+  dedicated-schema replay;
 - Helm render with all four sandbox alerts;
 - isolated live Modal create, hardlink/content snapshot, restore, receipt-bound
   Image deletion, and cleanup.

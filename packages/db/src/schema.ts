@@ -2757,6 +2757,19 @@ export const sandboxLeases = pgTable(
     // the same row update; equality is the only durable completeness proof.
     workspaceGeneration: integer("workspace_generation").notNull().default(0),
     archiveGeneration: integer("archive_generation"),
+    // Provider-native capture may pause the live box. The exact claim is
+    // acquired before provider I/O and cleared only after that capture settles;
+    // new holders and workspace mutations fence on it. The SQL constraint also
+    // requires the claimed generation to remain current, so an unaware writer
+    // cannot advance generation through an active capture.
+    archiveCaptureId: uuid("archive_capture_id"),
+    archiveCaptureGeneration: integer("archive_capture_generation"),
+    archiveCaptureStartedAt: timestamp("archive_capture_started_at", {
+      withTimezone: true,
+    }),
+    archiveCaptureDeadlineAt: timestamp("archive_capture_deadline_at", {
+      withTimezone: true,
+    }),
 
     // The group box-envelope (the "envelope split" Critical): the small recovery
     // descriptor to resume()-by-id the group's box without a per-session join.
@@ -2821,6 +2834,24 @@ export const sandboxLeases = pgTable(
         or (${table.archiveGeneration} >= 0
           and ${table.archiveGeneration} <= ${table.workspaceGeneration})`,
     ),
+    archiveCaptureValid: check(
+      "sandbox_leases_archive_capture_check",
+      sql`(
+          ${table.archiveCaptureId} is null
+          and ${table.archiveCaptureGeneration} is null
+          and ${table.archiveCaptureStartedAt} is null
+          and ${table.archiveCaptureDeadlineAt} is null
+        ) or (
+          ${table.archiveCaptureId} is not null
+          and ${table.archiveCaptureGeneration} is not null
+          and ${table.archiveCaptureGeneration} = ${table.workspaceGeneration}
+          and ${table.archiveCaptureStartedAt} is not null
+          and ${table.archiveCaptureDeadlineAt} > ${table.archiveCaptureStartedAt}
+        )`,
+    ),
+    archiveCaptureDeadline: index("sandbox_leases_archive_capture_deadline_idx")
+      .on(table.archiveCaptureDeadlineAt, table.id)
+      .where(sql`${table.archiveCaptureId} is not null`),
     providerDeadlineValid: check(
       "sandbox_leases_provider_deadline_check",
       sql`(${table.providerCreatedAt} is null and ${table.providerDeadlineAt} is null)

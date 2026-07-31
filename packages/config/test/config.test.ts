@@ -20,6 +20,7 @@ import {
   resolveStreamTokenSecret,
   retryStartupDependency,
   SANDBOX_REQUIRED_ENV,
+  sandboxArchiveCaptureTimeoutMs,
   sandboxEnvironmentVariableNames,
   sandboxLifecycleHookIds,
   stableSandboxEnvironmentForRun,
@@ -1285,6 +1286,12 @@ describe("backend-gated sandbox required-credential validation", () => {
 });
 
 describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)", () => {
+  test("the durable capture gate outlives provider snapshot settlement but remains bounded", () => {
+    expect(sandboxArchiveCaptureTimeoutMs({ sandboxSnapshotTimeoutMs: 10_000 })).toBe(40_000);
+    expect(sandboxArchiveCaptureTimeoutMs({ sandboxSnapshotTimeoutMs: 40_000 })).toBe(80_000);
+    expect(sandboxArchiveCaptureTimeoutMs({ sandboxSnapshotTimeoutMs: 3_590_000 })).toBe(3_600_000);
+  });
+
   test("idle timeout defaults to the hard lifetime and the default cadence passes boot", () => {
     const settings = withEnv({}, () => getSettings());
     // Default config: idleGrace 900s + reaper 30s = 930s warm window must fit under

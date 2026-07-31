@@ -133,6 +133,7 @@ import {
   calculateModelUsageCostMicros,
   configuredModelPricing,
   configuredStaticUsageLimits,
+  sandboxArchiveCaptureTimeoutMs,
   sandboxWarmRateMicrosPerSecond,
   settingsWithResolvedModelContext,
   resolveTurnExecutionPolicyV1,
@@ -2426,6 +2427,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         expectedEpoch: sandbox.leaseEpoch,
         expectedInstanceId: sandbox.established.instanceId,
         operation,
+        captureWaitMs: sandboxArchiveCaptureTimeoutMs(settings),
       };
       const admission = await advanceWorkspaceGeneration(db, identity);
       let result: T;
