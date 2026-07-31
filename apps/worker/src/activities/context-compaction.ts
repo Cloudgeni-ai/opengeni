@@ -6,6 +6,7 @@ import {
   type Database,
 } from "@opengeni/db";
 import {
+  EmptyCompactionSummaryError,
   REMOTE_COMPACTION_V2_IMPLEMENTATION,
   SUMMARY_BUFFER_TOKENS,
   buildCompactionReplacementHistory,
@@ -53,7 +54,10 @@ export type MaybeCompactResult =
  * Codex, call Codex `/codex/responses` with `compaction_trigger` and persist the
  * opaque compaction item. Fail closed — never silently fall back to portable.
  */
-export type CompactionSummarizer = (settings: Settings, input: CompactionItem[]) => Promise<string>;
+export type CompactionSummarizer = (
+  settings: Settings,
+  input: CompactionItem[],
+) => Promise<string>;
 
 /** Returns the opaque Codex remote compaction v2 item. */
 export type RemoteCompactionV2Requester = (
@@ -101,7 +105,10 @@ export async function maybeCompactContext(
     publishLiveEvents?: (events: SessionEvent[]) => Promise<void>;
   } = {},
 ): Promise<MaybeCompactResult> {
-  if (options.codexCompactionMode === "remote_v2" && options.isCodexSubscriptionTurn !== true) {
+  if (
+    options.codexCompactionMode === "remote_v2" &&
+    options.isCodexSubscriptionTurn !== true
+  ) {
     // Fail closed: a V2-locked session must never silently take the portable path
     // (mixed history shapes). Admission should have blocked this already.
     throw new Error(
@@ -110,7 +117,11 @@ export async function maybeCompactContext(
   }
   const useRemoteV2 = options.codexCompactionMode === "remote_v2";
 
-  const active = await getActiveSessionHistoryItems(db, scope.workspaceId, scope.sessionId);
+  const active = await getActiveSessionHistoryItems(
+    db,
+    scope.workspaceId,
+    scope.sessionId,
+  );
   if (active.length === 0) {
     let requestConsumed = false;
     if (options.clearRequestedCompaction) {
@@ -142,14 +153,18 @@ export async function maybeCompactContext(
   }
 
   const items = sanitizeHistoryItemsForModel(
-    applyCodexHistoryStrip(active, options.codexAccount ?? { currentCodexCredentialId: null }),
+    applyCodexHistoryStrip(
+      active,
+      options.codexAccount ?? { currentCodexCredentialId: null },
+    ),
   ) as CompactionItem[];
   const decision = decideCompaction({
     items,
     lastInputTokens,
     contextWindowTokens: settings.contextWindowTokens,
     contextReservedOutputTokens: settings.contextReservedOutputTokens,
-    contextAutoCompactThresholdTokens: settings.contextAutoCompactThresholdTokens,
+    contextAutoCompactThresholdTokens:
+      settings.contextAutoCompactThresholdTokens,
     contextCompactionThresholdRatio: settings.contextCompactionThresholdRatio,
     ...(options.force ? { force: true } : {}),
   });
@@ -170,7 +185,9 @@ export async function maybeCompactContext(
     expectedAttemptId: scope.attemptId,
     trigger,
     estimatedTokensBefore,
-    ...(useRemoteV2 ? { implementation: REMOTE_COMPACTION_V2_IMPLEMENTATION } : {}),
+    ...(useRemoteV2
+      ? { implementation: REMOTE_COMPACTION_V2_IMPLEMENTATION }
+      : {}),
   });
   if (!started.recorded) {
     throw new TurnAttemptFencedError(
@@ -180,7 +197,14 @@ export async function maybeCompactContext(
   await options.publishLiveEvents?.(started.events);
 
   if (useRemoteV2) {
-    const outcome = await compactContextRemoteV2(db, settings, scope, items, decision, options);
+    const outcome = await compactContextRemoteV2(
+      db,
+      settings,
+      scope,
+      items,
+      decision,
+      options,
+    );
     return prependCompactionEvents(started.events, outcome);
   }
 
@@ -196,12 +220,86 @@ export async function maybeCompactContext(
   return prependCompactionEvents(started.events, outcome);
 }
 
+/**
+ * After `compaction.started`, record a visible skip so the timeline cannot
+ * stick on "Compacting…". Used when the provider/summarizer throws a terminal
+ * (non-retryable) failure — including auto/overflow paths that never set
+ * `compactRequested`.
+ */
+export async function settleFailedContextCompactionLandmark(
+  db: Database,
+  scope: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    executionGeneration: number;
+    attemptId: string;
+  },
+  options: {
+    clearRequestedCompaction?: boolean;
+    publishLiveEvents?: (events: SessionEvent[]) => Promise<void>;
+  } = {},
+): Promise<Extract<MaybeCompactResult, { compacted: false }>> {
+  const settled = await settleSkippedAfterStart(
+    db,
+    scope,
+    options,
+    "summarization_failed",
+  );
+  await options.publishLiveEvents?.(settled.events);
+  return settled;
+}
+
 function prependCompactionEvents(
   prefix: SessionEvent[],
   outcome: MaybeCompactResult,
 ): MaybeCompactResult {
   if (prefix.length === 0) return outcome;
   return { ...outcome, events: [...prefix, ...outcome.events] };
+}
+
+async function settleSkippedAfterStart(
+  db: Database,
+  scope: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    executionGeneration: number;
+    attemptId: string;
+  },
+  options: {
+    clearRequestedCompaction?: boolean;
+  },
+  reason:
+    | "no_history"
+    | "replacement_not_smaller"
+    | "replacement_unchanged"
+    | "summarization_failed",
+): Promise<Extract<MaybeCompactResult, { compacted: false }>> {
+  const clearRequestedCompaction = options.clearRequestedCompaction === true;
+  const skipped = await recordSkippedContextCompaction(db, {
+    ...scope,
+    expectedExecutionGeneration: scope.executionGeneration,
+    expectedAttemptId: scope.attemptId,
+    reason,
+    // After `compaction.started`, always settle the landmark. Do not require
+    // an operator `/compact` flag — auto/overflow never set one.
+    requirePendingRequest: false,
+    clearRequestedCompaction,
+  });
+  if (!skipped.recorded) {
+    throw new TurnAttemptFencedError(
+      `turn attempt was fenced while recording a context compaction skip (${reason}): ${skipped.reason}`,
+    );
+  }
+  return {
+    compacted: false,
+    reason,
+    events: skipped.events,
+    requestConsumed: clearRequestedCompaction,
+  };
 }
 
 async function compactContextRemoteV2(
@@ -225,19 +323,32 @@ async function compactContextRemoteV2(
   },
 ): Promise<MaybeCompactResult> {
   if (!options.requestRemoteCompactionV2) {
-    throw new Error(
-      "remote compaction v2 requested but no requestRemoteCompactionV2 requester was provided",
-    );
+    throw new EmptyCompactionSummaryError({
+      stage: "remote_v2_requester",
+      reason: "missing_requester",
+    });
   }
   const estimatedTokensBefore = estimateTokens(items);
-  // Fail closed: any provider/extract failure propagates — no portable fallback.
-  const compactionItem = await options.requestRemoteCompactionV2(settings, items);
-  const replacementHistory = buildRemoteV2ReplacementHistory(items, compactionItem);
+  // Codex remote_v2: on a valid compaction item, install and recompute usage.
+  // No local "must shrink / must differ" gate — that is portable-only.
+  // Fail closed on provider/extract failure — no portable fallback.
+  const compactionItem = await options.requestRemoteCompactionV2(
+    settings,
+    items,
+  );
+  const replacementHistory = buildRemoteV2ReplacementHistory(
+    items,
+    compactionItem,
+  );
   const estimatedTokensAfter = estimateTokens(replacementHistory);
-  const replacementFingerprint = compactionReplacementFingerprint(replacementHistory);
+  const replacementFingerprint =
+    compactionReplacementFingerprint(replacementHistory);
   const tailItem = replacementHistory.at(-1);
   if (!tailItem) {
-    throw new Error("remote compaction v2 produced no replacement history");
+    throw new EmptyCompactionSummaryError({
+      stage: "remote_v2_replacement",
+      reason: "no_replacement_history",
+    });
   }
   const applied = await applyContextCompaction(db, {
     accountId: scope.accountId,
@@ -249,7 +360,9 @@ async function compactContextRemoteV2(
     replacementItems: replacementHistory.slice(0, -1),
     summaryItem: tailItem as Record<string, unknown>,
     replacementInputTokens: estimatedTokensAfter,
-    ...(options.clearRequestedCompaction ? { clearRequestedCompaction: true } : {}),
+    ...(options.clearRequestedCompaction
+      ? { clearRequestedCompaction: true }
+      : {}),
     ...(options.producerCodexCredentialId
       ? { producerCodexCredentialId: options.producerCodexCredentialId }
       : {}),
@@ -298,78 +411,47 @@ async function compactContextPortable(
   },
 ): Promise<MaybeCompactResult> {
   const estimatedTokensBefore = estimateTokens(items);
-  const summarized = await summarizeWithCodexOverflowTrimming(summarize, settings, items);
+  const summarized = await summarizeWithCodexOverflowTrimming(
+    summarize,
+    settings,
+    items,
+  );
   const summaryBody = summarized.summaryBody;
-  const replacementHistory = buildCompactionReplacementHistory(items, summaryBody);
+  const replacementHistory = buildCompactionReplacementHistory(
+    items,
+    summaryBody,
+  );
   const estimatedTokensAfter = estimateTokens(replacementHistory);
-  const replacementFingerprint = compactionReplacementFingerprint(replacementHistory);
-  const previousReplacementFingerprint = latestCompactionReplacementFingerprint(items);
+  const replacementFingerprint =
+    compactionReplacementFingerprint(replacementHistory);
+  const previousReplacementFingerprint =
+    latestCompactionReplacementFingerprint(items);
   const summaryItem = replacementHistory.at(-1);
   if (!summaryItem) {
-    return {
-      compacted: false,
-      reason: "compaction produced no replacement history",
-      events: [],
-      requestConsumed: false,
-    };
+    // Started already fanout; settle visibly so the landmark cannot stick on
+    // "Compacting…". This is not an operator-request clear path.
+    return await settleSkippedAfterStart(
+      db,
+      scope,
+      options,
+      "summarization_failed",
+    );
   }
   if (previousReplacementFingerprint === replacementFingerprint) {
-    let requestConsumed = false;
-    if (options.clearRequestedCompaction) {
-      const skipped = await recordSkippedContextCompaction(db, {
-        ...scope,
-        expectedExecutionGeneration: scope.executionGeneration,
-        expectedAttemptId: scope.attemptId,
-        reason: "replacement_unchanged",
-      });
-      if (!skipped.recorded) {
-        throw new TurnAttemptFencedError(
-          "turn attempt was fenced while consuming an unchanged context compaction request",
-        );
-      }
-      requestConsumed = true;
-      return {
-        compacted: false,
-        reason: "replacement_unchanged",
-        events: skipped.events,
-        requestConsumed,
-      };
-    }
-    return {
-      compacted: false,
-      reason: "replacement_unchanged",
-      events: [],
-      requestConsumed,
-    };
+    return await settleSkippedAfterStart(
+      db,
+      scope,
+      options,
+      "replacement_unchanged",
+    );
   }
   if (estimatedTokensAfter >= estimatedTokensBefore) {
-    let requestConsumed = false;
-    if (options.clearRequestedCompaction) {
-      const skipped = await recordSkippedContextCompaction(db, {
-        ...scope,
-        expectedExecutionGeneration: scope.executionGeneration,
-        expectedAttemptId: scope.attemptId,
-        reason: "replacement_not_smaller",
-      });
-      if (!skipped.recorded) {
-        throw new TurnAttemptFencedError(
-          "turn attempt was fenced while consuming a non-shrinking context compaction request",
-        );
-      }
-      requestConsumed = true;
-      return {
-        compacted: false,
-        reason: "replacement_not_smaller",
-        events: skipped.events,
-        requestConsumed,
-      };
-    }
-    return {
-      compacted: false,
-      reason: "replacement_not_smaller",
-      events: [],
-      requestConsumed,
-    };
+    return await settleSkippedAfterStart(
+      db,
+      scope,
+      options,
+      "replacement_not_smaller",
+    );
   }
   const applied = await applyContextCompaction(db, {
     accountId: scope.accountId,
@@ -381,14 +463,19 @@ async function compactContextPortable(
     replacementItems: replacementHistory.slice(0, -1),
     summaryItem: summaryItem as Record<string, unknown>,
     replacementInputTokens: estimatedTokensAfter,
-    ...(options.clearRequestedCompaction ? { clearRequestedCompaction: true } : {}),
+    ...(options.clearRequestedCompaction
+      ? { clearRequestedCompaction: true }
+      : {}),
     eventPayload: {
       trigger: options.trigger ?? "auto",
       estimatedTokensBefore,
       estimatedTokensAfter,
-      compactionInputEstimatedTokens: summarized.preparation.estimatedInputTokens,
-      compactionInputToolOutputsRewritten: summarized.preparation.rewrittenToolOutputs,
-      compactionInputHistoryItemsDropped: summarized.preparation.droppedHistoryItems,
+      compactionInputEstimatedTokens:
+        summarized.preparation.estimatedInputTokens,
+      compactionInputToolOutputsRewritten:
+        summarized.preparation.rewrittenToolOutputs,
+      compactionInputHistoryItemsDropped:
+        summarized.preparation.droppedHistoryItems,
       compactionInputProviderCalls: summarized.providerCalls,
     },
   });
@@ -425,7 +512,10 @@ async function summarizeWithCodexOverflowTrimming(
   // requested summary, then leave 15% estimator headroom. This changes only the
   // temporary summarizer input; durable active history remains untouched until
   // applyContextCompaction succeeds under the attempt fence.
-  const summaryAwareBudget = Math.max(0, settings.contextWindowTokens - SUMMARY_BUFFER_TOKENS);
+  const summaryAwareBudget = Math.max(
+    0,
+    settings.contextWindowTokens - SUMMARY_BUFFER_TOKENS,
+  );
   const configuredInputBudget = contextInputBudgetTokens(settings);
   const structuralBudget = Math.min(
     configuredInputBudget > 0 ? configuredInputBudget : summaryAwareBudget,
@@ -459,7 +549,10 @@ async function summarizeWithCodexOverflowTrimming(
   }
 }
 
-export function isContextWindowExceeded(error: unknown, seen = new WeakSet<object>()): boolean {
+export function isContextWindowExceeded(
+  error: unknown,
+  seen = new WeakSet<object>(),
+): boolean {
   if (!error || typeof error !== "object") return false;
   if (seen.has(error)) return false;
   seen.add(error);

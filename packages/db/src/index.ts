@@ -18852,6 +18852,14 @@ export async function recordSkippedContextCompaction(
       | "replacement_not_smaller"
       | "replacement_unchanged"
       | "summarization_failed";
+    /**
+     * When false, record the visible skip even if no operator `/compact` is
+     * pending (auto/overflow paths that already emitted `compaction.started`).
+     * Defaults to true so idle-operator consumption stays request-gated.
+     */
+    requirePendingRequest?: boolean;
+    /** When false, leave `compactRequested` untouched. Defaults to true. */
+    clearRequestedCompaction?: boolean;
   },
 ): Promise<
   | { recorded: true; events: SessionEvent[] }
@@ -18860,6 +18868,8 @@ export async function recordSkippedContextCompaction(
       reason: TurnAttemptFenceRejectReason | "request_not_pending";
     }
 > {
+  const requirePendingRequest = input.requirePendingRequest !== false;
+  const clearRequestedCompaction = input.clearRequestedCompaction !== false;
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -18873,11 +18883,8 @@ export async function recordSkippedContextCompaction(
           attemptId: input.expectedAttemptId,
         });
         if (!fence.allowed) return { recorded: false as const, reason: fence.reason };
-        if (!fence.session.compactRequested) {
-          return {
-            recorded: false as const,
-            reason: "request_not_pending" as const,
-          };
+        if (requirePendingRequest && !fence.session.compactRequested) {
+          return { recorded: false as const, reason: "request_not_pending" as const };
         }
         const inserted = await tx
           .insert(schema.sessionEvents)
@@ -18898,7 +18905,7 @@ export async function recordSkippedContextCompaction(
         await tx
           .update(schema.sessions)
           .set({
-            compactRequested: false,
+            ...(clearRequestedCompaction ? { compactRequested: false } : {}),
             lastSequence: fence.session.lastSequence + 1,
             updatedAt: new Date(),
           })
@@ -18906,7 +18913,9 @@ export async function recordSkippedContextCompaction(
             and(
               eq(schema.sessions.workspaceId, input.workspaceId),
               eq(schema.sessions.id, input.sessionId),
-              eq(schema.sessions.compactRequested, true),
+              ...(clearRequestedCompaction
+                ? [eq(schema.sessions.compactRequested, true)]
+                : []),
             ),
           );
         return { recorded: true as const, events: inserted.map(mapEvent) };

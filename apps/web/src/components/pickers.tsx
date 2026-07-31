@@ -10,7 +10,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { displayModel } from "@/lib/format";
+import { isCodexProductModel } from "@/lib/session-model";
 import {
   effortOptionsFor,
   labelEffort,
@@ -27,11 +27,25 @@ import type { ClientConfig, ClientModel } from "@/types";
  * falls back to the flat {@link ClientConfig.allowedModels} id list on older
  * hosts (no provider grouping, label === id). Always includes the currently
  * selected model so a stale/curated-out choice still renders its own row.
+ *
+ * On remote_v2 (`codexOnly`), non-Codex rows stay visible but disabled — same
+ * chrome as a normal session, just not selectable.
  */
-type ModelChoice = { id: string; label: string; providerLabel: string | null };
+type ModelChoice = {
+  id: string;
+  label: string;
+  providerLabel: string | null;
+  disabled: boolean;
+};
 
 function isCodexModelChoice(id: string, provider?: string | null): boolean {
-  return id.startsWith("codex/") || provider === "codex-subscription";
+  return isCodexProductModel(id) || provider === "codex-subscription";
+}
+
+/** Catalog / id label — never invent a shouty short name. */
+function modelChoiceLabel(id: string, catalogLabel?: string): string {
+  if (catalogLabel && catalogLabel.length > 0) return catalogLabel;
+  return isCodexProductModel(id) ? id.slice("codex/".length) : id;
 }
 
 function modelChoices(
@@ -45,31 +59,34 @@ function modelChoices(
   const rich = [...(config?.models ?? []), ...extraModels];
   const choices: ModelChoice[] =
     rich.length > 0
-      ? rich
-          .filter((model) => !codexOnly || isCodexModelChoice(model.id, model.provider))
-          .map((model) => ({
-            id: model.id,
-            label: model.label,
-            providerLabel: model.providerLabel,
-          }))
-      : (config?.allowedModels ?? [selected])
-          .filter((id) => !codexOnly || isCodexModelChoice(id))
-          .map((id) => ({
-            id,
-            label: displayModel(id),
-            providerLabel: null,
-          }));
+      ? rich.map((model) => ({
+          id: model.id,
+          label: modelChoiceLabel(model.id, model.label),
+          providerLabel: model.providerLabel,
+          disabled: codexOnly && !isCodexModelChoice(model.id, model.provider),
+        }))
+      : (config?.allowedModels ?? [selected]).map((id) => ({
+          id,
+          label: modelChoiceLabel(id),
+          providerLabel: null,
+          disabled: codexOnly && !isCodexModelChoice(id),
+        }));
   // Guarantee the active selection is always offered, even if the host has since
   // curated it out of the exposed list (mirrors the old `[props.model]` fallback).
   if (!choices.some((choice) => choice.id === selected)) {
-    choices.unshift({ id: selected, label: displayModel(selected), providerLabel: null });
+    choices.unshift({
+      id: selected,
+      label: modelChoiceLabel(selected),
+      providerLabel: null,
+      disabled: codexOnly && !isCodexModelChoice(selected),
+    });
   }
   return choices;
 }
 
 /** Trigger label for the active model: its display label from the exposed list. */
 function selectedModelLabel(choices: ModelChoice[], selected: string): string {
-  return choices.find((choice) => choice.id === selected)?.label ?? displayModel(selected);
+  return choices.find((choice) => choice.id === selected)?.label ?? modelChoiceLabel(selected);
 }
 
 export function ModelPicker(props: {
@@ -78,7 +95,10 @@ export function ModelPicker(props: {
   effort: IntelligenceEffort;
   disabled?: boolean;
   extraModels?: ClientModel[];
-  /** When true, only Codex subscription models are offered (remote_v2 sessions). */
+  /**
+   * When true (remote_v2 sessions), non-Codex models remain listed but cannot
+   * be selected. Same picker chrome as a normal session.
+   */
   codexOnly?: boolean;
   onModelChange: (value: string) => void;
   onEffortChange: (value: IntelligenceEffort) => void;
@@ -133,11 +153,6 @@ export function ModelPicker(props: {
         <DropdownMenuLabel className="px-2 pt-0 pb-1 text-xs font-normal text-fg-subtle">
           Model
         </DropdownMenuLabel>
-        {props.codexOnly ? (
-          <p className="px-2 pb-1 text-2xs leading-snug text-fg-subtle">
-            This session uses Codex remote compaction — only Codex models are available.
-          </p>
-        ) : null}
         {choices.map((choice, index) => (
           <ModelChoiceRow
             key={choice.id}
@@ -150,7 +165,10 @@ export function ModelPicker(props: {
               choice.providerLabel !== choices[index - 1]?.providerLabel
             }
             selected={choice.id === props.model}
-            onSelect={() => props.onModelChange(choice.id)}
+            onSelect={() => {
+              if (choice.disabled) return;
+              props.onModelChange(choice.id);
+            }}
           />
         ))}
       </DropdownMenuContent>
@@ -173,6 +191,7 @@ function ModelChoiceRow(props: {
       ) : null}
       <DropdownMenuItem
         onSelect={props.onSelect}
+        disabled={props.choice.disabled}
         className="h-8 cursor-pointer rounded-md px-2 text-sm"
       >
         <span className="truncate">{props.choice.label}</span>

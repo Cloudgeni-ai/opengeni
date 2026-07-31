@@ -245,6 +245,7 @@ export type {
   ActivityItem,
   AgentMessageItem,
   AuthNeededItem,
+  ContextCompactionItem,
   GoalItem,
   MachineInputBatchItem,
   MachineInputMember,

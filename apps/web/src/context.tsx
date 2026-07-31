@@ -91,11 +91,13 @@ export type AppContextValue = {
   /**
    * The model chosen for a specific open session. Composer state (draft, mode)
    * is session-scoped, and so is the model: each session remembers its own pick
-   * in-memory, falling back to the deployment default ({@link model}) until the
-   * operator overrides it. The new-session surface uses the bare {@link model}
-   * (no session id yet); the session route threads its id through these.
+   * in-memory. Prefer the durable session model (`durableSessionModel`) when no
+   * override exists; only fall back to the deployment default ({@link model})
+   * when that is absent (e.g. tests). The new-session surface uses the bare
+   * {@link model} (no session id yet); the session route threads its id +
+   * `session.model` through these.
    */
-  modelForSession: (sessionId: string) => string;
+  modelForSession: (sessionId: string, durableSessionModel?: string) => string;
   setModelForSession: (sessionId: string, value: string) => void;
   reasoningEffort: IntelligenceEffort;
   setReasoningEffort: Dispatch<SetStateAction<IntelligenceEffort>>;
@@ -227,8 +229,9 @@ export function RootRouteComponent() {
   const [accessError, setAccessError] = useState<string | null>(null);
   const [model, setModel] = useState("gpt-5.6-sol");
   // Per-session model overrides (session id → model). A session with no entry
-  // inherits the deployment default `model`; selecting in its picker writes here
-  // so each open session keeps its own choice independently.
+  // inherits that session's durable `session.model` (passed at the call site),
+  // then the deployment default. Selecting in its picker writes here so each
+  // open session keeps its own next-turn choice independently.
   const [modelBySession, setModelBySession] = useState<Record<string, string>>({});
   const [reasoningEffort, setReasoningEffort] = useState<IntelligenceEffort>("low");
   // The dock is open by default on desktop, but on narrow viewports (<1024px)
@@ -916,11 +919,12 @@ export function RootRouteComponent() {
     setConnectionState("idle");
   }, [setSession]);
 
-  // Session-scoped model: read the session's override or fall back to the
-  // deployment default; writing records it without disturbing other sessions
-  // (or the new-session surface, which reads the bare `model`).
+  // Session-scoped model: override → durable session.model → deployment default.
+  // Writing records an override without disturbing other sessions (or the
+  // new-session surface, which reads the bare `model`).
   const modelForSession = useCallback(
-    (sessionId: string): string => modelBySession[sessionId] ?? model,
+    (sessionId: string, durableSessionModel?: string): string =>
+      modelBySession[sessionId] ?? durableSessionModel ?? model,
     [model, modelBySession],
   );
   const setModelForSession = useCallback((sessionId: string, value: string): void => {

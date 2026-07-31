@@ -939,14 +939,54 @@ describe("buildTimeline", () => {
       event("session.context.compacted", {
         estimatedTokensBefore: 288_000,
         estimatedTokensAfter: 23_091,
+        trigger: "auto",
       }),
     ]);
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({
-      kind: "notice",
-      tone: "waiting",
-      text: "Active conversation history compacted from approximately 288,000 to 23,091 tokens.",
+      kind: "context-compaction",
+      phase: "compacted",
+      trigger: "auto",
+      estimatedTokensBefore: 288_000,
+      estimatedTokensAfter: 23_091,
     });
+  });
+
+  test("settles a started compaction landmark into the finish event", () => {
+    reset();
+    const items = buildTimeline([
+      event("session.context.compaction.started", {
+        trigger: "auto",
+        estimatedTokensBefore: 288_000,
+      }),
+      event("session.context.compacted", {
+        trigger: "auto",
+        estimatedTokensBefore: 288_000,
+        estimatedTokensAfter: 23_091,
+        implementation: "responses_compaction_v2",
+      }),
+    ]);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: "context-compaction",
+      phase: "compacted",
+      estimatedTokensAfter: 23_091,
+      implementation: "responses_compaction_v2",
+    });
+  });
+
+  test("projects operator requested as a live started landmark until finish", () => {
+    reset();
+    const items = buildTimeline([
+      event("session.context.compaction.requested", { trigger: "operator" }),
+    ]);
+    expect(items).toEqual([
+      expect.objectContaining({
+        kind: "context-compaction",
+        phase: "started",
+        trigger: "operator",
+      }),
+    ]);
   });
 
   test("renders standalone compaction as maintenance, not an extra chat turn", () => {
@@ -962,8 +1002,50 @@ describe("buildTimeline", () => {
       }),
     ]);
     expect(items).toHaveLength(1);
-    expect(items[0]).toMatchObject({ kind: "notice" });
+    expect(items[0]).toMatchObject({ kind: "context-compaction", phase: "compacted" });
     expect(items.some((item) => item.kind === "turn-end")).toBe(false);
+  });
+
+  test("keeps mid-turn compaction outside the folded turn body", () => {
+    reset();
+    const turn = { turnId: "turn-compact" };
+    const events = [
+      event("turn.started", {}, turn),
+      event(
+        "agent.toolCall.created",
+        { id: "c1", name: "exec_command", arguments: { cmd: "before" } },
+        turn,
+      ),
+      event("agent.toolCall.output", { id: "c1", output: "ok" }, turn),
+      event("session.context.compaction.started", { trigger: "auto" }, turn),
+      event(
+        "session.context.compacted",
+        { trigger: "auto", estimatedTokensBefore: 100_000, estimatedTokensAfter: 40_000 },
+        turn,
+      ),
+      event(
+        "agent.toolCall.created",
+        { id: "c2", name: "exec_command", arguments: { cmd: "after" } },
+        turn,
+      ),
+      event("agent.toolCall.output", { id: "c2", output: "ok" }, turn),
+      event("turn.completed", {}, turn),
+    ];
+    const items = buildTimeline(events);
+    const groups = groupTimeline(items);
+    expect(items.some((item) => item.kind === "context-compaction")).toBe(true);
+    const topLevelCompaction = groups.find(
+      (group) => group.kind === "item" && group.item.kind === "context-compaction",
+    );
+    expect(topLevelCompaction).toBeDefined();
+    for (const group of groups) {
+      if (group.kind !== "turn") continue;
+      expect(
+        group.groups.some(
+          (child) => child.kind === "item" && child.item.kind === "context-compaction",
+        ),
+      ).toBe(false);
+    }
   });
 
   test("shows why an operator compaction request was skipped", () => {
@@ -977,9 +1059,9 @@ describe("buildTimeline", () => {
     ]);
     expect(items).toEqual([
       expect.objectContaining({
-        kind: "notice",
-        tone: "waiting",
-        text: "Context compaction skipped because the generated checkpoint would not reduce the context.",
+        kind: "context-compaction",
+        phase: "skipped",
+        skipReason: "replacement_not_smaller",
       }),
     ]);
   });
@@ -991,9 +1073,9 @@ describe("buildTimeline", () => {
     ]);
     expect(items).toEqual([
       expect.objectContaining({
-        kind: "notice",
-        tone: "failed",
-        text: "Context compaction failed without replacing the active conversation history. Request it again to retry.",
+        kind: "context-compaction",
+        phase: "skipped",
+        skipReason: "summarization_failed",
       }),
     ]);
   });

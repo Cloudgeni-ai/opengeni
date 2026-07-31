@@ -1,5 +1,6 @@
 import type { SessionEvent, SessionStatus } from "@opengeni/sdk";
-const { default: fleetDecisionItem } = await import("./fleet-decision-projection");
+const { default: fleetDecisionItem } =
+  await import("./fleet-decision-projection");
 import {
   CREDIT_EXHAUSTION_MESSAGE,
   humanizeFailureReason,
@@ -57,7 +58,10 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
   /** A new item of a different kind ends whatever was streaming at the tail. */
   const closeStreamingTail = (): void => {
     const open = last();
-    if ((open?.kind === "agent-message" || open?.kind === "reasoning") && open.streaming) {
+    if (
+      (open?.kind === "agent-message" || open?.kind === "reasoning") &&
+      open.streaming
+    ) {
       open.streaming = false;
     }
   };
@@ -76,10 +80,16 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
       ) {
         continue;
       }
-      if ((item.kind === "agent-message" || item.kind === "reasoning") && item.streaming) {
+      if (
+        (item.kind === "agent-message" || item.kind === "reasoning") &&
+        item.streaming
+      ) {
         item.streaming = false;
       }
-      if ((item.kind === "tool-call" || item.kind === "worker") && item.status === "running") {
+      if (
+        (item.kind === "tool-call" || item.kind === "worker") &&
+        item.status === "running"
+      ) {
         item.status = disposition;
       }
       if (item.kind === "sandbox" && item.status === "running") {
@@ -97,7 +107,9 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         // A steering message must not mark in-flight tools complete; it only
         // ends whatever text was streaming. Turn lifecycle events finalize.
         closeStreamingTail();
-        const childCompletion = workerCompletionPayload(payload.childCompletion);
+        const childCompletion = workerCompletionPayload(
+          payload.childCompletion,
+        );
         if (childCompletion) {
           items.push({
             kind: "worker-completion",
@@ -145,7 +157,11 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           break;
         }
         const open = last();
-        if (open?.kind === "agent-message" && open.streaming && open.turnId === turnId) {
+        if (
+          open?.kind === "agent-message" &&
+          open.streaming &&
+          open.turnId === turnId
+        ) {
           open.text += text;
           break;
         }
@@ -169,7 +185,10 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         let openIndex = -1;
         for (let index = items.length - 1; index >= 0; index -= 1) {
           const candidate = items[index];
-          if (candidate?.kind === "agent-message" && candidate.turnId === turnId) {
+          if (
+            candidate?.kind === "agent-message" &&
+            candidate.turnId === turnId
+          ) {
             openIndex = index;
             break;
           }
@@ -179,7 +198,10 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           candidate?.kind === "agent-message" ? candidate : undefined;
         if (
           open &&
-          (open.streaming || !open.text || text === open.text || text.startsWith(open.text))
+          (open.streaming ||
+            !open.text ||
+            text === open.text ||
+            text.startsWith(open.text))
         ) {
           // The completed text is authoritative when it extends what streamed.
           if (!open.text || (text && text.startsWith(open.text))) {
@@ -216,7 +238,11 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           break;
         }
         const open = last();
-        if (open?.kind === "reasoning" && open.streaming && open.turnId === turnId) {
+        if (
+          open?.kind === "reasoning" &&
+          open.streaming &&
+          open.turnId === turnId
+        ) {
           open.text += text;
           break;
         }
@@ -278,7 +304,8 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           // A worker spawn/message that returns an error flag (or an MCP
           // isError result) settles to "failed" too, so WorkerRow surfaces it.
           target.status = isErrorOutput(payload) ? "failed" : "complete";
-          target.workerSessionId = target.workerSessionId ?? extractSessionRef(payload.output);
+          target.workerSessionId =
+            target.workerSessionId ?? extractSessionRef(payload.output);
           break;
         }
         // An output carrying an explicit error flag (or an MCP isError result)
@@ -291,7 +318,8 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
       case "sandbox.operation.started":
       case "sandbox.operation.completed":
       case "sandbox.operation.failed": {
-        const name = typeof payload.name === "string" ? payload.name : "sandbox";
+        const name =
+          typeof payload.name === "string" ? payload.name : "sandbox";
         const status = event.type.endsWith(".failed")
           ? "failed"
           : event.type.endsWith(".completed")
@@ -325,7 +353,9 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           }
           const message = failureMessage(payload);
           if (message) {
-            existing.output = existing.output ? `${existing.output}\n${message}` : message;
+            existing.output = existing.output
+              ? `${existing.output}\n${message}`
+              : message;
           }
           break;
         }
@@ -336,7 +366,8 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
             id: event.id,
             turnId,
             name,
-            command: typeof payload.command === "string" ? payload.command : null,
+            command:
+              typeof payload.command === "string" ? payload.command : null,
             output: failureMessage(payload) ?? "",
             origin:
               payload.origin === "created" ||
@@ -367,11 +398,14 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         // Attach to the named operation when the payload carries one;
         // otherwise the latest running operation is the best available owner.
         const open =
-          (typeof payload.name === "string" ? findOpenSandbox(items, payload.name) : undefined) ??
+          (typeof payload.name === "string"
+            ? findOpenSandbox(items, payload.name)
+            : undefined) ??
           [...items]
             .reverse()
             .find(
-              (item): item is SandboxItem => item.kind === "sandbox" && item.status === "running",
+              (item): item is SandboxItem =>
+                item.kind === "sandbox" && item.status === "running",
             );
         if (open) {
           open.output += text;
@@ -394,11 +428,18 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         }
         const previous = [...items]
           .reverse()
-          .find((item): item is SessionStatusItem => item.kind === "session-status");
+          .find(
+            (item): item is SessionStatusItem => item.kind === "session-status",
+          );
         if (previous?.status === status) {
           break;
         }
-        items.push({ kind: "session-status", id: event.id, status, occurredAt: event.occurredAt });
+        items.push({
+          kind: "session-status",
+          id: event.id,
+          status,
+          occurredAt: event.occurredAt,
+        });
         break;
       }
 
@@ -426,7 +467,9 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           estimatedTokensAfter: null,
           skipReason: null,
           implementation:
-            typeof payload.implementation === "string" ? payload.implementation : null,
+            typeof payload.implementation === "string"
+              ? payload.implementation
+              : null,
           occurredAt: event.occurredAt,
         });
         break;
@@ -443,7 +486,9 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           estimatedTokensAfter: numberOrNull(payload.estimatedTokensAfter),
           skipReason: null,
           implementation:
-            typeof payload.implementation === "string" ? payload.implementation : null,
+            typeof payload.implementation === "string"
+              ? payload.implementation
+              : null,
           occurredAt: event.occurredAt,
         });
         break;
@@ -458,9 +503,12 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           trigger: compactionTrigger(payload),
           estimatedTokensBefore: numberOrNull(payload.estimatedTokensBefore),
           estimatedTokensAfter: null,
-          skipReason: typeof payload.reason === "string" ? payload.reason : null,
+          skipReason:
+            typeof payload.reason === "string" ? payload.reason : null,
           implementation:
-            typeof payload.implementation === "string" ? payload.implementation : null,
+            typeof payload.implementation === "string"
+              ? payload.implementation
+              : null,
           occurredAt: event.occurredAt,
         });
         break;
@@ -492,13 +540,20 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           id: event.id,
           turnId,
           providerDomain: stringValue(payload.providerDomain),
-          connectionId: typeof payload.connectionId === "string" ? payload.connectionId : null,
+          connectionId:
+            typeof payload.connectionId === "string"
+              ? payload.connectionId
+              : null,
           reason: authNeededReason(payload.reason),
           scopes: stringList(payload.scopes),
-          resource: typeof payload.resource === "string" ? payload.resource : null,
-          toolName: typeof payload.toolName === "string" ? payload.toolName : null,
+          resource:
+            typeof payload.resource === "string" ? payload.resource : null,
+          toolName:
+            typeof payload.toolName === "string" ? payload.toolName : null,
           authorizationUrl:
-            typeof payload.authorizationUrl === "string" ? payload.authorizationUrl : null,
+            typeof payload.authorizationUrl === "string"
+              ? payload.authorizationUrl
+              : null,
           occurredAt: event.occurredAt,
         });
         break;
@@ -590,7 +645,13 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         // A first-party memory write is a discrete step, not streamed text, so it
         // ends whatever was streaming (mirrors tool/sandbox pushes). A payload
         // missing the memory id is malformed and dropped rather than shown blank.
-        const memory = memoryItem(event.id, event.type, turnId, payload, event.occurredAt);
+        const memory = memoryItem(
+          event.id,
+          event.type,
+          turnId,
+          payload,
+          event.occurredAt,
+        );
         if (memory) {
           closeStreamingTail();
           items.push(memory);
@@ -670,7 +731,8 @@ function isCreditExhaustionPayload(payload: Record<string, unknown>): boolean {
   return isCreditExhaustion({
     error: typeof payload.error === "string" ? payload.error : null,
     detail: typeof payload.detail === "string" ? payload.detail : null,
-    segmentLimit: typeof payload.segmentLimit === "string" ? payload.segmentLimit : null,
+    segmentLimit:
+      typeof payload.segmentLimit === "string" ? payload.segmentLimit : null,
   });
 }
 
@@ -697,7 +759,9 @@ export function creditExhaustedFromEvents(events: SessionEvent[]): boolean {
 }
 
 /** The latest session status carried in the event log, if any. */
-export function sessionStatusFromEvents(events: SessionEvent[]): SessionStatus | null {
+export function sessionStatusFromEvents(
+  events: SessionEvent[],
+): SessionStatus | null {
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index];
     if (event?.type !== "session.status.changed") {
@@ -744,7 +808,11 @@ export function groupTimeline(items: TimelineItem[]): TimelineGroup[] {
       if (open?.kind === "activity" && open.outcome === undefined) {
         open.items.push(item);
       } else {
-        groups.push({ kind: "activity", id: `activity-${item.id}`, items: [item] });
+        groups.push({
+          kind: "activity",
+          id: `activity-${item.id}`,
+          items: [item],
+        });
       }
       continue;
     }
@@ -780,8 +848,11 @@ function prescanTurnAnchors(events: SessionEvent[]): TurnAnchorPrescan {
     const turnId = event.turnId ?? null;
     if (event.type === "turn.queued") {
       const triggerEventId =
-        typeof payload.triggerEventId === "string" ? payload.triggerEventId : null;
-      const queuedTurnId = typeof payload.turnId === "string" ? payload.turnId : turnId;
+        typeof payload.triggerEventId === "string"
+          ? payload.triggerEventId
+          : null;
+      const queuedTurnId =
+        typeof payload.turnId === "string" ? payload.turnId : turnId;
       if (triggerEventId && queuedTurnId) {
         queuedTurnByTrigger.set(triggerEventId, queuedTurnId);
       }
@@ -789,7 +860,9 @@ function prescanTurnAnchors(events: SessionEvent[]): TurnAnchorPrescan {
     }
     if (event.type === "turn.started") {
       const triggerEventId =
-        typeof payload.triggerEventId === "string" ? payload.triggerEventId : null;
+        typeof payload.triggerEventId === "string"
+          ? payload.triggerEventId
+          : null;
       if (triggerEventId && !startSeqByTrigger.has(triggerEventId)) {
         startSeqByTrigger.set(triggerEventId, event.sequence);
       }
@@ -831,10 +904,18 @@ function prescanTurnAnchors(events: SessionEvent[]): TurnAnchorPrescan {
     }
   }
 
-  return { queuedTurnByTrigger, startSeqByTrigger, cancelledBeforeStartTriggers, startedTurnIds };
+  return {
+    queuedTurnByTrigger,
+    startSeqByTrigger,
+    cancelledBeforeStartTriggers,
+    startedTurnIds,
+  };
 }
 
-function orderTimelineEvents(events: SessionEvent[], prescan: TurnAnchorPrescan): SessionEvent[] {
+function orderTimelineEvents(
+  events: SessionEvent[],
+  prescan: TurnAnchorPrescan,
+): SessionEvent[] {
   const ordered = [...events].sort((a, b) => a.sequence - b.sequence);
   const insertions = new Map<number, SessionEvent[]>();
 
@@ -929,7 +1010,10 @@ function turnEndItem(
   };
 }
 
-function hasTurnActivity(items: TimelineItem[], turnId: string | null): boolean {
+function hasTurnActivity(
+  items: TimelineItem[],
+  turnId: string | null,
+): boolean {
   if (turnId) {
     return items.some((item) => isActivityItem(item) && item.turnId === turnId);
   }
@@ -976,11 +1060,17 @@ function applyTurnOutcome(
     group.outcome = "complete";
     return;
   }
-  const hasFailed = group.items.some((item) => "status" in item && item.status === "failed");
+  const hasFailed = group.items.some(
+    (item) => "status" in item && item.status === "failed",
+  );
   const hasInterrupted = group.items.some(
     (item) => "status" in item && item.status === "cancelled",
   );
-  group.outcome = hasFailed ? "failed" : hasInterrupted ? "cancelled" : "complete";
+  group.outcome = hasFailed
+    ? "failed"
+    : hasInterrupted
+      ? "cancelled"
+      : "complete";
   if (turnEnd.failureText && hasFailed) {
     group.failureText = turnEnd.failureText;
   }
@@ -1001,7 +1091,10 @@ function foldSettledTurn(groups: TimelineGroup[], turnEnd: TurnEndItem): void {
     startIndex -= 1;
   }
   if (stoppedAtForeignTurn) {
-    while (startIndex < groups.length && isBetweenTurnDivider(groups[startIndex])) {
+    while (
+      startIndex < groups.length &&
+      isBetweenTurnDivider(groups[startIndex])
+    ) {
       startIndex += 1;
     }
   }
@@ -1055,14 +1148,19 @@ function isTurnBoundary(group: TimelineGroup | undefined): boolean {
   );
 }
 
-function belongsToDifferentTurn(group: TimelineGroup | undefined, turnId: string | null): boolean {
+function belongsToDifferentTurn(
+  group: TimelineGroup | undefined,
+  turnId: string | null,
+): boolean {
   if (!group || !turnId) {
     return false;
   }
   if (group.kind === "activity") {
     return (
       group.items.length > 0 &&
-      group.items.every((item) => item.turnId !== null && item.turnId !== turnId)
+      group.items.every(
+        (item) => item.turnId !== null && item.turnId !== turnId,
+      )
     );
   }
   return (
@@ -1086,10 +1184,18 @@ function extractFinalAgentMessage(
   turnEnd: TurnEndItem,
 ): Extract<TimelineGroup, { kind: "item" }> | null {
   const tail = groups[groups.length - 1];
-  if (tail?.kind !== "item" || tail.item.kind !== "agent-message" || tail.item.streaming) {
+  if (
+    tail?.kind !== "item" ||
+    tail.item.kind !== "agent-message" ||
+    tail.item.streaming
+  ) {
     return null;
   }
-  if (tail.item.turnId && turnEnd.turnId && tail.item.turnId !== turnEnd.turnId) {
+  if (
+    tail.item.turnId &&
+    turnEnd.turnId &&
+    tail.item.turnId !== turnEnd.turnId
+  ) {
     return null;
   }
   return tail;
@@ -1110,7 +1216,9 @@ function groupStartedAt(group: TimelineGroup | undefined): string | undefined {
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
-  return value !== null && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  return value !== null && typeof value === "object"
+    ? (value as Record<string, unknown>)
+    : {};
 }
 
 function stringValue(value: unknown): string {
@@ -1151,7 +1259,8 @@ function settleOrPushContextCompaction(
         // Prefer the settled event id so keys stay stable with the finish row.
         id: next.phase === "started" ? open.id : next.id,
         trigger: next.trigger ?? open.trigger,
-        estimatedTokensBefore: next.estimatedTokensBefore ?? open.estimatedTokensBefore,
+        estimatedTokensBefore:
+          next.estimatedTokensBefore ?? open.estimatedTokensBefore,
         implementation: next.implementation ?? open.implementation,
       };
       return;
@@ -1185,18 +1294,17 @@ function machineInputMembers(value: unknown): MachineInputBatchItem["members"] {
     "agent_steer_instruction",
     "child_terminal_result",
   ]);
-  const classifications = new Set<MachineInputBatchItem["members"][number]["classification"]>([
-    "success",
-    "failure",
-    "action_required",
-    "info",
-  ]);
+  const classifications = new Set<
+    MachineInputBatchItem["members"][number]["classification"]
+  >(["success", "failure", "action_required", "info"]);
   return Array.isArray(value)
     ? value.flatMap((candidate) => {
         const member = asRecord(candidate);
         return typeof member.id === "string" &&
           typeof member.kind === "string" &&
-          kinds.has(member.kind as MachineInputBatchItem["members"][number]["kind"]) &&
+          kinds.has(
+            member.kind as MachineInputBatchItem["members"][number]["kind"],
+          ) &&
           typeof member.classification === "string" &&
           classifications.has(
             member.classification as MachineInputBatchItem["members"][number]["classification"],
@@ -1266,7 +1374,8 @@ function workerCompletionPayload(value: unknown): {
   pausedReason: string | null;
 } | null {
   const payload = asRecord(value);
-  const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const uuidPattern =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   if (
     typeof payload.childSessionId !== "string" ||
     !uuidPattern.test(payload.childSessionId) ||
@@ -1295,7 +1404,10 @@ function workerCompletionPayload(value: unknown): {
 }
 
 function isSessionStatus(value: unknown): value is SessionStatus {
-  return typeof value === "string" && (SESSION_STATUSES as readonly string[]).includes(value);
+  return (
+    typeof value === "string" &&
+    (SESSION_STATUSES as readonly string[]).includes(value)
+  );
 }
 
 /** Does this tool output represent an error (explicit flag or MCP `isError`)? */
@@ -1305,7 +1417,9 @@ function isErrorOutput(payload: Record<string, unknown>): boolean {
   }
   const output = payload.output;
   return (
-    !!output && typeof output === "object" && (output as { isError?: unknown }).isError === true
+    !!output &&
+    typeof output === "object" &&
+    (output as { isError?: unknown }).isError === true
   );
 }
 
@@ -1317,22 +1431,30 @@ function findOpenCall(
   const isCall = (item: TimelineItem): item is ToolCallItem | WorkerItem =>
     item.kind === "tool-call" || item.kind === "worker";
   if (callId) {
-    const byId = reversed.find((item) => isCall(item) && item.callId === callId);
+    const byId = reversed.find(
+      (item) => isCall(item) && item.callId === callId,
+    );
     if (byId) {
       return byId as ToolCallItem | WorkerItem;
     }
   }
   return reversed.find(
-    (item): item is ToolCallItem | WorkerItem => isCall(item) && item.status === "running",
+    (item): item is ToolCallItem | WorkerItem =>
+      isCall(item) && item.status === "running",
   );
 }
 
-function findOpenSandbox(items: TimelineItem[], name: string): SandboxItem | undefined {
+function findOpenSandbox(
+  items: TimelineItem[],
+  name: string,
+): SandboxItem | undefined {
   return [...items]
     .reverse()
     .find(
       (item): item is SandboxItem =>
-        item.kind === "sandbox" && item.name === name && item.status === "running",
+        item.kind === "sandbox" &&
+        item.name === name &&
+        item.status === "running",
     );
 }
 
@@ -1375,15 +1497,22 @@ function memoryItem(
   occurredAt: string,
 ): MemoryItem | null {
   const memoryId =
-    typeof payload.memoryId === "string" && payload.memoryId ? payload.memoryId : null;
+    typeof payload.memoryId === "string" && payload.memoryId
+      ? payload.memoryId
+      : null;
   if (!memoryId) {
     return null;
   }
   const replacementPreview =
-    typeof payload.replacementPreview === "string" ? payload.replacementPreview : undefined;
+    typeof payload.replacementPreview === "string"
+      ? payload.replacementPreview
+      : undefined;
   const replacementMemoryId =
-    typeof payload.replacementMemoryId === "string" ? payload.replacementMemoryId : undefined;
-  const action = typeof payload.action === "string" ? payload.action : undefined;
+    typeof payload.replacementMemoryId === "string"
+      ? payload.replacementMemoryId
+      : undefined;
+  const action =
+    typeof payload.action === "string" ? payload.action : undefined;
   return {
     kind: "memory",
     id,
@@ -1417,7 +1546,10 @@ function authNeededReason(value: unknown): AuthNeededItem["reason"] {
 
 function stringList(value: unknown): string[] {
   return Array.isArray(value)
-    ? value.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+    ? value.filter(
+        (entry): entry is string =>
+          typeof entry === "string" && entry.trim().length > 0,
+      )
     : [];
 }
 
@@ -1481,11 +1613,18 @@ export function extractSessionRef(value: unknown, depth = 0): string | null {
   if (
     typeof record.id === "string" &&
     looksLikeId(record.id) &&
-    ("status" in record || "workspaceId" in record || "initialMessage" in record)
+    ("status" in record ||
+      "workspaceId" in record ||
+      "initialMessage" in record)
   ) {
     return record.id;
   }
-  for (const key of ["structuredContent", "session", "result", "content"] as const) {
+  for (const key of [
+    "structuredContent",
+    "session",
+    "result",
+    "content",
+  ] as const) {
     if (key in record) {
       const found = extractSessionRef(record[key], depth + 1);
       if (found) {
@@ -1500,7 +1639,9 @@ export function extractSessionRef(value: unknown, depth = 0): string | null {
 }
 
 function looksLikeId(value: string): boolean {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+    value,
+  );
 }
 
 /**

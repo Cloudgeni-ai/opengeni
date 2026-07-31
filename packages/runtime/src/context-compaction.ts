@@ -516,8 +516,67 @@ function projectNativeImages(value: unknown, seen: WeakSet<object>): NativeImage
   return { value: projected, imageTokens, imageCount, imageFallbackCount };
 }
 
+/**
+ * Codex CLI `estimate_reasoning_length`: opaque encrypted payloads are not
+ * model-visible as raw JSON/base64. Visible bytes ≈ `len * 3/4 - 650`.
+ */
+export function estimateOpaqueEncryptedModelVisibleBytes(encodedLen: number): number {
+  const length = Math.max(0, Math.floor(encodedLen));
+  return Math.max(0, Math.floor((length * 3) / 4) - 650);
+}
+
+/** Codex CLI bytes→tokens for opaque encrypted content (`ceil(bytes / 4)`). */
+export function estimateOpaqueEncryptedTokens(encodedLen: number): number {
+  const bytes = estimateOpaqueEncryptedModelVisibleBytes(encodedLen);
+  return bytes === 0 ? 0 : Math.ceil(bytes / 4);
+}
+
+/**
+ * Length of opaque encrypted content that must use the Codex encrypted
+ * estimator instead of JSON.stringify (compaction blobs and reasoning).
+ */
+export function opaqueEncryptedContentLength(item: unknown): number | null {
+  if (!item || typeof item !== "object") return null;
+  const record = item as Record<string, unknown>;
+  const type = typeof record.type === "string" ? record.type : "";
+  if (
+    (type === "compaction" || type === "context_compaction" || type === "reasoning") &&
+    typeof record.encrypted_content === "string" &&
+    record.encrypted_content.length > 0
+  ) {
+    return record.encrypted_content.length;
+  }
+  if (type === "reasoning") {
+    const providerData =
+      record.providerData && typeof record.providerData === "object"
+        ? (record.providerData as Record<string, unknown>)
+        : null;
+    const nested =
+      providerData && typeof providerData.encrypted_content === "string"
+        ? providerData.encrypted_content
+        : providerData && typeof providerData.encryptedContent === "string"
+          ? providerData.encryptedContent
+          : null;
+    if (nested && nested.length > 0) return nested.length;
+  }
+  return null;
+}
+
 /** Native-image-aware item estimate for pre-call accounting and retained budgets. */
 export function estimateItemTokenBreakdown(item: CompactionItem): ModelInputTokenBreakdown {
+  const opaqueLen = opaqueEncryptedContentLength(item);
+  if (opaqueLen !== null) {
+    // Match Codex: Compaction / encrypted reasoning use the opaque byte
+    // heuristic only — never JSON-stringify the ciphertext into the budget.
+    const textTokens = estimateOpaqueEncryptedTokens(opaqueLen);
+    return {
+      totalTokens: textTokens,
+      textTokens,
+      imageTokens: 0,
+      imageCount: 0,
+      imageFallbackCount: 0,
+    };
+  }
   const projected = projectNativeImages(item, new WeakSet<object>());
   let text: string;
   try {

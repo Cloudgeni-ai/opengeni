@@ -6,7 +6,7 @@ OpenGeni freezes a per-session compaction mode at create time
 | Mode | When | Mechanism |
 | --- | --- | --- |
 | `portable` | All non-Codex sessions; existing sessions (backfill); new Codex sessions when the workspace sets `codexCompactionDefault: "portable"` | Durable plaintext checkpoint (Codex CLI local path). Free mid-session provider switching. |
-| `remote_v2` | New Codex sessions by default (`codexCompactionDefault` absent or `"remote_v2"`) | Codex remote compaction v2 (wire `compaction_trigger` → opaque `{ type: "compaction", encrypted_content }`). The Agents SDK rejects a bare trigger item, so OpenGeni emits `{ type: "unknown", providerData: { type: "compaction_trigger" } }` through `CompactionResponsesModel` and the Codex fetch normalizer restores the wire shape. Session is **Codex-only** for its lifetime (HTTP + worker admission). |
+| `remote_v2` | New Codex sessions by default (`codexCompactionDefault` absent or `"remote_v2"`) | Codex remote compaction v2 (wire `compaction_trigger` → opaque `{ type: "compaction", encrypted_content }`). On a valid compaction item, install and recompute usage — same as Codex CLI (no local “must shrink / must differ” gate). The Agents SDK rejects a bare trigger item, so OpenGeni emits `{ type: "unknown", providerData: { type: "compaction_trigger" } }` through `CompactionResponsesModel` and the Codex fetch normalizer restores the wire shape. Session is **Codex-only** for its lifetime (HTTP + worker admission). |
 
 There is no off switch, compatibility ladder, request-local history trim, or
 deterministic non-model fallback. A `remote_v2` session never silently falls
@@ -69,6 +69,13 @@ MCP schemas marked `defer_loading:true` are excluded from that estimate because
 the provider excludes them from context until a bounded `tool_search_output`
 discloses a match. The disclosed definition is then ordinary structured history
 and is counted there.
+
+Opaque Codex items (`type: "compaction"` with `encrypted_content`, and
+reasoning with encrypted content) use Codex CLI's encrypted-payload heuristic
+(`visible_bytes ≈ len * 3/4 - 650`, then `ceil(bytes / 4)` tokens). They are
+never JSON-stringified into the local budget — that mistake treated ciphertext
+as prompt text, inflated `last_input_tokens` after remote_v2, and re-triggered
+auto-compaction.
 
 Typed `input_image`, `image_url`, structured `image`, and
 `computer_screenshot` objects are projected as native media before the generic
@@ -152,15 +159,37 @@ inputs participate in the history being summarized like every other canonical
 model item. Assistant messages, reasoning, tool calls, and tool results leave
 the active model history but remain in inactive audit rows.
 
-The generated replacement must estimate strictly smaller than the active input.
-Its deterministic fingerprint must also differ from the latest durable
-replacement; an exact repeat settles once as `replacement_unchanged` instead of
-entering another compaction/retry cycle.
+On the **portable** path, the generated replacement must estimate strictly
+smaller than the active input, and its deterministic fingerprint must differ
+from the latest durable replacement (an exact repeat settles as
+`replacement_unchanged`). **remote_v2** follows Codex CLI: a valid opaque
+compaction item is installed without those local gates; token usage is
+recomputed from the opaque-aware estimate afterward.
+
 One transaction locks workspace, session, and turn; verifies
 `turnId + executionGeneration + attemptId`; supersedes every old active row;
 inserts the replacement at fresh whole-number positions; updates
 `last_input_tokens`; records `session.context.compacted`; and clears a manual
 compaction request when applicable. A stale attempt can do none of those writes.
+
+## Timeline UX
+
+Compaction is maintenance of **conversation memory** (model history), not a
+rewrite of the chat transcript. The React timeline projects a first-class
+`context-compaction` landmark (not a foldable notice):
+
+| Event | Landmark phase |
+| --- | --- |
+| `session.context.compaction.requested` (idle manual claim) | `started` until a later finish settles it |
+| `session.context.compaction.started` (attempt-fenced, before provider call) | `started` — live-published so the UI can show progress |
+| `session.context.compacted` | `compacted` with optional `~before → ~after` tokens |
+| `session.context.compaction.skipped` | `skipped` with a short reason |
+
+Start and finish for the same turn settle in place (one landmark). The landmark
+is a turn boundary, so mid-turn auto-compact stays visible between collapsed
+pre/post activity instead of vanishing inside a chevron. Copy always reminds
+that chat history above is unchanged. Provider `implementation` stays in the
+event payload for debug, not as hero UI text.
 
 ## Turn behavior
 

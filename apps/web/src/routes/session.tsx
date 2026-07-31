@@ -45,6 +45,7 @@ import { Notice } from "@/components/ui/notice";
 import type { WorkspaceTab } from "@opengeni/react";
 import { useAppContext } from "@/context";
 import { useCodexModels } from "@/lib/use-codex-models";
+import { resolveSessionComposerModel } from "@/lib/session-model";
 import { normalizeProviderDomain } from "@/lib/capabilities";
 import {
   isTerminalSessionStatus,
@@ -598,10 +599,20 @@ function SessionChatPane(props: {
   const durableToolsSessionId = useRef(props.session.id);
   const [durableToolsSaving, setDurableToolsSaving] = useState(false);
   const [durableToolsError, setDurableToolsError] = useState<string | null>(null);
-  // The model is session-scoped: this session remembers its own pick (falling
-  // back to the deployment default), so a switch here doesn't bleed into others.
-  const model = context.modelForSession(props.session.id);
+  // Next-turn model: in-memory override, else durable session.model — never the
+  // unrelated deployment default (that made remote_v2 sessions look like "5.6-SOL").
+  const requestedModel = context.modelForSession(props.session.id, props.session.model);
+  const model = resolveSessionComposerModel({
+    requested: requestedModel,
+    durableSessionModel: props.session.model,
+    codexCompactionMode: props.session.codexCompactionMode,
+  });
   const { setModelForSession, setReasoningEffort } = context;
+  useEffect(() => {
+    if (model === requestedModel) return;
+    // Drop a stale non-Codex override so the picker selection matches send.
+    setModelForSession(props.session.id, model);
+  }, [model, requestedModel, props.session.id, setModelForSession]);
   useEffect(() => {
     if (durableToolsSessionId.current !== props.session.id) {
       durableToolsSessionId.current = props.session.id;

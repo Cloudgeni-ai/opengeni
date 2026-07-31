@@ -625,7 +625,15 @@ export class MockOpenGeniClient implements SessionClientLike {
     _workspaceId: string,
     sessionId: string,
   ): Promise<{ status: "completed" | "noop"; message: string }> {
-    this.bus(sessionId).append("session.context.compacted", { trigger: "operator" });
+    this.bus(sessionId).append("session.context.compaction.started", {
+      trigger: "operator",
+      estimatedTokensBefore: 120_000,
+    });
+    this.bus(sessionId).append("session.context.compacted", {
+      trigger: "operator",
+      estimatedTokensBefore: 120_000,
+      estimatedTokensAfter: 24_000,
+    });
     return { status: "completed", message: "Context compacted." };
   }
 

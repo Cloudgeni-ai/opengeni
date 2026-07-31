@@ -30,9 +30,11 @@ import {
   estimateCompleteModelInput,
   estimateItemTokenBreakdown,
   estimateItemTokens,
+  estimateOpaqueEncryptedTokens,
   estimateNativeImageTokens,
   estimateSerializedValueTokens,
   estimateTextTokens,
+  opaqueEncryptedContentLength,
   findCompactionNeededError,
   compactionReplacementFingerprint,
   latestCompactionReplacementFingerprint,
@@ -299,6 +301,28 @@ describe("complete outgoing model-input accounting", () => {
     expect(estimate.tokens).toBe(
       estimate.inputTokens + estimate.instructionsTokens + estimate.toolSchemaTokens,
     );
+  });
+
+  test("counts opaque compaction blobs with the Codex encrypted heuristic, not JSON size", () => {
+    const blob = "A".repeat(80_000);
+    const item = { type: "compaction", encrypted_content: blob, summary: "optional" };
+    const naive = estimateTextTokens(JSON.stringify(item));
+    const estimate = estimateItemTokenBreakdown(item);
+    // Codex: visible_bytes = len*3/4 - 650; tokens = ceil(bytes/4)
+    const expected = Math.ceil(Math.max(0, Math.floor((80_000 * 3) / 4) - 650) / 4);
+    expect(estimate.totalTokens).toBe(expected);
+    expect(estimate.totalTokens).toBeLessThan(naive);
+    expect(opaqueEncryptedContentLength(item)).toBe(80_000);
+  });
+
+  test("counts opaque reasoning.encrypted_content with the same Codex heuristic", () => {
+    const blob = "B".repeat(10_000);
+    const item = {
+      type: "reasoning",
+      providerData: { encrypted_content: blob },
+    };
+    expect(estimateItemTokens(item)).toBe(estimateOpaqueEncryptedTokens(10_000));
+    expect(estimateItemTokens(item)).toBeLessThan(estimateTextTokens(JSON.stringify(item)));
   });
 
   test("counts a 1280x800 typed PNG as a native image instead of base64 text", () => {

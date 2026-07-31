@@ -15,8 +15,8 @@ export type ModelPickerProps = {
   /** Visible-to-assistive-technology label. Defaults to "Model". */
   label?: string | undefined;
   /**
-   * When true, only Codex subscription models are offered. Used for sessions
-   * frozen on remote compaction v2 (Codex-only admission).
+   * When true (remote compaction v2), non-Codex models remain listed but are
+   * disabled. Same picker chrome — only selectability changes.
    */
   codexOnly?: boolean | undefined;
 };
@@ -46,27 +46,30 @@ export function ModelPicker({
   codexOnly = false,
 }: ModelPickerProps) {
   const selectId = useId();
-  const visibleModels = useMemo(
-    () => (codexOnly ? models.filter(isCodexClientModel) : models),
-    [models, codexOnly],
-  );
   // Group by provider, preserving first-seen order for both the providers and
   // the models within each — the server already orders the list (default model
-  // and built-in provider first), so we must not re-sort it.
+  // and built-in provider first), so we must not re-sort it. When `codexOnly`,
+  // keep every row visible; disable non-Codex options instead of filtering.
   const groups = useMemo(() => {
-    const byProvider = new Map<string, { label: string; models: ClientModel[] }>();
-    for (const model of visibleModels) {
+    const byProvider = new Map<
+      string,
+      { label: string; models: Array<ClientModel & { optionDisabled: boolean }> }
+    >();
+    for (const model of models) {
       let group = byProvider.get(model.provider);
       if (!group) {
         group = { label: model.providerLabel, models: [] };
         byProvider.set(model.provider, group);
       }
-      group.models.push(model);
+      group.models.push({
+        ...model,
+        optionDisabled: codexOnly && !isCodexClientModel(model),
+      });
     }
     return [...byProvider.values()];
-  }, [visibleModels]);
+  }, [models, codexOnly]);
 
-  if (visibleModels.length === 0) {
+  if (models.length === 0) {
     return null;
   }
 
@@ -82,11 +85,6 @@ export function ModelPicker({
           onChange={(event) => onChange(event.target.value)}
           disabled={disabled === true}
           aria-label={label}
-          title={
-            codexOnly
-              ? "This session uses Codex remote compaction — only Codex models are available."
-              : undefined
-          }
           className={cn(
             // Sized like the other footer controls; the chevron overlay needs the
             // right padding so the value never collides with it.
@@ -100,7 +98,11 @@ export function ModelPicker({
           {groups.map((group) => (
             <optgroup key={group.label} label={group.label}>
               {group.models.map((model) => (
-                <option key={model.id} value={model.id}>
+                <option
+                  key={model.id}
+                  value={model.id}
+                  disabled={model.optionDisabled}
+                >
                   {model.label}
                 </option>
               ))}

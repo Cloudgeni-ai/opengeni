@@ -55,7 +55,10 @@ import {
   TurnSummary,
 } from "../timeline";
 import { SESSION_STATUS_META, StatusDot } from "./session-status";
-import { EntranceAnimationProvider, useEntranceAnimation } from "../timeline/entrance";
+import {
+  EntranceAnimationProvider,
+  useEntranceAnimation,
+} from "../timeline/entrance";
 
 export type MessageTimelineProps = {
   /** Raw session events (projected internally) … */
@@ -94,7 +97,8 @@ export type MessageTimelineProps = {
    * fetches an off-origin favicon (CSP + privacy); an unresolved logo is a
    * monogram, not an external image.
    */
-  resolveProviderLogo?: ((providerDomain: string) => string | null | undefined) | undefined;
+  resolveProviderLogo?:
+    ((providerDomain: string) => string | null | undefined) | undefined;
   /**
    * The tool-renderer registry that resolves how each tool call is drawn.
    * Defaults to {@link defaultToolRegistry}; pass a registry from
@@ -141,10 +145,17 @@ export function MessageTimeline({
   emptyState,
   className,
 }: MessageTimelineProps) {
-  const resolvedItems = useMemo(() => items ?? buildTimeline(events ?? []), [items, events]);
-  const allGroups = useMemo(() => groupTimeline(resolvedItems), [resolvedItems]);
+  const resolvedItems = useMemo(
+    () => items ?? buildTimeline(events ?? []),
+    [items, events],
+  );
+  const allGroups = useMemo(
+    () => groupTimeline(resolvedItems),
+    [resolvedItems],
+  );
   const keyedGroups = useStableTimelineGroupKeys(allGroups);
-  const { mountedGroups: groups, mountingOlderGroups } = useProgressivelyMountedGroups(keyedGroups);
+  const { mountedGroups: groups, mountingOlderGroups } =
+    useProgressivelyMountedGroups(keyedGroups);
   const firstGroupKey = allGroups[0] ? timelineGroupKey(allGroups[0]) : null;
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -196,7 +207,8 @@ export function MessageTimeline({
     previousBulkFirstKeyRef.current !== undefined &&
     previousBulkFirstKeyRef.current !== firstGroupKey;
   const bulkRender =
-    allGroups.length > 0 && (bulkActive || firstKeyChangedForBulk || mountingOlderGroups);
+    allGroups.length > 0 &&
+    (bulkActive || firstKeyChangedForBulk || mountingOlderGroups);
 
   // Snapshot the topmost visible element and where it sits in the viewport, so a
   // later reflow can restore it to the same spot. Prefer durable row wrappers
@@ -215,7 +227,10 @@ export function MessageTimeline({
     const containerTop = node.getBoundingClientRect().top;
     const findVisible = (selector: string): Element | null => {
       for (const candidate of inner.querySelectorAll(selector)) {
-        if (candidate instanceof HTMLElement && candidate.dataset.ogTimelineChrome !== undefined) {
+        if (
+          candidate instanceof HTMLElement &&
+          candidate.dataset.ogTimelineChrome !== undefined
+        ) {
           continue;
         }
         const rect = candidate.getBoundingClientRect();
@@ -356,7 +371,9 @@ export function MessageTimeline({
       return;
     }
     const pending = programmaticScrollTargetsRef.current;
-    const programmaticIndex = pending.findIndex((target) => Math.abs(node.scrollTop - target) <= 1);
+    const programmaticIndex = pending.findIndex(
+      (target) => Math.abs(node.scrollTop - target) <= 1,
+    );
     const programmatic = programmaticIndex >= 0;
     if (programmatic) {
       pending.splice(0, programmaticIndex + 1);
@@ -364,7 +381,8 @@ export function MessageTimeline({
       // A real reader scroll supersedes every delayed programmatic echo.
       pending.length = 0;
     }
-    const nextPinned = node.scrollHeight - node.scrollTop - node.clientHeight < 48;
+    const nextPinned =
+      node.scrollHeight - node.scrollTop - node.clientHeight < 48;
     // Echoes of our own assignments may PIN but never UNPIN — only the reader
     // scrolling away releases the bottom-follow.
     if (nextPinned || !programmatic) {
@@ -382,19 +400,27 @@ export function MessageTimeline({
   return (
     <LightboxProvider>
       <EntranceAnimationProvider value={!bulkRender}>
-        <div className={cn("og-root relative flex min-h-0 flex-col", className)}>
+        <div
+          className={cn("og-root relative flex min-h-0 flex-col", className)}
+        >
           {/* overflow-anchor off: the browser's native scroll anchoring would fight
           the ResizeObserver corrections above — one authority only. */}
           <div
             ref={scrollRef}
             onScroll={onScroll}
-            style={groups.length > 0 && !revealed ? { visibility: "hidden" } : undefined}
+            style={
+              groups.length > 0 && !revealed
+                ? { visibility: "hidden" }
+                : undefined
+            }
             className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-6 [overflow-anchor:none] sm:px-6"
           >
             <div className="mx-auto flex w-full max-w-3xl flex-col gap-5">
               {groups.length === 0 && !working
                 ? (emptyState ?? (
-                    <p className="py-10 text-center text-sm text-og-fg-subtle">No activity yet.</p>
+                    <p className="py-10 text-center text-sm text-og-fg-subtle">
+                      No activity yet.
+                    </p>
                   ))
                 : null}
               {hasOlder && !mountingOlderGroups ? (
@@ -407,8 +433,13 @@ export function MessageTimeline({
                 />
               ) : null}
               {loadingOlder ? (
-                <div data-og-timeline-chrome="" className="flex items-center gap-2 text-sm">
-                  <span className="og-shimmer-text font-medium">Loading earlier activity…</span>
+                <div
+                  data-og-timeline-chrome=""
+                  className="flex items-center gap-2 text-sm"
+                >
+                  <span className="og-shimmer-text font-medium">
+                    Loading earlier activity…
+                  </span>
                 </div>
               ) : null}
               {groups.map(({ group, key }, index) => {
@@ -435,7 +466,9 @@ export function MessageTimeline({
                       turnSummary={turnSummary}
                       foldLiveCluster={isAgentProgress(next)}
                       contextCompactionCount={
-                        contextCompactionCount > 0 ? contextCompactionCount : undefined
+                        contextCompactionCount > 0
+                          ? contextCompactionCount
+                          : undefined
                       }
                     />
                   </div>
@@ -459,7 +492,10 @@ export function MessageTimeline({
                 onClick={() => {
                   const node = scrollRef.current;
                   if (node) {
-                    node.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
+                    node.scrollTo({
+                      top: node.scrollHeight,
+                      behavior: "smooth",
+                    });
                   }
                   pinnedRef.current = true;
                   setPinned(true);
@@ -500,7 +536,9 @@ type KeyedTimelineGroup = {
  * committed groups by their durable item IDs so both the React key and the
  * progressive-window anchor survive either change.
  */
-function useStableTimelineGroupKeys(allGroups: TimelineGroup[]): KeyedTimelineGroup[] {
+function useStableTimelineGroupKeys(
+  allGroups: TimelineGroup[],
+): KeyedTimelineGroup[] {
   const previousRef = useRef<KeyedTimelineGroup[]>([]);
   const keyedGroups = useMemo(() => {
     const previousByItemId = new Map<string, KeyedTimelineGroup>();
@@ -576,10 +614,15 @@ function useProgressivelyMountedGroups(allGroups: KeyedTimelineGroup[]): {
     visibleStart: Math.max(0, allGroups.length - INITIAL_MOUNTED_GROUPS),
   }));
 
-  const lastPossibleStart = Math.max(0, allGroups.length - INITIAL_MOUNTED_GROUPS);
+  const lastPossibleStart = Math.max(
+    0,
+    allGroups.length - INITIAL_MOUNTED_GROUPS,
+  );
   let visibleStart = 0;
   if (allGroups.length > 0) {
-    const currentIndexByKey = new Map(groupKeys.map((key, index) => [key, index]));
+    const currentIndexByKey = new Map(
+      groupKeys.map((key, index) => [key, index]),
+    );
     let retainedStart: number | undefined;
     for (const key of window.groupKeys.slice(window.visibleStart)) {
       const index = currentIndexByKey.get(key);
@@ -589,12 +632,17 @@ function useProgressivelyMountedGroups(allGroups: KeyedTimelineGroup[]): {
       }
     }
     visibleStart =
-      retainedStart === undefined ? lastPossibleStart : Math.min(retainedStart, lastPossibleStart);
+      retainedStart === undefined
+        ? lastPossibleStart
+        : Math.min(retainedStart, lastPossibleStart);
   }
 
   useEffect(() => {
     // Synchronize a prepend/replacement before scheduling its first reveal.
-    if (window.groupKeys !== groupKeys || window.visibleStart !== visibleStart) {
+    if (
+      window.groupKeys !== groupKeys ||
+      window.visibleStart !== visibleStart
+    ) {
       setWindow({ groupKeys, visibleStart });
       return;
     }
@@ -656,7 +704,8 @@ const TimelineGroupView = memo(function TimelineGroupView({
   onOpenSession?: ((sessionId: string) => void) | undefined;
   onMemoryClick?: ((memoryId: string) => void) | undefined;
   onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
-  resolveProviderLogo?: ((providerDomain: string) => string | null | undefined) | undefined;
+  resolveProviderLogo?:
+    ((providerDomain: string) => string | null | undefined) | undefined;
   toolRegistry: ToolRegistry;
   turnSummary?: TurnSummaryOptions | undefined;
   /** A completed cluster of a still-RUNNING turn (not the live tail) folds
@@ -677,7 +726,9 @@ const TimelineGroupView = memo(function TimelineGroupView({
           items={group.items}
           outcome={group.outcome}
           failureText={insideTurn ? undefined : group.failureText}
-          defaultOpen={!insideTurn && group.outcome === "failed" ? true : undefined}
+          defaultOpen={
+            !insideTurn && group.outcome === "failed" ? true : undefined
+          }
           bare={insideTurn}
           facets={turnSummary?.facets}
           contextCompactionCount={contextCompactionCount}
@@ -726,10 +777,14 @@ const TimelineGroupView = memo(function TimelineGroupView({
           // as the nested activity-cluster case does.
           failureText={insideTurn ? undefined : group.failureText}
           durationMs={durationBetween(group.startedAt, group.endedAt)}
-          defaultOpen={!insideTurn && group.outcome === "failed" ? true : undefined}
+          defaultOpen={
+            !insideTurn && group.outcome === "failed" ? true : undefined
+          }
           bare={insideTurn}
           facets={turnSummary?.facets}
-          contextCompactionCount={contextCompactionCount ?? group.contextCompactionCount}
+          contextCompactionCount={
+            contextCompactionCount ?? group.contextCompactionCount
+          }
         >
           {insideTurn ? (
             // A nested turn is already on an ancestor rail — its body just stacks
@@ -799,7 +854,9 @@ function isAgentProgress(next: TimelineGroup | undefined): boolean {
 /** No item still running or streaming — the only state safe to fold live.
     Position alone is a broken proxy: a pending queued message (or any trailing
     item) can sit after the ACTIVE cluster, which must never fold mid-work. */
-function clusterIsSettled(group: Extract<TimelineGroup, { kind: "activity" }>): boolean {
+function clusterIsSettled(
+  group: Extract<TimelineGroup, { kind: "activity" }>,
+): boolean {
   return group.items.every((item) => {
     if (item.kind === "reasoning") {
       return !item.streaming;
@@ -824,7 +881,10 @@ function flattenActivityItems(groups: TimelineGroup[]): ActivityItem[] {
   return items;
 }
 
-function durationBetween(startedAt: string, endedAt: string): number | undefined {
+function durationBetween(
+  startedAt: string,
+  endedAt: string,
+): number | undefined {
   const started = Date.parse(startedAt);
   const ended = Date.parse(endedAt);
   if (!Number.isFinite(started) || !Number.isFinite(ended) || ended < started) {
@@ -852,14 +912,19 @@ export function TimelineRow({
     | ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode)
     | undefined;
   onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
-  resolveProviderLogo?: ((providerDomain: string) => string | null | undefined) | undefined;
+  resolveProviderLogo?:
+    ((providerDomain: string) => string | null | undefined) | undefined;
   onOpenSession?: ((sessionId: string) => void) | undefined;
 }) {
   switch (item.kind) {
     case "user-message":
-      return <UserMessageRow item={item} renderMessageText={renderMessageText} />;
+      return (
+        <UserMessageRow item={item} renderMessageText={renderMessageText} />
+      );
     case "agent-message":
-      return <AgentMessageRow item={item} renderMessageText={renderMessageText} />;
+      return (
+        <AgentMessageRow item={item} renderMessageText={renderMessageText} />
+      );
     case "worker-completion":
       return <WorkerCompletionRow item={item} onOpenSession={onOpenSession} />;
     case "session-status":
@@ -927,7 +992,12 @@ function AgentMessageRow({
     />
   ) : null;
   return (
-    <div className={cn(enter && "animate-og-enter", "min-w-0 text-og-md leading-7 text-og-fg")}>
+    <div
+      className={cn(
+        enter && "animate-og-enter",
+        "min-w-0 text-og-md leading-7 text-og-fg",
+      )}
+    >
       {renderMessageText ? (
         <>
           {renderMessageText(item.text, item)}
@@ -937,7 +1007,9 @@ function AgentMessageRow({
         // While streaming, let the caret ride the end of the last rendered line:
         // the trailing block (usually a <p>) flows inline so the caret sits on
         // its baseline instead of dropping to a new line.
-        <div className={item.streaming ? "[&_>div>:last-child]:inline" : undefined}>
+        <div
+          className={item.streaming ? "[&_>div>:last-child]:inline" : undefined}
+        >
           <Markdown>{item.text}</Markdown>
           {caret}
         </div>
@@ -967,7 +1039,9 @@ type WorkerCompletionMeta = {
   accentClass: string;
 };
 
-function workerCompletionMeta(item: WorkerCompletionItem): WorkerCompletionMeta {
+function workerCompletionMeta(
+  item: WorkerCompletionItem,
+): WorkerCompletionMeta {
   if (item.childStatus === "failed") {
     return {
       label: "Worker failed",
@@ -1026,7 +1100,13 @@ function WorkerCompletionRow({
       ? [{ label: "Evidence", value: item.evidence.trim(), muted: true }]
       : []),
     ...(showPausedReason
-      ? [{ label: "Paused because", value: item.pausedReason!.trim(), muted: true }]
+      ? [
+          {
+            label: "Paused because",
+            value: item.pausedReason!.trim(),
+            muted: true,
+          },
+        ]
       : []),
   ];
   const hasDetails = details.length > 0;
@@ -1034,7 +1114,9 @@ function WorkerCompletionRow({
     <div className={cn(enter && "animate-og-enter", "min-w-0")}>
       {/* An inbound result, not a bubble: a 2px left accent carries the outcome —
           no full frame, no surface fill. The report unfolds flush beneath. */}
-      <div className={cn("flex flex-col gap-2 border-l-2 pl-3", meta.accentClass)}>
+      <div
+        className={cn("flex flex-col gap-2 border-l-2 pl-3", meta.accentClass)}
+      >
         <div className="flex items-start gap-2.5">
           <span className={cn("mt-0.5 shrink-0", meta.iconClass)}>
             <Icon className="size-4" />
@@ -1043,7 +1125,10 @@ function WorkerCompletionRow({
             <p className="text-og-base leading-5 text-og-fg">
               <span className="font-medium">{meta.label}</span>
               {item.goalText ? (
-                <span className="text-og-fg-muted"> · {truncate(item.goalText, 90)}</span>
+                <span className="text-og-fg-muted">
+                  {" "}
+                  · {truncate(item.goalText, 90)}
+                </span>
               ) : null}
             </p>
           </div>
@@ -1102,7 +1187,11 @@ function WorkerCompletionRow({
   );
 }
 
-function SessionStatusRow({ item }: { item: { status: SessionStatus; occurredAt: string } }) {
+function SessionStatusRow({
+  item,
+}: {
+  item: { status: SessionStatus; occurredAt: string };
+}) {
   const enter = useEntranceAnimation();
   const meta = SESSION_STATUS_META[item.status];
   return (
@@ -1140,7 +1229,11 @@ function SessionStatusRow({ item }: { item: { status: SessionStatus; occurredAt:
  * bg-X/10`); neutral actions reuse the surface/border tokens so a clean run of
  * landmarks stays calm rather than a row of colored chips.
  */
-type GoalMeta = { label: string; pill: string; icon: ComponentType<{ className?: string }> };
+type GoalMeta = {
+  label: string;
+  pill: string;
+  icon: ComponentType<{ className?: string }>;
+};
 
 const NEUTRAL_PILL = "border-og-border bg-og-surface-1 text-og-fg-muted";
 
@@ -1163,7 +1256,11 @@ const GOAL_META: Record<GoalItem["action"], GoalMeta> = {
   },
   resumed: { label: "Goal resumed", pill: NEUTRAL_PILL, icon: PlayIcon },
   cleared: { label: "Goal cleared", pill: NEUTRAL_PILL, icon: Trash2Icon },
-  continuation: { label: "Continuing toward the goal", pill: NEUTRAL_PILL, icon: ArrowRightIcon },
+  continuation: {
+    label: "Continuing toward the goal",
+    pill: NEUTRAL_PILL,
+    icon: ArrowRightIcon,
+  },
 };
 
 /**
@@ -1205,7 +1302,9 @@ const COMPACTION_TRIGGER_LABEL: Record<
 function CompactionRow({ item }: { item: ContextCompactionItem }) {
   const enter = useEntranceAnimation();
   const trigger =
-    item.trigger && item.phase !== "started" ? COMPACTION_TRIGGER_LABEL[item.trigger] : null;
+    item.trigger && item.phase !== "started"
+      ? COMPACTION_TRIGGER_LABEL[item.trigger]
+      : null;
   const before =
     item.estimatedTokensBefore !== null
       ? Math.round(item.estimatedTokensBefore).toLocaleString("en-US")
@@ -1221,7 +1320,7 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
         ? before && after
           ? `Conversation memory compacted · ~${before} → ~${after} tokens`
           : "Conversation memory compacted"
-        : compactionSkipTitle(item.skipReason);
+        : "Couldn’t compact conversation memory";
   const subtitle =
     item.phase === "compacted"
       ? "Chat history above is unchanged"
@@ -1258,10 +1357,6 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
   );
 }
 
-function compactionSkipTitle(_reason: string | null): string {
-  return "Couldn’t compact conversation memory";
-}
-
 function compactionSkipSubtitle(reason: string | null): string {
   switch (reason) {
     case "no_history":
@@ -1277,7 +1372,10 @@ function compactionSkipSubtitle(reason: string | null): string {
   }
 }
 
-const MACHINE_INPUT_META: Record<MachineInputBatchItem["members"][number]["kind"], string> = {
+const MACHINE_INPUT_META: Record<
+  MachineInputBatchItem["members"][number]["kind"],
+  string
+> = {
   scheduled_occurrence: "Scheduled update",
   goal_continuation: "Goal continued",
   agent_message: "Agent update",
@@ -1321,16 +1419,27 @@ function MachineInputBatchRow({ item }: { item: MachineInputBatchItem }) {
   );
 }
 
-function MachineInputRow({ member }: { member: MachineInputBatchItem["members"][number] }) {
+function MachineInputRow({
+  member,
+}: {
+  member: MachineInputBatchItem["members"][number];
+}) {
   const source = readableMachineInputSource(member.sourceId);
   return (
     <div className="flex min-w-0 items-start gap-2.5">
-      <span className="mt-2 size-1.5 shrink-0 rounded-full bg-og-fg-subtle" aria-hidden />
+      <span
+        className="mt-2 size-1.5 shrink-0 rounded-full bg-og-fg-subtle"
+        aria-hidden
+      />
       <div className="min-w-0 flex-1">
         <span className="text-xs font-medium text-og-fg-muted">
           {MACHINE_INPUT_META[member.kind]}
         </span>
-        {source && <span className="ml-1.5 text-xs text-og-fg-subtle">from {source}</span>}
+        {source && (
+          <span className="ml-1.5 text-xs text-og-fg-subtle">
+            from {source}
+          </span>
+        )}
         {member.summary && (
           <p className="mt-0.5 whitespace-pre-wrap break-words text-sm leading-5 text-og-fg">
             {truncate(cleanMachineInputSummary(member.summary), 320)}
@@ -1370,13 +1479,18 @@ function NoticeRow({ item }: { item: NoticeItem }) {
       role="status"
     >
       <TriangleAlertIcon
-        className={cn("mt-0.5 size-4 shrink-0", item.tone === "cancelled" && "opacity-60")}
+        className={cn(
+          "mt-0.5 size-4 shrink-0",
+          item.tone === "cancelled" && "opacity-60",
+        )}
       />
       <div className="min-w-0 flex-1">
         <span className="whitespace-pre-wrap break-words">{item.text}</span>
         {item.details ? (
           <details className="mt-2 text-xs">
-            <summary className="cursor-pointer font-medium">{item.details.label}</summary>
+            <summary className="cursor-pointer font-medium">
+              {item.details.label}
+            </summary>
             <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-og-sm bg-black/5 p-2 font-mono dark:bg-white/5">
               {JSON.stringify(item.details.value, null, 2)}
             </pre>
@@ -1412,14 +1526,16 @@ function AuthNeededRow({
 }: {
   item: AuthNeededItem;
   onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
-  resolveProviderLogo?: ((providerDomain: string) => string | null | undefined) | undefined;
+  resolveProviderLogo?:
+    ((providerDomain: string) => string | null | undefined) | undefined;
 }) {
   const enter = useEntranceAnimation();
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
   const provider = providerLabel(item.providerDomain);
   const unavailable =
-    item.reason === "unsupported_auth" || item.reason === "resource_scope_unavailable";
+    item.reason === "unsupported_auth" ||
+    item.reason === "resource_scope_unavailable";
   const missing = item.reason === "missing_connection";
   const actionLabel = missing ? "Connect" : "Reconnect";
 
@@ -1442,7 +1558,10 @@ function AuthNeededRow({
   };
 
   return (
-    <div className={cn(enter && "animate-og-enter", "flex flex-col gap-2")} role="status">
+    <div
+      className={cn(enter && "animate-og-enter", "flex flex-col gap-2")}
+      role="status"
+    >
       <div className="flex flex-col gap-3 rounded-og-lg border border-og-border bg-og-surface-1 px-3.5 py-3 sm:flex-row sm:items-center">
         <div className="flex min-w-0 flex-1 items-center gap-3">
           <AuthProviderLogo
@@ -1451,9 +1570,13 @@ function AuthNeededRow({
           />
           <div className="min-w-0">
             <p className="truncate text-og-md font-medium text-og-fg">
-              {unavailable ? `${provider} tools unavailable` : `${actionLabel} ${provider}`}
+              {unavailable
+                ? `${provider} tools unavailable`
+                : `${actionLabel} ${provider}`}
             </p>
-            <p className="truncate text-og-sm text-og-fg-subtle">{authReasonLine(item.reason)}</p>
+            <p className="truncate text-og-sm text-og-fg-subtle">
+              {authReasonLine(item.reason)}
+            </p>
           </div>
         </div>
         {!unavailable && onReconnect ? (
@@ -1466,7 +1589,10 @@ function AuthNeededRow({
               "transition-colors hover:bg-og-accent-strong disabled:opacity-70 pointer-coarse:min-h-9",
             )}
           >
-            <RefreshCwIcon className={cn("size-3.5", busy && "animate-og-spin")} aria-hidden />
+            <RefreshCwIcon
+              className={cn("size-3.5", busy && "animate-og-spin")}
+              aria-hidden
+            />
             {busy ? "Opening…" : actionLabel}
           </button>
         ) : !unavailable && item.authorizationUrl ? (
@@ -1486,13 +1612,15 @@ function AuthNeededRow({
       </div>
       {!unavailable ? (
         <p className="px-1 text-og-xs text-og-fg-subtle">
-          This tool call wasn't replayed. After {missing ? "connecting" : "reconnecting"}, send a
-          new message to try again.
+          This tool call wasn't replayed. After{" "}
+          {missing ? "connecting" : "reconnecting"}, send a new message to try
+          again.
         </p>
       ) : null}
       {failed ? (
         <p className="px-1 text-og-xs text-og-status-failed">
-          Couldn't start {missing ? "connecting" : "reconnecting"} {provider}. Try again.
+          Couldn't start {missing ? "connecting" : "reconnecting"} {provider}.
+          Try again.
         </p>
       ) : null}
     </div>
@@ -1506,7 +1634,13 @@ function AuthNeededRow({
  * app — so the card never shows a broken-image glyph and never reaches off-origin
  * for a favicon (CSP + privacy).
  */
-function AuthProviderLogo({ src, label }: { src: string | null; label: string }) {
+function AuthProviderLogo({
+  src,
+  label,
+}: {
+  src: string | null;
+  label: string;
+}) {
   const [failed, setFailed] = useState(false);
   // A resolver that only returns the URL after a lazy catalog fetch means `src`
   // can arrive on a later render; reset the error latch so it gets its attempt.
