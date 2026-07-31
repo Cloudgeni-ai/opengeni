@@ -6,6 +6,8 @@
  * and no provider implementation.
  */
 
+import type { WorkspaceVoiceInputSettings } from "./types";
+
 export type TranscriptionCredentialMode = "managed" | "byok";
 
 export type WorkspaceTranscriptionTarget = {
@@ -111,7 +113,21 @@ export type TranscriptionErrorCode =
   | "policy_blocked"
   | "timeout"
   | "cancelled"
+  | "unavailable"
+  | "too_large"
+  | "invalid_audio"
   | "unknown";
+
+/** Native browser voice input defaults to the configured deployment capability. */
+export function resolveWorkspaceVoiceInputEnabled(settings: unknown): boolean | null {
+  if (!isRecord(settings)) return null;
+  const voiceInput = settings.voiceInput;
+  if (isRecord(voiceInput) && typeof voiceInput.enabled === "boolean") {
+    return (voiceInput as WorkspaceVoiceInputSettings).enabled;
+  }
+  const legacy = settings.transcription;
+  return isRecord(legacy) && typeof legacy.enabled === "boolean" ? legacy.enabled : null;
+}
 
 export type TranscriptionTimeSpan = {
   startMilliseconds: number;

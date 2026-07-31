@@ -2,6 +2,7 @@ import type { SessionEvent, SessionStatus } from "@opengeni/sdk";
 import {
   ArrowDownIcon,
   ArrowRightIcon,
+  ArrowUpToLineIcon,
   BotIcon,
   CheckCircle2Icon,
   CheckIcon,
@@ -32,6 +33,7 @@ import {
 } from "react";
 import { cn } from "../lib/cn";
 import { formatRelativeTime, truncate } from "../lib/format";
+import { prefersReducedMotion } from "../lib/motion";
 import { Markdown } from "./markdown";
 import {
   ActivityRail,
@@ -53,12 +55,11 @@ import {
   type UserMessageItem,
   type WorkerCompletionItem,
   TurnSummary,
+  useTurnSettleOpen,
 } from "../timeline";
+import { CopyHoverFrame } from "./copy-button";
 import { SESSION_STATUS_META, StatusDot } from "./session-status";
-import {
-  EntranceAnimationProvider,
-  useEntranceAnimation,
-} from "../timeline/entrance";
+import { EntranceAnimationProvider, useEntranceAnimation } from "../timeline/entrance";
 
 export type MessageTimelineProps = {
   /** Raw session events (projected internally) … */
@@ -97,8 +98,7 @@ export type MessageTimelineProps = {
    * fetches an off-origin favicon (CSP + privacy); an unresolved logo is a
    * monogram, not an external image.
    */
-  resolveProviderLogo?:
-    ((providerDomain: string) => string | null | undefined) | undefined;
+  resolveProviderLogo?: ((providerDomain: string) => string | null | undefined) | undefined;
   /**
    * The tool-renderer registry that resolves how each tool call is drawn.
    * Defaults to {@link defaultToolRegistry}; pass a registry from
@@ -115,11 +115,81 @@ export type MessageTimelineProps = {
   loadingOlder?: boolean | undefined;
   /** Called when the reader nears the top and older history should backfill. */
   onLoadOlder?: (() => void) | undefined;
+  /** Jump to the durable session start (bounded oldest window, no middle). */
+  onJumpToStart?: (() => void | Promise<void>) | undefined;
+  /** True while the oldest window is loading. */
+  loadingOldest?: boolean | undefined;
+  /** Newer durable history exists below the current (history) window. */
+  hasNewer?: boolean | undefined;
+  /** A newer history page is being fetched. */
+  loadingNewer?: boolean | undefined;
+  /** Page forward through history without loading the whole gap to the tip. */
+  onLoadNewer?: (() => void) | undefined;
+  /**
+   * Reload the live tip window. When omitted, Jump to latest only re-pins and
+   * scrolls the in-memory window.
+   */
+  onJumpToLatest?: (() => void | Promise<void>) | undefined;
   emptyState?: ReactNode | undefined;
   className?: string | undefined;
 };
 
-const INITIAL_MOUNTED_GROUPS = 1;
+/**
+ * Scroll ownership, from first principles. Everything the events hook has
+ * loaded is mounted — no tip-lock window, no per-frame progressive reveal.
+ * (The in-memory window is already byte/count-bounded by useSessionEvents, and
+ * rows are memoized, so a full mount is cheap; the drip-feed machinery this
+ * replaces was the "content is hidden, then pops in in batches" wobble.)
+ *
+ * Exactly one authority writes scrollTop, depending on mode:
+ * - Pinned at the tip → we own it: ease toward the bottom after every commit
+ *   (and on ResizeObserver ticks for late layout like images). Native scroll
+ *   anchoring is disabled in this mode so it cannot fight the glide.
+ * - Scrolled up reading → the BROWSER owns it: native scroll anchoring
+ *   (`overflow-anchor: auto`) holds the reader's viewport through history
+ *   prepends, image/font late layout, and fold reflows at the compositor
+ *   level — no script, nothing to wobble. Where the engine lacks scroll
+ *   anchoring, the one scripted exception is a history prepend, corrected
+ *   once per commit by the exact scrollHeight delta.
+ */
+const PIN_THRESHOLD_PX = 48;
+
+/**
+ * Adaptive tip-follow glide. Remaining distance shrinks by ~63% every tau ms.
+ * Tau is dynamic:
+ * - Slow / sparse growth → longer tau (calm float; no strange laggy chase
+ *   after a single line).
+ * - Fast bursts or stacked debt → shorter tau (catch up without rattling).
+ * Velocity is an EMA of scrollHeight growth; debt is distance-to-bottom.
+ */
+const GLIDE_TAU_MIN_MS = 100;
+const GLIDE_TAU_MAX_MS = 420;
+/** At this tip-debt, urgency saturates toward the fast tau. */
+const GLIDE_CATCHUP_DEBT_PX = 140;
+/** Growth speed (px/s) that saturates urgency toward the fast tau. */
+const GLIDE_VELOCITY_REF_PX_S = 380;
+/** Idle this long without growth → velocity decays (slow stream calms). */
+const GLIDE_VELOCITY_IDLE_MS = 180;
+/** Growth beyond this snaps instead of gliding (session switches, huge folds). */
+const GLIDE_MAX_DISTANCE_PX = 600;
+
+function glideTauMs(debtPx: number, velocityPxPerSec: number): number {
+  const debtT = Math.min(1, Math.abs(debtPx) / GLIDE_CATCHUP_DEBT_PX);
+  const velT = Math.min(1, Math.max(0, velocityPxPerSec) / GLIDE_VELOCITY_REF_PX_S);
+  const urgency = Math.max(debtT, velT);
+  return GLIDE_TAU_MAX_MS + (GLIDE_TAU_MIN_MS - GLIDE_TAU_MAX_MS) * urgency;
+}
+
+/** Detects native scroll anchoring; a hook so tests can exercise the fallback. */
+function useNativeScrollAnchoring(): boolean {
+  return useMemo(
+    () =>
+      typeof CSS !== "undefined" &&
+      typeof CSS.supports === "function" &&
+      CSS.supports("overflow-anchor: auto"),
+    [],
+  );
+}
 
 /**
  * The session timeline: chat messages with streaming deltas, collapsed
@@ -142,59 +212,57 @@ export function MessageTimeline({
   hasOlder = false,
   loadingOlder = false,
   onLoadOlder,
+  onJumpToStart,
+  loadingOldest = false,
+  hasNewer = false,
+  loadingNewer = false,
+  onLoadNewer,
+  onJumpToLatest,
   emptyState,
   className,
 }: MessageTimelineProps) {
-  const resolvedItems = useMemo(
-    () => items ?? buildTimeline(events ?? []),
-    [items, events],
-  );
-  const allGroups = useMemo(
-    () => groupTimeline(resolvedItems),
-    [resolvedItems],
-  );
-  const keyedGroups = useStableTimelineGroupKeys(allGroups);
-  const { mountedGroups: groups, mountingOlderGroups } =
-    useProgressivelyMountedGroups(keyedGroups);
-  const firstGroupKey = allGroups[0] ? timelineGroupKey(allGroups[0]) : null;
-
+  const resolvedItems = useMemo(() => items ?? buildTimeline(events ?? []), [items, events]);
+  const allGroups = useMemo(() => groupTimeline(resolvedItems), [resolvedItems]);
+  const groups = useStableTimelineGroupKeys(allGroups);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const topSentinelRef = useRef<HTMLDivElement | null>(null);
+  const bottomSentinelRef = useRef<HTMLDivElement | null>(null);
   const previousBulkFirstKeyRef = useRef<string | null | undefined>(undefined);
   const [pinned, setPinned] = useState(true);
   const [bulkActive, setBulkActive] = useState(true);
+  // Older history prefetch is user-driven: a window shorter than the viewport
+  // + rootMargin would otherwise keep the top sentinel intersecting and fetch
+  // history forever while the reader sits at the tip. Arm on first scroll-up.
+  const olderPrefetchArmedRef = useRef(false);
+  const [olderPrefetchArmed, setOlderPrefetchArmed] = useState(false);
+  const firstGroupKey = allGroups[0] ? timelineGroupKey(allGroups[0]) : null;
   // Content stays invisible until its first bottom-anchored frame, so a flash
-  // of the window's TOP while a large timeline lays out across commits is
-  // structurally impossible — the reader only ever sees it already at the
-  // bottom. An empty timeline reveals immediately (there is nothing to anchor).
+  // of the window's TOP while a large timeline lays out is structurally
+  // impossible — the reader only ever sees it already at the bottom.
   const [revealed, setRevealed] = useState(false);
-  // Our own scrollTop assignments echo back as delayed scroll events. Keep the
-  // ordered, clamped targets rather than only the latest one: successive
-  // ResizeObserver corrections can queue several echoes before the browser
-  // dispatches them. If reader input lands at a different position, its value
-  // wins and clears the pending echoes. A matching echo must not recapture the
-  // visual anchor while progressive prepend is still mounting older rows.
-  const programmaticScrollTargetsRef = useRef<number[]>([]);
-  const assignScrollTop = useCallback((node: HTMLElement, value: number) => {
-    const previous = node.scrollTop;
-    node.scrollTop = value;
-    if (node.scrollTop === previous) {
-      return;
-    }
-    const pending = programmaticScrollTargetsRef.current;
-    pending.push(node.scrollTop);
-    if (pending.length > 32) {
-      pending.splice(0, pending.length - 32);
-    }
-  }, []);
-  // Mirror `pinned` into a ref so the ResizeObserver callback (a stable closure)
-  // always reads the live value without re-subscribing on every scroll.
+  // Mirror `pinned` into a ref so ResizeObserver/layout callbacks (stable
+  // closures) always read the live value without re-subscribing.
   const pinnedRef = useRef(true);
-  // The reader's visual anchor: the topmost still-visible timeline element and
-  // its offset from the viewport top. Recaptured on scroll and after every
-  // height change, it lets us hold the reader's position when content above the
-  // viewport expands or collapses (e.g. a turn folds when it settles).
-  const anchorRef = useRef<{ el: Element; top: number } | null>(null);
+  // History windows (`hasNewer`) have a bottom that is not the live tip.
+  // Pin/follow must ignore that floor — otherwise loadNewer appends yank the
+  // reader to the new page bottom. LoadOlder prepends already stay put because
+  // the reader is unpinned and scroll anchoring / delta correction owns place.
+  const hasNewerRef = useRef(hasNewer);
+  hasNewerRef.current = hasNewer;
+  // Our own scrollTop writes echo back as delayed scroll events. We only ever
+  // write "to the bottom" while pinned (echo reads as pinned — harmless) or a
+  // prepend delta while unpinned (echo reads as unpinned — harmless), so no
+  // target bookkeeping is needed; a small counter just stops a late echo of a
+  // bottom-follow from unpinning a reader who has not touched the wheel.
+  const pendingEchoesRef = useRef(0);
+  // Prepend detection: the oldest loaded item's id changes exactly when older
+  // history lands (including the merge-into-first-group case where the first
+  // GROUP key is retained). Item ids, not group keys, are the durable signal.
+  // Only consulted where the engine lacks native scroll anchoring.
+  const nativeScrollAnchoring = useNativeScrollAnchoring();
+  const previousFirstItemIdRef = useRef<string | null>(null);
+  const previousScrollHeightRef = useRef(0);
+  const firstItemId = resolvedItems[0]?.id ?? null;
   const lastItem = resolvedItems[resolvedItems.length - 1];
   const streaming =
     lastItem !== undefined &&
@@ -206,93 +274,177 @@ export function MessageTimeline({
   const firstKeyChangedForBulk =
     previousBulkFirstKeyRef.current !== undefined &&
     previousBulkFirstKeyRef.current !== firstGroupKey;
-  const bulkRender =
-    allGroups.length > 0 &&
-    (bulkActive || firstKeyChangedForBulk || mountingOlderGroups);
+  const bulkRender = allGroups.length > 0 && (bulkActive || firstKeyChangedForBulk);
 
-  // Snapshot the topmost visible element and where it sits in the viewport, so a
-  // later reflow can restore it to the same spot. Prefer durable row wrappers
-  // over their containing group: an older activity item can merge into the
-  // existing group, leaving that outer group in place while shifting every row
-  // after the insertion. Transient chrome (the backfill sentinel and shimmer) is
-  // skipped — anchoring to a row that unmounts when the older window lands would
-  // drop the correction mid-prepend.
-  const captureAnchor = useCallback(() => {
-    const node = scrollRef.current;
-    const inner = node?.firstElementChild;
-    if (!node || !inner) {
-      anchorRef.current = null;
-      return;
+  // Mirrors `revealed` for the stable follow callbacks: the very first
+  // bottom-anchored frame must SNAP (the reader hasn't seen anything yet);
+  // everything after it may glide.
+  const revealedRef = useRef(false);
+
+  const writeScrollTop = useCallback((node: HTMLElement, value: number) => {
+    const previous = node.scrollTop;
+    node.scrollTop = value;
+    if (node.scrollTop !== previous) {
+      pendingEchoesRef.current = Math.min(pendingEchoesRef.current + 1, 32);
     }
-    const containerTop = node.getBoundingClientRect().top;
-    const findVisible = (selector: string): Element | null => {
-      for (const candidate of inner.querySelectorAll(selector)) {
-        if (
-          candidate instanceof HTMLElement &&
-          candidate.dataset.ogTimelineChrome !== undefined
-        ) {
-          continue;
-        }
-        const rect = candidate.getBoundingClientRect();
-        if (rect.bottom > containerTop + 1 && rect.height > 0) {
-          return candidate;
-        }
-      }
-      return null;
-    };
-    const anchor =
-      findVisible("[data-og-timeline-row-anchor]") ??
-      findVisible("[data-og-timeline-group-anchor]");
-    if (anchor) {
-      const rect = anchor.getBoundingClientRect();
-      anchorRef.current = { el: anchor, top: rect.top - containerTop };
-      return;
-    }
-    anchorRef.current = null;
   }, []);
 
-  // Restore the user-owned anchor synchronously after React commits a frame.
-  // ResizeObserver remains a late-measurement fallback, but progressive history
-  // frames must be corrected before the browser can paint an intermediate jump.
-  const restoreAnchor = useCallback(
+  // Soft follow glide: while pinned, the tip eases toward the bottom with an
+  // exponential approach (frame-rate independent) instead of teleporting per
+  // commit. Tau adapts to recent growth velocity + tip debt — slow streams
+  // stay calm, fast bursts catch up. Target re-read every frame so mid-glide
+  // growth extends the same motion. Self-terminates when the pin releases.
+  const glideFrameRef = useRef<number | null>(null);
+  const glideLastTsRef = useRef(0);
+  const growthTrackerRef = useRef({ height: 0, at: 0, velocity: 0 });
+
+  const noteContentGrowth = useCallback((height: number) => {
+    const tracker = growthTrackerRef.current;
+    const nowTs = typeof performance !== "undefined" ? performance.now() : Date.now();
+    if (tracker.height > 0 && nowTs > tracker.at) {
+      const dh = height - tracker.height;
+      const dt = nowTs - tracker.at;
+      if (dh > 0 && dt > 0) {
+        const instant = (dh / dt) * 1000;
+        tracker.velocity = tracker.velocity * 0.65 + instant * 0.35;
+      } else if (dt > GLIDE_VELOCITY_IDLE_MS) {
+        // Sparse stream: forget burst urgency so the next line floats calmly.
+        tracker.velocity *= 0.45;
+      }
+    }
+    tracker.height = height;
+    tracker.at = nowTs;
+  }, []);
+
+  const stopGlide = useCallback(() => {
+    if (glideFrameRef.current !== null) {
+      cancelFrame(glideFrameRef.current);
+      glideFrameRef.current = null;
+    }
+  }, []);
+
+  const glideStep = useCallback(() => {
+    glideFrameRef.current = null;
+    const node = scrollRef.current;
+    if (!node || !pinnedRef.current) {
+      return;
+    }
+    noteContentGrowth(node.scrollHeight);
+    const target = node.scrollHeight - node.clientHeight;
+    const delta = target - node.scrollTop;
+    if (Math.abs(delta) <= 1) {
+      if (delta !== 0) {
+        writeScrollTop(node, target);
+      }
+      return;
+    }
+    const nowTs = typeof performance !== "undefined" ? performance.now() : Date.now();
+    const dt =
+      glideLastTsRef.current === 0 ? 16 : Math.min(64, Math.max(8, nowTs - glideLastTsRef.current));
+    glideLastTsRef.current = nowTs;
+    // Decay velocity while gliding without new growth so catch-up eases out.
+    const tracker = growthTrackerRef.current;
+    if (nowTs - tracker.at > GLIDE_VELOCITY_IDLE_MS) {
+      tracker.velocity *= 0.85;
+      tracker.at = nowTs;
+    }
+    const tau = glideTauMs(delta, tracker.velocity);
+    const alpha = 1 - Math.exp(-dt / tau);
+    const step = delta * alpha;
+    writeScrollTop(node, node.scrollTop + (Math.abs(step) < 1 ? Math.sign(delta) : step));
+    glideFrameRef.current = requestFrame(glideStep);
+  }, [noteContentGrowth, writeScrollTop]);
+
+  const startGlide = useCallback(() => {
+    if (glideFrameRef.current === null) {
+      glideLastTsRef.current = 0;
+      glideFrameRef.current = requestFrame(glideStep);
+    }
+  }, [glideStep]);
+
+  useEffect(() => stopGlide, [stopGlide]);
+
+  const followTip = useCallback(
     (node: HTMLElement) => {
-      if (autoFollow && pinnedRef.current) {
-        assignScrollTop(node, node.scrollHeight);
+      noteContentGrowth(node.scrollHeight);
+      const target = node.scrollHeight - node.clientHeight;
+      const delta = target - node.scrollTop;
+      if (Math.abs(delta) <= 1) {
         return;
       }
-      const anchor = anchorRef.current;
-      if (!anchor || !anchor.el.isConnected) {
-        return;
-      }
-      const containerTop = node.getBoundingClientRect().top;
-      const now = anchor.el.getBoundingClientRect().top - containerTop;
-      const diff = now - anchor.top;
-      if (diff !== 0) {
-        assignScrollTop(node, node.scrollTop + diff);
+      // Glide only for ordinary streaming-scale growth after the first paint.
+      // The initial reveal, session switches, and layout jumps larger than a
+      // viewport-ish distance snap — animating those would feel like lag.
+      if (
+        revealedRef.current &&
+        Math.abs(delta) <= GLIDE_MAX_DISTANCE_PX &&
+        !prefersReducedMotion()
+      ) {
+        startGlide();
+      } else {
+        stopGlide();
+        writeScrollTop(node, target);
       }
     },
-    [assignScrollTop, autoFollow],
+    [noteContentGrowth, startGlide, stopGlide, writeScrollTop],
   );
 
-  // A LAYOUT effect so the very first paint of a freshly loaded session is
-  // already anchored at the bottom — no visible traversal down the history.
+  // The single post-commit scroll authority. Runs after EVERY commit (no dep
+  // list): any commit may change content height, and the decision is cheap.
+  // oxlint-disable-next-line react-hooks/exhaustive-deps -- Deliberately runs after every commit.
   useLayoutEffect(() => {
     const node = scrollRef.current;
-    if (node) {
-      restoreAnchor(node);
+    if (!node) {
+      return;
     }
+    const previousFirstItemId = previousFirstItemIdRef.current;
+    const prepended =
+      previousFirstItemId !== null &&
+      firstItemId !== previousFirstItemId &&
+      resolvedItems.some((item) => item.id === previousFirstItemId);
+    // Live tip only. A history-page bottom (`hasNewer`) must not follow appends
+    // from loadNewer — that path should leave scrollTop alone, like an unpinned
+    // reader watching growth below the viewport.
+    if (autoFollow && pinnedRef.current && !hasNewerRef.current) {
+      followTip(node);
+    } else if (prepended && !nativeScrollAnchoring) {
+      // Fallback engines only: one exact correction per prepend commit, whole
+      // pixels. Anchoring engines already adjusted during layout — correcting
+      // again here would double-shift. Growth below the viewport (a live tip
+      // streaming while the reader is up in history) never lands here.
+      const delta = Math.round(node.scrollHeight - previousScrollHeightRef.current);
+      if (delta > 0) {
+        writeScrollTop(node, node.scrollTop + delta);
+      }
+    }
+    previousFirstItemIdRef.current = firstItemId;
+    previousScrollHeightRef.current = node.scrollHeight;
     if (!revealed && groups.length > 0) {
+      revealedRef.current = true;
       setRevealed(true);
     }
-  }, [resolvedItems, working, revealed, groups.length, restoreAnchor]);
+  });
 
-  // A cleared timeline (stream identity change) re-arms the reveal so the next
-  // session also first paints at its bottom.
+  // A cleared timeline (stream identity change) re-arms the reveal + prefetch
+  // gate and returns to bottom-follow for the next session's first paint.
   useLayoutEffect(() => {
-    if (allGroups.length === 0 && revealed) {
+    if (allGroups.length > 0) {
+      return;
+    }
+    stopGlide();
+    revealedRef.current = false;
+    if (revealed) {
       setRevealed(false);
     }
-  }, [allGroups.length, revealed]);
+    if (olderPrefetchArmedRef.current) {
+      olderPrefetchArmedRef.current = false;
+      setOlderPrefetchArmed(false);
+    }
+    if (!pinnedRef.current) {
+      pinnedRef.current = true;
+      setPinned(true);
+    }
+  }, [allGroups.length, revealed, stopGlide]);
 
   // Clear the bulk-paint marker a frame after it renders, so rows appended
   // live (streams, new turns) animate exactly as before.
@@ -302,27 +454,20 @@ export function MessageTimeline({
       return;
     }
     setBulkActive(true);
-    // Initial tails and prepended history mount from newest to oldest across
-    // frames. Keep every row born during that bulk window animation-free; only
-    // clear the marker after the authoritative group list is fully mounted.
-    if (mountingOlderGroups) {
-      return;
-    }
     const frame = requestFrame(() => setBulkActive(false));
     return () => cancelFrame(frame);
-  }, [bulkRender, firstGroupKey, mountingOlderGroups]);
+  }, [bulkRender, firstGroupKey]);
 
-  // Prefetch older history well before the reader reaches the top: the
-  // sentinel sits above the first group and trips 1600px early, so backfill
-  // is usually rendered (and anchored by the ResizeObserver below) before the
-  // top of the window ever becomes visible.
+  // Prefetch older history only after the reader scrolls up from the tip.
+  // Once armed, the sentinel trips 1600px early so backfill is usually
+  // rendered (and its scroll delta corrected) before the reader reaches it.
   useEffect(() => {
     const root = scrollRef.current;
     const target = topSentinelRef.current;
     if (
       !root ||
       !target ||
-      mountingOlderGroups ||
+      !olderPrefetchArmed ||
       !hasOlder ||
       loadingOlder ||
       !onLoadOlder ||
@@ -340,14 +485,40 @@ export function MessageTimeline({
     );
     observer.observe(target);
     return () => observer.disconnect();
-  }, [hasOlder, loadingOlder, onLoadOlder, firstGroupKey, mountingOlderGroups]);
+  }, [olderPrefetchArmed, hasOlder, loadingOlder, onLoadOlder, firstGroupKey]);
 
-  // Scroll anchoring: when the content reflows (a fold expands/collapses, a
-  // stream appends), keep following the bottom if pinned; otherwise pin the
-  // reader's anchor in place. A change ABOVE the anchor shifts its viewport
-  // offset — we correct scrollTop by that shift so the reader never gets yanked.
-  // A change BELOW the anchor (a bottom append while scrolled up) leaves the
-  // anchor put, so `diff` is 0 and we leave scrollTop alone.
+  // History view: page forward when the reader nears the bottom of the current
+  // non-tip window. Does not pull the whole gap — one density-bounded page.
+  useEffect(() => {
+    const root = scrollRef.current;
+    const target = bottomSentinelRef.current;
+    if (
+      !root ||
+      !target ||
+      !hasNewer ||
+      loadingNewer ||
+      !onLoadNewer ||
+      typeof IntersectionObserver === "undefined"
+    ) {
+      return;
+    }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          onLoadNewer();
+        }
+      },
+      { root, rootMargin: "0px 0px 1200px 0px" },
+    );
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [hasNewer, loadingNewer, onLoadNewer, firstGroupKey]);
+
+  // Late layout that React commits cannot see (images decoding, fonts, code
+  // blocks) grows content without a commit. While pinned we keep following the
+  // bottom; while unpinned we deliberately do NOTHING — chasing those shifts
+  // with scroll corrections was the wobble. We only refresh the height
+  // baseline so the next prepend delta stays exact.
   useEffect(() => {
     const node = scrollRef.current;
     const inner = node?.firstElementChild;
@@ -359,88 +530,203 @@ export function MessageTimeline({
       if (!current) {
         return;
       }
-      restoreAnchor(current);
+      if (autoFollow && pinnedRef.current && !hasNewerRef.current) {
+        followTip(current);
+      }
+      previousScrollHeightRef.current = current.scrollHeight;
     });
     observer.observe(inner);
     return () => observer.disconnect();
-  }, [restoreAnchor]);
+  }, [autoFollow, followTip]);
+
+  // Entering a non-tip history window: drop any live pin so the page bottom
+  // cannot re-stick follow across loadNewer.
+  useEffect(() => {
+    if (!hasNewer) {
+      return;
+    }
+    stopGlide();
+    if (pinnedRef.current) {
+      pinnedRef.current = false;
+      setPinned(false);
+    }
+  }, [hasNewer, stopGlide]);
+
+  // While the glide is writing scrollTop every frame, its echoes could mask
+  // the reader's own upward scroll events — so upward INTENT (wheel up, finger
+  // drag down, scrollbar gutter, keys) releases the pin directly. Layout
+  // scrolls during settle-fold / scenario spawns must NEVER unpin from
+  // onScroll alone — that was the recurring "Jump to latest" trap.
+  const releasePin = useCallback(() => {
+    const node = scrollRef.current;
+    if (!node || node.scrollHeight - node.clientHeight <= 1) {
+      return; // nothing to scroll — no pin to release
+    }
+    stopGlide();
+    if (pinnedRef.current) {
+      pinnedRef.current = false;
+      setPinned(false);
+    }
+    if (!olderPrefetchArmedRef.current) {
+      olderPrefetchArmedRef.current = true;
+      setOlderPrefetchArmed(true);
+    }
+  }, [stopGlide]);
+
+  const scrollbarDragRef = useRef(false);
+  const touchYRef = useRef<number | null>(null);
 
   const onScroll = () => {
     const node = scrollRef.current;
     if (!node) {
       return;
     }
-    const pending = programmaticScrollTargetsRef.current;
-    const programmaticIndex = pending.findIndex(
-      (target) => Math.abs(node.scrollTop - target) <= 1,
-    );
-    const programmatic = programmaticIndex >= 0;
-    if (programmatic) {
-      pending.splice(0, programmaticIndex + 1);
-    } else {
-      // A real reader scroll supersedes every delayed programmatic echo.
-      pending.length = 0;
+    const echo = pendingEchoesRef.current > 0;
+    if (echo) {
+      pendingEchoesRef.current -= 1;
     }
-    const nextPinned =
-      node.scrollHeight - node.scrollTop - node.clientHeight < 48;
-    // Echoes of our own assignments may PIN but never UNPIN — only the reader
-    // scrolling away releases the bottom-follow.
-    if (nextPinned || !programmatic) {
-      pinnedRef.current = nextPinned;
-      setPinned(nextPinned);
+    const gap = node.scrollHeight - node.scrollTop - node.clientHeight;
+    // Near-bottom (re)pins only for the live tip. History-window bottoms are
+    // loadNewer triggers, not follow targets.
+    const nextPinned = !hasNewerRef.current && gap < PIN_THRESHOLD_PX;
+    previousScrollHeightRef.current = node.scrollHeight;
+    // Near-bottom always (re)pins — including echoes of our own writes.
+    if (nextPinned) {
+      if (!pinnedRef.current) {
+        pinnedRef.current = true;
+        setPinned(true);
+      }
+      return;
     }
-    // The assignment site already captured the corrected anchor. Recapturing
-    // it from a delayed echo can observe the next prepended row before that
-    // row's ResizeObserver correction and make the viewport walk up the page.
-    if (!programmatic) {
-      captureAnchor();
+    if (echo) {
+      return;
     }
+    // Still pinned but far from the tip. Either layout moved the floor
+    // (collapse / append / images) or the reader is dragging the scrollbar.
+    // Wheel/touch/keys already called releasePin. Scrollbar sets the drag
+    // flag below. Everything else is layout — re-stick, never drop the pin.
+    // History mode never re-sticks: drop the pin instead.
+    if (pinnedRef.current) {
+      if (hasNewerRef.current || scrollbarDragRef.current) {
+        releasePin();
+        return;
+      }
+      followTip(node);
+      return;
+    }
+    if (!olderPrefetchArmedRef.current) {
+      olderPrefetchArmedRef.current = true;
+      setOlderPrefetchArmed(true);
+    }
+  };
+
+  // Native wheel listener: React's onWheel is unreliable under some test
+  // doms, and we want the same intent path in production.
+  useEffect(() => {
+    const node = scrollRef.current;
+    if (!node) {
+      return;
+    }
+    const onWheelNative = (event: WheelEvent) => {
+      if (event.deltaY < 0) {
+        releasePin();
+      }
+    };
+    const onKeyDownNative = (event: KeyboardEvent) => {
+      if (event.key === "ArrowUp" || event.key === "PageUp" || event.key === "Home") {
+        releasePin();
+      }
+    };
+    node.addEventListener("wheel", onWheelNative, { passive: true });
+    node.addEventListener("keydown", onKeyDownNative);
+    return () => {
+      node.removeEventListener("wheel", onWheelNative);
+      node.removeEventListener("keydown", onKeyDownNative);
+    };
+  }, [releasePin]);
+
+  const onWheel = (event: React.WheelEvent) => {
+    if (event.deltaY < 0) {
+      releasePin();
+    }
+  };
+  const onPointerDown = (event: React.PointerEvent) => {
+    const node = scrollRef.current;
+    if (!node) {
+      return;
+    }
+    // Only the classic overlay scrollbar gutter counts as reader intent —
+    // clicks on fold chevrons / messages must not arm unpin.
+    const gutter = node.offsetWidth - node.clientWidth;
+    if (gutter <= 0) {
+      return;
+    }
+    const rect = node.getBoundingClientRect();
+    if (event.clientX >= rect.right - gutter - 2) {
+      scrollbarDragRef.current = true;
+    }
+  };
+  const onPointerUp = () => {
+    scrollbarDragRef.current = false;
+  };
+  const onTouchStart = (event: React.TouchEvent) => {
+    touchYRef.current = event.touches[0]?.clientY ?? null;
+  };
+  const onTouchMove = (event: React.TouchEvent) => {
+    const y = event.touches[0]?.clientY;
+    if (y === undefined) {
+      return;
+    }
+    const previous = touchYRef.current;
+    if (previous !== null && y - previous > 6) {
+      releasePin();
+    }
+    touchYRef.current = y;
   };
 
   return (
     <LightboxProvider>
       <EntranceAnimationProvider value={!bulkRender}>
-        <div
-          className={cn("og-root relative flex min-h-0 flex-col", className)}
-        >
-          {/* overflow-anchor off: the browser's native scroll anchoring would fight
-          the ResizeObserver corrections above — one authority only. */}
+        <div className={cn("og-root relative flex min-h-0 flex-col", className)}>
+          {/* Pinned: anchoring off so the soft tip-follow glide is the only
+          authority. Unpinned: native scroll anchoring holds the reader's
+          place through prepends and late layout — the wobble-free path. */}
           <div
             ref={scrollRef}
+            tabIndex={-1}
             onScroll={onScroll}
-            style={
-              groups.length > 0 && !revealed
-                ? { visibility: "hidden" }
-                : undefined
-            }
-            className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-6 [overflow-anchor:none] sm:px-6"
+            onWheel={onWheel}
+            onPointerDown={onPointerDown}
+            onPointerUp={onPointerUp}
+            onPointerCancel={onPointerUp}
+            onTouchStart={onTouchStart}
+            onTouchMove={onTouchMove}
+            style={groups.length > 0 && !revealed ? { visibility: "hidden" } : undefined}
+            className={cn(
+              // tabIndex=-1 is programmatic only — never paint a focus ring on
+              // the whole scroller (click + Shift used to flash a blue outline).
+              "min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-6 sm:px-6 outline-none",
+              autoFollow && pinned && !hasNewer
+                ? "[overflow-anchor:none]"
+                : "[overflow-anchor:auto]",
+            )}
           >
-            <div className="mx-auto flex w-full max-w-3xl flex-col gap-5">
+            <div className="relative mx-auto flex w-full max-w-3xl flex-col gap-5">
               {groups.length === 0 && !working
                 ? (emptyState ?? (
-                    <p className="py-10 text-center text-sm text-og-fg-subtle">
-                      No activity yet.
-                    </p>
+                    <p className="py-10 text-center text-sm text-og-fg-subtle">No activity yet.</p>
                   ))
                 : null}
-              {hasOlder && !mountingOlderGroups ? (
+              {hasOlder && olderPrefetchArmed ? (
+                // Overlaid, not a layout row: mounting/unmounting the sentinel
+                // must never shift content (that shift was itself a wobble).
                 <div
                   ref={topSentinelRef}
                   data-og-top-sentinel=""
                   data-og-timeline-chrome=""
                   aria-hidden="true"
-                  className="h-px w-full shrink-0"
+                  className="pointer-events-none absolute inset-x-0 top-0 h-px"
                 />
-              ) : null}
-              {loadingOlder ? (
-                <div
-                  data-og-timeline-chrome=""
-                  className="flex items-center gap-2 text-sm"
-                >
-                  <span className="og-shimmer-text font-medium">
-                    Loading earlier activity…
-                  </span>
-                </div>
               ) : null}
               {groups.map(({ group, key }, index) => {
                 const next = groups[index + 1]?.group;
@@ -465,15 +751,23 @@ export function MessageTimeline({
                       toolRegistry={toolRegistry}
                       turnSummary={turnSummary}
                       foldLiveCluster={isAgentProgress(next)}
+                      trailingAgentText={trailingAgentTextAfterTurn(group, next)}
                       contextCompactionCount={
-                        contextCompactionCount > 0
-                          ? contextCompactionCount
-                          : undefined
+                        contextCompactionCount > 0 ? contextCompactionCount : undefined
                       }
                     />
                   </div>
                 );
               })}
+              {hasNewer ? (
+                <div
+                  ref={bottomSentinelRef}
+                  data-og-bottom-sentinel=""
+                  data-og-timeline-chrome=""
+                  aria-hidden="true"
+                  className="h-px w-full"
+                />
+              ) : null}
               {working ? (
                 <div className="flex items-center gap-2 text-sm">
                   <span className="og-shimmer-text font-medium">Working…</span>
@@ -482,7 +776,74 @@ export function MessageTimeline({
             </div>
           </div>
           <AnimatePresence>
-            {!pinned && autoFollow ? (
+            {loadingOlder || loadingOldest || (hasOlder && onJumpToStart && olderPrefetchArmed) ? (
+              // Floating over the scroller (not a timeline row) so showing and
+              // hiding it never reflows history under the reader.
+              <motion.div
+                initial={{ opacity: 0, y: -6 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -6 }}
+                transition={{ duration: 0.15, ease: "easeOut" }}
+                data-og-loading-older=""
+                aria-live="polite"
+                className="absolute inset-x-0 top-3 z-10 flex justify-center gap-2"
+              >
+                {loadingOlder || loadingOldest ? (
+                  <span className="pointer-events-none inline-flex items-center rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1 text-xs font-medium shadow-og-md backdrop-blur">
+                    <span className="og-shimmer-text">
+                      {loadingOldest ? "Jumping to start…" : "Loading earlier activity…"}
+                    </span>
+                  </span>
+                ) : null}
+                {hasOlder && onJumpToStart && !loadingOldest ? (
+                  <button
+                    type="button"
+                    data-og-jump-to-start=""
+                    disabled={loadingOlder}
+                    onClick={() => {
+                      stopGlide();
+                      pinnedRef.current = false;
+                      setPinned(false);
+                      const node = scrollRef.current;
+                      void Promise.resolve(onJumpToStart()).then(() => {
+                        const scroller = scrollRef.current ?? node;
+                        if (scroller) {
+                          writeScrollTop(scroller, 0);
+                        }
+                      });
+                    }}
+                    className={cn(
+                      "inline-flex items-center gap-1.5 rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1.5",
+                      "text-xs font-medium text-og-fg shadow-og-md backdrop-blur",
+                      "hover:border-og-border-strong disabled:opacity-60",
+                    )}
+                  >
+                    <ArrowUpToLineIcon className="size-3.5" />
+                    Jump to start
+                  </button>
+                ) : null}
+              </motion.div>
+            ) : null}
+          </AnimatePresence>
+          <AnimatePresence>
+            {loadingNewer ? (
+              <motion.div
+                initial={{ opacity: 0, y: 6 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: 6 }}
+                transition={{ duration: 0.15, ease: "easeOut" }}
+                data-og-loading-newer=""
+                aria-live="polite"
+                className="pointer-events-none absolute inset-x-0 bottom-14 z-10 flex justify-center"
+              >
+                <span className="inline-flex items-center rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1 text-xs font-medium shadow-og-md backdrop-blur">
+                  <span className="og-shimmer-text">Loading later activity…</span>
+                </span>
+              </motion.div>
+            ) : null}
+          </AnimatePresence>
+          <AnimatePresence>
+            {((!pinned && autoFollow) || hasNewer) && autoFollow ? (
               <motion.button
                 type="button"
                 initial={{ opacity: 0, y: 8 }}
@@ -490,15 +851,27 @@ export function MessageTimeline({
                 exit={{ opacity: 0, y: 8 }}
                 transition={{ duration: 0.15, ease: "easeOut" }}
                 onClick={() => {
-                  const node = scrollRef.current;
-                  if (node) {
-                    node.scrollTo({
-                      top: node.scrollHeight,
-                      behavior: "smooth",
-                    });
+                  const finish = () => {
+                    // Re-pin, then let the glide carry the trip: its writes are
+                    // echo-counted (a native smooth scrollTo's are not, and its
+                    // mid-flight events would read as the reader unpinning).
+                    pinnedRef.current = true;
+                    setPinned(true);
+                    const node = scrollRef.current;
+                    if (!node) {
+                      return;
+                    }
+                    if (prefersReducedMotion()) {
+                      writeScrollTop(node, node.scrollHeight - node.clientHeight);
+                    } else {
+                      startGlide();
+                    }
+                  };
+                  if (onJumpToLatest && hasNewer) {
+                    void Promise.resolve(onJumpToLatest()).then(finish);
+                    return;
                   }
-                  pinnedRef.current = true;
-                  setPinned(true);
+                  finish();
                 }}
                 className={cn(
                   "absolute bottom-4 left-1/2 -translate-x-1/2",
@@ -518,11 +891,6 @@ export function MessageTimeline({
   );
 }
 
-type MountedGroupWindow = {
-  groupKeys: string[];
-  visibleStart: number;
-};
-
 type KeyedTimelineGroup = {
   group: TimelineGroup;
   key: string;
@@ -536,9 +904,7 @@ type KeyedTimelineGroup = {
  * committed groups by their durable item IDs so both the React key and the
  * progressive-window anchor survive either change.
  */
-function useStableTimelineGroupKeys(
-  allGroups: TimelineGroup[],
-): KeyedTimelineGroup[] {
+function useStableTimelineGroupKeys(allGroups: TimelineGroup[]): KeyedTimelineGroup[] {
   const previousRef = useRef<KeyedTimelineGroup[]>([]);
   const keyedGroups = useMemo(() => {
     const previousByItemId = new Map<string, KeyedTimelineGroup>();
@@ -554,7 +920,10 @@ function useStableTimelineGroupKeys(
       let retainedKey: string | undefined;
       for (const itemId of itemIds) {
         const previous = previousByItemId.get(itemId);
-        if (previous && !usedKeys.has(previous.key)) {
+        // Retain only same-kind matches. Activity → turn wrap must NOT keep the
+        // activity chip's React key: that reused a collapsed TurnSummary and
+        // skipped the settle beat (insta-collapse / content flash).
+        if (previous && previous.group.kind === group.kind && !usedKeys.has(previous.key)) {
           retainedKey = previous.key;
           break;
         }
@@ -579,92 +948,6 @@ function useStableTimelineGroupKeys(
   return keyedGroups;
 }
 
-/**
- * Bulk history is already projected into its authoritative order before this
- * hook runs. Mount its newest group first, then prepend one older group per
- * animation frame so low-end browsers can paint and service input between
- * React/Markdown commits instead of doing the entire tail in one long task.
- *
- * A live append does not move the first mounted key, so it is included
- * immediately in the mounted suffix. A history prepend moves that key deeper
- * in the array; shifting `visibleStart` by that exact prefix keeps every
- * existing row mounted while the new prefix is revealed. If projection
- * coalesces the seam item itself away, the earliest surviving mounted key
- * provides the same anchor. Replacements with no shared mounted key (for
- * example a session switch or clear-view) start a fresh suffix.
- */
-function useProgressivelyMountedGroups(allGroups: KeyedTimelineGroup[]): {
-  mountedGroups: KeyedTimelineGroup[];
-  mountingOlderGroups: boolean;
-} {
-  const previousGroupKeysRef = useRef<string[]>([]);
-  const groupKeys = useMemo(() => {
-    const nextKeys = allGroups.map((group) => group.key);
-    const previousKeys = previousGroupKeysRef.current;
-    return nextKeys.length === previousKeys.length &&
-      nextKeys.every((key, index) => key === previousKeys[index])
-      ? previousKeys
-      : nextKeys;
-  }, [allGroups]);
-  useLayoutEffect(() => {
-    previousGroupKeysRef.current = groupKeys;
-  }, [groupKeys]);
-  const [window, setWindow] = useState<MountedGroupWindow>(() => ({
-    groupKeys,
-    visibleStart: Math.max(0, allGroups.length - INITIAL_MOUNTED_GROUPS),
-  }));
-
-  const lastPossibleStart = Math.max(
-    0,
-    allGroups.length - INITIAL_MOUNTED_GROUPS,
-  );
-  let visibleStart = 0;
-  if (allGroups.length > 0) {
-    const currentIndexByKey = new Map(
-      groupKeys.map((key, index) => [key, index]),
-    );
-    let retainedStart: number | undefined;
-    for (const key of window.groupKeys.slice(window.visibleStart)) {
-      const index = currentIndexByKey.get(key);
-      if (index !== undefined) {
-        retainedStart = index;
-        break;
-      }
-    }
-    visibleStart =
-      retainedStart === undefined
-        ? lastPossibleStart
-        : Math.min(retainedStart, lastPossibleStart);
-  }
-
-  useEffect(() => {
-    // Synchronize a prepend/replacement before scheduling its first reveal.
-    if (
-      window.groupKeys !== groupKeys ||
-      window.visibleStart !== visibleStart
-    ) {
-      setWindow({ groupKeys, visibleStart });
-      return;
-    }
-    if (visibleStart === 0) {
-      return;
-    }
-    const frame = requestFrame(() => {
-      setWindow((current) =>
-        current.groupKeys === groupKeys && current.visibleStart > 0
-          ? { ...current, visibleStart: current.visibleStart - 1 }
-          : current,
-      );
-    });
-    return () => cancelFrame(frame);
-  }, [groupKeys, visibleStart, window.groupKeys, window.visibleStart]);
-
-  return {
-    mountedGroups: allGroups.slice(visibleStart),
-    mountingOlderGroups: visibleStart > 0,
-  };
-}
-
 function requestFrame(callback: FrameRequestCallback): number {
   if (typeof requestAnimationFrame === "function") {
     return requestAnimationFrame(callback);
@@ -680,10 +963,11 @@ function cancelFrame(id: number): void {
   window.clearTimeout(id);
 }
 
-// Progressive history mounting reuses the exact group objects from `allGroups`.
-// Skip repainting those stable rows on every prefix reveal; live projection
-// creates a new group object, and behavior/callback changes are separate props,
-// so ordinary streaming and host updates still invalidate immediately.
+// The full loaded window stays mounted, so settled history rows must be cheap
+// on every commit: projection reuses group objects for unchanged groups, so
+// memo skips them. Live projection creates a new group object, and
+// behavior/callback changes are separate props, so ordinary streaming and host
+// updates still invalidate immediately.
 const TimelineGroupView = memo(function TimelineGroupView({
   group,
   renderMessageText,
@@ -694,7 +978,9 @@ const TimelineGroupView = memo(function TimelineGroupView({
   toolRegistry,
   turnSummary,
   insideTurn = false,
+  nestClusterChips = false,
   foldLiveCluster = false,
+  trailingAgentText,
   contextCompactionCount,
 }: {
   group: TimelineGroup;
@@ -704,8 +990,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
   onOpenSession?: ((sessionId: string) => void) | undefined;
   onMemoryClick?: ((memoryId: string) => void) | undefined;
   onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
-  resolveProviderLogo?:
-    ((providerDomain: string) => string | null | undefined) | undefined;
+  resolveProviderLogo?: ((providerDomain: string) => string | null | undefined) | undefined;
   toolRegistry: ToolRegistry;
   turnSummary?: TurnSummaryOptions | undefined;
   /** A completed cluster of a still-RUNNING turn (not the live tail) folds
@@ -716,44 +1001,105 @@ const TimelineGroupView = memo(function TimelineGroupView({
       failure surface, so nested chips stay tinted but quiet (no repeated
       failure text, no auto-open) — one loud error, N calm sub-expands. */
   insideTurn?: boolean;
+  /**
+   * Parent turn has ≥2 foldable activity clusters. Only then do we wrap settled
+   * clusters in nested chips — a single cluster under "N steps" is redundant.
+   * Suppressed while the outer settle beat is open so collapse is one layer.
+   */
+  nestClusterChips?: boolean;
+  /**
+   * Final agent answer extracted as a sibling after a settled turn — folded
+   * into "Copy turn" so the chip copies the whole assistant reply, not only
+   * mid-turn narration still inside the fold.
+   */
+  trailingAgentText?: string | undefined;
   /** Secondary chip facet when this fold sits next to a compaction landmark. */
   contextCompactionCount?: number | undefined;
 }) {
+  const enter = useEntranceAnimation();
+  const settleOpen = useTurnSettleOpen();
+  // Settled (or live-fold) activity clusters get a chip. Inside an expanded
+  // turn that is the second layer — quiet nested chips under the outer turn
+  // summary when contiguous activity naturally clusters (≥2 only).
+  const activityShouldFold =
+    group.kind === "activity" &&
+    Boolean(group.outcome || (foldLiveCluster && clusterIsSettled(group)));
+  // Latch live→folded so a top-level shell that was already mounted open can
+  // start the settle beat without remounting bare rail → wrapper.
+  const liveActivitySettle = useLiveSettleFold(activityShouldFold && !insideTurn);
+  const turnDefaultOpen = !insideTurn && group.kind === "turn" && group.outcome === "failed";
+  const settleFold =
+    group.kind === "turn" ? Boolean(enter && !insideTurn && !turnDefaultOpen) : liveActivitySettle;
   switch (group.kind) {
     case "activity":
-      return group.outcome || (foldLiveCluster && clusterIsSettled(group)) ? (
+      if (insideTurn) {
+        // Nested chips only when the parent has ≥2 clusters AND the outer
+        // settle choreography is done. While settling (beat + collapse) the
+        // body stays a flat rail — one height to animate. Remounting closed
+        // nested chips when `open` flips false was the mid-collapse snap.
+        const useNestedChip = nestClusterChips && activityShouldFold && !settleOpen;
+        if (!useNestedChip) {
+          return (
+            <ActivityRail
+              items={group.items}
+              onOpenSession={onOpenSession}
+              onMemoryClick={onMemoryClick}
+              toolRegistry={toolRegistry}
+              bare
+            />
+          );
+        }
+        return (
+          <TurnSummary
+            items={group.items}
+            outcome={group.outcome}
+            failureText={undefined}
+            bare
+            facets={turnSummary?.facets}
+            contextCompactionCount={contextCompactionCount}
+          >
+            <ActivityRail
+              items={group.items}
+              onOpenSession={onOpenSession}
+              onMemoryClick={onMemoryClick}
+              toolRegistry={toolRegistry}
+              bare
+            />
+          </TurnSummary>
+        );
+      }
+      // Always the same TurnSummary shell while live so mid-turn fold only
+      // flips settleFold (collapse) instead of remounting bare rail → wrapper.
+      return (
         <TurnSummary
           items={group.items}
           outcome={group.outcome}
-          failureText={insideTurn ? undefined : group.failureText}
-          defaultOpen={
-            !insideTurn && group.outcome === "failed" ? true : undefined
-          }
-          bare={insideTurn}
+          failureText={group.failureText}
+          defaultOpen={!activityShouldFold || group.outcome === "failed" ? true : undefined}
           facets={turnSummary?.facets}
+          settleFold={settleFold}
           contextCompactionCount={contextCompactionCount}
         >
-          <ActivityRail
-            items={group.items}
-            onOpenSession={onOpenSession}
-            onMemoryClick={onMemoryClick}
-            toolRegistry={toolRegistry}
-            bare={insideTurn}
-          />
+          <FoldBody>
+            <TurnRailFrame>
+              <ActivityRail
+                items={group.items}
+                onOpenSession={onOpenSession}
+                onMemoryClick={onMemoryClick}
+                toolRegistry={toolRegistry}
+                bare
+              />
+            </TurnRailFrame>
+          </FoldBody>
         </TurnSummary>
-      ) : (
-        // A nested live cluster hangs on the turn's rail (bare); a top-level one
-        // owns its own rail.
-        <ActivityRail
-          items={group.items}
-          onOpenSession={onOpenSession}
-          onMemoryClick={onMemoryClick}
-          toolRegistry={toolRegistry}
-          bare={insideTurn}
-        />
       );
     case "turn": {
       const activityItems = flattenActivityItems(group.groups);
+      // Second-layer chips only when there are natural multi-cluster seams —
+      // otherwise the outer turn chip alone is enough ("N steps" wrapping one
+      // more "N steps" was the redundant double fold).
+      const nestClusters = foldableActivityClusterCount(group.groups) >= 2;
+      const turnCopyText = collectTurnCopyText(group.groups, trailingAgentText);
       const body = group.groups.map((child) => (
         <TimelineGroupView
           key={timelineGroupKey(child)}
@@ -766,37 +1112,33 @@ const TimelineGroupView = memo(function TimelineGroupView({
           toolRegistry={toolRegistry}
           turnSummary={turnSummary}
           insideTurn
+          nestClusterChips={nestClusters}
         />
       ));
       return (
         <TurnSummary
           items={activityItems}
           outcome={group.outcome}
-          // One loud error at the top; nested sub-turn chips stay calm — the
-          // parent already renders the failure reason, so clear it here exactly
-          // as the nested activity-cluster case does.
           failureText={insideTurn ? undefined : group.failureText}
           durationMs={durationBetween(group.startedAt, group.endedAt)}
-          defaultOpen={
-            !insideTurn && group.outcome === "failed" ? true : undefined
-          }
+          defaultOpen={turnDefaultOpen ? true : undefined}
           bare={insideTurn}
           facets={turnSummary?.facets}
+          settleFold={settleFold}
+          copyText={insideTurn ? undefined : turnCopyText}
           contextCompactionCount={
             contextCompactionCount ?? group.contextCompactionCount
           }
         >
-          {insideTurn ? (
-            // A nested turn is already on an ancestor rail — its body just stacks
-            // flush (the bare-node body already indents it), so no second rule.
-            <div className="flex flex-col gap-4">{body}</div>
-          ) : (
-            // The top-level turn draws THE rail: one thin continuous rule that
-            // every nested node and step hangs off of.
-            <div className="flex flex-col gap-4 border-l-2 border-og-border pl-3 sm:pl-4">
-              {body}
-            </div>
-          )}
+          <FoldBody>
+            {insideTurn ? (
+              // A nested turn is already on an ancestor rail — its body just stacks
+              // flush (the bare-node body already indents it), so no second rule.
+              <div className="flex flex-col gap-4">{body}</div>
+            ) : (
+              <TurnRailFrame>{body}</TurnRailFrame>
+            )}
+          </FoldBody>
         </TurnSummary>
       );
     }
@@ -812,6 +1154,44 @@ const TimelineGroupView = memo(function TimelineGroupView({
       );
   }
 });
+
+/**
+ * Rows revealed by a disclosure — expanding a chip, or the settle-fold beat —
+ * must not run per-row entrance animations: the disclosure's height animation
+ * owns the motion, and rows that were ALREADY visible when a live cluster
+ * folds would otherwise flash as they remount inside the summary. Entrance
+ * stays reserved for rows arriving in the live timeline flow.
+ */
+function FoldBody({ children }: { children: ReactNode }) {
+  return <EntranceAnimationProvider value={false}>{children}</EntranceAnimationProvider>;
+}
+
+/** Stable left rule for turn/activity bodies — always present so settle wrap
+    never inserts or removes the rail chrome. */
+function TurnRailFrame({ children }: { children: ReactNode }) {
+  return (
+    <div className="flex flex-col gap-4 border-l-2 border-og-border pl-3 sm:pl-4">{children}</div>
+  );
+}
+
+/**
+ * True once THIS component instance has seen its group transition from
+ * unfolded to folded — i.e. the reader watched the rows live and the fold is
+ * new information worth choreographing. Latched: TurnSummary captures the flag
+ * at its own mount (the flip render), so later prop churn is inert. History
+ * that mounts already folded initializes folded and never latches.
+ */
+function useLiveSettleFold(folded: boolean): boolean {
+  const previousFoldedRef = useRef(folded);
+  const latchedRef = useRef(false);
+  if (!previousFoldedRef.current && folded) {
+    latchedRef.current = true;
+  }
+  useLayoutEffect(() => {
+    previousFoldedRef.current = folded;
+  });
+  return latchedRef.current;
+}
 
 function timelineGroupKey(group: TimelineGroup): string {
   switch (group.kind) {
@@ -854,9 +1234,7 @@ function isAgentProgress(next: TimelineGroup | undefined): boolean {
 /** No item still running or streaming — the only state safe to fold live.
     Position alone is a broken proxy: a pending queued message (or any trailing
     item) can sit after the ACTIVE cluster, which must never fold mid-work. */
-function clusterIsSettled(
-  group: Extract<TimelineGroup, { kind: "activity" }>,
-): boolean {
+function clusterIsSettled(group: Extract<TimelineGroup, { kind: "activity" }>): boolean {
   return group.items.every((item) => {
     if (item.kind === "reasoning") {
       return !item.streaming;
@@ -867,6 +1245,17 @@ function clusterIsSettled(
     }
     return item.status !== "running";
   });
+}
+
+/** Settled activity clusters that could become nested chips under a turn. */
+function foldableActivityClusterCount(groups: readonly TimelineGroup[]): number {
+  let count = 0;
+  for (const child of groups) {
+    if (child.kind === "activity" && (child.outcome || clusterIsSettled(child))) {
+      count += 1;
+    }
+  }
+  return count;
 }
 
 function flattenActivityItems(groups: TimelineGroup[]): ActivityItem[] {
@@ -881,10 +1270,57 @@ function flattenActivityItems(groups: TimelineGroup[]): ActivityItem[] {
   return items;
 }
 
-function durationBetween(
-  startedAt: string,
-  endedAt: string,
-): number | undefined {
+/** Assistant prose inside a turn fold (mid-turn narration), joined for copy. */
+function collectAgentMessageText(groups: readonly TimelineGroup[]): string {
+  const parts: string[] = [];
+  for (const group of groups) {
+    if (group.kind === "item" && group.item.kind === "agent-message") {
+      const text = group.item.text.trim();
+      if (text.length > 0) {
+        parts.push(text);
+      }
+    } else if (group.kind === "turn") {
+      const nested = collectAgentMessageText(group.groups);
+      if (nested.length > 0) {
+        parts.push(nested);
+      }
+    }
+  }
+  return parts.join("\n\n");
+}
+
+/**
+ * Settled turns lift the final agent answer out as a sibling group. Include it
+ * in "Copy turn" when present so the chip copies the full assistant reply.
+ */
+function trailingAgentTextAfterTurn(
+  group: TimelineGroup,
+  next: TimelineGroup | undefined,
+): string | undefined {
+  if (group.kind !== "turn") {
+    return undefined;
+  }
+  if (next?.kind === "item" && next.item.kind === "agent-message") {
+    const text = next.item.text.trim();
+    return text.length > 0 ? text : undefined;
+  }
+  return undefined;
+}
+
+function collectTurnCopyText(
+  groups: readonly TimelineGroup[],
+  trailingAgentText: string | undefined,
+): string | undefined {
+  const parts = [collectAgentMessageText(groups), trailingAgentText?.trim() ?? ""].filter(
+    (part) => part.length > 0,
+  );
+  if (parts.length === 0) {
+    return undefined;
+  }
+  return parts.join("\n\n");
+}
+
+function durationBetween(startedAt: string, endedAt: string): number | undefined {
   const started = Date.parse(startedAt);
   const ended = Date.parse(endedAt);
   if (!Number.isFinite(started) || !Number.isFinite(ended) || ended < started) {
@@ -912,19 +1348,14 @@ export function TimelineRow({
     | ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode)
     | undefined;
   onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
-  resolveProviderLogo?:
-    ((providerDomain: string) => string | null | undefined) | undefined;
+  resolveProviderLogo?: ((providerDomain: string) => string | null | undefined) | undefined;
   onOpenSession?: ((sessionId: string) => void) | undefined;
 }) {
   switch (item.kind) {
     case "user-message":
-      return (
-        <UserMessageRow item={item} renderMessageText={renderMessageText} />
-      );
+      return <UserMessageRow item={item} renderMessageText={renderMessageText} />;
     case "agent-message":
-      return (
-        <AgentMessageRow item={item} renderMessageText={renderMessageText} />
-      );
+      return <AgentMessageRow item={item} renderMessageText={renderMessageText} />;
     case "worker-completion":
       return <WorkerCompletionRow item={item} onOpenSession={onOpenSession} />;
     case "session-status":
@@ -948,345 +1379,6 @@ export function TimelineRow({
     default:
       return null;
   }
-}
-
-function UserMessageRow({
-  item,
-  renderMessageText,
-}: {
-  item: UserMessageItem;
-  renderMessageText?:
-    | ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode)
-    | undefined;
-}) {
-  const enter = useEntranceAnimation();
-  return (
-    <div className={cn(enter && "animate-og-enter", "flex justify-end")}>
-      <div className="flex max-w-[85%] min-w-0 flex-col items-end gap-1">
-        <div className="w-fit max-w-full min-w-0 rounded-og-lg rounded-br-og-xs border border-og-border bg-og-surface-2 px-4 py-2.5 text-og-md leading-6 text-og-fg">
-          {renderMessageText ? (
-            renderMessageText(item.text, item)
-          ) : (
-            <Markdown>{item.text}</Markdown>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function AgentMessageRow({
-  item,
-  renderMessageText,
-}: {
-  item: AgentMessageItem;
-  renderMessageText?:
-    | ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode)
-    | undefined;
-}) {
-  const enter = useEntranceAnimation();
-  const caret = item.streaming ? (
-    <span
-      className="ml-0.5 inline-block h-[1.1em] w-[2px] translate-y-[3px] animate-og-blink rounded-full bg-og-accent"
-      aria-hidden
-    />
-  ) : null;
-  return (
-    <div
-      className={cn(
-        enter && "animate-og-enter",
-        "min-w-0 text-og-md leading-7 text-og-fg",
-      )}
-    >
-      {renderMessageText ? (
-        <>
-          {renderMessageText(item.text, item)}
-          {caret}
-        </>
-      ) : (
-        // While streaming, let the caret ride the end of the last rendered line:
-        // the trailing block (usually a <p>) flows inline so the caret sits on
-        // its baseline instead of dropping to a new line.
-        <div
-          className={item.streaming ? "[&_>div>:last-child]:inline" : undefined}
-        >
-          <Markdown>{item.text}</Markdown>
-          {caret}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/**
- * A worker session reporting back to its manager. The child's completion arrives
- * as a `user.message` carrying a `childCompletion` payload (the raw message text
- * used to render as an "ugly" user bubble); it projects to a `worker-completion`
- * item and draws here as a quietly-confident card — an inbound result, not
- * something the human said. One glyph + one line carry the outcome; the worker's
- * full report, evidence, and any paused reason live behind a collapsed
- * disclosure, and a "View session" affordance deep-links into the child.
- *
- * Color follows the timeline's restraint: green only for a completed goal, the
- * waiting hue only for a paused one, red only for a failed child — everything
- * else is a neutral inbound card.
- */
-type WorkerCompletionMeta = {
-  label: string;
-  icon: ComponentType<{ className?: string }>;
-  iconClass: string;
-  /** The 2px left-accent hue — color spent only on the exceptional outcomes. */
-  accentClass: string;
-};
-
-function workerCompletionMeta(
-  item: WorkerCompletionItem,
-): WorkerCompletionMeta {
-  if (item.childStatus === "failed") {
-    return {
-      label: "Worker failed",
-      icon: XCircleIcon,
-      iconClass: "text-og-status-failed",
-      accentClass: "border-og-status-failed/60",
-    };
-  }
-  if (item.goalStatus === "paused") {
-    return {
-      label: "Worker paused",
-      icon: PauseCircleIcon,
-      iconClass: "text-og-status-waiting",
-      accentClass: "border-og-status-waiting/50",
-    };
-  }
-  if (item.goalStatus === "completed") {
-    return {
-      label: "Worker completed",
-      icon: CheckCircle2Icon,
-      iconClass: "text-og-status-idle",
-      accentClass: "border-og-status-idle/45",
-    };
-  }
-  return {
-    label: "Worker reported back",
-    icon: BotIcon,
-    iconClass: "text-og-accent",
-    accentClass: "border-og-border-strong",
-  };
-}
-
-function WorkerCompletionRow({
-  item,
-  onOpenSession,
-}: {
-  item: WorkerCompletionItem;
-  onOpenSession?: ((sessionId: string) => void) | undefined;
-}) {
-  const enter = useEntranceAnimation();
-  const [open, setOpen] = useState(false);
-  const meta = workerCompletionMeta(item);
-  const Icon = meta.icon;
-  // The worker's own report is the substance behind the fold; evidence and any
-  // paused reason sit alongside it as quieter, labelled context.
-  // "Paused because" only when the outcome actually IS a pause — completion
-  // payloads can carry a leftover pausedReason/rationale from earlier in the
-  // worker's life, and a "Worker completed" card must not show a pause section.
-  const showPausedReason =
-    item.childStatus !== "failed" &&
-    item.goalStatus === "paused" &&
-    Boolean(item.pausedReason?.trim());
-  const details: { label: string; value: string; muted?: boolean }[] = [
-    ...(item.text.trim() ? [{ label: "Report", value: item.text.trim() }] : []),
-    ...(item.evidence?.trim()
-      ? [{ label: "Evidence", value: item.evidence.trim(), muted: true }]
-      : []),
-    ...(showPausedReason
-      ? [
-          {
-            label: "Paused because",
-            value: item.pausedReason!.trim(),
-            muted: true,
-          },
-        ]
-      : []),
-  ];
-  const hasDetails = details.length > 0;
-  return (
-    <div className={cn(enter && "animate-og-enter", "min-w-0")}>
-      {/* An inbound result, not a bubble: a 2px left accent carries the outcome —
-          no full frame, no surface fill. The report unfolds flush beneath. */}
-      <div
-        className={cn("flex flex-col gap-2 border-l-2 pl-3", meta.accentClass)}
-      >
-        <div className="flex items-start gap-2.5">
-          <span className={cn("mt-0.5 shrink-0", meta.iconClass)}>
-            <Icon className="size-4" />
-          </span>
-          <div className="min-w-0 flex-1">
-            <p className="text-og-base leading-5 text-og-fg">
-              <span className="font-medium">{meta.label}</span>
-              {item.goalText ? (
-                <span className="text-og-fg-muted">
-                  {" "}
-                  · {truncate(item.goalText, 90)}
-                </span>
-              ) : null}
-            </p>
-          </div>
-          {item.childSessionId && onOpenSession ? (
-            <button
-              type="button"
-              onClick={() => onOpenSession(item.childSessionId)}
-              className={cn(
-                "-my-0.5 -mr-1 inline-flex shrink-0 items-center gap-1 rounded-og-sm px-2 py-1 text-og-sm font-medium text-og-fg-muted pointer-coarse:py-2",
-                "outline-none transition-colors duration-150 hover:bg-og-surface-2 hover:text-og-fg",
-                "focus-visible:ring-2 focus-visible:ring-og-accent",
-              )}
-            >
-              View session
-              <ArrowRightIcon className="size-3.5" />
-            </button>
-          ) : null}
-        </div>
-        {hasDetails ? (
-          <Collapsible.Root open={open} onOpenChange={setOpen}>
-            <Collapsible.Trigger asChild>
-              <button
-                type="button"
-                className={cn(
-                  "group/wc -mx-1 inline-flex w-fit items-center gap-1 rounded-og-sm px-1 py-0.5 text-og-xs font-medium text-og-fg-subtle",
-                  "outline-none transition-colors duration-150 hover:text-og-fg-muted focus-visible:ring-2 focus-visible:ring-og-accent",
-                )}
-              >
-                <ChevronRightIcon className="size-3 transition-transform duration-150 ease-og-in-out group-data-[state=open]/wc:rotate-90" />
-                {open ? "Hide details" : "Show details"}
-              </button>
-            </Collapsible.Trigger>
-            <Collapsible.Content className="overflow-hidden data-[state=closed]:animate-og-collapse data-[state=open]:animate-og-expand">
-              <div className="ml-1 mt-1.5 flex flex-col gap-2.5">
-                {details.map((detail) => (
-                  <div key={detail.label} className="min-w-0">
-                    <p className="mb-1 text-og-xs font-medium uppercase tracking-[0.08em] text-og-fg-subtle">
-                      {detail.label}
-                    </p>
-                    <p
-                      className={cn(
-                        "whitespace-pre-wrap break-words text-og-sm leading-6",
-                        detail.muted ? "text-og-fg-subtle" : "text-og-fg-muted",
-                      )}
-                    >
-                      {detail.value}
-                    </p>
-                  </div>
-                ))}
-              </div>
-            </Collapsible.Content>
-          </Collapsible.Root>
-        ) : null}
-      </div>
-    </div>
-  );
-}
-
-function SessionStatusRow({
-  item,
-}: {
-  item: { status: SessionStatus; occurredAt: string };
-}) {
-  const enter = useEntranceAnimation();
-  const meta = SESSION_STATUS_META[item.status];
-  return (
-    <div
-      className={cn(
-        enter && "animate-og-enter",
-        "flex items-center gap-3 text-og-xs text-og-fg-subtle",
-      )}
-      role="status"
-    >
-      <span className="h-px flex-1 bg-og-border" />
-      <span className="inline-flex items-center gap-1.5">
-        <StatusDot status={item.status} className="size-1" />
-        {meta.label.toLowerCase()} · {formatRelativeTime(item.occurredAt)}
-      </span>
-      <span className="h-px flex-1 bg-og-border" />
-    </div>
-  );
-}
-
-/**
- * The per-action presentation of a goal landmark pill. Each of the six goal
- * actions reads distinctly, but the palette stays quiet — color is spent only on
- * the two states that genuinely earn it, the rest are neutral pills set apart by
- * their glyph alone:
- *
- *   completed   success      green (status-idle) check — the only "done" hue
- *   paused      attention    waiting-tinted pause — a held goal asks to resume
- *   set         a landmark   a quiet accent target — opening a fresh goal
- *   resumed     forward      neutral play — motion picking back up
- *   updated     a revision   neutral pencil — the goal text changed
- *   continuation steady on   neutral arrow — still tracking the same goal
- *
- * The pill class is the established badge convention (`text-X border-X/30
- * bg-X/10`); neutral actions reuse the surface/border tokens so a clean run of
- * landmarks stays calm rather than a row of colored chips.
- */
-type GoalMeta = {
-  label: string;
-  pill: string;
-  icon: ComponentType<{ className?: string }>;
-};
-
-const NEUTRAL_PILL = "border-og-border bg-og-surface-1 text-og-fg-muted";
-
-const GOAL_META: Record<GoalItem["action"], GoalMeta> = {
-  set: {
-    label: "Goal set",
-    pill: "border-og-accent/30 bg-og-accent/10 text-og-accent",
-    icon: TargetIcon,
-  },
-  updated: { label: "Goal updated", pill: NEUTRAL_PILL, icon: PencilLineIcon },
-  completed: {
-    label: "Goal completed",
-    pill: "border-og-status-idle/30 bg-og-status-idle/10 text-og-status-idle",
-    icon: CheckIcon,
-  },
-  paused: {
-    label: "Goal paused",
-    pill: "border-og-status-waiting/35 bg-og-status-waiting/10 text-og-status-waiting",
-    icon: PauseIcon,
-  },
-  resumed: { label: "Goal resumed", pill: NEUTRAL_PILL, icon: PlayIcon },
-  cleared: { label: "Goal cleared", pill: NEUTRAL_PILL, icon: Trash2Icon },
-  continuation: {
-    label: "Continuing toward the goal",
-    pill: NEUTRAL_PILL,
-    icon: ArrowRightIcon,
-  },
-};
-
-/**
- * A goal landmark pill. Resolves its label, accent/tone, and glyph from
- * {@link GOAL_META} so all six actions are visually distinguishable while the
- * palette stays restrained — see that table for the per-action rationale.
- */
-function GoalRow({ item }: { item: GoalItem }) {
-  const enter = useEntranceAnimation();
-  const { label, pill, icon: Icon } = GOAL_META[item.action];
-  return (
-    <div className={cn(enter && "animate-og-enter", "flex justify-center")}>
-      <span
-        className={cn(
-          "inline-flex max-w-full items-center gap-1.5 rounded-full border px-3 py-1 text-og-sm",
-          pill,
-        )}
-      >
-        <Icon className="size-3.5 shrink-0" />
-        <span className="truncate">
-          {label}
-          {item.text ? `: ${truncate(item.text, 90)}` : ""}
-        </span>
-      </span>
-    </div>
-  );
 }
 
 const COMPACTION_TRIGGER_LABEL: Record<
@@ -1372,10 +1464,315 @@ function compactionSkipSubtitle(reason: string | null): string {
   }
 }
 
-const MACHINE_INPUT_META: Record<
-  MachineInputBatchItem["members"][number]["kind"],
-  string
-> = {
+function UserMessageRow({
+  item,
+  renderMessageText,
+}: {
+  item: UserMessageItem;
+  renderMessageText?:
+    | ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode)
+    | undefined;
+}) {
+  const enter = useEntranceAnimation();
+  return (
+    <div className={cn(enter && "animate-og-enter", "flex justify-end")}>
+      <div className="flex max-w-[85%] min-w-0 flex-col items-end gap-1">
+        <CopyHoverFrame
+          copyText={item.text}
+          label="Copy message"
+          className="w-fit max-w-full min-w-0"
+        >
+          <div className="w-fit max-w-full min-w-0 rounded-og-lg rounded-br-og-xs border border-og-border bg-og-surface-2 px-4 py-2.5 pr-10 text-og-md leading-6 text-og-fg">
+            {renderMessageText ? (
+              renderMessageText(item.text, item)
+            ) : (
+              <Markdown>{item.text}</Markdown>
+            )}
+          </div>
+        </CopyHoverFrame>
+      </div>
+    </div>
+  );
+}
+
+function AgentMessageRow({
+  item,
+  renderMessageText,
+}: {
+  item: AgentMessageItem;
+  renderMessageText?:
+    | ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode)
+    | undefined;
+}) {
+  const enter = useEntranceAnimation();
+  // No streaming caret: it fought the trailing block layout (inline ↔ block)
+  // and snapped on exit. Live text already carries the stream via word-entrance
+  // + "Working…" when the tip isn't a streaming message.
+  const body = renderMessageText ? (
+    renderMessageText(item.text, item)
+  ) : (
+    <Markdown streaming={item.streaming}>{item.text}</Markdown>
+  );
+  // While streaming, copy is still useful (current text) but keep chrome calm.
+  return (
+    <CopyHoverFrame
+      copyText={item.text}
+      label="Copy message"
+      align="end"
+      className={cn(enter && "animate-og-enter", "min-w-0 pr-9 text-og-md leading-7 text-og-fg")}
+    >
+      {body}
+    </CopyHoverFrame>
+  );
+}
+
+/**
+ * A worker session reporting back to its manager. The child's completion arrives
+ * as a `user.message` carrying a `childCompletion` payload (the raw message text
+ * used to render as an "ugly" user bubble); it projects to a `worker-completion`
+ * item and draws here as a quietly-confident card — an inbound result, not
+ * something the human said. One glyph + one line carry the outcome; the worker's
+ * full report, evidence, and any paused reason live behind a collapsed
+ * disclosure, and a "View session" affordance deep-links into the child.
+ *
+ * Color follows the timeline's restraint: green only for a completed goal, the
+ * waiting hue only for a paused one, red only for a failed child — everything
+ * else is a neutral inbound card.
+ */
+type WorkerCompletionMeta = {
+  label: string;
+  icon: ComponentType<{ className?: string }>;
+  iconClass: string;
+  /** The 2px left-accent hue — color spent only on the exceptional outcomes. */
+  accentClass: string;
+};
+
+function workerCompletionMeta(item: WorkerCompletionItem): WorkerCompletionMeta {
+  if (item.childStatus === "failed") {
+    return {
+      label: "Worker failed",
+      icon: XCircleIcon,
+      iconClass: "text-og-status-failed",
+      accentClass: "border-og-status-failed/60",
+    };
+  }
+  if (item.goalStatus === "paused") {
+    return {
+      label: "Worker paused",
+      icon: PauseCircleIcon,
+      iconClass: "text-og-status-waiting",
+      accentClass: "border-og-status-waiting/50",
+    };
+  }
+  if (item.goalStatus === "completed") {
+    return {
+      label: "Worker completed",
+      icon: CheckCircle2Icon,
+      iconClass: "text-og-status-idle",
+      accentClass: "border-og-status-idle/45",
+    };
+  }
+  return {
+    label: "Worker reported back",
+    icon: BotIcon,
+    iconClass: "text-og-accent",
+    accentClass: "border-og-border-strong",
+  };
+}
+
+function WorkerCompletionRow({
+  item,
+  onOpenSession,
+}: {
+  item: WorkerCompletionItem;
+  onOpenSession?: ((sessionId: string) => void) | undefined;
+}) {
+  const enter = useEntranceAnimation();
+  const [open, setOpen] = useState(false);
+  const meta = workerCompletionMeta(item);
+  const Icon = meta.icon;
+  // The worker's own report is the substance behind the fold; evidence and any
+  // paused reason sit alongside it as quieter, labelled context.
+  // "Paused because" only when the outcome actually IS a pause — completion
+  // payloads can carry a leftover pausedReason/rationale from earlier in the
+  // worker's life, and a "Worker completed" card must not show a pause section.
+  const showPausedReason =
+    item.childStatus !== "failed" &&
+    item.goalStatus === "paused" &&
+    Boolean(item.pausedReason?.trim());
+  const details: { label: string; value: string; muted?: boolean }[] = [
+    ...(item.text.trim() ? [{ label: "Report", value: item.text.trim() }] : []),
+    ...(item.evidence?.trim()
+      ? [{ label: "Evidence", value: item.evidence.trim(), muted: true }]
+      : []),
+    ...(showPausedReason
+      ? [{ label: "Paused because", value: item.pausedReason!.trim(), muted: true }]
+      : []),
+  ];
+  const hasDetails = details.length > 0;
+  return (
+    <div className={cn(enter && "animate-og-enter", "min-w-0")}>
+      {/* An inbound result, not a bubble: a 2px left accent carries the outcome —
+          no full frame, no surface fill. The report unfolds flush beneath. */}
+      <div className={cn("flex flex-col gap-2 border-l-2 pl-3", meta.accentClass)}>
+        <div className="flex items-start gap-2.5">
+          <span className={cn("mt-0.5 shrink-0", meta.iconClass)}>
+            <Icon className="size-4" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <p className="text-og-base leading-5 text-og-fg">
+              <span className="font-medium">{meta.label}</span>
+              {item.goalText ? (
+                <span className="text-og-fg-muted"> · {truncate(item.goalText, 90)}</span>
+              ) : null}
+            </p>
+          </div>
+          {item.childSessionId && onOpenSession ? (
+            <button
+              type="button"
+              onClick={() => onOpenSession(item.childSessionId)}
+              className={cn(
+                "-my-0.5 -mr-1 inline-flex shrink-0 items-center gap-1 rounded-og-sm px-2 py-1 text-og-sm font-medium text-og-fg-muted pointer-coarse:py-2",
+                "outline-none transition-colors duration-150 hover:bg-og-surface-2 hover:text-og-fg",
+                "focus-visible:ring-2 focus-visible:ring-og-accent",
+              )}
+            >
+              View session
+              <ArrowRightIcon className="size-3.5" />
+            </button>
+          ) : null}
+        </div>
+        {hasDetails ? (
+          <Collapsible.Root open={open} onOpenChange={setOpen}>
+            <Collapsible.Trigger asChild>
+              <button
+                type="button"
+                className={cn(
+                  "group/wc -mx-1 inline-flex w-fit items-center gap-1 rounded-og-sm px-1 py-0.5 text-og-xs font-medium text-og-fg-subtle",
+                  "outline-none transition-colors duration-150 hover:text-og-fg-muted focus-visible:ring-2 focus-visible:ring-og-accent",
+                )}
+              >
+                <ChevronRightIcon className="size-3 transition-transform duration-150 ease-og-in-out group-data-[state=open]/wc:rotate-90" />
+                {open ? "Hide details" : "Show details"}
+              </button>
+            </Collapsible.Trigger>
+            <Collapsible.Content className="overflow-hidden data-[state=closed]:animate-og-collapse data-[state=open]:animate-og-expand">
+              <div className="ml-1 mt-1.5 flex flex-col gap-2.5">
+                {details.map((detail) => (
+                  <div key={detail.label} className="min-w-0">
+                    <p className="mb-1 text-og-xs font-medium uppercase tracking-[0.08em] text-og-fg-subtle">
+                      {detail.label}
+                    </p>
+                    <p
+                      className={cn(
+                        "whitespace-pre-wrap break-words text-og-sm leading-6",
+                        detail.muted ? "text-og-fg-subtle" : "text-og-fg-muted",
+                      )}
+                    >
+                      {detail.value}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </Collapsible.Content>
+          </Collapsible.Root>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function SessionStatusRow({ item }: { item: { status: SessionStatus; occurredAt: string } }) {
+  const enter = useEntranceAnimation();
+  const meta = SESSION_STATUS_META[item.status];
+  return (
+    <div
+      className={cn(
+        enter && "animate-og-enter",
+        "flex items-center gap-3 text-og-xs text-og-fg-subtle",
+      )}
+      role="status"
+    >
+      <span className="h-px flex-1 bg-og-border" />
+      <span className="inline-flex items-center gap-1.5">
+        <StatusDot status={item.status} className="size-1" />
+        {meta.label.toLowerCase()} · {formatRelativeTime(item.occurredAt)}
+      </span>
+      <span className="h-px flex-1 bg-og-border" />
+    </div>
+  );
+}
+
+/**
+ * The per-action presentation of a goal landmark pill. Each of the six goal
+ * actions reads distinctly, but the palette stays quiet — color is spent only on
+ * the two states that genuinely earn it, the rest are neutral pills set apart by
+ * their glyph alone:
+ *
+ *   completed   success      green (status-idle) check — the only "done" hue
+ *   paused      attention    waiting-tinted pause — a held goal asks to resume
+ *   set         a landmark   a quiet accent target — opening a fresh goal
+ *   resumed     forward      neutral play — motion picking back up
+ *   updated     a revision   neutral pencil — the goal text changed
+ *   continuation steady on   neutral arrow — still tracking the same goal
+ *
+ * The pill class is the established badge convention (`text-X border-X/30
+ * bg-X/10`); neutral actions reuse the surface/border tokens so a clean run of
+ * landmarks stays calm rather than a row of colored chips.
+ */
+type GoalMeta = { label: string; pill: string; icon: ComponentType<{ className?: string }> };
+
+const NEUTRAL_PILL = "border-og-border bg-og-surface-1 text-og-fg-muted";
+
+const GOAL_META: Record<GoalItem["action"], GoalMeta> = {
+  set: {
+    label: "Goal set",
+    pill: "border-og-accent/30 bg-og-accent/10 text-og-accent",
+    icon: TargetIcon,
+  },
+  updated: { label: "Goal updated", pill: NEUTRAL_PILL, icon: PencilLineIcon },
+  completed: {
+    label: "Goal completed",
+    pill: "border-og-status-idle/30 bg-og-status-idle/10 text-og-status-idle",
+    icon: CheckIcon,
+  },
+  paused: {
+    label: "Goal paused",
+    pill: "border-og-status-waiting/35 bg-og-status-waiting/10 text-og-status-waiting",
+    icon: PauseIcon,
+  },
+  resumed: { label: "Goal resumed", pill: NEUTRAL_PILL, icon: PlayIcon },
+  cleared: { label: "Goal cleared", pill: NEUTRAL_PILL, icon: Trash2Icon },
+  continuation: { label: "Continuing toward the goal", pill: NEUTRAL_PILL, icon: ArrowRightIcon },
+};
+
+/**
+ * A goal landmark pill. Resolves its label, accent/tone, and glyph from
+ * {@link GOAL_META} so all six actions are visually distinguishable while the
+ * palette stays restrained — see that table for the per-action rationale.
+ */
+function GoalRow({ item }: { item: GoalItem }) {
+  const enter = useEntranceAnimation();
+  const { label, pill, icon: Icon } = GOAL_META[item.action];
+  return (
+    <div className={cn(enter && "animate-og-enter", "flex justify-center")}>
+      <span
+        className={cn(
+          "inline-flex max-w-full items-center gap-1.5 rounded-full border px-3 py-1 text-og-sm",
+          pill,
+        )}
+      >
+        <Icon className="size-3.5 shrink-0" />
+        <span className="truncate">
+          {label}
+          {item.text ? `: ${truncate(item.text, 90)}` : ""}
+        </span>
+      </span>
+    </div>
+  );
+}
+
+const MACHINE_INPUT_META: Record<MachineInputBatchItem["members"][number]["kind"], string> = {
   scheduled_occurrence: "Scheduled update",
   goal_continuation: "Goal continued",
   agent_message: "Agent update",
@@ -1419,27 +1816,16 @@ function MachineInputBatchRow({ item }: { item: MachineInputBatchItem }) {
   );
 }
 
-function MachineInputRow({
-  member,
-}: {
-  member: MachineInputBatchItem["members"][number];
-}) {
+function MachineInputRow({ member }: { member: MachineInputBatchItem["members"][number] }) {
   const source = readableMachineInputSource(member.sourceId);
   return (
     <div className="flex min-w-0 items-start gap-2.5">
-      <span
-        className="mt-2 size-1.5 shrink-0 rounded-full bg-og-fg-subtle"
-        aria-hidden
-      />
+      <span className="mt-2 size-1.5 shrink-0 rounded-full bg-og-fg-subtle" aria-hidden />
       <div className="min-w-0 flex-1">
         <span className="text-xs font-medium text-og-fg-muted">
           {MACHINE_INPUT_META[member.kind]}
         </span>
-        {source && (
-          <span className="ml-1.5 text-xs text-og-fg-subtle">
-            from {source}
-          </span>
-        )}
+        {source && <span className="ml-1.5 text-xs text-og-fg-subtle">from {source}</span>}
         {member.summary && (
           <p className="mt-0.5 whitespace-pre-wrap break-words text-sm leading-5 text-og-fg">
             {truncate(cleanMachineInputSummary(member.summary), 320)}
@@ -1479,18 +1865,13 @@ function NoticeRow({ item }: { item: NoticeItem }) {
       role="status"
     >
       <TriangleAlertIcon
-        className={cn(
-          "mt-0.5 size-4 shrink-0",
-          item.tone === "cancelled" && "opacity-60",
-        )}
+        className={cn("mt-0.5 size-4 shrink-0", item.tone === "cancelled" && "opacity-60")}
       />
       <div className="min-w-0 flex-1">
         <span className="whitespace-pre-wrap break-words">{item.text}</span>
         {item.details ? (
           <details className="mt-2 text-xs">
-            <summary className="cursor-pointer font-medium">
-              {item.details.label}
-            </summary>
+            <summary className="cursor-pointer font-medium">{item.details.label}</summary>
             <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-og-sm bg-black/5 p-2 font-mono dark:bg-white/5">
               {JSON.stringify(item.details.value, null, 2)}
             </pre>
@@ -1526,16 +1907,14 @@ function AuthNeededRow({
 }: {
   item: AuthNeededItem;
   onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
-  resolveProviderLogo?:
-    ((providerDomain: string) => string | null | undefined) | undefined;
+  resolveProviderLogo?: ((providerDomain: string) => string | null | undefined) | undefined;
 }) {
   const enter = useEntranceAnimation();
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
   const provider = providerLabel(item.providerDomain);
   const unavailable =
-    item.reason === "unsupported_auth" ||
-    item.reason === "resource_scope_unavailable";
+    item.reason === "unsupported_auth" || item.reason === "resource_scope_unavailable";
   const missing = item.reason === "missing_connection";
   const actionLabel = missing ? "Connect" : "Reconnect";
 
@@ -1558,10 +1937,7 @@ function AuthNeededRow({
   };
 
   return (
-    <div
-      className={cn(enter && "animate-og-enter", "flex flex-col gap-2")}
-      role="status"
-    >
+    <div className={cn(enter && "animate-og-enter", "flex flex-col gap-2")} role="status">
       <div className="flex flex-col gap-3 rounded-og-lg border border-og-border bg-og-surface-1 px-3.5 py-3 sm:flex-row sm:items-center">
         <div className="flex min-w-0 flex-1 items-center gap-3">
           <AuthProviderLogo
@@ -1570,13 +1946,9 @@ function AuthNeededRow({
           />
           <div className="min-w-0">
             <p className="truncate text-og-md font-medium text-og-fg">
-              {unavailable
-                ? `${provider} tools unavailable`
-                : `${actionLabel} ${provider}`}
+              {unavailable ? `${provider} tools unavailable` : `${actionLabel} ${provider}`}
             </p>
-            <p className="truncate text-og-sm text-og-fg-subtle">
-              {authReasonLine(item.reason)}
-            </p>
+            <p className="truncate text-og-sm text-og-fg-subtle">{authReasonLine(item.reason)}</p>
           </div>
         </div>
         {!unavailable && onReconnect ? (
@@ -1589,10 +1961,7 @@ function AuthNeededRow({
               "transition-colors hover:bg-og-accent-strong disabled:opacity-70 pointer-coarse:min-h-9",
             )}
           >
-            <RefreshCwIcon
-              className={cn("size-3.5", busy && "animate-og-spin")}
-              aria-hidden
-            />
+            <RefreshCwIcon className={cn("size-3.5", busy && "animate-og-spin")} aria-hidden />
             {busy ? "Opening…" : actionLabel}
           </button>
         ) : !unavailable && item.authorizationUrl ? (
@@ -1612,15 +1981,13 @@ function AuthNeededRow({
       </div>
       {!unavailable ? (
         <p className="px-1 text-og-xs text-og-fg-subtle">
-          This tool call wasn't replayed. After{" "}
-          {missing ? "connecting" : "reconnecting"}, send a new message to try
-          again.
+          This tool call wasn't replayed. After {missing ? "connecting" : "reconnecting"}, send a
+          new message to try again.
         </p>
       ) : null}
       {failed ? (
         <p className="px-1 text-og-xs text-og-status-failed">
-          Couldn't start {missing ? "connecting" : "reconnecting"} {provider}.
-          Try again.
+          Couldn't start {missing ? "connecting" : "reconnecting"} {provider}. Try again.
         </p>
       ) : null}
     </div>
@@ -1634,13 +2001,7 @@ function AuthNeededRow({
  * app — so the card never shows a broken-image glyph and never reaches off-origin
  * for a favicon (CSP + privacy).
  */
-function AuthProviderLogo({
-  src,
-  label,
-}: {
-  src: string | null;
-  label: string;
-}) {
+function AuthProviderLogo({ src, label }: { src: string | null; label: string }) {
   const [failed, setFailed] = useState(false);
   // A resolver that only returns the URL after a lazy catalog fetch means `src`
   // can arrive on a later render; reset the error latch so it gets its attempt.

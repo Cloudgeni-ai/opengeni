@@ -256,7 +256,19 @@ describe("timeline scroll ownership browser regression", () => {
     expect(before.gap).toBeLessThan(48);
 
     await page.evaluate(() => window.timelineScrollHarness!.append());
-    await page.waitForTimeout(100);
+    // The follow is a soft glide (an exponential approach, ~80ms time
+    // constant), not an instant snap — wait for it to settle at the bottom
+    // instead of sampling mid-flight.
+    await page.waitForFunction(
+      () => {
+        const node = document.querySelector("[data-timeline-test] .og-root > div");
+        return (
+          node instanceof HTMLElement && node.scrollHeight - node.scrollTop - node.clientHeight < 2
+        );
+      },
+      undefined,
+      { timeout: 5_000 },
+    );
     const after = await scroller.evaluate((node) => ({
       gap: node.scrollHeight - node.scrollTop - node.clientHeight,
       scrollTop: node.scrollTop,

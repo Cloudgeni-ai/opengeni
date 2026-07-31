@@ -125,8 +125,11 @@ function Harness() {
             const isStream = timelineItem.id === "stream-1";
             const sequence = Number(timelineItem.id.replace("row-", ""));
             const baseHeight = isStream ? (streamed ? 220 : 48) : 34 + (sequence % 7) * 13;
-            // Models delayed image/font/tool-fold measurement above the reader.
-            const delayedGrowth = !isStream && grown && sequence < 1_060 ? 57 : 0;
+            // Models delayed image/font/tool-fold measurement strictly ABOVE the
+            // reader (anchored near row 1040). Native scroll anchoring owns this
+            // compensation; browsers intentionally suppress it when the anchor
+            // node's own style mutates, so growth never touches the anchor row.
+            const delayedGrowth = !isStream && grown && sequence < 1_035 ? 57 : 0;
             return (
               <div
                 data-timeline-row={timelineItem.id}

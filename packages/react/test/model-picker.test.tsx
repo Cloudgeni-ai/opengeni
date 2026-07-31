@@ -165,6 +165,80 @@ describe("ModelPicker", () => {
       false,
     );
   });
+
+  test("prefers catalog rows grouped by billing class and disables unavailable options", async () => {
+    const rows = [
+      {
+        id: "gpt-5.6-sol",
+        label: "Sol",
+        billingClass: "opengeni_credits" as const,
+        billingClassLabel: "OpenGeni credits",
+        selectable: true,
+        unavailableReason: null,
+        provider: "openai",
+        providerLabel: "OpenAI",
+        catalog: {
+          id: "gpt-5.6-sol",
+          label: "Sol",
+          provider: "openai",
+          providerLabel: "OpenAI",
+          api: "responses" as const,
+          credentialReadiness: {
+            status: "ready" as const,
+            reason: null,
+            basis: "configuration" as const,
+            checkedAt: null,
+          },
+          availability: {
+            status: "available" as const,
+            selectable: true,
+            reason: null,
+            checkedAt: null,
+          },
+        },
+      },
+      {
+        id: "blocked",
+        label: "Blocked",
+        billingClass: "byok" as const,
+        billingClassLabel: "Bring your own key",
+        selectable: false,
+        unavailableReason: "Blocked by workspace policy",
+        provider: "xai",
+        providerLabel: "xAI",
+        catalog: {
+          id: "blocked",
+          label: "Blocked",
+          provider: "xai",
+          providerLabel: "xAI",
+          api: "responses" as const,
+          credentialReadiness: {
+            status: "not_ready" as const,
+            reason: "missing_credential" as const,
+            basis: "connection" as const,
+            checkedAt: null,
+          },
+          availability: {
+            status: "unavailable" as const,
+            selectable: false,
+            reason: "policy_blocked" as const,
+            checkedAt: null,
+          },
+        },
+      },
+    ];
+    const container = await mount(
+      <ModelPicker rows={rows} value="gpt-5.6-sol" onChange={() => {}} />,
+    );
+    const select = picker(container)!;
+    const groups = [...select.querySelectorAll("optgroup")];
+    expect(groups.map((group) => group.label)).toEqual(["OpenGeni credits", "Bring your own key"]);
+    const blocked = [...select.querySelectorAll("option")].find(
+      (option) => option.value === "blocked",
+    );
+    expect(blocked?.disabled).toBe(true);
+    expect(blocked?.textContent).toContain("Blocked by workspace policy");
+  });
 });
 
 describe("ChatComposer model picker", () => {

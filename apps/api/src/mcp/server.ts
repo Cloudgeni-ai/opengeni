@@ -236,6 +236,7 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   slack_bot_file_info: { allOf: ["connections:read"] },
   slack_bot_file_content: { allOf: ["connections:read"] },
   slack_bot_post_message: { allOf: ["connections:read"] },
+  slack_bot_delete_message: { allOf: ["connections:read"] },
 } satisfies Record<FirstPartyMcpToolName, FirstPartyToolAuthorization>;
 
 const FIRST_PARTY_MCP_TOOL_NAME_SET = new Set<string>(FIRST_PARTY_MCP_TOOL_NAMES);
@@ -1000,6 +1001,24 @@ function registerSlackBotTools(
         }),
       );
     },
+  );
+
+  server.registerTool(
+    "slack_bot_delete_message",
+    {
+      description:
+        "Delete a message authored by the workspace-shared OpenGeni bot. Pass the channel ID and exact message timestamp returned by a prior post or channel/thread read. Generate one operationId UUID per intended deletion and reuse it on every retry, including after an unknown outcome. Slack refuses deletion of messages not authored by this bot.",
+      inputSchema: {
+        connectionId: z4.string().uuid().optional(),
+        operationId: z4.string().uuid(),
+        channelId: z4.string().min(1).max(64),
+        timestamp: z4.string().min(1).max(64),
+      },
+    },
+    async ({ connectionId, operationId, channelId, timestamp }) =>
+      json(
+        await (await clientFor(connectionId)).deleteMessage({ operationId, channelId, timestamp }),
+      ),
   );
 }
 

@@ -1,136 +1,125 @@
 import type {
+  ClientVoiceInputConfig,
+  OpenGeniClient,
   TranscriptionAdapter,
-  TranscriptionDiagnostic,
-  TranscriptionErrorCode,
-  TranscriptionTargetSelection,
   WorkspaceTranscriptionPolicy,
 } from "@opengeni/sdk";
-import { LoaderCircleIcon, MicIcon, RotateCwIcon, SquareIcon } from "lucide-react";
-import { type MouseEvent } from "react";
+import { LoaderCircleIcon, MicIcon, SquareIcon, XIcon } from "lucide-react";
+import { AnimatePresence, motion } from "motion/react";
+import { useEffect, useState, type MouseEvent } from "react";
 import { cn } from "../lib/cn";
-import { useTranscription, type TranscriptionLifecycleTimeouts } from "../hooks/use-transcription";
+import { useVoiceInput } from "../hooks/use-voice-input";
 import { useChatComposer } from "./composer";
 
 export type ComposerTranscriptionMessages = {
   start: string;
   stop: string;
+  cancel: string;
   retry: string;
   requestingPermission: string;
-  listening: string;
-  reconnecting: string;
-  cancelling: string;
+  recording: string;
+  transcribing: string;
   unavailableDisabled: string;
-  unavailableAdapter: string;
-  unavailablePolicy: string;
+  unavailable: string;
   errorPermissionDenied: string;
   errorNotSupported: string;
-  errorNetwork: string;
-  errorProvider: string;
-  errorPolicyBlocked: string;
-  errorTimeout: string;
-  errorCancelled: string;
+  errorUnavailable: string;
+  errorTooLarge: string;
+  errorInvalidAudio: string;
   errorUnknown: string;
 };
 
 const defaultMessages: ComposerTranscriptionMessages = {
   start: "Start voice input",
-  stop: "Stop voice input",
+  stop: "Stop and transcribe",
+  cancel: "Cancel recording",
   retry: "Retry voice input",
-  requestingPermission: "Requesting microphone permission…",
-  listening: "Listening… Press Escape to cancel.",
-  reconnecting: "Reconnecting voice input…",
-  cancelling: "Cancelling voice input…",
+  requestingPermission: "Requesting microphone…",
+  recording: "Recording. Press Escape to cancel.",
+  transcribing: "Transcribing…",
   unavailableDisabled: "Voice input is unavailable while the composer is disabled.",
-  unavailableAdapter: "Voice input needs an approved transcription adapter.",
-  unavailablePolicy: "Enable and accept transcription in Workspace settings.",
+  unavailable: "Voice input is unavailable for this workspace.",
   errorPermissionDenied: "Microphone permission was denied. Your draft was not changed.",
   errorNotSupported: "Voice input is not supported on this device.",
-  errorNetwork: "Voice input lost its network connection.",
-  errorProvider: "The transcription service could not continue.",
-  errorPolicyBlocked: "Workspace policy does not authorize voice input.",
-  errorTimeout: "Voice input took too long to start. Try again.",
-  errorCancelled: "Voice input was cancelled.",
+  errorUnavailable: "Voice input is not configured.",
+  errorTooLarge: "Recording is too large. Try a shorter message.",
+  errorInvalidAudio: "The recording could not be read. Try again.",
   errorUnknown: "Voice input could not start. Try again.",
 };
 
 export type ComposerTranscriptionControlProps = {
-  adapter: TranscriptionAdapter | null;
-  policy: WorkspaceTranscriptionPolicy;
-  selection?: TranscriptionTargetSelection | undefined;
+  client?: OpenGeniClient | null | undefined;
+  workspaceId?: string | undefined;
+  capability?: ClientVoiceInputConfig | null | undefined;
+  workspaceEnabled?: boolean | undefined;
+  /** @deprecated Native MediaRecorder input no longer uses host adapters. */
+  adapter?: TranscriptionAdapter | null | undefined;
+  /** @deprecated Native MediaRecorder input no longer uses host policies. */
+  policy?: WorkspaceTranscriptionPolicy | undefined;
+  /** @deprecated Native input uses the server capability duration limit. */
+  lifecycleTimeouts?: unknown;
+  /** @deprecated Native input does not expose provider diagnostics. */
+  onDiagnostic?: unknown;
   messages?: Partial<ComposerTranscriptionMessages> | undefined;
   className?: string | undefined;
-  lifecycleTimeouts?: Partial<TranscriptionLifecycleTimeouts> | undefined;
-  onDiagnostic?: ((diagnostic: TranscriptionDiagnostic) => void) | undefined;
 };
+
+const WAVEFORM_BARS = 18;
+const WAVEFORM_BAR_KEYS = Array.from(
+  { length: WAVEFORM_BARS },
+  (_, index) => `voice-waveform-bar-${index + 1}`,
+);
 
 /** One provider-neutral microphone control for the nearest editable composer. */
 export function ComposerTranscriptionControl({
-  adapter,
-  policy,
-  selection,
+  client = null,
+  workspaceId = "",
+  capability = null,
+  workspaceEnabled = false,
   messages: overrides,
   className,
-  lifecycleTimeouts,
-  onDiagnostic,
 }: ComposerTranscriptionControlProps) {
   const composer = useChatComposer();
   const messages = { ...defaultMessages, ...overrides };
-  const transcription = useTranscription({
-    adapter,
-    policy,
-    ...(selection ? { selection } : {}),
+  const transcription = useVoiceInput({
+    client,
+    workspaceId,
+    capability,
+    enabled: workspaceEnabled,
     value: composer.value,
     setValue: composer.setValue,
     focusInput: composer.focusInput,
     disabled: composer.disabled,
-    lifecycleTimeouts,
-    onDiagnostic,
   });
-  const status = transcription.state.status;
+  const { status } = transcription;
   const active =
-    status === "requesting-permission" ||
-    status === "listening" ||
-    status === "reconnecting" ||
-    status === "cancelling";
-  const unavailableMessage =
-    transcription.unavailableReason === "composer_disabled"
-      ? messages.unavailableDisabled
-      : transcription.unavailableReason === "adapter_missing"
-        ? messages.unavailableAdapter
-        : transcription.unavailableReason
-          ? messages.unavailablePolicy
-          : null;
-  const label = unavailableMessage
-    ? unavailableMessage
-    : status === "error"
-      ? messages.retry
-      : active
-        ? messages.stop
-        : messages.start;
-  const errorMessage = transcription.state.error
-    ? transcriptionErrorMessage(transcription.state.error.code, messages)
+    status === "requesting-permission" || status === "recording" || status === "transcribing";
+  const unavailableMessage = composer.disabled
+    ? messages.unavailableDisabled
+    : !capability?.available || !workspaceEnabled
+      ? messages.unavailable
+      : null;
+  const idleLabel = unavailableMessage ?? (status === "error" ? messages.retry : messages.start);
+  const errorMessage = transcription.error
+    ? transcriptionErrorMessage(transcription.error, messages)
     : null;
   const announcement =
-    transcription.state.partial ||
-    (status === "requesting-permission"
+    status === "requesting-permission"
       ? messages.requestingPermission
-      : status === "listening"
-        ? messages.listening
-        : status === "reconnecting"
-          ? (errorMessage ?? messages.reconnecting)
-          : status === "cancelling"
-            ? messages.cancelling
-            : status === "error"
-              ? (errorMessage ?? messages.errorUnknown)
-              : unavailableMessage);
+      : status === "recording"
+        ? messages.recording
+        : status === "transcribing"
+          ? messages.transcribing
+          : status === "error"
+            ? (errorMessage ?? messages.errorUnknown)
+            : unavailableMessage;
 
-  function activate(event: MouseEvent<HTMLButtonElement>) {
-    if (unavailableMessage || status === "cancelling") {
+  function start(event: MouseEvent<HTMLButtonElement>) {
+    if (unavailableMessage) {
       event.preventDefault();
       return;
     }
-    if (active) void transcription.cancel();
-    else void transcription.start();
+    void transcription.start();
   }
 
   return (
@@ -138,45 +127,110 @@ export function ComposerTranscriptionControl({
       className={cn("inline-flex min-w-0 items-center gap-1.5", className)}
       data-transcription-status={status}
     >
-      <button
-        type="button"
-        onClick={activate}
-        aria-label={label}
-        aria-pressed={active}
-        aria-disabled={unavailableMessage !== null || status === "cancelling"}
-        aria-keyshortcuts={active ? "Escape" : undefined}
-        title={label}
-        className={cn(
-          "inline-flex size-8 shrink-0 items-center justify-center rounded-og-md pointer-coarse:size-11",
-          "text-og-fg-muted transition-colors duration-150 motion-reduce:transition-none",
-          unavailableMessage
-            ? "cursor-not-allowed opacity-45"
-            : status === "cancelling"
-              ? "cursor-not-allowed"
-              : "hover:bg-og-surface-2 hover:text-og-fg",
-          status === "listening" && "bg-og-status-failed/10 text-og-status-failed",
-        )}
-      >
-        {status === "requesting-permission" || status === "cancelling" ? (
-          <LoaderCircleIcon className="size-4 animate-og-spin motion-reduce:animate-none" />
-        ) : status === "reconnecting" ? (
-          <RotateCwIcon className="size-4 animate-og-spin motion-reduce:animate-none" />
-        ) : active ? (
-          <SquareIcon className="size-3.5 fill-current" />
+      <AnimatePresence mode="popLayout" initial={false}>
+        {active ? (
+          <motion.span
+            key={status === "transcribing" ? "transcribing" : "capture"}
+            initial={{ opacity: 0, scale: 0.96 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.96 }}
+            transition={{ duration: 0.16, ease: [0.22, 1, 0.36, 1] }}
+            className={cn(
+              "inline-flex h-8 items-center gap-1 rounded-og-md border border-og-border/80",
+              "bg-og-surface-2/70 pl-2 pr-1 pointer-coarse:h-11",
+            )}
+          >
+            {status === "requesting-permission" ? (
+              <LoaderCircleIcon
+                className="size-3.5 shrink-0 text-og-fg-muted animate-og-spin motion-reduce:animate-none"
+                aria-hidden
+              />
+            ) : (
+              <span className="flex items-center gap-1.5">
+                {status === "recording" ? (
+                  <span
+                    aria-hidden
+                    className="size-1.5 shrink-0 rounded-full bg-og-status-failed animate-og-pulse motion-reduce:animate-none"
+                  />
+                ) : null}
+                <VoiceWaveform
+                  stream={status === "recording" ? transcription.stream : null}
+                  mode={status === "transcribing" ? "transcribing" : "recording"}
+                />
+              </span>
+            )}
+            {status === "recording" ? (
+              <>
+                <button
+                  type="button"
+                  onClick={() => transcription.cancel()}
+                  aria-label={messages.cancel}
+                  aria-keyshortcuts="Escape"
+                  title={messages.cancel}
+                  className={cn(
+                    "inline-flex size-7 shrink-0 items-center justify-center rounded-og-sm",
+                    "text-og-fg-muted transition-colors duration-150 motion-reduce:transition-none",
+                    "hover:bg-og-surface-3 hover:text-og-fg pointer-coarse:size-9",
+                  )}
+                >
+                  <XIcon className="size-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => transcription.stop()}
+                  aria-label={messages.stop}
+                  title={messages.stop}
+                  className={cn(
+                    "inline-flex size-7 shrink-0 items-center justify-center rounded-og-sm",
+                    "bg-og-fg text-og-bg transition-colors duration-150 motion-reduce:transition-none",
+                    "hover:bg-og-fg-muted pointer-coarse:size-9",
+                  )}
+                >
+                  <SquareIcon className="size-2.5 fill-current" />
+                </button>
+              </>
+            ) : status === "transcribing" ? (
+              <span className="og-shimmer-text px-1.5 text-og-xs font-medium whitespace-nowrap">
+                {messages.transcribing}
+              </span>
+            ) : (
+              <span className="px-1.5 text-og-xs text-og-fg-muted whitespace-nowrap">
+                {messages.requestingPermission}
+              </span>
+            )}
+          </motion.span>
         ) : (
-          <MicIcon className="size-4" />
+          <motion.button
+            key="idle"
+            type="button"
+            initial={{ opacity: 0, scale: 0.96 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.96 }}
+            transition={{ duration: 0.14, ease: [0.22, 1, 0.36, 1] }}
+            onClick={start}
+            aria-label={idleLabel}
+            aria-pressed={false}
+            aria-disabled={unavailableMessage !== null}
+            title={idleLabel}
+            className={cn(
+              "inline-flex size-8 shrink-0 items-center justify-center rounded-og-md pointer-coarse:size-11",
+              "text-og-fg-muted transition-colors duration-150 motion-reduce:transition-none",
+              unavailableMessage
+                ? "cursor-not-allowed opacity-45"
+                : "hover:bg-og-surface-2 hover:text-og-fg",
+            )}
+          >
+            <MicIcon className="size-4" />
+          </motion.button>
         )}
-      </button>
-      {announcement && (active || status === "error") ? (
+      </AnimatePresence>
+      {status === "error" && errorMessage ? (
         <span
           aria-hidden="true"
-          title={announcement}
-          className={cn(
-            "max-w-48 truncate text-og-xs text-og-fg-muted max-sm:max-w-28",
-            status === "error" && "text-og-status-failed",
-          )}
+          title={errorMessage}
+          className="max-w-40 truncate text-og-xs text-og-status-failed max-sm:max-w-24"
         >
-          {announcement}
+          {errorMessage}
         </span>
       ) : null}
       <span className="sr-only" role={status === "error" ? "alert" : "status"} aria-live="polite">
@@ -186,26 +240,120 @@ export function ComposerTranscriptionControl({
   );
 }
 
-function transcriptionErrorMessage(
-  code: TranscriptionErrorCode,
-  messages: ComposerTranscriptionMessages,
-): string {
+function VoiceWaveform({
+  stream,
+  mode,
+}: {
+  stream: MediaStream | null;
+  mode: "recording" | "transcribing";
+}) {
+  const [levels, setLevels] = useState<number[]>(() => restingLevels(WAVEFORM_BARS));
+  const [live, setLive] = useState(false);
+
+  useEffect(() => {
+    if (!stream || mode !== "recording") {
+      setLive(false);
+      setLevels(restingLevels(WAVEFORM_BARS));
+      return;
+    }
+
+    const AudioCtx =
+      window.AudioContext ??
+      (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AudioCtx) return;
+
+    let cancelled = false;
+    let frame = 0;
+    let context: AudioContext | null = null;
+
+    try {
+      context = new AudioCtx();
+      const source = context.createMediaStreamSource(stream);
+      const analyser = context.createAnalyser();
+      analyser.fftSize = 64;
+      analyser.smoothingTimeConstant = 0.8;
+      source.connect(analyser);
+      const bins = new Uint8Array(analyser.frequencyBinCount);
+
+      const tick = () => {
+        if (cancelled) return;
+        analyser.getByteFrequencyData(bins);
+        const next = new Array<number>(WAVEFORM_BARS);
+        const usable = Math.max(8, Math.floor(bins.length * 0.65));
+        for (let i = 0; i < WAVEFORM_BARS; i++) {
+          const start = Math.floor((i / WAVEFORM_BARS) * usable);
+          const end = Math.max(start + 1, Math.floor(((i + 1) / WAVEFORM_BARS) * usable));
+          let sum = 0;
+          for (let j = start; j < end; j++) sum += bins[j] ?? 0;
+          const avg = sum / (end - start) / 255;
+          next[i] = Math.min(1, 0.14 + avg * 1.65);
+        }
+        setLevels(next);
+        setLive(true);
+        frame = requestAnimationFrame(tick);
+      };
+
+      void context.resume().then(() => {
+        if (!cancelled) frame = requestAnimationFrame(tick);
+      });
+    } catch {
+      setLive(false);
+    }
+
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(frame);
+      void context?.close();
+    };
+  }, [stream, mode]);
+
+  return (
+    <span
+      aria-hidden
+      data-voice-waveform={live ? "live" : "fallback"}
+      className="flex h-4 w-[3.75rem] items-center justify-center gap-px"
+    >
+      {WAVEFORM_BAR_KEYS.map((key, index) => {
+        const level = levels[index] ?? 0;
+        return (
+          <span
+            key={key}
+            className={cn(
+              "w-0.5 rounded-full bg-og-fg-muted/90 origin-center",
+              !live && "animate-og-waveform motion-reduce:animate-none",
+              mode === "transcribing" && "opacity-45",
+            )}
+            style={{
+              height: live ? `${Math.max(3, Math.round(level * 14))}px` : "14px",
+              animationDelay: live ? undefined : `${(index % 9) * 0.07}s`,
+              opacity: live ? 0.55 + level * 0.45 : undefined,
+            }}
+          />
+        );
+      })}
+    </span>
+  );
+}
+
+function restingLevels(count: number): number[] {
+  return Array.from({ length: count }, (_, index) => 0.22 + ((index * 17) % 5) * 0.06);
+}
+
+function transcriptionErrorMessage(code: string, messages: ComposerTranscriptionMessages): string {
   switch (code) {
     case "permission_denied":
       return messages.errorPermissionDenied;
     case "not_supported":
       return messages.errorNotSupported;
-    case "network":
-      return messages.errorNetwork;
-    case "provider":
-      return messages.errorProvider;
-    case "policy_blocked":
-      return messages.errorPolicyBlocked;
-    case "timeout":
-      return messages.errorTimeout;
-    case "cancelled":
-      return messages.errorCancelled;
+    case "unavailable":
+      return messages.errorUnavailable;
+    case "too_large":
+      return messages.errorTooLarge;
+    case "invalid_audio":
+      return messages.errorInvalidAudio;
     case "unknown":
+      return messages.errorUnknown;
+    default:
       return messages.errorUnknown;
   }
 }

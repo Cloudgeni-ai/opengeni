@@ -217,6 +217,9 @@ const SettingsSchema = z.object({
   observabilityOtlpEndpoint: z.string().url().optional(),
   observabilityOtlpHeaders: z.string().default(""),
   publicBaseUrl: z.string().url().optional(),
+  // Browser origin when the web app and API use separate origins in local
+  // development. Production normally leaves this unset and uses publicBaseUrl.
+  webBaseUrl: z.string().url().optional(),
   // Base URL for the bring-your-own-compute agent release assets the get.<domain>
   // install routes redirect to. Defaults to this repo's GitHub Releases. The route
   // appends `/download/agent-v<ver>/<asset>`.
@@ -264,6 +267,8 @@ const SettingsSchema = z.object({
   integrationsOauthClientsJson: z.string().default("{}"),
   slackClientId: z.string().optional(),
   slackClientSecret: z.string().optional(),
+  googleDriveClientId: z.string().optional(),
+  googleDriveClientSecret: z.string().optional(),
   // Undefined is meaningful: the migration boundary persists the product
   // default of 3 when no deployment override is supplied.
   maxNestedAgentDepth: z.coerce.number().int().nonnegative().max(MAX_NESTED_AGENT_DEPTH).optional(),
@@ -327,6 +332,41 @@ const SettingsSchema = z.object({
   openaiBaseUrl: z.string().optional(),
   openaiModel: z.string().default("gpt-5.6-sol"),
   openaiAllowedModels: z.string().default("gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna"),
+  // Native composer voice input (browser MediaRecorder → API transcription).
+  // Provider credentials stay server-side; ClientConfig only projects availability
+  // and hard ceilings. Selection happens once before audio is sent — never retry
+  // the same clip across vendors after an upstream request may have started.
+  voiceInputMaxDurationSeconds: z.coerce.number().int().positive().max(600).default(60),
+  voiceInputMaxSizeBytes: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(100 * 1024 * 1024)
+    .default(25 * 1024 * 1024),
+  // Preferred provider order (comma-separated ids). First configured+ready wins.
+  // Codex subscription STT is preferred by default when subscription routing is
+  // enabled; operators can put openai/azure-openai first explicitly.
+  // Supported: openai, azure-openai, codex-subscription.
+  voiceInputProviderOrder: z.string().default("codex-subscription,openai,azure-openai"),
+  // OpenAI public /v1/audio/transcriptions path. Reuses OPENGENI_OPENAI_API_KEY
+  // when voiceInputOpenaiApiKey is unset. Default model is gpt-transcribe.
+  voiceInputOpenaiEnabled: EnvBoolean.default(true),
+  voiceInputOpenaiApiKey: z.string().optional(),
+  voiceInputOpenaiBaseUrl: z.string().optional(),
+  voiceInputOpenaiModel: z.string().default("gpt-transcribe"),
+  // Azure OpenAI deployment-scoped audio transcriptions. Reuses the turn-model
+  // Azure endpoint/key/AD token when voice-specific overrides are unset.
+  voiceInputAzureEnabled: EnvBoolean.default(true),
+  voiceInputAzureEndpoint: z.string().optional(),
+  voiceInputAzureDeployment: z.string().optional(),
+  voiceInputAzureApiVersion: z.string().optional(),
+  voiceInputAzureApiKey: z.string().optional(),
+  voiceInputAzureAdToken: z.string().optional(),
+  // Legacy opt-in for undocumented ChatGPT /backend-api/transcribe. When
+  // OPENGENI_CODEX_SUBSCRIPTION_ENABLED is true, Codex STT is included without
+  // this flag. Set false and omit codex-subscription from PROVIDER_ORDER to
+  // keep subscription model routing while disabling Codex voice input.
+  voiceInputCodexExperimentalEnabled: EnvBoolean.default(false),
   modelPricingJson: z.string().default("{}"),
   // Extra (non-built-in) model providers, declared by the host as a JSON
   // provider registry. Each entry carries its own base URL, API key, wire API
@@ -830,6 +870,163 @@ const SettingsSchema = z.object({
 
 export type Settings = z.infer<typeof SettingsSchema>;
 export type McpServerConfig = Settings["mcpServers"][number];
+
+/** Declarative voice-input transcription provider ids. */
+export type VoiceInputProviderId = "openai" | "azure-openai" | "codex-subscription";
+
+export type VoiceInputProviderConfig =
+  | {
+      id: "openai";
+      kind: "openai";
+      apiKey: string;
+      baseUrl: string;
+      model: string;
+    }
+  | {
+      id: "azure-openai";
+      kind: "azure-openai";
+      endpoint: string;
+      deployment: string;
+      apiVersion: string;
+      apiKey: string | null;
+      adToken: string | null;
+    }
+  | {
+      id: "codex-subscription";
+      kind: "codex-subscription";
+      experimental: true;
+    };
+
+/**
+ * Reject empty / template secrets so `.env.example` placeholders like
+ * `your-key` cannot advertise voice input as available and then 401 upstream.
+ */
+export function isUsableVoiceInputSecret(value: string | null | undefined): value is string {
+  if (value == null) return false;
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  const normalized = trimmed.toLowerCase();
+  if (
+    normalized === "your-key" ||
+    normalized === "your_key" ||
+    normalized === "changeme" ||
+    normalized === "replace-me" ||
+    normalized === "xxx" ||
+    normalized.startsWith("your-") ||
+    normalized.startsWith("your_")
+  ) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Resolve the configured voice-input provider registry in selection order.
+ * Credentials stay in this server-side structure; ClientConfig only projects
+ * whether at least one non-experimental (or probed experimental) provider exists.
+ */
+export function resolveVoiceInputProviderRegistry(settings: Settings): VoiceInputProviderConfig[] {
+  const order = settings.voiceInputProviderOrder
+    .split(",")
+    .map((part) => part.trim())
+    .filter(
+      (part): part is VoiceInputProviderId =>
+        part === "openai" || part === "azure-openai" || part === "codex-subscription",
+    );
+  const seen = new Set<VoiceInputProviderId>();
+  const providers: VoiceInputProviderConfig[] = [];
+  for (const id of order) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    if (id === "openai") {
+      if (!settings.voiceInputOpenaiEnabled) continue;
+      const apiKey = settings.voiceInputOpenaiApiKey ?? settings.openaiApiKey;
+      if (!isUsableVoiceInputSecret(apiKey)) continue;
+      // When the turn provider is Azure-only and no voice-specific OpenAI key/URL
+      // was set, do not silently reuse a leftover OPENAI_API_KEY for voice.
+      if (
+        settings.openaiProvider === "azure" &&
+        !settings.voiceInputOpenaiApiKey &&
+        !settings.voiceInputOpenaiBaseUrl
+      ) {
+        continue;
+      }
+      providers.push({
+        id: "openai",
+        kind: "openai",
+        apiKey,
+        baseUrl: (
+          settings.voiceInputOpenaiBaseUrl ??
+          settings.openaiBaseUrl ??
+          "https://api.openai.com/v1"
+        ).replace(/\/+$/, ""),
+        model: settings.voiceInputOpenaiModel,
+      });
+      continue;
+    }
+    if (id === "azure-openai") {
+      if (!settings.voiceInputAzureEnabled) continue;
+      const endpoint = (
+        settings.voiceInputAzureEndpoint ??
+        settings.azureOpenaiEndpoint ??
+        ""
+      ).replace(/\/+$/, "");
+      const deployment = settings.voiceInputAzureDeployment ?? settings.azureOpenaiDeployment ?? "";
+      const apiVersion =
+        settings.voiceInputAzureApiVersion ??
+        settings.azureOpenaiApiVersion ??
+        "2025-04-01-preview";
+      const apiKey = settings.voiceInputAzureApiKey ?? settings.azureOpenaiApiKey ?? null;
+      const adToken = settings.voiceInputAzureAdToken ?? settings.azureOpenaiAdToken ?? null;
+      if (
+        !endpoint ||
+        !deployment ||
+        (!isUsableVoiceInputSecret(apiKey) && !isUsableVoiceInputSecret(adToken))
+      ) {
+        continue;
+      }
+      // When turn provider is OpenAI-only and no voice-specific Azure settings
+      // were provided, skip ambient Azure leftovers.
+      if (
+        settings.openaiProvider !== "azure" &&
+        !settings.voiceInputAzureEndpoint &&
+        !settings.voiceInputAzureDeployment &&
+        !settings.voiceInputAzureApiKey &&
+        !settings.voiceInputAzureAdToken
+      ) {
+        continue;
+      }
+      providers.push({
+        id: "azure-openai",
+        kind: "azure-openai",
+        endpoint,
+        deployment,
+        apiVersion,
+        apiKey: isUsableVoiceInputSecret(apiKey) ? apiKey : null,
+        adToken: isUsableVoiceInputSecret(adToken) ? adToken : null,
+      });
+      continue;
+    }
+    if (id === "codex-subscription") {
+      // Prefer Codex STT whenever subscription model routing is enabled.
+      // Operators who want OpenAI/Azure first should set PROVIDER_ORDER; omit
+      // `codex-subscription` from the order to disable Codex voice while keeping
+      // subscription turns. VOICE_INPUT_CODEX_EXPERIMENTAL is retained for
+      // back-compat docs/env but no longer gates inclusion.
+      if (!settings.codexSubscriptionEnabled) continue;
+      providers.push({ id: "codex-subscription", kind: "codex-subscription", experimental: true });
+    }
+  }
+  return providers;
+}
+
+/** True when the deployment has at least one supported (non-experimental) provider. */
+export function voiceInputDeploymentConfigured(settings: Settings): boolean {
+  return resolveVoiceInputProviderRegistry(settings).some(
+    (provider) => provider.kind !== "codex-subscription",
+  );
+}
+
 export type TemporalTlsConnectionConfig = {
   serverNameOverride?: string;
   serverRootCACertificate?: Uint8Array;
@@ -1362,6 +1559,7 @@ export function getSettings(): Settings {
     observabilityOtlpHeaders:
       optional("OPENGENI_OTEL_EXPORTER_OTLP_HEADERS") ?? optional("OTEL_EXPORTER_OTLP_HEADERS"),
     publicBaseUrl: optional("OPENGENI_PUBLIC_BASE_URL"),
+    webBaseUrl: optional("OPENGENI_WEB_BASE_URL"),
     agentReleasesBaseUrl: optional("OPENGENI_AGENT_RELEASES_BASE_URL"),
     agentStableVersion: optional("OPENGENI_AGENT_STABLE_VERSION"),
     productAccessMode: optional("OPENGENI_PRODUCT_ACCESS_MODE"),
@@ -1385,6 +1583,8 @@ export function getSettings(): Settings {
     integrationsOauthClientsJson: optional("OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON"),
     slackClientId: optional("OPENGENI_SLACK_CLIENT_ID"),
     slackClientSecret: optional("OPENGENI_SLACK_CLIENT_SECRET"),
+    googleDriveClientId: optional("OPENGENI_GOOGLE_DRIVE_CLIENT_ID"),
+    googleDriveClientSecret: optional("OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET"),
     maxNestedAgentDepth: optional("OPENGENI_MAX_NESTED_AGENT_DEPTH"),
     goalMaxAutoContinuations: optional("OPENGENI_GOAL_MAX_AUTO_CONTINUATIONS"),
     goalNoProgressLimit: optional("OPENGENI_GOAL_NO_PROGRESS_LIMIT"),
@@ -1409,6 +1609,20 @@ export function getSettings(): Settings {
     openaiBaseUrl: optional("OPENGENI_OPENAI_BASE_URL") ?? optional("OPENAI_BASE_URL"),
     openaiModel: optional("OPENGENI_OPENAI_MODEL"),
     openaiAllowedModels: optional("OPENGENI_OPENAI_ALLOWED_MODELS"),
+    voiceInputMaxDurationSeconds: optional("OPENGENI_VOICE_INPUT_MAX_DURATION_SECONDS"),
+    voiceInputMaxSizeBytes: optional("OPENGENI_VOICE_INPUT_MAX_SIZE_BYTES"),
+    voiceInputProviderOrder: optional("OPENGENI_VOICE_INPUT_PROVIDER_ORDER"),
+    voiceInputOpenaiEnabled: optional("OPENGENI_VOICE_INPUT_OPENAI_ENABLED"),
+    voiceInputOpenaiApiKey: optional("OPENGENI_VOICE_INPUT_OPENAI_API_KEY"),
+    voiceInputOpenaiBaseUrl: optional("OPENGENI_VOICE_INPUT_OPENAI_BASE_URL"),
+    voiceInputOpenaiModel: optional("OPENGENI_VOICE_INPUT_OPENAI_MODEL"),
+    voiceInputAzureEnabled: optional("OPENGENI_VOICE_INPUT_AZURE_ENABLED"),
+    voiceInputAzureEndpoint: optional("OPENGENI_VOICE_INPUT_AZURE_ENDPOINT"),
+    voiceInputAzureDeployment: optional("OPENGENI_VOICE_INPUT_AZURE_DEPLOYMENT"),
+    voiceInputAzureApiVersion: optional("OPENGENI_VOICE_INPUT_AZURE_API_VERSION"),
+    voiceInputAzureApiKey: optional("OPENGENI_VOICE_INPUT_AZURE_API_KEY"),
+    voiceInputAzureAdToken: optional("OPENGENI_VOICE_INPUT_AZURE_AD_TOKEN"),
+    voiceInputCodexExperimentalEnabled: optional("OPENGENI_VOICE_INPUT_CODEX_EXPERIMENTAL"),
     modelPricingJson: optional("OPENGENI_MODEL_PRICING_JSON"),
     modelProvidersJson: optional("OPENGENI_MODEL_PROVIDERS_JSON"),
     codexSubscriptionEnabled: optional("OPENGENI_CODEX_SUBSCRIPTION_ENABLED"),
@@ -3465,6 +3679,31 @@ function validateSettings(settings: Settings): void {
     if (!settings.integrationsStateSecret) {
       throw new Error(
         "OPENGENI_INTEGRATIONS_STATE_SECRET is required when the OpenGeni Slack app is configured",
+      );
+    }
+  }
+  if (Boolean(settings.googleDriveClientId) !== Boolean(settings.googleDriveClientSecret)) {
+    throw new Error(
+      "OPENGENI_GOOGLE_DRIVE_CLIENT_ID and OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET must be configured together",
+    );
+  }
+  if (settings.googleDriveClientId) {
+    if (!settings.publicBaseUrl) {
+      throw new Error(
+        "OPENGENI_PUBLIC_BASE_URL is required when the Google Drive integration is configured",
+      );
+    }
+    if (
+      !settings.publicBaseUrl.startsWith("https://") &&
+      !["local", "test"].includes(settings.environment)
+    ) {
+      throw new Error(
+        "OPENGENI_PUBLIC_BASE_URL must use https when the Google Drive integration is configured outside local/test",
+      );
+    }
+    if (!settings.integrationsStateSecret) {
+      throw new Error(
+        "OPENGENI_INTEGRATIONS_STATE_SECRET is required when the Google Drive integration is configured",
       );
     }
   }

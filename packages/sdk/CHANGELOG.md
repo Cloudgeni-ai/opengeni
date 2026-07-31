@@ -1,5 +1,9 @@
 # @opengeni/sdk
 
+## Unreleased
+
+- Add native voice-input configuration mirrors, workspace toggle resolution, and one-shot multipart `transcribeAudio` uploads.
+
 ## 0.30.2
 
 ### Patch Changes

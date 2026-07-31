@@ -5110,6 +5110,72 @@ export function normalizeToolOutputForEvent(output: unknown): unknown {
   return output;
 }
 
+/**
+ * Hosted web_search progresses on the raw Responses stream
+ * (`response.output_item.added/done` with `web_search_call`) long before the SDK
+ * materializes a `RunToolCallItem` at `response_done`. Without this mapping the
+ * timeline only sees search cards after the whole model round finishes — or
+ * never mid-turn — while assistant prose ("Search 1/5") streams live.
+ */
+function hostedWebSearchToolCallFromResponsesEvent(raw: unknown): NormalizedRuntimeEvent | null {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+  const event = raw as {
+    type?: unknown;
+    item?: {
+      id?: unknown;
+      type?: unknown;
+      status?: unknown;
+      action?: unknown;
+      [key: string]: unknown;
+    };
+  };
+  const eventType = typeof event.type === "string" ? event.type : "";
+  if (
+    !(
+      (eventType === "response.output_item.added" || eventType === "response.output_item.done") &&
+      event.item?.type === "web_search_call"
+    )
+  ) {
+    // Progress-only `response.web_search_call.*` events lack the action
+    // payload; added/done are enough for a live, query-bearing card.
+    return null;
+  }
+  const item = event.item;
+  const itemId = typeof item.id === "string" ? item.id : null;
+  if (!itemId) {
+    return null;
+  }
+  const status =
+    typeof item.status === "string"
+      ? item.status
+      : eventType === "response.output_item.done"
+        ? "completed"
+        : "in_progress";
+  const action = item.action ?? null;
+  // Codex frequently emits `output_item.added` for web_search_call before the
+  // action payload exists. Persist that so the timeline can show "Searching…",
+  // then the matching `done` (same id) fills in query/queries via merge.
+  const { status: _status, ...providerData } = item;
+
+  return {
+    type: "agent.toolCall.created",
+    payload: {
+      id: itemId,
+      name: "web_search_call",
+      arguments: action,
+      raw: {
+        type: "hosted_tool_call",
+        id: itemId,
+        name: "web_search_call",
+        status,
+        providerData,
+      },
+    },
+  };
+}
+
 export function normalizeSdkEvent(event: RunStreamEvent): NormalizedRuntimeEvent[] {
   const out: NormalizedRuntimeEvent[] = [];
   if (event.type === "raw_model_stream_event") {
@@ -5126,6 +5192,10 @@ export function normalizeSdkEvent(event: RunStreamEvent): NormalizedRuntimeEvent
     const raw = (event as any).data?.event;
     if (raw?.type === "response.reasoning_summary_text.delta" && typeof raw.delta === "string") {
       out.push({ type: "agent.reasoning.delta", payload: { text: raw.delta } });
+    }
+    const webSearch = hostedWebSearchToolCallFromResponsesEvent(raw);
+    if (webSearch) {
+      out.push(webSearch);
     }
     return out;
   }

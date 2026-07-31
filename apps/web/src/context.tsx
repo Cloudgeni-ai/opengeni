@@ -91,16 +91,21 @@ export type AppContextValue = {
   /**
    * The model chosen for a specific open session. Composer state (draft, mode)
    * is session-scoped, and so is the model: each session remembers its own pick
-   * in-memory. Prefer the durable session model (`durableSessionModel`) when no
-   * override exists; only fall back to the deployment default ({@link model})
-   * when that is absent (e.g. tests). The new-session surface uses the bare
-   * {@link model} (no session id yet); the session route threads its id +
-   * `session.model` through these.
+   * in-memory. Until seeded, falls back to the frozen deployment default — never
+   * the mutable new-session {@link model} pick (that would cross-bleed).
+   * Seed with {@link ensureModelForSession} from `session.model` / draft.
    */
-  modelForSession: (sessionId: string, durableSessionModel?: string) => string;
+  modelForSession: (sessionId: string) => string;
   setModelForSession: (sessionId: string, value: string) => void;
+  /** Write only when this session has no override yet (safe metadata/draft seed). */
+  ensureModelForSession: (sessionId: string, value: string) => void;
+  /** Deployment/new-session default effort. Open sessions use {@link effortForSession}. */
   reasoningEffort: IntelligenceEffort;
   setReasoningEffort: Dispatch<SetStateAction<IntelligenceEffort>>;
+  effortForSession: (sessionId: string) => IntelligenceEffort;
+  setEffortForSession: (sessionId: string, value: IntelligenceEffort) => void;
+  /** Write only when this session has no override yet (safe metadata/draft seed). */
+  ensureEffortForSession: (sessionId: string, value: IntelligenceEffort) => void;
   inspectorOpen: boolean;
   setInspectorOpen: Dispatch<SetStateAction<boolean>>;
   session: Session | null;
@@ -229,19 +234,16 @@ export function RootRouteComponent() {
   const [accessError, setAccessError] = useState<string | null>(null);
   const [model, setModel] = useState("gpt-5.6-sol");
   // Per-session model overrides (session id → model). A session with no entry
-  // inherits that session's durable `session.model` (passed at the call site),
-  // then the deployment default. Selecting in its picker writes here so each
-  // open session keeps its own next-turn choice independently.
+  // inherits the deployment default `model`; selecting in its picker writes here
+  // so each open session keeps its own choice independently.
   const [modelBySession, setModelBySession] = useState<Record<string, string>>({});
+  const [reasoningEffortBySession, setReasoningEffortBySession] = useState<
+    Record<string, IntelligenceEffort>
+  >({});
   const [reasoningEffort, setReasoningEffort] = useState<IntelligenceEffort>("low");
-  // The dock is open by default on desktop, but on narrow viewports (<1024px)
-  // the dock renders as a full-screen overlay — so it must start CLOSED there or
-  // a phone opening a session would land with the overlay covering the
-  // transcript. Only the initial default is viewport-aware; the user's later
-  // toggles are never overridden.
-  const [inspectorOpen, setInspectorOpen] = useState<boolean>(() =>
-    typeof window === "undefined" ? true : !window.matchMedia("(max-width: 1023px)").matches,
-  );
+  // Changes/Files dock starts collapsed; user opens via the session-panel toggle.
+  // No localStorage — only an in-memory default (toggle still works for the session).
+  const [inspectorOpen, setInspectorOpen] = useState(false);
   const [connectionState, setConnectionState] = useState<SessionEventsConnectionState>("idle");
   const [manualRepos, setManualRepos] = useState<RepoDraft[]>([]);
   const [manualReposOpen, setManualReposOpen] = useState(false);
@@ -292,7 +294,10 @@ export function RootRouteComponent() {
   // password reset is signed out by definition, so `/reset-password` must never
   // be intercepted by the sign-in panel or workspace-access loading.
   const pathname = useRouterState({ select: (state) => state.location.pathname });
-  const isPublicAuthRoute = pathname === "/reset-password";
+  // Public surfaces render ahead of auth/config gates. `/reset-password` is
+  // always public; the SessionChrome DEV harness is public and needs no session.
+  const isPublicAuthRoute =
+    pathname === "/reset-password" || (import.meta.env.DEV && pathname === "/dev/composer-chrome");
   // The @opengeni/sdk client behind every console API call and hook. Auth
   // headers are read per request; a new identity per key version makes the
   // hooks re-fetch and the event streams reconnect with the new credentials.
@@ -919,17 +924,45 @@ export function RootRouteComponent() {
     setConnectionState("idle");
   }, [setSession]);
 
-  // Session-scoped model: override → durable session.model → deployment default.
-  // Writing records an override without disturbing other sessions (or the
-  // new-session surface, which reads the bare `model`).
+  // Session-scoped model/effort: never fall back to the mutable new-session
+  // picks — those change while other sessions are open and would bleed across.
+  const deploymentDefaultModel = clientConfig?.defaultModel ?? model;
   const modelForSession = useCallback(
-    (sessionId: string, durableSessionModel?: string): string =>
-      modelBySession[sessionId] ?? durableSessionModel ?? model,
-    [model, modelBySession],
+    (sessionId: string): string => modelBySession[sessionId] ?? deploymentDefaultModel,
+    [deploymentDefaultModel, modelBySession],
   );
   const setModelForSession = useCallback((sessionId: string, value: string): void => {
-    setModelBySession((current) => ({ ...current, [sessionId]: value }));
+    setModelBySession((current) =>
+      current[sessionId] === value ? current : { ...current, [sessionId]: value },
+    );
   }, []);
+  const ensureModelForSession = useCallback((sessionId: string, value: string): void => {
+    setModelBySession((current) =>
+      Object.prototype.hasOwnProperty.call(current, sessionId)
+        ? current
+        : { ...current, [sessionId]: value },
+    );
+  }, []);
+  const effortForSession = useCallback(
+    (sessionId: string): IntelligenceEffort =>
+      reasoningEffortBySession[sessionId] ?? clientConfig?.defaultReasoningEffort ?? "low",
+    [clientConfig?.defaultReasoningEffort, reasoningEffortBySession],
+  );
+  const setEffortForSession = useCallback((sessionId: string, value: IntelligenceEffort): void => {
+    setReasoningEffortBySession((current) =>
+      current[sessionId] === value ? current : { ...current, [sessionId]: value },
+    );
+  }, []);
+  const ensureEffortForSession = useCallback(
+    (sessionId: string, value: IntelligenceEffort): void => {
+      setReasoningEffortBySession((current) =>
+        Object.prototype.hasOwnProperty.call(current, sessionId)
+          ? current
+          : { ...current, [sessionId]: value },
+      );
+    },
+    [],
+  );
 
   const resetWorkspaceIntegrations = useCallback(() => {
     setGithubStatus(null);
@@ -973,8 +1006,12 @@ export function RootRouteComponent() {
           setModel,
           modelForSession,
           setModelForSession,
+          ensureModelForSession,
           reasoningEffort,
           setReasoningEffort,
+          effortForSession,
+          setEffortForSession,
+          ensureEffortForSession,
           inspectorOpen,
           setInspectorOpen,
           session,
@@ -1065,7 +1102,11 @@ export function RootRouteComponent() {
     manualReposOpen,
     model,
     modelForSession,
+    ensureModelForSession,
     reasoningEffort,
+    effortForSession,
+    setEffortForSession,
+    ensureEffortForSession,
     refreshGitHub,
     refreshWorkspace,
     refreshWorkspaceMcpServers,

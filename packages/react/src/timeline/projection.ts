@@ -277,6 +277,26 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           });
           break;
         }
+        // Live Responses `web_search_call` events and the later SDK
+        // `RunToolCallItem` share the same item id. Merge so mid-stream cards
+        // do not duplicate when the step finally materializes.
+        if (callId) {
+          const existing = [...items]
+            .reverse()
+            .find(
+              (item): item is ToolCallItem => item.kind === "tool-call" && item.callId === callId,
+            );
+          if (existing) {
+            if (args != null) {
+              existing.arguments = args;
+            }
+            if (payload.raw !== undefined) {
+              existing.raw = mergeToolCallRaw(existing.raw, payload.raw);
+            }
+            existing.status = providerNativeToolStatus(existing.raw);
+            break;
+          }
+        }
         items.push({
           kind: "tool-call",
           id: event.id,
@@ -714,6 +734,38 @@ function providerNativeToolStatus(rawValue: unknown): ToolCallItem["status"] {
     default:
       return "running";
   }
+}
+
+/**
+ * Prefer newer status/fields, but keep earlier providerData.action when a
+ * progress-only Responses event arrives without the search query payload.
+ */
+function mergeToolCallRaw(existingValue: unknown, nextValue: unknown): unknown {
+  const existing = asRecord(existingValue);
+  const next = asRecord(nextValue);
+  if (Object.keys(next).length === 0) {
+    return existingValue;
+  }
+  const existingProvider = asRecord(existing.providerData);
+  const nextProvider = asRecord(next.providerData);
+  const providerData = {
+    ...existingProvider,
+    ...nextProvider,
+  };
+  if (
+    existingProvider.action != null &&
+    (nextProvider.action == null ||
+      (typeof nextProvider.action === "object" &&
+        nextProvider.action !== null &&
+        Object.keys(nextProvider.action as object).length === 0))
+  ) {
+    providerData.action = existingProvider.action;
+  }
+  return {
+    ...existing,
+    ...next,
+    ...(Object.keys(providerData).length > 0 ? { providerData } : {}),
+  };
 }
 
 /**

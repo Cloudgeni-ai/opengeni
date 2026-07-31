@@ -44,6 +44,7 @@ import {
 } from "../hooks/use-slash-commands";
 import { cn } from "../lib/cn";
 import { composerSubmissionErrorMessage, formatBytes, formatRelativeTime } from "../lib/format";
+import type { PickerModelRow } from "../model-policy";
 import { CommandPalette as CommandPaletteView } from "./command-palette";
 import { ModelPicker as ModelPickerView } from "./model-picker";
 
@@ -191,6 +192,8 @@ export const defaultChatComposerMessages: ChatComposerMessages = {
   draftConflict: "This draft changed in another tab. Your local draft is still here.",
   useOtherDraft: "Use other draft",
   keepMine: "Keep mine",
+  // Kept for embedder message overrides / back-compat. Routine autosave is
+  // silent — only draft conflicts surface under the composer.
   savingDraft: "Saving draft…",
   formatBytes,
   formatRelativeTime,
@@ -698,9 +701,9 @@ export const Surface = forwardRef<HTMLDivElement, ComposerSurfaceProps>(function
       onDragLeave={controller.attachments ? controller.handleDragLeave : undefined}
       onDrop={controller.attachments ? controller.handleDrop : undefined}
       className={cn(
-        "relative rounded-og-lg border border-og-border bg-og-surface-1 shadow-og-sm",
-        "transition-[border-color,box-shadow] duration-200",
-        "focus-within:border-og-accent/60 focus-within:shadow-og-glow",
+        "relative rounded-og-lg border border-og-border/90 bg-og-surface-1 shadow-og-sm",
+        "transition-[border-color,box-shadow] duration-200 ease-og-out",
+        "focus-within:border-og-accent/50 focus-within:shadow-og-glow",
         controller.dragging && "border-dashed border-og-accent",
         className,
       )}
@@ -814,7 +817,7 @@ export const Input = forwardRef<HTMLTextAreaElement, ComposerInputProps>(functio
         paletteOpen ? `${controller.listboxId}-option-${controller.palette.highlight}` : undefined
       }
       className={cn(
-        "block w-full resize-none bg-transparent px-4 pt-3.5 pb-1 text-base leading-6 md:text-og-md",
+        "block w-full resize-none bg-transparent px-3.5 pt-3 pb-1 text-base leading-6 md:px-4 md:text-og-md",
         "text-og-fg placeholder:text-og-fg-subtle focus:outline-none focus-visible:outline-none",
         "disabled:cursor-not-allowed disabled:opacity-60",
         className,
@@ -848,7 +851,7 @@ export const Footer = forwardRef<HTMLDivElement, ComposerFooterProps>(function C
     <div
       {...props}
       ref={ref}
-      className={cn("flex items-end gap-2 px-2.5 pb-2.5 pt-1", className)}
+      className={cn("flex items-end gap-1.5 px-2 pb-2 pt-0.5 sm:px-2.5 sm:pb-2.5", className)}
     />
   );
 });
@@ -949,7 +952,9 @@ export const AttachButton = forwardRef<HTMLButtonElement, ComposerAttachButtonPr
 );
 
 export type ComposerModelPickerProps = {
-  models: ClientModel[];
+  models?: ClientModel[] | undefined;
+  /** Catalog-backed rows preferred over legacy provider-grouped models. */
+  rows?: PickerModelRow[] | undefined;
   value?: string | undefined;
   onChange?: ((modelId: string) => void) | undefined;
   label?: string | undefined;
@@ -960,6 +965,7 @@ export type ComposerModelPickerProps = {
 
 export function ModelPicker({
   models,
+  rows,
   value,
   onChange,
   label,
@@ -970,6 +976,7 @@ export function ModelPicker({
   return (
     <ModelPickerView
       models={models}
+      rows={rows}
       value={value}
       onChange={(modelId) => onChange?.(modelId)}
       disabled={controller.disabled}
@@ -1123,8 +1130,6 @@ export function Status() {
             {controller.messages.keepMine}
           </button>
         </div>
-      ) : controller.draftSaving ? (
-        <p className="px-1 pt-1 text-og-xs text-og-fg-subtle">{controller.messages.savingDraft}</p>
       ) : null}
     </>
   );
@@ -1139,11 +1144,7 @@ function ComposerAnnouncements() {
           {controller.activeNotice.message}
         </p>
       ) : null}
-      {controller.draftConflict ? (
-        <p role="alert">{controller.messages.draftConflict}</p>
-      ) : controller.draftSaving ? (
-        <p role="status">{controller.messages.savingDraft}</p>
-      ) : null}
+      {controller.draftConflict ? <p role="alert">{controller.messages.draftConflict}</p> : null}
     </div>
   );
 }

@@ -1,7 +1,7 @@
 // The session view — live timeline plus one compact prompt queue above the
 // composer. Enter queues and Cmd/Ctrl+Enter steers; failed sessions stay
 // honest (reason + retry history) and revivable from the same composer.
-import { HumanInputForm, MessageTimeline, QueueSurface } from "@opengeni/react/session-ui";
+import { HumanInputForm, MessageTimeline, SessionChrome } from "@opengeni/react/session-ui";
 import {
   creditExhaustedFromEvents,
   projectPendingApprovals,
@@ -35,29 +35,30 @@ import {
   TerminalSessionBanner,
   UserMessageBody,
 } from "@/components/session/banners";
-import { ComposerAgentsPill } from "@/components/session/composer-agents-pill";
 import { useRail } from "@/components/rail/rail-context";
-import { GoalSurface } from "@/components/session/goal-surface";
+import { SubagentTree } from "@/components/session/subagents";
 import { SessionWorkspace } from "@/components/session/sandbox-workspace";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Notice } from "@/components/ui/notice";
 import type { WorkspaceTab } from "@opengeni/react";
 import { useAppContext } from "@/context";
-import { useCodexModels } from "@/lib/use-codex-models";
-import { resolveSessionComposerModel } from "@/lib/session-model";
 import { normalizeProviderDomain } from "@/lib/capabilities";
 import {
   isTerminalSessionStatus,
   projectSessionTimeline,
   summarizeSessionFailure,
 } from "@/lib/events";
+import { coerceReasoningEffortForModel, findPickerRow } from "@/lib/model-policy";
+import { resolveSessionComposerModel } from "@/lib/session-model";
 import { mergeSessionContextProjection } from "@/lib/session-pins";
 import {
   firstPartySessionToolOptions,
+  isIntelligenceEffort,
   sessionPolicyPickerIds,
   toolsForPolicySelection,
 } from "@/lib/session-tools";
+import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 import type { ComposerDraft, LineageNode } from "@opengeni/sdk";
 import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
 
@@ -89,6 +90,12 @@ export function SessionRoute({
     hasOlder,
     loadingOlder,
     loadOlder,
+    hasNewer,
+    loadingNewer,
+    loadNewer,
+    loadingOldest,
+    loadOldest,
+    jumpToLatest,
     error: streamError,
   } = useSessionEvents(sessionId);
   // Queue + goal share the timeline's event stream — one SSE connection total.
@@ -383,6 +390,12 @@ export function SessionRoute({
       hasOlder={hasOlder}
       loadingOlder={loadingOlder}
       onLoadOlder={loadOlder}
+      hasNewer={hasNewer}
+      loadingNewer={loadingNewer}
+      onLoadNewer={loadNewer}
+      loadingOldest={loadingOldest}
+      onJumpToStart={loadOldest}
+      onJumpToLatest={jumpToLatest}
       onClearView={clearView}
       onOpenSession={(nextSessionId) =>
         void navigate({
@@ -515,11 +528,17 @@ function SessionChatPane(props: {
   creditExhausted: boolean;
   goal: ReturnType<typeof useGoal>;
   queue: ReturnType<typeof useTurnQueue>;
-  /** Spawned-worker lineage children — feeds the composer-anchored agents pill. */
+  /** Spawned-worker lineage children — feeds SessionChrome agents segment. */
   agentNodes: LineageNode[];
   hasOlder: boolean;
   loadingOlder: boolean;
   onLoadOlder: () => Promise<boolean>;
+  hasNewer: boolean;
+  loadingNewer: boolean;
+  onLoadNewer: () => Promise<boolean>;
+  loadingOldest: boolean;
+  onJumpToStart: () => Promise<boolean>;
+  onJumpToLatest: () => Promise<void>;
   /** Reset the local timeline view (the /clear-view command target). */
   onClearView: () => void;
   onOpenSession: (sessionId: string) => void;
@@ -534,8 +553,32 @@ function SessionChatPane(props: {
   resolveCapabilityName: (mcpServerId: string) => string | null;
 }) {
   const context = useAppContext();
-  const codexModels = useCodexModels(props.session.workspaceId);
+  const modelCatalog = useWorkspaceModelCatalog(props.session.workspaceId);
   const terminal = isTerminalSessionStatus(props.session.status);
+  const agentsSignal = useMemo(() => {
+    const agents = props.agentNodes;
+    if (agents.length === 0) return undefined;
+    const runningAgents = agents.filter(
+      (node) =>
+        node.session.status === "running" && node.session.effectiveControl.state === "active",
+    ).length;
+    const pausedAgents = agents.filter(
+      (node) => node.session.effectiveControl.state === "paused",
+    ).length;
+    return {
+      count: agents.length,
+      detail:
+        runningAgents > 0
+          ? `${runningAgents} running`
+          : pausedAgents > 0
+            ? `${pausedAgents} paused`
+            : "Idle",
+      tone: (runningAgents > 0 ? "running" : pausedAgents > 0 ? "waiting" : "neutral") as
+        | "running"
+        | "waiting"
+        | "neutral",
+    };
+  }, [props.agentNodes]);
   // Per-approval decision state: an in-flight decision disables both buttons for
   // that approval and shows progress; a settled one can never double-submit even
   // if the strip lingers for a beat before the status flips.
@@ -578,7 +621,7 @@ function SessionChatPane(props: {
   // Workspace-scoped: the provider (mounted on the workspace route) supplies
   // the workspaceId, so the hook needs no positional argument.
   const attachments = useFileAttachments();
-  const { reasoningEffort } = context;
+  const { effortForSession } = context;
   const selectableSessionMcpServers = context.toolMcpServers;
   const selectableToolIds = useMemo(
     () => selectableSessionMcpServers.map((server) => server.id),
@@ -599,20 +642,54 @@ function SessionChatPane(props: {
   const durableToolsSessionId = useRef(props.session.id);
   const [durableToolsSaving, setDurableToolsSaving] = useState(false);
   const [durableToolsError, setDurableToolsError] = useState<string | null>(null);
-  // Next-turn model: in-memory override, else durable session.model — never the
-  // unrelated deployment default (that made remote_v2 sessions look like "5.6-SOL").
-  const requestedModel = context.modelForSession(props.session.id, props.session.model);
+  // Session-scoped pick (seeded from durable session.model). On remote_v2,
+  // never keep a stale non-Codex override over the durable Codex model.
+  const requestedModel = context.modelForSession(props.session.id);
   const model = resolveSessionComposerModel({
     requested: requestedModel,
     durableSessionModel: props.session.model,
     codexCompactionMode: props.session.codexCompactionMode,
   });
-  const { setModelForSession, setReasoningEffort } = context;
+  const reasoningEffort = effortForSession(props.session.id);
+  const { setModelForSession, setEffortForSession, ensureModelForSession, ensureEffortForSession } =
+    context;
+  // Once the operator touches the picker, draft reloads must not stomp it.
+  const pickerTouchedRef = useRef(false);
+  useEffect(() => {
+    pickerTouchedRef.current = false;
+  }, [props.session.id]);
+  // Seed once from durable session facts so open sessions never inherit the
+  // mutable new-session composer picks. Draft apply / picker writes still win.
+  useEffect(() => {
+    ensureModelForSession(props.session.id, props.session.model);
+    const metaEffort = props.session.metadata.reasoningEffort;
+    if (isIntelligenceEffort(metaEffort)) {
+      ensureEffortForSession(props.session.id, metaEffort);
+    }
+  }, [
+    ensureEffortForSession,
+    ensureModelForSession,
+    props.session.id,
+    props.session.metadata.reasoningEffort,
+    props.session.model,
+  ]);
+  // Drop a stale non-Codex override so the picker selection matches send.
   useEffect(() => {
     if (model === requestedModel) return;
-    // Drop a stale non-Codex override so the picker selection matches send.
     setModelForSession(props.session.id, model);
   }, [model, requestedModel, props.session.id, setModelForSession]);
+  // Catalog-backed effort legality: snap sticky effort when the selected model
+  // cannot run it (e.g. after reconnect or catalog refresh).
+  useEffect(() => {
+    const row = findPickerRow(modelCatalog.rows, model);
+    if (!row?.selectable) {
+      return;
+    }
+    const coerced = coerceReasoningEffortForModel(row.catalog, reasoningEffort);
+    if (coerced !== reasoningEffort) {
+      setEffortForSession(props.session.id, coerced);
+    }
+  }, [model, modelCatalog.rows, props.session.id, reasoningEffort, setEffortForSession]);
   useEffect(() => {
     if (durableToolsSessionId.current !== props.session.id) {
       durableToolsSessionId.current = props.session.id;
@@ -714,10 +791,16 @@ function SessionChatPane(props: {
   );
   const applyComposerSettings = useCallback(
     (draft: ComposerDraft) => {
+      // Initial hydrate only. A later draft reload (or a fetch that raced the
+      // picker) must not undo an in-session model/effort change; autosave
+      // persists the picker into the draft.
+      if (pickerTouchedRef.current) {
+        return;
+      }
       setModelForSession(props.session.id, draft.model);
-      setReasoningEffort(draft.reasoningEffort);
+      setEffortForSession(props.session.id, draft.reasoningEffort);
     },
-    [props.session.id, setModelForSession, setReasoningEffort],
+    [props.session.id, setEffortForSession, setModelForSession],
   );
   const composer = useComposer(props.session.id, {
     events: props.events,
@@ -824,6 +907,12 @@ function SessionChatPane(props: {
               hasOlder={props.hasOlder}
               loadingOlder={props.loadingOlder}
               onLoadOlder={() => void props.onLoadOlder()}
+              hasNewer={props.hasNewer}
+              loadingNewer={props.loadingNewer}
+              onLoadNewer={() => void props.onLoadNewer()}
+              loadingOldest={props.loadingOldest}
+              onJumpToStart={() => void props.onJumpToStart()}
+              onJumpToLatest={() => void props.onJumpToLatest()}
               emptyState={
                 props.initialLoading ? (
                   // History is still fetching — a quiet shimmer, not the
@@ -916,12 +1005,22 @@ function SessionChatPane(props: {
         </div>
       ) : null}
 
-      {/* The one compact control stack above the composer. Each surface hides
-          when it has nothing to show, so the stack degrades to
-          whichever one is present — or neither. */}
-      {!terminal ? <QueueSurface queue={props.queue} composer={composer} /> : null}
-      <GoalSurface session={props.session} goal={props.goal} />
-      <ComposerAgentsPill workspaceId={props.session.workspaceId} nodes={props.agentNodes} />
+      {/* Compact session chrome above the composer — incoming, queue, goal,
+          and agents as one dock. Hides entirely when there are no signals. */}
+      <div className="mx-auto mb-2 w-full max-w-3xl shrink-0 px-4 sm:px-6">
+        <SessionChrome
+          queue={props.queue}
+          composer={terminal ? undefined : composer}
+          goal={props.goal}
+          readOnly={terminal}
+          agentsSignal={agentsSignal}
+          agentsPanel={
+            props.agentNodes.length > 0 ? (
+              <SubagentTree workspaceId={props.session.workspaceId} nodes={props.agentNodes} />
+            ) : null
+          }
+        />
+      </div>
 
       <div className="shrink-0 px-4 pb-4 pt-1 sm:px-6">
         <div className="mx-auto w-full max-w-3xl">
@@ -956,14 +1055,21 @@ function SessionChatPane(props: {
             controls={
               <div className="flex min-w-0 items-center gap-1.5">
                 <ModelPicker
-                  config={context.clientConfig}
+                  rows={modelCatalog.rowsForSelection(model)}
                   model={model}
-                  effort={context.reasoningEffort}
+                  effort={reasoningEffort}
                   disabled={composer.sending}
-                  extraModels={codexModels}
+                  loading={modelCatalog.loading}
+                  error={modelCatalog.error}
                   codexOnly={props.session.codexCompactionMode === "remote_v2"}
-                  onModelChange={(value) => context.setModelForSession(props.session.id, value)}
-                  onEffortChange={context.setReasoningEffort}
+                  onModelChange={(value) => {
+                    pickerTouchedRef.current = true;
+                    context.setModelForSession(props.session.id, value);
+                  }}
+                  onEffortChange={(value) => {
+                    pickerTouchedRef.current = true;
+                    context.setEffortForSession(props.session.id, value);
+                  }}
                 />
                 <SessionToolPicker
                   servers={selectableSessionMcpServers}

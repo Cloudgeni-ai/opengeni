@@ -1,5 +1,6 @@
 import { CheckIcon, ChevronDownIcon, PlugIcon } from "lucide-react";
 import type { FirstPartyMcpToolName } from "@opengeni/contracts";
+import { useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -10,108 +11,75 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { isCodexProductModel } from "@/lib/session-model";
 import {
-  effortOptionsFor,
-  labelEffort,
-  type IntelligenceEffort,
-  type McpServerOption,
-} from "@/lib/session-tools";
+  advancedSourceSummary,
+  coerceReasoningEffortForModel,
+  effortOptionsForModel,
+  findPickerRow,
+  groupPickerRowsByBillingClass,
+  labelLatencyMode,
+  payerSummaryForModel,
+  runnableLatencyModesForModel,
+  type PickerModelRow,
+} from "@/lib/model-policy";
+import { isCodexProductModel } from "@/lib/session-model";
+import { labelEffort, type IntelligenceEffort, type McpServerOption } from "@/lib/session-tools";
 import { cn } from "@/lib/utils";
-import type { ClientConfig, ClientModel } from "@/types";
 
-/**
- * One row in the model dropdown: the id sent to the host plus the display label
- * and the provider section it belongs under. Derived from the host-exposed
- * {@link ClientConfig.models} (provider-grouped, with labels) when present, and
- * falls back to the flat {@link ClientConfig.allowedModels} id list on older
- * hosts (no provider grouping, label === id). Always includes the currently
- * selected model so a stale/curated-out choice still renders its own row.
- *
- * On remote_v2 (`codexOnly`), non-Codex rows stay visible but disabled — same
- * chrome as a normal session, just not selectable.
- */
-type ModelChoice = {
-  id: string;
-  label: string;
-  providerLabel: string | null;
-  disabled: boolean;
-};
+export type { PickerModelRow };
 
-function isCodexModelChoice(id: string, provider?: string | null): boolean {
-  return isCodexProductModel(id) || provider === "codex-subscription";
+function selectedRowLabel(rows: PickerModelRow[], selectedId: string): string {
+  return findPickerRow(rows, selectedId)?.label ?? selectedId;
 }
 
-/** Catalog / id label — never invent a shouty short name. */
-function modelChoiceLabel(id: string, catalogLabel?: string): string {
-  if (catalogLabel && catalogLabel.length > 0) return catalogLabel;
-  return isCodexProductModel(id) ? id.slice("codex/".length) : id;
+function isCodexPickerRow(row: PickerModelRow): boolean {
+  return isCodexProductModel(row.id) || row.provider === "codex-subscription";
 }
 
-function modelChoices(
-  config: ClientConfig | null,
-  selected: string,
-  extraModels: ClientModel[] = [],
-  codexOnly = false,
-): ModelChoice[] {
-  // extraModels are workspace-scoped (e.g. a connected Codex subscription's models)
-  // appended to the host's deployment list; provider grouping keeps them distinct.
-  const rich = [...(config?.models ?? []), ...extraModels];
-  const choices: ModelChoice[] =
-    rich.length > 0
-      ? rich.map((model) => ({
-          id: model.id,
-          label: modelChoiceLabel(model.id, model.label),
-          providerLabel: model.providerLabel,
-          disabled: codexOnly && !isCodexModelChoice(model.id, model.provider),
-        }))
-      : (config?.allowedModels ?? [selected]).map((id) => ({
-          id,
-          label: modelChoiceLabel(id),
-          providerLabel: null,
-          disabled: codexOnly && !isCodexModelChoice(id),
-        }));
-  // Guarantee the active selection is always offered, even if the host has since
-  // curated it out of the exposed list (mirrors the old `[props.model]` fallback).
-  if (!choices.some((choice) => choice.id === selected)) {
-    choices.unshift({
-      id: selected,
-      label: modelChoiceLabel(selected),
-      providerLabel: null,
-      disabled: codexOnly && !isCodexModelChoice(selected),
-    });
-  }
-  return choices;
-}
-
-/** Trigger label for the active model: its display label from the exposed list. */
-function selectedModelLabel(choices: ModelChoice[], selected: string): string {
-  return choices.find((choice) => choice.id === selected)?.label ?? modelChoiceLabel(selected);
+/** Keep rows visible; tighten selectable + reason for remote_v2. */
+function applyCodexOnly(rows: PickerModelRow[], codexOnly: boolean): PickerModelRow[] {
+  if (!codexOnly) return rows;
+  return rows.map((row) => {
+    if (isCodexPickerRow(row)) return row;
+    return {
+      ...row,
+      selectable: false,
+      unavailableReason: row.unavailableReason ?? "Codex-only session",
+    };
+  });
 }
 
 export function ModelPicker(props: {
-  config: ClientConfig | null;
+  rows: PickerModelRow[];
   model: string;
   effort: IntelligenceEffort;
   disabled?: boolean;
-  extraModels?: ClientModel[];
-  /**
-   * When true (remote_v2 sessions), non-Codex models remain listed but cannot
-   * be selected. Same picker chrome as a normal session.
-   */
+  loading?: boolean;
+  error?: string | null;
+  /** remote_v2: non-Codex stay listed, not selectable */
   codexOnly?: boolean;
   onModelChange: (value: string) => void;
   onEffortChange: (value: IntelligenceEffort) => void;
 }) {
-  // Host-curated effort allow-list, canonically ordered, full enum — mirrors how
-  // the model picker is driven by config.allowedModels (no lossy UI filter).
-  const effortOptions = effortOptionsFor(props.config);
-  const choices = modelChoices(
-    props.config,
-    props.model,
-    props.extraModels ?? [],
-    props.codexOnly === true,
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const rows = useMemo(
+    () => applyCodexOnly(props.rows, props.codexOnly === true),
+    [props.rows, props.codexOnly],
   );
+  const groups = useMemo(() => groupPickerRowsByBillingClass(rows), [rows]);
+  const selectedRow = findPickerRow(rows, props.model);
+  const effortOptions = selectedRow
+    ? effortOptionsForModel(selectedRow.catalog)
+    : (["low"] as IntelligenceEffort[]);
+  const latencyModes = selectedRow ? runnableLatencyModesForModel(selectedRow.catalog) : [];
+  // Catalog advertises non-default latency modes; selection is not wired yet,
+  // so surface as read-only context — never as disabled fake menu items.
+  const speedSummary =
+    latencyModes.length > 1 || latencyModes.some((mode) => mode !== "standard")
+      ? latencyModes.map(labelLatencyMode).join(" · ")
+      : null;
+  const routeDetails = selectedRow ? advancedSourceSummary(selectedRow.catalog) : null;
+
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -121,10 +89,12 @@ export function ModelPicker(props: {
           size="sm"
           disabled={props.disabled}
           aria-label="Model and effort"
-          className="h-8 max-w-[14rem] gap-1 rounded-full border border-transparent px-2.5 text-xs text-fg-muted hover:border-border hover:bg-surface-2 hover:text-fg"
+          className="h-8 max-w-[16rem] gap-1 rounded-full border border-transparent px-2.5 text-xs text-fg-muted hover:border-border hover:bg-surface-2 hover:text-fg"
         >
           <span className="truncate font-medium text-fg">
-            {selectedModelLabel(choices, props.model)}
+            {props.loading && rows.length === 0
+              ? "Loading models…"
+              : selectedRowLabel(rows, props.model)}
           </span>
           <span>{labelEffort(props.effort)}</span>
           <ChevronDownIcon className="size-3 shrink-0" />
@@ -134,14 +104,23 @@ export function ModelPicker(props: {
         align="start"
         side="top"
         sideOffset={8}
-        className="w-56 rounded-xl border-border bg-surface p-2 shadow-xl"
+        className="max-h-[min(32rem,70vh)] w-72 overflow-y-auto rounded-xl border-border bg-surface p-2 shadow-xl"
       >
+        {props.error ? (
+          <p className="px-2 py-1 text-xs text-destructive" role="alert">
+            {props.error}
+          </p>
+        ) : null}
+        {props.loading && rows.length === 0 ? (
+          <p className="px-2 py-1 text-xs text-fg-subtle">Loading model catalog…</p>
+        ) : null}
         <DropdownMenuLabel className="px-2 pt-1 pb-1 text-xs font-normal text-fg-subtle">
-          Effort
+          Thinking
         </DropdownMenuLabel>
         {effortOptions.map((option) => (
           <DropdownMenuItem
             key={option}
+            disabled={!selectedRow?.selectable}
             onSelect={() => props.onEffortChange(option)}
             className="h-8 cursor-pointer rounded-md px-2 text-sm"
           >
@@ -149,55 +128,87 @@ export function ModelPicker(props: {
             {option === props.effort ? <CheckIcon className="ml-auto size-4" /> : null}
           </DropdownMenuItem>
         ))}
+        {speedSummary ? (
+          <p className="px-2 pt-1 pb-0.5 text-2xs text-fg-subtle">
+            Speed (catalog): {speedSummary}
+          </p>
+        ) : null}
         <DropdownMenuSeparator className="my-2 bg-border" />
         <DropdownMenuLabel className="px-2 pt-0 pb-1 text-xs font-normal text-fg-subtle">
           Model
         </DropdownMenuLabel>
-        {choices.map((choice, index) => (
-          <ModelChoiceRow
-            key={choice.id}
-            choice={choice}
-            // Repeat a provider heading only when it changes from the row above,
-            // so multi-provider lists read as grouped sections; single-provider
-            // (and the flat allowedModels fallback) shows no heading at all.
-            showProviderLabel={
-              choice.providerLabel !== null &&
-              choice.providerLabel !== choices[index - 1]?.providerLabel
-            }
-            selected={choice.id === props.model}
-            onSelect={() => {
-              if (choice.disabled) return;
-              props.onModelChange(choice.id);
-            }}
-          />
+        {groups.length === 0 && !props.loading ? (
+          <p className="px-2 py-1 text-xs text-fg-subtle">No models available.</p>
+        ) : null}
+        {groups.map((group) => (
+          <div key={group.billingClass}>
+            <DropdownMenuLabel className="px-2 pt-1 pb-0.5 text-2xs font-normal uppercase tracking-wide text-fg-subtle">
+              {group.label}
+            </DropdownMenuLabel>
+            {group.rows.map((row) => (
+              <ModelChoiceRow
+                key={`${row.billingClass}:${row.id}`}
+                row={row}
+                selected={row.id === props.model}
+                onSelect={() => {
+                  props.onModelChange(row.id);
+                  props.onEffortChange(coerceReasoningEffortForModel(row.catalog, props.effort));
+                }}
+              />
+            ))}
+          </div>
         ))}
+        {selectedRow ? (
+          <>
+            <DropdownMenuSeparator className="my-2 bg-border" />
+            <div className="space-y-1 px-2 pb-1 text-xs text-fg-subtle">
+              <p>{payerSummaryForModel(selectedRow.catalog)}</p>
+              {routeDetails ? (
+                <button
+                  type="button"
+                  className="text-left text-fg-muted underline-offset-2 hover:underline"
+                  onClick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    setAdvancedOpen((open) => !open);
+                  }}
+                >
+                  {advancedOpen ? "Hide route details" : "Show route details"}
+                </button>
+              ) : null}
+              {advancedOpen && routeDetails ? (
+                <p className="text-fg-muted">{routeDetails}</p>
+              ) : null}
+            </div>
+          </>
+        ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
   );
 }
 
-function ModelChoiceRow(props: {
-  choice: ModelChoice;
-  showProviderLabel: boolean;
-  selected: boolean;
-  onSelect: () => void;
-}) {
+function ModelChoiceRow(props: { row: PickerModelRow; selected: boolean; onSelect: () => void }) {
+  const disabled = !props.row.selectable;
   return (
-    <>
-      {props.showProviderLabel ? (
-        <DropdownMenuLabel className="px-2 pt-1 pb-0.5 text-2xs font-normal uppercase tracking-wide text-fg-subtle">
-          {props.choice.providerLabel}
-        </DropdownMenuLabel>
+    <DropdownMenuItem
+      disabled={disabled}
+      onSelect={() => {
+        if (!disabled) {
+          props.onSelect();
+        }
+      }}
+      className={cn(
+        "h-auto min-h-8 cursor-pointer rounded-md px-2 py-1.5 text-sm",
+        disabled && "cursor-not-allowed opacity-60",
+      )}
+      title={props.row.unavailableReason ?? undefined}
+    >
+      <span className="min-w-0 flex-1 truncate">{props.row.label}</span>
+      {props.selected ? <CheckIcon className="ml-2 size-4 shrink-0" /> : null}
+      {props.row.unavailableReason ? (
+        <span className="ml-2 shrink-0 text-2xs text-fg-subtle">{props.row.unavailableReason}</span>
       ) : null}
-      <DropdownMenuItem
-        onSelect={props.onSelect}
-        disabled={props.choice.disabled}
-        className="h-8 cursor-pointer rounded-md px-2 text-sm"
-      >
-        <span className="truncate">{props.choice.label}</span>
-        {props.selected ? <CheckIcon className="ml-auto size-4 shrink-0" /> : null}
-      </DropdownMenuItem>
-    </>
+    </DropdownMenuItem>
   );
 }
 

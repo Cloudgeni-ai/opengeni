@@ -4,6 +4,7 @@ import {
   authorizeTranscriptionAdapter,
   createTranscriptionSessionRequest,
   resolveWorkspaceTranscriptionPolicy,
+  resolveWorkspaceVoiceInputEnabled,
   type TranscriptionAdapter,
   type WorkspaceTranscriptionPolicy,
 } from "../src/transcription";
@@ -164,5 +165,18 @@ describe("provider-agnostic transcription policy", () => {
         sequenceFloor: -1,
       }),
     ).toBeNull();
+  });
+});
+
+describe("native voiceInput settings resolution", () => {
+  test("prefers voiceInput and maps legacy transcription.enabled", () => {
+    expect(resolveWorkspaceVoiceInputEnabled({ voiceInput: { enabled: false } })).toBe(false);
+    expect(resolveWorkspaceVoiceInputEnabled({ transcription: acceptedPolicy })).toBe(true);
+    expect(
+      resolveWorkspaceVoiceInputEnabled({
+        transcription: { ...acceptedPolicy, enabled: false },
+      }),
+    ).toBe(false);
+    expect(resolveWorkspaceVoiceInputEnabled({})).toBeNull();
   });
 });

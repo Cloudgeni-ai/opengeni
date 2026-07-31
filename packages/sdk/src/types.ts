@@ -418,6 +418,71 @@ export type OpenGeniSlackBotInstallStart = {
   expiresAt: string;
 };
 
+export type GoogleDriveTargetScope = "user" | "workspace" | "organization";
+export type GoogleDriveSyncCadence = "manual" | "hourly" | "daily";
+export type GoogleDriveReadPolicy = "allow" | "ask" | "block";
+
+export type GoogleDriveSelectedSource = {
+  id: string;
+  name: string;
+  mimeType: string;
+  driveId: string | null;
+  targetScope: GoogleDriveTargetScope;
+  syncCadence: GoogleDriveSyncCadence;
+  readPolicy: GoogleDriveReadPolicy;
+  selectedAt: string;
+};
+
+export type GoogleDriveConnectionMetadata = {
+  credentialRole: "google_drive_metadata";
+  credentialLabel: "Google Drive metadata browser";
+  googlePermissionId: string;
+  googleEmail: string;
+  googleDisplayName: string | null;
+  verifiedAt: string;
+  accessMode: "metadata_readonly" | "readonly";
+  selectedSources?: GoogleDriveSelectedSource[] | undefined;
+  /** @deprecated Read selectedSources; retained while existing connections migrate. */
+  selectedSource?: GoogleDriveSelectedSource | null | undefined;
+  [key: string]: unknown;
+};
+
+export type GoogleDriveOAuthStartRequest = {
+  connectionId?: string | undefined;
+};
+
+export type GoogleDriveOAuthStartResponse = {
+  authorizationUrl: string;
+  expiresAt: string;
+};
+
+export type GoogleDriveBrowseItem = {
+  id: string;
+  name: string;
+  mimeType: string;
+  kind: "folder" | "file";
+  driveId: string | null;
+  modifiedTime: string | null;
+  size: string | null;
+  webViewLink: string | null;
+};
+
+export type GoogleDriveBrowseResponse = {
+  connection: ConnectionMetadata;
+  parentId: string;
+  current: GoogleDriveBrowseItem | null;
+  items: GoogleDriveBrowseItem[];
+  nextPageToken: string | null;
+  incompleteSearch: boolean;
+};
+
+export type SaveGoogleDriveSourceRequest = {
+  sources: Array<Pick<GoogleDriveBrowseItem, "id" | "name" | "mimeType" | "driveId">>;
+  targetScope: GoogleDriveTargetScope;
+  syncCadence: GoogleDriveSyncCadence;
+  readPolicy: GoogleDriveReadPolicy;
+};
+
 export type UpdateConnectionRequest = {
   providerDomain?: string | undefined;
   subjectId?: string | null | undefined;
@@ -1726,7 +1791,8 @@ export type FirstPartyMcpToolName =
   | "slack_bot_list_files"
   | "slack_bot_file_info"
   | "slack_bot_file_content"
-  | "slack_bot_post_message";
+  | "slack_bot_post_message"
+  | "slack_bot_delete_message";
 
 export type ProductAccessMode = "local" | "configured" | "managed";
 
@@ -2114,6 +2180,8 @@ export type ClientConfig = {
   allowedReasoningEfforts: ReasoningEffort[];
   mcpServers: { id: string; name: string }[];
   fileUploads: { enabled: boolean; maxSizeBytes: number };
+  /** Native browser microphone capture + server-side transcription capability. */
+  voiceInput?: ClientVoiceInputConfig | undefined;
   productAccessMode: ProductAccessMode;
   auth: ClientAuthConfig;
   // Server-wide hint: does this deployment support Channel-A structured services
@@ -2125,6 +2193,20 @@ export type ClientConfig = {
     git: boolean;
     terminalEvents: boolean;
   };
+};
+
+/** Client-safe voice-input capability projection. */
+export type ClientVoiceInputConfig = {
+  available: boolean;
+  maxDurationSeconds: number;
+  maxSizeBytes: number;
+  acceptedMimeTypes: string[];
+};
+
+/** Response from POST /v1/workspaces/:workspaceId/transcriptions. */
+export type TranscribeAudioResponse = {
+  text: string;
+  languages: string[];
 };
 
 export type AccountRole = "owner" | "admin" | "member";
@@ -2190,6 +2272,7 @@ export type Workspace = {
 
 export type WorkspaceSettings = {
   memoryEnabled?: boolean | undefined;
+  voiceInput?: WorkspaceVoiceInputSettings | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   maxNestedAgentDepth?: number | null | undefined;
   /** Default for new Codex sessions; absent ⇒ remote_v2. */
@@ -2197,8 +2280,13 @@ export type WorkspaceSettings = {
   [key: string]: unknown;
 };
 
+export type WorkspaceVoiceInputSettings = {
+  enabled: boolean;
+};
+
 export type UpdateWorkspaceSettingsRequest = {
   memoryEnabled?: boolean | undefined;
+  voiceInput?: WorkspaceVoiceInputSettings | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   maxNestedAgentDepth?: number | null | undefined;
   codexCompactionDefault?: "remote_v2" | "portable" | undefined;

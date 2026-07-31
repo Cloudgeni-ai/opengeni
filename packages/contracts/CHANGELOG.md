@@ -1,5 +1,20 @@
 # @opengeni/contracts
 
+## Unreleased
+
+### Minor Changes
+
+- Add native voice-input contracts: `ClientConfig.voiceInput`, `WorkspaceVoiceInputSettings`,
+  `TranscribeAudioResponse`, MIME/duration/size ceilings, and
+  `resolveWorkspaceVoiceInputEnabled` (maps legacy `transcription.enabled` for one release).
+  Expand transcription error codes with `unavailable` / `too_large` / `invalid_audio`.
+
+## 0.24.3
+
+### Patch Changes
+
+- 710b081: Keep sessions usable when a previously selected MCP capability is disconnected or removed. Unavailable historical refs remain visible in effective policy but are omitted from executable tools, and the agent receives a bounded turn-level warning not to claim access to the missing source.
+
 ## 0.24.2
 
 ### Patch Changes
