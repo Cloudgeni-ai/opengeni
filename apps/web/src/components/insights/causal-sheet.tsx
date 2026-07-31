@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from "motion/react";
-import { ArrowRightIcon, CheckCircle2Icon, CircleDotIcon } from "lucide-react";
+import { ArrowRightIcon, CheckCircle2Icon } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -13,23 +13,30 @@ import {
 import { cn } from "@/lib/utils";
 
 import {
-  CREDIT_DRIVERS,
-  SESSION_TREE,
-  WINDOW,
   formatTokens,
   formatUsd,
+  type InsightsSnapshot,
   type TraceTarget,
 } from "./mock-data";
 
-const STEPS = ["Window", "Driver", "Tree", "Receipt", "Act"] as const;
+const STEPS = ["Window", "Driver", "Act"] as const;
 
 export function CausalSheet(props: {
   open: boolean;
   target: TraceTarget | null;
   onOpenChange: (open: boolean) => void;
+  snapshot: InsightsSnapshot;
 }) {
   const [step, setStep] = useState(0);
-  const driver = CREDIT_DRIVERS.find((d) => d.id === props.target?.driverId) ?? CREDIT_DRIVERS[0]!;
+  const snap = props.snapshot;
+  const modelCost = snap.models.reduce((n, m) => n + m.creditUsd, 0);
+  const inputTokens = snap.models.reduce((n, m) => n + m.inputTokens, 0);
+  const cachedTokens = snap.models.reduce((n, m) => n + m.cachedTokens, 0);
+  const cachePct = inputTokens > 0 ? Math.round((cachedTokens / inputTokens) * 100) : 0;
+  const driver =
+    snap.drivers.find((d) => d.id === props.target?.driverId) ??
+    snap.drivers[0] ??
+    null;
 
   return (
     <Sheet
@@ -47,10 +54,10 @@ export function CausalSheet(props: {
         <div className="border-b border-border px-5 pb-4 pt-5">
           <SheetHeader className="gap-1 text-left">
             <SheetTitle className="text-base font-semibold tracking-[-0.02em]">
-              Causal trace
+              Credit driver
             </SheetTitle>
             <SheetDescription className="text-xs leading-5 text-fg-muted">
-              Decompose a credit-$ driver into session tree and usage_events receipts.
+              Window totals and the selected credit-$ driver from model_call_facts.
             </SheetDescription>
           </SheetHeader>
           <ol className="mt-4 flex gap-1">
@@ -92,112 +99,59 @@ export function CausalSheet(props: {
               className="grid gap-4"
             >
               {step === 0 ? (
-                <Block title="Window totals" body={`${WINDOW.label} · credit ledger only`}>
+                <Block title="Window totals" body={`${snap.rangeLabel} · UTC`}>
                   <dl className="grid grid-cols-2 gap-2 text-xs">
-                    <Fact label="model.cost" value={formatUsd(WINDOW.modelCostUsd)} />
-                    <Fact label="warm_cost" value={formatUsd(WINDOW.warmCostUsd)} />
-                    <Fact label="model.tokens" value={formatTokens(WINDOW.tokens)} />
-                    <Fact
-                      label="Codex turns"
-                      value={`${WINDOW.codexTurns} · $0 credit`}
-                    />
+                    <Fact label="Model credit $" value={formatUsd(modelCost)} />
+                    <Fact label="Workspace credit $" value={formatUsd(snap.workspaceCreditUsd)} />
+                    <Fact label="input tokens" value={formatTokens(inputTokens)} />
+                    <Fact label="cache hit" value={`${cachePct}%`} />
+                    <Fact label="warm hours" value={`${(snap.warmSeconds / 3600).toFixed(1)}h`} />
                   </dl>
                 </Block>
               ) : null}
               {step === 1 ? (
                 <Block
                   title="Selected driver"
-                  body={`Grouped by ${driver.groupBy} · sum(model.cost + warm_cost)`}
+                  body={
+                    driver
+                      ? `Grouped by ${driver.groupBy}`
+                      : "No credit drivers in this window."
+                  }
                 >
-                  <div className="rounded-lg border border-border bg-surface/50 p-3">
-                    <p className="text-sm font-medium text-fg">{driver.label}</p>
-                    <p className="mt-1 font-mono text-xs tabular-nums text-fg-muted">
-                      {formatUsd(driver.creditUsd)} · {formatTokens(driver.tokens)} tokens ·{" "}
-                      {driver.pctOfCreditUsd}% of window
-                    </p>
-                  </div>
+                  {driver ? (
+                    <div className="rounded-lg border border-border bg-surface/50 p-3">
+                      <p className="text-sm font-medium text-fg">{driver.label}</p>
+                      <p className="mt-1 font-mono text-xs tabular-nums text-fg-muted">
+                        {formatUsd(driver.creditUsd)} · {formatTokens(driver.tokens)} tokens ·{" "}
+                        {driver.tokens === 0 ? "—" : `${driver.cacheHitPct}% cache`} ·{" "}
+                        {driver.pctOfCreditUsd}% of window
+                      </p>
+                    </div>
+                  ) : (
+                    <p className="text-xs text-fg-muted">Nothing to show yet.</p>
+                  )}
                 </Block>
               ) : null}
               {step === 2 ? (
                 <Block
-                  title="Session tree"
-                  body="Root + children via session lineage; usage attributed by session_id."
-                >
-                  <ul className="grid gap-1.5">
-                    {SESSION_TREE.map((node) => (
-                      <li
-                        key={node.id}
-                        className="flex items-center gap-2 rounded-lg border border-border px-3 py-2"
-                      >
-                        <CircleDotIcon
-                          className={cn(
-                            "size-3.5 shrink-0",
-                            node.role === "root" ? "text-brand" : "text-fg-subtle",
-                          )}
-                        />
-                        <div className="min-w-0 flex-1">
-                          <p className="truncate text-xs font-medium text-fg">
-                            {node.role === "child" ? "└ " : ""}
-                            {node.label}
-                          </p>
-                          <p className="truncate text-2xs text-fg-subtle">
-                            {node.state} · {node.initiatorLabel}
-                          </p>
-                        </div>
-                        <span className="font-mono text-2xs tabular-nums text-fg-muted">
-                          {formatUsd(node.creditUsd)}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                </Block>
-              ) : null}
-              {step === 3 ? (
-                <Block
-                  title="Example usage_events rows"
-                  body="Idempotent meters on one turn attempt (illustrative)."
-                >
-                  <dl className="grid gap-2 rounded-lg border border-border bg-surface/40 p-3 text-xs">
-                    {[
-                      ["event_type", "model.tokens"],
-                      ["quantity / unit", "842110 / tokens"],
-                      ["event_type", "model.cost"],
-                      ["quantity / unit", "2140000 / usd_micros"],
-                      ["session_id / turn_id", "bound on row"],
-                      ["origin", "goal"],
-                      ["idempotency_key", "usage:model.*:turn:source"],
-                    ].map(([k, v], i) => (
-                      <div
-                        key={`${k}-${i}`}
-                        className="flex justify-between gap-3 border-b border-border/60 pb-1.5 last:border-0 last:pb-0"
-                      >
-                        <dt className="text-fg-subtle">{k}</dt>
-                        <dd className="text-right font-mono text-fg-muted">{v}</dd>
-                      </div>
-                    ))}
-                  </dl>
-                </Block>
-              ) : null}
-              {step === 4 ? (
-                <Block
-                  title="Authority-correct actions"
-                  body="Map findings to existing control APIs — not fleet restarts."
+                  title="Next moves"
+                  body="Use existing session, goal, and schedule controls."
                 >
                   <div className="grid gap-2">
                     {[
                       {
-                        title: "Pause root goal",
-                        detail: "PATCH goal status=paused — stops continuations / children.",
+                        title: "Open the root session",
+                        detail: "Inspect the tree that owns this credit share.",
                         primary: true,
                       },
                       {
-                        title: "Resolve approval",
-                        detail: "Approve or reject the waiting tool call on the child turn.",
+                        title: "Pause an active goal",
+                        detail: "Stops goal continuations for that session.",
                         primary: false,
                       },
                       {
-                        title: "Disable schedule",
-                        detail: "If driver is a schedule — stop scheduled_task.fired volume.",
+                        title: "Disable a schedule",
+                        detail: "Cut fires when the driver is schedule-attributed.",
                         primary: false,
                       },
                     ].map((action) => (
@@ -249,7 +203,12 @@ export function CausalSheet(props: {
               <ArrowRightIcon className="size-3.5" />
             </Button>
           ) : (
-            <Button type="button" size="sm" variant="secondary" onClick={() => props.onOpenChange(false)}>
+            <Button
+              type="button"
+              size="sm"
+              variant="secondary"
+              onClick={() => props.onOpenChange(false)}
+            >
               Done
             </Button>
           )}

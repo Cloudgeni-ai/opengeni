@@ -1912,6 +1912,169 @@ export const UsageEvent = z.object({
 });
 export type UsageEvent = z.infer<typeof UsageEvent>;
 
+/** UTC Insights windows. "this month" aligns with billing's UTC month. */
+export const InsightsRange = z.enum(["today", "week", "month", "ytd"]);
+export type InsightsRange = z.infer<typeof InsightsRange>;
+
+export const InsightsBillingPath = z.enum(["opengeni_credits", "external"]);
+export type InsightsBillingPath = z.infer<typeof InsightsBillingPath>;
+
+export const InsightsModelUsageRow = z.object({
+  id: z.string().min(1),
+  model: z.string().min(1),
+  provider: z.string().min(1),
+  billing: InsightsBillingPath,
+  calls: z.number().int().nonnegative(),
+  inputTokens: z.number().nonnegative(),
+  outputTokens: z.number().nonnegative(),
+  cachedTokens: z.number().nonnegative(),
+  cacheWriteTokens: z.number().nonnegative(),
+  reasoningTokens: z.number().nonnegative(),
+  /** Priced OpenGeni credit $ for this model×provider (from model_call_facts). */
+  creditUsd: z.number().nonnegative(),
+});
+export type InsightsModelUsageRow = z.infer<typeof InsightsModelUsageRow>;
+
+export const InsightsSeriesPoint = z.object({
+  label: z.string().min(1),
+  /** Day-bucketed sum of usage_events.model.cost (workspace-wide) or filtered facts when provider/model set. */
+  modelCostUsd: z.number().nonnegative(),
+  warmSeconds: z.number().nonnegative(),
+  inputTokens: z.number().nonnegative(),
+  cachedTokens: z.number().nonnegative(),
+  cacheHitPct: z.number().int().min(0).max(100),
+  calls: z.number().int().nonnegative(),
+});
+export type InsightsSeriesPoint = z.infer<typeof InsightsSeriesPoint>;
+
+export const InsightsDepthBucket = z.object({
+  depth: z.number().int().nonnegative(),
+  sessions: z.number().int().nonnegative(),
+});
+export type InsightsDepthBucket = z.infer<typeof InsightsDepthBucket>;
+
+export const InsightsModelFacet = z.object({
+  provider: z.string().min(1),
+  model: z.string().min(1),
+});
+export type InsightsModelFacet = z.infer<typeof InsightsModelFacet>;
+
+export const InsightsSpendDriver = z.object({
+  id: z.string().min(1),
+  groupBy: z.enum(["root_session", "schedule"]),
+  label: z.string().min(1),
+  creditUsd: z.number().nonnegative(),
+  tokens: z.number().nonnegative(),
+  cacheHitPct: z.number().int().min(0).max(100),
+  pctOfCreditUsd: z.number().int().min(0).max(100),
+  deltaUsdVsPrior: z.number(),
+});
+export type InsightsSpendDriver = z.infer<typeof InsightsSpendDriver>;
+
+export const InsightsWarmGroupRow = z.object({
+  id: z.string().min(1),
+  groupId: z.string().uuid(),
+  label: z.string().min(1),
+  /** Live lease backend when known; null when only historical warm ticks exist. */
+  backend: z.string().nullable(),
+  warmSeconds: z.number().nonnegative(),
+  /** Currently attached sessions — not cost share. */
+  sessionsAttached: z.number().int().nonnegative(),
+});
+export type InsightsWarmGroupRow = z.infer<typeof InsightsWarmGroupRow>;
+
+export const InsightsLiveWarmLease = z.object({
+  id: z.string().uuid(),
+  groupId: z.string().uuid(),
+  backend: z.string().min(1),
+  turnHolders: z.number().int().nonnegative(),
+  viewerHolders: z.number().int().nonnegative(),
+  warmForLabel: z.string().min(1),
+  warmSeconds: z.number().nonnegative(),
+});
+export type InsightsLiveWarmLease = z.infer<typeof InsightsLiveWarmLease>;
+
+export const InsightsFloorSession = z.object({
+  id: z.string().uuid(),
+  title: z.string(),
+  state: z.enum(["running", "paused", "failed", "idle", "compacting", "waiting"]),
+  depth: z.number().int().nonnegative(),
+  model: z.string().nullable(),
+  provider: z.string().nullable(),
+  ageLabel: z.string(),
+  cacheHitPct: z.number().int().min(0).max(100).nullable(),
+  route: z.string().nullable(),
+});
+export type InsightsFloorSession = z.infer<typeof InsightsFloorSession>;
+
+export const InsightsScheduleRow = z.object({
+  id: z.string().uuid(),
+  name: z.string(),
+  fires: z.number().int().nonnegative(),
+  /** Null when no facts carry scheduled_task_id for this window. */
+  creditUsd: z.number().nonnegative().nullable(),
+  tokens: z.number().nonnegative().nullable(),
+  cacheHitPct: z.number().int().min(0).max(100).nullable(),
+  billing: InsightsBillingPath.nullable(),
+});
+export type InsightsScheduleRow = z.infer<typeof InsightsScheduleRow>;
+
+export const WorkspaceInsightsSnapshot = z.object({
+  range: InsightsRange,
+  rangeLabel: z.string().min(1),
+  priorLabel: z.string().min(1),
+  seriesLabel: z.string().min(1),
+  cacheSeriesLabel: z.string().min(1),
+  /** All ranges/series are UTC. */
+  timezone: z.literal("UTC"),
+  models: z.array(InsightsModelUsageRow),
+  /** Unfiltered provider×model pairs in the window — drives filter dropdowns. */
+  facets: z.array(InsightsModelFacet),
+  series: z.array(InsightsSeriesPoint),
+  depth: z.array(InsightsDepthBucket),
+  drivers: z.array(InsightsSpendDriver),
+  schedules: z.array(InsightsScheduleRow),
+  warmSeconds: z.number().nonnegative(),
+  priorWarmSeconds: z.number().nonnegative(),
+  warmGroups: z.array(InsightsWarmGroupRow),
+  liveWarm: z.array(InsightsLiveWarmLease),
+  floor: z.array(InsightsFloorSession),
+  selfhostedEnabled: z.boolean(),
+  machinesOnline: z.number().int().nonnegative(),
+  /** Workspace-wide OpenGeni credit $ from usage_events.model.cost (unfiltered). */
+  workspaceCreditUsd: z.number().nonnegative(),
+  priorWorkspaceCreditUsd: z.number().nonnegative(),
+  /** Model-filterable credit $ from facts (equals workspace when unfiltered, ignoring late-reject drift). */
+  creditUsd: z.number().nonnegative(),
+  priorCreditUsd: z.number().nonnegative(),
+  priorInputTokens: z.number().nonnegative(),
+  priorCacheHitPct: z.number().int().min(0).max(100),
+  priorCalls: z.number().int().nonnegative(),
+  /** Lifetime workspace topology (not scoped to the selected Insights range). */
+  goalsActive: z.number().int().nonnegative(),
+  goalsCompleted: z.number().int().nonnegative(),
+  sessionsTouched: z.number().int().nonnegative(),
+  rootSessions: z.number().int().nonnegative(),
+  deepestDepth: z.number().int().nonnegative(),
+  deepestSessionTitle: z.string(),
+  avgDepth: z.number().nonnegative(),
+  warmIdleNow: z.number().int().nonnegative(),
+  /** Billable credits-path tokens this UTC month (usage_events.model.tokens). */
+  billableTokensUsed: z.number().nonnegative(),
+  billableTokenCap: z.number().int().positive().nullable(),
+  /** Agent runs this UTC month (usage_events.agent_run.created). */
+  agentRunsUsed: z.number().nonnegative(),
+  agentRunCap: z.number().int().positive().nullable(),
+  /** True when provider/model filters exclude workspace-wide warm/caps meaning. */
+  modelFilterActive: z.boolean(),
+});
+export type WorkspaceInsightsSnapshot = z.infer<typeof WorkspaceInsightsSnapshot>;
+
+export const WorkspaceInsightsResponse = z.object({
+  snapshot: WorkspaceInsightsSnapshot,
+});
+export type WorkspaceInsightsResponse = z.infer<typeof WorkspaceInsightsResponse>;
+
 export const LimitAction = z.enum([
   "agent_run:create",
   "tokens:consume",

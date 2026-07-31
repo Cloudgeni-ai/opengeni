@@ -20,6 +20,8 @@ import type { ReactNode } from "react";
 
 import { useRail } from "@/components/rail/rail-context";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { useAppContext } from "@/context";
+import { hasWorkspacePermission } from "@/lib/permissions";
 import { cn } from "@/lib/utils";
 
 type NavTarget =
@@ -94,6 +96,15 @@ const CONFIG_ITEMS: Array<{ to: NavTarget; icon: LucideIcon; label: string; desc
 
 export function WorkspaceNav() {
   const rail = useRail();
+  const context = useAppContext();
+  const canReadInsights = hasWorkspacePermission(
+    context.accessContext,
+    rail.workspaceId,
+    "workspace:admin",
+  );
+  const items = CONFIG_ITEMS.filter(
+    (item) => item.to !== "/workspaces/$workspaceId/insights" || canReadInsights,
+  );
   return (
     <nav aria-label="Workspace" className={cn("grid gap-0.5", rail.collapsed ? "px-2" : "px-2")}>
       {!rail.collapsed ? (
@@ -101,7 +112,7 @@ export function WorkspaceNav() {
           Workspace
         </p>
       ) : null}
-      {CONFIG_ITEMS.map((item) => (
+      {items.map((item) => (
         <RailNavItem
           key={item.to}
           to={item.to}

@@ -1,5 +1,11 @@
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { useId, useMemo, useState, type PointerEvent as ReactPointerEvent } from "react";
+import {
+  useId,
+  useMemo,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+} from "react";
 
 import { cn } from "@/lib/utils";
 
@@ -9,6 +15,28 @@ type Series = {
   values: number[];
   className: string;
 };
+
+export type DonutSlice = {
+  id: string;
+  label: string;
+  value: number;
+  /** Tailwind text-* class used for fill-current */
+  toneClass: string;
+};
+
+const DONUT_TONES = [
+  "text-brand",
+  "text-status-running",
+  "text-status-waiting",
+  "text-fg-muted",
+  "text-status-failed",
+  "text-status-idle",
+  "text-fg",
+] as const;
+
+export function donutTone(index: number): string {
+  return DONUT_TONES[index % DONUT_TONES.length]!;
+}
 
 function smoothLine(points: Array<{ x: number; y: number }>): string {
   if (points.length === 0) return "";
@@ -28,6 +56,13 @@ function smoothLine(points: Array<{ x: number; y: number }>): string {
   return d;
 }
 
+function formatChartNumber(value: number, digits?: number): string {
+  if (digits != null) return value.toFixed(digits);
+  if (Math.abs(value) >= 100) return value.toFixed(0);
+  if (Math.abs(value) >= 10) return value.toFixed(1);
+  return value.toFixed(1);
+}
+
 export function AreaChart(props: {
   labels: readonly string[];
   series: Series[];
@@ -35,25 +70,31 @@ export function AreaChart(props: {
   className?: string;
   valuePrefix?: string;
   valueSuffix?: string;
+  /** Fixed decimal places for tooltip / axis */
+  valueDigits?: number;
+  /** Soft y-axis floor for percentage charts */
+  yMax?: number;
 }) {
   const reduceMotion = useReducedMotion();
   const gradId = useId();
   const [active, setActive] = useState<number | null>(null);
   const height = props.height ?? 220;
   const width = 720;
-  const padX = 8;
-  const padTop = 18;
-  const padBottom = 8;
+  const padL = 36;
+  const padR = 12;
+  const padTop = 16;
+  const padBottom = 6;
   const all = props.series.flatMap((s) => s.values);
-  const max = Math.max(...all, 1) * 1.08;
-  const innerW = width - padX * 2;
+  const dataMax = Math.max(...all, 0);
+  const max = props.yMax ?? Math.max(dataMax * 1.12, 1);
+  const innerW = width - padL - padR;
   const innerH = height - padTop - padBottom;
 
   const geometry = useMemo(() => {
     return props.series.map((series) => {
       const points = series.values.map((value, i) => {
         const x =
-          padX +
+          padL +
           (series.values.length <= 1 ? innerW / 2 : (i / (series.values.length - 1)) * innerW);
         const y = padTop + innerH - (value / max) * innerH;
         return { x, y, value };
@@ -68,7 +109,8 @@ export function AreaChart(props: {
 
   const onMove = (event: ReactPointerEvent<SVGSVGElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
-    const ratio = (event.clientX - rect.left) / rect.width;
+    const localX = ((event.clientX - rect.left) / rect.width) * width;
+    const ratio = (localX - padL) / innerW;
     const index = Math.round(ratio * (props.labels.length - 1));
     setActive(Math.max(0, Math.min(props.labels.length - 1, index)));
   };
@@ -76,7 +118,9 @@ export function AreaChart(props: {
   const activeX =
     active == null
       ? null
-      : padX + (active / Math.max(props.labels.length - 1, 1)) * innerW;
+      : padL + (active / Math.max(props.labels.length - 1, 1)) * innerW;
+
+  const ticks = [0, 0.5, 1];
 
   return (
     <div className={cn("relative w-full", props.className)} onPointerLeave={() => setActive(null)}>
@@ -87,25 +131,23 @@ export function AreaChart(props: {
             initial={{ opacity: 0, y: 4 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 2 }}
-            transition={{ duration: 0.16 }}
-            className="pointer-events-none absolute top-0 z-10 rounded-lg border border-border/80 bg-surface-3/95 px-2.5 py-2 shadow-[var(--og-shadow-md)] backdrop-blur-md"
+            transition={{ duration: 0.15 }}
+            className="pointer-events-none absolute top-0 z-10 min-w-[7.5rem] rounded-lg border border-border bg-surface-3/95 px-2.5 py-2 shadow-sm backdrop-blur-md"
             style={{
-              left: `clamp(0px, calc(${(active / Math.max(props.labels.length - 1, 1)) * 100}% - 56px), calc(100% - 120px))`,
+              left: `clamp(0px, calc(${(active / Math.max(props.labels.length - 1, 1)) * 100}% - 40px), calc(100% - 130px))`,
             }}
           >
-            <p className="text-2xs font-semibold uppercase tracking-[0.12em] text-fg-subtle">
-              {props.labels[active]}
-            </p>
-            <div className="mt-1 grid gap-0.5">
+            <p className="text-2xs font-medium text-fg-subtle">{props.labels[active]}</p>
+            <div className="mt-1.5 grid gap-1">
               {props.series.map((series) => (
                 <div key={series.id} className="flex items-center justify-between gap-4 text-2xs">
                   <span className={cn("inline-flex items-center gap-1.5", series.className)}>
                     <span className="size-1.5 rounded-full bg-current" />
                     <span className="text-fg-muted">{series.label}</span>
                   </span>
-                  <span className="font-mono text-fg">
+                  <span className="font-mono tabular-nums text-fg">
                     {props.valuePrefix}
-                    {series.values[active]!.toFixed(series.values[active]! >= 10 ? 0 : 1)}
+                    {formatChartNumber(series.values[active]!, props.valueDigits)}
                     {props.valueSuffix}
                   </span>
                 </div>
@@ -119,41 +161,72 @@ export function AreaChart(props: {
         viewBox={`0 0 ${width} ${height}`}
         className="h-auto w-full cursor-crosshair overflow-visible"
         role="img"
-        aria-label="Interactive usage trend"
+        aria-label="Trend chart"
         onPointerMove={onMove}
       >
         <defs>
           {geometry.map(({ series }, index) => (
             <linearGradient key={series.id} id={`${gradId}-${index}`} x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="currentColor" stopOpacity={0.28} />
-              <stop offset="55%" stopColor="currentColor" stopOpacity={0.08} />
+              <stop offset="0%" stopColor="currentColor" stopOpacity={0.22} />
+              <stop offset="70%" stopColor="currentColor" stopOpacity={0.05} />
               <stop offset="100%" stopColor="currentColor" stopOpacity={0} />
             </linearGradient>
           ))}
-          <filter id={`${gradId}-glow`} x="-20%" y="-20%" width="140%" height="140%">
-            <feGaussianBlur stdDeviation="2.2" result="blur" />
-            <feMerge>
-              <feMergeNode in="blur" />
-              <feMergeNode in="SourceGraphic" />
-            </feMerge>
-          </filter>
         </defs>
 
-        {[0.25, 0.5, 0.75].map((t) => {
+        {/* baseline */}
+        <line
+          x1={padL}
+          x2={width - padR}
+          y1={padTop + innerH}
+          y2={padTop + innerH}
+          className="stroke-border"
+          strokeWidth={1}
+        />
+
+        {ticks.map((t) => {
           const y = padTop + innerH * (1 - t);
+          const label = max * t;
           return (
-            <line
-              key={t}
-              x1={padX}
-              x2={width - padX}
-              y1={y}
-              y2={y}
-              className="stroke-border/50"
-              strokeWidth={1}
-              strokeDasharray="3 5"
-            />
+            <g key={t}>
+              {t > 0 ? (
+                <line
+                  x1={padL}
+                  x2={width - padR}
+                  y1={y}
+                  y2={y}
+                  className="stroke-border/40"
+                  strokeWidth={1}
+                  strokeDasharray="2 6"
+                />
+              ) : null}
+              <text
+                x={padL - 8}
+                y={y + 3}
+                textAnchor="end"
+                className="fill-fg-subtle"
+                style={{ fontSize: 10, fontFamily: "ui-monospace, monospace" }}
+              >
+                {props.valuePrefix}
+                {formatChartNumber(label, props.valueDigits ?? (max >= 50 ? 0 : 0))}
+                {props.valueSuffix}
+              </text>
+            </g>
           );
         })}
+
+        {activeX != null ? (
+          <motion.rect
+            x={activeX - innerW / props.labels.length / 2}
+            y={padTop}
+            width={Math.max(innerW / props.labels.length, 12)}
+            height={innerH}
+            className="fill-fg/[0.04]"
+            initial={false}
+            animate={{ x: activeX - innerW / props.labels.length / 2 }}
+            transition={{ type: "spring", stiffness: 380, damping: 36 }}
+          />
+        ) : null}
 
         {geometry.map(({ series, line, area, points }, index) => (
           <g key={series.id} className={series.className}>
@@ -162,59 +235,56 @@ export function AreaChart(props: {
               fill={`url(#${gradId}-${index})`}
               initial={reduceMotion ? false : { opacity: 0 }}
               animate={{ opacity: 1 }}
-              transition={{ duration: 0.8, delay: 0.12 + index * 0.08, ease: [0.22, 1, 0.36, 1] }}
+              transition={{ duration: 0.7, delay: 0.08 + index * 0.06, ease: [0.22, 1, 0.36, 1] }}
             />
             <motion.path
               d={line}
               fill="none"
               stroke="currentColor"
-              strokeWidth={2.4}
+              strokeWidth={2.25}
               strokeLinecap="round"
               strokeLinejoin="round"
-              filter={`url(#${gradId}-glow)`}
               initial={reduceMotion ? false : { pathLength: 0, opacity: 0 }}
               animate={{ pathLength: 1, opacity: 1 }}
-              transition={{ duration: 1.15, delay: index * 0.1, ease: [0.22, 1, 0.36, 1] }}
+              transition={{ duration: 1, delay: index * 0.08, ease: [0.22, 1, 0.36, 1] }}
             />
             {points.map((point, i) => (
-              <motion.circle
+              <circle
                 key={`${series.id}-${i}`}
                 cx={point.x}
                 cy={point.y}
-                r={active === i ? 4.5 : 0}
-                className="fill-bg stroke-current"
-                strokeWidth={2}
-                initial={false}
-                animate={{ r: active === i ? 4.5 : 0, opacity: active === i ? 1 : 0 }}
-                transition={{ type: "spring", stiffness: 420, damping: 28 }}
+                r={active === i ? 4.5 : 2.25}
+                className={cn(
+                  "stroke-bg transition-[r]",
+                  active === i || active == null ? "opacity-100" : "opacity-40",
+                )}
+                fill="currentColor"
+                strokeWidth={active === i ? 2 : 1.5}
               />
             ))}
           </g>
         ))}
 
         {activeX != null ? (
-          <motion.line
+          <line
             x1={activeX}
             x2={activeX}
             y1={padTop}
             y2={padTop + innerH}
-            className="stroke-fg/35"
+            className="stroke-fg/25"
             strokeWidth={1}
-            initial={false}
-            animate={{ x1: activeX, x2: activeX }}
-            transition={{ type: "spring", stiffness: 380, damping: 36 }}
           />
         ) : null}
       </svg>
 
-      <div className="mt-1.5 flex justify-between px-0.5">
+      <div className="mt-1 flex justify-between pl-9 pr-1">
         {props.labels.map((label, index) => (
           <button
-            key={label}
+            key={`${label}-${index}`}
             type="button"
             onMouseEnter={() => setActive(index)}
             className={cn(
-              "text-2xs transition-colors",
+              "min-w-0 truncate text-2xs transition-colors",
               active === index ? "font-medium text-fg" : "text-fg-subtle",
             )}
           >
@@ -222,6 +292,156 @@ export function AreaChart(props: {
           </button>
         ))}
       </div>
+    </div>
+  );
+}
+
+function polar(cx: number, cy: number, r: number, angle: number) {
+  const rad = ((angle - 90) * Math.PI) / 180;
+  return { x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad) };
+}
+
+function arcPath(
+  cx: number,
+  cy: number,
+  rOuter: number,
+  rInner: number,
+  startAngle: number,
+  endAngle: number,
+): string {
+  const large = endAngle - startAngle > 180 ? 1 : 0;
+  const o1 = polar(cx, cy, rOuter, startAngle);
+  const o2 = polar(cx, cy, rOuter, endAngle);
+  const i1 = polar(cx, cy, rInner, endAngle);
+  const i2 = polar(cx, cy, rInner, startAngle);
+  return [
+    `M ${o1.x} ${o1.y}`,
+    `A ${rOuter} ${rOuter} 0 ${large} 1 ${o2.x} ${o2.y}`,
+    `L ${i1.x} ${i1.y}`,
+    `A ${rInner} ${rInner} 0 ${large} 0 ${i2.x} ${i2.y}`,
+    "Z",
+  ].join(" ");
+}
+
+export function DonutChart(props: {
+  slices: DonutSlice[];
+  className?: string;
+  /** Center primary line */
+  centerValue?: ReactNode;
+  centerLabel?: string;
+  formatValue?: (value: number) => string;
+  onSelect?: (id: string) => void;
+  size?: number;
+}) {
+  const reduceMotion = useReducedMotion();
+  const [hover, setHover] = useState<string | null>(null);
+  const size = props.size ?? 176;
+  const cx = size / 2;
+  const cy = size / 2;
+  const rOuter = size * 0.42;
+  const rInner = size * 0.27;
+  const total = props.slices.reduce((n, s) => n + s.value, 0);
+  const format = props.formatValue ?? ((v: number) => formatChartNumber(v));
+
+  const arcs = useMemo(() => {
+    if (total <= 0) return [];
+    let angle = 0;
+    return props.slices
+      .filter((s) => s.value > 0)
+      .map((slice) => {
+        const sweep = (slice.value / total) * 360;
+        // Leave a tiny gap between slices for clarity
+        const gap = props.slices.length > 1 ? 1.2 : 0;
+        const start = angle + gap / 2;
+        const end = angle + sweep - gap / 2;
+        angle += sweep;
+        const mid = (start + end) / 2;
+        return {
+          slice,
+          path: arcPath(cx, cy, rOuter, rInner, start, Math.max(start + 0.01, end)),
+          mid,
+          pct: Math.round((slice.value / total) * 100),
+        };
+      });
+  }, [props.slices, total, cx, cy, rOuter, rInner]);
+
+  const active = arcs.find((a) => a.slice.id === hover) ?? null;
+
+  return (
+    <div className={cn("flex flex-col items-stretch gap-4 sm:flex-row sm:items-center", props.className)}>
+      <div className="relative mx-auto shrink-0" style={{ width: size, height: size }}>
+        <svg viewBox={`0 0 ${size} ${size}`} className="h-full w-full overflow-visible" role="img">
+          {total <= 0 ? (
+            <circle
+              cx={cx}
+              cy={cy}
+              r={(rOuter + rInner) / 2}
+              fill="none"
+              className="stroke-border"
+              strokeWidth={rOuter - rInner}
+            />
+          ) : (
+            arcs.map((arc, index) => {
+              const isActive = hover == null || hover === arc.slice.id;
+              return (
+                <motion.path
+                  key={arc.slice.id}
+                  d={arc.path}
+                  className={cn(arc.slice.toneClass, "cursor-pointer fill-current")}
+                  initial={reduceMotion ? false : { opacity: 0, scale: 0.92 }}
+                  animate={{
+                    opacity: isActive ? 1 : 0.35,
+                    scale: hover === arc.slice.id ? 1.03 : 1,
+                  }}
+                  transition={{
+                    duration: 0.45,
+                    delay: index * 0.04,
+                    ease: [0.22, 1, 0.36, 1],
+                  }}
+                  style={{ transformOrigin: `${cx}px ${cy}px` }}
+                  onMouseEnter={() => setHover(arc.slice.id)}
+                  onMouseLeave={() => setHover(null)}
+                  onClick={() => props.onSelect?.(arc.slice.id)}
+                />
+              );
+            })
+          )}
+        </svg>
+        <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center px-6 text-center">
+          <p className="text-lg font-semibold tracking-[-0.03em] tabular-nums text-fg">
+            {active ? format(active.slice.value) : (props.centerValue ?? format(total))}
+          </p>
+          <p className="mt-0.5 line-clamp-2 text-2xs text-fg-subtle">
+            {active ? `${active.pct}% · ${active.slice.label}` : (props.centerLabel ?? "Total")}
+          </p>
+        </div>
+      </div>
+
+      <ul className="min-w-0 flex-1 grid gap-1">
+        {arcs.map((arc) => (
+          <li key={arc.slice.id}>
+            <button
+              type="button"
+              onMouseEnter={() => setHover(arc.slice.id)}
+              onMouseLeave={() => setHover(null)}
+              onClick={() => props.onSelect?.(arc.slice.id)}
+              className={cn(
+                "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors",
+                hover === arc.slice.id ? "bg-surface-2/80" : "hover:bg-surface-2/50",
+              )}
+            >
+              <span className={cn("size-2 shrink-0 rounded-full bg-current", arc.slice.toneClass)} />
+              <span className="min-w-0 flex-1 truncate text-xs text-fg">{arc.slice.label}</span>
+              <span className="shrink-0 font-mono text-2xs tabular-nums text-fg-muted">
+                {format(arc.slice.value)}
+              </span>
+              <span className="w-8 shrink-0 text-right font-mono text-2xs tabular-nums text-fg-subtle">
+                {arc.pct}%
+              </span>
+            </button>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
@@ -246,29 +466,27 @@ export function HorizontalBars(props: {
               type="button"
               onClick={() => props.onSelect?.(row.id)}
               className={cn(
-                "group relative grid w-full gap-1.5 overflow-hidden rounded-xl px-3 py-2.5 text-left transition-colors",
+                "group relative grid w-full gap-1.5 overflow-hidden rounded-lg px-2.5 py-2 text-left transition-colors",
                 "hover:bg-surface-2/70",
                 props.onSelect && "cursor-pointer",
               )}
             >
               <div className="relative z-[1] flex items-baseline justify-between gap-3">
-                <span className="truncate text-[13px] font-medium tracking-[-0.01em] text-fg">
-                  {row.label}
-                </span>
+                <span className="truncate text-xs font-medium text-fg">{row.label}</span>
                 <span className="shrink-0 font-mono text-2xs tabular-nums text-fg-muted">
                   {props.valuePrefix}
                   {row.value.toFixed(row.value >= 10 ? 1 : 2)}
                   {row.hint ? <span className="ml-1.5 text-fg-subtle">{row.hint}</span> : null}
                 </span>
               </div>
-              <div className="relative z-[1] h-[3px] overflow-hidden rounded-full bg-fg/[0.06]">
+              <div className="relative z-[1] h-1.5 overflow-hidden rounded-full bg-fg/[0.06]">
                 <motion.div
                   className={cn("h-full rounded-full bg-brand", row.toneClass)}
                   initial={reduceMotion ? false : { width: 0 }}
                   animate={{ width: `${pct}%` }}
                   transition={{
-                    duration: 0.9,
-                    delay: 0.06 + index * 0.045,
+                    duration: 0.75,
+                    delay: 0.04 + index * 0.04,
                     ease: [0.22, 1, 0.36, 1],
                   }}
                 />
@@ -288,8 +506,17 @@ export function UsageMeter(props: {
   total: number;
 }) {
   const reduceMotion = useReducedMotion();
-  const used = props.segments.reduce((sum, s) => sum + s.value, 0);
-  const pct = Math.min(100, (used / props.total) * 100);
+  const total = Math.max(0, props.total);
+  const segments = props.segments.map((segment) => ({
+    ...segment,
+    value: Math.max(0, Math.min(segment.value, total)),
+  }));
+  const used = Math.min(
+    total,
+    segments.reduce((sum, segment) => sum + segment.value, 0),
+  );
+  const remainder = Math.max(0, total - used);
+  const pct = total > 0 ? Math.min(100, (used / total) * 100) : 0;
 
   return (
     <div className="grid gap-2.5">
@@ -301,7 +528,7 @@ export function UsageMeter(props: {
         <p className="font-mono text-sm tabular-nums text-fg">{pct.toFixed(0)}%</p>
       </div>
       <div className="flex h-2 overflow-hidden rounded-full bg-fg/[0.06]">
-        {props.segments.map((segment, index) => (
+        {segments.map((segment, index) => (
           <motion.div
             key={segment.id}
             className={cn("h-full", segment.className)}
@@ -316,6 +543,9 @@ export function UsageMeter(props: {
             title={segment.label}
           />
         ))}
+        {remainder > 0 ? (
+          <div className="h-full" style={{ flexBasis: 0, flexGrow: remainder }} aria-hidden />
+        ) : null}
       </div>
     </div>
   );

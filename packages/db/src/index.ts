@@ -247,6 +247,7 @@ export {
 } from "./event-payload-sanitizer";
 export * from "./persistence-errors";
 export * from "./runtime-posture";
+export * from "./insights";
 export { sanitizeMemoryText } from "./memory-domain";
 // Re-exported so external consumers can `import { migrate } from "@opengeni/db"`.
 // The `@opengeni/db/migrate` subpath stays available too (internal callers + the
@@ -2731,6 +2732,211 @@ export async function recordUsageEvent(
         return mapUsageEvent(row);
       }
       throw new Error("Failed to record usage event");
+    },
+  );
+}
+
+export type ModelCallBillingPath = "opengeni_credits" | "external";
+
+export type ModelCallFact = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  turnAttemptId: string | null;
+  sourceKey: string;
+  provider: string;
+  providerApi: string;
+  model: string;
+  billingPath: ModelCallBillingPath;
+  turnSource: string | null;
+  initiatorKind: string | null;
+  initiatorSubjectId: string | null;
+  scheduledTaskId: string | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cachedTokens: number | null;
+  cacheWriteTokens: number | null;
+  reasoningTokens: number | null;
+  totalTokens: number | null;
+  pricedCostMicros: number;
+  occurredAt: Date;
+  recordedAt: Date;
+};
+
+function mapModelCallFact(row: typeof schema.modelCallFacts.$inferSelect): ModelCallFact {
+  const billingPath = row.billingPath;
+  if (billingPath !== "opengeni_credits" && billingPath !== "external") {
+    throw new Error(`model_call_facts: invalid billing_path ${billingPath}`);
+  }
+  return {
+    id: row.id,
+    accountId: row.accountId,
+    workspaceId: row.workspaceId,
+    sessionId: row.sessionId,
+    turnId: row.turnId,
+    turnAttemptId: row.turnAttemptId,
+    sourceKey: row.sourceKey,
+    provider: row.provider,
+    providerApi: row.providerApi,
+    model: row.model,
+    billingPath,
+    turnSource: row.turnSource,
+    initiatorKind: row.initiatorKind,
+    initiatorSubjectId: row.initiatorSubjectId,
+    scheduledTaskId: row.scheduledTaskId,
+    inputTokens: row.inputTokens,
+    outputTokens: row.outputTokens,
+    cachedTokens: row.cachedTokens,
+    cacheWriteTokens: row.cacheWriteTokens,
+    reasoningTokens: row.reasoningTokens,
+    totalTokens: row.totalTokens,
+    pricedCostMicros: row.pricedCostMicros,
+    occurredAt: row.occurredAt,
+    recordedAt: row.recordedAt,
+  };
+}
+
+function scheduledRunIdsFromContext(context: unknown): string[] {
+  if (!context || typeof context !== "object" || Array.isArray(context)) return [];
+  const raw = (context as Record<string, unknown>).scheduledRunIds;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((value): value is string => typeof value === "string" && value.length > 0);
+}
+
+async function resolveScheduledTaskIdForTurn(
+  scopedDb: Database,
+  input: {
+    workspaceId: string;
+    initiatorSubjectId: string | null;
+    initiatorContext: unknown;
+  },
+): Promise<string | null> {
+  // initiatorSubjectId is intentionally unused: any turn that carries
+  // scheduledRunIds is eligible for schedule attribution (scheduler wakes and
+  // inherited contexts alike). Mis-bucketing by turn.source remains forbidden.
+  void input.initiatorSubjectId;
+  const runIds = scheduledRunIdsFromContext(input.initiatorContext);
+  if (runIds.length === 0) return null;
+  // Prefer the earliest run when a batch somehow carries multiple ids so
+  // attribution is deterministic across retries.
+  const [run] = await scopedDb
+    .select({ taskId: schema.scheduledTaskRuns.taskId })
+    .from(schema.scheduledTaskRuns)
+    .where(
+      and(
+        eq(schema.scheduledTaskRuns.workspaceId, input.workspaceId),
+        inArray(schema.scheduledTaskRuns.id, runIds),
+      ),
+    )
+    .orderBy(schema.scheduledTaskRuns.createdAt)
+    .limit(1);
+  return run?.taskId ?? null;
+}
+
+/**
+ * Idempotent Insights fact for one authoritative model call. Soft-callers must
+ * never let failures affect billing; this writer itself is safe to retry.
+ */
+export async function recordModelCallFact(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    turnAttemptId?: string | null;
+    sourceKey: string;
+    provider: string;
+    providerApi: string;
+    model: string;
+    billingPath: ModelCallBillingPath;
+    pricedCostMicros: number;
+    inputTokens?: number | null;
+    outputTokens?: number | null;
+    cachedTokens?: number | null;
+    cacheWriteTokens?: number | null;
+    reasoningTokens?: number | null;
+    totalTokens?: number | null;
+    occurredAt?: Date;
+  },
+): Promise<ModelCallFact> {
+  if (input.pricedCostMicros < 0 || !Number.isSafeInteger(input.pricedCostMicros)) {
+    throw new Error("recordModelCallFact: pricedCostMicros must be a non-negative safe integer");
+  }
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [turn] = await scopedDb
+        .select({
+          source: schema.sessionTurns.source,
+          initiatorKind: schema.sessionTurns.initiatorKind,
+          initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
+          initiatorContext: schema.sessionTurns.initiatorContext,
+        })
+        .from(schema.sessionTurns)
+        .where(
+          and(
+            eq(schema.sessionTurns.workspaceId, input.workspaceId),
+            eq(schema.sessionTurns.id, input.turnId),
+          ),
+        )
+        .limit(1);
+      const scheduledTaskId = turn
+        ? await resolveScheduledTaskIdForTurn(scopedDb, {
+            workspaceId: input.workspaceId,
+            initiatorSubjectId: turn.initiatorSubjectId,
+            initiatorContext: turn.initiatorContext,
+          })
+        : null;
+      const occurredAt = input.occurredAt ?? new Date();
+      const [row] = await scopedDb
+        .insert(schema.modelCallFacts)
+        .values({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          turnAttemptId: input.turnAttemptId ?? null,
+          sourceKey: input.sourceKey,
+          provider: input.provider,
+          providerApi: input.providerApi,
+          model: input.model,
+          billingPath: input.billingPath,
+          turnSource: turn?.source ?? null,
+          initiatorKind: turn?.initiatorKind ?? null,
+          initiatorSubjectId: turn?.initiatorSubjectId ?? null,
+          scheduledTaskId,
+          inputTokens: input.inputTokens ?? null,
+          outputTokens: input.outputTokens ?? null,
+          cachedTokens: input.cachedTokens ?? null,
+          cacheWriteTokens: input.cacheWriteTokens ?? null,
+          reasoningTokens: input.reasoningTokens ?? null,
+          totalTokens: input.totalTokens ?? null,
+          pricedCostMicros: input.pricedCostMicros,
+          occurredAt,
+        })
+        .onConflictDoUpdate({
+          target: [
+            schema.modelCallFacts.workspaceId,
+            schema.modelCallFacts.turnId,
+            schema.modelCallFacts.sourceKey,
+          ],
+          set: {
+            turnAttemptId: sql`coalesce(${schema.modelCallFacts.turnAttemptId}, excluded.turn_attempt_id)`,
+            scheduledTaskId: sql`coalesce(${schema.modelCallFacts.scheduledTaskId}, excluded.scheduled_task_id)`,
+            initiatorKind: sql`coalesce(${schema.modelCallFacts.initiatorKind}, excluded.initiator_kind)`,
+            initiatorSubjectId: sql`coalesce(${schema.modelCallFacts.initiatorSubjectId}, excluded.initiator_subject_id)`,
+            turnSource: sql`coalesce(${schema.modelCallFacts.turnSource}, excluded.turn_source)`,
+          },
+        })
+        .returning();
+      if (!row) {
+        throw new Error("Failed to record model call fact");
+      }
+      return mapModelCallFact(row);
     },
   );
 }
