@@ -22,6 +22,7 @@ declare global {
 function NorthstarApp() {
   const demo = useSupportDemo();
   const [agentEnabled, setAgentEnabled] = useState(false);
+  const [agentPanelExpanded, setAgentPanelExpanded] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [selectedTicketId, setSelectedTicketId] = useState("TKT-2847");
 
@@ -47,8 +48,10 @@ function NorthstarApp() {
       <div
         className={
           agentEnabled
-            ? "northstar grid h-dvh min-w-[1120px] grid-cols-[260px_minmax(460px,1fr)_420px] overflow-hidden bg-[#f7f7f5]"
-            : "northstar grid h-dvh min-w-[980px] grid-cols-[320px_minmax(0,1fr)] overflow-hidden bg-[#f7f7f5]"
+            ? agentPanelExpanded
+              ? "northstar grid h-dvh min-w-[1120px] grid-cols-[240px_minmax(360px,1fr)_620px] overflow-hidden bg-[#f7f7f5] transition-[grid-template-columns] duration-300 ease-out"
+              : "northstar grid h-dvh min-w-[1120px] grid-cols-[260px_minmax(460px,1fr)_420px] overflow-hidden bg-[#f7f7f5] transition-[grid-template-columns] duration-300 ease-out"
+            : "northstar grid h-dvh min-w-[980px] grid-cols-[320px_minmax(0,1fr)] overflow-hidden bg-[#f7f7f5] transition-[grid-template-columns] duration-300 ease-out"
         }
         data-agent-enabled={agentEnabled}
         data-og-theme="light"
@@ -69,6 +72,7 @@ function NorthstarApp() {
             agentEnabled={agentEnabled}
             onAgentEnabledChange={(enabled) => {
               setAgentEnabled(enabled);
+              if (!enabled) setAgentPanelExpanded(false);
               setSessionId(null);
             }}
             onReset={() => {
@@ -102,6 +106,8 @@ function NorthstarApp() {
                 health={demo.health}
                 supportCase={selectedCase}
                 sessionId={sessionId}
+                expanded={agentPanelExpanded}
+                onExpandedChange={setAgentPanelExpanded}
                 onSessionCreated={setSessionId}
                 onClearSession={() => setSessionId(null)}
               />

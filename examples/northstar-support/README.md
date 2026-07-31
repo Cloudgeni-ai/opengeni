@@ -28,6 +28,11 @@ component source rather than a stale published copy.
 Requirements: Bun, an OpenGeni workspace API key, and a public HTTPS tunnel for
 the MCP endpoint.
 
+The product API key needs `workspace:read`, `sessions:create`, `sessions:read`,
+`sessions:control`, `mcp_servers:attach`, `files:upload`, and `files:read`.
+These are workspace capabilities, not browser-origin registrations; file bytes
+still travel through short-lived signed storage URLs.
+
 ```bash
 cd examples/northstar-support
 cp .env.example .env.local
