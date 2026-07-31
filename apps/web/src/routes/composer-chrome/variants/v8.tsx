@@ -207,14 +207,14 @@ function FlowExpand({ open, children }: { open: boolean; children: ReactNode }) 
   return (
     <div
       className={cn(
-        "grid transition-[grid-template-rows,opacity] duration-400 ease-[cubic-bezier(0.22,1,0.36,1)]",
+        "grid transition-[grid-template-rows,opacity] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]",
         open ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0",
       )}
     >
       <div className="min-h-0 overflow-hidden">
         <div
           className={cn(
-            "border-t border-white/10 px-2.5 py-2 transition-transform duration-400",
+            "border-t border-white/10 px-2.5 py-2 transition-transform duration-300",
             open ? "translate-y-0" : "-translate-y-1",
           )}
         >
@@ -411,7 +411,7 @@ function FlowChrome({ scenario }: { scenario: ChromeScenario }) {
 
   return (
     <div className="mx-auto mb-1.5 w-full max-w-3xl px-4 sm:px-6">
-      <style href={stylesId}>{`
+      <style id={stylesId}>{`
         @keyframes og-flow-sheen {
           0%, 100% { background-position: 0% 40%; opacity: 0.72; }
           50% { background-position: 100% 60%; opacity: 1; }
