@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { ScheduleNotFoundError, ScheduleOverlapPolicy } from "@temporalio/client";
 import { HTTPException } from "hono/http-exception";
 import {
-  API_MAX_REQUEST_BODY_BYTES,
+  apiRequestBodyLimitBytes,
   allowedCorsOrigin,
   createApp,
   errorCodeForStatus,
@@ -603,8 +603,9 @@ describe("API helpers", () => {
   });
 
   test("rejects oversized streamed request bodies before route parsing", async () => {
+    const settings = testSettings();
     const app = createApp({
-      settings: testSettings(),
+      settings,
       db: {} as never,
       bus: {} as never,
       workflowClient: {} as never,
@@ -612,7 +613,9 @@ describe("API helpers", () => {
     });
     const body = new ReadableStream<Uint8Array>({
       start(controller) {
-        controller.enqueue(new Uint8Array(API_MAX_REQUEST_BODY_BYTES));
+        // Exceed the effective limit (voice multipart can raise it above the
+        // plain JSON API ceiling).
+        controller.enqueue(new Uint8Array(apiRequestBodyLimitBytes(settings)));
         controller.enqueue(new Uint8Array([0x20]));
         controller.close();
       },

@@ -95,6 +95,11 @@ export { workflowIdForSession } from "@opengeni/core";
 export { replaySessionEvents, sseSessionStream, sseWorkspaceControlStream } from "./http/sse";
 
 export const API_MAX_REQUEST_BODY_BYTES = 8 * 1024 * 1024;
+
+/** Effective Hono bodyLimit — API JSON ceiling or voice multipart + multipart overhead. */
+export function apiRequestBodyLimitBytes(settings: { voiceInputMaxSizeBytes: number }): number {
+  return Math.max(API_MAX_REQUEST_BODY_BYTES, settings.voiceInputMaxSizeBytes + 64 * 1024);
+}
 const API_PUBLIC_ERROR_MESSAGE_MAX_BYTES = 512;
 
 export function createApp(deps: AppDependencies): Hono {
@@ -206,10 +211,7 @@ export function createApp(deps: AppDependencies): Hono {
   app.use(
     "*",
     bodyLimit({
-      maxSize: Math.max(
-        API_MAX_REQUEST_BODY_BYTES,
-        deps.settings.voiceInputMaxSizeBytes + 64 * 1024,
-      ),
+      maxSize: apiRequestBodyLimitBytes(deps.settings),
       onError: (c) =>
         c.json({ code: "PAYLOAD_TOO_LARGE", message: "Request body is too large." }, 413),
     }),
