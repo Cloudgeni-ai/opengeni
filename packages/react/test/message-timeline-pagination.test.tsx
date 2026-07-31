@@ -442,8 +442,8 @@ describe("MessageTimeline pagination affordances", () => {
 
   test("pinned follow keeps the tip at the scroller bottom across live appends", async () => {
     const frames: FrameRequestCallback[] = [];
-    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
-      frames.push(cb);
+    globalThis.requestAnimationFrame = (callback: FrameRequestCallback): number => {
+      frames.push(callback);
       return frames.length;
     };
     globalThis.cancelAnimationFrame = () => undefined;
