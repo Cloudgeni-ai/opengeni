@@ -80,8 +80,15 @@ function scheduledSession(
 }
 
 describe("OpenGeni Slack bot trust predicates", () => {
-  test("requires the shared app role and exact bot scopes", () => {
+  test("requires the shared app role and required bot scopes", () => {
     expect(isOpenGeniSlackBotConnection(botConnection())).toBe(true);
+    expect(
+      isOpenGeniSlackBotConnection(
+        botConnection({
+          grantedScopes: [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES, "team:read"],
+        }),
+      ),
+    ).toBe(true);
     expect(isOpenGeniSlackBotConnection(botConnection({ verifiedInstallAt: null }))).toBe(false);
     expect(isOpenGeniSlackBotConnection(botConnection({ verifiedInstallVersion: 2 }))).toBe(false);
     expect(isOpenGeniSlackBotConnection(botConnection({ subjectId: "subject-a" }))).toBe(false);

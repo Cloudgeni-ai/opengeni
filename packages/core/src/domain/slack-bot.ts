@@ -1,5 +1,6 @@
 import {
   OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
+  OPENGENI_SLACK_BOT_FORBIDDEN_SCOPES,
   OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
   OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
   OPENGENI_SLACK_BOT_SESSION_METADATA_KEY,
@@ -37,8 +38,8 @@ export function isOpenGeniSlackBotConnection(
     connection.subjectId === null &&
     connection.providerDomain === "slack.com" &&
     connection.kind === "app_install" &&
-    granted.size === OPENGENI_SLACK_BOT_REQUIRED_SCOPES.length &&
     OPENGENI_SLACK_BOT_REQUIRED_SCOPES.every((scope) => granted.has(scope)) &&
+    OPENGENI_SLACK_BOT_FORBIDDEN_SCOPES.every((scope) => !granted.has(scope)) &&
     openGeniSlackBotMetadata(connection.metadata)?.credentialRole ===
       OPENGENI_SLACK_BOT_CREDENTIAL_ROLE
   );

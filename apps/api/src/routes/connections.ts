@@ -415,7 +415,7 @@ async function persistOpenGeniSlackBotConnection(input: {
   const { db, settings } = input.deps;
   const key = requireEnvironmentEncryption(settings);
   const credentialEncrypted = encryptCredentialBundle(key, slackBotCredentialBundle(input.token));
-  const existing = input.state.connectionId
+  const requestedExisting = input.state.connectionId
     ? await getConnectionMetadata(
         db,
         input.state.workspaceId,
@@ -423,7 +423,7 @@ async function persistOpenGeniSlackBotConnection(input: {
         input.state.subjectId,
       )
     : null;
-  if (input.state.connectionId && !existing) {
+  if (input.state.connectionId && !requestedExisting) {
     throw new SlackInstallCallbackError(
       404,
       "connection_conflict",
@@ -431,7 +431,7 @@ async function persistOpenGeniSlackBotConnection(input: {
       "principal_validation",
     );
   }
-  if (existing && !isOpenGeniSlackBotConnection(existing)) {
+  if (requestedExisting && !isOpenGeniSlackBotConnection(requestedExisting)) {
     throw new SlackInstallCallbackError(
       422,
       "connection_conflict",
@@ -439,7 +439,7 @@ async function persistOpenGeniSlackBotConnection(input: {
       "principal_validation",
     );
   }
-  if (existing?.version !== input.state.connectionVersion) {
+  if (requestedExisting && requestedExisting.version !== input.state.connectionVersion) {
     throw new SlackInstallCallbackError(
       409,
       "connection_conflict",
@@ -447,6 +447,13 @@ async function persistOpenGeniSlackBotConnection(input: {
       "principal_validation",
     );
   }
+  const existing =
+    requestedExisting ??
+    (await findMatchingOpenGeniSlackBotConnection(
+      db,
+      input.state.workspaceId,
+      input.verified.metadata,
+    ));
   const existingMetadata = existing ? openGeniSlackBotMetadata(existing.metadata) : null;
   if (existingMetadata && existingMetadata.slackTeamId !== input.verified.metadata.slackTeamId) {
     throw new SlackInstallCallbackError(
@@ -524,6 +531,28 @@ async function persistOpenGeniSlackBotConnection(input: {
     );
   }
   return connection;
+}
+
+async function findMatchingOpenGeniSlackBotConnection(
+  db: ApiRouteDeps["db"],
+  workspaceId: string,
+  verified: Awaited<ReturnType<typeof verifyOpenGeniSlackBotCredential>>["metadata"],
+) {
+  const connections = await listConnectionsMetadata(db, workspaceId, null);
+  return (
+    connections.find((connection) => {
+      const metadata = openGeniSlackBotMetadata(connection.metadata);
+      return (
+        connection.subjectId === null &&
+        connection.providerDomain === "slack.com" &&
+        connection.kind === "app_install" &&
+        metadata?.credentialRole === OPENGENI_SLACK_BOT_CREDENTIAL_ROLE &&
+        metadata.slackTeamId === verified.slackTeamId &&
+        metadata.botId === verified.botId &&
+        metadata.botUserId === verified.botUserId
+      );
+    }) ?? null
+  );
 }
 
 function requireOpenGeniSlackOAuthSettings(settings: ApiRouteDeps["settings"]): {

@@ -185,7 +185,7 @@ export async function verifyOpenGeniSlackBotCredential(
 ): Promise<VerifiedOpenGeniSlackBot> {
   const authResponse = await slackApiFetch(fetchImpl, "auth.test", token, {});
   const grantedScopes = parseGrantedScopes(authResponse.response.headers.get("x-oauth-scopes"));
-  assertExactOpenGeniSlackBotScopes(grantedScopes);
+  assertOpenGeniSlackBotScopes(grantedScopes);
   const auth = authResponse.payload;
   const slackTeamId = requiredSlackString(auth.team_id, "team_id");
   const slackTeamName = requiredSlackString(auth.team, "team");
@@ -267,9 +267,17 @@ export async function resolveSlackBotConnectionForTool(input: {
       throw new Error("no active OpenGeni Slack bot connection is installed in this workspace");
     }
     if (activeConnections.length > 1) {
-      throw new Error(
-        "connectionId is required because this workspace has multiple active OpenGeni Slack bot connections",
+      const principals = new Set(
+        activeConnections.map((candidate) => {
+          const metadata = openGeniSlackBotMetadata(candidate.metadata)!;
+          return `${metadata.slackTeamId}:${metadata.botId}:${metadata.botUserId}`;
+        }),
       );
+      if (principals.size > 1) {
+        throw new Error(
+          "connectionId is required because this workspace has multiple active OpenGeni Slack bot connections",
+        );
+      }
     }
     connectionId = activeConnections[0]!.id;
   }
@@ -954,21 +962,19 @@ async function slackApiFetchWithHeaders(
   return { response, payload };
 }
 
-function assertExactOpenGeniSlackBotScopes(grantedScopes: string[]): void {
+function assertOpenGeniSlackBotScopes(grantedScopes: string[]): void {
   const required = new Set<string>(OPENGENI_SLACK_BOT_REQUIRED_SCOPES);
   const granted = new Set(grantedScopes);
   const missing = [...required].filter((scope) => !granted.has(scope));
   const forbidden = OPENGENI_SLACK_BOT_FORBIDDEN_SCOPES.filter((scope) => granted.has(scope));
-  const unsupported = grantedScopes.filter((scope) => !required.has(scope));
-  if (missing.length || forbidden.length || unsupported.length) {
+  if (missing.length || forbidden.length) {
     const facts = [
       ...(missing.length ? [`missing: ${missing.join(", ")}`] : []),
       ...(forbidden.length ? [`forbidden: ${forbidden.join(", ")}`] : []),
-      ...(unsupported.length ? [`unsupported: ${unsupported.join(", ")}`] : []),
     ];
     throw new SlackBotCredentialVerificationError(
       "scope_mismatch",
-      `Slack bot scopes must exactly match the OpenGeni manifest (${facts.join("; ")})`,
+      `Slack bot scopes do not satisfy the OpenGeni manifest (${facts.join("; ")})`,
     );
   }
 }

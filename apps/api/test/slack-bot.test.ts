@@ -563,7 +563,7 @@ describe("OpenGeni Slack bot credential verification", () => {
     ).rejects.toThrow();
   });
 
-  test("accepts only the exact bot identity and scope set", async () => {
+  test("accepts the bot identity with required scopes and rejects unsafe grants", async () => {
     expect(OPENGENI_SLACK_BOT_REQUIRED_SCOPES).toEqual([
       "canvases:read",
       "channels:history",
@@ -604,7 +604,7 @@ describe("OpenGeni Slack bot credential verification", () => {
           scopes: OPENGENI_SLACK_BOT_REQUIRED_SCOPES.filter((scope) => scope !== "groups:history"),
         }).fetch,
       ),
-    ).rejects.toThrow("exactly match");
+    ).rejects.toThrow("do not satisfy");
     await expect(
       verifyOpenGeniSlackBotCredential(
         fixtureBotToken(),
@@ -612,7 +612,7 @@ describe("OpenGeni Slack bot credential verification", () => {
           scopes: [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES, "chat:write.public"],
         }).fetch,
       ),
-    ).rejects.toThrow("exactly match");
+    ).rejects.toThrow("do not satisfy");
     await expect(
       verifyOpenGeniSlackBotCredential(
         fixtureBotToken(),
@@ -678,14 +678,19 @@ async function connectBot(
 ) {
   const start = await startBotInstall(workspace, slackFetch, connectionId);
   if (start.response.status !== 200 || !start.state) {
-    return { response: start.response, body: { connection: { id: "" } } };
+    return { response: start.response, body: { connection: { id: "", grantedScopes: [] } } };
   }
   const response = await completeBotInstall(slackFetch, start.state);
   const connections = await listConnectionsMetadata(client.db, workspace.workspaceId, "subject-a");
   const connection = connections.find(
     (candidate) => candidate.metadata.credentialRole === OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
   );
-  const body = { connection: { id: connection?.id ?? "" } };
+  const body = {
+    connection: {
+      id: connection?.id ?? "",
+      grantedScopes: connection?.grantedScopes ?? [],
+    },
+  };
   return { response, body };
 }
 
@@ -1043,6 +1048,20 @@ describe("OpenGeni Slack bot connection", () => {
         requestedConnectionId: legacyFabricated.id,
       }),
     ).rejects.toThrow("OpenGeni Slack bot connection");
+  });
+
+  test("accepts additional non-forbidden Slack scopes", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const result = await connectBot(
+      workspace,
+      fakeSlack({
+        scopes: [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES, "team:read"],
+      }).fetch,
+    );
+    expect(result.response.status).toBe(302);
+    expect(result.response.headers.get("location")).toContain("slack=connected");
+    expect(result.body.connection.grantedScopes).toContain("team:read");
   });
 
   test("revalidates callback membership before consuming state and rejects replay", async () => {
@@ -2062,9 +2081,10 @@ describe("OpenGeni Slack bot connection", () => {
 
     const second = await connectBot(workspace, fakeSlack().fetch);
     expect(second.response.status).toBe(302);
-    await expect(
-      resolveSlackBotConnectionForTool({ db: client.db, grant, sessionId: null }),
-    ).rejects.toThrow("multiple active OpenGeni Slack bot connections");
+    expect(second.body.connection.id).toBe(connected.body.connection.id);
+    expect(
+      await resolveSlackBotConnectionForTool({ db: client.db, grant, sessionId: null }),
+    ).toMatchObject({ connection: { id: connected.body.connection.id } });
   });
 
   test("converges response-loss retries and completed replays through one client_msg_id", async () => {
