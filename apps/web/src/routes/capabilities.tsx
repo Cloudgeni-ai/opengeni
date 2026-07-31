@@ -17,7 +17,7 @@ import {
   RefreshCwIcon,
   SearchIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { AddCustomDialog } from "@/components/capabilities/add-custom-dialog";
@@ -25,7 +25,6 @@ import {
   CapabilityDetailSheet,
   type ConnectAction,
 } from "@/components/capabilities/capability-detail-sheet";
-import { GoogleDriveConnectorCard } from "@/components/capabilities/google-drive-connector-card";
 import { CapabilityLogo } from "@/components/capabilities/capability-logo";
 import { CapabilityTile } from "@/components/capabilities/capability-tile";
 import { PacksSection } from "@/components/capabilities/packs-section";
@@ -66,6 +65,11 @@ import {
   preferredOpenGeniSlackBotConnection,
 } from "@/lib/slack-bot";
 import { cn } from "@/lib/utils";
+
+const GoogleDriveConnectorCard = lazy(async () => {
+  const module = await import("@/components/capabilities/google-drive-connector-card");
+  return { default: module.GoogleDriveConnectorCard };
+});
 import type {
   AccessContext,
   CapabilityCatalogItem,
@@ -867,7 +871,9 @@ export function CapabilitiesRoute({
           }
         />
 
-        <GoogleDriveConnectorCard workspaceId={workspaceId} />
+        <Suspense fallback={<Skeleton className="mt-6 h-40 w-full rounded-xl" />}>
+          <GoogleDriveConnectorCard workspaceId={workspaceId} />
+        </Suspense>
 
         <section
           className="mt-6 rounded-xl border border-border bg-surface p-4"

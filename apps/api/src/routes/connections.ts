@@ -2,10 +2,6 @@ import { createHash } from "node:crypto";
 import {
   ConnectionResponse,
   CreateConnectionRequest,
-  GOOGLE_DRIVE_PROVIDER_DOMAIN,
-  GoogleDriveConnectionMetadata,
-  GoogleDriveOAuthStartRequest,
-  GoogleDriveOAuthStartResponse,
   IntegrationClientMetadata,
   ListConnectionsResponse,
   OpenGeniSlackBotInstallRequest,
@@ -14,6 +10,12 @@ import {
   OAuthStartResponse,
   UpdateConnectionRequest,
 } from "@opengeni/contracts";
+import {
+  GOOGLE_DRIVE_PROVIDER_DOMAIN,
+  GoogleDriveConnectionMetadata,
+  GoogleDriveOAuthStartRequest,
+  GoogleDriveOAuthStartResponse,
+} from "@opengeni/contracts/google-drive";
 import {
   hasPermission,
   hasReservedOpenGeniSlackBotMetadata,

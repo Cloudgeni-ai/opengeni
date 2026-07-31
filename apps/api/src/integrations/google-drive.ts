@@ -12,7 +12,7 @@ import {
   GoogleDriveOAuthStartResponse,
   SaveGoogleDriveSourceRequest,
   type GoogleDriveOAuthStartRequest,
-} from "@opengeni/contracts";
+} from "@opengeni/contracts/google-drive";
 import { hasPermission, requireEnvironmentEncryption } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {

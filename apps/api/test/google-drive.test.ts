@@ -2,13 +2,15 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
 import type { Settings } from "@opengeni/config";
 import {
-  GOOGLE_DRIVE_CREDENTIAL_ROLE,
-  GOOGLE_DRIVE_READONLY_SCOPE,
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
   signDelegatedAccessToken,
   type Permission,
 } from "@opengeni/contracts";
+import {
+  GOOGLE_DRIVE_CREDENTIAL_ROLE,
+  GOOGLE_DRIVE_READONLY_SCOPE,
+} from "@opengeni/contracts/google-drive";
 import {
   createDb,
   getConnectionMetadata,
