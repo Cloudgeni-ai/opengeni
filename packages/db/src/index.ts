@@ -238,6 +238,7 @@ export * from "./session-queue-commands";
 export * from "./new-session-drafts";
 export * from "./workspace-instruction-policies";
 export * from "./preference-registry";
+export * from "./memory-governance";
 export { interruptedToolCallResult } from "./session-tool-call-settlement";
 export { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
 export {
@@ -7828,7 +7829,10 @@ function memoryVectorLiteral(values: number[]): string {
 }
 
 const agentVisibleMemoryStatuses = [...AGENT_VISIBLE_MEMORY_STATUSES];
-const visibleTextHashUniqueIndexName = "knowledge_memories_workspace_visible_text_hash_uq";
+const visibleTextHashUniqueIndexNames = new Set([
+  "knowledge_memories_workspace_visible_text_hash_uq",
+  "knowledge_memories_scope_visible_text_hash_uq",
+]);
 
 function isVisibleTextHashUniqueViolation(error: unknown): boolean {
   const candidate = error as {
@@ -7842,14 +7846,15 @@ function isVisibleTextHashUniqueViolation(error: unknown): boolean {
     return false;
   }
   const constraint = candidate.constraint ?? candidate.constraint_name;
-  if (candidate.code === "23505" && constraint === visibleTextHashUniqueIndexName) {
+  if (candidate.code === "23505" && visibleTextHashUniqueIndexNames.has(String(constraint))) {
     return true;
   }
+  const message = typeof candidate.message === "string" ? candidate.message : null;
   if (
-    typeof candidate.message === "string" &&
-    candidate.message.includes(visibleTextHashUniqueIndexName) &&
+    message !== null &&
+    [...visibleTextHashUniqueIndexNames].some((name) => message.includes(name)) &&
     (candidate.code === "23505" ||
-      candidate.message.includes("duplicate key value violates unique constraint"))
+      message.includes("duplicate key value violates unique constraint"))
   ) {
     return true;
   }

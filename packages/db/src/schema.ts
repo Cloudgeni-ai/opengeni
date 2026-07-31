@@ -1879,6 +1879,21 @@ export const knowledgeMemories = pgTable(
     supersededById: uuid("superseded_by_id"),
     validFrom: timestamp("valid_from", { withTimezone: true }).notNull().defaultNow(),
     validUntil: timestamp("valid_until", { withTimezone: true }),
+    // Hierarchical memory foundation (migration 0151). `scope` remains the V1
+    // compatibility projection; typed selectors are the fail-closed authority.
+    scopeType: text("scope_type").notNull().default("workspace"),
+    scopeSubjectId: text("scope_subject_id"),
+    scopeRoleKey: text("scope_role_key"),
+    scopeSessionId: uuid("scope_session_id"),
+    namespace: text("namespace_key").notNull().default("general"),
+    labels: text("labels").array().notNull().default([]),
+    memoryVersion: integer("memory_version").notNull().default(1),
+    createdByKind: text("created_by_kind").notNull().default("service"),
+    createdBySubjectId: text("created_by_subject_id").notNull().default("unattributed-legacy"),
+    createdByContext: jsonb("created_by_context")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({ backfill: true }),
     // sha256(normalizeMemoryText(text)) — exact-dedup key; see memory-domain.
     textHash: text("text_hash"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -1895,6 +1910,18 @@ export const knowledgeMemories = pgTable(
       table.workspaceId,
       table.scope,
     ),
+    workspaceTypedScope: index("knowledge_memories_workspace_typed_scope_idx").on(
+      table.workspaceId,
+      table.scopeType,
+      table.scopeSubjectId,
+      table.scopeRoleKey,
+      table.scopeSessionId,
+    ),
+    workspaceNamespace: index("knowledge_memories_workspace_namespace_idx").on(
+      table.workspaceId,
+      table.namespace,
+    ),
+    labelsGin: index("knowledge_memories_labels_idx").using("gin", table.labels),
     createdBySession: index("knowledge_memories_workspace_created_by_session_idx").on(
       table.workspaceId,
       table.createdBySessionId,
@@ -1907,8 +1934,18 @@ export const knowledgeMemories = pgTable(
       table.workspaceId,
       table.textHash,
     ),
-    workspaceVisibleTextHashUnique: uniqueIndex("knowledge_memories_workspace_visible_text_hash_uq")
-      .on(table.workspaceId, table.textHash)
+    // Drizzle 0.45 cannot encode PostgreSQL `NULLS NOT DISTINCT`; migration
+    // 0151 owns that option so nullable scope selectors remain one identity.
+    scopeVisibleTextHashUnique: uniqueIndex("knowledge_memories_scope_visible_text_hash_uq")
+      .on(
+        table.workspaceId,
+        table.scopeType,
+        table.scopeSubjectId,
+        table.scopeRoleKey,
+        table.scopeSessionId,
+        table.namespace,
+        table.textHash,
+      )
       .where(sql`${table.status} in ('active', 'approved') and ${table.textHash} is not null`),
   }),
 );
@@ -5299,3 +5336,4 @@ export const rigChanges = pgTable(
 
 export * from "./workspace-instruction-policies-schema";
 export * from "./preference-registry-schema";
+export * from "./memory-governance-schema";
