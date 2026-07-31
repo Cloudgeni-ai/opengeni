@@ -705,7 +705,11 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "scheduled_task_runs_list",
   "slack_bot_list_channels",
   "slack_bot_channel_history",
+  "slack_bot_thread_replies",
   "slack_bot_list_users",
+  "slack_bot_list_files",
+  "slack_bot_file_info",
+  "slack_bot_file_content",
   "slack_bot_post_message",
 ] as const;
 export const FirstPartyMcpToolName = z.enum(FIRST_PARTY_MCP_TOOL_NAMES);
@@ -4943,12 +4947,18 @@ export const OPENGENI_SLACK_BOT_CREDENTIAL_ROLE = "opengeni_slack_bot" as const;
 export const OPENGENI_SLACK_BOT_CREDENTIAL_LABEL = "OpenGeni Slack bot" as const;
 export const OPENGENI_SLACK_BOT_SESSION_METADATA_KEY = "opengeniSlackBotConnectionId" as const;
 export const OPENGENI_SLACK_BOT_REQUIRED_SCOPES = [
-  "chat:write",
-  "im:write",
-  "channels:read",
+  "canvases:read",
   "channels:history",
-  "groups:read",
+  "channels:read",
+  "chat:write",
+  "files:read",
   "groups:history",
+  "groups:read",
+  "im:history",
+  "im:read",
+  "im:write",
+  "mpim:history",
+  "mpim:read",
   "users:read",
 ] as const;
 export const OPENGENI_SLACK_BOT_FORBIDDEN_SCOPES = ["channels:join", "chat:write.public"] as const;

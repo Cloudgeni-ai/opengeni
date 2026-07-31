@@ -36,6 +36,7 @@ import { canonicalProviderDomain } from "./provider-domain";
 export const oauthStateTtlMs = 10 * 60 * 1000;
 export const OFFICIAL_SLACK_MCP_URL = "https://mcp.slack.com/mcp";
 const SLACK_OAUTH_ORIGIN = "https://slack.com";
+const SLACK_MCP_ORIGIN = "https://mcp.slack.com";
 export { OAUTH_MAX_RESPONSE_BYTES } from "@opengeni/network";
 
 type OAuthClientDeps = {
@@ -410,8 +411,14 @@ function assertPersonalSlackOAuthStart(
 }
 
 export function assertSlackAuthorizationServer(as: AuthorizationServerMetadata): void {
-  const urls = [as.issuer, as.authorizationServer, as.authorizationEndpoint, as.tokenEndpoint];
-  if (urls.some((value) => new URL(value).origin !== SLACK_OAUTH_ORIGIN)) {
+  const issuerOrigins = [as.issuer, as.authorizationServer].map((value) => new URL(value).origin);
+  const endpointOrigins = [as.authorizationEndpoint, as.tokenEndpoint].map(
+    (value) => new URL(value).origin,
+  );
+  if (
+    issuerOrigins.some((origin) => origin !== SLACK_OAUTH_ORIGIN && origin !== SLACK_MCP_ORIGIN) ||
+    endpointOrigins.some((origin) => origin !== SLACK_OAUTH_ORIGIN)
+  ) {
     throw new HTTPException(422, {
       message: "Slack MCP authorization metadata did not remain bound to slack.com",
     });
@@ -720,7 +727,14 @@ function operatorClientEntryFor(
 ): ReturnType<typeof parseIntegrationsOauthClientsJson>[string] | null {
   const normalizedCandidates = new Set(candidates.map(normalizedIssuerKey));
   if (
-    normalizedCandidates.has(SLACK_OAUTH_ORIGIN) &&
+    candidates.some((candidate) => {
+      try {
+        const origin = new URL(candidate).origin;
+        return origin === SLACK_OAUTH_ORIGIN || origin === SLACK_MCP_ORIGIN;
+      } catch {
+        return false;
+      }
+    }) &&
     settings.slackClientId?.trim() &&
     settings.slackClientSecret?.trim()
   ) {
