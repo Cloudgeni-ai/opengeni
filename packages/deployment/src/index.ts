@@ -1392,6 +1392,9 @@ export function requiredRuntimeEnvVars(
         "OPENGENI_OBJECT_STORAGE_S3_PROVIDER",
         "OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY",
       );
+      if (env.OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT) {
+        vars.push("OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT");
+      }
     } else if (contract.objectStorage.api === "aws-s3") {
       vars.push("OPENGENI_OBJECT_STORAGE_REGION");
     } else if (contract.objectStorage.api === "azure-blob") {
@@ -2247,6 +2250,17 @@ function runtimeEnvValues(
       valueEnv(
         "OPENGENI_OBJECT_STORAGE_S3_PROVIDER",
         env.OPENGENI_OBJECT_STORAGE_S3_PROVIDER ?? "S3Compatible",
+      ),
+    );
+  }
+  if (
+    (contract.objectStorage.api === "s3-compatible" || contract.objectStorage.api === "aws-s3") &&
+    env.OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT
+  ) {
+    entries.push(
+      valueEnv(
+        "OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT",
+        env.OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT,
       ),
     );
   }

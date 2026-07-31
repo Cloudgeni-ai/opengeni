@@ -858,6 +858,7 @@ describe("sandbox preparation profiles", () => {
       {
         OPENGENI_OBJECT_STORAGE_BACKEND: "s3-compatible",
         OPENGENI_OBJECT_STORAGE_ENDPOINT: "http://127.0.0.1:9000",
+        OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT: "http://minio:9000",
         OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID: "minioadmin",
         OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY: "minioadmin",
       },
@@ -865,6 +866,7 @@ describe("sandbox preparation profiles", () => {
         const settings = getSettings();
         expect(settings.objectStorageBackend).toBe("s3-compatible");
         expect(settings.objectStorageEndpoint).toBe("http://127.0.0.1:9000");
+        expect(settings.objectStorageInternalEndpoint).toBe("http://minio:9000");
         expect(settings.objectStorageBucket).toBe("opengeni-files");
         expect(settings.objectStorageForcePathStyle).toBe(true);
       },

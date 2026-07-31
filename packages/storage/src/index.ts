@@ -106,11 +106,10 @@ function createS3CompatibleObjectStorage(settings: Settings): ObjectStorage | nu
   ) {
     return null;
   }
-  const clientConfig: S3ClientConfig = {
+  const sharedClientConfig: S3ClientConfig = {
     region: settings.objectStorageRegion,
     forcePathStyle: settings.objectStorageForcePathStyle,
     requestChecksumCalculation: "WHEN_REQUIRED",
-    ...(settings.objectStorageEndpoint ? { endpoint: settings.objectStorageEndpoint } : {}),
     ...(settings.objectStorageAccessKeyId && settings.objectStorageSecretAccessKey
       ? {
           credentials: {
@@ -120,7 +119,16 @@ function createS3CompatibleObjectStorage(settings: Settings): ObjectStorage | nu
         }
       : {}),
   };
-  const client = new S3Client(clientConfig);
+  const presignClient = new S3Client({
+    ...sharedClientConfig,
+    ...(settings.objectStorageEndpoint ? { endpoint: settings.objectStorageEndpoint } : {}),
+  });
+  const requestClient = settings.objectStorageInternalEndpoint
+    ? new S3Client({
+        ...sharedClientConfig,
+        endpoint: settings.objectStorageInternalEndpoint,
+      })
+    : presignClient;
   return {
     bucket: settings.objectStorageBucket,
     backend: settings.objectStorageBackend === "aws-s3" ? "aws-s3" : "s3-compatible",
@@ -137,7 +145,7 @@ function createS3CompatibleObjectStorage(settings: Settings): ObjectStorage | nu
         Metadata: args.sha256 ? { sha256: args.sha256 } : undefined,
       });
       return {
-        url: await getSignedUrl(client, command, { expiresIn }),
+        url: await getSignedUrl(presignClient, command, { expiresIn }),
         requiredHeaders,
         expiresAt: new Date(Date.now() + expiresIn * 1000),
       };
@@ -146,7 +154,7 @@ function createS3CompatibleObjectStorage(settings: Settings): ObjectStorage | nu
       const expiresIn = args.expiresInSeconds ?? DOWNLOAD_URL_TTL_SECONDS;
       return {
         url: await getSignedUrl(
-          client,
+          presignClient,
           new GetObjectCommand({
             Bucket: settings.objectStorageBucket,
             Key: args.key,
@@ -161,7 +169,7 @@ function createS3CompatibleObjectStorage(settings: Settings): ObjectStorage | nu
       // A presigned URL buys nothing here — the worker already holds the creds — and
       // on a split public/internal endpoint topology the presigned URL points at the
       // PUBLIC host (no MinIO route → 401). This sends bytes straight to the backend.
-      await client.send(
+      await requestClient.send(
         new PutObjectCommand({
           Bucket: settings.objectStorageBucket,
           Key: args.key,
@@ -172,7 +180,7 @@ function createS3CompatibleObjectStorage(settings: Settings): ObjectStorage | nu
       );
     },
     async headFile(file) {
-      const head = await client.send(
+      const head = await requestClient.send(
         new HeadObjectCommand({
           Bucket: file.bucket,
           Key: file.objectKey,
@@ -186,7 +194,7 @@ function createS3CompatibleObjectStorage(settings: Settings): ObjectStorage | nu
     },
     async fileExists(file) {
       try {
-        await client.send(
+        await requestClient.send(
           new HeadObjectCommand({
             Bucket: file.bucket,
             Key: file.objectKey,
@@ -199,7 +207,7 @@ function createS3CompatibleObjectStorage(settings: Settings): ObjectStorage | nu
       }
     },
     async getFileBytes(file) {
-      const result = await client.send(
+      const result = await requestClient.send(
         new GetObjectCommand({
           Bucket: file.bucket,
           Key: file.objectKey,
@@ -210,7 +218,7 @@ function createS3CompatibleObjectStorage(settings: Settings): ObjectStorage | nu
     async getFileRange(file, range) {
       const length = assertFileByteRange(file, range);
       try {
-        const result = await client.send(
+        const result = await requestClient.send(
           new GetObjectCommand({
             Bucket: file.bucket,
             Key: file.objectKey,
@@ -225,7 +233,7 @@ function createS3CompatibleObjectStorage(settings: Settings): ObjectStorage | nu
     },
     async getObjectBytes(key) {
       try {
-        const result = await client.send(
+        const result = await requestClient.send(
           new GetObjectCommand({
             Bucket: settings.objectStorageBucket,
             Key: key,
@@ -242,7 +250,7 @@ function createS3CompatibleObjectStorage(settings: Settings): ObjectStorage | nu
     },
     async deleteObject(key) {
       // S3 DeleteObject is idempotent — deleting an absent key returns 204.
-      await client.send(
+      await requestClient.send(
         new DeleteObjectCommand({
           Bucket: settings.objectStorageBucket,
           Key: key,
