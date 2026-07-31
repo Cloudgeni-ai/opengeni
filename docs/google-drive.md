@@ -57,11 +57,16 @@ to the exact ports printed by the dev stack.
 
 ## Sync configuration behavior
 
-The browser starts at **My Drive**. The current location—not a child document—is
-the sync boundary. A Shared Drive or shared folder can be tested by pasting its
-full `https://drive.google.com/.../folders/...` URL or its folder ID. The user
-chooses that boundary once; subsequent runs are intended to use a durable cursor
-to process new, changed, moved, or deleted documents incrementally.
+The browser starts at **My Drive**, but browsing does not select anything for
+sync. The user must explicitly choose **Use My Drive**, **Use this Shared
+Drive**, or **Use this folder** before saving. A Shared Drive or shared folder
+can be opened by pasting its full `https://drive.google.com/.../folders/...` URL
+or its folder ID.
+
+The intended first successful run recursively imports all existing supported
+documents inside the selected boundary. Subsequent scheduled runs use a durable
+cursor to process only new, changed, moved, or deleted documents since the last
+successful run; they do not re-ingest every unchanged document each hour.
 
 Enumerating all Shared Drives by name requires the broader `drive.readonly`
 scope, so the metadata-only preview does not silently request it.

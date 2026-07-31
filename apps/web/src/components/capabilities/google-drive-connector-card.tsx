@@ -1,5 +1,6 @@
 import { GoogleDriveConnectionMetadata } from "@opengeni/contracts";
 import {
+  ArrowLeftIcon,
   ChevronRightIcon,
   FileIcon,
   FolderIcon,
@@ -52,6 +53,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
   const [items, setItems] = useState<GoogleDriveBrowseItem[]>([]);
   const [crumbs, setCrumbs] = useState<FolderCrumb[]>([{ id: "root", name: "My Drive" }]);
   const [nextPageToken, setNextPageToken] = useState<string | null>(null);
+  const [currentFolder, setCurrentFolder] = useState<GoogleDriveBrowseItem | null>(null);
   const [selected, setSelected] = useState<GoogleDriveBrowseItem | null>(null);
   const [targetScope, setTargetScope] = useState<GoogleDriveTargetScope>("workspace");
   const [folderIdDraft, setFolderIdDraft] = useState("");
@@ -162,7 +164,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
       setItems((current) => (mode === "append" ? [...current, ...response.items] : response.items));
       setNextPageToken(response.nextPageToken);
       if (mode === "replace") {
-        setSelected(response.current);
+        setCurrentFolder(response.current);
         setCrumbs((current) => {
           const last = current[current.length - 1];
           if (!last || !response.current) return current;
@@ -190,8 +192,10 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
   function openBrowser() {
     setCrumbs([{ id: "root", name: "My Drive" }]);
     setItems([]);
+    setCurrentFolder(null);
     setSelected(null);
     setNextPageToken(null);
+    setFolderIdDraft("");
     setTargetScope(metadata?.selectedSource?.targetScope ?? "workspace");
     setSyncCadence(metadata?.selectedSource?.syncCadence ?? "hourly");
     setReadPolicy(metadata?.selectedSource?.readPolicy ?? "allow");
@@ -209,6 +213,14 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
     const folder = crumbs[index];
     if (!folder) return;
     setCrumbs((current) => current.slice(0, index + 1));
+    void loadFolder(folder);
+  }
+
+  function goBack() {
+    if (crumbs.length <= 1) return;
+    const folder = crumbs[crumbs.length - 2];
+    if (!folder) return;
+    setCrumbs((current) => current.slice(0, -1));
     void loadFolder(folder);
   }
 
@@ -265,8 +277,8 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
             <div className="min-w-0">
               <div className="text-sm font-medium">Google Drive</div>
               <p className="mt-0.5 text-xs leading-5 text-fg-muted">
-                Connect once, choose a Shared Drive or folder boundary, and configure how OpenGeni
-                should check for new and changed documents.
+                Connecting grants the approved Drive access. Nothing syncs until you explicitly
+                choose and save a Shared Drive or folder boundary.
               </p>
             </div>
           </div>
@@ -370,67 +382,94 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
       </section>
 
       <Dialog open={browseOpen} onOpenChange={setBrowseOpen}>
-        <DialogContent className="max-h-[85vh] max-w-3xl overflow-hidden">
+        <DialogContent className="max-h-[90vh] max-w-3xl grid-rows-[auto_minmax(0,1fr)_auto_auto] overflow-hidden">
           <DialogHeader>
             <DialogTitle>Configure Google Drive sync</DialogTitle>
             <DialogDescription>
-              Choose a whole Shared Drive or folder once. Files shown below are included as a
-              preview—you do not select them individually.
+              Browse first, then explicitly choose one Shared Drive or folder. Opening a location
+              does not select it for sync.
             </DialogDescription>
           </DialogHeader>
 
-          <div className="grid min-h-0 gap-3 overflow-hidden">
-            <div className="flex flex-wrap items-center gap-1 text-xs text-fg-muted">
-              {crumbs.map((crumb, index) => (
-                <div key={crumb.id} className="flex items-center gap-1">
-                  {index > 0 ? <ChevronRightIcon className="size-3" /> : null}
-                  <button
-                    type="button"
-                    className="rounded px-1.5 py-1 hover:bg-surface-2 hover:text-fg"
-                    onClick={() => openCrumb(index)}
-                  >
-                    {crumb.name}
-                  </button>
-                </div>
-              ))}
-            </div>
-
-            <div className="flex gap-2">
-              <Input
-                value={folderIdDraft}
-                onChange={(event) => setFolderIdDraft(event.target.value)}
-                placeholder="Optional: paste a Google Drive folder link or folder ID"
-                className="h-8 text-xs"
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") openFolderId();
-                }}
-              />
+          <div className="grid min-h-0 gap-2 overflow-y-auto pr-1">
+            <div className="flex min-w-0 items-center gap-2">
               <Button
                 type="button"
-                variant="secondary"
+                variant="ghost"
                 size="sm"
-                disabled={!folderIdDraft.trim() || browseBusy}
-                onClick={openFolderId}
+                className="h-7 shrink-0 px-2"
+                disabled={crumbs.length <= 1 || browseBusy}
+                onClick={goBack}
               >
-                Open
+                <ArrowLeftIcon className="size-3.5" />
+                Back
               </Button>
+              <div className="flex min-w-0 flex-wrap items-center gap-1 text-xs text-fg-muted">
+                {crumbs.map((crumb, index) => (
+                  <div key={crumb.id} className="flex min-w-0 items-center gap-1">
+                    {index > 0 ? <ChevronRightIcon className="size-3 shrink-0" /> : null}
+                    <button
+                      type="button"
+                      className="max-w-44 truncate rounded px-1.5 py-1 hover:bg-surface-2 hover:text-fg"
+                      onClick={() => openCrumb(index)}
+                    >
+                      {crumb.name}
+                    </button>
+                  </div>
+                ))}
+              </div>
             </div>
 
-            {selected ? (
-              <div className="flex items-center gap-3 rounded-lg border border-brand/30 bg-brand/5 px-3 py-2.5">
+            <div className="grid gap-1">
+              <div className="text-2xs text-fg-subtle">
+                To open a Shared Drive, paste its Google Drive link.
+              </div>
+              <div className="flex gap-2">
+                <Input
+                  value={folderIdDraft}
+                  onChange={(event) => setFolderIdDraft(event.target.value)}
+                  placeholder="Paste a Shared Drive or folder link"
+                  className="h-8 text-xs"
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") openFolderId();
+                  }}
+                />
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  disabled={!folderIdDraft.trim() || browseBusy}
+                  onClick={openFolderId}
+                >
+                  Open
+                </Button>
+              </div>
+            </div>
+
+            {currentFolder ? (
+              <div className="flex items-center gap-3 rounded-lg border border-border bg-surface/45 px-3 py-2.5">
                 <FolderOpenIcon className="size-4 shrink-0 text-brand" />
                 <div className="min-w-0 flex-1">
                   <div className="text-2xs font-medium uppercase tracking-wide text-fg-subtle">
-                    Everything inside this boundary
+                    Current location (not selected)
                   </div>
                   <div className="truncate text-sm font-medium text-fg">
-                    {googleDriveBoundaryLabel(selected)}
+                    {googleDriveBoundaryLabel(currentFolder)}
                   </div>
                 </div>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={selected?.id === currentFolder.id ? "secondary" : "default"}
+                  disabled={selected?.id === currentFolder.id || browseBusy}
+                  onClick={() => setSelected(currentFolder)}
+                >
+                  {selected?.id === currentFolder.id ? "Selected" : useBoundaryLabel(currentFolder)}
+                </Button>
               </div>
             ) : null}
 
-            <div className="max-h-[45vh] min-h-52 overflow-y-auto rounded-lg border border-border">
+            <div className="max-h-[26vh] min-h-28 overflow-y-auto rounded-lg border border-border">
               {browseBusy && items.length === 0 ? (
                 <div className="flex h-52 items-center justify-center gap-2 text-xs text-fg-muted">
                   <Loader2Icon className="size-4 animate-spin" />
@@ -495,41 +534,71 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
               ) : null}
             </div>
 
-            <div className="grid gap-2 sm:grid-cols-3">
-              <label className="grid gap-1 text-xs text-fg-muted">
-                Knowledge scope
-                <Select
-                  value={targetScope}
-                  onChange={(event) => setTargetScope(event.target.value as GoogleDriveTargetScope)}
-                >
-                  <option value="user">Only me</option>
-                  <option value="workspace">This workspace</option>
-                  <option value="organization">Company</option>
-                </Select>
-              </label>
-              <label className="grid gap-1 text-xs text-fg-muted">
-                Check for changes
-                <Select
-                  value={syncCadence}
-                  onChange={(event) => setSyncCadence(event.target.value as GoogleDriveSyncCadence)}
-                >
-                  <option value="hourly">Every hour</option>
-                  <option value="daily">Every day</option>
-                  <option value="manual">Only when triggered</option>
-                </Select>
-              </label>
-              <label className="grid gap-1 text-xs text-fg-muted">
-                Read access
-                <Select
-                  value={readPolicy}
-                  onChange={(event) => setReadPolicy(event.target.value as GoogleDriveReadPolicy)}
-                >
-                  <option value="allow">Allow automatically</option>
-                  <option value="ask">Ask before each run</option>
-                  <option value="block">Block</option>
-                </Select>
-              </label>
+            <div
+              className={`rounded-lg border px-3 py-2.5 text-xs ${
+                selected ? "border-brand/30 bg-brand/5" : "border-border bg-surface/30"
+              }`}
+            >
+              {selected ? (
+                <>
+                  <div className="font-medium text-fg">
+                    Sync boundary: {googleDriveBoundaryLabel(selected)}
+                  </div>
+                  <div className="mt-0.5 text-fg-muted">
+                    The first run imports all existing supported documents inside this boundary,
+                    including nested folders. Later runs process only new, changed, moved, or
+                    deleted documents since the last successful run.
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="font-medium text-fg">No sync boundary selected</div>
+                  <div className="mt-0.5 text-fg-muted">
+                    Browsing My Drive or a linked Shared Drive does not configure a sync.
+                  </div>
+                </>
+              )}
+              <div className="mt-1 text-fg-subtle">
+                Local preview: saving stores configuration only; document ingestion is not running
+                yet.
+              </div>
             </div>
+          </div>
+
+          <div className="grid gap-2 sm:grid-cols-3">
+            <label className="grid gap-1 text-xs text-fg-muted">
+              Knowledge scope
+              <Select
+                value={targetScope}
+                onChange={(event) => setTargetScope(event.target.value as GoogleDriveTargetScope)}
+              >
+                <option value="user">Only me</option>
+                <option value="workspace">This workspace</option>
+                <option value="organization">Company</option>
+              </Select>
+            </label>
+            <label className="grid gap-1 text-xs text-fg-muted">
+              After the initial import
+              <Select
+                value={syncCadence}
+                onChange={(event) => setSyncCadence(event.target.value as GoogleDriveSyncCadence)}
+              >
+                <option value="hourly">Every hour</option>
+                <option value="daily">Every day</option>
+                <option value="manual">Only when triggered</option>
+              </Select>
+            </label>
+            <label className="grid gap-1 text-xs text-fg-muted">
+              Read access
+              <Select
+                value={readPolicy}
+                onChange={(event) => setReadPolicy(event.target.value as GoogleDriveReadPolicy)}
+              >
+                <option value="allow">Allow automatically</option>
+                <option value="ask">Ask before each run</option>
+                <option value="block">Block</option>
+              </Select>
+            </label>
           </div>
 
           <DialogFooter>
@@ -570,6 +639,12 @@ function googleDriveBoundaryLabel(source: {
 }): string {
   if (source.id === source.driveId && source.name.trim() === "Drive") return "Shared Drive";
   return source.name.trim();
+}
+
+function useBoundaryLabel(source: { id: string; driveId: string | null }): string {
+  if (source.id === "root") return "Use My Drive";
+  if (source.driveId === source.id) return "Use this Shared Drive";
+  return "Use this folder";
 }
 
 function scopeLabel(scope: GoogleDriveTargetScope): string {
