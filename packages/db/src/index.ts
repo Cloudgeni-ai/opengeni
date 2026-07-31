@@ -20426,6 +20426,24 @@ export class SandboxLeaseSupersededError extends Error {
   }
 }
 
+export type SandboxViewerForceDrainReason = "balance" | "warm_cap";
+
+export class SandboxViewerAdmissionBlockedError extends Error {
+  readonly name = "SandboxViewerAdmissionBlockedError";
+
+  constructor(
+    public readonly workspaceId: string,
+    public readonly sandboxGroupId: string,
+    public readonly reason: SandboxViewerForceDrainReason,
+  ) {
+    super(
+      reason === "balance"
+        ? "Sandbox viewer admission is blocked because the workspace has no managed credits"
+        : "Sandbox viewer admission is blocked because the workspace warm allowance is exhausted",
+    );
+  }
+}
+
 export class SandboxLeaseRecoveryBlockedError extends Error {
   readonly name = "SandboxLeaseRecoveryBlockedError";
 
@@ -20882,6 +20900,26 @@ async function acquireLeaseOnce(
         if (!row) throw new Error(`Lease row vanished post-insert: ${sandboxGroupId}`);
 
         const liveness = row.liveness;
+
+        // A workspace-wide billing/cap drain survives this lease becoming cold.
+        // Viewer-only admission must consult it while holding the exact lease
+        // row lock, otherwise a dashboard heartbeat can re-arm the draining box
+        // between holder deletion and provider teardown. A live turn remains
+        // viewable: the reaper intentionally drains only boxes with no turn
+        // holder, and this same lock makes the distinction race-free.
+        if (kind === "viewer" && Number(row.turn_holders) === 0) {
+          const workspaceRows = await tx.execute<{
+            sandbox_viewer_force_drain_reason: SandboxViewerForceDrainReason | null;
+          }>(sql`
+            select sandbox_viewer_force_drain_reason
+            from workspaces
+            where id = ${workspaceId}
+          `);
+          const reason = workspaceRows[0]?.sandbox_viewer_force_drain_reason ?? null;
+          if (reason !== null) {
+            throw new SandboxViewerAdmissionBlockedError(workspaceId, sandboxGroupId, reason);
+          }
+        }
 
         // Provider-native capture may temporarily pause the box. Do not attach
         // another holder while that operation owns the exact lease: the caller
@@ -24683,6 +24721,17 @@ export async function listMeterableWarmLeases(db: Database): Promise<MeterableWa
     leaseEpoch: Number(r.lease_epoch),
     backend: r.backend,
   }));
+}
+
+/** Workspaces whose durable viewer-drain admission intent must be reevaluated
+ * even after every affected sandbox lease has become cold. */
+export async function listSandboxViewerForceDrainWorkspaceIds(db: Database): Promise<string[]> {
+  const rows = await rawRows<{ workspace_id: string }>(
+    db,
+    sql`select workspace_id
+        from opengeni_private.list_sandbox_viewer_force_drain_workspaces()`,
+  );
+  return rows.map((row) => row.workspace_id);
 }
 
 export async function countQueuedTurns(db: Database): Promise<number> {
@@ -31496,7 +31545,7 @@ export interface ForceDrainResult {
   /** Whether the workspace was over a limit (0 balance or over the warm cap). */
   overLimit: boolean;
   /** The reason, for observability. */
-  reason: "balance" | "warm_cap" | null;
+  reason: SandboxViewerForceDrainReason | null;
   /** The (workspaceId, sandboxGroupId) viewer-only boxes CASed warm->draining. */
   drained: { workspaceId: string; sandboxGroupId: string }[];
 }
@@ -31527,7 +31576,7 @@ export async function forceDrainOverLimitViewerOnlyBoxes(
   return await withWorkspaceUsageLock(db, input.workspaceId, async (scopedDb) => {
     // Determine over-limit under the lock (so the cap read + the drain are one
     // serialized critical section per workspace).
-    let reason: "balance" | "warm_cap" | null = null;
+    let reason: SandboxViewerForceDrainReason | null = null;
     if (input.enforceBalance && input.balanceMicros <= 0) {
       reason = "balance";
     } else if (input.maxWarmSecondsPerWorkspace > 0) {
@@ -31550,8 +31599,39 @@ export async function forceDrainOverLimitViewerOnlyBoxes(
     }
 
     if (!reason) {
+      // A top-up, a monthly-cap rollover, or a deployment policy change clears
+      // the durable admission gate only after this fresh serialized evaluation.
+      await scopedDb.execute(sql`
+        update workspaces set
+          sandbox_viewer_force_drain_reason = null,
+          sandbox_viewer_force_drain_requested_at = null,
+          updated_at = now()
+        where id = ${input.workspaceId}
+          and sandbox_viewer_force_drain_reason is not null
+      `);
       return { overLimit: false, reason: null, drained: [] };
     }
+
+    // Publish the workspace-wide admission gate before touching any holder.
+    // A concurrent viewer that already owns the lease lock may complete first;
+    // the locked drain below then deletes that holder. Every later viewer sees
+    // this committed intent before it can re-arm or spawn a provider box.
+    await scopedDb.execute(sql`
+      update workspaces set
+        sandbox_viewer_force_drain_reason = ${reason},
+        sandbox_viewer_force_drain_requested_at =
+          case
+            when sandbox_viewer_force_drain_reason is distinct from ${reason}
+              then now()
+            else coalesce(sandbox_viewer_force_drain_requested_at, now())
+          end,
+        updated_at = now()
+      where id = ${input.workspaceId}
+        and (
+          sandbox_viewer_force_drain_reason is distinct from ${reason}
+          or sandbox_viewer_force_drain_requested_at is null
+        )
+    `);
 
     // Canonical holder-mutation order is lease -> holder. Lock the exact
     // viewer-only candidates before deleting their holder rows so this path

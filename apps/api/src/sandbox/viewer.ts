@@ -43,6 +43,7 @@ import {
   recordLeaseTerminalDataPlaneUrl,
   releaseLeaseHolder,
   SandboxLeaseSupersededError,
+  SandboxViewerAdmissionBlockedError,
   type Database,
   type LeaseSnapshot,
   type SandboxRecord,
@@ -196,19 +197,33 @@ export async function attachViewer(
     });
   };
 
-  const acquired = await acquireLease(db, {
-    accountId,
-    workspaceId,
-    sandboxGroupId,
-    kind: "viewer",
-    holderId: viewerId,
-    subjectId: session.id,
-    backend: session.sandboxBackend,
-    os: session.sandboxOs,
-    leaseTtlMs,
-    warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,
-    captureWaitMs: sandboxArchiveCaptureTimeoutMs(settings),
-  });
+  let acquired: Awaited<ReturnType<typeof acquireLease>>;
+  try {
+    acquired = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId,
+      kind: "viewer",
+      holderId: viewerId,
+      subjectId: session.id,
+      backend: session.sandboxBackend,
+      os: session.sandboxOs,
+      leaseTtlMs,
+      warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,
+      captureWaitMs: sandboxArchiveCaptureTimeoutMs(settings),
+    });
+  } catch (error) {
+    if (error instanceof SandboxViewerAdmissionBlockedError) {
+      throw new HTTPException(error.reason === "balance" ? 402 : 429, {
+        message:
+          error.reason === "balance"
+            ? "insufficient OpenGeni credits for an idle sandbox viewer"
+            : "workspace sandbox warm allowance exhausted",
+        cause: error,
+      });
+    }
+    throw error;
+  }
 
   // FENCED: a newer epoch re-established the box. Release our just-registered
   // holder and surface a 409 — the client re-reads capabilities and re-attaches.
