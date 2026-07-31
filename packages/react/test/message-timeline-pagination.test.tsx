@@ -441,6 +441,13 @@ describe("MessageTimeline pagination affordances", () => {
   });
 
   test("pinned follow keeps the tip at the scroller bottom across live appends", async () => {
+    const frames: FrameRequestCallback[] = [];
+    globalThis.requestAnimationFrame = (callback: FrameRequestCallback): number => {
+      frames.push(callback);
+      return frames.length;
+    };
+    globalThis.cancelAnimationFrame = () => undefined;
+
     const prefix = manyEvents(19);
     const initial = [...prefix, agentDelta(20, "hello ")];
     const r = await renderComponent(<MessageTimeline events={initial} status="running" />);
@@ -469,7 +476,7 @@ describe("MessageTimeline pagination affordances", () => {
     await r.rerender(
       <MessageTimeline events={[...initial, agentDelta(21, " world")]} status="running" />,
     );
-    await flush();
+    await drainFrames(frames);
 
     expect(r.container.textContent).toContain("hello  world");
     expect(distanceFromBottom(scroller)).toBeLessThan(48);
