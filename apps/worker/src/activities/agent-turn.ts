@@ -178,6 +178,7 @@ import {
   CODEX_CLIENT_VERSION,
   CODEX_FALLBACK_MODEL_SLUGS,
   CodexReloginRequired,
+  classifyCodexEncryptedArtifactRejection,
   classifyCodexResponseTimeoutError,
   classifyCodexUsageLimitError,
   codexRequestStorage,
@@ -4178,6 +4179,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   force: true,
                   clearRequestedCompaction: true,
                   trigger: "operator",
+                  codexAccount: {
+                    currentCodexCredentialId: effectiveCodexCredentialId,
+                  },
                 },
               ),
               cancellationSignal,
@@ -5625,8 +5629,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     force: true,
                     clearRequestedCompaction: true,
                     trigger: "operator",
+                    codexAccount: {
+                      currentCodexCredentialId: effectiveCodexCredentialId,
+                    },
                   }
-                : { trigger: "auto" },
+                : {
+                    trigger: "auto",
+                    codexAccount: {
+                      currentCodexCredentialId: effectiveCodexCredentialId,
+                    },
+                  },
             ),
             cancellationSignal,
             undefined,
@@ -5844,6 +5856,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               force: true,
               ...(triggerLabel === "operator" ? { clearRequestedCompaction: true } : {}),
               trigger: triggerLabel,
+              codexAccount: {
+                currentCodexCredentialId: effectiveCodexCredentialId,
+              },
             },
           ),
           cancellationSignal,
@@ -6589,7 +6604,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           return claimedResult({
             status: "recovering",
             ...(deadlineRotationPending
-              ? { continueDelayMs: sandboxDeadlineRotationRecoveryDelayMs(settings) }
+              ? {
+                  continueDelayMs: sandboxDeadlineRotationRecoveryDelayMs(settings),
+                }
               : {}),
           });
         } catch (recoveryError) {
@@ -7406,6 +7423,62 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         });
         activityStatus = "idle";
         return claimedResult({ status: "idle" });
+      }
+      // The Codex backend can reject an opaque reasoning artifact that it
+      // minted on the immediately preceding successful request, even when the
+      // credential-row UUID is unchanged. HTTP 400 + the exact provider
+      // semantic proves this request never entered inference. Atomically mark
+      // the active opaque artifacts rejected and recover the SAME logical turn
+      // from durable history; messages, tool calls/results, summaries, and the
+      // original audit rows remain intact. If no artifact can be invalidated,
+      // fall through to the terminal path rather than resend an equivalent
+      // request forever.
+      const encryptedArtifactRejection =
+        isCodexTurn && effectiveCodexCredentialId
+          ? classifyCodexEncryptedArtifactRejection(error)
+          : null;
+      if (
+        encryptedArtifactRejection &&
+        effectiveCodexCredentialId &&
+        publish &&
+        turnId &&
+        turnStartedPublished
+      ) {
+        await flushRuntimeBatcher();
+        await reconcileConversationTruth({ requireDurable: true });
+        const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+          sessionId: input.sessionId,
+          turnId,
+          triggerEventId: triggerEventId!,
+          attemptId: input.attemptId,
+          reason: encryptedArtifactRejection.kind,
+          detail: {
+            code: encryptedArtifactRejection.kind,
+            retryable: true,
+          },
+          providerArtifactInvalidation: {
+            codexCredentialId: effectiveCodexCredentialId,
+            reason: encryptedArtifactRejection.kind,
+          },
+        });
+        if (recovery.action === "stale") {
+          acknowledgeLostAttemptOwnership();
+          activityStatus = "cancelled";
+          turnMetricOutcome = "cancelled";
+          return claimedResult({ status: "cancelled" });
+        }
+        if (recovery.action === "recovering") {
+          await publishDurableSessionEvents(
+            bus,
+            input.workspaceId,
+            input.sessionId,
+            recovery.events,
+          );
+          turnMetricOutcome = "recovering";
+          activityStatus = "recovering";
+          activityError = error;
+          return claimedResult({ status: "recovering" });
+        }
       }
       // A retryable provider/MCP failure is transient external backpressure,
       // not a session or goal failure. The in-client retry budget is already

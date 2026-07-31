@@ -152,12 +152,13 @@ describe("release schema contract", () => {
         (migrations.has("0135_durable_machine_input_batches.sql") ? 1 : 0) +
         (migrations.has("0136_unified_session_tool_policy.sql") ? 1 : 0) +
         (migrations.has("0137_preference_registry.sql") ? 1 : 0) +
-        (migrations.has("0138_sandbox_checkpoint_artifacts_and_deadlines.sql") ? 1 : 0),
+        (migrations.has("0138_sandbox_checkpoint_artifacts_and_deadlines.sql") ? 1 : 0) +
+        (migrations.has("0139_codex_provider_artifact_invalidations.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "0b1fdc945ff41fa8946019ba7ae7ae9f9de54844b7ac6fc43da39fcbdab873b7",
+      "2d043f83db771ba49584963faa291c5bb7be9a1b07ef55c2d58bace70ae90189",
     );
-    expect(contract.latestMigration).toBe("0138_sandbox_checkpoint_artifacts_and_deadlines.sql");
+    expect(contract.latestMigration).toBe("0139_codex_provider_artifact_invalidations.sql");
     expect(migrations.get("0128_github_installation_authority.sql")).toMatchObject({
       sha256: "365793b2a204a70e214adb90298b522acbb6dcfae22a46681a58f41a6938e6f0",
       deploymentMode: "rolling",
@@ -203,7 +204,7 @@ describe("release schema contract", () => {
     expect(
       contract.migrations
         .map((migration) => migration.path)
-        .filter((path) => /^(?:010[3-9]|011[0-9]|012[0-9]|013[0-8])_/.test(path)),
+        .filter((path) => /^(?:010[3-9]|011[0-9]|012[0-9]|013[0-9])_/.test(path)),
     ).toEqual([
       "0103_host_export_root_session.sql",
       "0104_host_export_root_session_backfill.sql",
@@ -231,6 +232,7 @@ describe("release schema contract", () => {
       "0136_unified_session_tool_policy.sql",
       "0137_preference_registry.sql",
       "0138_sandbox_checkpoint_artifacts_and_deadlines.sql",
+      "0139_codex_provider_artifact_invalidations.sql",
     ]);
     expect(new Set(contract.migrations.map((migration) => migration.path)).size).toBe(
       contract.fileCount,
@@ -322,6 +324,10 @@ describe("release schema contract", () => {
     expect(migrations.get("0138_sandbox_checkpoint_artifacts_and_deadlines.sql")).toMatchObject({
       sha256: "c32c70ff47930c77f45482dc5f66b26b13dd444d440397837cca134f97c48e14",
       deploymentMode: "maintenance",
+    });
+    expect(migrations.get("0139_codex_provider_artifact_invalidations.sql")).toMatchObject({
+      sha256: "977c161505854ef352ade74d396e3c2205e8d3391789fb3535973bd0d20f953b",
+      deploymentMode: "rolling",
     });
   });
 });

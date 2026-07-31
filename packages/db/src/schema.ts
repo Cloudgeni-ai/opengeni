@@ -2322,6 +2322,14 @@ export const agentRunStates = pgTable("agent_run_states", {
   // correct either way). NULL on both sides (non-codex freeze + non-codex
   // resume) is a no-op, so single-account and non-codex sessions are unchanged.
   frozenCodexCredentialId: uuid("frozen_codex_credential_id"),
+  // Exact provider rejection invalidates only the opaque reasoning identity
+  // inside this frozen state. The serialized receipt remains durable and
+  // auditable; the resume path neutralizes its provider-bound identity.
+  providerArtifactInvalidatedAt: timestamp("provider_artifact_invalidated_at", {
+    withTimezone: true,
+  }),
+  providerArtifactInvalidationReason: text("provider_artifact_invalidation_reason"),
+  providerArtifactInvalidatedByAttemptId: uuid("provider_artifact_invalidated_by_attempt_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -2451,6 +2459,16 @@ export const sessionHistoryItems = pgTable(
     // (an ON DELETE SET NULL would erase the tag, and a stale-but-null tag still
     // mismatches a live codex id so the strip stays correct either way).
     producerCodexCredentialId: uuid("producer_codex_credential_id"),
+    // An exact provider 400 can prove that an otherwise same-credential opaque
+    // reasoning artifact is no longer decryptable. Keep the original item and
+    // producer provenance immutable, but record the attempt-fenced rejection so
+    // later model reads omit only the provider-bound identity. No FK: the receipt
+    // must outlive operational attempt retention just like producer provenance.
+    providerArtifactInvalidatedAt: timestamp("provider_artifact_invalidated_at", {
+      withTimezone: true,
+    }),
+    providerArtifactInvalidationReason: text("provider_artifact_invalidation_reason"),
+    providerArtifactInvalidatedByAttemptId: uuid("provider_artifact_invalidated_by_attempt_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
