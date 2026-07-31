@@ -14,7 +14,16 @@ export type ModelPickerProps = {
   className?: string | undefined;
   /** Visible-to-assistive-technology label. Defaults to "Model". */
   label?: string | undefined;
+  /**
+   * When true, only Codex subscription models are offered. Used for sessions
+   * frozen on remote compaction v2 (Codex-only admission).
+   */
+  codexOnly?: boolean | undefined;
 };
+
+function isCodexClientModel(model: ClientModel): boolean {
+  return model.id.startsWith("codex/") || model.provider === "codex-subscription";
+}
 
 /**
  * The model picker — a compact dropdown for the composer footer, grouping the
@@ -34,14 +43,19 @@ export function ModelPicker({
   disabled,
   className,
   label = "Model",
+  codexOnly = false,
 }: ModelPickerProps) {
   const selectId = useId();
+  const visibleModels = useMemo(
+    () => (codexOnly ? models.filter(isCodexClientModel) : models),
+    [models, codexOnly],
+  );
   // Group by provider, preserving first-seen order for both the providers and
   // the models within each — the server already orders the list (default model
   // and built-in provider first), so we must not re-sort it.
   const groups = useMemo(() => {
     const byProvider = new Map<string, { label: string; models: ClientModel[] }>();
-    for (const model of models) {
+    for (const model of visibleModels) {
       let group = byProvider.get(model.provider);
       if (!group) {
         group = { label: model.providerLabel, models: [] };
@@ -50,47 +64,54 @@ export function ModelPicker({
       group.models.push(model);
     }
     return [...byProvider.values()];
-  }, [models]);
+  }, [visibleModels]);
 
-  if (models.length === 0) {
+  if (visibleModels.length === 0) {
     return null;
   }
 
   return (
-    <span className={cn("relative inline-flex items-center", className)}>
-      <label htmlFor={selectId} className="sr-only">
-        {label}
-      </label>
-      <select
-        id={selectId}
-        value={value ?? ""}
-        onChange={(event) => onChange(event.target.value)}
-        disabled={disabled === true}
-        aria-label={label}
-        className={cn(
-          // Sized like the other footer controls; the chevron overlay needs the
-          // right padding so the value never collides with it.
-          "h-8 max-w-[180px] cursor-pointer appearance-none truncate rounded-og-md bg-transparent",
-          "py-0 pl-2 pr-6 text-[13px] text-og-fg-muted",
-          "transition-colors duration-150 hover:bg-og-surface-2 hover:text-og-fg",
-          "focus:outline-none focus-visible:outline-none",
-          "disabled:cursor-not-allowed disabled:opacity-50",
-        )}
-      >
-        {groups.map((group) => (
-          <optgroup key={group.label} label={group.label}>
-            {group.models.map((model) => (
-              <option key={model.id} value={model.id}>
-                {model.label}
-              </option>
-            ))}
-          </optgroup>
-        ))}
-      </select>
-      <ChevronDownIcon
-        aria-hidden
-        className="pointer-events-none absolute right-1.5 size-3.5 text-og-fg-subtle"
-      />
+    <span className={cn("relative inline-flex flex-col items-start gap-0.5", className)}>
+      <span className="relative inline-flex items-center">
+        <label htmlFor={selectId} className="sr-only">
+          {label}
+        </label>
+        <select
+          id={selectId}
+          value={value ?? ""}
+          onChange={(event) => onChange(event.target.value)}
+          disabled={disabled === true}
+          aria-label={label}
+          title={
+            codexOnly
+              ? "This session uses Codex remote compaction — only Codex models are available."
+              : undefined
+          }
+          className={cn(
+            // Sized like the other footer controls; the chevron overlay needs the
+            // right padding so the value never collides with it.
+            "h-8 max-w-[180px] cursor-pointer appearance-none truncate rounded-og-md bg-transparent",
+            "py-0 pl-2 pr-6 text-[13px] text-og-fg-muted",
+            "transition-colors duration-150 hover:bg-og-surface-2 hover:text-og-fg",
+            "focus:outline-none focus-visible:outline-none",
+            "disabled:cursor-not-allowed disabled:opacity-50",
+          )}
+        >
+          {groups.map((group) => (
+            <optgroup key={group.label} label={group.label}>
+              {group.models.map((model) => (
+                <option key={model.id} value={model.id}>
+                  {model.label}
+                </option>
+              ))}
+            </optgroup>
+          ))}
+        </select>
+        <ChevronDownIcon
+          aria-hidden
+          className="pointer-events-none absolute right-1.5 size-3.5 text-og-fg-subtle"
+        />
+      </span>
     </span>
   );
 }

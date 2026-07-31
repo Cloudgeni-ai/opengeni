@@ -27,6 +27,7 @@ export const BUILT_IN_TURN_SUMMARY_FACET_IDS = [
   "commands",
   "screenshots",
   "memories",
+  "compacted",
   "duration",
 ] as const;
 
@@ -45,6 +46,11 @@ export type TurnSummaryContext = Readonly<{
   durationMs: number | undefined;
   /** False when any projected activity is still running or streaming. */
   settled: boolean;
+  /**
+   * Adjacent compaction landmarks next to this fold. Landmark remains the
+   * primary UI; this is a secondary chip signal only.
+   */
+  contextCompactionCount: number;
 }>;
 
 export type TurnSummaryFacetResult = Readonly<{
@@ -106,6 +112,8 @@ export type TurnSummaryProps = {
   bare?: boolean | undefined;
   /** Per-instance facet customization. Omit to preserve the built-in summary exactly. */
   facets?: TurnSummaryFacetConfiguration | undefined;
+  /** Adjacent compaction landmark count for the secondary chip facet. */
+  contextCompactionCount?: number | undefined;
   /** The rendered activity rail revealed on expand. */
   children: ReactNode;
 };
@@ -118,6 +126,7 @@ export function TurnSummary({
   defaultOpen,
   bare,
   facets: facetConfiguration,
+  contextCompactionCount,
   children,
 }: TurnSummaryProps) {
   // An explicit `defaultOpen` always wins; otherwise an ancestor may seed it
@@ -126,8 +135,15 @@ export function TurnSummary({
   const [open, setOpen] = useState(defaultOpen ?? forcedDefaultOpen ?? false);
   const enter = useEntranceAnimation();
   const context = useMemo(
-    () => createTurnSummaryContext(items, outcome, failureText, durationMs),
-    [items, outcome, failureText, durationMs],
+    () =>
+      createTurnSummaryContext(
+        items,
+        outcome,
+        failureText,
+        durationMs,
+        contextCompactionCount ?? 0,
+      ),
+    [items, outcome, failureText, durationMs, contextCompactionCount],
   );
   const facetDefinitions = useMemo(
     () => resolveTurnSummaryFacets(facetConfiguration),
@@ -253,6 +269,7 @@ function createTurnSummaryContext(
   outcome: TurnOutcome | undefined,
   failureText: string | undefined,
   durationMs: number | undefined,
+  contextCompactionCount: number,
 ): TurnSummaryContext {
   const itemSnapshot = Object.freeze([...items]);
   const toolCalls = Object.freeze(
@@ -274,6 +291,7 @@ function createTurnSummaryContext(
     failureText,
     durationMs,
     settled,
+    contextCompactionCount: Math.max(0, Math.floor(contextCompactionCount)),
   });
 }
 
@@ -350,6 +368,22 @@ const BUILT_IN_TURN_SUMMARY_FACETS: readonly TurnSummaryFacet[] = Object.freeze(
       }
       return parts.length > 0 ? { content: parts.join(" · ") } : null;
     },
+  },
+  {
+    id: "compacted",
+    summarize: ({ contextCompactionCount }) =>
+      contextCompactionCount > 0
+        ? {
+            content:
+              contextCompactionCount === 1
+                ? "compacted"
+                : `${contextCompactionCount} compacts`,
+            ariaLabel:
+              contextCompactionCount === 1
+                ? "Conversation memory compacted"
+                : `${contextCompactionCount} conversation memory compactions`,
+          }
+        : null,
   },
   {
     id: "duration",

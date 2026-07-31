@@ -539,6 +539,11 @@ export type Session = {
   codexPinnedCredentialId?: string | null;
   /** Multi-account Codex (P1): the account the most recent turn ran on (the "Running on:" indicator). */
   codexLastCredentialId?: string | null;
+  /**
+   * Frozen at create. `remote_v2` ⇒ Codex remote compaction + Codex-only model
+   * admission; `portable` ⇒ plaintext compaction and free provider switching.
+   */
+  codexCompactionMode: "remote_v2" | "portable";
   /** Personal (authenticated subject) workspace pin state, never workspace-global. */
   pinned?: boolean;
   /** Stable pin ordering key; null when this subject has not pinned the session. */
@@ -716,6 +721,7 @@ export const SESSION_EVENT_TYPES = [
   "session.requiresAction",
   "session.humanInput.requested",
   "session.context.compaction.requested",
+  "session.context.compaction.started",
   "session.context.compacted",
   "session.context.compaction.skipped",
   "session.context.cleared",
@@ -2186,6 +2192,8 @@ export type WorkspaceSettings = {
   memoryEnabled?: boolean | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   maxNestedAgentDepth?: number | null | undefined;
+  /** Default for new Codex sessions; absent ⇒ remote_v2. */
+  codexCompactionDefault?: "remote_v2" | "portable" | undefined;
   [key: string]: unknown;
 };
 
@@ -2193,6 +2201,7 @@ export type UpdateWorkspaceSettingsRequest = {
   memoryEnabled?: boolean | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   maxNestedAgentDepth?: number | null | undefined;
+  codexCompactionDefault?: "remote_v2" | "portable" | undefined;
   [key: string]: unknown;
 };
 

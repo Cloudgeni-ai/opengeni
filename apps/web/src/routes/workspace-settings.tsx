@@ -322,6 +322,9 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
         {/* Provider-agnostic composer transcription policy */}
         <TranscriptionSettingsSection workspaceId={workspaceId} canManage={canRename} />
 
+        {/* Codex compaction default for new Codex sessions */}
+        <CodexCompactionSettingsSection workspaceId={workspaceId} canManage={canRename} />
+
         {/* Codex (ChatGPT) subscriptions (multi-account) */}
         {/* Its live provider overview is intentionally once-per-mount. Remount at
             the tenant boundary so stale async state can never cross workspaces. */}
@@ -824,6 +827,83 @@ function MemorySettingsSection({
               className={cn(
                 "inline-block size-3.5 rounded-full bg-white shadow-sm transition-transform",
                 enabled ? "translate-x-4" : "translate-x-0.5",
+              )}
+            />
+          </button>
+        </div>
+      </div>
+      {!canManage ? (
+        <p className="text-xs text-fg-subtle">Only workspace admins can change this.</p>
+      ) : null}
+    </section>
+  );
+}
+
+/**
+ * Default compaction strategy for NEW Codex sessions. Off (= remote_v2) keeps
+ * Codex remote compaction and locks the session to Codex models; on (= portable)
+ * uses plaintext compaction and allows mid-session provider switches.
+ */
+function CodexCompactionSettingsSection({
+  workspaceId,
+  canManage,
+}: {
+  workspaceId: string;
+  canManage: boolean;
+}) {
+  const context = useAppContext();
+  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
+  const portable = workspace?.settings?.codexCompactionDefault === "portable";
+  const [saving, setSaving] = useState(false);
+
+  async function toggle(nextPortable: boolean) {
+    setSaving(true);
+    try {
+      const updated = await context.updateWorkspaceSettings(workspaceId, {
+        codexCompactionDefault: nextPortable ? "portable" : "remote_v2",
+      });
+      if (updated) {
+        toast.success(
+          nextPortable
+            ? "New Codex sessions will use portable compaction"
+            : "New Codex sessions will use remote compaction v2",
+        );
+      }
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section className="grid gap-3 rounded-lg border border-border bg-surface p-4">
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <h2 className="flex items-center gap-1.5 text-sm font-medium">
+            Codex compaction
+          </h2>
+          <p className="mt-1 text-xs text-fg-muted">
+            Use portable Codex compaction (allows switching away from Codex mid-session). When off,
+            new Codex sessions use remote compaction v2 and stay locked to Codex models.
+          </p>
+        </div>
+        <div className="flex shrink-0 items-center gap-2 pt-0.5">
+          {saving ? <Loader2Icon className="size-3.5 animate-spin text-fg-subtle" /> : null}
+          <button
+            type="button"
+            role="switch"
+            aria-checked={portable}
+            aria-label="Use portable Codex compaction"
+            disabled={saving || !canManage}
+            onClick={() => void toggle(!portable)}
+            className={cn(
+              "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors disabled:cursor-not-allowed disabled:opacity-50",
+              portable ? "border-brand bg-brand" : "border-border bg-surface-2",
+            )}
+          >
+            <span
+              className={cn(
+                "inline-block size-3.5 rounded-full bg-white shadow-sm transition-transform",
+                portable ? "translate-x-4" : "translate-x-0.5",
               )}
             />
           </button>

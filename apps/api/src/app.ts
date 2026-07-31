@@ -31,6 +31,7 @@ import { HTTPException } from "hono/http-exception";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { ApiRouteDeps, AppDependencies } from "@opengeni/core";
 import {
+  CodexCompactionV2ProviderLockedError,
   hasPermission,
   requireAccessGrant,
   requirePermission,
@@ -464,8 +465,11 @@ export function createApp(deps: AppDependencies): Hono {
   });
 
   app.onError((error, c) => {
-    const status = httpStatusForError(error);
-    const code = errorCodeForStatus(status);
+    const compactionLock = codexCompactionV2ProviderLockedError(error);
+    const status = compactionLock ? 422 : httpStatusForError(error);
+    const code: ErrorCode = compactionLock
+      ? compactionLock.code
+      : errorCodeForStatus(status);
     const requestId = correlationIds.get(c.req.raw) ?? crypto.randomUUID();
     c.header(OPENGENI_CORRELATION_HEADER, requestId);
     if (new URL(c.req.url).pathname.startsWith("/v1/")) {
@@ -475,7 +479,9 @@ export function createApp(deps: AppDependencies): Hono {
       error: {
         status,
         code,
-        message: publicErrorMessage(error, status),
+        message: compactionLock
+          ? boundedPublicMessage(compactionLock.message) ?? "Request failed."
+          : publicErrorMessage(error, status),
         retryable: retryableHttpStatus(status),
         requestId,
       },
@@ -542,7 +548,20 @@ export function allowedCorsOrigin(pattern: string, origin: string): boolean {
   return new RegExp(`^(?:${pattern})$`).test(origin);
 }
 
+function codexCompactionV2ProviderLockedError(
+  error: unknown,
+): CodexCompactionV2ProviderLockedError | null {
+  if (error instanceof CodexCompactionV2ProviderLockedError) return error;
+  if (error instanceof HTTPException && error.cause instanceof CodexCompactionV2ProviderLockedError) {
+    return error.cause;
+  }
+  return null;
+}
+
 export function httpStatusForError(error: unknown): number {
+  if (codexCompactionV2ProviderLockedError(error)) {
+    return 422;
+  }
   if (error instanceof HTTPException) {
     return error.status;
   }

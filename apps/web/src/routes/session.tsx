@@ -950,6 +950,7 @@ function SessionChatPane(props: {
                   effort={context.reasoningEffort}
                   disabled={composer.sending}
                   extraModels={codexModels}
+                  codexOnly={props.session.codexCompactionMode === "remote_v2"}
                   onModelChange={(value) => context.setModelForSession(props.session.id, value)}
                   onEffortChange={context.setReasoningEffort}
                 />

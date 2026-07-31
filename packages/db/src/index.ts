@@ -125,6 +125,7 @@ import {
   metadataWithTurnExecutionPolicyV1,
   readTurnExecutionPolicyV1,
   reasoningEffortForMetadata,
+  resolveWorkspaceCodexCompactionDefault,
   resolveWorkspaceMemoryEnabled,
   RigChange as RigChangeContract,
   SessionGoal as SessionGoalContract,
@@ -14438,6 +14439,11 @@ async function createSessionInTransaction(
       effectiveMaxNestedAgentDepth: decision.effectiveMaxNestedAgentDepth,
       nestedAgentDepthPolicySource: decision.nestedAgentDepthPolicySource,
       nestedAgentDepthPolicySessionId: decision.nestedAgentDepthPolicySessionId,
+      // Freeze once at create from the effective create model + workspace
+      // default. Later workspace setting changes never move existing sessions.
+      codexCompactionMode: isCodexBilledModel(input.model)
+        ? resolveWorkspaceCodexCompactionDefault(workspace.settings)
+        : "portable",
       status: "queued",
     })
     .onConflictDoNothing()
@@ -18632,6 +18638,8 @@ export async function applyContextCompaction(
     replacementInputTokens: number;
     clearRequestedCompaction?: boolean;
     eventPayload?: Record<string, unknown>;
+    /** Tag inserted history rows with the Codex credential that produced them. */
+    producerCodexCredentialId?: string | null;
   },
 ): Promise<ApplyContextCompactionResult> {
   return await withRlsContext(
@@ -18681,6 +18689,9 @@ export async function applyContextCompaction(
               position: supersededFrom + index,
               item: sanitizeModelPayload(item),
               active: true,
+              ...(input.producerCodexCredentialId
+                ? { producerCodexCredentialId: input.producerCodexCredentialId }
+                : {}),
             })),
           );
         }
@@ -18693,6 +18704,9 @@ export async function applyContextCompaction(
           position: summaryPosition,
           item: sanitizeModelPayload(input.summaryItem),
           active: true,
+          ...(input.producerCodexCredentialId
+            ? { producerCodexCredentialId: input.producerCodexCredentialId }
+            : {}),
         });
         const insertedEvents = input.eventPayload
           ? await tx
@@ -18741,6 +18755,80 @@ export async function applyContextCompaction(
         };
       });
     },
+  );
+}
+
+/**
+ * Attempt-fenced visible start of a compaction provider call. Emitted before
+ * the summarizer / remote-v2 request so the timeline can show progress while
+ * the opaque checkpoint is being built. A fenced attempt writes nothing.
+ */
+export async function recordStartedContextCompaction(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    expectedExecutionGeneration: number;
+    expectedAttemptId: string;
+    trigger: "auto" | "operator" | "proactive" | "overflow";
+    implementation?: string;
+    estimatedTokensBefore?: number;
+  },
+): Promise<
+  | { recorded: true; events: SessionEvent[] }
+  | { recorded: false; reason: TurnAttemptFenceRejectReason }
+> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const fence = await lockTurnAttemptWriteFenceTx(tx, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          executionGeneration: input.expectedExecutionGeneration,
+          attemptId: input.expectedAttemptId,
+        });
+        if (!fence.allowed) return { recorded: false as const, reason: fence.reason };
+        const inserted = await tx
+          .insert(schema.sessionEvents)
+          .values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            turnGeneration: input.expectedExecutionGeneration,
+            turnAttemptId: input.expectedAttemptId,
+            turnAssociation: "current",
+            sequence: fence.session.lastSequence + 1,
+            type: "session.context.compaction.started",
+            payload: sanitizeEventPayload({
+              trigger: input.trigger,
+              ...(input.implementation ? { implementation: input.implementation } : {}),
+              ...(typeof input.estimatedTokensBefore === "number"
+                ? { estimatedTokensBefore: input.estimatedTokensBefore }
+                : {}),
+            }),
+            occurredAt: new Date(),
+          })
+          .returning();
+        await tx
+          .update(schema.sessions)
+          .set({
+            lastSequence: fence.session.lastSequence + 1,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          );
+        return { recorded: true as const, events: inserted.map(mapEvent) };
+      }),
   );
 }
 
@@ -39859,6 +39947,10 @@ function mapSession(
     lastSequence: row.lastSequence,
     codexPinnedCredentialId: row.codexPinnedCredentialId ?? null,
     codexLastCredentialId: row.codexLastCredentialId ?? null,
+    codexCompactionMode:
+      row.codexCompactionMode === "remote_v2" || row.codexCompactionMode === "portable"
+        ? row.codexCompactionMode
+        : "portable",
     ...pin,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),

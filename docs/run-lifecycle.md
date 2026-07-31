@@ -135,7 +135,9 @@ timer or signal can produce double inference.
 
 Provider context-window overflow is also handled inside the activity, not by a
 Temporal retry. When an OpenAI/Azure context overflow is classified,
-`runAgentTurn` invokes the portable Codex-local compaction path. The summarizer
+`runAgentTurn` invokes compaction for the session's frozen mode: portable
+Codex-local plaintext for non-Codex and portable-locked Codex sessions, or
+Codex remote compaction v2 for `remote_v2` Codex sessions. On the portable path the summarizer
 receives a bounded, protocol-valid temporary copy of structured active history
 plus the checkpoint prompt. Aggregate tool outputs are replaced oldest-first in
 that copy; whole oldest user-delimited units are removed only if necessary. A

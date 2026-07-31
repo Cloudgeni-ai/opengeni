@@ -1834,6 +1834,7 @@ function session(patch: Partial<Session> = {}): Session {
     queueHeadPosition: patch.queueHeadPosition ?? 0,
     queueTailPosition: patch.queueTailPosition ?? 0,
     effectiveControl: patch.effectiveControl ?? activeControl(false),
+    codexCompactionMode: patch.codexCompactionMode ?? "portable",
   };
 }
 

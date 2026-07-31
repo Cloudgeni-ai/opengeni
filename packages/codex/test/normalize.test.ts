@@ -77,6 +77,27 @@ describe("normalizeCodexRequestBody", () => {
     expect(input[0]?.type).toBe("item_reference");
   });
 
+  test("preserves compaction_trigger and compaction items for remote v2", () => {
+    const body = normalizeCodexRequestBody(
+      {
+        input: [
+          { type: "message", role: "user", content: "hi", id: "msg_1" },
+          { type: "compaction_trigger" },
+          { type: "compaction", encrypted_content: "opaque", id: "cmp_1" },
+        ],
+      },
+      identity,
+    );
+    const input = body.input as Array<Record<string, unknown>>;
+    expect(input.map((item) => item.type)).toEqual([
+      "message",
+      "compaction_trigger",
+      "compaction",
+    ]);
+    expect(input[2]?.encrypted_content).toBe("opaque");
+    expect("id" in (input[2] ?? {})).toBe(false);
+  });
+
   test("leaves tools / tool_choice / parallel_tool_calls / text untouched", () => {
     const original = {
       tools: [{ type: "function" }],

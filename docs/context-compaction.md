@@ -1,26 +1,34 @@
 # Conversation context compaction
 
-OpenGeni has one compaction mechanism: durable, portable plaintext compaction
-that follows the local compaction path in Codex CLI 0.146.0 (upstream tag
-`rust-v0.146.0`, commit `be449751a978f02e5bbba886999662956c7f38f5`). It is used for
-OpenAI, Azure, Codex subscriptions, and registry providers. There is no
-provider-side mode, off switch, compatibility ladder, request-local history
-trim, or deterministic non-model fallback.
+OpenGeni freezes a per-session compaction mode at create time
+(`sessions.codex_compaction_mode`):
 
-Portable plaintext is required for the Codex subscription pool. A session can
-move between independently authenticated ChatGPT subscriptions, while Codex's
-remote encrypted compaction item is tied to the provider/account that created
-it. Persisting that opaque item would make a later subscription unable to
-recover the compacted assistant/tool history.
+| Mode | When | Mechanism |
+| --- | --- | --- |
+| `portable` | All non-Codex sessions; existing sessions (backfill); new Codex sessions when the workspace sets `codexCompactionDefault: "portable"` | Durable plaintext checkpoint (Codex CLI local path). Free mid-session provider switching. |
+| `remote_v2` | New Codex sessions by default (`codexCompactionDefault` absent or `"remote_v2"`) | Codex remote compaction v2 (wire `compaction_trigger` → opaque `{ type: "compaction", encrypted_content }`). The Agents SDK rejects a bare trigger item, so OpenGeni emits `{ type: "unknown", providerData: { type: "compaction_trigger" } }` through `CompactionResponsesModel` and the Codex fetch normalizer restores the wire shape. Session is **Codex-only** for its lifetime (HTTP + worker admission). |
+
+There is no off switch, compatibility ladder, request-local history trim, or
+deterministic non-model fallback. A `remote_v2` session never silently falls
+back to portable on remote failure (avoids mixed history shapes). Azure /
+OpenAI platform remote compact APIs are out of scope.
+
+Workspace setting `codexCompactionDefault` only affects **new** Codex sessions;
+later setting changes never move an already-frozen session.
+
+The portable path follows Codex CLI 0.146.0 local compaction (upstream tag
+`rust-v0.146.0`, commit `be449751a978f02e5bbba886999662956c7f38f5`) and is used
+for OpenAI, Azure, registry providers, and portable-locked Codex sessions.
 
 The implementation lives in:
 
-- `packages/runtime/src/context-compaction.ts`: thresholds, upstream prompt and
-  prefix, rebuild rules, and the typed compaction signal.
-- `packages/runtime/src/index.ts`: the tool-less summarizer and per-call signal.
-- `apps/worker/src/activities/context-compaction.ts`: summarizer retry and the
-  fenced durable replacement.
-- `apps/worker/src/activities/agent-turn.ts`: pre-call and same-turn recovery.
+- `packages/runtime/src/context-compaction.ts`: thresholds, portable rebuild,
+  remote v2 retain/rebuild helpers, and the typed compaction signal.
+- `packages/runtime/src/index.ts`: portable summarizer + `requestRemoteCompactionV2`.
+- `apps/worker/src/activities/context-compaction.ts`: mode branch, summarizer
+  retry, remote fail-closed path, fenced durable replacement.
+- `apps/worker/src/activities/agent-turn.ts`: pre-call and same-turn recovery;
+  Codex ALS beta/turn-metadata headers for remote v2.
 - `packages/db/src/index.ts`: the atomic history replacement and token signal.
 
 ## Token limits

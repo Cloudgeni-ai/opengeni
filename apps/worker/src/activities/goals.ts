@@ -10,6 +10,7 @@ import {
   type SessionGoal,
   type ToolRef,
 } from "@opengeni/contracts";
+import { isCodexBilledModel } from "@opengeni/codex";
 import {
   enqueueSessionWorkflowWakeIfRunnable,
   getBillingBalance,
@@ -88,6 +89,15 @@ export function createGoalActivities(services: () => Promise<ActivityServices>) 
           modelPolicyBlocked = `workspace model policy blocks model "${continuationModel}"; pick an allowed model or change the workspace model policy`;
         }
       }
+    }
+    // remote_v2 sessions may only continue on Codex models — refuse synthesis
+    // that would leave the portable/non-Codex path (and mixed history shapes).
+    if (
+      !modelPolicyBlocked &&
+      session.codexCompactionMode === "remote_v2" &&
+      !isCodexBilledModel(continuationModel)
+    ) {
+      modelPolicyBlocked = `session is locked to Codex remote compaction v2; model "${continuationModel}" is not a Codex subscription model`;
     }
     // A codex-model goal continuation is paid by the user's ChatGPT/Codex plan,
     // so it must not be budget-paused for zero OpenGeni credits. This file uses
