@@ -601,6 +601,7 @@ export function Variant() {
 
   return (
     <div className="flex flex-col gap-6">
+      <style>{FLOW_MOTION_CSS}</style>
       <header className="space-y-3">
         <div className="rounded-xl border border-border bg-surface-2/40 px-4 py-4">
           <p className="flex items-center gap-2 text-sm font-medium text-fg">
