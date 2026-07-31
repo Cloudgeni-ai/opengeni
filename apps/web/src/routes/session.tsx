@@ -50,6 +50,7 @@ import {
   summarizeSessionFailure,
 } from "@/lib/events";
 import { coerceReasoningEffortForModel, findPickerRow } from "@/lib/model-policy";
+import { resolveSessionComposerModel } from "@/lib/session-model";
 import { mergeSessionContextProjection } from "@/lib/session-pins";
 import {
   firstPartySessionToolOptions,
@@ -641,9 +642,14 @@ function SessionChatPane(props: {
   const durableToolsSessionId = useRef(props.session.id);
   const [durableToolsSaving, setDurableToolsSaving] = useState(false);
   const [durableToolsError, setDurableToolsError] = useState<string | null>(null);
-  // The model is session-scoped: this session remembers its own pick (falling
-  // back to the deployment default), so a switch here doesn't bleed into others.
-  const model = context.modelForSession(props.session.id);
+  // Session-scoped pick (seeded from durable session.model). On remote_v2,
+  // never keep a stale non-Codex override over the durable Codex model.
+  const requestedModel = context.modelForSession(props.session.id);
+  const model = resolveSessionComposerModel({
+    requested: requestedModel,
+    durableSessionModel: props.session.model,
+    codexCompactionMode: props.session.codexCompactionMode,
+  });
   const reasoningEffort = effortForSession(props.session.id);
   const { setModelForSession, setEffortForSession, ensureModelForSession, ensureEffortForSession } =
     context;
@@ -667,6 +673,11 @@ function SessionChatPane(props: {
     props.session.metadata.reasoningEffort,
     props.session.model,
   ]);
+  // Drop a stale non-Codex override so the picker selection matches send.
+  useEffect(() => {
+    if (model === requestedModel) return;
+    setModelForSession(props.session.id, model);
+  }, [model, requestedModel, props.session.id, setModelForSession]);
   // Catalog-backed effort legality: snap sticky effort when the selected model
   // cannot run it (e.g. after reconnect or catalog refresh).
   useEffect(() => {
@@ -1050,6 +1061,7 @@ function SessionChatPane(props: {
                   disabled={composer.sending}
                   loading={modelCatalog.loading}
                   error={modelCatalog.error}
+                  codexOnly={props.session.codexCompactionMode === "remote_v2"}
                   onModelChange={(value) => {
                     pickerTouchedRef.current = true;
                     context.setModelForSession(props.session.id, value);

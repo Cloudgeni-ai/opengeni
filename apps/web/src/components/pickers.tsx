@@ -22,6 +22,7 @@ import {
   runnableLatencyModesForModel,
   type PickerModelRow,
 } from "@/lib/model-policy";
+import { isCodexProductModel } from "@/lib/session-model";
 import { labelEffort, type IntelligenceEffort, type McpServerOption } from "@/lib/session-tools";
 import { cn } from "@/lib/utils";
 
@@ -31,6 +32,23 @@ function selectedRowLabel(rows: PickerModelRow[], selectedId: string): string {
   return findPickerRow(rows, selectedId)?.label ?? selectedId;
 }
 
+function isCodexPickerRow(row: PickerModelRow): boolean {
+  return isCodexProductModel(row.id) || row.provider === "codex-subscription";
+}
+
+/** Keep rows visible; tighten selectable + reason for remote_v2. */
+function applyCodexOnly(rows: PickerModelRow[], codexOnly: boolean): PickerModelRow[] {
+  if (!codexOnly) return rows;
+  return rows.map((row) => {
+    if (isCodexPickerRow(row)) return row;
+    return {
+      ...row,
+      selectable: false,
+      unavailableReason: row.unavailableReason ?? "Codex-only session",
+    };
+  });
+}
+
 export function ModelPicker(props: {
   rows: PickerModelRow[];
   model: string;
@@ -38,12 +56,18 @@ export function ModelPicker(props: {
   disabled?: boolean;
   loading?: boolean;
   error?: string | null;
+  /** remote_v2: non-Codex stay listed, not selectable */
+  codexOnly?: boolean;
   onModelChange: (value: string) => void;
   onEffortChange: (value: IntelligenceEffort) => void;
 }) {
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  const groups = useMemo(() => groupPickerRowsByBillingClass(props.rows), [props.rows]);
-  const selectedRow = findPickerRow(props.rows, props.model);
+  const rows = useMemo(
+    () => applyCodexOnly(props.rows, props.codexOnly === true),
+    [props.rows, props.codexOnly],
+  );
+  const groups = useMemo(() => groupPickerRowsByBillingClass(rows), [rows]);
+  const selectedRow = findPickerRow(rows, props.model);
   const effortOptions = selectedRow
     ? effortOptionsForModel(selectedRow.catalog)
     : (["low"] as IntelligenceEffort[]);
@@ -68,9 +92,9 @@ export function ModelPicker(props: {
           className="h-8 max-w-[16rem] gap-1 rounded-full border border-transparent px-2.5 text-xs text-fg-muted hover:border-border hover:bg-surface-2 hover:text-fg"
         >
           <span className="truncate font-medium text-fg">
-            {props.loading && props.rows.length === 0
+            {props.loading && rows.length === 0
               ? "Loading models…"
-              : selectedRowLabel(props.rows, props.model)}
+              : selectedRowLabel(rows, props.model)}
           </span>
           <span>{labelEffort(props.effort)}</span>
           <ChevronDownIcon className="size-3 shrink-0" />
@@ -87,7 +111,7 @@ export function ModelPicker(props: {
             {props.error}
           </p>
         ) : null}
-        {props.loading && props.rows.length === 0 ? (
+        {props.loading && rows.length === 0 ? (
           <p className="px-2 py-1 text-xs text-fg-subtle">Loading model catalog…</p>
         ) : null}
         <DropdownMenuLabel className="px-2 pt-1 pb-1 text-xs font-normal text-fg-subtle">

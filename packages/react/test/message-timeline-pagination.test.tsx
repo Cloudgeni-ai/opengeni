@@ -470,7 +470,7 @@ describe("MessageTimeline pagination affordances", () => {
     expect(layout.tipBottomGap()).toBeLessThan(2);
 
     // Grow content first (stale scrollTop leaves tip above the bottom), then
-    // let the live append's layout effect run stick-to-bottom.
+    // let the live append's soft-follow glide settle to the tip.
     layout.setContentHeight(2080);
     expect(layout.tipBottomGap()).toBeGreaterThan(2);
     await r.rerender(

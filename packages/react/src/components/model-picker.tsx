@@ -14,19 +14,50 @@ export type ModelPickerProps = {
   disabled?: boolean | undefined;
   className?: string | undefined;
   label?: string | undefined;
+  /**
+   * When true (remote compaction v2), non-Codex models remain listed but are
+   * disabled. Same picker chrome — only selectability changes.
+   */
+  codexOnly?: boolean | undefined;
 };
 
 const EMPTY_CLIENT_MODELS: ClientModel[] = [];
 
-function providerGroups(models: ClientModel[]) {
-  const byProvider = new Map<string, { label: string; models: ClientModel[] }>();
+function isCodexClientModel(model: ClientModel): boolean {
+  return model.id.startsWith("codex/") || model.provider === "codex-subscription";
+}
+
+function isCodexPickerRow(row: PickerModelRow): boolean {
+  return row.id.startsWith("codex/") || row.provider === "codex-subscription";
+}
+
+function applyCodexOnlyRows(rows: PickerModelRow[], codexOnly: boolean): PickerModelRow[] {
+  if (!codexOnly) return rows;
+  return rows.map((row) => {
+    if (isCodexPickerRow(row)) return row;
+    return {
+      ...row,
+      selectable: false,
+      unavailableReason: row.unavailableReason ?? "Codex-only session",
+    };
+  });
+}
+
+function providerGroups(models: ClientModel[], codexOnly: boolean) {
+  const byProvider = new Map<
+    string,
+    { label: string; models: Array<ClientModel & { optionDisabled: boolean }> }
+  >();
   for (const model of models) {
     let group = byProvider.get(model.provider);
     if (!group) {
       group = { label: model.providerLabel, models: [] };
       byProvider.set(model.provider, group);
     }
-    group.models.push(model);
+    group.models.push({
+      ...model,
+      optionDisabled: codexOnly && !isCodexClientModel(model),
+    });
   }
   return [...byProvider.values()];
 }
@@ -39,16 +70,21 @@ export function ModelPicker({
   disabled,
   className,
   label = "Model",
+  codexOnly = false,
 }: ModelPickerProps) {
   const selectId = useId();
-  const billingGroups = useMemo(
-    () => (rows && rows.length > 0 ? groupPickerRowsByBillingClass(rows) : []),
-    [rows],
+  const effectiveRows = useMemo(
+    () => (rows && rows.length > 0 ? applyCodexOnlyRows(rows, codexOnly) : []),
+    [rows, codexOnly],
   );
-  const providerGroupList = useMemo(() => providerGroups(models), [models]);
-  const useBillingGroups = Boolean(rows?.length);
+  const billingGroups = useMemo(
+    () => (effectiveRows.length > 0 ? groupPickerRowsByBillingClass(effectiveRows) : []),
+    [effectiveRows],
+  );
+  const providerGroupList = useMemo(() => providerGroups(models, codexOnly), [models, codexOnly]);
+  const useBillingGroups = Boolean(effectiveRows.length);
 
-  if (models.length === 0 && (!rows || rows.length === 0)) {
+  if (models.length === 0 && effectiveRows.length === 0) {
     return null;
   }
 
@@ -84,7 +120,7 @@ export function ModelPicker({
           : providerGroupList.map((group) => (
               <optgroup key={group.label} label={group.label}>
                 {group.models.map((model) => (
-                  <option key={model.id} value={model.id}>
+                  <option key={model.id} value={model.id} disabled={model.optionDisabled}>
                     {model.label}
                   </option>
                 ))}

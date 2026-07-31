@@ -1000,6 +1000,10 @@ export const sessions = pgTable(
     // (manual|policy) lives in the migration; no FK (it describes the pin, not an
     // account).
     codexPinSource: text("codex_pin_source"),
+    // Frozen at create: remote_v2 (Codex remote compaction + Codex-only models)
+    // or portable (plaintext compaction + free provider switching). Existing
+    // rows backfill to portable. CHECK lives in the migration.
+    codexCompactionMode: text("codex_compaction_mode").notNull().default("portable"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     // Assigned by the database trigger whenever canonical updated_at activity

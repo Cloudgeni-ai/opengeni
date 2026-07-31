@@ -226,6 +226,24 @@ export type NoticeItem = {
   occurredAt: string;
 };
 
+/**
+ * First-class conversation-memory checkpoint. Stays outside collapsed turns so
+ * auto-compaction cannot vanish behind a chevron. Chat bubbles are unchanged.
+ */
+export type ContextCompactionItem = {
+  kind: "context-compaction";
+  id: string;
+  turnId: string | null;
+  phase: "started" | "compacted" | "skipped";
+  trigger: "auto" | "operator" | "proactive" | "overflow" | null;
+  estimatedTokensBefore: number | null;
+  estimatedTokensAfter: number | null;
+  skipReason: string | null;
+  /** Provider implementation id for debug disclosure only. */
+  implementation: string | null;
+  occurredAt: string;
+};
+
 export type MachineInputMember = {
   id: string;
   kind:
@@ -303,6 +321,7 @@ export type TimelineItem =
   | SessionStatusItem
   | GoalItem
   | NoticeItem
+  | ContextCompactionItem
   | MachineInputBatchItem
   | AuthNeededItem
   | MemoryItem
@@ -335,4 +354,6 @@ export type TimelineGroup =
       startedAt: string;
       endedAt: string;
       groups: TimelineGroup[];
+      /** Adjacent compaction landmark just before this fold (secondary chip facet). */
+      contextCompactionCount?: number;
     };

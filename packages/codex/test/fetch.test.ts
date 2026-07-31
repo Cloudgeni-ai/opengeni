@@ -162,6 +162,39 @@ describe("codexSubscriptionFetch", () => {
     expect(new Headers(captures[0]?.init?.headers).get("session_id")).toBeNull();
   });
 
+  test("advertises remote compaction v2 beta features and turn metadata", async () => {
+    const { base, captures } = baseRecorder();
+    const fetchImpl = codexSubscriptionFetch(base);
+    await codexRequestStorage.run(
+      ctx({
+        betaFeatures: ["remote_compaction_v2"],
+        turnMetadata: {
+          request_kind: "compaction",
+          compaction: { implementation: "responses_compaction_v2", strategy: "memento" },
+        },
+      }),
+      () =>
+        fetchImpl("https://chatgpt.com/backend-api/responses", {
+          method: "POST",
+          body: JSON.stringify({
+            model: "gpt-5.4",
+            input: [{ type: "compaction_trigger" }],
+            stream: false,
+          }),
+        }),
+    );
+    const headers = new Headers(captures[0]?.init?.headers);
+    expect(headers.get("x-codex-beta-features")).toBe("remote_compaction_v2");
+    expect(JSON.parse(headers.get("x-codex-turn-metadata")!)).toEqual({
+      request_kind: "compaction",
+      compaction: { implementation: "responses_compaction_v2", strategy: "memento" },
+    });
+    const body = JSON.parse(captures[0]?.init?.body as string) as {
+      input: Array<{ type: string }>;
+    };
+    expect(body.input.some((item) => item.type === "compaction_trigger")).toBe(true);
+  });
+
   test("does not double-rewrite when url already targets /codex/responses", async () => {
     const { base, captures } = baseRecorder();
     const fetchImpl = codexSubscriptionFetch(base);

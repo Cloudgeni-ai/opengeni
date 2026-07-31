@@ -30,6 +30,7 @@ export type {
   ActivityItem,
   AgentMessageItem,
   AuthNeededItem,
+  ContextCompactionItem,
   FleetDecisionItem,
   FleetDecisionScoreItem,
   GoalItem,

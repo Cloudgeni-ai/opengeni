@@ -157,6 +157,8 @@ import {
   CompactionProviderResponseError,
   EmptyCompactionSummaryError,
   SUMMARY_BUFFER_TOKENS,
+  buildRemoteCompactionV2PromptInput,
+  extractRemoteCompactionV2OutputItem,
   compactionThresholdTokens,
   estimateCompleteModelInput,
   estimateSerializedValueTokens,
@@ -279,8 +281,13 @@ export {
   clampCompactionThresholdRatio,
   decideCompaction,
   buildSummaryItem,
+  buildRemoteCompactionV2PromptInput,
+  buildRemoteV2ReplacementHistory,
+  extractRemoteCompactionV2OutputItem,
   findCompactionNeededError,
   isCompactionSummary,
+  isRemoteCompactionItem,
+  isRetainedRemoteV2Message,
   latestCompactionReplacementFingerprint,
   prepareCompactionPromptInput,
   isUserMessage,
@@ -288,6 +295,9 @@ export {
   estimateTokensBreakdown,
   estimateItemTokens,
   estimateItemTokenBreakdown,
+  estimateOpaqueEncryptedModelVisibleBytes,
+  estimateOpaqueEncryptedTokens,
+  opaqueEncryptedContentLength,
   estimateNativeImageTokens,
   estimateCompleteModelInput,
   estimateSerializedValueTokens,
@@ -296,6 +306,9 @@ export {
   COMPACTION_SUMMARY_MARKER,
   COMPACTION_PROMPT,
   COMPACT_USER_MESSAGE_MAX_TOKENS,
+  REMOTE_V2_RETAINED_MESSAGE_TOKEN_BUDGET,
+  REMOTE_COMPACTION_V2_IMPLEMENTATION,
+  REMOTE_COMPACTION_V2_BETA_FEATURE,
   DEFAULT_COMPACTION_THRESHOLD_RATIO,
   MIN_COMPACTION_THRESHOLD_RATIO,
   MAX_COMPACTION_THRESHOLD_RATIO,
@@ -1010,6 +1023,67 @@ export async function summarizeForCompaction(
     throw new EmptyCompactionSummaryError(compactionResponseDiagnostics(response, summary));
   }
   return summary;
+}
+
+/**
+ * Codex remote compaction v2: send active history + `compaction_trigger`, collect
+ * exactly one `{ type: "compaction", encrypted_content }` output item.
+ * Must run inside Codex ALS with `remote_compaction_v2` beta + turn metadata.
+ */
+export async function requestRemoteCompactionV2(
+  settings: Settings,
+  input: Array<Record<string, unknown>>,
+  options: {
+    client: OpenAI;
+    model: string;
+    promptCacheKey?: string;
+    onUsage?: (usage: ModelResponseUsage) => void | Promise<void>;
+  },
+): Promise<Record<string, unknown>> {
+  const promptInput = buildRemoteCompactionV2PromptInput(input);
+  const request: ModelRequest = {
+    systemInstructions: "",
+    input: promptInput as AgentInputItem[],
+    modelSettings: {
+      // Azure rejects store:false; Codex transport enforces store:false itself.
+      ...(settings.openaiProvider === "azure" ? {} : { store: false }),
+      ...(options.promptCacheKey
+        ? { providerData: { prompt_cache_key: options.promptCacheKey } }
+        : {}),
+    },
+    tools: [],
+    toolsExplicitlyProvided: true,
+    outputType: "text",
+    handoffs: [],
+    tracing: false,
+  };
+  let response: unknown;
+  try {
+    response = await new CompactionResponsesModel(options.client, options.model).fetchResponse(
+      request,
+    );
+  } catch (error) {
+    throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
+  }
+  const usage = modelResponseUsageFromResponse(response);
+  if (usage) {
+    await options.onUsage?.(usage);
+  }
+  if (isFailedCompactionProviderResponse(response)) {
+    throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(response));
+  }
+  try {
+    return extractRemoteCompactionV2OutputItem(response);
+  } catch (error) {
+    if (error instanceof EmptyCompactionSummaryError) {
+      throw new EmptyCompactionSummaryError({
+        ...compactionResponseDiagnostics(response, ""),
+        ...error.diagnostics,
+        stage: "remote_v2_extract",
+      });
+    }
+    throw error;
+  }
 }
 
 function isFailedCompactionProviderResponse(response: unknown): boolean {

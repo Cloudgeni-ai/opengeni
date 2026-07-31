@@ -96,6 +96,26 @@ export type CodexRequestContext = {
   onModelRequestEvent?: (event: CodexModelRequestEvent) => Promise<void> | void;
   /** Stable request identity supplied by the owning durable execution. */
   nextRequestId?: () => string;
+  /**
+   * Optional Codex beta feature flags advertised as `x-codex-beta-features`
+   * (comma-separated). Used for remote compaction v2 (`remote_compaction_v2`).
+   */
+  betaFeatures?: readonly string[];
+  /**
+   * Optional turn analytics / routing metadata sent as `x-codex-turn-metadata`
+   * (JSON). Body `metadata` is stripped by normalize — never put request_kind there.
+   */
+  turnMetadata?: Record<string, unknown>;
 };
 
 export const codexRequestStorage = new AsyncLocalStorage<CodexRequestContext>();
+
+/** Nest a Codex ALS scope with header overrides (e.g. remote compaction v2). */
+export function withCodexRequestOverrides<T>(
+  overrides: Pick<CodexRequestContext, "betaFeatures" | "turnMetadata">,
+  fn: () => T,
+): T {
+  const current = codexRequestStorage.getStore();
+  if (!current) return fn();
+  return codexRequestStorage.run({ ...current, ...overrides }, fn);
+}
