@@ -193,6 +193,14 @@ export function MessageTimeline({
   // Mirror `pinned` into a ref so the ResizeObserver callback (a stable closure)
   // always reads the live value without re-subscribing on every scroll.
   const pinnedRef = useRef(true);
+  // While older history is fetching or progressively mounting, preserve the
+  // reader's place by scrollHeight delta — not tip-follow and not a live
+  // element-anchor chase. The loading shimmer + per-frame prepends otherwise
+  // fight ResizeObserver/layout corrections and wobble ~1px near the top.
+  const settlingOlder = loadingOlder || mountingOlderGroups;
+  const settlingOlderRef = useRef(settlingOlder);
+  settlingOlderRef.current = settlingOlder;
+  const previousScrollHeightRef = useRef(0);
   // The reader's visual anchor: the topmost still-visible timeline element and
   // its offset from the viewport top. Recaptured on scroll and after every
   // height change, it lets us hold the reader's position when content above the
@@ -255,6 +263,21 @@ export function MessageTimeline({
   // frames must be corrected before the browser can paint an intermediate jump.
   const restoreAnchor = useCallback(
     (node: HTMLElement) => {
+      const nextHeight = node.scrollHeight;
+      const previousHeight = previousScrollHeightRef.current;
+      // Older fetch/mount: keep the viewport locked via height delta only.
+      // Tip-follow would yank a near-top reader; element-anchor + RO would
+      // micro-correct against shimmer/batch inserts and wobble.
+      if (settlingOlderRef.current && !(autoFollow && pinnedRef.current)) {
+        if (previousHeight > 0) {
+          const heightDelta = nextHeight - previousHeight;
+          if (Math.abs(heightDelta) > 0.5) {
+            assignScrollTop(node, node.scrollTop + heightDelta);
+          }
+        }
+        previousScrollHeightRef.current = node.scrollHeight;
+        return;
+      }
       if (autoFollow && pinnedRef.current) {
         // Align the last non-chrome child's bottom to the scroller padding edge.
         // Prefer the tip box over raw scrollHeight: estimated/offscreen sizes
@@ -286,22 +309,27 @@ export function MessageTimeline({
             if (Math.abs(delta) > 0.5) {
               assignScrollTop(node, node.scrollTop + delta);
             }
+            previousScrollHeightRef.current = node.scrollHeight;
             return;
           }
         }
         assignScrollTop(node, node.scrollHeight);
+        previousScrollHeightRef.current = node.scrollHeight;
         return;
       }
       const anchor = anchorRef.current;
       if (!anchor || !anchor.el.isConnected) {
+        previousScrollHeightRef.current = nextHeight;
         return;
       }
       const containerTop = node.getBoundingClientRect().top;
       const now = anchor.el.getBoundingClientRect().top - containerTop;
       const diff = now - anchor.top;
-      if (diff !== 0) {
+      // Ignore sub-pixel RO chatter; near-top prepend settle used to oscillate.
+      if (Math.abs(diff) > 1) {
         assignScrollTop(node, node.scrollTop + diff);
       }
+      previousScrollHeightRef.current = node.scrollHeight;
     },
     [assignScrollTop, autoFollow],
   );
@@ -316,7 +344,17 @@ export function MessageTimeline({
     if (!revealed && groups.length > 0) {
       setRevealed(true);
     }
-  }, [resolvedItems, working, revealed, groups.length, restoreAnchor]);
+  }, [resolvedItems, working, revealed, groups.length, loadingOlder, mountingOlderGroups, restoreAnchor]);
+
+  // After older hydration settles, re-seed the element-anchor from the stable
+  // viewport. Capture was frozen during settling so height-delta could own it.
+  const wasSettlingOlderRef = useRef(false);
+  useLayoutEffect(() => {
+    if (wasSettlingOlderRef.current && !settlingOlder) {
+      captureAnchor();
+    }
+    wasSettlingOlderRef.current = settlingOlder;
+  }, [settlingOlder, captureAnchor]);
 
   // A cleared timeline (stream identity change) re-arms the reveal so the next
   // session also first paints at its bottom.
@@ -391,6 +429,8 @@ export function MessageTimeline({
   // offset — we correct scrollTop by that shift so the reader never gets yanked.
   // A change BELOW the anchor (a bottom append while scrolled up) leaves the
   // anchor put, so `diff` is 0 and we leave scrollTop alone.
+  // During older hydration, restoreAnchor switches to height-delta mode so RO
+  // does not chase a moving element-anchor through shimmer/batch inserts.
   useEffect(() => {
     const node = scrollRef.current;
     const inner = node?.firstElementChild;
@@ -435,10 +475,10 @@ export function MessageTimeline({
       olderPrefetchArmedRef.current = true;
       setOlderPrefetchArmed(true);
     }
-    // The assignment site already captured the corrected anchor. Recapturing
-    // it from a delayed echo can observe the next prepended row before that
-    // row's ResizeObserver correction and make the viewport walk up the page.
-    if (!programmatic) {
+    // Freeze the element-anchor while older history is settling: height-delta
+    // owns that window. Recapturing mid-prepend (or from a delayed echo) lets
+    // the viewport walk / wobble near the top.
+    if (!programmatic && !settlingOlderRef.current) {
       captureAnchor();
     }
   };

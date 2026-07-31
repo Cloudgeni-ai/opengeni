@@ -327,6 +327,89 @@ describe("MessageTimeline pagination affordances", () => {
     await r.unmount();
   });
 
+  test("near-top older hydration preserves scrollTop by height delta without wobble", async () => {
+    const frames: FrameRequestCallback[] = [];
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      frames.push(cb);
+      return frames.length;
+    };
+    globalThis.cancelAnimationFrame = () => undefined;
+
+    const settled = manyEvents(12).map((evt) => event(evt.sequence + 8)); // 9..20
+    const r = await renderComponent(
+      <MessageTimeline events={settled} hasOlder loadingOlder={false} />,
+    );
+    await armOlderPrefetch(r.container);
+    await drainFrames(frames);
+
+    const scroller = r.container.querySelector(".overflow-y-auto");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+
+    // Reader is near the top (not tip-locked), slightly below absolute 0 — the
+    // painful wobble zone while the next older page inserts.
+    let contentHeight = 2000;
+    const clientHeight = 400;
+    let currentScrollTop = 24;
+    Object.defineProperty(scroller, "clientHeight", {
+      configurable: true,
+      get: () => clientHeight,
+    });
+    Object.defineProperty(scroller, "scrollHeight", {
+      configurable: true,
+      get: () => contentHeight,
+    });
+    Object.defineProperty(scroller, "scrollTop", {
+      configurable: true,
+      get: () => currentScrollTop,
+      set: (value: number) => {
+        const max = Math.max(0, contentHeight - clientHeight);
+        currentScrollTop = Math.max(0, Math.min(max, value));
+      },
+    });
+    await actRun(() => {
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+
+    // Enter settling at the mocked height so previousScrollHeight matches 2000
+    // (otherwise the first delta is against happy-dom's earlier scrollHeight).
+    await r.rerender(<MessageTimeline events={settled} hasOlder loadingOlder status="idle" />);
+    await flush();
+    currentScrollTop = 24;
+
+    // loadingOlder shimmer / first prepend batch grows the column above.
+    // status flip forces the layout restore without leaving settling.
+    contentHeight = 2240;
+    await r.rerender(
+      <MessageTimeline events={settled} hasOlder loadingOlder status="running" />,
+    );
+    await flush();
+    expect(scroller.scrollTop).toBe(264); // 24 + (2240 - 2000)
+
+    // Further progressive growth must keep the same visual place — repeated
+    // restore with an unchanged height must not oscillate scrollTop.
+    contentHeight = 2480;
+    await r.rerender(
+      <MessageTimeline events={manyEvents(20)} hasOlder loadingOlder={false} status="running" />,
+    );
+    await runNextFrame(frames);
+    const afterPrepend = scroller.scrollTop;
+    expect(afterPrepend).toBe(504); // 264 + (2480 - 2240)
+
+    await flush();
+    expect(scroller.scrollTop).toBe(afterPrepend);
+    // A no-growth restore (RO chatter) must not nudge the reader.
+    await actRun(() => {
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    expect(scroller.scrollTop).toBe(afterPrepend);
+
+    await drainFrames(frames);
+    expect(scroller.scrollTop).toBe(afterPrepend);
+    await r.unmount();
+  });
+
   test("pinned follow keeps the tip at the scroller bottom across live appends", async () => {
     const prefix = manyEvents(19);
     const initial = [...prefix, agentDelta(20, "hello ")];
