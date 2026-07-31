@@ -6,7 +6,7 @@ import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/test
 import postgres from "postgres";
 
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
-const migrationName = "0139_hierarchical_role_aware_memory.sql";
+const migrationName = "0140_hierarchical_role_aware_memory.sql";
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
 async function applyFile(sql: postgres.Sql, file: string): Promise<void> {

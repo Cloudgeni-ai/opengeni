@@ -5,6 +5,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
+import { migrate } from "../src/migrate";
 
 const migration = "0138_sandbox_checkpoint_artifacts_and_deadlines.sql";
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
@@ -57,6 +58,7 @@ describe("migration 0138 (checkpoint artifacts and finite provider deadlines)", 
   test("migrates populated leases, fences references, rotates holders, and GC-claims only unreferenced objects", async () => {
     if (!available || !blank) return;
     const sql = postgres(blank.databaseUrl, { max: 1 });
+    let migrationRole: string | null = null;
     try {
       await sql.unsafe(`create table schema_migrations (
         name text primary key,
@@ -243,7 +245,26 @@ describe("migration 0138 (checkpoint artifacts and finite provider deadlines)", 
       expect(String(liveWriterRejected)).toContain(
         "requires all opengeni_app sessions to be stopped",
       );
-      await sql.unsafe(migrationSql);
+      // Reproduce the production boundary: the migration identity is a
+      // non-superuser with DDL authority and BYPASSRLS, so protocol-v2 triggers
+      // still require the transaction-local marker. The canonical runner must
+      // supply that marker inside the same implicit transaction as 0138; no
+      // process-global PGOPTIONS escape hatch is present here.
+      migrationRole = `migration_0138_${crypto.randomUUID().replaceAll("-", "")}`;
+      const migrationPassword = crypto.randomUUID();
+      const [identity] = await sql<Array<{ currentUser: string }>>`
+        select current_user as "currentUser"`;
+      const quoteIdentifier = (value: string) => `"${value.replaceAll('"', '""')}"`;
+      await sql.unsafe(
+        `CREATE ROLE ${quoteIdentifier(migrationRole)} LOGIN BYPASSRLS PASSWORD '${migrationPassword.replaceAll("'", "''")}'`,
+      );
+      await sql.unsafe(
+        `GRANT ${quoteIdentifier(identity!.currentUser)} TO ${quoteIdentifier(migrationRole)}`,
+      );
+      const migrationUrl = new URL(blank.databaseUrl);
+      migrationUrl.username = migrationRole;
+      migrationUrl.password = migrationPassword;
+      await migrate(migrationUrl.toString());
 
       const [migrated] = await sql<
         Array<{
@@ -707,6 +728,10 @@ describe("migration 0138 (checkpoint artifacts and finite provider deadlines)", 
           and delete_claim_id in (${staleClaimIds[0]!}, ${staleClaimIds[1]!})`;
       expect(oldClaimsRemaining?.count).toBe(1);
     } finally {
+      if (migrationRole) {
+        const quoteIdentifier = (value: string) => `"${value.replaceAll('"', '""')}"`;
+        await sql.unsafe(`DROP ROLE IF EXISTS ${quoteIdentifier(migrationRole)}`).catch(() => {});
+      }
       await sql.end();
     }
   }, 180_000);

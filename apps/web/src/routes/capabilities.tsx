@@ -54,6 +54,7 @@ import {
   type SheetSelection,
 } from "@/lib/capabilities";
 import { listViewState } from "@/lib/load-state";
+import { startMcpOAuthWithTimeout } from "@/lib/mcp-oauth";
 import {
   openGeniSlackBotConnections,
   openGeniSlackBotInstallInput,
@@ -325,7 +326,7 @@ export function CapabilitiesRoute({
         const mcpUrl =
           plan.mode === "oauth" ? plan.mcpUrl : (item.mcpUrl ?? item.endpointUrl ?? null);
         const returnPath = `${window.location.pathname}?connect_item=${encodeURIComponent(item.id)}`;
-        const response = await client.startConnectionOAuth(workspaceId, {
+        const response = await startMcpOAuthWithTimeout(client, workspaceId, {
           ...(mcpUrl ? { mcpUrl } : {}),
           ...(providerDomain ? { providerDomain } : {}),
           // Reuse the existing row when it survives; a null id means the row was
@@ -381,7 +382,7 @@ export function CapabilitiesRoute({
 
       if (action.type === "oauth" && plan.mode === "oauth") {
         const returnPath = `${window.location.pathname}?connect_item=${encodeURIComponent(persisted.id)}`;
-        const response = await client.startConnectionOAuth(workspaceId, {
+        const response = await startMcpOAuthWithTimeout(client, workspaceId, {
           ...(plan.mcpUrl ? { mcpUrl: plan.mcpUrl } : {}),
           ...(plan.providerDomain ? { providerDomain: plan.providerDomain } : {}),
           returnPath,

@@ -353,11 +353,7 @@ async function writeReceiptFromEnvironment(): Promise<void> {
   console.log(JSON.stringify({ path: outputPath, sha256, receipt }));
 }
 
-async function verifyReceiptFile(args: {
-  path: string;
-  sourceSha: string;
-  expectedPackages: string;
-}): Promise<void> {
+async function verifyReceiptFile(args: { path: string; sourceSha: string }): Promise<void> {
   const raw = await readFile(resolve(args.path), "utf8");
   if (raw.length > 1024 * 1024) {
     throw new Error("release candidate receipt exceeds 1 MiB");
@@ -366,7 +362,6 @@ async function verifyReceiptFile(args: {
     parseJson<unknown>("release candidate receipt", raw),
     {
       sourceSha: args.sourceSha,
-      packages: parseExpectedPackages(args.expectedPackages),
       ociPrefix: releaseOciPrefixFromEnvironment(),
     },
   );
@@ -376,12 +371,10 @@ async function verifyReceiptFile(args: {
 function parseArgs(values: string[]): {
   verifyPath: string | null;
   sourceSha: string;
-  expectedPackages: string;
 } {
   const output = {
     verifyPath: null as string | null,
     sourceSha: "",
-    expectedPackages: "",
   };
   for (let index = 0; index < values.length; index += 1) {
     const flag = values[index];
@@ -392,11 +385,7 @@ function parseArgs(values: string[]): {
     };
     if (flag === "--verify") output.verifyPath = next();
     else if (flag === "--source-sha") output.sourceSha = next();
-    else if (flag === "--expected-packages") {
-      const value = values[++index];
-      if (value === undefined) throw new Error(`${flag} requires a value`);
-      output.expectedPackages = value;
-    } else throw new Error(`unknown argument: ${flag}`);
+    else throw new Error(`unknown argument: ${flag}`);
   }
   if (output.verifyPath && !output.sourceSha) {
     throw new Error("--verify requires --source-sha");
@@ -410,7 +399,6 @@ if (import.meta.main) {
     await verifyReceiptFile({
       path: args.verifyPath,
       sourceSha: args.sourceSha,
-      expectedPackages: args.expectedPackages,
     });
   } else {
     await writeReceiptFromEnvironment();

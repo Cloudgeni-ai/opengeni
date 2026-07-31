@@ -46,6 +46,7 @@ import {
   markSessionWorkflowWakeDelivered,
   insertRecording,
   getRecording,
+  getLatestRunState,
   peekSessionWork,
   recoverSessionDispatch,
   reconcileSessionAttemptQuiescence,
@@ -211,6 +212,234 @@ async function claimTestSessionWork(
 }
 
 describe("clean session control plane", () => {
+  test("provider-artifact shape constraints are rolling-safe and enforce new writes", async () => {
+    const constraints = await shared.admin<
+      Array<{ conname: string; convalidated: boolean }>
+    >`SELECT conname, convalidated
+      FROM pg_constraint
+      WHERE conname IN (
+        'session_history_items_provider_artifact_invalidation_shape_chk',
+        'agent_run_states_provider_artifact_invalidation_shape_chk'
+      )
+      ORDER BY conname`;
+    expect(constraints.map((row) => ({ ...row }))).toEqual([
+      {
+        conname: "agent_run_states_provider_artifact_invalidation_shape_chk",
+        convalidated: false,
+      },
+      {
+        conname: "session_history_items_provider_artifact_invalidation_shape_chk",
+        convalidated: false,
+      },
+    ]);
+
+    const { grant, session } = await fixture();
+    let rejected = false;
+    try {
+      await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+        db.insert(schema.sessionHistoryItems).values({
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          position: 0,
+          item: { type: "message", role: "user", content: "must reject partial invalidation" },
+          providerArtifactInvalidatedAt: new Date(),
+        }),
+      );
+    } catch {
+      rejected = true;
+    }
+    expect(rejected).toBe(true);
+  });
+
+  test("provider-artifact rejection atomically invalidates opaque history and recovers the same turn", async () => {
+    const { grant, session } = await fixture();
+    await send(
+      {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        subjectId: grant.subjectId,
+      },
+      session.id,
+      "provider artifact fixture",
+    );
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      session.temporalWorkflowId ?? `session-${session.id}`,
+      { attemptId },
+    );
+    expect(turn).not.toBeNull();
+    const existing = await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id);
+    const nextPosition = Math.max(-1, ...existing.map((row) => row.position)) + 1;
+    expect(
+      await appendSessionHistoryItems(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn!.id,
+        expectedExecutionGeneration: turn!.executionGeneration,
+        expectedAttemptId: attemptId,
+        producerCodexCredentialId: "11111111-1111-4111-8111-111111111111",
+        items: [
+          {
+            position: nextPosition,
+            item: {
+              type: "reasoning",
+              id: "rs_rejected",
+              providerData: { encrypted_content: "opaque-rejected" },
+              summary: [],
+            },
+          },
+          {
+            position: nextPosition + 1,
+            item: {
+              type: "compaction",
+              encrypted_content: "opaque-compaction",
+              summary: "durable summary",
+            },
+          },
+          {
+            position: nextPosition + 2,
+            item: {
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: "durable answer" }],
+            },
+          },
+        ],
+      }),
+    ).toBe(true);
+
+    const recovery = await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: turn!.id,
+      triggerEventId: turn!.triggerEventId,
+      attemptId,
+      reason: "encrypted_content_rejected",
+      providerArtifactInvalidation: {
+        codexCredentialId: "11111111-1111-4111-8111-111111111111",
+        reason: "encrypted_content_rejected",
+      },
+    });
+    expect(recovery).toMatchObject({
+      action: "recovering",
+      providerArtifactsInvalidated: 2,
+    });
+    const rows = await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id);
+    const inserted = rows.filter((row) => row.position >= nextPosition);
+    expect(inserted.map((row) => row.providerArtifactInvalidatedAt !== null)).toEqual([
+      true,
+      true,
+      false,
+    ]);
+    expect(inserted[2]!.item).toMatchObject({
+      type: "message",
+      content: [{ text: "durable answer" }],
+    });
+    expect(
+      recovery.action === "recovering"
+        ? recovery.events.find((event) => event.type === "turn.recovery.requested")?.payload
+        : null,
+    ).toMatchObject({ providerArtifactsInvalidated: 2 });
+  });
+
+  test("provider-artifact recovery refuses an equivalent retry when no opaque artifact exists", async () => {
+    const { grant, session } = await fixture();
+    await send(
+      {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        subjectId: grant.subjectId,
+      },
+      session.id,
+      "provider artifact empty fixture",
+    );
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      session.temporalWorkflowId ?? `session-${session.id}`,
+      { attemptId },
+    );
+    expect(turn).not.toBeNull();
+    const recovery = await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: turn!.id,
+      triggerEventId: turn!.triggerEventId,
+      attemptId,
+      reason: "encrypted_content_rejected",
+      providerArtifactInvalidation: {
+        codexCredentialId: "11111111-1111-4111-8111-111111111111",
+        reason: "encrypted_content_rejected",
+      },
+    });
+    expect(recovery).toEqual({
+      action: "not_recoverable",
+      events: [],
+      providerArtifactsInvalidated: 0,
+    });
+    expect((await getSessionTurn(client.db, grant.workspaceId!, turn!.id))?.status).toBe("running");
+  });
+
+  test("provider-artifact recovery invalidates the frozen approval state for the same turn", async () => {
+    const { grant, session } = await fixture();
+    await send(
+      {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        subjectId: grant.subjectId,
+      },
+      session.id,
+      "provider artifact frozen state fixture",
+    );
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      session.temporalWorkflowId ?? `session-${session.id}`,
+      { attemptId },
+    );
+    expect(turn).not.toBeNull();
+    expect(
+      await saveRunState(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn!.id,
+        expectedExecutionGeneration: turn!.executionGeneration,
+        expectedAttemptId: attemptId,
+        serializedRunState: JSON.stringify({ history: [{ type: "reasoning" }] }),
+        pendingApprovals: [],
+        frozenCodexCredentialId: "11111111-1111-4111-8111-111111111111",
+      }),
+    ).toBe(true);
+
+    const recovery = await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: turn!.id,
+      triggerEventId: turn!.triggerEventId,
+      attemptId,
+      reason: "encrypted_content_rejected",
+      providerArtifactInvalidation: {
+        codexCredentialId: "11111111-1111-4111-8111-111111111111",
+        reason: "encrypted_content_rejected",
+      },
+    });
+    expect(recovery).toMatchObject({
+      action: "recovering",
+      providerArtifactsInvalidated: 1,
+    });
+    expect(
+      (await getLatestRunState(client.db, grant.workspaceId!, session.id))
+        ?.providerArtifactInvalidatedAt,
+    ).toBeInstanceOf(Date);
+  });
+
   test("session discovery is compact-by-query and cursor-stable", async () => {
     const { grant, session: first } = await fixture();
     const hugeTitle = "界😀".repeat(100_000);

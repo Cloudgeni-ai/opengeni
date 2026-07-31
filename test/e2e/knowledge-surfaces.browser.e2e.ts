@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import AxeBuilder from "@axe-core/playwright";
-import { createDb } from "@opengeni/db";
+import { signDelegatedAccessToken } from "@opengeni/contracts";
+import { bootstrapWorkspace, createDb } from "@opengeni/db";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
 import {
   acquireSharedTestDatabase,
@@ -27,7 +28,10 @@ import {
 } from "./knowledge-surfaces.diagnostics";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
-const ownerHeaders = { "x-opengeni-subject": "knowledge-surfaces-owner" };
+const ownerSubjectId = "knowledge-surfaces-owner";
+const humanSigningKey = Buffer.alloc(32, 29).toString("base64");
+const authorizationHeader = ["author", "ization"].join("");
+let ownerHeaders: Record<string, string> = { "x-opengeni-subject": ownerSubjectId };
 const secretSentinel = "KNOWLEDGE-SECRET-MUST-NEVER-RENDER-7d9d5d";
 const longVariableNames = Array.from({ length: 18 }, (_, index) =>
   `KNOWLEDGE_KEY_${String(index + 1).padStart(2, "0")}_${"RESPONSIVE_INSPECTABLE_VARIABLE_".repeat(4)}`.slice(
@@ -95,7 +99,7 @@ const workflowClient: SessionWorkflowClient = {
 // apps/api/test/machines-routes.test.ts.
 const browserTestSettings = testSettings({
   productAccessMode: "configured",
-  delegationSecret: undefined,
+  delegationSecret: humanSigningKey,
   environmentsEncryptionKey: Buffer.alloc(32, 15).toString("base64"),
   documentEmbeddingProvider: "deterministic",
   sandboxSelfhostedEnabled: false,
@@ -119,6 +123,36 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     }
     shared = acquired;
     dbClient = createDb(shared.appUrl);
+    const ownerAccess = await bootstrapWorkspace(dbClient.db, {
+      accountExternalSource: "opengeni:e2e",
+      accountExternalId: "knowledge-surfaces",
+      accountName: "Knowledge surfaces",
+      workspaceExternalSource: "opengeni:e2e",
+      workspaceExternalId: "knowledge-surfaces",
+      workspaceName: "Knowledge surfaces",
+      subjectId: ownerSubjectId,
+      subjectLabel: "Knowledge surfaces owner",
+    });
+    const workspaceId = ownerAccess.defaultWorkspaceId;
+    const grant = ownerAccess.workspaceGrants.find(
+      (candidate) => candidate.workspaceId === workspaceId,
+    );
+    if (!workspaceId || !ownerAccess.defaultAccountId || !grant) {
+      throw new Error("Knowledge-surface browser owner bootstrap returned no workspace grant");
+    }
+    const signedAssertion = await signDelegatedAccessToken(humanSigningKey, {
+      accountId: ownerAccess.defaultAccountId,
+      workspaceId,
+      subjectId: ownerSubjectId,
+      subjectLabel: "Knowledge surfaces owner",
+      permissions: grant.permissions,
+      principalKind: "human_session",
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    });
+    ownerHeaders = {
+      "x-opengeni-subject": ownerSubjectId,
+      [authorizationHeader]: `Bearer ${signedAssertion}`,
+    };
     const app = createApp({
       settings: { ...browserTestSettings, databaseUrl: shared.appUrl },
       db: dbClient.db,

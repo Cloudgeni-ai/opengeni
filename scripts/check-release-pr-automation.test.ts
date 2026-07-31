@@ -30,7 +30,19 @@ const rebasedFirstSha = "a".repeat(40);
 const pullNumber = 88;
 const runId = 123456;
 const runAttempt = 2;
+const recoveryRunId = 790;
+const recoveryRunAttempt = 3;
 const releaseHeadReleaseId = 7654321;
+
+function recoveredSourceAdmissionExternalId(
+  workflowRunId = recoveryRunId,
+  workflowRunAttempt = recoveryRunAttempt,
+) {
+  return (
+    `opengeni:release-automation:source-admission-recovery:v2:` +
+    `pr:${pullNumber}:head:${headSha}:run:${workflowRunId}:attempt:${workflowRunAttempt}`
+  );
+}
 
 type RequestRecord = {
   method: string;
@@ -171,7 +183,12 @@ function dispatchFixture(
     const url = new URL(String(input));
     const method = init?.method ?? "GET";
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
-    requests.push({ method, path: url.pathname, query: url.searchParams, body });
+    requests.push({
+      method,
+      path: url.pathname,
+      query: url.searchParams,
+      body,
+    });
     const prefix = `/repos/${RELEASE_AUTOMATION_CONTRACT.repository}`;
     if (method === "GET" && url.pathname === prefix) return response(repository());
     if (method === "GET" && url.pathname === `${prefix}/git/ref/heads/main`)
@@ -338,11 +355,17 @@ describe("Version PR dispatch identity", () => {
   test("rejects fork identity and stale main before dispatch", async () => {
     const fork = dispatchFixture({ headRepository: "attacker/opengeni" });
     await expect(
-      validateVersionPrDispatch({ env: releasePushEnv(), fetchImpl: fork.fetchImpl }),
+      validateVersionPrDispatch({
+        env: releasePushEnv(),
+        fetchImpl: fork.fetchImpl,
+      }),
     ).rejects.toThrow("Version PR is not from the base repository");
     const stale = dispatchFixture({ mainSha: "9".repeat(40) });
     await expect(
-      validateVersionPrDispatch({ env: releasePushEnv(), fetchImpl: stale.fetchImpl }),
+      validateVersionPrDispatch({
+        env: releasePushEnv(),
+        fetchImpl: stale.fetchImpl,
+      }),
     ).rejects.toThrow("default branch differs from the admitted base SHA");
   });
 });
@@ -378,7 +401,12 @@ function admissionFixture(
     const url = new URL(String(input));
     const method = init?.method ?? "GET";
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
-    requests.push({ method, path: url.pathname, query: url.searchParams, body });
+    requests.push({
+      method,
+      path: url.pathname,
+      query: url.searchParams,
+      body,
+    });
     if (method === "POST" && options.seal && url.pathname === `${prefix}/git/refs`) {
       retainedHeadSha = body?.sha;
       return response(
@@ -513,13 +541,27 @@ function admissionFixture(
       return response({
         sha: pullMergeBaseTreeSha,
         truncated: false,
-        tree: [{ path: "package.json", mode: "100644", type: "blob", sha: "1".repeat(40) }],
+        tree: [
+          {
+            path: "package.json",
+            mode: "100644",
+            type: "blob",
+            sha: "1".repeat(40),
+          },
+        ],
       });
     if (url.pathname === `${prefix}/git/trees/${headTreeSha}`)
       return response({
         sha: headTreeSha,
         truncated: false,
-        tree: [{ path: "package.json", mode: "100644", type: "blob", sha: "2".repeat(40) }],
+        tree: [
+          {
+            path: "package.json",
+            mode: "100644",
+            type: "blob",
+            sha: "2".repeat(40),
+          },
+        ],
       });
     return response({ message: `unexpected GET ${url.pathname}` }, 404);
   }
@@ -535,7 +577,12 @@ describe("automation CI admission", () => {
       logger: { log() {} },
     });
     expect(result).toMatchObject({ prNumber: pullNumber, baseSha, headSha });
-    expect(result.admission).toMatchObject({ baseSha, headSha, baseTreeSha, headTreeSha });
+    expect(result.admission).toMatchObject({
+      baseSha,
+      headSha,
+      baseTreeSha,
+      headTreeSha,
+    });
     expect(fixture.requests.every((request) => request.method === "GET")).toBe(true);
   });
 
@@ -734,7 +781,10 @@ describe("release head evidence retention", () => {
   });
 
   test("rejects a conflicting retained head and workflow/base drift", async () => {
-    const fixture = admissionFixture({ seal: true, releaseHeadRefSha: "9".repeat(40) });
+    const fixture = admissionFixture({
+      seal: true,
+      releaseHeadRefSha: "9".repeat(40),
+    });
     await expect(
       sealReleaseHeadEvidence({
         env: sealReleaseHeadEnv(),
@@ -761,7 +811,8 @@ function recoverySealEnv(overrides: Record<string, string> = {}) {
     GITHUB_SERVER_URL: RELEASE_AUTOMATION_CONTRACT.serverUrl,
     GITHUB_SHA: currentMainSha,
     GITHUB_TOKEN: "fixture-token",
-    GITHUB_RUN_ID: "790",
+    GITHUB_RUN_ATTEMPT: String(recoveryRunAttempt),
+    GITHUB_RUN_ID: String(recoveryRunId),
     GITHUB_WORKFLOW_REF:
       `${RELEASE_AUTOMATION_CONTRACT.repository}/` +
       `${RELEASE_AUTOMATION_CONTRACT.sealWorkflowPath}@refs/heads/main`,
@@ -781,12 +832,20 @@ function recoverySealFixture(
     headRefs?: string[];
     headRepositories?: string[];
     pullAuthors?: Array<Record<string, unknown>>;
+    originalSourceAdmissions?: Array<Record<string, unknown>>;
+    existingRecoveryChecks?: Array<Record<string, unknown>>;
+    releaseHeadRef?: Record<string, unknown> | null;
     release?: Record<string, unknown> | null;
+    refCreateStatus?: number;
+    retentionCheck?: Record<string, unknown>;
+    tagLookupStatus?: number;
+    releaseLookupStatus?: number;
     sourceTreeSha?: string;
   } = {},
 ) {
   const requests: RequestRecord[] = [];
   const checks: Array<Record<string, any>> = [];
+  checks.push(...(options.existingRecoveryChecks ?? []));
   const prefix = `/repos/${RELEASE_AUTOMATION_CONTRACT.repository}`;
   const releaseTag = `${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${headSha}`;
   const merger = { login: "merge-maintainer", id: 1234567, type: "User" };
@@ -827,11 +886,25 @@ function recoverySealFixture(
     conclusion: "success",
     app: RELEASE_AUTOMATION_CONTRACT.githubActionsApp,
   };
+  let releaseHeadRef =
+    options.releaseHeadRef === undefined
+      ? {
+          ref: `refs/tags/${releaseTag}`,
+          object: { type: "commit", sha: headSha },
+        }
+      : options.releaseHeadRef;
+  let release = options.release === undefined ? releaseHeadRelease() : options.release;
+  if (options.retentionCheck) checks.push(options.retentionCheck);
   async function fetchImpl(input: string | URL | Request, init?: RequestInit) {
     const url = new URL(String(input));
     const method = init?.method ?? "GET";
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
-    requests.push({ method, path: url.pathname, query: url.searchParams, body });
+    requests.push({
+      method,
+      path: url.pathname,
+      query: url.searchParams,
+      body,
+    });
     if (method === "POST" && url.pathname === `${prefix}/check-runs`) {
       const check = {
         ...body,
@@ -847,6 +920,21 @@ function recoverySealFixture(
       if (!check) return response({ message: "missing check" }, 404);
       Object.assign(check, body);
       return response(check);
+    }
+    if (method === "POST" && url.pathname === `${prefix}/git/refs`) {
+      if (options.refCreateStatus !== undefined)
+        return response({ message: "ref create rejected" }, options.refCreateStatus);
+      if (releaseHeadRef !== null) return response({ message: "ref already exists" }, 422);
+      releaseHeadRef = {
+        ref: body?.ref,
+        object: { type: "commit", sha: body?.sha },
+      };
+      return response(releaseHeadRef, 201);
+    }
+    if (method === "POST" && url.pathname === `${prefix}/releases`) {
+      if (release !== null) return response({ message: "release already exists" }, 422);
+      release = releaseHeadRelease();
+      return response(release, 201);
     }
     if (method !== "GET") return response({ message: "unexpected mutation" }, 405);
     if (url.pathname === prefix) return response(repository());
@@ -926,37 +1014,280 @@ function recoverySealFixture(
       return response({
         sha: baseTreeSha,
         truncated: false,
-        tree: [{ path: "package.json", mode: "100644", type: "blob", sha: "1".repeat(40) }],
+        tree: [
+          {
+            path: "package.json",
+            mode: "100644",
+            type: "blob",
+            sha: "1".repeat(40),
+          },
+        ],
       });
     if (url.pathname === `${prefix}/git/trees/${headTreeSha}`)
       return response({
         sha: headTreeSha,
         truncated: false,
-        tree: [{ path: "package.json", mode: "100644", type: "blob", sha: "2".repeat(40) }],
+        tree: [
+          {
+            path: "package.json",
+            mode: "100644",
+            type: "blob",
+            sha: "2".repeat(40),
+          },
+        ],
       });
     if (url.pathname === `${prefix}/commits/${headSha}/check-runs`) {
       const checkName = url.searchParams.get("check_name");
+      const originalSourceAdmissions =
+        options.originalSourceAdmissions ??
+        (options.existingSourceAdmission ? [sourceAdmission] : []);
       return response({
         check_runs: checkName
           ? checks.filter((check) => check.name === checkName)
-          : [...(options.existingSourceAdmission ? [sourceAdmission] : []), ...checks],
+          : [...originalSourceAdmissions, ...checks],
       });
     }
-    if (url.pathname === `${prefix}/git/ref/tags/${releaseTag}`)
-      return response({
-        ref: `refs/tags/${releaseTag}`,
-        object: { type: "commit", sha: headSha },
-      });
-    if (url.pathname === `${prefix}/releases/tags/${releaseTag}`)
-      return options.release === null
+    if (url.pathname === `${prefix}/git/ref/tags/${releaseTag}`) {
+      if (options.tagLookupStatus !== undefined)
+        return response({ message: "tag lookup failed" }, options.tagLookupStatus);
+      return releaseHeadRef === null
+        ? response({ message: "missing release head ref" }, 404)
+        : response(releaseHeadRef);
+    }
+    if (url.pathname === `${prefix}/releases/tags/${releaseTag}`) {
+      if (options.releaseLookupStatus !== undefined)
+        return response({ message: "release lookup failed" }, options.releaseLookupStatus);
+      return release === null
         ? response({ message: "missing immutable release" }, 404)
-        : response(options.release ?? releaseHeadRelease());
+        : response(release);
+    }
     return response({ message: `unexpected GET ${url.pathname}` }, 404);
   }
   return { checks, fetchImpl, requests };
 }
 
 describe("release head retention recovery", () => {
+  test("creates one canonical recovery receipt when draft-to-ready emitted duplicate original admissions", async () => {
+    const fixture = recoverySealFixture({
+      originalSourceAdmissions: [
+        {
+          id: 101,
+          name: RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+          head_sha: headSha,
+          status: "completed",
+          conclusion: "success",
+          external_id: "draft-source-admission",
+          app: RELEASE_AUTOMATION_CONTRACT.githubActionsApp,
+        },
+        {
+          id: 102,
+          name: RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+          head_sha: headSha,
+          status: "completed",
+          conclusion: "success",
+          external_id: "ready-source-admission",
+          app: RELEASE_AUTOMATION_CONTRACT.githubActionsApp,
+        },
+      ],
+    });
+
+    const result = await recoverReleaseHeadEvidence({
+      env: recoverySealEnv(),
+      fetchImpl: fixture.fetchImpl,
+      logger: { log() {} },
+      now: () => new Date("2026-07-27T09:30:00Z"),
+    });
+
+    expect(result.sourceAdmission).toEqual({
+      name: RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+      appSlug: RELEASE_AUTOMATION_CONTRACT.githubActionsApp.slug,
+      appId: RELEASE_AUTOMATION_CONTRACT.githubActionsApp.id,
+    });
+    expect(
+      fixture.checks.filter(
+        (check) =>
+          check.name === RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission &&
+          check.external_id === recoveredSourceAdmissionExternalId(),
+      ),
+    ).toHaveLength(1);
+  });
+
+  test("migrates the prior deterministic recovery check in place", async () => {
+    const legacyExternalId = String.raw`opengeni:release-automation:source-admission:v1:pr:${pullNumber}:head:${headSha}`;
+    const fixture = recoverySealFixture({
+      existingRecoveryChecks: [
+        {
+          id: 777,
+          name: RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+          head_sha: headSha,
+          status: "completed",
+          conclusion: "success",
+          external_id: legacyExternalId,
+          app: RELEASE_AUTOMATION_CONTRACT.githubActionsApp,
+        },
+      ],
+    });
+
+    await recoverReleaseHeadEvidence({
+      env: recoverySealEnv(),
+      fetchImpl: fixture.fetchImpl,
+      logger: { log() {} },
+      now: () => new Date("2026-07-27T09:30:00Z"),
+    });
+
+    expect(
+      fixture.checks.filter(
+        (check) => check.name === RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        id: 777,
+        external_id: recoveredSourceAdmissionExternalId(),
+        status: "completed",
+        conclusion: "success",
+      }),
+    ]);
+    expect(
+      fixture.requests.filter(
+        (request) =>
+          request.method === "POST" &&
+          request.path.endsWith("/check-runs") &&
+          request.body?.name === RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+      ),
+    ).toHaveLength(0);
+  });
+
+  test("moves one prior v2 recovery check to the current seal run without duplicating it", async () => {
+    const fixture = recoverySealFixture();
+    const options = {
+      fetchImpl: fixture.fetchImpl,
+      logger: { log() {} },
+      now: () => new Date("2026-07-27T09:30:00Z"),
+    };
+
+    await recoverReleaseHeadEvidence({
+      ...options,
+      env: recoverySealEnv(),
+    });
+    await recoverReleaseHeadEvidence({
+      ...options,
+      env: recoverySealEnv({
+        GITHUB_RUN_ID: String(recoveryRunId + 1),
+        GITHUB_RUN_ATTEMPT: String(recoveryRunAttempt + 1),
+      }),
+    });
+
+    expect(
+      fixture.checks.filter(
+        (check) => check.name === RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        external_id: recoveredSourceAdmissionExternalId(recoveryRunId + 1, recoveryRunAttempt + 1),
+        status: "completed",
+        conclusion: "success",
+      }),
+    ]);
+    expect(
+      fixture.requests.filter(
+        (request) =>
+          request.method === "POST" &&
+          request.path.endsWith("/check-runs") &&
+          request.body?.name === RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+      ),
+    ).toHaveLength(1);
+  });
+
+  test("rejects duplicate prior v2 recovery checks before mutation", async () => {
+    const canonical = (id: number, workflowRunId: number) => ({
+      id,
+      name: RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+      head_sha: headSha,
+      status: "completed",
+      conclusion: "success",
+      external_id: recoveredSourceAdmissionExternalId(workflowRunId, 1),
+      app: RELEASE_AUTOMATION_CONTRACT.githubActionsApp,
+    });
+    const fixture = recoverySealFixture({
+      existingRecoveryChecks: [
+        canonical(777, recoveryRunId - 2),
+        canonical(778, recoveryRunId - 1),
+      ],
+    });
+
+    await expect(
+      recoverReleaseHeadEvidence({
+        env: recoverySealEnv(),
+        fetchImpl: fixture.fetchImpl,
+        logger: { log() {} },
+      }),
+    ).rejects.toThrow("multiple check runs share the idempotency marker");
+    expect(fixture.requests.every((request) => request.method === "GET")).toBe(true);
+  });
+
+  test("creates a clean absent retained pair after every pre-mutation gate and replays idempotently", async () => {
+    const fixture = recoverySealFixture({ releaseHeadRef: null, release: null });
+    const options = {
+      env: recoverySealEnv(),
+      fetchImpl: fixture.fetchImpl,
+      logger: { log() {} },
+      now: () => new Date("2026-07-27T09:30:00Z"),
+    };
+    const result = await recoverReleaseHeadEvidence(options);
+    const replay = await recoverReleaseHeadEvidence(options);
+
+    expect(result.releaseHead).toEqual({
+      name: `${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${headSha}`,
+      ref: `refs/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${headSha}`,
+      sha: headSha,
+    });
+    expect(replay.releaseHead).toEqual(result.releaseHead);
+    expect(replay.releaseHeadRelease).toEqual(result.releaseHeadRelease);
+    expect(
+      fixture.requests.filter(
+        (request) => request.method === "POST" && request.path.endsWith("/git/refs"),
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        body: {
+          ref: `refs/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${headSha}`,
+          sha: headSha,
+        },
+      }),
+    ]);
+    expect(
+      fixture.requests.filter(
+        (request) => request.method === "POST" && request.path.endsWith("/releases"),
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        body: expect.objectContaining({
+          tag_name: `${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${headSha}`,
+          name: `${RELEASE_AUTOMATION_CONTRACT.releaseHeadReleaseNamePrefix}${headSha}`,
+          draft: false,
+          prerelease: true,
+          make_latest: "false",
+        }),
+      }),
+    ]);
+    const firstMutation = fixture.requests.findIndex((request) => request.method !== "GET");
+    expect(firstMutation).toBeGreaterThan(0);
+    expect(
+      fixture.requests.slice(0, firstMutation).every((request) => request.method === "GET"),
+    ).toBe(true);
+    expect(
+      fixture.requests
+        .slice(0, firstMutation)
+        .filter((request) => request.path.endsWith(`/git/ref/tags/${result.releaseHead.name}`)),
+    ).toHaveLength(2);
+    expect(
+      fixture.requests
+        .slice(0, firstMutation)
+        .filter((request) => request.path.endsWith(`/releases/tags/${result.releaseHead.name}`)),
+    ).toHaveLength(2);
+    expect(fixture.checks).toHaveLength(2);
+  });
+
   test("replays recovery idempotently for a reviewed non-Version release head", async () => {
     const fixture = recoverySealFixture({
       pullAuthors: [
@@ -1029,6 +1360,56 @@ describe("release head retention recovery", () => {
     ).toBe(false);
   });
 
+  test("rejects a conflicting retention check for an exact retained pair before mutation", async () => {
+    const fixture = recoverySealFixture();
+    const options = {
+      env: recoverySealEnv(),
+      fetchImpl: fixture.fetchImpl,
+      logger: { log() {} },
+      now: () => new Date("2026-07-27T09:30:00Z"),
+    };
+    await recoverReleaseHeadEvidence(options);
+    const retentionCheck = fixture.checks.find(
+      (check) => check.name === RELEASE_AUTOMATION_CONTRACT.checks.releaseHeadRetention,
+    );
+    expect(retentionCheck).toBeDefined();
+    fixture.checks.splice(0, fixture.checks.length, {
+      ...retentionCheck,
+      external_id: "attacker-preclaim",
+    });
+    fixture.requests.length = 0;
+
+    await expect(recoverReleaseHeadEvidence(options)).rejects.toThrow(
+      "existing check run conflicts with the exact idempotency identity",
+    );
+    expect(fixture.requests.every((request) => request.method === "GET")).toBe(true);
+  });
+
+  test("rejects duplicate exact retention checks for an exact retained pair before mutation", async () => {
+    const fixture = recoverySealFixture();
+    const options = {
+      env: recoverySealEnv(),
+      fetchImpl: fixture.fetchImpl,
+      logger: { log() {} },
+      now: () => new Date("2026-07-27T09:30:00Z"),
+    };
+    await recoverReleaseHeadEvidence(options);
+    const retentionCheck = fixture.checks.find(
+      (check) => check.name === RELEASE_AUTOMATION_CONTRACT.checks.releaseHeadRetention,
+    );
+    expect(retentionCheck).toBeDefined();
+    fixture.checks.splice(0, fixture.checks.length, retentionCheck!, {
+      ...retentionCheck,
+      id: Number(retentionCheck?.id) + 1,
+    });
+    fixture.requests.length = 0;
+
+    await expect(recoverReleaseHeadEvidence(options)).rejects.toThrow(
+      "multiple check runs share the idempotency marker",
+    );
+    expect(fixture.requests.every((request) => request.method === "GET")).toBe(true);
+  });
+
   test("fails closed on recovery author identity substitution or missing identity", async () => {
     for (const [author, message] of [
       [
@@ -1091,15 +1472,29 @@ describe("release head retention recovery", () => {
     expect(movedRepository.checks).toHaveLength(0);
   });
 
-  test("fails closed before check mutation when retained evidence is absent or main lost ancestry", async () => {
+  test("fails closed before mutation on partial retained evidence or main lost ancestry", async () => {
     const missing = recoverySealFixture({ release: null });
     await expect(
       recoverReleaseHeadEvidence({
         env: recoverySealEnv(),
         fetchImpl: missing.fetchImpl,
       }),
-    ).rejects.toThrow("failed with HTTP 404");
+    ).rejects.toThrow("release head recovery evidence is only partially present");
     expect(missing.checks).toHaveLength(0);
+    expect(missing.requests.every((request) => request.method === "GET")).toBe(true);
+
+    const missingTag = recoverySealFixture({
+      releaseHeadRef: null,
+      release: releaseHeadRelease(),
+    });
+    await expect(
+      recoverReleaseHeadEvidence({
+        env: recoverySealEnv(),
+        fetchImpl: missingTag.fetchImpl,
+      }),
+    ).rejects.toThrow("release head recovery evidence is only partially present");
+    expect(missingTag.checks).toHaveLength(0);
+    expect(missingTag.requests.every((request) => request.method === "GET")).toBe(true);
 
     const diverged = recoverySealFixture({ currentMainContainsSource: false });
     await expect(
@@ -1109,6 +1504,64 @@ describe("release head retention recovery", () => {
       }),
     ).rejects.toThrow("current main is not ahead of the merged source");
     expect(diverged.checks).toHaveLength(0);
+  });
+
+  test("fails closed before mutation when absent evidence has a preclaimed retention check", async () => {
+    const fixture = recoverySealFixture({
+      releaseHeadRef: null,
+      release: null,
+      retentionCheck: {
+        id: 991,
+        name: RELEASE_AUTOMATION_CONTRACT.checks.releaseHeadRetention,
+        head_sha: headSha,
+        status: "completed",
+        conclusion: "success",
+        external_id: "attacker-preclaim",
+        app: RELEASE_AUTOMATION_CONTRACT.githubActionsApp,
+      },
+    });
+    await expect(
+      recoverReleaseHeadEvidence({
+        env: recoverySealEnv(),
+        fetchImpl: fixture.fetchImpl,
+      }),
+    ).rejects.toThrow("release head retention check exists without retained evidence");
+    expect(fixture.requests.every((request) => request.method === "GET")).toBe(true);
+  });
+
+  test("does not normalize non-404 retained-evidence provider failures or mutate", async () => {
+    for (const [fixtureOptions, message] of [
+      [{ releaseHeadRef: null, release: null, tagLookupStatus: 500 }, "failed with HTTP 500"],
+      [{ releaseHeadRef: null, release: null, releaseLookupStatus: 503 }, "failed with HTTP 503"],
+    ] as const) {
+      const fixture = recoverySealFixture(fixtureOptions);
+      await expect(
+        recoverReleaseHeadEvidence({
+          env: recoverySealEnv(),
+          fetchImpl: fixture.fetchImpl,
+        }),
+      ).rejects.toThrow(message);
+      expect(fixture.checks).toHaveLength(0);
+      expect(fixture.requests.every((request) => request.method === "GET")).toBe(true);
+    }
+  });
+
+  test("does not take over a tag claimed after the clean absence fence", async () => {
+    const fixture = recoverySealFixture({
+      releaseHeadRef: null,
+      release: null,
+      refCreateStatus: 422,
+    });
+    await expect(
+      recoverReleaseHeadEvidence({
+        env: recoverySealEnv(),
+        fetchImpl: fixture.fetchImpl,
+      }),
+    ).rejects.toThrow("GitHub API POST /repos/Cloudgeni-ai/opengeni/git/refs failed with HTTP 422");
+    expect(fixture.checks).toHaveLength(0);
+    expect(
+      fixture.requests.filter((request) => request.method !== "GET").map((request) => request.path),
+    ).toEqual([`/repos/${RELEASE_AUTOMATION_CONTRACT.repository}/git/refs`]);
   });
 });
 
@@ -1134,7 +1587,12 @@ function checksFixture(
     const url = new URL(String(input));
     const method = init?.method ?? "GET";
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
-    requests.push({ method, path: url.pathname, query: url.searchParams, body });
+    requests.push({
+      method,
+      path: url.pathname,
+      query: url.searchParams,
+      body,
+    });
     if (method === "GET" && url.pathname === `${prefix}/git/ref/heads/main`)
       return response(mainRef());
     if (method === "GET" && url.pathname === `${prefix}/pulls/${pullNumber}`)
@@ -1408,6 +1866,7 @@ function approvalFixture(
       mainReads += 1;
       return response(mainRef(mainReads === 1 ? mergeSha : (options.terminalMainSha ?? mergeSha)));
     }
+    if (method === "GET" && url.pathname === prefix) return response(repository());
     if (method === "GET" && url.pathname === `${prefix}/git/commits/${mergeSha}`)
       return response({
         sha: mergeSha,
@@ -1450,11 +1909,54 @@ function approvalFixture(
           sha: baseSha,
           repo: { full_name: RELEASE_AUTOMATION_CONTRACT.repository },
         },
-        head: { sha: pullHeadSha },
+        head: {
+          ref: "changeset-release/main",
+          sha: pullHeadSha,
+          repo: { full_name: RELEASE_AUTOMATION_CONTRACT.repository },
+        },
         commits: pullCommitCount,
+        changed_files: 1,
         requested_reviewers: options.requestedReview
           ? [options.requestedReviewer ?? RELEASE_AUTOMATION_CONTRACT.releaseApprover]
           : [],
+      });
+    if (method === "GET" && url.pathname === `${prefix}/compare/${baseSha}...${pullHeadSha}`)
+      return response({
+        status: "ahead",
+        base_commit: { sha: baseSha },
+        merge_base_commit: { sha: baseSha },
+        ahead_by: pullCommitCount,
+        behind_by: 0,
+        total_commits: pullCommitCount,
+        commits: [{ sha: pullHeadSha }],
+      });
+    if (method === "GET" && url.pathname === `${prefix}/pulls/${pullNumber}/files`)
+      return response([{ filename: "package.json", status: "modified" }]);
+    if (method === "GET" && url.pathname === `${prefix}/git/trees/${baseTreeSha}`)
+      return response({
+        sha: baseTreeSha,
+        truncated: false,
+        tree: [
+          {
+            path: "package.json",
+            mode: "100644",
+            type: "blob",
+            sha: "1".repeat(40),
+          },
+        ],
+      });
+    if (method === "GET" && url.pathname === `${prefix}/git/trees/${headTreeSha}`)
+      return response({
+        sha: headTreeSha,
+        truncated: false,
+        tree: [
+          {
+            path: "package.json",
+            mode: "100644",
+            type: "blob",
+            sha: "2".repeat(40),
+          },
+        ],
       });
     if (method === "GET" && url.pathname === `${prefix}/issues/${pullNumber}/timeline`)
       return response(mergeEvent);
@@ -1465,7 +1967,11 @@ function approvalFixture(
               { sha: rebasedFirstSha, parents: [{ sha: baseSha }] },
               {
                 sha: mergeSha,
-                parents: [{ sha: options.discontinuousCompare ? baseSha : rebasedFirstSha }],
+                parents: [
+                  {
+                    sha: options.discontinuousCompare ? baseSha : rebasedFirstSha,
+                  },
+                ],
               },
             ]
           : [{ sha: mergeSha, parents: [{ sha: baseSha }] }];
@@ -1595,7 +2101,10 @@ describe("release approval provenance", () => {
   });
 
   test("accepts the provider-bound structured single-maintainer admin PASS", async () => {
-    const fixture = approvalFixture({ mergeMethod: "single", reviewState: "COMMENTED" });
+    const fixture = approvalFixture({
+      mergeMethod: "single",
+      reviewState: "COMMENTED",
+    });
     await expect(
       verifyApprovedMerge({
         env: approvalEnv(),
@@ -1605,9 +2114,95 @@ describe("release approval provenance", () => {
     ).resolves.toEqual(
       expect.objectContaining({
         mergeMethod: "single-commit-squash-or-rebase",
-        review: expect.objectContaining({ type: "single-maintainer-admin-pass" }),
+        review: expect.objectContaining({
+          type: "single-maintainer-admin-pass",
+        }),
       }),
     );
+  });
+
+  test("reconstructs source admission when GitHub deletes merged-head check projections", async () => {
+    const fixture = approvalFixture({ headChecks: [] });
+    const result = await verifyApprovedMerge({
+      env: approvalEnv(),
+      fetchImpl: fixture.fetchImpl,
+      logger: { log() {} },
+    });
+    expect(result.sourceAdmission).toEqual({
+      name: RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+      appSlug: "github-actions",
+      appId: 15368,
+      reconstructed: true,
+      manifestSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+    });
+    expect(
+      fixture.requests.filter(
+        (request) =>
+          request.path ===
+          `/repos/${RELEASE_AUTOMATION_CONTRACT.repository}/commits/${headSha}/check-runs`,
+      ),
+    ).toHaveLength(2);
+  });
+
+  test("prefers one canonical recovered admission over duplicate draft-to-ready originals", async () => {
+    const original = (id: number) => ({
+      id,
+      name: RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+      head_sha: headSha,
+      status: "completed",
+      conclusion: "success",
+      external_id: `ordinary-${id}`,
+      app: RELEASE_AUTOMATION_CONTRACT.githubActionsApp,
+    });
+    const fixture = approvalFixture({
+      headChecks: [
+        original(101),
+        original(102),
+        {
+          ...original(103),
+          external_id: recoveredSourceAdmissionExternalId(),
+        },
+      ],
+    });
+
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: fixture.fetchImpl,
+        logger: { log() {} },
+      }),
+    ).resolves.toMatchObject({
+      sourceAdmission: {
+        name: RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+        appSlug: RELEASE_AUTOMATION_CONTRACT.githubActionsApp.slug,
+        appId: RELEASE_AUTOMATION_CONTRACT.githubActionsApp.id,
+      },
+    });
+  });
+
+  test("rejects duplicate canonical recovered admissions", async () => {
+    const externalId = recoveredSourceAdmissionExternalId();
+    const canonical = {
+      name: RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+      head_sha: headSha,
+      status: "completed",
+      conclusion: "success",
+      external_id: externalId,
+      app: RELEASE_AUTOMATION_CONTRACT.githubActionsApp,
+    };
+    const fixture = approvalFixture({
+      headChecks: [
+        { ...canonical, id: 201 },
+        { ...canonical, id: 202 },
+      ],
+    });
+
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: fixture.fetchImpl,
+      }),
+    ).rejects.toThrow("canonical recovered source-admission check is not unique");
   });
 
   test("accepts reviewer login movement while preserving stable provider identity", async () => {
@@ -1653,7 +2248,9 @@ describe("release approval provenance", () => {
     });
     expect(result).toEqual(
       expect.objectContaining({
-        review: expect.objectContaining({ type: "single-maintainer-admin-pass" }),
+        review: expect.objectContaining({
+          type: "single-maintainer-admin-pass",
+        }),
       }),
     );
   });
@@ -1678,7 +2275,10 @@ describe("release approval provenance", () => {
     ] as const) {
       const fixture = approvalFixture({ reviewDetailReviewer });
       await expect(
-        verifyApprovedMerge({ env: approvalEnv(), fetchImpl: fixture.fetchImpl }),
+        verifyApprovedMerge({
+          env: approvalEnv(),
+          fetchImpl: fixture.fetchImpl,
+        }),
       ).rejects.toThrow(message);
     }
 
@@ -1688,7 +2288,10 @@ describe("release approval provenance", () => {
       reviewerLoginSnapshot: "",
     });
     await expect(
-      verifyApprovedMerge({ env: approvalEnv(), fetchImpl: missingSnapshot.fetchImpl }),
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: missingSnapshot.fetchImpl,
+      }),
     ).rejects.toThrow("single-maintainer admin PASS reviewer login snapshot is missing");
   });
 
@@ -1704,13 +2307,18 @@ describe("release approval provenance", () => {
   });
 
   test("rejects self-approval and a non-approval decision", async () => {
-    const self = approvalFixture({ authorId: RELEASE_AUTOMATION_CONTRACT.releaseApprover.id });
+    const self = approvalFixture({
+      authorId: RELEASE_AUTOMATION_CONTRACT.releaseApprover.id,
+    });
     await expect(
       verifyApprovedMerge({ env: approvalEnv(), fetchImpl: self.fetchImpl }),
     ).rejects.toThrow("trusted reviewer authored the independently approved pull request");
     const requested = approvalFixture({ reviewState: "CHANGES_REQUESTED" });
     await expect(
-      verifyApprovedMerge({ env: approvalEnv(), fetchImpl: requested.fetchImpl }),
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: requested.fetchImpl,
+      }),
     ).rejects.toThrow(
       "neither independent approval nor a provider-bound single-maintainer admin PASS",
     );
@@ -1756,14 +2364,19 @@ describe("release approval provenance", () => {
     await expect(
       verifyApprovedMerge({
         env: approvalEnv(),
-        fetchImpl: approvalFixture({ pullHeadSha: "8".repeat(40), reviewCommit: headSha })
-          .fetchImpl,
+        fetchImpl: approvalFixture({
+          pullHeadSha: "8".repeat(40),
+          reviewCommit: headSha,
+        }).fetchImpl,
       }),
     ).rejects.toThrow("did not review the exact PR head");
     await expect(
       verifyApprovedMerge({
         env: approvalEnv(),
-        fetchImpl: approvalFixture({ mergeMethod: "rebase", discontinuousCompare: true }).fetchImpl,
+        fetchImpl: approvalFixture({
+          mergeMethod: "rebase",
+          discontinuousCompare: true,
+        }).fetchImpl,
       }),
     ).rejects.toThrow("discontinuity");
     await expect(
@@ -1786,7 +2399,7 @@ describe("release approval provenance", () => {
     ).rejects.toThrow("terminal release main differs");
   });
 
-  test("rejects missing, duplicate, failed, or foreign source-admission and source checks", async () => {
+  test("rejects duplicate, failed, or foreign source-admission and source checks", async () => {
     const success = (name: string, sha = headSha, appSlug = "github-actions", appId = 15368) => ({
       name,
       head_sha: sha,
@@ -1794,12 +2407,6 @@ describe("release approval provenance", () => {
       conclusion: "success",
       app: { slug: appSlug, id: appId },
     });
-    await expect(
-      verifyApprovedMerge({
-        env: approvalEnv(),
-        fetchImpl: approvalFixture({ headChecks: [] }).fetchImpl,
-      }),
-    ).rejects.toThrow("exactly one check run");
     await expect(
       verifyApprovedMerge({
         env: approvalEnv(),
@@ -2034,7 +2641,10 @@ describe("workflow contracts", () => {
       "actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10",
     );
     expect(admission.steps[0].with).toEqual(
-      expect.objectContaining({ ref: "${{ github.sha }}", "persist-credentials": false }),
+      expect.objectContaining({
+        ref: "${{ github.sha }}",
+        "persist-credentials": false,
+      }),
     );
     expect(admission.steps.find((step: any) => step.name === "Set up Bun").uses).toBe(
       "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6",
@@ -2064,7 +2674,10 @@ describe("workflow contracts", () => {
       pull_request_number: expect.objectContaining({ required: true }),
       reviewed_base_sha: expect.objectContaining({ required: true }),
       reviewed_head_sha: expect.objectContaining({ required: true }),
-      merged_source_sha: expect.objectContaining({ required: false, default: "" }),
+      merged_source_sha: expect.objectContaining({
+        required: false,
+        default: "",
+      }),
     });
     expect(seal.permissions).toEqual({ contents: "read" });
     expect(seal.jobs.seal.permissions).toEqual({
@@ -2081,7 +2694,10 @@ describe("workflow contracts", () => {
       "actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10",
     );
     expect(seal.jobs.seal.steps[0].with).toEqual(
-      expect.objectContaining({ ref: "${{ github.sha }}", "persist-credentials": false }),
+      expect.objectContaining({
+        ref: "${{ github.sha }}",
+        "persist-credentials": false,
+      }),
     );
   });
 

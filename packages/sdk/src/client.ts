@@ -274,7 +274,7 @@ export type OpenGeniClientOptions = {
   fetch?: FetchLike;
 };
 
-/** Per-request cancellation for identity-scoped, side-effect-free reads. */
+/** Per-request cancellation for operations whose caller owns an AbortSignal. */
 export type OpenGeniRequestOptions = {
   signal?: AbortSignal | undefined;
 };
@@ -2885,11 +2885,14 @@ export class OpenGeniClient {
   async startConnectionOAuth(
     workspaceId: string,
     request: OAuthStartRequest,
+    options: OpenGeniRequestOptions = {},
   ): Promise<OAuthStartResponse> {
     return await this.requestJson<OAuthStartResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/connections/oauth/start`,
       request,
+      {},
+      options,
     );
   }
 

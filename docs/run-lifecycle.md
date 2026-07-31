@@ -710,3 +710,12 @@ strips provider item ids from every model-call input by default
 `reasoning.encrypted_content` instead
 (`OPENGENI_OPENAI_REASONING_ENCRYPTED_CONTENT=true`), so requests are
 self-contained and reasoning continuity does not hinge on provider storage.
+If Codex nevertheless rejects that exact opaque artifact with its recognized
+HTTP-400 encrypted-content family, the current attempt atomically marks only
+the same-credential active reasoning/compaction rows and the current turn's
+latest frozen RunState as provider-invalid. Their durable rows, summaries,
+messages, provenance, and timeline truth remain intact. Recovery then reclaims
+the same logical turn with a new attempt and omits or neutralizes only the
+rejected provider-bound identity. A generic 400, a different provider error, or
+a rejection that invalidates no matching artifact is terminal rather than an
+equivalent retry loop.

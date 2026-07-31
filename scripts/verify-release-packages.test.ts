@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
+  deriveExpectedReleasePackages,
   loadPublishablePackages,
   parseExpectedPackages,
   reconcileReleasePackages,
+  resolveExpectedReleasePackages,
   type PublishablePackage,
   type RegistryPackage,
 } from "./verify-release-packages";
@@ -97,6 +99,88 @@ describe("release package evidence", () => {
         gitHead: "b".repeat(40),
         integrity: "sha512-release-integrity",
       },
+    ]);
+  });
+
+  test("derives the complete unpublished package set without caller-maintained input", () => {
+    expect(
+      deriveExpectedReleasePackages(
+        [react, sdk],
+        new Map([
+          [react.name, null],
+          [sdk.name, published(sdk, "b".repeat(40))],
+        ]),
+      ),
+    ).toEqual([react]);
+  });
+
+  test("derivation fails closed when registry coverage is incomplete", () => {
+    expect(() => deriveExpectedReleasePackages([react], new Map())).toThrow(
+      "registry state was not loaded",
+    );
+  });
+
+  test("automatic derivation is explicit and cannot change other empty-input callers", () => {
+    const registry = new Map<string, RegistryPackage | null>([[react.name, null]]);
+    expect(
+      resolveExpectedReleasePackages({
+        phase: "plan",
+        deriveExpected: false,
+        declaredExpected: [],
+        publishable: [react],
+        registry,
+      }),
+    ).toEqual([]);
+    expect(
+      resolveExpectedReleasePackages({
+        phase: "plan",
+        deriveExpected: true,
+        declaredExpected: [],
+        publishable: [react],
+        registry,
+      }),
+    ).toEqual([react]);
+    expect(() =>
+      resolveExpectedReleasePackages({
+        phase: "verify",
+        deriveExpected: true,
+        declaredExpected: [],
+        publishable: [react],
+        registry,
+      }),
+    ).toThrow("only during planning");
+    expect(() =>
+      resolveExpectedReleasePackages({
+        phase: "plan",
+        deriveExpected: true,
+        declaredExpected: [react],
+        publishable: [react],
+        registry,
+      }),
+    ).toThrow("cannot be combined");
+  });
+
+  test("a frozen candidate package set makes partial-publication retries idempotent", () => {
+    const result = reconcileReleasePackages({
+      sourceSha: sha,
+      phase: "plan",
+      publishable: [react, sdk],
+      expected: [react, sdk],
+      registry: new Map([
+        [react.name, published(react)],
+        [sdk.name, null],
+      ]),
+    });
+
+    expect(result.needsPublish).toBe(true);
+    expect(result.packages).toEqual([
+      {
+        ...react,
+        state: "published",
+        gitHead: sha,
+        integrity: "sha512-release-integrity",
+      },
+      { ...sdk, state: "pending", gitHead: null, integrity: null },
     ]);
   });
 

@@ -61,7 +61,7 @@ the audited SHA. These values are a point-in-time observation, not a live SLO.
 
 Implemented on the focused branch after the audited baseline:
 
-- maintenance/drain-only migration `0139_hierarchical_role_aware_memory.sql` consumes the existing
+- maintenance/drain-only migration `0140_hierarchical_role_aware_memory.sql` consumes the existing
   immutable exact-turn-initiator contract and adds trusted session provenance,
   typed scopes, bounded labels, relationships, reversible
   maintenance operations, and text-free deletion/private-export audit tables;
@@ -361,7 +361,7 @@ Required database evidence uses a non-owner app role and at least:
 ## Migration and rollout
 
 The implementation uses maintenance/drain-only migration
-`0139_hierarchical_role_aware_memory.sql` after the retained, byte-identical
+`0140_hierarchical_role_aware_memory.sql` after the retained, byte-identical
 `0137_preference_registry.sql` and the `0138_sandbox_checkpoint_artifacts_and_deadlines.sql`
 maintenance cutover.
 Although its storage changes are additive, it is not safe for mixed worker
@@ -372,11 +372,11 @@ The cutover sequence is therefore:
 
 1. stop new session/turn admission;
 2. drain and terminate every old worker and in-flight session execution;
-3. apply `0139_hierarchical_role_aware_memory.sql` with no old application process reading memory;
+3. apply `0140_hierarchical_role_aware_memory.sql` with no old application process reading memory;
 4. start only compatible API and worker versions;
 5. verify health and reopen admission.
 
-Within that fenced cutover, `0139_hierarchical_role_aware_memory.sql`:
+Within that fenced cutover, `0140_hierarchical_role_aware_memory.sql`:
 
 1. add nullable session creator provenance and typed memory columns with safe
    defaults;

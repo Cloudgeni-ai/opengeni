@@ -33,6 +33,36 @@ function ghApiCommands(source: string): string[] {
 }
 
 describe("release image workflow contract", () => {
+  test("coalesces mutable Version-PR work without cancelling immutable publication", async () => {
+    const [release, ci] = await Promise.all([workflow("release.yml"), workflow("ci.yml")]);
+    const versionProjection = release.slice(
+      release.indexOf("\n  version:\n"),
+      release.indexOf("\n  publish:\n"),
+    );
+
+    expect(release).toContain(
+      "github.event_name == 'push' && 'release-version-latest-main' || format('release-publish-{0}', inputs.source_sha)",
+    );
+    expect(release).toContain("cancel-in-progress: ${{ github.event_name == 'push' }}");
+    expect(ci).toContain(
+      "github.event_name == 'workflow_dispatch' && format('ci-automation-{0}', inputs.automation_pr_number)",
+    );
+    expect(ci).toContain("cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}");
+    expect(ci).not.toContain(
+      "format('ci-automation-{0}-{1}', inputs.automation_pr_number, inputs.automation_head_sha)",
+    );
+    for (const duplicatedGate of [
+      "bun run typecheck",
+      "bun run build:packages",
+      "bun scripts/publish-closure-guard.ts",
+      "bun run test:runtime-embedding-consumer",
+      "bun run test:ogtool-package",
+    ]) {
+      expect(versionProjection).not.toContain(duplicatedGate);
+      expect(ci).toContain(duplicatedGate);
+    }
+  });
+
   test("downloads artifact ZIPs through portable gh api stdout redirection", async () => {
     const workflows = await Promise.all(
       ["release-acceptance.yml", "release.yml", "release-embedded.yml"].map(workflow),
@@ -52,6 +82,9 @@ describe("release image workflow contract", () => {
   test("candidate builds every physical image and freezes a full-SHA receipt", async () => {
     const candidate = await workflow("release-candidate.yml");
 
+    expect(candidate).not.toContain("expected_packages:");
+    expect(candidate).not.toContain("OPENGENI_EXPECTED_PACKAGES");
+    expect(candidate).toContain('OPENGENI_RELEASE_PACKAGE_DERIVE_EXPECTED: "true"');
     for (const identity of [
       "target: api",
       "target: worker",
@@ -87,6 +120,8 @@ describe("release image workflow contract", () => {
     expect(candidate).toContain("Refuse to rerun a completed immutable candidate");
     expect(candidate).toContain("use its original successful producer run ID");
     expect(candidate).toContain("bun scripts/resolve-github-release-state.ts");
+    expect(candidate).toContain('git merge-base --is-ancestor "$SOURCE_SHA" origin/main');
+    expect(candidate).not.toContain('[ "$(git rev-parse origin/main)" = "$SOURCE_SHA" ]');
     expect(candidate).not.toContain('gh release view "$tag"');
     expect(candidate).not.toContain('existing_tag_sha="$(gh api');
   });
@@ -95,6 +130,10 @@ describe("release image workflow contract", () => {
     const release = await workflow("release.yml");
     const finalJob = release.slice(release.indexOf("\n  images:\n"));
 
+    expect(release).not.toContain("inputs.expected_packages");
+    expect(release).toContain("steps.acceptance-bundle.outputs.expected_packages");
+    expect(release).toContain('map(.name + "@" + .version)');
+    expect(release).toContain("map({name, version})");
     expect(finalJob).toContain("Promote exact accepted manifests");
     expect(finalJob).toContain("docker buildx imagetools create");
     expect(finalJob).toContain("--prefer-index=false");
@@ -201,6 +240,7 @@ describe("release image workflow contract", () => {
     expect(release).toContain("bun run test:publish-consumer");
     expect(release).toContain("uses: changesets/action@");
     expect(release).toContain("OPENGENI_RELEASE_PACKAGE_PHASE: verify");
+    expect(release).not.toContain("OPENGENI_RELEASE_PACKAGE_DERIVE_EXPECTED");
     expect(release).toContain("Publish or reconcile the exact candidate chart");
     expect(release).toContain('[ "$GITHUB_REF" = "refs/heads/main" ]');
     expect(release).not.toContain('[ "$GITHUB_SHA" = "$SOURCE_SHA" ]');
@@ -255,6 +295,7 @@ describe("release image workflow contract", () => {
     const reconciliation = publish.indexOf("Reconcile exact registry package identity");
 
     expect(publish).toContain("expected_packages:");
+    expect(publish).not.toContain("OPENGENI_RELEASE_PACKAGE_DERIVE_EXPECTED");
     expect(publish).toContain("checks: read");
     expect(publish).toContain("filter=latest&per_page=100");
     expect(publish).toContain('test "$GITHUB_REF" = "refs/heads/main"');

@@ -58,12 +58,19 @@ const NON_CODEX_TURN: TurnCodexAccount = { currentCodexCredentialId: null };
  * non-codex turn over a history with no codex-produced reasoning.
  */
 export function applyCodexHistoryStrip(
-  rows: ReadonlyArray<{ item: Record<string, unknown>; producerCodexCredentialId: string | null }>,
+  rows: ReadonlyArray<{
+    item: Record<string, unknown>;
+    producerCodexCredentialId: string | null;
+    providerArtifactInvalidatedAt?: Date | null;
+  }>,
   current: TurnCodexAccount,
 ): Array<Record<string, unknown>> {
   const out: Array<Record<string, unknown>> = [];
   for (const row of rows) {
-    if (row.producerCodexCredentialId === current.currentCodexCredentialId) {
+    if (
+      row.producerCodexCredentialId === current.currentCodexCredentialId &&
+      !row.providerArtifactInvalidatedAt
+    ) {
       out.push(row.item);
       continue;
     }
@@ -106,10 +113,17 @@ export function applyCodexHistoryStrip(
  * turn), 400ing the resume.
  */
 export function resumeRunStateForCodexAccount(
-  state: { serializedRunState: string; frozenCodexCredentialId: string | null },
+  state: {
+    serializedRunState: string;
+    frozenCodexCredentialId: string | null;
+    providerArtifactInvalidatedAt?: Date | null;
+  },
   current: TurnCodexAccount,
 ): string {
-  if (state.frozenCodexCredentialId === current.currentCodexCredentialId) {
+  if (
+    state.frozenCodexCredentialId === current.currentCodexCredentialId &&
+    !state.providerArtifactInvalidatedAt
+  ) {
     return state.serializedRunState;
   }
   // Cross-account: neutralize reasoning identity in place AND flip frozen

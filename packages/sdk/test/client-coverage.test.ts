@@ -23,6 +23,7 @@ type RecordedRequest = {
   method: string;
   headers: Record<string, string>;
   body: string | null;
+  signal: AbortSignal;
 };
 
 function recordingFetch(responder: (request: RecordedRequest) => Response): {
@@ -42,6 +43,7 @@ function recordingFetch(responder: (request: RecordedRequest) => Response): {
             ? init.body
             : await new Response(init.body as BodyInit).text()
           : null,
+      signal: request.signal,
     };
     requests.push(recorded);
     return responder(recorded);
@@ -1077,6 +1079,27 @@ describe("OpenGeniClient connections", () => {
       mcpUrl: "https://mcp.example.com/mcp",
       returnPath: "/integrations",
     });
+  });
+
+  test("startConnectionOAuth forwards caller cancellation to fetch", async () => {
+    const { client, requests } = makeClient(() =>
+      jsonResponse({
+        state: "state-token",
+        authorizationUrl: "https://as.example.com/authorize",
+        expiresAt: "2026-06-12T00:10:00.000Z",
+      }),
+    );
+    const controller = new AbortController();
+
+    await client.startConnectionOAuth(
+      WORKSPACE_ID,
+      { mcpUrl: "https://mcp.example.com/mcp" },
+      { signal: controller.signal },
+    );
+
+    expect(requests[0]!.signal.aborted).toBe(false);
+    controller.abort();
+    expect(requests[0]!.signal.aborted).toBe(true);
   });
 
   test("startOpenGeniSlackBotInstall POSTs the optional replacement connection", async () => {
