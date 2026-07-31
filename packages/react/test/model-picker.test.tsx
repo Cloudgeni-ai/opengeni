@@ -149,21 +149,14 @@ describe("ModelPicker", () => {
       },
     ];
     const container = await mount(
-      <ModelPicker
-        models={models}
-        value="codex/gpt-5.6-luna"
-        codexOnly
-        onChange={() => {}}
-      />,
+      <ModelPicker models={models} value="codex/gpt-5.6-luna" codexOnly onChange={() => {}} />,
     );
     const select = picker(container)!;
     expect(select.value).toBe("codex/gpt-5.6-luna");
     const options = [...select.querySelectorAll("option")];
     expect(options.map((option) => option.value)).toContain("gpt-5.6-sol");
     expect(options.find((option) => option.value === "gpt-5.6-sol")?.disabled).toBe(true);
-    expect(options.find((option) => option.value === "codex/gpt-5.6-luna")?.disabled).toBe(
-      false,
-    );
+    expect(options.find((option) => option.value === "codex/gpt-5.6-luna")?.disabled).toBe(false);
   });
 
   test("prefers catalog rows grouped by billing class and disables unavailable options", async () => {

@@ -197,10 +197,7 @@ import {
   defaultSessionMcpServerIds,
   resolveSessionToolPolicy,
 } from "@opengeni/core";
-import {
-  maybeCompactContext,
-  settleFailedContextCompactionLandmark,
-} from "./context-compaction";
+import { maybeCompactContext, settleFailedContextCompactionLandmark } from "./context-compaction";
 import { TurnAttemptFencedError } from "./turn-attempt-fenced";
 import {
   assertGitCredentialRenewalTransportUnchanged,
@@ -4356,9 +4353,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 turnStatus: "failed",
                 sessionStatus: "idle",
                 activeTurnId: null,
-                ...(landmark.requestConsumed
-                  ? {}
-                  : { consumeRequestedCompactionFailure: true }),
+                ...(landmark.requestConsumed ? {} : { consumeRequestedCompactionFailure: true }),
               }))
             ) {
               return claimedResult({ status: "cancelled" });

@@ -1126,9 +1126,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
           facets={turnSummary?.facets}
           settleFold={settleFold}
           copyText={insideTurn ? undefined : turnCopyText}
-          contextCompactionCount={
-            contextCompactionCount ?? group.contextCompactionCount
-          }
+          contextCompactionCount={contextCompactionCount ?? group.contextCompactionCount}
         >
           <FoldBody>
             {insideTurn ? (
@@ -1381,10 +1379,7 @@ export function TimelineRow({
   }
 }
 
-const COMPACTION_TRIGGER_LABEL: Record<
-  NonNullable<ContextCompactionItem["trigger"]>,
-  string
-> = {
+const COMPACTION_TRIGGER_LABEL: Record<NonNullable<ContextCompactionItem["trigger"]>, string> = {
   auto: "Auto",
   operator: "Manual",
   proactive: "Auto",
@@ -1394,9 +1389,7 @@ const COMPACTION_TRIGGER_LABEL: Record<
 function CompactionRow({ item }: { item: ContextCompactionItem }) {
   const enter = useEntranceAnimation();
   const trigger =
-    item.trigger && item.phase !== "started"
-      ? COMPACTION_TRIGGER_LABEL[item.trigger]
-      : null;
+    item.trigger && item.phase !== "started" ? COMPACTION_TRIGGER_LABEL[item.trigger] : null;
   const before =
     item.estimatedTokensBefore !== null
       ? Math.round(item.estimatedTokensBefore).toLocaleString("en-US")
@@ -1441,9 +1434,7 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
             {trigger ? ` · ${trigger}` : ""}
           </span>
         </span>
-        {subtitle ? (
-          <span className="truncate text-og-xs opacity-80">{subtitle}</span>
-        ) : null}
+        {subtitle ? <span className="truncate text-og-xs opacity-80">{subtitle}</span> : null}
       </div>
     </div>
   );

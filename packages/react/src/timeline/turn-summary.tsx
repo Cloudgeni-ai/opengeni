@@ -556,9 +556,7 @@ const BUILT_IN_TURN_SUMMARY_FACETS: readonly TurnSummaryFacet[] = Object.freeze(
       contextCompactionCount > 0
         ? {
             content:
-              contextCompactionCount === 1
-                ? "compacted"
-                : `${contextCompactionCount} compacts`,
+              contextCompactionCount === 1 ? "compacted" : `${contextCompactionCount} compacts`,
             ariaLabel:
               contextCompactionCount === 1
                 ? "Conversation memory compacted"

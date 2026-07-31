@@ -878,9 +878,7 @@ function CodexCompactionSettingsSection({
     <section className="grid gap-3 rounded-lg border border-border bg-surface p-4">
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
-          <h2 className="flex items-center gap-1.5 text-sm font-medium">
-            Codex compaction
-          </h2>
+          <h2 className="flex items-center gap-1.5 text-sm font-medium">Codex compaction</h2>
           <p className="mt-1 text-xs text-fg-muted">
             Use portable Codex compaction (allows switching away from Codex mid-session). When off,
             new Codex sessions use remote compaction v2 and stay locked to Codex models.

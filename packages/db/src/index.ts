@@ -19256,9 +19256,7 @@ export async function recordSkippedContextCompaction(
             and(
               eq(schema.sessions.workspaceId, input.workspaceId),
               eq(schema.sessions.id, input.sessionId),
-              ...(clearRequestedCompaction
-                ? [eq(schema.sessions.compactRequested, true)]
-                : []),
+              ...(clearRequestedCompaction ? [eq(schema.sessions.compactRequested, true)] : []),
             ),
           );
         return { recorded: true as const, events: inserted.map(mapEvent) };

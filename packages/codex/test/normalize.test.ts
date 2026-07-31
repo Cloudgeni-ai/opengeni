@@ -89,11 +89,7 @@ describe("normalizeCodexRequestBody", () => {
       identity,
     );
     const input = body.input as Array<Record<string, unknown>>;
-    expect(input.map((item) => item.type)).toEqual([
-      "message",
-      "compaction_trigger",
-      "compaction",
-    ]);
+    expect(input.map((item) => item.type)).toEqual(["message", "compaction_trigger", "compaction"]);
     expect(input[2]?.encrypted_content).toBe("opaque");
     expect("id" in (input[2] ?? {})).toBe(false);
   });

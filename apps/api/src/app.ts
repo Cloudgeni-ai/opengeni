@@ -489,9 +489,7 @@ export function createApp(deps: AppDependencies): Hono {
   app.onError((error, c) => {
     const compactionLock = codexCompactionV2ProviderLockedError(error);
     const status = compactionLock ? 422 : httpStatusForError(error);
-    const code: ErrorCode = compactionLock
-      ? compactionLock.code
-      : errorCodeForStatus(status);
+    const code: ErrorCode = compactionLock ? compactionLock.code : errorCodeForStatus(status);
     const requestId = correlationIds.get(c.req.raw) ?? crypto.randomUUID();
     c.header(OPENGENI_CORRELATION_HEADER, requestId);
     if (new URL(c.req.url).pathname.startsWith("/v1/")) {
@@ -502,7 +500,7 @@ export function createApp(deps: AppDependencies): Hono {
         status,
         code,
         message: compactionLock
-          ? boundedPublicMessage(compactionLock.message) ?? "Request failed."
+          ? (boundedPublicMessage(compactionLock.message) ?? "Request failed.")
           : publicErrorMessage(error, status),
         retryable: retryableHttpStatus(status),
         requestId,
@@ -574,7 +572,10 @@ function codexCompactionV2ProviderLockedError(
   error: unknown,
 ): CodexCompactionV2ProviderLockedError | null {
   if (error instanceof CodexCompactionV2ProviderLockedError) return error;
-  if (error instanceof HTTPException && error.cause instanceof CodexCompactionV2ProviderLockedError) {
+  if (
+    error instanceof HTTPException &&
+    error.cause instanceof CodexCompactionV2ProviderLockedError
+  ) {
     return error.cause;
   }
   return null;

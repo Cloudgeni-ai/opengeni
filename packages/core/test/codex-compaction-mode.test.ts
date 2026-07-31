@@ -32,10 +32,7 @@ describe("assertSessionAllowsProductModel", () => {
 
   test("allows Codex models on remote_v2 sessions", () => {
     expect(() =>
-      assertSessionAllowsProductModel(
-        { codexCompactionMode: "remote_v2" },
-        "codex/gpt-5.4",
-      ),
+      assertSessionAllowsProductModel({ codexCompactionMode: "remote_v2" }, "codex/gpt-5.4"),
     ).not.toThrow();
   });
 

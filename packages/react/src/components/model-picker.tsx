@@ -81,10 +81,7 @@ export function ModelPicker({
     () => (effectiveRows.length > 0 ? groupPickerRowsByBillingClass(effectiveRows) : []),
     [effectiveRows],
   );
-  const providerGroupList = useMemo(
-    () => providerGroups(models, codexOnly),
-    [models, codexOnly],
-  );
+  const providerGroupList = useMemo(() => providerGroups(models, codexOnly), [models, codexOnly]);
   const useBillingGroups = Boolean(effectiveRows.length);
 
   if (models.length === 0 && effectiveRows.length === 0) {
