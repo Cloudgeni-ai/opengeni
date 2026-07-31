@@ -1,19 +1,25 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { OpenGeniClient, type CreateSessionRequest } from "@opengeni/sdk";
+import { join, normalize } from "node:path";
 import * as z from "zod/v4";
 import type {
+  SupportCase,
   DemoHealth,
-  SupportCustomer,
-  SupportDemoState,
   SupportDomainEvent,
   SupportTicket,
+  SupportWorkspaceState,
   TicketPriority,
   TicketStatus,
 } from "./types";
 
-const PRODUCT_PORT = 4100;
-const MCP_PORT = 4101;
+const PRODUCT_PORT = Number(process.env.PORT ?? 4100);
+const MCP_PORT = Number(process.env.OPENGENI_DEMO_MCP_PORT ?? 4101);
+const UNIFIED_SERVER = Boolean(process.env.PORT);
+const PRODUCT_APP_ORIGIN = (
+  process.env.OPENGENI_DEMO_APP_ORIGIN ?? "http://127.0.0.1:3101"
+).replace(/\/+$/, "");
+const STATIC_ROOT = join(import.meta.dir, "../dist");
 const MCP_SERVER_ID = "northstar_support";
 const MCP_TOOLS = ["get_ticket", "get_customer", "update_ticket", "add_internal_note"];
 const encoder = new TextEncoder();
@@ -28,81 +34,268 @@ const mcpToken = process.env.OPENGENI_DEMO_MCP_TOKEN?.trim() ?? "";
 const model = process.env.OPENGENI_MODEL?.trim() ?? "";
 const openGeni = new OpenGeniClient({ baseUrl: apiBaseUrl, apiKey });
 
-const initialCustomer: SupportCustomer = {
-  id: "cus_aster_01",
-  name: "Aster Labs",
-  initials: "AL",
-  plan: "Scale",
-  arr: 48_000,
-  healthScore: 82,
-  joinedAt: "2024-09-18T10:00:00.000Z",
-  primaryContact: {
-    name: "Nora Lind",
-    role: "Operations lead",
-    email: "nora@asterlabs.example",
-  },
-  recentUsage: {
-    activeSeats: 37,
-    totalSeats: 45,
-    exportsLast30Days: 186,
-    failedExportsLast7Days: 14,
-  },
-};
+function minutesAgo(minutes: number): string {
+  return new Date(Date.now() - minutes * 60_000).toISOString();
+}
 
-const initialTicket: SupportTicket = {
-  id: "TKT-2847",
-  customerId: initialCustomer.id,
-  subject: "Monthly export stalls at 87%",
-  body: "Hi team — our monthly finance export has stopped at exactly 87% three times today. We need the report for tomorrow's board meeting. Can someone take a look?",
-  status: "open",
-  priority: "normal",
-  assignee: "Maya Chen",
-  channel: "email",
-  createdAt: "2026-07-15T08:42:00.000Z",
-  slaDueAt: "2026-07-15T16:42:00.000Z",
-  tags: ["exports", "finance"],
-  notes: [
-    {
-      id: "note_seed",
-      author: "Maya Chen",
-      authorKind: "human",
-      body: "No platform incident showing. Customer has retried from two browsers.",
-      createdAt: "2026-07-15T09:03:00.000Z",
-    },
-  ],
-  activity: [
-    {
-      id: "activity_seed",
-      actor: "Nora Lind",
-      summary: "Created the ticket by email",
-      createdAt: "2026-07-15T08:42:00.000Z",
-    },
-  ],
-};
+function minutesFromNow(minutes: number): string {
+  return new Date(Date.now() + minutes * 60_000).toISOString();
+}
 
-let state: SupportDemoState = freshState();
+const initialCases: SupportCase[] = [
+  {
+    customer: {
+      id: "cus_aster_01",
+      name: "Aster Labs",
+      initials: "AL",
+      plan: "Scale",
+      arr: 48_000,
+      healthScore: 82,
+      joinedAt: "2024-09-18T10:00:00.000Z",
+      primaryContact: {
+        name: "Nora Lind",
+        role: "Operations lead",
+        email: "nora@asterlabs.example",
+      },
+      recentUsage: {
+        activeSeats: 37,
+        totalSeats: 45,
+        exportsLast30Days: 186,
+        failedExportsLast7Days: 14,
+      },
+    },
+    ticket: {
+      id: "TKT-2847",
+      customerId: "cus_aster_01",
+      subject: "Monthly export stalls at 87%",
+      body: "Hi team — our monthly finance export has stopped at exactly 87% three times today. We need the report for tomorrow's board meeting. Can someone take a look?",
+      status: "open",
+      priority: "normal",
+      assignee: "Maya Chen",
+      channel: "email",
+      createdAt: minutesAgo(12),
+      slaDueAt: minutesFromNow(108),
+      tags: ["exports", "finance"],
+      inbox: "mine",
+      unread: true,
+      notes: [
+        {
+          id: "note_seed_aster",
+          author: "Maya Chen",
+          authorKind: "human",
+          body: "No platform incident showing. Customer has retried from two browsers.",
+          createdAt: minutesAgo(8),
+        },
+      ],
+      replies: [],
+      activity: [
+        {
+          id: "activity_seed_aster",
+          actor: "Nora Lind",
+          summary: "Created the ticket by email",
+          createdAt: minutesAgo(12),
+        },
+      ],
+    },
+  },
+  {
+    customer: {
+      id: "cus_pine_01",
+      name: "Pine & Co.",
+      initials: "PC",
+      plan: "Growth",
+      arr: 18_000,
+      healthScore: 91,
+      joinedAt: "2025-02-11T10:00:00.000Z",
+      primaryContact: {
+        name: "Elias Berg",
+        role: "IT manager",
+        email: "elias@pine.example",
+      },
+      recentUsage: {
+        activeSeats: 21,
+        totalSeats: 25,
+        exportsLast30Days: 64,
+        failedExportsLast7Days: 1,
+      },
+    },
+    ticket: {
+      id: "TKT-2841",
+      customerId: "cus_pine_01",
+      subject: "Invite emails are delayed",
+      body: "Three new teammates have been waiting more than 20 minutes for invite emails. Resending did not help. Could you check the delivery queue?",
+      status: "investigating",
+      priority: "high",
+      assignee: "Maya Chen",
+      channel: "email",
+      createdAt: minutesAgo(18),
+      slaDueAt: minutesFromNow(72),
+      tags: ["email", "invites"],
+      inbox: "mine",
+      unread: true,
+      notes: [],
+      replies: [],
+      activity: [
+        {
+          id: "activity_seed_pine",
+          actor: "Elias Berg",
+          summary: "Created the ticket by email",
+          createdAt: minutesAgo(18),
+        },
+      ],
+    },
+  },
+  {
+    customer: {
+      id: "cus_cinder_01",
+      name: "Cinder",
+      initials: "CI",
+      plan: "Enterprise",
+      arr: 96_000,
+      healthScore: 96,
+      joinedAt: "2023-11-05T10:00:00.000Z",
+      primaryContact: {
+        name: "Sofia Reyes",
+        role: "Security lead",
+        email: "sofia@cinder.example",
+      },
+      recentUsage: {
+        activeSeats: 118,
+        totalSeats: 140,
+        exportsLast30Days: 412,
+        failedExportsLast7Days: 0,
+      },
+    },
+    ticket: {
+      id: "TKT-2839",
+      customerId: "cus_cinder_01",
+      subject: "Question about SSO setup",
+      body: "We are ready to enforce SSO next week. Can you confirm whether existing sessions are revoked immediately when enforcement is enabled?",
+      status: "open",
+      priority: "normal",
+      assignee: "Maya Chen",
+      channel: "email",
+      createdAt: minutesAgo(42),
+      slaDueAt: minutesFromNow(198),
+      tags: ["sso", "security"],
+      inbox: "mine",
+      unread: false,
+      notes: [],
+      replies: [],
+      activity: [
+        {
+          id: "activity_seed_cinder",
+          actor: "Sofia Reyes",
+          summary: "Created the ticket by email",
+          createdAt: minutesAgo(42),
+        },
+      ],
+    },
+  },
+  {
+    customer: {
+      id: "cus_northwind_01",
+      name: "Northwind",
+      initials: "NW",
+      plan: "Starter",
+      arr: 7_200,
+      healthScore: 75,
+      joinedAt: "2025-08-22T10:00:00.000Z",
+      primaryContact: {
+        name: "Ava Cole",
+        role: "Finance manager",
+        email: "ava@northwind.example",
+      },
+      recentUsage: {
+        activeSeats: 8,
+        totalSeats: 10,
+        exportsLast30Days: 22,
+        failedExportsLast7Days: 2,
+      },
+    },
+    ticket: {
+      id: "TKT-2835",
+      customerId: "cus_northwind_01",
+      subject: "Update billing contact",
+      body: "Please change our billing contact to finance@northwind.example before the next invoice is generated.",
+      status: "open",
+      priority: "low",
+      assignee: "Unassigned",
+      channel: "email",
+      createdAt: minutesAgo(67),
+      slaDueAt: minutesFromNow(413),
+      tags: ["billing"],
+      inbox: "unassigned",
+      unread: false,
+      notes: [],
+      replies: [],
+      activity: [
+        {
+          id: "activity_seed_northwind",
+          actor: "Ava Cole",
+          summary: "Created the ticket by email",
+          createdAt: minutesAgo(67),
+        },
+      ],
+    },
+  },
+];
+
+let state: SupportWorkspaceState = freshState();
 const subscribers = new Set<ReadableStreamDefaultController<Uint8Array>>();
 
-function freshState(): SupportDemoState {
+function freshState(): SupportWorkspaceState {
   return {
     revision: 1,
-    customer: structuredClone(initialCustomer),
-    ticket: structuredClone(initialTicket),
+    cases: structuredClone(initialCases),
   };
+}
+
+function getCase(ticketId: string): SupportCase | null {
+  return state.cases.find((supportCase) => supportCase.ticket.id === ticketId) ?? null;
 }
 
 function json(value: unknown, status = 200): Response {
   return Response.json(value, {
     status,
-    headers: { "cache-control": "no-store" },
+    headers: {
+      "cache-control": "no-store",
+      "access-control-allow-origin": PRODUCT_APP_ORIGIN,
+    },
   });
 }
 
-function emit(type: SupportDomainEvent["type"], summary: string): SupportDomainEvent {
+function staticResponse(pathname: string): Response {
+  const requested = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
+  const safePath = normalize(requested);
+  if (safePath.startsWith("..") || safePath.includes("/../")) {
+    return new Response("Not found", { status: 404 });
+  }
+  const asset = Bun.file(join(STATIC_ROOT, safePath));
+  if (asset.size > 0) {
+    return new Response(asset, {
+      headers: {
+        "cache-control":
+          safePath === "index.html" ? "no-cache" : "public, max-age=31536000, immutable",
+      },
+    });
+  }
+  const index = Bun.file(join(STATIC_ROOT, "index.html"));
+  return index.size > 0
+    ? new Response(index, { headers: { "cache-control": "no-cache" } })
+    : new Response("Not found", { status: 404 });
+}
+
+function emit(
+  type: SupportDomainEvent["type"],
+  summary: string,
+  ticketId: string,
+): SupportDomainEvent {
   state.revision += 1;
   const event: SupportDomainEvent = {
     id: crypto.randomUUID(),
     type,
+    ticketId,
     revision: state.revision,
     summary,
     occurredAt: new Date().toISOString(),
@@ -120,8 +313,8 @@ function emit(type: SupportDomainEvent["type"], summary: string): SupportDomainE
   return event;
 }
 
-function addActivity(actor: string, summary: string): void {
-  state.ticket.activity.unshift({
+function addActivity(ticket: SupportTicket, actor: string, summary: string): void {
+  ticket.activity.unshift({
     id: crypto.randomUUID(),
     actor,
     summary,
@@ -167,6 +360,7 @@ function domainEventStream(request: Request): Response {
       "content-type": "text/event-stream",
       "cache-control": "no-cache, no-transform",
       connection: "keep-alive",
+      "access-control-allow-origin": PRODUCT_APP_ORIGIN,
     },
   });
 }
@@ -231,11 +425,18 @@ async function createAgentSession(request: Request): Promise<Response> {
   }
   const input = (await request.json().catch(() => ({}))) as {
     initialMessage?: unknown;
+    ticketId?: unknown;
   };
+  const ticketId = typeof input.ticketId === "string" ? input.ticketId : "";
+  const supportCase = getCase(ticketId);
+  if (!supportCase) {
+    return json({ error: `Ticket ${ticketId || "unknown"} not found.` }, 404);
+  }
+  const { ticket, customer } = supportCase;
   const initialMessage =
     typeof input.initialMessage === "string" && input.initialMessage.trim()
       ? input.initialMessage.trim()
-      : "Investigate this support ticket. Use the available support tools, explain the evidence, and take the appropriate actions.";
+      : `Investigate ${ticket.id}. Use the available support tools, explain the evidence, and take the appropriate actions.`;
 
   const mcpServer = {
     id: MCP_SERVER_ID,
@@ -249,12 +450,12 @@ async function createAgentSession(request: Request): Promise<Response> {
   };
   const sessionRequest: CreateSessionRequest = {
     initialMessage,
-    instructions: `You are the embedded support copilot inside Northstar, a fictional SaaS product. You are working only on ticket TKT-2847 for Aster Labs. Always inspect the ticket and customer with Northstar Support tools before drawing conclusions. The failed-export evidence is important. When evidence warrants action, call update_ticket and add_internal_note immediately. Product actions are pre-approved for this demo, so execute them without asking for confirmation. Never invent customer data. Keep the final answer brief and operational.`,
+    instructions: `You are the embedded support copilot inside Northstar, a fictional SaaS product. You are working only on ticket ${ticket.id} for ${customer.name}. Always inspect the ticket and customer with Northstar Support tools before drawing conclusions. When evidence warrants action, call update_ticket and add_internal_note immediately. Product actions are pre-approved for this demo, so execute them without asking for confirmation. Never invent customer data. Keep the final answer brief and operational.`,
     ...(model ? { model } : {}),
-    reasoningEffort: "low",
+    reasoningEffort: "high",
     tools: [{ kind: "mcp", id: MCP_SERVER_ID }],
     mcpServers: [mcpServer] as CreateSessionRequest["mcpServers"],
-    metadata: { demo: "northstar-support", ticketId: state.ticket.id },
+    metadata: { demo: "northstar-support", ticketId: ticket.id },
     clientEventId: crypto.randomUUID(),
     idempotencyKey: crypto.randomUUID(),
   };
@@ -270,8 +471,12 @@ async function proxyOpenGeni(request: Request): Promise<Response> {
   const incoming = new URL(request.url);
   const upstreamPath = incoming.pathname.replace(/^\/api\/opengeni/, "");
   const workspacePrefix = `/v1/workspaces/${workspaceId}`;
-  if (upstreamPath !== workspacePrefix && !upstreamPath.startsWith(`${workspacePrefix}/`)) {
-    return json({ error: "Workspace path is outside this demo's scope." }, 403);
+  const isWorkspacePath =
+    upstreamPath === workspacePrefix || upstreamPath.startsWith(`${workspacePrefix}/`);
+  const isClientConfigRead = request.method === "GET" && upstreamPath === "/v1/config/client";
+
+  if (!isWorkspacePath && !isClientConfigRead) {
+    return json({ error: "API path is outside this demo's scope." }, 403);
   }
 
   const headers = new Headers(request.headers);
@@ -299,6 +504,17 @@ async function proxyOpenGeni(request: Request): Promise<Response> {
 
 async function productRequest(request: Request): Promise<Response> {
   const url = new URL(request.url);
+  if (request.method === "OPTIONS") {
+    return new Response(null, {
+      status: 204,
+      headers: {
+        "access-control-allow-origin": PRODUCT_APP_ORIGIN,
+        "access-control-allow-methods": "GET, POST, PATCH, OPTIONS",
+        "access-control-allow-headers": "content-type",
+        "access-control-max-age": "86400",
+      },
+    });
+  }
   if (url.pathname.startsWith("/api/opengeni/")) {
     try {
       return await proxyOpenGeni(request);
@@ -317,11 +533,101 @@ async function productRequest(request: Request): Promise<Response> {
       return json({ error: error instanceof Error ? error.message : String(error) }, 502);
     }
   }
-  if (url.pathname === "/api/demo/reset" && request.method === "POST") {
-    state = freshState();
-    emit("demo.reset", "Demo data reset");
+  if (url.pathname === "/api/demo/ticket" && request.method === "PATCH") {
+    const input = (await request.json().catch(() => ({}))) as {
+      ticketId?: unknown;
+      priority?: unknown;
+      status?: unknown;
+    };
+    const ticketId = typeof input.ticketId === "string" ? input.ticketId : "";
+    const supportCase = getCase(ticketId);
+    if (!supportCase) return json({ error: `Ticket ${ticketId || "unknown"} not found.` }, 404);
+    const { ticket } = supportCase;
+    const priorities: TicketPriority[] = ["low", "normal", "high", "urgent"];
+    const statuses: TicketStatus[] = ["open", "investigating", "waiting_on_customer", "resolved"];
+    const changes: string[] = [];
+    if (
+      typeof input.priority === "string" &&
+      priorities.includes(input.priority as TicketPriority) &&
+      input.priority !== ticket.priority
+    ) {
+      changes.push(`priority to ${input.priority}`);
+      ticket.priority = input.priority as TicketPriority;
+    }
+    if (
+      typeof input.status === "string" &&
+      statuses.includes(input.status as TicketStatus) &&
+      input.status !== ticket.status
+    ) {
+      changes.push(`status to ${input.status.replaceAll("_", " ")}`);
+      ticket.status = input.status as TicketStatus;
+    }
+    if (changes.length > 0) {
+      const summary = `Maya changed ${changes.join(" and ")}`;
+      addActivity(ticket, "Maya Chen", summary);
+      emit("ticket.updated", summary, ticket.id);
+    }
     return json(state);
   }
+  if (url.pathname === "/api/demo/notes" && request.method === "POST") {
+    const input = (await request.json().catch(() => ({}))) as {
+      ticketId?: unknown;
+      body?: unknown;
+    };
+    const ticketId = typeof input.ticketId === "string" ? input.ticketId : "";
+    const supportCase = getCase(ticketId);
+    if (!supportCase) return json({ error: `Ticket ${ticketId || "unknown"} not found.` }, 404);
+    const { ticket } = supportCase;
+    const body = typeof input.body === "string" ? input.body.trim() : "";
+    if (body.length < 2 || body.length > 1_000) {
+      return json({ error: "Internal note must be between 2 and 1,000 characters." }, 422);
+    }
+    ticket.notes.unshift({
+      id: crypto.randomUUID(),
+      author: "Maya Chen",
+      authorKind: "human",
+      body,
+      createdAt: new Date().toISOString(),
+    });
+    addActivity(ticket, "Maya Chen", "Added an internal note");
+    emit("ticket.note_added", "Maya added an internal note", ticket.id);
+    return json(state);
+  }
+  if (url.pathname === "/api/demo/replies" && request.method === "POST") {
+    const input = (await request.json().catch(() => ({}))) as {
+      ticketId?: unknown;
+      body?: unknown;
+    };
+    const ticketId = typeof input.ticketId === "string" ? input.ticketId : "";
+    const supportCase = getCase(ticketId);
+    if (!supportCase) return json({ error: `Ticket ${ticketId || "unknown"} not found.` }, 404);
+    const { ticket, customer } = supportCase;
+    const body = typeof input.body === "string" ? input.body.trim() : "";
+    if (body.length < 2 || body.length > 2_000) {
+      return json({ error: "Reply must be between 2 and 2,000 characters." }, 422);
+    }
+    ticket.replies.push({
+      id: crypto.randomUUID(),
+      author: "Maya Chen",
+      body,
+      createdAt: new Date().toISOString(),
+    });
+    ticket.status = "waiting_on_customer";
+    ticket.unread = false;
+    addActivity(
+      ticket,
+      "Maya Chen",
+      `Replied to ${customer.primaryContact.name} and set the ticket to waiting on customer`,
+    );
+    emit("ticket.replied", `Reply sent to ${customer.primaryContact.name}`, ticket.id);
+    return json(state);
+  }
+  if (url.pathname === "/api/demo/reset" && request.method === "POST") {
+    state = freshState();
+    emit("demo.reset", "Demo data reset", "all");
+    return json(state);
+  }
+  if (UNIFIED_SERVER && request.method === "GET") return staticResponse(url.pathname);
   return new Response("Not found", { status: 404 });
 }
 
@@ -337,16 +643,18 @@ function buildMcpServer(): McpServer {
       description:
         "Get the complete support ticket, including priority, status, SLA, customer message, internal notes, and activity.",
       inputSchema: {
-        ticketId: z.string().describe("Ticket id, normally TKT-2847"),
+        ticketId: z.string().describe("Ticket id from the active Northstar session"),
       },
     },
-    async ({ ticketId }) =>
-      ticketId === state.ticket.id
-        ? toolResult(state.ticket)
+    async ({ ticketId }) => {
+      const supportCase = getCase(ticketId);
+      return supportCase
+        ? toolResult(supportCase.ticket)
         : {
             ...toolResult({ error: `Ticket ${ticketId} not found` }),
             isError: true,
-          },
+          };
+    },
   );
   server.registerTool(
     "get_customer",
@@ -357,13 +665,16 @@ function buildMcpServer(): McpServer {
         customerId: z.string().describe("Customer id from the ticket"),
       },
     },
-    async ({ customerId }) =>
-      customerId === state.customer.id
-        ? toolResult(state.customer)
+    async ({ customerId }) => {
+      const customer =
+        state.cases.find((supportCase) => supportCase.customer.id === customerId)?.customer ?? null;
+      return customer
+        ? toolResult(customer)
         : {
             ...toolResult({ error: `Customer ${customerId} not found` }),
             isError: true,
-          },
+          };
+    },
   );
   server.registerTool(
     "update_ticket",
@@ -379,33 +690,35 @@ function buildMcpServer(): McpServer {
       },
     },
     async ({ ticketId, priority, status, assignee, reason }) => {
-      if (ticketId !== state.ticket.id) {
+      const supportCase = getCase(ticketId);
+      if (!supportCase) {
         return {
           ...toolResult({ error: `Ticket ${ticketId} not found` }),
           isError: true,
         };
       }
+      const { ticket } = supportCase;
       const changes: string[] = [];
-      if (priority && priority !== state.ticket.priority) {
-        changes.push(`priority ${state.ticket.priority} → ${priority}`);
-        state.ticket.priority = priority as TicketPriority;
+      if (priority && priority !== ticket.priority) {
+        changes.push(`priority ${ticket.priority} → ${priority}`);
+        ticket.priority = priority as TicketPriority;
       }
-      if (status && status !== state.ticket.status) {
-        changes.push(`status ${state.ticket.status} → ${status}`);
-        state.ticket.status = status as TicketStatus;
+      if (status && status !== ticket.status) {
+        changes.push(`status ${ticket.status} → ${status}`);
+        ticket.status = status as TicketStatus;
       }
-      if (assignee && assignee !== state.ticket.assignee) {
-        changes.push(`assignee ${state.ticket.assignee} → ${assignee}`);
-        state.ticket.assignee = assignee;
+      if (assignee && assignee !== ticket.assignee) {
+        changes.push(`assignee ${ticket.assignee} → ${assignee}`);
+        ticket.assignee = assignee;
       }
       const summary = changes.length
         ? `Updated ${changes.join(", ")}`
         : "Reviewed ticket; no field changes";
       if (changes.length > 0) {
-        addActivity("OpenGeni agent", `${summary}. Reason: ${reason}`);
-        emit("ticket.updated", summary);
+        addActivity(ticket, "OpenGeni agent", `${summary}. Reason: ${reason}`);
+        emit("ticket.updated", summary, ticket.id);
       }
-      return toolResult({ ok: true, summary, ticket: state.ticket });
+      return toolResult({ ok: true, summary, ticket });
     },
   );
   server.registerTool(
@@ -419,13 +732,15 @@ function buildMcpServer(): McpServer {
       },
     },
     async ({ ticketId, body }) => {
-      if (ticketId !== state.ticket.id) {
+      const supportCase = getCase(ticketId);
+      if (!supportCase) {
         return {
           ...toolResult({ error: `Ticket ${ticketId} not found` }),
           isError: true,
         };
       }
-      const existing = state.ticket.notes.find(
+      const { ticket } = supportCase;
+      const existing = ticket.notes.find(
         (note) => note.authorKind === "agent" && note.body === body,
       );
       if (existing) {
@@ -438,9 +753,9 @@ function buildMcpServer(): McpServer {
         body,
         createdAt: new Date().toISOString(),
       };
-      state.ticket.notes.unshift(note);
-      addActivity("OpenGeni agent", "Added an internal investigation note");
-      emit("ticket.note_added", "Agent added an internal note");
+      ticket.notes.unshift(note);
+      addActivity(ticket, "OpenGeni agent", "Added an internal investigation note");
+      emit("ticket.note_added", "Agent added an internal note", ticket.id);
       return toolResult({ ok: true, note });
     },
   );
@@ -462,17 +777,24 @@ async function mcpRequest(request: Request): Promise<Response> {
 }
 
 const productServer = Bun.serve({
-  hostname: "127.0.0.1",
+  hostname: UNIFIED_SERVER ? "0.0.0.0" : "127.0.0.1",
   port: PRODUCT_PORT,
   idleTimeout: 255,
-  fetch: productRequest,
+  fetch: async (request) => {
+    if (UNIFIED_SERVER && new URL(request.url).pathname === "/mcp") {
+      return await mcpRequest(request);
+    }
+    return await productRequest(request);
+  },
 });
-const mcpServer = Bun.serve({
-  hostname: "127.0.0.1",
-  port: MCP_PORT,
-  idleTimeout: 255,
-  fetch: mcpRequest,
-});
+const mcpServer = UNIFIED_SERVER
+  ? productServer
+  : Bun.serve({
+      hostname: "127.0.0.1",
+      port: MCP_PORT,
+      idleTimeout: 255,
+      fetch: mcpRequest,
+    });
 
 console.log(`Northstar product API  http://127.0.0.1:${productServer.port}/api/demo/health`);
 console.log(`Northstar MCP server   http://127.0.0.1:${mcpServer.port}/mcp`);
