@@ -111,6 +111,8 @@ export type AppDependencies = {
   codexFetch?: typeof fetch;
   /** Injectable Slack Web API transport for deterministic bot-connection tests. */
   slackFetch?: typeof fetch;
+  /** Injectable Google OAuth/Drive transport for deterministic connector tests. */
+  googleDriveFetch?: typeof fetch;
   /** Optional host-owned voice-input transcription service. */
   transcription?: TranscriptionService | null;
   // The API process's OWN agent-loop-free sandbox client (constructed from

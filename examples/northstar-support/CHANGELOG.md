@@ -1,5 +1,32 @@
 # @opengeni/example-northstar-support
 
+## 0.0.37
+
+### Patch Changes
+
+- 0179a95: Add an expandable embedded-agent panel, a compact host-composed OpenGeni experience, and SDK-native file attachments to the Northstar demo.
+  - @opengeni/react@0.30.2
+  - @opengeni/sdk@0.30.2
+
+## 0.0.36
+
+### Patch Changes
+
+- 218cac3: Redesign the Northstar example as a functional multi-ticket support product with a clear manual workflow, an explicit OpenGeni embedding switch, and live MCP-driven product updates.
+- Updated dependencies [84fb671]
+- Updated dependencies [96eb64b]
+  - @opengeni/react@0.30.2
+  - @opengeni/sdk@0.30.2
+
+## 0.0.35
+
+### Patch Changes
+
+- Updated dependencies [bbcbef5]
+- Updated dependencies [ddff8db]
+  - @opengeni/sdk@0.30.1
+  - @opengeni/react@0.30.1
+
 ## 0.0.34
 
 ### Patch Changes

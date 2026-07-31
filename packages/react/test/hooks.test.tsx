@@ -1934,6 +1934,118 @@ describe("useComposer durable draft and control binding", () => {
     await hook.unmount();
   });
 
+  test("a reconnect does not duplicate a ready file across the durable draft and live attachment", async () => {
+    const fileId = "33333333-3333-4333-8333-333333333333";
+    const canonicalFile = {
+      kind: "file" as const,
+      mountPath: `files/${fileId}`,
+      fileId,
+    };
+    let serverDraft: ComposerDraft = {
+      revision: 0,
+      text: "",
+      resources: [],
+      model: "model-x",
+      reasoningEffort: "medium",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: null,
+    };
+    const canonicalizeResources = (
+      resources: ComposerDraft["resources"],
+    ): ComposerDraft["resources"] =>
+      resources.map((resource) =>
+        resource.kind === "file"
+          ? {
+              kind: "file" as const,
+              mountPath: resource.mountPath ?? `files/${resource.fileId}`,
+              fileId: resource.fileId,
+            }
+          : resource,
+      );
+    const admissionMismatches: string[] = [];
+    const client = fakeClient({
+      getComposerDraft: async () => serverDraft,
+      saveComposerDraft: async (_workspaceId, _sessionId, request) => {
+        expect(request.expectedRevision).toBe(serverDraft.revision);
+        serverDraft = {
+          ...serverDraft,
+          ...request,
+          revision: serverDraft.revision + 1,
+          resources: canonicalizeResources(request.resources),
+          updatedAt: new Date().toISOString(),
+        };
+        return serverDraft;
+      },
+      sendMessage: async (_workspaceId, _sessionId, input) => {
+        const submitted = input as SendMessageInput;
+        const normalizedResources = canonicalizeResources(submitted.resources ?? []).filter(
+          (resource, index, resources) =>
+            resources.findIndex(
+              (candidate) => JSON.stringify(candidate) === JSON.stringify(resource),
+            ) === index,
+        );
+        const savedContent = JSON.stringify({
+          text: serverDraft.text,
+          resources: serverDraft.resources,
+          model: serverDraft.model,
+          reasoningEffort: serverDraft.reasoningEffort,
+        });
+        const submittedContent = JSON.stringify({
+          text: submitted.text,
+          resources: normalizedResources,
+          model: submitted.model ?? "model-x",
+          reasoningEffort: submitted.reasoningEffort ?? "medium",
+        });
+        if (
+          submitted.expectedDraftRevision === serverDraft.revision &&
+          savedContent !== submittedContent
+        ) {
+          admissionMismatches.push("Submitted content is not the saved draft");
+          throw new Error("Submitted content is not the saved draft");
+        }
+        return makeEvent(1, "user.message");
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          sendExtras: () => ({
+            resources: [{ kind: "file", fileId }],
+            model: "model-x",
+            reasoningEffort: "medium",
+          }),
+        }),
+      undefined,
+    );
+    await flush();
+
+    await flushing(() => hook.result.current.setValue("Inspect the attached image."));
+    await flush(600);
+    expect(serverDraft).toMatchObject({
+      revision: 1,
+      resources: [canonicalFile],
+    });
+
+    // Reconnect reconciliation reloads the canonical server resource while
+    // the browser-local ready attachment card still supplies its bare ref.
+    await flushing(async () => await hook.result.current.reloadDraft());
+    expect(hook.result.current.restoredResources).toEqual([canonicalFile]);
+
+    let accepted = false;
+    await flushing(async () => {
+      accepted = await hook.result.current.send();
+    });
+
+    expect({ accepted, admissionMismatches }).toEqual({
+      accepted: true,
+      admissionMismatches: [],
+    });
+    await hook.unmount();
+  });
+
   for (const delivery of ["send", "steer"] as const) {
     test(`${delivery} preserves the exact autosaved draft text`, async () => {
       const submitted: string[] = [];

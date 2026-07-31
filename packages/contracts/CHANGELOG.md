@@ -9,6 +9,28 @@
   `resolveWorkspaceVoiceInputEnabled` (maps legacy `transcription.enabled` for one release).
   Expand transcription error codes with `unavailable` / `too_large` / `invalid_audio`.
 
+## 0.24.3
+
+### Patch Changes
+
+- 710b081: Keep sessions usable when a previously selected MCP capability is disconnected or removed. Unavailable historical refs remain visible in effective policy but are omitted from executable tools, and the agent receives a bounded turn-level warning not to claim access to the missing source.
+
+## 0.24.2
+
+### Patch Changes
+
+- 96eb64b: Advance the reviewed knowledge release package graph to fresh publishable identities after the previous version projection was invalidated. This changes release metadata only and does not alter runtime behavior.
+
+## 0.24.1
+
+### Patch Changes
+
+- ddff8db: Add the read-only Workspace State inventory with bounded, authorization-scoped
+  Documents aggregates and a deterministic metadata-only Memory projection. The
+  projection explicitly labels legacy `knowledge_memories` preference-kind counts
+  as non-authoritative observations while preserving the structured preference
+  registry as the sole active preference authority.
+
 ## 0.24.0
 
 ### Minor Changes

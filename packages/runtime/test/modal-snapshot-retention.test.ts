@@ -1,6 +1,9 @@
 import { describe, expect, mock, test } from "bun:test";
 import { ModalClient } from "modal";
-import { installOpenGeniModalSnapshotPolicy } from "../src/sandbox/providers/modal";
+import {
+  installOpenGeniModalSnapshotPolicy,
+  isModalExecAlreadyCompletedError,
+} from "../src/sandbox/providers/modal";
 
 type Persistence = "tar" | "snapshot_filesystem" | "snapshot_directory";
 
@@ -110,6 +113,91 @@ describe("OpenGeni Modal 0.9 snapshot policy", () => {
     await session.persistWorkspace();
 
     expect(originalPersistWorkspace).toHaveBeenCalledTimes(1);
+  });
+
+  test("turns Modal's exact completed-exec stdin race into an ordinary terminal poll", async () => {
+    const terminal = [
+      "Chunk ID: terminal",
+      "Wall time: 0.001 seconds",
+      "Process exited with code 0",
+      "Output:",
+      "done",
+    ].join("\n");
+    const writeStdin = mock(async (args: { sessionId: number; chars?: string }) => {
+      if (args.chars) {
+        throw Object.assign(new Error("typed Modal completion"), {
+          name: "ClientError",
+          path: "/modal.task_command_router.TaskCommandRouter/TaskExecStdinWrite",
+          code: 9,
+          details:
+            "Exec has already completed; stdin is no longer accepting writes (Error code: 55IXOOXA)",
+        });
+      }
+      return terminal;
+    });
+    const session = Object.assign(fakeSession("tar"), { writeStdin });
+
+    installOpenGeniModalSnapshotPolicy(session);
+
+    await expect(session.writeStdin({ sessionId: 7, chars: "input" })).resolves.toBe(terminal);
+    expect(writeStdin.mock.calls).toEqual([
+      [{ sessionId: 7, chars: "input" }],
+      [{ sessionId: 7, chars: "" }],
+    ]);
+  });
+
+  test("falls back to the exact lost-session result after typed completion cleanup fails", async () => {
+    let call = 0;
+    const writeStdin = mock(async () => {
+      call += 1;
+      if (call === 1) {
+        throw Object.assign(new Error("typed Modal completion"), {
+          name: "ClientError",
+          path: "/modal.task_command_router.TaskCommandRouter/TaskExecStdinWrite",
+          code: 9,
+          details: "Exec has already completed; stdin is no longer accepting writes",
+        });
+      }
+      throw new Error("cleanup transport failed");
+    });
+    const session = Object.assign(fakeSession("tar"), { writeStdin });
+
+    installOpenGeniModalSnapshotPolicy(session);
+
+    await expect(session.writeStdin({ sessionId: 11, chars: "input" })).resolves.toBe(
+      "write_stdin failed: session not found: 11",
+    );
+  });
+
+  test("does not reinterpret other Modal or untyped stdin failures as terminal proof", async () => {
+    const exact = {
+      name: "ClientError",
+      path: "/modal.task_command_router.TaskCommandRouter/TaskExecStdinWrite",
+      code: 9,
+      details: "Exec has already completed; stdin is no longer accepting writes",
+    };
+    expect(isModalExecAlreadyCompletedError(exact)).toBe(true);
+    expect(isModalExecAlreadyCompletedError({ ...exact, code: 14 })).toBe(false);
+    expect(isModalExecAlreadyCompletedError({ ...exact, path: "/other/TaskExecStdinWrite" })).toBe(
+      false,
+    );
+    expect(isModalExecAlreadyCompletedError({ ...exact, details: "Sandbox is paused" })).toBe(
+      false,
+    );
+    expect(isModalExecAlreadyCompletedError(new Error(exact.details))).toBe(false);
+
+    const failure = Object.assign(new Error("wrong Modal precondition"), {
+      ...exact,
+      details: "The exec does not expose stdin",
+    });
+    const writeStdin = mock(async () => {
+      throw failure;
+    });
+    const session = Object.assign(fakeSession("tar"), { writeStdin });
+    installOpenGeniModalSnapshotPolicy(session);
+
+    await expect(session.writeStdin({ sessionId: 13, chars: "input" })).rejects.toBe(failure);
+    expect(writeStdin).toHaveBeenCalledTimes(1);
   });
 
   test("fails closed on an unsupported SDK or native session shape", () => {

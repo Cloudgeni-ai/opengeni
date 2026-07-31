@@ -36,6 +36,7 @@ import { canonicalProviderDomain } from "./provider-domain";
 export const oauthStateTtlMs = 10 * 60 * 1000;
 export const OFFICIAL_SLACK_MCP_URL = "https://mcp.slack.com/mcp";
 const SLACK_OAUTH_ORIGIN = "https://slack.com";
+const SLACK_MCP_ORIGIN = "https://mcp.slack.com";
 export { OAUTH_MAX_RESPONSE_BYTES } from "@opengeni/network";
 
 type OAuthClientDeps = {
@@ -410,8 +411,14 @@ function assertPersonalSlackOAuthStart(
 }
 
 export function assertSlackAuthorizationServer(as: AuthorizationServerMetadata): void {
-  const urls = [as.issuer, as.authorizationServer, as.authorizationEndpoint, as.tokenEndpoint];
-  if (urls.some((value) => new URL(value).origin !== SLACK_OAUTH_ORIGIN)) {
+  const issuerOrigins = [as.issuer, as.authorizationServer].map((value) => new URL(value).origin);
+  const endpointOrigins = [as.authorizationEndpoint, as.tokenEndpoint].map(
+    (value) => new URL(value).origin,
+  );
+  if (
+    issuerOrigins.some((origin) => origin !== SLACK_OAUTH_ORIGIN && origin !== SLACK_MCP_ORIGIN) ||
+    endpointOrigins.some((origin) => origin !== SLACK_OAUTH_ORIGIN)
+  ) {
     throw new HTTPException(422, {
       message: "Slack MCP authorization metadata did not remain bound to slack.com",
     });
@@ -508,9 +515,14 @@ async function discoverAuthorizationServerMetadata(
     "OAuth authorization server",
   ).replace(/\/+$/, "");
   const candidates = uniqueStrings([
-    safeAuthorizationServer,
+    // Prefer the RFC metadata locations before probing the issuer itself. Some
+    // providers (including Linear) redirect their issuer root to a human docs
+    // page; following that redirect can leave discovery waiting on an unrelated
+    // streaming response even though the well-known metadata is immediately
+    // available.
     ...wellKnownCandidates(safeAuthorizationServer, "oauth-authorization-server"),
     ...wellKnownCandidates(safeAuthorizationServer, "openid-configuration"),
+    safeAuthorizationServer,
   ]);
   for (const candidate of candidates) {
     const payload = await fetchJsonObject(candidate, settings).catch((error) => {
@@ -572,6 +584,12 @@ async function registerOAuthClient(
   if (operator) {
     return operator;
   }
+  // Linear currently advertises CIMD but rejects its client metadata URL at
+  // the authorization endpoint. Its documented interactive setup uses DCR,
+  // so prefer the simultaneously advertised registration endpoint.
+  if (prefersDynamicClientRegistration(as)) {
+    return await getOrCreateDynamicClientRegistration(db, settings, as, redirectUri, scopes);
+  }
   if (as.clientIdMetadataDocumentSupported) {
     return {
       method: "cimd",
@@ -595,6 +613,12 @@ async function registerOAuthClient(
     };
   }
   return await getOrCreateDynamicClientRegistration(db, settings, as, redirectUri, scopes);
+}
+
+function prefersDynamicClientRegistration(as: AuthorizationServerMetadata): boolean {
+  return Boolean(
+    as.registrationEndpoint && normalizedIssuerKey(as.issuer) === "https://mcp.linear.app",
+  );
 }
 
 async function getOrCreateDynamicClientRegistration(
@@ -720,7 +744,14 @@ function operatorClientEntryFor(
 ): ReturnType<typeof parseIntegrationsOauthClientsJson>[string] | null {
   const normalizedCandidates = new Set(candidates.map(normalizedIssuerKey));
   if (
-    normalizedCandidates.has(SLACK_OAUTH_ORIGIN) &&
+    candidates.some((candidate) => {
+      try {
+        const origin = new URL(candidate).origin;
+        return origin === SLACK_OAUTH_ORIGIN || origin === SLACK_MCP_ORIGIN;
+      } catch {
+        return false;
+      }
+    }) &&
     settings.slackClientId?.trim() &&
     settings.slackClientSecret?.trim()
   ) {

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { testSettings } from "@opengeni/testing";
-import { buildAgentCapabilities } from "../src/index";
+import { buildAgentCapabilities, buildOpenGeniAgent } from "../src/index";
 import {
   SandboxComputer,
   NativeDesktopComputer,
@@ -725,7 +725,7 @@ describe("computer backend selection (native vs xdotool)", () => {
 
   test("ComputerUseCapability bound to a native session drives desktopInput (NOT exec)", async () => {
     const { session, inputs } = makeNativeSession();
-    const cap = computerUse({ readOnly: false });
+    const cap = computerUse({ readOnly: false, toolMode: "hosted" });
     // Structured transport → the single hosted computerTool over the selected Computer.
     cap.bind(session as never).bindModel("responses", structuredModel());
     const tools = cap.tools();
@@ -741,7 +741,7 @@ describe("computer backend selection (native vs xdotool)", () => {
 
   test("ComputerUseCapability bound to a Modal session selects the xdotool SandboxComputer", () => {
     const { session } = makeMockSession();
-    const cap = computerUse({ readOnly: false });
+    const cap = computerUse({ readOnly: false, toolMode: "hosted" });
     cap.bind(session as never).bindModel("responses", structuredModel());
     const tools = cap.tools();
     const computer = (tools[0] as unknown as { computer: unknown }).computer;
@@ -751,7 +751,7 @@ describe("computer backend selection (native vs xdotool)", () => {
 
 describe("ComputerUseCapability (the SDK seam)", () => {
   test("tools() throws before bind(session) and returns one HOSTED computerTool on the structured transport", () => {
-    const cap = computerUse({ readOnly: false });
+    const cap = computerUse({ readOnly: false, toolMode: "hosted" });
     expect(cap).toBeInstanceOf(ComputerUseCapability);
     expect(cap.type).toBe("computer-use");
     // Unbound → requireBoundSession throws.
@@ -766,51 +766,33 @@ describe("ComputerUseCapability (the SDK seam)", () => {
   });
 });
 
-// ── Transport-aware seam: codex/text FUNCTION tools vs the hosted computer tool ──
-// Mirrors the SDK filesystem capability, which branches view_image/apply_patch on
-// supportsStructuredToolOutputTransport(_modelInstance). ComputerUseCapability now
-// emits the hosted `computer_use_preview` tool on the structured transport and a set
-// of FUNCTION `computer_*` tools on the text/codex transport (an unbound or
-// ChatCompletions-family model), because the codex backend rejects hosted tools.
-describe("ComputerUseCapability transport-aware seam", () => {
-  test("text transport (no structured model bound) → the 8 FUNCTION computer_* tools", () => {
-    const { session } = makeMockSession();
-    const cap = computerUse({ readOnly: false });
-    cap.bind(session as never); // no bindModel → _modelInstance undefined → text transport
-    const names = cap.tools().map((t) => (t as { name?: string }).name);
-    expect(names).toEqual(FUNCTION_TOOL_NAMES);
-    // Every emitted tool is a function tool (not the hosted "computer" type).
-    for (const t of cap.tools()) expect((t as { type?: string }).type).toBe("function");
-  });
+describe("ComputerUseCapability omitted transport fails closed", () => {
+  test("unbound, chat, and responses model routes cannot expose screenshot tools or base64 text", () => {
+    const { session: unprovenSession } = makeMockSession();
+    const unproven = computerUse({});
+    unproven.bind(unprovenSession as never);
+    expect(unproven.tools()).toEqual([]);
 
-  test("a ChatCompletions-family model also gets the FUNCTION tools", () => {
-    const { session } = makeMockSession();
-    const cap = computerUse({});
-    cap.bind(session as never).bindModel("gpt", chatCompletionsModel());
-    const names = cap.tools().map((t) => (t as { name?: string }).name);
-    expect(names).toEqual(FUNCTION_TOOL_NAMES);
-  });
+    const { session: chatSession } = makeMockSession();
+    const chat = computerUse({});
+    chat.bind(chatSession as never).bindModel("gpt", chatCompletionsModel());
+    expect(chat.tools()).toEqual([]);
 
-  test("structured transport → the single HOSTED computer tool (unchanged)", () => {
-    const { session } = makeMockSession();
-    const cap = computerUse({});
-    cap.bind(session as never).bindModel("responses", structuredModel());
-    const tools = cap.tools();
-    expect(tools.length).toBe(1);
-    expect((tools[0] as { type?: string }).type).toBe("computer");
+    const { session: responsesSession } = makeMockSession();
+    const responses = computerUse({});
+    responses.bind(responsesSession as never).bindModel("responses", structuredModel());
+    expect(responses.tools()).toEqual([]);
   });
 });
 
 // ── HARDENING: EXPLICIT toolMode overrides the constructor-name sniff ─────────
-// The refactor adds `toolMode: "hosted" | "function-image" | "function-text"` so
+// The refactor adds an explicit hosted/function-image/disabled tool mode so
 // tool selection is decided by the caller that knows the provider's true wire
 // identity (the worker), NOT inferred from the bound model instance's constructor
-// name (which a wrapped/proxied/minified instance would defeat). When toolMode is
-// set, tools() OBEYS it and never consults supportsStructuredToolOutputTransport;
-// when ABSENT, the legacy sniff behaviour is preserved byte-for-byte.
+// name (which a wrapped/proxied/minified instance would defeat). tools() obeys the
+// explicit mode, while an absent mode fails closed.
 describe("ComputerUseCapability explicit toolMode (hardening — sniff not consulted)", () => {
   const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-  const PNG_DATA_URL = `data:image/png;base64,${Buffer.from(PNG).toString("base64")}`;
 
   test('toolMode "hosted" → the single HOSTED tool EVEN when a ChatCompletions model is bound', () => {
     const { session } = makeMockSession();
@@ -839,30 +821,31 @@ describe("ComputerUseCapability explicit toolMode (hardening — sniff not consu
     expect(out.image?.mediaType).toBe("image/png");
   });
 
-  test('toolMode "function-text" → the 8 FUNCTION tools; screenshot is a text data-URL string', async () => {
+  test('toolMode "function-text" fails closed with no computer tools', () => {
     const { session } = makeMockSession({ pngBytes: PNG });
     const cap = computerUse({ toolMode: "function-text" });
     cap.bind(session as never).bindModel("responses", structuredModel());
     const tools = cap.tools();
-    expect(tools.map((t) => (t as { name?: string }).name)).toEqual(FUNCTION_TOOL_NAMES);
-    // function-text renders the screenshot as a `data:…;base64` STRING (chat-completions
-    // providers can't read structured image tool results) — NOT a {type:'image'} object.
-    const shot = toolsByName(tools).computer_screenshot;
-    const out = await invokeTool(shot, {});
-    expect(out).toBe(PNG_DATA_URL);
+    expect(tools).toEqual([]);
   });
 
-  test("REGRESSION: ABSENT toolMode preserves the sniff byte-for-byte (structured→hosted, chat→function)", () => {
+  test('toolMode "disabled" fails closed with no computer tools', () => {
+    const { session } = makeMockSession({ pngBytes: PNG });
+    const cap = computerUse({ toolMode: "disabled" });
+    cap.bind(session as never).bindModel("responses", structuredModel());
+    expect(cap.tools()).toEqual([]);
+  });
+
+  test("REGRESSION: ABSENT toolMode never falls through constructor sniffing", () => {
     const { session: s1 } = makeMockSession();
     const structured = computerUse({}); // no toolMode
     structured.bind(s1 as never).bindModel("responses", structuredModel());
-    expect(structured.tools().length).toBe(1);
-    expect((structured.tools()[0] as { type?: string }).type).toBe("computer");
+    expect(structured.tools()).toEqual([]);
 
     const { session: s2 } = makeMockSession();
     const chat = computerUse({}); // no toolMode
     chat.bind(s2 as never).bindModel("gpt", chatCompletionsModel());
-    expect(chat.tools().map((t) => (t as { name?: string }).name)).toEqual(FUNCTION_TOOL_NAMES);
+    expect(chat.tools()).toEqual([]);
   });
 });
 
@@ -1091,34 +1074,31 @@ describe("buildAgentCapabilities computer-use gating (P4.3)", () => {
     expect(t).not.toContain("computer-use");
   });
 
-  test("codex path (structuredToolTransport:false): computer-use ATTACHED and NEUTRALIZED to FUNCTION tools (no longer suppressed)", () => {
+  test("structuredToolTransport alone is not proof: omitted computer mode stays attached but exposes no tools", () => {
     const desktopOn = testSettings({
       sandboxBackend: "modal",
       sandboxDesktopEnabled: true,
       computerUseEnabled: true,
     });
-    // Structured backend attaches computer-use (as before) — the hosted tool path.
+    // Computer-use remains represented as a capability so explicit worker modes can
+    // activate it, but public construction without a proven mode exposes no tools.
     expect(
       buildAgentCapabilities(desktopOn, []).map((c) => (c as { type?: string }).type),
     ).toContain("computer-use");
-    // On the codex backend it is NO LONGER dropped: it is attached and neutralized so
-    // its tools() emits the FUNCTION computer_* tools the codex backend accepts.
     const codexCaps = buildAgentCapabilities(desktopOn, [], { structuredToolTransport: false });
     const codexTypes = codexCaps.map((c) => (c as { type?: string }).type);
     expect(codexTypes).toContain("computer-use");
     // filesystem/shell still present (unchanged).
     expect(codexTypes).toContain("filesystem");
     expect(codexTypes).toContain("shell");
-    // Prove the attached capability emits the FUNCTION tools even when the SDK bind
-    // chain hands it a STRUCTURED model instance: neutralize overrode bindModel to
-    // drop the instance, so tools() falls to the function transport.
+    // Neither the filesystem transport option nor a model constructor proves a
+    // screenshot transport for computer use.
     const computerCap = codexCaps.find(
       (c) => (c as { type?: string }).type === "computer-use",
     ) as unknown as ComputerUseCapability;
     const { session } = makeMockSession();
     computerCap.bind(session as never).bindModel("responses", structuredModel());
-    const names = computerCap.tools().map((t) => (t as { name?: string }).name);
-    expect(names).toEqual(FUNCTION_TOOL_NAMES);
+    expect(computerCap.tools()).toEqual([]);
   });
 
   test("explicit computerToolMode is threaded to the capability and OVERRIDES the bound-model sniff", async () => {
@@ -1140,8 +1120,8 @@ describe("buildAgentCapabilities computer-use gating (P4.3)", () => {
     expect(hostedTools.length).toBe(1);
     expect((hostedTools[0] as { type?: string }).type).toBe("computer");
 
-    // "function-text" → the FUNCTION tools EVEN with a structured model bound, and the
-    // screenshot renders as a text data-URL (imageFunctionResults=false).
+    // "function-text" is a deprecated fail-closed alias: providers without a proven
+    // visual image transport receive no computer capability.
     const textCaps = buildAgentCapabilities(desktopOn, [], { computerToolMode: "function-text" });
     const textCap = textCaps.find(
       (c) => (c as { type?: string }).type === "computer-use",
@@ -1150,11 +1130,7 @@ describe("buildAgentCapabilities computer-use gating (P4.3)", () => {
     const { session: s2 } = makeMockSession({ pngBytes: png });
     textCap.bind(s2 as never).bindModel("responses", structuredModel());
     const textTools = textCap.tools();
-    expect(textTools.map((t) => (t as { name?: string }).name)).toEqual(FUNCTION_TOOL_NAMES);
-    const shot = toolsByName(textTools).computer_screenshot;
-    expect(await invokeTool(shot, {})).toBe(
-      `data:image/png;base64,${Buffer.from(png).toString("base64")}`,
-    );
+    expect(textTools).toEqual([]);
 
     // "function-image" → the FUNCTION tools with a STRUCTURED image screenshot.
     const imgCaps = buildAgentCapabilities(desktopOn, [], { computerToolMode: "function-image" });
@@ -1172,31 +1148,21 @@ describe("buildAgentCapabilities computer-use gating (P4.3)", () => {
     expect(imgOut.image?.mediaType).toBe("image/png");
   });
 
-  test("codex path threads imageFunctionResults:true → the emitted computer_screenshot returns a structured image", async () => {
+  test("buildOpenGeniAgent omitted mode cannot expose screenshot base64 on a chat/unproven route", () => {
     const desktopOn = testSettings({
       sandboxBackend: "modal",
       sandboxDesktopEnabled: true,
       computerUseEnabled: true,
     });
-    const codexCaps = buildAgentCapabilities(desktopOn, [], { structuredToolTransport: false });
-    const computerCap = codexCaps.find(
+    const agent = buildOpenGeniAgent(desktopOn, [], { structuredToolTransport: false });
+    const computerCap = ((agent as unknown as { capabilities: unknown[] }).capabilities ?? []).find(
       (c) => (c as { type?: string }).type === "computer-use",
     ) as unknown as ComputerUseCapability;
-    // A MODAL mock session → SandboxComputer; its base64 screenshot read returns PNG bytes.
     const { session } = makeMockSession({
       pngBytes: new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
     });
-    computerCap.bind(session as never).bindModel("responses", structuredModel());
-    const screenshotTool = computerCap
-      .tools()
-      .find((t) => (t as { name?: string }).name === "computer_screenshot");
-    const out = (await invokeTool(screenshotTool, {})) as {
-      type?: string;
-      image?: { mediaType?: string };
-    };
-    // Structured image (codex sees it), NOT the text data-URL string.
-    expect(out.type).toBe("image");
-    expect(out.image?.mediaType).toBe("image/png");
+    computerCap.bind(session as never).bindModel("gpt", chatCompletionsModel());
+    expect(computerCap.tools()).toEqual([]);
   });
 });
 

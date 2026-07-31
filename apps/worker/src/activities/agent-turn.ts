@@ -133,6 +133,7 @@ import {
   calculateModelUsageCostMicros,
   configuredModelPricing,
   configuredStaticUsageLimits,
+  sandboxArchiveCaptureTimeoutMs,
   sandboxWarmRateMicrosPerSecond,
   settingsWithResolvedModelContext,
   resolveTurnExecutionPolicyV1,
@@ -141,7 +142,7 @@ import {
   type RegistryProviderKind,
   type Settings,
 } from "@opengeni/config";
-import { CancelledFailure } from "@temporalio/activity";
+import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
 import {
   settingsWithCodexCredential,
   settingsWithEnabledCapabilityMcpServers,
@@ -246,9 +247,14 @@ import {
 } from "./streaming";
 import type {
   ActivityServices,
+  EscapedMcpTimeoutRecoveryDetail,
   RunAgentTurnInput,
   RunAgentTurnResult,
   SessionAttemptQuiescenceProof,
+} from "./types";
+import {
+  ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_MESSAGE,
+  ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_TYPE,
 } from "./types";
 import {
   resumeBoxForTurn,
@@ -404,6 +410,56 @@ export function providerRecoveryResult(): {
     status: "recovering",
     continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS,
   };
+}
+
+/**
+ * Tell the model when durable MCP policy references are unavailable for this
+ * exact turn. The policy projection already bounds and validates these ids;
+ * this notice prevents a graceful runtime drop from becoming a silent source-
+ * of-truth substitution or a false claim that the disconnected system was read.
+ */
+export function unavailableMcpTurnInstructions(input: {
+  droppedIds: readonly string[];
+  droppedCount: number;
+}): string | undefined {
+  if (input.droppedCount <= 0) {
+    return undefined;
+  }
+  const omittedCount = Math.max(0, input.droppedCount - input.droppedIds.length);
+  const listed = input.droppedIds.map((id) => `"${id}"`).join(", ");
+  const inventory = listed
+    ? `${listed}${omittedCount > 0 ? `, plus ${omittedCount} additional unavailable server(s)` : ""}`
+    : `${input.droppedCount} unavailable server(s)`;
+  return `MCP capability availability for this turn: the following session-selected server(s) are disconnected or no longer registered and were skipped: ${inventory}. Do not claim to have read or updated those systems. If the task depends on one as a source of truth, explain the limitation and ask the user to reconnect it or select another authoritative source; continue with unaffected work only when safe.`;
+}
+
+/**
+ * Preserve one precise recovery obligation across Temporal's activity boundary.
+ * This is intentionally narrower than the ordinary retryable-provider path:
+ * only a recovered turn (generation > 1) whose MCP timeout happened before a
+ * model request may ask the workflow's DB-only control activity to finish the
+ * same-turn checkpoint. The original transport/recovery errors are excluded
+ * from details so raw MCP response data can never enter workflow history.
+ */
+export function escapedMcpTimeoutRecoveryFailure(input: {
+  failureCode: string | undefined;
+  modelRequestStarted: boolean;
+  detail: EscapedMcpTimeoutRecoveryDetail;
+}): ApplicationFailure | null {
+  if (
+    input.failureCode !== "mcp_transport_timeout" ||
+    input.modelRequestStarted ||
+    !Number.isSafeInteger(input.detail.executionGeneration) ||
+    input.detail.executionGeneration <= 1
+  ) {
+    return null;
+  }
+  return ApplicationFailure.create({
+    message: ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_MESSAGE,
+    type: ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_TYPE,
+    nonRetryable: true,
+    details: [input.detail],
+  });
 }
 
 /**
@@ -1698,9 +1754,9 @@ export function shouldStartOnTurnRecording(params: {
  * and threaded to the runtime as an explicit flag (buildAgent → computerToolMode):
  *   • codex-subscription → "function-image": the ChatGPT/Codex backend rejects
  *     hosted tool types but SEES structured `input_image` tool results.
- *   • a "chat" (OpenAIChatCompletionsModel wire) provider → "function-text": it takes
- *     function tools but can't read structured image results, so screenshots render
- *     as a text data-URL.
+ *   • a "chat" (OpenAIChatCompletionsModel wire) provider → "disabled": it cannot
+ *     receive a screenshot through a proven visual transport, so computer use fails
+ *     closed instead of serializing the image as text.
  *   • everything else — built-in Azure/OpenAI responses, registry "responses"
  *     providers, AND the LEGACY global-client fallback (resolveTurnModel returned
  *     null) — → "hosted": real Responses hosted-tool support.
@@ -1719,7 +1775,7 @@ export function computerToolModeForTurn(
     return "function-image";
   }
   if (resolvedModel.provider.api === "chat") {
-    return "function-text";
+    return "disabled";
   }
   return "hosted";
 }
@@ -2163,6 +2219,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     let isCodexTurn = false;
     let isExternallyBilledTurn = false;
     let executionGeneration = 0;
+    let modelRequestStarted = false;
     // Still required by credential-loss/capacity settlements, whose own
     // recovery transactions fence against worker-death redispatches.
     let redispatchesAtDispatch = 0;
@@ -2370,6 +2427,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         expectedEpoch: sandbox.leaseEpoch,
         expectedInstanceId: sandbox.established.instanceId,
         operation,
+        captureWaitMs: sandboxArchiveCaptureTimeoutMs(settings),
       };
       const admission = await advanceWorkspaceGeneration(db, identity);
       let result: T;
@@ -4278,6 +4336,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         availableMcpServerIds: runSettings.mcpServers.map((server) => server.id),
         defaultMcpServerIds: defaultSessionMcpServerIds(capabilitySettings.mcpServers),
       });
+      const mcpAvailabilityInstructions = unavailableMcpTurnInstructions({
+        droppedIds: resolvedToolPolicy.effectivePolicy.droppedIds,
+        droppedCount: resolvedToolPolicy.effectivePolicy.counts.dropped,
+      });
       const effectivePolicyTools = resolvedToolPolicy.toolRefs;
       const turnTools = withFirstPartyTools(runSettings, effectivePolicyTools);
       // §7.6 connection-credential provider — load (and decrypt) the variable set via the host
@@ -5039,9 +5101,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 environment: sandboxEnvironment,
                 // IMAGE IS SHARED STATE (B3, Modal warm-box path only): the container image
                 // this run resolves. The lease stamps it + conflicts on a live shared box
-                // running a DIFFERENT image (solo → recreate on the new image; N-holders →
-                // SandboxImageConflictError surfaced as an actionable turn error). Prefer the
-                // explicit Modal image ref, else the docker image. The selfhosted branch
+                // running a DIFFERENT image (solo → durable rotation; N-holders →
+                // SandboxImageConflictError surfaced as an actionable turn error). Prefer
+                // the explicit Modal image ref, else the docker image. The selfhosted branch
                 // (establishSelfhostedTurnSession) NEVER passes
                 // an image — B3 lives only on this Modal else-branch.
                 ...((runSettings.modalImageRef ?? runSettings.dockerImage)
@@ -5051,8 +5113,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   : {}),
                 // RIG IS SHARED STATE (M3): stamp the frozen rig version so the lease
                 // conflicts on a live shared box set up under a different rig (solo
-                // recreate / N-holders SandboxRigConflictError). Omitted for a rig-less
-                // turn -> never stamped or enforced (shares exactly as today).
+                // durable rotation / N-holders SandboxRigConflictError). Omitted for a
+                // rig-less turn -> never stamped or enforced (shares exactly as today).
                 ...(rigVersion ? { rigVersionId: rigVersion.id } : {}),
               },
               "turn",
@@ -5311,7 +5373,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               // default.
               structuredToolTransport: resolvedModel.provider.kind !== "codex-subscription",
               // EXPLICIT computer-use tool transport, derived from the resolved provider's
-              // authoritative wire identity (codex → function-image, chat → function-text,
+              // authoritative wire identity (codex → function-image, chat → disabled,
               // responses → hosted) so the runtime never string-sniffs the model instance's
               // constructor name. See {@link computerToolModeForTurn}.
               computerToolMode: computerToolModeForTurn(resolvedModel),
@@ -5354,7 +5416,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         ...(session.instructions ? { sessionInstructions: session.instructions } : {}),
         // Exact host context captured when this turn was accepted. It is
         // system-level and disappears with the turn rather than entering chat.
-        ...(turn.turnInstructions ? { turnInstructions: turn.turnInstructions } : {}),
+        ...(turn.turnInstructions || mcpAvailabilityInstructions
+          ? {
+              turnInstructions: [turn.turnInstructions, mcpAvailabilityInstructions]
+                .filter((value): value is string => Boolean(value))
+                .join(" "),
+            }
+          : {}),
         ...workspaceEnvironmentOption,
         // RIG RUNTIME (M3): the doctrine block, the setup-script hook (only when
         // the frozen version carries a non-empty script), and the rig credential
@@ -5946,6 +6014,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               initialGitCredentials,
             );
           }
+          // Conservative request boundary: once control enters runStream, the
+          // provider may have accepted work even if no response/event follows.
+          // Escaped MCP setup timeouts are automatically recoverable only
+          // before this line.
+          modelRequestStarted = true;
           return await runtime.runStream(agent, runInput!, modelRunSettings, {
             signal: runtimeCancellationSignal,
             sandboxEnvironment,
@@ -6569,7 +6642,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const fencedLease = await readLease(db, input.workspaceId, error.sandboxGroupId).catch(
             () => null,
           );
-          const deadlineRotationPending = fencedLease?.rotationRequestedAt != null;
+          const rotationPending = fencedLease?.rotationRequestedAt != null;
+          const deadlineRotationPending =
+            rotationPending && fencedLease?.rotationReason === "provider_deadline";
           const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
             sessionId: input.sessionId,
             turnId: recoveryTurnId,
@@ -6578,11 +6653,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             reason: deadlineRotationPending
               ? "sandbox_deadline_rotation"
               : "sandbox_lease_superseded",
-            ...(deadlineRotationPending
+            ...(rotationPending
               ? {
                   detail: {
                     sandboxGroupId: error.sandboxGroupId,
                     leaseEpoch: error.leaseEpoch,
+                    rotationReason: fencedLease?.rotationReason ?? "operator",
                   },
                 }
               : {}),
@@ -6603,7 +6679,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           turnMetricOutcome = "recovering";
           return claimedResult({
             status: "recovering",
-            ...(deadlineRotationPending
+            ...(rotationPending
               ? {
                   continueDelayMs: sandboxDeadlineRotationRecoveryDelayMs(settings),
                 }
@@ -7518,31 +7594,55 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         });
       }
       if (failure.retryable && publish && turnId && turnStartedPublished) {
-        const recoveryResult = providerRecoveryResult();
-        await flushRuntimeBatcher();
-        await reconcileConversationTruth({ requireDurable: true });
-        const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
-          sessionId: input.sessionId,
-          turnId,
-          triggerEventId: triggerEventId!,
-          attemptId: input.attemptId,
-          reason: failure.code ?? "provider_unavailable",
-          detail: {
-            ...failure,
-            continueDelayMs: recoveryResult.continueDelayMs,
-          },
-        });
-        if (recovery.action === "stale") {
-          acknowledgeLostAttemptOwnership();
-          activityStatus = "cancelled";
-          turnMetricOutcome = "cancelled";
-          return claimedResult({ status: "cancelled" });
+        try {
+          const recoveryResult = providerRecoveryResult();
+          await flushRuntimeBatcher();
+          await reconcileConversationTruth({ requireDurable: true });
+          const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+            sessionId: input.sessionId,
+            turnId,
+            triggerEventId: triggerEventId!,
+            attemptId: input.attemptId,
+            reason: failure.code ?? "provider_unavailable",
+            detail: {
+              ...failure,
+              continueDelayMs: recoveryResult.continueDelayMs,
+            },
+          });
+          if (recovery.action === "stale") {
+            acknowledgeLostAttemptOwnership();
+            activityStatus = "cancelled";
+            turnMetricOutcome = "cancelled";
+            return claimedResult({ status: "cancelled" });
+          }
+          await publishDurableSessionEvents(
+            bus,
+            input.workspaceId,
+            input.sessionId,
+            recovery.events,
+          );
+          turnMetricOutcome = "recovering";
+          activityStatus = "recovering";
+          activityError = error;
+          return claimedResult(recoveryResult);
+        } catch (recoveryError) {
+          const escaped = escapedMcpTimeoutRecoveryFailure({
+            failureCode: failure.code,
+            modelRequestStarted,
+            detail: {
+              turnId,
+              triggerEventId: triggerEventId!,
+              executionGeneration,
+            },
+          });
+          if (escaped) {
+            activityStatus = "recovering";
+            turnMetricOutcome = "recovering";
+            activityError = error;
+            throw escaped;
+          }
+          throw recoveryError;
         }
-        await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
-        turnMetricOutcome = "recovering";
-        activityStatus = "recovering";
-        activityError = error;
-        return claimedResult(recoveryResult);
       }
       activityStatus = "failed";
       activityError = error;

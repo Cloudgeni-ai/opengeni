@@ -418,6 +418,71 @@ export type OpenGeniSlackBotInstallStart = {
   expiresAt: string;
 };
 
+export type GoogleDriveTargetScope = "user" | "workspace" | "organization";
+export type GoogleDriveSyncCadence = "manual" | "hourly" | "daily";
+export type GoogleDriveReadPolicy = "allow" | "ask" | "block";
+
+export type GoogleDriveSelectedSource = {
+  id: string;
+  name: string;
+  mimeType: string;
+  driveId: string | null;
+  targetScope: GoogleDriveTargetScope;
+  syncCadence: GoogleDriveSyncCadence;
+  readPolicy: GoogleDriveReadPolicy;
+  selectedAt: string;
+};
+
+export type GoogleDriveConnectionMetadata = {
+  credentialRole: "google_drive_metadata";
+  credentialLabel: "Google Drive metadata browser";
+  googlePermissionId: string;
+  googleEmail: string;
+  googleDisplayName: string | null;
+  verifiedAt: string;
+  accessMode: "metadata_readonly" | "readonly";
+  selectedSources?: GoogleDriveSelectedSource[] | undefined;
+  /** @deprecated Read selectedSources; retained while existing connections migrate. */
+  selectedSource?: GoogleDriveSelectedSource | null | undefined;
+  [key: string]: unknown;
+};
+
+export type GoogleDriveOAuthStartRequest = {
+  connectionId?: string | undefined;
+};
+
+export type GoogleDriveOAuthStartResponse = {
+  authorizationUrl: string;
+  expiresAt: string;
+};
+
+export type GoogleDriveBrowseItem = {
+  id: string;
+  name: string;
+  mimeType: string;
+  kind: "folder" | "file";
+  driveId: string | null;
+  modifiedTime: string | null;
+  size: string | null;
+  webViewLink: string | null;
+};
+
+export type GoogleDriveBrowseResponse = {
+  connection: ConnectionMetadata;
+  parentId: string;
+  current: GoogleDriveBrowseItem | null;
+  items: GoogleDriveBrowseItem[];
+  nextPageToken: string | null;
+  incompleteSearch: boolean;
+};
+
+export type SaveGoogleDriveSourceRequest = {
+  sources: Array<Pick<GoogleDriveBrowseItem, "id" | "name" | "mimeType" | "driveId">>;
+  targetScope: GoogleDriveTargetScope;
+  syncCadence: GoogleDriveSyncCadence;
+  readPolicy: GoogleDriveReadPolicy;
+};
+
 export type UpdateConnectionRequest = {
   providerDomain?: string | undefined;
   subjectId?: string | null | undefined;
@@ -1715,7 +1780,11 @@ export type FirstPartyMcpToolName =
   | "scheduled_task_runs_list"
   | "slack_bot_list_channels"
   | "slack_bot_channel_history"
+  | "slack_bot_thread_replies"
   | "slack_bot_list_users"
+  | "slack_bot_list_files"
+  | "slack_bot_file_info"
+  | "slack_bot_file_content"
   | "slack_bot_post_message";
 
 export type ProductAccessMode = "local" | "configured" | "managed";

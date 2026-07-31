@@ -36,6 +36,8 @@ export type {
   ReconcileCodexCapacityWaitResult,
   RecoverDispatchInput,
   RecoverDispatchResult,
+  RecoverEscapedMcpTimeoutInput,
+  RecoverEscapedMcpTimeoutResult,
   PersistSessionAttemptQuiescenceInput,
   ReconcileSessionAttemptQuiescenceInput,
   ReconcileSessionAttemptQuiescenceResult,
@@ -167,6 +169,7 @@ export const persistSessionAttemptQuiescence =
 export const reconcileSessionAttemptQuiescence =
   defaultControlActivities.reconcileSessionAttemptQuiescence;
 export const recoverDispatch = defaultControlActivities.recoverDispatch;
+export const recoverEscapedMcpTimeout = defaultControlActivities.recoverEscapedMcpTimeout;
 export const peekSessionWork = defaultControlActivities.peekSessionWork;
 export const expireSessionHumanInput = defaultControlActivities.expireSessionHumanInput;
 export const markSessionIdle = defaultControlActivities.markSessionIdle;

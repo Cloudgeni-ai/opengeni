@@ -1,5 +1,5 @@
 import { describe, expect, mock, spyOn, test } from "bun:test";
-import { CancelledFailure } from "@temporalio/activity";
+import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
 import { RunRawModelStreamEvent, Usage } from "@openai/agents-core";
 import { ModelItem } from "@openai/agents-core/types";
 import type { Settings } from "@opengeni/config";
@@ -46,6 +46,7 @@ import {
   drainAttemptOwnedSandboxWriters,
   emitModelCallUsage,
   ensureTurnModalRegistryImage,
+  escapedMcpTimeoutRecoveryFailure,
   filterUnmaterializedSandboxFileDownloads,
   headerSecretRedactions,
   historyRowsToAppend,
@@ -75,6 +76,7 @@ import {
   stableHumanInputRequestId,
   turnExecutionPolicyBillingIdentity,
   turnOperationCancellationFailure,
+  unavailableMcpTurnInstructions,
   waitForTurnOperation,
   waitForTurnFinalizerStep,
   waitForTurnStreamCleanup,
@@ -86,6 +88,29 @@ import { settingsWithPackSandboxImage } from "../src/activities/packs";
 import { startGitCredentialRenewalLoop } from "../src/activities/git-credential-renewal";
 
 const OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE = "openai-responses";
+
+describe("disconnected MCP turn instructions", () => {
+  test("warns the model without exposing an unbounded unavailable registry", () => {
+    expect(
+      unavailableMcpTurnInstructions({
+        droppedIds: ["cap-linear", "cap-slack"],
+        droppedCount: 4,
+      }),
+    ).toBe(
+      'MCP capability availability for this turn: the following session-selected server(s) are disconnected or no longer registered and were skipped: "cap-linear", "cap-slack", plus 2 additional unavailable server(s). Do not claim to have read or updated those systems. If the task depends on one as a source of truth, explain the limitation and ask the user to reconnect it or select another authoritative source; continue with unaffected work only when safe.',
+    );
+  });
+
+  test("is absent when no selected server was dropped", () => {
+    expect(unavailableMcpTurnInstructions({ droppedIds: [], droppedCount: 0 })).toBeUndefined();
+  });
+
+  test("keeps a generic warning when legacy ids cannot be projected safely", () => {
+    expect(unavailableMcpTurnInstructions({ droppedIds: [], droppedCount: 1 })).toContain(
+      "1 unavailable server(s)",
+    );
+  });
+});
 
 // Item shapes mirror the SDK history representation persisted into
 // session_history_items (type discriminator, camelCase callId).
@@ -2677,6 +2702,47 @@ describe("escaped MCP transport timeout classifier", () => {
     expect(classifyMcpTransportTimeoutError(new Error("sandbox creation timed out"))).toBeNull();
     expect(classifyMcpTransportTimeoutError(new Error("Too Many Requests"))).toBeNull();
   });
+
+  test("emits a typed workflow recovery obligation only before a generation-2 model request", () => {
+    const detail = {
+      turnId: "turn-2",
+      triggerEventId: "trigger-1",
+      executionGeneration: 2,
+    };
+    const escaped = escapedMcpTimeoutRecoveryFailure({
+      failureCode: "mcp_transport_timeout",
+      modelRequestStarted: false,
+      detail,
+    });
+    expect(escaped).toBeInstanceOf(ApplicationFailure);
+    expect(escaped).toMatchObject({
+      type: "EscapedMcpTimeoutRecoveryFailure",
+      nonRetryable: true,
+      details: [detail],
+    });
+
+    expect(
+      escapedMcpTimeoutRecoveryFailure({
+        failureCode: "mcp_transport_timeout",
+        modelRequestStarted: false,
+        detail: { ...detail, executionGeneration: 1 },
+      }),
+    ).toBeNull();
+    expect(
+      escapedMcpTimeoutRecoveryFailure({
+        failureCode: "mcp_transport_timeout",
+        modelRequestStarted: true,
+        detail,
+      }),
+    ).toBeNull();
+    expect(
+      escapedMcpTimeoutRecoveryFailure({
+        failureCode: "provider_unavailable",
+        modelRequestStarted: false,
+        detail,
+      }),
+    ).toBeNull();
+  });
 });
 
 describe("Codex response timeout fail-closed settlement", () => {
@@ -3129,8 +3195,8 @@ describe("computerToolModeForTurn (explicit computer-use transport derivation)",
     expect(computerToolModeForTurn(resolved("codex-subscription", "chat"))).toBe("function-image");
   });
 
-  test("a chat-wire (OpenAIChatCompletionsModel) provider → function-text", () => {
-    expect(computerToolModeForTurn(resolved("api-key", "chat"))).toBe("function-text");
+  test("a chat-wire provider without proven visual image transport → disabled", () => {
+    expect(computerToolModeForTurn(resolved("api-key", "chat"))).toBe("disabled");
   });
 
   test("a registry responses provider → hosted", () => {

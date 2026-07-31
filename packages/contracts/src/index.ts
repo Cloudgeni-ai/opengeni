@@ -705,7 +705,11 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "scheduled_task_runs_list",
   "slack_bot_list_channels",
   "slack_bot_channel_history",
+  "slack_bot_thread_replies",
   "slack_bot_list_users",
+  "slack_bot_list_files",
+  "slack_bot_file_info",
+  "slack_bot_file_content",
   "slack_bot_post_message",
 ] as const;
 export const FirstPartyMcpToolName = z.enum(FIRST_PARTY_MCP_TOOL_NAMES);
@@ -3064,11 +3068,14 @@ export const ToolRef = z.object({
   kind: z.literal("mcp"),
   id: z.string().min(1),
   // Non-fatal-on-connect marker for MCP server refs that can degrade
-  // gracefully. Absent/false is STRICT: the id must be configured and an
-  // unavailable server fails the turn. `optional:true` is preserved for known
-  // servers and makes runtime connect/list failures skip that server; if the
-  // deployment does not configure the id, validation drops the ref. The server
-  // also sets this for auto-attached workspace-default capability MCPs.
+  // gracefully. On new input, absent/false is STRICT: the id must be configured
+  // and an unavailable registered server fails the turn. Persisted refs are
+  // intersected with the current registry at each turn boundary, so a server
+  // disconnected after admission is retained in policy/audit truth but skipped
+  // until it is registered again. `optional:true` additionally makes runtime
+  // connect/list failures skip a known server; if the deployment does not
+  // configure the id, validation drops the ref. Auto-attached workspace-default
+  // capability MCPs also use this marker.
   optional: z.boolean().optional(),
 });
 export type ToolRef = z.infer<typeof ToolRef>;
@@ -5025,12 +5032,18 @@ export const OPENGENI_SLACK_BOT_CREDENTIAL_ROLE = "opengeni_slack_bot" as const;
 export const OPENGENI_SLACK_BOT_CREDENTIAL_LABEL = "OpenGeni Slack bot" as const;
 export const OPENGENI_SLACK_BOT_SESSION_METADATA_KEY = "opengeniSlackBotConnectionId" as const;
 export const OPENGENI_SLACK_BOT_REQUIRED_SCOPES = [
-  "chat:write",
-  "im:write",
-  "channels:read",
+  "canvases:read",
   "channels:history",
-  "groups:read",
+  "channels:read",
+  "chat:write",
+  "files:read",
   "groups:history",
+  "groups:read",
+  "im:history",
+  "im:read",
+  "im:write",
+  "mpim:history",
+  "mpim:read",
   "users:read",
 ] as const;
 export const OPENGENI_SLACK_BOT_FORBIDDEN_SCOPES = ["channels:join", "chat:write.public"] as const;

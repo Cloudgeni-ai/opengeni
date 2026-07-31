@@ -9,6 +9,72 @@
   active attached Codex credential; fall through to OpenAI/Azure when none is
   attached. Drop the unauthenticated Cloudflare HEAD probe.
 
+## 0.13.5
+
+### Patch Changes
+
+- e19ba28: Prefer dynamic client registration for Linear MCP authorization when Linear advertises both DCR and Client ID Metadata Documents.
+- Updated dependencies [710b081]
+- Updated dependencies [b7df541]
+  - @opengeni/core@0.13.9
+  - @opengeni/contracts@0.24.3
+  - @opengeni/config@0.7.19
+  - @opengeni/db@0.15.5
+  - @opengeni/runtime@0.14.11
+  - @opengeni/documents@0.2.55
+  - @opengeni/events@0.3.46
+  - @opengeni/github@0.4.6
+  - @opengeni/storage@0.2.43
+
+## 0.13.4
+
+### Patch Changes
+
+- Updated dependencies [84fb671]
+- Updated dependencies [96eb64b]
+  - @opengeni/db@0.15.4
+  - @opengeni/config@0.7.18
+  - @opengeni/contracts@0.24.2
+  - @opengeni/github@0.4.5
+  - @opengeni/runtime@0.14.10
+  - @opengeni/storage@0.2.42
+  - @opengeni/core@0.13.8
+  - @opengeni/documents@0.2.54
+  - @opengeni/events@0.3.45
+
+## 0.13.3
+
+### Patch Changes
+
+- Updated dependencies [510eae3]
+  - @opengeni/db@0.15.3
+  - @opengeni/core@0.13.7
+  - @opengeni/documents@0.2.53
+  - @opengeni/events@0.3.44
+
+## 0.13.2
+
+### Patch Changes
+
+- 387cb73: Return the canonical validation envelope when a knowledge-search request exceeds the maximum result limit.
+- ddff8db: Add the read-only Workspace State inventory with bounded, authorization-scoped
+  Documents aggregates and a deterministic metadata-only Memory projection. The
+  projection explicitly labels legacy `knowledge_memories` preference-kind counts
+  as non-authoritative observations while preserving the structured preference
+  registry as the sole active preference authority.
+- Updated dependencies [3450ee5]
+- Updated dependencies [ddff8db]
+- Updated dependencies [0a9a6eb]
+  - @opengeni/runtime@0.14.9
+  - @opengeni/contracts@0.24.1
+  - @opengeni/db@0.15.2
+  - @opengeni/documents@0.2.52
+  - @opengeni/config@0.7.17
+  - @opengeni/storage@0.2.41
+  - @opengeni/core@0.13.6
+  - @opengeni/events@0.3.43
+  - @opengeni/github@0.4.4
+
 ## 0.13.1
 
 ### Patch Changes
