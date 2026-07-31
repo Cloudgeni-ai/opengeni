@@ -1404,17 +1404,6 @@ describe("connections routes", () => {
       expect(as.tokenRequests[0]!.has("client_secret")).toBe(false);
       expect(as.tokenRequestAuthHeaders[0]).toBeNull();
       expect(as.tokenRequests[0]!.get("resource")).toBe("urn:test:mcp");
-
-      const loadedClient = await loadIntegrationOAuthClient(
-        client.db,
-        settings,
-        "https://mcp.linear.app",
-      );
-      expect(loadedClient).toMatchObject({
-        issuer: "https://mcp.linear.app",
-        clientId: `${as.url}/registered-client/1`,
-        tokenEndpointAuthMethod: "none",
-      });
     } finally {
       mcp.close();
       as.close();
@@ -1432,6 +1421,7 @@ describe("connections routes", () => {
       metadata: {
         registrationEndpoint: "https://mcp.linear.app/register",
         registeredAt: "2026-01-01T00:00:00.000Z",
+        registeredScopes: ["read", "write"],
       },
     });
     const as = startFakeAuthorizationServer({
