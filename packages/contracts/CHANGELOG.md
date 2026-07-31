@@ -1,5 +1,12 @@
 # @opengeni/contracts
 
+## 0.24.4
+
+### Patch Changes
+
+- 0199108: Harden the workspace Slack bot with one fail-closed scope policy, deterministic legacy connection selection, and durable replay-safe message deletion operation identities.
+- b2e975f: Advance the merged knowledge release train to fresh publication identities without changing runtime behavior. This corrective source is derived from current main and does not reuse generated release output.
+
 ## Unreleased
 
 ### Minor Changes

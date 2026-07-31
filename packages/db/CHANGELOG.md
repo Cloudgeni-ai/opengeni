@@ -1,5 +1,15 @@
 # @opengeni/db
 
+## 0.15.6
+
+### Patch Changes
+
+- 0199108: Harden the workspace Slack bot with one fail-closed scope policy, deterministic legacy connection selection, and durable replay-safe message deletion operation identities.
+- Updated dependencies [0199108]
+- Updated dependencies [b2e975f]
+  - @opengeni/contracts@0.24.4
+  - @opengeni/config@0.7.20
+
 ## 0.15.5
 
 ### Patch Changes
