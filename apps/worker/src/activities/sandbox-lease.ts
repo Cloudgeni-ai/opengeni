@@ -30,12 +30,14 @@
 // so a box that was re-armed mid-sweep is never terminated out from under a live
 // holder.
 
+import { randomUUID } from "node:crypto";
 import {
   accrueWarmSeconds,
   adoptLegacyModalCheckpointArtifact,
   confirmDrainCold,
   appendSessionEventToSandboxGroup,
   bindRetainedProcessProviderIdentity,
+  claimWorkspaceArchiveCapture,
   claimSandboxCheckpointArtifactsForGc,
   claimTerminalRetainedProcesses,
   countActiveRetainedProcessesByOwnerState,
@@ -55,7 +57,8 @@ import {
   pruneDeletedSandboxCheckpointArtifacts,
   registerSandboxCheckpointArtifact,
   recordRetainedProcessReconciliationProof,
-  readWorkspaceArchiveCapturePreflight,
+  releaseWorkspaceArchiveCapture,
+  replaceExpiredWorkspaceArchiveCapture,
   readLease,
   reapExpiredSessionListSnapshots,
   reapStaleLeaseHoldersGlobal,
@@ -72,18 +75,18 @@ import {
   type SandboxRetainedProcess,
   type LeaseSnapshot,
 } from "@opengeni/db";
-import { sandboxWarmRateMicrosPerSecond } from "@opengeni/config";
+import { sandboxArchiveCaptureTimeoutMs, sandboxWarmRateMicrosPerSecond } from "@opengeni/config";
 import {
-  // The reaper attaches to the box by id to terminate it. It does NOT use
-  // establishSandboxSessionFromEnvelope (which cold-RESTORES via create() on a
-  // NotFound) — restoring a box just to immediately kill it is wrong. Instead it
-  // builds the client + resumes the envelope DIRECTLY: a live box resumes, gets
-  // its /workspace PERSISTED (snapshot/tar), then is terminated; a gone box
-  // (NotFound on resume) is already down, a clean no-op.
+  // Normal drain teardown builds the client and resumes the envelope directly:
+  // a live box gets its /workspace persisted before termination, while a gone
+  // box is typed as provider loss. Stale capture reconciliation separately uses
+  // establishSandboxSessionFromEnvelope in strict resume-only mode so it can
+  // reuse the runtime's provider-ready proof without ever cold-restoring.
   captureVerifiedWorkspaceArchive,
   createSandboxClientForBackend,
   deleteModalCheckpointSnapshot,
   deserializeSandboxSessionStateEnvelope,
+  establishSandboxSessionFromEnvelope,
   inspectModalSandboxLifecycle,
   isExecSessionLostBanner,
   isProviderSandboxNotFoundError,
@@ -91,8 +94,11 @@ import {
   resolveModalCheckpointProviderBindingForLiveSandbox,
   resolveModalCheckpointProviderBinding,
   resolveModalCheckpointProviderBindingForSession,
+  sandboxCommandExitCode,
+  sandboxCommandStillRunning,
   sweepModalOrphanSandboxes,
   terminateModalSandboxById,
+  verifySandboxExecReadiness,
   type ModalOrphanSweepTermination,
   type ModalCheckpointProviderBinding,
   type WorkspaceArchiveDescriptor,
@@ -1358,6 +1364,77 @@ async function sweepModalOrphansForConfiguredBackend(
 }
 
 /**
+ * A capture claim whose owning worker disappeared must not fence a workspace
+ * forever. The drain reaper reaches this seam only after every holder is gone.
+ * It resumes the exact attributed provider without replacement and proves that
+ * a no-op command can execute. A paused snapshot cannot pass that proof; a
+ * missing provider is returned as typed loss; every ambiguous error preserves
+ * the old claim for the next sweep.
+ */
+async function probeExpiredArchiveCaptureProvider(
+  settings: ActivityServices["settings"],
+  lease: LeaseSnapshot,
+): Promise<"ready" | "missing"> {
+  if (!lease.instanceId || !lease.resumeState) {
+    throw new Error("Expired workspace capture has no resumable provider identity");
+  }
+  const backend = (lease.resumeBackendId ?? lease.backend) as string;
+  let established: Awaited<ReturnType<typeof establishSandboxSessionFromEnvelope>>;
+  try {
+    established = await establishSandboxSessionFromEnvelope(settings, lease.resumeState, {
+      sessionId: `sandbox-capture-recovery:${lease.sandboxGroupId}`,
+      recovery: "resume-only",
+      backendOverride: backend as never,
+    });
+  } catch (error) {
+    if (isProviderSandboxNotFoundError(backend, error)) return "missing";
+    throw error;
+  }
+  if (established.instanceId !== lease.instanceId) {
+    throw new Error("Expired workspace capture resumed a different provider instance");
+  }
+  try {
+    if (established.backendId === "modal") {
+      await verifySandboxExecReadiness(established, RETAINED_PROCESS_PROVIDER_PROBE_TIMEOUT_MS);
+      return "ready";
+    }
+    const session = established.session as {
+      exec?: (args: {
+        cmd: string;
+        yieldTimeMs?: number;
+        maxOutputTokens?: number;
+      }) => Promise<unknown>;
+      execCommand?: (args: {
+        cmd: string;
+        yieldTimeMs?: number;
+        maxOutputTokens?: number;
+      }) => Promise<unknown>;
+    };
+    const run = session.exec ?? session.execCommand;
+    if (!run) throw new Error("Expired workspace capture provider has no readiness command");
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const result = await Promise.race([
+      run.call(session, { cmd: "true", yieldTimeMs: 1_000, maxOutputTokens: 1_000 }),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("Expired workspace capture readiness probe timed out")),
+          RETAINED_PROCESS_PROVIDER_PROBE_TIMEOUT_MS,
+        );
+      }),
+    ]).finally(() => {
+      if (timer) clearTimeout(timer);
+    });
+    if (sandboxCommandStillRunning(result) || sandboxCommandExitCode(result) !== 0) {
+      throw new Error("Expired workspace capture provider is not command-ready");
+    }
+    return "ready";
+  } catch (error) {
+    if (isProviderSandboxNotFoundError(backend, error)) return "missing";
+    throw error;
+  }
+}
+
+/**
  * Terminate one drainable box by id, then CAS its lease draining->cold under the
  * epoch fence. Returns true when the lease went cold (the box is ours to stop
  * and was stopped), false when a concurrent sweep / re-arm / newer epoch means
@@ -1402,16 +1479,65 @@ async function terminateDrainableBox(
     return false;
   }
 
-  const capturePreflight = lease.instanceId
-    ? await readWorkspaceArchiveCapturePreflight(db, {
+  const captureTimeoutMs = sandboxArchiveCaptureTimeoutMs(settings);
+  let captureClaim:
+    | NonNullable<
+        Extract<Awaited<ReturnType<typeof claimWorkspaceArchiveCapture>>, { status: "claimed" }>
+      >["claim"]
+    | null = null;
+  let providerMissingBeforeCapture = false;
+  if (lease.instanceId) {
+    if (lease.archiveCapture) {
+      if (lease.archiveCapture.deadlineAt.getTime() > Date.now()) {
+        // A live owner still holds the provider pause gate. It will release the
+        // exact claim on settlement; this sweep must not compete.
+        return false;
+      }
+      // A deadline is never evidence that a non-cancellable provider capture
+      // stopped. Without an exact resume envelope there is no safe way to prove
+      // the attributed provider is command-ready, so preserve the gate.
+      if (!lease.resumeState) return false;
+      const providerState = await probeExpiredArchiveCaptureProvider(settings, lease);
+      if (providerState === "missing") {
+        providerMissingBeforeCapture = true;
+        captureClaim = {
+          ...lease.archiveCapture,
+          leaseId: lease.id,
+          leaseEpoch: lease.leaseEpoch,
+          instanceId: lease.instanceId,
+          archiveGeneration: lease.archiveGeneration,
+          archiveComplete: lease.archiveComplete,
+        };
+      } else {
+        const replacement = await replaceExpiredWorkspaceArchiveCapture(db, {
+          accountId,
+          workspaceId: row.workspaceId,
+          sandboxGroupId: row.sandboxGroupId,
+          priorCaptureId: lease.archiveCapture.id,
+          captureId: randomUUID(),
+          expectedEpoch: row.leaseEpoch,
+          expectedInstanceId: lease.instanceId,
+          captureTimeoutMs,
+        });
+        if (!replacement) return false;
+        captureClaim = replacement;
+      }
+    } else {
+      const claimed = await claimWorkspaceArchiveCapture(db, {
         accountId,
         workspaceId: row.workspaceId,
         sandboxGroupId: row.sandboxGroupId,
+        captureId: randomUUID(),
         expectedEpoch: row.leaseEpoch,
         expectedInstanceId: lease.instanceId,
         liveness: "draining",
-      })
-    : null;
+        captureTimeoutMs,
+        minIntervalMs: 0,
+      });
+      if (claimed.status !== "claimed") return false;
+      captureClaim = claimed.claim;
+    }
+  }
 
   // The epoch-fenced PERSIST-onto-lease CAS the terminate seam calls AFTER it has
   // snapshotted the live box and BEFORE it terminates (sandbox-file-persistence).
@@ -1431,10 +1557,10 @@ async function terminateDrainableBox(
       ReturnType<typeof resolveModalCheckpointProviderBindingForSession>
     > | null,
   ) => {
-    // A live persistable provider must have passed an exact instance/generation
-    // preflight before capture. Without it we cannot prove that these bytes came
-    // from the lease row we are about to fold, so fail closed and leave it live.
-    if (!lease.instanceId || !capturePreflight) {
+    // A live persistable provider must own the exact durable capture claim.
+    // Without it we cannot prove that these bytes came from a provider that was
+    // admission-fenced for the full pause/capture interval.
+    if (!lease.instanceId || !captureClaim) {
       return { wrote: false, archiveRevision: null };
     }
     let checkpointArtifactId: string | null = null;
@@ -1454,7 +1580,7 @@ async function terminateDrainableBox(
         sourceLeaseId: lease.id,
         sourceLeaseEpoch: row.leaseEpoch,
         sourceInstanceId: lease.instanceId,
-        sourceWorkspaceGeneration: capturePreflight.workspaceGeneration,
+        sourceWorkspaceGeneration: captureClaim.workspaceGeneration,
         providerBindingKey: providerBinding.key,
         providerBinding: providerBinding.binding,
         workspaceArchive: archiveBase64,
@@ -1468,7 +1594,8 @@ async function terminateDrainableBox(
       sandboxGroupId: row.sandboxGroupId,
       expectedEpoch: row.leaseEpoch,
       expectedInstanceId: lease.instanceId,
-      expectedWorkspaceGeneration: capturePreflight.workspaceGeneration,
+      expectedWorkspaceGeneration: captureClaim.workspaceGeneration,
+      captureId: captureClaim.id,
     };
     let result: Awaited<ReturnType<typeof persistDrainSnapshot>>;
     if (archiveBase64 === null) {
@@ -1508,51 +1635,73 @@ async function terminateDrainableBox(
   // lease draining for a later sweep (NEVER terminate a box whose files we
   // could not capture). A persist CAS miss means the box was re-armed and left
   // running, so the cold commit is skipped.
-  const termination = await terminateBox(settings, lease, observability, persistArchive);
-  const terminated = typeof termination === "boolean" ? termination : termination.terminated;
-  if (!terminated) {
-    return false;
-  }
+  try {
+    const termination: ProviderTerminationOutcome | boolean = providerMissingBeforeCapture
+      ? { terminated: true, providerMissingBeforeCapture: true }
+      : await terminateBox(settings, lease, observability, persistArchive);
+    const terminated = typeof termination === "boolean" ? termination : termination.terminated;
+    if (!terminated) {
+      return false;
+    }
 
-  // The authoritative commit: CAS draining->cold under the epoch fence. If a
-  // late re-arm or newer epoch raced in after our re-read, wentCold:false and we
-  // report a skip (the box is down; a fresh acquire cold-restores it).
-  const { wentCold } = await confirmDrainCold(db, {
-    accountId,
-    workspaceId: row.workspaceId,
-    sandboxGroupId: row.sandboxGroupId,
-    expectedEpoch: row.leaseEpoch,
-    providerMissingBeforeCapture:
-      typeof termination === "boolean" ? false : termination.providerMissingBeforeCapture,
-  });
-  if (wentCold) {
-    // Durable termination record (sandbox-file-persistence observability): who
-    // ended this box and whether its /workspace was captured first, appended to
-    // every session sharing the group's box. Best-effort: attribution must
-    // never affect the drain outcome.
-    try {
-      await appendSessionEventToSandboxGroup(db, row.workspaceId, row.sandboxGroupId, {
-        type: "sandbox.box.terminated",
-        payload: {
-          actor: "reaper",
-          persisted,
-          archiveRevision,
-          instanceId: lease.instanceId,
-          providerMissingBeforeCapture:
-            typeof termination === "boolean" ? false : termination.providerMissingBeforeCapture,
-        },
-      });
-    } catch (eventError) {
-      observability.warn(
-        "sandbox reaper: box-terminated event write failed (drain outcome unaffected)",
-        {
+    const providerMissing =
+      providerMissingBeforeCapture ||
+      (typeof termination === "boolean" ? false : termination.providerMissingBeforeCapture);
+    // The authoritative commit: CAS draining->cold under the epoch fence. If a
+    // late re-arm or newer epoch raced in after our re-read, wentCold:false and we
+    // report a skip (the box is down; a fresh acquire cold-restores it).
+    const { wentCold } = await confirmDrainCold(db, {
+      accountId,
+      workspaceId: row.workspaceId,
+      sandboxGroupId: row.sandboxGroupId,
+      expectedEpoch: row.leaseEpoch,
+      providerMissingBeforeCapture: providerMissing,
+    });
+    if (wentCold) {
+      // Durable termination record (sandbox-file-persistence observability): who
+      // ended this box and whether its /workspace was captured first, appended to
+      // every session sharing the group's box. Best-effort: attribution must
+      // never affect the drain outcome.
+      try {
+        await appendSessionEventToSandboxGroup(db, row.workspaceId, row.sandboxGroupId, {
+          type: "sandbox.box.terminated",
+          payload: {
+            actor: "reaper",
+            persisted,
+            archiveRevision,
+            instanceId: lease.instanceId,
+            providerMissingBeforeCapture: providerMissing,
+          },
+        });
+      } catch (eventError) {
+        observability.warn(
+          "sandbox reaper: box-terminated event write failed (drain outcome unaffected)",
+          {
+            sandboxGroupId: row.sandboxGroupId,
+            error: eventError instanceof Error ? eventError.message : String(eventError),
+          },
+        );
+      }
+    }
+    return wentCold;
+  } finally {
+    if (captureClaim && lease.instanceId) {
+      await releaseWorkspaceArchiveCapture(db, {
+        accountId,
+        workspaceId: row.workspaceId,
+        sandboxGroupId: row.sandboxGroupId,
+        captureId: captureClaim.id,
+        expectedEpoch: row.leaseEpoch,
+        expectedInstanceId: lease.instanceId,
+      }).catch((error) => {
+        observability.warn("sandbox reaper: archive capture gate release failed", {
           sandboxGroupId: row.sandboxGroupId,
-          error: eventError instanceof Error ? eventError.message : String(eventError),
-        },
-      );
+          leaseEpoch: row.leaseEpoch,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
     }
   }
-  return wentCold;
 }
 
 // The persist-capable slice of a live provider session. persistWorkspace()

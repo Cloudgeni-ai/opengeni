@@ -9,6 +9,7 @@ import {
   type WorkspaceArchiveDescriptor,
   type WorkspaceTreeFingerprint,
 } from "@opengeni/contracts";
+import { withSandboxProviderCapture } from "./provider-operation-gate";
 
 export {
   WORKSPACE_ARCHIVE_DESCRIPTOR_VERSION,
@@ -302,6 +303,15 @@ function fingerprintsEqual(a: WorkspaceTreeFingerprint, b: WorkspaceTreeFingerpr
 export async function captureVerifiedWorkspaceArchive(
   session: unknown,
   capturedAtMs = Date.now(),
+): Promise<VerifiedWorkspaceArchive> {
+  return await withSandboxProviderCapture(session, async () => {
+    return await captureVerifiedWorkspaceArchiveExclusive(session, capturedAtMs);
+  });
+}
+
+async function captureVerifiedWorkspaceArchiveExclusive(
+  session: unknown,
+  capturedAtMs: number,
 ): Promise<VerifiedWorkspaceArchive> {
   const target = session as WorkspaceSession;
   if (typeof target.persistWorkspace !== "function") {

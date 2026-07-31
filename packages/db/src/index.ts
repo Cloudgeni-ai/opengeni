@@ -19834,6 +19834,10 @@ type LeaseRow = {
   lease_epoch: number | string;
   workspace_generation: number | string;
   archive_generation: number | string | null;
+  archive_capture_id: string | null;
+  archive_capture_generation: number | string | null;
+  archive_capture_started_at: Date | string | null;
+  archive_capture_deadline_at: Date | string | null;
   resume_backend_id: string | null;
   resume_state: Record<string, unknown> | null;
   last_meter_at: Date | string | null;
@@ -19879,6 +19883,13 @@ export interface LeaseSnapshot {
   /** True only when the current verified archive represents the exact current
    * workspace generation. This is numeric/boolean truth, never archive content. */
   archiveComplete: boolean;
+  /** Exact provider capture currently holding the lease-local admission gate. */
+  archiveCapture: {
+    id: string;
+    workspaceGeneration: number;
+    startedAt: Date;
+    deadlineAt: Date;
+  } | null;
   resumeBackendId: string | null;
   resumeState: Record<string, unknown> | null;
   /** Provider/archive/restore/workspace truth, deliberately separate from the
@@ -19940,6 +19951,9 @@ export interface AcquireLeaseInput {
   // Optional epoch fence for a re-establishing turn holder: when set, the
   // turn-arrival increment is gated on lease_epoch == expectedEpoch (split-brain).
   expectedEpoch?: number;
+  /** Bounded wait for an exact provider-native capture claim to settle. The
+   * transaction is released between retries; every retry re-reads the lease. */
+  captureWaitMs?: number;
 }
 
 export type AcquireLeaseResult =
@@ -20057,6 +20071,24 @@ function mapLeaseRow(row: LeaseRow): LeaseSnapshot {
       recovery.archive.status === "available" &&
       archiveGeneration !== null &&
       archiveGeneration === workspaceGeneration,
+    archiveCapture:
+      row.archive_capture_id === null ||
+      row.archive_capture_generation === null ||
+      row.archive_capture_started_at === null ||
+      row.archive_capture_deadline_at === null
+        ? null
+        : {
+            id: row.archive_capture_id,
+            workspaceGeneration: Number(row.archive_capture_generation),
+            startedAt:
+              row.archive_capture_started_at instanceof Date
+                ? row.archive_capture_started_at
+                : new Date(row.archive_capture_started_at),
+            deadlineAt:
+              row.archive_capture_deadline_at instanceof Date
+                ? row.archive_capture_deadline_at
+                : new Date(row.archive_capture_deadline_at),
+          },
     resumeBackendId: row.resume_backend_id,
     resumeState: row.resume_state,
     recovery,
@@ -20365,7 +20397,7 @@ async function upsertLeaseHolder(
 // §4.1 — the get-or-create critical section. ONE transaction:
 // insert-or-nothing -> SELECT … FOR UPDATE (block, not skip) -> branch -> bump.
 // The single most load-bearing function: the sole double-spawn guard.
-export async function acquireLease(
+async function acquireLeaseOnce(
   db: Database,
   input: AcquireLeaseInput,
 ): Promise<AcquireLeaseResult> {
@@ -20412,6 +20444,13 @@ export async function acquireLease(
         if (!row) throw new Error(`Lease row vanished post-insert: ${sandboxGroupId}`);
 
         const liveness = row.liveness;
+
+        // Provider-native capture may temporarily pause the box. Do not attach
+        // another holder while that operation owns the exact lease: the caller
+        // retries after the claim clears, before it can reach the provider.
+        if (row.archive_capture_id !== null) {
+          return { role: "fenced" as const, lease: mapLeaseRow(row) };
+        }
 
         // A finite-lifetime provider instance is already being replaced. Do not
         // admit another holder onto the old box: the current holders own its
@@ -20564,6 +20603,34 @@ export async function acquireLease(
         return { role: "attached" as const, lease: mapLeaseRow(updated) };
       }),
   );
+}
+
+function waitForLeaseArchiveCapture(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export async function acquireLease(
+  db: Database,
+  input: AcquireLeaseInput,
+): Promise<AcquireLeaseResult> {
+  const captureWaitMs = input.captureWaitMs ?? 0;
+  if (!Number.isSafeInteger(captureWaitMs) || captureWaitMs < 0 || captureWaitMs > 60 * 60_000) {
+    throw new Error("Sandbox lease archive capture wait is invalid");
+  }
+  const deadline = Date.now() + captureWaitMs;
+  let delayMs = 25;
+  for (;;) {
+    const result = await acquireLeaseOnce(db, input);
+    if (
+      result.role !== "fenced" ||
+      result.lease.archiveCapture === null ||
+      Date.now() >= deadline
+    ) {
+      return result;
+    }
+    await waitForLeaseArchiveCapture(Math.min(delayMs, Math.max(1, deadline - Date.now())));
+    delayMs = Math.min(500, delayMs * 2);
+  }
 }
 
 export type SandboxCheckpointRestoreArtifact = {
@@ -21106,6 +21173,10 @@ export async function failSandboxRematerialization(
             provider_deadline_at = null,
             rotation_requested_at = null,
             rotation_reason = null,
+            archive_capture_id = null,
+            archive_capture_generation = null,
+            archive_capture_started_at = null,
+            archive_capture_deadline_at = null,
             updated_at = now()
           where id = ${row.id}
             and liveness = 'warming'
@@ -23271,6 +23342,10 @@ export async function markWarmLeaseInstanceLost(
             provider_deadline_at = null,
             rotation_requested_at = null,
             rotation_reason = null,
+            archive_capture_id = null,
+            archive_capture_generation = null,
+            archive_capture_started_at = null,
+            archive_capture_deadline_at = null,
             updated_at = now()
           where id = ${current.id}
           returning *
@@ -23574,6 +23649,10 @@ export async function failWarmingToCold(
             provider_deadline_at = null,
             rotation_requested_at = null,
             rotation_reason = null,
+            archive_capture_id = null,
+            archive_capture_generation = null,
+            archive_capture_started_at = null,
+            archive_capture_deadline_at = null,
             updated_at = now()
           where id = ${row.id}
             and liveness = 'warming'
@@ -23983,7 +24062,10 @@ export async function reapStaleLeaseHolders(
             resume_state = ${resetResumeState ? JSON.stringify(resetResumeState) : null}::jsonb,
             data_plane_url = null, terminal_data_plane_url = null,
             provider_created_at = null, provider_deadline_at = null,
-            rotation_requested_at = null, rotation_reason = null, updated_at = now()
+            rotation_requested_at = null, rotation_reason = null,
+            archive_capture_id = null, archive_capture_generation = null,
+            archive_capture_started_at = null, archive_capture_deadline_at = null,
+            updated_at = now()
           where id = ${row.id}
             and liveness = 'warming'
             and lease_epoch = ${Number(row.lease_epoch)}
@@ -24275,6 +24357,7 @@ export async function reArmDrainingLease(
         where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
           and liveness = 'draining'
           and expires_at > now()
+          and archive_capture_id is null
         returning id
       `);
       return { rearmed: rows.length > 0 };
@@ -24405,6 +24488,10 @@ export async function confirmDrainCold(
           provider_deadline_at = null,
           rotation_requested_at = null,
           rotation_reason = null,
+          archive_capture_id = null,
+          archive_capture_generation = null,
+          archive_capture_started_at = null,
+          archive_capture_deadline_at = null,
           updated_at = now()
         where id = ${row.id}
           and liveness = 'draining'
@@ -24449,6 +24536,7 @@ export class SandboxWorkspaceMutationFencedError extends Error {
       | "lease_fenced"
       | "route_fenced"
       | "process_fenced"
+      | "capture_in_progress"
       | "admission_fenced"
       | "operation_invalid"
       | "generation_exhausted",
@@ -25045,7 +25133,7 @@ async function lockWorkspaceMutationAuthorityTx(
   };
 }
 
-async function advanceWorkspaceGenerationForAuthority(
+async function advanceWorkspaceGenerationForAuthorityOnce(
   db: Database,
   authority: WorkspaceMutationAuthority,
   operationInput: string,
@@ -25085,6 +25173,7 @@ async function advanceWorkspaceGenerationForAuthority(
               and lease.sandbox_group_id = ${locked.sandboxGroupId}
               and lease.liveness = 'warm'
               and lease.rotation_requested_at is null
+              and lease.archive_capture_id is null
               and lease.lease_epoch = ${locked.expectedEpoch}
               and lease.instance_id = ${locked.expectedInstanceId}
               and (${locked.expectedLeaseId}::uuid is null or lease.id = ${locked.expectedLeaseId}::uuid)
@@ -25125,6 +25214,7 @@ async function advanceWorkspaceGenerationForAuthority(
             workspace_generation: number | string;
             lease_current: boolean;
             holder_current: boolean;
+            capture_in_progress: boolean;
           }>(sql`
             select lease.workspace_generation,
               (
@@ -25136,6 +25226,7 @@ async function advanceWorkspaceGenerationForAuthority(
                 and (${locked.expectedLeaseId}::uuid is null or lease.id = ${locked.expectedLeaseId}::uuid)
                 and (${locked.expectedBackend}::text is null or lease.backend = ${locked.expectedBackend}::text)
               ) as lease_current,
+              (lease.archive_capture_id is not null) as capture_in_progress,
               exists (
                 select 1 from sandbox_lease_holders as holder
                 where holder.lease_id = lease.id
@@ -25163,6 +25254,12 @@ async function advanceWorkspaceGenerationForAuthority(
               "Workspace mutation rejected because the exact lease holder is absent",
             );
           }
+          if (current[0]?.lease_current && current[0].capture_in_progress) {
+            throw new SandboxWorkspaceMutationFencedError(
+              "capture_in_progress",
+              "Workspace mutation is waiting for the exact provider archive capture to settle",
+            );
+          }
           throw new SandboxWorkspaceMutationFencedError(
             "lease_fenced",
             "Workspace mutation rejected by lease epoch/provider fence",
@@ -25171,6 +25268,40 @@ async function advanceWorkspaceGenerationForAuthority(
         return mapWorkspaceMutationAdmission(row);
       }),
   );
+}
+
+function waitForWorkspaceArchiveCapturePoll(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function advanceWorkspaceGenerationForAuthority(
+  db: Database,
+  authority: WorkspaceMutationAuthority,
+  operationInput: string,
+  captureWaitMs = 0,
+): Promise<SandboxWorkspaceMutationAdmission> {
+  if (!Number.isSafeInteger(captureWaitMs) || captureWaitMs < 0 || captureWaitMs > 60 * 60_000) {
+    throw new Error("Workspace archive capture wait is invalid");
+  }
+  const deadline = Date.now() + captureWaitMs;
+  let delayMs = 25;
+  for (;;) {
+    try {
+      return await advanceWorkspaceGenerationForAuthorityOnce(db, authority, operationInput);
+    } catch (error) {
+      if (
+        !(error instanceof SandboxWorkspaceMutationFencedError) ||
+        error.code !== "capture_in_progress" ||
+        Date.now() >= deadline
+      ) {
+        throw error;
+      }
+      await waitForWorkspaceArchiveCapturePoll(
+        Math.min(delayMs, Math.max(1, deadline - Date.now())),
+      );
+      delayMs = Math.min(500, delayMs * 2);
+    }
+  }
 }
 
 /**
@@ -25194,6 +25325,9 @@ export async function advanceWorkspaceGeneration(
     expectedEpoch: number;
     expectedInstanceId: string;
     operation: string;
+    /** Wait before provider admission while an exact archive capture owns this
+     * lease. The attempt/route fences are re-read on every bounded retry. */
+    captureWaitMs?: number;
     /** Active-routed mutations bind to the exact session pointer. Omitted means
      * an intentional home-provider write outside the routing surface. */
     routeKind?: "home" | "active";
@@ -25221,6 +25355,7 @@ export async function advanceWorkspaceGeneration(
       ...(input.routeEpoch === undefined ? {} : { routeEpoch: input.routeEpoch }),
     },
     input.operation,
+    input.captureWaitMs,
   );
 }
 
@@ -25241,12 +25376,14 @@ export async function advanceWorkspaceGenerationForDirectRequest(
     routeTargetId: string | null;
     routeEpoch: number;
     operation: string;
+    captureWaitMs?: number;
   },
 ): Promise<SandboxWorkspaceMutationAdmission> {
   return await advanceWorkspaceGenerationForAuthority(
     db,
     { kind: "direct", routeKind: "active", ...input },
     input.operation,
+    input.captureWaitMs,
   );
 }
 
@@ -25261,12 +25398,14 @@ export async function advanceWorkspaceGenerationForRetainedProcess(
     sessionId: string;
     processId: string;
     operation: string;
+    captureWaitMs?: number;
   },
 ): Promise<SandboxWorkspaceMutationAdmission> {
   return await advanceWorkspaceGenerationForAuthority(
     db,
     { kind: "process", ...input },
     input.operation,
+    input.captureWaitMs,
   );
 }
 
@@ -26681,6 +26820,419 @@ export async function readWorkspaceArchiveCapturePreflight(
   );
 }
 
+export type WorkspaceArchiveCaptureClaim = {
+  id: string;
+  leaseId: string;
+  leaseEpoch: number;
+  instanceId: string;
+  workspaceGeneration: number;
+  archiveGeneration: number | null;
+  archiveComplete: boolean;
+  startedAt: Date;
+  deadlineAt: Date;
+};
+
+export type ClaimWorkspaceArchiveCaptureResult =
+  | { status: "claimed"; claim: WorkspaceArchiveCaptureClaim; lease: LeaseSnapshot }
+  | {
+      status:
+        | "lease_fenced"
+        | "attempt_fenced"
+        | "capture_in_progress"
+        | "holder_in_progress"
+        | "mutation_in_progress"
+        | "throttled";
+    };
+
+/**
+ * Atomically reserve one live provider for archive capture. Modal pauses a box
+ * during native snapshot creation, so a read-only generation preflight is not
+ * sufficient: every later holder acquisition and mutation admission must see
+ * this durable claim before provider capture begins.
+ */
+export async function claimWorkspaceArchiveCapture(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    captureId: string;
+    expectedEpoch: number;
+    expectedInstanceId: string;
+    liveness: "warm" | "draining";
+    captureTimeoutMs: number;
+    minIntervalMs: number;
+    warmAttempt?: {
+      sessionId: string;
+      turnId: string;
+      attemptId: string;
+      holderId: string;
+    };
+  },
+): Promise<ClaimWorkspaceArchiveCaptureResult> {
+  if (
+    !Number.isSafeInteger(input.captureTimeoutMs) ||
+    input.captureTimeoutMs <= 0 ||
+    input.captureTimeoutMs > 60 * 60_000
+  ) {
+    throw new Error("Workspace archive capture timeout is invalid");
+  }
+  if (
+    !Number.isSafeInteger(input.minIntervalMs) ||
+    input.minIntervalMs < 0 ||
+    input.minIntervalMs > 24 * 60 * 60_000
+  ) {
+    throw new Error("Workspace archive capture interval is invalid");
+  }
+  if ((input.liveness === "warm") !== (input.warmAttempt !== undefined)) {
+    throw new Error("Warm workspace archive capture requires its exact turn attempt");
+  }
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      if (input.warmAttempt) {
+        await lockWorkspaceInferenceControl(scopedDb, input.workspaceId, "share");
+        const [attempt] = await scopedDb
+          .select({
+            accountId: schema.sessionTurnAttempts.accountId,
+            state: schema.sessionTurnAttempts.state,
+            outcome: schema.sessionTurnAttempts.outcome,
+            activeAttemptId: schema.sessionTurns.activeAttemptId,
+            sandboxGroupId: schema.sessions.sandboxGroupId,
+          })
+          .from(schema.sessionTurnAttempts)
+          .innerJoin(
+            schema.sessionTurns,
+            and(
+              eq(schema.sessionTurns.workspaceId, schema.sessionTurnAttempts.workspaceId),
+              eq(schema.sessionTurns.sessionId, schema.sessionTurnAttempts.sessionId),
+              eq(schema.sessionTurns.id, schema.sessionTurnAttempts.turnId),
+              eq(
+                schema.sessionTurns.executionGeneration,
+                schema.sessionTurnAttempts.executionGeneration,
+              ),
+            ),
+          )
+          .innerJoin(
+            schema.sessions,
+            and(
+              eq(schema.sessions.workspaceId, schema.sessionTurnAttempts.workspaceId),
+              eq(schema.sessions.id, schema.sessionTurnAttempts.sessionId),
+            ),
+          )
+          .where(
+            and(
+              eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
+              eq(schema.sessionTurnAttempts.sessionId, input.warmAttempt.sessionId),
+              eq(schema.sessionTurnAttempts.turnId, input.warmAttempt.turnId),
+              eq(schema.sessionTurnAttempts.id, input.warmAttempt.attemptId),
+            ),
+          )
+          .limit(1);
+        const [interruption] = attempt
+          ? await scopedDb
+              .select({ id: schema.sessionAttemptInterruptions.id })
+              .from(schema.sessionAttemptInterruptions)
+              .where(
+                and(
+                  eq(schema.sessionAttemptInterruptions.workspaceId, input.workspaceId),
+                  eq(schema.sessionAttemptInterruptions.sessionId, input.warmAttempt.sessionId),
+                  eq(schema.sessionAttemptInterruptions.attemptId, input.warmAttempt.attemptId),
+                ),
+              )
+              .limit(1)
+          : [];
+        const attemptMayCapture =
+          attempt !== undefined &&
+          attempt.accountId === input.accountId &&
+          attempt.sandboxGroupId === input.sandboxGroupId &&
+          attempt.activeAttemptId === input.warmAttempt.attemptId &&
+          !interruption &&
+          (attempt.state === "claimed" || attempt.state === "running"
+            ? attempt.outcome === null
+            : attempt.state === "closed" &&
+              (attempt.outcome === "completed" ||
+                attempt.outcome === "failed" ||
+                attempt.outcome === "requires_action"));
+        if (!attemptMayCapture) return { status: "attempt_fenced" as const };
+      }
+
+      const rows = await scopedDb.execute<LeaseRow>(sql`
+        select lease.*
+        from sandbox_leases lease
+        where lease.account_id = ${input.accountId}
+          and lease.workspace_id = ${input.workspaceId}
+          and lease.sandbox_group_id = ${input.sandboxGroupId}
+        for update
+      `);
+      const row = rows[0];
+      if (
+        !row ||
+        row.liveness !== input.liveness ||
+        (input.liveness === "draining" && Number(row.refcount) !== 0) ||
+        Number(row.lease_epoch) !== input.expectedEpoch ||
+        row.instance_id !== input.expectedInstanceId
+      ) {
+        return { status: "lease_fenced" as const };
+      }
+      if (row.archive_capture_id !== null) {
+        return { status: "capture_in_progress" as const };
+      }
+      const holderCounts = input.warmAttempt
+        ? await scopedDb.execute<{
+            total: number;
+            exact: number;
+          }>(sql`
+            select
+              count(*)::integer as total,
+              count(*) filter (
+                where kind = 'turn'
+                  and holder_id = ${input.warmAttempt.holderId}
+              )::integer as exact
+            from sandbox_lease_holders
+            where lease_id = ${row.id}
+          `)
+        : await scopedDb.execute<{
+            total: number;
+            exact: number;
+          }>(sql`
+            select count(*)::integer as total, 0::integer as exact
+            from sandbox_lease_holders
+            where lease_id = ${row.id}
+          `);
+      if (input.warmAttempt && holderCounts[0]?.exact !== 1) {
+        return { status: "attempt_fenced" as const };
+      }
+      // The durable claim blocks new acquisitions. Requiring the warm owner to
+      // be the sole holder means every other worker/session has relinquished its
+      // provider handle before capture can pause the box. A viewer is not
+      // passive: its scoped noVNC/PTY tunnel can mutate the workspace without a
+      // control-plane generation admission. Never delete a live viewer receipt
+      // and snapshot behind that still-valid tunnel. A skipped turn-end capture
+      // is recovered by the zero-holder drain capture after the viewer detaches.
+      const expectedHolderCount = input.warmAttempt ? 1 : 0;
+      if ((holderCounts[0]?.total ?? 0) !== expectedHolderCount) {
+        return { status: "holder_in_progress" as const };
+      }
+      const unsettled = await scopedDb.execute<{ present: boolean }>(sql`
+        select exists (
+          select 1
+          from sandbox_workspace_mutation_admissions admission
+          left join session_turn_attempts attempt
+            on attempt.account_id = admission.account_id
+           and attempt.workspace_id = admission.workspace_id
+           and attempt.session_id = admission.session_id
+           and attempt.turn_id = admission.turn_id
+           and attempt.id = admission.attempt_id
+           and attempt.execution_generation = admission.execution_generation
+           and admission.actor_kind = 'turn'
+          where admission.lease_id = ${row.id}
+            and admission.lease_epoch = ${input.expectedEpoch}
+            and admission.provider_backend = ${row.backend}
+            and admission.provider_instance_id = ${input.expectedInstanceId}
+            and admission.workspace_generation <= ${Number(row.workspace_generation)}
+            and admission.settled_at is null
+            and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
+        ) as present
+      `);
+      if (unsettled[0]?.present) {
+        return { status: "mutation_in_progress" as const };
+      }
+      const sessionState =
+        row.resume_state?.sessionState && typeof row.resume_state.sessionState === "object"
+          ? (row.resume_state.sessionState as Record<string, unknown>)
+          : null;
+      const priorAtRaw = sessionState?.workspaceArchiveAt;
+      const priorAtMs = typeof priorAtRaw === "string" ? Date.parse(priorAtRaw) : Number.NaN;
+      const archiveGeneration =
+        row.archive_generation === null ? null : Number(row.archive_generation);
+      const archiveComplete =
+        archiveGeneration !== null &&
+        archiveGeneration === Number(row.workspace_generation) &&
+        recoveryStateFromLeaseRow(row).archive.status === "available";
+      if (
+        input.minIntervalMs > 0 &&
+        archiveComplete &&
+        Number.isFinite(priorAtMs) &&
+        Date.now() - priorAtMs < input.minIntervalMs
+      ) {
+        return { status: "throttled" as const };
+      }
+
+      const startedAt = new Date();
+      // The deadline is diagnostic/reconciliation truth, never permission to
+      // clear a possibly still-running provider operation. Normal completion
+      // clears the exact claim; stale recovery must first prove provider safety.
+      const deadlineAt = new Date(startedAt.getTime() + input.captureTimeoutMs);
+      const claimed = await scopedDb.execute<LeaseRow>(sql`
+        update sandbox_leases set
+          archive_capture_id = ${input.captureId}::uuid,
+          archive_capture_generation = workspace_generation,
+          archive_capture_started_at = ${startedAt.toISOString()}::timestamptz,
+          archive_capture_deadline_at = ${deadlineAt.toISOString()}::timestamptz,
+          updated_at = now()
+        where id = ${row.id}
+          and archive_capture_id is null
+          and workspace_generation = ${Number(row.workspace_generation)}
+        returning *
+      `);
+      const lease = claimed[0];
+      if (!lease) return { status: "capture_in_progress" as const };
+      const instanceId = lease.instance_id;
+      if (!instanceId) {
+        throw new Error("Workspace archive capture claim returned no provider instance");
+      }
+      return {
+        status: "claimed" as const,
+        claim: {
+          id: input.captureId,
+          leaseId: lease.id,
+          leaseEpoch: Number(lease.lease_epoch),
+          instanceId,
+          workspaceGeneration: Number(lease.workspace_generation),
+          archiveGeneration,
+          archiveComplete,
+          startedAt,
+          deadlineAt,
+        },
+        lease: mapLeaseRow(lease),
+      };
+    },
+  );
+}
+
+/** Clear only the exact capture owner. A stale callback cannot release a
+ * successor claim or a replacement provider epoch. */
+export async function releaseWorkspaceArchiveCapture(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    captureId: string;
+    expectedEpoch: number;
+    expectedInstanceId: string;
+  },
+): Promise<boolean> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb.execute<{ id: string }>(sql`
+        update sandbox_leases set
+          archive_capture_id = null,
+          archive_capture_generation = null,
+          archive_capture_started_at = null,
+          archive_capture_deadline_at = null,
+          updated_at = now()
+        where workspace_id = ${input.workspaceId}
+          and sandbox_group_id = ${input.sandboxGroupId}
+          and lease_epoch = ${input.expectedEpoch}
+          and instance_id = ${input.expectedInstanceId}
+          and archive_capture_id = ${input.captureId}::uuid
+        returning id
+      `);
+      return rows.length === 1;
+    },
+  );
+}
+
+/**
+ * Replace an expired capture claim without ever opening the admission gate.
+ * This is reserved for the zero-holder drain reaper after it has independently
+ * proved the exact provider is command-ready (and therefore no longer paused by
+ * the dead owner's capture). The old claim remains authoritative on every miss.
+ */
+export async function replaceExpiredWorkspaceArchiveCapture(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    priorCaptureId: string;
+    captureId: string;
+    expectedEpoch: number;
+    expectedInstanceId: string;
+    captureTimeoutMs: number;
+  },
+): Promise<WorkspaceArchiveCaptureClaim | null> {
+  if (
+    !Number.isSafeInteger(input.captureTimeoutMs) ||
+    input.captureTimeoutMs <= 0 ||
+    input.captureTimeoutMs > 60 * 60_000
+  ) {
+    throw new Error("Workspace archive capture timeout is invalid");
+  }
+  const startedAt = new Date();
+  const deadlineAt = new Date(startedAt.getTime() + input.captureTimeoutMs);
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb.execute<LeaseRow>(sql`
+        update sandbox_leases as lease set
+          archive_capture_id = ${input.captureId}::uuid,
+          archive_capture_generation = lease.workspace_generation,
+          archive_capture_started_at = ${startedAt.toISOString()}::timestamptz,
+          archive_capture_deadline_at = ${deadlineAt.toISOString()}::timestamptz,
+          updated_at = now()
+        where lease.workspace_id = ${input.workspaceId}
+          and lease.sandbox_group_id = ${input.sandboxGroupId}
+          and lease.liveness = 'draining'
+          and lease.refcount = 0
+          and lease.lease_epoch = ${input.expectedEpoch}
+          and lease.instance_id = ${input.expectedInstanceId}
+          and lease.archive_capture_id = ${input.priorCaptureId}::uuid
+          and lease.archive_capture_generation = lease.workspace_generation
+          and lease.archive_capture_deadline_at <= now()
+          and not exists (
+            select 1 from sandbox_lease_holders holder
+            where holder.lease_id = lease.id
+          )
+          and not exists (
+            select 1
+            from sandbox_workspace_mutation_admissions admission
+            left join session_turn_attempts attempt
+              on attempt.account_id = admission.account_id
+             and attempt.workspace_id = admission.workspace_id
+             and attempt.session_id = admission.session_id
+             and attempt.turn_id = admission.turn_id
+             and attempt.id = admission.attempt_id
+             and attempt.execution_generation = admission.execution_generation
+             and admission.actor_kind = 'turn'
+            where admission.lease_id = lease.id
+              and admission.lease_epoch = lease.lease_epoch
+              and admission.provider_backend = lease.backend
+              and admission.provider_instance_id = lease.instance_id
+              and admission.workspace_generation <= lease.workspace_generation
+              and admission.settled_at is null
+              and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
+          )
+        returning lease.*
+      `);
+      const lease = rows[0];
+      if (!lease) return null;
+      const instanceId = lease.instance_id;
+      if (!instanceId) {
+        throw new Error("Replacement workspace archive capture returned no provider instance");
+      }
+      return {
+        id: input.captureId,
+        leaseId: lease.id,
+        leaseEpoch: Number(lease.lease_epoch),
+        instanceId,
+        workspaceGeneration: Number(lease.workspace_generation),
+        archiveGeneration:
+          lease.archive_generation === null ? null : Number(lease.archive_generation),
+        archiveComplete: hasCompleteWorkspaceArchive(lease),
+        startedAt,
+        deadlineAt,
+      };
+    },
+  );
+}
+
 export type SandboxCheckpointArtifactState =
   | "candidate"
   | "current"
@@ -27341,6 +27893,7 @@ export async function persistDrainSnapshot(
     expectedEpoch: number;
     expectedInstanceId: string;
     expectedWorkspaceGeneration: number;
+    captureId: string;
   } & (
     | {
         /** Null performs only the epoch/instance/generation CAS check. */
@@ -27408,6 +27961,8 @@ export async function persistDrainSnapshot(
           and lease.lease_epoch = ${input.expectedEpoch}
           and lease.instance_id = ${input.expectedInstanceId}
           and lease.workspace_generation = ${input.expectedWorkspaceGeneration}
+          and lease.archive_capture_id = ${input.captureId}::uuid
+          and lease.archive_capture_generation = ${input.expectedWorkspaceGeneration}
           and not exists (
             select 1
             from sandbox_workspace_mutation_admissions as admission
@@ -27440,6 +27995,19 @@ export async function persistDrainSnapshot(
       // null workspaceArchive = pure CAS-check (re-arm guard for no-archive backends).
       // The FOR UPDATE lock above is the only synchronization needed; no write.
       if (input.workspaceArchive === null) {
+        await scopedDb.execute(sql`
+          update sandbox_leases set
+            archive_capture_id = null,
+            archive_capture_generation = null,
+            archive_capture_started_at = null,
+            archive_capture_deadline_at = null,
+            updated_at = now()
+          where workspace_id = ${input.workspaceId}
+            and sandbox_group_id = ${input.sandboxGroupId}
+            and lease_epoch = ${input.expectedEpoch}
+            and instance_id = ${input.expectedInstanceId}
+            and archive_capture_id = ${input.captureId}::uuid
+        `);
         return {
           wrote: true,
           archiveRevision: null,
@@ -27462,6 +28030,7 @@ export async function persistDrainSnapshot(
         expectedEpoch: input.expectedEpoch,
         expectedInstanceId: input.expectedInstanceId,
         expectedWorkspaceGeneration: input.expectedWorkspaceGeneration,
+        captureId: input.captureId,
         workspaceArchive: input.workspaceArchive,
         workspaceArchiveMeta,
         resumeState: guard[0]!.resume_state,
@@ -27552,6 +28121,7 @@ async function foldWorkspaceArchiveOntoLease(
     expectedEpoch: number;
     expectedInstanceId: string;
     expectedWorkspaceGeneration: number;
+    captureId: string;
     workspaceArchive: string;
     workspaceArchiveMeta: SandboxArchiveRevision | null;
     resumeState: Record<string, unknown> | null;
@@ -27616,6 +28186,10 @@ async function foldWorkspaceArchiveOntoLease(
       archive_generation = ${input.expectedWorkspaceGeneration},
       current_checkpoint_artifact_id = ${input.checkpointArtifactId}::uuid,
       previous_checkpoint_artifact_id = ${input.previousCheckpointArtifactId}::uuid,
+      archive_capture_id = null,
+      archive_capture_generation = null,
+      archive_capture_started_at = null,
+      archive_capture_deadline_at = null,
       updated_at = now()
     where lease.workspace_id = ${input.workspaceId}
       and lease.sandbox_group_id = ${input.sandboxGroupId}
@@ -27623,6 +28197,8 @@ async function foldWorkspaceArchiveOntoLease(
       and lease.lease_epoch = ${input.expectedEpoch}
       and lease.instance_id = ${input.expectedInstanceId}
       and lease.workspace_generation = ${input.expectedWorkspaceGeneration}
+      and lease.archive_capture_id = ${input.captureId}::uuid
+      and lease.archive_capture_generation = ${input.expectedWorkspaceGeneration}
       and (
         ${input.checkpointArtifactId}::uuid is null
         or exists (
@@ -27730,6 +28306,7 @@ export async function persistWarmSnapshot(
     expectedEpoch: number;
     expectedInstanceId: string;
     expectedWorkspaceGeneration: number;
+    captureId: string;
     /** base64 of the provider snapshot-ref / tar archive from persistWorkspace(). */
     workspaceArchive: string;
     /** Exact verified archive/tree descriptor produced by the runtime capture. */
@@ -27855,6 +28432,8 @@ export async function persistWarmSnapshot(
           and lease.lease_epoch = ${input.expectedEpoch}
           and lease.instance_id = ${input.expectedInstanceId}
           and lease.workspace_generation = ${input.expectedWorkspaceGeneration}
+          and lease.archive_capture_id = ${input.captureId}::uuid
+          and lease.archive_capture_generation = ${input.expectedWorkspaceGeneration}
           and not exists (
             select 1
             from sandbox_workspace_mutation_admissions as admission
@@ -27934,6 +28513,7 @@ export async function persistWarmSnapshot(
         expectedEpoch: input.expectedEpoch,
         expectedInstanceId: input.expectedInstanceId,
         expectedWorkspaceGeneration: input.expectedWorkspaceGeneration,
+        captureId: input.captureId,
         workspaceArchive: input.workspaceArchive,
         workspaceArchiveMeta,
         resumeState: guard[0]!.resume_state,
