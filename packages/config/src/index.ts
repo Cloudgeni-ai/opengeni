@@ -43,10 +43,7 @@ const EnvBoolean = z.preprocess((value) => {
   return value;
 }, z.boolean());
 
-export const sandboxPreparationProfiles: Record<
-  string,
-  { env: string[]; hooks: string[] }
-> = {
+export const sandboxPreparationProfiles: Record<string, { env: string[]; hooks: string[] }> = {
   none: {
     env: [],
     hooks: [],
@@ -174,9 +171,7 @@ export const McpServerConnectionRefSchema = z
       });
     }
   });
-export type McpServerConnectionRef = z.infer<
-  typeof McpServerConnectionRefSchema
->;
+export type McpServerConnectionRef = z.infer<typeof McpServerConnectionRefSchema>;
 
 const SettingsSchema = z.object({
   serviceName: z.string().default("opengeni"),
@@ -185,9 +180,7 @@ const SettingsSchema = z.object({
   // The release-train version baked into official images (OPENGENI_SERVER_VERSION).
   // Absent on dev/source builds — consumers must treat it as optional.
   serverVersion: z.string().optional(),
-  databaseUrl: z
-    .string()
-    .default("postgres://opengeni:opengeni@127.0.0.1:5432/opengeni"),
+  databaseUrl: z.string().default("postgres://opengeni:opengeni@127.0.0.1:5432/opengeni"),
   // Step I (§7.8 runtime half). Dedicated Postgres schema for the EMBEDDED
   // topology. Default "" → standalone: no search_path scoping, server default
   // (`public`). When set (e.g. "opengeni"), the db handle + the managed-auth
@@ -212,36 +205,13 @@ const SettingsSchema = z.object({
   temporalTlsRootCaCertificateBase64: z.string().optional(),
   temporalTlsClientCertificateBase64: z.string().optional(),
   temporalTlsClientPrivateKeyBase64: z.string().optional(),
-  startupDependencyRetryAttempts: z.coerce
-    .number()
-    .int()
-    .positive()
-    .default(30),
-  startupDependencyRetryInitialDelayMs: z.coerce
-    .number()
-    .int()
-    .positive()
-    .default(1000),
-  startupDependencyRetryMaxDelayMs: z.coerce
-    .number()
-    .int()
-    .positive()
-    .default(5000),
-  turnWorkerConcurrencyMode: z
-    .enum(["fixed", "resource-based"])
-    .default("fixed"),
-  turnWorkerMaxConcurrentTurns: z.coerce
-    .number()
-    .int()
-    .positive()
-    .max(2_000)
-    .default(16),
+  startupDependencyRetryAttempts: z.coerce.number().int().positive().default(30),
+  startupDependencyRetryInitialDelayMs: z.coerce.number().int().positive().default(1000),
+  startupDependencyRetryMaxDelayMs: z.coerce.number().int().positive().default(5000),
+  turnWorkerConcurrencyMode: z.enum(["fixed", "resource-based"]).default("fixed"),
+  turnWorkerMaxConcurrentTurns: z.coerce.number().int().positive().max(2_000).default(16),
   turnWorkerTargetCpuUsage: z.coerce.number().positive().max(1).default(0.8),
-  turnWorkerTargetMemoryUsage: z.coerce
-    .number()
-    .positive()
-    .max(0.8)
-    .default(0.75),
+  turnWorkerTargetMemoryUsage: z.coerce.number().positive().max(0.8).default(0.75),
   observabilityStructuredLogs: EnvBoolean.default(false),
   observabilityMetricsEnabled: EnvBoolean.default(true),
   observabilityOtlpEndpoint: z.string().url().optional(),
@@ -288,9 +258,7 @@ const SettingsSchema = z.object({
   // the agent must never guess a tag or silently install `latest`.
   ogtoolPackageSpec: z
     .string()
-    .regex(
-      /^@opengeni\/ogtool@(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u,
-    )
+    .regex(/^@opengeni\/ogtool@(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u)
     .optional(),
   environmentsEncryptionKey: z.string().optional(),
   integrationsEnabled: EnvBoolean.default(false),
@@ -303,12 +271,7 @@ const SettingsSchema = z.object({
   googleDriveClientSecret: z.string().optional(),
   // Undefined is meaningful: the migration boundary persists the product
   // default of 3 when no deployment override is supplied.
-  maxNestedAgentDepth: z.coerce
-    .number()
-    .int()
-    .nonnegative()
-    .max(MAX_NESTED_AGENT_DEPTH)
-    .optional(),
+  maxNestedAgentDepth: z.coerce.number().int().nonnegative().max(MAX_NESTED_AGENT_DEPTH).optional(),
   // Session goal guard rails. Goals are designed for runs that legitimately
   // span days, so length is bounded by pathology detection (no-progress
   // streaks, budget exhaustion), never by count. goalMaxAutoContinuations is
@@ -320,11 +283,7 @@ const SettingsSchema = z.object({
   // session turn. Effectively unbounded by default for the same reason as
   // above; the graceful max-turns valve (idle + goal continuation, never a
   // session failure) remains as inert safety should a deployment set a cap.
-  agentMaxModelCallsPerTurn: z.coerce
-    .number()
-    .int()
-    .positive()
-    .default(1_000_000),
+  agentMaxModelCallsPerTurn: z.coerce.number().int().positive().default(1_000_000),
   // The model family's real context window in tokens. OpenGeni always performs
   // one durable, portable plaintext compaction transition; there is no
   // provider/server/off mode ladder.
@@ -351,26 +310,14 @@ const SettingsSchema = z.object({
     }),
   // Tokens reserved for model output; subtracted from the window to get the
   // usable input budget B = contextWindowTokens - contextReservedOutputTokens.
-  contextReservedOutputTokens: z.coerce
-    .number()
-    .int()
-    .nonnegative()
-    .default(128_000),
+  contextReservedOutputTokens: z.coerce.number().int().nonnegative().default(128_000),
   // Model-catalog auto-compact limit. When present it is clamped to
   // 90% of the raw window, matching Codex core's auto_compact_token_limit().
-  contextAutoCompactThresholdTokens: z.coerce
-    .number()
-    .int()
-    .positive()
-    .optional(),
+  contextAutoCompactThresholdTokens: z.coerce.number().int().positive().optional(),
   // Provider-neutral fallback for canonical model-facing tool-result text.
   // The current stable Codex catalog policy is 10k tokens; the truncator adds
   // Codex's 1.2x JSON serialization allowance when applying it.
-  modelToolOutputTruncationTokens: z.coerce
-    .number()
-    .int()
-    .positive()
-    .default(10_000),
+  modelToolOutputTruncationTokens: z.coerce.number().int().positive().default(10_000),
   authRequired: EnvBoolean.default(false),
   accessKey: z.string().optional(),
   authAllowHealth: EnvBoolean.default(true),
@@ -379,9 +326,7 @@ const SettingsSchema = z.object({
   apiPort: z.coerce.number().int().positive().default(8000),
   workerHttpPort: z.coerce.number().int().positive().default(8001),
   opengeniMcpUrl: z.string().url().optional(),
-  corsAllowOriginRegex: z
-    .string()
-    .default(String.raw`^https?://(localhost|127\.0\.0\.1)(:\d+)?$`),
+  corsAllowOriginRegex: z.string().default(String.raw`^https?://(localhost|127\.0\.0\.1)(:\d+)?$`),
   openaiProvider: z.enum(["openai", "azure"]).default("openai"),
   openaiApiKey: z.string().optional(),
   openaiBaseUrl: z.string().optional(),
@@ -458,12 +403,7 @@ const SettingsSchema = z.object({
   // Multi-account P3 (auto-rotation): an account is "near exhaustion" — ineligible to be
   // rotated TO — when EITHER usage window (5h/weekly) is at/over this percent. Default 90 to
   // match the UI danger flip (UsageBar danger at pct >= 90). OPENGENI_CODEX_ROTATION_NEAR_EXHAUSTION_PCT.
-  codexRotationNearExhaustionPct: z.coerce
-    .number()
-    .int()
-    .min(1)
-    .max(100)
-    .default(90),
+  codexRotationNearExhaustionPct: z.coerce.number().int().min(1).max(100).default(90),
   openaiReasoningEffort: ReasoningEffort.default("low"),
   openaiAllowedReasoningEfforts: z.string().default("low,medium,high,xhigh"),
   openaiResponsesTransport: z.enum(["http", "websocket"]).default("http"),
@@ -536,12 +476,7 @@ const SettingsSchema = z.object({
   // deadline-aware snapshot/rematerialization transition. The transition—not a
   // larger timeout—is what lets a session outlive one finite provider box.
   // Knob: OPENGENI_MODAL_TIMEOUT_SECONDS.
-  modalTimeoutSeconds: z.coerce
-    .number()
-    .int()
-    .positive()
-    .max(86_400)
-    .default(86_400),
+  modalTimeoutSeconds: z.coerce.number().int().positive().max(86_400).default(86_400),
   modalTokenId: z.string().optional(),
   modalTokenSecret: z.string().optional(),
   modalEnvironment: z.string().optional(),
@@ -625,11 +560,7 @@ const SettingsSchema = z.object({
   daytonaSnapshotName: z.string().optional(),
   daytonaAutoStopInterval: z.coerce.number().int().nonnegative().optional(), // 0 disables idle-kill
   daytonaTimeoutSeconds: z.coerce.number().int().positive().optional(),
-  daytonaExposedPortUrlTtlSeconds: z.coerce
-    .number()
-    .int()
-    .positive()
-    .optional(),
+  daytonaExposedPortUrlTtlSeconds: z.coerce.number().int().positive().optional(),
   // --- runloop ---
   runloopApiKey: z.string().optional(),
   runloopBaseUrl: z.string().url().optional(),
@@ -779,16 +710,8 @@ const SettingsSchema = z.object({
   // in the background (see the exec-deadline hint) or raise the knob per deployment.
   // Knobs: OPENGENI_SANDBOX_SELFHOSTED_EXEC_TIMEOUT_MS (default 2min) and
   // OPENGENI_SANDBOX_SELFHOSTED_CONTROL_TIMEOUT_MS (default 30s).
-  sandboxSelfhostedExecTimeoutMs: z.coerce
-    .number()
-    .int()
-    .positive()
-    .default(120_000),
-  sandboxSelfhostedControlTimeoutMs: z.coerce
-    .number()
-    .int()
-    .positive()
-    .default(30_000),
+  sandboxSelfhostedExecTimeoutMs: z.coerce.number().int().positive().default(120_000),
+  sandboxSelfhostedControlTimeoutMs: z.coerce.number().int().positive().default(30_000),
   // --- sandbox lease cadences (cadence invariant validated at boot below) ---
   // reaperPeriod < viewerHolderTTL, and reaperPeriod + idleGrace < the EFFECTIVE
   // box idle timeout (effectiveModalIdleTimeoutSeconds, which defaults to the hard
@@ -796,11 +719,7 @@ const SettingsSchema = z.object({
   // idle timeout — which we pin high enough (via the idle-timeout default) that
   // OpenGeni's reaper, not Modal's idle-reap, governs teardown so /workspace is
   // snapshotted before the box dies (sandbox-file-persistence).
-  sandboxLeaseReaperPeriodMs: z.coerce
-    .number()
-    .int()
-    .positive()
-    .default(30_000),
+  sandboxLeaseReaperPeriodMs: z.coerce.number().int().positive().default(30_000),
   sandboxViewerHolderTtlMs: z.coerce.number().int().positive().default(90_000),
   // The DRAIN grace: how long a refcount-0 (draining) lease stays WARM before the
   // reaper resume-by-ids the box and terminates it. This is the cost-vs-snappiness
@@ -843,12 +762,7 @@ const SettingsSchema = z.object({
   // sequentially, so claiming a wider batch would fence boxes before the same
   // sweep can service them. Larger fleets may raise this only as an explicit,
   // observed deployment choice.
-  sandboxRotationBatchSize: z.coerce
-    .number()
-    .int()
-    .positive()
-    .max(500)
-    .default(1),
+  sandboxRotationBatchSize: z.coerce.number().int().positive().max(500).default(1),
   // expires_at refresh window for a held lease (>> the turn 10s heartbeat so a
   // single missed heartbeat never TTL-reaps a live turn). The warming TTL is the
   // window a cold->warming spawner has to commit warm before a reaper resets it.
@@ -873,11 +787,7 @@ const SettingsSchema = z.object({
   // month, summed over sandbox.warm_seconds). 0 = unbounded. A workspace over the
   // cap force-drains its VIEWER-ONLY boxes (guarded AND turn_holders=0 — a paying
   // turn is never killed); the reaper then stop()s at refcount 0.
-  sandboxMaxWarmSecondsPerWorkspace: z.coerce
-    .number()
-    .int()
-    .nonnegative()
-    .default(0),
+  sandboxMaxWarmSecondsPerWorkspace: z.coerce.number().int().nonnegative().default(0),
   sandboxPreparationProfiles: z.string().default("none"),
   sandboxEnvAllowlist: z.string().default(""),
   objectStorageEndpoint: z.string().url().optional(),
@@ -903,16 +813,12 @@ const SettingsSchema = z.object({
   documentParser: z.string().min(1).default("liteparse"),
   documentChunkSize: z.coerce.number().int().positive().default(1200),
   documentChunkOverlap: z.coerce.number().int().nonnegative().default(160),
-  documentEmbeddingProvider: z
-    .enum(["openai", "deterministic"])
-    .default("openai"),
+  documentEmbeddingProvider: z.enum(["openai", "deterministic"]).default("openai"),
   documentEmbeddingModel: z.string().min(1).default("text-embedding-3-large"),
   documentEmbeddingDimensions: z.coerce.number().int().positive().default(3072),
   documentEmbeddingApiKey: z.string().optional(),
   documentEmbeddingBaseUrl: z.string().url().optional(),
-  documentCurationProvider: z
-    .enum(["openai", "heuristic", "none"])
-    .default("openai"),
+  documentCurationProvider: z.enum(["openai", "heuristic", "none"]).default("openai"),
   documentCurationModel: z.string().min(1).default("gpt-4o-mini"),
   documentCurationApiKey: z.string().optional(),
   documentCurationBaseUrl: z.string().url().optional(),
@@ -1153,8 +1059,7 @@ export type ModelUsageInput = {
   inputTokens?: number | undefined;
   outputTokens?: number | undefined;
   totalTokens?: number | undefined;
-  inputTokensDetails?:
-    Record<string, number> | Array<Record<string, number>> | undefined;
+  inputTokensDetails?: Record<string, number> | Array<Record<string, number>> | undefined;
   requestUsageEntries?: ModelUsageInput[] | undefined;
 };
 
@@ -1194,11 +1099,7 @@ const ModelPricingScheduleSchema = z
     }
   });
 
-export const CapabilitySupportV1 = z.enum([
-  "supported",
-  "unsupported",
-  "unknown",
-]);
+export const CapabilitySupportV1 = z.enum(["supported", "unsupported", "unknown"]);
 export type CapabilitySupportV1 = z.infer<typeof CapabilitySupportV1>;
 
 export const CapabilityStateV1Schema = z
@@ -1268,19 +1169,14 @@ export const ModelCapabilitiesV1Schema = z
       ctx.addIssue({
         code: "custom",
         path: ["reasoning", "defaultEffort"],
-        message:
-          "the default reasoning effort must be one of the supported efforts",
+        message: "the default reasoning effort must be one of the supported efforts",
       });
     }
-    if (
-      capabilities.reasoning.runnable &&
-      capabilities.reasoning.efforts.length === 0
-    ) {
+    if (capabilities.reasoning.runnable && capabilities.reasoning.efforts.length === 0) {
       ctx.addIssue({
         code: "custom",
         path: ["reasoning", "efforts"],
-        message:
-          "a runnable reasoning capability must declare at least one effort",
+        message: "a runnable reasoning capability must declare at least one effort",
       });
     }
     for (const field of ["inputModalities", "outputModalities"] as const) {
@@ -1369,9 +1265,7 @@ const RegistryModelSchema = z
     reasoningEffort: z.boolean().optional(), // legacy compatibility input/projection
     hostedWebSearch: z.boolean().optional(), // legacy compatibility input/projection
     capabilities: ModelCapabilitiesV1Schema.optional(),
-    pricing: z
-      .union([ModelPricingSchema, ModelPricingScheduleSchema])
-      .optional(),
+    pricing: z.union([ModelPricingSchema, ModelPricingScheduleSchema]).optional(),
     // Reserved normalized contracts are derived by OpenGeni in V1. Generic
     // registry JSON must not opt itself into workspace BYOK or reattribute cost.
     credentialSource: z.never().optional(),
@@ -1386,15 +1280,13 @@ const RegistryModelSchema = z
       ctx.addIssue({
         code: "custom",
         path: ["reasoningEffort"],
-        message:
-          "legacy reasoningEffort must agree with capabilities.reasoning.runnable",
+        message: "legacy reasoningEffort must agree with capabilities.reasoning.runnable",
       });
     }
     if (
       model.capabilities &&
       model.hostedWebSearch !== undefined &&
-      model.hostedWebSearch !==
-        model.capabilities.hostedTools.webSearch.runnable
+      model.hostedWebSearch !== model.capabilities.hostedTools.webSearch.runnable
     ) {
       ctx.addIssue({
         code: "custom",
@@ -1433,9 +1325,7 @@ export const IntegrationOAuthClientConfigSchema = z.object({
     .enum(["none", "client_secret_post", "client_secret_basic"])
     .default("none"),
 });
-export type IntegrationOAuthClientConfig = z.infer<
-  typeof IntegrationOAuthClientConfigSchema
->;
+export type IntegrationOAuthClientConfig = z.infer<typeof IntegrationOAuthClientConfigSchema>;
 
 /**
  * Runtime-resolved provider (built-in or registry), client-construction-ready.
@@ -1606,9 +1496,7 @@ export const SANDBOX_REQUIRED_ENV: Record<
   runloop: [{ field: "runloopApiKey", env: "OPENGENI_RUNLOOP_API_KEY" }],
   e2b: [{ field: "e2bApiKey", env: "OPENGENI_E2B_API_KEY" }],
   blaxel: [{ field: "blaxelApiKey", env: "OPENGENI_BLAXEL_API_KEY" }],
-  cloudflare: [
-    { field: "cloudflareWorkerUrl", env: "OPENGENI_CLOUDFLARE_WORKER_URL" },
-  ],
+  cloudflare: [{ field: "cloudflareWorkerUrl", env: "OPENGENI_CLOUDFLARE_WORKER_URL" }],
   vercel: [
     { field: "vercelToken", env: "OPENGENI_VERCEL_TOKEN" },
     { field: "vercelProjectId", env: "OPENGENI_VERCEL_PROJECT_ID" },
@@ -1621,9 +1509,7 @@ export const SANDBOX_REQUIRED_ENV: Record<
 };
 
 /** The required OPENGENI_* env var names for a backend (for the deployment manifest). */
-export function requiredSandboxEnvForBackend(
-  backend: z.infer<typeof SandboxBackend>,
-): string[] {
+export function requiredSandboxEnvForBackend(backend: z.infer<typeof SandboxBackend>): string[] {
   return (SANDBOX_REQUIRED_ENV[backend] ?? []).map((entry) => entry.env);
 }
 
@@ -1655,43 +1541,23 @@ export function getSettings(): Settings {
     temporalTlsRootCaCertificateBase64: optional(
       "OPENGENI_TEMPORAL_TLS_ROOT_CA_CERTIFICATE_BASE64",
     ),
-    temporalTlsClientCertificateBase64: optional(
-      "OPENGENI_TEMPORAL_TLS_CLIENT_CERTIFICATE_BASE64",
-    ),
-    temporalTlsClientPrivateKeyBase64: optional(
-      "OPENGENI_TEMPORAL_TLS_CLIENT_PRIVATE_KEY_BASE64",
-    ),
-    startupDependencyRetryAttempts: optional(
-      "OPENGENI_STARTUP_DEPENDENCY_RETRY_ATTEMPTS",
-    ),
+    temporalTlsClientCertificateBase64: optional("OPENGENI_TEMPORAL_TLS_CLIENT_CERTIFICATE_BASE64"),
+    temporalTlsClientPrivateKeyBase64: optional("OPENGENI_TEMPORAL_TLS_CLIENT_PRIVATE_KEY_BASE64"),
+    startupDependencyRetryAttempts: optional("OPENGENI_STARTUP_DEPENDENCY_RETRY_ATTEMPTS"),
     startupDependencyRetryInitialDelayMs: optional(
       "OPENGENI_STARTUP_DEPENDENCY_RETRY_INITIAL_DELAY_MS",
     ),
-    startupDependencyRetryMaxDelayMs: optional(
-      "OPENGENI_STARTUP_DEPENDENCY_RETRY_MAX_DELAY_MS",
-    ),
-    turnWorkerConcurrencyMode: optional(
-      "OPENGENI_TURN_WORKER_CONCURRENCY_MODE",
-    ),
-    turnWorkerMaxConcurrentTurns: optional(
-      "OPENGENI_TURN_WORKER_MAX_CONCURRENT_TURNS",
-    ),
+    startupDependencyRetryMaxDelayMs: optional("OPENGENI_STARTUP_DEPENDENCY_RETRY_MAX_DELAY_MS"),
+    turnWorkerConcurrencyMode: optional("OPENGENI_TURN_WORKER_CONCURRENCY_MODE"),
+    turnWorkerMaxConcurrentTurns: optional("OPENGENI_TURN_WORKER_MAX_CONCURRENT_TURNS"),
     turnWorkerTargetCpuUsage: optional("OPENGENI_TURN_WORKER_TARGET_CPU_USAGE"),
-    turnWorkerTargetMemoryUsage: optional(
-      "OPENGENI_TURN_WORKER_TARGET_MEMORY_USAGE",
-    ),
-    observabilityStructuredLogs: optional(
-      "OPENGENI_OBSERVABILITY_STRUCTURED_LOGS",
-    ),
-    observabilityMetricsEnabled: optional(
-      "OPENGENI_OBSERVABILITY_METRICS_ENABLED",
-    ),
+    turnWorkerTargetMemoryUsage: optional("OPENGENI_TURN_WORKER_TARGET_MEMORY_USAGE"),
+    observabilityStructuredLogs: optional("OPENGENI_OBSERVABILITY_STRUCTURED_LOGS"),
+    observabilityMetricsEnabled: optional("OPENGENI_OBSERVABILITY_METRICS_ENABLED"),
     observabilityOtlpEndpoint:
-      optional("OPENGENI_OTEL_EXPORTER_OTLP_ENDPOINT") ??
-      optional("OTEL_EXPORTER_OTLP_ENDPOINT"),
+      optional("OPENGENI_OTEL_EXPORTER_OTLP_ENDPOINT") ?? optional("OTEL_EXPORTER_OTLP_ENDPOINT"),
     observabilityOtlpHeaders:
-      optional("OPENGENI_OTEL_EXPORTER_OTLP_HEADERS") ??
-      optional("OTEL_EXPORTER_OTLP_HEADERS"),
+      optional("OPENGENI_OTEL_EXPORTER_OTLP_HEADERS") ?? optional("OTEL_EXPORTER_OTLP_HEADERS"),
     publicBaseUrl: optional("OPENGENI_PUBLIC_BASE_URL"),
     webBaseUrl: optional("OPENGENI_WEB_BASE_URL"),
     agentReleasesBaseUrl: optional("OPENGENI_AGENT_RELEASES_BASE_URL"),
@@ -1714,9 +1580,7 @@ export function getSettings(): Settings {
     integrationsAllowPrivateNetworkTargets: optional(
       "OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS",
     ),
-    integrationsOauthClientsJson: optional(
-      "OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON",
-    ),
+    integrationsOauthClientsJson: optional("OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON"),
     slackClientId: optional("OPENGENI_SLACK_CLIENT_ID"),
     slackClientSecret: optional("OPENGENI_SLACK_CLIENT_SECRET"),
     googleDriveClientId: optional("OPENGENI_GOOGLE_DRIVE_CLIENT_ID"),
@@ -1724,25 +1588,13 @@ export function getSettings(): Settings {
     maxNestedAgentDepth: optional("OPENGENI_MAX_NESTED_AGENT_DEPTH"),
     goalMaxAutoContinuations: optional("OPENGENI_GOAL_MAX_AUTO_CONTINUATIONS"),
     goalNoProgressLimit: optional("OPENGENI_GOAL_NO_PROGRESS_LIMIT"),
-    agentMaxModelCallsPerTurn: optional(
-      "OPENGENI_AGENT_MAX_MODEL_CALLS_PER_TURN",
-    ),
+    agentMaxModelCallsPerTurn: optional("OPENGENI_AGENT_MAX_MODEL_CALLS_PER_TURN"),
     contextWindowTokens: optional("OPENGENI_CONTEXT_WINDOW_TOKENS"),
-    contextEffectiveWindowTokens: optional(
-      "OPENGENI_CONTEXT_EFFECTIVE_WINDOW_TOKENS",
-    ),
-    contextCompactionThresholdRatio: optional(
-      "OPENGENI_COMPACTION_THRESHOLD_RATIO",
-    ),
-    contextReservedOutputTokens: optional(
-      "OPENGENI_CONTEXT_RESERVED_OUTPUT_TOKENS",
-    ),
-    contextAutoCompactThresholdTokens: optional(
-      "OPENGENI_CONTEXT_AUTO_COMPACT_THRESHOLD_TOKENS",
-    ),
-    modelToolOutputTruncationTokens: optional(
-      "OPENGENI_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS",
-    ),
+    contextEffectiveWindowTokens: optional("OPENGENI_CONTEXT_EFFECTIVE_WINDOW_TOKENS"),
+    contextCompactionThresholdRatio: optional("OPENGENI_COMPACTION_THRESHOLD_RATIO"),
+    contextReservedOutputTokens: optional("OPENGENI_CONTEXT_RESERVED_OUTPUT_TOKENS"),
+    contextAutoCompactThresholdTokens: optional("OPENGENI_CONTEXT_AUTO_COMPACT_THRESHOLD_TOKENS"),
+    modelToolOutputTruncationTokens: optional("OPENGENI_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS"),
     authRequired: optional("OPENGENI_AUTH_REQUIRED"),
     accessKey: optional("OPENGENI_ACCESS_KEY"),
     authAllowHealth: optional("OPENGENI_AUTH_ALLOW_HEALTH"),
@@ -1753,10 +1605,8 @@ export function getSettings(): Settings {
     opengeniMcpUrl: optional("OPENGENI_MCP_URL"),
     corsAllowOriginRegex: optional("OPENGENI_CORS_ALLOW_ORIGIN_REGEX"),
     openaiProvider: optional("OPENGENI_OPENAI_PROVIDER"),
-    openaiApiKey:
-      optional("OPENGENI_OPENAI_API_KEY") ?? optional("OPENAI_API_KEY"),
-    openaiBaseUrl:
-      optional("OPENGENI_OPENAI_BASE_URL") ?? optional("OPENAI_BASE_URL"),
+    openaiApiKey: optional("OPENGENI_OPENAI_API_KEY") ?? optional("OPENAI_API_KEY"),
+    openaiBaseUrl: optional("OPENGENI_OPENAI_BASE_URL") ?? optional("OPENAI_BASE_URL"),
     openaiModel: optional("OPENGENI_OPENAI_MODEL"),
     openaiAllowedModels: optional("OPENGENI_OPENAI_ALLOWED_MODELS"),
     voiceInputMaxDurationSeconds: optional("OPENGENI_VOICE_INPUT_MAX_DURATION_SECONDS"),
@@ -1776,26 +1626,16 @@ export function getSettings(): Settings {
     modelPricingJson: optional("OPENGENI_MODEL_PRICING_JSON"),
     modelProvidersJson: optional("OPENGENI_MODEL_PROVIDERS_JSON"),
     codexSubscriptionEnabled: optional("OPENGENI_CODEX_SUBSCRIPTION_ENABLED"),
-    codexConnectedAppsEnabled: optional(
-      "OPENGENI_CODEX_CONNECTED_APPS_ENABLED",
-    ),
+    codexConnectedAppsEnabled: optional("OPENGENI_CODEX_CONNECTED_APPS_ENABLED"),
     codexToolSearchEnabled: optional("OPENGENI_CODEX_TOOL_SEARCH_ENABLED"),
-    codexCredentialLeasingEnabled: optional(
-      "OPENGENI_CODEX_CREDENTIAL_LEASING_ENABLED",
-    ),
-    codexFleetPolicyShadowEnabled: optional(
-      "OPENGENI_CODEX_FLEET_POLICY_SHADOW_ENABLED",
-    ),
+    codexCredentialLeasingEnabled: optional("OPENGENI_CODEX_CREDENTIAL_LEASING_ENABLED"),
+    codexFleetPolicyShadowEnabled: optional("OPENGENI_CODEX_FLEET_POLICY_SHADOW_ENABLED"),
     codexProductSku: optional("OPENGENI_CODEX_PRODUCT_SKU"),
     openaiReasoningEffort: optional("OPENGENI_OPENAI_REASONING_EFFORT"),
-    openaiAllowedReasoningEfforts: optional(
-      "OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS",
-    ),
+    openaiAllowedReasoningEfforts: optional("OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS"),
     openaiResponsesTransport: optional("OPENGENI_OPENAI_RESPONSES_TRANSPORT"),
     openaiProviderItemIds: optional("OPENGENI_OPENAI_PROVIDER_ITEM_IDS"),
-    openaiReasoningEncryptedContent: optional(
-      "OPENGENI_OPENAI_REASONING_ENCRYPTED_CONTENT",
-    ),
+    openaiReasoningEncryptedContent: optional("OPENGENI_OPENAI_REASONING_ENCRYPTED_CONTENT"),
     openaiMaxRetries: optional("OPENGENI_OPENAI_MAX_RETRIES"),
     webSearchEnabled: optional("OPENGENI_WEB_SEARCH_ENABLED"),
     agentInstructionsTemplate: optional("OPENGENI_AGENT_INSTRUCTIONS_TEMPLATE"),
@@ -1840,9 +1680,7 @@ export function getSettings(): Settings {
     daytonaSnapshotName: optional("OPENGENI_DAYTONA_SNAPSHOT_NAME"),
     daytonaAutoStopInterval: optional("OPENGENI_DAYTONA_AUTO_STOP_INTERVAL"),
     daytonaTimeoutSeconds: optional("OPENGENI_DAYTONA_TIMEOUT_SECONDS"),
-    daytonaExposedPortUrlTtlSeconds: optional(
-      "OPENGENI_DAYTONA_EXPOSED_PORT_URL_TTL_SECONDS",
-    ),
+    daytonaExposedPortUrlTtlSeconds: optional("OPENGENI_DAYTONA_EXPOSED_PORT_URL_TTL_SECONDS"),
     runloopApiKey: optional("OPENGENI_RUNLOOP_API_KEY"),
     runloopBaseUrl: optional("OPENGENI_RUNLOOP_BASE_URL"),
     runloopBlueprintName: optional("OPENGENI_RUNLOOP_BLUEPRINT_NAME"),
@@ -1860,9 +1698,7 @@ export function getSettings(): Settings {
     blaxelImage: optional("OPENGENI_BLAXEL_IMAGE"),
     blaxelRegion: optional("OPENGENI_BLAXEL_REGION"),
     blaxelExposedPortPublic: optional("OPENGENI_BLAXEL_EXPOSED_PORT_PUBLIC"),
-    blaxelExposedPortUrlTtlSeconds: optional(
-      "OPENGENI_BLAXEL_EXPOSED_PORT_URL_TTL_SECONDS",
-    ),
+    blaxelExposedPortUrlTtlSeconds: optional("OPENGENI_BLAXEL_EXPOSED_PORT_URL_TTL_SECONDS"),
     blaxelMemoryMb: optional("OPENGENI_BLAXEL_MEMORY_MB"),
     blaxelTtl: optional("OPENGENI_BLAXEL_TTL"),
     cloudflareWorkerUrl: optional("OPENGENI_CLOUDFLARE_WORKER_URL"),
@@ -1881,42 +1717,20 @@ export function getSettings(): Settings {
     enrollmentSigningSecret: optional("OPENGENI_ENROLLMENT_SIGNING_SECRET"),
     selfhostedNatsUrl: optional("OPENGENI_SELFHOSTED_NATS_URL"),
     selfhostedRelayUrl: optional("OPENGENI_SELFHOSTED_RELAY_URL"),
-    selfhostedRelayTokenSecret: optional(
-      "OPENGENI_SELFHOSTED_RELAY_TOKEN_SECRET",
-    ),
+    selfhostedRelayTokenSecret: optional("OPENGENI_SELFHOSTED_RELAY_TOKEN_SECRET"),
     agentUpdatePublicKey: optional("OPENGENI_AGENT_UPDATE_PUBLIC_KEY"),
-    selfhostedNatsCalloutAccountSeed: optional(
-      "OPENGENI_SELFHOSTED_NATS_CALLOUT_ACCOUNT_SEED",
-    ),
-    selfhostedNatsCalloutAccountName: optional(
-      "OPENGENI_SELFHOSTED_NATS_CALLOUT_ACCOUNT_NAME",
-    ),
-    selfhostedNatsCalloutUser: optional(
-      "OPENGENI_SELFHOSTED_NATS_CALLOUT_USER",
-    ),
-    selfhostedNatsCalloutPassword: optional(
-      "OPENGENI_SELFHOSTED_NATS_CALLOUT_PASSWORD",
-    ),
-    selfhostedNatsControlUser: optional(
-      "OPENGENI_SELFHOSTED_NATS_CONTROL_USER",
-    ),
-    selfhostedNatsControlPassword: optional(
-      "OPENGENI_SELFHOSTED_NATS_CONTROL_PASSWORD",
-    ),
-    sandboxSelfhostedExecTimeoutMs: optional(
-      "OPENGENI_SANDBOX_SELFHOSTED_EXEC_TIMEOUT_MS",
-    ),
-    sandboxSelfhostedControlTimeoutMs: optional(
-      "OPENGENI_SANDBOX_SELFHOSTED_CONTROL_TIMEOUT_MS",
-    ),
-    sandboxLeaseReaperPeriodMs: optional(
-      "OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS",
-    ),
+    selfhostedNatsCalloutAccountSeed: optional("OPENGENI_SELFHOSTED_NATS_CALLOUT_ACCOUNT_SEED"),
+    selfhostedNatsCalloutAccountName: optional("OPENGENI_SELFHOSTED_NATS_CALLOUT_ACCOUNT_NAME"),
+    selfhostedNatsCalloutUser: optional("OPENGENI_SELFHOSTED_NATS_CALLOUT_USER"),
+    selfhostedNatsCalloutPassword: optional("OPENGENI_SELFHOSTED_NATS_CALLOUT_PASSWORD"),
+    selfhostedNatsControlUser: optional("OPENGENI_SELFHOSTED_NATS_CONTROL_USER"),
+    selfhostedNatsControlPassword: optional("OPENGENI_SELFHOSTED_NATS_CONTROL_PASSWORD"),
+    sandboxSelfhostedExecTimeoutMs: optional("OPENGENI_SANDBOX_SELFHOSTED_EXEC_TIMEOUT_MS"),
+    sandboxSelfhostedControlTimeoutMs: optional("OPENGENI_SANDBOX_SELFHOSTED_CONTROL_TIMEOUT_MS"),
+    sandboxLeaseReaperPeriodMs: optional("OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS"),
     sandboxViewerHolderTtlMs: optional("OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS"),
     sandboxIdleGraceMs: optional("OPENGENI_SANDBOX_IDLE_GRACE_MS"),
-    sandboxSnapshotIntervalMs: optional(
-      "OPENGENI_SANDBOX_SNAPSHOT_INTERVAL_MS",
-    ),
+    sandboxSnapshotIntervalMs: optional("OPENGENI_SANDBOX_SNAPSHOT_INTERVAL_MS"),
     sandboxSnapshotTimeoutMs: optional("OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS"),
     sandboxRotationLeadMs: optional("OPENGENI_SANDBOX_ROTATION_LEAD_MS"),
     sandboxRotationBatchSize: optional("OPENGENI_SANDBOX_ROTATION_BATCH_SIZE"),
@@ -1927,63 +1741,33 @@ export function getSettings(): Settings {
     sandboxWarmRateMicrosPerSecondJson: optional(
       "OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON",
     ),
-    sandboxMaxWarmSecondsPerWorkspace: optional(
-      "OPENGENI_SANDBOX_MAX_WARM_SECONDS_PER_WORKSPACE",
-    ),
-    sandboxPreparationProfiles: optional(
-      "OPENGENI_SANDBOX_PREPARATION_PROFILES",
-    ),
+    sandboxMaxWarmSecondsPerWorkspace: optional("OPENGENI_SANDBOX_MAX_WARM_SECONDS_PER_WORKSPACE"),
+    sandboxPreparationProfiles: optional("OPENGENI_SANDBOX_PREPARATION_PROFILES"),
     sandboxEnvAllowlist: optional("OPENGENI_SANDBOX_ENV_ALLOWLIST"),
     objectStorageEndpoint: optional("OPENGENI_OBJECT_STORAGE_ENDPOINT"),
-    objectStorageInternalEndpoint: optional(
-      "OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT",
-    ),
-    objectStorageSandboxEndpoint: optional(
-      "OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT",
-    ),
+    objectStorageInternalEndpoint: optional("OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT"),
+    objectStorageSandboxEndpoint: optional("OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT"),
     objectStorageBackend: optional("OPENGENI_OBJECT_STORAGE_BACKEND"),
     objectStorageBucket: optional("OPENGENI_OBJECT_STORAGE_BUCKET"),
     objectStorageRegion: optional("OPENGENI_OBJECT_STORAGE_REGION"),
     objectStorageS3Provider: optional("OPENGENI_OBJECT_STORAGE_S3_PROVIDER"),
     objectStorageAccessKeyId: optional("OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID"),
-    objectStorageSecretAccessKey: optional(
-      "OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY",
-    ),
-    objectStorageForcePathStyle: optional(
-      "OPENGENI_OBJECT_STORAGE_FORCE_PATH_STYLE",
-    ),
-    objectStorageAzureConnectionString: optional(
-      "OPENGENI_OBJECT_STORAGE_AZURE_CONNECTION_STRING",
-    ),
-    objectStorageAzureAccountName: optional(
-      "OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_NAME",
-    ),
-    objectStorageAzureAccountKey: optional(
-      "OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_KEY",
-    ),
-    objectStorageAzureEndpoint: optional(
-      "OPENGENI_OBJECT_STORAGE_AZURE_ENDPOINT",
-    ),
-    objectStorageGcsProjectId: optional(
-      "OPENGENI_OBJECT_STORAGE_GCS_PROJECT_ID",
-    ),
-    objectStorageGcsCredentialsJson: optional(
-      "OPENGENI_OBJECT_STORAGE_GCS_CREDENTIALS_JSON",
-    ),
-    objectStorageGcsKeyFilename: optional(
-      "OPENGENI_OBJECT_STORAGE_GCS_KEY_FILENAME",
-    ),
-    objectStorageGcsApiEndpoint: optional(
-      "OPENGENI_OBJECT_STORAGE_GCS_API_ENDPOINT",
-    ),
+    objectStorageSecretAccessKey: optional("OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY"),
+    objectStorageForcePathStyle: optional("OPENGENI_OBJECT_STORAGE_FORCE_PATH_STYLE"),
+    objectStorageAzureConnectionString: optional("OPENGENI_OBJECT_STORAGE_AZURE_CONNECTION_STRING"),
+    objectStorageAzureAccountName: optional("OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_NAME"),
+    objectStorageAzureAccountKey: optional("OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_KEY"),
+    objectStorageAzureEndpoint: optional("OPENGENI_OBJECT_STORAGE_AZURE_ENDPOINT"),
+    objectStorageGcsProjectId: optional("OPENGENI_OBJECT_STORAGE_GCS_PROJECT_ID"),
+    objectStorageGcsCredentialsJson: optional("OPENGENI_OBJECT_STORAGE_GCS_CREDENTIALS_JSON"),
+    objectStorageGcsKeyFilename: optional("OPENGENI_OBJECT_STORAGE_GCS_KEY_FILENAME"),
+    objectStorageGcsApiEndpoint: optional("OPENGENI_OBJECT_STORAGE_GCS_API_ENDPOINT"),
     documentParser: optional("OPENGENI_DOCUMENT_PARSER"),
     documentChunkSize: optional("OPENGENI_DOCUMENT_CHUNK_SIZE"),
     documentChunkOverlap: optional("OPENGENI_DOCUMENT_CHUNK_OVERLAP"),
     documentEmbeddingProvider: optional("OPENGENI_DOCUMENT_EMBEDDING_PROVIDER"),
     documentEmbeddingModel: optional("OPENGENI_DOCUMENT_EMBEDDING_MODEL"),
-    documentEmbeddingDimensions: optional(
-      "OPENGENI_DOCUMENT_EMBEDDING_DIMENSIONS",
-    ),
+    documentEmbeddingDimensions: optional("OPENGENI_DOCUMENT_EMBEDDING_DIMENSIONS"),
     documentEmbeddingApiKey: optional("OPENGENI_DOCUMENT_EMBEDDING_API_KEY"),
     documentEmbeddingBaseUrl: optional("OPENGENI_DOCUMENT_EMBEDDING_BASE_URL"),
     documentCurationProvider: optional("OPENGENI_DOCUMENT_CURATION_PROVIDER"),
@@ -1995,9 +1779,7 @@ export function getSettings(): Settings {
     gitCommitterName: optional("OPENGENI_GIT_COMMITTER_NAME"),
     gitCommitterEmail: optional("OPENGENI_GIT_COMMITTER_EMAIL"),
     githubAppManifestBaseUrl: optional("OPENGENI_GITHUB_APP_MANIFEST_BASE_URL"),
-    githubAppManifestStateSecret: optional(
-      "OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET",
-    ),
+    githubAppManifestStateSecret: optional("OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET"),
     githubAppId: optional("OPENGENI_GITHUB_APP_ID"),
     githubClientId: optional("OPENGENI_GITHUB_CLIENT_ID"),
     githubClientSecret: optional("OPENGENI_GITHUB_CLIENT_SECRET"),
@@ -2025,10 +1807,7 @@ export function getSettings(): Settings {
         : parsed.sandboxIdleGraceMs,
     sandboxRotationLeadMs:
       raw.sandboxRotationLeadMs === undefined
-        ? Math.min(
-            3_600_000,
-            Math.floor((parsed.modalTimeoutSeconds * 1000) / 2),
-          )
+        ? Math.min(3_600_000, Math.floor((parsed.modalTimeoutSeconds * 1000) / 2))
         : parsed.sandboxRotationLeadMs,
     mcpServers: ensureBuiltInMcpServers(parsed),
   };
@@ -2036,8 +1815,7 @@ export function getSettings(): Settings {
   return settings;
 }
 
-const LOCAL_FIRST_PARTY_DELEGATION_SECRET =
-  "opengeni-local-first-party-delegation-secret-v1";
+const LOCAL_FIRST_PARTY_DELEGATION_SECRET = "opengeni-local-first-party-delegation-secret-v1";
 
 /**
  * First-party session tools need a shared HMAC identity even in the unauthenticated
@@ -2045,9 +1823,7 @@ const LOCAL_FIRST_PARTY_DELEGATION_SECRET =
  * existing access boundary, while configured and managed deployments continue to
  * require an operator-provided secret.
  */
-export function resolveFirstPartyDelegationSecret(
-  settings: Settings,
-): string | undefined {
+export function resolveFirstPartyDelegationSecret(settings: Settings): string | undefined {
   const explicit = settings.delegationSecret?.trim();
   if (explicit) return explicit;
   return settings.productAccessMode === "local" &&
@@ -2141,9 +1917,7 @@ const CREDENTIAL_LIKE_NAME_PARTS = new Set([
 const REASONING_EFFORT_ORDER = new Map(
   ReasoningEffort.options.map((effort, index) => [effort, index]),
 );
-const MODALITY_ORDER = new Map(
-  ["text", "image", "audio"].map((value, index) => [value, index]),
-);
+const MODALITY_ORDER = new Map(["text", "image", "audio"].map((value, index) => [value, index]));
 const LATENCY_MODE_ORDER = new Map(
   ["standard", "priority", "fast"].map((value, index) => [value, index]),
 );
@@ -2159,9 +1933,7 @@ function normalizeRegistryBaseUrl(value: string, providerId: string): string {
     );
   }
   if (url.hash) {
-    throw new Error(
-      `provider ${providerId} baseUrl must not contain a fragment`,
-    );
+    throw new Error(`provider ${providerId} baseUrl must not contain a fragment`);
   }
   return url.toString();
 }
@@ -2253,9 +2025,7 @@ function normalizeQueryMap(
   }
   for (const name of Object.keys(query)) {
     if (!name) {
-      throw new Error(
-        `provider ${providerId} defaultQuery contains an empty name`,
-      );
+      throw new Error(`provider ${providerId} defaultQuery contains an empty name`);
     }
   }
   return { ...query };
@@ -2291,13 +2061,8 @@ function normalizePublicQueryNames(
   return [...names];
 }
 
-function normalizeRegistryProvider(
-  provider: RegistryProvider,
-): RegistryProvider {
-  const defaultHeaders = normalizeHeaderMap(
-    provider.id,
-    provider.defaultHeaders,
-  );
+function normalizeRegistryProvider(provider: RegistryProvider): RegistryProvider {
+  const defaultHeaders = normalizeHeaderMap(provider.id, provider.defaultHeaders);
   const defaultQuery = normalizeQueryMap(provider.id, provider.defaultQuery);
   return {
     ...provider,
@@ -2331,9 +2096,7 @@ function normalizeModelPricingSchedule(
   return "default" in pricing ? pricing : { default: pricing };
 }
 
-function normalizeCapabilities(
-  capabilities: ModelCapabilitiesV1,
-): ModelCapabilitiesV1 {
+function normalizeCapabilities(capabilities: ModelCapabilitiesV1): ModelCapabilitiesV1 {
   const parsed = ModelCapabilitiesV1Schema.parse(capabilities);
   return {
     ...parsed,
@@ -2341,22 +2104,18 @@ function normalizeCapabilities(
       ...parsed.reasoning,
       efforts: [...parsed.reasoning.efforts].sort(
         (left, right) =>
-          (REASONING_EFFORT_ORDER.get(left) ?? 0) -
-          (REASONING_EFFORT_ORDER.get(right) ?? 0),
+          (REASONING_EFFORT_ORDER.get(left) ?? 0) - (REASONING_EFFORT_ORDER.get(right) ?? 0),
       ),
     },
     inputModalities: [...parsed.inputModalities].sort(
-      (left, right) =>
-        (MODALITY_ORDER.get(left) ?? 0) - (MODALITY_ORDER.get(right) ?? 0),
+      (left, right) => (MODALITY_ORDER.get(left) ?? 0) - (MODALITY_ORDER.get(right) ?? 0),
     ),
     outputModalities: [...parsed.outputModalities].sort(
-      (left, right) =>
-        (MODALITY_ORDER.get(left) ?? 0) - (MODALITY_ORDER.get(right) ?? 0),
+      (left, right) => (MODALITY_ORDER.get(left) ?? 0) - (MODALITY_ORDER.get(right) ?? 0),
     ),
     latencyModes: [...parsed.latencyModes].sort(
       (left, right) =>
-        (LATENCY_MODE_ORDER.get(left.id) ?? 0) -
-        (LATENCY_MODE_ORDER.get(right.id) ?? 0),
+        (LATENCY_MODE_ORDER.get(left.id) ?? 0) - (LATENCY_MODE_ORDER.get(right.id) ?? 0),
     ),
   };
 }
@@ -2365,17 +2124,13 @@ function legacyModelCapabilities(
   settings: Settings,
   input: { reasoningEffort: boolean; hostedWebSearch: boolean },
 ): ModelCapabilitiesV1 {
-  const reasoningEfforts = input.reasoningEffort
-    ? configuredAllowedReasoningEfforts(settings)
-    : [];
+  const reasoningEfforts = input.reasoningEffort ? configuredAllowedReasoningEfforts(settings) : [];
   return normalizeCapabilities({
     reasoning: {
       upstream: input.reasoningEffort ? "supported" : "unknown",
       runnable: input.reasoningEffort,
       efforts: reasoningEfforts,
-      defaultEffort: input.reasoningEffort
-        ? settings.openaiReasoningEffort
-        : null,
+      defaultEffort: input.reasoningEffort ? settings.openaiReasoningEffort : null,
       required: false,
     },
     functionCalling: { upstream: "unknown", runnable: true },
@@ -2399,9 +2154,7 @@ function legacyModelCapabilities(
   });
 }
 
-function registryCredentialSource(
-  provider: RegistryProvider,
-): CredentialSourceV1 {
+function registryCredentialSource(provider: RegistryProvider): CredentialSourceV1 {
   return provider.kind === "codex-subscription"
     ? { kind: "connected_subscription", provider: "codex" }
     : { kind: "deployment", mechanism: "api_key" };
@@ -2508,15 +2261,11 @@ function definitionVersionFor(
  * client) to the SAME identity the router uses — otherwise a policy blocking
  * the built-in could be bypassed through the null-resolution path.
  */
-export function builtinProviderId(
-  settings: Pick<Settings, "openaiProvider">,
-): string {
+export function builtinProviderId(settings: Pick<Settings, "openaiProvider">): string {
   return settings.openaiProvider === "azure" ? "azure" : "openai";
 }
 
-function builtinProviderLabel(
-  settings: Pick<Settings, "openaiProvider">,
-): string {
+function builtinProviderLabel(settings: Pick<Settings, "openaiProvider">): string {
   return settings.openaiProvider === "azure" ? "Azure OpenAI" : "OpenAI";
 }
 
@@ -2528,9 +2277,7 @@ function builtinProviderLabel(
  * registry entry for the rest. Registry ids may not collide with the built-in
  * id — validateSettings rejects that at boot.
  */
-export function configuredProviders(
-  settings: Settings,
-): ResolvedModelProvider[] {
+export function configuredProviders(settings: Settings): ResolvedModelProvider[] {
   const credentialSource = builtinCredentialSource(settings);
   const builtin: ResolvedModelProvider = {
     id: builtinProviderId(settings),
@@ -2543,9 +2290,7 @@ export function configuredProviders(
   };
   if (settings.openaiProvider === "azure") {
     const baseUrl = settings.azureOpenaiBaseUrl ?? settings.azureOpenaiEndpoint;
-    builtin.baseUrl = baseUrl
-      ? normalizeRegistryBaseUrl(baseUrl, builtin.id)
-      : undefined;
+    builtin.baseUrl = baseUrl ? normalizeRegistryBaseUrl(baseUrl, builtin.id) : undefined;
     builtin.apiKey = settings.azureOpenaiApiKey ?? settings.azureOpenaiAdToken;
   } else {
     builtin.baseUrl = settings.openaiBaseUrl
@@ -2625,17 +2370,12 @@ export function withCodexCatalogProvider(settings: Settings): Settings {
  *     resolveTurnModel-null fallback, which the built-in OpenAI/Azure client
  *     serves. A policy blocking the built-in must block this path too.
  */
-export function policyProviderIdForModel(
-  settings: Settings,
-  modelId: string,
-): string {
+export function policyProviderIdForModel(settings: Settings, modelId: string): string {
   const canonicalModelId = canonicalizeConfiguredModelId(settings, modelId);
   if (canonicalModelId.startsWith(CODEX_MODEL_ID_PREFIX)) {
     return CODEX_PROVIDER_ID;
   }
-  const configured = configuredModels(settings).find(
-    (model) => model.id === canonicalModelId,
-  );
+  const configured = configuredModels(settings).find((model) => model.id === canonicalModelId);
   return configured?.providerId ?? builtinProviderId(settings);
 }
 
@@ -2649,30 +2389,20 @@ function resolvedExecutionLimits(
   },
 ): ModelExecutionLimitsV1 {
   return {
-    contextWindowTokens:
-      model.contextWindowTokens ?? settings.contextWindowTokens,
+    contextWindowTokens: model.contextWindowTokens ?? settings.contextWindowTokens,
     effectiveContextWindowTokens:
-      model.effectiveContextWindowTokens ??
-      settings.contextEffectiveWindowTokens ??
-      null,
+      model.effectiveContextWindowTokens ?? settings.contextEffectiveWindowTokens ?? null,
     autoCompactTokenLimit:
-      model.autoCompactTokenLimit ??
-      settings.contextAutoCompactThresholdTokens ??
-      null,
+      model.autoCompactTokenLimit ?? settings.contextAutoCompactThresholdTokens ?? null,
     toolOutputTruncationTokens:
-      model.toolOutputTruncationTokens ??
-      settings.modelToolOutputTruncationTokens ??
-      null,
+      model.toolOutputTruncationTokens ?? settings.modelToolOutputTruncationTokens ?? null,
   };
 }
 
 function finalizeConfiguredModel(
   settings: Settings,
   provider: ResolvedModelProvider,
-  input: Omit<
-    ConfiguredModel,
-    "schemaVersion" | "definitionVersion" | "executionLimits"
-  >,
+  input: Omit<ConfiguredModel, "schemaVersion" | "definitionVersion" | "executionLimits">,
 ): ConfiguredModel {
   const modelWithoutVersion: Omit<ConfiguredModel, "definitionVersion"> = {
     schemaVersion: 1,
@@ -2730,9 +2460,7 @@ export function configuredModels(settings: Settings): ConfiguredModel[] {
   const builtinId = builtinProviderId(settings);
   const builtinLabel = builtinProviderLabel(settings);
   const providers = configuredProviders(settings);
-  const providerById = new Map(
-    providers.map((provider) => [provider.id, provider]),
-  );
+  const providerById = new Map(providers.map((provider) => [provider.id, provider]));
   const pricingSchedules = configuredModelPricingSchedules(settings);
   // The built-in (OpenAI/Azure) provider must NEVER claim a registry-namespaced
   // model id. The worker overwrites settings.openaiModel with the turn's model
@@ -2752,14 +2480,10 @@ export function configuredModels(settings: Settings): ConfiguredModel[] {
   // CodexSubscriptionUnavailableError instead of mis-routing to Azure.
   const parsedRegistry = parseModelProvidersJson(settings.modelProvidersJson);
   const registryOwnedIds = new Set(
-    parsedRegistry.flatMap((provider) =>
-      provider.models.map((model) => model.id),
-    ),
+    parsedRegistry.flatMap((provider) => provider.models.map((model) => model.id)),
   );
   const registryAliases = new Set(
-    parsedRegistry.flatMap((provider) =>
-      provider.models.flatMap((model) => model.aliases ?? []),
-    ),
+    parsedRegistry.flatMap((provider) => provider.models.flatMap((model) => model.aliases ?? [])),
   );
   const isRegistryNamespaced = (id: string): boolean =>
     id.startsWith(CODEX_MODEL_ID_PREFIX) ||
@@ -2791,9 +2515,7 @@ export function configuredModels(settings: Settings): ConfiguredModel[] {
         credentialSource: builtinProvider.credentialSource,
         billing: builtinProvider.billing,
         capabilities,
-        ...(pricingSchedules[id] === undefined
-          ? {}
-          : { pricing: pricingSchedules[id] }),
+        ...(pricingSchedules[id] === undefined ? {} : { pricing: pricingSchedules[id] }),
         contextWindowTokens: settings.contextWindowTokens,
         toolOutputTruncationTokens: settings.modelToolOutputTruncationTokens,
         reasoningEffort: capabilities.reasoning.runnable,
@@ -2804,9 +2526,7 @@ export function configuredModels(settings: Settings): ConfiguredModel[] {
     const providerLabel = provider.label ?? provider.id;
     const resolvedProvider = providerById.get(provider.id);
     if (!resolvedProvider) {
-      throw new Error(
-        `Registry model provider ${provider.id} is not configured`,
-      );
+      throw new Error(`Registry model provider ${provider.id} is not configured`);
     }
     for (const model of provider.models) {
       const capabilities = model.capabilities
@@ -2838,8 +2558,7 @@ export function configuredModels(settings: Settings): ConfiguredModel[] {
           ...(model.effectiveContextWindowTokens === undefined
             ? {}
             : {
-                effectiveContextWindowTokens:
-                  model.effectiveContextWindowTokens,
+                effectiveContextWindowTokens: model.effectiveContextWindowTokens,
               }),
           ...(model.autoCompactTokenLimit === undefined
             ? {}
@@ -2858,10 +2577,7 @@ export function configuredModels(settings: Settings): ConfiguredModel[] {
 }
 
 /** Resolve a known canonical id or alias. Unknown strings are returned unchanged. */
-export function canonicalizeConfiguredModelId(
-  settings: Settings,
-  modelId: string,
-): string {
+export function canonicalizeConfiguredModelId(settings: Settings, modelId: string): string {
   const models = configuredModels(settings);
   const canonical = models.find((model) => model.id === modelId);
   if (canonical) {
@@ -2892,9 +2608,7 @@ export function resolveModelProvider(
   modelId: string,
 ): { provider: ResolvedModelProvider; model: ConfiguredModel } | undefined {
   const canonicalModelId = canonicalizeConfiguredModelId(settings, modelId);
-  const model = configuredModels(settings).find(
-    (candidate) => candidate.id === canonicalModelId,
-  );
+  const model = configuredModels(settings).find((candidate) => candidate.id === canonicalModelId);
   if (!model) {
     return undefined;
   }
@@ -2917,12 +2631,8 @@ export type ResolveTurnExecutionPolicyV1Input = {
   reasoningSource: TurnExecutionReasoningSourceV1;
 };
 
-function settingsForTurnExecutionPolicy(
-  settings: Settings,
-  modelId: string,
-): Settings {
-  return settings.codexSubscriptionEnabled &&
-    modelId.startsWith(CODEX_MODEL_ID_PREFIX)
+function settingsForTurnExecutionPolicy(settings: Settings, modelId: string): Settings {
+  return settings.codexSubscriptionEnabled && modelId.startsWith(CODEX_MODEL_ID_PREFIX)
     ? withCodexCatalogProvider(settings)
     : settings;
 }
@@ -2936,28 +2646,17 @@ export function resolveTurnExecutionPolicyV1(
   settings: Settings,
   input: ResolveTurnExecutionPolicyV1Input,
 ): TurnExecutionPolicyV1 {
-  const catalogSettings = settingsForTurnExecutionPolicy(
-    settings,
-    input.modelId,
-  );
-  const productModelId = canonicalizeConfiguredModelId(
-    catalogSettings,
-    input.modelId,
-  );
+  const catalogSettings = settingsForTurnExecutionPolicy(settings, input.modelId);
+  const productModelId = canonicalizeConfiguredModelId(catalogSettings, input.modelId);
   const resolved = resolveModelProvider(catalogSettings, productModelId);
   if (!resolved) {
-    throw new Error(
-      "Turn execution policy model is not present in the configured catalog",
-    );
+    throw new Error("Turn execution policy model is not present in the configured catalog");
   }
   if (
     input.requestedModelId !== null &&
-    canonicalizeConfiguredModelId(catalogSettings, input.requestedModelId) !==
-      productModelId
+    canonicalizeConfiguredModelId(catalogSettings, input.requestedModelId) !== productModelId
   ) {
-    throw new Error(
-      "Turn execution policy requested model does not canonicalize to its product",
-    );
+    throw new Error("Turn execution policy requested model does not canonicalize to its product");
   }
   return TurnExecutionPolicyV1.parse({
     schemaVersion: 1,
@@ -2993,30 +2692,20 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
   model: ConfiguredModel;
 } {
   const parsed = TurnExecutionPolicyV1.parse(policy);
-  const catalogSettings = settingsForTurnExecutionPolicy(
-    settings,
-    parsed.productModelId,
-  );
-  const canonicalExpectedModel = canonicalizeConfiguredModelId(
-    catalogSettings,
-    expected.modelId,
-  );
+  const catalogSettings = settingsForTurnExecutionPolicy(settings, parsed.productModelId);
+  const canonicalExpectedModel = canonicalizeConfiguredModelId(catalogSettings, expected.modelId);
   if (
     parsed.productModelId !== canonicalExpectedModel ||
     parsed.reasoningEffort !== expected.reasoningEffort
   ) {
-    throw new Error(
-      "Turn execution policy does not match the accepted turn model/reasoning",
-    );
+    throw new Error("Turn execution policy does not match the accepted turn model/reasoning");
   }
   if (
     parsed.requestedModelId !== null &&
     canonicalizeConfiguredModelId(catalogSettings, parsed.requestedModelId) !==
       parsed.productModelId
   ) {
-    throw new Error(
-      "Turn execution policy requested model does not match its product model",
-    );
+    throw new Error("Turn execution policy requested model does not match its product model");
   }
   const resolved = resolveModelProvider(catalogSettings, parsed.productModelId);
   if (!resolved) {
@@ -3027,13 +2716,10 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
     parsed.upstreamModelId !== resolved.model.upstreamModelId ||
     parsed.wireApi !== resolved.model.api ||
     parsed.definitionVersion !== resolved.model.definitionVersion ||
-    canonicalJson(parsed.credentialSource) !==
-      canonicalJson(resolved.model.credentialSource) ||
+    canonicalJson(parsed.credentialSource) !== canonicalJson(resolved.model.credentialSource) ||
     canonicalJson(parsed.billing) !== canonicalJson(resolved.model.billing);
   if (mismatched) {
-    throw new Error(
-      "Turn execution policy does not match the current provider definition",
-    );
+    throw new Error("Turn execution policy does not match the current provider definition");
   }
   return { policy: parsed, provider: resolved.provider, model: resolved.model };
 }
@@ -3049,10 +2735,7 @@ export function configuredModelPricingSchedules(
   settings: Settings,
 ): Record<string, ModelPricingScheduleV1> {
   const defaults = Object.fromEntries(
-    Object.entries(defaultModelPricing).map(([model, pricing]) => [
-      model,
-      { default: pricing },
-    ]),
+    Object.entries(defaultModelPricing).map(([model, pricing]) => [model, { default: pricing }]),
   );
   const registry: Record<string, ModelPricingScheduleV1> = {};
   for (const provider of parseModelProvidersJson(settings.modelProvidersJson)) {
@@ -3063,9 +2746,10 @@ export function configuredModelPricingSchedules(
     }
   }
   const configured = Object.fromEntries(
-    Object.entries(parseModelPricingJson(settings.modelPricingJson)).map(
-      ([model, pricing]) => [model, { default: pricing }],
-    ),
+    Object.entries(parseModelPricingJson(settings.modelPricingJson)).map(([model, pricing]) => [
+      model,
+      { default: pricing },
+    ]),
   );
   return {
     ...defaults,
@@ -3075,13 +2759,12 @@ export function configuredModelPricingSchedules(
 }
 
 /** Legacy flat projection: returns the default/below-threshold price. */
-export function configuredModelPricing(
-  settings: Settings,
-): Record<string, ModelPricing> {
+export function configuredModelPricing(settings: Settings): Record<string, ModelPricing> {
   return Object.fromEntries(
-    Object.entries(configuredModelPricingSchedules(settings)).map(
-      ([model, schedule]) => [model, schedule.default],
-    ),
+    Object.entries(configuredModelPricingSchedules(settings)).map(([model, schedule]) => [
+      model,
+      schedule.default,
+    ]),
   );
 }
 
@@ -3108,21 +2791,13 @@ export function selectModelPricing(
 export function contextInputBudgetTokens(
   settings: Pick<
     Settings,
-    | "contextWindowTokens"
-    | "contextEffectiveWindowTokens"
-    | "contextReservedOutputTokens"
+    "contextWindowTokens" | "contextEffectiveWindowTokens" | "contextReservedOutputTokens"
   >,
 ): number {
   if (settings.contextEffectiveWindowTokens !== undefined) {
-    return Math.min(
-      settings.contextWindowTokens,
-      settings.contextEffectiveWindowTokens,
-    );
+    return Math.min(settings.contextWindowTokens, settings.contextEffectiveWindowTokens);
   }
-  return Math.max(
-    0,
-    settings.contextWindowTokens - settings.contextReservedOutputTokens,
-  );
+  return Math.max(0, settings.contextWindowTokens - settings.contextReservedOutputTokens);
 }
 
 /**
@@ -3140,8 +2815,7 @@ export function settingsWithResolvedModelContext(
     | "toolOutputTruncationTokens"
   >,
 ): Settings {
-  const contextWindowTokens =
-    model.contextWindowTokens ?? settings.contextWindowTokens;
+  const contextWindowTokens = model.contextWindowTokens ?? settings.contextWindowTokens;
   return {
     ...settings,
     contextWindowTokens,
@@ -3162,9 +2836,7 @@ export function settingsWithResolvedModelContext(
   };
 }
 
-export function configuredStaticUsageLimits(
-  settings: Settings,
-): StaticUsageLimitsConfig {
+export function configuredStaticUsageLimits(settings: Settings): StaticUsageLimitsConfig {
   return parseStaticUsageLimitsJson(settings.staticUsageLimitsJson);
 }
 
@@ -3172,9 +2844,7 @@ export function configuredEntitlements(settings: Settings): EntitlementsConfig {
   if (settings.entitlementsMode === "none") {
     return {};
   }
-  const configured = parseStaticEntitlementsJson(
-    settings.staticEntitlementsJson,
-  );
+  const configured = parseStaticEntitlementsJson(settings.staticEntitlementsJson);
   if (settings.entitlementsMode === "static") {
     return configured;
   }
@@ -3183,9 +2853,7 @@ export function configuredEntitlements(settings: Settings): EntitlementsConfig {
     "managed.billing.prepaid_credits": settings.billingMode === "stripe",
     "managed.api_keys": true,
     "managed.workspaces": true,
-    "managed.github_app": Boolean(
-      settings.githubAppId && settings.githubAppPrivateKey,
-    ),
+    "managed.github_app": Boolean(settings.githubAppId && settings.githubAppPrivateKey),
     ...configured,
   };
 }
@@ -3205,14 +2873,10 @@ export function calculateModelUsageCostMicros(
       : [usage];
   const rawCostByPricing = new Map<ModelPricing, number>();
   for (const entry of entries) {
-    const pricing = selectModelPricing(
-      schedule,
-      positiveInt(entry.inputTokens),
-    );
+    const pricing = selectModelPricing(schedule, positiveInt(entry.inputTokens));
     rawCostByPricing.set(
       pricing,
-      (rawCostByPricing.get(pricing) ?? 0) +
-        calculateEntryCostMicros(pricing, entry),
+      (rawCostByPricing.get(pricing) ?? 0) + calculateEntryCostMicros(pricing, entry),
     );
   }
   let total = 0;
@@ -3237,9 +2901,7 @@ export function configuredAllowedReasoningEfforts(
  * AES-256-GCM workspace environment value encryption. Returns null when unset.
  * Throws naming only the env var, never echoing its value.
  */
-export function environmentsEncryptionKeyBytes(
-  settings: Settings,
-): Uint8Array | null {
+export function environmentsEncryptionKeyBytes(settings: Settings): Uint8Array | null {
   if (!settings.environmentsEncryptionKey) {
     return null;
   }
@@ -3258,12 +2920,9 @@ export function environmentsEncryptionKeyBytes(
  * material enables TLS automatically; the explicit flag covers server-auth TLS
  * without credentials. Secret values are never included in validation errors.
  */
-export function temporalConnectionOptions(
-  settings: Settings,
-): TemporalConnectionOptions {
+export function temporalConnectionOptions(settings: Settings): TemporalConnectionOptions {
   const apiKey = settings.temporalApiKey?.trim() || undefined;
-  const serverNameOverride =
-    settings.temporalTlsServerName?.trim() || undefined;
+  const serverNameOverride = settings.temporalTlsServerName?.trim() || undefined;
   const rootCa = decodeTemporalTlsMaterial(
     settings.temporalTlsRootCaCertificateBase64,
     "OPENGENI_TEMPORAL_TLS_ROOT_CA_CERTIFICATE_BASE64",
@@ -3295,8 +2954,7 @@ export function temporalConnectionOptions(
     tls.clientCertPair = { crt: clientCertificate, key: clientPrivateKey };
   }
   const hasCustomTls = Object.keys(tls).length > 0;
-  const tlsEnabled =
-    settings.temporalTlsEnabled || Boolean(apiKey) || hasCustomTls;
+  const tlsEnabled = settings.temporalTlsEnabled || Boolean(apiKey) || hasCustomTls;
 
   return {
     address: settings.temporalHost,
@@ -3337,31 +2995,24 @@ function decodeTemporalTlsMaterial(
  * resolve (the schema-isolation contract live footgun). `opengeni_private` is on the path so the
  * RLS GUC-reader helpers resolve when referenced unqualified.
  */
-export function dbSearchPath(
-  settings: Pick<Settings, "dbSchema">,
-): string | undefined {
+export function dbSearchPath(settings: Pick<Settings, "dbSchema">): string | undefined {
   const schema = settings.dbSchema?.trim();
   if (!schema) {
     return undefined;
   }
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(schema)) {
-    throw new Error(
-      `OPENGENI_DB_SCHEMA is not a valid Postgres identifier: ${schema}`,
-    );
+    throw new Error(`OPENGENI_DB_SCHEMA is not a valid Postgres identifier: ${schema}`);
   }
   return `${schema},opengeni_private,public`;
 }
 
-export function collectGitIdentityEnvironment(
-  settings: Settings,
-): Record<string, string> {
+export function collectGitIdentityEnvironment(settings: Settings): Record<string, string> {
   return Object.fromEntries(
     Object.entries({
       GIT_AUTHOR_NAME: settings.gitAuthorName,
       GIT_AUTHOR_EMAIL: settings.gitAuthorEmail,
       GIT_COMMITTER_NAME: settings.gitCommitterName ?? settings.gitAuthorName,
-      GIT_COMMITTER_EMAIL:
-        settings.gitCommitterEmail ?? settings.gitAuthorEmail,
+      GIT_COMMITTER_EMAIL: settings.gitCommitterEmail ?? settings.gitAuthorEmail,
     }).filter(
       (entry): entry is [string, string] =>
         typeof entry[1] === "string" && entry[1].trim().length > 0,
@@ -3369,13 +3020,9 @@ export function collectGitIdentityEnvironment(
   );
 }
 
-const DEFAULT_SANDBOX_PATH =
-  "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+const DEFAULT_SANDBOX_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
-function prependPathEntry(
-  pathValue: string | undefined,
-  entry: string,
-): string {
+function prependPathEntry(pathValue: string | undefined, entry: string): string {
   const parts = (pathValue ?? DEFAULT_SANDBOX_PATH).split(":").filter(Boolean);
   return [entry, ...parts.filter((part) => part !== entry)].join(":");
 }
@@ -3449,10 +3096,7 @@ export function stableSandboxEnvironmentForRun(
     environment.OPENGENI_GIT_CREDENTIALS_DIR ??= `${home}/.opengeni/git-credentials`;
     environment.OPENGENI_GIT_TOKEN_FILE ??= `${home}/.opengeni/git-token`;
     environment.OPENGENI_GIT_CLI_WRAPPER_DIR ??= `${home}/.opengeni/bin`;
-    environment.PATH = prependPathEntry(
-      environment.PATH,
-      environment.OPENGENI_GIT_CLI_WRAPPER_DIR,
-    );
+    environment.PATH = prependPathEntry(environment.PATH, environment.OPENGENI_GIT_CLI_WRAPPER_DIR);
   }
   if (settings.toolspaceEnabled) {
     // Connected Machines do not share one control-plane-known home path. Keep a
@@ -3500,8 +3144,7 @@ export function hasGitHubRepositorySelection(
   return resources.some(
     (resource) =>
       resource.kind === "repository" &&
-      ((positive(resource.githubInstallationId) &&
-        positive(resource.githubRepositoryId)) ||
+      ((positive(resource.githubInstallationId) && positive(resource.githubRepositoryId)) ||
         (resource.provider === "github" &&
           positive(resource.installationId) &&
           positive(resource.repositoryId))),
@@ -3551,12 +3194,9 @@ export function applyGitAuthPointerEnvironment(
   environment.GIT_TERMINAL_PROMPT = "0";
   if (identity) {
     environment.GIT_AUTHOR_NAME = environment.GIT_AUTHOR_NAME || identity.name;
-    environment.GIT_AUTHOR_EMAIL =
-      environment.GIT_AUTHOR_EMAIL || identity.email;
-    environment.GIT_COMMITTER_NAME =
-      environment.GIT_COMMITTER_NAME || identity.name;
-    environment.GIT_COMMITTER_EMAIL =
-      environment.GIT_COMMITTER_EMAIL || identity.email;
+    environment.GIT_AUTHOR_EMAIL = environment.GIT_AUTHOR_EMAIL || identity.email;
+    environment.GIT_COMMITTER_NAME = environment.GIT_COMMITTER_NAME || identity.name;
+    environment.GIT_COMMITTER_EMAIL = environment.GIT_COMMITTER_EMAIL || identity.email;
   }
   return environment;
 }
@@ -3590,14 +3230,8 @@ export async function retryStartupDependency<T>(
   options: StartupRetryOptions = {},
 ): Promise<T> {
   const attempts = Math.max(1, Math.floor(options.attempts ?? 30));
-  const initialDelayMs = Math.max(
-    0,
-    Math.floor(options.initialDelayMs ?? 1000),
-  );
-  const maxDelayMs = Math.max(
-    initialDelayMs,
-    Math.floor(options.maxDelayMs ?? 5000),
-  );
+  const initialDelayMs = Math.max(0, Math.floor(options.initialDelayMs ?? 1000));
+  const maxDelayMs = Math.max(initialDelayMs, Math.floor(options.maxDelayMs ?? 5000));
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
       return await operation();
@@ -3655,17 +3289,13 @@ export function parseExposedPorts(raw: string): number[] {
   return splitCsv(raw).map((value) => {
     const port = Number(value);
     if (!Number.isInteger(port) || port < 1 || port > 65535) {
-      throw new Error(
-        "OPENGENI_DOCKER_EXPOSED_PORTS must contain TCP port numbers",
-      );
+      throw new Error("OPENGENI_DOCKER_EXPOSED_PORTS must contain TCP port numbers");
     }
     return port;
   });
 }
 
-export function parseMcpServers(
-  raw: string | undefined,
-): unknown[] | undefined {
+export function parseMcpServers(raw: string | undefined): unknown[] | undefined {
   if (!raw) {
     return undefined;
   }
@@ -3683,9 +3313,7 @@ export function parseMcpServers(
   }
 }
 
-export function parseModelPricingJson(
-  raw: string,
-): Record<string, ModelPricing> {
+export function parseModelPricingJson(raw: string): Record<string, ModelPricing> {
   if (!raw.trim() || raw.trim() === "{}") {
     return {};
   }
@@ -3694,22 +3322,15 @@ export function parseModelPricingJson(
     parsed = JSON.parse(raw);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(
-      `OPENGENI_MODEL_PRICING_JSON must be valid JSON: ${message}`,
-      { cause: error },
-    );
+    throw new Error(`OPENGENI_MODEL_PRICING_JSON must be valid JSON: ${message}`, { cause: error });
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error(
-      "OPENGENI_MODEL_PRICING_JSON must be a JSON object keyed by model name",
-    );
+    throw new Error("OPENGENI_MODEL_PRICING_JSON must be a JSON object keyed by model name");
   }
   const out: Record<string, ModelPricing> = {};
   for (const [model, value] of Object.entries(parsed)) {
     if (!model.trim()) {
-      throw new Error(
-        "OPENGENI_MODEL_PRICING_JSON contains an empty model name",
-      );
+      throw new Error("OPENGENI_MODEL_PRICING_JSON contains an empty model name");
     }
     out[model] = ModelPricingSchema.parse(value);
   }
@@ -3759,13 +3380,8 @@ export function parseSandboxWarmRateJson(raw: string): Record<string, number> {
 
 // Resolve the warm rate (usd_micros/sec) for a backend; 0 when the backend has no
 // configured rate (the box is metered in seconds but not cost-debited).
-export function sandboxWarmRateMicrosPerSecond(
-  settings: Settings,
-  backend: string,
-): number {
-  const table = parseSandboxWarmRateJson(
-    settings.sandboxWarmRateMicrosPerSecondJson,
-  );
+export function sandboxWarmRateMicrosPerSecond(settings: Settings, backend: string): number {
+  const table = parseSandboxWarmRateJson(settings.sandboxWarmRateMicrosPerSecondJson);
   return table[backend] ?? 0;
 }
 
@@ -3783,17 +3399,12 @@ export function parseModelProvidersJson(raw: string): RegistryProvider[] {
     parsed = JSON.parse(raw);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(
-      `OPENGENI_MODEL_PROVIDERS_JSON must be valid JSON: ${message}`,
-      {
-        cause: error,
-      },
-    );
+    throw new Error(`OPENGENI_MODEL_PROVIDERS_JSON must be valid JSON: ${message}`, {
+      cause: error,
+    });
   }
   if (!Array.isArray(parsed)) {
-    throw new Error(
-      "OPENGENI_MODEL_PROVIDERS_JSON must be a JSON array of providers",
-    );
+    throw new Error("OPENGENI_MODEL_PROVIDERS_JSON must be a JSON array of providers");
   }
   return parsed.map((entry, index) => {
     const result = RegistryProviderSchema.safeParse(entry);
@@ -3806,12 +3417,9 @@ export function parseModelProvidersJson(raw: string): RegistryProvider[] {
       return normalizeRegistryProvider(result.data);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      throw new Error(
-        `OPENGENI_MODEL_PROVIDERS_JSON provider[${index}] is invalid: ${message}`,
-        {
-          cause: error,
-        },
-      );
+      throw new Error(`OPENGENI_MODEL_PROVIDERS_JSON provider[${index}] is invalid: ${message}`, {
+        cause: error,
+      });
     }
   });
 }
@@ -3827,12 +3435,9 @@ export function parseIntegrationsOauthClientsJson(
     parsed = JSON.parse(raw);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(
-      `OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON must be valid JSON: ${message}`,
-      {
-        cause: error,
-      },
-    );
+    throw new Error(`OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON must be valid JSON: ${message}`, {
+      cause: error,
+    });
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error(
@@ -3842,9 +3447,7 @@ export function parseIntegrationsOauthClientsJson(
   const out: Record<string, IntegrationOAuthClientConfig> = {};
   for (const [key, value] of Object.entries(parsed)) {
     if (!key.trim()) {
-      throw new Error(
-        "OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON contains an empty issuer key",
-      );
+      throw new Error("OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON contains an empty issuer key");
     }
     const result = IntegrationOAuthClientConfigSchema.safeParse(value);
     if (!result.success) {
@@ -3857,9 +3460,7 @@ export function parseIntegrationsOauthClientsJson(
   return out;
 }
 
-export function parseStaticUsageLimitsJson(
-  raw: string,
-): StaticUsageLimitsConfig {
+export function parseStaticUsageLimitsJson(raw: string): StaticUsageLimitsConfig {
   if (!raw.trim() || raw.trim() === "{}") {
     return {};
   }
@@ -3868,12 +3469,9 @@ export function parseStaticUsageLimitsJson(
     parsed = JSON.parse(raw);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(
-      `OPENGENI_STATIC_USAGE_LIMITS_JSON must be valid JSON: ${message}`,
-      {
-        cause: error,
-      },
-    );
+    throw new Error(`OPENGENI_STATIC_USAGE_LIMITS_JSON must be valid JSON: ${message}`, {
+      cause: error,
+    });
   }
   return StaticUsageLimits.parse(parsed);
 }
@@ -3887,31 +3485,22 @@ export function parseStaticEntitlementsJson(raw: string): EntitlementsConfig {
     parsed = JSON.parse(raw);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(
-      `OPENGENI_STATIC_ENTITLEMENTS_JSON must be valid JSON: ${message}`,
-      {
-        cause: error,
-      },
-    );
+    throw new Error(`OPENGENI_STATIC_ENTITLEMENTS_JSON must be valid JSON: ${message}`, {
+      cause: error,
+    });
   }
   return Entitlements.parse(parsed);
 }
 
-function calculateEntryCostMicros(
-  pricing: ModelPricing,
-  entry: ModelUsageInput,
-): number {
+function calculateEntryCostMicros(pricing: ModelPricing, entry: ModelUsageInput): number {
   const inputTokens = positiveInt(entry.inputTokens);
   const outputTokens = positiveInt(entry.outputTokens);
   const cachedTokens = Math.min(inputTokens, cachedInputTokens(entry));
   const uncachedInputTokens = Math.max(0, inputTokens - cachedTokens);
   const cachedInputRate =
-    pricing.cachedInputMicrosPerMillionTokens ??
-    pricing.inputMicrosPerMillionTokens;
+    pricing.cachedInputMicrosPerMillionTokens ?? pricing.inputMicrosPerMillionTokens;
   return (
-    Math.ceil(
-      (uncachedInputTokens * pricing.inputMicrosPerMillionTokens) / 1_000_000,
-    ) +
+    Math.ceil((uncachedInputTokens * pricing.inputMicrosPerMillionTokens) / 1_000_000) +
     Math.ceil((cachedTokens * cachedInputRate) / 1_000_000) +
     Math.ceil((outputTokens * pricing.outputMicrosPerMillionTokens) / 1_000_000)
   );
@@ -3934,19 +3523,14 @@ function cachedInputTokens(entry: ModelUsageInput): number {
 }
 
 function positiveInt(value: unknown): number {
-  return typeof value === "number" && Number.isFinite(value) && value > 0
-    ? Math.floor(value)
-    : 0;
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
 }
 
 function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
-  const existing = settings.mcpServers.filter(
-    (server) => server.id !== "opengeni",
-  );
+  const existing = settings.mcpServers.filter((server) => server.id !== "opengeni");
   const firstPartyMcpUrl = firstPartyMcpServerUrl(settings);
   const firstPartyFilesMcpUrl = firstPartyFilesMcpServerUrl(firstPartyMcpUrl);
-  const firstPartyDocsMcpUrl =
-    firstPartyDocumentsMcpServerUrl(firstPartyMcpUrl);
+  const firstPartyDocsMcpUrl = firstPartyDocumentsMcpServerUrl(firstPartyMcpUrl);
   const hasFiles = existing.some((server) => server.id === "files");
   const hasDocs = existing.some((server) => server.id === "docs");
   return [
@@ -4029,10 +3613,7 @@ export function firstPartyMcpBaseUrl(settings: Settings): string {
   );
 }
 
-export function firstPartyMcpWorkspaceUrl(
-  settings: Settings,
-  workspaceId: string,
-): string {
+export function firstPartyMcpWorkspaceUrl(settings: Settings, workspaceId: string): string {
   const raw = firstPartyMcpBaseUrl(settings);
   if (raw.includes("{workspaceId}")) {
     return raw.replaceAll("{workspaceId}", workspaceId);
@@ -4059,9 +3640,7 @@ function firstPartyFilesMcpServerUrl(mcpUrl: string): string {
 function validateSettings(settings: Settings): void {
   temporalConnectionOptions(settings);
   if (settings.toolspaceEnabled && !settings.delegationSecret) {
-    throw new Error(
-      "OPENGENI_DELEGATION_SECRET is required when OPENGENI_TOOLSPACE_ENABLED=true",
-    );
+    throw new Error("OPENGENI_DELEGATION_SECRET is required when OPENGENI_TOOLSPACE_ENABLED=true");
   }
   if (settings.productAccessMode === "managed") {
     if (!settings.publicBaseUrl) {
@@ -4079,18 +3658,10 @@ function validateSettings(settings: Settings): void {
         "OPENGENI_DELEGATION_SECRET is required when OPENGENI_PRODUCT_ACCESS_MODE=managed",
       );
     }
-    if (
-      !["local", "test"].includes(settings.environment) &&
-      !settings.resendApiKey
-    ) {
-      throw new Error(
-        "OPENGENI_RESEND_API_KEY is required for managed mode outside local/test",
-      );
+    if (!["local", "test"].includes(settings.environment) && !settings.resendApiKey) {
+      throw new Error("OPENGENI_RESEND_API_KEY is required for managed mode outside local/test");
     }
-    if (
-      !["local", "test"].includes(settings.environment) &&
-      !settings.environmentsEncryptionKey
-    ) {
+    if (!["local", "test"].includes(settings.environment) && !settings.environmentsEncryptionKey) {
       throw new Error(
         "OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is required for managed mode outside local/test",
       );
@@ -4112,10 +3683,7 @@ function validateSettings(settings: Settings): void {
         "OPENGENI_PUBLIC_BASE_URL must use https when OPENGENI_INTEGRATIONS_ENABLED=true outside local/test",
       );
     }
-    if (
-      !settings.integrationsStateSecret &&
-      !["local", "test"].includes(settings.environment)
-    ) {
+    if (!settings.integrationsStateSecret && !["local", "test"].includes(settings.environment)) {
       throw new Error(
         "OPENGENI_INTEGRATIONS_STATE_SECRET is required when OPENGENI_INTEGRATIONS_ENABLED=true outside local/test",
       );
@@ -4189,22 +3757,12 @@ function validateSettings(settings: Settings): void {
       );
     }
   }
-  if (
-    settings.productAccessMode !== "managed" &&
-    settings.billingMode === "stripe"
-  ) {
-    throw new Error(
-      "OPENGENI_BILLING_MODE=stripe requires OPENGENI_PRODUCT_ACCESS_MODE=managed",
-    );
+  if (settings.productAccessMode !== "managed" && settings.billingMode === "stripe") {
+    throw new Error("OPENGENI_BILLING_MODE=stripe requires OPENGENI_PRODUCT_ACCESS_MODE=managed");
   }
-  if (
-    settings.billingMode === "stripe" ||
-    settings.usageLimitsMode === "managed"
-  ) {
+  if (settings.billingMode === "stripe" || settings.usageLimitsMode === "managed") {
     const pricing = configuredModelPricing(settings);
-    const missing = configuredAllowedModels(settings).filter(
-      (model) => !pricing[model],
-    );
+    const missing = configuredAllowedModels(settings).filter((model) => !pricing[model]);
     if (missing.length > 0) {
       throw new Error(
         `Missing model pricing for managed billing model(s): ${missing.join(", ")}. Set OPENGENI_MODEL_PRICING_JSON.`,
@@ -4222,9 +3780,7 @@ function validateSettings(settings: Settings): void {
     parseStaticUsageLimitsJson(settings.staticUsageLimitsJson);
   }
   if (settings.entitlementsMode === "static") {
-    const entitlements = parseStaticEntitlementsJson(
-      settings.staticEntitlementsJson,
-    );
+    const entitlements = parseStaticEntitlementsJson(settings.staticEntitlementsJson);
     if (Object.keys(entitlements).length === 0) {
       throw new Error(
         "OPENGENI_STATIC_ENTITLEMENTS_JSON must define at least one feature when OPENGENI_ENTITLEMENTS_MODE=static",
@@ -4234,9 +3790,7 @@ function validateSettings(settings: Settings): void {
     parseStaticEntitlementsJson(settings.staticEntitlementsJson);
   }
   if (settings.authRequired && !settings.accessKey) {
-    throw new Error(
-      "OPENGENI_ACCESS_KEY is required when OPENGENI_AUTH_REQUIRED=true",
-    );
+    throw new Error("OPENGENI_ACCESS_KEY is required when OPENGENI_AUTH_REQUIRED=true");
   }
   if (settings.openaiProvider === "azure") {
     if (!settings.azureOpenaiBaseUrl && !settings.azureOpenaiEndpoint) {
@@ -4245,14 +3799,10 @@ function validateSettings(settings: Settings): void {
       );
     }
     if (!settings.azureOpenaiBaseUrl && !settings.azureOpenaiDeployment) {
-      throw new Error(
-        "Azure OpenAI endpoint mode requires OPENGENI_AZURE_OPENAI_DEPLOYMENT",
-      );
+      throw new Error("Azure OpenAI endpoint mode requires OPENGENI_AZURE_OPENAI_DEPLOYMENT");
     }
     if (!settings.azureOpenaiBaseUrl && !settings.azureOpenaiApiVersion) {
-      throw new Error(
-        "Azure OpenAI endpoint mode requires OPENGENI_AZURE_OPENAI_API_VERSION",
-      );
+      throw new Error("Azure OpenAI endpoint mode requires OPENGENI_AZURE_OPENAI_API_VERSION");
     }
     if (!settings.azureOpenaiApiKey && !settings.azureOpenaiAdToken) {
       throw new Error("Azure OpenAI requires an API key or AD token");
@@ -4287,8 +3837,7 @@ function validateSettings(settings: Settings): void {
     settings.objectStorageBackend === "aws-s3"
   ) {
     if (
-      Boolean(settings.objectStorageAccessKeyId) !==
-      Boolean(settings.objectStorageSecretAccessKey)
+      Boolean(settings.objectStorageAccessKeyId) !== Boolean(settings.objectStorageSecretAccessKey)
     ) {
       throw new Error(
         "OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID and OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY must both be set or both omitted",
@@ -4299,8 +3848,7 @@ function validateSettings(settings: Settings): void {
       (settings.objectStorageEndpoint ||
         settings.objectStorageInternalEndpoint ||
         settings.objectStorageSandboxEndpoint) &&
-      (!settings.objectStorageAccessKeyId ||
-        !settings.objectStorageSecretAccessKey)
+      (!settings.objectStorageAccessKeyId || !settings.objectStorageSecretAccessKey)
     ) {
       throw new Error(
         "S3-compatible object storage endpoints require OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID and OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY",
@@ -4348,9 +3896,7 @@ function validateSettings(settings: Settings): void {
         "Azure Blob storage uses OPENGENI_OBJECT_STORAGE_AZURE_* settings, not OPENGENI_OBJECT_STORAGE_GCS_* settings",
       );
     }
-    const hasConnectionString = Boolean(
-      settings.objectStorageAzureConnectionString,
-    );
+    const hasConnectionString = Boolean(settings.objectStorageAzureConnectionString);
     const hasSharedKey =
       Boolean(settings.objectStorageAzureAccountName) &&
       Boolean(settings.objectStorageAzureAccountKey);
@@ -4398,9 +3944,7 @@ function validateSettings(settings: Settings): void {
   const serverIds = new Set<string>();
   for (const server of settings.mcpServers) {
     if (serverIds.has(server.id)) {
-      throw new Error(
-        `OPENGENI_MCP_SERVERS contains duplicate id ${server.id}`,
-      );
+      throw new Error(`OPENGENI_MCP_SERVERS contains duplicate id ${server.id}`);
     }
     serverIds.add(server.id);
   }
@@ -4448,9 +3992,7 @@ function validateSettings(settings: Settings): void {
           `OPENGENI_MODAL_TIMEOUT_SECONDS*1000 (${providerLifetimeMs}).`,
       );
     }
-    if (
-      !(rotationLeadMs > settings.sandboxSnapshotTimeoutMs + 2 * reaperPeriod)
-    ) {
+    if (!(rotationLeadMs > settings.sandboxSnapshotTimeoutMs + 2 * reaperPeriod)) {
       throw new Error(
         `OPENGENI_SANDBOX_ROTATION_LEAD_MS (${rotationLeadMs}) must exceed the snapshot timeout ` +
           `plus two reaper periods (${settings.sandboxSnapshotTimeoutMs + 2 * reaperPeriod}).`,
@@ -4483,10 +4025,7 @@ function validateSettings(settings: Settings): void {
   // negotiateCapabilities degrades the desktop cell). This keeps a desktop-
   // configured deployment bootable (headless + Channel-A still work) instead of
   // crashing the whole API on a missing secret.
-  if (
-    settings.sandboxDesktopEnabled &&
-    resolveStreamTokenSecret(settings) === undefined
-  ) {
+  if (settings.sandboxDesktopEnabled && resolveStreamTokenSecret(settings) === undefined) {
     console.warn(
       "[opengeni] OPENGENI_SANDBOX_DESKTOP_ENABLED=true but neither OPENGENI_STREAM_TOKEN_SECRET nor " +
         "OPENGENI_DELEGATION_SECRET is set: the desktop pixel plane will GRACEFULLY DEGRADE " +
@@ -4501,9 +4040,7 @@ function validateSettings(settings: Settings): void {
   // provider with no usable key can never serve a turn). Registry models flow
   // through configuredAllowedModels, so the managed-billing pricing check above
   // already covers them.
-  const registryProviders = parseModelProvidersJson(
-    settings.modelProvidersJson,
-  );
+  const registryProviders = parseModelProvidersJson(settings.modelProvidersJson);
   const builtinId = builtinProviderId(settings);
   const providerIds = new Set<string>();
   for (const provider of registryProviders) {
@@ -4537,9 +4074,7 @@ function validateSettings(settings: Settings): void {
  * secret does not need a second one. Returns undefined when neither is set,
  * which drives the graceful-degrade (DesktopStream.transport:null).
  */
-export function resolveStreamTokenSecret(
-  settings: Settings,
-): string | undefined {
+export function resolveStreamTokenSecret(settings: Settings): string | undefined {
   const explicit = settings.streamTokenSecret?.trim();
   if (explicit) {
     return explicit;
@@ -4554,10 +4089,7 @@ export function resolveStreamTokenSecret(
  * negotiateCapabilities forces DesktopStream.transport:null.
  */
 export function streamTokenDegraded(settings: Settings): boolean {
-  return (
-    settings.sandboxDesktopEnabled &&
-    resolveStreamTokenSecret(settings) === undefined
-  );
+  return settings.sandboxDesktopEnabled && resolveStreamTokenSecret(settings) === undefined;
 }
 
 /**
@@ -4569,9 +4101,7 @@ export function streamTokenDegraded(settings: Settings): boolean {
  * reports the credential plane disabled (graceful degrade, never a 500). NEVER log
  * the returned value.
  */
-export function resolveEnrollmentSigningSecret(
-  settings: Settings,
-): string | undefined {
+export function resolveEnrollmentSigningSecret(settings: Settings): string | undefined {
   const explicit = settings.enrollmentSigningSecret?.trim();
   if (explicit) {
     return explicit;
@@ -4590,9 +4120,7 @@ export function resolveEnrollmentSigningSecret(
  * none is set — the enrollment poll then returns an empty relayToken (graceful
  * degrade; the stream plane is unavailable until configured). NEVER log the value.
  */
-export function resolveRelayTokenSecret(
-  settings: Settings,
-): string | undefined {
+export function resolveRelayTokenSecret(settings: Settings): string | undefined {
   const explicit = settings.selfhostedRelayTokenSecret?.trim();
   if (explicit) {
     return explicit;
@@ -4622,12 +4150,9 @@ export interface NatsCalloutConfig {
   password: string;
 }
 
-export function resolveNatsCalloutConfig(
-  settings: Settings,
-): NatsCalloutConfig | null {
+export function resolveNatsCalloutConfig(settings: Settings): NatsCalloutConfig | null {
   const accountSeed = settings.selfhostedNatsCalloutAccountSeed?.trim();
-  const accountName =
-    settings.selfhostedNatsCalloutAccountName?.trim() || "APP";
+  const accountName = settings.selfhostedNatsCalloutAccountName?.trim() || "APP";
   const user = settings.selfhostedNatsCalloutUser?.trim();
   const password = settings.selfhostedNatsCalloutPassword?.trim();
   if (!accountSeed || !user || !password) {
@@ -4647,9 +4172,7 @@ export interface NatsControlPlaneAuth {
   password: string;
 }
 
-export function resolveNatsControlPlaneAuth(
-  settings: Settings,
-): NatsControlPlaneAuth | null {
+export function resolveNatsControlPlaneAuth(settings: Settings): NatsControlPlaneAuth | null {
   const user = settings.selfhostedNatsControlUser?.trim();
   const password = settings.selfhostedNatsControlPassword?.trim();
   if (!user || !password) {
@@ -4689,12 +4212,9 @@ function parseGcsCredentialsJson(raw: string): unknown {
     return JSON.parse(raw);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(
-      `OPENGENI_OBJECT_STORAGE_GCS_CREDENTIALS_JSON must be valid JSON: ${message}`,
-      {
-        cause: error,
-      },
-    );
+    throw new Error(`OPENGENI_OBJECT_STORAGE_GCS_CREDENTIALS_JSON must be valid JSON: ${message}`, {
+      cause: error,
+    });
   }
 }
 

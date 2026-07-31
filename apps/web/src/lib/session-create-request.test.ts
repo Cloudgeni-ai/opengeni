@@ -1,8 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import {
-  ResourceRefConflictError,
-  type ResourceRef,
-} from "@opengeni/contracts";
+import { ResourceRefConflictError, type ResourceRef } from "@opengeni/contracts";
 import {
   buildCreateSessionRequest,
   applyNewSessionModelPreference,
@@ -167,10 +164,9 @@ describe("buildCreateSessionRequest", () => {
       fileId: fileA,
       mountPath: `files/${fileA}`,
     };
-    expect(
-      build([repository], [attachment], { omitWorkspaceResources: true })
-        .resources,
-    ).toEqual([attachment]);
+    expect(build([repository], [attachment], { omitWorkspaceResources: true }).resources).toEqual([
+      attachment,
+    ]);
   });
 
   test("reuses create keys only for the same client, workspace, and logical request", () => {

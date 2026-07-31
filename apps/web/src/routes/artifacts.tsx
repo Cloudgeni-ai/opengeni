@@ -128,9 +128,7 @@ export function ArtifactsRoute({ workspaceId }: { workspaceId: string }) {
                   <Code2Icon className="size-4" />
                 </div>
                 <span className="text-2xs text-fg-subtle">
-                  {artifact.currentVersion
-                    ? `v${artifact.currentVersion.revision}`
-                    : "Draft"}
+                  {artifact.currentVersion ? `v${artifact.currentVersion.revision}` : "Draft"}
                 </span>
               </div>
               <h2 className="mt-4 font-semibold text-fg group-hover:text-brand">
@@ -160,27 +158,16 @@ export function ArtifactDetailRoute({
 }) {
   const context = useAppContext();
   const navigate = useNavigate();
-  const [detail, setDetail] = useState<WorkspaceArtifactDetailResponse | null>(
-    null,
-  );
-  const [content, setContent] =
-    useState<WorkspaceArtifactContentResponse | null>(null);
+  const [detail, setDetail] = useState<WorkspaceArtifactDetailResponse | null>(null);
+  const [content, setContent] = useState<WorkspaceArtifactContentResponse | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [busyVersion, setBusyVersion] = useState<string | null>(null);
   const load = useCallback(async () => {
     try {
       setError(null);
-      const nextDetail = await context.client.getWorkspaceArtifact(
-        workspaceId,
-        artifactId,
-      );
+      const nextDetail = await context.client.getWorkspaceArtifact(workspaceId, artifactId);
       setDetail(nextDetail);
-      setContent(
-        await context.client.getWorkspaceArtifactContent(
-          workspaceId,
-          artifactId,
-        ),
-      );
+      setContent(await context.client.getWorkspaceArtifactContent(workspaceId, artifactId));
     } catch (nextError) {
       setError(nextError);
     }
@@ -229,8 +216,7 @@ export function ArtifactDetailRoute({
       await load();
     } catch (nextError) {
       toast.error("Couldn't restore version", {
-        description:
-          nextError instanceof Error ? nextError.message : String(nextError),
+        description: nextError instanceof Error ? nextError.message : String(nextError),
       });
     } finally {
       setBusyVersion(null);
@@ -249,14 +235,9 @@ export function ArtifactDetailRoute({
       <PageHeader
         icon={<PanelsTopLeftIcon className="size-4" />}
         title={detail?.artifact.title ?? "Artifact"}
-        description={
-          detail?.artifact.description ?? "A live workspace artifact."
-        }
+        description={detail?.artifact.description ?? "A live workspace artifact."}
         actions={
-          <Button
-            onClick={() => void editWithGeni()}
-            disabled={!detail || context.busy}
-          >
+          <Button onClick={() => void editWithGeni()} disabled={!detail || context.busy}>
             <SparklesIcon className="mr-2 size-4" />
             Edit with Geni
           </Button>
@@ -287,25 +268,21 @@ export function ArtifactDetailRoute({
             <h2 className="text-sm font-semibold text-fg">Version history</h2>
             <div className="mt-3 divide-y divide-border">
               {detail.versions.map((version) => {
-                const current =
-                  detail.artifact.currentVersion?.id === version.id;
+                const current = detail.artifact.currentVersion?.id === version.id;
                 return (
                   <div
                     key={version.id}
                     className="flex items-center justify-between gap-4 py-3 text-sm"
                   >
                     <div>
-                      <span className="font-medium text-fg">
-                        Version {version.revision}
-                      </span>
+                      <span className="font-medium text-fg">Version {version.revision}</span>
                       {current ? (
                         <span className="ml-2 rounded-full bg-brand/10 px-2 py-0.5 text-2xs text-brand">
                           Current
                         </span>
                       ) : null}
                       <p className="mt-1 text-xs text-fg-subtle">
-                        {formatDate(version.createdAt)} ·{" "}
-                        {(version.sizeBytes / 1024).toFixed(1)} KB
+                        {formatDate(version.createdAt)} · {(version.sizeBytes / 1024).toFixed(1)} KB
                       </p>
                     </div>
                     {!current ? (

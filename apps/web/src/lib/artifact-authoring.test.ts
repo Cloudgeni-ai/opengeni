@@ -22,12 +22,8 @@ describe("artifact authoring sessions", () => {
     expect(ARTIFACT_SESSION_TOOLS).toEqual([{ kind: "mcp", id: "opengeni" }]);
     expect(opening).toBe("Help me create a workspace artifact.");
     expect(opening).not.toContain("artifacts_create");
-    expect(instructions).toContain(
-      "call artifacts_create yourself in this same session",
-    );
-    expect(instructions).toContain(
-      "Do not create, spawn, or delegate to another session",
-    );
+    expect(instructions).toContain("call artifacts_create yourself in this same session");
+    expect(instructions).toContain("Do not create, spawn, or delegate to another session");
     expect(instructions).toContain("Network requests");
     expect(instructions).toContain("downloads");
   });
@@ -40,21 +36,13 @@ describe("artifact authoring sessions", () => {
       currentVersionId: "version-2",
     });
 
-    expect(ARTIFACT_EDIT_TOOLS).toEqual([
-      "artifacts_get_source",
-      "artifacts_publish",
-    ]);
-    expect(ARTIFACT_EDIT_PERMISSIONS).toEqual([
-      "artifacts:read",
-      "artifacts:publish",
-    ]);
+    expect(ARTIFACT_EDIT_TOOLS).toEqual(["artifacts_get_source", "artifacts_publish"]);
+    expect(ARTIFACT_EDIT_PERMISSIONS).toEqual(["artifacts:read", "artifacts:publish"]);
     expect(ARTIFACT_SESSION_TOOLS).toEqual([{ kind: "mcp", id: "opengeni" }]);
     expect(opening).toBe("Help me edit “Status board”.");
     expect(opening).not.toContain("artifact id");
     expect(instructions).toContain("artifact id artifact-1");
     expect(instructions).toContain("current version version-2");
-    expect(instructions).toContain(
-      "call artifacts_publish yourself in this same session",
-    );
+    expect(instructions).toContain("call artifacts_publish yourself in this same session");
   });
 });

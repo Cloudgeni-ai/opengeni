@@ -1,8 +1,4 @@
-import type {
-  FirstPartyMcpToolName,
-  Permission,
-  ToolRef,
-} from "@opengeni/contracts";
+import type { FirstPartyMcpToolName, Permission, ToolRef } from "@opengeni/contracts";
 
 /**
  * Artifact authoring needs only OpenGeni's mandatory first-party MCP server.

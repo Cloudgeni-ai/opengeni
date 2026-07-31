@@ -21,10 +21,7 @@ import {
   type FirstPartyMcpToolName,
   type MachineView,
 } from "@opengeni/contracts";
-import type {
-  CreateSessionRequest,
-  NewSessionDraftOptions,
-} from "@opengeni/sdk";
+import type { CreateSessionRequest, NewSessionDraftOptions } from "@opengeni/sdk";
 
 import { sessionMcpPermissionGroups } from "@/lib/permissions";
 import type {
@@ -88,9 +85,7 @@ export function emptySessionDraft(): SessionDraft {
     goalSuccessCriteria: "",
     goalMaxAutoContinuations: "",
     customMcpPermissions: false,
-    mcpPermissions: new Set(
-      sessionMcpPermissionGroups.flatMap((group) => group.permissions),
-    ),
+    mcpPermissions: new Set(sessionMcpPermissionGroups.flatMap((group) => group.permissions)),
     firstPartyMcpTools: new Set(FIRST_PARTY_MCP_TOOL_NAMES),
   };
 }
@@ -100,9 +95,7 @@ function explicitFirstPartyTools(draft: SessionDraft): {
 } {
   const selected = [...draft.firstPartyMcpTools];
   return selected.length === FIRST_PARTY_MCP_TOOL_NAMES.length &&
-    FIRST_PARTY_MCP_TOOL_NAMES.every((tool) =>
-      draft.firstPartyMcpTools.has(tool),
-    )
+    FIRST_PARTY_MCP_TOOL_NAMES.every((tool) => draft.firstPartyMcpTools.has(tool))
     ? {}
     : { firstPartyMcpTools: selected };
 }
@@ -168,8 +161,7 @@ export function applyNewSessionModelPreference(
   return {
     ...submission,
     model: submission.model ?? preference.model,
-    reasoningEffort:
-      submission.reasoningEffort ?? preference.reasoningEffort,
+    reasoningEffort: submission.reasoningEffort ?? preference.reasoningEffort,
   };
 }
 
@@ -181,9 +173,7 @@ export function applyNewSessionModelPreference(
 export function buildCreateSessionRequest(
   input: BuildCreateSessionRequestInput,
 ): CreateSessionRequest {
-  const baseResources = input.omitWorkspaceResources
-    ? []
-    : input.currentResources;
+  const baseResources = input.omitWorkspaceResources ? [] : input.currentResources;
   const resources = mergeResourceRefs(
     [],
     [...baseResources, ...(input.submission.resources ?? [])],
@@ -204,9 +194,7 @@ export function buildCreateSessionRequest(
     input.workspaceMcpCatalogReady === true &&
     defaultToolIds &&
     selectedToolIds.join("\u0000") ===
-      [...new Set(buildTools([], defaultToolIds).map((tool) => tool.id))]
-        .sort()
-        .join("\u0000")
+      [...new Set(buildTools([], defaultToolIds).map((tool) => tool.id))].sort().join("\u0000")
       ? undefined
       : [...input.selectedTools];
   return {
@@ -215,16 +203,11 @@ export function buildCreateSessionRequest(
     resources,
     ...(tools === undefined ? {} : { tools }),
     model: input.submission.model ?? input.defaultModel,
-    reasoningEffort:
-      input.submission.reasoningEffort ?? input.defaultReasoningEffort,
+    reasoningEffort: input.submission.reasoningEffort ?? input.defaultReasoningEffort,
     clientEventId: input.clientEventId,
     idempotencyKey: input.idempotencyKey,
-    ...(input.submission.sandboxBackend
-      ? { sandboxBackend: input.submission.sandboxBackend }
-      : {}),
-    ...(input.submission.variableSetId
-      ? { variableSetId: input.submission.variableSetId }
-      : {}),
+    ...(input.submission.sandboxBackend ? { sandboxBackend: input.submission.sandboxBackend } : {}),
+    ...(input.submission.variableSetId ? { variableSetId: input.submission.variableSetId } : {}),
     ...(input.submission.rigId ? { rigId: input.submission.rigId } : {}),
     ...(input.submission.goal ? { goal: input.submission.goal } : {}),
     ...(input.submission.firstPartyMcpPermissions
@@ -233,14 +216,11 @@ export function buildCreateSessionRequest(
     ...(input.submission.firstPartyMcpTools
       ? { firstPartyMcpTools: input.submission.firstPartyMcpTools }
       : {}),
-    ...(input.targetSandboxId
-      ? { targetSandboxId: input.targetSandboxId }
-      : {}),
+    ...(input.targetSandboxId ? { targetSandboxId: input.targetSandboxId } : {}),
     ...(input.workingDir ? { workingDir: input.workingDir } : {}),
     ...(input.expectedNewSessionDraftRevision !== undefined
       ? {
-          expectedNewSessionDraftRevision:
-            input.expectedNewSessionDraftRevision,
+          expectedNewSessionDraftRevision: input.expectedNewSessionDraftRevision,
         }
       : {}),
   };
@@ -286,9 +266,7 @@ export function prepareCreateSessionAttempt(input: {
 
 /** The single submit mapper: turns a `SessionDraft` into the create payload,
  *  branching on the compute kind (the one discriminant). */
-export function submissionFromSessionDraft(
-  draft: SessionDraft,
-): SessionDraftSubmission {
+export function submissionFromSessionDraft(draft: SessionDraft): SessionDraftSubmission {
   const goal = goalFromDraft(draft);
   const mcp = draft.customMcpPermissions
     ? { firstPartyMcpPermissions: [...draft.mcpPermissions] }
@@ -314,9 +292,7 @@ export function submissionFromSessionDraft(
 
   return {
     extras: {
-      ...(draft.compute.backend
-        ? { sandboxBackend: draft.compute.backend }
-        : {}),
+      ...(draft.compute.backend ? { sandboxBackend: draft.compute.backend } : {}),
       ...(draft.variableSetId ? { variableSetId: draft.variableSetId } : {}),
       ...(draft.rigId ? { rigId: draft.rigId } : {}),
       ...(goal ? { goal } : {}),
@@ -349,9 +325,7 @@ export function newSessionDraftOptionsFromSessionDraft(
   if (draft.compute.kind === "machine") {
     const workingDir = workingDirFromFolder(draft.compute.folder);
     return {
-      ...(draft.compute.sandboxId
-        ? { targetSandboxId: draft.compute.sandboxId }
-        : {}),
+      ...(draft.compute.sandboxId ? { targetSandboxId: draft.compute.sandboxId } : {}),
       ...(workingDir ? { workingDir } : {}),
       ...(goal ? { goal } : {}),
       ...permissions,
@@ -375,9 +349,7 @@ export function sessionDraftFromNewSessionDraftOptions(
 ): SessionDraft {
   const base = emptySessionDraft();
   const machine = Boolean(
-    options.targetSandboxId ||
-    options.workingDir ||
-    options.sandboxBackend === "selfhosted",
+    options.targetSandboxId || options.workingDir || options.sandboxBackend === "selfhosted",
   );
   return {
     ...base,
@@ -424,9 +396,7 @@ function goalFromDraft(draft: SessionDraft): GoalSpec | null {
   if (!draft.goalText.trim()) {
     return null;
   }
-  const maxAutoContinuations = nonNegativeInteger(
-    draft.goalMaxAutoContinuations,
-  );
+  const maxAutoContinuations = nonNegativeInteger(draft.goalMaxAutoContinuations);
   return {
     text: draft.goalText.trim(),
     ...(draft.goalSuccessCriteria.trim()
@@ -469,10 +439,7 @@ const MANAGED_BACKEND_LABELS: Partial<Record<SandboxBackend, string>> = {
 };
 
 function backendLabel(backend: SandboxBackend): string {
-  return (
-    MANAGED_BACKEND_LABELS[backend] ??
-    backend.slice(0, 1).toUpperCase() + backend.slice(1)
-  );
+  return MANAGED_BACKEND_LABELS[backend] ?? backend.slice(0, 1).toUpperCase() + backend.slice(1);
 }
 
 function descriptorChips(descriptor: CapabilityDescriptor): string[] {
@@ -489,9 +456,7 @@ function descriptorChips(descriptor: CapabilityDescriptor): string[] {
   }
   // Fall back to the tier so a headless/dev/none backend still reads as something.
   if (chips.length === 0 && descriptor.tier !== "none") {
-    chips.push(
-      descriptor.tier.slice(0, 1).toUpperCase() + descriptor.tier.slice(1),
-    );
+    chips.push(descriptor.tier.slice(0, 1).toUpperCase() + descriptor.tier.slice(1));
   }
   return chips;
 }
@@ -506,9 +471,7 @@ function formatLifetime(ms: number): string {
  *  kind). */
 export function managedBackendOptions(): ManagedBackendOption[] {
   const managed = (
-    Object.entries(CAPABILITY_DESCRIPTORS) as Array<
-      [SandboxBackend, CapabilityDescriptor]
-    >
+    Object.entries(CAPABILITY_DESCRIPTORS) as Array<[SandboxBackend, CapabilityDescriptor]>
   )
     .filter(([backend]) => backend !== "selfhosted")
     .map(([backend, descriptor]) => ({
@@ -527,9 +490,7 @@ export function managedBackendOptions(): ManagedBackendOption[] {
  *  "Desktop" chip is shown only when the picked machine actually has a display
  *  (`hasDisplay`). A headless machine therefore never shows "Desktop"; the caller
  *  surfaces a distinct "no display" indicator instead. */
-export function selfhostedCapabilityChips(
-  machine?: MachineView | null,
-): string[] {
+export function selfhostedCapabilityChips(machine?: MachineView | null): string[] {
   const descriptor = CAPABILITY_DESCRIPTORS.selfhosted;
   const chips: string[] = [];
   if (descriptor.capabilities.FileSystem.available) {

@@ -8,12 +8,7 @@ import {
   type Permission,
 } from "@opengeni/contracts";
 import type { ApiRouteDeps, ObjectStorageDependency } from "@opengeni/core";
-import {
-  bootstrapWorkspace,
-  createDb,
-  deleteWorkspace,
-  type DbClient,
-} from "@opengeni/db";
+import { bootstrapWorkspace, createDb, deleteWorkspace, type DbClient } from "@opengeni/db";
 import {
   acquireSharedTestDatabase,
   MemoryEventBus,
@@ -28,9 +23,7 @@ import { registerWorkspaceArtifactRoutes } from "../src/routes/workspace-artifac
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 
 const SIGNING_SECRET = "workspace-artifacts-test-signing-secret";
-type Grant = Awaited<
-  ReturnType<typeof bootstrapWorkspace>
->["workspaceGrants"][number];
+type Grant = Awaited<ReturnType<typeof bootstrapWorkspace>>["workspaceGrants"][number];
 
 let shared: SharedTestDatabase;
 let client: DbClient;
@@ -93,8 +86,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (client && grant) await deleteWorkspace(client.db, grant.workspaceId);
-  if (client && otherGrant)
-    await deleteWorkspace(client.db, otherGrant.workspaceId);
+  if (client && otherGrant) await deleteWorkspace(client.db, otherGrant.workspaceId);
   await client?.close();
   await shared?.release();
 }, 60_000);
@@ -135,9 +127,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       body: JSON.stringify(createBody),
     });
     expect(createdResponse.status).toBe(201);
-    const created = WorkspaceArtifactMutationResponse.parse(
-      await createdResponse.json(),
-    );
+    const created = WorkspaceArtifactMutationResponse.parse(await createdResponse.json());
     expect(created.replayed).toBe(false);
     expect(created.artifact).not.toHaveProperty("kind");
     expect(created.artifact.currentVersion?.revision).toBe(1);
@@ -146,9 +136,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       method: "POST",
       body: JSON.stringify(createBody),
     });
-    const replay = WorkspaceArtifactMutationResponse.parse(
-      await replayResponse.json(),
-    );
+    const replay = WorkspaceArtifactMutationResponse.parse(await replayResponse.json());
     expect(replay.replayed).toBe(true);
     expect(replay.artifact.id).toBe(created.artifact.id);
 
@@ -168,27 +156,19 @@ describe("workspace artifact API and PostgreSQL authority", () => {
         }),
       }),
     ]);
-    expect(concurrentCreate.map((response) => response.status)).toEqual([
-      201, 201,
-    ]);
+    expect(concurrentCreate.map((response) => response.status)).toEqual([201, 201]);
     const concurrentCreates = await Promise.all(
       concurrentCreate.map(async (response) =>
         WorkspaceArtifactMutationResponse.parse(await response.json()),
       ),
     );
-    expect(
-      new Set(concurrentCreates.map((result) => result.artifact.id)).size,
-    ).toBe(1);
-    expect(concurrentCreates.filter((result) => result.replayed)).toHaveLength(
-      1,
-    );
+    expect(new Set(concurrentCreates.map((result) => result.artifact.id)).size).toBe(1);
+    expect(concurrentCreates.filter((result) => result.replayed)).toHaveLength(1);
 
     const listed = WorkspaceArtifactListResponse.parse(
       await (await request(grant, ["artifacts:read"], base)).json(),
     );
-    expect(listed.artifacts.map((artifact) => artifact.id)).toContain(
-      created.artifact.id,
-    );
+    expect(listed.artifacts.map((artifact) => artifact.id)).toContain(created.artifact.id);
 
     const contentPath = `${base}/${created.artifact.id}/content`;
     const firstContent = WorkspaceArtifactContentResponse.parse(
@@ -210,30 +190,19 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       publish("<!doctype html><h1>Version two A</h1>", "publish-a"),
       publish("<!doctype html><h1>Version two B</h1>", "publish-b"),
     ]);
-    expect(concurrent.map((response) => response.status).sort()).toEqual([
-      200, 409,
-    ]);
-    const winnerResponse = concurrent.find(
-      (response) => response.status === 200,
-    )!;
-    const winner = WorkspaceArtifactMutationResponse.parse(
-      await winnerResponse.json(),
-    );
+    expect(concurrent.map((response) => response.status).sort()).toEqual([200, 409]);
+    const winnerResponse = concurrent.find((response) => response.status === 200)!;
+    const winner = WorkspaceArtifactMutationResponse.parse(await winnerResponse.json());
     expect(winner.version.revision).toBe(2);
 
-    const reusedPublishKey = await request(
-      grant,
-      ["artifacts:publish"],
-      versionPath,
-      {
-        method: "POST",
-        body: JSON.stringify({
-          html: createBody.html,
-          expectedCurrentVersionId: created.version.id,
-          idempotencyKey: "create-status-board",
-        }),
-      },
-    );
+    const reusedPublishKey = await request(grant, ["artifacts:publish"], versionPath, {
+      method: "POST",
+      body: JSON.stringify({
+        html: createBody.html,
+        expectedCurrentVersionId: created.version.id,
+        idempotencyKey: "create-status-board",
+      }),
+    });
     expect(reusedPublishKey.status).toBe(409);
 
     const rollbackResponse = await request(
@@ -251,19 +220,11 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       },
     );
     expect(rollbackResponse.status).toBe(200);
-    const rolledBack = WorkspaceArtifactMutationResponse.parse(
-      await rollbackResponse.json(),
-    );
+    const rolledBack = WorkspaceArtifactMutationResponse.parse(await rollbackResponse.json());
     expect(rolledBack.artifact.currentVersion?.id).toBe(created.version.id);
 
     const detail = WorkspaceArtifactDetailResponse.parse(
-      await (
-        await request(
-          grant,
-          ["artifacts:read"],
-          `${base}/${created.artifact.id}`,
-        )
-      ).json(),
+      await (await request(grant, ["artifacts:read"], `${base}/${created.artifact.id}`)).json(),
     );
     expect(detail.versions).toHaveLength(2);
     expect(detail.events).toHaveLength(3);
@@ -282,9 +243,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       immutableError = error;
     }
     expect(immutableError).toBeInstanceOf(Error);
-    expect(String(immutableError)).toContain(
-      "workspace artifact history is immutable",
-    );
+    expect(String(immutableError)).toContain("workspace artifact history is immutable");
   }, 60_000);
 
   test("exposes exact agent create and source tools through the first-party MCP surface", async () => {
@@ -312,15 +271,15 @@ describe("workspace artifact API and PostgreSQL authority", () => {
         },
       },
     );
-    const [clientTransport, serverTransport] =
-      InMemoryTransport.createLinkedPair();
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const mcp = new Client({ name: "workspace-artifact-test", version: "1" });
     await server.connect(serverTransport);
     await mcp.connect(clientTransport);
     try {
-      expect(
-        (await mcp.listTools()).tools.map((tool) => tool.name).sort(),
-      ).toEqual(["artifacts_create", "artifacts_get_source"]);
+      expect((await mcp.listTools()).tools.map((tool) => tool.name).sort()).toEqual([
+        "artifacts_create",
+        "artifacts_get_source",
+      ]);
       const createdResult = await mcp.callTool({
         name: "artifacts_create",
         arguments: {
@@ -329,14 +288,9 @@ describe("workspace artifact API and PostgreSQL authority", () => {
           idempotencyKey: "agent-create-map",
         },
       });
-      const createdText = createdResult.content.find(
-        (item) => item.type === "text",
-      );
-      if (!createdText || createdText.type !== "text")
-        throw new Error("missing MCP text result");
-      const created = WorkspaceArtifactMutationResponse.parse(
-        JSON.parse(createdText.text),
-      );
+      const createdText = createdResult.content.find((item) => item.type === "text");
+      if (!createdText || createdText.type !== "text") throw new Error("missing MCP text result");
+      const created = WorkspaceArtifactMutationResponse.parse(JSON.parse(createdText.text));
       expect(created.version.sourceSessionId).toBe(sessionId);
       expect(created.version.sourceTurnId).toBe(turnId);
 
@@ -344,11 +298,8 @@ describe("workspace artifact API and PostgreSQL authority", () => {
         name: "artifacts_get_source",
         arguments: { artifactId: created.artifact.id },
       });
-      const sourceText = sourceResult.content.find(
-        (item) => item.type === "text",
-      );
-      if (!sourceText || sourceText.type !== "text")
-        throw new Error("missing MCP source result");
+      const sourceText = sourceResult.content.find((item) => item.type === "text");
+      if (!sourceText || sourceText.type !== "text") throw new Error("missing MCP source result");
       expect(JSON.parse(sourceText.text).html).toContain("Created through MCP");
     } finally {
       await Promise.all([mcp.close(), server.close()]);
