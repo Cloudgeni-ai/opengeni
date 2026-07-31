@@ -660,7 +660,11 @@ authoritative provider/archive/restore/workspace projection and epoch;
 `sandbox_session_envelopes` stores the small per-session provider/manifest
 descriptor used to reattach and can supply a legacy archive only through the
 lease's atomic revision-selection step. Both are decoupled from the RunState
-blob.
+blob. The current artifact's `archive_generation` remains the immutable capture
+boundary while later tool admissions advance `workspace_generation`. Global
+holder reconciliation claims a bounded lease-first `SKIP LOCKED` batch before
+it deletes stale holders or recomputes counts, so an in-flight acquire is
+deferred to the next sweep rather than overwritten from a pre-wait snapshot.
 
 See issue #35 for the rationale and the dual-write → flagged-read → default-flip
 migration history.

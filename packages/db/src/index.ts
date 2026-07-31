@@ -19863,7 +19863,7 @@ export interface LeaseSnapshot {
   image: string | null;
   // The frozen rig version the group box was created under (M3). Like `image`,
   // shared state: a resume resolving a DIFFERENT rig_version_id conflicts (solo
-  // recreates, N-holders throw SandboxRigConflictError). Null = rig unknown
+  // rotates through durable capture, N-holders throw SandboxRigConflictError). Null = rig unknown
   // (legacy/cold row or a rig-less session), which never conflicts.
   rigVersionId: string | null;
   dataPlaneUrl: string | null;
@@ -19922,14 +19922,14 @@ export interface AcquireLeaseInput {
   os?: string; // default 'linux'
   // The container image this run resolves (Modal image ref / docker image). Stamped on
   // the cold-create + folded onto a warming/CAS; a warm/draining/warming box already
-  // running a DIFFERENT image is a shared-state conflict (B3): a SOLO holder forces the
-  // box to recreate on this image, N-holders throw SandboxImageConflictError. Omitted
+  // running a DIFFERENT image is a shared-state conflict (B3): a SOLO holder requests
+  // durable capture-and-drain rotation, N-holders throw SandboxImageConflictError. Omitted
   // (null/undefined) -> image is not enforced (legacy/cold rows, selfhosted).
   image?: string | null;
   // The frozen rig version this run rides (M3). Stamped on the cold-create + CAS
   // and conflicted exactly like `image`: a live multi-holder box under a DIFFERENT
-  // rig version throws SandboxRigConflictError; a solo holder recreates the box cold
-  // on the new rig. Omitted (null/undefined) -> rig is not enforced (rig-less
+  // rig version throws SandboxRigConflictError; a solo holder requests durable
+  // capture-and-drain rotation. Omitted (null/undefined) -> rig is not enforced (rig-less
   // sessions never stamp or conflict; legacy/cold rows read null = compatible).
   rigVersionId?: string | null;
   leaseTtlMs: number; // refresh window for expires_at (turn-heartbeat cadence)
@@ -19994,7 +19994,7 @@ export class SandboxLeaseRecoveryBlockedError extends Error {
 // A shared box is ONE filesystem; recreating it on a new image would yank the running
 // filesystem out from under the OTHER sessions, so we refuse. The turn activity surfaces
 // this as an actionable error: spawn with sandbox:'new' or align the pack image. A SOLO
-// holder never hits this — acquireLease recreates the box on the new image instead.
+// holder never hits this — acquireLease requests a reaper-owned durable rotation instead.
 export class SandboxImageConflictError extends Error {
   constructor(
     public readonly sandboxGroupId: string,
@@ -20014,7 +20014,8 @@ export class SandboxImageConflictError extends Error {
 // A rig bakes setup/tooling into the ONE shared filesystem; recreating it on a different
 // rig would yank that filesystem out from under the other sessions, so we refuse. The
 // turn activity surfaces this as an actionable error. A SOLO holder never hits this —
-// acquireLease recreates the box cold on the new rig instead. Mirrors SandboxImageConflictError.
+// acquireLease requests a reaper-owned durable rotation instead. Mirrors
+// SandboxImageConflictError.
 export class SandboxRigConflictError extends Error {
   constructor(
     public readonly sandboxGroupId: string,
@@ -20410,7 +20411,7 @@ export async function acquireLease(
         const row = rows[0];
         if (!row) throw new Error(`Lease row vanished post-insert: ${sandboxGroupId}`);
 
-        let liveness = row.liveness;
+        const liveness = row.liveness;
 
         // A finite-lifetime provider instance is already being replaced. Do not
         // admit another holder onto the old box: the current holders own its
@@ -20436,11 +20437,11 @@ export async function acquireLease(
         // known), the one shared filesystem cannot serve both. Under the held row lock we
         // count the OTHER holders (not this exact (kind, holderId) — an idempotent retry of
         // our own holder is not a rival):
-        //   - SOLO (no other holders): RECREATE. Reset the box to cold and re-stamp the NEW
-        //     image + rig version, then fall through to the cold branch below, which CASes us
-        //     in as the spawner. The spawner cold-creates a fresh box (the archive replay in
-        //     establishSandboxSessionFromEnvelope hydrates /workspace) — for the RIG case the
-        //     new box then re-runs the new rig's setup hook (fresh marker).
+        //   - SOLO (no other holders): ROTATE. Preserve the attributed provider instance and
+        //     durable checkpoint, request an immediate operator rotation, and fence this
+        //     arrival. Its idempotent release drops the final holder; the sole reaper then
+        //     captures /workspace, terminates the old provider, and confirms cold. A retry
+        //     stamps the new image/rig only when it wins the cold successor election.
         //   - OTHER holders present: REFUSE. Throw — recreating would yank the running
         //     filesystem out from under the other sessions. Image conflict is reported first
         //     so its (pre-rig) error is unchanged for the image-only case.
@@ -20472,27 +20473,24 @@ export async function acquireLease(
               rigVersionId as string,
             );
           }
-          // SOLO recreate: reset to cold + re-stamp whichever axis this run carries (each
-          // conditional so a rig-only change does not null out a still-valid image and vice
-          // versa). Clear the live-box fields so no stale instance/tunnel survives the roll
-          // (symmetric with failWarmingToCold). resume_state is nulled — a solo image/rig
-          // change is an intentional fresh box (a divergent image/rig cannot replay the old
-          // box's live state); the session envelope/archive still drives /workspace
-          // hydration on the cold re-create. Fall through to the cold branch (CAS spawner).
-          await tx.execute(sql`
+          // A live provider may be deleted only by the reaper after a verified
+          // capture. Never manufacture a cold row or erase its provider/checkpoint
+          // attribution here. Expiring the lease makes warming/draining conflicts
+          // immediately eligible; a warm conflict reaches draining when the fenced
+          // caller releases its exact final holder.
+          const rotating = await tx.execute<LeaseRow>(sql`
           update sandbox_leases set
-            liveness = 'cold',
-            ${image !== null ? sql`image = ${image},` : sql``}
-            ${rigVersionId !== null ? sql`rig_version_id = ${rigVersionId},` : sql``}
-            instance_id = null,
-            data_plane_url = null, terminal_data_plane_url = null,
-            resume_backend_id = null, resume_state = null,
-            provider_created_at = null, provider_deadline_at = null,
-            rotation_requested_at = null, rotation_reason = null,
+            rotation_requested_at = coalesce(rotation_requested_at, now()),
+            rotation_reason = coalesce(rotation_reason, 'operator'),
+            expires_at = least(expires_at, now()),
             updated_at = now()
           where id = ${row.id}
+          returning *
         `);
-          liveness = "cold";
+          return {
+            role: "fenced" as const,
+            lease: mapLeaseRow(rotating[0] ?? row),
+          };
         }
 
         // -- draining: late arrival re-arms (D1) only while the grace is open.
@@ -23731,6 +23729,24 @@ export async function heartbeatLeaseHolder(
     async (scopedDb) =>
       await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
+        // Canonical lock order is lease -> holder. The global reaper uses the
+        // same order, so a heartbeat reviving a stale holder can never deadlock
+        // against stale-holder deletion.
+        const leases = await tx.execute<{ id: string }>(sql`
+          select id from sandbox_leases
+          where workspace_id = ${input.workspaceId}
+            and sandbox_group_id = ${input.sandboxGroupId}
+          for update
+        `);
+        const lease = leases[0];
+        if (!lease) return false;
+
+        // Holder liveness and lease authority are separate signals. Even after
+        // rotation fences lease extension, the still-running owner can spend
+        // minutes checkpointing before it aborts. Keep its holder alive so the
+        // dead-worker reaper cannot race that checkpoint and terminate the box.
+        // The guarded lease UPDATE below still returns false, which tells the
+        // owner to complete orderly rotation and release its holder.
         const holderAlive = await touchLiveLeaseHolder(tx, {
           workspaceId: input.workspaceId,
           sandboxGroupId: input.sandboxGroupId,
@@ -23738,14 +23754,13 @@ export async function heartbeatLeaseHolder(
           holderId: input.holderId,
         });
         if (!holderAlive) return false; // reaped or no longer the exact active attempt
-        // Epoch-fenced, liveness-guarded lease TTL refresh: only a live-epoch
-        // warm/warming lease is refreshed. A stale-epoch (split-brain) or draining
-        // lease returns 0 rows -> false -> the stale holder drops its handle.
+        // Recheck the same fence in the write even though its row lock is held,
+        // keeping the mutation independently auditable and future-proof.
         const leaseRows = await tx.execute<{ id: string }>(sql`
         update sandbox_leases set
           expires_at = now() + (${String(input.leaseTtlMs)} || ' milliseconds')::interval,
           updated_at = now()
-        where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
+        where id = ${lease.id}
           and lease_epoch = ${input.expectedEpoch}
           and liveness in ('warm','warming')
           and rotation_requested_at is null
@@ -23832,13 +23847,30 @@ export async function reapStaleLeaseHolders(
     async (scopedDb) =>
       await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
+        // Take every workspace lease before touching holders. Each following
+        // statement receives a fresh READ COMMITTED snapshot after any active
+        // acquire finishes, so refcounts can never be published from pre-wait
+        // holder state.
+        await tx.execute(sql`
+          select id from sandbox_leases
+          where workspace_id = ${input.workspaceId}
+          order by id
+          for update
+        `);
+
         // (a) Reap stale short-lived VIEWER and DIRECT request holders. Process
         // holders are deliberately absent: they have no TTL and leave only by
-        // exact retained-process exit/loss settlement.
+        // exact retained-process exit/loss settlement. Lock victims with SKIP
+        // LOCKED so a legacy heartbeat holding one holder row during a rolling
+        // rollout cannot invert the lease -> holder order.
         const reaped = await tx.execute<{ lease_id: string; kind: string }>(sql`
         delete from sandbox_lease_holders
-        where workspace_id = ${input.workspaceId} and kind in ('viewer', 'direct')
-          and last_heartbeat_at < now() - (${String(input.viewerHolderTtlMs)} || ' milliseconds')::interval
+        where id in (
+          select id from sandbox_lease_holders
+          where workspace_id = ${input.workspaceId} and kind in ('viewer', 'direct')
+            and last_heartbeat_at < now() - (${String(input.viewerHolderTtlMs)} || ' milliseconds')::interval
+          for update skip locked
+        )
         returning lease_id, kind
       `);
         const reapedViewers = reaped.filter(
@@ -23863,8 +23895,12 @@ export async function reapStaleLeaseHolders(
           input.turnHolderTtlMs && input.turnHolderTtlMs > 0
             ? await tx.execute<{ lease_id: string }>(sql`
           delete from sandbox_lease_holders
-          where workspace_id = ${input.workspaceId} and kind = 'turn'
-            and last_heartbeat_at < now() - (${String(input.turnHolderTtlMs)} || ' milliseconds')::interval
+          where id in (
+            select id from sandbox_lease_holders
+            where workspace_id = ${input.workspaceId} and kind = 'turn'
+              and last_heartbeat_at < now() - (${String(input.turnHolderTtlMs)} || ' milliseconds')::interval
+            for update skip locked
+          )
           returning lease_id
         `)
             : [];
@@ -23880,7 +23916,10 @@ export async function reapStaleLeaseHolders(
           liveness = case when L.liveness = 'warm' and c.total = 0 and c.turns = 0
                           then 'draining' else L.liveness end,
           expires_at = case when L.liveness = 'warm' and c.total = 0 and c.turns = 0
-                          then now() + (${String(input.idleGraceMs)} || ' milliseconds')::interval
+                          then case when L.rotation_requested_at is not null
+                            then now() - interval '1 millisecond'
+                            else now() + (${String(input.idleGraceMs)} || ' milliseconds')::interval
+                          end
                           else L.expires_at end,
           updated_at = now()
         from (
@@ -25820,6 +25859,21 @@ export async function retainWorkspaceMutationProcess(
             throw new SandboxWorkspaceMutationFencedError(
               "admission_fenced",
               "Settled workspace mutation cannot be promoted to a retained process",
+            );
+          }
+          // Holder mutations follow the canonical lease -> holder lock order.
+          // The physical provider process already exists, so this lock does not
+          // re-evaluate mutable attempt authority; it only serializes its
+          // durable holder/refcount publication with acquire/release/reaping.
+          const processLeases = await tx.execute<{ id: string }>(sql`
+            select id from sandbox_leases
+            where id = ${admission.lease_id}
+            for update
+          `);
+          if (!processLeases[0]) {
+            throw new SandboxWorkspaceMutationFencedError(
+              "lease_fenced",
+              "Retained process lease vanished before durable promotion",
             );
           }
           const processHolderId = `process:${input.processId}`;
@@ -30480,6 +30534,17 @@ export async function forceDrainOverLimitViewerOnlyBoxes(
     if (!reason) {
       return { overLimit: false, reason: null, drained: [] };
     }
+
+    // Canonical holder-mutation order is lease -> holder. Lock the exact
+    // viewer-only candidates before deleting their holder rows so this path
+    // cannot deadlock with the global reaper or race a concurrent acquire.
+    await scopedDb.execute(sql`
+      select id from sandbox_leases
+      where workspace_id = ${input.workspaceId}
+        and liveness = 'warm' and turn_holders = 0
+      order by id
+      for update
+    `);
 
     // Force-drain VIEWER-ONLY warm boxes: CAS warm->draining guarded
     // turn_holders = 0 (a paying turn is NEVER killed). Stamp the grace deadline
