@@ -16,6 +16,13 @@ export type SupportActivity = {
   createdAt: string;
 };
 
+export type SupportReply = {
+  id: string;
+  author: string;
+  body: string;
+  createdAt: string;
+};
+
 export type SupportCustomer = {
   id: string;
   name: string;
@@ -50,18 +57,28 @@ export type SupportTicket = {
   slaDueAt: string;
   tags: string[];
   notes: SupportNote[];
+  replies: SupportReply[];
   activity: SupportActivity[];
+  inbox: "mine" | "unassigned";
+  unread: boolean;
 };
 
-export type SupportDemoState = {
-  revision: number;
+export type SupportCase = {
   ticket: SupportTicket;
   customer: SupportCustomer;
 };
 
+export type SupportWorkspaceState = {
+  revision: number;
+  cases: SupportCase[];
+};
+
+export type SupportDemoState = SupportCase & Pick<SupportWorkspaceState, "revision">;
+
 export type SupportDomainEvent = {
   id: string;
-  type: "ticket.updated" | "ticket.note_added" | "demo.reset";
+  type: "ticket.updated" | "ticket.note_added" | "ticket.replied" | "demo.reset";
+  ticketId: string;
   revision: number;
   summary: string;
   occurredAt: string;

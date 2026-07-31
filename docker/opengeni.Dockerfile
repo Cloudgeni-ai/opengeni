@@ -82,3 +82,11 @@ RUN bun run --cwd apps/web build
 FROM web-build AS web
 EXPOSE 3000
 CMD ["bun", "run", "--cwd", "apps/web", "start"]
+
+FROM base AS northstar-demo-build
+RUN bun run --cwd examples/northstar-support build
+
+FROM northstar-demo-build AS northstar-demo
+ENV PORT=8080
+EXPOSE 8080
+CMD ["bun", "run", "--cwd", "examples/northstar-support", "start"]
