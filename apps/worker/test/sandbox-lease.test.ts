@@ -3653,6 +3653,92 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(created).toBe(1); // still exactly one Schedule.
   });
 
+  test("(5a) a missing exact provider settles stale mutation blockers and drains cold", async () => {
+    if (!available) return;
+
+    const ws = await freshWorkspace();
+    const attempt = await freshWarmSnapshotAttempt(ws);
+    ws.groupId = attempt.sandboxGroupId;
+    const leaseId = await insertLease(ws, {
+      liveness: "warm",
+      refcount: 1,
+      turnHolders: 1,
+      leaseEpoch: 15,
+      expiresInMs: 60_000,
+      instanceId: "sb-missing-with-stale-admission",
+      backend: "modal",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: {
+          providerState: { sandboxId: "sb-missing-with-stale-admission" },
+        },
+      },
+    });
+    await insertHolder(ws, leaseId, "turn", attempt.holderId, 0, attempt.sessionId);
+    const admission = await advanceWorkspaceGeneration(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      ...attempt,
+      sandboxGroupId: ws.groupId,
+      expectedEpoch: 15,
+      expectedInstanceId: "sb-missing-with-stale-admission",
+      operation: "providerOperationLostWithInstance",
+    });
+
+    // Model a worker/provider loss after admission: the holder is gone, the
+    // lease has passed its drain deadline, but the provider outcome is unknown.
+    await admin`
+      delete from sandbox_lease_holders
+      where lease_id = ${leaseId}
+        and kind = 'turn'
+        and holder_id = ${attempt.holderId}`;
+    await admin`
+      update sandbox_leases set
+        liveness = 'draining',
+        refcount = 0,
+        turn_holders = 0,
+        expires_at = now() - interval '1 second'
+      where id = ${leaseId}`;
+
+    let probes = 0;
+    let terminations = 0;
+    const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(), {
+      probeDrainableProvider: async (_settings, lease) => {
+        probes += 1;
+        expect(lease.id).toBe(leaseId);
+        expect(lease.instanceId).toBe("sb-missing-with-stale-admission");
+        return "missing";
+      },
+      terminateBox: async () => {
+        terminations += 1;
+        throw new Error("A definitively missing provider must not be terminated again");
+      },
+    });
+    const result = await reapSandboxLeases();
+
+    expect(probes).toBe(1);
+    expect(terminations).toBe(0);
+    expect(result.terminated).toBeGreaterThanOrEqual(1);
+    const lease = await readLease(db, ws.workspaceId, ws.groupId);
+    expect(lease).toMatchObject({
+      liveness: "cold",
+      instanceId: null,
+      recovery: {
+        provider: {
+          status: "missing",
+          instanceId: "sb-missing-with-stale-admission",
+        },
+      },
+    });
+    const [settled] = await admin<{ provider_outcome: string | null; settled_at: Date | null }[]>`
+      select provider_outcome, settled_at
+      from sandbox_workspace_mutation_admissions
+      where id = ${admission.id}`;
+    expect(settled?.provider_outcome).toBe("rejected");
+    expect(settled?.settled_at).not.toBeNull();
+  }, 60_000);
+
   // ── FINDING 1: even a test/legacy no-archive termination seam must remain
   // epoch/refcount fenced. Production cloud teardown now refuses to delete a
   // resumable box without a verified capture; this lower-level test preserves

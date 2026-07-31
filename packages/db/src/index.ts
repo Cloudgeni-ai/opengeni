@@ -25096,6 +25096,38 @@ export async function confirmDrainCold(
         // -> resume_state is nulled as before. The archive then rides the COLD lease's
         // resume_state until the next spawner reads + hydrates it; it is re-superseded
         // (GC'd) on the next drain and finally cleared on workspace teardown.
+        const observedRows = await tx.execute<LeaseRow>(sql`
+          select * from sandbox_leases
+          where workspace_id = ${input.workspaceId}
+            and sandbox_group_id = ${input.sandboxGroupId}
+        `);
+        const observed = observedRows[0];
+        if (
+          !observed ||
+          observed.liveness !== "draining" ||
+          observed.refcount !== 0 ||
+          Number(observed.lease_epoch) !== input.expectedEpoch
+        ) {
+          return { wentCold: false };
+        }
+        const blockerScope =
+          input.providerMissingBeforeCapture && observed.instance_id
+            ? {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                leaseId: observed.id,
+                sandboxGroupId: input.sandboxGroupId,
+                lostEpoch: input.expectedEpoch,
+                lostInstanceId: observed.instance_id,
+              }
+            : null;
+        // Provider loss settles process/admission/PTY rows before taking the
+        // lease lock, matching the canonical blocker -> lease lock order used
+        // by retained-process settlement. Revalidate the lease after locking
+        // the entire exact provider-owned blocker set.
+        if (blockerScope) {
+          await lockExactLostProviderWorkspaceBlockersTx(tx, blockerScope);
+        }
         const locked = await tx.execute<LeaseRow>(sql`
           select * from sandbox_leases
           where workspace_id = ${input.workspaceId}
@@ -25105,11 +25137,16 @@ export async function confirmDrainCold(
         const row = locked[0];
         if (
           !row ||
+          row.id !== observed.id ||
           row.liveness !== "draining" ||
           row.refcount !== 0 ||
-          Number(row.lease_epoch) !== input.expectedEpoch
+          Number(row.lease_epoch) !== input.expectedEpoch ||
+          (blockerScope && row.instance_id !== blockerScope.lostInstanceId)
         ) {
           return { wentCold: false };
+        }
+        if (blockerScope) {
+          await settleExactLostProviderWorkspaceBlockersTx(tx, blockerScope);
         }
         const current = recoveryStateFromLeaseRow(row);
         const hasArchive = current.archive.status !== "none";
