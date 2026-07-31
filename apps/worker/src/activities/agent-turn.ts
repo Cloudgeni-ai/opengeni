@@ -1698,9 +1698,9 @@ export function shouldStartOnTurnRecording(params: {
  * and threaded to the runtime as an explicit flag (buildAgent → computerToolMode):
  *   • codex-subscription → "function-image": the ChatGPT/Codex backend rejects
  *     hosted tool types but SEES structured `input_image` tool results.
- *   • a "chat" (OpenAIChatCompletionsModel wire) provider → "function-text": it takes
- *     function tools but can't read structured image results, so screenshots render
- *     as a text data-URL.
+ *   • a "chat" (OpenAIChatCompletionsModel wire) provider → "disabled": it cannot
+ *     receive a screenshot through a proven visual transport, so computer use fails
+ *     closed instead of serializing the image as text.
  *   • everything else — built-in Azure/OpenAI responses, registry "responses"
  *     providers, AND the LEGACY global-client fallback (resolveTurnModel returned
  *     null) — → "hosted": real Responses hosted-tool support.
@@ -1719,7 +1719,7 @@ export function computerToolModeForTurn(
     return "function-image";
   }
   if (resolvedModel.provider.api === "chat") {
-    return "function-text";
+    return "disabled";
   }
   return "hosted";
 }
@@ -5311,7 +5311,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               // default.
               structuredToolTransport: resolvedModel.provider.kind !== "codex-subscription",
               // EXPLICIT computer-use tool transport, derived from the resolved provider's
-              // authoritative wire identity (codex → function-image, chat → function-text,
+              // authoritative wire identity (codex → function-image, chat → disabled,
               // responses → hosted) so the runtime never string-sniffs the model instance's
               // constructor name. See {@link computerToolModeForTurn}.
               computerToolMode: computerToolModeForTurn(resolvedModel),

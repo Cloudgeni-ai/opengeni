@@ -148,7 +148,6 @@ import { fileURLToPath } from "node:url";
 
 import {
   computerCallNormalizingFetch,
-  elideSupersededViewImagePairs,
   normalizeComputerCallActions,
   sanitizeHistoryItemsForModel,
 } from "./history-sanitizer";
@@ -286,7 +285,10 @@ export {
   prepareCompactionPromptInput,
   isUserMessage,
   estimateTokens,
+  estimateTokensBreakdown,
   estimateItemTokens,
+  estimateItemTokenBreakdown,
+  estimateNativeImageTokens,
   estimateCompleteModelInput,
   estimateSerializedValueTokens,
   hasModelGeneratedItem,
@@ -300,9 +302,14 @@ export {
   SUMMARY_BUFFER_TOKENS,
   SUMMARY_PREFIX,
   USER_MESSAGE_TRUNCATION_MARKER,
+  UNKNOWN_IMAGE_TOKENS,
+  MAX_NATIVE_IMAGE_TOKENS,
 } from "./context-compaction";
 export type {
   CompactionDecision,
+  ModelInputTokenBreakdown,
+  NativeImageEstimateReason,
+  NativeImageTokenEstimate,
   CompactionItem,
   PreparedCompactionPromptInput,
 } from "./context-compaction";
@@ -1323,8 +1330,7 @@ export type BuildAgentOptions = {
   // EXPLICIT computer-use tool transport, decided where provider identity is
   // authoritative (the worker's model resolution — agent-turn.ts). Threaded into
   // buildAgentCapabilities → computerUse({toolMode}) so tool selection never rests
-  // on the SDK's constructor-name sniff. When omitted, the legacy sniff +
-  // `structuredToolTransport` neutralize path is preserved byte-for-byte.
+  // on the SDK's constructor-name sniff. Omitted means disabled/fail-closed.
   computerToolMode?: ComputerToolMode;
   /**
    * Invoked once, immediately before the first real computer action and after
@@ -2252,10 +2258,8 @@ export function buildAgentCapabilities(
     sessionSkills?: PackSkill[];
     workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];
     structuredToolTransport?: boolean;
-    // EXPLICIT computer-use transport (see BuildAgentOptions.computerToolMode). When
-    // present, computerUse() is handed the mode directly and its tools() obeys it
-    // without the constructor-name sniff. When absent, the legacy neutralize +
-    // imageFunctionResults path (driven by structuredToolTransport) is unchanged.
+    // EXPLICIT computer-use transport (see BuildAgentOptions.computerToolMode).
+    // Omitted/unproven transport fails closed with no computer tools.
     computerToolMode?: ComputerToolMode;
     onComputerUseReady?: (session: SandboxSessionLike) => Promise<void>;
     turnCancellationSignal?: AbortSignal;
@@ -2328,37 +2332,14 @@ export function buildAgentCapabilities(
     // FUNCTION `computer_*` tools on the text transport. The ChatGPT/Codex backend
     // rejects hosted tool types (only function/custom/web_search accepted).
     //
-    // HARDENING: when the caller declares an EXPLICIT `computerToolMode` (the worker
-    // does, from its authoritative model resolution), thread it straight through —
-    // tool selection then never depends on the SDK's model-instance constructor-name
-    // sniff (which a wrapped/proxied model would defeat, silently 400ing a
-    // chat-completions provider handed the hosted tool). When ABSENT, the legacy path
-    // is preserved byte-for-byte: on the codex path (structuredToolTransport === false)
-    // we set imageFunctionResults and neutralize the capability's model binding — the
-    // SAME trick used for filesystem above — so `tools()` sees no model instance and
-    // emits the function tools the backend can call, instead of suppressing the tier.
-    const explicitMode = options.computerToolMode;
+    // The worker declares an explicit mode from authoritative provider resolution.
+    // Exported/public callers that omit it are unproven and therefore disabled.
     const computerCapability = computerUse({
       dimensions: [settings.streamResolutionWidth, settings.streamResolutionHeight],
       readOnly: settings.computerUseReadOnly,
       ...(options.onComputerUseReady ? { onReady: options.onComputerUseReady } : {}),
-      ...(explicitMode
-        ? { toolMode: explicitMode }
-        : // Legacy (no explicit mode): on the codex path the function tools deliver
-          // screenshots as a real image the model can see. The ChatGPT/Codex backend
-          // rejects HOSTED tool types but DOES accept `input_image` content items inside a
-          // `function_call_output` (proven by openai/codex codex-rs, whose view_image tool
-          // ships exactly that shape) — so a structured image tool result is seen, where a
-          // text data-URL would be unreadable.
-          options.structuredToolTransport === false
-          ? { imageFunctionResults: true }
-          : {}),
+      toolMode: options.computerToolMode ?? "disabled",
     });
-    // Neutralize ONLY on the legacy sniff path. With an explicit toolMode the mode
-    // already forces the function tools, so the constructor-name override is moot.
-    if (!explicitMode && options.structuredToolTransport === false) {
-      neutralizeStructuredToolTransport(computerCapability);
-    }
     caps.push(computerCapability as unknown as ReturnType<typeof Capabilities.default>[number]);
   }
   if (toolCancellation) {
@@ -3862,18 +3843,6 @@ export const normalizeComputerCallsFilter: CallModelInputFilter = ({ modelData }
 });
 
 /**
- * Per-call state compaction for local image inspection. Re-opening the same
- * path supersedes its prior base64 result; carrying both provides no newer
- * information and can otherwise balloon every following model request.
- */
-export const elideSupersededViewImagesFilter: CallModelInputFilter = ({ modelData }) => ({
-  ...modelData,
-  input: elideSupersededViewImagePairs(
-    modelData.input as unknown as Array<Record<string, unknown>>,
-  ) as unknown as AgentInputItem[],
-});
-
-/**
  * Canonical Codex-style tool-result bound at the final model-input seam. The
  * identical pure normalizer also runs before conversation rows are persisted,
  * so this is a live-turn defense rather than a request-only alternate history.
@@ -3999,7 +3968,6 @@ export function callModelInputFilterForSettings(
 ): CallModelInputFilter | undefined {
   const filters: CallModelInputFilter[] = [
     normalizeComputerCallsFilter,
-    elideSupersededViewImagesFilter,
     boundModelToolOutputsFilterForSettings(settings),
   ];
   if (settings.openaiProviderItemIds === "strip") {
