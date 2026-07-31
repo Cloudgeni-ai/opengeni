@@ -614,10 +614,10 @@ export class OpenGeniSlackBotClient {
         return this.completedDeleteResult(claim.operation, input.operationId);
       }
       claimAcquired = true;
+      outcomeUnknown = claim.kind === "reconcile";
       const headers = await this.headersFor(operation);
       await this.requireMemberChannel(headers, input.channelId);
       if (claim.kind === "reconcile") {
-        outcomeUnknown = true;
         const exists = await this.slackMessageExists(input.channelId, input.timestamp);
         if (!exists) {
           const completed = await completeSlackBotDeleteOperation(this.db, {
