@@ -9,6 +9,7 @@ import {
   SOCIAL_TIMEOUT_MS,
   SOCIAL_USER_AGENT,
   type SocialCredentialBundle,
+  type SocialProviderFetch,
 } from "./social-oauth";
 
 // One normalized shape across providers so agent prompts do not need
@@ -30,6 +31,8 @@ type SocialApiDeps = {
   db: Database;
   settings: Settings;
   observability?: Observability | undefined;
+  // Test-only provider seam; production leaves it unset and uses pinnedFetch.
+  providerFetch?: SocialProviderFetch | undefined;
 };
 
 type ConnectionRef = { workspaceId: string; connectionId: string };
@@ -300,15 +303,14 @@ async function socialApiRequest(
   url: URL,
   init: RequestInit,
 ): Promise<Record<string, unknown>> {
-  const response = await pinnedFetch(
-    url.toString(),
-    { ...init, signal: AbortSignal.timeout(SOCIAL_TIMEOUT_MS) },
-    deps.settings,
-    {
-      label: `social ${bundle.provider} API`,
-      requireHttpsOutsideLocalTest: true,
-    },
-  );
+  const requestInit = { ...init, signal: AbortSignal.timeout(SOCIAL_TIMEOUT_MS) };
+  const label = `social ${bundle.provider} API`;
+  const response = deps.providerFetch
+    ? await deps.providerFetch(url.toString(), requestInit, label)
+    : await pinnedFetch(url.toString(), requestInit, deps.settings, {
+        label,
+        requireHttpsOutsideLocalTest: true,
+      });
   if (response.status === 401) {
     await response.body?.cancel().catch(() => undefined);
     // A 401 after freshSocialAccessToken means the access token the provider

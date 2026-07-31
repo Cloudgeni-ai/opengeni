@@ -94,11 +94,38 @@ export type SocialCredentialBundle = {
   scope?: string;
 };
 
+/**
+ * Provider-transport seam (Slack-connector pattern): production always goes
+ * through pinnedFetch; tests inject an in-process provider to exercise the
+ * full callback/refresh/tool loop functionally.
+ */
+export type SocialProviderFetch = (
+  url: string,
+  init: RequestInit,
+  label: string,
+) => Promise<Response>;
+
 type SocialOAuthDeps = {
   db: Database;
   settings: Settings;
   observability?: Observability | undefined;
+  providerFetch?: SocialProviderFetch | undefined;
 };
+
+function socialProviderFetch(
+  deps: Pick<SocialOAuthDeps, "settings" | "providerFetch">,
+  url: string,
+  init: RequestInit,
+  label: string,
+): Promise<Response> {
+  if (deps.providerFetch) {
+    return deps.providerFetch(url, init, label);
+  }
+  return pinnedFetch(url, init, deps.settings, {
+    label,
+    requireHttpsOutsideLocalTest: true,
+  });
+}
 
 export type SocialOAuthStartContext = {
   accountId: string;
@@ -263,13 +290,13 @@ export async function completeSocialOAuthCallback(
     const verifier = state.encryptedPkceVerifier
       ? decryptEnvironmentValue(key, state.encryptedPkceVerifier)
       : null;
-    const token = await socialTokenRequest(settings, provider, client, {
+    const token = await socialTokenRequest(deps, provider, client, {
       grant_type: "authorization_code",
       code: input.code,
       redirect_uri: socialOAuthRedirectUri(settings, input.requestUrl),
       ...(verifier ? { code_verifier: verifier } : {}),
     });
-    const identity = await fetchSocialIdentity(settings, provider.id, token.accessToken);
+    const identity = await fetchSocialIdentity(deps, provider.id, token.accessToken);
     const bundle: SocialCredentialBundle = {
       provider: provider.id,
       accessToken: token.accessToken,
@@ -347,7 +374,7 @@ export async function freshSocialAccessToken(
   const client = socialOAuthClientFor(settings, provider.id);
   let token: NormalizedTokenResponse;
   try {
-    token = await socialTokenRequest(settings, provider, client, {
+    token = await socialTokenRequest(deps, provider, client, {
       grant_type: "refresh_token",
       refresh_token: bundle.refreshToken,
     });
@@ -467,7 +494,7 @@ type NormalizedTokenResponse = {
 };
 
 async function socialTokenRequest(
-  settings: Settings,
+  deps: Pick<SocialOAuthDeps, "settings" | "providerFetch">,
   provider: SocialProviderDefinition,
   client: { clientId: string; clientSecret?: string | undefined },
   params: Record<string, string>,
@@ -489,11 +516,11 @@ async function socialTokenRequest(
   if (!headers.authorization || provider.id === "x") {
     body.set("client_id", client.clientId);
   }
-  const response = await pinnedFetch(
+  const response = await socialProviderFetch(
+    deps,
     provider.tokenEndpoint,
     { method: "POST", headers, body, signal: AbortSignal.timeout(SOCIAL_TIMEOUT_MS) },
-    settings,
-    { label: "social OAuth token exchange", requireHttpsOutsideLocalTest: true },
+    "social OAuth token exchange",
   );
   if (!response.ok) {
     const oauthError = await boundedOAuthErrorCode(response);
@@ -552,13 +579,14 @@ function boundedErrorCode(value: unknown): string | null {
 }
 
 async function fetchSocialIdentity(
-  settings: Settings,
+  deps: Pick<SocialOAuthDeps, "settings" | "providerFetch">,
   provider: SocialOAuthProviderId,
   accessToken: string,
 ): Promise<{ handle: string; name?: string; externalAccountId: string }> {
   const endpoint =
     provider === "x" ? "https://api.x.com/2/users/me" : "https://oauth.reddit.com/api/v1/me";
-  const response = await pinnedFetch(
+  const response = await socialProviderFetch(
+    deps,
     endpoint,
     {
       headers: {
@@ -568,8 +596,7 @@ async function fetchSocialIdentity(
       },
       signal: AbortSignal.timeout(SOCIAL_TIMEOUT_MS),
     },
-    settings,
-    { label: "social identity lookup", requireHttpsOutsideLocalTest: true },
+    "social identity lookup",
   );
   if (!response.ok) {
     await response.body?.cancel().catch(() => undefined);
