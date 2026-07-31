@@ -5,7 +5,7 @@ import type {
   WorkspaceArtifactMutationResponse,
   WorkspaceArtifactVersion,
 } from "@opengeni/contracts";
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, lt, or, sql } from "drizzle-orm";
 import type { Database } from "./index";
 import { withRlsContext, withWorkspaceRls } from "./index";
 import * as schema from "./schema";
@@ -48,6 +48,8 @@ function versionFromRow(row: VersionRow): WorkspaceArtifactVersion {
     sizeBytes: row.sizeBytes,
     sourceSessionId: row.sourceSessionId,
     sourceTurnId: row.sourceTurnId,
+    sourceAttemptId: row.sourceAttemptId,
+    sourceExecutionGeneration: row.sourceExecutionGeneration,
     createdBySubjectId: row.createdBySubjectId,
     createdAt: iso(row.createdAt),
   };
@@ -64,6 +66,8 @@ function eventFromRow(row: EventRow): WorkspaceArtifactEvent {
     toVersionId: row.toVersionId,
     sourceSessionId: row.sourceSessionId,
     sourceTurnId: row.sourceTurnId,
+    sourceAttemptId: row.sourceAttemptId,
+    sourceExecutionGeneration: row.sourceExecutionGeneration,
     actorSubjectId: row.actorSubjectId,
     reason: row.reason,
     createdAt: iso(row.createdAt),
@@ -120,18 +124,68 @@ async function artifactRow(scopedDb: any, workspaceId: string, artifactId: strin
 export async function listWorkspaceArtifacts(
   db: Database,
   workspaceId: string,
-): Promise<WorkspaceArtifact[]> {
+  options: { limit?: number; cursor?: string } = {},
+): Promise<{ artifacts: WorkspaceArtifact[]; nextCursor: string | null; truncated: boolean }> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const limit = Math.min(Math.max(options.limit ?? 50, 1), 100);
+    const cursor = options.cursor ? decodeListCursor(options.cursor) : null;
+    const visibility = cursor
+      ? and(
+          eq(schema.workspaceArtifacts.workspaceId, workspaceId),
+          or(
+            lt(schema.workspaceArtifacts.updatedAt, cursor.updatedAt),
+            and(
+              eq(schema.workspaceArtifacts.updatedAt, cursor.updatedAt),
+              lt(schema.workspaceArtifacts.id, cursor.id),
+            ),
+          ),
+        )
+      : eq(schema.workspaceArtifacts.workspaceId, workspaceId);
     const rows = await scopedDb
       .select()
       .from(schema.workspaceArtifacts)
-      .where(eq(schema.workspaceArtifacts.workspaceId, workspaceId))
-      .orderBy(desc(schema.workspaceArtifacts.updatedAt))
-      .limit(100);
-    return await Promise.all(
-      rows.map(async (row) => artifactFromRow(row, await currentVersion(scopedDb, row))),
+      .where(visibility)
+      .orderBy(desc(schema.workspaceArtifacts.updatedAt), desc(schema.workspaceArtifacts.id))
+      .limit(limit + 1);
+    const truncated = rows.length > limit;
+    const pageRows = rows.slice(0, limit);
+    const artifacts = await Promise.all(
+      pageRows.map(async (row) => artifactFromRow(row, await currentVersion(scopedDb, row))),
     );
+    const tail = truncated ? pageRows.at(-1) : null;
+    return {
+      artifacts,
+      nextCursor: tail ? encodeListCursor(tail) : null,
+      truncated,
+    };
   });
+}
+
+const artifactCursorId =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function encodeListCursor(row: ArtifactRow): string {
+  return Buffer.from(JSON.stringify([iso(row.updatedAt), row.id]), "utf8").toString("base64url");
+}
+
+function decodeListCursor(value: string): { updatedAt: Date; id: string } {
+  try {
+    const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+    if (
+      !Array.isArray(parsed) ||
+      parsed.length !== 2 ||
+      typeof parsed[0] !== "string" ||
+      typeof parsed[1] !== "string" ||
+      !artifactCursorId.test(parsed[1])
+    ) {
+      throw new Error("invalid shape");
+    }
+    const updatedAt = new Date(parsed[0]);
+    if (!Number.isFinite(updatedAt.getTime())) throw new Error("invalid timestamp");
+    return { updatedAt, id: parsed[1] };
+  } catch {
+    throw new WorkspaceArtifactOperationError("Invalid artifact list cursor");
+  }
 }
 
 export async function getWorkspaceArtifact(
@@ -142,7 +196,7 @@ export async function getWorkspaceArtifact(
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const artifact = await artifactRow(scopedDb, workspaceId, artifactId);
     if (!artifact) throw new WorkspaceArtifactNotFoundError("Artifact not found");
-    const [versions, events, current] = await Promise.all([
+    const [versionRows, eventRows, current] = await Promise.all([
       scopedDb
         .select()
         .from(schema.workspaceArtifactVersions)
@@ -153,7 +207,7 @@ export async function getWorkspaceArtifact(
           ),
         )
         .orderBy(desc(schema.workspaceArtifactVersions.revision))
-        .limit(100),
+        .limit(101),
       scopedDb
         .select()
         .from(schema.workspaceArtifactEvents)
@@ -164,13 +218,15 @@ export async function getWorkspaceArtifact(
           ),
         )
         .orderBy(desc(schema.workspaceArtifactEvents.createdAt))
-        .limit(100),
+        .limit(101),
       currentVersion(scopedDb, artifact),
     ]);
     return {
       artifact: artifactFromRow(artifact, current),
-      versions: versions.map(versionFromRow),
-      events: events.map(eventFromRow),
+      versions: versionRows.slice(0, 100).map(versionFromRow),
+      events: eventRows.slice(0, 100).map(eventFromRow),
+      versionsTruncated: versionRows.length > 100,
+      eventsTruncated: eventRows.length > 100,
     };
   });
 }
@@ -212,7 +268,89 @@ type PublishMetadata = {
   actorSubjectId: string;
   sourceSessionId: string | null;
   sourceTurnId: string | null;
+  sourceAttemptId: string | null;
+  sourceExecutionGeneration: number | null;
+  persistContent: () => Promise<void>;
 };
+
+async function assertAttemptAuthority(
+  scopedDb: any,
+  input: Pick<
+    PublishMetadata,
+    | "accountId"
+    | "workspaceId"
+    | "actorSubjectId"
+    | "sourceSessionId"
+    | "sourceTurnId"
+    | "sourceAttemptId"
+    | "sourceExecutionGeneration"
+  >,
+): Promise<void> {
+  const provenance = [
+    input.sourceSessionId,
+    input.sourceTurnId,
+    input.sourceAttemptId,
+    input.sourceExecutionGeneration,
+  ];
+  if (provenance.every((value) => value === null)) return;
+  if (provenance.some((value) => value === null)) {
+    throw new WorkspaceArtifactOperationError("Artifact attempt provenance is incomplete");
+  }
+  const rows = (await scopedDb.execute(sql`
+    WITH locked_session AS MATERIALIZED (
+      SELECT session.id, session.account_id, session.workspace_id, session.active_turn_id
+      FROM sessions session
+      WHERE session.id = ${input.sourceSessionId}::uuid
+        AND session.workspace_id = ${input.workspaceId}::uuid
+        AND session.account_id = ${input.accountId}::uuid
+        AND session.active_turn_id = ${input.sourceTurnId}::uuid
+      FOR SHARE OF session
+    ), locked_turn AS MATERIALIZED (
+      SELECT turn.id, turn.account_id, turn.workspace_id, turn.session_id,
+        turn.active_attempt_id, turn.execution_generation, turn.initiator_subject_id
+      FROM session_turns turn
+      JOIN locked_session session
+        ON session.id = turn.session_id
+        AND session.workspace_id = turn.workspace_id
+        AND session.account_id = turn.account_id
+      WHERE turn.id = ${input.sourceTurnId}::uuid
+        AND turn.active_attempt_id = ${input.sourceAttemptId}::uuid
+        AND turn.execution_generation = ${input.sourceExecutionGeneration}
+        AND turn.status IN ('running', 'requires_action', 'recovering', 'waiting_capacity')
+        AND turn.initiator_kind = 'subject'
+        AND length(btrim(turn.initiator_subject_id)) BETWEEN 1 AND 1024
+      FOR SHARE OF turn
+    ), locked_attempt AS MATERIALIZED (
+      SELECT attempt.id, attempt.account_id, attempt.workspace_id,
+        attempt.session_id, attempt.turn_id, attempt.execution_generation
+      FROM session_turn_attempts attempt
+      JOIN locked_turn turn
+        ON turn.id = attempt.turn_id
+        AND turn.session_id = attempt.session_id
+        AND turn.workspace_id = attempt.workspace_id
+        AND turn.account_id = attempt.account_id
+      WHERE attempt.id = ${input.sourceAttemptId}::uuid
+        AND attempt.execution_generation = ${input.sourceExecutionGeneration}
+        AND attempt.state IN ('claimed', 'running')
+        AND NOT EXISTS (
+          SELECT 1 FROM session_attempt_interruptions interruption
+          WHERE interruption.workspace_id = attempt.workspace_id
+            AND interruption.attempt_id = attempt.id
+            AND interruption.state IN ('pending', 'delivered', 'acknowledged')
+        )
+      FOR SHARE OF attempt
+    )
+    SELECT attempt.id
+    FROM locked_session session
+    JOIN locked_turn turn ON true
+    JOIN locked_attempt attempt ON true
+  `)) as unknown as Array<{ id: string }>;
+  if (!rows[0]) {
+    throw new WorkspaceArtifactOperationError(
+      "Artifact mutation requires the exact active attempt and execution generation",
+    );
+  }
+}
 
 async function replayForOperation(scopedDb: any, workspaceId: string, operationKey: string) {
   const [event] = await scopedDb
@@ -322,44 +460,26 @@ export async function createWorkspaceArtifact(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
-      const replay = await replayForOperation(scopedDb, input.workspaceId, input.operationKey);
-      if (replay) {
-        assertCreateReplay(replay);
-        if (replay.version.contentSha256 !== input.contentSha256) {
-          throw new WorkspaceArtifactConflictError(
-            "Idempotency key was already used with different content",
-          );
-        }
-        return mutationResult(
-          replay.artifact,
-          replay.version,
-          replay.event,
-          true,
-          replay.current ?? replay.version,
-        );
-      }
       return await scopedDb.transaction(async (tx) => {
         await lockOperation(tx, input.workspaceId, input.operationKey);
-        const concurrentReplay = await replayForOperation(
-          tx,
-          input.workspaceId,
-          input.operationKey,
-        );
-        if (concurrentReplay) {
-          assertCreateReplay(concurrentReplay);
-          if (concurrentReplay.version.contentSha256 !== input.contentSha256) {
+        await assertAttemptAuthority(tx, input);
+        const replay = await replayForOperation(tx, input.workspaceId, input.operationKey);
+        if (replay) {
+          assertCreateReplay(replay);
+          if (replay.version.contentSha256 !== input.contentSha256) {
             throw new WorkspaceArtifactConflictError(
               "Idempotency key was already used with different content",
             );
           }
           return mutationResult(
-            concurrentReplay.artifact,
-            concurrentReplay.version,
-            concurrentReplay.event,
+            replay.artifact,
+            replay.version,
+            replay.event,
             true,
-            concurrentReplay.current ?? concurrentReplay.version,
+            replay.current ?? replay.version,
           );
         }
+        await input.persistContent();
         const [artifact] = await tx
           .insert(schema.workspaceArtifacts)
           .values({
@@ -385,6 +505,8 @@ export async function createWorkspaceArtifact(
             operationKey: input.operationKey,
             sourceSessionId: input.sourceSessionId,
             sourceTurnId: input.sourceTurnId,
+            sourceAttemptId: input.sourceAttemptId,
+            sourceExecutionGeneration: input.sourceExecutionGeneration,
             createdBySubjectId: input.actorSubjectId,
           })
           .returning();
@@ -408,6 +530,8 @@ export async function createWorkspaceArtifact(
             operationKey: input.operationKey,
             sourceSessionId: input.sourceSessionId,
             sourceTurnId: input.sourceTurnId,
+            sourceAttemptId: input.sourceAttemptId,
+            sourceExecutionGeneration: input.sourceExecutionGeneration,
             actorSubjectId: input.actorSubjectId,
             reason: "Initial publication",
           })
@@ -431,41 +555,23 @@ export async function publishWorkspaceArtifactVersion(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
-      const replay = await replayForOperation(scopedDb, input.workspaceId, input.operationKey);
-      if (replay) {
-        assertPublishReplay(replay, input.artifactId, input.expectedCurrentVersionId);
-        if (replay.version.contentSha256 !== input.contentSha256)
-          throw new WorkspaceArtifactConflictError(
-            "Idempotency key was already used with different content",
-          );
-        return mutationResult(
-          replay.artifact,
-          replay.version,
-          replay.event,
-          true,
-          replay.current ?? replay.version,
-        );
-      }
       return await scopedDb.transaction(async (tx) => {
         await lockOperation(tx, input.workspaceId, input.operationKey);
-        const concurrentReplay = await replayForOperation(
-          tx,
-          input.workspaceId,
-          input.operationKey,
-        );
-        if (concurrentReplay) {
-          assertPublishReplay(concurrentReplay, input.artifactId, input.expectedCurrentVersionId);
-          if (concurrentReplay.version.contentSha256 !== input.contentSha256) {
+        await assertAttemptAuthority(tx, input);
+        const replay = await replayForOperation(tx, input.workspaceId, input.operationKey);
+        if (replay) {
+          assertPublishReplay(replay, input.artifactId, input.expectedCurrentVersionId);
+          if (replay.version.contentSha256 !== input.contentSha256) {
             throw new WorkspaceArtifactConflictError(
               "Idempotency key was already used with different content",
             );
           }
           return mutationResult(
-            concurrentReplay.artifact,
-            concurrentReplay.version,
-            concurrentReplay.event,
+            replay.artifact,
+            replay.version,
+            replay.event,
             true,
-            concurrentReplay.current ?? concurrentReplay.version,
+            replay.current ?? replay.version,
           );
         }
         const artifact = await artifactRow(tx, input.workspaceId, input.artifactId, true);
@@ -487,6 +593,7 @@ export async function publishWorkspaceArtifactVersion(
           )
           .orderBy(desc(schema.workspaceArtifactVersions.revision))
           .limit(1);
+        await input.persistContent();
         const [version] = await tx
           .insert(schema.workspaceArtifactVersions)
           .values({
@@ -500,6 +607,8 @@ export async function publishWorkspaceArtifactVersion(
             operationKey: input.operationKey,
             sourceSessionId: input.sourceSessionId,
             sourceTurnId: input.sourceTurnId,
+            sourceAttemptId: input.sourceAttemptId,
+            sourceExecutionGeneration: input.sourceExecutionGeneration,
             createdBySubjectId: input.actorSubjectId,
           })
           .returning();
@@ -526,6 +635,8 @@ export async function publishWorkspaceArtifactVersion(
             operationKey: input.operationKey,
             sourceSessionId: input.sourceSessionId,
             sourceTurnId: input.sourceTurnId,
+            sourceAttemptId: input.sourceAttemptId,
+            sourceExecutionGeneration: input.sourceExecutionGeneration,
             actorSubjectId: input.actorSubjectId,
             reason: `Published revision ${version!.revision}`,
           })
@@ -538,7 +649,7 @@ export async function publishWorkspaceArtifactVersion(
 
 export async function rollbackWorkspaceArtifact(
   db: Database,
-  input: Omit<PublishMetadata, "contentKey" | "contentSha256" | "sizeBytes"> & {
+  input: Omit<PublishMetadata, "contentKey" | "contentSha256" | "sizeBytes" | "persistContent"> & {
     artifactId: string;
     versionId: string;
     expectedCurrentVersionId: string;
@@ -549,44 +660,24 @@ export async function rollbackWorkspaceArtifact(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
-      const replay = await replayForOperation(scopedDb, input.workspaceId, input.operationKey);
-      if (replay) {
-        assertRollbackReplay(
-          replay,
-          input.artifactId,
-          input.versionId,
-          input.expectedCurrentVersionId,
-          input.reason,
-        );
-        return mutationResult(
-          replay.artifact,
-          replay.version,
-          replay.event,
-          true,
-          replay.current ?? replay.version,
-        );
-      }
       return await scopedDb.transaction(async (tx) => {
         await lockOperation(tx, input.workspaceId, input.operationKey);
-        const concurrentReplay = await replayForOperation(
-          tx,
-          input.workspaceId,
-          input.operationKey,
-        );
-        if (concurrentReplay) {
+        await assertAttemptAuthority(tx, input);
+        const replay = await replayForOperation(tx, input.workspaceId, input.operationKey);
+        if (replay) {
           assertRollbackReplay(
-            concurrentReplay,
+            replay,
             input.artifactId,
             input.versionId,
             input.expectedCurrentVersionId,
             input.reason,
           );
           return mutationResult(
-            concurrentReplay.artifact,
-            concurrentReplay.version,
-            concurrentReplay.event,
+            replay.artifact,
+            replay.version,
+            replay.event,
             true,
-            concurrentReplay.current ?? concurrentReplay.version,
+            replay.current ?? replay.version,
           );
         }
         const artifact = await artifactRow(tx, input.workspaceId, input.artifactId, true);
@@ -625,6 +716,8 @@ export async function rollbackWorkspaceArtifact(
             operationKey: input.operationKey,
             sourceSessionId: input.sourceSessionId,
             sourceTurnId: input.sourceTurnId,
+            sourceAttemptId: input.sourceAttemptId,
+            sourceExecutionGeneration: input.sourceExecutionGeneration,
             actorSubjectId: input.actorSubjectId,
             reason: input.reason,
           })

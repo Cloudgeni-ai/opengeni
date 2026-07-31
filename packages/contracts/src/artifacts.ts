@@ -4,6 +4,8 @@ export const WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES = 512 * 1024;
 export const WORKSPACE_ARTIFACT_TITLE_MAX_CHARS = 120;
 export const WORKSPACE_ARTIFACT_DESCRIPTION_MAX_CHARS = 2_000;
 export const WORKSPACE_ARTIFACT_LIST_MAX = 100;
+export const WORKSPACE_ARTIFACT_LIST_DEFAULT = 50;
+export const WORKSPACE_ARTIFACT_CURSOR_MAX_CHARS = 512;
 
 const encoder = new TextEncoder();
 const sha256 = z.string().regex(/^[0-9a-f]{64}$/);
@@ -27,9 +29,11 @@ export const WorkspaceArtifactVersion = z.object({
   revision: z.number().int().positive(),
   contentType: z.literal("text/html"),
   contentSha256: sha256,
-  sizeBytes: z.number().int().nonnegative().max(WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES),
+  sizeBytes: z.number().int().positive().max(WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES),
   sourceSessionId: z.string().uuid().nullable(),
   sourceTurnId: z.string().uuid().nullable(),
+  sourceAttemptId: z.string().uuid().nullable(),
+  sourceExecutionGeneration: z.number().int().positive().nullable(),
   createdBySubjectId: z.string().min(1).max(1024),
   createdAt: z.string().datetime({ offset: true }),
 });
@@ -63,14 +67,29 @@ export const WorkspaceArtifactEvent = z.object({
   toVersionId: z.string().uuid(),
   sourceSessionId: z.string().uuid().nullable(),
   sourceTurnId: z.string().uuid().nullable(),
+  sourceAttemptId: z.string().uuid().nullable(),
+  sourceExecutionGeneration: z.number().int().positive().nullable(),
   actorSubjectId: z.string().min(1).max(1024),
   reason: z.string().min(1).max(4096),
   createdAt: z.string().datetime({ offset: true }),
 });
 export type WorkspaceArtifactEvent = z.infer<typeof WorkspaceArtifactEvent>;
 
+export const WorkspaceArtifactListQuery = z.object({
+  limit: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(WORKSPACE_ARTIFACT_LIST_MAX)
+    .default(WORKSPACE_ARTIFACT_LIST_DEFAULT),
+  cursor: z.string().min(1).max(WORKSPACE_ARTIFACT_CURSOR_MAX_CHARS).optional(),
+});
+export type WorkspaceArtifactListQuery = z.infer<typeof WorkspaceArtifactListQuery>;
+
 export const WorkspaceArtifactListResponse = z.object({
   artifacts: z.array(WorkspaceArtifact).max(WORKSPACE_ARTIFACT_LIST_MAX),
+  nextCursor: z.string().max(WORKSPACE_ARTIFACT_CURSOR_MAX_CHARS).nullable(),
+  truncated: z.boolean(),
 });
 export type WorkspaceArtifactListResponse = z.infer<typeof WorkspaceArtifactListResponse>;
 
@@ -78,6 +97,8 @@ export const WorkspaceArtifactDetailResponse = z.object({
   artifact: WorkspaceArtifact,
   versions: z.array(WorkspaceArtifactVersion).max(WORKSPACE_ARTIFACT_LIST_MAX),
   events: z.array(WorkspaceArtifactEvent).max(WORKSPACE_ARTIFACT_LIST_MAX),
+  versionsTruncated: z.boolean(),
+  eventsTruncated: z.boolean(),
 });
 export type WorkspaceArtifactDetailResponse = z.infer<typeof WorkspaceArtifactDetailResponse>;
 

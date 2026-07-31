@@ -5,6 +5,7 @@ import {
   RollbackWorkspaceArtifactRequest,
   WorkspaceArtifactContentResponse,
   WorkspaceArtifactDetailResponse,
+  WorkspaceArtifactListQuery,
   WorkspaceArtifactListResponse,
   WorkspaceArtifactMutationResponse,
   normalizeWorkspaceArtifactSlug,
@@ -81,17 +82,21 @@ function contentMetadata(workspaceId: string, html: string) {
   };
 }
 
-async function storeHtml(deps: ApiRouteDeps, workspaceId: string, html: string) {
+function prepareHtml(deps: ApiRouteDeps, workspaceId: string, html: string) {
   if (!deps.objectStorage)
     throw new HTTPException(503, { message: "Object storage is not configured" });
   const content = contentMetadata(workspaceId, html);
-  await deps.objectStorage.putObject({
-    key: content.contentKey,
-    contentType: "text/html; charset=utf-8",
-    body: content.bytes,
-    sha256: content.contentSha256,
-  });
-  return content;
+  return {
+    ...content,
+    persistContent: async () => {
+      await deps.objectStorage!.putObject({
+        key: content.contentKey,
+        contentType: "text/html; charset=utf-8",
+        body: content.bytes,
+        sha256: content.contentSha256,
+      });
+    },
+  };
 }
 
 function provenance(subjectId: string, idempotencyKey: string) {
@@ -100,6 +105,8 @@ function provenance(subjectId: string, idempotencyKey: string) {
     actorSubjectId: subjectId,
     sourceSessionId: null,
     sourceTurnId: null,
+    sourceAttemptId: null,
+    sourceExecutionGeneration: null,
   };
 }
 
@@ -111,11 +118,23 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
   app.get(base, async (context) => {
     const workspaceId = context.req.param("workspaceId");
     await requireAccessGrant(context, deps, workspaceId, "artifacts:read");
-    return context.json(
-      WorkspaceArtifactListResponse.parse({
-        artifacts: await listWorkspaceArtifacts(deps.db, workspaceId),
-      }),
-    );
+    const query = WorkspaceArtifactListQuery.safeParse({
+      limit: context.req.query("limit"),
+      cursor: context.req.query("cursor"),
+    });
+    if (!query.success) throw new HTTPException(422, { message: "Invalid artifact list query" });
+    try {
+      return context.json(
+        WorkspaceArtifactListResponse.parse(
+          await listWorkspaceArtifacts(deps.db, workspaceId, {
+            limit: query.data.limit,
+            ...(query.data.cursor ? { cursor: query.data.cursor } : {}),
+          }),
+        ),
+      );
+    } catch (error) {
+      return errorResponse(context, error);
+    }
   });
 
   app.post(base, async (context) => {
@@ -125,7 +144,7 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
     const id = crypto.randomUUID();
     const slugBase = request.slug ?? (normalizeWorkspaceArtifactSlug(request.title) || "artifact");
     const slug = request.slug ?? `${slugBase.slice(0, 87)}-${id.slice(0, 8)}`;
-    const content = await storeHtml(deps, workspaceId, request.html);
+    const content = prepareHtml(deps, workspaceId, request.html);
     try {
       return context.json(
         WorkspaceArtifactMutationResponse.parse(
@@ -207,14 +226,15 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
     const workspaceId = context.req.param("workspaceId");
     const grant = await requireAccessGrant(context, deps, workspaceId, "artifacts:publish");
     const request = await body(context, PublishWorkspaceArtifactVersionRequest);
-    const content = await storeHtml(deps, workspaceId, request.html);
+    const id = artifactId(context);
+    const content = prepareHtml(deps, workspaceId, request.html);
     try {
       return context.json(
         WorkspaceArtifactMutationResponse.parse(
           await publishWorkspaceArtifactVersion(deps.db, {
             accountId: grant.accountId,
             workspaceId,
-            artifactId: artifactId(context),
+            artifactId: id,
             expectedCurrentVersionId: request.expectedCurrentVersionId,
             ...(request.title !== undefined ? { title: request.title } : {}),
             ...(request.description !== undefined ? { description: request.description } : {}),

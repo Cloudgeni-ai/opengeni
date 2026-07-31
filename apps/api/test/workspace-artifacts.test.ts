@@ -8,7 +8,13 @@ import {
   type Permission,
 } from "@opengeni/contracts";
 import type { ApiRouteDeps, ObjectStorageDependency } from "@opengeni/core";
-import { bootstrapWorkspace, createDb, deleteWorkspace, type DbClient } from "@opengeni/db";
+import {
+  bootstrapWorkspace,
+  createDb,
+  createSession,
+  deleteWorkspace,
+  type DbClient,
+} from "@opengeni/db";
 import {
   acquireSharedTestDatabase,
   MemoryEventBus,
@@ -32,6 +38,7 @@ let grant: Grant;
 let otherGrant: Grant;
 let objectStorage: ObjectStorageDependency;
 const objects = new Map<string, { bytes: Uint8Array; contentType: string }>();
+let objectPutCount = 0;
 
 beforeAll(async () => {
   const acquired = await acquireSharedTestDatabase("workspace-artifacts");
@@ -69,6 +76,7 @@ beforeAll(async () => {
       body: Uint8Array;
       contentType: string;
     }) => {
+      objectPutCount += 1;
       objects.set(key, { bytes: body.slice(), contentType });
     },
     getObjectBytes: async (key: string) => objects.get(key) ?? null,
@@ -131,6 +139,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     expect(created.replayed).toBe(false);
     expect(created.artifact).not.toHaveProperty("kind");
     expect(created.artifact.currentVersion?.revision).toBe(1);
+    const putsAfterCreate = objectPutCount;
 
     const replayResponse = await request(grant, ["artifacts:publish"], base, {
       method: "POST",
@@ -139,6 +148,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     const replay = WorkspaceArtifactMutationResponse.parse(await replayResponse.json());
     expect(replay.replayed).toBe(true);
     expect(replay.artifact.id).toBe(created.artifact.id);
+    expect(objectPutCount).toBe(putsAfterCreate);
 
     const concurrentCreate = await Promise.all([
       request(grant, ["artifacts:publish"], base, {
@@ -169,6 +179,27 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       await (await request(grant, ["artifacts:read"], base)).json(),
     );
     expect(listed.artifacts.map((artifact) => artifact.id)).toContain(created.artifact.id);
+    expect(listed.truncated).toBe(false);
+    expect(listed.nextCursor).toBeNull();
+
+    const firstPage = WorkspaceArtifactListResponse.parse(
+      await (await request(grant, ["artifacts:read"], `${base}?limit=1`)).json(),
+    );
+    expect(firstPage.artifacts).toHaveLength(1);
+    expect(firstPage.truncated).toBe(true);
+    expect(firstPage.nextCursor).not.toBeNull();
+    const secondPage = WorkspaceArtifactListResponse.parse(
+      await (
+        await request(
+          grant,
+          ["artifacts:read"],
+          `${base}?limit=1&cursor=${encodeURIComponent(firstPage.nextCursor!)}`,
+        )
+      ).json(),
+    );
+    expect(secondPage.artifacts).toHaveLength(1);
+    expect(secondPage.artifacts[0]!.id).not.toBe(firstPage.artifacts[0]!.id);
+    expect((await request(grant, ["artifacts:read"], `${base}?cursor=invalid`)).status).toBe(422);
 
     const contentPath = `${base}/${created.artifact.id}/content`;
     const firstContent = WorkspaceArtifactContentResponse.parse(
@@ -194,6 +225,14 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     const winnerResponse = concurrent.find((response) => response.status === 200)!;
     const winner = WorkspaceArtifactMutationResponse.parse(await winnerResponse.json());
     expect(winner.version.revision).toBe(2);
+
+    const putsBeforeStalePublish = objectPutCount;
+    const stalePublish = await publish(
+      "<!doctype html><h1>Must not be stored</h1>",
+      "stale-publish",
+    );
+    expect(stalePublish.status).toBe(409);
+    expect(objectPutCount).toBe(putsBeforeStalePublish);
 
     const reusedPublishKey = await request(grant, ["artifacts:publish"], versionPath, {
       method: "POST",
@@ -228,6 +267,8 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     );
     expect(detail.versions).toHaveLength(2);
     expect(detail.events).toHaveLength(3);
+    expect(detail.versionsTruncated).toBe(false);
+    expect(detail.eventsTruncated).toBe(false);
 
     const isolated = await request(
       otherGrant,
@@ -247,8 +288,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
   }, 60_000);
 
   test("exposes exact agent create and source tools through the first-party MCP surface", async () => {
-    const sessionId = crypto.randomUUID();
-    const turnId = crypto.randomUUID();
+    const attempt = await seedAttempt(grant);
     const server = buildOpenGeniMcpServer(
       {
         settings: testSettings(),
@@ -259,14 +299,14 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
-        subjectId: grant.subjectId,
+        subjectId: "worker:first-party-mcp",
         permissions: ["artifacts:read", "artifacts:publish"],
         principalKind: "agent_attempt",
         metadata: {
-          sessionId,
-          turnId,
-          attemptId: crypto.randomUUID(),
-          executionGeneration: 1,
+          sessionId: attempt.sessionId,
+          turnId: attempt.turnId,
+          attemptId: attempt.attemptId,
+          executionGeneration: attempt.executionGeneration,
           firstPartyMcpTools: ["artifacts_create", "artifacts_get_source"],
         },
       },
@@ -291,8 +331,10 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       const createdText = createdResult.content.find((item) => item.type === "text");
       if (!createdText || createdText.type !== "text") throw new Error("missing MCP text result");
       const created = WorkspaceArtifactMutationResponse.parse(JSON.parse(createdText.text));
-      expect(created.version.sourceSessionId).toBe(sessionId);
-      expect(created.version.sourceTurnId).toBe(turnId);
+      expect(created.version.sourceSessionId).toBe(attempt.sessionId);
+      expect(created.version.sourceTurnId).toBe(attempt.turnId);
+      expect(created.version.sourceAttemptId).toBe(attempt.attemptId);
+      expect(created.version.sourceExecutionGeneration).toBe(attempt.executionGeneration);
 
       const sourceResult = await mcp.callTool({
         name: "artifacts_get_source",
@@ -301,8 +343,96 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       const sourceText = sourceResult.content.find((item) => item.type === "text");
       if (!sourceText || sourceText.type !== "text") throw new Error("missing MCP source result");
       expect(JSON.parse(sourceText.text).html).toContain("Created through MCP");
+
+      await supersedeAttempt(attempt);
+      const putsBeforeStaleAttempt = objectPutCount;
+      const staleResult = await mcp.callTool({
+        name: "artifacts_create",
+        arguments: {
+          title: "Stale attempt",
+          html: "<!doctype html><main>Must not be stored</main>",
+          idempotencyKey: "stale-attempt-create",
+        },
+      });
+      expect(staleResult.isError).toBe(true);
+      expect(objectPutCount).toBe(putsBeforeStaleAttempt);
     } finally {
       await Promise.all([mcp.close(), server.close()]);
     }
   }, 60_000);
 });
+
+type Attempt = {
+  sessionId: string;
+  turnId: string;
+  attemptId: string;
+  executionGeneration: number;
+};
+
+async function seedAttempt(targetGrant: Grant): Promise<Attempt> {
+  const session = await createSession(client.db, {
+    accountId: targetGrant.accountId,
+    workspaceId: targetGrant.workspaceId,
+    initialMessage: "Artifact attempt test",
+    resources: [],
+    tools: [],
+    metadata: {},
+    model: "gpt-5.6-sol",
+    sandboxBackend: "none",
+  });
+  const executionGeneration = 3;
+  const [turn] = await shared.admin<{ id: string }[]>`
+    INSERT INTO session_turns (
+      account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
+      status, position, prompt, model, reasoning_effort, sandbox_backend,
+      execution_generation, initiator_kind, initiator_subject_id, initiator_context
+    ) VALUES (
+      ${targetGrant.accountId}, ${targetGrant.workspaceId}, ${session.id}, gen_random_uuid(),
+      ${`artifact-wf-${crypto.randomUUID()}`}, 'running', 0, 'Publish artifact',
+      'gpt-5.6-sol', 'medium', 'none', ${executionGeneration}, 'subject',
+      ${targetGrant.subjectId}, '{"accepted":true}'::jsonb
+    ) RETURNING id`;
+  const attemptId = crypto.randomUUID();
+  await shared.admin`
+    INSERT INTO session_turn_attempts (
+      id, account_id, workspace_id, session_id, turn_id, execution_generation,
+      state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id,
+      verified_control_revision, mcp_approval_policies
+    ) VALUES (
+      ${attemptId}, ${targetGrant.accountId}, ${targetGrant.workspaceId}, ${session.id}, ${turn!.id},
+      ${executionGeneration}, 'running', 'artifact-wf', ${`run-${attemptId}`},
+      ${`activity-${attemptId}`}, 0, '{}'::jsonb
+    )`;
+  await shared.admin`
+    UPDATE session_turns SET active_attempt_id = ${attemptId} WHERE id = ${turn!.id}`;
+  await shared.admin`
+    UPDATE sessions SET active_turn_id = ${turn!.id} WHERE id = ${session.id}`;
+  return { sessionId: session.id, turnId: turn!.id, attemptId, executionGeneration };
+}
+
+async function supersedeAttempt(attempt: Attempt): Promise<void> {
+  const replacementId = crypto.randomUUID();
+  const replacementGeneration = attempt.executionGeneration + 1;
+  await shared.admin.begin(async (tx) => {
+    await tx`
+      UPDATE session_turn_attempts
+      SET state = 'closed', outcome = 'superseded', closed_at = now(), updated_at = now()
+      WHERE id = ${attempt.attemptId}`;
+    await tx`
+      INSERT INTO session_turn_attempts (
+        id, account_id, workspace_id, session_id, turn_id, execution_generation,
+        state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id,
+        verified_control_revision, mcp_approval_policies
+      )
+      SELECT
+        ${replacementId}, account_id, workspace_id, session_id, turn_id,
+        ${replacementGeneration}, 'running', temporal_workflow_id,
+        ${`replacement-run-${replacementId}`}, ${`replacement-activity-${replacementId}`},
+        verified_control_revision, mcp_approval_policies
+      FROM session_turn_attempts WHERE id = ${attempt.attemptId}`;
+    await tx`
+      UPDATE session_turns
+      SET execution_generation = ${replacementGeneration}, active_attempt_id = ${replacementId}
+      WHERE id = ${attempt.turnId}`;
+  });
+}

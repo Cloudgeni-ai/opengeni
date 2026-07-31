@@ -161,11 +161,11 @@ describe("release schema contract", () => {
         (migrations.has("0144_workspace_artifacts.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "REPLACE_AFTER_REBASE",
+      "0186569f49e4567e7e28e42ab01b8fb2563858d2ca4f8958afdb894d9481c9e9",
     );
     expect(contract.latestMigration).toBe("0144_workspace_artifacts.sql");
     expect(migrations.get("0144_workspace_artifacts.sql")).toMatchObject({
-      sha256: "2b2bc7a2ed6735ea6f3e6c86eac864193a710279b312c0946c368fd50f91c30c",
+      sha256: "46b5d121c057433f75aab5366ee24ba08ff357f673cc6a89f26d9670bfe9e67a",
       deploymentMode: "maintenance",
     });
     expect(migrations.get("0128_github_installation_authority.sql")).toMatchObject({
@@ -246,6 +246,7 @@ describe("release schema contract", () => {
       "0141_slack_bot_delete_idempotency.sql",
       "0142_sandbox_archive_capture_gate.sql",
       "0143_session_codex_compaction_mode.sql",
+      "0144_workspace_artifacts.sql",
     ]);
     expect(migrations.get("0143_session_codex_compaction_mode.sql")).toMatchObject({
       sha256: "574cfe6fc5ab24135e84d3932fd936e134ebe28bce8ac3cb5db97a549683906f",

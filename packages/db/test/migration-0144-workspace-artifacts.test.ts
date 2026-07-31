@@ -19,7 +19,12 @@ describe("workspace artifacts migration", () => {
     expect(sql).toContain("workspace_artifact_events_immutable");
     expect(sql).toContain("pg_trigger_depth() > 1");
     expect(sql).toContain("GRANT SELECT, INSERT ON TABLE");
-    expect(sql).toContain('"artifacts_get_source"');
-    expect(sql).toContain('"artifacts:publish"');
+    expect(sql).toContain('"source_attempt_id" uuid');
+    expect(sql).toContain('"source_execution_generation" integer');
+    expect(sql).toContain("workspace_artifact_versions_provenance_chk");
+    expect(sql).toContain("workspace_artifact_events_source_attempt_fk");
+    expect(sql).not.toContain('UPDATE "sessions"');
+    expect(sql).not.toContain('SET "first_party_mcp_tools"');
+    expect(sql).not.toContain('SET "first_party_mcp_permissions"');
   });
 });

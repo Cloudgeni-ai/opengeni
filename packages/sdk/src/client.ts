@@ -218,6 +218,7 @@ import type {
   RollbackWorkspaceArtifactRequest,
   WorkspaceArtifactContentResponse,
   WorkspaceArtifactDetailResponse,
+  WorkspaceArtifactListOptions,
   WorkspaceArtifactListResponse,
   WorkspaceArtifactMutationResponse,
 } from "./workspace-artifacts";
@@ -1726,10 +1727,17 @@ export class OpenGeniClient {
     );
   }
 
-  async listWorkspaceArtifacts(workspaceId: string): Promise<WorkspaceArtifactListResponse> {
+  async listWorkspaceArtifacts(
+    workspaceId: string,
+    options: WorkspaceArtifactListOptions = {},
+  ): Promise<WorkspaceArtifactListResponse> {
+    const query = new URLSearchParams();
+    if (options.limit !== undefined) query.set("limit", String(options.limit));
+    if (options.cursor) query.set("cursor", options.cursor);
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
     return await this.requestJson<WorkspaceArtifactListResponse>(
       "GET",
-      `/v1/workspaces/${workspaceId}/published-artifacts`,
+      `/v1/workspaces/${workspaceId}/published-artifacts${suffix}`,
     );
   }
 

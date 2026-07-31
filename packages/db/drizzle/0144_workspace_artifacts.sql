@@ -1,6 +1,7 @@
 -- deployment-mode: maintenance
--- Generic, versioned workspace-published HTML artifacts. The maintenance gate
--- also admits the new first-party tool names into historical session policies.
+-- Generic, versioned workspace-published HTML artifacts. Existing sessions
+-- retain their immutable capability policy; only newly created sessions use
+-- the artifact tools added to the application default catalog.
 
 CREATE TABLE "workspace_artifacts" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -26,6 +27,9 @@ CREATE TABLE "workspace_artifacts" (
   CONSTRAINT "workspace_artifacts_actor_chk" CHECK (
     length(btrim("created_by_subject_id")) BETWEEN 1 AND 1024
   ),
+  CONSTRAINT "workspace_artifacts_workspace_account_fk"
+    FOREIGN KEY ("workspace_id", "account_id")
+    REFERENCES "workspaces"("id", "account_id") ON DELETE CASCADE,
   CONSTRAINT "workspace_artifacts_workspace_id_uq" UNIQUE ("workspace_id", "id"),
   CONSTRAINT "workspace_artifacts_workspace_slug_uq" UNIQUE ("workspace_id", "slug")
 );
@@ -46,11 +50,16 @@ CREATE TABLE "workspace_artifact_versions" (
   "operation_key" text NOT NULL,
   "source_session_id" uuid,
   "source_turn_id" uuid,
+  "source_attempt_id" uuid,
+  "source_execution_generation" integer,
   "created_by_subject_id" text NOT NULL,
   "created_at" timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT "workspace_artifact_versions_artifact_fk"
     FOREIGN KEY ("workspace_id", "artifact_id")
     REFERENCES "workspace_artifacts"("workspace_id", "id") ON DELETE CASCADE,
+  CONSTRAINT "workspace_artifact_versions_workspace_account_fk"
+    FOREIGN KEY ("workspace_id", "account_id")
+    REFERENCES "workspaces"("id", "account_id") ON DELETE CASCADE,
   CONSTRAINT "workspace_artifact_versions_workspace_id_uq" UNIQUE ("workspace_id", "id"),
   CONSTRAINT "workspace_artifact_versions_revision_uq"
     UNIQUE ("workspace_id", "artifact_id", "revision"),
@@ -67,6 +76,19 @@ CREATE TABLE "workspace_artifact_versions" (
   ),
   CONSTRAINT "workspace_artifact_versions_actor_chk" CHECK (
     length(btrim("created_by_subject_id")) BETWEEN 1 AND 1024
+  ),
+  CONSTRAINT "workspace_artifact_versions_provenance_chk" CHECK (
+    (
+      "source_session_id" IS NULL
+      AND "source_turn_id" IS NULL
+      AND "source_attempt_id" IS NULL
+      AND "source_execution_generation" IS NULL
+    ) OR (
+      "source_session_id" IS NOT NULL
+      AND "source_turn_id" IS NOT NULL
+      AND "source_attempt_id" IS NOT NULL
+      AND "source_execution_generation" > 0
+    )
   )
 );
 
@@ -87,23 +109,63 @@ CREATE TABLE "workspace_artifact_events" (
   "operation_key" text NOT NULL,
   "source_session_id" uuid,
   "source_turn_id" uuid,
+  "source_attempt_id" uuid,
+  "source_execution_generation" integer,
   "actor_subject_id" text NOT NULL,
   "reason" text NOT NULL,
   "created_at" timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT "workspace_artifact_events_artifact_fk"
     FOREIGN KEY ("workspace_id", "artifact_id")
     REFERENCES "workspace_artifacts"("workspace_id", "id") ON DELETE CASCADE,
+  CONSTRAINT "workspace_artifact_events_workspace_account_fk"
+    FOREIGN KEY ("workspace_id", "account_id")
+    REFERENCES "workspaces"("id", "account_id") ON DELETE CASCADE,
   CONSTRAINT "workspace_artifact_events_operation_uq" UNIQUE ("workspace_id", "operation_key"),
   CONSTRAINT "workspace_artifact_events_type_chk" CHECK ("type" IN ('published', 'rolled_back')),
   CONSTRAINT "workspace_artifact_events_operation_chk" CHECK (length("operation_key") BETWEEN 1 AND 512),
   CONSTRAINT "workspace_artifact_events_audit_chk" CHECK (
     length(btrim("actor_subject_id")) BETWEEN 1 AND 1024
     AND length(btrim("reason")) BETWEEN 1 AND 4096
+  ),
+  CONSTRAINT "workspace_artifact_events_provenance_chk" CHECK (
+    (
+      "source_session_id" IS NULL
+      AND "source_turn_id" IS NULL
+      AND "source_attempt_id" IS NULL
+      AND "source_execution_generation" IS NULL
+    ) OR (
+      "source_session_id" IS NOT NULL
+      AND "source_turn_id" IS NOT NULL
+      AND "source_attempt_id" IS NOT NULL
+      AND "source_execution_generation" > 0
+    )
   )
 );
 
 CREATE INDEX "workspace_artifact_events_list_idx"
   ON "workspace_artifact_events" ("workspace_id", "artifact_id", "created_at" DESC);
+
+ALTER TABLE "workspace_artifact_versions"
+  ADD CONSTRAINT "workspace_artifact_versions_source_session_fk"
+    FOREIGN KEY ("workspace_id", "source_session_id")
+    REFERENCES "sessions"("workspace_id", "id") ON DELETE RESTRICT,
+  ADD CONSTRAINT "workspace_artifact_versions_source_turn_fk"
+    FOREIGN KEY ("workspace_id", "source_turn_id")
+    REFERENCES "session_turns"("workspace_id", "id") ON DELETE RESTRICT,
+  ADD CONSTRAINT "workspace_artifact_versions_source_attempt_fk"
+    FOREIGN KEY ("workspace_id", "source_attempt_id")
+    REFERENCES "session_turn_attempts"("workspace_id", "id") ON DELETE RESTRICT;
+
+ALTER TABLE "workspace_artifact_events"
+  ADD CONSTRAINT "workspace_artifact_events_source_session_fk"
+    FOREIGN KEY ("workspace_id", "source_session_id")
+    REFERENCES "sessions"("workspace_id", "id") ON DELETE RESTRICT,
+  ADD CONSTRAINT "workspace_artifact_events_source_turn_fk"
+    FOREIGN KEY ("workspace_id", "source_turn_id")
+    REFERENCES "session_turns"("workspace_id", "id") ON DELETE RESTRICT,
+  ADD CONSTRAINT "workspace_artifact_events_source_attempt_fk"
+    FOREIGN KEY ("workspace_id", "source_attempt_id")
+    REFERENCES "session_turn_attempts"("workspace_id", "id") ON DELETE RESTRICT;
 
 CREATE OR REPLACE FUNCTION workspace_artifact_validate_current()
 RETURNS trigger LANGUAGE plpgsql AS $$
@@ -194,15 +256,3 @@ BEGIN
   END IF;
 END;
 $$;
-
-UPDATE "sessions"
-SET "first_party_mcp_tools" = "first_party_mcp_tools" ||
-  '["artifacts_list","artifacts_get_source","artifacts_create","artifacts_publish","artifacts_rollback"]'::jsonb
-WHERE NOT "first_party_mcp_tools" @> '["artifacts_list"]'::jsonb;
-
-UPDATE "sessions"
-SET "first_party_mcp_permissions" = "first_party_mcp_permissions" ||
-  '["artifacts:read","artifacts:publish"]'::jsonb
-WHERE "first_party_mcp_permissions" IS NOT NULL
-  AND jsonb_typeof("first_party_mcp_permissions") = 'array'
-  AND NOT "first_party_mcp_permissions" @> '["artifacts:read"]'::jsonb;

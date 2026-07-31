@@ -1314,7 +1314,7 @@ function registerWorkspaceArtifactTools(
   const authorize = async () => {
     await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
   };
-  const store = async (html: string) => {
+  const prepare = (html: string) => {
     if (!deps.objectStorage) throw new Error("Object storage is not configured");
     const bytes = new TextEncoder().encode(html);
     if (bytes.byteLength < 1 || bytes.byteLength > WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES) {
@@ -1324,23 +1324,35 @@ function registerWorkspaceArtifactTools(
     }
     const contentSha256 = createHash("sha256").update(bytes).digest("hex");
     const contentKey = `workspaces/${grant.workspaceId}/workspace-artifacts/blobs/${contentSha256}.html`;
-    await deps.objectStorage.putObject({
-      key: contentKey,
-      contentType: "text/html; charset=utf-8",
-      body: bytes,
-      sha256: contentSha256,
-    });
-    return { contentKey, contentSha256, sizeBytes: bytes.byteLength };
+    return {
+      contentKey,
+      contentSha256,
+      sizeBytes: bytes.byteLength,
+      persistContent: async () => {
+        await deps.objectStorage!.putObject({
+          key: contentKey,
+          contentType: "text/html; charset=utf-8",
+          body: bytes,
+          sha256: contentSha256,
+        });
+      },
+    };
   };
   const provenance = (idempotencyKey: string) => {
     const claims = attempt();
     return {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
-      operationKey: `session:${claims.sessionId}:${idempotencyKey}`.slice(0, 512),
+      operationKey: `attempt:${createHash("sha256")
+        .update(
+          `${claims.sessionId}:${claims.turnId}:${claims.attemptId}:${claims.executionGeneration}:${idempotencyKey}`,
+        )
+        .digest("hex")}`,
       actorSubjectId: grant.subjectId,
       sourceSessionId: claims.sessionId,
       sourceTurnId: claims.turnId,
+      sourceAttemptId: claims.attemptId,
+      sourceExecutionGeneration: claims.executionGeneration,
     };
   };
 
@@ -1353,7 +1365,7 @@ function registerWorkspaceArtifactTools(
     },
     async () => {
       await authorize();
-      return json({ artifacts: await listWorkspaceArtifacts(deps.db, grant.workspaceId) });
+      return json(await listWorkspaceArtifacts(deps.db, grant.workspaceId));
     },
   );
 
@@ -1411,7 +1423,7 @@ function registerWorkspaceArtifactTools(
           slug: resolvedSlug,
           title,
           description: description ?? null,
-          ...(await store(html)),
+          ...prepare(html),
           ...provenance(idempotencyKey),
         }),
       );
@@ -1440,7 +1452,7 @@ function registerWorkspaceArtifactTools(
           expectedCurrentVersionId,
           ...(title !== undefined ? { title } : {}),
           ...(description !== undefined ? { description } : {}),
-          ...(await store(html)),
+          ...prepare(html),
           ...provenance(idempotencyKey),
         }),
       );

@@ -109,6 +109,11 @@ export const workspaceArtifacts = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
+    workspaceAccount: foreignKey({
+      name: "workspace_artifacts_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
     workspaceSlug: uniqueIndex("workspace_artifacts_workspace_slug_uq").on(
       table.workspaceId,
       table.slug,
@@ -137,10 +142,17 @@ export const workspaceArtifactVersions = pgTable(
     operationKey: text("operation_key").notNull(),
     sourceSessionId: uuid("source_session_id"),
     sourceTurnId: uuid("source_turn_id"),
+    sourceAttemptId: uuid("source_attempt_id"),
+    sourceExecutionGeneration: integer("source_execution_generation"),
     createdBySubjectId: text("created_by_subject_id").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
+    workspaceAccount: foreignKey({
+      name: "workspace_artifact_versions_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
     artifact: foreignKey({
       name: "workspace_artifact_versions_artifact_fk",
       columns: [table.workspaceId, table.artifactId],
@@ -158,6 +170,20 @@ export const workspaceArtifactVersions = pgTable(
     operation: uniqueIndex("workspace_artifact_versions_operation_uq").on(
       table.workspaceId,
       table.operationKey,
+    ),
+    provenance: check(
+      "workspace_artifact_versions_provenance_chk",
+      sql`(
+        ${table.sourceSessionId} is null
+        and ${table.sourceTurnId} is null
+        and ${table.sourceAttemptId} is null
+        and ${table.sourceExecutionGeneration} is null
+      ) or (
+        ${table.sourceSessionId} is not null
+        and ${table.sourceTurnId} is not null
+        and ${table.sourceAttemptId} is not null
+        and ${table.sourceExecutionGeneration} > 0
+      )`,
     ),
   }),
 );
@@ -179,11 +205,18 @@ export const workspaceArtifactEvents = pgTable(
     operationKey: text("operation_key").notNull(),
     sourceSessionId: uuid("source_session_id"),
     sourceTurnId: uuid("source_turn_id"),
+    sourceAttemptId: uuid("source_attempt_id"),
+    sourceExecutionGeneration: integer("source_execution_generation"),
     actorSubjectId: text("actor_subject_id").notNull(),
     reason: text("reason").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
+    workspaceAccount: foreignKey({
+      name: "workspace_artifact_events_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
     artifact: foreignKey({
       name: "workspace_artifact_events_artifact_fk",
       columns: [table.workspaceId, table.artifactId],
@@ -197,6 +230,20 @@ export const workspaceArtifactEvents = pgTable(
       table.workspaceId,
       table.artifactId,
       table.createdAt,
+    ),
+    provenance: check(
+      "workspace_artifact_events_provenance_chk",
+      sql`(
+        ${table.sourceSessionId} is null
+        and ${table.sourceTurnId} is null
+        and ${table.sourceAttemptId} is null
+        and ${table.sourceExecutionGeneration} is null
+      ) or (
+        ${table.sourceSessionId} is not null
+        and ${table.sourceTurnId} is not null
+        and ${table.sourceAttemptId} is not null
+        and ${table.sourceExecutionGeneration} > 0
+      )`,
     ),
   }),
 );

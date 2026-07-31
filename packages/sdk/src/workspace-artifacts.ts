@@ -9,6 +9,8 @@ export type WorkspaceArtifactVersion = {
   sizeBytes: number;
   sourceSessionId: string | null;
   sourceTurnId: string | null;
+  sourceAttemptId: string | null;
+  sourceExecutionGeneration: number | null;
   createdBySubjectId: string;
   createdAt: string;
 };
@@ -37,16 +39,25 @@ export type WorkspaceArtifactEvent = {
   toVersionId: string;
   sourceSessionId: string | null;
   sourceTurnId: string | null;
+  sourceAttemptId: string | null;
+  sourceExecutionGeneration: number | null;
   actorSubjectId: string;
   reason: string;
   createdAt: string;
 };
 
-export type WorkspaceArtifactListResponse = { artifacts: WorkspaceArtifact[] };
+export type WorkspaceArtifactListOptions = { limit?: number; cursor?: string };
+export type WorkspaceArtifactListResponse = {
+  artifacts: WorkspaceArtifact[];
+  nextCursor: string | null;
+  truncated: boolean;
+};
 export type WorkspaceArtifactDetailResponse = {
   artifact: WorkspaceArtifact;
   versions: WorkspaceArtifactVersion[];
   events: WorkspaceArtifactEvent[];
+  versionsTruncated: boolean;
+  eventsTruncated: boolean;
 };
 export type WorkspaceArtifactContentResponse = {
   artifactId: string;
