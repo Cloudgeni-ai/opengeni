@@ -145,12 +145,12 @@
 
 /* Streaming tip ink: age-window opacity wash (no blur — blur read as muddy
    glitter at speed). One continuous run per append batch; fast arrival keeps
-   a large young band soft, slow arrival keeps only the tip soft. Inline, no
-   transform — typography/selection untouched. `both` holds pre-birth ink
-   invisible until its age window starts. */
+   a large young band soft, slow arrival keeps only the tip soft. Starts at a
+   readable low opacity (not 0) so the tip reads as wet ink, not missing text.
+   Inline, no transform — typography/selection untouched. */
 @keyframes og-stream-ink {
   from {
-    opacity: 0;
+    opacity: 0.28;
   }
   to {
     opacity: 1;
@@ -175,27 +175,9 @@
   animation: var(--animate-og-markdown-settle);
 }
 
-/* Markdown crystallize VT: short opacity cross-fade only (typed so it does
-   not restyle every unrelated view transition on the page). */
-html:active-view-transition-type(og-md-crystallize)::view-transition-old(*) {
-  animation: og-md-vt-out var(--og-duration-markdown-crystallize) var(--og-ease-stream) both;
-}
-html:active-view-transition-type(og-md-crystallize)::view-transition-new(*) {
-  animation: og-md-vt-in var(--og-duration-markdown-crystallize) var(--og-ease-stream) both;
-}
-@keyframes og-md-vt-out {
-  to {
-    opacity: 0;
-  }
-}
-@keyframes og-md-vt-in {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
-}
+/* Markdown crystallize no longer uses View Transitions — styling `*` faded the
+   document root and read as a full-page blink at stream end. Local
+   `.og-markdown-settle` on the body is enough. */
 
 /* Entry: messages and timeline rows slide in just enough to feel placed. */
 @keyframes og-enter {

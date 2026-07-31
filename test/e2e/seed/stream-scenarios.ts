@@ -119,10 +119,10 @@ export function resolveStreamPacing(
       // Tiny tokens, slightly uneven — soft word reveal under stress.
       return { tokenMs: Math.max(10, Math.floor(baselineTokenMs * 0.55)), chunkChars: 3, jitter: 0.35 };
     case "slow":
-      return { tokenMs: Math.max(70, Math.floor(baselineTokenMs * 2.2)), chunkChars: 8, jitter: 0.2 };
+      return { tokenMs: Math.max(48, Math.floor(baselineTokenMs * 1.7)), chunkChars: 10, jitter: 0.2 };
     case "crawl":
-      // Intentionally glacial so markdown structure can be watched materializing.
-      return { tokenMs: Math.max(110, Math.floor(baselineTokenMs * 3.4)), chunkChars: 4, jitter: 0.25 };
+      // Still slow enough to watch structure land, but not glacial.
+      return { tokenMs: Math.max(72, Math.floor(baselineTokenMs * 2.4)), chunkChars: 6, jitter: 0.22 };
     case "laggy":
       // Provider hiccups: normal-ish tokens with periodic multi-second stalls.
       return {
@@ -308,6 +308,94 @@ prefer short-lived signed handles at the edge. No further blockers — ready to
 land the patch and capture the dashboard proof in the next turn.
 `;
 
+/** Long prose wall — stress tip-follow under mostly-fast streaming. */
+const MARKDOWN_HUGE_WALL = `## Long-form streaming stress
+
+This answer is intentionally **huge**: several dense paragraphs at near-model
+speed so tip-follow, soft ink, and crystallize get a real workout. Skim the
+shape; the point is motion under load, not the prose itself.
+
+The session timeline has to stay honest while an agent narrates for a long
+time. That means the pinned tip must float upward as content grows, never
+teleport by a full line on every token batch, and never yank a reader who
+scrolled up into history. When the model is slow, each new line should ease
+into place without a strange laggy chase. When the model is fast, debt to the
+bottom must clear quickly so the reader never feels stuck watching the tip
+race away below the fold. Those two regimes share one glide; only the time
+constant changes with recent growth velocity and how far we are from the tip.
+
+In practice a turn rarely stays pure prose. Tools interrupt, reasoning opens
+and closes, sandboxes warm, and mid-turn clusters fold while the live tail
+keeps streaming. The outer settle fold has to choreograph that handoff: hold
+the rows the reader was watching, ease the summary chip in, then glide closed
+without remounting nested chips mid-collapse. If any of that snaps, the whole
+stream reads as jagged even when the scroll math is fine. So this wall of
+text is also a rehearsal for the quieter moments that follow — a long calm
+stretch, then a soft landing.
+
+Deployment notes belong in the same breath. The API remains the only public
+surface; Postgres is durable truth; NATS is live fanout; Temporal orchestrates
+but never carries token streams in workflow history. Context compaction is one
+portable plaintext checkpoint, not an opaque provider blob, because sessions
+rotate across subscription identities. Goals wake through a Postgres
+obligation, never a polling loop. None of that changes because we are
+stressing the UI — it is the reason the UI must stay calm under long runs.
+
+Sandbox targets stay pluggable. Docker is the local default; Modal and the
+other cloud boxes are swappable; a Connected Machine is a co-equal primary
+compute target, not a phantom box behind a lease. Machine-primary turns never
+clone repos onto the user's disk and never export platform git credentials.
+The control plane talks NATS; heartbeats stay off the work pool so a full
+queue cannot mark the machine offline. When this wall mentions sandboxes, it
+is only to keep those invariants in the reader's peripheral vision while the
+paragraphs keep arriving.
+
+Markdown itself is part of the stress. Headings, emphasis, inline code like
+\`overflow-anchor\`, and occasional links such as
+[GFM](https://github.github.com/gfm/) all reflow while tokens land. Softening
+unfinished markers prevents punctuation flashes; tip ink washes the young
+suffix; crystallize settles the body when the stream ends. A fast wall should
+still feel like one surface being painted, not a stack of cards slamming in.
+
+Here is another block at the same density. Imagine the agent is explaining a
+migration plan across API, worker, and web: expand columns, dual-write, cut
+readers over, then contract. Every step emits timeline evidence. The reader
+pinned at the tip watches narration grow for minutes. Soft follow must absorb
+multi-line bursts without jagged ratchets, and a slow trailing sentence must
+not revive burst urgency from a hundred milliseconds ago. Velocity decays when
+growth pauses; debt urgency only spikes when the tip actually falls behind.
+
+Keep going through the middle of the essay. Product copy often underestimates
+how long a competent agent will talk when the task is open-ended. Days-long
+runs are in scope. The UI cannot treat a long answer as an edge case. Scroll
+ownership stays simple: pinned tip is scripted glide; history is native
+anchoring; \`hasNewer\` pages never pretend to be the live tip. If those rules
+hold, a wall like this is boring in the best way — content moves, the tip
+stays readable, nothing fights the reader.
+
+One more large paragraph before the close. Think about queue edits, Agent
+Steer, approvals, and capacity waits all landing while prose continues. The
+timeline projects them into clusters and notices without feeding audit events
+back into model memory. Human-facing motion and model-facing truth stay on
+separate rails. Watching this paragraph stream is a cheap proxy for that
+separation holding under speed: layout can churn; authority cannot.
+
+### Why the length
+
+1. Tip-follow under sustained growth
+2. Ink band under large append batches
+3. Crystallize after a long body
+4. No history yank if you scroll away mid-wall
+`;
+
+const MARKDOWN_HUGE_WALL_CLOSE = `### Soft landing
+
+That was the fast pass. This coda arrives slower on purpose — let the glide
+calm down, watch the last lines ease in, then crystallize. If follow still
+feels jagged here, the slow path is the bug; if the wall above raced away,
+the fast catch-up path needs more urgency.
+`;
+
 function marathonTools(ctx: StreamCtx, n: number): ToolSpec[] {
   const cmds = [
     "git status -sb",
@@ -343,7 +431,30 @@ function mixedToolTour(ctx: StreamCtx): ToolSpec[] {
   ];
 }
 
+const SCENARIO_HUGE_FAST_WALL: StreamScenario = {
+  id: "markdown-huge-fast-wall",
+  title: "Huge prose wall (mostly fast, soft landing)",
+  userText: () =>
+    "Scenario: dump a very long multi-paragraph answer mostly at fast-model speed, then ease the last beat.",
+  phases: [
+    { kind: "reason", text: "Long narration wall — tip-follow + ink under sustained growth." },
+    { kind: "sleep", ms: 180 },
+    {
+      kind: "message",
+      text: MARKDOWN_HUGE_WALL,
+      stream: true,
+      // Faster + fatter than preset "fast": big batches, short gaps.
+      pacing: { tokenMs: 8, chunkChars: 52, jitter: 0.08 },
+    },
+    { kind: "sleep", ms: 400 },
+    { kind: "message", text: MARKDOWN_HUGE_WALL_CLOSE, stream: true, pacing: "slow" },
+  ],
+};
+
 export const STREAM_SCENARIOS: StreamScenario[] = [
+  // Listed twice so the long wall runs ~2× as often as sibling scenarios.
+  SCENARIO_HUGE_FAST_WALL,
+  SCENARIO_HUGE_FAST_WALL,
   {
     id: "markdown-kitchen-sink",
     title: "Markdown kitchen sink (mixed pacing + crystallize)",

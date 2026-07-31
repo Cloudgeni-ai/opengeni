@@ -418,6 +418,8 @@ export type { LatencyModeId, PickerBillingClass, PickerModelRow } from "./model-
 export { MessageTimeline, TimelineRow } from "./components/message-timeline";
 export type { MessageTimelineProps } from "./components/message-timeline";
 export { Markdown } from "./components/markdown";
+export { CopyButton, CopyHoverFrame } from "./components/copy-button";
+export { copyTextToClipboard, tableElementToTsv } from "./lib/clipboard";
 export type { MarkdownProps } from "./components/markdown";
 export { SessionStatus, StatusDot, SESSION_STATUS_META } from "./components/session-status";
 export type {

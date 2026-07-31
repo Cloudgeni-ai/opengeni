@@ -18,9 +18,9 @@
 //   OPENGENI_DATABASE_URL   default postgres://…@127.0.0.1:6432/opengeni
 //   OPENGENI_NATS_URL       default nats://127.0.0.1:4222
 //   OPENGENI_SEED_WORKSPACE_ID / OPENGENI_SEED_SESSION_ID
-//   OPENGENI_SEED_STREAM_TOKEN_MS   baseline delay between token deltas (default 40)
-//   OPENGENI_SEED_STREAM_BURST_MS   pause between phase beats (default 280)
-//   OPENGENI_SEED_STREAM_TURN_MS    pause between scenarios (default 1600)
+//   OPENGENI_SEED_STREAM_TOKEN_MS   baseline delay between token deltas (default 28)
+//   OPENGENI_SEED_STREAM_BURST_MS   pause between phase beats (default 160)
+//   OPENGENI_SEED_STREAM_TURN_MS    pause between scenarios (default 900)
 // Per-message pacing presets (fast/slow/crawl/laggy/burst/yank) override the
 // baseline so one loop exercises fast models, slow models, and stalling streams.
 import {
@@ -51,9 +51,9 @@ import type { ToolSpec } from "./monster/payloads.ts";
 const DEFAULT_WORKSPACE = "f9e27d24-06c9-4888-8e24-c658896c36df";
 const DEFAULT_SESSION = "e1816d3b-fbc4-40e6-a520-4a5564d3cd78";
 
-const TOKEN_MS = Math.max(8, Number(process.env.OPENGENI_SEED_STREAM_TOKEN_MS ?? "40"));
-const BURST_MS = Math.max(50, Number(process.env.OPENGENI_SEED_STREAM_BURST_MS ?? "280"));
-const TURN_MS = Math.max(200, Number(process.env.OPENGENI_SEED_STREAM_TURN_MS ?? "1600"));
+const TOKEN_MS = Math.max(8, Number(process.env.OPENGENI_SEED_STREAM_TOKEN_MS ?? "28"));
+const BURST_MS = Math.max(40, Number(process.env.OPENGENI_SEED_STREAM_BURST_MS ?? "160"));
+const TURN_MS = Math.max(200, Number(process.env.OPENGENI_SEED_STREAM_TURN_MS ?? "900"));
 const TOOL_SETTLE_DEFAULT_MS = 200;
 
 function resolveDatabaseUrl(): string {

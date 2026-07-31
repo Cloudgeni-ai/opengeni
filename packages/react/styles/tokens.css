@@ -37,7 +37,7 @@
      did not ask for. Stream tip ink is an age window (same ms as fade). */
   --og-duration-disclose: 120ms;
   --og-duration-disclose-settle: 820ms;
-  --og-duration-stream: 720ms;
+  --og-duration-stream: 1100ms;
   /* Softened/partial markdown → final GFM (View Transition + settle breath). */
   --og-duration-markdown-crystallize: 480ms;
   --og-ease-out: cubic-bezier(0.22, 1, 0.36, 1);

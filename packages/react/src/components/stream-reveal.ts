@@ -18,7 +18,7 @@
    -------------------------------------------------------------------------- */
 
 /** Keep in sync with `--og-duration-stream` / `.og-stream-ink` in styles. */
-export const INK_FADE_MS = 720;
+export const INK_FADE_MS = 1100;
 /** @deprecated Use {@link INK_FADE_MS}. */
 export const WORD_ANIMATION_MS = INK_FADE_MS;
 

@@ -723,9 +723,31 @@ describe("MessageTimeline — settled turn folding", () => {
     // Fresh turn key + settleFold: open during the beat, not snapped shut.
     expect(outer?.getAttribute("data-state")).toBe("open");
     expect(outer?.className ?? "").toContain("animate-og-settle-chip");
-    // Nested cluster chips are the second layer (closed; bodies stay behind them).
-    expect(triggers).toHaveLength(3);
-    expect(triggers.slice(1).every((t) => t.getAttribute("data-state") === "closed")).toBe(true);
+    // Settle beat stays ONE layer — nested chips wait until the reader expands
+    // after collapse (so we never flash "N steps" over closed "1 step" rows).
+    expect(triggers).toHaveLength(1);
+    expect(r.container.textContent).toContain("Mid-turn checkpoint");
+    expect(r.container.textContent).toContain("step one");
+
+    // Mid-collapse (beat done, slow close still running): body must stay flat.
+    // Nested chips remounting here yank height and read as a hard snap.
+    await flush(1150);
+    expect(outer?.getAttribute("data-state")).toBe("closed");
+    expect(turnSummaryTriggers(r.container)).toHaveLength(1);
+    expect(r.container.textContent).toContain("step one");
+
+    // Settle chrome clears after the slow collapse; expand then nests.
+    await flush(900);
+    expect(outer?.getAttribute("data-state")).toBe("closed");
+
+    await act(async () => {
+      outer?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+    const expanded = turnSummaryTriggers(r.container);
+    // Outer + two nested cluster chips once the reader opens the settled turn.
+    expect(expanded).toHaveLength(3);
+    expect(expanded.slice(1).every((t) => t.getAttribute("data-state") === "closed")).toBe(true);
     expect(r.container.textContent).toContain("Mid-turn checkpoint");
     expect(r.container.textContent).not.toContain("step one");
 

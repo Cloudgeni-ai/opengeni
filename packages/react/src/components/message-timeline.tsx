@@ -53,7 +53,9 @@ import {
   type UserMessageItem,
   type WorkerCompletionItem,
   TurnSummary,
+  useTurnSettleOpen,
 } from "../timeline";
+import { CopyHoverFrame } from "./copy-button";
 import { SESSION_STATUS_META, StatusDot } from "./session-status";
 import { EntranceAnimationProvider, useEntranceAnimation } from "../timeline/entrance";
 
@@ -138,9 +140,9 @@ export type MessageTimelineProps = {
  * replaces was the "content is hidden, then pops in in batches" wobble.)
  *
  * Exactly one authority writes scrollTop, depending on mode:
- * - Pinned at the tip → we own it: snap to the bottom after every commit (and
- *   on ResizeObserver ticks for late layout like images). Native scroll
- *   anchoring is disabled in this mode so it cannot fight the snap.
+ * - Pinned at the tip → we own it: ease toward the bottom after every commit
+ *   (and on ResizeObserver ticks for late layout like images). Native scroll
+ *   anchoring is disabled in this mode so it cannot fight the glide.
  * - Scrolled up reading → the BROWSER owns it: native scroll anchoring
  *   (`overflow-anchor: auto`) holds the reader's viewport through history
  *   prepends, image/font late layout, and fold reflows at the compositor
@@ -151,13 +153,30 @@ export type MessageTimelineProps = {
 const PIN_THRESHOLD_PX = 48;
 
 /**
- * Soft follow glide time constant: the remaining distance to the bottom
- * shrinks by ~63% every GLIDE_TAU_MS. Small enough to stay clearly "at the
- * tip", large enough that streaming growth reads as motion, not teleports.
+ * Adaptive tip-follow glide. Remaining distance shrinks by ~63% every tau ms.
+ * Tau is dynamic:
+ * - Slow / sparse growth → longer tau (calm float; no strange laggy chase
+ *   after a single line).
+ * - Fast bursts or stacked debt → shorter tau (catch up without rattling).
+ * Velocity is an EMA of scrollHeight growth; debt is distance-to-bottom.
  */
-const GLIDE_TAU_MS = 140;
+const GLIDE_TAU_MIN_MS = 100;
+const GLIDE_TAU_MAX_MS = 420;
+/** At this tip-debt, urgency saturates toward the fast tau. */
+const GLIDE_CATCHUP_DEBT_PX = 140;
+/** Growth speed (px/s) that saturates urgency toward the fast tau. */
+const GLIDE_VELOCITY_REF_PX_S = 380;
+/** Idle this long without growth → velocity decays (slow stream calms). */
+const GLIDE_VELOCITY_IDLE_MS = 180;
 /** Growth beyond this snaps instead of gliding (session switches, huge folds). */
 const GLIDE_MAX_DISTANCE_PX = 600;
+
+function glideTauMs(debtPx: number, velocityPxPerSec: number): number {
+  const debtT = Math.min(1, Math.abs(debtPx) / GLIDE_CATCHUP_DEBT_PX);
+  const velT = Math.min(1, Math.max(0, velocityPxPerSec) / GLIDE_VELOCITY_REF_PX_S);
+  const urgency = Math.max(debtT, velT);
+  return GLIDE_TAU_MAX_MS + (GLIDE_TAU_MIN_MS - GLIDE_TAU_MAX_MS) * urgency;
+}
 
 /** Detects native scroll anchoring; a hook so tests can exercise the fallback. */
 function useNativeScrollAnchoring(): boolean {
@@ -270,11 +289,30 @@ export function MessageTimeline({
 
   // Soft follow glide: while pinned, the tip eases toward the bottom with an
   // exponential approach (frame-rate independent) instead of teleporting per
-  // commit — streaming reads as one continuous motion, not a hard ratchet.
-  // The target is re-read every frame, so content growing mid-glide simply
-  // extends the same motion. Self-terminates the moment the pin releases.
+  // commit. Tau adapts to recent growth velocity + tip debt — slow streams
+  // stay calm, fast bursts catch up. Target re-read every frame so mid-glide
+  // growth extends the same motion. Self-terminates when the pin releases.
   const glideFrameRef = useRef<number | null>(null);
   const glideLastTsRef = useRef(0);
+  const growthTrackerRef = useRef({ height: 0, at: 0, velocity: 0 });
+
+  const noteContentGrowth = useCallback((height: number) => {
+    const tracker = growthTrackerRef.current;
+    const nowTs = typeof performance !== "undefined" ? performance.now() : Date.now();
+    if (tracker.height > 0 && nowTs > tracker.at) {
+      const dh = height - tracker.height;
+      const dt = nowTs - tracker.at;
+      if (dh > 0 && dt > 0) {
+        const instant = (dh / dt) * 1000;
+        tracker.velocity = tracker.velocity * 0.65 + instant * 0.35;
+      } else if (dt > GLIDE_VELOCITY_IDLE_MS) {
+        // Sparse stream: forget burst urgency so the next line floats calmly.
+        tracker.velocity *= 0.45;
+      }
+    }
+    tracker.height = height;
+    tracker.at = nowTs;
+  }, []);
 
   const stopGlide = useCallback(() => {
     if (glideFrameRef.current !== null) {
@@ -289,6 +327,7 @@ export function MessageTimeline({
     if (!node || !pinnedRef.current) {
       return;
     }
+    noteContentGrowth(node.scrollHeight);
     const target = node.scrollHeight - node.clientHeight;
     const delta = target - node.scrollTop;
     if (Math.abs(delta) <= 1) {
@@ -303,11 +342,18 @@ export function MessageTimeline({
         ? 16
         : Math.min(64, Math.max(8, nowTs - glideLastTsRef.current));
     glideLastTsRef.current = nowTs;
-    const alpha = 1 - Math.exp(-dt / GLIDE_TAU_MS);
+    // Decay velocity while gliding without new growth so catch-up eases out.
+    const tracker = growthTrackerRef.current;
+    if (nowTs - tracker.at > GLIDE_VELOCITY_IDLE_MS) {
+      tracker.velocity *= 0.85;
+      tracker.at = nowTs;
+    }
+    const tau = glideTauMs(delta, tracker.velocity);
+    const alpha = 1 - Math.exp(-dt / tau);
     const step = delta * alpha;
     writeScrollTop(node, node.scrollTop + (Math.abs(step) < 1 ? Math.sign(delta) : step));
     glideFrameRef.current = requestFrame(glideStep);
-  }, [writeScrollTop]);
+  }, [noteContentGrowth, writeScrollTop]);
 
   const startGlide = useCallback(() => {
     if (glideFrameRef.current === null) {
@@ -320,6 +366,7 @@ export function MessageTimeline({
 
   const followTip = useCallback(
     (node: HTMLElement) => {
+      noteContentGrowth(node.scrollHeight);
       const target = node.scrollHeight - node.clientHeight;
       const delta = target - node.scrollTop;
       if (Math.abs(delta) <= 1) {
@@ -335,7 +382,7 @@ export function MessageTimeline({
         writeScrollTop(node, target);
       }
     },
-    [startGlide, stopGlide, writeScrollTop],
+    [noteContentGrowth, startGlide, stopGlide, writeScrollTop],
   );
 
   // The single post-commit scroll authority. Runs after EVERY commit (no dep
@@ -636,9 +683,9 @@ export function MessageTimeline({
     <LightboxProvider>
       <EntranceAnimationProvider value={!bulkRender}>
         <div className={cn("og-root relative flex min-h-0 flex-col", className)}>
-          {/* Pinned: anchoring off so the bottom-snap is the only authority.
-          Unpinned: native scroll anchoring holds the reader's place through
-          prepends and late layout — the wobble-free path. */}
+          {/* Pinned: anchoring off so the soft tip-follow glide is the only
+          authority. Unpinned: native scroll anchoring holds the reader's
+          place through prepends and late layout — the wobble-free path. */}
           <div
             ref={scrollRef}
             tabIndex={-1}
@@ -688,6 +735,7 @@ export function MessageTimeline({
                     toolRegistry={toolRegistry}
                     turnSummary={turnSummary}
                     foldLiveCluster={isAgentProgress(groups[index + 1]?.group)}
+                    trailingAgentText={trailingAgentTextAfterTurn(group, groups[index + 1]?.group)}
                   />
                 </div>
               ))}
@@ -916,7 +964,9 @@ const TimelineGroupView = memo(function TimelineGroupView({
   toolRegistry,
   turnSummary,
   insideTurn = false,
+  nestClusterChips = false,
   foldLiveCluster = false,
+  trailingAgentText,
 }: {
   group: TimelineGroup;
   renderMessageText?:
@@ -936,11 +986,24 @@ const TimelineGroupView = memo(function TimelineGroupView({
       failure surface, so nested chips stay tinted but quiet (no repeated
       failure text, no auto-open) — one loud error, N calm sub-expands. */
   insideTurn?: boolean;
+  /**
+   * Parent turn has ≥2 foldable activity clusters. Only then do we wrap settled
+   * clusters in nested chips — a single cluster under "N steps" is redundant.
+   * Suppressed while the outer settle beat is open so collapse is one layer.
+   */
+  nestClusterChips?: boolean;
+  /**
+   * Final agent answer extracted as a sibling after a settled turn — folded
+   * into "Copy turn" so the chip copies the whole assistant reply, not only
+   * mid-turn narration still inside the fold.
+   */
+  trailingAgentText?: string | undefined;
 }) {
   const enter = useEntranceAnimation();
+  const settleOpen = useTurnSettleOpen();
   // Settled (or live-fold) activity clusters get a chip. Inside an expanded
   // turn that is the second layer — quiet nested chips under the outer turn
-  // summary when contiguous activity naturally clusters.
+  // summary when contiguous activity naturally clusters (≥2 only).
   const activityShouldFold =
     group.kind === "activity" &&
     Boolean(group.outcome || (foldLiveCluster && clusterIsSettled(group)));
@@ -955,10 +1018,12 @@ const TimelineGroupView = memo(function TimelineGroupView({
   switch (group.kind) {
     case "activity":
       if (insideTurn) {
-        // Nested under a turn chip: still a real (bare) cluster chip when the
-        // cluster settled — outer owns failure copy / auto-open; inner is a
-        // calm sub-expand. Live nested clusters hang on the turn rail bare.
-        if (!activityShouldFold) {
+        // Nested chips only when the parent has ≥2 clusters AND the outer
+        // settle choreography is done. While settling (beat + collapse) the
+        // body stays a flat rail — one height to animate. Remounting closed
+        // nested chips when `open` flips false was the mid-collapse snap.
+        const useNestedChip = nestClusterChips && activityShouldFold && !settleOpen;
+        if (!useNestedChip) {
           return (
             <ActivityRail
               items={group.items}
@@ -1015,6 +1080,11 @@ const TimelineGroupView = memo(function TimelineGroupView({
       );
     case "turn": {
       const activityItems = flattenActivityItems(group.groups);
+      // Second-layer chips only when there are natural multi-cluster seams —
+      // otherwise the outer turn chip alone is enough ("N steps" wrapping one
+      // more "N steps" was the redundant double fold).
+      const nestClusters = foldableActivityClusterCount(group.groups) >= 2;
+      const turnCopyText = collectTurnCopyText(group.groups, trailingAgentText);
       const body = group.groups.map((child) => (
         <TimelineGroupView
           key={timelineGroupKey(child)}
@@ -1027,6 +1097,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
           toolRegistry={toolRegistry}
           turnSummary={turnSummary}
           insideTurn
+          nestClusterChips={nestClusters}
         />
       ));
       return (
@@ -1039,6 +1110,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
           bare={insideTurn}
           facets={turnSummary?.facets}
           settleFold={settleFold}
+          copyText={insideTurn ? undefined : turnCopyText}
         >
           <FoldBody>
             {insideTurn ? (
@@ -1157,6 +1229,17 @@ function clusterIsSettled(group: Extract<TimelineGroup, { kind: "activity" }>): 
   });
 }
 
+/** Settled activity clusters that could become nested chips under a turn. */
+function foldableActivityClusterCount(groups: readonly TimelineGroup[]): number {
+  let count = 0;
+  for (const child of groups) {
+    if (child.kind === "activity" && (child.outcome || clusterIsSettled(child))) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
 function flattenActivityItems(groups: TimelineGroup[]): ActivityItem[] {
   const items: ActivityItem[] = [];
   for (const group of groups) {
@@ -1167,6 +1250,56 @@ function flattenActivityItems(groups: TimelineGroup[]): ActivityItem[] {
     }
   }
   return items;
+}
+
+/** Assistant prose inside a turn fold (mid-turn narration), joined for copy. */
+function collectAgentMessageText(groups: readonly TimelineGroup[]): string {
+  const parts: string[] = [];
+  for (const group of groups) {
+    if (group.kind === "item" && group.item.kind === "agent-message") {
+      const text = group.item.text.trim();
+      if (text.length > 0) {
+        parts.push(text);
+      }
+    } else if (group.kind === "turn") {
+      const nested = collectAgentMessageText(group.groups);
+      if (nested.length > 0) {
+        parts.push(nested);
+      }
+    }
+  }
+  return parts.join("\n\n");
+}
+
+/**
+ * Settled turns lift the final agent answer out as a sibling group. Include it
+ * in "Copy turn" when present so the chip copies the full assistant reply.
+ */
+function trailingAgentTextAfterTurn(
+  group: TimelineGroup,
+  next: TimelineGroup | undefined,
+): string | undefined {
+  if (group.kind !== "turn") {
+    return undefined;
+  }
+  if (next?.kind === "item" && next.item.kind === "agent-message") {
+    const text = next.item.text.trim();
+    return text.length > 0 ? text : undefined;
+  }
+  return undefined;
+}
+
+function collectTurnCopyText(
+  groups: readonly TimelineGroup[],
+  trailingAgentText: string | undefined,
+): string | undefined {
+  const parts = [collectAgentMessageText(groups), trailingAgentText?.trim() ?? ""].filter(
+    (part) => part.length > 0,
+  );
+  if (parts.length === 0) {
+    return undefined;
+  }
+  return parts.join("\n\n");
 }
 
 function durationBetween(startedAt: string, endedAt: string): number | undefined {
@@ -1241,13 +1374,19 @@ function UserMessageRow({
   return (
     <div className={cn(enter && "animate-og-enter", "flex justify-end")}>
       <div className="flex max-w-[85%] min-w-0 flex-col items-end gap-1">
-        <div className="w-fit max-w-full min-w-0 rounded-og-lg rounded-br-og-xs border border-og-border bg-og-surface-2 px-4 py-2.5 text-og-md leading-6 text-og-fg">
-          {renderMessageText ? (
-            renderMessageText(item.text, item)
-          ) : (
-            <Markdown>{item.text}</Markdown>
-          )}
-        </div>
+        <CopyHoverFrame
+          copyText={item.text}
+          label="Copy message"
+          className="w-fit max-w-full min-w-0"
+        >
+          <div className="w-fit max-w-full min-w-0 rounded-og-lg rounded-br-og-xs border border-og-border bg-og-surface-2 px-4 py-2.5 pr-10 text-og-md leading-6 text-og-fg">
+            {renderMessageText ? (
+              renderMessageText(item.text, item)
+            ) : (
+              <Markdown>{item.text}</Markdown>
+            )}
+          </div>
+        </CopyHoverFrame>
       </div>
     </div>
   );
@@ -1266,14 +1405,21 @@ function AgentMessageRow({
   // No streaming caret: it fought the trailing block layout (inline ↔ block)
   // and snapped on exit. Live text already carries the stream via word-entrance
   // + "Working…" when the tip isn't a streaming message.
+  const body = renderMessageText ? (
+    renderMessageText(item.text, item)
+  ) : (
+    <Markdown streaming={item.streaming}>{item.text}</Markdown>
+  );
+  // While streaming, copy is still useful (current text) but keep chrome calm.
   return (
-    <div className={cn(enter && "animate-og-enter", "min-w-0 text-og-md leading-7 text-og-fg")}>
-      {renderMessageText ? (
-        renderMessageText(item.text, item)
-      ) : (
-        <Markdown streaming={item.streaming}>{item.text}</Markdown>
-      )}
-    </div>
+    <CopyHoverFrame
+      copyText={item.text}
+      label="Copy message"
+      align="end"
+      className={cn(enter && "animate-og-enter", "min-w-0 pr-9 text-og-md leading-7 text-og-fg")}
+    >
+      {body}
+    </CopyHoverFrame>
   );
 }
 

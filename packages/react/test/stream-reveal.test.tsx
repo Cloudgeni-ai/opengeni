@@ -15,14 +15,16 @@ describe("createStreamReveal", () => {
     expect(first).not.toBeNull();
     expect(last).toBe(first);
 
-    // A later append animates only the new suffix.
-    reveal.observe("hello world and beyond", 2000);
-    expect(reveal.delayFor(12, 2000)).not.toBeNull();
+    // A later append animates only the new suffix (still inside the first
+    // batch's age window at +900ms with the current fade length).
+    reveal.observe("hello world and beyond", 1900);
+    expect(reveal.delayFor(12, 1900)).not.toBeNull();
 
     // First batch is settled once its age window has passed.
-    expect(reveal.delayFor(0, 2000)).toBeNull();
-    expect(reveal.hasActive(2000)).toBe(true);
-    expect(reveal.hasActive(2000 + INK_FADE_MS)).toBe(false);
+    const settledAt = 1000 + INK_FADE_MS;
+    expect(reveal.delayFor(0, settledAt)).toBeNull();
+    expect(reveal.hasActive(1900)).toBe(true);
+    expect(reveal.hasActive(1900 + INK_FADE_MS)).toBe(false);
   });
 
   test("a mid-fade re-render resumes with a negative delay, never restarts", () => {

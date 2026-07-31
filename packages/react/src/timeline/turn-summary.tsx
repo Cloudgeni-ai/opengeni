@@ -10,6 +10,7 @@ import {
   type ReactNode,
 } from "react";
 import { Collapsible } from "radix-ui";
+import { CopyButton } from "../components/copy-button";
 import { cn } from "../lib/cn";
 import { useForcedDefaultOpen } from "./disclosure-context";
 import { useEntranceAnimation } from "./entrance";
@@ -33,7 +34,12 @@ export type { TurnOutcome } from "./types";
 
 const TurnSettleChromeContext = createContext(false);
 
-/** True while a settle-fold is open (beat before auto-collapse). */
+/**
+ * True for the whole settle choreography — open beat AND the slow collapse.
+ * Nested cluster chips must stay suppressed until this clears: the moment
+ * collapse starts (`open` flips false) used to remount closed inner chips and
+ * yank the content height mid-animation (the ugly snap).
+ */
 export function useTurnSettleOpen(): boolean {
   return useContext(TurnSettleChromeContext);
 }
@@ -132,6 +138,12 @@ export type TurnSummaryProps = {
    * mount; ignored when the fold starts expanded (e.g. a failed turn).
    */
   settleFold?: boolean | undefined;
+  /**
+   * When set, a hover/focus copy control sits on the chip row (outside the
+   * disclosure trigger) so the reader can copy the turn's assistant prose
+   * without toggling the fold.
+   */
+  copyText?: string | undefined;
   /** The rendered activity rail revealed on expand. */
   children: ReactNode;
 };
@@ -150,6 +162,7 @@ export function TurnSummary({
   bare,
   facets: facetConfiguration,
   settleFold,
+  copyText,
   children,
 }: TurnSummaryProps) {
   // An explicit `defaultOpen` always wins; otherwise an ancestor may seed it
@@ -276,10 +289,19 @@ export function TurnSummary({
   // Live open shell: keep the chip in-flow (so settle never inserts layout)
   // but quiet it until there is an outcome or a settle beat.
   const liveShell = outcome === undefined && open && !settlePhase && !bare;
-  const settleOpen = settlePhase && open;
+  // Full settle window (beat + collapse), not merely while open — see
+  // useTurnSettleOpen. Nested chips must not remount when open flips false.
+  const settleChrome = settling || settlePhase;
+
+  // Copy only on the collapsed chip — when open, per-message copy is enough
+  // and a second control on the summary row felt crowded / off.
+  const copyable = Boolean(
+    copyText && copyText.trim().length > 0 && !bare && !liveShell && !open && !settlePhase,
+  );
 
   return (
-    <TurnSettleChromeContext.Provider value={settleOpen}>
+    <TurnSettleChromeContext.Provider value={settleChrome}>
+    <div className={cn(copyable && "group/copy relative")}>
     <Collapsible.Root
       open={open}
       onOpenChange={onOpenChange}
@@ -290,12 +312,12 @@ export function TurnSummary({
       <Collapsible.Trigger
         className={cn(
           settling && "animate-og-settle-chip",
-          // Both the top-level turn fold and a nested cluster fold render as a
-          // FLAT rail row — chevron + glyph + facets on the page background, no
+          // Top-level turn fold and (when used) nested cluster folds render as
+          // FLAT rail rows — chevron + glyph + facets on the page background, no
           // border, no fill. Only a hover tint hints the row is expandable, so a
           // collapsed turn never reads as a boxed card. The top-level row is a
           // touch larger (base text, size-5 glyph, wider gap) so it still reads
-          // as a turn landmark above the nested cluster rows it groups.
+          // as a turn landmark above any nested cluster rows it groups.
           "group flex w-full items-center rounded-og-sm text-left transition-colors",
           // A folded turn is a touch target on coarse pointers: grow the row so it
           // clears the 40px minimum without disturbing the calm desktop rhythm.
@@ -374,6 +396,8 @@ export function TurnSummary({
           aria-hidden
           className={cn(
             "ml-auto shrink-0 pl-2 text-og-xs text-og-fg-subtle transition-opacity duration-150",
+            // Leave a sliver so a collapsed-chip copy icon can sit outside.
+            copyable ? "pr-8" : null,
             "opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100",
             "pointer-coarse:opacity-100",
           )}
@@ -397,6 +421,14 @@ export function TurnSummary({
         <div className={bare ? "pt-1 pl-5" : "pt-2"}>{children}</div>
       </Collapsible.Content>
     </Collapsible.Root>
+    {copyable ? (
+      <div className="pointer-events-none absolute top-1.5 right-0 z-10">
+        <div className="pointer-events-auto">
+          <CopyButton text={copyText!} label="Copy turn" reveal="group-hover" />
+        </div>
+      </div>
+    ) : null}
+    </div>
     </TurnSettleChromeContext.Provider>
   );
 }
