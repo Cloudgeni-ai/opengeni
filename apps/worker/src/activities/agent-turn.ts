@@ -90,6 +90,9 @@ import {
   appendWorkspaceMemory,
   composeAgentInstructions,
   summarizeForCompaction,
+  requestRemoteCompactionV2,
+  REMOTE_COMPACTION_V2_BETA_FEATURE,
+  REMOTE_COMPACTION_V2_IMPLEMENTATION,
   CompactionProviderResponseError,
   EmptyCompactionSummaryError,
   ensureModalRegistryImage,
@@ -185,12 +188,17 @@ import {
   classifyCodexUsageLimitError,
   codexRequestStorage,
   isCodexTransportError,
+  withCodexRequestOverrides,
   type CodexRequestContext,
   type CodexUsageHeaderSnapshot,
 } from "@opengeni/codex";
 import { mergeResourceRefs } from "./common";
-import { defaultSessionMcpServerIds, resolveSessionToolPolicy } from "@opengeni/core";
-import { maybeCompactContext } from "./context-compaction";
+import {
+  assertSessionAllowsProductModel,
+  defaultSessionMcpServerIds,
+  resolveSessionToolPolicy,
+} from "@opengeni/core";
+import { maybeCompactContext, settleFailedContextCompactionLandmark } from "./context-compaction";
 import { TurnAttemptFencedError } from "./turn-attempt-fenced";
 import {
   assertGitCredentialRenewalTransportUnchanged,
@@ -3072,6 +3080,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         },
       );
       const turnExecutionPolicy = verifiedExecutionPolicy.policy;
+      assertSessionAllowsProductModel(session, turnExecutionPolicy.productModelId);
       const billingIdentity = turnExecutionPolicyBillingIdentity(turnExecutionPolicy);
       isExternallyBilledTurn = billingIdentity.externallyBilled;
       isCodexTurn = billingIdentity.codexSubscription;
@@ -4171,6 +4180,22 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           : null;
       const withCodex = <T>(fn: () => Promise<T>): Promise<T> =>
         codexContext ? codexRequestStorage.run(codexContext, fn) : fn();
+      const withCodexRemoteCompaction = <T>(fn: () => Promise<T>): Promise<T> =>
+        withCodex(() =>
+          withCodexRequestOverrides(
+            {
+              betaFeatures: [REMOTE_COMPACTION_V2_BETA_FEATURE],
+              turnMetadata: {
+                request_kind: "compaction",
+                compaction: {
+                  implementation: REMOTE_COMPACTION_V2_IMPLEMENTATION,
+                  strategy: "memento",
+                },
+              },
+            },
+            fn,
+          ),
+        );
       const promptCacheKey = acceptsPromptCacheKeyForTurn(resolvedModel)
         ? input.sessionId
         : undefined;
@@ -4225,6 +4250,41 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 ...(systemInstructions ? { systemInstructions } : {}),
                 ...(promptCacheKey ? { promptCacheKey } : {}),
               });
+      const remoteCompactionRequester =
+        resolvedModel && isCodexTurn
+          ? (s: Settings, m: Array<Record<string, unknown>>) =>
+              withCodexRemoteCompaction(() =>
+                requestRemoteCompactionV2(s, m, {
+                  client: resolvedModel.client,
+                  model: turnExecutionPolicy.upstreamModelId,
+                  onUsage: recordCompactionUsage,
+                  ...(promptCacheKey ? { promptCacheKey } : {}),
+                }),
+              )
+          : undefined;
+      const publishCompactionLiveEvents = async (events: SessionEvent[]) => {
+        await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, events);
+      };
+      const publishCompactionOutcomeEvents = async (events: SessionEvent[]) => {
+        // `compaction.started` was already fanout via publishCompactionLiveEvents.
+        await publishDurableSessionEvents(
+          bus,
+          input.workspaceId,
+          input.sessionId,
+          events.filter((event) => event.type !== "session.context.compaction.started"),
+        );
+      };
+      const compactionModeOptions = {
+        codexCompactionMode: session.codexCompactionMode,
+        isCodexSubscriptionTurn: isCodexTurn,
+        publishLiveEvents: publishCompactionLiveEvents,
+        ...(remoteCompactionRequester
+          ? { requestRemoteCompactionV2: remoteCompactionRequester }
+          : {}),
+        ...(effectiveCodexCredentialId
+          ? { producerCodexCredentialId: effectiveCodexCredentialId }
+          : {}),
+      } as const;
 
       if (turn.source === "compaction") {
         const persistentSessionSettings = {
@@ -4273,6 +4333,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   codexAccount: {
                     currentCodexCredentialId: effectiveCodexCredentialId,
                   },
+                  ...compactionModeOptions,
                 },
               ),
               cancellationSignal,
@@ -4284,6 +4345,24 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             // request pending and let the ordinary same-turn provider/capacity
             // recovery path re-dispatch this exact maintenance execution.
             if (shouldRecoverCompactionProviderFailure(error)) throw error;
+            if (error instanceof TurnAttemptFencedError) throw error;
+            // `compaction.started` may already be live — settle skipped before
+            // failing the turn so the timeline cannot stick on Compacting…
+            const landmark = await settleFailedContextCompactionLandmark(
+              db,
+              {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: turn.id,
+                executionGeneration,
+                attemptId: input.attemptId,
+              },
+              {
+                clearRequestedCompaction: true,
+                publishLiveEvents: publishCompactionLiveEvents,
+              },
+            );
             if (!isCompactionSummaryFailure(error)) throw error;
             const errorMessage = String(redact(compactionFailureReasonFromError(error)));
             if (
@@ -4307,7 +4386,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 turnStatus: "failed",
                 sessionStatus: "idle",
                 activeTurnId: null,
-                consumeRequestedCompactionFailure: true,
+                ...(landmark.requestConsumed ? {} : { consumeRequestedCompactionFailure: true }),
               }))
             ) {
               return claimedResult({ status: "cancelled" });
@@ -4321,12 +4400,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             if (outcome.compacted) {
               recordContextCompaction(observability, "operator");
             }
-            await publishDurableSessionEvents(
-              bus,
-              input.workspaceId,
-              input.sessionId,
-              outcome.events,
-            );
+            await publishCompactionOutcomeEvents(outcome.events);
           }
         }
         if (
@@ -5733,29 +5807,44 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     codexAccount: {
                       currentCodexCredentialId: effectiveCodexCredentialId,
                     },
+                    ...compactionModeOptions,
                   }
                 : {
                     trigger: "auto",
                     codexAccount: {
                       currentCodexCredentialId: effectiveCodexCredentialId,
                     },
+                    ...compactionModeOptions,
                   },
             ),
             cancellationSignal,
             undefined,
           );
-          if (outcome.compacted) {
-            const compactionTrigger = forced ? "operator" : undefined;
-            recordContextCompaction(observability, compactionTrigger ?? "auto");
-            await publishDurableSessionEvents(
-              bus,
-              input.workspaceId,
-              input.sessionId,
-              outcome.events,
-            );
+          if (outcome.events.length > 0) {
+            if (outcome.compacted) {
+              const compactionTrigger = forced ? "operator" : undefined;
+              recordContextCompaction(observability, compactionTrigger ?? "auto");
+            }
+            await publishCompactionOutcomeEvents(outcome.events);
           }
         } catch (compactError) {
           if (shouldRecoverCompactionProviderFailure(compactError)) throw compactError;
+          if (compactError instanceof TurnAttemptFencedError) throw compactError;
+          const landmark = await settleFailedContextCompactionLandmark(
+            db,
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: turnId!,
+              executionGeneration,
+              attemptId: input.attemptId,
+            },
+            {
+              clearRequestedCompaction: forced,
+              publishLiveEvents: publishCompactionLiveEvents,
+            },
+          );
           if (!isCompactionSummaryFailure(compactError)) throw compactError;
           const errorMessage = String(redact(compactionFailureReasonFromError(compactError)));
           observability.error("context compaction failed", {
@@ -5781,7 +5870,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               turnStatus: "failed",
               sessionStatus: "idle",
               activeTurnId: null,
-              ...(forced ? { consumeRequestedCompactionFailure: true } : {}),
+              ...(forced && !landmark.requestConsumed
+                ? { consumeRequestedCompactionFailure: true }
+                : {}),
             }))
           ) {
             return claimedResult({ status: "cancelled" });
@@ -5960,6 +6051,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               codexAccount: {
                 currentCodexCredentialId: effectiveCodexCredentialId,
               },
+              ...compactionModeOptions,
             },
           ),
           cancellationSignal,
@@ -5969,12 +6061,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           if (outcome.compacted) {
             recordContextCompaction(observability, triggerLabel);
           }
-          await publishDurableSessionEvents(
-            bus,
-            input.workspaceId,
-            input.sessionId,
-            outcome.events,
-          );
+          await publishCompactionOutcomeEvents(outcome.events);
         }
         return outcome;
       };
@@ -6585,6 +6672,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           let compacted = false;
           let compactionHandled = false;
           let compactionFailureMessage: string | null = null;
+          let compactionRequestCleared = false;
           try {
             const outcome = await forceContextCompaction(
               recoveryKind,
@@ -6604,6 +6692,23 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             // turn through the normal provider/capacity path. They are not an
             // empty summary and must not create a new goal continuation.
             if (shouldRecoverCompactionProviderFailure(compactError)) throw compactError;
+            if (compactError instanceof TurnAttemptFencedError) throw compactError;
+            const landmark = await settleFailedContextCompactionLandmark(
+              db,
+              {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: activeTurnId!,
+                executionGeneration,
+                attemptId: input.attemptId,
+              },
+              {
+                clearRequestedCompaction: recoveryKind === "operator",
+                publishLiveEvents: publishCompactionLiveEvents,
+              },
+            );
+            compactionRequestCleared = landmark.requestConsumed;
             if (!isCompactionSummaryFailure(compactError)) throw compactError;
             compactionFailureMessage = String(
               redact(compactionFailureReasonFromError(compactError)),
@@ -6639,7 +6744,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 turnStatus: "failed",
                 sessionStatus: "idle",
                 activeTurnId: null,
-                ...(recoveryKind === "operator" ? { consumeRequestedCompactionFailure: true } : {}),
+                ...(recoveryKind === "operator" && !compactionRequestCleared
+                  ? { consumeRequestedCompactionFailure: true }
+                  : {}),
               }))
             ) {
               return claimedResult({ status: "cancelled" });

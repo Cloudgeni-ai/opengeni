@@ -98,6 +98,7 @@ export function gallerySession(overrides: Partial<Session> = {}): Session {
     createdAt: isoMinutesAgo(60 * 8),
     updatedAt,
     ...overrides,
+    codexCompactionMode: overrides.codexCompactionMode ?? "portable",
   };
 }
 

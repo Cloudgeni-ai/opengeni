@@ -150,6 +150,19 @@ function serializeItem(item: TimelineItem): Record<string, unknown> {
         text: item.text,
         details: stableValue(item.details),
       };
+    case "context-compaction":
+      return {
+        kind: item.kind,
+        id: item.id,
+        turnId: item.turnId,
+        occurredAt: item.occurredAt,
+        phase: item.phase,
+        trigger: item.trigger,
+        estimatedTokensBefore: item.estimatedTokensBefore,
+        estimatedTokensAfter: item.estimatedTokensAfter,
+        skipReason: item.skipReason,
+        implementation: item.implementation,
+      };
     case "machine-input-batch":
       return {
         kind: item.kind,
@@ -207,6 +220,9 @@ function serializeGroup(group: TimelineGroup): Record<string, unknown> {
         id: group.id,
         outcome: group.outcome,
         ...(group.failureText ? { failureText: group.failureText } : {}),
+        ...(group.contextCompactionCount
+          ? { contextCompactionCount: group.contextCompactionCount }
+          : {}),
         startedAt: group.startedAt,
         endedAt: group.endedAt,
         groupCount: group.groups.length,

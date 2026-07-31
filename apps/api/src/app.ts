@@ -32,6 +32,7 @@ import { HTTPException } from "hono/http-exception";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { ApiRouteDeps, AppDependencies } from "@opengeni/core";
 import {
+  CodexCompactionV2ProviderLockedError,
   hasPermission,
   requireAccessGrant,
   requirePermission,
@@ -95,6 +96,11 @@ export { workflowIdForSession } from "@opengeni/core";
 export { replaySessionEvents, sseSessionStream, sseWorkspaceControlStream } from "./http/sse";
 
 export const API_MAX_REQUEST_BODY_BYTES = 8 * 1024 * 1024;
+
+/** Effective Hono bodyLimit — API JSON ceiling or voice multipart + multipart overhead. */
+export function apiRequestBodyLimitBytes(settings: { voiceInputMaxSizeBytes: number }): number {
+  return Math.max(API_MAX_REQUEST_BODY_BYTES, settings.voiceInputMaxSizeBytes + 64 * 1024);
+}
 const API_PUBLIC_ERROR_MESSAGE_MAX_BYTES = 512;
 
 export function createApp(deps: AppDependencies): Hono {
@@ -206,10 +212,7 @@ export function createApp(deps: AppDependencies): Hono {
   app.use(
     "*",
     bodyLimit({
-      maxSize: Math.max(
-        API_MAX_REQUEST_BODY_BYTES,
-        deps.settings.voiceInputMaxSizeBytes + 64 * 1024,
-      ),
+      maxSize: apiRequestBodyLimitBytes(deps.settings),
       onError: (c) =>
         c.json({ code: "PAYLOAD_TOO_LARGE", message: "Request body is too large." }, 413),
     }),
@@ -488,8 +491,9 @@ export function createApp(deps: AppDependencies): Hono {
   });
 
   app.onError((error, c) => {
-    const status = httpStatusForError(error);
-    const code = errorCodeForStatus(status);
+    const compactionLock = codexCompactionV2ProviderLockedError(error);
+    const status = compactionLock ? 422 : httpStatusForError(error);
+    const code: ErrorCode = compactionLock ? compactionLock.code : errorCodeForStatus(status);
     const requestId = correlationIds.get(c.req.raw) ?? crypto.randomUUID();
     c.header(OPENGENI_CORRELATION_HEADER, requestId);
     if (new URL(c.req.url).pathname.startsWith("/v1/")) {
@@ -499,7 +503,9 @@ export function createApp(deps: AppDependencies): Hono {
       error: {
         status,
         code,
-        message: publicErrorMessage(error, status),
+        message: compactionLock
+          ? (boundedPublicMessage(compactionLock.message) ?? "Request failed.")
+          : publicErrorMessage(error, status),
         retryable: retryableHttpStatus(status),
         requestId,
       },
@@ -566,7 +572,23 @@ export function allowedCorsOrigin(pattern: string, origin: string): boolean {
   return new RegExp(`^(?:${pattern})$`).test(origin);
 }
 
+function codexCompactionV2ProviderLockedError(
+  error: unknown,
+): CodexCompactionV2ProviderLockedError | null {
+  if (error instanceof CodexCompactionV2ProviderLockedError) return error;
+  if (
+    error instanceof HTTPException &&
+    error.cause instanceof CodexCompactionV2ProviderLockedError
+  ) {
+    return error.cause;
+  }
+  return null;
+}
+
 export function httpStatusForError(error: unknown): number {
+  if (codexCompactionV2ProviderLockedError(error)) {
+    return 422;
+  }
   if (error instanceof HTTPException) {
     return error.status;
   }

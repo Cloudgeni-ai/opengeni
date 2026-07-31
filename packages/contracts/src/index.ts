@@ -492,6 +492,7 @@ export const ErrorCode = z.enum([
   "limit_exceeded",
   "nested_agent_depth_exceeded",
   "nested_agent_depth_override_forbidden",
+  "codex_compaction_v2_provider_locked",
   "provider_verification_failed",
   "upstream_unavailable",
   "internal_error",
@@ -1128,6 +1129,10 @@ export const VOICE_INPUT_ACCEPTED_MIME_TYPES = [
   "audio/m4a",
 ] as const;
 
+/** Per-session / workspace Codex compaction strategy. */
+export const CodexCompactionMode = z.enum(["remote_v2", "portable"]);
+export type CodexCompactionMode = z.infer<typeof CodexCompactionMode>;
+
 // Validates the KNOWN keys of workspaces.settings; passthrough keeps unknown
 // (future) keys rather than stripping them. memoryEnabled defaults off;
 // voiceInput defaults to enabled when the deployment has a provider.
@@ -1144,6 +1149,9 @@ export const WorkspaceSettingsSchema = z
     // null clears the workspace override and falls back to the persisted
     // deployment policy. The database boundary validates the same range.
     maxNestedAgentDepth: NestedAgentDepthValue.nullable().optional(),
+    // Default compaction strategy for NEW Codex sessions created in this
+    // workspace. Absent ⇒ remote_v2. Non-Codex sessions always freeze portable.
+    codexCompactionDefault: CodexCompactionMode.optional(),
   })
   .passthrough();
 export type WorkspaceSettings = z.infer<typeof WorkspaceSettingsSchema>;
@@ -1152,6 +1160,13 @@ export type WorkspaceSettings = z.infer<typeof WorkspaceSettingsSchema>;
 export function resolveWorkspaceMemoryEnabled(settings: unknown): boolean {
   const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
   return parsed.success ? parsed.data.memoryEnabled === true : false;
+}
+
+/** Default Codex compaction mode for new Codex sessions (remote_v2 when unset). */
+export function resolveWorkspaceCodexCompactionDefault(settings: unknown): CodexCompactionMode {
+  const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
+  if (!parsed.success) return "remote_v2";
+  return parsed.data.codexCompactionDefault ?? "remote_v2";
 }
 
 /**
@@ -1180,6 +1195,7 @@ export const UpdateWorkspaceSettingsRequest = z
     /** @deprecated Prefer `voiceInput`. Kept for one compatibility release. */
     transcription: WorkspaceTranscriptionPolicy.optional(),
     maxNestedAgentDepth: NestedAgentDepthValue.nullable().optional(),
+    codexCompactionDefault: CodexCompactionMode.optional(),
   })
   .passthrough();
 export type UpdateWorkspaceSettingsRequest = z.infer<typeof UpdateWorkspaceSettingsRequest>;
@@ -5617,6 +5633,10 @@ export const Session = z.object({
   // "Running on:" indicator's source). Both are credential-row ids, null until set.
   codexPinnedCredentialId: z.string().uuid().nullable(),
   codexLastCredentialId: z.string().uuid().nullable(),
+  // Frozen at session create. remote_v2 ⇒ Codex remote compaction + Codex-only
+  // model admission for the life of the session; portable ⇒ plaintext compaction
+  // and free mid-session provider switching (today's behavior).
+  codexCompactionMode: CodexCompactionMode,
   /** Personal (authenticated subject) workspace pin state, never workspace-global. */
   pinned: z.boolean().default(false),
   /** Stable pin ordering key; null when this subject has not pinned the session. */
@@ -5707,6 +5727,7 @@ export const SessionEventType = z.enum([
   "session.requiresAction",
   "session.humanInput.requested",
   "session.context.compaction.requested",
+  "session.context.compaction.started",
   "session.context.compacted",
   "session.context.compaction.skipped",
   "session.context.cleared",
@@ -6000,6 +6021,7 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
   ],
   checkpoint: [
     "session.context.compaction.requested",
+    "session.context.compaction.started",
     "session.context.compacted",
     "session.context.compaction.skipped",
     "session.context.cleared",

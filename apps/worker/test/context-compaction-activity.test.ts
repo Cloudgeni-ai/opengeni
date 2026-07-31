@@ -241,6 +241,7 @@ describe("standalone context compaction execution", () => {
       limit: 100,
     });
     expect(events.map((event) => event.type)).toContain("session.context.compaction.requested");
+    expect(events.map((event) => event.type)).toContain("session.context.compaction.started");
     expect(events.map((event) => event.type)).toContain("session.context.compacted");
     expect(events.map((event) => event.type)).toContain("turn.completed");
     expect(events.filter((event) => event.type === "agent.model.usage")).toEqual([
@@ -1161,7 +1162,10 @@ describe("standalone context compaction execution", () => {
       compacted: false,
       reason: "replacement_not_smaller",
       requestConsumed: true,
-      events: [expect.objectContaining({ type: "session.context.compaction.skipped" })],
+      events: [
+        expect.objectContaining({ type: "session.context.compaction.started" }),
+        expect.objectContaining({ type: "session.context.compaction.skipped" }),
+      ],
     });
     expect(await isSessionCompactionRequested(client.db, grant.workspaceId!, session.id)).toBe(
       false,
@@ -1248,6 +1252,10 @@ describe("standalone context compaction execution", () => {
     expect(outcome).toMatchObject({
       compacted: true,
       events: [
+        expect.objectContaining({
+          type: "session.context.compaction.started",
+          payload: expect.objectContaining({ trigger: "overflow" }),
+        }),
         expect.objectContaining({
           type: "session.context.compacted",
           payload: expect.objectContaining({ trigger: "overflow" }),

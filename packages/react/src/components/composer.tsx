@@ -959,6 +959,8 @@ export type ComposerModelPickerProps = {
   onChange?: ((modelId: string) => void) | undefined;
   label?: string | undefined;
   className?: string | undefined;
+  /** Filter to Codex models for remote_v2-locked sessions. */
+  codexOnly?: boolean | undefined;
 };
 
 export function ModelPicker({
@@ -968,6 +970,7 @@ export function ModelPicker({
   onChange,
   label,
   className,
+  codexOnly,
 }: ComposerModelPickerProps) {
   const controller = useComposerController();
   return (
@@ -979,6 +982,7 @@ export function ModelPicker({
       disabled={controller.disabled}
       label={label ?? controller.messages.modelLabel}
       className={className}
+      codexOnly={codexOnly}
     />
   );
 }
