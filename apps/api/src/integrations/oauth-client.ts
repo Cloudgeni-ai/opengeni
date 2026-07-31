@@ -515,9 +515,14 @@ async function discoverAuthorizationServerMetadata(
     "OAuth authorization server",
   ).replace(/\/+$/, "");
   const candidates = uniqueStrings([
-    safeAuthorizationServer,
+    // Prefer the RFC metadata locations before probing the issuer itself. Some
+    // providers (including Linear) redirect their issuer root to a human docs
+    // page; following that redirect can leave discovery waiting on an unrelated
+    // streaming response even though the well-known metadata is immediately
+    // available.
     ...wellKnownCandidates(safeAuthorizationServer, "oauth-authorization-server"),
     ...wellKnownCandidates(safeAuthorizationServer, "openid-configuration"),
+    safeAuthorizationServer,
   ]);
   for (const candidate of candidates) {
     const payload = await fetchJsonObject(candidate, settings).catch((error) => {
