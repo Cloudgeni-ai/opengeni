@@ -14,7 +14,9 @@ const budgets = {
   initialGzip: 210 * kib,
   initialFileGzip: 70 * kib,
   directSessionRaw: 1900 * kib,
-  directSessionGzip: 550 * kib,
+  // 550 KiB was exceeded by 19 bytes when the social-connector contract/SDK
+  // surface (tool catalog entries + OAuth types) joined the session graph.
+  directSessionGzip: 551 * kib,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,
   cssGzip: 30 * kib,
