@@ -3,8 +3,28 @@
 -- principal, connection, tool, target, and protected request digest before the
 -- mutation; an abandoned provider_started claim becomes outcome_unknown and is
 -- reconciled before another delete is admitted.
+--
+-- This migration originally landed as 0141 after 0142 was already deployed.
+-- Never rewrite that production history. A staging database may have applied
+-- the withdrawn 0141 name before the ordering defect was caught; only that
+-- exact committed legacy receipt may make an existing table idempotent here.
 
-CREATE TABLE "slack_bot_delete_operations" (
+DO $migration$
+BEGIN
+  IF to_regclass('slack_bot_delete_operations') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1
+       FROM "schema_migrations"
+       WHERE "name" = '0141_slack_bot_delete_idempotency.sql'
+     )
+  THEN
+    RAISE EXCEPTION
+      'slack_bot_delete_operations exists without the exact withdrawn 0141 migration receipt';
+  END IF;
+END
+$migration$;
+
+CREATE TABLE IF NOT EXISTS "slack_bot_delete_operations" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   "account_id" uuid NOT NULL REFERENCES "managed_accounts"("id") ON DELETE CASCADE,
   "workspace_id" uuid NOT NULL REFERENCES "workspaces"("id") ON DELETE CASCADE,
@@ -63,11 +83,23 @@ CREATE TABLE "slack_bot_delete_operations" (
     )
 );
 
-CREATE INDEX "slack_bot_delete_operations_workspace_status_idx"
+CREATE INDEX IF NOT EXISTS "slack_bot_delete_operations_workspace_status_idx"
   ON "slack_bot_delete_operations" ("workspace_id", "status", "updated_at");
 
 ALTER TABLE "slack_bot_delete_operations" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "slack_bot_delete_operations" FORCE ROW LEVEL SECURITY;
-CREATE POLICY workspace_isolation ON "slack_bot_delete_operations"
-  USING (opengeni_private.workspace_rls_visible("account_id", "workspace_id"))
-  WITH CHECK (opengeni_private.workspace_rls_visible("account_id", "workspace_id"));
+DO $migration$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_policy
+    WHERE polrelid = 'slack_bot_delete_operations'::regclass
+      AND polname = 'workspace_isolation'
+  )
+  THEN
+    CREATE POLICY workspace_isolation ON "slack_bot_delete_operations"
+      USING (opengeni_private.workspace_rls_visible("account_id", "workspace_id"))
+      WITH CHECK (opengeni_private.workspace_rls_visible("account_id", "workspace_id"));
+  END IF;
+END
+$migration$;
