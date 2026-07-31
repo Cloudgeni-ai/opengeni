@@ -37,7 +37,6 @@ import {
 } from "@/components/session/banners";
 import { ComposerAgentsPill } from "@/components/session/composer-agents-pill";
 import { useRail } from "@/components/rail/rail-context";
-import { GoalSurface } from "@/components/session/goal-surface";
 import { SessionWorkspace } from "@/components/session/sandbox-workspace";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -63,6 +62,11 @@ import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
 const LazySessionInspector = lazy(() =>
   import("@/components/session/inspector").then(({ SessionInspector }) => ({
     default: SessionInspector,
+  })),
+);
+const GoalSurface = lazy(() =>
+  import("@/components/session/goal-surface").then(({ GoalSurface: LoadedGoalSurface }) => ({
+    default: LoadedGoalSurface,
   })),
 );
 
@@ -909,7 +913,11 @@ function SessionChatPane(props: {
           when it has nothing to show, so the stack degrades to
           whichever one is present — or neither. */}
       {!terminal ? <QueueSurface queue={props.queue} composer={composer} /> : null}
-      <GoalSurface session={props.session} goal={props.goal} />
+      {props.goal.goal ? (
+        <Suspense fallback={null}>
+          <GoalSurface session={props.session} goal={props.goal} />
+        </Suspense>
+      ) : null}
       <ComposerAgentsPill workspaceId={props.session.workspaceId} nodes={props.agentNodes} />
 
       <div className="shrink-0 px-4 pb-4 pt-1 sm:px-6">
