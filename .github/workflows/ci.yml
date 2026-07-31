@@ -540,7 +540,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: read
+      packages: write # push immutable exact-main-SHA dogfood images; PR and automation runs remain build-only
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -562,52 +562,134 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build API image
+        id: api_image
         uses: docker/build-push-action@v7.3.0
         with:
           context: .
           file: docker/opengeni.Dockerfile
           target: api
           platforms: linux/amd64,linux/arm64
-          push: false
-          tags: opengeni-api:ci
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ github.event_name == 'push' && format('ghcr.io/cloudgeni-ai/opengeni-api:sha-{0}', github.sha) || 'opengeni-api:ci' }}
+          build-args: |
+            OPENGENI_SERVER_VERSION=sha-${{ github.sha }}
 
       - name: Build worker image
+        id: worker_image
         uses: docker/build-push-action@v7.3.0
         with:
           context: .
           file: docker/opengeni.Dockerfile
           target: worker
           platforms: linux/amd64,linux/arm64
-          push: false
-          tags: opengeni-worker:ci
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ github.event_name == 'push' && format('ghcr.io/cloudgeni-ai/opengeni-worker:sha-{0}', github.sha) || 'opengeni-worker:ci' }}
+          build-args: |
+            OPENGENI_SERVER_VERSION=sha-${{ github.sha }}
 
       - name: Build web image
+        id: web_image
         uses: docker/build-push-action@v7.3.0
         with:
           context: .
           file: docker/opengeni.Dockerfile
           target: web
           platforms: linux/amd64,linux/arm64
-          push: false
-          tags: opengeni-web:ci
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ github.event_name == 'push' && format('ghcr.io/cloudgeni-ai/opengeni-web:sha-{0}', github.sha) || 'opengeni-web:ci' }}
+          build-args: |
+            OPENGENI_SERVER_VERSION=sha-${{ github.sha }}
+            OPENGENI_DEPLOYMENT_REVISION=${{ github.sha }}
 
       - name: Build headless sandbox image
+        id: sandbox_image
         uses: docker/build-push-action@v7.3.0
         with:
           context: .
           file: docker/sandbox.Dockerfile
           platforms: linux/amd64,linux/arm64
-          push: false
-          tags: opengeni-sandbox:ci
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ github.event_name == 'push' && format('ghcr.io/cloudgeni-ai/opengeni-sandbox:sha-{0}', github.sha) || 'opengeni-sandbox:ci' }}
 
       - name: Build relay image
+        id: relay_image
         uses: docker/build-push-action@v7.3.0
         with:
           context: agent
           file: agent/crates/opengeni-relay/Dockerfile
           platforms: linux/amd64,linux/arm64
-          push: false
-          tags: opengeni-relay:ci
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ github.event_name == 'push' && format('ghcr.io/cloudgeni-ai/opengeni-relay:sha-{0}', github.sha) || 'opengeni-relay:ci' }}
+
+      - name: Write exact-main-SHA dogfood receipt
+        if: ${{ github.event_name == 'push' }}
+        env:
+          API_DIGEST: ${{ steps.api_image.outputs.digest }}
+          WORKER_DIGEST: ${{ steps.worker_image.outputs.digest }}
+          WEB_DIGEST: ${{ steps.web_image.outputs.digest }}
+          SANDBOX_DIGEST: ${{ steps.sandbox_image.outputs.digest }}
+          RELAY_DIGEST: ${{ steps.relay_image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          for digest in \
+            "$API_DIGEST" \
+            "$WORKER_DIGEST" \
+            "$WEB_DIGEST" \
+            "$SANDBOX_DIGEST" \
+            "$RELAY_DIGEST"; do
+            printf '%s\n' "$digest" \
+              | grep -Eq '^sha256:[0-9a-f]{64}$'
+          done
+
+          chart_version="$(awk '$1 == "version:" { print $2 }' deploy/helm/opengeni/Chart.yaml)"
+          test -n "$chart_version"
+          jq -n \
+            --arg sourceSha "${GITHUB_SHA}" \
+            --arg sourceRef "${GITHUB_REF}" \
+            --arg sourceRepository "${GITHUB_REPOSITORY}" \
+            --arg runId "${GITHUB_RUN_ID}" \
+            --arg runAttempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg chartVersion "$chart_version" \
+            --arg tag "sha-${GITHUB_SHA}" \
+            --arg apiDigest "$API_DIGEST" \
+            --arg workerDigest "$WORKER_DIGEST" \
+            --arg webDigest "$WEB_DIGEST" \
+            --arg sandboxDigest "$SANDBOX_DIGEST" \
+            --arg relayDigest "$RELAY_DIGEST" \
+            '{
+              schemaVersion: 1,
+              source: {
+                repository: $sourceRepository,
+                ref: $sourceRef,
+                sha: $sourceSha
+              },
+              producer: {
+                workflow: ".github/workflows/ci.yml",
+                runId: $runId,
+                runAttempt: $runAttempt
+              },
+              chartVersion: $chartVersion,
+              imageTag: $tag,
+              images: {
+                api: { repository: "ghcr.io/cloudgeni-ai/opengeni-api", digest: $apiDigest },
+                worker: { repository: "ghcr.io/cloudgeni-ai/opengeni-worker", digest: $workerDigest },
+                web: { repository: "ghcr.io/cloudgeni-ai/opengeni-web", digest: $webDigest },
+                sandbox: { repository: "ghcr.io/cloudgeni-ai/opengeni-sandbox", digest: $sandboxDigest },
+                relay: { repository: "ghcr.io/cloudgeni-ai/opengeni-relay", digest: $relayDigest }
+              }
+            }' > dogfood-images.json
+          sha256sum dogfood-images.json > dogfood-images.sha256
+
+      - name: Upload exact-main-SHA dogfood receipt
+        if: ${{ github.event_name == 'push' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: dogfood-images-${{ github.sha }}
+          path: |
+            dogfood-images.json
+            dogfood-images.sha256
+          if-no-files-found: error
+          retention-days: 30
 
   automation-report:
     name: Report exact-head automation CI
