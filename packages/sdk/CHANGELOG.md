@@ -1,5 +1,11 @@
 # @opengeni/sdk
 
+## 0.30.3
+
+### Patch Changes
+
+- b2e975f: Advance the merged knowledge release train to fresh publication identities without changing runtime behavior. This corrective source is derived from current main and does not reuse generated release output.
+
 ## Unreleased
 
 - Add native voice-input configuration mirrors, workspace toggle resolution, and one-shot multipart `transcribeAudio` uploads.

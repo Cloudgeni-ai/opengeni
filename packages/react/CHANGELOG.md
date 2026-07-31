@@ -1,5 +1,13 @@
 # @opengeni/react
 
+## 0.30.3
+
+### Patch Changes
+
+- b2e975f: Advance the merged knowledge release train to fresh publication identities without changing runtime behavior. This corrective source is derived from current main and does not reuse generated release output.
+- Updated dependencies [b2e975f]
+  - @opengeni/sdk@0.30.3
+
 ## Unreleased
 
 - Copy affordances: fenced code + tables in `Markdown`, hover copy on user/assistant messages, and "Copy turn" on settled turn chips (includes the lifted final answer).
