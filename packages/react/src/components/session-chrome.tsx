@@ -517,27 +517,26 @@ export function SessionChrome({
                   data-og-session-chrome-signal={signal.id}
                   onClick={() => setActive(selected ? null : signal.id)}
                   className={cn(
-                    "group relative z-[1] inline-flex max-w-full items-center gap-1 rounded-og-md text-left text-og-xs outline-none",
+                    "group relative z-[1] inline-flex min-h-[var(--og-session-chrome-chip-min-height)] max-w-full items-center gap-1 rounded-og-md text-left text-og-xs outline-none",
                     "transition-colors duration-150 motion-reduce:transition-none",
                     "hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent/40",
                     "pointer-coarse:min-h-11",
                     selected ? "text-og-fg" : "text-og-fg-muted",
                   )}
                   style={{
-                    minHeight: "var(--og-session-chrome-chip-min-height)",
                     paddingInline: "var(--og-session-chrome-chip-pad-x)",
                   }}
                 >
                   <span className={cn("shrink-0", toneClass(signal.tone, selected))}>
                     {signal.icon}
                   </span>
-                  <span className="shrink-0 font-medium">{signal.label}</span>
+                  <span className="shrink-0 font-medium text-og-fg">{signal.label}</span>
                   {signal.detail ? (
                     <>
                       <span aria-hidden className="shrink-0 text-og-fg-subtle/60">
                         ·
                       </span>
-                      <span className="min-w-0 max-w-[8.5rem] truncate text-og-fg-muted sm:max-w-[12rem]">
+                      <span className="min-w-0 max-w-[8.5rem] truncate text-og-fg sm:max-w-[12rem]">
                         {signal.detail}
                       </span>
                     </>
