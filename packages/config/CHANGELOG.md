@@ -1,5 +1,15 @@
 # @opengeni/config
 
+## 0.7.20
+
+### Patch Changes
+
+- b2e975f: Advance the merged knowledge release train to fresh publication identities without changing runtime behavior. This corrective source is derived from current main and does not reuse generated release output.
+- Updated dependencies [0199108]
+- Updated dependencies [b2e975f]
+- Updated dependencies [9f3b931]
+  - @opengeni/contracts@0.24.4
+
 ## Unreleased
 
 ### Minor Changes
