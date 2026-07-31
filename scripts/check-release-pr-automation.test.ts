@@ -1360,6 +1360,56 @@ describe("release head retention recovery", () => {
     ).toBe(false);
   });
 
+  test("rejects a conflicting retention check for an exact retained pair before mutation", async () => {
+    const fixture = recoverySealFixture();
+    const options = {
+      env: recoverySealEnv(),
+      fetchImpl: fixture.fetchImpl,
+      logger: { log() {} },
+      now: () => new Date("2026-07-27T09:30:00Z"),
+    };
+    await recoverReleaseHeadEvidence(options);
+    const retentionCheck = fixture.checks.find(
+      (check) => check.name === RELEASE_AUTOMATION_CONTRACT.checks.releaseHeadRetention,
+    );
+    expect(retentionCheck).toBeDefined();
+    fixture.checks.splice(0, fixture.checks.length, {
+      ...retentionCheck,
+      external_id: "attacker-preclaim",
+    });
+    fixture.requests.length = 0;
+
+    await expect(recoverReleaseHeadEvidence(options)).rejects.toThrow(
+      "existing check run conflicts with the exact idempotency identity",
+    );
+    expect(fixture.requests.every((request) => request.method === "GET")).toBe(true);
+  });
+
+  test("rejects duplicate exact retention checks for an exact retained pair before mutation", async () => {
+    const fixture = recoverySealFixture();
+    const options = {
+      env: recoverySealEnv(),
+      fetchImpl: fixture.fetchImpl,
+      logger: { log() {} },
+      now: () => new Date("2026-07-27T09:30:00Z"),
+    };
+    await recoverReleaseHeadEvidence(options);
+    const retentionCheck = fixture.checks.find(
+      (check) => check.name === RELEASE_AUTOMATION_CONTRACT.checks.releaseHeadRetention,
+    );
+    expect(retentionCheck).toBeDefined();
+    fixture.checks.splice(0, fixture.checks.length, retentionCheck!, {
+      ...retentionCheck,
+      id: Number(retentionCheck?.id) + 1,
+    });
+    fixture.requests.length = 0;
+
+    await expect(recoverReleaseHeadEvidence(options)).rejects.toThrow(
+      "multiple check runs share the idempotency marker",
+    );
+    expect(fixture.requests.every((request) => request.method === "GET")).toBe(true);
+  });
+
   test("fails closed on recovery author identity substitution or missing identity", async () => {
     for (const [author, message] of [
       [
