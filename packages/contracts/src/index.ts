@@ -711,6 +711,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "slack_bot_file_info",
   "slack_bot_file_content",
   "slack_bot_post_message",
+  "slack_bot_delete_message",
 ] as const;
 export const FirstPartyMcpToolName = z.enum(FIRST_PARTY_MCP_TOOL_NAMES);
 export type FirstPartyMcpToolName = z.infer<typeof FirstPartyMcpToolName>;

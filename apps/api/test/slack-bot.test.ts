@@ -379,6 +379,14 @@ function fakeSlack(
       }
       return Response.json({ ok: true, channel: committed.channel, ts: committed.timestamp });
     }
+    if (method === "chat.delete") {
+      const channel = params.get("channel");
+      const timestamp = params.get("ts");
+      if (!channel || !timestamp) {
+        return Response.json({ ok: false, error: "invalid_arguments" });
+      }
+      return Response.json({ ok: true, channel, ts: timestamp });
+    }
     return Response.json({ ok: false, error: "unexpected_method" });
   };
   return { fetch: fetch as typeof globalThis.fetch, calls, committedPosts };
@@ -1989,7 +1997,11 @@ describe("OpenGeni Slack bot connection", () => {
       threadTimestamp: "1.000",
       text: "private threaded fixture text",
     });
-    expect(threadedPost).toMatchObject({ channelId: "C_MEMBER", timestamp: "3.000" });
+    expect(threadedPost).toMatchObject({
+      channelId: "C_MEMBER",
+      timestamp: "3.000",
+      threadTimestamp: "1.000",
+    });
     expect(slack.calls.find((call) => call.clientMessageId === threadedOperationId)).toMatchObject({
       channel: "C_MEMBER",
       threadTimestamp: "1.000",
@@ -2008,6 +2020,21 @@ describe("OpenGeni Slack bot connection", () => {
           call.method === "chat.postMessage" && call.clientMessageId === threadedOperationId,
       ),
     ).toHaveLength(1);
+    const deleted = await bot.deleteMessage({
+      channelId: "C_MEMBER",
+      timestamp: threadedPost.timestamp,
+    });
+    expect(deleted).toMatchObject({
+      channelId: "C_MEMBER",
+      timestamp: "3.000",
+      deleted: true,
+      receipt: { operation: "message.delete" },
+    });
+    expect(slack.calls.find((call) => call.method === "chat.delete")).toMatchObject({
+      channel: "C_MEMBER",
+      parentTimestamp: "3.000",
+      hasText: false,
+    });
 
     const audits = await shared!.admin<
       Array<{ action: string; metadata: Record<string, unknown> }>
@@ -2026,6 +2053,7 @@ describe("OpenGeni Slack bot connection", () => {
         "slack_bot.file.info",
         "slack_bot.file.content.read",
         "slack_bot.message.post",
+        "slack_bot.message.delete",
       ]),
     );
     expect(JSON.stringify(audits)).not.toContain("private fixture text");

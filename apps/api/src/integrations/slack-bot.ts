@@ -130,7 +130,8 @@ type SlackBotOperation =
   | "files.list"
   | "file.info"
   | "file.content.read"
-  | "message.post";
+  | "message.post"
+  | "message.delete";
 
 type SlackBotContext = {
   accountId: string;
@@ -508,7 +509,7 @@ export class OpenGeniSlackBotClient {
         throw new Error("Slack post operation is already in progress; retry the same operationId");
       }
       if (claim.kind === "completed") {
-        return this.completedPostResult(claim.operation, input.operationId);
+        return this.completedPostResult(claim.operation, input.operationId, input.threadTimestamp);
       }
       claimAcquired = true;
       providerCallStarted = true;
@@ -535,7 +536,11 @@ export class OpenGeniSlackBotClient {
         throw new Error("Slack post completion lost its durable operation claim");
       }
       claimAcquired = false;
-      return this.completedPostResult(completed.operation, input.operationId);
+      return this.completedPostResult(
+        completed.operation,
+        input.operationId,
+        input.threadTimestamp,
+      );
     } catch (error) {
       const failureCode = safeFailureCode(error);
       if (claimAcquired) {
@@ -556,6 +561,21 @@ export class OpenGeniSlackBotClient {
       );
       throw error;
     }
+  }
+
+  async deleteMessage(input: { channelId: string; timestamp: string }) {
+    return await this.withAudit("message.delete", async (headers) => {
+      await this.requireMemberChannel(headers, input.channelId);
+      const deleted = await this.call(headers, "chat.delete", {
+        channel: input.channelId,
+        ts: input.timestamp,
+      });
+      return {
+        channelId: requiredSlackString(deleted.channel, "channel"),
+        timestamp: requiredSlackString(deleted.ts, "ts"),
+        deleted: true,
+      };
+    });
   }
 
   private async requireMemberChannel(headers: Record<string, string>, channelId: string) {
@@ -775,6 +795,7 @@ export class OpenGeniSlackBotClient {
       slackMessageTimestamp: string | null;
     },
     operationId: string,
+    threadTimestamp?: string,
   ) {
     if (!operation.slackChannelId || !operation.slackMessageTimestamp) {
       throw new Error("completed Slack post operation is missing its provider result");
@@ -782,6 +803,7 @@ export class OpenGeniSlackBotClient {
     return {
       channelId: operation.slackChannelId,
       timestamp: operation.slackMessageTimestamp,
+      threadTimestamp: threadTimestamp ?? null,
       receipt: this.receipt("message.post", operationId),
     };
   }
@@ -1254,6 +1276,8 @@ function slackMethodForOperation(operation: SlackBotOperation): string {
       return "files.info";
     case "message.post":
       return "chat.postMessage";
+    case "message.delete":
+      return "chat.delete";
   }
 }
 
