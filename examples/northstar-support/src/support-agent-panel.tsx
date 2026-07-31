@@ -1,13 +1,25 @@
-import { ArrowRightIcon, LoaderCircleIcon, ShieldCheckIcon, SparklesIcon } from "lucide-react";
+import {
+  ArrowRightIcon,
+  LoaderCircleIcon,
+  Maximize2Icon,
+  Minimize2Icon,
+  ShieldCheckIcon,
+  SparklesIcon,
+} from "lucide-react";
 import { useState } from "react";
 import {
-  ChatComposer,
+  Markdown,
   MessageTimeline,
   SessionStatus,
   useComposer,
+  useFileAttachments,
   useSession,
   useSessionEvents,
+  type ComposerState,
+  type UseFileAttachmentsResult,
 } from "@opengeni/react";
+import * as Composer from "@opengeni/react/composer";
+import type { EffectiveSessionControl } from "@opengeni/sdk";
 import type { DemoHealth, SupportCase } from "./types";
 import { createDemoSession } from "./use-support-demo";
 import { supportToolRegistry } from "./support-tool-renderers";
@@ -17,16 +29,24 @@ function demoPrompt(supportCase: SupportCase): string {
   return `Investigate ${ticket.id} for ${customer.name} using the Northstar support tools. Read the ticket and customer signals, decide whether its priority or status should change, apply justified changes, and add an internal note with the evidence and next step.`;
 }
 
+function renderNorthstarMessage(text: string) {
+  return <Markdown className="northstar-agent-copy">{text}</Markdown>;
+}
+
 export function SupportAgentPanel({
   health,
   supportCase,
   sessionId,
+  expanded,
+  onExpandedChange,
   onSessionCreated,
   onClearSession,
 }: {
   health: DemoHealth | null;
   supportCase: SupportCase;
   sessionId: string | null;
+  expanded: boolean;
+  onExpandedChange: (expanded: boolean) => void;
   onSessionCreated: (sessionId: string) => void;
   onClearSession: () => void;
 }) {
@@ -47,7 +67,7 @@ export function SupportAgentPanel({
   }
 
   return (
-    <aside className="flex h-full min-h-0 flex-col border-l border-[#302a40] bg-white text-og-fg">
+    <aside className="northstar-agent-panel flex h-full min-h-0 flex-col border-l border-[#302a40] bg-white text-og-fg">
       <header className="flex h-[72px] shrink-0 items-center justify-between gap-4 border-b border-white/10 bg-[#252131] px-5 text-white">
         <div className="flex min-w-0 items-center gap-3">
           <div className="relative grid size-8 shrink-0 place-items-center rounded-lg bg-[#6759ce] text-white">
@@ -63,21 +83,37 @@ export function SupportAgentPanel({
             </p>
           </div>
         </div>
-        {sessionId ? (
+        <div className="flex shrink-0 items-center gap-1.5">
+          {sessionId ? (
+            <button
+              type="button"
+              onClick={onClearSession}
+              className="rounded-lg px-2.5 py-2 text-[11px] font-semibold text-white/60 transition hover:bg-white/10 hover:text-white"
+            >
+              New run
+            </button>
+          ) : (
+            <McpIndicator health={health} />
+          )}
           <button
             type="button"
-            onClick={onClearSession}
-            className="rounded-xl px-3 py-2 text-[11px] font-semibold text-white/60 transition hover:bg-white/10 hover:text-white"
+            aria-label={expanded ? "Collapse OpenGeni panel" : "Expand OpenGeni panel"}
+            aria-pressed={expanded}
+            title={expanded ? "Collapse panel" : "Expand panel"}
+            onClick={() => onExpandedChange(!expanded)}
+            className="grid size-8 place-items-center rounded-lg text-white/55 transition hover:bg-white/10 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white/70"
           >
-            New run
+            {expanded ? (
+              <Minimize2Icon className="size-3.5" />
+            ) : (
+              <Maximize2Icon className="size-3.5" />
+            )}
           </button>
-        ) : (
-          <McpIndicator health={health} />
-        )}
+        </div>
       </header>
 
       {sessionId ? (
-        <LiveAgentSession sessionId={sessionId} />
+        <LiveAgentSession sessionId={sessionId} expanded={expanded} />
       ) : (
         <div className="flex min-h-0 flex-1 flex-col justify-between overflow-y-auto bg-[#f7f7f7] px-7 py-7">
           <div>
@@ -188,11 +224,21 @@ function McpIndicator({ health }: { health: DemoHealth | null }) {
   );
 }
 
-function LiveAgentSession({ sessionId }: { sessionId: string }) {
+function LiveAgentSession({ sessionId, expanded }: { sessionId: string; expanded: boolean }) {
   const { session } = useSession(sessionId, { pollIntervalMs: 4_000 });
   const { timeline, sessionStatus, connectionState, hasOlder, loadingOlder, loadOlder, error } =
     useSessionEvents(sessionId);
-  const composer = useComposer(sessionId);
+  const attachments = useFileAttachments();
+  const composer = useComposer(sessionId, {
+    sendExtras: () => ({ resources: attachments.readyResources }),
+    sendBlocked: () => attachments.hasUnresolved,
+    onSent: (_text, input) =>
+      attachments.removeReadyFiles(
+        (input.resources ?? []).flatMap((resource) =>
+          resource.kind === "file" ? [resource.fileId] : [],
+        ),
+      ),
+  });
   const status = sessionStatus ?? session?.status ?? null;
 
   return (
@@ -226,16 +272,75 @@ function LiveAgentSession({ sessionId }: { sessionId: string }) {
         hasOlder={hasOlder}
         loadingOlder={loadingOlder}
         onLoadOlder={() => void loadOlder()}
-        className="min-h-0 flex-1"
+        renderMessageText={renderNorthstarMessage}
+        className="northstar-agent-timeline min-h-0 flex-1"
       />
 
-      <div className="shrink-0 border-t border-og-border/70 bg-white px-4 pb-4 pt-3">
-        <ChatComposer
+      <div className="shrink-0 border-t border-og-border/70 bg-white px-4 pb-3 pt-3">
+        <NorthstarComposer
           composer={composer}
           effectiveControl={session?.effectiveControl}
-          placeholder="Ask a follow-up…"
+          attachments={attachments}
+          expanded={expanded}
         />
       </div>
     </div>
+  );
+}
+
+function NorthstarComposer({
+  composer,
+  effectiveControl,
+  attachments,
+  expanded,
+}: {
+  composer: ComposerState;
+  effectiveControl: EffectiveSessionControl | null | undefined;
+  attachments: UseFileAttachmentsResult;
+  expanded: boolean;
+}) {
+  const controller = Composer.useChatComposerController({
+    delivery: composer,
+    draft: composer,
+    control: composer,
+    effectiveControl,
+    attachments,
+  });
+
+  return (
+    <Composer.Root controller={controller} className="northstar-agent-composer">
+      <Composer.Frame>
+        <Composer.CommandPalette />
+        <Composer.Surface className="rounded-[11px] border-[#dedce5] shadow-none focus-within:border-[#8b7fe1] focus-within:shadow-[0_0_0_3px_rgba(103,89,206,0.10)]">
+          <Composer.PausedState />
+          <Composer.RestoredResources />
+          <Composer.Attachments />
+          <Composer.Input
+            placeholder="Ask OpenGeni…"
+            className="min-h-[42px] px-3.5 pb-1 pt-2.5 !text-[13px] !leading-5"
+          />
+          {controller.confirmState ? (
+            <Composer.Confirmation />
+          ) : (
+            <Composer.Footer className="items-center px-2.5 pb-2 pt-0.5">
+              <Composer.Controls className="flex-nowrap gap-1">
+                <Composer.AttachButton className="size-7 rounded-lg pointer-coarse:size-10" />
+                <span className="min-w-0 flex-1 truncate px-1 text-[10px] text-og-fg-subtle">
+                  {expanded
+                    ? "Add context · Enter to send · Shift+Enter for a new line"
+                    : "Add context"}
+                </span>
+              </Composer.Controls>
+              <Composer.Actions className="gap-1">
+                <Composer.PauseButton className="size-7 rounded-lg pointer-coarse:size-10" />
+                <Composer.SendButton className="size-7 rounded-lg pointer-coarse:size-10" />
+              </Composer.Actions>
+            </Composer.Footer>
+          )}
+        </Composer.Surface>
+      </Composer.Frame>
+      <Composer.Help />
+      <Composer.Status />
+    </Composer.Root>
   );
 }
