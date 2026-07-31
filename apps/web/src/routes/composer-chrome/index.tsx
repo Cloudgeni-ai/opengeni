@@ -24,7 +24,7 @@ export function ComposerChromeGalleryRoute() {
           <p className="text-sm leading-relaxed text-fg-muted">
             Scenario matrix for the production{" "}
             <code className="font-mono text-xs text-fg">SessionChrome</code> dock (incoming, queue,
-            goal, agents) above ChatComposer. Not a multi-variant exploration gallery.
+            goal, agents) above the stock ChatComposer.
           </p>
           <code className="block rounded-lg border border-border bg-surface-2/60 px-3 py-2 font-mono text-xs text-fg-muted">
             http://127.0.0.1:3000/dev/composer-chrome

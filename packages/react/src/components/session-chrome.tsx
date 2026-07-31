@@ -881,8 +881,12 @@ function GoalPanel({
   );
 }
 
-/** Match QueueSurface native `title` copy so chrome icon tips stay consistent. */
-const QUEUE_STEER_TIP = "Make this the next direction";
+const QUEUE_STEER_TIP = (
+  <span className="flex flex-col gap-0.5 text-left">
+    <span className="font-medium">Steer</span>
+    <span className="opacity-80">Interrupt the current turn and send this message now</span>
+  </span>
+);
 const QUEUE_EDIT_TIP = "Edit in composer";
 const QUEUE_DELETE_TIP = "Delete this queued prompt";
 
@@ -895,7 +899,7 @@ function IconAction({
   children,
 }: {
   label: string;
-  tip: string;
+  tip: ReactNode;
   onClick: () => void;
   disabled?: boolean;
   danger?: boolean;
