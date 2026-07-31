@@ -379,9 +379,17 @@ bun run deployment:conformance -- \
 
 The object-storage check performs a browser-style `OPTIONS` preflight before
 the signed `PUT`. Managed and external buckets must allow direct upload CORS
-for the deployed web origin. Prefer exact HTTPS origins in production; use `*`
-only for disposable private evaluation stacks where signed URLs and the
-OpenGeni access key are the real access boundaries.
+from `*` because the OpenGeni browser SDK is designed to run inside arbitrary
+customer products, whose origins are not known to the OpenGeni operator. CORS
+is transport policy, not upload authorization: the API first authenticates the
+workspace request, then returns a short-lived, object-scoped signed URL. The
+storage account/container remains private and browser PUTs carry no storage
+credentials or cookies beyond that signed URL.
+
+For Azure Blob, the blob-service CORS rule must allow origin `*`, method `PUT`
+(plus `GET`, `HEAD`, and `OPTIONS` for the complete file flow), and all request
+and exposed headers. S3/GCS equivalents must express the same wildcard-origin
+contract. Do not add each embedding application to an origin allowlist.
 
 For S3-compatible storage on a split network, keep
 `OPENGENI_OBJECT_STORAGE_ENDPOINT` browser-reachable and set
