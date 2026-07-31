@@ -25,6 +25,10 @@
     "./slack-bot-scopes": {
       "types": "./src/slack-bot-scopes.ts",
       "default": "./src/slack-bot-scopes.ts"
+    },
+    "./google-drive": {
+      "types": "./src/google-drive.ts",
+      "default": "./src/google-drive.ts"
     }
   },
   "publishConfig": {
