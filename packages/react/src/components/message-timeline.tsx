@@ -47,6 +47,7 @@ import {
   type TimelineGroup,
   type TimelineItem,
   type ToolRegistry,
+  type RetainedScreenshotLoader,
   type TurnSummaryOptions,
   type UserMessageItem,
   type WorkerCompletionItem,
@@ -99,6 +100,8 @@ export type MessageTimelineProps = {
    * `createDefaultToolRegistry({ entries })` to add custom tool renderers.
    */
   toolRegistry?: ToolRegistry | undefined;
+  /** Resolve opaque retained screenshot receipts through the authenticated host SDK. */
+  loadRetainedScreenshot?: RetainedScreenshotLoader | undefined;
   /** Customize collapsed turn facets for this timeline instance. */
   turnSummary?: TurnSummaryOptions | undefined;
   /** Follow new events when pinned to the bottom. Defaults to true. */
@@ -131,6 +134,7 @@ export function MessageTimeline({
   onReconnect,
   resolveProviderLogo,
   toolRegistry = defaultToolRegistry,
+  loadRetainedScreenshot,
   turnSummary,
   autoFollow = true,
   hasOlder = false,
@@ -419,6 +423,7 @@ export function MessageTimeline({
                     onReconnect={onReconnect}
                     resolveProviderLogo={resolveProviderLogo}
                     toolRegistry={toolRegistry}
+                    loadRetainedScreenshot={loadRetainedScreenshot}
                     turnSummary={turnSummary}
                     foldLiveCluster={isAgentProgress(groups[index + 1]?.group)}
                   />
@@ -442,7 +447,10 @@ export function MessageTimeline({
                 onClick={() => {
                   const node = scrollRef.current;
                   if (node) {
-                    node.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
+                    node.scrollTo({
+                      top: node.scrollHeight,
+                      behavior: "smooth",
+                    });
                   }
                   pinnedRef.current = true;
                   setPinned(true);
@@ -627,6 +635,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
   onReconnect,
   resolveProviderLogo,
   toolRegistry,
+  loadRetainedScreenshot,
   turnSummary,
   insideTurn = false,
   foldLiveCluster = false,
@@ -640,6 +649,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
   onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
   resolveProviderLogo?: ((providerDomain: string) => string | null | undefined) | undefined;
   toolRegistry: ToolRegistry;
+  loadRetainedScreenshot?: RetainedScreenshotLoader | undefined;
   turnSummary?: TurnSummaryOptions | undefined;
   /** A completed cluster of a still-RUNNING turn (not the live tail) folds
       behind a neutral chip — the one place activity without an outcome still
@@ -666,6 +676,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
             onOpenSession={onOpenSession}
             onMemoryClick={onMemoryClick}
             toolRegistry={toolRegistry}
+            loadRetainedScreenshot={loadRetainedScreenshot}
             bare={insideTurn}
           />
         </TurnSummary>
@@ -677,6 +688,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
           onOpenSession={onOpenSession}
           onMemoryClick={onMemoryClick}
           toolRegistry={toolRegistry}
+          loadRetainedScreenshot={loadRetainedScreenshot}
           bare={insideTurn}
         />
       );
@@ -692,6 +704,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
           onReconnect={onReconnect}
           resolveProviderLogo={resolveProviderLogo}
           toolRegistry={toolRegistry}
+          loadRetainedScreenshot={loadRetainedScreenshot}
           turnSummary={turnSummary}
           insideTurn
         />
@@ -1002,7 +1015,13 @@ function WorkerCompletionRow({
       ? [{ label: "Evidence", value: item.evidence.trim(), muted: true }]
       : []),
     ...(showPausedReason
-      ? [{ label: "Paused because", value: item.pausedReason!.trim(), muted: true }]
+      ? [
+          {
+            label: "Paused because",
+            value: item.pausedReason!.trim(),
+            muted: true,
+          },
+        ]
       : []),
   ];
   const hasDetails = details.length > 0;
@@ -1116,7 +1135,11 @@ function SessionStatusRow({ item }: { item: { status: SessionStatus; occurredAt:
  * bg-X/10`); neutral actions reuse the surface/border tokens so a clean run of
  * landmarks stays calm rather than a row of colored chips.
  */
-type GoalMeta = { label: string; pill: string; icon: ComponentType<{ className?: string }> };
+type GoalMeta = {
+  label: string;
+  pill: string;
+  icon: ComponentType<{ className?: string }>;
+};
 
 const NEUTRAL_PILL = "border-og-border bg-og-surface-1 text-og-fg-muted";
 
@@ -1139,7 +1162,11 @@ const GOAL_META: Record<GoalItem["action"], GoalMeta> = {
   },
   resumed: { label: "Goal resumed", pill: NEUTRAL_PILL, icon: PlayIcon },
   cleared: { label: "Goal cleared", pill: NEUTRAL_PILL, icon: Trash2Icon },
-  continuation: { label: "Continuing toward the goal", pill: NEUTRAL_PILL, icon: ArrowRightIcon },
+  continuation: {
+    label: "Continuing toward the goal",
+    pill: NEUTRAL_PILL,
+    icon: ArrowRightIcon,
+  },
 };
 
 /**

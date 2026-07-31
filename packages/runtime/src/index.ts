@@ -332,6 +332,14 @@ const SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS = 120_000;
 export type NormalizedRuntimeEvent = {
   type: SessionEventType;
   payload: unknown;
+  retainedOutputEvidence?: unknown;
+};
+
+export type NormalizeSdkEventOptions = {
+  /** Trusted worker replacement for one tool output (for example an artifact receipt). */
+  toolOutputOverride?: unknown;
+  /** Separately trusted receipt for the event truncation boundary. */
+  retainedOutputEvidence?: unknown;
 };
 
 export type ModelResponseUsage = {
@@ -5036,7 +5044,10 @@ export function normalizeToolOutputForEvent(output: unknown): unknown {
   return output;
 }
 
-export function normalizeSdkEvent(event: RunStreamEvent): NormalizedRuntimeEvent[] {
+export function normalizeSdkEvent(
+  event: RunStreamEvent,
+  options: NormalizeSdkEventOptions = {},
+): NormalizedRuntimeEvent[] {
   const out: NormalizedRuntimeEvent[] = [];
   if (event.type === "raw_model_stream_event") {
     const data = (event as any).data;
@@ -5087,8 +5098,14 @@ export function normalizeSdkEvent(event: RunStreamEvent): NormalizedRuntimeEvent
         id: item.rawItem?.callId ?? item.id ?? null,
         // Inline media becomes a content-free audit fact. Model history keeps
         // the provider's real structured image output on its separate path.
-        output: normalizeToolOutputForEvent(item.output),
+        output:
+          "toolOutputOverride" in options
+            ? options.toolOutputOverride
+            : normalizeToolOutputForEvent(item.output),
       },
+      ...(options.retainedOutputEvidence !== undefined
+        ? { retainedOutputEvidence: options.retainedOutputEvidence }
+        : {}),
     });
   } else if (item.type === "tool_search_call_item") {
     // Progressive connector disclosure: surface the model's tool search as a

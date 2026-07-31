@@ -162,6 +162,10 @@ export type TurnInputOptions = {
   unavailableSandboxFilesNote?: string;
   runCredentialsNote?: string;
   readFileBytesForModel?: (file: FileAsset) => Promise<Uint8Array>;
+  materializeModelHistory?: (
+    history: Array<Record<string, unknown>>,
+  ) => Promise<Array<Record<string, unknown>>>;
+  materializeSerializedRunState?: (serialized: string) => Promise<string>;
 };
 
 export const MAX_INLINE_MODEL_ATTACHMENT_BYTES = 20 * 1024 * 1024;
@@ -372,13 +376,24 @@ export async function turnInput(
       joinInternalContext(internalContext, attachmentContext),
       current,
       modelAttachments,
+      options.materializeModelHistory,
     );
   }
   if (trigger.type === "system.update.delivered") {
     if (updates.length === 0) {
       throw new Error("Internal update inference has no delivered updates");
     }
-    return await messageInput(db, runtime, agent, trigger, undefined, internalContext, current);
+    return await messageInput(
+      db,
+      runtime,
+      agent,
+      trigger,
+      undefined,
+      internalContext,
+      current,
+      [],
+      options.materializeModelHistory,
+    );
   }
   if (trigger.type === "user.approvalDecision") {
     const payload = trigger.payload as {
@@ -392,13 +407,16 @@ export async function turnInput(
     if (!state) {
       throw new Error("No saved run state is available for approval decision");
     }
+    const serializedRunState = resumeRunStateForCodexAccount(state, current);
     return {
       input: await runtime.prepareInput(agent, {
         kind: "approval",
         // Cross-account run-state strip (HOLE C): if the account resuming this
         // frozen approval differs from the one that froze it, neutralize the
         // blob's account-bound reasoning before replay (else byte-for-byte).
-        serializedRunState: resumeRunStateForCodexAccount(state, current),
+        serializedRunState: options.materializeSerializedRunState
+          ? await options.materializeSerializedRunState(serializedRunState)
+          : serializedRunState,
         approvalId: String(payload.approvalId ?? ""),
         decision: payload.decision === "approve" ? "approve" : "reject",
         ...(typeof payload.message === "string" ? { message: payload.message } : {}),
@@ -421,10 +439,13 @@ export async function turnInput(
     if (!resume) {
       throw new Error("Human-input response does not resolve to a durable request");
     }
+    const serializedRunState = resumeRunStateForCodexAccount(state, current);
     return {
       input: await runtime.prepareInput(agent, {
         kind: "human_input",
-        serializedRunState: resumeRunStateForCodexAccount(state, current),
+        serializedRunState: options.materializeSerializedRunState
+          ? await options.materializeSerializedRunState(serializedRunState)
+          : serializedRunState,
         toolCallId: resume.toolCallId,
       }),
       modelHistoryFromItems: false,
@@ -448,13 +469,17 @@ async function messageInput(
   internalContext: string | undefined,
   current: TurnCodexAccount = NON_CODEX_TURN,
   modelAttachments: ModelAttachmentContent[] = [],
+  materializeModelHistory?: (
+    history: Array<Record<string, unknown>>,
+  ) => Promise<Array<Record<string, unknown>>>,
 ): Promise<PreparedTurnInput> {
   const stored = await getActiveSessionHistoryItems(db, trigger.workspaceId, trigger.sessionId);
   const envelope = await getSandboxSessionEnvelope(db, trigger.workspaceId, trigger.sessionId);
-  const historyItems = withCurrentUserAttachmentContent(
-    applyCodexHistoryStrip(stored, current),
-    modelAttachments,
-  );
+  const strippedHistory = applyCodexHistoryStrip(stored, current);
+  const modelHistory = materializeModelHistory
+    ? await materializeModelHistory(strippedHistory)
+    : strippedHistory;
+  const historyItems = withCurrentUserAttachmentContent(modelHistory, modelAttachments);
   return {
     input: await runtime.prepareInput(agent, {
       kind: "message",

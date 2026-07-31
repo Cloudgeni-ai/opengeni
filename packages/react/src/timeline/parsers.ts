@@ -1,4 +1,4 @@
-import { normalizeMcpOutput, type GitFileDiff } from "@opengeni/sdk";
+import { normalizeMcpOutput, type GitFileDiff, type RetainedArtifactMetadata } from "@opengeni/sdk";
 import { tryParseJson } from "../lib/format";
 
 /* ----------------------------------------------------------------------------
@@ -357,6 +357,38 @@ export function screenshotDataUrl(out: unknown): string | null {
     }
   }
   return null;
+}
+
+/** Parse the closed retained-screenshot receipt carried by new tool events. */
+export function retainedScreenshotMetadata(out: unknown): RetainedArtifactMetadata | null {
+  if (typeof out === "string" && (out.startsWith("{") || out.startsWith("["))) {
+    const parsed = tryParseJson(out);
+    if (parsed !== undefined && parsed !== out) return retainedScreenshotMetadata(parsed);
+  }
+  if (Array.isArray(out)) {
+    for (const entry of out) {
+      const metadata = retainedScreenshotMetadata(entry);
+      if (metadata) return metadata;
+    }
+    return null;
+  }
+  if (!out || typeof out !== "object") return null;
+  const value = out as Record<string, unknown>;
+  if (typeof value.artifactId !== "string" || typeof value.available !== "boolean") return null;
+  if (!value.available) {
+    return typeof value.reason === "string" ? (value as unknown as RetainedArtifactMetadata) : null;
+  }
+  return value.kind === "computer_screenshot" &&
+    value.contentType === "image/png" &&
+    typeof value.originalBytes === "number" &&
+    typeof value.sha256 === "string" &&
+    value.dimensions !== null &&
+    typeof value.dimensions === "object" &&
+    value.retention !== null &&
+    typeof value.retention === "object" &&
+    (value.retention as Record<string, unknown>).policy === "session_screenshot"
+    ? (value as unknown as RetainedArtifactMetadata)
+    : null;
 }
 
 export type TimelineMediaPreview = {

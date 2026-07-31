@@ -84,6 +84,9 @@ export async function maybeCompactContext(
     clearRequestedCompaction?: boolean;
     trigger?: "auto" | "operator" | "proactive" | "overflow";
     codexAccount?: TurnCodexAccount;
+    materializeHistory?: (
+      history: Array<Record<string, unknown>>,
+    ) => Promise<Array<Record<string, unknown>>>;
   } = {},
 ): Promise<MaybeCompactResult> {
   const active = await getActiveSessionHistoryItems(db, scope.workspaceId, scope.sessionId);
@@ -117,9 +120,12 @@ export async function maybeCompactContext(
     };
   }
 
-  const items = sanitizeHistoryItemsForModel(
+  const portableItems = sanitizeHistoryItemsForModel(
     applyCodexHistoryStrip(active, options.codexAccount ?? { currentCodexCredentialId: null }),
   ) as CompactionItem[];
+  const items = options.materializeHistory
+    ? ((await options.materializeHistory(portableItems)) as CompactionItem[])
+    : portableItems;
   const decision = decideCompaction({
     items,
     lastInputTokens,

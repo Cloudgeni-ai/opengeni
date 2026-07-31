@@ -1,4 +1,4 @@
-import type { GitFileDiff } from "@opengeni/sdk";
+import type { GitFileDiff, RetainedArtifactReference } from "@opengeni/sdk";
 import {
   CameraIcon,
   CameraOffIcon,
@@ -14,7 +14,7 @@ import {
   TerminalIcon,
   WrenchIcon,
 } from "lucide-react";
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { stringifyPayload, tryParseJson } from "../lib/format";
 import {
   applyPatchOps,
@@ -32,6 +32,7 @@ import {
   unwrapMcpOutput,
   v4aToGitFileDiff,
   screenshotDataUrl,
+  retainedScreenshotMetadata,
   type ApplyPatchOperation,
 } from "./parsers";
 import {
@@ -533,7 +534,7 @@ function asComputerArgs(args: unknown): Partial<ComputerAction> {
   };
 }
 
-function ComputerCallRenderer({ item }: ToolRendererProps) {
+function ComputerCallRenderer({ item, loadRetainedScreenshot }: ToolRendererProps) {
   const raw = (item.raw ?? {}) as {
     action?: ComputerAction;
     actions?: ComputerAction[];
@@ -546,7 +547,10 @@ function ComputerCallRenderer({ item }: ToolRendererProps) {
   // every transport.
   const functionAction: ComputerAction | undefined =
     !raw.action && item.name.startsWith("computer_") && item.name !== "computer_call"
-      ? { type: item.name.slice("computer_".length), ...asComputerArgs(item.arguments) }
+      ? {
+          type: item.name.slice("computer_".length),
+          ...asComputerArgs(item.arguments),
+        }
       : undefined;
   const action = raw.action ?? functionAction;
   const actions = raw.actions ?? (action ? [action] : []);
@@ -556,6 +560,7 @@ function ComputerCallRenderer({ item }: ToolRendererProps) {
   const rejected = raw.providerData?.approvalStatus === "rejected";
   const readOnly = typeof out === "string" && out.includes("read-only");
   const shotUrl = screenshotDataUrl(out);
+  const retained = retainedScreenshotMetadata(out);
   const omittedMedia = mediaPreviewFact(out);
   const empty = out === "" || out == null;
   const batched = actions.length > 1 ? actions.map((a) => computerVerb(a)).join(" · ") : null;
@@ -613,6 +618,41 @@ function ComputerCallRenderer({ item }: ToolRendererProps) {
 
   const isFailed = item.status === "failed";
   const isCancelled = item.status === "cancelled";
+
+  if (retained) {
+    if (!retained.available) {
+      const state =
+        retained.reason === "expired" || retained.reason === "deleted"
+          ? retained.reason
+          : "unavailable";
+      return (
+        <ActivityDisclosure
+          icon={<CameraOffIcon className={ICON_SIZE} />}
+          iconTone={isFailed ? "failed" : "muted"}
+          title={`${verb}${countSuffix} · ${state}`}
+          failed={isFailed}
+          cancelled={isCancelled}
+          preview={`screenshot ${state}`}
+          media={<MediaEmpty />}
+        >
+          <BodyNote tone={isFailed ? "error" : undefined}>
+            Screenshot {state}: {retained.reason.replaceAll("_", " ")}.
+          </BodyNote>
+        </ActivityDisclosure>
+      );
+    }
+    return (
+      <RetainedScreenshotDisclosure
+        artifact={retained}
+        load={loadRetainedScreenshot}
+        verb={verb}
+        countSuffix={countSuffix}
+        batched={batched}
+        failed={isFailed}
+        cancelled={isCancelled}
+      />
+    );
+  }
 
   if (shotUrl) {
     const caption = `${verb}${actions.length > 1 ? ` (+${actions.length - 1} more)` : ""}`;
@@ -690,6 +730,112 @@ function ComputerCallRenderer({ item }: ToolRendererProps) {
       expandable={batched != null}
     >
       {batched ? <BodyNote>{batched}</BodyNote> : null}
+    </ActivityDisclosure>
+  );
+}
+
+function RetainedScreenshotDisclosure({
+  artifact,
+  load,
+  verb,
+  countSuffix,
+  batched,
+  failed,
+  cancelled,
+}: {
+  artifact: RetainedArtifactReference;
+  load: ToolRendererProps["loadRetainedScreenshot"];
+  verb: string;
+  countSuffix: string;
+  batched: string | null;
+  failed: boolean;
+  cancelled: boolean;
+}) {
+  const [state, setState] = useState<
+    | { kind: "loading" }
+    | { kind: "ready"; url: string }
+    | { kind: "unavailable"; label: string }
+    | { kind: "error"; message: string }
+  >({ kind: "loading" });
+
+  useEffect(() => {
+    if (!load) {
+      setState({ kind: "unavailable", label: "retrieval is not configured" });
+      return;
+    }
+    const controller = new AbortController();
+    let objectUrl: string | null = null;
+    setState({ kind: "loading" });
+    void load(artifact, controller.signal)
+      .then((bytes) => {
+        if (controller.signal.aborted) return;
+        if (!bytes) {
+          setState({ kind: "unavailable", label: "bytes are unavailable" });
+          return;
+        }
+        objectUrl = URL.createObjectURL(new Blob([Uint8Array.from(bytes)], { type: "image/png" }));
+        setState({ kind: "ready", url: objectUrl });
+      })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return;
+        const status =
+          error && typeof error === "object" && "status" in error
+            ? Number((error as { status?: unknown }).status)
+            : null;
+        setState(
+          status === 404
+            ? { kind: "unavailable", label: "deleted" }
+            : status === 410
+              ? { kind: "unavailable", label: "expired or unavailable" }
+              : {
+                  kind: "error",
+                  message: error instanceof Error ? error.message : "retrieval failed",
+                },
+        );
+      });
+    return () => {
+      controller.abort();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [artifact, load]);
+
+  const caption = `${verb}${countSuffix}`;
+  return (
+    <ActivityDisclosure
+      icon={<CameraIcon className={ICON_SIZE} />}
+      iconTone={failed ? "failed" : state.kind === "ready" ? "accent" : "muted"}
+      title={caption}
+      failed={failed}
+      cancelled={cancelled}
+      preview={
+        state.kind === "loading"
+          ? "loading retained screenshot…"
+          : state.kind === "error"
+            ? "screenshot retrieval failed"
+            : state.kind === "unavailable"
+              ? `screenshot ${state.label}`
+              : undefined
+      }
+      media={
+        state.kind === "ready" ? (
+          <Thumbnail src={state.url} caption={caption} />
+        ) : state.kind === "loading" ? (
+          <MediaSkeleton />
+        ) : (
+          <MediaEmpty />
+        )
+      }
+    >
+      {state.kind === "ready" ? (
+        <ScreenshotFigure src={state.url} caption={caption} />
+      ) : state.kind === "loading" ? (
+        <BodyNote>Loading the retained screenshot…</BodyNote>
+      ) : state.kind === "unavailable" ? (
+        <BodyNote>Screenshot {state.label}.</BodyNote>
+      ) : (
+        <BodyNote tone="error">Screenshot retrieval failed: {state.message}</BodyNote>
+      )}
+      {batched ? <BodyNote>batched: {batched}</BodyNote> : null}
     </ActivityDisclosure>
   );
 }
@@ -1045,7 +1191,11 @@ const BASE_ENTRIES: ToolRegistryEntry[] = [
   // Function-mode computer tools (codex / chat-wire transports).
   { match: "name", name: "computer_screenshot", render: ComputerCallRenderer },
   { match: "name", name: "computer_click", render: ComputerCallRenderer },
-  { match: "name", name: "computer_double_click", render: ComputerCallRenderer },
+  {
+    match: "name",
+    name: "computer_double_click",
+    render: ComputerCallRenderer,
+  },
   { match: "name", name: "computer_move", render: ComputerCallRenderer },
   { match: "name", name: "computer_scroll", render: ComputerCallRenderer },
   { match: "name", name: "computer_type", render: ComputerCallRenderer },
@@ -1053,7 +1203,11 @@ const BASE_ENTRIES: ToolRegistryEntry[] = [
   { match: "name", name: "computer_drag", render: ComputerCallRenderer },
   { match: "name", name: "web_search_call", render: WebSearchRenderer },
   { match: "name", name: "view_image", render: ViewImageRenderer },
-  { match: "name", name: "environment_set_variable", render: SecretSetRenderer },
+  {
+    match: "name",
+    name: "environment_set_variable",
+    render: SecretSetRenderer,
+  },
 ];
 
 /** The built-in tool renderer registry: every first-party tool plus a fallback. */

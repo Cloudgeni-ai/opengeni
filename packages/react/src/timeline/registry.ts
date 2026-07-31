@@ -1,3 +1,4 @@
+import type { RetainedArtifactReference } from "@opengeni/sdk";
 import type { ComponentType } from "react";
 import type { ToolCallItem } from "./types";
 
@@ -20,7 +21,13 @@ import type { ToolCallItem } from "./types";
 
 export type ToolRendererProps = {
   item: ToolCallItem;
+  loadRetainedScreenshot?: RetainedScreenshotLoader | undefined;
 };
+
+export type RetainedScreenshotLoader = (
+  artifact: RetainedArtifactReference,
+  signal: AbortSignal,
+) => Promise<Uint8Array | null>;
 
 export type ToolRenderer = ComponentType<ToolRendererProps>;
 

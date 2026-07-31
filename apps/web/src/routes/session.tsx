@@ -57,7 +57,7 @@ import {
   sessionPolicyPickerIds,
   toolsForPolicySelection,
 } from "@/lib/session-tools";
-import type { ComposerDraft, LineageNode } from "@opengeni/sdk";
+import type { ComposerDraft, LineageNode, RetainedArtifactReference } from "@opengeni/sdk";
 import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
 
 const LazySessionInspector = lazy(() =>
@@ -776,6 +776,18 @@ function SessionChatPane(props: {
     },
     [props.session.workspaceId, props.resolveCapabilityName],
   );
+  const loadRetainedScreenshot = useCallback(
+    async (artifact: RetainedArtifactReference, signal: AbortSignal) =>
+      (
+        await context.client.downloadRetainedScreenshot(
+          props.session.workspaceId,
+          props.session.id,
+          artifact.artifactId,
+          { signal },
+        )
+      ).bytes,
+    [context.client, props.session.id, props.session.workspaceId],
+  );
 
   return (
     <section className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
@@ -810,6 +822,7 @@ function SessionChatPane(props: {
               onMemoryClick={props.onMemoryClick}
               onReconnect={props.onReconnect}
               resolveProviderLogo={props.resolveProviderLogo}
+              loadRetainedScreenshot={loadRetainedScreenshot}
               hasOlder={props.hasOlder}
               loadingOlder={props.loadingOlder}
               onLoadOlder={() => void props.onLoadOlder()}

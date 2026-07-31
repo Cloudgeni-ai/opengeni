@@ -11,7 +11,7 @@ import { cn } from "../lib/cn";
 import { truncate } from "../lib/format";
 import { defaultToolRegistry } from "./tool-renderers";
 import { useEntranceAnimation } from "./entrance";
-import type { ToolRegistry } from "./registry";
+import type { RetainedScreenshotLoader, ToolRegistry } from "./registry";
 import { BodyNote, PayloadBlock, ActivityDisclosure } from "./shared";
 import { toolDisplayName } from "./tool-display-name";
 import type { ActivityItem, MemoryItem, ReasoningItem, SandboxItem, WorkerItem } from "./types";
@@ -41,6 +41,7 @@ export type ActivityRailProps = {
    * row is then non-interactive rich content). See {@link MessageTimelineProps}.
    */
   onMemoryClick?: ((memoryId: string) => void) | undefined;
+  loadRetainedScreenshot?: RetainedScreenshotLoader | undefined;
   /** Drop the left rule + indent (used inside a folded turn summary). */
   bare?: boolean | undefined;
   className?: string | undefined;
@@ -63,6 +64,7 @@ export function ActivityRail({
   toolRegistry = defaultToolRegistry,
   onOpenSession,
   onMemoryClick,
+  loadRetainedScreenshot,
   bare,
   className,
 }: ActivityRailProps) {
@@ -81,7 +83,13 @@ export function ActivityRail({
     >
       {items.map((item, index) => {
         const newFamily = index > 0 && familyOf(item) !== familyOf(items[index - 1]!);
-        const row = renderActivity(item, toolRegistry, onOpenSession, onMemoryClick);
+        const row = renderActivity(
+          item,
+          toolRegistry,
+          onOpenSession,
+          onMemoryClick,
+          loadRetainedScreenshot,
+        );
         return (
           <div key={item.id} data-og-timeline-row-anchor="" className={cn(newFamily && "mt-3")}>
             {row}
@@ -102,13 +110,14 @@ function renderActivity(
   toolRegistry: ToolRegistry,
   onOpenSession: ((sessionId: string) => void) | undefined,
   onMemoryClick: ((memoryId: string) => void) | undefined,
+  loadRetainedScreenshot: RetainedScreenshotLoader | undefined,
 ) {
   switch (item.kind) {
     case "reasoning":
       return <ReasoningRow item={item} />;
     case "tool-call": {
       const Renderer = toolRegistry.resolve(item);
-      return <Renderer item={item} />;
+      return <Renderer item={item} loadRetainedScreenshot={loadRetainedScreenshot} />;
     }
     case "worker":
       return <WorkerRow item={item} onOpenSession={onOpenSession} />;

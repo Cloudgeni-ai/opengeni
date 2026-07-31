@@ -3620,6 +3620,552 @@ export async function getRetainedFileArtifact(
   });
 }
 
+export type RetainedScreenshotArtifactStatus =
+  | "pending"
+  | "reconciling"
+  | "ready"
+  | "cleanup_pending"
+  | "failed"
+  | "expired"
+  | "deleted";
+
+export type RetainedScreenshotArtifact = {
+  artifactId: string;
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  attemptId: string;
+  settlementKey: string;
+  toolCallId: string;
+  toolOutputId: string;
+  status: RetainedScreenshotArtifactStatus;
+  mediaType: string;
+  sizeBytes: number;
+  sha256: string;
+  width: number;
+  height: number;
+  retentionExpiresAt: Date;
+  readyAt: Date | null;
+  cleanupReason: string | null;
+  lastError: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+  file: FileAsset;
+};
+
+export class RetainedScreenshotQuotaExceededError extends Error {
+  readonly code = "retained_screenshot_workspace_quota_exceeded";
+
+  constructor(
+    readonly quotaBytes: number,
+    readonly usedBytes: number,
+    readonly requestedBytes: number,
+  ) {
+    super(
+      `Retained screenshot workspace quota exceeded: ${usedBytes} + ${requestedBytes} > ${quotaBytes}`,
+    );
+    this.name = "RetainedScreenshotQuotaExceededError";
+  }
+}
+
+export type PrepareRetainedScreenshotArtifactInput = {
+  artifactId: string;
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  attemptId: string;
+  settlementKey: string;
+  toolCallId: string;
+  toolOutputId: string;
+  mediaType: "image/png";
+  sizeBytes: number;
+  sha256: string;
+  width: number;
+  height: number;
+  retentionExpiresAt: Date;
+  bucket: string;
+  objectKey: string;
+  workspaceQuotaBytes: number;
+};
+
+/**
+ * Reserve quota and create one deterministic pending file/artifact pair.
+ * Replays return the original row only when every immutable identity and byte
+ * fact matches; a UUID/settlement collision fails closed.
+ */
+export async function prepareRetainedScreenshotArtifact(
+  db: Database,
+  input: PrepareRetainedScreenshotArtifactInput,
+): Promise<{ artifact: RetainedScreenshotArtifact; created: boolean }> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        await tx
+          .insert(schema.workspaceScreenshotQuotas)
+          .values({ accountId: input.accountId, workspaceId: input.workspaceId })
+          .onConflictDoNothing({ target: schema.workspaceScreenshotQuotas.workspaceId });
+
+        const [existing] = await tx
+          .select({ artifact: schema.retainedScreenshotArtifacts, file: schema.files })
+          .from(schema.retainedScreenshotArtifacts)
+          .innerJoin(
+            schema.files,
+            and(
+              eq(schema.files.workspaceId, schema.retainedScreenshotArtifacts.workspaceId),
+              eq(schema.files.id, schema.retainedScreenshotArtifacts.artifactId),
+            ),
+          )
+          .where(eq(schema.retainedScreenshotArtifacts.settlementKey, input.settlementKey))
+          .for("update")
+          .limit(1);
+        if (existing) {
+          const artifact = mapRetainedScreenshotArtifact(existing.artifact, existing.file);
+          assertRetainedScreenshotReplayMatches(artifact, input);
+          return { artifact, created: false };
+        }
+
+        const [quota] = await tx
+          .select()
+          .from(schema.workspaceScreenshotQuotas)
+          .where(eq(schema.workspaceScreenshotQuotas.workspaceId, input.workspaceId))
+          .for("update")
+          .limit(1);
+        if (!quota) {
+          throw new Error(`Screenshot quota row not found: ${input.workspaceId}`);
+        }
+        const usedBytes = quota.reservedBytes + quota.readyBytes;
+        if (usedBytes + input.sizeBytes > input.workspaceQuotaBytes) {
+          throw new RetainedScreenshotQuotaExceededError(
+            input.workspaceQuotaBytes,
+            usedBytes,
+            input.sizeBytes,
+          );
+        }
+
+        const [file] = await tx
+          .insert(schema.files)
+          .values({
+            id: input.artifactId,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            status: "pending_upload",
+            filename: `computer-screenshot-${input.artifactId}.png`,
+            safeFilename: `computer-screenshot-${input.artifactId}.png`,
+            contentType: input.mediaType,
+            sizeBytes: input.sizeBytes,
+            sha256: input.sha256,
+            bucket: input.bucket,
+            objectKey: input.objectKey,
+          })
+          .returning();
+        if (!file) throw new Error("Failed to create retained screenshot file");
+
+        const [artifact] = await tx
+          .insert(schema.retainedScreenshotArtifacts)
+          .values({
+            artifactId: input.artifactId,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            attemptId: input.attemptId,
+            settlementKey: input.settlementKey,
+            toolCallId: input.toolCallId,
+            toolOutputId: input.toolOutputId,
+            status: "pending",
+            mediaType: input.mediaType,
+            sizeBytes: input.sizeBytes,
+            sha256: input.sha256,
+            width: input.width,
+            height: input.height,
+            retentionExpiresAt: input.retentionExpiresAt,
+          })
+          .returning();
+        if (!artifact) throw new Error("Failed to create retained screenshot artifact");
+
+        await tx
+          .update(schema.workspaceScreenshotQuotas)
+          .set({
+            reservedBytes: sql`${schema.workspaceScreenshotQuotas.reservedBytes} + ${input.sizeBytes}`,
+            updatedAt: new Date(),
+          })
+          .where(eq(schema.workspaceScreenshotQuotas.workspaceId, input.workspaceId));
+
+        return {
+          artifact: mapRetainedScreenshotArtifact(artifact, file),
+          created: true,
+        };
+      }),
+  );
+}
+
+/** Settle one exact pending/reconciling artifact ready and move its quota once. */
+export async function settleRetainedScreenshotArtifactReady(
+  db: Database,
+  input: { accountId: string; workspaceId: string; artifactId: string; settlementKey: string },
+): Promise<RetainedScreenshotArtifact> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const [artifact] = await tx
+          .select()
+          .from(schema.retainedScreenshotArtifacts)
+          .where(
+            and(
+              eq(schema.retainedScreenshotArtifacts.workspaceId, input.workspaceId),
+              eq(schema.retainedScreenshotArtifacts.artifactId, input.artifactId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!artifact || artifact.settlementKey !== input.settlementKey) {
+          throw new Error(`Retained screenshot settlement not found: ${input.artifactId}`);
+        }
+        const [quota] = await tx
+          .select()
+          .from(schema.workspaceScreenshotQuotas)
+          .where(eq(schema.workspaceScreenshotQuotas.workspaceId, input.workspaceId))
+          .for("update")
+          .limit(1);
+        const [file] = await tx
+          .select()
+          .from(schema.files)
+          .where(
+            and(
+              eq(schema.files.workspaceId, input.workspaceId),
+              eq(schema.files.id, input.artifactId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!quota || !file)
+          throw new Error(`Retained screenshot backing rows missing: ${input.artifactId}`);
+        if (artifact.status === "ready" && file.status === "ready") {
+          return mapRetainedScreenshotArtifact(artifact, file);
+        }
+        if (artifact.status !== "pending" && artifact.status !== "reconciling") {
+          throw new Error(`Retained screenshot is ${artifact.status}: ${input.artifactId}`);
+        }
+        if (quota.reservedBytes < artifact.sizeBytes) {
+          throw new Error(
+            `Retained screenshot reserved-byte invariant failed: ${input.artifactId}`,
+          );
+        }
+        const now = new Date();
+        const [updatedArtifact] = await tx
+          .update(schema.retainedScreenshotArtifacts)
+          .set({
+            status: "ready",
+            readyAt: now,
+            cleanupReason: null,
+            lastError: null,
+            updatedAt: now,
+          })
+          .where(eq(schema.retainedScreenshotArtifacts.artifactId, artifact.artifactId))
+          .returning();
+        const [updatedFile] = await tx
+          .update(schema.files)
+          .set({ status: "ready", updatedAt: now })
+          .where(eq(schema.files.id, artifact.artifactId))
+          .returning();
+        await tx
+          .update(schema.workspaceScreenshotQuotas)
+          .set({
+            reservedBytes: sql`${schema.workspaceScreenshotQuotas.reservedBytes} - ${artifact.sizeBytes}`,
+            readyBytes: sql`${schema.workspaceScreenshotQuotas.readyBytes} + ${artifact.sizeBytes}`,
+            updatedAt: now,
+          })
+          .where(eq(schema.workspaceScreenshotQuotas.workspaceId, input.workspaceId));
+        if (!updatedArtifact || !updatedFile) {
+          throw new Error(`Failed to settle retained screenshot: ${input.artifactId}`);
+        }
+        return mapRetainedScreenshotArtifact(updatedArtifact, updatedFile);
+      }),
+  );
+}
+
+/** Record a bounded diagnostic while preserving retryable pending truth. */
+export async function recordRetainedScreenshotArtifactError(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    artifactId: string;
+    settlementKey: string;
+    error: string;
+  },
+): Promise<void> {
+  await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      await scopedDb
+        .update(schema.retainedScreenshotArtifacts)
+        .set({ lastError: input.error.slice(0, 512), updatedAt: new Date() })
+        .where(
+          and(
+            eq(schema.retainedScreenshotArtifacts.workspaceId, input.workspaceId),
+            eq(schema.retainedScreenshotArtifacts.artifactId, input.artifactId),
+            eq(schema.retainedScreenshotArtifacts.settlementKey, input.settlementKey),
+            sql`${schema.retainedScreenshotArtifacts.status} in ('pending', 'reconciling')`,
+          ),
+        );
+    },
+  );
+}
+
+/** Session-qualified lookup: a screenshot from another session is indistinguishable from absent. */
+export async function getRetainedScreenshotArtifact(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  artifactId: string,
+): Promise<RetainedScreenshotArtifact | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({ artifact: schema.retainedScreenshotArtifacts, file: schema.files })
+      .from(schema.retainedScreenshotArtifacts)
+      .innerJoin(
+        schema.files,
+        and(
+          eq(schema.files.workspaceId, schema.retainedScreenshotArtifacts.workspaceId),
+          eq(schema.files.id, schema.retainedScreenshotArtifacts.artifactId),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.retainedScreenshotArtifacts.workspaceId, workspaceId),
+          eq(schema.retainedScreenshotArtifacts.sessionId, sessionId),
+          eq(schema.retainedScreenshotArtifacts.artifactId, artifactId),
+        ),
+      )
+      .limit(1);
+    return row ? mapRetainedScreenshotArtifact(row.artifact, row.file) : null;
+  });
+}
+
+export type RetainedScreenshotMaintenanceClaim = {
+  action: "reconcile" | "delete";
+  artifactId: string;
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  objectKey: string;
+  mediaType: string;
+  sizeBytes: number;
+  sha256: string;
+  width: number;
+  height: number;
+  retentionExpiresAt: Date;
+  cleanupReason: string | null;
+};
+
+/** Bounded global claim through the migration's sole FORCE-RLS bypass. */
+export async function claimRetainedScreenshotMaintenance(
+  db: Database,
+  input: { pendingGraceMs: number; claimTimeoutMs: number; limit: number },
+): Promise<RetainedScreenshotMaintenanceClaim[]> {
+  const rows = await rawRows<{
+    action: "reconcile" | "delete";
+    artifact_id: string;
+    account_id: string;
+    workspace_id: string;
+    session_id: string;
+    object_key: string;
+    media_type: string;
+    size_bytes: string | number;
+    sha256: string;
+    width: number;
+    height: number;
+    retention_expires_at: Date;
+    cleanup_reason: string | null;
+  }>(
+    db,
+    sql`
+      select * from opengeni_private.claim_retained_screenshot_maintenance(
+        ${input.pendingGraceMs}, ${input.claimTimeoutMs}, ${input.limit}
+      )
+    `,
+  );
+  return rows.map((row) => ({
+    action: row.action,
+    artifactId: row.artifact_id,
+    accountId: row.account_id,
+    workspaceId: row.workspace_id,
+    sessionId: row.session_id,
+    objectKey: row.object_key,
+    mediaType: row.media_type,
+    sizeBytes: Number(row.size_bytes),
+    sha256: row.sha256,
+    width: row.width,
+    height: row.height,
+    retentionExpiresAt: new Date(row.retention_expires_at),
+    cleanupReason: row.cleanup_reason,
+  }));
+}
+
+/**
+ * Complete a claimed reconcile/delete operation and release exactly one quota
+ * bucket. A lost response is idempotent on the requested terminal state.
+ */
+export async function completeRetainedScreenshotMaintenance(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    artifactId: string;
+    outcome: "ready" | "failed" | "expired" | "deleted";
+  },
+): Promise<boolean> {
+  if (input.outcome === "ready") {
+    const current = await getRetainedScreenshotArtifactByWorkspace(
+      db,
+      input.accountId,
+      input.workspaceId,
+      input.artifactId,
+    );
+    if (!current) return false;
+    await settleRetainedScreenshotArtifactReady(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      artifactId: input.artifactId,
+      settlementKey: current.settlementKey,
+    });
+    return true;
+  }
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const [artifact] = await tx
+          .select()
+          .from(schema.retainedScreenshotArtifacts)
+          .where(eq(schema.retainedScreenshotArtifacts.artifactId, input.artifactId))
+          .for("update")
+          .limit(1);
+        if (!artifact) return false;
+        if (artifact.status === input.outcome) return true;
+        if (artifact.status !== "reconciling" && artifact.status !== "cleanup_pending") {
+          return false;
+        }
+        const [quota] = await tx
+          .select()
+          .from(schema.workspaceScreenshotQuotas)
+          .where(eq(schema.workspaceScreenshotQuotas.workspaceId, input.workspaceId))
+          .for("update")
+          .limit(1);
+        const [file] = await tx
+          .select()
+          .from(schema.files)
+          .where(eq(schema.files.id, input.artifactId))
+          .for("update")
+          .limit(1);
+        if (!quota || !file) return false;
+        const wasReady = artifact.readyAt !== null;
+        if (
+          wasReady
+            ? quota.readyBytes < artifact.sizeBytes
+            : quota.reservedBytes < artifact.sizeBytes
+        ) {
+          throw new Error(`Retained screenshot quota invariant failed: ${input.artifactId}`);
+        }
+        const now = new Date();
+        await tx
+          .update(schema.retainedScreenshotArtifacts)
+          .set({
+            status: input.outcome,
+            cleanupReason: artifact.cleanupReason ?? input.outcome,
+            updatedAt: now,
+          })
+          .where(eq(schema.retainedScreenshotArtifacts.artifactId, input.artifactId));
+        await tx
+          .update(schema.files)
+          .set({ status: input.outcome === "failed" ? "failed" : input.outcome, updatedAt: now })
+          .where(eq(schema.files.id, input.artifactId));
+        await tx
+          .update(schema.workspaceScreenshotQuotas)
+          .set({
+            ...(wasReady
+              ? {
+                  readyBytes: sql`${schema.workspaceScreenshotQuotas.readyBytes} - ${artifact.sizeBytes}`,
+                }
+              : {
+                  reservedBytes: sql`${schema.workspaceScreenshotQuotas.reservedBytes} - ${artifact.sizeBytes}`,
+                }),
+            updatedAt: now,
+          })
+          .where(eq(schema.workspaceScreenshotQuotas.workspaceId, input.workspaceId));
+        return true;
+      }),
+  );
+}
+
+export async function getWorkspaceScreenshotQuota(
+  db: Database,
+  workspaceId: string,
+): Promise<{ reservedBytes: number; readyBytes: number } | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        reservedBytes: schema.workspaceScreenshotQuotas.reservedBytes,
+        readyBytes: schema.workspaceScreenshotQuotas.readyBytes,
+      })
+      .from(schema.workspaceScreenshotQuotas)
+      .where(eq(schema.workspaceScreenshotQuotas.workspaceId, workspaceId))
+      .limit(1);
+    return row ?? null;
+  });
+}
+
+async function getRetainedScreenshotArtifactByWorkspace(
+  db: Database,
+  accountId: string,
+  workspaceId: string,
+  artifactId: string,
+): Promise<RetainedScreenshotArtifact | null> {
+  return await withRlsContext(db, { accountId, workspaceId }, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({ artifact: schema.retainedScreenshotArtifacts, file: schema.files })
+      .from(schema.retainedScreenshotArtifacts)
+      .innerJoin(schema.files, eq(schema.files.id, schema.retainedScreenshotArtifacts.artifactId))
+      .where(eq(schema.retainedScreenshotArtifacts.artifactId, artifactId))
+      .limit(1);
+    return row ? mapRetainedScreenshotArtifact(row.artifact, row.file) : null;
+  });
+}
+
+function assertRetainedScreenshotReplayMatches(
+  artifact: RetainedScreenshotArtifact,
+  input: PrepareRetainedScreenshotArtifactInput,
+): void {
+  const exact =
+    artifact.artifactId === input.artifactId &&
+    artifact.accountId === input.accountId &&
+    artifact.workspaceId === input.workspaceId &&
+    artifact.sessionId === input.sessionId &&
+    artifact.turnId === input.turnId &&
+    artifact.attemptId === input.attemptId &&
+    artifact.toolCallId === input.toolCallId &&
+    artifact.toolOutputId === input.toolOutputId &&
+    artifact.mediaType === input.mediaType &&
+    artifact.sizeBytes === input.sizeBytes &&
+    artifact.sha256 === input.sha256 &&
+    artifact.width === input.width &&
+    artifact.height === input.height &&
+    artifact.file.bucket === input.bucket &&
+    artifact.file.objectKey === input.objectKey;
+  if (!exact) {
+    throw new Error(`Retained screenshot settlement identity conflict: ${input.settlementKey}`);
+  }
+}
+
 export async function getFileUpload(
   db: Database,
   workspaceId: string,
@@ -39357,6 +39903,36 @@ function mapFile(row: typeof schema.files.$inferSelect): FileAsset {
     objectKey: row.objectKey,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+function mapRetainedScreenshotArtifact(
+  artifact: typeof schema.retainedScreenshotArtifacts.$inferSelect,
+  file: typeof schema.files.$inferSelect,
+): RetainedScreenshotArtifact {
+  return {
+    artifactId: artifact.artifactId,
+    accountId: artifact.accountId,
+    workspaceId: artifact.workspaceId,
+    sessionId: artifact.sessionId,
+    turnId: artifact.turnId,
+    attemptId: artifact.attemptId,
+    settlementKey: artifact.settlementKey,
+    toolCallId: artifact.toolCallId,
+    toolOutputId: artifact.toolOutputId,
+    status: artifact.status as RetainedScreenshotArtifactStatus,
+    mediaType: artifact.mediaType,
+    sizeBytes: artifact.sizeBytes,
+    sha256: artifact.sha256,
+    width: artifact.width,
+    height: artifact.height,
+    retentionExpiresAt: artifact.retentionExpiresAt,
+    readyAt: artifact.readyAt,
+    cleanupReason: artifact.cleanupReason,
+    lastError: artifact.lastError,
+    createdAt: artifact.createdAt,
+    updatedAt: artifact.updatedAt,
+    file: mapFile(file),
   };
 }
 
