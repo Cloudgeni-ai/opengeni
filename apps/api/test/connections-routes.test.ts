@@ -161,6 +161,7 @@ async function bearer(
 
 type FakeAuthorizationServer = {
   url: string;
+  issuerRootRequests: string[];
   tokenRequests: URLSearchParams[];
   tokenRequestAuthHeaders: Array<string | null>;
   registrations: Record<string, unknown>[];
@@ -184,12 +185,17 @@ function startFakeAuthorizationServer(
   const tokenRequests: URLSearchParams[] = [];
   const tokenRequestAuthHeaders: Array<string | null> = [];
   const registrations: Record<string, unknown>[] = [];
+  const issuerRootRequests: string[] = [];
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
     async fetch(request) {
       const url = new URL(request.url);
       const origin = `http://127.0.0.1:${server.port}`;
+      if (url.pathname === "/") {
+        issuerRootRequests.push(url.toString());
+        return new Response("human documentation", { status: 200 });
+      }
       if (url.pathname === "/.well-known/oauth-protected-resource") {
         return Response.json({
           resource: "urn:test:mcp",
@@ -261,6 +267,7 @@ function startFakeAuthorizationServer(
   });
   return {
     url: `http://127.0.0.1:${server.port}`,
+    issuerRootRequests,
     tokenRequests,
     tokenRequestAuthHeaders,
     registrations,
@@ -664,6 +671,7 @@ describe("connections routes", () => {
       expect(authUrl.searchParams.get("resource")).toBe("urn:test:mcp");
       expect(authUrl.searchParams.get("scope")).toBe("documents:read");
       expect(authUrl.searchParams.get("code_challenge_method")).toBe("S256");
+      expect(as.issuerRootRequests).toEqual([]);
       expect(authUrl.searchParams.has("code_verifier")).toBe(false);
 
       const state = readSignedState(body.state, STATE_SECRET) as Record<string, unknown> | null;
@@ -1195,7 +1203,18 @@ describe("connections routes", () => {
       const responseText = await response.text();
       expect(response.status, responseText).toBe(422);
       expect(responseText).toContain("may not follow redirects");
-      expect(hits).toEqual(["/mcp", "/prm", "/as", "/register"]);
+      expect(hits).toEqual([
+        "/mcp",
+        "/prm",
+        "/.well-known/oauth-authorization-server/as",
+        "/as/.well-known/oauth-authorization-server",
+        "/.well-known/oauth-authorization-server",
+        "/.well-known/openid-configuration/as",
+        "/as/.well-known/openid-configuration",
+        "/.well-known/openid-configuration",
+        "/as",
+        "/register",
+      ]);
       expect(registrations).toEqual([
         {
           method: "POST",
