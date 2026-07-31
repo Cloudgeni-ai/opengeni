@@ -1,5 +1,22 @@
 # @opengeni/worker-bundle
 
+## 0.12.17
+
+### Patch Changes
+
+- 3450ee5: Estimate typed images as bounded native media only after validating PNG IHDR CRCs, preserve exact model-history prefixes across requests, and fail closed for computer use whenever hosted or structured-image transport is omitted or unproven so screenshots cannot become base64 function text.
+- Updated dependencies [3450ee5]
+- Updated dependencies [ddff8db]
+  - @opengeni/runtime@0.14.9
+  - @opengeni/contracts@0.24.1
+  - @opengeni/db@0.15.2
+  - @opengeni/documents@0.2.52
+  - @opengeni/core@0.13.6
+  - @opengeni/config@0.7.17
+  - @opengeni/events@0.3.43
+  - @opengeni/github@0.4.4
+  - @opengeni/storage@0.2.41
+
 ## 0.12.16
 
 ### Patch Changes

@@ -1,5 +1,27 @@
 # @opengeni/api-router
 
+## 0.13.2
+
+### Patch Changes
+
+- 387cb73: Return the canonical validation envelope when a knowledge-search request exceeds the maximum result limit.
+- ddff8db: Add the read-only Workspace State inventory with bounded, authorization-scoped
+  Documents aggregates and a deterministic metadata-only Memory projection. The
+  projection explicitly labels legacy `knowledge_memories` preference-kind counts
+  as non-authoritative observations while preserving the structured preference
+  registry as the sole active preference authority.
+- Updated dependencies [3450ee5]
+- Updated dependencies [ddff8db]
+  - @opengeni/runtime@0.14.9
+  - @opengeni/contracts@0.24.1
+  - @opengeni/db@0.15.2
+  - @opengeni/documents@0.2.52
+  - @opengeni/core@0.13.6
+  - @opengeni/config@0.7.17
+  - @opengeni/events@0.3.43
+  - @opengeni/github@0.4.4
+  - @opengeni/storage@0.2.41
+
 ## 0.13.1
 
 ### Patch Changes
