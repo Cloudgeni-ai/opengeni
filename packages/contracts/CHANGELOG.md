@@ -1,5 +1,11 @@
 # @opengeni/contracts
 
+## 0.24.4
+
+### Patch Changes
+
+- b2e975f: Advance the merged knowledge release train to fresh publication identities without changing runtime behavior. This corrective source is derived from current main and does not reuse generated release output.
+
 ## 0.24.3
 
 ### Patch Changes
