@@ -37,11 +37,7 @@ import {
 import { and, eq, sql } from "drizzle-orm";
 import { sessionEvents, sessions } from "@opengeni/db/schema";
 import { BASE_URL, resolveWorkspaceId, WEB_URL } from "./harness";
-import {
-  buildMonsterEvents,
-  resolveProfile,
-  type MonsterProfile,
-} from "./monster/builder.ts";
+import { buildMonsterEvents, resolveProfile, type MonsterProfile } from "./monster/builder.ts";
 
 const ORIGIN = "monster-chat-seed";
 const BATCH = `monster-${new Date().toISOString().replace(/[:.]/g, "-")}`;
@@ -60,8 +56,7 @@ async function resolveIdentity(): Promise<{
   accountId: string;
   subjectId: string;
 }> {
-  const workspaceId =
-    process.env.OPENGENI_SEED_WORKSPACE_ID ?? (await resolveWorkspaceId());
+  const workspaceId = process.env.OPENGENI_SEED_WORKSPACE_ID ?? (await resolveWorkspaceId());
   const envAccount = process.env.OPENGENI_SEED_ACCOUNT_ID;
   if (envAccount && SUBJECT) {
     return { workspaceId, accountId: envAccount, subjectId: SUBJECT };
@@ -214,12 +209,16 @@ async function mkChild(
     title: input.title,
     source: "user",
   });
-  await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scoped) => {
-    await scoped
-      .update(sessions)
-      .set({ status: "idle", updatedAt: new Date() })
-      .where(and(eq(sessions.workspaceId, input.workspaceId), eq(sessions.id, session.id)));
-  });
+  await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scoped) => {
+      await scoped
+        .update(sessions)
+        .set({ status: "idle", updatedAt: new Date() })
+        .where(and(eq(sessions.workspaceId, input.workspaceId), eq(sessions.id, session.id)));
+    },
+  );
   return session;
 }
 
@@ -336,9 +335,7 @@ async function main(): Promise<void> {
       throw new Error(`count mismatch: db=${counted} built=${built.events.length}`);
     }
     if (session.lastSequence !== built.events.length) {
-      throw new Error(
-        `lastSequence mismatch: ${session.lastSequence} !== ${built.events.length}`,
-      );
+      throw new Error(`lastSequence mismatch: ${session.lastSequence} !== ${built.events.length}`);
     }
     if (session.status !== "idle") {
       throw new Error(`expected idle, got ${session.status}`);
@@ -349,7 +346,9 @@ async function main(): Promise<void> {
     );
     console.log(`[seed:monster-chat] histogramHash=${built.histogramHash}`);
     await spotCheckApi(workspaceId, parent.id);
-    console.log(`[seed:monster-chat] open: ${WEB_URL}/workspaces/${workspaceId}/sessions/${parent.id}`);
+    console.log(
+      `[seed:monster-chat] open: ${WEB_URL}/workspaces/${workspaceId}/sessions/${parent.id}`,
+    );
   } finally {
     await close();
   }

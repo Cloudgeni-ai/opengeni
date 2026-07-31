@@ -575,10 +575,7 @@ export class OpenGeniClient {
   }
 
   /** Newest turn that durably emitted `turn.started`, or null before any admission. */
-  async getLatestStartedTurn(
-    workspaceId: string,
-    sessionId: string,
-  ): Promise<SessionTurn | null> {
+  async getLatestStartedTurn(workspaceId: string, sessionId: string): Promise<SessionTurn | null> {
     const turns = await this.listTurns(workspaceId, sessionId, { latestStarted: true });
     return turns[0] ?? null;
   }

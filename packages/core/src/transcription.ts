@@ -87,9 +87,7 @@ export type TranscriptionProvider = {
    * Deployment readiness when called without a workspace. When `workspaceId` is
    * provided, providers may require a workspace-attached credential (e.g. Codex).
    */
-  available(
-    context?: TranscriptionAvailabilityContext,
-  ): boolean | Promise<boolean>;
+  available(context?: TranscriptionAvailabilityContext): boolean | Promise<boolean>;
   transcribe(input: {
     audio: Uint8Array;
     mimeType: string;
@@ -102,9 +100,7 @@ export type TranscriptionProvider = {
 export type TranscriptionService = {
   limits(): TranscriptionLimits;
   /** True when at least one ready provider can serve requests. */
-  available(
-    context?: TranscriptionAvailabilityContext,
-  ): boolean | Promise<boolean>;
+  available(context?: TranscriptionAvailabilityContext): boolean | Promise<boolean>;
   transcribe(request: TranscriptionRequest): Promise<TranscriptionResult>;
 };
 
@@ -112,10 +108,7 @@ export function normalizeMimeType(mimeType: string): string {
   return mimeType.trim().toLowerCase();
 }
 
-export function isAcceptedMimeType(
-  mimeType: string,
-  accepted: readonly string[],
-): boolean {
+export function isAcceptedMimeType(mimeType: string, accepted: readonly string[]): boolean {
   const normalized = normalizeMimeType(mimeType);
   if (accepted.some((candidate) => normalizeMimeType(candidate) === normalized)) {
     return true;

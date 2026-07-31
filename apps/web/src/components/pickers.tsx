@@ -163,11 +163,7 @@ export function ModelPicker(props: {
   );
 }
 
-function ModelChoiceRow(props: {
-  row: PickerModelRow;
-  selected: boolean;
-  onSelect: () => void;
-}) {
+function ModelChoiceRow(props: { row: PickerModelRow; selected: boolean; onSelect: () => void }) {
   const disabled = !props.row.selectable;
   return (
     <DropdownMenuItem

@@ -5,7 +5,11 @@ import {
   type ComposerState,
   type UseTurnQueueResult,
 } from "@opengeni/react";
-import type { ClientVoiceInputConfig, SessionPendingInputPreview, SessionTurn } from "@opengeni/sdk";
+import type {
+  ClientVoiceInputConfig,
+  SessionPendingInputPreview,
+  SessionTurn,
+} from "@opengeni/sdk";
 import { useMemo, useState } from "react";
 
 import { ModelPicker, SessionToolPicker } from "@/components/pickers";
@@ -114,8 +118,9 @@ export function ScenarioStack({
   const runningAgents = agents.filter(
     (node) => node.session.status === "running" && node.session.effectiveControl.state === "active",
   ).length;
-  const pausedAgents = agents.filter((node) => node.session.effectiveControl.state === "paused")
-    .length;
+  const pausedAgents = agents.filter(
+    (node) => node.session.effectiveControl.state === "paused",
+  ).length;
 
   return (
     <div

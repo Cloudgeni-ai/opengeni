@@ -257,8 +257,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           const existing = [...items]
             .reverse()
             .find(
-              (item): item is ToolCallItem =>
-                item.kind === "tool-call" && item.callId === callId,
+              (item): item is ToolCallItem => item.kind === "tool-call" && item.callId === callId,
             );
           if (existing) {
             if (args != null) {

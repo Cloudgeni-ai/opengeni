@@ -749,9 +749,7 @@ function WebSearchRenderer({ item }: ToolRendererProps) {
     (value): value is string => typeof value === "string" && value.trim().length > 0,
   );
   const searchQuery =
-    (typeof action.query === "string" && action.query.trim().length > 0
-      ? action.query
-      : null) ??
+    (typeof action.query === "string" && action.query.trim().length > 0 ? action.query : null) ??
     queries[0] ??
     webSearchQueryFromArguments(item.arguments);
   const running = item.status === "running";

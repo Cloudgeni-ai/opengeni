@@ -850,8 +850,10 @@ describe("buildTimeline", () => {
     expect(items.map((item) => item.kind)).toEqual(["tool-call", "agent-message"]);
     const search = items[0] as ToolCallItem;
     expect(search.status).toBe("complete");
-    expect((search.raw as { providerData?: { action?: { query?: string } } }).providerData?.action
-      ?.query).toBe("hexagonal diamond");
+    expect(
+      (search.raw as { providerData?: { action?: { query?: string } } }).providerData?.action
+        ?.query,
+    ).toBe("hexagonal diamond");
   });
 
   test("ordinary tools after a completed mid-turn message keep append order", () => {
@@ -866,11 +868,7 @@ describe("buildTimeline", () => {
       event("agent.message.completed", { text: "Done." }),
     ]);
 
-    expect(items.map((item) => item.kind)).toEqual([
-      "agent-message",
-      "tool-call",
-      "agent-message",
-    ]);
+    expect(items.map((item) => item.kind)).toEqual(["agent-message", "tool-call", "agent-message"]);
   });
 
   test("removes unresolved private citation handles from timeline text", () => {

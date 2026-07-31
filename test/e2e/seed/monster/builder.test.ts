@@ -1,9 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import {
-  buildMonsterEvents,
-  hashHistogram,
-  PROFILE_TARGETS,
-} from "./builder.ts";
+import { buildMonsterEvents, hashHistogram, PROFILE_TARGETS } from "./builder.ts";
 import { TIP_PAGE_EVENTS, TIMELINE_DENSE_TYPES } from "./phases.ts";
 
 const CHILD_IDS = [
@@ -76,9 +72,9 @@ describe("monster chat seed builder", () => {
 
     // Tip must end on a settled conversational turn, not seed-pad junk.
     const lastTypes = tip.slice(-8).map((event) => event.type);
-    expect(lastTypes.some((type) => type === "turn.completed" || type === "agent.message.completed")).toBe(
-      true,
-    );
+    expect(
+      lastTypes.some((type) => type === "turn.completed" || type === "agent.message.completed"),
+    ).toBe(true);
     expect(lastTypes.every((type) => type !== "fs.changed")).toBe(true);
   });
 

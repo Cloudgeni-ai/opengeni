@@ -67,10 +67,7 @@ export const reasoningEffortOrder: IntelligenceEffort[] = [
 ];
 
 export function isIntelligenceEffort(value: unknown): value is IntelligenceEffort {
-  return (
-    typeof value === "string" &&
-    (reasoningEffortOrder as readonly string[]).includes(value)
-  );
+  return typeof value === "string" && (reasoningEffortOrder as readonly string[]).includes(value);
 }
 
 export function labelEffort(value: IntelligenceEffort): string {

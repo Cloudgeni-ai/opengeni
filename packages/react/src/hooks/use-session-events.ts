@@ -474,8 +474,7 @@ export function useSessionEvents(
       setHasOlder(olderStillAvailable);
       if (viewModeRef.current === "history") {
         const highWater = lastSequenceRef.current;
-        const newer =
-          retainedNewest !== null && (retainedNewest < highWater || retained.truncated);
+        const newer = retainedNewest !== null && (retainedNewest < highWater || retained.truncated);
         hasNewerRef.current = newer;
         setHasNewer(newer);
       } else {

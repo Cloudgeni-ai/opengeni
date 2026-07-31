@@ -5043,9 +5043,7 @@ export function normalizeToolOutputForEvent(output: unknown): unknown {
  * timeline only sees search cards after the whole model round finishes — or
  * never mid-turn — while assistant prose ("Search 1/5") streams live.
  */
-function hostedWebSearchToolCallFromResponsesEvent(
-  raw: unknown,
-): NormalizedRuntimeEvent | null {
+function hostedWebSearchToolCallFromResponsesEvent(raw: unknown): NormalizedRuntimeEvent | null {
   if (!raw || typeof raw !== "object") {
     return null;
   }

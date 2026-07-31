@@ -1,10 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { act } from "react";
 
-import {
-  SessionChrome,
-  sessionChromeGoalPillState,
-} from "../src/components/session-chrome";
+import { SessionChrome, sessionChromeGoalPillState } from "../src/components/session-chrome";
 import type { ComposerState } from "../src/hooks/use-composer";
 import type { UseGoalResult } from "../src/hooks/use-goal";
 import type { UseTurnQueueResult } from "../src/hooks/use-turn-queue";
@@ -187,10 +184,18 @@ describe("SessionChrome", () => {
     );
     const root = mounted.container.querySelector("[data-og-session-chrome]");
     expect(root).not.toBeNull();
-    expect(mounted.container.querySelector('[data-og-session-chrome-signal="incoming"]')).not.toBeNull();
-    expect(mounted.container.querySelector('[data-og-session-chrome-signal="queue"]')).not.toBeNull();
-    expect(mounted.container.querySelector('[data-og-session-chrome-signal="goal"]')).not.toBeNull();
-    expect(mounted.container.querySelector('[data-og-session-chrome-signal="agents"]')).not.toBeNull();
+    expect(
+      mounted.container.querySelector('[data-og-session-chrome-signal="incoming"]'),
+    ).not.toBeNull();
+    expect(
+      mounted.container.querySelector('[data-og-session-chrome-signal="queue"]'),
+    ).not.toBeNull();
+    expect(
+      mounted.container.querySelector('[data-og-session-chrome-signal="goal"]'),
+    ).not.toBeNull();
+    expect(
+      mounted.container.querySelector('[data-og-session-chrome-signal="agents"]'),
+    ).not.toBeNull();
   });
 
   test("expands queue and reveals hover actions wired to queue APIs", async () => {
@@ -222,7 +227,9 @@ describe("SessionChrome", () => {
     await act(async () => {
       queueChip?.click();
     });
-    expect(mounted.container.querySelector('[data-og-session-chrome-panel="queue"]')).not.toBeNull();
+    expect(
+      mounted.container.querySelector('[data-og-session-chrome-panel="queue"]'),
+    ).not.toBeNull();
     expect(mounted.container.querySelector('[data-og-session-chrome-open="true"]')).not.toBeNull();
 
     const remove = mounted.container.querySelector<HTMLButtonElement>(
@@ -251,9 +258,9 @@ describe("SessionChrome", () => {
     expect(calls).toContain("steer:11111111-1111-4111-8111-111111111111");
     expect(calls).toContain("remove:11111111-1111-4111-8111-111111111111");
     expect(calls).toContain("edit:11111111-1111-4111-8111-111111111111");
-    expect(calls.some((entry) => entry.startsWith("move:11111111-1111-4111-8111-111111111111:"))).toBe(
-      true,
-    );
+    expect(
+      calls.some((entry) => entry.startsWith("move:11111111-1111-4111-8111-111111111111:")),
+    ).toBe(true);
   });
 
   test("inbox dismiss action appears when onDismissIncoming is provided", async () => {
@@ -314,7 +321,9 @@ describe("SessionChrome", () => {
       queueChip?.click();
     });
     expect(mounted.container.querySelector("[data-og-session-chrome-panel-shell]")).toBe(shell);
-    expect(mounted.container.querySelector('[data-og-session-chrome-panel="queue"]')).not.toBeNull();
+    expect(
+      mounted.container.querySelector('[data-og-session-chrome-panel="queue"]'),
+    ).not.toBeNull();
     expect(mounted.container.querySelector('[data-og-session-chrome-open="true"]')).not.toBeNull();
 
     const remove = mounted.container.querySelector<HTMLButtonElement>(
@@ -331,9 +340,7 @@ describe("SessionChrome", () => {
     expect(steer?.getAttribute("data-slot")).toBe("tooltip-trigger");
 
     // Truncated prompt / signal chips stay tip-free; only icon actions use Tooltip.
-    const prompt = mounted.container.querySelector(
-      '[data-og-session-chrome-panel="queue"] p',
-    );
+    const prompt = mounted.container.querySelector('[data-og-session-chrome-panel="queue"] p');
     expect(prompt?.closest('[data-slot="tooltip-trigger"]')).toBeNull();
     expect(queueChip?.getAttribute("data-slot")).not.toBe("tooltip-trigger");
   });

@@ -47,7 +47,9 @@ class FakeMediaRecorder {
   }
   stop() {
     this.state = "inactive";
-    this.ondataavailable?.({ data: new Blob([new Uint8Array([1, 2, 3])], { type: this.mimeType }) });
+    this.ondataavailable?.({
+      data: new Blob([new Uint8Array([1, 2, 3])], { type: this.mimeType }),
+    });
     this.onstop?.();
   }
 }
@@ -75,7 +77,11 @@ function installMediaMocks(options?: { deny?: boolean }) {
   return track;
 }
 
-function composerState(value: string, setValue: (value: string) => void, sends: string[]): ComposerState {
+function composerState(
+  value: string,
+  setValue: (value: string) => void,
+  sends: string[],
+): ComposerState {
   return {
     value,
     setValue,
@@ -302,7 +308,9 @@ describe("useVoiceInput", () => {
 
     mounted = await renderComponent(<Harness />);
     await act(async () => {
-      mounted?.container.querySelector<HTMLButtonElement>("[aria-label='Start voice input']")?.click();
+      mounted?.container
+        .querySelector<HTMLButtonElement>("[aria-label='Start voice input']")
+        ?.click();
       await Promise.resolve();
     });
     await act(async () => {
@@ -315,9 +323,7 @@ describe("useVoiceInput", () => {
     expect(draft).toBe("keep me");
     expect(calls).toBe(0);
     expect(sends).toHaveLength(0);
-    expect(
-      mounted.container.querySelector("[aria-label='Start voice input']"),
-    ).toBeTruthy();
+    expect(mounted.container.querySelector("[aria-label='Start voice input']")).toBeTruthy();
   });
 
   test("appendFinalTranscript inserts once with spacing", () => {

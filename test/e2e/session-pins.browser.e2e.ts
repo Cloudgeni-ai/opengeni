@@ -1027,10 +1027,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await desktopPage.getByRole("button", { name: "Resume this workstream" }).click();
       await desktopPage.getByRole("button", { name: "Pause this workstream" }).waitFor();
 
-      const boxes = await Promise.all([
-        chrome.boundingBox(),
-        composer.boundingBox(),
-      ]);
+      const boxes = await Promise.all([chrome.boundingBox(), composer.boundingBox()]);
       for (const box of boxes) expect(box).not.toBeNull();
       expect(boxes[0]!.y).toBeLessThan(boxes[1]!.y);
       expect(await goalChip.count()).toBe(1);

@@ -710,10 +710,7 @@ describe("MessageTimeline — settled turn folding", () => {
     expect(turnSummaryTriggers(r.container).length).toBeGreaterThanOrEqual(1);
 
     await r.rerender(
-      <MessageTimeline
-        events={[...midTurn, timelineEvent("turn.completed", {})]}
-        status="idle"
-      />,
+      <MessageTimeline events={[...midTurn, timelineEvent("turn.completed", {})]} status="idle" />,
     );
     await flush();
 

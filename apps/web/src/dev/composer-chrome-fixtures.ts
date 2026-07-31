@@ -231,10 +231,7 @@ export function galleryGoal(overrides: Partial<SessionGoal> | null): UseGoalResu
   };
 }
 
-export function galleryAgentNode(
-  index: number,
-  overrides: Partial<Session> = {},
-): LineageNode {
+export function galleryAgentNode(index: number, overrides: Partial<Session> = {}): LineageNode {
   const id = `${String(index + 1).padStart(8, "0")}-7777-4777-8777-${String(index + 1).padStart(12, "0")}`;
   return {
     session: gallerySession({

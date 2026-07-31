@@ -263,8 +263,7 @@ describe("timeline scroll ownership browser regression", () => {
       () => {
         const node = document.querySelector("[data-timeline-test] .og-root > div");
         return (
-          node instanceof HTMLElement &&
-          node.scrollHeight - node.scrollTop - node.clientHeight < 2
+          node instanceof HTMLElement && node.scrollHeight - node.scrollTop - node.clientHeight < 2
         );
       },
       undefined,

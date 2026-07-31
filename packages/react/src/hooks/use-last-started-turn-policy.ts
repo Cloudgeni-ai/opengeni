@@ -1,11 +1,7 @@
 import type { ReasoningEffort, SessionEvent, SessionTurn } from "@opengeni/sdk";
 import { useCallback, useEffect } from "react";
 import { useOpenGeni, type ClientOverride } from "../session-context";
-import {
-  usePolledValue,
-  useSessionEventTrigger,
-  type SessionEventFeedOptions,
-} from "./internal";
+import { usePolledValue, useSessionEventTrigger, type SessionEventFeedOptions } from "./internal";
 
 /** Refresh when a turn actually admits — not on composer picker / queue-only changes. */
 export function isLastStartedTurnPolicyEvent(event: Pick<SessionEvent, "type">): boolean {

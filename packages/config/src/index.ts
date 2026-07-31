@@ -347,9 +347,7 @@ const SettingsSchema = z.object({
   // Codex subscription STT is preferred by default when subscription routing is
   // enabled; operators can put openai/azure-openai first explicitly.
   // Supported: openai, azure-openai, codex-subscription.
-  voiceInputProviderOrder: z
-    .string()
-    .default("codex-subscription,openai,azure-openai"),
+  voiceInputProviderOrder: z.string().default("codex-subscription,openai,azure-openai"),
   // OpenAI public /v1/audio/transcriptions path. Reuses OPENGENI_OPENAI_API_KEY
   // when voiceInputOpenaiApiKey is unset. Default model is gpt-transcribe.
   voiceInputOpenaiEnabled: EnvBoolean.default(true),
@@ -903,9 +901,7 @@ export type VoiceInputProviderConfig =
  * Reject empty / template secrets so `.env.example` placeholders like
  * `your-key` cannot advertise voice input as available and then 401 upstream.
  */
-export function isUsableVoiceInputSecret(
-  value: string | null | undefined,
-): value is string {
+export function isUsableVoiceInputSecret(value: string | null | undefined): value is string {
   if (value == null) return false;
   const trimmed = value.trim();
   if (!trimmed) return false;
@@ -933,8 +929,9 @@ export function resolveVoiceInputProviderRegistry(settings: Settings): VoiceInpu
   const order = settings.voiceInputProviderOrder
     .split(",")
     .map((part) => part.trim())
-    .filter((part): part is VoiceInputProviderId =>
-      part === "openai" || part === "azure-openai" || part === "codex-subscription",
+    .filter(
+      (part): part is VoiceInputProviderId =>
+        part === "openai" || part === "azure-openai" || part === "codex-subscription",
     );
   const seen = new Set<VoiceInputProviderId>();
   const providers: VoiceInputProviderConfig[] = [];
@@ -974,10 +971,11 @@ export function resolveVoiceInputProviderRegistry(settings: Settings): VoiceInpu
         settings.azureOpenaiEndpoint ??
         ""
       ).replace(/\/+$/, "");
-      const deployment =
-        settings.voiceInputAzureDeployment ?? settings.azureOpenaiDeployment ?? "";
+      const deployment = settings.voiceInputAzureDeployment ?? settings.azureOpenaiDeployment ?? "";
       const apiVersion =
-        settings.voiceInputAzureApiVersion ?? settings.azureOpenaiApiVersion ?? "2025-04-01-preview";
+        settings.voiceInputAzureApiVersion ??
+        settings.azureOpenaiApiVersion ??
+        "2025-04-01-preview";
       const apiKey = settings.voiceInputAzureApiKey ?? settings.azureOpenaiApiKey ?? null;
       const adToken = settings.voiceInputAzureAdToken ?? settings.azureOpenaiAdToken ?? null;
       if (
