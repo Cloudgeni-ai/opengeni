@@ -31,8 +31,11 @@ import {
 } from "@opengeni/testing";
 import { createApp } from "../src/app";
 import {
+  createSlackFilesListCursor,
   createOpenGeniSlackBotClient,
   exchangeOpenGeniSlackAuthorizationCode,
+  nextSlackFilesListPage,
+  resolveSlackFilesListPage,
   resolveSlackBotConnectionForTool,
   verifyOpenGeniSlackBotCredential,
 } from "../src/integrations/slack-bot";
@@ -108,6 +111,10 @@ function fixtureBotToken(): string {
 type SlackCall = {
   method: string;
   channel: string | null;
+  count: string | null;
+  page: string | null;
+  cursor: string | null;
+  limit: string | null;
   fileId: string | null;
   clientMessageId: string | null;
   parentTimestamp: string | null;
@@ -126,6 +133,7 @@ function fakeSlack(
     loseFirstPostResponse?: boolean;
     transcriptRequiresUserSession?: boolean;
     transcriptInFileInfo?: boolean;
+    fileListResponse?: (input: { count: number; page: number }) => Record<string, unknown>;
   } = {},
 ) {
   const calls: SlackCall[] = [];
@@ -138,6 +146,10 @@ function fakeSlack(
     calls.push({
       method,
       channel: params.get("channel"),
+      count: params.get("count"),
+      page: params.get("page"),
+      cursor: params.get("cursor"),
+      limit: params.get("limit"),
       fileId: params.get("file"),
       clientMessageId: params.get("client_msg_id"),
       parentTimestamp: params.get("ts"),
@@ -278,6 +290,11 @@ function fakeSlack(
       });
     }
     if (method === "files.list") {
+      const count = Number(params.get("count"));
+      const page = Number(params.get("page"));
+      if (options.fileListResponse) {
+        return Response.json({ ok: true, ...options.fileListResponse({ count, page }) });
+      }
       return Response.json({
         ok: true,
         files: [
@@ -294,7 +311,7 @@ function fakeSlack(
             huddle_transcript_file_id: "FTRANSCRIPT",
           },
         ],
-        response_metadata: { next_cursor: "" },
+        paging: { count, total: 1, page, pages: 1 },
       });
     }
     if (method === "files.info") {
@@ -366,6 +383,120 @@ function fakeSlack(
   return { fetch: fetch as typeof globalThis.fetch, calls, committedPosts };
 }
 
+describe("Slack files.list pagination adapter", () => {
+  const context = {
+    connectionId: "11111111-1111-4111-8111-111111111111",
+    key: randomBytes(32),
+  };
+
+  test("bounds count and advances exactly once across realistic pages", () => {
+    expect(resolveSlackFilesListPage({ channelId: "C_MEMBER", limit: 999 }, context)).toEqual({
+      count: 200,
+      page: 1,
+    });
+
+    const firstPage = resolveSlackFilesListPage({ channelId: "C_MEMBER", limit: 1 }, context);
+    expect(firstPage).toEqual({ count: 1, page: 1 });
+    const nextPage = nextSlackFilesListPage(
+      {
+        files: [{ id: "F_PAGE_1" }],
+        paging: { count: 1, total: 2, page: 1, pages: 2 },
+      },
+      firstPage,
+      1,
+    );
+    expect(nextPage).toBe(2);
+    const cursor = createSlackFilesListCursor(
+      { channelId: "C_MEMBER", count: firstPage.count, page: nextPage! },
+      context,
+    );
+    expect(cursor).toMatch(/^files-v1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
+
+    const secondPage = resolveSlackFilesListPage({ channelId: "C_MEMBER", cursor }, context);
+    expect(secondPage).toEqual({ count: 1, page: 2 });
+    expect(
+      nextSlackFilesListPage(
+        {
+          files: [{ id: "F_PAGE_2" }],
+          paging: { count: 1, total: 2, page: 2, pages: 2 },
+        },
+        secondPage,
+        1,
+      ),
+    ).toBeNull();
+  });
+
+  test("rejects malformed, mixed, oversized, and non-advancing provider paging", () => {
+    const requested = { count: 1, page: 1 };
+    const invalidPayloads = [
+      { files: [] },
+      {
+        files: [],
+        paging: { count: 1, total: 0, page: 1, pages: 0 },
+        response_metadata: { next_cursor: "legacy-cursor" },
+      },
+      {
+        files: [{ id: "F_ONE" }, { id: "F_TWO" }],
+        paging: { count: 1, total: 1, page: 1, pages: 1 },
+      },
+      {
+        files: [{ id: "F_PAGE_1" }],
+        paging: { count: 1, total: 2, page: 2, pages: 2 },
+      },
+      {
+        files: [{ id: "F_PAGE_1" }],
+        paging: { count: 1, total: 2, page: 1, pages: 1 },
+      },
+    ];
+    for (const payload of invalidPayloads) {
+      expect(() =>
+        nextSlackFilesListPage(
+          payload,
+          requested,
+          Array.isArray(payload.files) ? payload.files.length : 0,
+        ),
+      ).toThrow("invalid_files_paging");
+    }
+
+    expect(() =>
+      nextSlackFilesListPage(
+        {
+          files: [{ id: "F_PAGE_1" }],
+          paging: { count: 1, total: 2, page: 1, pages: 2 },
+        },
+        { count: 1, page: 2 },
+        1,
+      ),
+    ).toThrow("invalid_files_paging");
+  });
+
+  test("binds opaque continuations to connection, channel, and page size", () => {
+    const cursor = createSlackFilesListCursor(
+      { channelId: "C_MEMBER", count: 1, page: 2 },
+      context,
+    );
+    expect(() => resolveSlackFilesListPage({ channelId: "C_OTHER", cursor }, context)).toThrow(
+      "invalid_files_cursor",
+    );
+    expect(() =>
+      resolveSlackFilesListPage({ channelId: "C_MEMBER", cursor, limit: 2 }, context),
+    ).toThrow("invalid_files_cursor");
+    expect(() =>
+      resolveSlackFilesListPage(
+        { channelId: "C_MEMBER", cursor },
+        { ...context, connectionId: crypto.randomUUID() },
+      ),
+    ).toThrow("invalid_files_cursor");
+    const replacement = cursor.endsWith("A") ? "B" : "A";
+    expect(() =>
+      resolveSlackFilesListPage(
+        { channelId: "C_MEMBER", cursor: `${cursor.slice(0, -1)}${replacement}` },
+        context,
+      ),
+    ).toThrow("invalid_files_cursor");
+  });
+});
+
 describe("OpenGeni Slack bot credential verification", () => {
   test("exchanges the authorization code server-side with the configured callback", async () => {
     let requestUrl = "";
@@ -425,17 +556,13 @@ describe("OpenGeni Slack bot credential verification", () => {
 
   test("accepts only the exact bot identity and scope set", async () => {
     expect(OPENGENI_SLACK_BOT_REQUIRED_SCOPES).toEqual([
-      "app_mentions:read",
       "bookmarks:read",
       "canvases:read",
-      "canvases:write",
       "channels:history",
       "channels:read",
       "chat:write",
-      "commands",
       "emoji:read",
       "files:read",
-      "files:write",
       "groups:history",
       "groups:read",
       "im:history",
@@ -446,7 +573,6 @@ describe("OpenGeni Slack bot credential verification", () => {
       "mpim:read",
       "pins:read",
       "reactions:read",
-      "reactions:write",
       "team:read",
       "usergroups:read",
       "users:read",
@@ -1477,6 +1603,156 @@ describe("OpenGeni Slack bot connection", () => {
         requestedConnectionId: connected.body.connection.id,
       }),
     ).rejects.toThrow("OpenGeni Slack bot connection");
+  });
+
+  test("adapts files.list to bounded count/page pagination with opaque continuation", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack({
+      fileListResponse: ({ count, page }) => {
+        if (count === 200) {
+          return {
+            files: [{ id: "F_BOUNDED", title: "Bounded page" }],
+            paging: { count, total: 1, page, pages: 1 },
+          };
+        }
+        return {
+          files: [{ id: page === 1 ? "F_PAGE_1" : "F_PAGE_2", title: `Page ${page}` }],
+          paging: { count, total: 2, page, pages: 2 },
+        };
+      },
+    });
+    const connected = await connectBot(workspace, slack.fetch);
+    const resolved = await resolveSlackBotConnectionForTool({
+      db: client.db,
+      grant: {
+        ...workspace,
+        subjectId: "subject-a",
+        permissions: ["connections:read"],
+        metadata: {},
+      },
+      sessionId: null,
+      requestedConnectionId: connected.body.connection.id,
+    });
+    const bot = createOpenGeniSlackBotClient(
+      { db: client.db, settings, slackFetch: slack.fetch },
+      resolved,
+    );
+
+    const bounded = await bot.listFiles({ channelId: "C_MEMBER", limit: 999 });
+    expect(bounded).toMatchObject({
+      files: [{ id: "F_BOUNDED", title: "Bounded page" }],
+      nextCursor: null,
+    });
+
+    const first = await bot.listFiles({ channelId: "C_MEMBER", limit: 1 });
+    expect(first).toMatchObject({ files: [{ id: "F_PAGE_1", title: "Page 1" }] });
+    expect(first.nextCursor).toMatch(/^files-v1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
+    const second = await bot.listFiles({
+      channelId: "C_MEMBER",
+      cursor: first.nextCursor!,
+    });
+    expect(second).toMatchObject({
+      files: [{ id: "F_PAGE_2", title: "Page 2" }],
+      nextCursor: null,
+    });
+    expect(new Set([...first.files, ...second.files].map((file) => file.id)).size).toBe(2);
+
+    const fileCalls = slack.calls.filter((call) => call.method === "files.list");
+    expect(fileCalls).toMatchObject([
+      { channel: "C_MEMBER", count: "200", page: "1", cursor: null, limit: null },
+      { channel: "C_MEMBER", count: "1", page: "1", cursor: null, limit: null },
+      { channel: "C_MEMBER", count: "1", page: "2", cursor: null, limit: null },
+    ]);
+
+    await expect(
+      bot.listFiles({ channelId: "C_MEMBER", cursor: first.nextCursor!, limit: 2 }),
+    ).rejects.toThrow("invalid_files_cursor");
+    await expect(
+      bot.listFiles({ channelId: "C_OTHER", cursor: first.nextCursor! }),
+    ).rejects.toThrow("invalid_files_cursor");
+    const replacement = first.nextCursor!.endsWith("A") ? "B" : "A";
+    await expect(
+      bot.listFiles({
+        channelId: "C_MEMBER",
+        cursor: `${first.nextCursor!.slice(0, -1)}${replacement}`,
+      }),
+    ).rejects.toThrow("invalid_files_cursor");
+    expect(slack.calls.filter((call) => call.method === "files.list")).toHaveLength(3);
+  });
+
+  test("rejects malformed, mixed, and non-advancing files.list paging", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const installSlack = fakeSlack();
+    const connected = await connectBot(workspace, installSlack.fetch);
+    const resolved = await resolveSlackBotConnectionForTool({
+      db: client.db,
+      grant: {
+        ...workspace,
+        subjectId: "subject-a",
+        permissions: ["connections:read"],
+        metadata: {},
+      },
+      sessionId: null,
+      requestedConnectionId: connected.body.connection.id,
+    });
+
+    const malformedResponses = [
+      () => ({ files: [] }),
+      ({ count, page }: { count: number; page: number }) => ({
+        files: [],
+        paging: { count, total: 0, page, pages: 0 },
+        response_metadata: { next_cursor: "legacy-cursor" },
+      }),
+      ({ count, page }: { count: number; page: number }) => ({
+        files: [{ id: "F_ONE" }, { id: "F_TWO" }],
+        paging: { count, total: 1, page, pages: 1 },
+      }),
+    ];
+    for (const fileListResponse of malformedResponses) {
+      const slack = fakeSlack({ fileListResponse });
+      const bot = createOpenGeniSlackBotClient(
+        { db: client.db, settings, slackFetch: slack.fetch },
+        resolved,
+      );
+      await expect(bot.listFiles({ channelId: "C_MEMBER", limit: 1 })).rejects.toThrow(
+        "invalid_files_paging",
+      );
+      expect(slack.calls.filter((call) => call.method === "files.list")).toMatchObject([
+        { count: "1", page: "1", cursor: null, limit: null },
+      ]);
+    }
+
+    const firstPageSlack = fakeSlack({
+      fileListResponse: ({ count, page }) => ({
+        files: [{ id: "F_PAGE_1" }],
+        paging: { count, total: 2, page, pages: 2 },
+      }),
+    });
+    const firstPageBot = createOpenGeniSlackBotClient(
+      { db: client.db, settings, slackFetch: firstPageSlack.fetch },
+      resolved,
+    );
+    const first = await firstPageBot.listFiles({ channelId: "C_MEMBER", limit: 1 });
+    expect(first.nextCursor).toBeString();
+
+    const repeatedPageSlack = fakeSlack({
+      fileListResponse: ({ count }) => ({
+        files: [{ id: "F_PAGE_1" }],
+        paging: { count, total: 2, page: 1, pages: 2 },
+      }),
+    });
+    const repeatedPageBot = createOpenGeniSlackBotClient(
+      { db: client.db, settings, slackFetch: repeatedPageSlack.fetch },
+      resolved,
+    );
+    await expect(
+      repeatedPageBot.listFiles({ channelId: "C_MEMBER", cursor: first.nextCursor! }),
+    ).rejects.toThrow("invalid_files_paging");
+    expect(repeatedPageSlack.calls.filter((call) => call.method === "files.list")).toMatchObject([
+      { count: "1", page: "2", cursor: null, limit: null },
+    ]);
   });
 
   test("enforces channel membership, routes DMs, and never substitutes personal OAuth", async () => {

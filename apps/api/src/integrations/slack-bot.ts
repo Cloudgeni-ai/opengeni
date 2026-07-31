@@ -1,4 +1,4 @@
-import { createHmac } from "node:crypto";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import {
   OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
@@ -44,10 +44,19 @@ const MAX_HISTORY_PAGE = 100;
 const MAX_THREAD_PAGE = 100;
 const MAX_USER_PAGE = 200;
 const MAX_FILE_PAGE = 200;
+const MAX_FILE_CURSOR_LENGTH = 1_024;
+const SLACK_FILE_CURSOR_VERSION = "files-v1";
 const MAX_PROJECTED_TEXT = 4_000;
 const SLACK_POST_CLAIM_LEASE_MS = 30_000;
 
 type SlackPayload = Record<string, unknown> & { ok?: unknown; error?: unknown };
+
+export type SlackFilesListPage = { count: number; page: number };
+
+export type SlackFilesCursorContext = {
+  connectionId: string;
+  key: Uint8Array;
+};
 
 export type VerifiedOpenGeniSlackBot = {
   grantedScopes: string[];
@@ -375,18 +384,28 @@ export class OpenGeniSlackBotClient {
 
   async listFiles(input: { channelId: string; limit?: number; cursor?: string }) {
     return await this.withAudit("files.list", async (headers) => {
+      const requestedPage = this.fileListPage(input);
       const info = await this.requireMemberChannel(headers, input.channelId);
       const payload = await this.call(headers, "files.list", {
         channel: input.channelId,
-        limit: String(boundedInt(input.limit, MAX_FILE_PAGE, 100)),
-        ...(input.cursor ? { cursor: input.cursor } : {}),
+        count: String(requestedPage.count),
+        page: String(requestedPage.page),
       });
+      const files = slackArray(payload.files)
+        .map(projectFile)
+        .filter((file): file is NonNullable<typeof file> => file !== null);
+      const nextPage = nextSlackFilesListPage(payload, requestedPage, files.length);
       return {
         channel: info,
-        files: slackArray(payload.files)
-          .map(projectFile)
-          .filter((file): file is NonNullable<typeof file> => file !== null),
-        nextCursor: responseCursor(payload),
+        files,
+        nextCursor:
+          nextPage === null
+            ? null
+            : this.fileListCursor({
+                channelId: input.channelId,
+                count: requestedPage.count,
+                page: nextPage,
+              }),
       };
     });
   }
@@ -790,6 +809,22 @@ export class OpenGeniSlackBotClient {
       .digest("hex");
   }
 
+  private fileListPage(input: {
+    channelId: string;
+    limit?: number;
+    cursor?: string;
+  }): SlackFilesListPage {
+    const key = environmentsEncryptionKeyBytes(this.settings);
+    if (!key) throw new Error("connection encryption is not configured");
+    return resolveSlackFilesListPage(input, { connectionId: this.connection.id, key });
+  }
+
+  private fileListCursor(input: { channelId: string; count: number; page: number }): string {
+    const key = environmentsEncryptionKeyBytes(this.settings);
+    if (!key) throw new Error("connection encryption is not configured");
+    return createSlackFilesListCursor(input, { connectionId: this.connection.id, key });
+  }
+
   private async recordAudit(
     operation: SlackBotOperation,
     outcome: "succeeded" | "failed" | "ambiguous",
@@ -1096,6 +1131,112 @@ function responseCursor(payload: SlackPayload): string | null {
   return boundedSlackString(slackRecord(payload.response_metadata)?.next_cursor, 1_024) || null;
 }
 
+export function resolveSlackFilesListPage(
+  input: { channelId: string; limit?: number; cursor?: string },
+  context: SlackFilesCursorContext,
+): SlackFilesListPage {
+  const requestedCount = boundedInt(input.limit, MAX_FILE_PAGE, 100);
+  if (!input.cursor) return { count: requestedCount, page: 1 };
+  if (input.cursor.length > MAX_FILE_CURSOR_LENGTH) {
+    throw new SlackBotProviderError("invalid_files_cursor");
+  }
+  const [version, encoded, signature, extra] = input.cursor.split(".");
+  if (
+    version !== SLACK_FILE_CURSOR_VERSION ||
+    !encoded ||
+    !signature ||
+    extra !== undefined ||
+    !/^[A-Za-z0-9_-]+$/.test(encoded) ||
+    !/^[A-Za-z0-9_-]+$/.test(signature)
+  ) {
+    throw new SlackBotProviderError("invalid_files_cursor");
+  }
+  const expectedSignature = createHmac("sha256", context.key).update(encoded).digest();
+  const receivedSignature = Buffer.from(signature, "base64url");
+  if (
+    receivedSignature.toString("base64url") !== signature ||
+    receivedSignature.length !== expectedSignature.length ||
+    !timingSafeEqual(receivedSignature, expectedSignature)
+  ) {
+    throw new SlackBotProviderError("invalid_files_cursor");
+  }
+  let decoded: unknown;
+  try {
+    const bytes = Buffer.from(encoded, "base64url");
+    if (bytes.toString("base64url") !== encoded) {
+      throw new Error("non-canonical cursor");
+    }
+    decoded = JSON.parse(bytes.toString("utf8"));
+  } catch {
+    throw new SlackBotProviderError("invalid_files_cursor");
+  }
+  const cursor = slackRecord(decoded);
+  if (
+    !cursor ||
+    Object.keys(cursor).sort().join(",") !== "channelId,connectionId,count,page" ||
+    cursor.connectionId !== context.connectionId ||
+    cursor.channelId !== input.channelId ||
+    !positiveSafeInt(cursor.count) ||
+    cursor.count > MAX_FILE_PAGE ||
+    !positiveSafeInt(cursor.page) ||
+    (input.limit !== undefined && requestedCount !== cursor.count)
+  ) {
+    throw new SlackBotProviderError("invalid_files_cursor");
+  }
+  return { count: cursor.count, page: cursor.page };
+}
+
+export function createSlackFilesListCursor(
+  input: { channelId: string; count: number; page: number },
+  context: SlackFilesCursorContext,
+): string {
+  const encoded = Buffer.from(
+    JSON.stringify({
+      connectionId: context.connectionId,
+      channelId: input.channelId,
+      count: input.count,
+      page: input.page,
+    }),
+  ).toString("base64url");
+  const signature = createHmac("sha256", context.key).update(encoded).digest("base64url");
+  return `${SLACK_FILE_CURSOR_VERSION}.${encoded}.${signature}`;
+}
+
+export function nextSlackFilesListPage(
+  payload: SlackPayload,
+  requested: SlackFilesListPage,
+  returnedFileCount: number,
+): number | null {
+  const responseMetadata = slackRecord(payload.response_metadata);
+  const paging = slackRecord(payload.paging);
+  if (responseMetadata && Object.hasOwn(responseMetadata, "next_cursor")) {
+    throw new SlackBotProviderError("invalid_files_paging");
+  }
+  const count = paging?.count;
+  const total = paging?.total;
+  const page = paging?.page;
+  const pages = paging?.pages;
+  if (
+    !positiveSafeInt(count) ||
+    !nonNegativeSafeInt(total) ||
+    !positiveSafeInt(page) ||
+    !nonNegativeSafeInt(pages) ||
+    count !== requested.count ||
+    page !== requested.page ||
+    returnedFileCount > count ||
+    pages !== (total === 0 ? 0 : Math.ceil(total / count)) ||
+    page > Math.max(1, pages)
+  ) {
+    throw new SlackBotProviderError("invalid_files_paging");
+  }
+  if (page >= pages) return null;
+  const nextPage = page + 1;
+  if (!positiveSafeInt(nextPage)) {
+    throw new SlackBotProviderError("invalid_files_paging");
+  }
+  return nextPage;
+}
+
 function slackMethodForOperation(operation: SlackBotOperation): string {
   switch (operation) {
     case "channels.list":
@@ -1120,6 +1261,14 @@ function boundedInt(value: number | undefined, max: number, fallback: number): n
   return typeof value === "number" && Number.isInteger(value) && value > 0
     ? Math.min(value, max)
     : fallback;
+}
+
+function positiveSafeInt(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+function nonNegativeSafeInt(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
 function slackArray(value: unknown): unknown[] {

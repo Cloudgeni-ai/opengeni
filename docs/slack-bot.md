@@ -66,17 +66,13 @@ oauth_config:
     - https://app.opengeni.ai/v1/integrations/slack/callback
   scopes:
     bot:
-      - app_mentions:read
       - bookmarks:read
       - canvases:read
-      - canvases:write
       - channels:history
       - channels:read
       - chat:write
-      - commands
       - emoji:read
       - files:read
-      - files:write
       - groups:history
       - groups:read
       - im:history
@@ -87,7 +83,6 @@ oauth_config:
       - mpim:read
       - pins:read
       - reactions:read
-      - reactions:write
       - team:read
       - usergroups:read
       - users:read
@@ -97,7 +92,7 @@ settings:
   token_rotation_enabled: false
 ```
 
-Self-hosted deployments replace `https://app.opengeni.ai` with their stable HTTPS `OPENGENI_PUBLIC_BASE_URL`. Keep bot `user_scope` empty. The grant deliberately includes future-facing mention, command, DM/group-DM, reaction, canvas, file, list, pin, bookmark, emoji, user-group, and workspace capabilities so supported tools can be added without repeated Slack reauthorization. Scopes alone do not activate mentions, commands, or events; those also require explicit provider endpoints and server-side handlers. Event Subscriptions remain disabled until those handlers exist. Do not enable Socket Mode, token rotation, or add `channels:join`, `chat:write.public`, `chat:write.customize`, `users:read.email`, channel-management, administrative, or enterprise-search scopes. OpenGeni rejects an installation whose reported bot scopes do not exactly match the manifest.
+Self-hosted deployments replace `https://app.opengeni.ai` with their stable HTTPS `OPENGENI_PUBLIC_BASE_URL`. Keep bot `user_scope` empty. The manifest requests only the scopes required by the shipped workspace-bot tools; it does not pre-authorize future mention, slash-command, canvas/file mutation, or reaction-mutation behavior. Event Subscriptions remain disabled because no event handlers are shipped. Do not enable Socket Mode, token rotation, or add `app_mentions:read`, `commands`, `canvases:write`, `files:write`, `reactions:write`, `channels:join`, `chat:write.public`, `chat:write.customize`, `users:read.email`, channel-management, administrative, or enterprise-search scopes. OpenGeni rejects an installation whose reported bot scopes do not exactly match the manifest.
 
 ## Install and connect the workspace bot
 
