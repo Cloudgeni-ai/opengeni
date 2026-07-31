@@ -878,6 +878,16 @@ export async function recoverReleaseHeadEvidence(options = {}) {
       ),
       "release head retention check exists without retained evidence",
     );
+  } else {
+    const retentionContext = {
+      ...context,
+      releaseHeadRelease: initialEvidence.releaseHeadRelease,
+    };
+    await findCheckRun(
+      api,
+      retentionContext,
+      checkIdentity("release-head-retention", retentionContext),
+    );
   }
 
   const { releaseHead, releaseHeadRelease } = initialEvidence ?? {
