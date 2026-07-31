@@ -441,6 +441,13 @@ describe("MessageTimeline pagination affordances", () => {
   });
 
   test("pinned follow keeps the tip at the scroller bottom across live appends", async () => {
+    const frames: FrameRequestCallback[] = [];
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      frames.push(cb);
+      return frames.length;
+    };
+    globalThis.cancelAnimationFrame = () => undefined;
+
     const prefix = manyEvents(19);
     const initial = [...prefix, agentDelta(20, "hello ")];
     const r = await renderComponent(<MessageTimeline events={initial} status="running" />);
@@ -463,13 +470,13 @@ describe("MessageTimeline pagination affordances", () => {
     expect(layout.tipBottomGap()).toBeLessThan(2);
 
     // Grow content first (stale scrollTop leaves tip above the bottom), then
-    // let the live append's layout effect run stick-to-bottom.
+    // let the live append's soft-follow glide settle to the tip.
     layout.setContentHeight(2080);
     expect(layout.tipBottomGap()).toBeGreaterThan(2);
     await r.rerender(
       <MessageTimeline events={[...initial, agentDelta(21, " world")]} status="running" />,
     );
-    await flush();
+    await drainFrames(frames);
 
     expect(r.container.textContent).toContain("hello  world");
     expect(distanceFromBottom(scroller)).toBeLessThan(48);
