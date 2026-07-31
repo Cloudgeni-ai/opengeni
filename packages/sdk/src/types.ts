@@ -2173,6 +2173,8 @@ export type ClientConfig = {
   allowedReasoningEfforts: ReasoningEffort[];
   mcpServers: { id: string; name: string }[];
   fileUploads: { enabled: boolean; maxSizeBytes: number };
+  /** Native browser microphone capture + server-side transcription capability. */
+  voiceInput?: ClientVoiceInputConfig | undefined;
   productAccessMode: ProductAccessMode;
   auth: ClientAuthConfig;
   // Server-wide hint: does this deployment support Channel-A structured services
@@ -2184,6 +2186,20 @@ export type ClientConfig = {
     git: boolean;
     terminalEvents: boolean;
   };
+};
+
+/** Client-safe voice-input capability projection. */
+export type ClientVoiceInputConfig = {
+  available: boolean;
+  maxDurationSeconds: number;
+  maxSizeBytes: number;
+  acceptedMimeTypes: string[];
+};
+
+/** Response from POST /v1/workspaces/:workspaceId/transcriptions. */
+export type TranscribeAudioResponse = {
+  text: string;
+  languages: string[];
 };
 
 export type AccountRole = "owner" | "admin" | "member";
@@ -2249,13 +2265,19 @@ export type Workspace = {
 
 export type WorkspaceSettings = {
   memoryEnabled?: boolean | undefined;
+  voiceInput?: WorkspaceVoiceInputSettings | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   maxNestedAgentDepth?: number | null | undefined;
   [key: string]: unknown;
 };
 
+export type WorkspaceVoiceInputSettings = {
+  enabled: boolean;
+};
+
 export type UpdateWorkspaceSettingsRequest = {
   memoryEnabled?: boolean | undefined;
+  voiceInput?: WorkspaceVoiceInputSettings | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   maxNestedAgentDepth?: number | null | undefined;
   [key: string]: unknown;

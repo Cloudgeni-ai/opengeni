@@ -1,5 +1,14 @@
 # @opengeni/api-router
 
+## Unreleased
+
+### Minor Changes
+
+- Add server-side native voice-input transcription with OpenAI, Azure OpenAI, and gated experimental Codex subscription providers.
+- Prefer Codex STT when subscription routing is enabled and a workspace has an
+  active attached Codex credential; fall through to OpenAI/Azure when none is
+  attached. Drop the unauthenticated Cloudflare HEAD probe.
+
 ## 0.13.5
 
 ### Patch Changes

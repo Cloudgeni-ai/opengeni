@@ -86,7 +86,7 @@ export { LightboxProvider, useLightbox, useLightboxOptional } from "./screenshot
 export { DisclosureDefaultsProvider, useForcedDefaultOpen } from "./disclosure-context";
 
 // turn-collapse summary chip
-export { BUILT_IN_TURN_SUMMARY_FACET_IDS, TurnSummary } from "./turn-summary";
+export { BUILT_IN_TURN_SUMMARY_FACET_IDS, TurnSummary, useTurnSettleOpen } from "./turn-summary";
 export type {
   BuiltInTurnSummaryFacetId,
   TurnOutcome,

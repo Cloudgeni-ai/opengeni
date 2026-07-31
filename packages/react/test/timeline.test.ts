@@ -801,7 +801,7 @@ describe("buildTimeline", () => {
     expect((items[0] as ToolCallItem).status).toBe("complete");
   });
 
-  test("completed message ordering follows intervening hosted search activity", () => {
+  test("hosted search between stream and completed message keeps event order", () => {
     reset();
     const items = buildTimeline([
       event("agent.message.delta", { text: "Answer" }),
@@ -819,6 +819,58 @@ describe("buildTimeline", () => {
 
     expect(items.map((item) => item.kind)).toEqual(["tool-call", "agent-message"]);
     expect((items[1] as AgentMessageItem).text).toBe("Answer with sources.");
+  });
+
+  test("duplicate web_search toolCall.created events merge by call id", () => {
+    reset();
+    const items = buildTimeline([
+      event("agent.message.delta", { text: "Search 1/5" }),
+      event("agent.toolCall.created", {
+        id: "ws-1",
+        name: "web_search_call",
+        arguments: { type: "search", query: "hexagonal diamond" },
+        raw: {
+          type: "hosted_tool_call",
+          status: "in_progress",
+          providerData: { action: { type: "search", query: "hexagonal diamond" } },
+        },
+      }),
+      event("agent.toolCall.created", {
+        id: "ws-1",
+        name: "web_search_call",
+        raw: {
+          type: "hosted_tool_call",
+          status: "completed",
+          providerData: { type: "web_search_call" },
+        },
+      }),
+      event("agent.message.completed", { text: "Search 1/5\nResult from 1" }),
+    ]);
+
+    expect(items.map((item) => item.kind)).toEqual(["tool-call", "agent-message"]);
+    const search = items[0] as ToolCallItem;
+    expect(search.status).toBe("complete");
+    expect((search.raw as { providerData?: { action?: { query?: string } } }).providerData?.action
+      ?.query).toBe("hexagonal diamond");
+  });
+
+  test("ordinary tools after a completed mid-turn message keep append order", () => {
+    reset();
+    const items = buildTimeline([
+      event("agent.message.completed", { text: "I'll check next." }),
+      event("agent.toolCall.created", {
+        id: "call-1",
+        name: "exec_command",
+        arguments: { cmd: "ls" },
+      }),
+      event("agent.message.completed", { text: "Done." }),
+    ]);
+
+    expect(items.map((item) => item.kind)).toEqual([
+      "agent-message",
+      "tool-call",
+      "agent-message",
+    ]);
   });
 
   test("removes unresolved private citation handles from timeline text", () => {

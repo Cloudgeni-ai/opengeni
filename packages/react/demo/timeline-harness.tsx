@@ -203,7 +203,7 @@ function Harness() {
 
             <Section
               title="Live turn — streaming in (never folds mid-run)"
-              hint="Running rows render directly: shimmer + inline pulse, a skeleton thumb, a streaming caret."
+              hint="Running rows render directly: shimmer + inline pulse, a skeleton thumb."
             >
               <MessageTimeline events={liveTurnEvents()} status="running" className="max-h-none" />
             </Section>

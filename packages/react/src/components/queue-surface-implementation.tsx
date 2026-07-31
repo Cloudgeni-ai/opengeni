@@ -953,7 +953,7 @@ function SortableQueueRow({
             disabled={pending !== null}
             onClick={onSteer}
             aria-label={`Steer queued prompt ${index + 1}`}
-            title="Make this the next direction"
+            title="Steer — interrupt the current turn and send this message now"
             className="inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded-md px-2 text-xs font-medium text-fg outline-none transition-[background-color] hover:bg-surface-2 focus-visible:ring-2 focus-visible:ring-ring/40 disabled:pointer-events-none disabled:opacity-50 pointer-coarse:min-h-[44px] pointer-coarse:min-w-[44px]"
           >
             {pending === "steer" ? (

@@ -76,6 +76,7 @@ import {
   listSessionHumanInputRequests,
   listSessionIdsInGroup,
   listSessionsForSubject,
+  getLatestStartedSessionTurn,
   listSessionTurns,
   projectEffectiveControlForRelatedAccess,
   projectSessionForRelatedAccess,
@@ -1077,6 +1078,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
+    // Exact turn that most recently emitted durable `turn.started` — the same
+    // boundary goal continuations use for inherited model/effort. Queued-only
+    // or preflight-rejected turns are deliberately excluded.
+    if (c.req.query("latestStarted") === "1" || c.req.query("latestStarted") === "true") {
+      const latest = await getLatestStartedSessionTurn(db, workspaceId, sessionId);
+      return c.json(latest ? [latest] : []);
+    }
     return c.json(
       await listSessionTurns(db, workspaceId, sessionId, boundedLimit(c.req.query("limit"))),
     );

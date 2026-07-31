@@ -826,9 +826,16 @@ export const TranscriptionErrorCode = z.enum([
   "policy_blocked",
   "timeout",
   "cancelled",
+  "unavailable",
+  "too_large",
+  "invalid_audio",
   "unknown",
 ]);
 export type TranscriptionErrorCode = z.infer<typeof TranscriptionErrorCode>;
+
+/** Stable user-safe error codes for the native voice-input transcription path. */
+export const VoiceInputErrorCode = TranscriptionErrorCode;
+export type VoiceInputErrorCode = TranscriptionErrorCode;
 
 export const TranscriptionTimeSpan = z
   .object({
@@ -951,6 +958,9 @@ export const TranscriptionEvent = z.discriminatedUnion("type", [
 export type TranscriptionEvent = z.infer<typeof TranscriptionEvent>;
 
 /**
+ * @deprecated Host-adapter transcription policy. Kept for one release so existing
+ * workspace settings remain readable. New writes use `WorkspaceVoiceInputSettings`.
+ *
  * Workspace-only policy for the distinct speech-to-text capability. It never
  * authorizes a turn model/provider and contains connection references rather
  * than secrets. `acceptanceId` changes whenever an admin accepts a new target
@@ -1067,12 +1077,66 @@ export const WorkspaceTranscriptionPolicy = z
   });
 export type WorkspaceTranscriptionPolicy = z.infer<typeof WorkspaceTranscriptionPolicy>;
 
+/**
+ * Workspace toggle for native browser voice input. Provider/model/credentials
+ * stay server-private; this only records whether the workspace allows the
+ * deployment-configured transcription path.
+ */
+export const WorkspaceVoiceInputSettings = z
+  .object({
+    enabled: z.boolean(),
+  })
+  .strict();
+export type WorkspaceVoiceInputSettings = z.infer<typeof WorkspaceVoiceInputSettings>;
+
+/** Client-safe voice-input capability projection. Never includes provider secrets. */
+export const ClientVoiceInputConfig = z
+  .object({
+    available: z.boolean(),
+    maxDurationSeconds: z.number().int().positive().max(600),
+    maxSizeBytes: z.number().int().positive(),
+    acceptedMimeTypes: z.array(z.string().trim().min(1).max(128)).min(1).max(32),
+  })
+  .strict();
+export type ClientVoiceInputConfig = z.infer<typeof ClientVoiceInputConfig>;
+
+/** Response from POST /v1/workspaces/:workspaceId/transcriptions. */
+export const TranscribeAudioResponse = z
+  .object({
+    text: z.string().max(1_000_000),
+    languages: z.array(z.string().trim().min(1).max(64)).max(16).default([]),
+  })
+  .strict();
+export type TranscribeAudioResponse = z.infer<typeof TranscribeAudioResponse>;
+
+/** Default ceilings for native voice input (hard-stop recording + upload). */
+export const VOICE_INPUT_MAX_DURATION_SECONDS = 60 as const;
+export const VOICE_INPUT_MAX_SIZE_BYTES = 25 * 1024 * 1024;
+export const VOICE_INPUT_ACCEPTED_MIME_TYPES = [
+  "audio/webm",
+  "audio/webm;codecs=opus",
+  "audio/mp4",
+  "audio/ogg",
+  "audio/ogg;codecs=opus",
+  "audio/mpeg",
+  "audio/wav",
+  "audio/x-wav",
+  "audio/mp3",
+  "audio/m4a",
+] as const;
+
 // Validates the KNOWN keys of workspaces.settings; passthrough keeps unknown
-// (future) keys rather than stripping them. memoryEnabled and transcription are
-// both default-off capabilities.
+// (future) keys rather than stripping them. memoryEnabled defaults off;
+// voiceInput defaults to enabled when the deployment has a provider.
 export const WorkspaceSettingsSchema = z
   .object({
     memoryEnabled: z.boolean().optional(),
+    /** Preferred workspace voice-input toggle. */
+    voiceInput: WorkspaceVoiceInputSettings.optional(),
+    /**
+     * @deprecated Legacy host-adapter policy. Read for compatibility; new writes
+     * should use `voiceInput`.
+     */
     transcription: WorkspaceTranscriptionPolicy.optional(),
     // null clears the workspace override and falls back to the persisted
     // deployment policy. The database boundary validates the same range.
@@ -1087,12 +1151,30 @@ export function resolveWorkspaceMemoryEnabled(settings: unknown): boolean {
   return parsed.success ? parsed.data.memoryEnabled === true : false;
 }
 
+/**
+ * Resolve whether voice input is enabled for a workspace.
+ *
+ * - Prefer `settings.voiceInput.enabled` when present.
+ * - Map legacy `settings.transcription.enabled` when voiceInput is absent.
+ * - Return `null` when neither is set so callers can default to deployment
+ *   availability (enabled when a provider is configured).
+ */
+export function resolveWorkspaceVoiceInputEnabled(settings: unknown): boolean | null {
+  const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
+  if (!parsed.success) return null;
+  if (parsed.data.voiceInput) return parsed.data.voiceInput.enabled;
+  if (parsed.data.transcription) return parsed.data.transcription.enabled;
+  return null;
+}
+
 // PATCH body for workspace settings: a partial top-level patch that merges into
-// the stored bag. Nested transcription policy updates are therefore full
-// replacements; passthrough carries forward-compatible unknown keys.
+// the stored bag. Nested voiceInput/transcription updates are full replacements;
+// passthrough carries forward-compatible unknown keys.
 export const UpdateWorkspaceSettingsRequest = z
   .object({
     memoryEnabled: z.boolean().optional(),
+    voiceInput: WorkspaceVoiceInputSettings.optional(),
+    /** @deprecated Prefer `voiceInput`. Kept for one compatibility release. */
     transcription: WorkspaceTranscriptionPolicy.optional(),
     maxNestedAgentDepth: NestedAgentDepthValue.nullable().optional(),
   })
@@ -8992,6 +9074,14 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     fileUploads: z.object({
       enabled: z.boolean(),
       maxSizeBytes: z.number().int().positive(),
+    }),
+    // Native voice-input capability. Provider/model/credentials stay server-private;
+    // clients only learn whether a deployment can transcribe and the hard ceilings.
+    voiceInput: ClientVoiceInputConfig.default({
+      available: false,
+      maxDurationSeconds: VOICE_INPUT_MAX_DURATION_SECONDS,
+      maxSizeBytes: VOICE_INPUT_MAX_SIZE_BYTES,
+      acceptedMimeTypes: [...VOICE_INPUT_ACCEPTED_MIME_TYPES],
     }),
     productAccessMode: ProductAccessMode,
     auth: ClientAuthConfig.default({ mode: "none" }),

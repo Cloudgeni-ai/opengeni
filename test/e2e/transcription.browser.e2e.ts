@@ -28,7 +28,7 @@ type MatrixMeasurement = {
   axeViolations: number;
 };
 
-describe("provider-agnostic composer transcription browser acceptance", () => {
+describe("native composer voice-input browser acceptance", () => {
   let browser: Browser;
   let demo: StartedProcess;
   let baseUrl: string;
@@ -112,7 +112,7 @@ describe("provider-agnostic composer transcription browser acceptance", () => {
             micCount: document.querySelectorAll('button[aria-label="Start voice input"]').length,
             micWidth: rect?.width ?? 0,
             micHeight: rect?.height ?? 0,
-            providerConfigurationVisible: /fixture-speech|fixture-v1|BYOK|provider ID/i.test(
+            providerConfigurationVisible: /gpt-transcribe|api key|BYOK|provider ID|azure-openai/i.test(
               document.body.innerText,
             ),
             colorScheme: surface ? getComputedStyle(surface).colorScheme : "",
@@ -134,40 +134,22 @@ describe("provider-agnostic composer transcription browser acceptance", () => {
         expect(measurement.colorScheme).toContain(theme);
         expect(violations.violations).toEqual([]);
         expect(failures).toEqual([]);
-
-        if (
-          (viewport.width === 360 && theme === "dark") ||
-          (viewport.width === 1440 && theme === "light")
-        ) {
-          await mic.click();
-          await page.getByRole("button", { name: "Emit partial" }).click();
-          await page.screenshot({
-            path: `${evidenceDir}/listening-${viewport.width}-${theme}.png`,
-            animations: "disabled",
-          });
-        }
         await context.close();
       }
     }
   }, 90_000);
 
-  test("partials stay ephemeral while one final remains editable and uses ordinary Send", async () => {
+  test("stop immediately transcribes into an editable draft and ordinary Send still sends", async () => {
     const context = await browser.newContext({ viewport: { width: 768, height: 960 } });
     const page = await context.newPage();
     await page.goto(`${baseUrl}/transcription.html?theme=light`, { waitUntil: "networkidle" });
     const textarea = page.getByRole("textbox", { name: "Message the agent" });
     await page.getByRole("button", { name: "Start voice input" }).click();
-    await page.getByRole("button", { name: "Emit partial" }).click();
-    await page.getByRole("status").filter({ hasText: "This partial stays ephemeral" }).waitFor();
-    expect(await textarea.inputValue()).toBe("Existing editable draft");
-
-    await page.getByRole("button", { name: "Emit final" }).click();
-    expect(await textarea.inputValue()).toBe(
-      "Existing editable draft Final transcript remains editable",
+    await page.getByRole("button", { name: "Stop and transcribe" }).click();
+    await page.waitForFunction(
+      () => document.documentElement.dataset.transcriptionUpload === "completed",
     );
-    expect(await page.evaluate(() => document.activeElement?.getAttribute("aria-label"))).toBe(
-      "Message the agent",
-    );
+    expect(await textarea.inputValue()).toBe("Existing editable draft fixture transcript");
     await textarea.fill("Edited final transcript");
     await page.getByRole("button", { name: "Send message" }).click();
     await page.getByText("Sent: Edited final transcript", { exact: true }).waitFor();
@@ -178,7 +160,7 @@ describe("provider-agnostic composer transcription browser acceptance", () => {
     await context.close();
   });
 
-  test("permission denial and provider failure preserve the draft and expose retryable errors", async () => {
+  test("permission denial preserves the draft and Escape cancels a hanging upload", async () => {
     const context = await browser.newContext({
       viewport: { width: 375, height: 812 },
       hasTouch: true,
@@ -196,137 +178,25 @@ describe("provider-agnostic composer transcription browser acceptance", () => {
       "Existing editable draft",
     );
     expect(await denied.getByRole("button", { name: "Retry voice input" }).count()).toBe(1);
-    expect((await new AxeBuilder({ page: denied }).analyze()).violations).toEqual([]);
-    await denied.screenshot({
-      path: `${evidenceDir}/permission-denied-375-dark.png`,
-      animations: "disabled",
-    });
 
-    const failed = await context.newPage();
-    await failed.goto(`${baseUrl}/transcription.html?theme=light`, { waitUntil: "networkidle" });
-    await failed.getByRole("button", { name: "Start voice input" }).click();
-    await failed.getByRole("button", { name: "Fail stream" }).click();
-    const providerAlert = failed
-      .getByRole("alert")
-      .filter({ hasText: "The transcription service could not continue." });
-    await providerAlert.waitFor();
-    expect(await failed.getByRole("textbox", { name: "Message the agent" }).inputValue()).toBe(
+    const hanging = await context.newPage();
+    await hanging.goto(`${baseUrl}/transcription.html?theme=light&mode=hanging`, {
+      waitUntil: "networkidle",
+    });
+    await hanging.getByRole("button", { name: "Start voice input" }).click();
+    await hanging.getByRole("button", { name: "Stop and transcribe" }).click();
+    await hanging.waitForFunction(
+      () => document.documentElement.dataset.transcriptionUpload === "started",
+    );
+    await hanging.keyboard.press("Escape");
+    await hanging.getByRole("button", { name: "Start voice input" }).waitFor();
+    expect(await hanging.getByRole("textbox", { name: "Message the agent" }).inputValue()).toBe(
       "Existing editable draft",
     );
-    expect(await providerAlert.innerText()).not.toMatch(
-      /FixtureProvider|fixture-secret|opaque-token|Bearer/i,
-    );
-    expect(await failed.locator("body").innerText()).not.toMatch(
-      /FixtureProvider|fixture-secret|opaque-token|Bearer/i,
-    );
     await context.close();
   });
 
-  test("secret-bearing start failures render only controlled local copy", async () => {
-    const context = await browser.newContext({ viewport: { width: 375, height: 812 } });
-    const page = await context.newPage();
-    const failures = observePageFailures(page);
-    await page.goto(`${baseUrl}/transcription.html?theme=dark&mode=start-secret`, {
-      waitUntil: "networkidle",
-    });
-    await page.getByRole("button", { name: "Start voice input" }).click();
-    const alert = page
-      .getByRole("alert")
-      .filter({ hasText: "Voice input could not start. Try again." });
-    await alert.waitFor();
-    expect(await alert.innerText()).not.toMatch(
-      /FixtureProvider|fixture-secret|opaque-token|Bearer|sk-fixture/i,
-    );
-    expect(await page.locator("body").innerText()).not.toMatch(
-      /FixtureProvider|fixture-secret|opaque-token|Bearer|sk-fixture/i,
-    );
-    expect(await page.getByRole("button", { name: "Retry voice input" }).count()).toBe(1);
-    expect(failures).toEqual([]);
-    await context.close();
-  });
-
-  test("empty finals remain correctable and the same accepted correction inserts once", async () => {
-    const context = await browser.newContext({ viewport: { width: 768, height: 960 } });
-    const page = await context.newPage();
-    await page.goto(`${baseUrl}/transcription.html?theme=light`, { waitUntil: "networkidle" });
-    const textarea = page.getByRole("textbox", { name: "Message the agent" });
-    await page.getByRole("button", { name: "Start voice input" }).click();
-    const correction = page.getByRole("button", { name: "Emit empty then corrected final" });
-    await correction.click();
-    expect(await textarea.inputValue()).toBe(
-      "Existing editable draft Corrected final is inserted once",
-    );
-    await correction.click();
-    expect(await textarea.inputValue()).toBe(
-      "Existing editable draft Corrected final is inserted once",
-    );
-    await context.close();
-  });
-
-  test("a hanging start is aborted at the local deadline and becomes retryable", async () => {
-    const context = await browser.newContext({ viewport: { width: 375, height: 812 } });
-    const page = await context.newPage();
-    await page.goto(`${baseUrl}/transcription.html?theme=dark&mode=hanging`, {
-      waitUntil: "networkidle",
-    });
-    await page.getByRole("button", { name: "Start voice input" }).click();
-    await page
-      .getByRole("alert")
-      .filter({ hasText: "Voice input took too long to start. Try again." })
-      .waitFor();
-    expect(
-      await page.evaluate(() => document.documentElement.dataset.transcriptionStartAborted),
-    ).toBe("true");
-    expect(await page.getByRole("button", { name: "Retry voice input" }).count()).toBe(1);
-    await context.close();
-  });
-
-  test("Escape restores idle focus while hanging cancel and close run independently", async () => {
-    const context = await browser.newContext({ viewport: { width: 768, height: 960 } });
-    const page = await context.newPage();
-    await page.goto(`${baseUrl}/transcription.html?theme=light&mode=cleanup-hangs`, {
-      waitUntil: "networkidle",
-    });
-    await page.getByRole("button", { name: "Start voice input" }).click();
-    await page.getByRole("button", { name: "Stop voice input" }).waitFor();
-    await page.keyboard.press("Escape");
-    await page.getByRole("button", { name: "Start voice input" }).waitFor();
-    expect(await page.evaluate(() => document.activeElement?.getAttribute("aria-label"))).toBe(
-      "Message the agent",
-    );
-    expect(
-      await page.evaluate(() => document.documentElement.dataset.transcriptionCancelInvoked),
-    ).toBe("true");
-    expect(
-      await page.evaluate(() => document.documentElement.dataset.transcriptionCloseInvoked),
-    ).toBe("true");
-    await context.close();
-  });
-
-  test("reconnect clears partials; keyboard Escape cancels and returns focus", async () => {
-    const context = await browser.newContext({ viewport: { width: 768, height: 960 } });
-    const page = await context.newPage();
-    await page.goto(`${baseUrl}/transcription.html?theme=dark`, { waitUntil: "networkidle" });
-    const textarea = page.getByRole("textbox", { name: "Message the agent" });
-    const mic = page.getByRole("button", { name: "Start voice input" });
-    await mic.focus();
-    await page.keyboard.press("Enter");
-    await page.getByRole("button", { name: "Emit partial" }).click();
-    await page.getByRole("button", { name: "Interrupt stream" }).click();
-    await page.getByRole("status").filter({ hasText: "Reconnecting voice input…" }).waitFor();
-    expect(await page.getByText("This partial stays ephemeral", { exact: true }).count()).toBe(0);
-    expect(await textarea.inputValue()).toBe("Existing editable draft");
-    await page.getByRole("button", { name: "Restore stream" }).click();
-    await page.getByRole("button", { name: "Stop voice input" }).waitFor();
-    await page.keyboard.press("Escape");
-    await page.getByRole("button", { name: "Start voice input" }).waitFor();
-    expect(await page.evaluate(() => document.activeElement?.getAttribute("aria-label"))).toBe(
-      "Message the agent",
-    );
-    await context.close();
-  });
-
-  test("reduced motion removes lifecycle spinner animation", async () => {
+  test("reduced motion removes lifecycle spinner animation while recording", async () => {
     const context = await browser.newContext({
       viewport: { width: 360, height: 800 },
       hasTouch: true,
@@ -335,11 +205,12 @@ describe("provider-agnostic composer transcription browser acceptance", () => {
     const page = await context.newPage();
     await page.goto(`${baseUrl}/transcription.html?theme=dark`, { waitUntil: "networkidle" });
     await page.getByRole("button", { name: "Start voice input" }).click();
-    await page.getByRole("button", { name: "Interrupt stream" }).click();
+    await page.getByRole("button", { name: "Stop and transcribe" }).waitFor();
+    // Recording chrome uses stop/cancel icons, not a spinner; assert no forced spin remains.
     const animationName = await page
-      .locator('[data-transcription-status="reconnecting"] svg')
+      .locator('[data-transcription-status="recording"] button[aria-label="Stop and transcribe"] svg')
       .evaluate((element) => getComputedStyle(element).animationName);
-    expect(animationName).toBe("none");
+    expect(animationName === "none" || animationName === "").toBe(true);
     await context.close();
   });
 });

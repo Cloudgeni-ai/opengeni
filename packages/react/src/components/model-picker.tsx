@@ -1,34 +1,40 @@
 import type { ClientModel } from "@opengeni/sdk";
 import { ChevronDownIcon } from "lucide-react";
 import { useId, useMemo } from "react";
+import {
+  groupPickerRowsByBillingClass,
+  type PickerModelRow,
+} from "../model-policy";
 import { cn } from "../lib/cn";
 
 export type ModelPickerProps = {
-  /** The host-exposed models to choose from (typically {@link useAvailableModels}). */
-  models: ClientModel[];
-  /** Controlled selection — the model id, or undefined for "nothing chosen yet". */
+  /** Legacy host config models grouped by provider. */
+  models?: ClientModel[] | undefined;
+  /** Catalog-backed rows grouped by billing class. Preferred when available. */
+  rows?: PickerModelRow[] | undefined;
   value?: string | undefined;
-  /** Called with the chosen model id when the operator picks a row. */
   onChange: (modelId: string) => void;
   disabled?: boolean | undefined;
   className?: string | undefined;
-  /** Visible-to-assistive-technology label. Defaults to "Model". */
   label?: string | undefined;
 };
 
-/**
- * The model picker — a compact dropdown for the composer footer, grouping the
- * host-exposed models by `providerLabel` (so "OpenAI" and "Fireworks AI" head
- * their own sections) and showing each model's display `label`. A native
- * `<select>` keeps it keyboard- and screen-reader-accessible for free and
- * themes via the package's og-* tokens; the chevron is a decorative overlay.
- *
- * Controlled: the host owns `value`/`onChange` and threads the selection into
- * the send path. Renders nothing when no models are exposed, so a single-model
- * deployment shows no chrome.
- */
+function providerGroups(models: ClientModel[]) {
+  const byProvider = new Map<string, { label: string; models: ClientModel[] }>();
+  for (const model of models) {
+    let group = byProvider.get(model.provider);
+    if (!group) {
+      group = { label: model.providerLabel, models: [] };
+      byProvider.set(model.provider, group);
+    }
+    group.models.push(model);
+  }
+  return [...byProvider.values()];
+}
+
 export function ModelPicker({
-  models,
+  models = [],
+  rows,
   value,
   onChange,
   disabled,
@@ -36,23 +42,14 @@ export function ModelPicker({
   label = "Model",
 }: ModelPickerProps) {
   const selectId = useId();
-  // Group by provider, preserving first-seen order for both the providers and
-  // the models within each — the server already orders the list (default model
-  // and built-in provider first), so we must not re-sort it.
-  const groups = useMemo(() => {
-    const byProvider = new Map<string, { label: string; models: ClientModel[] }>();
-    for (const model of models) {
-      let group = byProvider.get(model.provider);
-      if (!group) {
-        group = { label: model.providerLabel, models: [] };
-        byProvider.set(model.provider, group);
-      }
-      group.models.push(model);
-    }
-    return [...byProvider.values()];
-  }, [models]);
+  const billingGroups = useMemo(
+    () => (rows && rows.length > 0 ? groupPickerRowsByBillingClass(rows) : []),
+    [rows],
+  );
+  const providerGroupList = useMemo(() => providerGroups(models), [models]);
+  const useBillingGroups = Boolean(rows?.length);
 
-  if (models.length === 0) {
+  if (models.length === 0 && (!rows || rows.length === 0)) {
     return null;
   }
 
@@ -68,8 +65,6 @@ export function ModelPicker({
         disabled={disabled === true}
         aria-label={label}
         className={cn(
-          // Sized like the other footer controls; the chevron overlay needs the
-          // right padding so the value never collides with it.
           "h-8 max-w-[180px] cursor-pointer appearance-none truncate rounded-og-md bg-transparent",
           "py-0 pl-2 pr-6 text-[13px] text-og-fg-muted",
           "transition-colors duration-150 hover:bg-og-surface-2 hover:text-og-fg",
@@ -77,15 +72,25 @@ export function ModelPicker({
           "disabled:cursor-not-allowed disabled:opacity-50",
         )}
       >
-        {groups.map((group) => (
-          <optgroup key={group.label} label={group.label}>
-            {group.models.map((model) => (
-              <option key={model.id} value={model.id}>
-                {model.label}
-              </option>
+        {useBillingGroups
+          ? billingGroups.map((group) => (
+              <optgroup key={group.billingClass} label={group.label}>
+                {group.rows.map((row) => (
+                  <option key={row.id} value={row.id} disabled={!row.selectable}>
+                    {row.unavailableReason ? `${row.label} (${row.unavailableReason})` : row.label}
+                  </option>
+                ))}
+              </optgroup>
+            ))
+          : providerGroupList.map((group) => (
+              <optgroup key={group.label} label={group.label}>
+                {group.models.map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {model.label}
+                  </option>
+                ))}
+              </optgroup>
             ))}
-          </optgroup>
-        ))}
       </select>
       <ChevronDownIcon
         aria-hidden

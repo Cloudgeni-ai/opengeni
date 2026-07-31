@@ -1,5 +1,14 @@
 # @opengeni/core
 
+## Unreleased
+
+### Minor Changes
+
+- Add `TranscriptionService` / `TranscriptionProvider` port and optional
+  `AppDependencies.transcription` for native workspace voice-input transcription.
+- Allow `available({ workspaceId })` so providers can require a workspace-attached
+  credential during selection (Codex subscription STT).
+
 ## 0.13.9
 
 ### Patch Changes

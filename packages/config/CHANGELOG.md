@@ -1,5 +1,18 @@
 # @opengeni/config
 
+## Unreleased
+
+### Minor Changes
+
+- Add declarative voice-input provider registry settings (`OPENGENI_VOICE_INPUT_*`) and
+  `resolveVoiceInputProviderRegistry` / `voiceInputDeploymentConfigured` helpers for
+  OpenAI, Azure OpenAI, and experimental Codex transcription.
+- Ignore template placeholder STT secrets (`your-key`, etc.) and prefer Codex
+  subscription STT by default when `OPENGENI_CODEX_SUBSCRIPTION_ENABLED` is on
+  (provider order `codex-subscription,openai,azure-openai`), even if OpenAI/Azure
+  keys exist. Omit `codex-subscription` from the order to keep subscription turns
+  without Codex voice.
+
 ## 0.7.19
 
 ### Patch Changes

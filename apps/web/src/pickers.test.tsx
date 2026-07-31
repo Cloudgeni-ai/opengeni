@@ -1,12 +1,16 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { FirstPartyMcpToolName } from "@opengeni/contracts";
+import { projectPickerRows } from "@opengeni/react";
+import type { WorkspaceModelCatalogModel } from "@opengeni/sdk";
 import { act, useState } from "react";
 import { createRoot } from "react-dom/client";
 
 import {
+  ModelPicker,
   SessionToolPicker,
   visibleSessionToolSelection,
+  type PickerModelRow,
   type SessionToolSelection,
 } from "@/components/pickers";
 
@@ -103,6 +107,105 @@ describe("unified session tool picker", () => {
         mcpServerIds: new Set(["docs"]),
         firstPartyToolIds: new Set(FIRST_PARTY.map((tool) => tool.id)),
       });
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+});
+
+function catalogModel(
+  overrides: Partial<WorkspaceModelCatalogModel> & Pick<WorkspaceModelCatalogModel, "id" | "label">,
+): WorkspaceModelCatalogModel {
+  return {
+    provider: "openai",
+    providerLabel: "OpenAI",
+    api: "responses",
+    credentialReadiness: {
+      status: "ready",
+      reason: null,
+      basis: "configuration",
+      checkedAt: null,
+    },
+    availability: {
+      status: "available",
+      selectable: true,
+      reason: null,
+      checkedAt: null,
+    },
+    capabilities: {
+      reasoning: {
+        upstream: "supported",
+        runnable: true,
+        efforts: ["low", "high", "xhigh"],
+        defaultEffort: "low",
+        required: false,
+      },
+      functionCalling: { upstream: "supported", runnable: true },
+      structuredOutput: { upstream: "supported", runnable: true },
+      hostedTools: {
+        webSearch: { upstream: "unsupported", runnable: false },
+        xSearch: { upstream: "unsupported", runnable: false },
+        codeExecution: { upstream: "unsupported", runnable: false },
+      },
+      inputModalities: ["text"],
+      outputModalities: ["text"],
+      transports: {
+        sse: { upstream: "supported", runnable: true },
+        responsesWebSocket: { upstream: "unsupported", runnable: false },
+        realtimeAudio: { upstream: "unsupported", runnable: false },
+      },
+      latencyModes: [
+        { id: "standard", upstream: "supported", runnable: true },
+        { id: "fast", upstream: "supported", runnable: true },
+      ],
+    },
+    billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
+    ...overrides,
+  };
+}
+
+describe("catalog-backed ModelPicker", () => {
+  test("renders selected product model and effort on the trigger", async () => {
+    const rows: PickerModelRow[] = projectPickerRows([
+      catalogModel({ id: "gpt-5.6-sol", label: "Sol" }),
+      catalogModel({
+        id: "blocked",
+        label: "Blocked",
+        availability: {
+          status: "unavailable",
+          selectable: false,
+          reason: "policy_blocked",
+          checkedAt: null,
+        },
+      }),
+    ]);
+    expect(rows.find((row) => row.id === "blocked")?.selectable).toBe(false);
+    expect(rows.find((row) => row.id === "blocked")?.unavailableReason).toBe(
+      "Blocked by workspace policy",
+    );
+    expect(rows.some((row) => row.billingClass === "opengeni_credits")).toBe(true);
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <ModelPicker
+            rows={rows}
+            model="gpt-5.6-sol"
+            effort="xhigh"
+            onModelChange={() => {}}
+            onEffortChange={() => {}}
+          />,
+        ),
+      );
+      const trigger = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Model and effort"]',
+      );
+      expect(trigger?.textContent).toContain("Sol");
+      expect(trigger?.textContent).toContain("Extra high");
     } finally {
       await act(async () => root.unmount());
       container.remove();
