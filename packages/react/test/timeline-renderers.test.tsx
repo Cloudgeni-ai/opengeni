@@ -388,12 +388,20 @@ describe("MessageTimeline — settled turn folding", () => {
     await flush();
 
     expect(r.container.textContent).toContain("Narration: one fixture needs a quick patch.");
-    expect(turnSummaryTriggers(r.container).length).toBeGreaterThan(1);
+    // Outer turn chip + one nested chip per activity cluster split by narration.
+    const afterExpand = turnSummaryTriggers(r.container);
+    expect(afterExpand).toHaveLength(3);
+    // Nested chips start closed — expand one to reach the command body.
+    await act(async () => {
+      afterExpand[1]?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+    expect(r.container.textContent).toContain("bun test");
 
     await r.unmount();
   });
 
-  test("live turn activity renders the rail directly without a TurnSummary trigger", async () => {
+  test("live turn activity keeps an open TurnSummary shell (no remount on settle)", async () => {
     resetTimelineEvents();
     const events = [
       timelineEvent("user.message", { text: "Run the checks" }),
@@ -407,7 +415,11 @@ describe("MessageTimeline — settled turn folding", () => {
     const r = await renderComponent(<MessageTimeline events={events} status="running" />);
     await flush();
 
-    expect(turnSummaryTrigger(r.container)).toBeNull();
+    // Same shell while live so mid-turn fold only collapses — it does not
+    // remount a bare rail into a brand-new steps wrapper (that was the yank).
+    const trigger = turnSummaryTrigger(r.container);
+    expect(trigger).not.toBeNull();
+    expect(trigger?.getAttribute("data-state")).toBe("open");
     expect(r.container.textContent).toContain("Checking the suite.");
 
     await r.unmount();
@@ -556,12 +568,16 @@ describe("MessageTimeline — settled turn folding", () => {
     await flush();
 
     const triggers = turnSummaryTriggers(r.container);
-    // Exactly ONE chip: the completed first cluster. It is NEUTRAL — no verdict
-    // glyph (chevron is the only svg; the slot holds the pulse dot span).
-    expect(triggers).toHaveLength(1);
-    expect(triggers[0]?.querySelectorAll("svg")).toHaveLength(1);
-    expect(triggers[0]?.querySelector(".animate-og-pulse")).not.toBeNull();
-    // The live tail cluster renders bare: its command is visible without expanding.
+    // Settled cluster chip + live-open shell for the running tail (same shell
+    // type so settle never remounts bare rail → wrapper).
+    expect(triggers).toHaveLength(2);
+    const settled = triggers.find((node) => node.getAttribute("data-state") === "closed");
+    const live = triggers.find((node) => node.getAttribute("data-state") === "open");
+    expect(settled).toBeTruthy();
+    expect(live).toBeTruthy();
+    expect(settled?.querySelectorAll("svg")).toHaveLength(1);
+    expect(settled?.querySelector(".animate-og-pulse")).not.toBeNull();
+    // The live tail stays expanded: its command is visible without expanding.
     expect(r.container.textContent).toContain("step two");
     // The folded cluster's contents are NOT in the DOM until expanded.
     expect(r.container.textContent).not.toContain("step one");
@@ -585,7 +601,10 @@ describe("MessageTimeline — settled turn folding", () => {
 
     // The waiting notice follows the cluster, but a notice is not agent
     // PROGRESS — the paused work stays expanded next to the approval ask.
-    expect(turnSummaryTriggers(r.container)).toHaveLength(0);
+    // Live shell chip is present and open (not collapsed).
+    const triggers = turnSummaryTriggers(r.container);
+    expect(triggers).toHaveLength(1);
+    expect(triggers[0]?.getAttribute("data-state")).toBe("open");
     expect(r.container.textContent).toContain("terraform apply");
     expect(r.container.textContent).toContain("Approval needed");
 
@@ -622,9 +641,10 @@ describe("MessageTimeline — settled turn folding", () => {
     const r = await renderComponent(<MessageTimeline events={events} status="running" />);
     await flush();
 
-    // The settled first cluster folds; the RUNNING second cluster stays bare.
+    // Settled first cluster folded; running cluster keeps an open live shell.
     const triggers = turnSummaryTriggers(r.container);
-    expect(triggers).toHaveLength(1);
+    expect(triggers).toHaveLength(2);
+    expect(triggers.some((node) => node.getAttribute("data-state") === "open")).toBe(true);
     expect(r.container.textContent).toContain("step two running");
     expect(r.container.textContent).not.toContain("queued follow-up");
 
@@ -665,7 +685,54 @@ describe("MessageTimeline — settled turn folding", () => {
     await r.unmount();
   });
 
-  test("nested chips inside a failed turn stay quiet — the outer chip owns the failure", async () => {
+  test("live activity→turn wrap remounts a settle-open chip (no insta-collapse)", async () => {
+    resetTimelineEvents();
+    const midTurn = [
+      timelineEvent("user.message", { text: "Do a long job" }),
+      timelineEvent("agent.toolCall.created", {
+        id: "call-1",
+        name: "exec_command",
+        arguments: { cmd: "step one" },
+      }),
+      timelineEvent("agent.toolCall.output", { id: "call-1", output: "ok" }),
+      timelineEvent("agent.message.completed", { text: "Mid-turn checkpoint" }),
+      timelineEvent("agent.toolCall.created", {
+        id: "call-2",
+        name: "exec_command",
+        arguments: { cmd: "step two" },
+      }),
+      timelineEvent("agent.toolCall.output", { id: "call-2", output: "ok" }),
+      timelineEvent("agent.message.completed", { text: "All finished." }),
+    ];
+    const r = await renderComponent(<MessageTimeline events={midTurn} status="running" />);
+    await flush();
+    // Two live/settling cluster chips before turn.completed.
+    expect(turnSummaryTriggers(r.container).length).toBeGreaterThanOrEqual(1);
+
+    await r.rerender(
+      <MessageTimeline
+        events={[...midTurn, timelineEvent("turn.completed", {})]}
+        status="idle"
+      />,
+    );
+    await flush();
+
+    const triggers = turnSummaryTriggers(r.container);
+    const outer = triggers[0];
+    expect(outer).not.toBeNull();
+    // Fresh turn key + settleFold: open during the beat, not snapped shut.
+    expect(outer?.getAttribute("data-state")).toBe("open");
+    expect(outer?.className ?? "").toContain("animate-og-settle-chip");
+    // Nested cluster chips are the second layer (closed; bodies stay behind them).
+    expect(triggers).toHaveLength(3);
+    expect(triggers.slice(1).every((t) => t.getAttribute("data-state") === "closed")).toBe(true);
+    expect(r.container.textContent).toContain("Mid-turn checkpoint");
+    expect(r.container.textContent).not.toContain("step one");
+
+    await r.unmount();
+  });
+
+  test("a failed turn keeps nested cluster chips quiet under the outer failure", async () => {
     resetTimelineEvents();
     const events = [
       timelineEvent("user.message", { text: "Deploy preview" }),
@@ -688,16 +755,15 @@ describe("MessageTimeline — settled turn folding", () => {
     await flush();
 
     const triggers = turnSummaryTriggers(r.container);
-    // The open outer chip is the one loud failure surface; nested cluster chips
-    // are closed and never repeat the failure text.
-    const withFailure = triggers.filter((t) => (t.textContent ?? "").includes("provider down"));
-    expect(withFailure).toHaveLength(1);
-    expect(withFailure[0]?.getAttribute("data-state")).toBe("open");
-    const nested = triggers.filter((t) => t !== withFailure[0]);
-    expect(nested.length).toBeGreaterThan(0);
-    for (const chip of nested) {
-      expect(chip.getAttribute("data-state")).toBe("closed");
-    }
+    // Outer owns the loud failure (auto-open). Nested cluster chips stay bare /
+    // closed — no repeated failure text, two calm sub-expands for the two clusters.
+    expect(triggers).toHaveLength(3);
+    expect(triggers[0]?.textContent ?? "").toContain("provider down");
+    expect(triggers[0]?.getAttribute("data-state")).toBe("open");
+    expect(triggers.slice(1).every((t) => !(t.textContent ?? "").includes("provider down"))).toBe(
+      true,
+    );
+    expect(triggers.slice(1).every((t) => t.getAttribute("data-state") === "closed")).toBe(true);
 
     await r.unmount();
   });

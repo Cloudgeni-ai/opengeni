@@ -1,5 +1,14 @@
 import { ChevronRightIcon, CircleSlashIcon, TriangleAlertIcon } from "lucide-react";
-import { Component, useMemo, useState, type ReactNode } from "react";
+import {
+  Component,
+  createContext,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { Collapsible } from "radix-ui";
 import { cn } from "../lib/cn";
 import { useForcedDefaultOpen } from "./disclosure-context";
@@ -14,12 +23,20 @@ export type { TurnOutcome } from "./types";
 
    A completed (or failed/cancelled) turn folds behind one quiet summary chip:
    "N steps · M files · K commands · 1 screenshot · 4m". The chip is the default
-   surface; expanding it reveals the full settled turn body. A live turn never
-   folds — render its rows directly.
+   surface; expanding it reveals the full settled turn body. Top-level live
+   activity keeps the same open shell so settling never remounts the rail into
+   a brand-new wrapper (that remount was the hard yank).
 
    This keeps the timeline calm: a finished turn is a single line until the
    reader chooses to look inside it.
    -------------------------------------------------------------------------- */
+
+const TurnSettleChromeContext = createContext(false);
+
+/** True while a settle-fold is open (beat before auto-collapse). */
+export function useTurnSettleOpen(): boolean {
+  return useContext(TurnSettleChromeContext);
+}
 
 export const BUILT_IN_TURN_SUMMARY_FACET_IDS = [
   "steps",
@@ -106,9 +123,23 @@ export type TurnSummaryProps = {
   bare?: boolean | undefined;
   /** Per-instance facet customization. Omit to preserve the built-in summary exactly. */
   facets?: TurnSummaryFacetConfiguration | undefined;
+  /**
+   * Settle choreography: this fold replaced rows the reader was just watching
+   * live. Instead of yanking them behind a chip in one frame, the fold mounts
+   * OPEN with the summary chip easing in above the still-visible rows, holds a
+   * short beat so the reader registers the settle, then glides closed. Any
+   * user interaction during the beat cancels the auto-collapse. Captured at
+   * mount; ignored when the fold starts expanded (e.g. a failed turn).
+   */
+  settleFold?: boolean | undefined;
   /** The rendered activity rail revealed on expand. */
   children: ReactNode;
 };
+
+/** How long a settling fold stays open before gliding closed. */
+const SETTLE_FOLD_BEAT_MS = 1100;
+/** Keep in sync with `--og-duration-disclose-settle`. */
+const SETTLE_COLLAPSE_MS = 820;
 
 export function TurnSummary({
   items,
@@ -118,16 +149,110 @@ export function TurnSummary({
   defaultOpen,
   bare,
   facets: facetConfiguration,
+  settleFold,
   children,
 }: TurnSummaryProps) {
   // An explicit `defaultOpen` always wins; otherwise an ancestor may seed it
   // (screenshot instrumentation); otherwise the turn starts folded.
   const forcedDefaultOpen = useForcedDefaultOpen();
-  const [open, setOpen] = useState(defaultOpen ?? forcedDefaultOpen ?? false);
+  const restingOpen = defaultOpen ?? forcedDefaultOpen ?? false;
+  const initialSettle = Boolean(settleFold) && !restingOpen;
+  const [settling, setSettling] = useState(initialSettle);
+  const [open, setOpen] = useState(initialSettle ? true : restingOpen);
+  // While true, a close uses the slow settle collapse. Cleared after that
+  // auto-collapse finishes (or on first user interaction) so later manual
+  // closes are the fast disclose pair.
+  const [settlePhase, setSettlePhase] = useState(initialSettle);
+  // Expand animation must NOT run on the settle mount (rows were already
+  // visible — a height sweep would flash them). Armed once we leave that
+  // initial open, so a later manual reopen animates instead of snapping.
+  const [expandReady, setExpandReady] = useState(!initialSettle);
+  const settleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const settleCloseDoneRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const settleFoldSeenRef = useRef(Boolean(settleFold));
+  const settleArmedRef = useRef(false);
+  const clearSettleTimers = () => {
+    if (settleTimerRef.current !== null) {
+      clearTimeout(settleTimerRef.current);
+      settleTimerRef.current = null;
+    }
+    if (settleCloseDoneRef.current !== null) {
+      clearTimeout(settleCloseDoneRef.current);
+      settleCloseDoneRef.current = null;
+    }
+  };
+  const armSettleCollapse = () => {
+    if (settleArmedRef.current) {
+      return;
+    }
+    settleArmedRef.current = true;
+    setSettling(true);
+    setSettlePhase(true);
+    setExpandReady(false);
+    setOpen(true);
+    clearSettleTimers();
+    settleTimerRef.current = setTimeout(() => {
+      settleTimerRef.current = null;
+      setExpandReady(true);
+      setOpen(false);
+      settleCloseDoneRef.current = setTimeout(() => {
+        settleCloseDoneRef.current = null;
+        settleArmedRef.current = false;
+        setSettlePhase(false);
+        setSettling(false);
+      }, SETTLE_COLLAPSE_MS);
+    }, SETTLE_FOLD_BEAT_MS);
+  };
+  const mountSettleRef = useRef(initialSettle);
+  // Mount-time settle (new turn wrap).
+  useEffect(() => {
+    if (mountSettleRef.current) {
+      armSettleCollapse();
+    }
+    return () => {
+      clearSettleTimers();
+      settleArmedRef.current = false;
+    };
+  }, []);
+  // Live shell already open: settleFold rises later without remounting.
+  // Do not require !restingOpen — live shells mount with defaultOpen and
+  // only later receive settleFold. Failed turns mount with both at once
+  // (seen=true), so they never take this edge.
+  useEffect(() => {
+    const was = settleFoldSeenRef.current;
+    settleFoldSeenRef.current = Boolean(settleFold);
+    if (!was && settleFold) {
+      armSettleCollapse();
+    }
+  }, [settleFold]);
+  const onOpenChange = (next: boolean) => {
+    // The reader took over — cancel the pending auto-collapse for good.
+    clearSettleTimers();
+    settleArmedRef.current = false;
+    setExpandReady(true);
+    setSettlePhase(false);
+    setSettling(false);
+    setOpen(next);
+  };
   const enter = useEntranceAnimation();
+  // Capture once: after a settle choreography the chip is already on screen.
+  // Re-applying `animate-og-enter` when `settling` clears was the post-collapse
+  // flash (opacity replay on the summary row).
+  const [allowEnterAnimation] = useState(
+    () => Boolean(enter && !bare && !initialSettle && !restingOpen),
+  );
+  // Hold duration (and its "· 8s" insertion) until settle choreography finishes.
+  // Surfacing it mid-beat or on the activity→turn remount made the chip text
+  // reflow twice and read as another flash after the fold.
   const context = useMemo(
-    () => createTurnSummaryContext(items, outcome, failureText, durationMs),
-    [items, outcome, failureText, durationMs],
+    () =>
+      createTurnSummaryContext(
+        items,
+        outcome,
+        failureText,
+        settling || settlePhase ? undefined : durationMs,
+      ),
+    [items, outcome, failureText, durationMs, settling, settlePhase],
   );
   const facetDefinitions = useMemo(
     () => resolveTurnSummaryFacets(facetConfiguration),
@@ -148,14 +273,23 @@ export function TurnSummary({
     [context, facetDefinitions],
   );
 
+  // Live open shell: keep the chip in-flow (so settle never inserts layout)
+  // but quiet it until there is an outcome or a settle beat.
+  const liveShell = outcome === undefined && open && !settlePhase && !bare;
+  const settleOpen = settlePhase && open;
+
   return (
+    <TurnSettleChromeContext.Provider value={settleOpen}>
     <Collapsible.Root
       open={open}
-      onOpenChange={setOpen}
-      className={enter && !bare ? "animate-og-enter" : undefined}
+      onOpenChange={onOpenChange}
+      // History-only entrance. Never toggle this on after mount — see
+      // allowEnterAnimation. Settle uses animate-og-settle-chip on the trigger.
+      className={allowEnterAnimation && !liveShell ? "animate-og-enter" : undefined}
     >
       <Collapsible.Trigger
         className={cn(
+          settling && "animate-og-settle-chip",
           // Both the top-level turn fold and a nested cluster fold render as a
           // FLAT rail row — chevron + glyph + facets on the page background, no
           // border, no fill. Only a hover tint hints the row is expandable, so a
@@ -175,12 +309,20 @@ export function TurnSummary({
           outcome === "failed"
             ? "hover:bg-og-status-failed/[0.06] hover:text-og-fg"
             : "hover:bg-og-surface-1 hover:text-og-fg",
+          liveShell && "pointer-events-none text-og-fg-subtle",
         )}
       >
         {/* Disclosure grammar matches the rows: chevron leads (far left), then any
             exceptional or active state, then the facets — one expand affordance
             side everywhere. */}
-        <ChevronRightIcon className="size-3.5 shrink-0 text-og-fg-subtle transition-transform duration-150 group-data-[state=open]:rotate-90" />
+        <ChevronRightIcon
+          className={cn(
+            "size-3.5 shrink-0 text-og-fg-subtle transition-transform ease-og-in-out group-data-[state=open]:rotate-90",
+            settlePhase
+              ? "duration-[var(--og-duration-disclose-settle)]"
+              : "duration-[var(--og-duration-disclose)]",
+          )}
+        />
         {/* Completion is the quiet default and needs no repeated glyph. Failed,
             cancelled, and still-running folds retain a visible state marker. */}
         {outcome === "complete" ? null : (
@@ -239,12 +381,23 @@ export function TurnSummary({
           {open ? "hide steps" : "show steps"}
         </span>
       </Collapsible.Trigger>
-      <Collapsible.Content className="overflow-hidden data-[state=closed]:animate-og-collapse data-[state=open]:animate-og-expand">
+      <Collapsible.Content
+        data-og-fold-content=""
+        className={cn(
+          "overflow-hidden",
+          expandReady && "data-[state=open]:animate-og-expand",
+          // Auto-close: slow settle. Manual close (settlePhase cleared): fast.
+          settlePhase
+            ? "data-[state=closed]:animate-og-settle-collapse"
+            : "data-[state=closed]:animate-og-collapse",
+        )}
+      >
         {/* A nested node indents its revealed rows under the glyph (thread nesting
             off the parent rail); the top-level turn body owns its own rail. */}
         <div className={bare ? "pt-1 pl-5" : "pt-2"}>{children}</div>
       </Collapsible.Content>
     </Collapsible.Root>
+    </TurnSettleChromeContext.Provider>
   );
 }
 

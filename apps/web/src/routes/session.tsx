@@ -89,6 +89,12 @@ export function SessionRoute({
     hasOlder,
     loadingOlder,
     loadOlder,
+    hasNewer,
+    loadingNewer,
+    loadNewer,
+    loadingOldest,
+    loadOldest,
+    jumpToLatest,
     error: streamError,
   } = useSessionEvents(sessionId);
   // Queue + goal share the timeline's event stream — one SSE connection total.
@@ -383,6 +389,12 @@ export function SessionRoute({
       hasOlder={hasOlder}
       loadingOlder={loadingOlder}
       onLoadOlder={loadOlder}
+      hasNewer={hasNewer}
+      loadingNewer={loadingNewer}
+      onLoadNewer={loadNewer}
+      loadingOldest={loadingOldest}
+      onJumpToStart={loadOldest}
+      onJumpToLatest={jumpToLatest}
       onClearView={clearView}
       onOpenSession={(nextSessionId) =>
         void navigate({
@@ -520,6 +532,12 @@ function SessionChatPane(props: {
   hasOlder: boolean;
   loadingOlder: boolean;
   onLoadOlder: () => Promise<boolean>;
+  hasNewer: boolean;
+  loadingNewer: boolean;
+  onLoadNewer: () => Promise<boolean>;
+  loadingOldest: boolean;
+  onJumpToStart: () => Promise<boolean>;
+  onJumpToLatest: () => Promise<void>;
   /** Reset the local timeline view (the /clear-view command target). */
   onClearView: () => void;
   onOpenSession: (sessionId: string) => void;
@@ -889,6 +907,12 @@ function SessionChatPane(props: {
               hasOlder={props.hasOlder}
               loadingOlder={props.loadingOlder}
               onLoadOlder={() => void props.onLoadOlder()}
+              hasNewer={props.hasNewer}
+              loadingNewer={props.loadingNewer}
+              onLoadNewer={() => void props.onLoadNewer()}
+              loadingOldest={props.loadingOldest}
+              onJumpToStart={() => void props.onJumpToStart()}
+              onJumpToLatest={() => void props.onJumpToLatest()}
               emptyState={
                 props.initialLoading ? (
                   // History is still fetching — a quiet shimmer, not the

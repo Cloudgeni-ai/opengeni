@@ -63,6 +63,17 @@ function manyEvents(count: number): SessionEvent[] {
   return Array.from({ length: count }, (_, index) => event(index + 1));
 }
 
+async function readerScrollUp(scroller: HTMLElement, scrollTop = 0): Promise<void> {
+  // Pin release is intent-only (wheel/touch/scrollbar/keys). A bare scrollTop
+  // jump looks like settle-fold layout and must re-stick, not unpin.
+  await actRun(() => {
+    scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -40, bubbles: true }));
+    scroller.scrollTop = scrollTop;
+    scroller.dispatchEvent(new Event("scroll"));
+  });
+  await flush();
+}
+
 async function armOlderPrefetch(container: HTMLElement): Promise<void> {
   const scroller = container.querySelector(".overflow-y-auto");
   if (!(scroller instanceof HTMLElement)) {
@@ -70,11 +81,7 @@ async function armOlderPrefetch(container: HTMLElement): Promise<void> {
   }
   Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 2400 });
   Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 400 });
-  await actRun(() => {
-    scroller.scrollTop = 0;
-    scroller.dispatchEvent(new Event("scroll"));
-  });
-  await flush();
+  await readerScrollUp(scroller, 0);
 }
 
 const originalIntersectionObserver = globalThis.IntersectionObserver;
@@ -82,6 +89,17 @@ const originalRequestAnimationFrame = globalThis.requestAnimationFrame;
 const originalCancelAnimationFrame = globalThis.cancelAnimationFrame;
 const originalElementRect = Element.prototype.getBoundingClientRect;
 const originalGetComputedStyle = window.getComputedStyle;
+const originalCssDescriptor = Object.getOwnPropertyDescriptor(globalThis, "CSS");
+
+/** happy-dom's `CSS` global is a per-access getter; stub the property itself. */
+function stubNativeScrollAnchoringUnsupported(): void {
+  Object.defineProperty(globalThis, "CSS", {
+    configurable: true,
+    value: {
+      supports: (condition: string) => !String(condition).includes("overflow-anchor"),
+    },
+  });
+}
 
 afterEach(() => {
   globalThis.IntersectionObserver = originalIntersectionObserver;
@@ -89,10 +107,13 @@ afterEach(() => {
   globalThis.cancelAnimationFrame = originalCancelAnimationFrame;
   Element.prototype.getBoundingClientRect = originalElementRect;
   window.getComputedStyle = originalGetComputedStyle;
+  if (originalCssDescriptor) {
+    Object.defineProperty(globalThis, "CSS", originalCssDescriptor);
+  }
 });
 
 describe("MessageTimeline pagination affordances", () => {
-  test("tip stays on newest suffix until scroll-up; then older groups batch in", async () => {
+  test("the full loaded window mounts in one bulk paint, ordered and animation-free", async () => {
     const frames: FrameRequestCallback[] = [];
     globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
       frames.push(cb);
@@ -100,43 +121,36 @@ describe("MessageTimeline pagination affordances", () => {
     };
     globalThis.cancelAnimationFrame = () => undefined;
 
-    // 20 groups: tip-locked paint shows newest 12 (9..20); no auto hydrate.
+    // Everything the hook loaded is in the DOM immediately — no tip-lock
+    // window and no per-frame drip-feed (that was the "content is hidden,
+    // then pops in" wobble).
     const initial = manyEvents(20);
     const r = await renderComponent(<MessageTimeline events={initial} hasOlder />);
 
-    expect(r.container.textContent).toContain("message 20");
-    expect(r.container.textContent).toContain("message 9");
-    expect(r.container.textContent).not.toContain("message 8");
-    expect(r.container.querySelector(".animate-og-enter")).toBeNull();
-    expect(r.container.querySelector("[data-og-top-sentinel]")).toBeNull();
-
-    // Tip-locked: bulk-animation clear may use a frame, but older groups stay unmounted.
-    await drainFrames(frames);
-    expect(r.container.textContent).not.toContain("message 8");
-    expect(r.container.querySelector("[data-og-top-sentinel]")).toBeNull();
-
-    await armOlderPrefetch(r.container);
-    // Hydration suppresses the sentinel until the older prefix is fully mounted.
-    await runNextFrame(frames);
-    expect(r.container.textContent).toContain("message 5");
-    expect(r.container.textContent).not.toContain("message 4");
-    expect(r.container.querySelector(".animate-og-enter")).toBeNull();
-
-    await drainFrames(frames);
     const text = r.container.textContent ?? "";
     const positions = Array.from({ length: 20 }, (_, index) =>
       text.indexOf(`message ${index + 1}`),
     );
+    expect(Math.min(...positions)).toBeGreaterThanOrEqual(0);
     expect(positions).toEqual([...positions].sort((left, right) => left - right));
     for (let sequence = 1; sequence <= 20; sequence += 1) {
       expect(text.match(new RegExp(`message ${sequence}(?!\\d)`, "g"))).toHaveLength(1);
     }
     expect(r.container.querySelector(".animate-og-enter")).toBeNull();
+    // The prefetch sentinel only exists after the reader scrolls up.
+    expect(r.container.querySelector("[data-og-top-sentinel]")).toBeNull();
+
+    await drainFrames(frames);
+    expect(r.container.querySelector(".animate-og-enter")).toBeNull();
+    expect(r.container.querySelector("[data-og-top-sentinel]")).toBeNull();
+
+    await armOlderPrefetch(r.container);
     expect(r.container.querySelector("[data-og-top-sentinel]")).not.toBeNull();
+    await drainFrames(frames);
     await r.unmount();
   });
 
-  test("live appends stay immediate on the tip without hydrating older groups", async () => {
+  test("live appends land immediately with the full history retained", async () => {
     const frames: FrameRequestCallback[] = [];
     globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
       frames.push(cb);
@@ -148,14 +162,12 @@ describe("MessageTimeline pagination affordances", () => {
     const r = await renderComponent(<MessageTimeline events={initial} />);
     await r.rerender(<MessageTimeline events={[...initial, event(21)]} />);
 
+    expect(r.container.textContent).toContain("message 1");
     expect(r.container.textContent).toContain("message 20");
     expect(r.container.textContent).toContain("message 21");
-    // Tip window slides forward (newest 12 of 21 ⇒ 10..21); older stay unmounted.
-    expect(r.container.textContent).not.toContain("message 9");
 
     await drainFrames(frames);
     expect(r.container.textContent).toContain("message 21");
-    expect(r.container.textContent).not.toContain("message 9");
     expect(r.container.textContent!.indexOf("message 20")).toBeLessThan(
       r.container.textContent!.indexOf("message 21"),
     );
@@ -173,32 +185,28 @@ describe("MessageTimeline pagination affordances", () => {
     await r.unmount();
   });
 
-  test("same-key streaming updates do not schedule older-group hydration while tip-locked", async () => {
+  test("streaming updates keep the full history mounted", async () => {
     const frames: FrameRequestCallback[] = [];
-    let cancellations = 0;
     globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
       frames.push(cb);
       return frames.length;
     };
-    globalThis.cancelAnimationFrame = () => {
-      cancellations += 1;
-    };
+    globalThis.cancelAnimationFrame = () => undefined;
 
     const prefix = manyEvents(19);
     const initial = [...prefix, agentDelta(20, "hello ")];
     const r = await renderComponent(<MessageTimeline events={initial} />);
     expect(r.container.textContent).toContain("hello");
-    expect(r.container.textContent).not.toContain("message 8");
+    expect(r.container.textContent).toContain("message 1");
 
     await r.rerender(<MessageTimeline events={[...initial, agentDelta(21, "world")]} />);
     expect(r.container.textContent).toContain("hello world");
-    expect(cancellations).toBe(0);
     await drainFrames(frames);
-    expect(r.container.textContent).not.toContain("message 8");
+    expect(r.container.textContent).toContain("message 1");
     await r.unmount();
   });
 
-  test("after scroll-up, a prepended page keeps mounted rows and reveals its new prefix", async () => {
+  test("a prepended page mounts entirely in one commit — no progressive reveal", async () => {
     const frames: FrameRequestCallback[] = [];
     globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
       frames.push(cb);
@@ -212,21 +220,17 @@ describe("MessageTimeline pagination affordances", () => {
     await drainFrames(frames);
     await r.rerender(<MessageTimeline events={manyEvents(20)} />);
 
-    expect(r.container.textContent).toContain("message 20");
-    expect(r.container.textContent).toContain("message 9");
-    // New prefix above the retained suffix mounts progressively.
-    expect(r.container.textContent).not.toContain("message 4");
-
-    await runNextFrame(frames);
-    expect(r.container.textContent).toContain("message 5");
-    await drainFrames(frames);
-
+    // The whole prepend is present in the very same commit, so its scroll
+    // correction is a single exact delta instead of per-frame batches.
     const text = r.container.textContent ?? "";
     for (let sequence = 1; sequence <= 20; sequence += 1) {
       expect(text.indexOf(`message ${sequence}`)).toBeGreaterThanOrEqual(0);
     }
     expect(text.indexOf("message 1")).toBeLessThan(text.indexOf("message 2"));
     expect(text.indexOf("message 19")).toBeLessThan(text.indexOf("message 20"));
+    // Prepended rows are a bulk paint: no entrance animations.
+    expect(r.container.querySelector(".animate-og-enter")).toBeNull();
+    await drainFrames(frames);
     await r.unmount();
   });
 
@@ -327,13 +331,16 @@ describe("MessageTimeline pagination affordances", () => {
     await r.unmount();
   });
 
-  test("near-top older hydration preserves scrollTop by height delta without wobble", async () => {
+  test("unpinned fallback (no native anchoring): only a genuine prepend moves scrollTop, by one exact delta", async () => {
     const frames: FrameRequestCallback[] = [];
     globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
       frames.push(cb);
       return frames.length;
     };
     globalThis.cancelAnimationFrame = () => undefined;
+    // Force the manual-correction path: engines WITH native scroll anchoring
+    // never script scrollTop while unpinned (the browser holds the anchor).
+    stubNativeScrollAnchoringUnsupported();
 
     const settled = manyEvents(12).map((evt) => event(evt.sequence + 8)); // 9..20
     const r = await renderComponent(
@@ -347,8 +354,8 @@ describe("MessageTimeline pagination affordances", () => {
       throw new Error("expected timeline scroller");
     }
 
-    // Reader is near the top (not tip-locked), slightly below absolute 0 — the
-    // painful wobble zone while the next older page inserts.
+    // Reader is near the top — the historical wobble zone while the next
+    // older page inserts.
     let contentHeight = 2000;
     const clientHeight = 400;
     let currentScrollTop = 24;
@@ -372,41 +379,62 @@ describe("MessageTimeline pagination affordances", () => {
       scroller.dispatchEvent(new Event("scroll"));
     });
 
-    // Enter settling at the mocked height so previousScrollHeight matches 2000
-    // (otherwise the first delta is against happy-dom's earlier scrollHeight).
+    // Sync the height baseline at the mocked 2000 (a commit with no prepend
+    // must never write scrollTop while unpinned).
     await r.rerender(<MessageTimeline events={settled} hasOlder loadingOlder status="idle" />);
     await flush();
-    currentScrollTop = 24;
+    expect(scroller.scrollTop).toBe(24);
 
-    // loadingOlder shimmer / first prepend batch grows the column above.
-    // status flip forces the layout restore without leaving settling.
-    contentHeight = 2240;
-    await r.rerender(
-      <MessageTimeline events={settled} hasOlder loadingOlder status="running" />,
-    );
+    // Content grows WITHOUT a prepend (live tip streaming below, shimmer,
+    // late layout): the reader must not be nudged a single pixel.
+    contentHeight = 2100;
+    await r.rerender(<MessageTimeline events={settled} hasOlder loadingOlder status="running" />);
     await flush();
-    expect(scroller.scrollTop).toBe(264); // 24 + (2240 - 2000)
+    expect(scroller.scrollTop).toBe(24);
 
-    // Further progressive growth must keep the same visual place — repeated
-    // restore with an unchanged height must not oscillate scrollTop.
-    contentHeight = 2480;
+    // A genuine prepend (older page landed: first item id changed) is
+    // corrected by exactly the height delta, once.
+    contentHeight = 2500;
     await r.rerender(
       <MessageTimeline events={manyEvents(20)} hasOlder loadingOlder={false} status="running" />,
     );
-    await runNextFrame(frames);
-    const afterPrepend = scroller.scrollTop;
-    expect(afterPrepend).toBe(504); // 264 + (2480 - 2240)
-
     await flush();
-    expect(scroller.scrollTop).toBe(afterPrepend);
-    // A no-growth restore (RO chatter) must not nudge the reader.
+    expect(scroller.scrollTop).toBe(424); // 24 + (2500 - 2100)
+
+    // Subsequent commits and scroll ticks with unchanged content leave the
+    // reader exactly in place — nothing left to oscillate.
+    await r.rerender(
+      <MessageTimeline events={manyEvents(20)} hasOlder loadingOlder={false} status="running" />,
+    );
+    await flush();
+    expect(scroller.scrollTop).toBe(424);
     await actRun(() => {
       scroller.dispatchEvent(new Event("scroll"));
     });
-    expect(scroller.scrollTop).toBe(afterPrepend);
+    expect(scroller.scrollTop).toBe(424);
 
     await drainFrames(frames);
-    expect(scroller.scrollTop).toBe(afterPrepend);
+    expect(scroller.scrollTop).toBe(424);
+    await r.unmount();
+  });
+
+  test("native scroll anchoring owns unpinned mode; the bottom-snap owns pinned mode", async () => {
+    const r = await renderComponent(<MessageTimeline events={manyEvents(6)} />);
+    await flush();
+    const scroller = r.container.querySelector(".overflow-y-auto");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+    // Pinned (default): anchoring disabled so it cannot fight the snap.
+    expect(scroller.className).toContain("[overflow-anchor:none]");
+    expect(scroller.className).not.toContain("[overflow-anchor:auto]");
+
+    Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 2400 });
+    Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 400 });
+    await readerScrollUp(scroller, 0);
+    // Unpinned: the browser holds the reader's place.
+    expect(scroller.className).toContain("[overflow-anchor:auto]");
+    expect(scroller.className).not.toContain("[overflow-anchor:none]");
     await r.unmount();
   });
 
@@ -470,6 +498,7 @@ describe("MessageTimeline pagination affordances", () => {
     expect(distanceFromBottom(scroller)).toBeLessThan(48);
 
     await actRun(() => {
+      scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -40, bubbles: true }));
       scroller.scrollTop = 200;
       layout.placeTipAt(120);
       scroller.dispatchEvent(new Event("scroll"));
@@ -488,6 +517,114 @@ describe("MessageTimeline pagination affordances", () => {
     expect(r.container.textContent).toContain("Jump to latest");
     // Stick-to-bottom must not yank the reader back to the tip after unpinning.
     expect(scroller.scrollTop).toBe(scrollTopBefore);
+    layout.restore();
+    await r.unmount();
+  });
+
+  test("hasNewer history append (loadNewer) never yanks to the new page bottom", async () => {
+    // Mirror of unpinned loadOlder: growth below the viewport must leave
+    // scrollTop alone. History-window bottoms used to count as pinned live tip.
+    const initial = manyEvents(20);
+    const r = await renderComponent(
+      <MessageTimeline events={initial} hasNewer onLoadNewer={() => undefined} />,
+    );
+    const scroller = r.container.querySelector(".overflow-y-auto");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+
+    const layout = mockScrollerLayout(scroller, {
+      clientHeight: 400,
+      contentHeight: 2000,
+      tipHeight: 80,
+      paddingBottom: 24,
+    });
+    // Sit near the bottom of this history page (where the newer sentinel fires).
+    layout.syncTipAtBottom();
+    scroller.scrollTop = Math.max(0, 2000 - 400 - 20);
+    await actRun(() => {
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    await flush();
+    expect(r.container.textContent).toContain("Jump to latest");
+    expect(scroller.className).toContain("[overflow-anchor:auto]");
+
+    const scrollTopBefore = scroller.scrollTop;
+    layout.setContentHeight(2600);
+    await r.rerender(
+      <MessageTimeline
+        events={[...initial, ...Array.from({ length: 8 }, (_, index) => event(21 + index))]}
+        hasNewer
+        onLoadNewer={() => undefined}
+      />,
+    );
+    await flush();
+
+    expect(scroller.scrollTop).toBe(scrollTopBefore);
+    expect(distanceFromBottom(scroller)).toBeGreaterThan(48);
+    expect(r.container.textContent).toContain("Jump to latest");
+    layout.restore();
+    await r.unmount();
+  });
+
+  test("layout height shrink while pinned does not unpin (settle-fold / scenario spawn)", async () => {
+    const frames: FrameRequestCallback[] = [];
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      frames.push(cb);
+      return frames.length;
+    };
+    globalThis.cancelAnimationFrame = () => undefined;
+
+    const prefix = manyEvents(19);
+    const initial = [...prefix, agentDelta(20, "hello ")];
+    const r = await renderComponent(<MessageTimeline events={initial} status="running" />);
+    const scroller = r.container.querySelector(".overflow-y-auto");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+
+    const layout = mockScrollerLayout(scroller, {
+      clientHeight: 400,
+      contentHeight: 2000,
+      tipHeight: 80,
+      paddingBottom: 24,
+    });
+    layout.syncTipAtBottom();
+    await actRun(() => {
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    expect(distanceFromBottom(scroller)).toBeLessThan(48);
+    expect(r.container.textContent).not.toContain("Jump to latest");
+
+    // Settle-fold collapse: content above the tip shrinks. A transient
+    // far-from-tip scroll (including the ResizeObserver race where height
+    // baseline already matches) must re-stick, not show Jump to latest.
+    layout.setContentHeight(1500);
+    await actRun(() => {
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    // Same-height second scroll: baseline already matches, gap still large —
+    // the old height-delta guard missed this and unpinned.
+    await actRun(() => {
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    await drainFrames(frames);
+    await flush();
+    expect(r.container.textContent).not.toContain("Jump to latest");
+    expect(distanceFromBottom(scroller)).toBeLessThan(48);
+
+    // A following tip append must still stick to bottom.
+    layout.setContentHeight(1580);
+    await r.rerender(
+      <MessageTimeline
+        events={[...initial, event(21)]}
+        status="running"
+      />,
+    );
+    await drainFrames(frames);
+    await flush();
+    expect(r.container.textContent).not.toContain("Jump to latest");
+    expect(distanceFromBottom(scroller)).toBeLessThan(48);
     layout.restore();
     await r.unmount();
   });

@@ -2,6 +2,7 @@ import type { SessionEvent, SessionStatus } from "@opengeni/sdk";
 import {
   ArrowDownIcon,
   ArrowRightIcon,
+  ArrowUpToLineIcon,
   BotIcon,
   CheckCircle2Icon,
   CheckIcon,
@@ -31,6 +32,7 @@ import {
 } from "react";
 import { cn } from "../lib/cn";
 import { formatRelativeTime, truncate } from "../lib/format";
+import { prefersReducedMotion } from "../lib/motion";
 import { Markdown } from "./markdown";
 import {
   ActivityRail,
@@ -109,18 +111,64 @@ export type MessageTimelineProps = {
   loadingOlder?: boolean | undefined;
   /** Called when the reader nears the top and older history should backfill. */
   onLoadOlder?: (() => void) | undefined;
+  /** Jump to the durable session start (bounded oldest window, no middle). */
+  onJumpToStart?: (() => void | Promise<void>) | undefined;
+  /** True while the oldest window is loading. */
+  loadingOldest?: boolean | undefined;
+  /** Newer durable history exists below the current (history) window. */
+  hasNewer?: boolean | undefined;
+  /** A newer history page is being fetched. */
+  loadingNewer?: boolean | undefined;
+  /** Page forward through history without loading the whole gap to the tip. */
+  onLoadNewer?: (() => void) | undefined;
+  /**
+   * Reload the live tip window. When omitted, Jump to latest only re-pins and
+   * scrolls the in-memory window.
+   */
+  onJumpToLatest?: (() => void | Promise<void>) | undefined;
   emptyState?: ReactNode | undefined;
   className?: string | undefined;
 };
 
-/** Tip window: enough newest groups to fill a typical chat viewport. */
-const INITIAL_MOUNTED_GROUPS = 12;
 /**
- * When the reader scrolls up, reveal already-fetched older groups in batches so
- * Markdown/layout work stays frame-budgeted. Never auto-run while pinned at the
- * tip — that scrollHeight churn was the open/load flash.
+ * Scroll ownership, from first principles. Everything the events hook has
+ * loaded is mounted — no tip-lock window, no per-frame progressive reveal.
+ * (The in-memory window is already byte/count-bounded by useSessionEvents, and
+ * rows are memoized, so a full mount is cheap; the drip-feed machinery this
+ * replaces was the "content is hidden, then pops in in batches" wobble.)
+ *
+ * Exactly one authority writes scrollTop, depending on mode:
+ * - Pinned at the tip → we own it: snap to the bottom after every commit (and
+ *   on ResizeObserver ticks for late layout like images). Native scroll
+ *   anchoring is disabled in this mode so it cannot fight the snap.
+ * - Scrolled up reading → the BROWSER owns it: native scroll anchoring
+ *   (`overflow-anchor: auto`) holds the reader's viewport through history
+ *   prepends, image/font late layout, and fold reflows at the compositor
+ *   level — no script, nothing to wobble. Where the engine lacks scroll
+ *   anchoring, the one scripted exception is a history prepend, corrected
+ *   once per commit by the exact scrollHeight delta.
  */
-const GROUPS_PER_FRAME = 4;
+const PIN_THRESHOLD_PX = 48;
+
+/**
+ * Soft follow glide time constant: the remaining distance to the bottom
+ * shrinks by ~63% every GLIDE_TAU_MS. Small enough to stay clearly "at the
+ * tip", large enough that streaming growth reads as motion, not teleports.
+ */
+const GLIDE_TAU_MS = 140;
+/** Growth beyond this snaps instead of gliding (session switches, huge folds). */
+const GLIDE_MAX_DISTANCE_PX = 600;
+
+/** Detects native scroll anchoring; a hook so tests can exercise the fallback. */
+function useNativeScrollAnchoring(): boolean {
+  return useMemo(
+    () =>
+      typeof CSS !== "undefined" &&
+      typeof CSS.supports === "function" &&
+      CSS.supports("overflow-anchor: auto"),
+    [],
+  );
+}
 
 /**
  * The session timeline: chat messages with streaming deltas, collapsed
@@ -143,73 +191,57 @@ export function MessageTimeline({
   hasOlder = false,
   loadingOlder = false,
   onLoadOlder,
+  onJumpToStart,
+  loadingOldest = false,
+  hasNewer = false,
+  loadingNewer = false,
+  onLoadNewer,
+  onJumpToLatest,
   emptyState,
   className,
 }: MessageTimelineProps) {
   const resolvedItems = useMemo(() => items ?? buildTimeline(events ?? []), [items, events]);
   const allGroups = useMemo(() => groupTimeline(resolvedItems), [resolvedItems]);
-  const keyedGroups = useStableTimelineGroupKeys(allGroups);
+  const groups = useStableTimelineGroupKeys(allGroups);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const topSentinelRef = useRef<HTMLDivElement | null>(null);
+  const bottomSentinelRef = useRef<HTMLDivElement | null>(null);
   const previousBulkFirstKeyRef = useRef<string | null | undefined>(undefined);
   const [pinned, setPinned] = useState(true);
   const [bulkActive, setBulkActive] = useState(true);
-  // Older history (DB prefetch + in-memory mount expansion) is user-driven: a
-  // short or non-rendering-dense newest window would keep the top sentinel
-  // inside the 1600px rootMargin while pinned at the tip and auto-fetch forever,
-  // and auto-mounting older groups while tip-pinned caused stick-to-bottom
-  // scrollHeight thrash (visible flash). Arm only after the reader scrolls up.
+  // Older history prefetch is user-driven: a window shorter than the viewport
+  // + rootMargin would otherwise keep the top sentinel intersecting and fetch
+  // history forever while the reader sits at the tip. Arm on first scroll-up.
   const olderPrefetchArmedRef = useRef(false);
   const [olderPrefetchArmed, setOlderPrefetchArmed] = useState(false);
-  const { mountedGroups: groups, mountingOlderGroups } = useProgressivelyMountedGroups(
-    keyedGroups,
-    olderPrefetchArmed,
-  );
   const firstGroupKey = allGroups[0] ? timelineGroupKey(allGroups[0]) : null;
   // Content stays invisible until its first bottom-anchored frame, so a flash
-  // of the window's TOP while a large timeline lays out across commits is
-  // structurally impossible — the reader only ever sees it already at the
-  // bottom. An empty timeline reveals immediately (there is nothing to anchor).
+  // of the window's TOP while a large timeline lays out is structurally
+  // impossible — the reader only ever sees it already at the bottom.
   const [revealed, setRevealed] = useState(false);
-  // Our own scrollTop assignments echo back as delayed scroll events. Keep the
-  // ordered, clamped targets rather than only the latest one: successive
-  // ResizeObserver corrections can queue several echoes before the browser
-  // dispatches them. If reader input lands at a different position, its value
-  // wins and clears the pending echoes. A matching echo must not recapture the
-  // visual anchor while progressive prepend is still mounting older rows.
-  const programmaticScrollTargetsRef = useRef<number[]>([]);
-  const assignScrollTop = useCallback((node: HTMLElement, value: number) => {
-    const previous = node.scrollTop;
-    node.scrollTop = value;
-    if (node.scrollTop === previous) {
-      return;
-    }
-    const pending = programmaticScrollTargetsRef.current;
-    pending.push(node.scrollTop);
-    if (pending.length > 32) {
-      pending.splice(0, pending.length - 32);
-    }
-  }, []);
-  // Mirror `pinned` into a ref so the ResizeObserver callback (a stable closure)
-  // always reads the live value without re-subscribing on every scroll.
+  // Mirror `pinned` into a ref so ResizeObserver/layout callbacks (stable
+  // closures) always read the live value without re-subscribing.
   const pinnedRef = useRef(true);
-  // While older history is fetching or progressively mounting, preserve the
-  // reader's place by scrollHeight delta — not tip-follow and not a live
-  // element-anchor chase. The loading shimmer + per-frame prepends otherwise
-  // fight ResizeObserver/layout corrections and wobble ~1px near the top.
-  // Keep a short post-settle cooldown so Markdown/layout RO chatter right after
-  // the last batch cannot flip into element-anchor micro-corrections.
-  const settlingOlder = loadingOlder || mountingOlderGroups;
-  const [olderSettleCooldown, setOlderSettleCooldown] = useState(false);
-  const freezeOlderScroll = settlingOlder || olderSettleCooldown;
-  const freezeOlderScrollRef = useRef(freezeOlderScroll);
-  freezeOlderScrollRef.current = freezeOlderScroll;
+  // History windows (`hasNewer`) have a bottom that is not the live tip.
+  // Pin/follow must ignore that floor — otherwise loadNewer appends yank the
+  // reader to the new page bottom. LoadOlder prepends already stay put because
+  // the reader is unpinned and scroll anchoring / delta correction owns place.
+  const hasNewerRef = useRef(hasNewer);
+  hasNewerRef.current = hasNewer;
+  // Our own scrollTop writes echo back as delayed scroll events. We only ever
+  // write "to the bottom" while pinned (echo reads as pinned — harmless) or a
+  // prepend delta while unpinned (echo reads as unpinned — harmless), so no
+  // target bookkeeping is needed; a small counter just stops a late echo of a
+  // bottom-follow from unpinning a reader who has not touched the wheel.
+  const pendingEchoesRef = useRef(0);
+  // Prepend detection: the oldest loaded item's id changes exactly when older
+  // history lands (including the merge-into-first-group case where the first
+  // GROUP key is retained). Item ids, not group keys, are the durable signal.
+  // Only consulted where the engine lacks native scroll anchoring.
+  const nativeScrollAnchoring = useNativeScrollAnchoring();
+  const previousFirstItemIdRef = useRef<string | null>(null);
   const previousScrollHeightRef = useRef(0);
-  // The reader's visual anchor: the topmost still-visible timeline element and
-  // its offset from the viewport top. Recaptured on scroll and after every
-  // height change, it lets us hold the reader's position when content above the
-  // viewport expands or collapses (e.g. a turn folds when it settles).
-  const anchorRef = useRef<{ el: Element; top: number } | null>(null);
+  const firstItemId = resolvedItems[0]?.id ?? null;
   const lastItem = resolvedItems[resolvedItems.length - 1];
   const streaming =
     lastItem !== undefined &&
@@ -221,191 +253,146 @@ export function MessageTimeline({
   const firstKeyChangedForBulk =
     previousBulkFirstKeyRef.current !== undefined &&
     previousBulkFirstKeyRef.current !== firstGroupKey;
-  const bulkRender =
-    allGroups.length > 0 && (bulkActive || firstKeyChangedForBulk || mountingOlderGroups);
+  const bulkRender = allGroups.length > 0 && (bulkActive || firstKeyChangedForBulk);
 
-  // Snapshot the topmost visible element and where it sits in the viewport, so a
-  // later reflow can restore it to the same spot. Prefer durable row wrappers
-  // over their containing group: an older activity item can merge into the
-  // existing group, leaving that outer group in place while shifting every row
-  // after the insertion. Transient chrome (the backfill sentinel and shimmer) is
-  // skipped — anchoring to a row that unmounts when the older window lands would
-  // drop the correction mid-prepend.
-  const captureAnchor = useCallback(() => {
-    const node = scrollRef.current;
-    const inner = node?.firstElementChild;
-    if (!node || !inner) {
-      anchorRef.current = null;
-      return;
+  // Mirrors `revealed` for the stable follow callbacks: the very first
+  // bottom-anchored frame must SNAP (the reader hasn't seen anything yet);
+  // everything after it may glide.
+  const revealedRef = useRef(false);
+
+  const writeScrollTop = useCallback((node: HTMLElement, value: number) => {
+    const previous = node.scrollTop;
+    node.scrollTop = value;
+    if (node.scrollTop !== previous) {
+      pendingEchoesRef.current = Math.min(pendingEchoesRef.current + 1, 32);
     }
-    const containerTop = node.getBoundingClientRect().top;
-    const findVisible = (selector: string): Element | null => {
-      for (const candidate of inner.querySelectorAll(selector)) {
-        if (candidate instanceof HTMLElement && candidate.dataset.ogTimelineChrome !== undefined) {
-          continue;
-        }
-        const rect = candidate.getBoundingClientRect();
-        if (rect.bottom > containerTop + 1 && rect.height > 0) {
-          return candidate;
-        }
-      }
-      return null;
-    };
-    const anchor =
-      findVisible("[data-og-timeline-row-anchor]") ??
-      findVisible("[data-og-timeline-group-anchor]");
-    if (anchor) {
-      const rect = anchor.getBoundingClientRect();
-      anchorRef.current = { el: anchor, top: rect.top - containerTop };
-      return;
-    }
-    anchorRef.current = null;
   }, []);
 
-  // Restore the user-owned anchor synchronously after React commits a frame.
-  // ResizeObserver remains a late-measurement fallback, but progressive history
-  // frames must be corrected before the browser can paint an intermediate jump.
-  const restoreAnchor = useCallback(
+  // Soft follow glide: while pinned, the tip eases toward the bottom with an
+  // exponential approach (frame-rate independent) instead of teleporting per
+  // commit — streaming reads as one continuous motion, not a hard ratchet.
+  // The target is re-read every frame, so content growing mid-glide simply
+  // extends the same motion. Self-terminates the moment the pin releases.
+  const glideFrameRef = useRef<number | null>(null);
+  const glideLastTsRef = useRef(0);
+
+  const stopGlide = useCallback(() => {
+    if (glideFrameRef.current !== null) {
+      cancelFrame(glideFrameRef.current);
+      glideFrameRef.current = null;
+    }
+  }, []);
+
+  const glideStep = useCallback(() => {
+    glideFrameRef.current = null;
+    const node = scrollRef.current;
+    if (!node || !pinnedRef.current) {
+      return;
+    }
+    const target = node.scrollHeight - node.clientHeight;
+    const delta = target - node.scrollTop;
+    if (Math.abs(delta) <= 1) {
+      if (delta !== 0) {
+        writeScrollTop(node, target);
+      }
+      return;
+    }
+    const nowTs = typeof performance !== "undefined" ? performance.now() : Date.now();
+    const dt =
+      glideLastTsRef.current === 0
+        ? 16
+        : Math.min(64, Math.max(8, nowTs - glideLastTsRef.current));
+    glideLastTsRef.current = nowTs;
+    const alpha = 1 - Math.exp(-dt / GLIDE_TAU_MS);
+    const step = delta * alpha;
+    writeScrollTop(node, node.scrollTop + (Math.abs(step) < 1 ? Math.sign(delta) : step));
+    glideFrameRef.current = requestFrame(glideStep);
+  }, [writeScrollTop]);
+
+  const startGlide = useCallback(() => {
+    if (glideFrameRef.current === null) {
+      glideLastTsRef.current = 0;
+      glideFrameRef.current = requestFrame(glideStep);
+    }
+  }, [glideStep]);
+
+  useEffect(() => stopGlide, [stopGlide]);
+
+  const followTip = useCallback(
     (node: HTMLElement) => {
-      const nextHeight = node.scrollHeight;
-      const previousHeight = previousScrollHeightRef.current;
-      // Older fetch/mount (+ brief cooldown): keep the viewport locked via
-      // height delta only. Tip-follow would yank a near-top reader;
-      // element-anchor + RO would micro-correct against shimmer/batch inserts.
-      if (freezeOlderScrollRef.current && !(autoFollow && pinnedRef.current)) {
-        if (previousHeight > 0) {
-          const heightDelta = nextHeight - previousHeight;
-          // Integer px only — sub-pixel height chatter was the 1mm wobble.
-          if (Math.abs(heightDelta) >= 1) {
-            assignScrollTop(node, Math.round(node.scrollTop + heightDelta));
-          }
-        }
-        previousScrollHeightRef.current = node.scrollHeight;
+      const target = node.scrollHeight - node.clientHeight;
+      const delta = target - node.scrollTop;
+      if (Math.abs(delta) <= 1) {
         return;
       }
-      if (autoFollow && pinnedRef.current) {
-        // Align the last non-chrome child's bottom to the scroller padding edge.
-        // Prefer the tip box over raw scrollHeight: estimated/offscreen sizes
-        // above the tip must not invent trailing empty space mid-viewport.
-        const inner = node.firstElementChild;
-        let tip: HTMLElement | null = null;
-        if (inner) {
-          for (
-            let child = inner.lastElementChild;
-            child;
-            child = child.previousElementSibling
-          ) {
-            if (
-              child instanceof HTMLElement &&
-              child.dataset.ogTimelineChrome === undefined
-            ) {
-              tip = child;
-              break;
-            }
-          }
-        }
-        if (tip) {
-          const nodeRect = node.getBoundingClientRect();
-          const tipRect = tip.getBoundingClientRect();
-          if (nodeRect.height > 0 && tipRect.height > 0) {
-            const paddingBottom =
-              Number.parseFloat(getComputedStyle(node).paddingBottom) || 0;
-            const delta = tipRect.bottom - (nodeRect.bottom - paddingBottom);
-            if (Math.abs(delta) > 0.5) {
-              assignScrollTop(node, node.scrollTop + delta);
-            }
-            previousScrollHeightRef.current = node.scrollHeight;
-            return;
-          }
-        }
-        assignScrollTop(node, node.scrollHeight);
-        previousScrollHeightRef.current = node.scrollHeight;
-        return;
+      // Glide only for ordinary streaming-scale growth after the first paint.
+      // The initial reveal, session switches, and layout jumps larger than a
+      // viewport-ish distance snap — animating those would feel like lag.
+      if (revealedRef.current && Math.abs(delta) <= GLIDE_MAX_DISTANCE_PX && !prefersReducedMotion()) {
+        startGlide();
+      } else {
+        stopGlide();
+        writeScrollTop(node, target);
       }
-      const anchor = anchorRef.current;
-      if (!anchor || !anchor.el.isConnected) {
-        previousScrollHeightRef.current = nextHeight;
-        return;
-      }
-      const containerTop = node.getBoundingClientRect().top;
-      const now = anchor.el.getBoundingClientRect().top - containerTop;
-      const diff = now - anchor.top;
-      // Ignore sub-pixel RO chatter; near-top prepend settle used to oscillate.
-      if (Math.abs(diff) > 1) {
-        assignScrollTop(node, node.scrollTop + diff);
-      }
-      previousScrollHeightRef.current = node.scrollHeight;
     },
-    [assignScrollTop, autoFollow],
+    [startGlide, stopGlide, writeScrollTop],
   );
 
-  // A LAYOUT effect so the very first paint of a freshly loaded session is
-  // already anchored at the bottom — no visible traversal down the history.
+  // The single post-commit scroll authority. Runs after EVERY commit (no dep
+  // list): any commit may change content height, and the decision is cheap.
   useLayoutEffect(() => {
     const node = scrollRef.current;
-    if (node) {
-      restoreAnchor(node);
+    if (!node) {
+      return;
     }
+    const previousFirstItemId = previousFirstItemIdRef.current;
+    const prepended =
+      previousFirstItemId !== null &&
+      firstItemId !== previousFirstItemId &&
+      resolvedItems.some((item) => item.id === previousFirstItemId);
+    // Live tip only. A history-page bottom (`hasNewer`) must not follow appends
+    // from loadNewer — that path should leave scrollTop alone, like an unpinned
+    // reader watching growth below the viewport.
+    if (autoFollow && pinnedRef.current && !hasNewerRef.current) {
+      followTip(node);
+    } else if (prepended && !nativeScrollAnchoring) {
+      // Fallback engines only: one exact correction per prepend commit, whole
+      // pixels. Anchoring engines already adjusted during layout — correcting
+      // again here would double-shift. Growth below the viewport (a live tip
+      // streaming while the reader is up in history) never lands here.
+      const delta = Math.round(node.scrollHeight - previousScrollHeightRef.current);
+      if (delta > 0) {
+        writeScrollTop(node, node.scrollTop + delta);
+      }
+    }
+    previousFirstItemIdRef.current = firstItemId;
+    previousScrollHeightRef.current = node.scrollHeight;
     if (!revealed && groups.length > 0) {
+      revealedRef.current = true;
       setRevealed(true);
     }
-  }, [
-    resolvedItems,
-    working,
-    revealed,
-    groups.length,
-    loadingOlder,
-    mountingOlderGroups,
-    olderSettleCooldown,
-    restoreAnchor,
-  ]);
+  });
 
-  // After older hydration settles, hold height-delta mode for a couple of
-  // frames, then re-seed the element-anchor from the stable viewport.
-  const wasSettlingOlderRef = useRef(false);
-  const settlingOlderLiveRef = useRef(settlingOlder);
-  settlingOlderLiveRef.current = settlingOlder;
+  // A cleared timeline (stream identity change) re-arms the reveal + prefetch
+  // gate and returns to bottom-follow for the next session's first paint.
   useLayoutEffect(() => {
-    if (settlingOlder) {
-      wasSettlingOlderRef.current = true;
-      setOlderSettleCooldown(false);
-      return undefined;
+    if (allGroups.length > 0) {
+      return;
     }
-    if (!wasSettlingOlderRef.current) {
-      return undefined;
-    }
-    wasSettlingOlderRef.current = false;
-    setOlderSettleCooldown(true);
-    let frame2 = 0;
-    const frame1 = requestFrame(() => {
-      frame2 = requestFrame(() => {
-        // A new older fetch may have started during the cooldown.
-        if (settlingOlderLiveRef.current) {
-          return;
-        }
-        setOlderSettleCooldown(false);
-        captureAnchor();
-      });
-    });
-    return () => {
-      cancelFrame(frame1);
-      if (frame2) {
-        cancelFrame(frame2);
-      }
-    };
-  }, [settlingOlder, captureAnchor]);
-
-  // A cleared timeline (stream identity change) re-arms the reveal so the next
-  // session also first paints at its bottom.
-  useLayoutEffect(() => {
-    if (allGroups.length === 0 && revealed) {
+    stopGlide();
+    revealedRef.current = false;
+    if (revealed) {
       setRevealed(false);
     }
-    if (allGroups.length === 0 && olderPrefetchArmedRef.current) {
+    if (olderPrefetchArmedRef.current) {
       olderPrefetchArmedRef.current = false;
       setOlderPrefetchArmed(false);
     }
-  }, [allGroups.length, revealed]);
+    if (!pinnedRef.current) {
+      pinnedRef.current = true;
+      setPinned(true);
+    }
+  }, [allGroups.length, revealed, stopGlide]);
 
   // Clear the bulk-paint marker a frame after it renders, so rows appended
   // live (streams, new turns) animate exactly as before.
@@ -415,19 +402,13 @@ export function MessageTimeline({
       return;
     }
     setBulkActive(true);
-    // Initial tails and prepended history mount from newest to oldest across
-    // frames. Keep every row born during that bulk window animation-free; only
-    // clear the marker after the authoritative group list is fully mounted.
-    if (mountingOlderGroups) {
-      return;
-    }
     const frame = requestFrame(() => setBulkActive(false));
     return () => cancelFrame(frame);
-  }, [bulkRender, firstGroupKey, mountingOlderGroups]);
+  }, [bulkRender, firstGroupKey]);
 
   // Prefetch older history only after the reader scrolls up from the tip.
   // Once armed, the sentinel trips 1600px early so backfill is usually
-  // rendered (and anchored) before the top of the window becomes visible.
+  // rendered (and its scroll delta corrected) before the reader reaches it.
   useEffect(() => {
     const root = scrollRef.current;
     const target = topSentinelRef.current;
@@ -435,7 +416,6 @@ export function MessageTimeline({
       !root ||
       !target ||
       !olderPrefetchArmed ||
-      mountingOlderGroups ||
       !hasOlder ||
       loadingOlder ||
       !onLoadOlder ||
@@ -453,23 +433,40 @@ export function MessageTimeline({
     );
     observer.observe(target);
     return () => observer.disconnect();
-  }, [
-    olderPrefetchArmed,
-    hasOlder,
-    loadingOlder,
-    onLoadOlder,
-    firstGroupKey,
-    mountingOlderGroups,
-  ]);
+  }, [olderPrefetchArmed, hasOlder, loadingOlder, onLoadOlder, firstGroupKey]);
 
-  // Scroll anchoring: when the content reflows (a fold expands/collapses, a
-  // stream appends), keep following the bottom if pinned; otherwise pin the
-  // reader's anchor in place. A change ABOVE the anchor shifts its viewport
-  // offset — we correct scrollTop by that shift so the reader never gets yanked.
-  // A change BELOW the anchor (a bottom append while scrolled up) leaves the
-  // anchor put, so `diff` is 0 and we leave scrollTop alone.
-  // During older hydration, restoreAnchor switches to height-delta mode so RO
-  // does not chase a moving element-anchor through shimmer/batch inserts.
+  // History view: page forward when the reader nears the bottom of the current
+  // non-tip window. Does not pull the whole gap — one density-bounded page.
+  useEffect(() => {
+    const root = scrollRef.current;
+    const target = bottomSentinelRef.current;
+    if (
+      !root ||
+      !target ||
+      !hasNewer ||
+      loadingNewer ||
+      !onLoadNewer ||
+      typeof IntersectionObserver === "undefined"
+    ) {
+      return;
+    }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          onLoadNewer();
+        }
+      },
+      { root, rootMargin: "0px 0px 1200px 0px" },
+    );
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [hasNewer, loadingNewer, onLoadNewer, firstGroupKey]);
+
+  // Late layout that React commits cannot see (images decoding, fonts, code
+  // blocks) grows content without a commit. While pinned we keep following the
+  // bottom; while unpinned we deliberately do NOTHING — chasing those shifts
+  // with scroll corrections was the wobble. We only refresh the height
+  // baseline so the next prepend delta stays exact.
   useEffect(() => {
     const node = scrollRef.current;
     const inner = node?.firstElementChild;
@@ -481,83 +478,203 @@ export function MessageTimeline({
       if (!current) {
         return;
       }
-      // Layout-effect owns scroll during older settle/cooldown. RO callbacks
-      // from Markdown/batch inserts were the continuous near-top wobble.
-      if (freezeOlderScrollRef.current) {
-        return;
+      if (autoFollow && pinnedRef.current && !hasNewerRef.current) {
+        followTip(current);
       }
-      restoreAnchor(current);
+      previousScrollHeightRef.current = current.scrollHeight;
     });
     observer.observe(inner);
     return () => observer.disconnect();
-  }, [restoreAnchor]);
+  }, [autoFollow, followTip]);
+
+  // Entering a non-tip history window: drop any live pin so the page bottom
+  // cannot re-stick follow across loadNewer.
+  useEffect(() => {
+    if (!hasNewer) {
+      return;
+    }
+    stopGlide();
+    if (pinnedRef.current) {
+      pinnedRef.current = false;
+      setPinned(false);
+    }
+  }, [hasNewer, stopGlide]);
+
+  // While the glide is writing scrollTop every frame, its echoes could mask
+  // the reader's own upward scroll events — so upward INTENT (wheel up, finger
+  // drag down, scrollbar gutter, keys) releases the pin directly. Layout
+  // scrolls during settle-fold / scenario spawns must NEVER unpin from
+  // onScroll alone — that was the recurring "Jump to latest" trap.
+  const releasePin = useCallback(() => {
+    const node = scrollRef.current;
+    if (!node || node.scrollHeight - node.clientHeight <= 1) {
+      return; // nothing to scroll — no pin to release
+    }
+    stopGlide();
+    if (pinnedRef.current) {
+      pinnedRef.current = false;
+      setPinned(false);
+    }
+    if (!olderPrefetchArmedRef.current) {
+      olderPrefetchArmedRef.current = true;
+      setOlderPrefetchArmed(true);
+    }
+  }, [stopGlide]);
+
+  const scrollbarDragRef = useRef(false);
+  const touchYRef = useRef<number | null>(null);
 
   const onScroll = () => {
     const node = scrollRef.current;
     if (!node) {
       return;
     }
-    const pending = programmaticScrollTargetsRef.current;
-    const programmaticIndex = pending.findIndex((target) => Math.abs(node.scrollTop - target) <= 1);
-    const programmatic = programmaticIndex >= 0;
-    if (programmatic) {
-      pending.splice(0, programmaticIndex + 1);
-    } else {
-      // A real reader scroll supersedes every delayed programmatic echo.
-      pending.length = 0;
+    const echo = pendingEchoesRef.current > 0;
+    if (echo) {
+      pendingEchoesRef.current -= 1;
     }
-    const nextPinned = node.scrollHeight - node.scrollTop - node.clientHeight < 48;
-    // Echoes of our own assignments may PIN but never UNPIN — only the reader
-    // scrolling away releases the bottom-follow.
-    if (nextPinned || !programmatic) {
-      pinnedRef.current = nextPinned;
-      setPinned(nextPinned);
+    const gap = node.scrollHeight - node.scrollTop - node.clientHeight;
+    // Near-bottom (re)pins only for the live tip. History-window bottoms are
+    // loadNewer triggers, not follow targets.
+    const nextPinned = !hasNewerRef.current && gap < PIN_THRESHOLD_PX;
+    previousScrollHeightRef.current = node.scrollHeight;
+    // Near-bottom always (re)pins — including echoes of our own writes.
+    if (nextPinned) {
+      if (!pinnedRef.current) {
+        pinnedRef.current = true;
+        setPinned(true);
+      }
+      return;
     }
-    // Arm older-history prefetch on a real upward scroll — never while the
-    // programmatic tip-anchor keeps the reader pinned at the bottom.
-    if (!programmatic && !nextPinned && !olderPrefetchArmedRef.current) {
+    if (echo) {
+      return;
+    }
+    // Still pinned but far from the tip. Either layout moved the floor
+    // (collapse / append / images) or the reader is dragging the scrollbar.
+    // Wheel/touch/keys already called releasePin. Scrollbar sets the drag
+    // flag below. Everything else is layout — re-stick, never drop the pin.
+    // History mode never re-sticks: drop the pin instead.
+    if (pinnedRef.current) {
+      if (hasNewerRef.current || scrollbarDragRef.current) {
+        releasePin();
+        return;
+      }
+      followTip(node);
+      return;
+    }
+    if (!olderPrefetchArmedRef.current) {
       olderPrefetchArmedRef.current = true;
       setOlderPrefetchArmed(true);
     }
-    // Freeze the element-anchor while older history is settling/cooling down:
-    // height-delta owns that window. Recapturing mid-prepend (or from a delayed
-    // echo) lets the viewport walk / wobble near the top.
-    if (!programmatic && !freezeOlderScrollRef.current) {
-      captureAnchor();
+  };
+
+  // Native wheel listener: React's onWheel is unreliable under some test
+  // doms, and we want the same intent path in production.
+  useEffect(() => {
+    const node = scrollRef.current;
+    if (!node) {
+      return;
     }
+    const onWheelNative = (event: WheelEvent) => {
+      if (event.deltaY < 0) {
+        releasePin();
+      }
+    };
+    const onKeyDownNative = (event: KeyboardEvent) => {
+      if (event.key === "ArrowUp" || event.key === "PageUp" || event.key === "Home") {
+        releasePin();
+      }
+    };
+    node.addEventListener("wheel", onWheelNative, { passive: true });
+    node.addEventListener("keydown", onKeyDownNative);
+    return () => {
+      node.removeEventListener("wheel", onWheelNative);
+      node.removeEventListener("keydown", onKeyDownNative);
+    };
+  }, [releasePin]);
+
+  const onWheel = (event: React.WheelEvent) => {
+    if (event.deltaY < 0) {
+      releasePin();
+    }
+  };
+  const onPointerDown = (event: React.PointerEvent) => {
+    const node = scrollRef.current;
+    if (!node) {
+      return;
+    }
+    // Only the classic overlay scrollbar gutter counts as reader intent —
+    // clicks on fold chevrons / messages must not arm unpin.
+    const gutter = node.offsetWidth - node.clientWidth;
+    if (gutter <= 0) {
+      return;
+    }
+    const rect = node.getBoundingClientRect();
+    if (event.clientX >= rect.right - gutter - 2) {
+      scrollbarDragRef.current = true;
+    }
+  };
+  const onPointerUp = () => {
+    scrollbarDragRef.current = false;
+  };
+  const onTouchStart = (event: React.TouchEvent) => {
+    touchYRef.current = event.touches[0]?.clientY ?? null;
+  };
+  const onTouchMove = (event: React.TouchEvent) => {
+    const y = event.touches[0]?.clientY;
+    if (y === undefined) {
+      return;
+    }
+    const previous = touchYRef.current;
+    if (previous !== null && y - previous > 6) {
+      releasePin();
+    }
+    touchYRef.current = y;
   };
 
   return (
     <LightboxProvider>
       <EntranceAnimationProvider value={!bulkRender}>
         <div className={cn("og-root relative flex min-h-0 flex-col", className)}>
-          {/* overflow-anchor off: the browser's native scroll anchoring would fight
-          the ResizeObserver corrections above — one authority only. */}
+          {/* Pinned: anchoring off so the bottom-snap is the only authority.
+          Unpinned: native scroll anchoring holds the reader's place through
+          prepends and late layout — the wobble-free path. */}
           <div
             ref={scrollRef}
+            tabIndex={-1}
             onScroll={onScroll}
+            onWheel={onWheel}
+            onPointerDown={onPointerDown}
+            onPointerUp={onPointerUp}
+            onPointerCancel={onPointerUp}
+            onTouchStart={onTouchStart}
+            onTouchMove={onTouchMove}
             style={groups.length > 0 && !revealed ? { visibility: "hidden" } : undefined}
-            className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-6 [overflow-anchor:none] sm:px-6"
+            className={cn(
+              // tabIndex=-1 is programmatic only — never paint a focus ring on
+              // the whole scroller (click + Shift used to flash a blue outline).
+              "min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-6 sm:px-6 outline-none",
+              autoFollow && pinned && !hasNewer
+                ? "[overflow-anchor:none]"
+                : "[overflow-anchor:auto]",
+            )}
           >
-            <div className="mx-auto flex w-full max-w-3xl flex-col gap-5">
+            <div className="relative mx-auto flex w-full max-w-3xl flex-col gap-5">
               {groups.length === 0 && !working
                 ? (emptyState ?? (
                     <p className="py-10 text-center text-sm text-og-fg-subtle">No activity yet.</p>
                   ))
                 : null}
               {hasOlder && olderPrefetchArmed ? (
+                // Overlaid, not a layout row: mounting/unmounting the sentinel
+                // must never shift content (that shift was itself a wobble).
                 <div
                   ref={topSentinelRef}
                   data-og-top-sentinel=""
                   data-og-timeline-chrome=""
                   aria-hidden="true"
-                  className="h-px w-full shrink-0"
+                  className="pointer-events-none absolute inset-x-0 top-0 h-px"
                 />
-              ) : null}
-              {loadingOlder ? (
-                <div data-og-timeline-chrome="" className="flex items-center gap-2 text-sm">
-                  <span className="og-shimmer-text font-medium">Loading earlier activity…</span>
-                </div>
               ) : null}
               {groups.map(({ group, key }, index) => (
                 <div key={key} data-og-timeline-group-anchor="">
@@ -574,6 +691,15 @@ export function MessageTimeline({
                   />
                 </div>
               ))}
+              {hasNewer ? (
+                <div
+                  ref={bottomSentinelRef}
+                  data-og-bottom-sentinel=""
+                  data-og-timeline-chrome=""
+                  aria-hidden="true"
+                  className="h-px w-full"
+                />
+              ) : null}
               {working ? (
                 <div className="flex items-center gap-2 text-sm">
                   <span className="og-shimmer-text font-medium">Working…</span>
@@ -582,7 +708,76 @@ export function MessageTimeline({
             </div>
           </div>
           <AnimatePresence>
-            {!pinned && autoFollow ? (
+            {loadingOlder ||
+            loadingOldest ||
+            (hasOlder && onJumpToStart && olderPrefetchArmed) ? (
+              // Floating over the scroller (not a timeline row) so showing and
+              // hiding it never reflows history under the reader.
+              <motion.div
+                initial={{ opacity: 0, y: -6 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -6 }}
+                transition={{ duration: 0.15, ease: "easeOut" }}
+                data-og-loading-older=""
+                aria-live="polite"
+                className="absolute inset-x-0 top-3 z-10 flex justify-center gap-2"
+              >
+                {loadingOlder || loadingOldest ? (
+                  <span className="pointer-events-none inline-flex items-center rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1 text-xs font-medium shadow-og-md backdrop-blur">
+                    <span className="og-shimmer-text">
+                      {loadingOldest ? "Jumping to start…" : "Loading earlier activity…"}
+                    </span>
+                  </span>
+                ) : null}
+                {hasOlder && onJumpToStart && !loadingOldest ? (
+                  <button
+                    type="button"
+                    data-og-jump-to-start=""
+                    disabled={loadingOlder}
+                    onClick={() => {
+                      stopGlide();
+                      pinnedRef.current = false;
+                      setPinned(false);
+                      const node = scrollRef.current;
+                      void Promise.resolve(onJumpToStart()).then(() => {
+                        const scroller = scrollRef.current ?? node;
+                        if (scroller) {
+                          writeScrollTop(scroller, 0);
+                        }
+                      });
+                    }}
+                    className={cn(
+                      "inline-flex items-center gap-1.5 rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1.5",
+                      "text-xs font-medium text-og-fg shadow-og-md backdrop-blur",
+                      "hover:border-og-border-strong disabled:opacity-60",
+                    )}
+                  >
+                    <ArrowUpToLineIcon className="size-3.5" />
+                    Jump to start
+                  </button>
+                ) : null}
+              </motion.div>
+            ) : null}
+          </AnimatePresence>
+          <AnimatePresence>
+            {loadingNewer ? (
+              <motion.div
+                initial={{ opacity: 0, y: 6 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: 6 }}
+                transition={{ duration: 0.15, ease: "easeOut" }}
+                data-og-loading-newer=""
+                aria-live="polite"
+                className="pointer-events-none absolute inset-x-0 bottom-14 z-10 flex justify-center"
+              >
+                <span className="inline-flex items-center rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1 text-xs font-medium shadow-og-md backdrop-blur">
+                  <span className="og-shimmer-text">Loading later activity…</span>
+                </span>
+              </motion.div>
+            ) : null}
+          </AnimatePresence>
+          <AnimatePresence>
+            {((!pinned && autoFollow) || hasNewer) && autoFollow ? (
               <motion.button
                 type="button"
                 initial={{ opacity: 0, y: 8 }}
@@ -590,12 +785,27 @@ export function MessageTimeline({
                 exit={{ opacity: 0, y: 8 }}
                 transition={{ duration: 0.15, ease: "easeOut" }}
                 onClick={() => {
-                  const node = scrollRef.current;
-                  if (node) {
-                    node.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
+                  const finish = () => {
+                    // Re-pin, then let the glide carry the trip: its writes are
+                    // echo-counted (a native smooth scrollTo's are not, and its
+                    // mid-flight events would read as the reader unpinning).
+                    pinnedRef.current = true;
+                    setPinned(true);
+                    const node = scrollRef.current;
+                    if (!node) {
+                      return;
+                    }
+                    if (prefersReducedMotion()) {
+                      writeScrollTop(node, node.scrollHeight - node.clientHeight);
+                    } else {
+                      startGlide();
+                    }
+                  };
+                  if (onJumpToLatest && hasNewer) {
+                    void Promise.resolve(onJumpToLatest()).then(finish);
+                    return;
                   }
-                  pinnedRef.current = true;
-                  setPinned(true);
+                  finish();
                 }}
                 className={cn(
                   "absolute bottom-4 left-1/2 -translate-x-1/2",
@@ -614,11 +824,6 @@ export function MessageTimeline({
     </LightboxProvider>
   );
 }
-
-type MountedGroupWindow = {
-  groupKeys: string[];
-  visibleStart: number;
-};
 
 type KeyedTimelineGroup = {
   group: TimelineGroup;
@@ -649,7 +854,14 @@ function useStableTimelineGroupKeys(allGroups: TimelineGroup[]): KeyedTimelineGr
       let retainedKey: string | undefined;
       for (const itemId of itemIds) {
         const previous = previousByItemId.get(itemId);
-        if (previous && !usedKeys.has(previous.key)) {
+        // Retain only same-kind matches. Activity → turn wrap must NOT keep the
+        // activity chip's React key: that reused a collapsed TurnSummary and
+        // skipped the settle beat (insta-collapse / content flash).
+        if (
+          previous &&
+          previous.group.kind === group.kind &&
+          !usedKeys.has(previous.key)
+        ) {
           retainedKey = previous.key;
           break;
         }
@@ -674,96 +886,6 @@ function useStableTimelineGroupKeys(allGroups: TimelineGroup[]): KeyedTimelineGr
   return keyedGroups;
 }
 
-/**
- * Bulk history is already projected into its authoritative order before this
- * hook runs. While the reader stays tip-pinned, mount only a newest suffix —
- * never auto-hydrate older in-memory groups (that was the tip flash: each
- * batch grew scrollHeight and stick-to-bottom corrected after paint).
- *
- * After the reader scrolls up (`hydrateOlderGroups`), reveal the older prefix
- * in small per-frame batches so Markdown/layout stays frame-budgeted. A live
- * tip append while still tip-locked slides the suffix forward (newest N only).
- * A history prepend while hydrating shifts `visibleStart` by the retained
- * first mounted key so existing rows stay mounted. Replacements with no shared
- * mounted key (session switch / clear) start a fresh tip suffix.
- */
-function useProgressivelyMountedGroups(
-  allGroups: KeyedTimelineGroup[],
-  hydrateOlderGroups: boolean,
-): {
-  mountedGroups: KeyedTimelineGroup[];
-  mountingOlderGroups: boolean;
-} {
-  const previousGroupKeysRef = useRef<string[]>([]);
-  const groupKeys = useMemo(() => {
-    const nextKeys = allGroups.map((group) => group.key);
-    const previousKeys = previousGroupKeysRef.current;
-    return nextKeys.length === previousKeys.length &&
-      nextKeys.every((key, index) => key === previousKeys[index])
-      ? previousKeys
-      : nextKeys;
-  }, [allGroups]);
-  useLayoutEffect(() => {
-    previousGroupKeysRef.current = groupKeys;
-  }, [groupKeys]);
-  const [window, setWindow] = useState<MountedGroupWindow>(() => ({
-    groupKeys,
-    visibleStart: Math.max(0, allGroups.length - INITIAL_MOUNTED_GROUPS),
-  }));
-
-  const lastPossibleStart = Math.max(0, allGroups.length - INITIAL_MOUNTED_GROUPS);
-  let visibleStart = 0;
-  if (allGroups.length > 0) {
-    if (!hydrateOlderGroups) {
-      // Tip-locked: keep the DOM to the newest suffix only.
-      visibleStart = lastPossibleStart;
-    } else {
-      const currentIndexByKey = new Map(groupKeys.map((key, index) => [key, index]));
-      let retainedStart: number | undefined;
-      for (const key of window.groupKeys.slice(window.visibleStart)) {
-        const index = currentIndexByKey.get(key);
-        if (index !== undefined) {
-          retainedStart = index;
-          break;
-        }
-      }
-      visibleStart =
-        retainedStart === undefined ? lastPossibleStart : Math.min(retainedStart, lastPossibleStart);
-    }
-  }
-
-  useEffect(() => {
-    // Synchronize a prepend/replacement before scheduling its first reveal.
-    if (window.groupKeys !== groupKeys || window.visibleStart !== visibleStart) {
-      setWindow({ groupKeys, visibleStart });
-      return;
-    }
-    // Tip-locked: do not schedule older-prefix reveal frames.
-    if (!hydrateOlderGroups || visibleStart === 0) {
-      return;
-    }
-    const frame = requestFrame(() => {
-      setWindow((current) => {
-        if (current.groupKeys !== groupKeys || current.visibleStart <= 0) {
-          return current;
-        }
-        return {
-          ...current,
-          visibleStart: Math.max(0, current.visibleStart - GROUPS_PER_FRAME),
-        };
-      });
-    });
-    return () => cancelFrame(frame);
-  }, [groupKeys, hydrateOlderGroups, visibleStart, window.groupKeys, window.visibleStart]);
-
-  return {
-    mountedGroups: allGroups.slice(visibleStart),
-    // Only the scroll-up hydration path is "mounting older"; tip-locked suffix
-    // is the steady tip window, not an in-progress bulk paint.
-    mountingOlderGroups: hydrateOlderGroups && visibleStart > 0,
-  };
-}
-
 function requestFrame(callback: FrameRequestCallback): number {
   if (typeof requestAnimationFrame === "function") {
     return requestAnimationFrame(callback);
@@ -779,10 +901,11 @@ function cancelFrame(id: number): void {
   window.clearTimeout(id);
 }
 
-// Progressive history mounting reuses the exact group objects from `allGroups`.
-// Skip repainting those stable rows on every prefix reveal; live projection
-// creates a new group object, and behavior/callback changes are separate props,
-// so ordinary streaming and host updates still invalidate immediately.
+// The full loaded window stays mounted, so settled history rows must be cheap
+// on every commit: projection reuses group objects for unchanged groups, so
+// memo skips them. Live projection creates a new group object, and
+// behavior/callback changes are separate props, so ordinary streaming and host
+// updates still invalidate immediately.
 const TimelineGroupView = memo(function TimelineGroupView({
   group,
   renderMessageText,
@@ -814,35 +937,81 @@ const TimelineGroupView = memo(function TimelineGroupView({
       failure text, no auto-open) — one loud error, N calm sub-expands. */
   insideTurn?: boolean;
 }) {
+  const enter = useEntranceAnimation();
+  // Settled (or live-fold) activity clusters get a chip. Inside an expanded
+  // turn that is the second layer — quiet nested chips under the outer turn
+  // summary when contiguous activity naturally clusters.
+  const activityShouldFold =
+    group.kind === "activity" &&
+    Boolean(group.outcome || (foldLiveCluster && clusterIsSettled(group)));
+  // Latch live→folded so a top-level shell that was already mounted open can
+  // start the settle beat without remounting bare rail → wrapper.
+  const liveActivitySettle = useLiveSettleFold(activityShouldFold && !insideTurn);
+  const turnDefaultOpen = !insideTurn && group.kind === "turn" && group.outcome === "failed";
+  const settleFold =
+    group.kind === "turn"
+      ? Boolean(enter && !insideTurn && !turnDefaultOpen)
+      : liveActivitySettle;
   switch (group.kind) {
     case "activity":
-      return group.outcome || (foldLiveCluster && clusterIsSettled(group)) ? (
+      if (insideTurn) {
+        // Nested under a turn chip: still a real (bare) cluster chip when the
+        // cluster settled — outer owns failure copy / auto-open; inner is a
+        // calm sub-expand. Live nested clusters hang on the turn rail bare.
+        if (!activityShouldFold) {
+          return (
+            <ActivityRail
+              items={group.items}
+              onOpenSession={onOpenSession}
+              onMemoryClick={onMemoryClick}
+              toolRegistry={toolRegistry}
+              bare
+            />
+          );
+        }
+        return (
+          <TurnSummary
+            items={group.items}
+            outcome={group.outcome}
+            failureText={undefined}
+            bare
+            facets={turnSummary?.facets}
+          >
+            <ActivityRail
+              items={group.items}
+              onOpenSession={onOpenSession}
+              onMemoryClick={onMemoryClick}
+              toolRegistry={toolRegistry}
+              bare
+            />
+          </TurnSummary>
+        );
+      }
+      // Always the same TurnSummary shell while live so mid-turn fold only
+      // flips settleFold (collapse) instead of remounting bare rail → wrapper.
+      return (
         <TurnSummary
           items={group.items}
           outcome={group.outcome}
-          failureText={insideTurn ? undefined : group.failureText}
-          defaultOpen={!insideTurn && group.outcome === "failed" ? true : undefined}
-          bare={insideTurn}
+          failureText={group.failureText}
+          defaultOpen={
+            !activityShouldFold || group.outcome === "failed" ? true : undefined
+          }
           facets={turnSummary?.facets}
+          settleFold={settleFold}
         >
-          <ActivityRail
-            items={group.items}
-            onOpenSession={onOpenSession}
-            onMemoryClick={onMemoryClick}
-            toolRegistry={toolRegistry}
-            bare={insideTurn}
-          />
+          <FoldBody>
+            <TurnRailFrame>
+              <ActivityRail
+                items={group.items}
+                onOpenSession={onOpenSession}
+                onMemoryClick={onMemoryClick}
+                toolRegistry={toolRegistry}
+                bare
+              />
+            </TurnRailFrame>
+          </FoldBody>
         </TurnSummary>
-      ) : (
-        // A nested live cluster hangs on the turn's rail (bare); a top-level one
-        // owns its own rail.
-        <ActivityRail
-          items={group.items}
-          onOpenSession={onOpenSession}
-          onMemoryClick={onMemoryClick}
-          toolRegistry={toolRegistry}
-          bare={insideTurn}
-        />
       );
     case "turn": {
       const activityItems = flattenActivityItems(group.groups);
@@ -864,26 +1033,22 @@ const TimelineGroupView = memo(function TimelineGroupView({
         <TurnSummary
           items={activityItems}
           outcome={group.outcome}
-          // One loud error at the top; nested sub-turn chips stay calm — the
-          // parent already renders the failure reason, so clear it here exactly
-          // as the nested activity-cluster case does.
           failureText={insideTurn ? undefined : group.failureText}
           durationMs={durationBetween(group.startedAt, group.endedAt)}
-          defaultOpen={!insideTurn && group.outcome === "failed" ? true : undefined}
+          defaultOpen={turnDefaultOpen ? true : undefined}
           bare={insideTurn}
           facets={turnSummary?.facets}
+          settleFold={settleFold}
         >
-          {insideTurn ? (
-            // A nested turn is already on an ancestor rail — its body just stacks
-            // flush (the bare-node body already indents it), so no second rule.
-            <div className="flex flex-col gap-4">{body}</div>
-          ) : (
-            // The top-level turn draws THE rail: one thin continuous rule that
-            // every nested node and step hangs off of.
-            <div className="flex flex-col gap-4 border-l-2 border-og-border pl-3 sm:pl-4">
-              {body}
-            </div>
-          )}
+          <FoldBody>
+            {insideTurn ? (
+              // A nested turn is already on an ancestor rail — its body just stacks
+              // flush (the bare-node body already indents it), so no second rule.
+              <div className="flex flex-col gap-4">{body}</div>
+            ) : (
+              <TurnRailFrame>{body}</TurnRailFrame>
+            )}
+          </FoldBody>
         </TurnSummary>
       );
     }
@@ -899,6 +1064,44 @@ const TimelineGroupView = memo(function TimelineGroupView({
       );
   }
 });
+
+/**
+ * Rows revealed by a disclosure — expanding a chip, or the settle-fold beat —
+ * must not run per-row entrance animations: the disclosure's height animation
+ * owns the motion, and rows that were ALREADY visible when a live cluster
+ * folds would otherwise flash as they remount inside the summary. Entrance
+ * stays reserved for rows arriving in the live timeline flow.
+ */
+function FoldBody({ children }: { children: ReactNode }) {
+  return <EntranceAnimationProvider value={false}>{children}</EntranceAnimationProvider>;
+}
+
+/** Stable left rule for turn/activity bodies — always present so settle wrap
+    never inserts or removes the rail chrome. */
+function TurnRailFrame({ children }: { children: ReactNode }) {
+  return (
+    <div className="flex flex-col gap-4 border-l-2 border-og-border pl-3 sm:pl-4">{children}</div>
+  );
+}
+
+/**
+ * True once THIS component instance has seen its group transition from
+ * unfolded to folded — i.e. the reader watched the rows live and the fold is
+ * new information worth choreographing. Latched: TurnSummary captures the flag
+ * at its own mount (the flip render), so later prop churn is inert. History
+ * that mounts already folded initializes folded and never latches.
+ */
+function useLiveSettleFold(folded: boolean): boolean {
+  const previousFoldedRef = useRef(folded);
+  const latchedRef = useRef(false);
+  if (!previousFoldedRef.current && folded) {
+    latchedRef.current = true;
+  }
+  useLayoutEffect(() => {
+    previousFoldedRef.current = folded;
+  });
+  return latchedRef.current;
+}
 
 function timelineGroupKey(group: TimelineGroup): string {
   switch (group.kind) {
@@ -1060,27 +1263,15 @@ function AgentMessageRow({
     | undefined;
 }) {
   const enter = useEntranceAnimation();
-  const caret = item.streaming ? (
-    <span
-      className="ml-0.5 inline-block h-[1.1em] w-[2px] translate-y-[3px] animate-og-blink rounded-full bg-og-accent"
-      aria-hidden
-    />
-  ) : null;
+  // No streaming caret: it fought the trailing block layout (inline ↔ block)
+  // and snapped on exit. Live text already carries the stream via word-entrance
+  // + "Working…" when the tip isn't a streaming message.
   return (
     <div className={cn(enter && "animate-og-enter", "min-w-0 text-og-md leading-7 text-og-fg")}>
       {renderMessageText ? (
-        <>
-          {renderMessageText(item.text, item)}
-          {caret}
-        </>
+        renderMessageText(item.text, item)
       ) : (
-        // While streaming, let the caret ride the end of the last rendered line:
-        // the trailing block (usually a <p>) flows inline so the caret sits on
-        // its baseline instead of dropping to a new line.
-        <div className={item.streaming ? "[&_>div>:last-child]:inline" : undefined}>
-          <Markdown>{item.text}</Markdown>
-          {caret}
-        </div>
+        <Markdown streaming={item.streaming}>{item.text}</Markdown>
       )}
     </div>
   );

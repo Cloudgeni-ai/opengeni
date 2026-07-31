@@ -1,5 +1,7 @@
-// stream-session-events — continuously append + NATS-publish realistic session
-// events so an open web tab (SSE) updates live. Token-free; no Temporal/LLM.
+// stream-session-events — cycle rich live-stream scenarios (DB append +
+// NATS publish) so an open web tab can watch folds, tool marathons, markdown
+// crystallize under fast/slow/laggy/crawl pacing, failures, memory, sandbox,
+// and workers. Token-free; no Temporal/LLM.
 //
 // Defaults target the current monster re-seed session. Ctrl+C stops cleanly.
 //
@@ -16,9 +18,11 @@
 //   OPENGENI_DATABASE_URL   default postgres://…@127.0.0.1:6432/opengeni
 //   OPENGENI_NATS_URL       default nats://127.0.0.1:4222
 //   OPENGENI_SEED_WORKSPACE_ID / OPENGENI_SEED_SESSION_ID
-//   OPENGENI_SEED_STREAM_TOKEN_MS   delay between token deltas (default 45)
-//   OPENGENI_SEED_STREAM_BURST_MS   pause between bursts (default 350)
-//   OPENGENI_SEED_STREAM_TURN_MS    pause between full turns (default 1200)
+//   OPENGENI_SEED_STREAM_TOKEN_MS   baseline delay between token deltas (default 40)
+//   OPENGENI_SEED_STREAM_BURST_MS   pause between phase beats (default 280)
+//   OPENGENI_SEED_STREAM_TURN_MS    pause between scenarios (default 1600)
+// Per-message pacing presets (fast/slow/crawl/laggy/burst/yank) override the
+// baseline so one loop exercises fast models, slow models, and stalling streams.
 import {
   appendSessionEvents,
   appendSessionEventsAndUpdateSession,
@@ -32,15 +36,25 @@ import {
   publishDurableSessionEvents,
   type EventBus,
 } from "@opengeni/events";
-import { execOk } from "./monster/payloads.ts";
 import { BASE_URL, WEB_URL } from "./harness";
+import {
+  SCENARIO_COUNT,
+  resolveStreamPacing,
+  scenarioForTurn,
+  type StreamCtx,
+  type StreamPacing,
+  type StreamPhase,
+  type StreamScenario,
+} from "./stream-scenarios.ts";
+import type { ToolSpec } from "./monster/payloads.ts";
 
 const DEFAULT_WORKSPACE = "f9e27d24-06c9-4888-8e24-c658896c36df";
 const DEFAULT_SESSION = "e1816d3b-fbc4-40e6-a520-4a5564d3cd78";
 
-const TOKEN_MS = Math.max(10, Number(process.env.OPENGENI_SEED_STREAM_TOKEN_MS ?? "45"));
-const BURST_MS = Math.max(50, Number(process.env.OPENGENI_SEED_STREAM_BURST_MS ?? "350"));
-const TURN_MS = Math.max(200, Number(process.env.OPENGENI_SEED_STREAM_TURN_MS ?? "1200"));
+const TOKEN_MS = Math.max(8, Number(process.env.OPENGENI_SEED_STREAM_TOKEN_MS ?? "40"));
+const BURST_MS = Math.max(50, Number(process.env.OPENGENI_SEED_STREAM_BURST_MS ?? "280"));
+const TURN_MS = Math.max(200, Number(process.env.OPENGENI_SEED_STREAM_TURN_MS ?? "1600"));
+const TOOL_SETTLE_DEFAULT_MS = 200;
 
 function resolveDatabaseUrl(): string {
   return (
@@ -73,7 +87,7 @@ function parseArgs(argv: string[]): { workspaceId: string; sessionId: string } {
       i += 1;
     } else if (arg === "--help" || arg === "-h") {
       console.log(`Usage: bun test/e2e/seed/stream-session-events.ts [--workspace UUID] [--session UUID]
-Streams realistic session events (DB append + NATS publish) until Ctrl+C.`);
+Cycles ${SCENARIO_COUNT} rich scenarios with mixed pacing (DB append + NATS) until Ctrl+C.`);
       process.exit(0);
     }
   }
@@ -104,8 +118,6 @@ async function publish(
   sessionUpdate?: { status?: "running" | "idle" },
 ): Promise<number> {
   if (events.length === 0) return 0;
-  // Never set activeTurnId here — that column FKs a real session_turns row.
-  // Status alone drives the timeline "Working…" affordance.
   const rows = sessionUpdate
     ? await appendSessionEventsAndUpdateSession(db, workspaceId, sessionId, events, sessionUpdate)
     : await appendSessionEvents(db, workspaceId, sessionId, events);
@@ -113,39 +125,266 @@ async function publish(
   return rows.length;
 }
 
-function tokenChunks(text: string): string[] {
+function tokenChunks(text: string, chunkChars: number): string[] {
+  const target = Math.max(1, Math.floor(chunkChars));
+  // Word-ish packing with a small amount of irregularity so fast/yank modes
+  // feel like real token boundaries instead of a metronome.
   const words = text.split(/(\s+)/).filter((part) => part.length > 0);
   const chunks: string[] = [];
   let buf = "";
+  let i = 0;
   for (const word of words) {
     buf += word;
-    if (buf.length >= 12 || /\n$/.test(buf)) {
+    const softLimit = target + ((i * 7) % Math.max(1, Math.floor(target / 2)));
+    if (buf.length >= softLimit || /\n$/.test(buf)) {
       chunks.push(buf);
       buf = "";
+      i += 1;
     }
   }
   if (buf) chunks.push(buf);
   return chunks.length > 0 ? chunks : [text];
 }
 
-async function streamTurn(
+function pacedDelay(pacing: StreamPacing, chunkIndex: number): number {
+  let ms = pacing.tokenMs ?? TOKEN_MS;
+  const jitter = pacing.jitter ?? 0;
+  if (jitter > 0) {
+    // Deterministic pseudo-random in [-jitter, +jitter] from chunk index.
+    const unit = ((chunkIndex * 1103515245 + 12345) >>> 0) / 0xffffffff;
+    ms = ms * (1 + (unit * 2 - 1) * jitter);
+  }
+  if (pacing.stallEvery && pacing.stallEvery > 0 && pacing.stallMs) {
+    if ((chunkIndex + 1) % pacing.stallEvery === 0) {
+      ms += pacing.stallMs;
+    }
+  }
+  if (pacing.burstSize && pacing.burstSize > 0 && pacing.burstPauseMs) {
+    if ((chunkIndex + 1) % pacing.burstSize === 0) {
+      ms += pacing.burstPauseMs;
+    }
+  }
+  return Math.max(4, Math.round(ms));
+}
+
+async function streamMessage(
+  db: Database,
+  bus: EventBus,
+  workspaceId: string,
+  sessionId: string,
+  turnId: string,
+  text: string,
+  stream: boolean,
+  signal: AbortSignal,
+  pacingInput?: Parameters<typeof resolveStreamPacing>[0],
+): Promise<number> {
+  let published = 0;
+  if (!stream) {
+    return publish(db, bus, workspaceId, sessionId, [
+      { type: "agent.message.delta", payload: { text }, turnId },
+    ]);
+  }
+  const pacing = resolveStreamPacing(pacingInput, TOKEN_MS);
+  const chunks = tokenChunks(text, pacing.chunkChars ?? 10);
+  for (let i = 0; i < chunks.length; i += 1) {
+    if (signal.aborted) return published;
+    published += await publish(db, bus, workspaceId, sessionId, [
+      { type: "agent.message.delta", payload: { text: chunks[i]! }, turnId },
+    ]);
+    await sleep(pacedDelay(pacing, i), signal);
+  }
+  return published;
+}
+
+async function streamTool(
+  db: Database,
+  bus: EventBus,
+  workspaceId: string,
+  sessionId: string,
+  turnId: string,
+  tool: ToolSpec,
+  signal: AbortSignal,
+  settleMs: number,
+): Promise<number> {
+  let published = 0;
+  published += await publish(db, bus, workspaceId, sessionId, [
+    {
+      type: "agent.toolCall.created",
+      payload: {
+        id: tool.id,
+        name: tool.name,
+        arguments: tool.arguments ?? null,
+        ...(tool.raw !== undefined ? { raw: tool.raw } : {}),
+      },
+      turnId,
+    },
+  ]);
+  if (signal.aborted) return published;
+  await sleep(settleMs, signal);
+  if (signal.aborted || tool.running) return published;
+  published += await publish(db, bus, workspaceId, sessionId, [
+    {
+      type: "agent.toolCall.output",
+      payload: {
+        id: tool.id,
+        output: tool.output ?? null,
+        error: Boolean(tool.error),
+      },
+      turnId,
+    },
+  ]);
+  return published;
+}
+
+async function playPhase(
+  db: Database,
+  bus: EventBus,
+  workspaceId: string,
+  sessionId: string,
+  ctx: StreamCtx,
+  phase: StreamPhase,
+  signal: AbortSignal,
+  messageAcc: { text: string },
+): Promise<number> {
+  if (signal.aborted) return 0;
+  switch (phase.kind) {
+    case "sleep":
+      await sleep(phase.ms, signal);
+      return 0;
+    case "reason":
+      return publish(db, bus, workspaceId, sessionId, [
+        { type: "agent.reasoning.delta", payload: { text: phase.text }, turnId: ctx.turnId },
+      ]);
+    case "message": {
+      messageAcc.text += phase.text;
+      return streamMessage(
+        db,
+        bus,
+        workspaceId,
+        sessionId,
+        ctx.turnId,
+        phase.text,
+        phase.stream !== false,
+        signal,
+        phase.pacing,
+      );
+    }
+    case "tools": {
+      let published = 0;
+      const tools = phase.tools(ctx);
+      const settleMs = phase.settleMs ?? TOOL_SETTLE_DEFAULT_MS;
+      for (const tool of tools) {
+        if (signal.aborted) return published;
+        published += await streamTool(
+          db,
+          bus,
+          workspaceId,
+          sessionId,
+          ctx.turnId,
+          tool,
+          signal,
+          settleMs,
+        );
+        await sleep(Math.max(80, Math.floor(settleMs * 0.6)), signal);
+      }
+      return published;
+    }
+    case "memory-save":
+      return publish(db, bus, workspaceId, sessionId, [
+        {
+          type: "memory.saved",
+          payload: {
+            memoryId: crypto.randomUUID(),
+            kind: phase.kindLabel,
+            preview: phase.preview,
+            deduped: false,
+          },
+          turnId: ctx.turnId,
+        },
+      ]);
+    case "memory-correct":
+      return publish(db, bus, workspaceId, sessionId, [
+        {
+          type: "memory.corrected",
+          payload: {
+            memoryId: crypto.randomUUID(),
+            kind: phase.kindLabel,
+            preview: phase.oldPreview,
+            action: "updated",
+            reason: "Verified in-session.",
+            replacementMemoryId: crypto.randomUUID(),
+            replacementPreview: phase.preview,
+          },
+          turnId: ctx.turnId,
+        },
+      ]);
+    case "sandbox": {
+      let published = await publish(db, bus, workspaceId, sessionId, [
+        {
+          type: "sandbox.operation.started",
+          payload: {
+            name: phase.operation,
+            command: phase.detail ?? phase.operation,
+          },
+          turnId: ctx.turnId,
+        },
+      ]);
+      await sleep(BURST_MS, signal);
+      if (signal.aborted) return published;
+      published += await publish(db, bus, workspaceId, sessionId, [
+        phase.outcome === "completed"
+          ? {
+              type: "sandbox.operation.completed",
+              payload: { name: phase.operation },
+              turnId: ctx.turnId,
+            }
+          : {
+              type: "sandbox.operation.failed",
+              payload: {
+                name: phase.operation,
+                error: phase.detail ?? "sandbox unavailable",
+                code: "SANDBOX_UNAVAILABLE",
+              },
+              turnId: ctx.turnId,
+            },
+      ]);
+      return published;
+    }
+    case "goal-set":
+      return publish(db, bus, workspaceId, sessionId, [
+        { type: "goal.set", payload: { text: phase.text }, turnId: ctx.turnId },
+      ]);
+    case "goal-update":
+      return publish(db, bus, workspaceId, sessionId, [
+        { type: "goal.updated", payload: { text: phase.text }, turnId: ctx.turnId },
+      ]);
+    case "raw":
+      return publish(db, bus, workspaceId, sessionId, phase.events(ctx));
+  }
+}
+
+async function streamScenario(
   db: Database,
   bus: EventBus,
   workspaceId: string,
   sessionId: string,
   turnIndex: number,
+  scenario: StreamScenario,
   signal: AbortSignal,
 ): Promise<number> {
   const turnId = crypto.randomUUID();
-  const callId = `stream-call-${turnIndex}`;
+  const ctx: StreamCtx = {
+    turnIndex,
+    turnId,
+    id: (label) => `stream-${turnIndex}-${label}-${crypto.randomUUID().slice(0, 8)}`,
+  };
   let published = 0;
+  const messageAcc = { text: "" };
 
   const [userRow] = await appendSessionEvents(db, workspaceId, sessionId, [
     {
       type: "user.message",
-      payload: {
-        text: `Live stream pulse #${turnIndex}: keep the timeline moving.`,
-      },
+      payload: { text: scenario.userText(ctx) },
       turnId: null,
     },
   ]);
@@ -170,85 +409,37 @@ async function streamTurn(
         payload: { turnId, triggerEventId: userRow.id },
         turnId,
       },
-      {
-        type: "agent.reasoning.delta",
-        payload: { text: `Planning pulse ${turnIndex}: stream tokens, run a tool, narrate.` },
-        turnId,
-      },
     ],
     { status: "running" },
   );
   await sleep(BURST_MS, signal);
-  if (signal.aborted) return published;
 
-  const narration = [
-    `Streaming reply for pulse **${turnIndex}**. `,
-    "Tokens arrive in small bursts so the open session can be watched live. ",
-    "Next I'll run a quick shell check, then finish the turn.\n\n",
-    "- stick-to-bottom should follow\n",
-    "- no tip flash from older-history hydration\n",
-  ].join("");
-
-  for (const chunk of tokenChunks(narration)) {
+  for (const phase of scenario.phases) {
     if (signal.aborted) return published;
-    published += await publish(db, bus, workspaceId, sessionId, [
-      { type: "agent.message.delta", payload: { text: chunk }, turnId },
-    ]);
-    await sleep(TOKEN_MS, signal);
+    published += await playPhase(
+      db,
+      bus,
+      workspaceId,
+      sessionId,
+      ctx,
+      phase,
+      signal,
+      messageAcc,
+    );
   }
 
-  await sleep(BURST_MS, signal);
   if (signal.aborted) return published;
 
-  const tool = execOk(callId, `echo stream-pulse-${turnIndex}`);
-  published += await publish(db, bus, workspaceId, sessionId, [
-    {
-      type: "agent.toolCall.created",
-      payload: {
-        id: tool.id,
-        name: tool.name,
-        arguments: tool.arguments ?? null,
-      },
+  const closingEvents: AppendEventInput[] = [];
+  if (messageAcc.text.length > 0) {
+    closingEvents.push({
+      type: "agent.message.completed",
+      payload: { text: messageAcc.text },
       turnId,
-    },
-  ]);
-  await sleep(BURST_MS, signal);
-  if (signal.aborted) return published;
-
-  published += await publish(db, bus, workspaceId, sessionId, [
-    {
-      type: "agent.toolCall.output",
-      payload: { id: tool.id, output: tool.output ?? null, error: false },
-      turnId,
-    },
-  ]);
-  await sleep(TOKEN_MS * 2, signal);
-  if (signal.aborted) return published;
-
-  const closing = `Pulse ${turnIndex} complete — tool ok, continuing.\n`;
-  for (const chunk of tokenChunks(closing)) {
-    if (signal.aborted) return published;
-    published += await publish(db, bus, workspaceId, sessionId, [
-      { type: "agent.message.delta", payload: { text: chunk }, turnId },
-    ]);
-    await sleep(TOKEN_MS, signal);
+    });
   }
-
-  published += await publish(
-    db,
-    bus,
-    workspaceId,
-    sessionId,
-    [
-      {
-        type: "agent.message.completed",
-        payload: { text: narration + closing },
-        turnId,
-      },
-      { type: "turn.completed", payload: {}, turnId },
-    ],
-    { status: "idle" },
-  );
+  closingEvents.push({ type: "turn.completed", payload: {}, turnId });
+  published += await publish(db, bus, workspaceId, sessionId, closingEvents, { status: "idle" });
   return published;
 }
 
@@ -270,7 +461,7 @@ async function main(): Promise<void> {
   console.log(`[stream] session=${sessionId} status=${session.status}`);
   console.log(`[stream] open: ${link}`);
   console.log(
-    `[stream] pacing token=${TOKEN_MS}ms burst=${BURST_MS}ms turn=${TURN_MS}ms — Ctrl+C to stop`,
+    `[stream] ${SCENARIO_COUNT} scenarios · token=${TOKEN_MS}ms burst=${BURST_MS}ms turn=${TURN_MS}ms — Ctrl+C to stop`,
   );
 
   const ac = new AbortController();
@@ -288,16 +479,19 @@ async function main(): Promise<void> {
   try {
     while (!ac.signal.aborted) {
       turnIndex += 1;
-      const n = await streamTurn(
+      const scenario = scenarioForTurn(turnIndex);
+      console.log(`[stream] ▶ ${scenario.id} — ${scenario.title}`);
+      const n = await streamScenario(
         dbClient.db,
         bus,
         workspaceId,
         sessionId,
         turnIndex,
+        scenario,
         ac.signal,
       );
       total += n;
-      console.log(`[stream] turn=${turnIndex} +${n} events (total=${total})`);
+      console.log(`[stream] ✓ turn=${turnIndex} scenario=${scenario.id} +${n} events (total=${total})`);
       await sleep(TURN_MS, ac.signal);
     }
   } finally {
