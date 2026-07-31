@@ -35,6 +35,18 @@ It produced several independent defects:
    workflow could close the attempt while that promise and timer remained
    resident in the worker, indefinitely refreshing a holder for work that no
    longer existed.
+10. The 0138 checkpoint trigger treated an adopted legacy checkpoint's capture
+    generation as if it had to equal the continually advancing live workspace
+    generation. The first successful post-restore workspace mutation therefore
+    invalidated the checkpoint that had just restored the box.
+11. The global reaper counted holders in one PostgreSQL statement snapshot
+    before waiting on a concurrently acquired lease row. It could then commit
+    the stale zero count after the acquire, changing the new owner's live lease
+    to draining immediately before its first tool mutation.
+12. A solo image/rig conflict bypassed the reaper by clearing the live provider
+    identity, resume envelope, and checkpoint state directly in `acquireLease`.
+    That could both leak the old provider box and discard the only durable
+    recovery path.
 
 These defects interact, but no single flag fixes all of them. The remediation
 draws four explicit boundaries:
@@ -281,6 +293,30 @@ fence.
 
 No marker and no whole-tree verifier are involved.
 
+`archive_generation` is the immutable generation represented by the current
+checkpoint. `workspace_generation` is live mutation intent and advances after
+restore. A native artifact binds the former to its exact recorded source
+generation. An adopted legacy artifact has no trustworthy historical source
+generation, so its archive generation is bound once when the pointer is
+attached and cannot be rewritten while that pointer remains current; live
+workspace generation may advance independently.
+
+### Lock-first lease reconciliation
+
+Every holder-creating or holder-removing path serializes in the order
+`lease row → holder row`. The global reaper first claims at most 500 oldest
+live/corrupt leases with `FOR UPDATE SKIP LOCKED`, then deletes stale holders,
+recomputes counters, and changes liveness only for that exact claimed set. It
+never waits behind an acquire and never applies counts observed before such a
+wait. Updating the claimed rows' `updated_at` rotates a larger backlog fairly;
+cold leases without holders are not rewritten every 30 seconds.
+
+Stale-holder selection also uses `SKIP LOCKED`, so a heartbeat from an older
+rolling writer cannot invert the lock order into a deadlock. A real PostgreSQL
+regression holds an in-flight draining→warm rearm open while the global sweep
+runs, proves the sweep returns without blocking or changing the lease, commits
+the holder, and proves the next sweep retains `warm/refcount=1`.
+
 ### Finite-deadline rotation
 
 Each Modal identity persists `provider_created_at`, `provider_deadline_at`, and
@@ -311,6 +347,13 @@ and lease publication. If capture fails, the old box is not intentionally
 terminated; the overdue alert fires while the reaper retries. The provider's
 hard deadline remains the final failure boundary, which is why rotation begins
 with an hour of headroom.
+
+A solo image or rig change uses this same handoff with
+`rotation_reason='operator'`. It preserves the old provider identity and
+checkpoint, fences the requesting attempt, and makes the final-holder release
+immediately drainable. Only the later cold successor stamps the new image/rig.
+A conflicting request while another holder is active remains an explicit
+shared-state error and does not disrupt the box.
 
 Every normal worker attach also performs one bounded command-readiness probe
 before handing a supposedly warm box to the agent. Authoritative terminal
@@ -471,8 +514,16 @@ the migration and application rollout.
      expired drain, orphan termination, and provider API errors;
    - leave the batch at one through at least two clean production rotation
      cycles; raise `OPENGENI_SANDBOX_ROTATION_BATCH_SIZE` only through the
-     reviewed deployment configuration, and only when observed provider and
-     worker capacity justify servicing more fenced boxes per sweep.
+   reviewed deployment configuration, and only when observed provider and
+   worker capacity justify servicing more fenced boxes per sweep.
+
+Migration 0140 is a forward-only rolling repair on top of the completed 0138
+maintenance cutover. It replaces the checkpoint validator and the
+SECURITY-DEFINER global reaper in place, so old and new application pods call
+the same corrected database protocol during rollout. It performs no historical
+data rewrite. Production verification must prove 0140 recorded, the exact
+function bodies installed, no stale active holders, and a cold→restore→shell
+mutation→drain→restore cycle before the release is terminal.
 
 Rollback may stop requesting new rotations, but must not remove migration 0138
 or discard artifact/process ownership rows. Old application code is not
@@ -501,8 +552,8 @@ The underlying fixed-label metrics also expose:
 - formatting, lint, diff hygiene, and Ultimate Bug Scanner;
 - runtime native/tar/legacy restore suites;
 - worker routing, turn recovery, reaper, metrics, and retained-process suites;
-- real PostgreSQL migration 0138, lease/RLS, concurrency, and dedicated-schema
-  replay;
+- real PostgreSQL migrations 0138 and 0140, lease/RLS, acquire-vs-reaper
+  concurrency, and dedicated-schema replay;
 - Helm render with all four sandbox alerts;
 - isolated live Modal create, hardlink/content snapshot, restore, receipt-bound
   Image deletion, and cleanup.
