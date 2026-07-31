@@ -352,9 +352,40 @@ function AgentsPanel({ nodes }: { nodes: LineageNode[] }) {
   );
 }
 
+const FLOW_MOTION_CSS = `
+@keyframes og-flow-sheen {
+  0%, 100% { background-position: 0% 40%; opacity: 0.72; }
+  50% { background-position: 100% 60%; opacity: 1; }
+}
+@keyframes og-flow-refract {
+  0% { transform: translateX(-20%) skewX(-18deg); opacity: 0.15; }
+  50% { transform: translateX(40%) skewX(-18deg); opacity: 0.45; }
+  100% { transform: translateX(120%) skewX(-18deg); opacity: 0.1; }
+}
+@keyframes og-flow-row-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .og-flow-sheen {
+    background-size: 180% 180%;
+    animation: og-flow-sheen 9s ease-in-out infinite;
+  }
+  .og-flow-refract {
+    animation: og-flow-refract 7.5s ease-in-out infinite;
+  }
+  .og-flow-row {
+    animation: og-flow-row-in 0.42s cubic-bezier(0.22, 1, 0.36, 1) both;
+    animation-delay: calc(var(--og-flow-i, 0) * 45ms);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .og-flow-sheen, .og-flow-refract, .og-flow-row { animation: none !important; }
+}
+`;
+
 function FlowChrome({ scenario }: { scenario: ChromeScenario }) {
   const [panel, setPanel] = useState<FlowPanel>(null);
-  const stylesId = useId();
 
   const queueTurns = scenario.queue.queue;
   const pendingInputs = scenario.queue.pendingInputs;
@@ -411,38 +442,6 @@ function FlowChrome({ scenario }: { scenario: ChromeScenario }) {
 
   return (
     <div className="mx-auto mb-1.5 w-full max-w-3xl px-4 sm:px-6">
-      <style id={stylesId}>{`
-        @keyframes og-flow-sheen {
-          0%, 100% { background-position: 0% 40%; opacity: 0.72; }
-          50% { background-position: 100% 60%; opacity: 1; }
-        }
-        @keyframes og-flow-refract {
-          0% { transform: translateX(-20%) skewX(-18deg); opacity: 0.15; }
-          50% { transform: translateX(40%) skewX(-18deg); opacity: 0.45; }
-          100% { transform: translateX(120%) skewX(-18deg); opacity: 0.1; }
-        }
-        @keyframes og-flow-row-in {
-          from { opacity: 0; transform: translateY(4px); }
-          to { opacity: 1; transform: translateY(0); }
-        }
-        @media (prefers-reduced-motion: no-preference) {
-          .og-flow-sheen {
-            background-size: 180% 180%;
-            animation: og-flow-sheen 9s ease-in-out infinite;
-          }
-          .og-flow-refract {
-            animation: og-flow-refract 7.5s ease-in-out infinite;
-          }
-          .og-flow-row {
-            animation: og-flow-row-in 0.42s cubic-bezier(0.22, 1, 0.36, 1) both;
-            animation-delay: calc(var(--og-flow-i, 0) * 45ms);
-          }
-        }
-        @media (prefers-reduced-motion: reduce) {
-          .og-flow-sheen, .og-flow-refract, .og-flow-row { animation: none !important; }
-        }
-      `}</style>
-
       <FlowGlass accent={accent}>
         <div className="flex items-stretch gap-0 px-0.5">
           {hasQueue ? (
