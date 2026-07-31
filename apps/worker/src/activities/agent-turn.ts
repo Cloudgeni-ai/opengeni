@@ -141,7 +141,7 @@ import {
   type RegistryProviderKind,
   type Settings,
 } from "@opengeni/config";
-import { CancelledFailure } from "@temporalio/activity";
+import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
 import {
   settingsWithCodexCredential,
   settingsWithEnabledCapabilityMcpServers,
@@ -246,9 +246,14 @@ import {
 } from "./streaming";
 import type {
   ActivityServices,
+  EscapedMcpTimeoutRecoveryDetail,
   RunAgentTurnInput,
   RunAgentTurnResult,
   SessionAttemptQuiescenceProof,
+} from "./types";
+import {
+  ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_MESSAGE,
+  ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_TYPE,
 } from "./types";
 import {
   resumeBoxForTurn,
@@ -404,6 +409,35 @@ export function providerRecoveryResult(): {
     status: "recovering",
     continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS,
   };
+}
+
+/**
+ * Preserve one precise recovery obligation across Temporal's activity boundary.
+ * This is intentionally narrower than the ordinary retryable-provider path:
+ * only a recovered turn (generation > 1) whose MCP timeout happened before a
+ * model request may ask the workflow's DB-only control activity to finish the
+ * same-turn checkpoint. The original transport/recovery errors are excluded
+ * from details so raw MCP response data can never enter workflow history.
+ */
+export function escapedMcpTimeoutRecoveryFailure(input: {
+  failureCode: string | undefined;
+  modelRequestStarted: boolean;
+  detail: EscapedMcpTimeoutRecoveryDetail;
+}): ApplicationFailure | null {
+  if (
+    input.failureCode !== "mcp_transport_timeout" ||
+    input.modelRequestStarted ||
+    !Number.isSafeInteger(input.detail.executionGeneration) ||
+    input.detail.executionGeneration <= 1
+  ) {
+    return null;
+  }
+  return ApplicationFailure.create({
+    message: ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_MESSAGE,
+    type: ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_TYPE,
+    nonRetryable: true,
+    details: [input.detail],
+  });
 }
 
 /**
@@ -2163,6 +2197,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     let isCodexTurn = false;
     let isExternallyBilledTurn = false;
     let executionGeneration = 0;
+    let modelRequestStarted = false;
     // Still required by credential-loss/capacity settlements, whose own
     // recovery transactions fence against worker-death redispatches.
     let redispatchesAtDispatch = 0;
@@ -5946,6 +5981,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               initialGitCredentials,
             );
           }
+          // Conservative request boundary: once control enters runStream, the
+          // provider may have accepted work even if no response/event follows.
+          // Escaped MCP setup timeouts are automatically recoverable only
+          // before this line.
+          modelRequestStarted = true;
           return await runtime.runStream(agent, runInput!, modelRunSettings, {
             signal: runtimeCancellationSignal,
             sandboxEnvironment,
@@ -7518,31 +7558,55 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         });
       }
       if (failure.retryable && publish && turnId && turnStartedPublished) {
-        const recoveryResult = providerRecoveryResult();
-        await flushRuntimeBatcher();
-        await reconcileConversationTruth({ requireDurable: true });
-        const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
-          sessionId: input.sessionId,
-          turnId,
-          triggerEventId: triggerEventId!,
-          attemptId: input.attemptId,
-          reason: failure.code ?? "provider_unavailable",
-          detail: {
-            ...failure,
-            continueDelayMs: recoveryResult.continueDelayMs,
-          },
-        });
-        if (recovery.action === "stale") {
-          acknowledgeLostAttemptOwnership();
-          activityStatus = "cancelled";
-          turnMetricOutcome = "cancelled";
-          return claimedResult({ status: "cancelled" });
+        try {
+          const recoveryResult = providerRecoveryResult();
+          await flushRuntimeBatcher();
+          await reconcileConversationTruth({ requireDurable: true });
+          const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+            sessionId: input.sessionId,
+            turnId,
+            triggerEventId: triggerEventId!,
+            attemptId: input.attemptId,
+            reason: failure.code ?? "provider_unavailable",
+            detail: {
+              ...failure,
+              continueDelayMs: recoveryResult.continueDelayMs,
+            },
+          });
+          if (recovery.action === "stale") {
+            acknowledgeLostAttemptOwnership();
+            activityStatus = "cancelled";
+            turnMetricOutcome = "cancelled";
+            return claimedResult({ status: "cancelled" });
+          }
+          await publishDurableSessionEvents(
+            bus,
+            input.workspaceId,
+            input.sessionId,
+            recovery.events,
+          );
+          turnMetricOutcome = "recovering";
+          activityStatus = "recovering";
+          activityError = error;
+          return claimedResult(recoveryResult);
+        } catch (recoveryError) {
+          const escaped = escapedMcpTimeoutRecoveryFailure({
+            failureCode: failure.code,
+            modelRequestStarted,
+            detail: {
+              turnId,
+              triggerEventId: triggerEventId!,
+              executionGeneration,
+            },
+          });
+          if (escaped) {
+            activityStatus = "recovering";
+            turnMetricOutcome = "recovering";
+            activityError = error;
+            throw escaped;
+          }
+          throw recoveryError;
         }
-        await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
-        turnMetricOutcome = "recovering";
-        activityStatus = "recovering";
-        activityError = error;
-        return claimedResult(recoveryResult);
       }
       activityStatus = "failed";
       activityError = error;
