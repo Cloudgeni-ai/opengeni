@@ -73,6 +73,17 @@ export const workspaces = pgTable(
     // .references(), because `rigs` is declared later in this file (same
     // forward-reference pattern as sessions.activeSandboxId). Consumed in M3.
     defaultRigId: uuid("default_rig_id"),
+    // Workspace-wide viewer admission intent set by the warm-meter reaper when
+    // managed credits or the monthly warm allowance are exhausted. It is
+    // deliberately independent of a lease so a dashboard cannot re-arm a
+    // draining box or spawn a cold successor before a fresh limit evaluation
+    // clears the gate.
+    sandboxViewerForceDrainReason: text("sandbox_viewer_force_drain_reason", {
+      enum: ["balance", "warm_cap"],
+    }),
+    sandboxViewerForceDrainRequestedAt: timestamp("sandbox_viewer_force_drain_requested_at", {
+      withTimezone: true,
+    }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -82,6 +93,19 @@ export const workspaces = pgTable(
       .on(table.accountId, table.slug)
       .where(sql`${table.slug} is not null`),
     external: uniqueIndex("workspaces_external_idx").on(table.externalSource, table.externalId),
+    sandboxViewerForceDrain: index("workspaces_sandbox_viewer_force_drain_idx")
+      .on(table.id)
+      .where(sql`${table.sandboxViewerForceDrainReason} is not null`),
+    sandboxViewerForceDrainValid: check(
+      "workspaces_sandbox_viewer_force_drain_check",
+      sql`(
+          ${table.sandboxViewerForceDrainReason} is null
+          and ${table.sandboxViewerForceDrainRequestedAt} is null
+        ) or (
+          ${table.sandboxViewerForceDrainReason} in ('balance', 'warm_cap')
+          and ${table.sandboxViewerForceDrainRequestedAt} is not null
+        )`,
+    ),
   }),
 );
 

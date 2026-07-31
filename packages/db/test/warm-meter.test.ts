@@ -5,9 +5,12 @@ import {
   accrueWarmSeconds,
   acquireLease,
   commitWarmingToWarm,
+  confirmDrainCold,
   createDb,
   forceDrainOverLimitViewerOnlyBoxes,
   listMeterableWarmLeases,
+  listSandboxViewerForceDrainWorkspaceIds,
+  SandboxViewerAdmissionBlockedError,
   type Database,
   type DbClient,
 } from "../src/index";
@@ -99,6 +102,21 @@ async function readMeterRow(workspaceId: string, groupId: string) {
     select last_meter_tick, last_meter_at from sandbox_leases
     where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
   return r as { last_meter_tick: number; last_meter_at: Date | null } | undefined;
+}
+
+async function readViewerForceDrain(workspaceId: string) {
+  const [row] = await admin<
+    {
+      reason: "balance" | "warm_cap" | null;
+      requested_at: Date | null;
+    }[]
+  >`
+    select
+      sandbox_viewer_force_drain_reason as reason,
+      sandbox_viewer_force_drain_requested_at as requested_at
+    from workspaces
+    where id = ${workspaceId}`;
+  return row;
 }
 
 async function warmSecondsEvents(
@@ -399,6 +417,85 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
     expect(result.reason).toBe("warm_cap");
     expect(result.drained.map((d) => d.sandboxGroupId)).toContain(viewerOnly.groupId);
     expect(await readLiveness(ws.workspaceId, viewerOnly.groupId)).toBe("draining");
+  }, 60_000);
+
+  test("(6c) a durable over-limit gate blocks viewer re-arm and cold respawn until a fresh limit evaluation clears it", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const epoch = await warmGroup(ws, [{ kind: "viewer", holderId: "v1" }]);
+
+    const drained = await forceDrainOverLimitViewerOnlyBoxes(db, {
+      workspaceId: ws.workspaceId,
+      balanceMicros: 0,
+      enforceBalance: true,
+      maxWarmSecondsPerWorkspace: 0,
+      idleGraceMs: 60_000,
+    });
+    expect(drained.reason).toBe("balance");
+    expect(await readViewerForceDrain(ws.workspaceId)).toMatchObject({
+      reason: "balance",
+      requested_at: expect.any(Date),
+    });
+    expect(await listSandboxViewerForceDrainWorkspaceIds(db)).toContain(ws.workspaceId);
+
+    const acquireViewer = (holderId: string) =>
+      acquireLease(db, {
+        accountId: ws.accountId,
+        workspaceId: ws.workspaceId,
+        sandboxGroupId: ws.groupId,
+        kind: "viewer",
+        holderId,
+        backend: "modal",
+        leaseTtlMs: 90_000,
+      });
+
+    let drainingError: unknown;
+    try {
+      await acquireViewer("v2");
+    } catch (error) {
+      drainingError = error;
+    }
+    expect(drainingError).toBeInstanceOf(SandboxViewerAdmissionBlockedError);
+    expect((drainingError as SandboxViewerAdmissionBlockedError).reason).toBe("balance");
+    expect(await readLiveness(ws.workspaceId, ws.groupId)).toBe("draining");
+
+    // The intent belongs to the workspace, not this provider instance, so
+    // teardown cannot make a cold successor viewer-admissible.
+    expect(
+      await confirmDrainCold(db, {
+        accountId: ws.accountId,
+        workspaceId: ws.workspaceId,
+        sandboxGroupId: ws.groupId,
+        expectedEpoch: epoch,
+      }),
+    ).toEqual({ wentCold: true });
+    let coldError: unknown;
+    try {
+      await acquireViewer("v3");
+    } catch (error) {
+      coldError = error;
+    }
+    expect(coldError).toBeInstanceOf(SandboxViewerAdmissionBlockedError);
+    expect(await readLiveness(ws.workspaceId, ws.groupId)).toBe("cold");
+
+    // A top-up is not inferred from time: the same serialized limit evaluator
+    // clears the gate from fresh balance truth, after which normal cold
+    // materialization can resume.
+    expect(
+      await forceDrainOverLimitViewerOnlyBoxes(db, {
+        workspaceId: ws.workspaceId,
+        balanceMicros: 1,
+        enforceBalance: true,
+        maxWarmSecondsPerWorkspace: 0,
+        idleGraceMs: 60_000,
+      }),
+    ).toEqual({ overLimit: false, reason: null, drained: [] });
+    expect(await readViewerForceDrain(ws.workspaceId)).toMatchObject({
+      reason: null,
+      requested_at: null,
+    });
+    expect(await listSandboxViewerForceDrainWorkspaceIds(db)).not.toContain(ws.workspaceId);
+    expect((await acquireViewer("v4")).role).toBe("spawner");
   }, 60_000);
 
   test("(7) warm-cost: a configured rate debits credits and records sandbox.warm_cost (orthogonal to warm_seconds)", async () => {

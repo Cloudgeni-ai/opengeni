@@ -346,6 +346,26 @@ all old application writers stop. Its database constraint makes a raw
 workspace-generation advance impossible while a capture claim is present, so a
 missed application caller fails closed rather than reintroducing the race.
 
+### Viewer-only limit drain admission
+
+Deleting viewer holders is not by itself an admission fence. Before migration
+0143, an open dashboard could acquire the same lease during the reaper's drain
+grace, change it back to `warm`, and indefinitely defeat a zero-balance or
+monthly-warm-cap drain.
+
+The limit evaluator now persists a reasoned gate on the workspace before
+deleting any viewer holder. Viewer acquisition reads that gate while holding the
+exact lease row lock whenever the lease has no turn holder. It therefore cannot
+re-arm a draining box or create a cold successor, while a sandbox actively owned
+by a turn remains viewable. The global reaper includes gated workspaces even
+after all their leases become cold and clears the gate only after a fresh
+balance/cap evaluation under the workspace usage lock. A top-up, cap rollover,
+or disabled limit consequently restores viewer admission without an operator
+repair.
+
+Migration 0143 is maintenance-only because an older API does not consult this
+new gate. It activates only after every old `opengeni_app` process is stopped.
+
 ### Lock-first lease reconciliation
 
 Every holder-creating or holder-removing path serializes in the order
