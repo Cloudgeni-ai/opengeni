@@ -1,5 +1,13 @@
 # @opengeni/example-northstar-support
 
+## 0.0.37
+
+### Patch Changes
+
+- 0179a95: Add an expandable embedded-agent panel, a compact host-composed OpenGeni experience, and SDK-native file attachments to the Northstar demo.
+  - @opengeni/react@0.30.2
+  - @opengeni/sdk@0.30.2
+
 ## 0.0.36
 
 ### Patch Changes
