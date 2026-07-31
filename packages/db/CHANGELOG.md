@@ -1,5 +1,18 @@
 # @opengeni/db
 
+## 0.15.2
+
+### Patch Changes
+
+- ddff8db: Add the read-only Workspace State inventory with bounded, authorization-scoped
+  Documents aggregates and a deterministic metadata-only Memory projection. The
+  projection explicitly labels legacy `knowledge_memories` preference-kind counts
+  as non-authoritative observations while preserving the structured preference
+  registry as the sole active preference authority.
+- Updated dependencies [ddff8db]
+  - @opengeni/contracts@0.24.1
+  - @opengeni/config@0.7.17
+
 ## 0.15.1
 
 ### Patch Changes
