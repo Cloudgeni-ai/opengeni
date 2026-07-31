@@ -1,5 +1,13 @@
 # @opengeni/config
 
+## 0.7.17
+
+### Patch Changes
+
+- 0a9a6eb: Keep browser-facing S3-compatible signed URLs on the public endpoint while routing authenticated API and worker object operations through an optional internal endpoint.
+- Updated dependencies [ddff8db]
+  - @opengeni/contracts@0.24.1
+
 ## 0.7.16
 
 ### Patch Changes
