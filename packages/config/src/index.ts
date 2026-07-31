@@ -220,12 +220,14 @@ const SettingsSchema = z.object({
   analyticsConsentRequired: EnvBoolean.default(true),
   analyticsReoClientId: z
     .string()
+    .max(128)
     .regex(/^[A-Za-z0-9_-]+$/u)
     .optional(),
-  analyticsPosthogProjectKey: z.string().min(1).optional(),
-  analyticsPosthogHost: z.string().url().optional(),
+  analyticsPosthogProjectKey: z.string().min(1).max(256).optional(),
+  analyticsPosthogHost: z.string().url().max(2_048).optional(),
   analyticsGa4MeasurementId: z
     .string()
+    .max(32)
     .regex(/^G-[A-Z0-9]+$/u)
     .optional(),
   publicBaseUrl: z.string().url().optional(),

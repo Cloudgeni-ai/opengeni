@@ -3,23 +3,41 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   analyticsHasProviders,
-  setAnalyticsConsent,
+  persistAnalyticsConsent,
   storedAnalyticsConsent,
   type AnalyticsConsent,
-} from "@/lib/analytics";
+} from "@/lib/analytics-consent";
 import type { ClientConfig } from "@/types";
 
 export function AnalyticsConsentBanner({ config }: { config: ClientConfig["analytics"] }) {
   const [choice, setChoice] = useState<AnalyticsConsent | null>(() => storedAnalyticsConsent());
+  const [editing, setEditing] = useState(choice === null);
 
-  if (!config.consentRequired || !analyticsHasProviders(config) || choice !== null) {
+  if (!config.consentRequired || !analyticsHasProviders(config)) {
     return null;
   }
 
   const choose = (nextChoice: AnalyticsConsent) => {
-    setAnalyticsConsent(nextChoice);
+    persistAnalyticsConsent(nextChoice);
     setChoice(nextChoice);
+    setEditing(false);
+    void import("@/lib/analytics").then(({ applyAnalyticsConsent }) => {
+      applyAnalyticsConsent(nextChoice);
+    });
   };
+
+  if (!editing) {
+    return (
+      <Button
+        type="button"
+        variant="secondary"
+        className="fixed bottom-3 left-3 z-40 h-8 px-2 text-xs"
+        onClick={() => setEditing(true)}
+      >
+        Analytics preferences
+      </Button>
+    );
+  }
 
   return (
     <section
@@ -28,10 +46,16 @@ export function AnalyticsConsentBanner({ config }: { config: ClientConfig["analy
     >
       <p className="text-sm font-medium text-fg">Help us improve OpenGeni</p>
       <p className="mt-1 text-sm text-fg-muted">
-        We use privacy-limited analytics to understand adoption. We do not send prompts, source
-        code, repository content, tool arguments, or secrets.
+        We use optional performance analytics, including first-party cookies, to understand
+        adoption. Copy tracking is disabled; we do not send prompts, source code, repository
+        content, tool arguments, or secrets.
       </p>
       <div className="mt-3 flex justify-end gap-2">
+        {choice !== null ? (
+          <Button type="button" variant="ghost" onClick={() => setEditing(false)}>
+            Cancel
+          </Button>
+        ) : null}
         <Button type="button" variant="secondary" onClick={() => choose("denied")}>
           Decline
         </Button>

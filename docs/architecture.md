@@ -494,10 +494,16 @@ exposes only validated public identifiers for allowlisted Reo, PostHog, and GA4
 adapters. The console loads provider code after hydration and, when
 `OPENGENI_ANALYTICS_CONSENT_REQUIRED=true`, only after the visitor opts in.
 Self-hosted deployments therefore emit no analytics unless their operator
-explicitly enables and configures it. Route tracking sends pathnames only; the
-event surface must never carry prompts, source code, repository content, tool
-arguments, logs, secrets, or document contents. Provider selection belongs to
-validated runtime configuration, never arbitrary script injection.
+explicitly enables and configures it. OpenGeni's explicit route tracking sends
+pathnames only and suspends providers on public-auth or query-bearing routes.
+The Reo adapter initializes with clipboard/code-copy and supported AI-widget
+capture disabled. It does not send authenticated identity: adding an identify
+call requires a separate privacy review and explicit consent copy. Visitors can
+reopen analytics preferences and withdraw consent; provider cleanup must run
+without breaking the console even when browser storage or a third-party script
+fails. The event surface must never carry prompts, source code, repository
+content, tool arguments, logs, secrets, or document contents. Provider selection
+belongs to validated runtime configuration, never arbitrary script injection.
 
 Watch-outs: `/clear-view` is local/this-device-only; stale-bundle auto-reload on revision mismatch; the stock repository picker is GitHub-oriented even though session resources and credential bindings support multiple providers and accounts.
 

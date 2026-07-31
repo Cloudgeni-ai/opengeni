@@ -1,6 +1,7 @@
+import { analyticsHasProviders, storedAnalyticsConsent } from "@/lib/analytics-consent";
+import type { AnalyticsConsent } from "@/lib/analytics-consent";
 import type { ClientConfig } from "@/types";
 
-export type AnalyticsConsent = "granted" | "denied";
 export type AnalyticsEventName =
   | "signed_up"
   | "workspace_created"
@@ -13,79 +14,61 @@ type AnalyticsConfig = ClientConfig["analytics"];
 type AnalyticsProperty = boolean | number | string;
 type AnalyticsProperties = Record<string, AnalyticsProperty>;
 type PostHogClient = typeof import("posthog-js").default;
+type ReoClient = {
+  init: (config: { clientID: string; dnt: string[] }) => void;
+  unload?: () => void;
+};
 
-const CONSENT_STORAGE_KEY = "opengeni.analyticsConsent";
 const REO_SCRIPT_ID = "opengeni-analytics-reo";
 const GA4_SCRIPT_ID = "opengeni-analytics-ga4";
+const EXTERNAL_SCRIPT_TIMEOUT_MS = 10_000;
 
 let activeConfig: AnalyticsConfig | null = null;
 let initialization: Promise<void> | null = null;
+let initializationGeneration = 0;
+let providersReady = false;
 let posthogClient: PostHogClient | null = null;
 let ga4MeasurementId: string | null = null;
 let latestPathname: string | null = null;
+let suspended = false;
 
 declare global {
   interface Window {
+    Reo?: ReoClient;
     dataLayer?: unknown[];
     gtag?: (...args: unknown[]) => void;
   }
 }
 
-export function analyticsHasProviders(config: AnalyticsConfig | null | undefined): boolean {
-  if (!config) {
-    return false;
-  }
-  return Object.values(config.providers).some(Boolean);
-}
-
-export function storedAnalyticsConsent(
-  storage: Pick<Storage, "getItem"> | null = typeof localStorage === "undefined"
-    ? null
-    : localStorage,
-): AnalyticsConsent | null {
-  const value = storage?.getItem(CONSENT_STORAGE_KEY);
-  return value === "granted" || value === "denied" ? value : null;
-}
-
-export function configureAnalytics(config: AnalyticsConfig): void {
+export function syncAnalytics(config: AnalyticsConfig, pathname: string): void {
+  suspended = false;
   activeConfig = config;
-  if (!analyticsHasProviders(config)) {
-    return;
-  }
-  const consent = storedAnalyticsConsent();
-  if (consent === "granted" || (!config.consentRequired && consent !== "denied")) {
-    void initializeProviders(config);
-  }
-}
-
-export function setAnalyticsConsent(
-  consent: AnalyticsConsent,
-  storage: Pick<Storage, "setItem"> | null = typeof localStorage === "undefined"
-    ? null
-    : localStorage,
-): void {
-  storage?.setItem(CONSENT_STORAGE_KEY, consent);
-  if (consent === "granted" && activeConfig) {
-    void initializeProviders(activeConfig);
-    return;
-  }
-  if (consent === "denied") {
-    posthogClient?.opt_out_capturing();
-    window.gtag?.("consent", "update", {
-      analytics_storage: "denied",
-      ad_storage: "denied",
-      ad_user_data: "denied",
-      ad_personalization: "denied",
-    });
-  }
-}
-
-export function trackAnalyticsPage(pathname: string): void {
   latestPathname = pathname;
   if (!analyticsCollectionAllowed()) {
     return;
   }
-  dispatchPageView(pathname);
+  if (initialization) {
+    if (providersReady) {
+      dispatchPageView(pathname);
+    }
+    return;
+  }
+  void initializeProviders(config);
+}
+
+export function suspendAnalytics(): void {
+  suspended = true;
+  stopProviders();
+}
+
+export function applyAnalyticsConsent(consent: AnalyticsConsent): void {
+  if (consent === "granted" && activeConfig && !suspended) {
+    void initializeProviders(activeConfig);
+    return;
+  }
+  if (consent === "denied") {
+    stopProviders();
+  }
 }
 
 export function captureAnalyticsEvent(
@@ -103,6 +86,7 @@ async function initializeProviders(config: AnalyticsConfig): Promise<void> {
   if (initialization) {
     return await initialization;
   }
+  const generation = initializationGeneration;
   initialization = Promise.allSettled([
     config.providers.reo ? initializeReo(config.providers.reo.clientId) : Promise.resolve(),
     config.providers.posthog
@@ -110,7 +94,8 @@ async function initializeProviders(config: AnalyticsConfig): Promise<void> {
       : Promise.resolve(),
     config.providers.ga4 ? initializeGa4(config.providers.ga4.measurementId) : Promise.resolve(),
   ]).then(() => {
-    if (latestPathname) {
+    if (generation === initializationGeneration && latestPathname && analyticsCollectionAllowed()) {
+      providersReady = true;
       dispatchPageView(latestPathname);
     }
   });
@@ -118,7 +103,7 @@ async function initializeProviders(config: AnalyticsConfig): Promise<void> {
 }
 
 function analyticsCollectionAllowed(): boolean {
-  if (!activeConfig || !analyticsHasProviders(activeConfig)) {
+  if (suspended || !activeConfig || !analyticsHasProviders(activeConfig)) {
     return false;
   }
   const consent = storedAnalyticsConsent();
@@ -136,18 +121,37 @@ function dispatchPageView(pathname: string): void {
 }
 
 async function initializeReo(clientId: string): Promise<void> {
-  if (document.getElementById(REO_SCRIPT_ID)) {
+  if (!analyticsCollectionAllowed()) {
     return;
   }
-  const script = document.createElement("script");
-  script.id = REO_SCRIPT_ID;
-  script.async = true;
-  script.src = `https://static.reo.dev/${encodeURIComponent(clientId)}/reo.js`;
-  document.head.append(script);
+  if (!window.Reo) {
+    document.getElementById(REO_SCRIPT_ID)?.remove();
+    const script = document.createElement("script");
+    script.id = REO_SCRIPT_ID;
+    script.async = true;
+    script.src = `https://static.reo.dev/${encodeURIComponent(clientId)}/reo.js`;
+    await appendExternalScript(script);
+  }
+  if (!analyticsCollectionAllowed() || !window.Reo) {
+    return;
+  }
+  window.Reo.init({
+    clientID: clientId,
+    // Reo's beacon otherwise observes clipboard/code-copy and supported AI-widget
+    // interactions. OpenGeni deliberately permits page intent only.
+    dnt: ["copy", "ai"],
+  });
 }
 
 async function initializePostHog(projectKey: string, host: string): Promise<void> {
+  if (posthogClient) {
+    posthogClient.opt_in_capturing();
+    return;
+  }
   const { default: posthog } = await import("posthog-js");
+  if (!analyticsCollectionAllowed()) {
+    return;
+  }
   posthog.init(projectKey, {
     api_host: host,
     autocapture: false,
@@ -160,29 +164,77 @@ async function initializePostHog(projectKey: string, host: string): Promise<void
 }
 
 async function initializeGa4(measurementId: string): Promise<void> {
-  if (document.getElementById(GA4_SCRIPT_ID)) {
+  if (!analyticsCollectionAllowed()) {
     return;
   }
   window.dataLayer ??= [];
   window.gtag ??= (...args: unknown[]) => {
     window.dataLayer?.push(args);
   };
-  window.gtag("consent", "default", {
+  window.gtag("consent", "update", {
     analytics_storage: "granted",
     ad_storage: "denied",
     ad_user_data: "denied",
     ad_personalization: "denied",
   });
+  ga4MeasurementId = measurementId;
+  if (document.getElementById(GA4_SCRIPT_ID)) {
+    return;
+  }
   window.gtag("js", new Date());
   window.gtag("config", measurementId, {
     allow_google_signals: false,
     send_page_view: false,
   });
-  ga4MeasurementId = measurementId;
 
   const script = document.createElement("script");
   script.id = GA4_SCRIPT_ID;
   script.async = true;
   script.src = `https://www.googletagmanager.com/gtag/js?id=${encodeURIComponent(measurementId)}`;
   document.head.append(script);
+}
+
+function stopProviders(): void {
+  initializationGeneration += 1;
+  initialization = null;
+  providersReady = false;
+  try {
+    window.Reo?.unload?.();
+  } catch {
+    // Third-party cleanup must never break the product UI.
+  }
+  posthogClient?.opt_out_capturing();
+  window.gtag?.("consent", "update", {
+    analytics_storage: "denied",
+    ad_storage: "denied",
+    ad_user_data: "denied",
+    ad_personalization: "denied",
+  });
+}
+
+function appendExternalScript(script: HTMLScriptElement): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timeout = window.setTimeout(() => {
+      script.remove();
+      reject(new Error("Analytics provider script timed out"));
+    }, EXTERNAL_SCRIPT_TIMEOUT_MS);
+    script.addEventListener(
+      "load",
+      () => {
+        window.clearTimeout(timeout);
+        resolve();
+      },
+      { once: true },
+    );
+    script.addEventListener(
+      "error",
+      () => {
+        window.clearTimeout(timeout);
+        script.remove();
+        reject(new Error("Analytics provider script failed to load"));
+      },
+      { once: true },
+    );
+    document.head.append(script);
+  });
 }

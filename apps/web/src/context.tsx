@@ -9,6 +9,8 @@ import { TanStackRouterDevtools } from "@tanstack/react-router-devtools";
 import { CheckIcon, Loader2Icon, LockIcon, RefreshCwIcon, UserIcon } from "lucide-react";
 import {
   createContext,
+  lazy,
+  Suspense,
   type Dispatch,
   type SetStateAction,
   useCallback,
@@ -33,12 +35,10 @@ import {
   signOutManaged,
   signUpEmail,
 } from "@/api";
-import { AnalyticsConsentBanner } from "@/components/analytics-consent";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { configureAnalytics, trackAnalyticsPage } from "@/lib/analytics";
 import { sameSessionForContext } from "@/lib/session-context";
 import {
   buildCreateSessionRequest,
@@ -79,6 +79,12 @@ import type {
   UpdateWorkspaceSettingsRequest,
   Workspace,
 } from "@/types";
+
+const AnalyticsConsentBanner = lazy(() =>
+  import("@/components/analytics-consent").then((module) => ({
+    default: module.AnalyticsConsentBanner,
+  })),
+);
 
 export type AppContextValue = {
   client: OpenGeniClient;
@@ -291,6 +297,9 @@ export function RootRouteComponent() {
   // password reset is signed out by definition, so `/reset-password` must never
   // be intercepted by the sign-in panel or workspace-access loading.
   const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const hasSearchParameters = useRouterState({
+    select: (state) => Object.keys(state.location.search).length > 0,
+  });
   const isPublicAuthRoute = pathname === "/reset-password";
   // The @opengeni/sdk client behind every console API call and hook. Auth
   // headers are read per request; a new identity per key version makes the
@@ -341,12 +350,24 @@ export function RootRouteComponent() {
   }, []);
 
   useEffect(() => {
-    if (!clientConfig || isPublicAuthRoute) {
+    if (!clientConfig) {
       return;
     }
-    configureAnalytics(clientConfig.analytics);
-    trackAnalyticsPage(pathname);
-  }, [clientConfig, isPublicAuthRoute, pathname]);
+    let cancelled = false;
+    void import("@/lib/analytics").then(({ suspendAnalytics, syncAnalytics }) => {
+      if (cancelled) {
+        return;
+      }
+      if (isPublicAuthRoute || hasSearchParameters) {
+        suspendAnalytics();
+        return;
+      }
+      syncAnalytics(clientConfig.analytics, pathname);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [clientConfig, hasSearchParameters, isPublicAuthRoute, pathname]);
 
   useEffect(() => {
     if (!clientConfig) {
@@ -1095,7 +1116,9 @@ export function RootRouteComponent() {
     <main className="flex h-dvh min-h-screen flex-col overflow-x-hidden bg-bg text-fg">
       <Toaster richColors theme="dark" />
       {clientConfig && !isPublicAuthRoute ? (
-        <AnalyticsConsentBanner config={clientConfig.analytics} />
+        <Suspense fallback={null}>
+          <AnalyticsConsentBanner config={clientConfig.analytics} />
+        </Suspense>
       ) : null}
       {isPublicAuthRoute ? (
         // Self-contained public page (e.g. /reset-password): rendered before the

@@ -81,6 +81,20 @@ describe("browser analytics configuration", () => {
     expect(settings.analyticsPosthogHost).toBe("https://eu.i.posthog.com");
     expect(settings.analyticsGa4MeasurementId).toBe("G-ABC123");
   });
+
+  test("bounds public provider identifiers before exposing them to browsers", () => {
+    expect(() =>
+      withEnv({ OPENGENI_ANALYTICS_REO_CLIENT_ID: "r".repeat(129) }, () => getSettings()),
+    ).toThrow();
+    expect(() =>
+      withEnv({ OPENGENI_ANALYTICS_POSTHOG_PROJECT_KEY: "p".repeat(257) }, () => getSettings()),
+    ).toThrow();
+    expect(() =>
+      withEnv({ OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID: `G-${"A".repeat(31)}` }, () =>
+        getSettings(),
+      ),
+    ).toThrow();
+  });
 });
 
 describe("Docker workspace materialization", () => {

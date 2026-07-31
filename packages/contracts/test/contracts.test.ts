@@ -972,6 +972,15 @@ describe("contracts", () => {
 
     expect(payload.analytics.providers.reo?.clientId).toBe("reo_client-1");
     expect(payload.analytics.providers.ga4?.measurementId).toBe("G-ABC123");
+    expect(() =>
+      ClientConfig.parse({
+        ...payload,
+        analytics: {
+          consentRequired: true,
+          providers: { reo: { clientId: "r".repeat(129) } },
+        },
+      }),
+    ).toThrow();
   });
 
   test("round-trips the provider-grouped models list on client config", () => {

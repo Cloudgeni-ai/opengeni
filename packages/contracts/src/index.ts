@@ -8998,18 +8998,24 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
         providers: z.object({
           reo: z
             .object({
-              clientId: z.string().regex(/^[A-Za-z0-9_-]+$/u),
+              clientId: z
+                .string()
+                .max(128)
+                .regex(/^[A-Za-z0-9_-]+$/u),
             })
             .optional(),
           posthog: z
             .object({
-              projectKey: z.string().min(1),
-              host: z.string().url(),
+              projectKey: z.string().min(1).max(256),
+              host: z.string().url().max(2_048),
             })
             .optional(),
           ga4: z
             .object({
-              measurementId: z.string().regex(/^G-[A-Z0-9]+$/u),
+              measurementId: z
+                .string()
+                .max(32)
+                .regex(/^G-[A-Z0-9]+$/u),
             })
             .optional(),
         }),
