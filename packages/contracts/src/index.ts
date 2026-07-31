@@ -2989,11 +2989,14 @@ export const ToolRef = z.object({
   kind: z.literal("mcp"),
   id: z.string().min(1),
   // Non-fatal-on-connect marker for MCP server refs that can degrade
-  // gracefully. Absent/false is STRICT: the id must be configured and an
-  // unavailable server fails the turn. `optional:true` is preserved for known
-  // servers and makes runtime connect/list failures skip that server; if the
-  // deployment does not configure the id, validation drops the ref. The server
-  // also sets this for auto-attached workspace-default capability MCPs.
+  // gracefully. On new input, absent/false is STRICT: the id must be configured
+  // and an unavailable registered server fails the turn. Persisted refs are
+  // intersected with the current registry at each turn boundary, so a server
+  // disconnected after admission is retained in policy/audit truth but skipped
+  // until it is registered again. `optional:true` additionally makes runtime
+  // connect/list failures skip a known server; if the deployment does not
+  // configure the id, validation drops the ref. Auto-attached workspace-default
+  // capability MCPs also use this marker.
   optional: z.boolean().optional(),
 });
 export type ToolRef = z.infer<typeof ToolRef>;

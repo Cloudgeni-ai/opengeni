@@ -515,9 +515,14 @@ async function discoverAuthorizationServerMetadata(
     "OAuth authorization server",
   ).replace(/\/+$/, "");
   const candidates = uniqueStrings([
-    safeAuthorizationServer,
+    // Prefer the RFC metadata locations before probing the issuer itself. Some
+    // providers (including Linear) redirect their issuer root to a human docs
+    // page; following that redirect can leave discovery waiting on an unrelated
+    // streaming response even though the well-known metadata is immediately
+    // available.
     ...wellKnownCandidates(safeAuthorizationServer, "oauth-authorization-server"),
     ...wellKnownCandidates(safeAuthorizationServer, "openid-configuration"),
+    safeAuthorizationServer,
   ]);
   for (const candidate of candidates) {
     const payload = await fetchJsonObject(candidate, settings).catch((error) => {
@@ -579,6 +584,12 @@ async function registerOAuthClient(
   if (operator) {
     return operator;
   }
+  // Linear currently advertises CIMD but rejects its client metadata URL at
+  // the authorization endpoint. Its documented interactive setup uses DCR,
+  // so prefer the simultaneously advertised registration endpoint.
+  if (prefersDynamicClientRegistration(as)) {
+    return await getOrCreateDynamicClientRegistration(db, settings, as, redirectUri, scopes);
+  }
   if (as.clientIdMetadataDocumentSupported) {
     return {
       method: "cimd",
@@ -602,6 +613,12 @@ async function registerOAuthClient(
     };
   }
   return await getOrCreateDynamicClientRegistration(db, settings, as, redirectUri, scopes);
+}
+
+function prefersDynamicClientRegistration(as: AuthorizationServerMetadata): boolean {
+  return Boolean(
+    as.registrationEndpoint && normalizedIssuerKey(as.issuer) === "https://mcp.linear.app",
+  );
 }
 
 async function getOrCreateDynamicClientRegistration(

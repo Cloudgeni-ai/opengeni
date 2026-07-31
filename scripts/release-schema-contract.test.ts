@@ -155,12 +155,13 @@ describe("release schema contract", () => {
         (migrations.has("0138_sandbox_checkpoint_artifacts_and_deadlines.sql") ? 1 : 0) +
         (migrations.has("0139_codex_provider_artifact_invalidations.sql") ? 1 : 0) +
         (migrations.has("0140_sandbox_restore_and_reaper_fences.sql") ? 1 : 0) +
-        (migrations.has("0141_slack_bot_delete_idempotency.sql") ? 1 : 0),
+        (migrations.has("0141_slack_bot_delete_idempotency.sql") ? 1 : 0) +
+        (migrations.has("0142_sandbox_archive_capture_gate.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "11cbfcf3c23ca8e42a21ce170295d11f077d1ad1eca3f2679f819533e7c3ef15",
+      "632a5e459ca41112a74c34dc9b3e5006268ac20ae2c06015183e159201e51832",
     );
-    expect(contract.latestMigration).toBe("0141_slack_bot_delete_idempotency.sql");
+    expect(contract.latestMigration).toBe("0142_sandbox_archive_capture_gate.sql");
     expect(migrations.get("0128_github_installation_authority.sql")).toMatchObject({
       sha256: "365793b2a204a70e214adb90298b522acbb6dcfae22a46681a58f41a6938e6f0",
       deploymentMode: "rolling",
@@ -206,7 +207,7 @@ describe("release schema contract", () => {
     expect(
       contract.migrations
         .map((migration) => migration.path)
-        .filter((path) => /^(?:010[3-9]|011[0-9]|012[0-9]|013[0-9])_/.test(path)),
+        .filter((path) => /^(?:010[3-9]|011[0-9]|012[0-9]|013[0-9]|014[0-9])_/.test(path)),
     ).toEqual([
       "0103_host_export_root_session.sql",
       "0104_host_export_root_session_backfill.sql",
@@ -235,6 +236,9 @@ describe("release schema contract", () => {
       "0137_preference_registry.sql",
       "0138_sandbox_checkpoint_artifacts_and_deadlines.sql",
       "0139_codex_provider_artifact_invalidations.sql",
+      "0140_sandbox_restore_and_reaper_fences.sql",
+      "0141_slack_bot_delete_idempotency.sql",
+      "0142_sandbox_archive_capture_gate.sql",
     ]);
     expect(new Set(contract.migrations.map((migration) => migration.path)).size).toBe(
       contract.fileCount,
@@ -338,6 +342,10 @@ describe("release schema contract", () => {
     expect(migrations.get("0141_slack_bot_delete_idempotency.sql")).toMatchObject({
       sha256: "cebd9cde4909e3c6b7f8d11f5b75353d9f0370600acead6e6b31d01c4ebaf847",
       deploymentMode: "rolling",
+    });
+    expect(migrations.get("0142_sandbox_archive_capture_gate.sql")).toMatchObject({
+      sha256: "48546fe4f106da0b36edf8a47da56e35b123fd0a63dc9c2eaed887756d35144f",
+      deploymentMode: "maintenance",
     });
   });
 });

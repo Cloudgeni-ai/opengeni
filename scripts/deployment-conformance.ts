@@ -266,7 +266,10 @@ if (args.skipStorage) {
     const headers = recordField(upload, "requiredHeaders");
     await preflightObjectPut(
       putUrl,
-      new URL(args.baseUrl).origin,
+      // The browser SDK is embeddable in arbitrary products. Storage CORS must
+      // therefore accept an origin that is unrelated to the OpenGeni web app;
+      // the short-lived signed URL remains the upload authorization boundary.
+      "https://sdk-conformance.invalid",
       Object.keys(headers),
       args.objectConnectTo,
     );
@@ -425,9 +428,9 @@ async function preflightObjectPut(
     );
   }
   const allowedOrigin = response.headers.get("access-control-allow-origin");
-  if (allowedOrigin !== "*" && allowedOrigin !== origin) {
+  if (allowedOrigin !== "*") {
     throw new Error(
-      `browser upload CORS preflight allowed origin ${allowedOrigin ?? "<missing>"}, expected ${origin} or *`,
+      `browser upload CORS preflight allowed origin ${allowedOrigin ?? "<missing>"}, expected * for the embeddable SDK`,
     );
   }
   const allowedMethods = (response.headers.get("access-control-allow-methods") ?? "")

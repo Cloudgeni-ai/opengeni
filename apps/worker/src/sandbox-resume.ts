@@ -20,12 +20,14 @@
 //
 // Liveness between turns is the lease refcount; there is no keepalive loop.
 
-import type { Settings } from "@opengeni/config";
+import { sandboxArchiveCaptureTimeoutMs, type Settings } from "@opengeni/config";
 import { redactSensitiveText } from "@opengeni/contracts";
+import { randomUUID } from "node:crypto";
 import {
   acquireLease,
   adoptLegacyModalCheckpointArtifact,
   beginSandboxRematerialization,
+  claimWorkspaceArchiveCapture,
   commitWarmingToWarm,
   failSandboxRematerialization,
   failWarmingToCold,
@@ -34,10 +36,10 @@ import {
   markWarmLeaseInstanceLost,
   markSandboxCheckpointArtifactDeletePending,
   persistWarmSnapshot,
-  readWorkspaceArchiveCapturePreflight,
   readLease,
   registerSandboxCheckpointArtifact,
   recordWarmingSandboxCreated,
+  releaseWorkspaceArchiveCapture,
   releaseLeaseHolder,
   touchLeaseHolder,
   SandboxLeaseRecoveryBlockedError,
@@ -508,9 +510,9 @@ export async function maybePersistWarmWorkspaceSnapshot(
     return false;
   }
   try {
-    // Cheap throttle pre-check before the (potentially slow) capture;
-    // persistWarmSnapshot re-checks atomically under the row lock, so this is
-    // purely a cost optimization, not the correctness guard.
+    // Resolve the provider namespace before taking the durable capture gate.
+    // This work cannot pause or mutate the box, so keeping it outside the claim
+    // minimizes the time that command admission must wait.
     const lease = await readLease(db, ids.workspaceId, ids.sandboxGroupId);
     if (
       !lease ||
@@ -520,78 +522,44 @@ export async function maybePersistWarmWorkspaceSnapshot(
     ) {
       return false;
     }
-    const preflight = await readWorkspaceArchiveCapturePreflight(db, {
-      accountId: ids.accountId,
-      workspaceId: ids.workspaceId,
-      sandboxGroupId: ids.sandboxGroupId,
-      expectedEpoch: leaseEpoch,
-      expectedInstanceId: lease.instanceId,
-      liveness: "warm",
-    });
-    if (!preflight) return false;
-    if (signal?.aborted) {
-      return false;
-    }
-    const sessionState =
-      lease.resumeState && typeof lease.resumeState === "object"
-        ? (lease.resumeState as { sessionState?: Record<string, unknown> }).sessionState
-        : undefined;
-    const priorAtRaw =
-      sessionState && typeof sessionState === "object"
-        ? sessionState.workspaceArchiveAt
-        : undefined;
-    const priorAtMs = typeof priorAtRaw === "string" ? Date.parse(priorAtRaw) : Number.NaN;
-    if (
-      !force &&
-      preflight.archiveComplete &&
-      Number.isFinite(priorAtMs) &&
-      Date.now() - priorAtMs < intervalMs
-    ) {
-      return false;
-    }
+    const instanceId = lease.instanceId;
     const nativeModalPersistence =
       persistable.state?.workspacePersistence === "snapshot_filesystem" ||
       persistable.state?.workspacePersistence === "snapshot_directory";
     const checkpointBinding = nativeModalPersistence
       ? await resolveModalCheckpointBindingBeforeCapture(settings, persistable, signal)
       : null;
+    if (signal?.aborted) return false;
+
+    const captureId = randomUUID();
+    const captureTimeoutMs = sandboxArchiveCaptureTimeoutMs(settings);
+    const claimed = await claimWorkspaceArchiveCapture(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.sandboxGroupId,
+      captureId,
+      expectedEpoch: leaseEpoch,
+      expectedInstanceId: instanceId,
+      liveness: "warm",
+      captureTimeoutMs,
+      minIntervalMs: force ? 0 : intervalMs,
+      warmAttempt: {
+        sessionId: ids.sessionId,
+        turnId: ids.turnId,
+        attemptId: ids.attemptId,
+        holderId: sandboxLeaseHolderIdForAttempt(ids.attemptId),
+      },
+    });
+    if (claimed.status !== "claimed") return false;
+
     let timeout: ReturnType<typeof setTimeout> | undefined;
     // Stamp WHEN this capture started: persistWarmSnapshot orders warm snapshots
     // by capture-initiation, not land time, so a slower heartbeat capture that
     // started earlier can never overwrite a fresher turn-end capture that landed
     // first (the bounded-wait race Bugbot flagged).
     const capturedAtMs = Date.now();
-    const capture = captureVerifiedWorkspaceArchive(session, capturedAtMs);
-    let cancelListener: (() => void) | undefined;
-    const outcome = await Promise.race([
-      capture.then((archive) => ({ kind: "captured" as const, archive })),
-      ...(signal
-        ? [
-            new Promise<{ kind: "cancelled" }>((resolve) => {
-              cancelListener = () => resolve({ kind: "cancelled" });
-              signal.addEventListener("abort", cancelListener, { once: true });
-              if (signal.aborted) cancelListener();
-            }),
-          ]
-        : []),
-      new Promise<{ kind: "timed_out" }>((resolve) => {
-        timeout = setTimeout(
-          () => resolve({ kind: "timed_out" }),
-          settings.sandboxSnapshotTimeoutMs,
-        );
-        if (timeout && "unref" in timeout && typeof timeout.unref === "function") {
-          timeout.unref();
-        }
-      }),
-    ]).finally(() => {
-      if (timeout) {
-        clearTimeout(timeout);
-      }
-      if (cancelListener) signal?.removeEventListener("abort", cancelListener);
-    });
-
     const registerCandidate = async (
-      archive: Awaited<typeof capture>,
+      archive: Awaited<ReturnType<typeof captureVerifiedWorkspaceArchive>>,
     ): Promise<{ id: string } | null> => {
       if (
         archive.descriptor.version !== 2 ||
@@ -607,10 +575,10 @@ export async function maybePersistWarmWorkspaceSnapshot(
         accountId: ids.accountId,
         workspaceId: ids.workspaceId,
         sandboxGroupId: ids.sandboxGroupId,
-        sourceLeaseId: lease.id,
+        sourceLeaseId: claimed.claim.leaseId,
         sourceLeaseEpoch: leaseEpoch,
-        sourceInstanceId: lease.instanceId!,
-        sourceWorkspaceGeneration: preflight.workspaceGeneration,
+        sourceInstanceId: instanceId,
+        sourceWorkspaceGeneration: claimed.claim.workspaceGeneration,
         providerBindingKey: checkpointBinding.key,
         providerBinding: checkpointBinding.binding,
         workspaceArchive: archive.base64,
@@ -626,58 +594,91 @@ export async function maybePersistWarmWorkspaceSnapshot(
         reason,
       }).catch(() => undefined);
     };
-    const registerCandidateDurably = async (
-      archive: Awaited<typeof capture>,
-    ): Promise<{ id: string } | null> => {
-      return await registerCandidate(archive);
-    };
-
-    if (outcome.kind !== "captured") {
-      // The provider operation itself is not cancellable in the pinned SDK. If
-      // it returns after our bounded wait, immediately register the new object
-      // and durably hand it to GC. This closes the former guaranteed leak on
-      // every local timeout/cancellation; a process crash in the tiny provider-
-      // response-before-registration interval remains externally unavoidable
-      // because Modal exposes no snapshot list/idempotency API.
-      void capture
-        .then(async (lateArchive) => {
-          const late = await registerCandidateDurably(lateArchive);
-          if (late) await abandonCandidate(late.id, `snapshot_${outcome.kind}`);
-        })
-        .catch(() => undefined);
-      return false;
-    }
-    const archive = outcome.archive;
-    let candidate: { id: string } | null = null;
-    candidate = await registerCandidateDurably(archive);
-    if (signal?.aborted) {
-      if (candidate) await abandonCandidate(candidate.id, "snapshot_cancelled_before_publish");
-      return false;
-    }
-    const { wrote } = await persistWarmSnapshot(db, {
-      accountId: ids.accountId,
-      workspaceId: ids.workspaceId,
-      sessionId: ids.sessionId,
-      turnId: ids.turnId,
-      attemptId: ids.attemptId,
-      sandboxGroupId: ids.sandboxGroupId,
-      expectedEpoch: leaseEpoch,
-      expectedInstanceId: lease.instanceId,
-      expectedWorkspaceGeneration: preflight.workspaceGeneration,
-      workspaceArchive: archive.base64,
-      workspaceArchiveMeta: archive.descriptor,
-      checkpointArtifactId: candidate?.id ?? null,
-      minIntervalMs: force ? 0 : intervalMs,
-      capturedAtMs,
+    // The SDK capture itself is not cancellable. Keep one owned continuation
+    // alive through provider settlement even if this caller's bounded wait or
+    // turn signal resolves first. Its finally block is the only normal release
+    // of the exact admission gate; a late callback cannot release a successor.
+    const captureAndPublish = (async (): Promise<boolean> => {
+      let candidate: { id: string } | null = null;
+      try {
+        const archive = await captureVerifiedWorkspaceArchive(session, capturedAtMs);
+        candidate = await registerCandidate(archive);
+        const { wrote } = await persistWarmSnapshot(db, {
+          accountId: ids.accountId,
+          workspaceId: ids.workspaceId,
+          sessionId: ids.sessionId,
+          turnId: ids.turnId,
+          attemptId: ids.attemptId,
+          sandboxGroupId: ids.sandboxGroupId,
+          expectedEpoch: leaseEpoch,
+          expectedInstanceId: instanceId,
+          expectedWorkspaceGeneration: claimed.claim.workspaceGeneration,
+          captureId,
+          workspaceArchive: archive.base64,
+          workspaceArchiveMeta: archive.descriptor,
+          checkpointArtifactId: candidate?.id ?? null,
+          minIntervalMs: force ? 0 : intervalMs,
+          capturedAtMs,
+        });
+        if (!wrote && candidate) {
+          await abandonCandidate(candidate.id, "snapshot_publication_fenced");
+        }
+        return wrote;
+      } catch (error) {
+        if (candidate) await abandonCandidate(candidate.id, "snapshot_capture_failed");
+        throw error;
+      } finally {
+        await releaseWorkspaceArchiveCapture(db, {
+          accountId: ids.accountId,
+          workspaceId: ids.workspaceId,
+          sandboxGroupId: ids.sandboxGroupId,
+          captureId,
+          expectedEpoch: leaseEpoch,
+          expectedInstanceId: instanceId,
+        }).catch((error) => {
+          console.error(
+            "mid-session workspace capture gate release failed",
+            safeSnapshotError(error),
+          );
+        });
+      }
+    })();
+    const settled = captureAndPublish.then(
+      (persisted) => ({ kind: "settled" as const, persisted }),
+      (error) => {
+        console.error(
+          "mid-session workspace snapshot failed (turn unaffected)",
+          safeSnapshotError(error),
+        );
+        return { kind: "settled" as const, persisted: false };
+      },
+    );
+    let cancelListener: (() => void) | undefined;
+    const outcome = await Promise.race([
+      settled,
+      ...(signal
+        ? [
+            new Promise<{ kind: "cancelled" }>((resolve) => {
+              cancelListener = () => resolve({ kind: "cancelled" });
+              signal.addEventListener("abort", cancelListener, { once: true });
+              if (signal.aborted) cancelListener();
+            }),
+          ]
+        : []),
+      new Promise<{ kind: "timed_out" }>((resolve) => {
+        timeout = setTimeout(
+          () => resolve({ kind: "timed_out" }),
+          settings.sandboxSnapshotTimeoutMs,
+        );
+      }),
+    ]).finally(() => {
+      if (timeout) clearTimeout(timeout);
+      if (cancelListener) signal?.removeEventListener("abort", cancelListener);
     });
-    if (!wrote) {
-      if (candidate) await abandonCandidate(candidate.id, "snapshot_publication_fenced");
-      return false;
-    }
-    // The fold retains the two-deep restore window and atomically marks the
-    // displaced provider object delete-pending. Provider-bound global GC owns
-    // deletion; do not issue it through this successor session's credentials.
-    return true;
+    // A timed-out/cancelled local waiter deliberately leaves the already-owned
+    // provider continuation running; `settled` has both rejection handling and
+    // exact claim cleanup, so it cannot leak an unhandled promise or artifact.
+    return outcome.kind === "settled" ? outcome.persisted : false;
   } catch (error) {
     // Protection, not a dependency: a failed snapshot must never fail (or slow
     // down retrying) the turn. The next heartbeat/turn-end tick retries.
@@ -772,6 +773,7 @@ export async function resumeBoxForTurn(
     ...(ids.rigVersionId ? { rigVersionId: ids.rigVersionId } : {}),
     leaseTtlMs,
     warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,
+    captureWaitMs: sandboxArchiveCaptureTimeoutMs(settings),
   });
 
   if (cancellationSignal) {
