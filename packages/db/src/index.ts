@@ -17224,6 +17224,7 @@ export async function getLatestRunState(
   // path compares it to the resuming turn's codex account to decide whether the
   // blob's account-bound reasoning must be neutralized before being replayed.
   frozenCodexCredentialId: string | null;
+  providerArtifactInvalidatedAt: Date | null;
 } | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
@@ -17244,6 +17245,7 @@ export async function getLatestRunState(
           serializedRunState: row.serializedRunState,
           pendingApprovals: row.pendingApprovals,
           frozenCodexCredentialId: row.frozenCodexCredentialId ?? null,
+          providerArtifactInvalidatedAt: row.providerArtifactInvalidatedAt ?? null,
         }
       : null;
   });
@@ -18404,6 +18406,7 @@ export async function getActiveSessionHistoryItems(
     position: number;
     item: Record<string, unknown>;
     producerCodexCredentialId: string | null;
+    providerArtifactInvalidatedAt: Date | null;
   }>
 > {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
@@ -18412,6 +18415,7 @@ export async function getActiveSessionHistoryItems(
         position: schema.sessionHistoryItems.position,
         item: schema.sessionHistoryItems.item,
         producerCodexCredentialId: schema.sessionHistoryItems.producerCodexCredentialId,
+        providerArtifactInvalidatedAt: schema.sessionHistoryItems.providerArtifactInvalidatedAt,
       })
       .from(schema.sessionHistoryItems)
       .where(
@@ -36528,10 +36532,23 @@ export type RequestSessionTurnRecoveryInput = {
   reason: string;
   detail?: Record<string, unknown>;
   fromStatuses?: SessionTurnStatus[];
+  providerArtifactInvalidation?: {
+    codexCredentialId: string;
+    reason: "encrypted_content_rejected";
+  };
 };
 
 export type RequestSessionTurnRecoveryResult =
-  | { action: "recovering"; events: SessionEvent[] }
+  | {
+      action: "recovering";
+      events: SessionEvent[];
+      providerArtifactsInvalidated?: number;
+    }
+  | {
+      action: "not_recoverable";
+      events: [];
+      providerArtifactsInvalidated: 0;
+    }
   | {
       action: "stale";
       events: [];
@@ -36591,6 +36608,77 @@ export async function requestSessionTurnRecovery(
       }
 
       const now = new Date();
+      let providerArtifactsInvalidated = 0;
+      if (input.providerArtifactInvalidation) {
+        const invalidatedHistory = await tx
+          .update(schema.sessionHistoryItems)
+          .set({
+            providerArtifactInvalidatedAt: now,
+            providerArtifactInvalidationReason: input.providerArtifactInvalidation.reason,
+            providerArtifactInvalidatedByAttemptId: input.attemptId,
+          })
+          .where(
+            and(
+              eq(schema.sessionHistoryItems.accountId, session.accountId),
+              eq(schema.sessionHistoryItems.workspaceId, workspaceId),
+              eq(schema.sessionHistoryItems.sessionId, input.sessionId),
+              eq(schema.sessionHistoryItems.active, true),
+              eq(
+                schema.sessionHistoryItems.producerCodexCredentialId,
+                input.providerArtifactInvalidation.codexCredentialId,
+              ),
+              isNull(schema.sessionHistoryItems.providerArtifactInvalidatedAt),
+              sql`${schema.sessionHistoryItems.item} ->> 'type' in ('reasoning', 'compaction')`,
+            ),
+          )
+          .returning({ id: schema.sessionHistoryItems.id });
+        const [latestRunState] = await tx
+          .select({ id: schema.agentRunStates.id })
+          .from(schema.agentRunStates)
+          .where(
+            and(
+              eq(schema.agentRunStates.accountId, session.accountId),
+              eq(schema.agentRunStates.workspaceId, workspaceId),
+              eq(schema.agentRunStates.sessionId, input.sessionId),
+              eq(schema.agentRunStates.turnId, input.turnId),
+              eq(
+                schema.agentRunStates.frozenCodexCredentialId,
+                input.providerArtifactInvalidation.codexCredentialId,
+              ),
+              isNull(schema.agentRunStates.providerArtifactInvalidatedAt),
+            ),
+          )
+          .orderBy(desc(schema.agentRunStates.stateVersion))
+          .limit(1);
+        const invalidatedRunState = latestRunState
+          ? await tx
+              .update(schema.agentRunStates)
+              .set({
+                providerArtifactInvalidatedAt: now,
+                providerArtifactInvalidationReason: input.providerArtifactInvalidation.reason,
+                providerArtifactInvalidatedByAttemptId: input.attemptId,
+              })
+              .where(
+                and(
+                  eq(schema.agentRunStates.id, latestRunState.id),
+                  isNull(schema.agentRunStates.providerArtifactInvalidatedAt),
+                ),
+              )
+              .returning({ id: schema.agentRunStates.id })
+          : [];
+        providerArtifactsInvalidated = invalidatedHistory.length + invalidatedRunState.length;
+        // A precise provider-artifact rejection is recoverable only when this
+        // attempt durably removed at least one opaque artifact from the next
+        // model input. Otherwise retrying would send an equivalent request and
+        // create a recovery loop.
+        if (providerArtifactsInvalidated === 0) {
+          return {
+            action: "not_recoverable" as const,
+            events: [] as [],
+            providerArtifactsInvalidated: 0 as const,
+          };
+        }
+      }
       await closeSessionTurnAttemptInTransaction(tx as unknown as Database, {
         id: input.attemptId,
         accountId: session.accountId,
@@ -36632,6 +36720,7 @@ export async function requestSessionTurnRecovery(
               ...(input.detail ?? {}),
               triggerEventId: input.triggerEventId,
               reason: input.reason,
+              ...(providerArtifactsInvalidated > 0 ? { providerArtifactsInvalidated } : {}),
             }),
             occurredAt: now,
           },
@@ -36700,6 +36789,7 @@ export async function requestSessionTurnRecovery(
       return {
         action: "recovering" as const,
         events: [...closedTools.events, ...inserted.map(mapEvent)],
+        ...(input.providerArtifactInvalidation ? { providerArtifactsInvalidated } : {}),
       };
     });
   });

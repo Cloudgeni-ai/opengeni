@@ -18,6 +18,7 @@ import {
 } from "@opengeni/runtime";
 import { contextInputBudgetTokens, type Settings } from "@opengeni/config";
 import type { SessionEvent } from "@opengeni/contracts";
+import { applyCodexHistoryStrip, type TurnCodexAccount } from "./run-input";
 import { TurnAttemptFencedError } from "./turn-attempt-fenced";
 
 export type MaybeCompactResult =
@@ -82,6 +83,7 @@ export async function maybeCompactContext(
     force?: boolean;
     clearRequestedCompaction?: boolean;
     trigger?: "auto" | "operator" | "proactive" | "overflow";
+    codexAccount?: TurnCodexAccount;
   } = {},
 ): Promise<MaybeCompactResult> {
   const active = await getActiveSessionHistoryItems(db, scope.workspaceId, scope.sessionId);
@@ -107,10 +109,17 @@ export async function maybeCompactContext(
         requestConsumed,
       };
     }
-    return { compacted: false, reason: "no_history", events: [], requestConsumed };
+    return {
+      compacted: false,
+      reason: "no_history",
+      events: [],
+      requestConsumed,
+    };
   }
 
-  const items = sanitizeHistoryItemsForModel(active.map((row) => row.item) as CompactionItem[]);
+  const items = sanitizeHistoryItemsForModel(
+    applyCodexHistoryStrip(active, options.codexAccount ?? { currentCodexCredentialId: null }),
+  ) as CompactionItem[];
   const decision = decideCompaction({
     items,
     lastInputTokens,

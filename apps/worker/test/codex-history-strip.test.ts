@@ -103,6 +103,33 @@ describe("applyCodexHistoryStrip", () => {
     expect(out[1]).toBe(rows[1].item);
   });
 
+  test("same-account rejected artifact is stripped without removing messages", () => {
+    const rejected = {
+      ...reasoningRow("A", "bad-blob"),
+      providerArtifactInvalidatedAt: new Date("2026-07-30T00:00:00.000Z"),
+    };
+    const message = messageRow("A", "durable answer");
+    const out = applyCodexHistoryStrip([rejected, message], {
+      currentCodexCredentialId: "A",
+    });
+    expect(out).toEqual([message.item]);
+    expect(JSON.stringify(out)).not.toContain("bad-blob");
+  });
+
+  test("same-account rejected compaction keeps its summary and drops only the blob", () => {
+    const row = {
+      producerCodexCredentialId: "A",
+      providerArtifactInvalidatedAt: new Date("2026-07-30T00:00:00.000Z"),
+      item: {
+        type: "compaction",
+        encrypted_content: "bad-compaction-blob",
+        summary: "durable compacted truth",
+      } as Record<string, unknown>,
+    };
+    const out = applyCodexHistoryStrip([row], { currentCodexCredentialId: "A" });
+    expect(out).toEqual([{ type: "compaction", summary: "durable compacted truth" }]);
+  });
+
   test("HOLE B — codex→non-codex: a non-codex turn (current=null) DROPS codex-produced reasoning", () => {
     // Before the fix this no-op'd, replaying codex-minted encrypted reasoning into
     // the Azure/built-in Responses call (which any responses provider 400s).
@@ -158,6 +185,36 @@ describe("applyCodexHistoryStrip", () => {
     expect("encrypted_content" in out[0]).toBe(false);
     // The summary (real conversation content) survives.
     expect(out[0].summary).toBe("the story so far");
+  });
+});
+
+describe("resumeRunStateForCodexAccount", () => {
+  test("same-account provider rejection neutralizes the frozen reasoning identity", () => {
+    const serializedRunState = JSON.stringify({
+      $schemaVersion: "1.12",
+      originalInput: [
+        {
+          type: "reasoning",
+          id: "rs_rejected",
+          providerData: { encrypted_content: "opaque-rejected" },
+          content: [{ type: "input_text", text: "durable summary" }],
+        },
+      ],
+      modelResponses: [],
+      generatedItems: [],
+    });
+    const resumed = resumeRunStateForCodexAccount(
+      {
+        serializedRunState,
+        frozenCodexCredentialId: "A",
+        providerArtifactInvalidatedAt: new Date("2026-07-30T00:00:00.000Z"),
+      },
+      { currentCodexCredentialId: "A" },
+    );
+    expect(resumed).not.toBe(serializedRunState);
+    expect(resumed).not.toContain("opaque-rejected");
+    expect(resumed).not.toContain("rs_rejected");
+    expect(resumed).toContain("durable summary");
   });
 });
 

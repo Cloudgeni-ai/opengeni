@@ -63,6 +63,56 @@ export function isCodexTransportError(error: unknown): boolean {
   return false;
 }
 
+export type CodexEncryptedArtifactRejection = {
+  status: 400;
+  kind: "encrypted_content_rejected";
+};
+
+/**
+ * Classify only the provider's definitive request rejection for an opaque
+ * reasoning artifact that it can no longer decrypt/parse. A Codex transport
+ * marker plus HTTP 400 proves this request was rejected before inference; the
+ * semantic match prevents unrelated malformed prompts from entering recovery.
+ */
+export function classifyCodexEncryptedArtifactRejection(
+  error: unknown,
+): CodexEncryptedArtifactRejection | null {
+  if (!isCodexTransportError(error)) return null;
+  let current: unknown = error;
+  for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
+    const value = current as Record<string, unknown>;
+    const body =
+      value.error && typeof value.error === "object"
+        ? (value.error as Record<string, unknown>)
+        : null;
+    const status = Number(value.status ?? body?.status);
+    const message = [
+      typeof value.message === "string" ? value.message : "",
+      typeof body?.message === "string" ? body.message : "",
+      typeof value.code === "string" ? value.code : "",
+      typeof body?.code === "string" ? body.code : "",
+      typeof value.type === "string" ? value.type : "",
+      typeof body?.type === "string" ? body.type : "",
+    ]
+      .join(" ")
+      .toLowerCase();
+    const unsupportedFieldShape =
+      /(?:invalid value|supported values?|unsupported|unknown (?:field|parameter|value))/.test(
+        message,
+      );
+    if (
+      status === 400 &&
+      !unsupportedFieldShape &&
+      /(?:encrypted[_ ]content|encrypted reasoning|reasoning artifact)/.test(message) &&
+      /(?:decrypt(?:ed|ion)?|could not be parsed|cannot be parsed|failed to parse)/.test(message)
+    ) {
+      return { status: 400, kind: "encrypted_content_rejected" };
+    }
+    current = value.cause;
+  }
+  return null;
+}
+
 /** Parse an integer header value; null when absent or not a finite integer. */
 function parseIntHeader(value: string | null): number | null {
   if (value === null) {
@@ -284,7 +334,9 @@ async function observedResponse(
       if (externalSignal?.aborted) {
         abortFromOutside();
       } else {
-        externalSignal?.addEventListener("abort", abortFromOutside, { once: true });
+        externalSignal?.addEventListener("abort", abortFromOutside, {
+          once: true,
+        });
       }
     },
     async pull(controller) {
@@ -344,7 +396,11 @@ async function observedResponse(
   });
   const headers = new Headers(res.headers);
   headers.delete("content-length");
-  return new Response(body, { status: res.status, statusText: res.statusText, headers });
+  return new Response(body, {
+    status: res.status,
+    statusText: res.statusText,
+    headers,
+  });
 }
 
 function timeoutErrorResponse(info: {

@@ -173,7 +173,15 @@ async function executeMigrationFile(
   }
   const concurrentIndex = parseConcurrentIndexMigration(file, sqlText);
   if (!concurrentIndex) {
-    await sql.unsafe(sqlText);
+    // Migration SQL is the only writer allowed to cross protocol generations.
+    // Keep the authority transaction-local and inside the same PostgreSQL simple
+    // query as the migration body: setting it in a prior statement would end
+    // that implicit transaction and silently lose the LOCAL value. This also
+    // makes a fresh database capable of applying maintenance migration 0138
+    // without a process-global PGOPTIONS escape hatch.
+    await sql.unsafe(
+      `SELECT pg_catalog.set_config('opengeni.sandbox_recovery_protocol_v2', '1', true);\n${sqlText}`,
+    );
     return;
   }
 
