@@ -989,6 +989,83 @@ describe("canonical queue commands", () => {
     });
   }
 
+  test("Send and Steer admit and replay one reconnected ready file across bare/canonical forms", async () => {
+    for (const delivery of ["send", "steer"] as const) {
+      const value = await fixture(1);
+      const fileId = crypto.randomUUID();
+      const bareResource = { kind: "file" as const, fileId };
+      const canonicalResource = {
+        ...bareResource,
+        mountPath: `files/${fileId}`,
+      };
+      const draft = await withWorkspaceSubjectRls(
+        client.db,
+        value.grant.workspaceId!,
+        value.grant.subjectId,
+        (db) =>
+          db.transaction((tx) =>
+            saveComposerDraftInTransaction(tx as typeof db, {
+              accountId: value.grant.accountId,
+              workspaceId: value.grant.workspaceId!,
+              sessionId: value.session.id,
+              subjectId: value.grant.subjectId,
+              expectedRevision: 0,
+              text: `inspect the reconnected attachment via ${delivery}`,
+              // The durable reload owns the canonical ref while the still-live
+              // upload card owns the bare ref for the same finalized file.
+              resources: [canonicalResource, bareResource],
+              model: "scripted-model",
+              reasoningEffort: "low",
+            }),
+          ),
+      );
+      expect(draft.resources).toEqual([canonicalResource]);
+
+      const operationKey = crypto.randomUUID();
+      const command = {
+        accountId: value.grant.accountId,
+        workspaceId: value.grant.workspaceId!,
+        sessionId: value.session.id,
+        subjectId: value.grant.subjectId,
+        actor: value.actor,
+        operationKey,
+        delivery,
+        expectedDraftRevision: draft.revision,
+        text: draft.text,
+        // Core admission has already normalized the command to one ref.
+        resources: [canonicalResource],
+        model: "scripted-model",
+        reasoningEffort: "low" as const,
+        reasoningEffortFallback: "medium" as const,
+        source: "user" as const,
+      };
+      const submitted = await withWorkspaceSubjectRls(
+        client.db,
+        value.grant.workspaceId!,
+        value.grant.subjectId,
+        (db) => db.transaction((tx) => submitHumanPromptInTransaction(tx as typeof db, command)),
+      );
+      expect(submitted.replay).toBe(false);
+      expect(
+        (await getSessionTurn(client.db, value.grant.workspaceId!, submitted.turnId))?.resources,
+      ).toEqual([canonicalResource]);
+
+      const replay = await withWorkspaceSubjectRls(
+        client.db,
+        value.grant.workspaceId!,
+        value.grant.subjectId,
+        (db) =>
+          db.transaction((tx) =>
+            submitHumanPromptInTransaction(tx as typeof db, {
+              ...command,
+              resources: [bareResource],
+            }),
+          ),
+      );
+      expect(replay).toMatchObject({ replay: true, turnId: submitted.turnId });
+    }
+  });
+
   test("Send keeps custom file mounts distinct and rejects genuinely changed drafts", async () => {
     const value = await fixture(1);
     const fileId = crypto.randomUUID();

@@ -1220,7 +1220,16 @@ function draftSignature(payload: SaveComposerDraftRequest): string {
 function mergeResources(base: ResourceRef[], additions: ResourceRef[]): ResourceRef[] {
   const seen = new Set<string>();
   return [...base, ...additions].filter((resource) => {
-    const key = JSON.stringify(resource);
+    // Reconnect reconciliation can restore the canonical server form while
+    // the still-mounted upload card supplies the same ready file without its
+    // default mount. Treat those two wire shapes as one selected attachment;
+    // preserving the first representation keeps custom mounts and ordering
+    // intact while preventing the draft and command paths from seeing
+    // different duplicate counts after server normalization.
+    const key =
+      resource.kind === "file"
+        ? `file:${resource.fileId}\u0000${resource.mountPath ?? `files/${resource.fileId}`}`
+        : JSON.stringify(resource);
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
