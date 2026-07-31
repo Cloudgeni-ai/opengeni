@@ -1,7 +1,7 @@
 // The session view — live timeline plus one compact prompt queue above the
 // composer. Enter queues and Cmd/Ctrl+Enter steers; failed sessions stay
 // honest (reason + retry history) and revivable from the same composer.
-import { HumanInputForm, MessageTimeline, QueueSurface } from "@opengeni/react/session-ui";
+import { HumanInputForm, MessageTimeline, SessionChrome } from "@opengeni/react/session-ui";
 import {
   creditExhaustedFromEvents,
   projectPendingApprovals,
@@ -35,9 +35,8 @@ import {
   TerminalSessionBanner,
   UserMessageBody,
 } from "@/components/session/banners";
-import { ComposerAgentsPill } from "@/components/session/composer-agents-pill";
 import { useRail } from "@/components/rail/rail-context";
-import { GoalSurface } from "@/components/session/goal-surface";
+import { SubagentTree } from "@/components/session/subagents";
 import { SessionWorkspace } from "@/components/session/sandbox-workspace";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -516,7 +515,7 @@ function SessionChatPane(props: {
   creditExhausted: boolean;
   goal: ReturnType<typeof useGoal>;
   queue: ReturnType<typeof useTurnQueue>;
-  /** Spawned-worker lineage children — feeds the composer-anchored agents pill. */
+  /** Spawned-worker lineage children — feeds SessionChrome agents segment. */
   agentNodes: LineageNode[];
   hasOlder: boolean;
   loadingOlder: boolean;
@@ -537,6 +536,31 @@ function SessionChatPane(props: {
   const context = useAppContext();
   const modelCatalog = useWorkspaceModelCatalog(props.session.workspaceId);
   const terminal = isTerminalSessionStatus(props.session.status);
+  const agentsSignal = useMemo(() => {
+    const agents = props.agentNodes;
+    if (agents.length === 0) return undefined;
+    const runningAgents = agents.filter(
+      (node) =>
+        node.session.status === "running" && node.session.effectiveControl.state === "active",
+    ).length;
+    const pausedAgents = agents.filter(
+      (node) => node.session.effectiveControl.state === "paused",
+    ).length;
+    return {
+      count: agents.length,
+      detail:
+        runningAgents > 0
+          ? `${runningAgents} running`
+          : pausedAgents > 0
+            ? `${pausedAgents} paused`
+            : "Idle",
+      tone: (runningAgents > 0
+        ? "running"
+        : pausedAgents > 0
+          ? "waiting"
+          : "neutral") as "running" | "waiting" | "neutral",
+    };
+  }, [props.agentNodes]);
   // Per-approval decision state: an in-flight decision disables both buttons for
   // that approval and shows progress; a settled one can never double-submit even
   // if the strip lingers for a beat before the status flips.
@@ -957,12 +981,22 @@ function SessionChatPane(props: {
         </div>
       ) : null}
 
-      {/* The one compact control stack above the composer. Each surface hides
-          when it has nothing to show, so the stack degrades to
-          whichever one is present — or neither. */}
-      {!terminal ? <QueueSurface queue={props.queue} composer={composer} /> : null}
-      <GoalSurface session={props.session} goal={props.goal} />
-      <ComposerAgentsPill workspaceId={props.session.workspaceId} nodes={props.agentNodes} />
+      {/* Compact session chrome above the composer — incoming, queue, goal,
+          and agents as one dock. Hides entirely when there are no signals. */}
+      <div className="mx-auto mb-2 w-full max-w-3xl shrink-0 px-4 sm:px-6">
+        <SessionChrome
+          queue={props.queue}
+          composer={terminal ? undefined : composer}
+          goal={props.goal}
+          readOnly={terminal}
+          agentsSignal={agentsSignal}
+          agentsPanel={
+            props.agentNodes.length > 0 ? (
+              <SubagentTree workspaceId={props.session.workspaceId} nodes={props.agentNodes} />
+            ) : null
+          }
+        />
+      </div>
 
       <div className="shrink-0 px-4 pb-4 pt-1 sm:px-6">
         <div className="mx-auto w-full max-w-3xl">

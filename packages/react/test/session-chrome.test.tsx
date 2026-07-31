@@ -2,9 +2,9 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { act } from "react";
 
 import {
-  MorphSessionChrome,
-  morphGoalPillState,
-} from "../src/components/morph-session-chrome";
+  SessionChrome,
+  sessionChromeGoalPillState,
+} from "../src/components/session-chrome";
 import type { ComposerState } from "../src/hooks/use-composer";
 import type { UseGoalResult } from "../src/hooks/use-goal";
 import type { UseTurnQueueResult } from "../src/hooks/use-turn-queue";
@@ -100,8 +100,8 @@ function goal(overrides: Partial<UseGoalResult["goal"]> = {}): UseGoalResult {
     workspaceId: "11111111-1111-4111-8111-111111111111",
     sessionId: "22222222-2222-4222-8222-222222222222",
     status: "active" as const,
-    text: "Ship the morph chrome",
-    successCriteria: "Gallery uses SDK Morph",
+    text: "Ship the session chrome",
+    successCriteria: "Production uses SessionChrome",
     evidence: null,
     rationale: null,
     pausedReason: null,
@@ -141,13 +141,13 @@ function goal(overrides: Partial<UseGoalResult["goal"]> = {}): UseGoalResult {
   };
 }
 
-describe("morphGoalPillState", () => {
+describe("sessionChromeGoalPillState", () => {
   test("maps continuation projection to pill states", () => {
-    expect(morphGoalPillState("completed", null)).toBe("completed");
-    expect(morphGoalPillState("paused", null)).toBe("paused");
-    expect(morphGoalPillState("active", null)).toBe("invariant_broken");
+    expect(sessionChromeGoalPillState("completed", null)).toBe("completed");
+    expect(sessionChromeGoalPillState("paused", null)).toBe("paused");
+    expect(sessionChromeGoalPillState("active", null)).toBe("invariant_broken");
     expect(
-      morphGoalPillState("active", {
+      sessionChromeGoalPillState("active", {
         state: "running",
         reason: "goal_turn_running",
         wakeRevision: 1,
@@ -157,7 +157,7 @@ describe("morphGoalPillState", () => {
       }),
     ).toBe("pursuing");
     expect(
-      morphGoalPillState("active", {
+      sessionChromeGoalPillState("active", {
         state: "blocked",
         reason: "workstream_paused",
         wakeRevision: 1,
@@ -169,15 +169,15 @@ describe("morphGoalPillState", () => {
   });
 });
 
-describe("MorphSessionChrome", () => {
+describe("SessionChrome", () => {
   test("hides when there are no signals", async () => {
-    mounted = await renderComponent(<MorphSessionChrome queue={queue({ queue: [] })} />);
-    expect(mounted.container.querySelector("[data-og-morph]")).toBeNull();
+    mounted = await renderComponent(<SessionChrome queue={queue({ queue: [] })} />);
+    expect(mounted.container.querySelector("[data-og-session-chrome]")).toBeNull();
   });
 
   test("renders separate incoming and queue segments", async () => {
     mounted = await renderComponent(
-      <MorphSessionChrome
+      <SessionChrome
         queue={queue({ pendingInputs: [pendingInput()] })}
         composer={composer()}
         goal={goal()}
@@ -185,12 +185,12 @@ describe("MorphSessionChrome", () => {
         agentsPanel={<div data-testid="agents-body">agents</div>}
       />,
     );
-    const root = mounted.container.querySelector("[data-og-morph]");
+    const root = mounted.container.querySelector("[data-og-session-chrome]");
     expect(root).not.toBeNull();
-    expect(mounted.container.querySelector('[data-og-morph-signal="incoming"]')).not.toBeNull();
-    expect(mounted.container.querySelector('[data-og-morph-signal="queue"]')).not.toBeNull();
-    expect(mounted.container.querySelector('[data-og-morph-signal="goal"]')).not.toBeNull();
-    expect(mounted.container.querySelector('[data-og-morph-signal="agents"]')).not.toBeNull();
+    expect(mounted.container.querySelector('[data-og-session-chrome-signal="incoming"]')).not.toBeNull();
+    expect(mounted.container.querySelector('[data-og-session-chrome-signal="queue"]')).not.toBeNull();
+    expect(mounted.container.querySelector('[data-og-session-chrome-signal="goal"]')).not.toBeNull();
+    expect(mounted.container.querySelector('[data-og-session-chrome-signal="agents"]')).not.toBeNull();
   });
 
   test("expands queue and reveals hover actions wired to queue APIs", async () => {
@@ -213,17 +213,17 @@ describe("MorphSessionChrome", () => {
         return null;
       },
     });
-    mounted = await renderComponent(<MorphSessionChrome queue={q} composer={composer()} />);
+    mounted = await renderComponent(<SessionChrome queue={q} composer={composer()} />);
 
     const queueChip = mounted.container.querySelector<HTMLButtonElement>(
-      '[data-og-morph-signal="queue"]',
+      '[data-og-session-chrome-signal="queue"]',
     );
     expect(queueChip).not.toBeNull();
     await act(async () => {
       queueChip?.click();
     });
-    expect(mounted.container.querySelector('[data-og-morph-panel="queue"]')).not.toBeNull();
-    expect(mounted.container.querySelector('[data-og-morph-open="true"]')).not.toBeNull();
+    expect(mounted.container.querySelector('[data-og-session-chrome-panel="queue"]')).not.toBeNull();
+    expect(mounted.container.querySelector('[data-og-session-chrome-open="true"]')).not.toBeNull();
 
     const remove = mounted.container.querySelector<HTMLButtonElement>(
       '[aria-label="Remove queued prompt 1"]',
@@ -259,7 +259,7 @@ describe("MorphSessionChrome", () => {
   test("inbox dismiss action appears when onDismissIncoming is provided", async () => {
     const dismissed: string[] = [];
     mounted = await renderComponent(
-      <MorphSessionChrome
+      <SessionChrome
         queue={queue({ queue: [], pendingInputs: [pendingInput()] })}
         onDismissIncoming={(id) => {
           dismissed.push(id);
@@ -267,7 +267,7 @@ describe("MorphSessionChrome", () => {
       />,
     );
     const chip = mounted.container.querySelector<HTMLButtonElement>(
-      '[data-og-morph-signal="incoming"]',
+      '[data-og-session-chrome-signal="incoming"]',
     );
     await act(async () => {
       chip?.click();
@@ -280,5 +280,48 @@ describe("MorphSessionChrome", () => {
       dismiss?.click();
     });
     expect(dismissed).toEqual(["33333333-3333-4333-8333-333333333333"]);
+  });
+
+  test("segment switches keep the panel shell and drop native title tooltips", async () => {
+    mounted = await renderComponent(
+      <SessionChrome
+        queue={queue({ pendingInputs: [pendingInput()] })}
+        composer={composer()}
+        goal={goal()}
+        agentsSignal={{ count: 1, detail: "running" }}
+        agentsPanel={<div data-testid="agents-body">agents</div>}
+      />,
+    );
+
+    const goalChip = mounted.container.querySelector<HTMLButtonElement>(
+      '[data-og-session-chrome-signal="goal"]',
+    );
+    const queueChip = mounted.container.querySelector<HTMLButtonElement>(
+      '[data-og-session-chrome-signal="queue"]',
+    );
+    expect(goalChip).not.toBeNull();
+    expect(queueChip).not.toBeNull();
+
+    await act(async () => {
+      goalChip?.click();
+    });
+    const shell = mounted.container.querySelector("[data-og-session-chrome-panel-shell]");
+    expect(shell).not.toBeNull();
+    expect(mounted.container.querySelector('[data-og-session-chrome-panel="goal"]')).not.toBeNull();
+    expect(mounted.container.querySelector('[data-og-session-chrome-open="true"]')).not.toBeNull();
+
+    await act(async () => {
+      queueChip?.click();
+    });
+    expect(mounted.container.querySelector("[data-og-session-chrome-panel-shell]")).toBe(shell);
+    expect(mounted.container.querySelector('[data-og-session-chrome-panel="queue"]')).not.toBeNull();
+    expect(mounted.container.querySelector('[data-og-session-chrome-open="true"]')).not.toBeNull();
+
+    const remove = mounted.container.querySelector<HTMLButtonElement>(
+      '[aria-label="Remove queued prompt 1"]',
+    );
+    expect(remove).not.toBeNull();
+    expect(remove?.getAttribute("title")).toBeNull();
+    expect(remove?.getAttribute("data-slot")).toBe("tooltip-trigger");
   });
 });

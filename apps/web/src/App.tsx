@@ -19,7 +19,7 @@
 //   /workspaces/:id/account                  → legacy redirect to /organization
 //   /billing?checkout=success|cancelled      → Stripe return → default organization
 //   /device?user_code=…                      → self-hosted enrollment approve page
-//   /dev/composer-chrome                     → DEV-only session chrome gallery (mocked)
+//   /dev/composer-chrome                     → DEV-only SessionChrome harness (mocked)
 import {
   Navigate,
   RouterProvider,

@@ -20,10 +20,10 @@ export type {
 } from "./timeline/turn-summary";
 export { QueueSurface } from "./components/queue-surface";
 export type { QueueSurfaceProps } from "./components/queue-surface";
-export { MorphSessionChrome, morphGoalPillState } from "./components/morph-session-chrome";
+export { SessionChrome, sessionChromeGoalPillState } from "./components/session-chrome";
 export type {
-  MorphAgentsSignal,
-  MorphSessionChromeProps,
-  MorphSignalId,
-  MorphSignalTone,
-} from "./components/morph-session-chrome";
+  SessionChromeAgentsSignal,
+  SessionChromeProps,
+  SessionChromeSignalId,
+  SessionChromeSignalTone,
+} from "./components/session-chrome";

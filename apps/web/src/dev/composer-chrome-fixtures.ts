@@ -1,4 +1,4 @@
-// Deterministic mock data for the Session composer-chrome gallery
+// Deterministic mock data for the SessionChrome DEV harness
 // (`/dev/composer-chrome`). No live session, queue, or goal APIs.
 import type {
   ComposerState,

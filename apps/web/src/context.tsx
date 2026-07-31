@@ -295,7 +295,7 @@ export function RootRouteComponent() {
   // be intercepted by the sign-in panel or workspace-access loading.
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   // Public surfaces render ahead of auth/config gates. `/reset-password` is
-  // always public; the composer-chrome gallery is DEV-only and needs no session.
+  // always public; the SessionChrome DEV harness is public and needs no session.
   const isPublicAuthRoute =
     pathname === "/reset-password" ||
     (import.meta.env.DEV && pathname === "/dev/composer-chrome");
