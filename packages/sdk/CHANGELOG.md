@@ -1,5 +1,16 @@
 # @opengeni/sdk
 
+## 0.30.1
+
+### Patch Changes
+
+- bbcbef5: Allow callers to cancel MCP OAuth-start requests so capability activation can fail visibly instead of spinning forever when browser transport stalls.
+- ddff8db: Add the read-only Workspace State inventory with bounded, authorization-scoped
+  Documents aggregates and a deterministic metadata-only Memory projection. The
+  projection explicitly labels legacy `knowledge_memories` preference-kind counts
+  as non-authoritative observations while preserving the structured preference
+  registry as the sole active preference authority.
+
 ## 0.30.0
 
 ### Minor Changes
