@@ -1,5 +1,24 @@
 # @opengeni/worker-bundle
 
+## 0.12.21
+
+### Patch Changes
+
+- 42428a2: Add per-session Codex remote compaction v2 (`remote_v2` / `portable`), with UI landmarks, Codex-only model locking, and opaque token accounting aligned to Codex CLI.
+- Updated dependencies [0199108]
+- Updated dependencies [42428a2]
+- Updated dependencies [b2e975f]
+- Updated dependencies [9f3b931]
+  - @opengeni/contracts@0.25.0
+  - @opengeni/core@0.13.10
+  - @opengeni/db@0.15.6
+  - @opengeni/runtime@0.14.12
+  - @opengeni/config@0.7.20
+  - @opengeni/github@0.4.7
+  - @opengeni/storage@0.2.44
+  - @opengeni/documents@0.2.56
+  - @opengeni/events@0.3.47
+
 ## 0.12.20
 
 ### Patch Changes

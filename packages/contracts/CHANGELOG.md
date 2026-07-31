@@ -1,5 +1,17 @@
 # @opengeni/contracts
 
+## 0.25.0
+
+### Minor Changes
+
+- 42428a2: Add per-session Codex remote compaction v2 (`remote_v2` / `portable`), with UI landmarks, Codex-only model locking, and opaque token accounting aligned to Codex CLI.
+
+### Patch Changes
+
+- 0199108: Harden the workspace Slack bot with one fail-closed scope policy, deterministic legacy connection selection, and durable replay-safe message deletion operation identities.
+- b2e975f: Advance the merged knowledge release train to fresh publication identities without changing runtime behavior. This corrective source is derived from current main and does not reuse generated release output.
+- 9f3b931: Add the canonical personal Slack hosted-MCP resource constant and a dedicated account-linking experience that keeps subject-owned OAuth status, reconnect, and disconnect controls separate from workspace bot installation.
+
 ## Unreleased
 
 ### Minor Changes
