@@ -1,6 +1,5 @@
 ---
 "@opengeni/config": patch
-"@opengeni/deployment": patch
 "@opengeni/storage": patch
 ---
 
