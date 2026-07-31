@@ -195,6 +195,8 @@ function pendingKindLabel(kind: SessionPendingInputPreview["kind"]): string {
       return "Steer";
     case "scheduled_occurrence":
       return "Schedule";
+    case "goal_continuation":
+      return "Goal wake";
     default:
       return "Update";
   }
@@ -372,26 +374,20 @@ function PanelList({ children }: { children: ReactNode }) {
 function PanelRow({
   children,
   className,
-  onClick,
 }: {
   children: ReactNode;
   className?: string;
-  onClick?: () => void;
 }) {
-  const Comp = onClick ? "button" : "div";
   return (
-    <Comp
-      type={onClick ? "button" : undefined}
-      onClick={onClick}
+    <div
       className={cn(
         "flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-left text-[11px]",
         "transition-[background-color,transform] duration-150",
-        onClick && "hover:translate-x-px hover:bg-white/[0.05]",
         className,
       )}
     >
       {children}
-    </Comp>
+    </div>
   );
 }
 
@@ -434,10 +430,10 @@ function IconAction({
 
 export function LumenChrome({
   scenario,
-  composer,
 }: {
   scenario: ChromeScenario;
-  composer: ComposerState;
+  /** Kept for ScenarioStack-shaped call sites; queue edits stay mock no-ops. */
+  composer?: ComposerState;
 }) {
   const [open, setOpen] = useState<SegmentId | null>(null);
   const baseId = useId();

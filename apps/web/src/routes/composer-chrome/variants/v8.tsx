@@ -13,7 +13,7 @@ import {
   TriangleAlertIcon,
   ZapIcon,
 } from "lucide-react";
-import { useEffect, useId, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 
 import { ModelPicker, SessionToolPicker } from "@/components/pickers";
 import { SubagentTree, SubagentsLabel } from "@/components/session/subagents";
