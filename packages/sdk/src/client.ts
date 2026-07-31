@@ -29,6 +29,8 @@ import type {
   CodexUsageMap,
   BillingSummary,
   BillingUsageResponse,
+  InsightsRange,
+  WorkspaceInsightsResponse,
   CapabilityCatalogItem,
   CapabilityCatalogResponse,
   CapabilityInstallation,
@@ -2886,6 +2888,26 @@ export class OpenGeniClient {
       ...(options.accountId !== undefined ? { accountId: options.accountId } : {}),
       ...(options.workspaceId !== undefined ? { workspaceId: options.workspaceId } : {}),
     });
+  }
+
+  async getWorkspaceInsights(
+    workspaceId: string,
+    options: {
+      range?: InsightsRange;
+      provider?: string;
+      model?: string;
+    } = {},
+  ): Promise<WorkspaceInsightsResponse> {
+    return await this.requestJson<WorkspaceInsightsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/insights`,
+      undefined,
+      {
+        range: options.range ?? "week",
+        ...(options.provider !== undefined ? { provider: options.provider } : {}),
+        ...(options.model !== undefined ? { model: options.model } : {}),
+      },
+    );
   }
 
   async getBillingEntitlements(

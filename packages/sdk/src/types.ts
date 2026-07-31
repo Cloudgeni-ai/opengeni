@@ -3617,6 +3617,142 @@ export type BillingUsageResponse = {
   usage: UsageEvent[];
 };
 
+export type InsightsRange = "today" | "week" | "month" | "ytd";
+
+export type InsightsBillingPath = "opengeni_credits" | "external";
+
+export type InsightsModelUsageRow = {
+  id: string;
+  model: string;
+  provider: string;
+  billing: InsightsBillingPath;
+  calls: number;
+  inputTokens: number;
+  outputTokens: number;
+  cachedTokens: number;
+  cacheWriteTokens: number;
+  reasoningTokens: number;
+  creditUsd: number;
+};
+
+export type InsightsSeriesPoint = {
+  label: string;
+  modelCostUsd: number;
+  warmSeconds: number;
+  inputTokens: number;
+  cachedTokens: number;
+  cacheHitPct: number;
+  calls: number;
+};
+
+export type InsightsDepthBucket = {
+  depth: number;
+  sessions: number;
+};
+
+export type InsightsModelFacet = {
+  provider: string;
+  model: string;
+};
+
+export type InsightsSpendDriver = {
+  id: string;
+  groupBy: "root_session" | "schedule";
+  label: string;
+  creditUsd: number;
+  tokens: number;
+  cacheHitPct: number;
+  pctOfCreditUsd: number;
+  deltaUsdVsPrior: number;
+};
+
+export type InsightsWarmGroupRow = {
+  id: string;
+  groupId: string;
+  label: string;
+  backend: string | null;
+  warmSeconds: number;
+  sessionsAttached: number;
+};
+
+export type InsightsLiveWarmLease = {
+  id: string;
+  groupId: string;
+  backend: string;
+  turnHolders: number;
+  viewerHolders: number;
+  warmForLabel: string;
+  warmSeconds: number;
+};
+
+export type InsightsFloorSession = {
+  id: string;
+  title: string;
+  state: "running" | "paused" | "failed" | "idle" | "compacting" | "waiting";
+  depth: number;
+  model: string | null;
+  provider: string | null;
+  ageLabel: string;
+  cacheHitPct: number | null;
+  route: string | null;
+};
+
+export type InsightsScheduleRow = {
+  id: string;
+  name: string;
+  fires: number;
+  creditUsd: number | null;
+  tokens: number | null;
+  cacheHitPct: number | null;
+  billing: InsightsBillingPath | null;
+};
+
+export type WorkspaceInsightsSnapshot = {
+  range: InsightsRange;
+  rangeLabel: string;
+  priorLabel: string;
+  seriesLabel: string;
+  cacheSeriesLabel: string;
+  timezone: "UTC";
+  models: InsightsModelUsageRow[];
+  facets: InsightsModelFacet[];
+  series: InsightsSeriesPoint[];
+  depth: InsightsDepthBucket[];
+  drivers: InsightsSpendDriver[];
+  schedules: InsightsScheduleRow[];
+  warmSeconds: number;
+  priorWarmSeconds: number;
+  warmGroups: InsightsWarmGroupRow[];
+  liveWarm: InsightsLiveWarmLease[];
+  floor: InsightsFloorSession[];
+  selfhostedEnabled: boolean;
+  machinesOnline: number;
+  workspaceCreditUsd: number;
+  priorWorkspaceCreditUsd: number;
+  creditUsd: number;
+  priorCreditUsd: number;
+  priorInputTokens: number;
+  priorCacheHitPct: number;
+  priorCalls: number;
+  goalsActive: number;
+  goalsCompleted: number;
+  sessionsTouched: number;
+  rootSessions: number;
+  deepestDepth: number;
+  deepestSessionTitle: string;
+  avgDepth: number;
+  warmIdleNow: number;
+  billableTokensUsed: number;
+  billableTokenCap: number | null;
+  agentRunsUsed: number;
+  agentRunCap: number | null;
+  modelFilterActive: boolean;
+};
+
+export type WorkspaceInsightsResponse = {
+  snapshot: WorkspaceInsightsSnapshot;
+};
+
 export type BillingEntitlementsResponse = {
   accountId: string;
   mode: EntitlementsMode;

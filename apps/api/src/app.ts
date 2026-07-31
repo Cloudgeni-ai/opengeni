@@ -68,6 +68,7 @@ import { registerWorkspaceRoutes } from "./routes/workspaces";
 import { registerWorkspaceInstructionPolicyRoutes } from "./routes/workspace-instruction-policies";
 import { registerWorkspaceStateRoutes } from "./routes/workspace-state";
 import { registerPreferenceRegistryRoutes } from "./routes/preference-registry";
+import { registerInsightsRoutes } from "./routes/insights";
 import { projectClientModel } from "./model-catalog";
 
 export type {
@@ -431,6 +432,7 @@ export function createApp(deps: AppDependencies): Hono {
   registerGitHubRoutes(app, routeDeps);
   registerInstallRoutes(app, routeDeps);
   registerWorkspaceRoutes(app, routeDeps);
+  registerInsightsRoutes(app, routeDeps);
   registerWorkspaceInstructionPolicyRoutes(app, routeDeps);
   registerWorkspaceStateRoutes(app, routeDeps);
   registerPreferenceRegistryRoutes(app, routeDeps);
@@ -722,6 +724,10 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /^\/v1\/billing$/, label: "/v1/billing" },
   { pattern: /^\/v1\/billing\/checkout$/, label: "/v1/billing/checkout" },
   { pattern: /^\/v1\/billing\/usage$/, label: "/v1/billing/usage" },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/insights$/,
+    label: "/v1/workspaces/:workspaceId/insights",
+  },
   {
     pattern: /^\/v1\/billing\/entitlements$/,
     label: "/v1/billing/entitlements",

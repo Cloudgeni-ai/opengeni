@@ -156,12 +156,14 @@ describe("release schema contract", () => {
         (migrations.has("0139_codex_provider_artifact_invalidations.sql") ? 1 : 0) +
         (migrations.has("0140_sandbox_restore_and_reaper_fences.sql") ? 1 : 0) +
         (migrations.has("0141_social_connection_credentials.sql") ? 1 : 0) +
-        (migrations.has("0142_sandbox_archive_capture_gate.sql") ? 1 : 0),
+        (migrations.has("0142_sandbox_archive_capture_gate.sql") ? 1 : 0) +
+        (migrations.has("0143_session_codex_compaction_mode.sql") ? 1 : 0) +
+        (migrations.has("0144_model_call_facts.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "38d9619f4d095f11e6d001e6e2b8d13a877d398dcff446e2ceaea2c6e68b2bfd",
+      "e8af05b94e6642468276d9091ab0b4917d6c1b255f0c0c3af2bd91bd3b04dff2",
     );
-    expect(contract.latestMigration).toBe("0142_sandbox_archive_capture_gate.sql");
+    expect(contract.latestMigration).toBe("0144_model_call_facts.sql");
     expect(migrations.get("0128_github_installation_authority.sql")).toMatchObject({
       sha256: "365793b2a204a70e214adb90298b522acbb6dcfae22a46681a58f41a6938e6f0",
       deploymentMode: "rolling",
@@ -241,6 +243,8 @@ describe("release schema contract", () => {
         ? ["0141_social_connection_credentials.sql"]
         : []),
       "0142_sandbox_archive_capture_gate.sql",
+      "0143_session_codex_compaction_mode.sql",
+      "0144_model_call_facts.sql",
     ]);
     expect(new Set(contract.migrations.map((migration) => migration.path)).size).toBe(
       contract.fileCount,
@@ -344,6 +348,14 @@ describe("release schema contract", () => {
     expect(migrations.get("0142_sandbox_archive_capture_gate.sql")).toMatchObject({
       sha256: "48546fe4f106da0b36edf8a47da56e35b123fd0a63dc9c2eaed887756d35144f",
       deploymentMode: "maintenance",
+    });
+    expect(migrations.get("0143_session_codex_compaction_mode.sql")).toMatchObject({
+      sha256: "574cfe6fc5ab24135e84d3932fd936e134ebe28bce8ac3cb5db97a549683906f",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0144_model_call_facts.sql")).toMatchObject({
+      sha256: "93bb3f262f465ca2128b6dadc5e166bfdc78ded610e57a803ce1d3e6a8599dde",
+      deploymentMode: "rolling",
     });
   });
 });
