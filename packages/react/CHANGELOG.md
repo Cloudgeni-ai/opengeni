@@ -4,6 +4,7 @@
 
 - Add `SessionChrome` — production/embed session-signal dock (incoming / queue / goal / agents) with token overrides (`--og-session-chrome-*`), token tooltips, crossfade panel switches, and queue hover actions wired to `UseTurnQueueResult`. Replaces stacked `QueueSurface` + host goal/agents chrome in the web session route.
 - Export shared `Tooltip*` primitives used by SessionChrome (portal-token aware).
+- Fix SessionChrome tooltips: inverted tip surface uses inline fg/bg so `.og-root` cannot blank the text; tip only icon actions; Steer copy matches QueueSurface (`Make this the next direction`).
 - Light ChatComposer spacing/token freshen (quieter focus border, tighter footer/input padding).
 - Replace host-adapter composer transcription with native MediaRecorder capture and immediate server transcription.
 - Compact composer voice chrome: live/fallback waveform, separate cancel vs stop-and-transcribe actions, and a quieter transcribing state.

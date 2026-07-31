@@ -323,5 +323,18 @@ describe("SessionChrome", () => {
     expect(remove).not.toBeNull();
     expect(remove?.getAttribute("title")).toBeNull();
     expect(remove?.getAttribute("data-slot")).toBe("tooltip-trigger");
+
+    const steer = mounted.container.querySelector<HTMLButtonElement>(
+      '[aria-label="Steer queued prompt 1"]',
+    );
+    expect(steer).not.toBeNull();
+    expect(steer?.getAttribute("data-slot")).toBe("tooltip-trigger");
+
+    // Truncated prompt / signal chips stay tip-free; only icon actions use Tooltip.
+    const prompt = mounted.container.querySelector(
+      '[data-og-session-chrome-panel="queue"] p',
+    );
+    expect(prompt?.closest('[data-slot="tooltip-trigger"]')).toBeNull();
+    expect(queueChip?.getAttribute("data-slot")).not.toBe("tooltip-trigger");
   });
 });

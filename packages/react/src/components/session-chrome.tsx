@@ -494,8 +494,9 @@ export function SessionChrome({
             />
             {signals.map((signal) => {
               const selected = active === signal.id;
-              const chip = (
+              return (
                 <button
+                  key={signal.id}
                   type="button"
                   ref={(node) => {
                     chipRefs.current[signal.id] = node;
@@ -532,18 +533,6 @@ export function SessionChrome({
                     </>
                   ) : null}
                 </button>
-              );
-              return signal.detail ? (
-                <Tooltip key={signal.id}>
-                  <TooltipTrigger asChild>{chip}</TooltipTrigger>
-                  <TooltipContent side="top" className="max-w-xs">
-                    {signal.detail}
-                  </TooltipContent>
-                </Tooltip>
-              ) : (
-                <span key={signal.id} className="contents">
-                  {chip}
-                </span>
               );
             })}
             <AnimatePresence initial={false}>
@@ -645,6 +634,7 @@ function IncomingPanel({
             <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 max-sm:opacity-100">
               <IconAction
                 label={`Dismiss incoming ${pendingKindLabel(input.kind)}`}
+                tip="Dismiss"
                 onClick={() => onDismiss(input.id)}
                 danger
               >
@@ -703,22 +693,16 @@ function QueuePanel({
               <span className="mt-px shrink-0 font-og-mono text-[10px] leading-4 text-og-fg-subtle">
                 {index + 1}
               </span>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <p className="min-w-0 flex-1 truncate text-og-xs leading-4 text-og-fg">
-                    {turn.prompt}
-                  </p>
-                </TooltipTrigger>
-                <TooltipContent side="top" className="max-w-sm">
-                  {turn.prompt}
-                </TooltipContent>
-              </Tooltip>
+              <p className="min-w-0 flex-1 truncate text-og-xs leading-4 text-og-fg">
+                {turn.prompt}
+              </p>
               {showActions ? (
                 <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 max-sm:opacity-100">
                   {onMove && turns.length > 1 ? (
                     <>
                       <IconAction
                         label={`Move queued prompt ${index + 1} up`}
+                        tip="Move up"
                         disabled={pending !== null || index === 0}
                         onClick={() => onMove(turn.id, beforeUp)}
                       >
@@ -726,6 +710,7 @@ function QueuePanel({
                       </IconAction>
                       <IconAction
                         label={`Move queued prompt ${index + 1} down`}
+                        tip="Move down"
                         disabled={pending !== null || index >= turns.length - 1}
                         onClick={() => onMove(turn.id, beforeDown)}
                       >
@@ -736,6 +721,7 @@ function QueuePanel({
                   {onSteer ? (
                     <IconAction
                       label={`Steer queued prompt ${index + 1}`}
+                      tip={QUEUE_STEER_TIP}
                       disabled={pending !== null}
                       onClick={() => onSteer(turn.id)}
                     >
@@ -749,6 +735,7 @@ function QueuePanel({
                   {onEdit ? (
                     <IconAction
                       label={`Edit queued prompt ${index + 1}`}
+                      tip={QUEUE_EDIT_TIP}
                       disabled={pending !== null}
                       onClick={() => onEdit(turn)}
                     >
@@ -762,6 +749,7 @@ function QueuePanel({
                   {onRemove ? (
                     <IconAction
                       label={`Remove queued prompt ${index + 1}`}
+                      tip={QUEUE_DELETE_TIP}
                       disabled={pending !== null}
                       onClick={() => onRemove(turn.id)}
                       danger
@@ -893,14 +881,21 @@ function GoalPanel({
   );
 }
 
+/** Match QueueSurface native `title` copy so chrome icon tips stay consistent. */
+const QUEUE_STEER_TIP = "Make this the next direction";
+const QUEUE_EDIT_TIP = "Edit in composer";
+const QUEUE_DELETE_TIP = "Delete this queued prompt";
+
 function IconAction({
   label,
+  tip,
   onClick,
   disabled,
   danger,
   children,
 }: {
   label: string;
+  tip: string;
   onClick: () => void;
   disabled?: boolean;
   danger?: boolean;
@@ -924,7 +919,7 @@ function IconAction({
           {children}
         </button>
       </TooltipTrigger>
-      <TooltipContent side="top">{label}</TooltipContent>
+      <TooltipContent side="top">{tip}</TooltipContent>
     </Tooltip>
   );
 }
