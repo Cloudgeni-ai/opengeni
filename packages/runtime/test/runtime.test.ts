@@ -734,6 +734,70 @@ describe("runtime event normalization", () => {
     ]);
   });
 
+  test("maps live Responses web_search_call output items into tool events", () => {
+    const [created] = normalizeSdkEvent(
+      new RunRawModelStreamEvent({
+        type: "model",
+        providerData: {
+          rawModelEventSource: OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE,
+        },
+        event: {
+          type: "response.output_item.added",
+          output_index: 1,
+          item: {
+            type: "web_search_call",
+            id: "ws_live_1",
+            status: "in_progress",
+            action: { type: "search", query: "hexagonal diamond" },
+          },
+        },
+      } as any),
+    );
+
+    expect(created).toEqual({
+      type: "agent.toolCall.created",
+      payload: {
+        id: "ws_live_1",
+        name: "web_search_call",
+        arguments: { type: "search", query: "hexagonal diamond" },
+        raw: {
+          type: "hosted_tool_call",
+          id: "ws_live_1",
+          name: "web_search_call",
+          status: "in_progress",
+          providerData: {
+            type: "web_search_call",
+            id: "ws_live_1",
+            action: { type: "search", query: "hexagonal diamond" },
+          },
+        },
+      },
+    });
+
+    const [completed] = normalizeSdkEvent(
+      new RunRawModelStreamEvent({
+        type: "model",
+        providerData: {
+          rawModelEventSource: OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE,
+        },
+        event: {
+          type: "response.output_item.done",
+          output_index: 1,
+          item: {
+            type: "web_search_call",
+            id: "ws_live_1",
+            status: "completed",
+            action: { type: "search", query: "hexagonal diamond" },
+          },
+        },
+      } as any),
+    );
+
+    expect((completed?.payload as { raw?: { status?: string } } | undefined)?.raw?.status).toBe(
+      "completed",
+    );
+  });
+
   test("does not persist raw SDK reasoning items", () => {
     const events = normalizeSdkEvent({
       type: "run_item_stream_event",

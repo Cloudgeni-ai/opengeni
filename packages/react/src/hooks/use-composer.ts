@@ -448,12 +448,21 @@ export function useComposer(
             replaceLocal ||
             (!localWasDirtyAtStart && localAtStart === localEditRevision.current)
           ) {
+            // Model/effort ride in sendExtras (outside localEditRevision). If
+            // the picker changed during this fetch, skip onDraftApplied so a
+            // stale server model/effort cannot undo the operator's pick.
+            const extrasNow = resolveSendExtras(sendExtrasRef.current);
+            const pickerChangedDuringFetch =
+              extrasNow.model !== extrasAtStart.model ||
+              extrasNow.reasoningEffort !== extrasAtStart.reasoningEffort;
             valueRef.current = fetched.text;
             restoredResourcesRef.current = fetched.resources;
             lastSavedSignature.current = draftSignature(draftPayload(fetched));
             setValue(fetched.text);
             setRestoredResources(fetched.resources);
-            onDraftAppliedRef.current?.(fetched);
+            if (replaceLocal || !pickerChangedDuringFetch) {
+              onDraftAppliedRef.current?.(fetched);
+            }
           }
         }
       } catch (cause) {

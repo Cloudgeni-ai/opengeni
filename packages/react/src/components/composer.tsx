@@ -44,6 +44,7 @@ import {
 } from "../hooks/use-slash-commands";
 import { cn } from "../lib/cn";
 import { composerSubmissionErrorMessage, formatBytes, formatRelativeTime } from "../lib/format";
+import type { PickerModelRow } from "../model-policy";
 import { CommandPalette as CommandPaletteView } from "./command-palette";
 import { ModelPicker as ModelPickerView } from "./model-picker";
 
@@ -191,6 +192,8 @@ export const defaultChatComposerMessages: ChatComposerMessages = {
   draftConflict: "This draft changed in another tab. Your local draft is still here.",
   useOtherDraft: "Use other draft",
   keepMine: "Keep mine",
+  // Kept for embedder message overrides / back-compat. Routine autosave is
+  // silent — only draft conflicts surface under the composer.
   savingDraft: "Saving draft…",
   formatBytes,
   formatRelativeTime,
@@ -949,7 +952,9 @@ export const AttachButton = forwardRef<HTMLButtonElement, ComposerAttachButtonPr
 );
 
 export type ComposerModelPickerProps = {
-  models: ClientModel[];
+  models?: ClientModel[] | undefined;
+  /** Catalog-backed rows preferred over legacy provider-grouped models. */
+  rows?: PickerModelRow[] | undefined;
   value?: string | undefined;
   onChange?: ((modelId: string) => void) | undefined;
   label?: string | undefined;
@@ -958,6 +963,7 @@ export type ComposerModelPickerProps = {
 
 export function ModelPicker({
   models,
+  rows,
   value,
   onChange,
   label,
@@ -967,6 +973,7 @@ export function ModelPicker({
   return (
     <ModelPickerView
       models={models}
+      rows={rows}
       value={value}
       onChange={(modelId) => onChange?.(modelId)}
       disabled={controller.disabled}
@@ -1119,8 +1126,6 @@ export function Status() {
             {controller.messages.keepMine}
           </button>
         </div>
-      ) : controller.draftSaving ? (
-        <p className="px-1 pt-1 text-og-xs text-og-fg-subtle">{controller.messages.savingDraft}</p>
       ) : null}
     </>
   );
@@ -1137,8 +1142,6 @@ function ComposerAnnouncements() {
       ) : null}
       {controller.draftConflict ? (
         <p role="alert">{controller.messages.draftConflict}</p>
-      ) : controller.draftSaving ? (
-        <p role="status">{controller.messages.savingDraft}</p>
       ) : null}
     </div>
   );

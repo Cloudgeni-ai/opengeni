@@ -39,6 +39,11 @@
       "types": "./src/machines.ts",
       "default": "./src/machines.ts"
     },
+    "./model-policy": {
+      "types": "./src/model-policy.ts",
+      "import": "./src/model-policy.ts",
+      "default": "./src/model-policy.ts"
+    },
     "./styles.css": {
       "types": "./styles/index.d.ts",
       "default": "./styles/index.css"

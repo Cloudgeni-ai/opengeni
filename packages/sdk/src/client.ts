@@ -499,7 +499,7 @@ export class OpenGeniClient {
   async listTurns(
     workspaceId: string,
     sessionId: string,
-    options: { limit?: number } = {},
+    options: { limit?: number; latestStarted?: boolean } = {},
   ): Promise<SessionTurn[]> {
     return await this.requestJson<SessionTurn[]>(
       "GET",
@@ -507,8 +507,18 @@ export class OpenGeniClient {
       undefined,
       {
         ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
+        ...(options.latestStarted ? { latestStarted: "1" } : {}),
       },
     );
+  }
+
+  /** Newest turn that durably emitted `turn.started`, or null before any admission. */
+  async getLatestStartedTurn(
+    workspaceId: string,
+    sessionId: string,
+  ): Promise<SessionTurn | null> {
+    const turns = await this.listTurns(workspaceId, sessionId, { latestStarted: true });
+    return turns[0] ?? null;
   }
 
   // --- Bring-your-own-compute: Machines dashboard + metrics (M10) ------------

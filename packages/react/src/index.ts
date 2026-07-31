@@ -75,6 +75,15 @@ export type {
   UseTurnQueueOptions,
   UseTurnQueueResult,
 } from "./hooks/use-turn-queue";
+export {
+  useLastStartedTurnPolicy,
+  isLastStartedTurnPolicyEvent,
+} from "./hooks/use-last-started-turn-policy";
+export type {
+  LastStartedTurnPolicy,
+  UseLastStartedTurnPolicyOptions,
+  UseLastStartedTurnPolicyResult,
+} from "./hooks/use-last-started-turn-policy";
 export { QueueSurface } from "./components/queue-surface";
 export type { QueueSurfaceProps } from "./components/queue-surface";
 export { OPEN_WORKSTREAM_CONTROL_EVENT } from "./components/chat-composer";
@@ -132,10 +141,12 @@ export { useWorkspaces } from "./hooks/use-workspaces";
 export type { UseWorkspacesOptions, UseWorkspacesResult } from "./hooks/use-workspaces";
 export { useBillingUsage } from "./hooks/use-billing-usage";
 export type { UseBillingUsageOptions, UseBillingUsageResult } from "./hooks/use-billing-usage";
-export { useAvailableModels } from "./hooks/use-available-models";
+export { useAvailableModels, useWorkspaceModelCatalog } from "./hooks/use-available-models";
 export type {
   UseAvailableModelsOptions,
   UseAvailableModelsResult,
+  UseWorkspaceModelCatalogOptions,
+  UseWorkspaceModelCatalogResult,
 } from "./hooks/use-available-models";
 
 // Sandbox surfacing (Phase 5): capability negotiation + terminal/files/diff/desktop
@@ -367,6 +378,24 @@ export { defaultChatComposerMessages } from "./components/composer";
 export type { ChatComposerMessages } from "./components/composer";
 export { ModelPicker } from "./components/model-picker";
 export type { ModelPickerProps } from "./components/model-picker";
+export {
+  advancedSourceSummary,
+  availabilityReasonLabel,
+  billingClassForModel,
+  billingClassLabel,
+  coerceReasoningEffortForModel,
+  defaultEffortForModel,
+  effortOptionsForModel,
+  ensureSelectedModelRow,
+  findPickerRow,
+  groupPickerRowsByBillingClass,
+  labelLatencyMode,
+  payerSummaryForModel,
+  projectPickerRows,
+  runnableLatencyModesForModel,
+  sortPickerRows,
+} from "./model-policy";
+export type { LatencyModeId, PickerBillingClass, PickerModelRow } from "./model-policy";
 export { MessageTimeline, TimelineRow } from "./components/message-timeline";
 export type { MessageTimelineProps } from "./components/message-timeline";
 export { Markdown } from "./components/markdown";

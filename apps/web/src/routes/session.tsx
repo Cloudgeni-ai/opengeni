@@ -44,19 +44,21 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { Notice } from "@/components/ui/notice";
 import type { WorkspaceTab } from "@opengeni/react";
 import { useAppContext } from "@/context";
-import { useCodexModels } from "@/lib/use-codex-models";
 import { normalizeProviderDomain } from "@/lib/capabilities";
 import {
   isTerminalSessionStatus,
   projectSessionTimeline,
   summarizeSessionFailure,
 } from "@/lib/events";
+import { coerceReasoningEffortForModel, findPickerRow } from "@/lib/model-policy";
 import { mergeSessionContextProjection } from "@/lib/session-pins";
 import {
   firstPartySessionToolOptions,
+  isIntelligenceEffort,
   sessionPolicyPickerIds,
   toolsForPolicySelection,
 } from "@/lib/session-tools";
+import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 import type { ComposerDraft, LineageNode } from "@opengeni/sdk";
 import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
 
@@ -533,7 +535,7 @@ function SessionChatPane(props: {
   resolveCapabilityName: (mcpServerId: string) => string | null;
 }) {
   const context = useAppContext();
-  const codexModels = useCodexModels(props.session.workspaceId);
+  const modelCatalog = useWorkspaceModelCatalog(props.session.workspaceId);
   const terminal = isTerminalSessionStatus(props.session.status);
   // Per-approval decision state: an in-flight decision disables both buttons for
   // that approval and shows progress; a settled one can never double-submit even
@@ -577,7 +579,7 @@ function SessionChatPane(props: {
   // Workspace-scoped: the provider (mounted on the workspace route) supplies
   // the workspaceId, so the hook needs no positional argument.
   const attachments = useFileAttachments();
-  const { reasoningEffort } = context;
+  const { effortForSession } = context;
   const selectableSessionMcpServers = context.toolMcpServers;
   const selectableToolIds = useMemo(
     () => selectableSessionMcpServers.map((server) => server.id),
@@ -601,7 +603,51 @@ function SessionChatPane(props: {
   // The model is session-scoped: this session remembers its own pick (falling
   // back to the deployment default), so a switch here doesn't bleed into others.
   const model = context.modelForSession(props.session.id);
-  const { setModelForSession, setReasoningEffort } = context;
+  const reasoningEffort = effortForSession(props.session.id);
+  const {
+    setModelForSession,
+    setEffortForSession,
+    ensureModelForSession,
+    ensureEffortForSession,
+  } = context;
+  // Once the operator touches the picker, draft reloads must not stomp it.
+  const pickerTouchedRef = useRef(false);
+  useEffect(() => {
+    pickerTouchedRef.current = false;
+  }, [props.session.id]);
+  // Seed once from durable session facts so open sessions never inherit the
+  // mutable new-session composer picks. Draft apply / picker writes still win.
+  useEffect(() => {
+    ensureModelForSession(props.session.id, props.session.model);
+    const metaEffort = props.session.metadata.reasoningEffort;
+    if (isIntelligenceEffort(metaEffort)) {
+      ensureEffortForSession(props.session.id, metaEffort);
+    }
+  }, [
+    ensureEffortForSession,
+    ensureModelForSession,
+    props.session.id,
+    props.session.metadata.reasoningEffort,
+    props.session.model,
+  ]);
+  // Catalog-backed effort legality: snap sticky effort when the selected model
+  // cannot run it (e.g. after reconnect or catalog refresh).
+  useEffect(() => {
+    const row = findPickerRow(modelCatalog.rows, model);
+    if (!row?.selectable) {
+      return;
+    }
+    const coerced = coerceReasoningEffortForModel(row.catalog, reasoningEffort);
+    if (coerced !== reasoningEffort) {
+      setEffortForSession(props.session.id, coerced);
+    }
+  }, [
+    model,
+    modelCatalog.rows,
+    props.session.id,
+    reasoningEffort,
+    setEffortForSession,
+  ]);
   useEffect(() => {
     if (durableToolsSessionId.current !== props.session.id) {
       durableToolsSessionId.current = props.session.id;
@@ -703,10 +749,16 @@ function SessionChatPane(props: {
   );
   const applyComposerSettings = useCallback(
     (draft: ComposerDraft) => {
+      // Initial hydrate only. A later draft reload (or a fetch that raced the
+      // picker) must not undo an in-session model/effort change; autosave
+      // persists the picker into the draft.
+      if (pickerTouchedRef.current) {
+        return;
+      }
       setModelForSession(props.session.id, draft.model);
-      setReasoningEffort(draft.reasoningEffort);
+      setEffortForSession(props.session.id, draft.reasoningEffort);
     },
-    [props.session.id, setModelForSession, setReasoningEffort],
+    [props.session.id, setEffortForSession, setModelForSession],
   );
   const composer = useComposer(props.session.id, {
     events: props.events,
@@ -945,13 +997,20 @@ function SessionChatPane(props: {
             controls={
               <div className="flex min-w-0 items-center gap-1.5">
                 <ModelPicker
-                  config={context.clientConfig}
+                  rows={modelCatalog.rowsForSelection(model)}
                   model={model}
-                  effort={context.reasoningEffort}
+                  effort={reasoningEffort}
                   disabled={composer.sending}
-                  extraModels={codexModels}
-                  onModelChange={(value) => context.setModelForSession(props.session.id, value)}
-                  onEffortChange={context.setReasoningEffort}
+                  loading={modelCatalog.loading}
+                  error={modelCatalog.error}
+                  onModelChange={(value) => {
+                    pickerTouchedRef.current = true;
+                    context.setModelForSession(props.session.id, value);
+                  }}
+                  onEffortChange={(value) => {
+                    pickerTouchedRef.current = true;
+                    context.setEffortForSession(props.session.id, value);
+                  }}
                 />
                 <SessionToolPicker
                   servers={selectableSessionMcpServers}

@@ -51,10 +51,11 @@ import { Notice } from "@/components/ui/notice";
 import { Select } from "@/components/ui/select";
 import { StatusDot, type StatusTone } from "@/components/ui/status-dot";
 import { useAppContext, useLatestCallback } from "@/context";
-import { groupSessionsForRail, relativeTimeLabel } from "@/lib/sessions-group";
-import { useCodexModels } from "@/lib/use-codex-models";
 import { isMachineComputeSelectable } from "@/lib/machine-selectability";
+import { coerceReasoningEffortForModel, findPickerRow } from "@/lib/model-policy";
 import { sessionMcpPermissionGroups } from "@/lib/permissions";
+import { groupSessionsForRail, relativeTimeLabel } from "@/lib/sessions-group";
+import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 import {
   emptySessionDraft,
   isSessionDraftComputeReady,
@@ -496,15 +497,31 @@ function SessionControlStrip({
   onToolSelectionChange: (selection: SessionToolSelection) => void;
 }) {
   const context = useAppContext();
-  const codexModels = useCodexModels(workspaceId);
+  const modelCatalog = useWorkspaceModelCatalog(workspaceId);
+  useEffect(() => {
+    const row = findPickerRow(modelCatalog.rows, context.model);
+    if (!row?.selectable) {
+      return;
+    }
+    const coerced = coerceReasoningEffortForModel(row.catalog, context.reasoningEffort);
+    if (coerced !== context.reasoningEffort) {
+      context.setReasoningEffort(coerced);
+    }
+  }, [
+    context.model,
+    context.reasoningEffort,
+    context.setReasoningEffort,
+    modelCatalog.rows,
+  ]);
   return (
     <div className="flex min-w-0 items-center gap-1.5">
       <ModelPicker
-        config={context.clientConfig}
+        rows={modelCatalog.rowsForSelection(context.model)}
         model={context.model}
         effort={context.reasoningEffort}
         disabled={disabled}
-        extraModels={codexModels}
+        loading={modelCatalog.loading}
+        error={modelCatalog.error}
         onModelChange={context.setModel}
         onEffortChange={context.setReasoningEffort}
       />

@@ -11,13 +11,16 @@
 //
 // Run a seed:  bun test/e2e/seed/seed-<name>.ts
 // Env:
-//   OPENGENI_SEED_BASE_URL       default http://127.0.0.1:8001  (dev API)
+//   OPENGENI_SEED_BASE_URL       default http://127.0.0.1:8000  (dev API)
 //   OPENGENI_SEED_WORKSPACE_ID   default: discovered via /v1/access/me
 //   OPENGENI_SEED_API_KEY        optional; omitted in local access mode
 //   OPENGENI_SEED_WEB_URL        default http://127.0.0.1:3000  (for printed links)
+//
+// Session-rail UI forest (DB nested inserts, no agent turns):
+//   OPENGENI_DATABASE_URL=... bun test/e2e/seed/seed-session-rail.ts
 import { OpenGeniClient, type Session } from "@opengeni/sdk";
 
-export const BASE_URL = process.env.OPENGENI_SEED_BASE_URL ?? "http://127.0.0.1:8001";
+export const BASE_URL = process.env.OPENGENI_SEED_BASE_URL ?? "http://127.0.0.1:8000";
 export const WEB_URL = process.env.OPENGENI_SEED_WEB_URL ?? "http://127.0.0.1:3000";
 const API_KEY = process.env.OPENGENI_SEED_API_KEY;
 

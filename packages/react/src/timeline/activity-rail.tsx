@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import { lazy, Suspense } from "react";
 import { jsx as rowJsx, jsxs as rowJsxs } from "react/jsx-runtime";
+import { Markdown } from "../components/markdown";
 import { cn } from "../lib/cn";
 import { truncate } from "../lib/format";
 import { defaultToolRegistry } from "./tool-renderers";
@@ -135,7 +136,9 @@ function renderActivity(
 
 function ReasoningRow({ item }: { item: ReasoningItem }) {
   // Reasoning recedes: a dimmer, lighter-weight title so action rows lead and
-  // thought rows sit a half-step back in the hierarchy.
+  // thought rows sit a half-step back in the hierarchy. Body uses the same
+  // GFM markdown path as agent messages — Codex reasoning often carries
+  // headings/lists/bold that were previously shown as raw plaintext.
   return (
     <ActivityDisclosure
       icon={<BrainIcon className="size-3.5" />}
@@ -150,7 +153,9 @@ function ReasoningRow({ item }: { item: ReasoningItem }) {
       running={item.streaming}
       preview={truncate(item.text, 110)}
     >
-      <p className="whitespace-pre-wrap text-og-base leading-6 text-og-fg-muted">{item.text}</p>
+      <div className="text-og-base leading-6 text-og-fg-muted [&_strong]:text-og-fg-muted">
+        <Markdown>{item.text}</Markdown>
+      </div>
     </ActivityDisclosure>
   );
 }

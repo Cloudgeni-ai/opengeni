@@ -855,6 +855,33 @@ describe("WebSearchRenderer — null/undefined entries in results array", () => 
     await r.unmount();
   });
 
+  test("renders modern queries[] when deprecated singular query is absent", async () => {
+    const item = toolItem({
+      name: "web_search_call",
+      raw: {
+        type: "hosted_tool_call",
+        status: "in_progress",
+        providerData: {
+          action: {
+            type: "search",
+            queries: ["hexagonal diamond lonsdaleite 2026 Nature paper"],
+          },
+        },
+      },
+      status: "running",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("Searching the web");
+    expect(text).toContain("hexagonal diamond lonsdaleite 2026 Nature paper");
+    expect(text).not.toContain("query unavailable");
+
+    await r.unmount();
+  });
+
   test("renders without throwing when results contains a null entry", async () => {
     // Simulate a host-enriched output where one entry is null (untrusted data).
     const item = toolItem({
