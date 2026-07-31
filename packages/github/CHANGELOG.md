@@ -1,5 +1,13 @@
 # @opengeni/github
 
+## 0.4.4
+
+### Patch Changes
+
+- Updated dependencies [ddff8db]
+  - @opengeni/contracts@0.24.1
+  - @opengeni/config@0.7.17
+
 ## 0.4.3
 
 ### Patch Changes
