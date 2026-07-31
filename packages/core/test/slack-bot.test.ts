@@ -3,7 +3,9 @@ import {
   OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
   OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
   OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
+  OPENGENI_SLACK_BOT_SAFE_OPTIONAL_SCOPES,
   OPENGENI_SLACK_BOT_SESSION_METADATA_KEY,
+  evaluateOpenGeniSlackBotScopes,
   type AccessGrant,
   type ConnectionMetadata,
   type Session,
@@ -85,7 +87,10 @@ describe("OpenGeni Slack bot trust predicates", () => {
     expect(
       isOpenGeniSlackBotConnection(
         botConnection({
-          grantedScopes: [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES, "team:read"],
+          grantedScopes: [
+            ...OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
+            ...OPENGENI_SLACK_BOT_SAFE_OPTIONAL_SCOPES,
+          ],
         }),
       ),
     ).toBe(true);
@@ -102,6 +107,23 @@ describe("OpenGeni Slack bot trust predicates", () => {
         }),
       ),
     ).toBe(false);
+    for (const unsafe of [
+      "files:write",
+      "reactions:write",
+      "chat:write.customize",
+      "users:read.email",
+      "admin",
+      "admin.users:read",
+      "search:read.enterprise",
+      "future:unknown",
+    ]) {
+      const scopes = [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES, unsafe];
+      expect(evaluateOpenGeniSlackBotScopes(scopes)).toMatchObject({
+        accepted: false,
+        unsupported: [unsafe],
+      });
+      expect(isOpenGeniSlackBotConnection(botConnection({ grantedScopes: scopes }))).toBe(false);
+    }
     expect(
       isOpenGeniSlackBotConnection(
         botConnection({

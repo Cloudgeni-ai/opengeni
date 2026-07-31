@@ -141,8 +141,9 @@ describe("first-party MCP tool visibility policy", () => {
         },
       });
       expect(remove?.inputSchema).toMatchObject({
-        required: expect.arrayContaining(["channelId", "timestamp"]),
+        required: expect.arrayContaining(["operationId", "channelId", "timestamp"]),
         properties: {
+          operationId: { type: "string" },
           channelId: { type: "string" },
           timestamp: { type: "string" },
         },

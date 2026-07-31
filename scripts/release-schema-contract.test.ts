@@ -154,12 +154,13 @@ describe("release schema contract", () => {
         (migrations.has("0137_preference_registry.sql") ? 1 : 0) +
         (migrations.has("0138_sandbox_checkpoint_artifacts_and_deadlines.sql") ? 1 : 0) +
         (migrations.has("0139_codex_provider_artifact_invalidations.sql") ? 1 : 0) +
-        (migrations.has("0140_sandbox_restore_and_reaper_fences.sql") ? 1 : 0),
+        (migrations.has("0140_sandbox_restore_and_reaper_fences.sql") ? 1 : 0) +
+        (migrations.has("0141_slack_bot_delete_idempotency.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "16ed02416256aab8a0f53aed67c9de49155acbd1cbbba0f822a291333b584c7e",
+      "11cbfcf3c23ca8e42a21ce170295d11f077d1ad1eca3f2679f819533e7c3ef15",
     );
-    expect(contract.latestMigration).toBe("0140_sandbox_restore_and_reaper_fences.sql");
+    expect(contract.latestMigration).toBe("0141_slack_bot_delete_idempotency.sql");
     expect(migrations.get("0128_github_installation_authority.sql")).toMatchObject({
       sha256: "365793b2a204a70e214adb90298b522acbb6dcfae22a46681a58f41a6938e6f0",
       deploymentMode: "rolling",
@@ -332,6 +333,10 @@ describe("release schema contract", () => {
     });
     expect(migrations.get("0140_sandbox_restore_and_reaper_fences.sql")).toMatchObject({
       sha256: "fe8441b669fd99fa0463378c34dd75ceca3077af7529c85c552a534c530828d8",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0141_slack_bot_delete_idempotency.sql")).toMatchObject({
+      sha256: "cebd9cde4909e3c6b7f8d11f5b75353d9f0370600acead6e6b31d01c4ebaf847",
       deploymentMode: "rolling",
     });
   });

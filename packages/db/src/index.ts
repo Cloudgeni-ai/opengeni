@@ -3250,6 +3250,30 @@ export type SlackBotPostOperation = {
   updatedAt: Date;
 };
 
+export type SlackBotDeleteOperation = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  connectionId: string;
+  operationId: string;
+  principalType: "subject" | "service";
+  principalId: string;
+  toolName: "slack_bot_delete_message";
+  channelId: string;
+  messageTimestamp: string;
+  requestDigest: string;
+  status: "pending" | "provider_started" | "outcome_unknown" | "completed";
+  claimHolderId: string | null;
+  claimExpiresAt: Date | null;
+  attemptCount: number;
+  lastFailureCode: string | null;
+  slackChannelId: string | null;
+  slackMessageTimestamp: string | null;
+  completedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
 export type ConnectionCredentialForBroker = {
   id: string;
   accountId: string;
@@ -4920,7 +4944,10 @@ export async function listConnectionsMetadata(
           connectionSubjectVisibility(subjectId),
         ),
       )
-      .orderBy(desc(schema.connections.createdAt));
+      // Legacy rows can share created_at. UUID DESC is the immutable stable
+      // tie-breaker, so every caller that intentionally selects the first row
+      // collapses duplicates in the same documented direction.
+      .orderBy(desc(schema.connections.createdAt), desc(schema.connections.id));
     return rows.map(mapConnectionMetadata);
   });
 }
@@ -5575,6 +5602,322 @@ export async function getSlackBotPostOperation(
       )
       .limit(1);
     return row ? mapSlackBotPostOperation(row) : null;
+  });
+}
+
+export type ClaimSlackBotDeleteOperationResult =
+  | {
+      kind: "claimed" | "reconcile" | "in_progress" | "completed";
+      operation: SlackBotDeleteOperation;
+    }
+  | { kind: "conflict" | "connection_not_found" };
+
+export async function claimSlackBotDeleteOperation(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    connectionId: string;
+    operationId: string;
+    principalType: "subject" | "service";
+    principalId: string;
+    toolName: "slack_bot_delete_message";
+    channelId: string;
+    messageTimestamp: string;
+    requestDigest: string;
+    claimHolderId: string;
+    claimLeaseMs: number;
+  },
+): Promise<ClaimSlackBotDeleteOperationResult> {
+  if (input.toolName !== "slack_bot_delete_message") {
+    return { kind: "conflict" };
+  }
+  const claimLeaseMs = Math.max(1, Math.min(Math.trunc(input.claimLeaseMs), 120_000));
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        const [connection] = await tx
+          .select({ id: schema.connections.id })
+          .from(schema.connections)
+          .where(
+            and(
+              eq(schema.connections.accountId, input.accountId),
+              eq(schema.connections.workspaceId, input.workspaceId),
+              eq(schema.connections.id, input.connectionId),
+            ),
+          )
+          .for("share")
+          .limit(1);
+        if (!connection) return { kind: "connection_not_found" } as const;
+
+        const [created] = await tx
+          .insert(schema.slackBotDeleteOperations)
+          .values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            connectionId: input.connectionId,
+            operationId: input.operationId,
+            principalType: input.principalType,
+            principalId: input.principalId,
+            toolName: input.toolName,
+            channelId: input.channelId,
+            messageTimestamp: input.messageTimestamp,
+            requestDigest: input.requestDigest,
+            status: "pending",
+            claimHolderId: input.claimHolderId,
+            claimExpiresAt: sql`now() + (${claimLeaseMs} * interval '1 millisecond')`,
+            attemptCount: 1,
+          })
+          .onConflictDoNothing({
+            target: [
+              schema.slackBotDeleteOperations.workspaceId,
+              schema.slackBotDeleteOperations.operationId,
+            ],
+          })
+          .returning();
+        if (created) {
+          return { kind: "claimed", operation: mapSlackBotDeleteOperation(created) } as const;
+        }
+
+        const [existing] = await tx
+          .select()
+          .from(schema.slackBotDeleteOperations)
+          .where(
+            and(
+              eq(schema.slackBotDeleteOperations.workspaceId, input.workspaceId),
+              eq(schema.slackBotDeleteOperations.operationId, input.operationId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!existing) throw new Error("Slack delete operation disappeared after conflict");
+        if (
+          existing.accountId !== input.accountId ||
+          existing.connectionId !== input.connectionId ||
+          existing.principalType !== input.principalType ||
+          existing.principalId !== input.principalId ||
+          existing.toolName !== input.toolName ||
+          existing.channelId !== input.channelId ||
+          existing.messageTimestamp !== input.messageTimestamp ||
+          existing.requestDigest !== input.requestDigest
+        ) {
+          return { kind: "conflict" } as const;
+        }
+        if (existing.status === "completed") {
+          return {
+            kind: "completed",
+            operation: mapSlackBotDeleteOperation(existing),
+          } as const;
+        }
+        if (
+          existing.claimHolderId &&
+          existing.claimExpiresAt &&
+          existing.claimExpiresAt > new Date()
+        ) {
+          return {
+            kind: "in_progress",
+            operation: mapSlackBotDeleteOperation(existing),
+          } as const;
+        }
+        const nextStatus =
+          existing.status === "provider_started" ? "outcome_unknown" : existing.status;
+        const [reclaimed] = await tx
+          .update(schema.slackBotDeleteOperations)
+          .set({
+            status: nextStatus,
+            claimHolderId: input.claimHolderId,
+            claimExpiresAt: sql`now() + (${claimLeaseMs} * interval '1 millisecond')`,
+            attemptCount: sql`${schema.slackBotDeleteOperations.attemptCount} + 1`,
+            updatedAt: sql`now()`,
+          })
+          .where(eq(schema.slackBotDeleteOperations.id, existing.id))
+          .returning();
+        if (!reclaimed) throw new Error("Slack delete operation reclaim returned no row");
+        return {
+          kind: nextStatus === "outcome_unknown" ? "reconcile" : "claimed",
+          operation: mapSlackBotDeleteOperation(reclaimed),
+        } as const;
+      }),
+  );
+}
+
+export async function markSlackBotDeleteOperationProviderStarted(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    connectionId: string;
+    operationId: string;
+    claimHolderId: string;
+  },
+): Promise<boolean> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb
+        .update(schema.slackBotDeleteOperations)
+        .set({ status: "provider_started", updatedAt: sql`now()` })
+        .where(
+          and(
+            eq(schema.slackBotDeleteOperations.workspaceId, input.workspaceId),
+            eq(schema.slackBotDeleteOperations.connectionId, input.connectionId),
+            eq(schema.slackBotDeleteOperations.operationId, input.operationId),
+            eq(schema.slackBotDeleteOperations.claimHolderId, input.claimHolderId),
+            or(
+              eq(schema.slackBotDeleteOperations.status, "pending"),
+              eq(schema.slackBotDeleteOperations.status, "outcome_unknown"),
+            ),
+          ),
+        )
+        .returning({ id: schema.slackBotDeleteOperations.id });
+      return rows.length === 1;
+    },
+  );
+}
+
+export async function releaseSlackBotDeleteOperationClaim(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    connectionId: string;
+    operationId: string;
+    claimHolderId: string;
+    outcomeUnknown: boolean;
+    failureCode: string;
+  },
+): Promise<boolean> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb
+        .update(schema.slackBotDeleteOperations)
+        .set({
+          status: input.outcomeUnknown ? "outcome_unknown" : "pending",
+          claimHolderId: null,
+          claimExpiresAt: null,
+          lastFailureCode: input.failureCode.slice(0, 128),
+          updatedAt: sql`now()`,
+        })
+        .where(
+          and(
+            eq(schema.slackBotDeleteOperations.workspaceId, input.workspaceId),
+            eq(schema.slackBotDeleteOperations.connectionId, input.connectionId),
+            eq(schema.slackBotDeleteOperations.operationId, input.operationId),
+            ne(schema.slackBotDeleteOperations.status, "completed"),
+            eq(schema.slackBotDeleteOperations.claimHolderId, input.claimHolderId),
+          ),
+        )
+        .returning({ id: schema.slackBotDeleteOperations.id });
+      return rows.length === 1;
+    },
+  );
+}
+
+export type CompleteSlackBotDeleteOperationResult =
+  | { kind: "completed"; operation: SlackBotDeleteOperation; newlyCompleted: boolean }
+  | { kind: "not_found" | "not_owned" };
+
+export async function completeSlackBotDeleteOperation(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    connectionId: string;
+    operationId: string;
+    claimHolderId: string;
+    slackChannelId: string;
+    slackMessageTimestamp: string;
+    subjectId?: string | null;
+    auditMetadata: Record<string, unknown>;
+  },
+): Promise<CompleteSlackBotDeleteOperationResult> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        const [current] = await tx
+          .select()
+          .from(schema.slackBotDeleteOperations)
+          .where(
+            and(
+              eq(schema.slackBotDeleteOperations.workspaceId, input.workspaceId),
+              eq(schema.slackBotDeleteOperations.connectionId, input.connectionId),
+              eq(schema.slackBotDeleteOperations.operationId, input.operationId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!current) return { kind: "not_found" } as const;
+        if (current.status === "completed") {
+          return {
+            kind: "completed",
+            operation: mapSlackBotDeleteOperation(current),
+            newlyCompleted: false,
+          } as const;
+        }
+        if (current.claimHolderId !== input.claimHolderId) {
+          return { kind: "not_owned" } as const;
+        }
+        const [completed] = await tx
+          .update(schema.slackBotDeleteOperations)
+          .set({
+            status: "completed",
+            claimHolderId: null,
+            claimExpiresAt: null,
+            lastFailureCode: null,
+            slackChannelId: input.slackChannelId,
+            slackMessageTimestamp: input.slackMessageTimestamp,
+            completedAt: sql`now()`,
+            updatedAt: sql`now()`,
+          })
+          .where(eq(schema.slackBotDeleteOperations.id, current.id))
+          .returning();
+        if (!completed) throw new Error("Slack delete completion returned no row");
+        await tx.insert(schema.auditEvents).values({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: input.subjectId ?? null,
+          action: "slack_bot.message.delete",
+          targetType: "connection",
+          targetId: input.connectionId,
+          metadata: input.auditMetadata,
+        });
+        return {
+          kind: "completed",
+          operation: mapSlackBotDeleteOperation(completed),
+          newlyCompleted: true,
+        } as const;
+      }),
+  );
+}
+
+export async function getSlackBotDeleteOperation(
+  db: Database,
+  workspaceId: string,
+  connectionId: string,
+  operationId: string,
+): Promise<SlackBotDeleteOperation | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.slackBotDeleteOperations)
+      .where(
+        and(
+          eq(schema.slackBotDeleteOperations.workspaceId, workspaceId),
+          eq(schema.slackBotDeleteOperations.connectionId, connectionId),
+          eq(schema.slackBotDeleteOperations.operationId, operationId),
+        ),
+      )
+      .limit(1);
+    return row ? mapSlackBotDeleteOperation(row) : null;
   });
 }
 
@@ -39788,6 +40131,34 @@ function mapSlackBotPostOperation(
     clientMessageId: row.clientMessageId,
     targetKind: row.targetKind,
     targetId: row.targetId,
+    requestDigest: row.requestDigest,
+    status: row.status,
+    claimHolderId: row.claimHolderId,
+    claimExpiresAt: row.claimExpiresAt,
+    attemptCount: row.attemptCount,
+    lastFailureCode: row.lastFailureCode,
+    slackChannelId: row.slackChannelId,
+    slackMessageTimestamp: row.slackMessageTimestamp,
+    completedAt: row.completedAt,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
+function mapSlackBotDeleteOperation(
+  row: typeof schema.slackBotDeleteOperations.$inferSelect,
+): SlackBotDeleteOperation {
+  return {
+    id: row.id,
+    accountId: row.accountId,
+    workspaceId: row.workspaceId,
+    connectionId: row.connectionId,
+    operationId: row.operationId,
+    principalType: row.principalType,
+    principalId: row.principalId,
+    toolName: row.toolName as "slack_bot_delete_message",
+    channelId: row.channelId,
+    messageTimestamp: row.messageTimestamp,
     requestDigest: row.requestDigest,
     status: row.status,
     claimHolderId: row.claimHolderId,

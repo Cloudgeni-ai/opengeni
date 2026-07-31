@@ -4962,7 +4962,38 @@ export const OPENGENI_SLACK_BOT_REQUIRED_SCOPES = [
   "mpim:read",
   "users:read",
 ] as const;
+/**
+ * Optional bot grants that remain inside the shipped bot's read/identity
+ * boundary. Every other unrequired scope fails closed, including unknown future
+ * Slack scopes, so verification, core routing, and UI eligibility cannot drift.
+ */
+export const OPENGENI_SLACK_BOT_SAFE_OPTIONAL_SCOPES = ["team:read"] as const;
+
+/** @deprecated Use evaluateOpenGeniSlackBotScopes; an allowlist is the policy. */
 export const OPENGENI_SLACK_BOT_FORBIDDEN_SCOPES = ["channels:join", "chat:write.public"] as const;
+
+export type OpenGeniSlackBotScopePolicy = {
+  accepted: boolean;
+  missingRequired: string[];
+  unsupported: string[];
+};
+
+export function evaluateOpenGeniSlackBotScopes(
+  grantedScopes: readonly string[],
+): OpenGeniSlackBotScopePolicy {
+  const granted = new Set(grantedScopes);
+  const allowed = new Set<string>([
+    ...OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
+    ...OPENGENI_SLACK_BOT_SAFE_OPTIONAL_SCOPES,
+  ]);
+  const missingRequired = OPENGENI_SLACK_BOT_REQUIRED_SCOPES.filter((scope) => !granted.has(scope));
+  const unsupported = [...granted].filter((scope) => !allowed.has(scope)).sort();
+  return {
+    accepted: missingRequired.length === 0 && unsupported.length === 0,
+    missingRequired,
+    unsupported,
+  };
+}
 
 export const OpenGeniSlackBotConnectionMetadata = z
   .object({

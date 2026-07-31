@@ -5,21 +5,26 @@ import {
   OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
   OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
   OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
+  OPENGENI_SLACK_BOT_SAFE_OPTIONAL_SCOPES,
   OPENGENI_SLACK_BOT_SESSION_METADATA_KEY,
   signDelegatedAccessToken,
   type AccessGrant,
   type Permission,
 } from "@opengeni/contracts";
 import {
+  claimSlackBotDeleteOperation,
   claimSlackBotPostOperation,
   createConnection,
   createDb,
   createSession,
   getConnectionMetadata,
+  getSlackBotDeleteOperation,
   getSlackBotPostOperation,
+  markSlackBotDeleteOperationProviderStarted,
   listConnectionsMetadata,
   loadConnectionCredentialForBroker,
   recordSlackBotInstallCallbackFailure,
+  releaseSlackBotDeleteOperationClaim,
   releaseSlackBotPostOperationClaim,
   updateConnection,
   type DbClient,
@@ -132,6 +137,9 @@ function fakeSlack(
     botUserId?: string;
     botId?: string;
     loseFirstPostResponse?: boolean;
+    loseFirstDeleteResponse?: boolean;
+    loseFirstDeleteBeforeCommit?: boolean;
+    deleteErrorCode?: string;
     transcriptRequiresUserSession?: boolean;
     transcriptInFileInfo?: boolean;
     fileListResponse?: (input: { count: number; page: number }) => Record<string, unknown>;
@@ -139,7 +147,9 @@ function fakeSlack(
 ) {
   const calls: SlackCall[] = [];
   const committedPosts = new Map<string, { channel: string; timestamp: string }>();
+  const committedDeletes = new Set<string>();
   let postAttempts = 0;
+  let deleteAttempts = 0;
   const fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
     const method = url.pathname.replace(/^\/api\//, "");
@@ -385,11 +395,32 @@ function fakeSlack(
       if (!channel || !timestamp) {
         return Response.json({ ok: false, error: "invalid_arguments" });
       }
+      deleteAttempts += 1;
+      if (options.deleteErrorCode) {
+        return Response.json({ ok: false, error: options.deleteErrorCode });
+      }
+      if (options.loseFirstDeleteBeforeCommit && deleteAttempts === 1) {
+        throw new Error("fixture Slack delete response lost before commit");
+      }
+      committedDeletes.add(`${channel}:${timestamp}`);
+      if (options.loseFirstDeleteResponse && deleteAttempts === 1) {
+        throw new Error("fixture Slack delete response lost after commit");
+      }
       return Response.json({ ok: true, channel, ts: timestamp });
+    }
+    if (method === "chat.getPermalink") {
+      const channel = params.get("channel");
+      const timestamp = params.get("message_ts");
+      if (!channel || !timestamp) {
+        return Response.json({ ok: false, error: "invalid_arguments" });
+      }
+      return committedDeletes.has(`${channel}:${timestamp}`)
+        ? Response.json({ ok: false, error: "message_not_found" })
+        : Response.json({ ok: true, channel, permalink: "https://fixture.slack.com/message" });
     }
     return Response.json({ ok: false, error: "unexpected_method" });
   };
-  return { fetch: fetch as typeof globalThis.fetch, calls, committedPosts };
+  return { fetch: fetch as typeof globalThis.fetch, calls, committedPosts, committedDeletes };
 }
 
 describe("Slack files.list pagination adapter", () => {
@@ -563,7 +594,7 @@ describe("OpenGeni Slack bot credential verification", () => {
     ).rejects.toThrow();
   });
 
-  test("accepts the bot identity with required scopes and rejects unsafe grants", async () => {
+  test("accepts only required plus canonical safe optional scopes", async () => {
     expect(OPENGENI_SLACK_BOT_REQUIRED_SCOPES).toEqual([
       "canvases:read",
       "channels:history",
@@ -605,6 +636,23 @@ describe("OpenGeni Slack bot credential verification", () => {
         }).fetch,
       ),
     ).rejects.toThrow("do not satisfy");
+    for (const unsafe of [
+      "files:write",
+      "reactions:write",
+      "chat:write.customize",
+      "users:read.email",
+      "admin",
+      "admin.users:read",
+      "search:read.enterprise",
+      "future:unknown",
+    ]) {
+      await expect(
+        verifyOpenGeniSlackBotCredential(
+          fixtureBotToken(),
+          fakeSlack({ scopes: [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES, unsafe] }).fetch,
+        ),
+      ).rejects.toThrow("do not satisfy");
+    }
     await expect(
       verifyOpenGeniSlackBotCredential(
         fixtureBotToken(),
@@ -638,7 +686,7 @@ async function startBotInstall(
   slackFetch: typeof globalThis.fetch,
   connectionId?: string,
   subjectId = "subject-a",
-): Promise<{ response: Response; state: string | null }> {
+): Promise<{ response: Response; state: string | null; authorizationUrl: string | null }> {
   const response = await app(slackFetch).request(
     `/v1/workspaces/${workspace.workspaceId}/connections/slack-bot/install`,
     {
@@ -653,11 +701,12 @@ async function startBotInstall(
       body: JSON.stringify(connectionId ? { connectionId } : {}),
     },
   );
-  if (response.status !== 200) return { response, state: null };
+  if (response.status !== 200) return { response, state: null, authorizationUrl: null };
   const installation = (await response.json()) as { authorizationUrl: string };
   return {
     response,
     state: new URL(installation.authorizationUrl).searchParams.get("state"),
+    authorizationUrl: installation.authorizationUrl,
   };
 }
 
@@ -780,6 +829,39 @@ async function withFailingConnectionInsert<T>(
 }
 
 describe("OpenGeni Slack bot connection", () => {
+  test("requests the required-only bot manifest and completes the reduced-scope callback", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack();
+    const start = await startBotInstall(workspace, slack.fetch);
+    expect(start.response.status).toBe(200);
+    if (!start.state || !start.authorizationUrl) {
+      throw new Error("expected Slack installation authorization URL fixture");
+    }
+    const authorizationUrl = new URL(start.authorizationUrl);
+    expect(authorizationUrl.origin).toBe("https://slack.com");
+    expect(authorizationUrl.pathname).toBe("/oauth/v2/authorize");
+    expect(authorizationUrl.searchParams.get("scope")).toBe(
+      OPENGENI_SLACK_BOT_REQUIRED_SCOPES.join(","),
+    );
+    expect(authorizationUrl.searchParams.has("user_scope")).toBe(false);
+
+    const callback = await completeBotInstall(slack.fetch, start.state);
+    expect(callback.status).toBe(302);
+    expect(callback.headers.get("location")).toContain("slack=connected");
+    const [connection] = (
+      await listConnectionsMetadata(client.db, workspace.workspaceId, null)
+    ).filter(
+      (candidate) => candidate.metadata.credentialRole === OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
+    );
+    expect(connection).toMatchObject({
+      status: "active",
+      grantedScopes: [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES].sort(),
+      verifiedInstallVersion: 1,
+    });
+    expect(connection?.verifiedInstallAt).not.toBeNull();
+  });
+
   test("validates and binds a shared bot without exposing its credential", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -1050,18 +1132,114 @@ describe("OpenGeni Slack bot connection", () => {
     ).rejects.toThrow("OpenGeni Slack bot connection");
   });
 
-  test("accepts additional non-forbidden Slack scopes", async () => {
+  test("accepts only explicitly safe additional Slack scopes", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const result = await connectBot(
       workspace,
       fakeSlack({
-        scopes: [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES, "team:read"],
+        scopes: [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES, ...OPENGENI_SLACK_BOT_SAFE_OPTIONAL_SCOPES],
       }).fetch,
     );
     expect(result.response.status).toBe(302);
     expect(result.response.headers.get("location")).toContain("slack=connected");
-    expect(result.body.connection.grantedScopes).toContain("team:read");
+    expect(result.body.connection.grantedScopes).toEqual(
+      expect.arrayContaining([...OPENGENI_SLACK_BOT_SAFE_OPTIONAL_SCOPES]),
+    );
+  });
+
+  test("deterministically collapses equal-timestamp legacy duplicates only for one bot principal", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const connected = await connectBot(workspace, fakeSlack().fetch);
+    const original = await getConnectionMetadata(
+      client.db,
+      workspace.workspaceId,
+      connected.body.connection.id,
+      null,
+    );
+    if (!original) throw new Error("expected connected Slack bot fixture");
+    const duplicate = await createConnection(client.db, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      subjectId: null,
+      providerDomain: "slack.com",
+      kind: "app_install",
+      credentialEncrypted: "legacy-duplicate-fixture",
+      grantedScopes: [...original.grantedScopes],
+      verifiedInstallAt: new Date(original.verifiedInstallAt!),
+      verifiedInstallVersion: 1,
+      metadata: { ...original.metadata },
+      createdBySubjectId: "subject-a",
+    });
+    const equalCreatedAt = new Date("2026-07-31T12:00:00.000Z");
+    await shared!.admin`
+      update connections
+      set created_at = ${equalCreatedAt}
+      where workspace_id = ${workspace.workspaceId}
+        and id in (${original.id}, ${duplicate.id})`;
+
+    const ordered = (await listConnectionsMetadata(client.db, workspace.workspaceId, null)).filter(
+      (connection) => connection.id === original.id || connection.id === duplicate.id,
+    );
+    const expectedId = [original.id, duplicate.id].sort().reverse()[0]!;
+    expect(ordered.map((connection) => connection.id)).toEqual(
+      [original.id, duplicate.id].sort().reverse(),
+    );
+    expect(
+      await resolveSlackBotConnectionForTool({
+        db: client.db,
+        grant: {
+          ...workspace,
+          subjectId: "subject-a",
+          permissions: ["connections:read"],
+          metadata: {},
+        },
+        sessionId: null,
+      }),
+    ).toMatchObject({ connection: { id: expectedId } });
+
+    const otherWorkspace = await freshWorkspace();
+    const crossTenant = await createConnection(client.db, {
+      accountId: otherWorkspace.accountId,
+      workspaceId: otherWorkspace.workspaceId,
+      subjectId: null,
+      providerDomain: "slack.com",
+      kind: "app_install",
+      credentialEncrypted: "cross-tenant-duplicate-fixture",
+      grantedScopes: [...original.grantedScopes],
+      verifiedInstallAt: new Date(original.verifiedInstallAt!),
+      verifiedInstallVersion: 1,
+      metadata: { ...original.metadata },
+      createdBySubjectId: "subject-a",
+    });
+    expect(ordered.some((connection) => connection.id === crossTenant.id)).toBe(false);
+
+    await createConnection(client.db, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      subjectId: null,
+      providerDomain: "slack.com",
+      kind: "app_install",
+      credentialEncrypted: "different-principal-fixture",
+      grantedScopes: [...original.grantedScopes],
+      verifiedInstallAt: new Date(original.verifiedInstallAt!),
+      verifiedInstallVersion: 1,
+      metadata: { ...original.metadata, botId: "B_OTHER", botUserId: "U_OTHER" },
+      createdBySubjectId: "subject-a",
+    });
+    await expect(
+      resolveSlackBotConnectionForTool({
+        db: client.db,
+        grant: {
+          ...workspace,
+          subjectId: "subject-a",
+          permissions: ["connections:read"],
+          metadata: {},
+        },
+        sessionId: null,
+      }),
+    ).rejects.toThrow("multiple active OpenGeni Slack bot connections");
   });
 
   test("revalidates callback membership before consuming state and rejects replay", async () => {
@@ -2040,6 +2218,7 @@ describe("OpenGeni Slack bot connection", () => {
       ),
     ).toHaveLength(1);
     const deleted = await bot.deleteMessage({
+      operationId: crypto.randomUUID(),
       channelId: "C_MEMBER",
       timestamp: threadedPost.timestamp,
     });
@@ -2047,7 +2226,7 @@ describe("OpenGeni Slack bot connection", () => {
       channelId: "C_MEMBER",
       timestamp: "3.000",
       deleted: true,
-      receipt: { operation: "message.delete" },
+      receipt: { operation: "message.delete", operationId: expect.any(String) },
     });
     expect(slack.calls.find((call) => call.method === "chat.delete")).toMatchObject({
       channel: "C_MEMBER",
@@ -2158,6 +2337,272 @@ describe("OpenGeni Slack bot connection", () => {
     );
     expect(operationAudits.some((audit) => audit.metadata.outcome === "ambiguous")).toBe(true);
     expect(JSON.stringify(operationAudits)).not.toContain("idempotent fixture text");
+  });
+
+  test("reconciles ambiguous delete outcomes without blindly issuing chat.delete twice", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack({ loseFirstDeleteResponse: true });
+    const connected = await connectBot(workspace, slack.fetch);
+    const resolved = await resolveSlackBotConnectionForTool({
+      db: client.db,
+      grant: {
+        ...workspace,
+        subjectId: "subject-a",
+        permissions: ["connections:read"],
+        metadata: {},
+      },
+      sessionId: null,
+      requestedConnectionId: connected.body.connection.id,
+    });
+    const bot = createOpenGeniSlackBotClient(
+      { db: client.db, settings, slackFetch: slack.fetch },
+      resolved,
+    );
+    const operationId = crypto.randomUUID();
+    const request = { operationId, channelId: "C_MEMBER", timestamp: "3.000" };
+
+    await expect(bot.deleteMessage(request)).rejects.toThrow("transport_error");
+    expect(slack.committedDeletes).toContain("C_MEMBER:3.000");
+    expect(
+      await getSlackBotDeleteOperation(
+        client.db,
+        workspace.workspaceId,
+        connected.body.connection.id,
+        operationId,
+      ),
+    ).toMatchObject({
+      status: "outcome_unknown",
+      claimHolderId: null,
+      attemptCount: 1,
+      principalType: "subject",
+      principalId: "subject-a",
+      toolName: "slack_bot_delete_message",
+    });
+
+    const retried = await bot.deleteMessage(request);
+    expect(retried).toMatchObject({
+      channelId: "C_MEMBER",
+      timestamp: "3.000",
+      deleted: true,
+      receipt: { operationId, operation: "message.delete" },
+    });
+    expect(slack.calls.filter((call) => call.method === "chat.delete")).toHaveLength(1);
+    expect(slack.calls.filter((call) => call.method === "chat.getPermalink")).toHaveLength(1);
+
+    const replay = await bot.deleteMessage(request);
+    expect(replay).toEqual(retried);
+    expect(slack.calls.filter((call) => call.method === "chat.delete")).toHaveLength(1);
+    expect(slack.calls.filter((call) => call.method === "chat.getPermalink")).toHaveLength(1);
+    expect(
+      await getSlackBotDeleteOperation(
+        client.db,
+        workspace.workspaceId,
+        connected.body.connection.id,
+        operationId,
+      ),
+    ).toMatchObject({ status: "completed", attemptCount: 2 });
+
+    await expect(bot.deleteMessage({ ...request, timestamp: "4.000" })).rejects.toThrow(
+      "already bound",
+    );
+    const resolvedForOtherSubject = await resolveSlackBotConnectionForTool({
+      db: client.db,
+      grant: {
+        ...workspace,
+        subjectId: "subject-b",
+        permissions: ["connections:read"],
+        metadata: {},
+      },
+      sessionId: null,
+      requestedConnectionId: connected.body.connection.id,
+    });
+    const otherSubjectBot = createOpenGeniSlackBotClient(
+      { db: client.db, settings, slackFetch: slack.fetch },
+      resolvedForOtherSubject,
+    );
+    await expect(otherSubjectBot.deleteMessage(request)).rejects.toThrow("already bound");
+
+    const audits = await shared!.admin<Array<{ metadata: Record<string, unknown> }>>`
+      select metadata from audit_events
+      where workspace_id = ${workspace.workspaceId}
+        and action = 'slack_bot.message.delete'
+        and metadata->>'operationId' = ${operationId}
+      order by occurred_at, id`;
+    expect(audits.filter((audit) => audit.metadata.outcome === "succeeded")).toHaveLength(1);
+    expect(audits.filter((audit) => audit.metadata.outcome === "ambiguous")).toHaveLength(1);
+  });
+
+  test("rechecks an unknown but uncommitted delete before one safe retry", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack({ loseFirstDeleteBeforeCommit: true });
+    const connected = await connectBot(workspace, slack.fetch);
+    const resolved = await resolveSlackBotConnectionForTool({
+      db: client.db,
+      grant: {
+        ...workspace,
+        subjectId: "subject-a",
+        permissions: ["connections:read"],
+        metadata: {},
+      },
+      sessionId: null,
+      requestedConnectionId: connected.body.connection.id,
+    });
+    const bot = createOpenGeniSlackBotClient(
+      { db: client.db, settings, slackFetch: slack.fetch },
+      resolved,
+    );
+    const request = {
+      operationId: crypto.randomUUID(),
+      channelId: "C_MEMBER",
+      timestamp: "5.000",
+    };
+    await expect(bot.deleteMessage(request)).rejects.toThrow("transport_error");
+    expect(slack.committedDeletes).not.toContain("C_MEMBER:5.000");
+    await expect(bot.deleteMessage(request)).resolves.toMatchObject({ deleted: true });
+    expect(slack.calls.filter((call) => call.method === "chat.getPermalink")).toHaveLength(1);
+    expect(slack.calls.filter((call) => call.method === "chat.delete")).toHaveLength(2);
+    expect(slack.committedDeletes).toContain("C_MEMBER:5.000");
+  });
+
+  test("keeps bot-owned-only deletion failures non-completed and retryable", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack({ deleteErrorCode: "cant_delete_message" });
+    const connected = await connectBot(workspace, slack.fetch);
+    const resolved = await resolveSlackBotConnectionForTool({
+      db: client.db,
+      grant: {
+        ...workspace,
+        subjectId: "subject-a",
+        permissions: ["connections:read"],
+        metadata: {},
+      },
+      sessionId: null,
+      requestedConnectionId: connected.body.connection.id,
+    });
+    const bot = createOpenGeniSlackBotClient(
+      { db: client.db, settings, slackFetch: slack.fetch },
+      resolved,
+    );
+    const operationId = crypto.randomUUID();
+    await expect(
+      bot.deleteMessage({ operationId, channelId: "C_MEMBER", timestamp: "6.000" }),
+    ).rejects.toThrow("cant_delete_message");
+    expect(
+      await getSlackBotDeleteOperation(
+        client.db,
+        workspace.workspaceId,
+        connected.body.connection.id,
+        operationId,
+      ),
+    ).toMatchObject({ status: "pending", lastFailureCode: "cant_delete_message" });
+  });
+
+  test("fences in-flight delete claims by tenant, principal, connection, tool, and request", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const connected = await connectBot(workspace, fakeSlack().fetch);
+    const otherConnection = await connectBot(
+      workspace,
+      fakeSlack({ botId: "B_OTHER", botUserId: "U_OTHER" }).fetch,
+    );
+    const operationId = crypto.randomUUID();
+    const firstHolder = crypto.randomUUID();
+    const baseClaim = {
+      ...workspace,
+      connectionId: connected.body.connection.id,
+      operationId,
+      principalType: "subject" as const,
+      principalId: "subject-a",
+      toolName: "slack_bot_delete_message" as const,
+      channelId: "C_MEMBER",
+      messageTimestamp: "7.000",
+      requestDigest: "b".repeat(64),
+      claimLeaseMs: 30_000,
+    };
+    expect(
+      await claimSlackBotDeleteOperation(client.db, {
+        ...baseClaim,
+        claimHolderId: firstHolder,
+      }),
+    ).toMatchObject({ kind: "claimed", operation: { attemptCount: 1 } });
+    expect(
+      await claimSlackBotDeleteOperation(client.db, {
+        ...baseClaim,
+        claimHolderId: crypto.randomUUID(),
+      }),
+    ).toMatchObject({ kind: "in_progress" });
+    expect(
+      await claimSlackBotDeleteOperation(client.db, {
+        ...baseClaim,
+        principalId: "subject-b",
+        claimHolderId: crypto.randomUUID(),
+      }),
+    ).toEqual({ kind: "conflict" });
+    expect(
+      await claimSlackBotDeleteOperation(client.db, {
+        ...baseClaim,
+        toolName: "different_tool" as never,
+        claimHolderId: crypto.randomUUID(),
+      }),
+    ).toEqual({ kind: "conflict" });
+    expect(
+      await claimSlackBotDeleteOperation(client.db, {
+        ...baseClaim,
+        connectionId: otherConnection.body.connection.id,
+        claimHolderId: crypto.randomUUID(),
+      }),
+    ).toEqual({ kind: "conflict" });
+
+    const otherWorkspace = await freshWorkspace();
+    expect(
+      await claimSlackBotDeleteOperation(client.db, {
+        ...baseClaim,
+        ...otherWorkspace,
+        claimHolderId: crypto.randomUUID(),
+      }),
+    ).toEqual({ kind: "connection_not_found" });
+    expect(
+      await getSlackBotDeleteOperation(
+        client.db,
+        otherWorkspace.workspaceId,
+        connected.body.connection.id,
+        operationId,
+      ),
+    ).toBeNull();
+
+    expect(
+      await markSlackBotDeleteOperationProviderStarted(client.db, {
+        ...workspace,
+        connectionId: connected.body.connection.id,
+        operationId,
+        claimHolderId: firstHolder,
+      }),
+    ).toBe(true);
+    await shared!.admin`
+      update slack_bot_delete_operations
+      set claim_expires_at = now() - interval '1 second'
+      where workspace_id = ${workspace.workspaceId}
+        and operation_id = ${operationId}`;
+    const reclaimHolder = crypto.randomUUID();
+    expect(
+      await claimSlackBotDeleteOperation(client.db, {
+        ...baseClaim,
+        claimHolderId: reclaimHolder,
+      }),
+    ).toMatchObject({ kind: "reconcile", operation: { attemptCount: 2 } });
+    expect(
+      await releaseSlackBotDeleteOperationClaim(client.db, {
+        ...workspace,
+        connectionId: connected.body.connection.id,
+        operationId,
+        claimHolderId: reclaimHolder,
+        outcomeUnknown: true,
+        failureCode: "reconcile_fixture",
+      }),
+    ).toBe(true);
   });
 
   test("reclaims a crashed post claim and keeps operation rows tenant-isolated", async () => {

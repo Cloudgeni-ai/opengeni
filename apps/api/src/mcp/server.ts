@@ -1007,15 +1007,18 @@ function registerSlackBotTools(
     "slack_bot_delete_message",
     {
       description:
-        "Delete a message authored by the workspace-shared OpenGeni bot. Pass the channel ID and exact message timestamp returned by a prior post or channel/thread read. Slack refuses deletion of messages not authored by this bot.",
+        "Delete a message authored by the workspace-shared OpenGeni bot. Pass the channel ID and exact message timestamp returned by a prior post or channel/thread read. Generate one operationId UUID per intended deletion and reuse it on every retry, including after an unknown outcome. Slack refuses deletion of messages not authored by this bot.",
       inputSchema: {
         connectionId: z4.string().uuid().optional(),
+        operationId: z4.string().uuid(),
         channelId: z4.string().min(1).max(64),
         timestamp: z4.string().min(1).max(64),
       },
     },
-    async ({ connectionId, channelId, timestamp }) =>
-      json(await (await clientFor(connectionId)).deleteMessage({ channelId, timestamp })),
+    async ({ connectionId, operationId, channelId, timestamp }) =>
+      json(
+        await (await clientFor(connectionId)).deleteMessage({ operationId, channelId, timestamp }),
+      ),
   );
 }
 

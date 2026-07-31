@@ -2,8 +2,7 @@ import type { ConnectionMetadata } from "@/types";
 import {
   OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
   OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
-  OPENGENI_SLACK_BOT_FORBIDDEN_SCOPES,
-  OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
+  evaluateOpenGeniSlackBotScopes,
 } from "@opengeni/contracts";
 
 export type OpenGeniSlackBotUiMetadata = {
@@ -18,15 +17,13 @@ export function openGeniSlackBotUiMetadata(
   connection: ConnectionMetadata,
 ): OpenGeniSlackBotUiMetadata | null {
   const metadata = connection.metadata;
-  const grantedScopes = new Set(connection.grantedScopes);
   if (
     connection.verifiedInstallAt == null ||
     connection.verifiedInstallVersion !== connection.version ||
     connection.subjectId !== null ||
     connection.providerDomain !== "slack.com" ||
     connection.kind !== "app_install" ||
-    !OPENGENI_SLACK_BOT_REQUIRED_SCOPES.every((scope) => grantedScopes.has(scope)) ||
-    OPENGENI_SLACK_BOT_FORBIDDEN_SCOPES.some((scope) => grantedScopes.has(scope)) ||
+    !evaluateOpenGeniSlackBotScopes(connection.grantedScopes).accepted ||
     metadata.credentialRole !== OPENGENI_SLACK_BOT_CREDENTIAL_ROLE ||
     metadata.credentialLabel !== OPENGENI_SLACK_BOT_CREDENTIAL_LABEL ||
     typeof metadata.slackTeamId !== "string" ||
