@@ -1,5 +1,5 @@
 import { describe, expect, mock, spyOn, test } from "bun:test";
-import { CancelledFailure } from "@temporalio/activity";
+import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
 import { RunRawModelStreamEvent, Usage } from "@openai/agents-core";
 import { ModelItem } from "@openai/agents-core/types";
 import type { Settings } from "@opengeni/config";
@@ -46,6 +46,7 @@ import {
   drainAttemptOwnedSandboxWriters,
   emitModelCallUsage,
   ensureTurnModalRegistryImage,
+  escapedMcpTimeoutRecoveryFailure,
   filterUnmaterializedSandboxFileDownloads,
   headerSecretRedactions,
   historyRowsToAppend,
@@ -2676,6 +2677,47 @@ describe("escaped MCP transport timeout classifier", () => {
     ).toBeNull();
     expect(classifyMcpTransportTimeoutError(new Error("sandbox creation timed out"))).toBeNull();
     expect(classifyMcpTransportTimeoutError(new Error("Too Many Requests"))).toBeNull();
+  });
+
+  test("emits a typed workflow recovery obligation only before a generation-2 model request", () => {
+    const detail = {
+      turnId: "turn-2",
+      triggerEventId: "trigger-1",
+      executionGeneration: 2,
+    };
+    const escaped = escapedMcpTimeoutRecoveryFailure({
+      failureCode: "mcp_transport_timeout",
+      modelRequestStarted: false,
+      detail,
+    });
+    expect(escaped).toBeInstanceOf(ApplicationFailure);
+    expect(escaped).toMatchObject({
+      type: "EscapedMcpTimeoutRecoveryFailure",
+      nonRetryable: true,
+      details: [detail],
+    });
+
+    expect(
+      escapedMcpTimeoutRecoveryFailure({
+        failureCode: "mcp_transport_timeout",
+        modelRequestStarted: false,
+        detail: { ...detail, executionGeneration: 1 },
+      }),
+    ).toBeNull();
+    expect(
+      escapedMcpTimeoutRecoveryFailure({
+        failureCode: "mcp_transport_timeout",
+        modelRequestStarted: true,
+        detail,
+      }),
+    ).toBeNull();
+    expect(
+      escapedMcpTimeoutRecoveryFailure({
+        failureCode: "provider_unavailable",
+        modelRequestStarted: false,
+        detail,
+      }),
+    ).toBeNull();
   });
 });
 
