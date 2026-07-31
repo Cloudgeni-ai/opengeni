@@ -1,5 +1,21 @@
 # @opengeni/api-router
 
+## 0.13.5
+
+### Patch Changes
+
+- e19ba28: Prefer dynamic client registration for Linear MCP authorization when Linear advertises both DCR and Client ID Metadata Documents.
+- Updated dependencies [710b081]
+  - @opengeni/core@0.13.9
+  - @opengeni/contracts@0.24.3
+  - @opengeni/config@0.7.19
+  - @opengeni/db@0.15.5
+  - @opengeni/documents@0.2.55
+  - @opengeni/events@0.3.46
+  - @opengeni/github@0.4.6
+  - @opengeni/runtime@0.14.11
+  - @opengeni/storage@0.2.43
+
 ## 0.13.4
 
 ### Patch Changes

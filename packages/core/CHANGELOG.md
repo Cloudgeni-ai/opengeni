@@ -1,5 +1,19 @@
 # @opengeni/core
 
+## 0.13.9
+
+### Patch Changes
+
+- 710b081: Keep sessions usable when a previously selected MCP capability is disconnected or removed. Unavailable historical refs remain visible in effective policy but are omitted from executable tools, and the agent receives a bounded turn-level warning not to claim access to the missing source.
+- Updated dependencies [710b081]
+  - @opengeni/contracts@0.24.3
+  - @opengeni/config@0.7.19
+  - @opengeni/db@0.15.5
+  - @opengeni/documents@0.2.55
+  - @opengeni/events@0.3.46
+  - @opengeni/runtime@0.14.11
+  - @opengeni/storage@0.2.43
+
 ## 0.13.8
 
 ### Patch Changes
