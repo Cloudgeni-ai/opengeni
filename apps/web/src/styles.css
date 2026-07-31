@@ -268,3 +268,8 @@ body {
 .pending-dot {
   animation: pending-dot 1.2s infinite ease-in-out both;
 }
+
+/* Workspace Insights — tabular figures for meter columns */
+[data-insights] {
+  font-feature-settings: "cv11", "ss01", "ss03", "tnum";
+}
