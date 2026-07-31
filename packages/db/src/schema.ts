@@ -4165,6 +4165,102 @@ export const usageEvents = pgTable(
   }),
 );
 
+/**
+ * Per model-call Insights facts. Additive observability only — never the billing
+ * ledger. Written after an authoritative `agent.model.usage` emit.
+ */
+export const modelCallFacts = pgTable(
+  "model_call_facts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id").notNull(),
+    turnId: uuid("turn_id").notNull(),
+    turnAttemptId: uuid("turn_attempt_id"),
+    sourceKey: text("source_key").notNull(),
+    provider: text("provider").notNull(),
+    providerApi: text("provider_api").notNull(),
+    model: text("model").notNull(),
+    billingPath: text("billing_path").notNull(),
+    turnSource: text("turn_source"),
+    initiatorKind: text("initiator_kind"),
+    initiatorSubjectId: text("initiator_subject_id"),
+    scheduledTaskId: uuid("scheduled_task_id"),
+    inputTokens: bigint("input_tokens", { mode: "number" }),
+    outputTokens: bigint("output_tokens", { mode: "number" }),
+    cachedTokens: bigint("cached_tokens", { mode: "number" }),
+    cacheWriteTokens: bigint("cache_write_tokens", { mode: "number" }),
+    reasoningTokens: bigint("reasoning_tokens", { mode: "number" }),
+    totalTokens: bigint("total_tokens", { mode: "number" }),
+    pricedCostMicros: bigint("priced_cost_micros", { mode: "number" }).notNull().default(0),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+    recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceTurnSource: uniqueIndex("model_call_facts_workspace_turn_source_uq").on(
+      table.workspaceId,
+      table.turnId,
+      table.sourceKey,
+    ),
+    workspaceOccurred: index("model_call_facts_workspace_occurred_idx").on(
+      table.workspaceId,
+      table.occurredAt,
+    ),
+    workspaceProviderModelOccurred: index(
+      "model_call_facts_workspace_provider_model_occurred_idx",
+    ).on(table.workspaceId, table.provider, table.model, table.occurredAt),
+    workspaceSessionOccurred: index("model_call_facts_workspace_session_occurred_idx").on(
+      table.workspaceId,
+      table.sessionId,
+      table.occurredAt,
+    ),
+    workspaceScheduledTaskOccurred: index("model_call_facts_workspace_scheduled_task_occurred_idx")
+      .on(table.workspaceId, table.scheduledTaskId, table.occurredAt)
+      .where(sql`${table.scheduledTaskId} is not null`),
+    workspaceAccount: foreignKey({
+      name: "model_call_facts_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    billingPathValid: check(
+      "model_call_facts_billing_path_check",
+      sql`${table.billingPath} in ('opengeni_credits', 'external')`,
+    ),
+    pricedCostNonNegative: check(
+      "model_call_facts_priced_cost_check",
+      sql`${table.pricedCostMicros} >= 0`,
+    ),
+    initiatorConsistent: check(
+      "model_call_facts_initiator_check",
+      sql`(${table.initiatorKind} is null and ${table.initiatorSubjectId} is null)
+        or (${table.initiatorKind} in ('subject', 'service')
+          and ${table.initiatorSubjectId} is not null
+          and octet_length(${table.initiatorSubjectId}) between 1 and 1024)`,
+    ),
+    sourceKeyBytes: check(
+      "model_call_facts_source_key_bytes_check",
+      sql`octet_length(${table.sourceKey}) between 1 and 1024`,
+    ),
+    providerBytes: check(
+      "model_call_facts_provider_bytes_check",
+      sql`octet_length(${table.provider}) between 1 and 256`,
+    ),
+    providerApiBytes: check(
+      "model_call_facts_provider_api_bytes_check",
+      sql`octet_length(${table.providerApi}) between 1 and 256`,
+    ),
+    modelBytes: check(
+      "model_call_facts_model_bytes_check",
+      sql`octet_length(${table.model}) between 1 and 512`,
+    ),
+  }),
+);
+
 /** Singleton, migration-installed gate. Standalone defaults keep both off. */
 export const hostExportConfig = pgTable(
   "host_export_config",

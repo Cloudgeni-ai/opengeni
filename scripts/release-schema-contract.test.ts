@@ -158,12 +158,13 @@ describe("release schema contract", () => {
         (migrations.has("0141_slack_bot_delete_idempotency.sql") ? 1 : 0) +
         (migrations.has("0142_sandbox_archive_capture_gate.sql") ? 1 : 0) +
         (migrations.has("0143_session_codex_compaction_mode.sql") ? 1 : 0) +
-        (migrations.has("0144_sandbox_viewer_force_drain_gate.sql") ? 1 : 0),
+        (migrations.has("0144_sandbox_viewer_force_drain_gate.sql") ? 1 : 0) +
+        (migrations.has("0145_model_call_facts.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "0492d26b8cac9f0c0ee0c68cb3fce794b293db638e3381f4a4280cacb90f5244",
+      "22013ed9478981fc7fd9c97d3beec264198f4e8a82de61f9dbb23960ca8d82a2",
     );
-    expect(contract.latestMigration).toBe("0144_sandbox_viewer_force_drain_gate.sql");
+    expect(contract.latestMigration).toBe("0145_model_call_facts.sql");
     expect(migrations.get("0128_github_installation_authority.sql")).toMatchObject({
       sha256: "365793b2a204a70e214adb90298b522acbb6dcfae22a46681a58f41a6938e6f0",
       deploymentMode: "rolling",
@@ -243,6 +244,7 @@ describe("release schema contract", () => {
       "0142_sandbox_archive_capture_gate.sql",
       "0143_session_codex_compaction_mode.sql",
       "0144_sandbox_viewer_force_drain_gate.sql",
+      "0145_model_call_facts.sql",
     ]);
     expect(migrations.get("0143_session_codex_compaction_mode.sql")).toMatchObject({
       sha256: "574cfe6fc5ab24135e84d3932fd936e134ebe28bce8ac3cb5db97a549683906f",
@@ -358,6 +360,10 @@ describe("release schema contract", () => {
     expect(migrations.get("0144_sandbox_viewer_force_drain_gate.sql")).toMatchObject({
       sha256: "0b03627860a310eb27caa94cf7f67d614f0198a7a01d36b383c7874edba41b38",
       deploymentMode: "maintenance",
+    });
+    expect(migrations.get("0145_model_call_facts.sql")).toMatchObject({
+      sha256: "93bb3f262f465ca2128b6dadc5e166bfdc78ded610e57a803ce1d3e6a8599dde",
+      deploymentMode: "rolling",
     });
   });
 });

@@ -42,6 +42,7 @@ import {
   countConsecutiveReactiveRotations,
   requireSession,
   recordUsageEvent,
+  recordModelCallFact,
   registerPendingSessionToolCall,
   recordPendingSessionToolCallResult,
   clearDurablePendingSessionToolCalls,
@@ -1127,7 +1128,7 @@ export async function processModelResponseUsageEvent(input: {
     leaseLost: input.leaseLost,
     leaseLostMessage: input.leaseLostMessage,
     recordUsage: async () => {
-      await recordModelUsageAndDebitCredits(input.settings, input.db, {
+      const billing = await recordModelUsageAndDebitCredits(input.settings, input.db, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
@@ -1157,6 +1158,22 @@ export async function processModelResponseUsageEvent(input: {
         accountChangedFromPrevCall: accountContext.accountChangedFromPrevCall,
         emittedSourceKeys: input.emittedSourceKeys,
       });
+      if (authoritative && billing) {
+        await recordAuthoritativeModelCallFact({
+          db: input.db,
+          observability: input.observability,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          turnAttemptId: input.turnAttemptId,
+          sourceKey,
+          provider: input.provider,
+          providerApi: input.providerApi,
+          model: input.model,
+          billing,
+        });
+      }
       const observedInput = normalizedUsage.telemetry.inputTokens;
       if (authoritative && observedInput !== null && observedInput > 0) {
         recordModelInputTokens(input.observability, input.metricProvider, observedInput);
@@ -1236,7 +1253,7 @@ export async function processCompactionModelUsageEvent(input: {
     leaseLost: input.leaseLost,
     leaseLostMessage: input.leaseLostMessage,
     recordUsage: async () => {
-      await recordModelUsageAndDebitCredits(input.settings, input.db, {
+      const billing = await recordModelUsageAndDebitCredits(input.settings, input.db, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
@@ -1266,6 +1283,22 @@ export async function processCompactionModelUsageEvent(input: {
         accountChangedFromPrevCall: accountContext.accountChangedFromPrevCall,
         emittedSourceKeys: input.emittedSourceKeys,
       });
+      if (authoritative && billing) {
+        await recordAuthoritativeModelCallFact({
+          db: input.db,
+          observability: input.observability,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          turnAttemptId: input.turnAttemptId,
+          sourceKey,
+          provider: input.provider,
+          providerApi: input.providerApi,
+          model: input.model,
+          billing,
+        });
+      }
     },
   });
   return { status: "processed", sourceKey, authoritative };
@@ -6399,7 +6432,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               leaseLost: () => codexLeaseLost,
               leaseLostMessage: "Codex credential lease expired during the active turn",
               recordUsage: async () => {
-                await recordModelUsageAndDebitCredits(settings, db, {
+                const billing = await recordModelUsageAndDebitCredits(settings, db, {
                   accountId: input.accountId,
                   workspaceId: input.workspaceId,
                   sessionId: input.sessionId,
@@ -6412,6 +6445,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   sourceKey: aggregateSourceKey,
                   observability,
                 });
+                const aggregateProvider = resolvedModel?.provider.id ?? settings.openaiProvider;
+                const aggregateProviderApi = resolvedModel?.provider.api ?? "responses";
                 aggregateAuthoritative = await emitModelCallUsage({
                   observability,
                   publish,
@@ -6419,8 +6454,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   workspaceId: input.workspaceId,
                   sessionId: input.sessionId,
                   turnId: activeTurnId,
-                  provider: resolvedModel?.provider.id ?? settings.openaiProvider,
-                  providerApi: resolvedModel?.provider.api ?? "responses",
+                  provider: aggregateProvider,
+                  providerApi: aggregateProviderApi,
                   model: turn.model,
                   sourceKey: aggregateSourceKey,
                   usage: { usage: aggregateUsage },
@@ -6429,6 +6464,22 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   accountChangedFromPrevCall: aggregateAccountCtx.accountChangedFromPrevCall,
                   emittedSourceKeys: emittedModelUsageSourceKeys,
                 });
+                if (aggregateAuthoritative && billing) {
+                  await recordAuthoritativeModelCallFact({
+                    db,
+                    observability,
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: input.sessionId,
+                    turnId: activeTurnId,
+                    turnAttemptId: input.attemptId,
+                    sourceKey: aggregateSourceKey,
+                    provider: aggregateProvider,
+                    providerApi: aggregateProviderApi,
+                    model: turn.model,
+                    billing,
+                  });
+                }
                 if (aggregateAuthoritative && aggregateInput !== null && aggregateInput > 0) {
                   recordModelInputTokens(observability, streamProvider, aggregateInput);
                 }
@@ -8816,6 +8867,13 @@ export async function ensureRunAllowed(
   }
 }
 
+export type ModelUsageBillingRecord = {
+  billingPath: "opengeni_credits" | "external";
+  /** Same quantity written to usage_events.model.cost when present; else 0. */
+  pricedCostMicros: number;
+  normalizedUsage: ModelCallUsageNormalization;
+};
+
 // Exported for unit testing the external-billing bypass; not part of the activity surface.
 export async function recordModelUsageAndDebitCredits(
   settings: Settings,
@@ -8833,9 +8891,9 @@ export async function recordModelUsageAndDebitCredits(
     sourceKey: string;
     observability?: ActivityServices["observability"];
   },
-): Promise<void> {
+): Promise<ModelUsageBillingRecord | null> {
   if (!input.usage) {
-    return;
+    return null;
   }
   const normalizedUsage = input.normalizedUsage ?? normalizeModelCallUsage(input.usage);
   const sanitizedUsage = sanitizedModelUsageInput(normalizedUsage);
@@ -8865,7 +8923,11 @@ export async function recordModelUsageAndDebitCredits(
       turnAttemptId: input.turnAttemptId,
       idempotencyKey: `usage:model.cost:${input.turnId}:${input.sourceKey}`,
     });
-    return;
+    return {
+      billingPath: "external",
+      pricedCostMicros: 0,
+      normalizedUsage,
+    };
   }
   if (totalTokens > 0) {
     await recordUsageEvent(db, {
@@ -8884,7 +8946,11 @@ export async function recordModelUsageAndDebitCredits(
   }
   const shouldDebit = settings.billingMode === "stripe" || settings.usageLimitsMode === "managed";
   if (!shouldDebit || totalTokens === 0) {
-    return;
+    return {
+      billingPath: "opengeni_credits",
+      pricedCostMicros: 0,
+      normalizedUsage,
+    };
   }
   if (!configuredModelPricing(settings)[input.model]) {
     throw new Error(`Missing model pricing for ${input.model}`);
@@ -8927,6 +8993,59 @@ export async function recordModelUsageAndDebitCredits(
       },
     });
     recordCreditMicros(input.observability, "usage", result.debitedMicros);
+  }
+  return {
+    billingPath: "opengeni_credits",
+    pricedCostMicros: costMicros,
+    normalizedUsage,
+  };
+}
+
+/** Soft-fail Insights fact write — never throws into the billing/emit path. */
+export async function recordAuthoritativeModelCallFact(input: {
+  db: ActivityServices["db"];
+  observability: ActivityServices["observability"];
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  turnAttemptId: string;
+  sourceKey: string;
+  provider: string;
+  providerApi: ModelProviderApi;
+  model: string;
+  billing: ModelUsageBillingRecord;
+}): Promise<void> {
+  try {
+    const telemetry = input.billing.normalizedUsage.telemetry;
+    await recordModelCallFact(input.db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      turnAttemptId: input.turnAttemptId,
+      sourceKey: input.sourceKey,
+      provider: input.provider,
+      providerApi: input.providerApi,
+      model: input.model,
+      billingPath: input.billing.billingPath,
+      pricedCostMicros: input.billing.pricedCostMicros,
+      inputTokens: telemetry.inputTokens,
+      outputTokens: telemetry.outputTokens,
+      cachedTokens: telemetry.cachedTokens,
+      cacheWriteTokens: telemetry.cacheWriteTokens,
+      reasoningTokens: telemetry.reasoningTokens,
+      totalTokens: input.billing.normalizedUsage.totalTokens,
+    });
+  } catch (error) {
+    input.observability.warn("model call fact persist failed", {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      sourceKey: input.sourceKey,
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
 }
 

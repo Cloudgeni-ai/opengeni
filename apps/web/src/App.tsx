@@ -14,6 +14,7 @@
 //   /workspaces/:id/schedules                → scheduled tasks + run history
 //   /workspaces/:id/documents                → document bases + search
 //   /workspaces/:id/memory                   → durable workspace memory
+//   /workspaces/:id/insights                 → workspace insights (admin usage rollup)
 //   /workspaces/:id/settings                 → workspace settings (name, API keys, danger zone)
 //   /workspaces/:id/organization             → organization settings (billing, usage, plan, members)
 //   /workspaces/:id/account                  → legacy redirect to /organization
@@ -47,6 +48,7 @@ const LazyVariableSetsRoute = lazyRouteComponent(
   "VariableSetsRoute",
 );
 const LazyMachinesRoute = lazyRouteComponent(() => import("@/routes/machines"), "MachinesRoute");
+const LazyInsightsRoute = lazyRouteComponent(() => import("@/routes/insights"), "InsightsRoute");
 const LazyOrgSettingsRoute = lazyRouteComponent(
   () => import("@/routes/org-settings"),
   "OrgSettingsRoute",
@@ -195,6 +197,11 @@ const workspaceMachinesRoute = createRoute({
   path: "machines",
   component: Machines,
 });
+const workspaceInsightsRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "insights",
+  component: Insights,
+});
 // Legacy standalone Packs route: packs are now a subsection of Capabilities,
 // so this redirects there (focusing the Packs subsection) instead of mounting
 // a separate page.
@@ -286,6 +293,7 @@ const routeTree = rootRoute.addChildren([
     workspaceRigsRoute,
     workspaceRigDetailRoute,
     workspaceMachinesRoute,
+    workspaceInsightsRoute,
     workspacePacksRoute,
     workspaceCapabilitiesRoute,
     workspaceSchedulesRoute,
@@ -374,6 +382,11 @@ function RigDetail() {
 function Machines() {
   const { workspaceId } = workspaceMachinesRoute.useParams();
   return <LazyMachinesRoute workspaceId={workspaceId} />;
+}
+
+function Insights() {
+  const { workspaceId } = workspaceInsightsRoute.useParams();
+  return <LazyInsightsRoute workspaceId={workspaceId} />;
 }
 
 function PacksRedirect() {
