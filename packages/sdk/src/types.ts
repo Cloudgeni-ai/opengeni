@@ -418,6 +418,62 @@ export type OpenGeniSlackBotInstallStart = {
   expiresAt: string;
 };
 
+export type GoogleDriveTargetScope = "user" | "workspace" | "organization";
+
+export type GoogleDriveSelectedSource = {
+  id: string;
+  name: string;
+  mimeType: string;
+  driveId: string | null;
+  targetScope: GoogleDriveTargetScope;
+  selectedAt: string;
+};
+
+export type GoogleDriveConnectionMetadata = {
+  credentialRole: "google_drive_metadata";
+  credentialLabel: "Google Drive metadata browser";
+  googlePermissionId: string;
+  googleEmail: string;
+  googleDisplayName: string | null;
+  verifiedAt: string;
+  accessMode: "metadata_readonly";
+  selectedSource?: GoogleDriveSelectedSource | null | undefined;
+  [key: string]: unknown;
+};
+
+export type GoogleDriveOAuthStartRequest = {
+  connectionId?: string | undefined;
+};
+
+export type GoogleDriveOAuthStartResponse = {
+  authorizationUrl: string;
+  expiresAt: string;
+};
+
+export type GoogleDriveBrowseItem = {
+  id: string;
+  name: string;
+  mimeType: string;
+  kind: "folder" | "file";
+  driveId: string | null;
+  modifiedTime: string | null;
+  size: string | null;
+  webViewLink: string | null;
+};
+
+export type GoogleDriveBrowseResponse = {
+  connection: ConnectionMetadata;
+  parentId: string;
+  items: GoogleDriveBrowseItem[];
+  nextPageToken: string | null;
+  incompleteSearch: boolean;
+};
+
+export type SaveGoogleDriveSourceRequest = {
+  source: Pick<GoogleDriveBrowseItem, "id" | "name" | "mimeType" | "driveId">;
+  targetScope: GoogleDriveTargetScope;
+};
+
 export type UpdateConnectionRequest = {
   providerDomain?: string | undefined;
   subjectId?: string | null | undefined;

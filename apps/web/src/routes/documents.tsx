@@ -16,6 +16,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { LoadErrorState, PageHeader } from "@/components/common";
+import { GoogleDriveSourceCard } from "@/components/knowledge/google-drive-source-card";
 import { Button } from "@/components/ui/button";
 import { ContentPage, FormField, FormGrid } from "@/components/ui/content-layout";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -427,6 +428,8 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
             </div>
           }
         />
+
+        <GoogleDriveSourceCard workspaceId={workspaceId} />
 
         <div
           className="mt-5 rounded-lg border border-dashed border-border bg-surface/25 p-3"

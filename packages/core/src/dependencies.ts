@@ -110,6 +110,8 @@ export type AppDependencies = {
   codexFetch?: typeof fetch;
   /** Injectable Slack Web API transport for deterministic bot-connection tests. */
   slackFetch?: typeof fetch;
+  /** Injectable Google OAuth/Drive transport for deterministic connector tests. */
+  googleDriveFetch?: typeof fetch;
   // The API process's OWN agent-loop-free sandbox client (constructed from
   // settings via @opengeni/runtime/sandbox). Undefined when sandboxBackend=none.
   // This is the foundation of the API-direct control plane: the API resumes

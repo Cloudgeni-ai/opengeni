@@ -79,6 +79,9 @@ import type {
   GetPackResponse,
   GitHubAppInfo,
   GitHubRepositoriesResponse,
+  GoogleDriveBrowseResponse,
+  GoogleDriveOAuthStartRequest,
+  GoogleDriveOAuthStartResponse,
   KnowledgeMemory,
   KnowledgeMemorySearchRequest,
   ListApiKeysResponse,
@@ -98,6 +101,7 @@ import type {
   RetainedArtifactMetadata,
   RegisterCapabilityPackRequest,
   ResourceRef,
+  SaveGoogleDriveSourceRequest,
   ScheduledTask,
   ScheduledTaskRun,
   Session,
@@ -2751,6 +2755,49 @@ export class OpenGeniClient {
       `/v1/workspaces/${workspaceId}/connections/slack-bot/install`,
       request,
     );
+  }
+
+  /** Start the dedicated Google Drive metadata-only OAuth flow. */
+  async startGoogleDriveConnection(
+    workspaceId: string,
+    request: GoogleDriveOAuthStartRequest = {},
+  ): Promise<GoogleDriveOAuthStartResponse> {
+    return await this.requestJson<GoogleDriveOAuthStartResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/connections/google-drive/install`,
+      request,
+    );
+  }
+
+  /** Browse one bounded page of Drive metadata. No file content is downloaded. */
+  async browseGoogleDrive(
+    workspaceId: string,
+    connectionId: string,
+    options: { parentId?: string; pageToken?: string } = {},
+  ): Promise<GoogleDriveBrowseResponse> {
+    return await this.requestJson<GoogleDriveBrowseResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/connections/google-drive/${connectionId}/browse`,
+      undefined,
+      {
+        ...(options.parentId ? { parentId: options.parentId } : {}),
+        ...(options.pageToken ? { pageToken: options.pageToken } : {}),
+      },
+    );
+  }
+
+  /** Save connector configuration only. This does not create or ingest a knowledge source. */
+  async saveGoogleDriveSource(
+    workspaceId: string,
+    connectionId: string,
+    request: SaveGoogleDriveSourceRequest,
+  ): Promise<ConnectionMetadata> {
+    const response = await this.requestJson<ConnectionResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/connections/google-drive/${connectionId}/source`,
+      request,
+    );
+    return response.connection;
   }
 
   async updateConnection(
