@@ -1,5 +1,23 @@
 # @opengeni/db
 
+## 0.16.0
+
+### Minor Changes
+
+- f413e6c: Add real Workspace Insights: durable `model_call_facts` after authoritative
+  `agent.model.usage`, a `workspace:admin` insights API over usage_events + facts +
+  live joins, SDK client, and a web console that drops mock rollups for honest
+  UTC credit/token/cache/warm/caps reporting.
+
+### Patch Changes
+
+- b5175a8: Move the unapplied Slack delete-operation migration after the already-deployed
+  sandbox migration history, while accepting only the exact legacy staging
+  receipt for an idempotent replay.
+- Updated dependencies [f413e6c]
+  - @opengeni/contracts@0.26.0
+  - @opengeni/config@0.7.21
+
 ## 0.15.6
 
 ### Patch Changes
