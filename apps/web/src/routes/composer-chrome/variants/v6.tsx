@@ -1,4 +1,4 @@
-// 6 · Lumen — one liquid-glass rail: queue · incoming · goal · agents.
+// 6 · Glass — one liquid-glass rail: queue · incoming · goal · agents.
 // Compact, sleek, motion-forward. ChatComposer stays production.
 import { ChatComposer, type ComposerState } from "@opengeni/react";
 import type {
@@ -50,7 +50,7 @@ import type { VariantMeta } from "../variant-meta";
 
 export const variantMeta: VariantMeta = {
   id: 6,
-  name: "Lumen",
+  name: "Glass",
 };
 
 const VOICE_CAPABILITY: ClientVoiceInputConfig = {

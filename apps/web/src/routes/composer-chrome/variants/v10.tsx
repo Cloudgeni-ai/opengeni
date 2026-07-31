@@ -380,36 +380,31 @@ function SilkChrome({ scenario }: { scenario: ChromeScenario }) {
 
         <div className={cn("v10-drawer", open && "is-open")} aria-hidden={!open}>
           <div className="v10-drawer-inner">
-            {(panel === "goal" || (!panel && hasGoal)) && record ? (
-              <GoalPanel goal={goal} state={goalState!} elapsed={elapsed} onToggle={() => void onGoalToggle()} busy={busy} />
+            {open && (panel === "goal" || panel === null) && record ? (
+              <GoalPanel
+                goal={goal}
+                state={goalState!}
+                elapsed={elapsed}
+                onToggle={() => void onGoalToggle()}
+                busy={busy}
+              />
             ) : null}
-            {(panel === "queue" || (!panel && !hasGoal && hasQueue)) && hasQueue ? (
+            {open &&
+            (panel === "queue" ||
+              (panel === "goal" && hasQueue) ||
+              (panel === null && !hasGoal && hasQueue)) ? (
               <QueuePanel
                 queue={queue}
                 pending={pending}
                 onRemove={(id) => void scenario.queue.removeTurn(id)}
+                compact={panel === "goal"}
               />
             ) : null}
-            {(panel === "agents" || (!panel && !hasGoal && !hasQueue && hasAgents)) && hasAgents ? (
-              <AgentsPanel nodes={agents} />
-            ) : null}
-            {open && panel === null && hasGoal && hasQueue ? (
-              <QueuePanel
-                queue={queue}
-                pending={pending}
-                onRemove={(id) => void scenario.queue.removeTurn(id)}
-              />
-            ) : null}
-            {open && panel === "goal" && hasQueue ? (
-              <QueuePanel
-                queue={queue}
-                pending={pending}
-                onRemove={(id) => void scenario.queue.removeTurn(id)}
-                compact
-              />
-            ) : null}
-            {open && (panel === "goal" || panel === "queue") && hasAgents ? (
-              <AgentsPanel nodes={agents} compact />
+            {open &&
+            (panel === "agents" ||
+              ((panel === "goal" || panel === "queue") && hasAgents) ||
+              (panel === null && !hasGoal && !hasQueue && hasAgents)) ? (
+              <AgentsPanel nodes={agents} compact={panel === "goal" || panel === "queue"} />
             ) : null}
           </div>
         </div>
