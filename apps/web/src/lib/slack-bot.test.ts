@@ -3,6 +3,7 @@ import {
   OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
   OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
   OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
+  OPENGENI_SLACK_BOT_SAFE_OPTIONAL_SCOPES,
 } from "@opengeni/contracts";
 import type { ConnectionMetadata } from "@/types";
 import {
@@ -49,10 +50,18 @@ function connection(overrides: Partial<ConnectionMetadata> = {}): ConnectionMeta
 }
 
 describe("OpenGeni Slack bot UI connection filtering", () => {
-  test("shows only active shared bot-role connections with the exact scope set", () => {
+  test("shows active shared bot-role connections with all required safe scopes", () => {
     const valid = connection();
+    const validWithAdditionalScopes = connection({
+      id: crypto.randomUUID(),
+      grantedScopes: [
+        ...OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
+        ...OPENGENI_SLACK_BOT_SAFE_OPTIONAL_SCOPES,
+      ],
+    });
     const candidates = [
       valid,
+      validWithAdditionalScopes,
       connection({ id: crypto.randomUUID(), status: "revoked" }),
       connection({ id: crypto.randomUUID(), subjectId: "subject-a" }),
       connection({ id: crypto.randomUUID(), kind: "oauth2" }),
@@ -66,6 +75,21 @@ describe("OpenGeni Slack bot UI connection filtering", () => {
         id: crypto.randomUUID(),
         grantedScopes: [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES, "channels:join"],
       }),
+      ...[
+        "files:write",
+        "reactions:write",
+        "chat:write.customize",
+        "users:read.email",
+        "admin",
+        "admin.users:read",
+        "search:read.enterprise",
+        "future:unknown",
+      ].map((scope) =>
+        connection({
+          id: crypto.randomUUID(),
+          grantedScopes: [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES, scope],
+        }),
+      ),
       connection({
         id: crypto.randomUUID(),
         metadata: { ...valid.metadata, credentialRole: "personal_slack_oauth" },
@@ -74,6 +98,7 @@ describe("OpenGeni Slack bot UI connection filtering", () => {
 
     expect(activeOpenGeniSlackBotConnections(candidates).map((item) => item.id)).toEqual([
       connectionId,
+      validWithAdditionalScopes.id,
     ]);
     expect(
       activeOpenGeniSlackBotConnections([

@@ -6,6 +6,8 @@ import {
   type SessionEventBoundarySurface,
 } from "./event-preview";
 
+export * from "./slack-bot-scopes";
+
 export {
   SESSION_EVENT_PAYLOAD_MAX_BYTES,
   approximateSessionEventTokens,
@@ -711,6 +713,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "slack_bot_file_info",
   "slack_bot_file_content",
   "slack_bot_post_message",
+  "slack_bot_delete_message",
 ] as const;
 export const FirstPartyMcpToolName = z.enum(FIRST_PARTY_MCP_TOOL_NAMES);
 export type FirstPartyMcpToolName = z.infer<typeof FirstPartyMcpToolName>;
@@ -5031,23 +5034,6 @@ export type ConnectionStatus = z.infer<typeof ConnectionStatus>;
 export const OPENGENI_SLACK_BOT_CREDENTIAL_ROLE = "opengeni_slack_bot" as const;
 export const OPENGENI_SLACK_BOT_CREDENTIAL_LABEL = "OpenGeni Slack bot" as const;
 export const OPENGENI_SLACK_BOT_SESSION_METADATA_KEY = "opengeniSlackBotConnectionId" as const;
-export const OPENGENI_SLACK_BOT_REQUIRED_SCOPES = [
-  "canvases:read",
-  "channels:history",
-  "channels:read",
-  "chat:write",
-  "files:read",
-  "groups:history",
-  "groups:read",
-  "im:history",
-  "im:read",
-  "im:write",
-  "mpim:history",
-  "mpim:read",
-  "users:read",
-] as const;
-export const OPENGENI_SLACK_BOT_FORBIDDEN_SCOPES = ["channels:join", "chat:write.public"] as const;
-
 export const OpenGeniSlackBotConnectionMetadata = z
   .object({
     credentialRole: z.literal(OPENGENI_SLACK_BOT_CREDENTIAL_ROLE),

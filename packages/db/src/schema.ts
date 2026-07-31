@@ -599,6 +599,90 @@ export const slackBotPostOperations = pgTable(
   }),
 );
 
+// Durable provider-operation identity for OpenGeni Slack bot deletions. Slack
+// has no client-supplied idempotency key for chat.delete, so an expired
+// provider_started claim becomes outcome_unknown and must be reconciled before
+// another mutation is admitted.
+export const slackBotDeleteOperations = pgTable(
+  "slack_bot_delete_operations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => connections.id, { onDelete: "cascade" }),
+    operationId: uuid("operation_id").notNull(),
+    principalType: text("principal_type").$type<"subject" | "service">().notNull(),
+    principalId: text("principal_id").notNull(),
+    toolName: text("tool_name").notNull(),
+    channelId: text("channel_id").notNull(),
+    messageTimestamp: text("message_timestamp").notNull(),
+    requestDigest: text("request_digest").notNull(),
+    status: text("status")
+      .$type<"pending" | "provider_started" | "outcome_unknown" | "completed">()
+      .notNull(),
+    claimHolderId: uuid("claim_holder_id"),
+    claimExpiresAt: timestamp("claim_expires_at", { withTimezone: true }),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    lastFailureCode: text("last_failure_code"),
+    slackChannelId: text("slack_channel_id"),
+    slackMessageTimestamp: text("slack_message_timestamp"),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceOperation: uniqueIndex("slack_bot_delete_operations_workspace_operation_uq").on(
+      table.workspaceId,
+      table.operationId,
+    ),
+    workspaceStatus: index("slack_bot_delete_operations_workspace_status_idx").on(
+      table.workspaceId,
+      table.status,
+      table.updatedAt,
+    ),
+    principalValid: check(
+      "slack_bot_delete_operations_principal_check",
+      sql`${table.principalType} in ('subject', 'service')
+        and length(${table.principalId}) between 1 and 512`,
+    ),
+    identityValid: check(
+      "slack_bot_delete_operations_identity_check",
+      sql`${table.toolName} = 'slack_bot_delete_message'
+        and length(${table.channelId}) between 1 and 64
+        and length(${table.messageTimestamp}) between 1 and 64
+        and ${table.requestDigest} ~ '^[0-9a-f]{64}$'
+        and ${table.attemptCount} > 0
+        and ((${table.claimHolderId} is null) = (${table.claimExpiresAt} is null))`,
+    ),
+    statusValid: check(
+      "slack_bot_delete_operations_status_check",
+      sql`${table.status} in ('pending', 'provider_started', 'outcome_unknown', 'completed')`,
+    ),
+    completionValid: check(
+      "slack_bot_delete_operations_completion_check",
+      sql`(
+          ${table.status} <> 'completed'
+          and ${table.slackChannelId} is null
+          and ${table.slackMessageTimestamp} is null
+          and ${table.completedAt} is null
+        ) or (
+          ${table.status} = 'completed'
+          and ${table.claimHolderId} is null
+          and ${table.claimExpiresAt} is null
+          and ${table.slackChannelId} is not null
+          and ${table.slackMessageTimestamp} is not null
+          and ${table.completedAt} is not null
+        )`,
+    ),
+  }),
+);
+
 // OAuth client registrations minted through MCP DCR, keyed by authorization
 // server issuer. This is deployment-wide client identity, not a workspace
 // credential; per-user/provider tokens still live only in connections.

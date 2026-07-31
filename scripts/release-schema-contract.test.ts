@@ -155,11 +155,11 @@ describe("release schema contract", () => {
         (migrations.has("0138_sandbox_checkpoint_artifacts_and_deadlines.sql") ? 1 : 0) +
         (migrations.has("0139_codex_provider_artifact_invalidations.sql") ? 1 : 0) +
         (migrations.has("0140_sandbox_restore_and_reaper_fences.sql") ? 1 : 0) +
-        (migrations.has("0141_social_connection_credentials.sql") ? 1 : 0) +
+        (migrations.has("0141_slack_bot_delete_idempotency.sql") ? 1 : 0) +
         (migrations.has("0142_sandbox_archive_capture_gate.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "38d9619f4d095f11e6d001e6e2b8d13a877d398dcff446e2ceaea2c6e68b2bfd",
+      "632a5e459ca41112a74c34dc9b3e5006268ac20ae2c06015183e159201e51832",
     );
     expect(contract.latestMigration).toBe("0142_sandbox_archive_capture_gate.sql");
     expect(migrations.get("0128_github_installation_authority.sql")).toMatchObject({
@@ -237,9 +237,7 @@ describe("release schema contract", () => {
       "0138_sandbox_checkpoint_artifacts_and_deadlines.sql",
       "0139_codex_provider_artifact_invalidations.sql",
       "0140_sandbox_restore_and_reaper_fences.sql",
-      ...(migrations.has("0141_social_connection_credentials.sql")
-        ? ["0141_social_connection_credentials.sql"]
-        : []),
+      "0141_slack_bot_delete_idempotency.sql",
       "0142_sandbox_archive_capture_gate.sql",
     ]);
     expect(new Set(contract.migrations.map((migration) => migration.path)).size).toBe(
@@ -339,6 +337,10 @@ describe("release schema contract", () => {
     });
     expect(migrations.get("0140_sandbox_restore_and_reaper_fences.sql")).toMatchObject({
       sha256: "fe8441b669fd99fa0463378c34dd75ceca3077af7529c85c552a534c530828d8",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0141_slack_bot_delete_idempotency.sql")).toMatchObject({
+      sha256: "cebd9cde4909e3c6b7f8d11f5b75353d9f0370600acead6e6b31d01c4ebaf847",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0142_sandbox_archive_capture_gate.sql")).toMatchObject({
