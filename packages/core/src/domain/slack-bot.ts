@@ -3,7 +3,7 @@ import {
   OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
   OPENGENI_SLACK_BOT_SESSION_METADATA_KEY,
   OpenGeniSlackBotConnectionMetadata,
-  evaluateOpenGeniSlackBotScopes,
+  areOpenGeniSlackBotScopesAccepted,
   type AccessGrant,
   type ConnectionMetadata,
   type OpenGeniSlackBotConnectionMetadata as OpenGeniSlackBotMetadata,
@@ -36,7 +36,7 @@ export function isOpenGeniSlackBotConnection(
     connection.subjectId === null &&
     connection.providerDomain === "slack.com" &&
     connection.kind === "app_install" &&
-    evaluateOpenGeniSlackBotScopes(connection.grantedScopes).accepted &&
+    areOpenGeniSlackBotScopesAccepted(connection.grantedScopes) &&
     openGeniSlackBotMetadata(connection.metadata)?.credentialRole ===
       OPENGENI_SLACK_BOT_CREDENTIAL_ROLE
   );

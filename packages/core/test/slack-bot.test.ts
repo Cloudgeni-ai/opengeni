@@ -5,6 +5,7 @@ import {
   OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
   OPENGENI_SLACK_BOT_SAFE_OPTIONAL_SCOPES,
   OPENGENI_SLACK_BOT_SESSION_METADATA_KEY,
+  areOpenGeniSlackBotScopesAccepted,
   evaluateOpenGeniSlackBotScopes,
   type AccessGrant,
   type ConnectionMetadata,
@@ -83,6 +84,13 @@ function scheduledSession(
 
 describe("OpenGeni Slack bot trust predicates", () => {
   test("requires the shared app role and required bot scopes", () => {
+    expect(areOpenGeniSlackBotScopesAccepted(OPENGENI_SLACK_BOT_REQUIRED_SCOPES)).toBe(true);
+    expect(
+      areOpenGeniSlackBotScopesAccepted([
+        ...OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
+        ...OPENGENI_SLACK_BOT_SAFE_OPTIONAL_SCOPES,
+      ]),
+    ).toBe(true);
     expect(isOpenGeniSlackBotConnection(botConnection())).toBe(true);
     expect(
       isOpenGeniSlackBotConnection(
@@ -107,6 +115,11 @@ describe("OpenGeni Slack bot trust predicates", () => {
         }),
       ),
     ).toBe(false);
+    expect(
+      areOpenGeniSlackBotScopesAccepted(
+        OPENGENI_SLACK_BOT_REQUIRED_SCOPES.filter((scope) => scope !== "channels:history"),
+      ),
+    ).toBe(false);
     for (const unsafe of [
       "files:write",
       "reactions:write",
@@ -118,6 +131,7 @@ describe("OpenGeni Slack bot trust predicates", () => {
       "future:unknown",
     ]) {
       const scopes = [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES, unsafe];
+      expect(areOpenGeniSlackBotScopesAccepted(scopes)).toBe(false);
       expect(evaluateOpenGeniSlackBotScopes(scopes)).toMatchObject({
         accepted: false,
         unsupported: [unsafe],

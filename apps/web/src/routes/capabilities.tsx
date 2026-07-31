@@ -5,7 +5,7 @@
 // spine (OAuth redirect or an API-key form) in a right-hand detail sheet, never
 // by hand-editing enable headers. Packs keep their first-class register/enable/
 // disable/unregister surface, restyled flat.
-import { OPENGENI_SLACK_BOT_REQUIRED_SCOPES } from "@opengeni/contracts";
+import { OPENGENI_SLACK_BOT_REQUIRED_SCOPES } from "@opengeni/contracts/slack-bot-scopes";
 import { usePacks, useVariableSets } from "@opengeni/react";
 import {
   CheckCircle2Icon,

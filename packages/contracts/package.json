@@ -21,6 +21,10 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
+    },
+    "./slack-bot-scopes": {
+      "types": "./src/slack-bot-scopes.ts",
+      "default": "./src/slack-bot-scopes.ts"
     }
   },
   "publishConfig": {
