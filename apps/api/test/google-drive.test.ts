@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import type { Settings } from "@opengeni/config";
 import {
   GOOGLE_DRIVE_CREDENTIAL_ROLE,
-  GOOGLE_DRIVE_METADATA_READONLY_SCOPE,
+  GOOGLE_DRIVE_READONLY_SCOPE,
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
   signDelegatedAccessToken,
@@ -115,7 +115,7 @@ function googleFixture(options: { permissionId?: string; omitRefreshToken?: bool
         ...(options.omitRefreshToken ? {} : { refresh_token: "google-refresh-token" }),
         token_type: "Bearer",
         expires_in: 3600,
-        scope: GOOGLE_DRIVE_METADATA_READONLY_SCOPE,
+        scope: GOOGLE_DRIVE_READONLY_SCOPE,
       });
     }
     apiAuthorizationHeaders.push(new Headers(init?.headers).get("authorization") ?? "");
@@ -237,7 +237,7 @@ async function connect(
 }
 
 describe("Google Drive local source preview", () => {
-  test("starts an explicit metadata-only OAuth flow with state and PKCE", async () => {
+  test("starts an explicit read-only OAuth flow with state and PKCE", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const google = googleFixture();
@@ -245,7 +245,7 @@ describe("Google Drive local source preview", () => {
     expect(response.status).toBe(200);
     const url = new URL(authorizationUrl);
     expect(url.origin).toBe("https://accounts.google.com");
-    expect(url.searchParams.get("scope")).toBe(GOOGLE_DRIVE_METADATA_READONLY_SCOPE);
+    expect(url.searchParams.get("scope")).toBe(GOOGLE_DRIVE_READONLY_SCOPE);
     expect(url.searchParams.get("access_type")).toBe("offline");
     expect(url.searchParams.get("prompt")).toContain("consent");
     expect(url.searchParams.get("code_challenge_method")).toBe("S256");
@@ -274,12 +274,12 @@ describe("Google Drive local source preview", () => {
       providerDomain: "googleapis.com",
       kind: "oauth2",
       status: "active",
-      grantedScopes: [GOOGLE_DRIVE_METADATA_READONLY_SCOPE],
+      grantedScopes: [GOOGLE_DRIVE_READONLY_SCOPE],
       metadata: {
         credentialRole: GOOGLE_DRIVE_CREDENTIAL_ROLE,
         googlePermissionId: "google-permission-a",
         googleEmail: "drive.tester@example.com",
-        accessMode: "metadata_readonly",
+        accessMode: "readonly",
       },
     });
     expect(JSON.stringify(connected.connection)).not.toContain("google-access-token");
@@ -348,12 +348,20 @@ describe("Google Drive local source preview", () => {
           [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
         },
         body: JSON.stringify({
-          source: {
-            id: "folder-1",
-            name: "Product",
-            mimeType: "application/vnd.google-apps.folder",
-            driveId: null,
-          },
+          sources: [
+            {
+              id: "folder-1",
+              name: "Product",
+              mimeType: "application/vnd.google-apps.folder",
+              driveId: null,
+            },
+            {
+              id: "root",
+              name: "My Drive",
+              mimeType: "application/vnd.google-apps.folder",
+              driveId: null,
+            },
+          ],
           targetScope: "workspace",
           syncCadence: "hourly",
           readPolicy: "allow",
@@ -368,13 +376,22 @@ describe("Google Drive local source preview", () => {
       "subject-a",
     );
     expect(persisted?.metadata).toMatchObject({
-      selectedSource: {
-        id: "folder-1",
-        name: "Product",
-        targetScope: "workspace",
-        syncCadence: "hourly",
-        readPolicy: "allow",
-      },
+      selectedSources: [
+        {
+          id: "folder-1",
+          name: "Product",
+          targetScope: "workspace",
+          syncCadence: "hourly",
+          readPolicy: "allow",
+        },
+        {
+          id: "root",
+          name: "My Drive",
+          targetScope: "workspace",
+          syncCadence: "hourly",
+          readPolicy: "allow",
+        },
+      ],
     });
     expect(
       await shared!.admin`

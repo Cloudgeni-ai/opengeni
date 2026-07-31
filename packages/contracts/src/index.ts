@@ -4966,6 +4966,8 @@ export const OPENGENI_SLACK_BOT_FORBIDDEN_SCOPES = ["channels:join", "chat:write
 export const GOOGLE_DRIVE_PROVIDER_DOMAIN = "googleapis.com" as const;
 export const GOOGLE_DRIVE_METADATA_READONLY_SCOPE =
   "https://www.googleapis.com/auth/drive.metadata.readonly" as const;
+export const GOOGLE_DRIVE_READONLY_SCOPE =
+  "https://www.googleapis.com/auth/drive.readonly" as const;
 export const GOOGLE_DRIVE_CREDENTIAL_ROLE = "google_drive_metadata" as const;
 export const GOOGLE_DRIVE_CREDENTIAL_LABEL = "Google Drive metadata browser" as const;
 
@@ -4998,7 +5000,9 @@ export const GoogleDriveConnectionMetadata = z
     googleEmail: z.string().email().max(320),
     googleDisplayName: z.string().min(1).max(512).nullable(),
     verifiedAt: z.string().datetime({ offset: true }),
-    accessMode: z.literal("metadata_readonly"),
+    accessMode: z.enum(["metadata_readonly", "readonly"]),
+    selectedSources: z.array(GoogleDriveSelectedSource).max(100).optional(),
+    /** @deprecated Read `selectedSources`; retained while existing connections migrate. */
     selectedSource: GoogleDriveSelectedSource.nullable().optional(),
   })
   .passthrough();
@@ -5038,12 +5042,19 @@ export const GoogleDriveBrowseResponse = z.object({
 export type GoogleDriveBrowseResponse = z.infer<typeof GoogleDriveBrowseResponse>;
 
 export const SaveGoogleDriveSourceRequest = z.object({
-  source: GoogleDriveBrowseItem.pick({
-    id: true,
-    name: true,
-    mimeType: true,
-    driveId: true,
-  }),
+  sources: z
+    .array(
+      GoogleDriveBrowseItem.pick({
+        id: true,
+        name: true,
+        mimeType: true,
+        driveId: true,
+      }),
+    )
+    .max(100)
+    .refine((sources) => new Set(sources.map((source) => source.id)).size === sources.length, {
+      message: "Google Drive sources must be unique",
+    }),
   targetScope: GoogleDriveTargetScope,
   syncCadence: GoogleDriveSyncCadence.default("hourly"),
   readPolicy: GoogleDriveReadPolicy.default("allow"),

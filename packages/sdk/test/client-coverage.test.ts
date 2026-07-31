@@ -1070,12 +1070,14 @@ describe("OpenGeniClient connections", () => {
     expect(browsed.current).toEqual(item);
     expect(browsed.items).toEqual([item]);
     const saved = await client.saveGoogleDriveSource(WORKSPACE_ID, connection.id, {
-      source: {
-        id: item.id,
-        name: item.name,
-        mimeType: item.mimeType,
-        driveId: item.driveId,
-      },
+      sources: [
+        {
+          id: item.id,
+          name: item.name,
+          mimeType: item.mimeType,
+          driveId: item.driveId,
+        },
+      ],
       targetScope: "workspace",
       syncCadence: "hourly",
       readPolicy: "allow",
@@ -1092,12 +1094,14 @@ describe("OpenGeniClient connections", () => {
       `POST /v1/workspaces/${WORKSPACE_ID}/connections/google-drive/${connection.id}/source`,
     ]);
     expect(JSON.parse(requests[2]!.body!)).toEqual({
-      source: {
-        id: "folder-1",
-        name: "Product",
-        mimeType: "application/vnd.google-apps.folder",
-        driveId: null,
-      },
+      sources: [
+        {
+          id: "folder-1",
+          name: "Product",
+          mimeType: "application/vnd.google-apps.folder",
+          driveId: null,
+        },
+      ],
       targetScope: "workspace",
       syncCadence: "hourly",
       readPolicy: "allow",

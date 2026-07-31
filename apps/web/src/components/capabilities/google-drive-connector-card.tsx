@@ -2,13 +2,13 @@ import { GoogleDriveConnectionMetadata } from "@opengeni/contracts";
 import {
   ArrowLeftIcon,
   ChevronRightIcon,
-  FileIcon,
   FolderIcon,
   FolderOpenIcon,
   HardDriveIcon,
   Loader2Icon,
   LogOutIcon,
   RefreshCwIcon,
+  XIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -39,6 +39,11 @@ import type {
 const GOOGLE_DRIVE_PROVIDER_DOMAIN = "googleapis.com";
 
 type FolderCrumb = { id: string; name: string };
+type ConfiguredGoogleDriveSource = GoogleDriveBrowseItem & {
+  targetScope: GoogleDriveTargetScope;
+  syncCadence: GoogleDriveSyncCadence;
+  readPolicy: GoogleDriveReadPolicy;
+};
 
 export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
@@ -54,7 +59,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
   const [crumbs, setCrumbs] = useState<FolderCrumb[]>([{ id: "root", name: "My Drive" }]);
   const [nextPageToken, setNextPageToken] = useState<string | null>(null);
   const [currentFolder, setCurrentFolder] = useState<GoogleDriveBrowseItem | null>(null);
-  const [selected, setSelected] = useState<GoogleDriveBrowseItem | null>(null);
+  const [selectedSources, setSelectedSources] = useState<GoogleDriveBrowseItem[]>([]);
   const [targetScope, setTargetScope] = useState<GoogleDriveTargetScope>("workspace");
   const [folderIdDraft, setFolderIdDraft] = useState("");
   const [syncCadence, setSyncCadence] = useState<GoogleDriveSyncCadence>("hourly");
@@ -73,6 +78,9 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
     [connections],
   );
   const metadata = connection ? googleDriveMetadata(connection.metadata) : undefined;
+  const savedSources = configuredGoogleDriveSources(metadata);
+  const savedDefaults = savedSources[0];
+  const folderItems = items.filter((item) => item.kind === "folder");
 
   const refreshConnections = useCallback(async () => {
     if (!canRead) {
@@ -153,8 +161,8 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
     folder: FolderCrumb,
     mode: "replace" | "append" = "replace",
     pageToken?: string,
-  ) {
-    if (!connection) return;
+  ): Promise<GoogleDriveBrowseItem | null> {
+    if (!connection) return null;
     setBrowseBusy(true);
     try {
       const response = await client.browseGoogleDrive(workspaceId, connection.id, {
@@ -180,10 +188,12 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
       setConnections((current) =>
         current.map((item) => (item.id === response.connection.id ? response.connection : item)),
       );
+      return response.current;
     } catch (error) {
       toast.error("Google Drive folder could not be opened", {
         description: error instanceof Error ? error.message : String(error),
       });
+      return null;
     } finally {
       setBrowseBusy(false);
     }
@@ -193,12 +203,13 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
     setCrumbs([{ id: "root", name: "My Drive" }]);
     setItems([]);
     setCurrentFolder(null);
-    setSelected(null);
+    setSelectedSources(configuredGoogleDriveSources(metadata));
     setNextPageToken(null);
     setFolderIdDraft("");
-    setTargetScope(metadata?.selectedSource?.targetScope ?? "workspace");
-    setSyncCadence(metadata?.selectedSource?.syncCadence ?? "hourly");
-    setReadPolicy(metadata?.selectedSource?.readPolicy ?? "allow");
+    const existingSource = configuredGoogleDriveSources(metadata)[0];
+    setTargetScope(existingSource?.targetScope ?? "workspace");
+    setSyncCadence(existingSource?.syncCadence ?? "hourly");
+    setReadPolicy(existingSource?.readPolicy ?? "allow");
     setBrowseOpen(true);
     void loadFolder({ id: "root", name: "My Drive" });
   }
@@ -224,34 +235,62 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
     void loadFolder(folder);
   }
 
-  function openFolderId() {
+  async function addFolderId() {
     const id = folderIdDraft.trim();
     if (!id) return;
     const folder = { id, name: "Linked folder" };
     setCrumbs([folder]);
-    void loadFolder(folder);
+    const resolved = await loadFolder(folder);
+    if (resolved) addSource(resolved);
   }
 
+  function addSource(source: GoogleDriveBrowseItem) {
+    setSelectedSources((current) => {
+      if (current.some((item) => item.id === source.id)) return current;
+      const visibleDescendantIds =
+        currentFolder?.id === source.id ? new Set(folderItems.map((item) => item.id)) : null;
+      return [...current.filter((item) => !visibleDescendantIds?.has(item.id)), source];
+    });
+  }
+
+  function removeSource(sourceId: string) {
+    setSelectedSources((current) => current.filter((source) => source.id !== sourceId));
+  }
+
+  function toggleSource(source: GoogleDriveBrowseItem) {
+    if (selectedSources.some((item) => item.id === source.id)) {
+      removeSource(source.id);
+      return;
+    }
+    addSource(source);
+  }
+
+  const currentFolderIncludedByAncestor = crumbs
+    .slice(0, -1)
+    .some((crumb) => selectedSources.some((source) => source.id === crumb.id));
+  const childFoldersIncludedByAncestor =
+    currentFolderIncludedByAncestor ||
+    (currentFolder ? selectedSources.some((source) => source.id === currentFolder.id) : false);
+
   async function saveSelection() {
-    if (!connection || !selected || !canWrite) return;
+    if (!connection || !canWrite) return;
     setBusy(true);
     try {
       const updated = await client.saveGoogleDriveSource(workspaceId, connection.id, {
-        source: {
+        sources: selectedSources.map((selected) => ({
           id: selected.id,
           name: selected.name,
           mimeType: selected.mimeType,
           driveId: selected.driveId,
-        },
+        })),
         targetScope,
         syncCadence,
         readPolicy,
       });
       setConnections((current) => current.map((item) => (item.id === updated.id ? updated : item)));
       setBrowseOpen(false);
-      toast.success("Google Drive sync configured", {
-        description:
-          "The boundary and recurring policy are saved. Content ingestion is not running yet.",
+      toast.success("Google Drive folders saved", {
+        description: `${selectedSources.length} location${selectedSources.length === 1 ? "" : "s"} connected. Document ingestion is not running yet.`,
       });
     } catch (error) {
       toast.error("Google Drive sync could not be saved", {
@@ -277,8 +316,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
             <div className="min-w-0">
               <div className="text-sm font-medium">Google Drive</div>
               <p className="mt-0.5 text-xs leading-5 text-fg-muted">
-                Connecting grants the approved Drive access. Nothing syncs until you explicitly
-                choose and save a Shared Drive or folder boundary.
+                Connect folders and Shared Drives for recurring knowledge import.
               </p>
             </div>
           </div>
@@ -297,7 +335,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
                   onClick={openBrowser}
                 >
                   <FolderOpenIcon className="size-3.5" />
-                  Configure sync
+                  {savedSources.length > 0 ? "Manage folders" : "Connect folders"}
                 </Button>
                 <Button
                   type="button"
@@ -339,7 +377,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
         </div>
 
         {connection && metadata ? (
-          <div className="mt-3 grid gap-2 border-t border-border/70 pt-3 text-xs sm:grid-cols-2 lg:grid-cols-4">
+          <div className="mt-3 grid gap-2 border-t border-border/70 pt-3 text-xs sm:grid-cols-3">
             <div>
               <span className="text-fg-subtle">Account</span>
               <div className="mt-0.5 truncate text-fg">
@@ -349,225 +387,228 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
               </div>
             </div>
             <div>
-              <span className="text-fg-subtle">Sync boundary</span>
+              <span className="text-fg-subtle">Connected locations</span>
               <div className="mt-0.5 truncate text-fg">
-                {metadata.selectedSource
-                  ? googleDriveBoundaryLabel(metadata.selectedSource)
-                  : "Not configured"}
+                {savedSources.length > 0
+                  ? savedSources.map(googleDriveBoundaryLabel).join(", ")
+                  : "None"}
               </div>
             </div>
             <div>
-              <span className="text-fg-subtle">Knowledge scope</span>
+              <span className="text-fg-subtle">Import defaults</span>
               <div className="mt-0.5 truncate text-fg">
-                {metadata.selectedSource
-                  ? scopeLabel(metadata.selectedSource.targetScope)
-                  : "Not configured"}
-              </div>
-            </div>
-            <div>
-              <span className="text-fg-subtle">Incremental sync</span>
-              <div className="mt-0.5 truncate text-fg">
-                {metadata.selectedSource
-                  ? `${cadenceLabel(metadata.selectedSource.syncCadence)} · ${readPolicyLabel(metadata.selectedSource.readPolicy)}`
+                {savedDefaults
+                  ? `${scopeLabel(savedDefaults.targetScope)} · ${cadenceLabel(savedDefaults.syncCadence)} · ${readPolicyLabel(savedDefaults.readPolicy)}`
                   : "Not configured"}
               </div>
             </div>
           </div>
         ) : null}
 
-        <Notice tone="waiting" className="mt-3">
-          This local slice saves the Drive boundary and recurring incremental-sync policy. It does
-          not download documents or run the knowledge ingestion worker yet.
-        </Notice>
+        {connection && metadata?.accessMode === "metadata_readonly" ? (
+          <Notice tone="waiting" className="mt-3">
+            Reconnect once to show Shared Drive names and enable document reading.
+          </Notice>
+        ) : (
+          <Notice tone="waiting" className="mt-3">
+            Folder setup works locally; document import is not built yet.
+          </Notice>
+        )}
       </section>
 
       <Dialog open={browseOpen} onOpenChange={setBrowseOpen}>
-        <DialogContent className="max-h-[90vh] max-w-3xl grid-rows-[auto_minmax(0,1fr)_auto_auto] overflow-hidden">
+        <DialogContent className="max-h-[90vh] max-w-xl grid-rows-[auto_minmax(0,1fr)_auto_auto] overflow-hidden">
           <DialogHeader>
-            <DialogTitle>Configure Google Drive sync</DialogTitle>
+            <DialogTitle>Connect Google Drive folders</DialogTitle>
             <DialogDescription>
-              Browse first, then explicitly choose one Shared Drive or folder. Opening a location
-              does not select it for sync.
+              Choose one or more locations. Subfolders are included automatically.
             </DialogDescription>
           </DialogHeader>
 
-          <div className="grid min-h-0 gap-2 overflow-y-auto pr-1">
-            <div className="flex min-w-0 items-center gap-2">
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="h-7 shrink-0 px-2"
-                disabled={crumbs.length <= 1 || browseBusy}
-                onClick={goBack}
-              >
-                <ArrowLeftIcon className="size-3.5" />
-                Back
-              </Button>
-              <div className="flex min-w-0 flex-wrap items-center gap-1 text-xs text-fg-muted">
-                {crumbs.map((crumb, index) => (
-                  <div key={crumb.id} className="flex min-w-0 items-center gap-1">
-                    {index > 0 ? <ChevronRightIcon className="size-3 shrink-0" /> : null}
-                    <button
-                      type="button"
-                      className="max-w-44 truncate rounded px-1.5 py-1 hover:bg-surface-2 hover:text-fg"
-                      onClick={() => openCrumb(index)}
+          <div className="grid min-h-0 gap-3 overflow-y-auto pr-1">
+            <div className="grid gap-1.5">
+              <div className="flex items-center justify-between text-xs">
+                <span className="font-medium text-fg">Connected locations</span>
+                <span className="text-fg-subtle">{selectedSources.length}</span>
+              </div>
+              {selectedSources.length > 0 ? (
+                <div className="flex flex-wrap gap-1.5">
+                  {selectedSources.map((source) => (
+                    <span
+                      key={source.id}
+                      className="inline-flex max-w-full items-center gap-1 rounded-md border border-border bg-surface-2 px-2 py-1 text-xs text-fg"
                     >
-                      {crumb.name}
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="grid gap-1">
-              <div className="text-2xs text-fg-subtle">
-                To open a Shared Drive, paste its Google Drive link.
-              </div>
-              <div className="flex gap-2">
-                <Input
-                  value={folderIdDraft}
-                  onChange={(event) => setFolderIdDraft(event.target.value)}
-                  placeholder="Paste a Shared Drive or folder link"
-                  className="h-8 text-xs"
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") openFolderId();
-                  }}
-                />
-                <Button
-                  type="button"
-                  variant="secondary"
-                  size="sm"
-                  disabled={!folderIdDraft.trim() || browseBusy}
-                  onClick={openFolderId}
-                >
-                  Open
-                </Button>
-              </div>
-            </div>
-
-            {currentFolder ? (
-              <div className="flex items-center gap-3 rounded-lg border border-border bg-surface/45 px-3 py-2.5">
-                <FolderOpenIcon className="size-4 shrink-0 text-brand" />
-                <div className="min-w-0 flex-1">
-                  <div className="text-2xs font-medium uppercase tracking-wide text-fg-subtle">
-                    Current location (not selected)
-                  </div>
-                  <div className="truncate text-sm font-medium text-fg">
-                    {googleDriveBoundaryLabel(currentFolder)}
-                  </div>
-                </div>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant={selected?.id === currentFolder.id ? "secondary" : "default"}
-                  disabled={selected?.id === currentFolder.id || browseBusy}
-                  onClick={() => setSelected(currentFolder)}
-                >
-                  {selected?.id === currentFolder.id ? "Selected" : useBoundaryLabel(currentFolder)}
-                </Button>
-              </div>
-            ) : null}
-
-            <div className="max-h-[26vh] min-h-28 overflow-y-auto rounded-lg border border-border">
-              {browseBusy && items.length === 0 ? (
-                <div className="flex h-52 items-center justify-center gap-2 text-xs text-fg-muted">
-                  <Loader2Icon className="size-4 animate-spin" />
-                  Loading Drive metadata
-                </div>
-              ) : items.length === 0 ? (
-                <div className="flex h-52 items-center justify-center text-xs text-fg-muted">
-                  This folder is empty.
+                      <FolderIcon className="size-3 shrink-0 text-brand" />
+                      <span className="max-w-56 truncate">{googleDriveBoundaryLabel(source)}</span>
+                      <button
+                        type="button"
+                        className="rounded p-0.5 text-fg-subtle hover:bg-surface-3 hover:text-fg"
+                        aria-label={`Remove ${googleDriveBoundaryLabel(source)}`}
+                        onClick={() => removeSource(source.id)}
+                      >
+                        <XIcon className="size-3" />
+                      </button>
+                    </span>
+                  ))}
                 </div>
               ) : (
-                <div className="divide-y divide-border/70">
-                  {items.map((item) => (
-                    <div key={item.id} className="flex items-center gap-2 px-3 py-2">
-                      {item.kind === "folder" ? (
-                        <FolderIcon className="size-4 shrink-0 text-brand" />
-                      ) : (
-                        <FileIcon className="size-4 shrink-0 text-fg-subtle" />
-                      )}
-                      <div
-                        className="min-w-0 flex-1 truncate text-left text-xs text-fg"
-                        title={item.name}
+                <div className="text-xs text-fg-subtle">No folders connected</div>
+              )}
+            </div>
+            <div className="overflow-hidden rounded-lg border border-border">
+              <div className="flex min-w-0 items-center gap-1 border-b border-border bg-surface/35 px-2 py-1.5">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 shrink-0 px-2"
+                  disabled={crumbs.length <= 1 || browseBusy}
+                  onClick={goBack}
+                  aria-label="Back one folder"
+                >
+                  <ArrowLeftIcon className="size-3.5" />
+                </Button>
+                <div className="flex min-w-0 items-center gap-0.5 text-xs text-fg-muted">
+                  {crumbs.map((crumb, index) => (
+                    <div key={crumb.id} className="flex min-w-0 items-center gap-0.5">
+                      {index > 0 ? <ChevronRightIcon className="size-3 shrink-0" /> : null}
+                      <button
+                        type="button"
+                        className="max-w-32 truncate rounded px-1.5 py-1 hover:bg-surface-2 hover:text-fg"
+                        onClick={() => openCrumb(index)}
                       >
-                        {item.name}
-                      </div>
-                      {item.kind === "folder" ? (
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          className="h-7"
-                          onClick={() => openFolder(item)}
-                        >
-                          Open
-                        </Button>
-                      ) : null}
-                      {item.kind === "file" ? (
-                        <span className="text-2xs text-fg-subtle">Included</span>
-                      ) : null}
+                        {crumb.name}
+                      </button>
                     </div>
                   ))}
                 </div>
-              )}
-              {nextPageToken ? (
-                <div className="border-t border-border p-2 text-center">
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    size="sm"
-                    disabled={browseBusy}
-                    onClick={() =>
-                      void loadFolder(
-                        crumbs[crumbs.length - 1] ?? { id: "root", name: "My Drive" },
-                        "append",
-                        nextPageToken,
-                      )
-                    }
-                  >
-                    {browseBusy ? <Loader2Icon className="size-3.5 animate-spin" /> : null}
-                    Load more
-                  </Button>
-                </div>
-              ) : null}
+              </div>
+
+              <div className="max-h-[30vh] min-h-40 overflow-y-auto">
+                {browseBusy && !currentFolder ? (
+                  <div className="flex h-40 items-center justify-center gap-2 text-xs text-fg-muted">
+                    <Loader2Icon className="size-4 animate-spin" />
+                    Loading folders
+                  </div>
+                ) : (
+                  <>
+                    {currentFolder ? (
+                      <div className="flex items-center gap-2 border-b border-border/70 px-3 py-2.5">
+                        <input
+                          type="checkbox"
+                          className="size-4 accent-brand"
+                          aria-label={`Connect ${googleDriveBoundaryLabel(currentFolder)}`}
+                          checked={
+                            currentFolderIncludedByAncestor ||
+                            selectedSources.some((source) => source.id === currentFolder.id)
+                          }
+                          disabled={currentFolderIncludedByAncestor}
+                          title={
+                            currentFolderIncludedByAncestor
+                              ? "Included by a connected parent folder"
+                              : undefined
+                          }
+                          onChange={() => toggleSource(currentFolder)}
+                        />
+                        <FolderOpenIcon className="size-4 shrink-0 text-brand" />
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-xs font-medium text-fg">
+                            {googleDriveBoundaryLabel(currentFolder)}
+                          </div>
+                          <div className="text-2xs text-fg-subtle">Everything inside</div>
+                        </div>
+                      </div>
+                    ) : null}
+                    {folderItems.map((item) => (
+                      <div
+                        key={item.id}
+                        className="flex items-center gap-2 border-b border-border/70 px-3 py-2 last:border-b-0"
+                      >
+                        <input
+                          type="checkbox"
+                          className="size-4 accent-brand"
+                          aria-label={`Connect ${item.name}`}
+                          checked={
+                            childFoldersIncludedByAncestor ||
+                            selectedSources.some((source) => source.id === item.id)
+                          }
+                          disabled={childFoldersIncludedByAncestor}
+                          title={
+                            childFoldersIncludedByAncestor
+                              ? "Included by a connected parent folder"
+                              : undefined
+                          }
+                          onChange={() => toggleSource(item)}
+                        />
+                        <FolderIcon className="size-4 shrink-0 text-brand" />
+                        <button
+                          type="button"
+                          className="flex min-w-0 flex-1 items-center gap-2 text-left text-xs text-fg hover:text-brand"
+                          onClick={() => openFolder(item)}
+                        >
+                          <span className="min-w-0 flex-1 truncate">{item.name}</span>
+                          <ChevronRightIcon className="size-3.5 shrink-0" />
+                        </button>
+                      </div>
+                    ))}
+                    {currentFolder && folderItems.length === 0 ? (
+                      <div className="px-3 py-5 text-center text-xs text-fg-subtle">
+                        No subfolders
+                      </div>
+                    ) : null}
+                  </>
+                )}
+                {nextPageToken ? (
+                  <div className="border-t border-border p-2 text-center">
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      disabled={browseBusy}
+                      onClick={() =>
+                        void loadFolder(
+                          crumbs[crumbs.length - 1] ?? { id: "root", name: "My Drive" },
+                          "append",
+                          nextPageToken,
+                        )
+                      }
+                    >
+                      Load more folders
+                    </Button>
+                  </div>
+                ) : null}
+              </div>
             </div>
 
-            <div
-              className={`rounded-lg border px-3 py-2.5 text-xs ${
-                selected ? "border-brand/30 bg-brand/5" : "border-border bg-surface/30"
-              }`}
-            >
-              {selected ? (
-                <>
-                  <div className="font-medium text-fg">
-                    Sync boundary: {googleDriveBoundaryLabel(selected)}
-                  </div>
-                  <div className="mt-0.5 text-fg-muted">
-                    The first run imports all existing supported documents inside this boundary,
-                    including nested folders. Later runs process only new, changed, moved, or
-                    deleted documents since the last successful run.
-                  </div>
-                </>
-              ) : (
-                <>
-                  <div className="font-medium text-fg">No sync boundary selected</div>
-                  <div className="mt-0.5 text-fg-muted">
-                    Browsing My Drive or a linked Shared Drive does not configure a sync.
-                  </div>
-                </>
-              )}
-              <div className="mt-1 text-fg-subtle">
-                Local preview: saving stores configuration only; document ingestion is not running
-                yet.
-              </div>
+            <div className="flex gap-2">
+              <Input
+                value={folderIdDraft}
+                onChange={(event) => setFolderIdDraft(event.target.value)}
+                placeholder="Paste a folder or Shared Drive link"
+                className="h-8 text-xs"
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") void addFolderId();
+                }}
+              />
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                disabled={!folderIdDraft.trim() || browseBusy}
+                onClick={() => void addFolderId()}
+              >
+                Add
+              </Button>
+            </div>
+
+            <div className="text-2xs text-fg-subtle">
+              First import: existing files. Later imports: changes only.
             </div>
           </div>
 
           <div className="grid gap-2 sm:grid-cols-3">
             <label className="grid gap-1 text-xs text-fg-muted">
-              Knowledge scope
+              Save to
               <Select
                 value={targetScope}
                 onChange={(event) => setTargetScope(event.target.value as GoogleDriveTargetScope)}
@@ -578,7 +619,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
               </Select>
             </label>
             <label className="grid gap-1 text-xs text-fg-muted">
-              After the initial import
+              Check
               <Select
                 value={syncCadence}
                 onChange={(event) => setSyncCadence(event.target.value as GoogleDriveSyncCadence)}
@@ -589,7 +630,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
               </Select>
             </label>
             <label className="grid gap-1 text-xs text-fg-muted">
-              Read access
+              Access
               <Select
                 value={readPolicy}
                 onChange={(event) => setReadPolicy(event.target.value as GoogleDriveReadPolicy)}
@@ -607,11 +648,13 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
             </Button>
             <Button
               type="button"
-              disabled={!selected || busy || !canWrite}
+              disabled={
+                busy || !canWrite || (selectedSources.length === 0 && savedSources.length === 0)
+              }
               onClick={() => void saveSelection()}
             >
               {busy ? <Loader2Icon className="size-3.5 animate-spin" /> : null}
-              Save sync setup
+              Save {selectedSources.length} location{selectedSources.length === 1 ? "" : "s"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -637,14 +680,30 @@ function googleDriveBoundaryLabel(source: {
   name: string;
   driveId: string | null;
 }): string {
-  if (source.id === source.driveId && source.name.trim() === "Drive") return "Shared Drive";
+  if (source.id === source.driveId && source.name.trim() === "Drive") {
+    return `Shared Drive · ${source.id.slice(-6)}`;
+  }
   return source.name.trim();
 }
 
-function useBoundaryLabel(source: { id: string; driveId: string | null }): string {
-  if (source.id === "root") return "Use My Drive";
-  if (source.driveId === source.id) return "Use this Shared Drive";
-  return "Use this folder";
+function configuredGoogleDriveSources(
+  metadata: GoogleDriveMetadata | undefined,
+): ConfiguredGoogleDriveSource[] {
+  const sources =
+    metadata?.selectedSources ?? (metadata?.selectedSource ? [metadata.selectedSource] : []);
+  return sources.map((source) => ({
+    id: source.id,
+    name: source.name,
+    mimeType: source.mimeType,
+    kind: "folder",
+    driveId: source.driveId,
+    modifiedTime: null,
+    size: null,
+    webViewLink: null,
+    targetScope: source.targetScope,
+    syncCadence: source.syncCadence,
+    readPolicy: source.readPolicy,
+  }));
 }
 
 function scopeLabel(scope: GoogleDriveTargetScope): string {
@@ -655,7 +714,7 @@ function scopeLabel(scope: GoogleDriveTargetScope): string {
 
 function googleDriveFailureMessage(reason: string | null): string {
   if (reason === "provider_denied") return "Google access was not approved.";
-  if (reason === "scope_not_granted") return "The required metadata scope was not approved.";
+  if (reason === "scope_not_granted") return "Google Drive read access was not approved.";
   if (reason === "refresh_token_missing")
     return "Google did not return offline access. Reconnect and approve the consent prompt.";
   if (reason === "account_mismatch")

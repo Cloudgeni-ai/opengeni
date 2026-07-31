@@ -440,7 +440,9 @@ export type GoogleDriveConnectionMetadata = {
   googleEmail: string;
   googleDisplayName: string | null;
   verifiedAt: string;
-  accessMode: "metadata_readonly";
+  accessMode: "metadata_readonly" | "readonly";
+  selectedSources?: GoogleDriveSelectedSource[] | undefined;
+  /** @deprecated Read selectedSources; retained while existing connections migrate. */
   selectedSource?: GoogleDriveSelectedSource | null | undefined;
   [key: string]: unknown;
 };
@@ -475,7 +477,7 @@ export type GoogleDriveBrowseResponse = {
 };
 
 export type SaveGoogleDriveSourceRequest = {
-  source: Pick<GoogleDriveBrowseItem, "id" | "name" | "mimeType" | "driveId">;
+  sources: Array<Pick<GoogleDriveBrowseItem, "id" | "name" | "mimeType" | "driveId">>;
   targetScope: GoogleDriveTargetScope;
   syncCadence: GoogleDriveSyncCadence;
   readPolicy: GoogleDriveReadPolicy;

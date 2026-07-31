@@ -5,6 +5,7 @@ import {
   GOOGLE_DRIVE_CREDENTIAL_ROLE,
   GOOGLE_DRIVE_METADATA_READONLY_SCOPE,
   GOOGLE_DRIVE_PROVIDER_DOMAIN,
+  GOOGLE_DRIVE_READONLY_SCOPE,
   GoogleDriveBrowseItem,
   GoogleDriveBrowseResponse,
   GoogleDriveConnectionMetadata,
@@ -105,7 +106,7 @@ export async function startGoogleDriveOAuth(
   authorizationUrl.searchParams.set("client_id", google.clientId);
   authorizationUrl.searchParams.set("redirect_uri", redirectUri);
   authorizationUrl.searchParams.set("response_type", "code");
-  authorizationUrl.searchParams.set("scope", GOOGLE_DRIVE_METADATA_READONLY_SCOPE);
+  authorizationUrl.searchParams.set("scope", GOOGLE_DRIVE_READONLY_SCOPE);
   authorizationUrl.searchParams.set("access_type", "offline");
   authorizationUrl.searchParams.set("include_granted_scopes", "true");
   authorizationUrl.searchParams.set("prompt", "consent select_account");
@@ -169,7 +170,7 @@ export async function completeGoogleDriveOAuthCallback(
       },
       fetchImpl,
     );
-    if (!token.scopes.includes(GOOGLE_DRIVE_METADATA_READONLY_SCOPE)) {
+    if (!token.scopes.includes(GOOGLE_DRIVE_READONLY_SCOPE)) {
       throw new GoogleDriveCallbackError("scope_not_granted");
     }
     const identity = await verifyGoogleDriveIdentity(token.accessToken, fetchImpl);
@@ -229,10 +230,12 @@ export async function completeGoogleDriveOAuthCallback(
       googleEmail: identity.emailAddress,
       googleDisplayName: identity.displayName,
       verifiedAt: new Date().toISOString(),
-      accessMode: "metadata_readonly",
-      ...(previousMetadata?.selectedSource
-        ? { selectedSource: previousMetadata.selectedSource }
-        : {}),
+      accessMode: "readonly",
+      ...(previousMetadata?.selectedSources
+        ? { selectedSources: previousMetadata.selectedSources }
+        : previousMetadata?.selectedSource
+          ? { selectedSources: [previousMetadata.selectedSource] }
+          : {}),
     });
     const connection = existing
       ? await updateConnection(deps.db, {
@@ -375,21 +378,25 @@ export async function saveGoogleDriveSource(
     throw new HTTPException(404, { message: "Google Drive connection not found" });
   }
   requireGoogleDriveConnection(existing, input.subjectId);
-  const sourceId = validDriveId(payload.source.id, "source.id");
-  const verified = await resolveGoogleDriveBoundaryItem(deps, {
-    workspaceId: input.workspaceId,
-    subjectId: input.subjectId,
-    connectionId: input.connectionId,
-    sourceId,
-  });
-  if (
-    verified.name !== payload.source.name ||
-    verified.mimeType !== payload.source.mimeType ||
-    verified.driveId !== payload.source.driveId
-  ) {
-    throw new HTTPException(409, {
-      message: "Google Drive source changed while it was being selected; browse again",
+  const verifiedSources = [];
+  for (const source of payload.sources) {
+    const sourceId = validDriveId(source.id, "source.id");
+    const verified = await resolveGoogleDriveBoundaryItem(deps, {
+      workspaceId: input.workspaceId,
+      subjectId: input.subjectId,
+      connectionId: input.connectionId,
+      sourceId,
     });
+    if (
+      verified.name !== source.name ||
+      verified.mimeType !== source.mimeType ||
+      verified.driveId !== source.driveId
+    ) {
+      throw new HTTPException(409, {
+        message: "Google Drive source changed while it was being selected; browse again",
+      });
+    }
+    verifiedSources.push(verified);
   }
   const latest =
     (await getConnectionMetadata(
@@ -406,7 +413,8 @@ export async function saveGoogleDriveSource(
     expectedVersion: latest.version,
     metadata: GoogleDriveConnectionMetadata.parse({
       ...latestMetadata,
-      selectedSource: {
+      selectedSource: null,
+      selectedSources: verifiedSources.map((verified) => ({
         id: verified.id,
         name: verified.name,
         mimeType: verified.mimeType,
@@ -415,7 +423,7 @@ export async function saveGoogleDriveSource(
         syncCadence: payload.syncCadence,
         readPolicy: payload.readPolicy,
         selectedAt: new Date().toISOString(),
-      },
+      })),
     }),
     updatedBySubjectId: input.subjectId,
   });
@@ -538,7 +546,10 @@ function requireGoogleDriveConnection(
   ) {
     throw new HTTPException(422, { message: "connection is not this user's Google Drive" });
   }
-  if (!connection.grantedScopes.includes(GOOGLE_DRIVE_METADATA_READONLY_SCOPE)) {
+  if (
+    !connection.grantedScopes.includes(GOOGLE_DRIVE_READONLY_SCOPE) &&
+    !connection.grantedScopes.includes(GOOGLE_DRIVE_METADATA_READONLY_SCOPE)
+  ) {
     throw new HTTPException(401, {
       message: "Google Drive needs to be reconnected with metadata access",
     });
