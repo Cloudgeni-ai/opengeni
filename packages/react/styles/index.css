@@ -81,7 +81,8 @@
   --animate-og-collapse: og-collapse var(--og-duration-disclose) var(--og-ease-in-out);
   /* Auto-fold the reader did not ask for: ~7× manual so it reads as choreography. */
   --animate-og-settle-chip: og-settle-chip var(--og-duration-slow) var(--og-ease-out) both;
-  --animate-og-settle-collapse: og-collapse var(--og-duration-disclose-settle) var(--og-ease-in-out);
+  /* Ease-out: settle lands softly (slow tail), not a symmetric ease-in-out stop. */
+  --animate-og-settle-collapse: og-collapse var(--og-duration-disclose-settle) var(--og-ease-out);
   /* Live tool rows arriving mid-turn — soft, not tied to manual disclose speed. */
   --animate-og-row-enter: og-row-enter var(--og-duration-slow) var(--og-ease-stream) both;
   /* Stream end fallback breath when View Transitions are unavailable. */
@@ -143,14 +144,12 @@
   }
 }
 
-/* Streaming tip ink: age-window opacity wash (no blur — blur read as muddy
-   glitter at speed). One continuous run per append batch; fast arrival keeps
-   a large young band soft, slow arrival keeps only the tip soft. Starts at a
-   readable low opacity (not 0) so the tip reads as wet ink, not missing text.
-   Inline, no transform — typography/selection untouched. */
+/* Streaming tip ink: short age-window wash. Fast arrival still keeps a soft
+   band (many young batches); slow arrival is only a tight tip breath — a long
+   linear fade read as 2–3× too much wash on sparse tokens. Inline, no transform. */
 @keyframes og-stream-ink {
   from {
-    opacity: 0.28;
+    opacity: 0.3;
   }
   to {
     opacity: 1;
@@ -158,7 +157,7 @@
 }
 .og-stream-ink {
   display: inline;
-  animation: og-stream-ink var(--og-duration-stream) var(--og-ease-stream) both;
+  animation: og-stream-ink var(--og-duration-stream) var(--og-ease-out) both;
 }
 
 /* Stream-end remount fallback when View Transitions are unavailable.
@@ -179,31 +178,24 @@
    document root and read as a full-page blink at stream end. Local
    `.og-markdown-settle` on the body is enough. */
 
-/* Entry: messages and timeline rows slide in just enough to feel placed. */
+/* Entry: opacity only — translateY fought the tip-follow camera and ticked. */
 @keyframes og-enter {
   from {
     opacity: 0;
-    transform: translateY(4px);
   }
   to {
     opacity: 1;
-    transform: translateY(0);
   }
 }
 
-/* Live activity rows appended mid-turn: softer than og-enter so a tool
-   marathon doesn't tick-tick-tick as hard pops. Blur stays subtle — filter
-   on a short row is cheap and reads as "arriving", not as a glitch. */
+/* Live activity rows: opacity only. translateY stacked with tip stick and
+   read as a second one-line tick on every tool/message append. */
 @keyframes og-row-enter {
   from {
     opacity: 0;
-    transform: translateY(10px);
-    filter: blur(3px);
   }
   to {
     opacity: 1;
-    transform: translateY(0);
-    filter: blur(0);
   }
 }
 .animate-og-row-enter {

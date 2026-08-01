@@ -676,8 +676,9 @@ describe("MessageTimeline — settled turn folding", () => {
     await flush();
 
     const triggers = turnSummaryTriggers(r.container);
-    // One settled OUTER chip. Successful summaries are intentionally quiet, so
-    // only the disclosure chevron remains; the final answer sits outside it.
+    // Bulk/history paint: no settle beat — one settled OUTER chip. Successful
+    // summaries are intentionally quiet, so only the disclosure chevron remains;
+    // the final answer sits outside it.
     expect(triggers).toHaveLength(1);
     expect(triggers[0]?.querySelectorAll("svg")).toHaveLength(1);
     expect(r.container.textContent).toContain("All finished.");
@@ -720,22 +721,27 @@ describe("MessageTimeline — settled turn folding", () => {
     // Fresh turn key + settleFold: open during the beat, not snapped shut.
     expect(outer?.getAttribute("data-state")).toBe("open");
     expect(outer?.className ?? "").toContain("animate-og-settle-chip");
-    // Settle beat stays ONE layer — nested chips wait until the reader expands
-    // after collapse (so we never flash "N steps" over closed "1 step" rows).
-    expect(triggers).toHaveLength(1);
+    // Settle beat keeps nested structure (force-open) — never flat-map to bare
+    // rails (that flash made clusters look unordered then re-nest on expand).
+    expect(triggers).toHaveLength(3);
+    expect(triggers.slice(1).every((t) => t.getAttribute("data-state") === "open")).toBe(true);
     expect(r.container.textContent).toContain("Mid-turn checkpoint");
     expect(r.container.textContent).toContain("step one");
 
-    // Mid-collapse (beat done, slow close still running): body must stay flat.
-    // Nested chips remounting here yank height and read as a hard snap.
+    // Mid-collapse: nested chips stay force-open (same height) — remounting
+    // them closed here would yank height and read as a hard snap.
     await flush(1150);
     expect(outer?.getAttribute("data-state")).toBe("closed");
-    expect(turnSummaryTriggers(r.container)).toHaveLength(1);
+    expect(turnSummaryTriggers(r.container)).toHaveLength(3);
     expect(r.container.textContent).toContain("step one");
 
-    // Settle chrome clears after the slow collapse; expand then nests.
+    // Settle chrome clears after the slow collapse; nested remount closed.
     await flush(900);
     expect(outer?.getAttribute("data-state")).toBe("closed");
+    const afterChrome = turnSummaryTriggers(r.container);
+    // Presence may keep closed content mounted briefly — nested must be closed.
+    expect(afterChrome[0]).toBe(outer);
+    expect(afterChrome.slice(1).every((t) => t.getAttribute("data-state") === "closed")).toBe(true);
 
     await act(async () => {
       outer?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
@@ -750,6 +756,88 @@ describe("MessageTimeline — settled turn folding", () => {
 
     await r.unmount();
   });
+
+  test("a cluster that finished its settle fold stays closed as siblings append and the turn wraps", async () => {
+    resetTimelineEvents();
+    // Grand finale choreography, streamed live: tool marathon → narration
+    // (cluster one settle-folds) → more tools → finale text (cluster two
+    // settle-folds) → turn.completed (wrap). Nothing that already settled
+    // closed may reopen at any point.
+    const phase1 = [
+      timelineEvent("user.message", { text: "Grand finale" }),
+      timelineEvent("agent.toolCall.created", {
+        id: "call-1",
+        name: "exec_command",
+        arguments: { cmd: "step one" },
+      }),
+      timelineEvent("agent.toolCall.output", { id: "call-1", output: "ok" }),
+    ];
+    const r = await renderComponent(<MessageTimeline events={phase1} status="running" />);
+    await flush();
+    let triggers = turnSummaryTriggers(r.container);
+    expect(triggers).toHaveLength(1);
+    expect(triggers[0]?.getAttribute("data-state")).toBe("open");
+
+    // Narration arrives → cluster one runs its full settle choreography.
+    const phase2 = [
+      ...phase1,
+      timelineEvent("agent.message.completed", { text: "Mid-turn checkpoint" }),
+    ];
+    await r.rerender(<MessageTimeline events={phase2} status="running" />);
+    await flush(2200);
+    triggers = turnSummaryTriggers(r.container);
+    expect(triggers[0]?.getAttribute("data-state")).toBe("closed");
+
+    // More tools append below: the settled cluster must stay closed.
+    const phase3 = [
+      ...phase2,
+      timelineEvent("agent.toolCall.created", {
+        id: "call-2",
+        name: "exec_command",
+        arguments: { cmd: "step two" },
+      }),
+      timelineEvent("agent.toolCall.output", { id: "call-2", output: "ok" }),
+    ];
+    await r.rerender(<MessageTimeline events={phase3} status="running" />);
+    await flush();
+    triggers = turnSummaryTriggers(r.container);
+    expect(triggers).toHaveLength(2);
+    expect(triggers[0]?.getAttribute("data-state")).toBe("closed");
+    expect(triggers[1]?.getAttribute("data-state")).toBe("open");
+
+    // Finale text folds cluster two the same way.
+    const phase4 = [...phase3, timelineEvent("agent.message.completed", { text: "All finished." })];
+    await r.rerender(<MessageTimeline events={phase4} status="running" />);
+    await flush(2200);
+    triggers = turnSummaryTriggers(r.container);
+    expect(triggers.every((t) => t.getAttribute("data-state") === "closed")).toBe(true);
+
+    // Snappy close: the turn wraps. The NEW outer chip takes its one settle
+    // beat, but the clusters that already settled closed must not reopen —
+    // force-opening them here was the "already-collapsed cluster auto-expands
+    // at the end" bug.
+    await r.rerender(
+      <MessageTimeline events={[...phase4, timelineEvent("turn.completed", {})]} status="idle" />,
+    );
+    await flush();
+    triggers = turnSummaryTriggers(r.container);
+    expect(triggers).toHaveLength(3);
+    const outer = triggers[0];
+    expect(outer?.getAttribute("data-state")).toBe("open");
+    expect(outer?.className ?? "").toContain("animate-og-settle-chip");
+    expect(triggers.slice(1).every((t) => t.getAttribute("data-state") === "closed")).toBe(true);
+    // Narration (visible pre-wrap) rides the beat; folded step rows do not.
+    expect(r.container.textContent).toContain("Mid-turn checkpoint");
+    expect(r.container.textContent).not.toContain("step one");
+
+    // Through the collapse and after chrome clears: everything stays closed.
+    await flush(2200);
+    triggers = turnSummaryTriggers(r.container);
+    expect(triggers[0]?.getAttribute("data-state")).toBe("closed");
+    expect(triggers.slice(1).every((t) => t.getAttribute("data-state") === "closed")).toBe(true);
+
+    await r.unmount();
+  }, 15_000);
 
   test("a failed turn keeps nested cluster chips quiet under the outer failure", async () => {
     resetTimelineEvents();

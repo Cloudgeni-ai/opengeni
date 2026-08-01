@@ -86,6 +86,13 @@ export { LightboxProvider, useLightbox, useLightboxOptional } from "./screenshot
 // disclosure defaults (opt-in initial-open seed; for screenshot/test instrumentation)
 export { DisclosureDefaultsProvider, useForcedDefaultOpen } from "./disclosure-context";
 
+// fold memory (cross-remount resting state so wraps never reopen settled folds)
+export { FoldMemoryProvider, inheritFoldRestingState, useFoldMemory } from "./fold-memory";
+export type { FoldRestingState } from "./fold-memory";
+
+// seen activity ids (live tool enter across rail remounts)
+export { SeenActivityIdsProvider, useSeenActivityIds } from "./seen-activity-ids";
+
 // turn-collapse summary chip
 export { BUILT_IN_TURN_SUMMARY_FACET_IDS, TurnSummary, useTurnSettleOpen } from "./turn-summary";
 export type {

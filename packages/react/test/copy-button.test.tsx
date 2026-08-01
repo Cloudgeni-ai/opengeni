@@ -4,6 +4,7 @@ import { registerDom, renderComponent, flush } from "./render-hook";
 import { CopyButton } from "../src/components/copy-button";
 import { Markdown } from "../src/components/markdown";
 import { tableElementToTsv } from "../src/lib/clipboard";
+import { TooltipProvider } from "../src/components/tooltip";
 
 registerDom();
 
@@ -19,7 +20,11 @@ describe("CopyButton", () => {
       },
     });
 
-    const r = await renderComponent(<CopyButton text="hello there" label="Copy message" />);
+    const r = await renderComponent(
+      <TooltipProvider delayDuration={400}>
+        <CopyButton text="hello there" label="Copy message" />
+      </TooltipProvider>,
+    );
     const button = r.container.querySelector("button[data-og-copy]");
     expect(button).not.toBeNull();
     await act(async () => {
