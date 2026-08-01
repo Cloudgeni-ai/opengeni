@@ -27,6 +27,7 @@ import { createObjectStorage } from "@opengeni/storage";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
+import { compress } from "hono/compress";
 import { cors } from "hono/cors";
 import { HTTPException } from "hono/http-exception";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
@@ -232,6 +233,20 @@ export function createAppComposition(deps: AppDependencies): {
         c.json({ code: "PAYLOAD_TOO_LARGE", message: "Request body is too large." }, 413),
     }),
   );
+
+  // Large catalog, capture, and session-list responses are on the browser's
+  // critical path. Compress JSON at the API boundary while leaving SSE and
+  // other streaming transports byte-for-byte unchanged.
+  const compressJson = compress({
+    encoding: "gzip",
+    contentTypeFilter: /^application\/json(?:;|$)/i,
+  });
+  app.use("/v1/*", async (c, next) => {
+    await compressJson(c, next);
+    if (/^application\/json(?:;|$)/i.test(c.res.headers.get("content-type") ?? "")) {
+      c.res.headers.set("vary", appendVary(c.res.headers.get("vary"), "Accept-Encoding"));
+    }
+  });
 
   app.use("*", async (c, next) => {
     const url = new URL(c.req.url);
@@ -541,6 +556,17 @@ export function createAppComposition(deps: AppDependencies): {
   });
 
   return { app, routeDeps };
+}
+
+export function appendVary(current: string | null, value: string): string {
+  const values = (current ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  if (!values.some((entry) => entry.toLowerCase() === value.toLowerCase())) {
+    values.push(value);
+  }
+  return values.join(", ");
 }
 
 async function requireMcpAccessGrant(
