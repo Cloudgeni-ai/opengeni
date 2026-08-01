@@ -7,14 +7,18 @@ import { actRun, flush, registerDom, renderComponent } from "./render-hook";
 
 registerDom();
 
-function tool(id: string, status: "running" | "completed" = "running"): ActivityItem {
+function tool(id: string, status: "running" | "complete" = "running"): ActivityItem {
   return {
     kind: "tool-call",
     id,
+    turnId: "turn-1",
+    callId: `call-${id}`,
     name: "exec_command",
     status,
     occurredAt: "2026-01-01T00:00:00.000Z",
     arguments: { command: `echo ${id}` },
+    output: undefined,
+    raw: undefined,
   };
 }
 
@@ -38,7 +42,7 @@ describe("ActivityRail row enter", () => {
     const r = await renderComponent(
       <SeenActivityIdsProvider value={seen}>
         <EntranceAnimationProvider value={true}>
-          <ActivityRail items={[tool("t1", "completed")]} bare />
+          <ActivityRail items={[tool("t1", "complete")]} bare />
         </EntranceAnimationProvider>
       </SeenActivityIdsProvider>,
     );
