@@ -84,11 +84,7 @@ function rowToPricing(row: LlmPriceRow): ModelPricing {
   };
 }
 
-function comparePricing(
-  label: string,
-  ours: ModelPricing,
-  theirs: ModelPricing,
-): string[] {
+function comparePricing(label: string, ours: ModelPricing, theirs: ModelPricing): string[] {
   const errors: string[] = [];
   if (ours.inputMicrosPerMillionTokens !== theirs.inputMicrosPerMillionTokens) {
     errors.push(
@@ -103,9 +99,7 @@ function comparePricing(
   const ourCache = ours.cachedInputMicrosPerMillionTokens;
   const theirCache = theirs.cachedInputMicrosPerMillionTokens;
   if (theirCache !== undefined && ourCache !== theirCache) {
-    errors.push(
-      `${label} cached: OpenGeni ${ourCache ?? "—"} vs llm-prices ${theirCache}`,
-    );
+    errors.push(`${label} cached: OpenGeni ${ourCache ?? "—"} vs llm-prices ${theirCache}`);
   }
   return errors;
 }
@@ -134,11 +128,7 @@ export function auditModelPricingAgainstLlmPrices(doc: LlmPricesDocument): {
     if (!shortRow) {
       errors.push(`llm-prices missing short-context row ${entry.shortId}`);
     } else {
-      const mismatches = comparePricing(
-        entry.productId,
-        schedule.default,
-        rowToPricing(shortRow),
-      );
+      const mismatches = comparePricing(entry.productId, schedule.default, rowToPricing(shortRow));
       if (mismatches.length === 0) {
         lines.push(`ok  ${entry.productId}  ${pricingLabel(schedule.default)}`);
       } else {
@@ -178,9 +168,7 @@ export function auditModelPricingAgainstLlmPrices(doc: LlmPricesDocument): {
     lines.push(`skip ${id} (OpenGeni-only; not in llm-prices)`);
   }
 
-  lines.push(
-    "note Fast/priority multipliers and marginBps are OpenGeni-owned — not audited here",
-  );
+  lines.push("note Fast/priority multipliers and marginBps are OpenGeni-owned — not audited here");
 
   return { ok: errors.length === 0, lines, errors };
 }

@@ -1295,8 +1295,7 @@ export async function submitHumanPromptInTransaction(
           resources: withCanonicalResourceMountPaths(input.resources),
           model: input.model ?? session.model,
           reasoningEffort: input.reasoningEffort ?? input.reasoningEffortFallback,
-          latencyMode:
-            input.turnExecutionPolicy?.latencyMode ?? input.latencyMode ?? "standard",
+          latencyMode: input.turnExecutionPolicy?.latencyMode ?? input.latencyMode ?? "standard",
         })
     ) {
       throw new QueueCommandConflictError(
@@ -1446,10 +1445,7 @@ export async function submitHumanPromptInTransaction(
       toolsProvided: false,
       model: input.model ?? session.model,
       reasoningEffort: input.reasoningEffort ?? input.reasoningEffortFallback,
-      latencyMode:
-        input.turnExecutionPolicy?.latencyMode ??
-        input.latencyMode ??
-        "standard",
+      latencyMode: input.turnExecutionPolicy?.latencyMode ?? input.latencyMode ?? "standard",
       sandboxBackend: session.sandboxBackend,
       metadata: input.turnExecutionPolicy
         ? metadataWithTurnExecutionPolicyV1({}, input.turnExecutionPolicy)

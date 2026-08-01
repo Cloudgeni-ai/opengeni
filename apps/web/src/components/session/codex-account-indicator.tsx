@@ -74,10 +74,7 @@ function MiniBar({ account }: { account: CodexAccount | undefined | null }) {
       title={`${Math.round(pct)}% remaining`}
     >
       <span
-        className={cn(
-          "block h-full rounded-full",
-          pct <= 10 ? "bg-status-waiting" : "bg-brand",
-        )}
+        className={cn("block h-full rounded-full", pct <= 10 ? "bg-status-waiting" : "bg-brand")}
         style={{ width: `${pct}%` }}
       />
     </span>

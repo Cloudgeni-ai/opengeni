@@ -58,10 +58,7 @@ function selectedRowLabel(rows: PickerModelRow[], selectedId: string): string {
 }
 
 /** Rail mark from catalog truth, else the durable id prefix — never a fake row. */
-function billingClassForSelection(
-  rows: PickerModelRow[],
-  selectedId: string,
-): PickerBillingClass {
+function billingClassForSelection(rows: PickerModelRow[], selectedId: string): PickerBillingClass {
   return (
     findPickerRow(rows, selectedId)?.billingClass ??
     (isCodexProductModel(selectedId) ? "codex_subscription" : "opengeni_credits")
@@ -145,10 +142,7 @@ function NavRow(props: {
       {props.icon}
       <span className="min-w-0 flex-1">
         <span
-          className={cn(
-            "block truncate text-sm",
-            props.active ? "font-medium text-fg" : "text-fg",
-          )}
+          className={cn("block truncate text-sm", props.active ? "font-medium text-fg" : "text-fg")}
         >
           {props.label}
         </span>
@@ -177,9 +171,7 @@ function BackHeader(props: {
       >
         <ChevronLeftIcon className="size-3.5 shrink-0 text-fg-subtle" />
         {props.icon}
-        <span className="min-w-0 flex-1 truncate text-sm font-medium text-fg">
-          {props.label}
-        </span>
+        <span className="min-w-0 flex-1 truncate text-sm font-medium text-fg">{props.label}</span>
       </button>
       {props.trailing ? <div className="relative z-10 shrink-0">{props.trailing}</div> : null}
     </div>
@@ -236,8 +228,7 @@ export function ModelPickerMenu(
 
   const activeGroup =
     nav.rail === null ? undefined : groups.find((group) => group.billingClass === nav.rail);
-  const focusModel =
-    nav.modelId === null ? undefined : findPickerRow(rows, nav.modelId);
+  const focusModel = nav.modelId === null ? undefined : findPickerRow(rows, nav.modelId);
   const selectedRow = findPickerRow(rows, props.model);
 
   const { latencyMode, loading, onLatencyModeChange } = props;
@@ -289,9 +280,7 @@ export function ModelPickerMenu(
             icon={<BillingClassMark billingClass={group.billingClass} />}
             active={selectedRow?.billingClass === group.billingClass}
             testId={`model-picker-rail-${group.billingClass}`}
-            onClick={() =>
-              go({ level: "models", rail: group.billingClass, modelId: null }, 1)
-            }
+            onClick={() => go({ level: "models", rail: group.billingClass, modelId: null }, 1)}
           />
         ))}
       </div>
@@ -302,9 +291,7 @@ export function ModelPickerMenu(
         <BackHeader
           label={activeGroup.label}
           icon={<BillingClassMark billingClass={activeGroup.billingClass} />}
-          onBack={() =>
-            go({ level: "providers", rail: null, modelId: null }, -1)
-          }
+          onBack={() => go({ level: "providers", rail: null, modelId: null }, -1)}
         />
         <div className="flex flex-col gap-0.5">
           {activeGroup.rows.map((row) => (
@@ -318,10 +305,7 @@ export function ModelPickerMenu(
               testId={`model-picker-choice-${row.id}`}
               onClick={() => {
                 if (!row.selectable) return;
-                go(
-                  { level: "thinking", rail: row.billingClass, modelId: row.id },
-                  1,
-                );
+                go({ level: "thinking", rail: row.billingClass, modelId: row.id }, 1);
               }}
             />
           ))}
@@ -353,9 +337,7 @@ export function ModelPickerMenu(
                 disabled={!focusModel.selectable}
                 aria-pressed={isActiveModel && props.latencyMode === "fast"}
                 aria-label={
-                  isActiveModel && props.latencyMode === "fast"
-                    ? "Disable Fast"
-                    : "Enable Fast"
+                  isActiveModel && props.latencyMode === "fast" ? "Disable Fast" : "Enable Fast"
                 }
                 title={
                   isActiveModel && props.latencyMode === "fast"
@@ -376,9 +358,7 @@ export function ModelPickerMenu(
                 }}
                 className={cn(
                   "flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-md transition-colors hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-50",
-                  isActiveModel && props.latencyMode === "fast"
-                    ? "text-fg"
-                    : "text-fg-subtle",
+                  isActiveModel && props.latencyMode === "fast" ? "text-fg" : "text-fg-subtle",
                 )}
               >
                 <ZapIcon
@@ -432,9 +412,7 @@ export function ModelPickerMenu(
             hint={BILLING_CLASS_HINT[group.billingClass]}
             icon={<BillingClassMark billingClass={group.billingClass} />}
             testId={`model-picker-rail-${group.billingClass}`}
-            onClick={() =>
-              go({ level: "models", rail: group.billingClass, modelId: null }, 1)
-            }
+            onClick={() => go({ level: "models", rail: group.billingClass, modelId: null }, 1)}
           />
         ))}
       </div>
@@ -503,7 +481,9 @@ export function ModelPicker(props: ModelPickerProps) {
             billingClass={billingClassForSelection(rows, props.model)}
             className="size-3.5 text-fg"
           />
-          <span className="truncate font-medium text-fg">{selectedRowLabel(rows, props.model)}</span>
+          <span className="truncate font-medium text-fg">
+            {selectedRowLabel(rows, props.model)}
+          </span>
           <span>{labelEffort(props.effort)}</span>
           {fastActive ? (
             <ZapIcon

@@ -29,8 +29,8 @@ export function BillingClassMark(props: {
   const label = props["aria-label"] ?? BILLING_CLASS_ARIA[props.billingClass];
   const decorative = label.length === 0;
   const a11y = decorative
-    ? ({ "aria-hidden": true as const })
-    : ({ role: "img" as const, "aria-label": label });
+    ? { "aria-hidden": true as const }
+    : { role: "img" as const, "aria-label": label };
   if (props.billingClass === "opengeni_credits") {
     return (
       <span className={shell} data-testid="billing-class-icon-opengeni_credits" {...a11y}>

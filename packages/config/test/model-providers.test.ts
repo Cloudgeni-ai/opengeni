@@ -504,11 +504,7 @@ describe("configuredModels", () => {
       reasoningEffort: true,
       hostedWebSearch: settings.webSearchEnabled,
     });
-    expect(models.map((model) => model.label)).toEqual([
-      "GPT-5.6 Sol",
-      "GPT-5.4",
-      "GPT-5.4 Mini",
-    ]);
+    expect(models.map((model) => model.label)).toEqual(["GPT-5.6 Sol", "GPT-5.4", "GPT-5.4 Mini"]);
   });
 
   test("unions built-in models first, then registry models in declaration order", () => {

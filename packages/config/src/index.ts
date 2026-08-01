@@ -2171,9 +2171,7 @@ export function productLabelForModelId(modelId: string): string {
   return suffix.length > 0 ? `${family} ${suffix}` : family;
 }
 
-function builtinLatencyModesForModel(
-  modelId: string,
-): Array<{
+function builtinLatencyModesForModel(modelId: string): Array<{
   id: z.infer<typeof ModelLatencyModeV1>;
   upstream: "supported" | "unsupported" | "unknown";
   runnable: boolean;
@@ -2227,10 +2225,7 @@ export function responseSatisfiesLatencyMode(
   return responseServiceTier === "priority" || responseServiceTier === "fast";
 }
 
-export function runnableLatencyModesForModel(
-  settings: Settings,
-  modelId: string,
-): LatencyMode[] {
+export function runnableLatencyModesForModel(settings: Settings, modelId: string): LatencyMode[] {
   const resolved = resolveModelProvider(
     settingsForTurnExecutionPolicy(settings, modelId),
     canonicalizeConfiguredModelId(settings, modelId),

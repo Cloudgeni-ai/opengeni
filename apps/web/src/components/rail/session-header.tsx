@@ -97,8 +97,7 @@ export function SessionHeader({
 }) {
   const modelId = lastStartedModel?.trim() || session.model;
   const resolvedBilling: BillingClass =
-    billingClass ??
-    (isCodexProductModel(modelId) ? "codex_subscription" : "opengeni_credits");
+    billingClass ?? (isCodexProductModel(modelId) ? "codex_subscription" : "opengeni_credits");
   const resolvedModel = modelLabel?.trim() || displayModel(modelId);
   const sessionEffort = session.metadata.reasoningEffort;
   const displayEffort: IntelligenceEffort =
@@ -126,10 +125,7 @@ export function SessionHeader({
       />
     ))
   ) : (
-    <BillingClassMark
-      billingClass={resolvedBilling}
-      className="size-3.5 shrink-0 text-fg-muted"
-    />
+    <BillingClassMark billingClass={resolvedBilling} className="size-3.5 shrink-0 text-fg-muted" />
   );
   return (
     // An elevated band, not just canvas-with-a-hairline: reading as a real top
