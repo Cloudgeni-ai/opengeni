@@ -17,18 +17,26 @@ declare global {
 }
 
 let registered = false;
+let registrationCount = 0;
 
 /** Register DOM globals for this test file; unregisters after the file. */
 export function registerDom(): void {
-  if (registered) {
-    return;
+  registrationCount += 1;
+  if (!registered) {
+    registered = true;
+    GlobalRegistrator.register();
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   }
-  registered = true;
-  GlobalRegistrator.register();
-  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+
+  // Bun may execute several DOM test files concurrently in one shard. Every
+  // file that calls registerDom() owns one reference; the first file to finish
+  // must not tear down globals while sibling files are still rendering.
   afterAll(async () => {
-    registered = false;
-    await GlobalRegistrator.unregister();
+    registrationCount -= 1;
+    if (registrationCount === 0) {
+      registered = false;
+      await GlobalRegistrator.unregister();
+    }
   });
 }
 
