@@ -2793,7 +2793,7 @@ describe("workflow contracts", () => {
     expect(shardStep.env).toEqual({ OPENGENI_REQUIRE_REAL_DB: "1" });
     expect(shardStep.run).toBe("bun run test:unit:shard -- --shard=${{ matrix.shard }}/4");
     expect(packageJson.scripts["test:unit:shard"]).toBe(
-      "bun test --max-concurrency=8 --timeout=30000",
+      "bun test --max-concurrency=1 --timeout=30000",
     );
 
     const safety = ci.jobs["unit-safety"];
