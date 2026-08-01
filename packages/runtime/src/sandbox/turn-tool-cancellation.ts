@@ -446,9 +446,9 @@ function identityGuardScript(
     // The randomized token lands late in the wrapped command line. Procps needs
     // `-ww` to avoid terminal-width truncation; minimal Linux images may omit ps,
     // so the same exact command line is read from /proc instead.
-    '__opengeni_args="$(__opengeni_process_args "$__opengeni_pid")"',
+    `__opengeni_args="$(__opengeni_process_args "$__opengeni_pid")" || exit ${missingIdentityExitCode}`,
     'case "$__opengeni_args" in *"$__opengeni_token"*) ;; *) exit 0 ;; esac',
-    '__opengeni_live_pgid="$(__opengeni_process_group_id "$__opengeni_pid")"',
+    `__opengeni_live_pgid="$(__opengeni_process_group_id "$__opengeni_pid")" || exit ${missingIdentityExitCode}`,
     '[ "$__opengeni_live_pgid" = "$__opengeni_pgid" ] || exit 0',
     body,
   ].join("\n");

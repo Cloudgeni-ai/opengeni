@@ -287,6 +287,32 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     expect(
       helperCommands.some((command) => command.includes("/proc/$__opengeni_lookup_pid/stat")),
     ).toBe(true);
+    const guardedIdentityProbe = helperCommands.find(
+      (command) =>
+        command.includes("__opengeni_process_args") && command.includes("command kill -0"),
+    );
+    expect(guardedIdentityProbe).toContain(
+      '__opengeni_args="$(__opengeni_process_args "$__opengeni_pid")" || exit 76',
+    );
+    expect(guardedIdentityProbe).toContain(
+      '__opengeni_live_pgid="$(__opengeni_process_group_id "$__opengeni_pid")" || exit 76',
+    );
+    const emptyBin = mkdtempSync(join(tmpdir(), "opengeni-inspection-unavailable-"));
+    try {
+      const inspectionFailure = Bun.spawn(["/bin/sh", "-c", guardedIdentityProbe!], {
+        env: { ...process.env, PATH: emptyBin },
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [inspectionStderr, inspectionExitCode] = await Promise.all([
+        new Response(inspectionFailure.stderr).text(),
+        inspectionFailure.exited,
+      ]);
+      expect(inspectionExitCode, inspectionStderr).toBe(76);
+    } finally {
+      rmSync(emptyBin, { recursive: true, force: true });
+    }
     expect(processAlive).toBe(false);
     expect(settlementOrder.lastIndexOf("provider-control")).toBeGreaterThan(
       settlementOrder.indexOf("group-absent"),
