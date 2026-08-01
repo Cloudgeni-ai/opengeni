@@ -1,5 +1,11 @@
 # @opengeni/react
 
+## 0.32.1
+
+### Patch Changes
+
+- 48ae722: Smooth tip-follow camera and streaming timeline motion (settle folds, tool enter, fence soft-close).
+
 ## 0.32.0
 
 ### Patch Changes
