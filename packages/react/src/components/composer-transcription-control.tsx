@@ -48,7 +48,7 @@ const defaultMessages: ComposerTranscriptionMessages = {
 };
 
 export type ComposerTranscriptionControlProps = {
-  client?: OpenGeniClient | null | undefined;
+  client?: Pick<OpenGeniClient, "transcribeAudio"> | null | undefined;
   workspaceId?: string | undefined;
   capability?: ClientVoiceInputConfig | null | undefined;
   workspaceEnabled?: boolean | undefined;

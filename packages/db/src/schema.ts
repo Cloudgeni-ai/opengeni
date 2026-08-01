@@ -109,6 +109,169 @@ export const workspaces = pgTable(
   }),
 );
 
+// A single generic workspace-published surface. Presentation labels such as
+// app, page, gallery, or document are intentionally not persisted as types.
+export const workspaceArtifacts = pgTable(
+  "workspace_artifacts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    slug: text("slug").notNull(),
+    title: text("title").notNull(),
+    description: text("description"),
+    status: text("status").$type<"active" | "archived">().notNull().default("active"),
+    // The FK to workspace_artifact_versions is installed by migration after
+    // that table exists. Keeping this pointer here makes reads inexpensive.
+    currentVersionId: uuid("current_version_id"),
+    createdBySubjectId: text("created_by_subject_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "workspace_artifacts_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceSlug: uniqueIndex("workspace_artifacts_workspace_slug_uq").on(
+      table.workspaceId,
+      table.slug,
+    ),
+    workspaceId: uniqueIndex("workspace_artifacts_workspace_id_uq").on(table.workspaceId, table.id),
+    list: index("workspace_artifacts_list_idx").on(table.workspaceId, table.updatedAt),
+  }),
+);
+
+export const workspaceArtifactVersions = pgTable(
+  "workspace_artifact_versions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    artifactId: uuid("artifact_id").notNull(),
+    revision: integer("revision").notNull(),
+    contentKey: text("content_key").notNull(),
+    contentType: text("content_type").$type<"text/html">().notNull().default("text/html"),
+    contentSha256: text("content_sha256").notNull(),
+    sizeBytes: integer("size_bytes").notNull(),
+    operationKey: text("operation_key").notNull(),
+    sourceSessionId: uuid("source_session_id"),
+    sourceTurnId: uuid("source_turn_id"),
+    sourceAttemptId: uuid("source_attempt_id"),
+    sourceExecutionGeneration: integer("source_execution_generation"),
+    createdBySubjectId: text("created_by_subject_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "workspace_artifact_versions_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    artifact: foreignKey({
+      name: "workspace_artifact_versions_artifact_fk",
+      columns: [table.workspaceId, table.artifactId],
+      foreignColumns: [workspaceArtifacts.workspaceId, workspaceArtifacts.id],
+    }).onDelete("cascade"),
+    workspaceId: uniqueIndex("workspace_artifact_versions_workspace_id_uq").on(
+      table.workspaceId,
+      table.id,
+    ),
+    revision: uniqueIndex("workspace_artifact_versions_revision_uq").on(
+      table.workspaceId,
+      table.artifactId,
+      table.revision,
+    ),
+    operation: uniqueIndex("workspace_artifact_versions_operation_uq").on(
+      table.workspaceId,
+      table.operationKey,
+    ),
+    provenance: check(
+      "workspace_artifact_versions_provenance_chk",
+      sql`(
+        ${table.sourceSessionId} is null
+        and ${table.sourceTurnId} is null
+        and ${table.sourceAttemptId} is null
+        and ${table.sourceExecutionGeneration} is null
+      ) or (
+        ${table.sourceSessionId} is not null
+        and ${table.sourceTurnId} is not null
+        and ${table.sourceAttemptId} is not null
+        and ${table.sourceExecutionGeneration} > 0
+      )`,
+    ),
+  }),
+);
+
+export const workspaceArtifactEvents = pgTable(
+  "workspace_artifact_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    artifactId: uuid("artifact_id").notNull(),
+    type: text("type").$type<"published" | "rolled_back">().notNull(),
+    fromVersionId: uuid("from_version_id"),
+    toVersionId: uuid("to_version_id").notNull(),
+    operationKey: text("operation_key").notNull(),
+    sourceSessionId: uuid("source_session_id"),
+    sourceTurnId: uuid("source_turn_id"),
+    sourceAttemptId: uuid("source_attempt_id"),
+    sourceExecutionGeneration: integer("source_execution_generation"),
+    actorSubjectId: text("actor_subject_id").notNull(),
+    reason: text("reason").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "workspace_artifact_events_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    artifact: foreignKey({
+      name: "workspace_artifact_events_artifact_fk",
+      columns: [table.workspaceId, table.artifactId],
+      foreignColumns: [workspaceArtifacts.workspaceId, workspaceArtifacts.id],
+    }).onDelete("cascade"),
+    operation: uniqueIndex("workspace_artifact_events_operation_uq").on(
+      table.workspaceId,
+      table.operationKey,
+    ),
+    list: index("workspace_artifact_events_list_idx").on(
+      table.workspaceId,
+      table.artifactId,
+      table.createdAt,
+    ),
+    provenance: check(
+      "workspace_artifact_events_provenance_chk",
+      sql`(
+        ${table.sourceSessionId} is null
+        and ${table.sourceTurnId} is null
+        and ${table.sourceAttemptId} is null
+        and ${table.sourceExecutionGeneration} is null
+      ) or (
+        ${table.sourceSessionId} is not null
+        and ${table.sourceTurnId} is not null
+        and ${table.sourceAttemptId} is not null
+        and ${table.sourceExecutionGeneration} > 0
+      )`,
+    ),
+  }),
+);
+
 // One target-schema-local deployment fallback. The migration runner reconciles
 // this singleton from OPENGENI_MAX_NESTED_AGENT_DEPTH; session admission locks
 // and reads it through the SECURITY DEFINER capability installed by the

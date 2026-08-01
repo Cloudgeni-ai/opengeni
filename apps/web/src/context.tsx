@@ -2,7 +2,7 @@
 // token / managed session), workspace access, and the cross-route console
 // state (model choice, repo selection, tool toggles). Everything below the
 // workspace shell consumes this through `useAppContext`.
-import { OpenGeniApiError, type OpenGeniClient } from "@opengeni/sdk";
+import { OpenGeniApiError, type OpenGeniCoreClient } from "@opengeni/sdk/core";
 import { composerSubmissionErrorMessage, type SessionEventsConnectionState } from "@opengeni/react";
 import { Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import { TanStackRouterDevtools } from "@tanstack/react-router-devtools";
@@ -74,13 +74,14 @@ import type {
   LatencyMode,
   ResourceRef,
   Session,
+  ToolRef,
   TurnSubmission,
   UpdateWorkspaceSettingsRequest,
   Workspace,
 } from "@/types";
 
 export type AppContextValue = {
-  client: OpenGeniClient;
+  client: OpenGeniCoreClient;
   clientConfig: ClientConfig;
   authSession: AuthSession | null;
   accessContext: AccessContext;
@@ -186,6 +187,9 @@ export type AppContextValue = {
     workspaceId: string,
     submission: TurnSubmission,
     options?: {
+      instructions?: string;
+      /** Exact session MCP policy. Omit to use the product UI's workspace selection. */
+      sessionTools?: ToolRef[];
       targetSandboxId?: string | null;
       workingDir?: string | null;
       omitWorkspaceResources?: boolean;
@@ -298,7 +302,9 @@ export function RootRouteComponent() {
   // Public routes render ahead of every auth/config gate: a user completing a
   // password reset is signed out by definition, so `/reset-password` must never
   // be intercepted by the sign-in panel or workspace-access loading.
-  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const pathname = useRouterState({
+    select: (state) => state.location.pathname,
+  });
   // Public surfaces render ahead of auth/config gates. `/reset-password` is
   // always public; the SessionChrome DEV harness is public and needs no session.
   const isPublicAuthRoute =
@@ -401,7 +407,9 @@ export function RootRouteComponent() {
         if (cancelled) {
           return;
         }
-        toast.error("Failed to load workspace access", { description: String(error) });
+        toast.error("Failed to load workspace access", {
+          description: String(error),
+        });
         setAccessContext(null);
         setWorkspaces([]);
         setAccessError(error instanceof Error ? error.message : String(error));
@@ -539,7 +547,9 @@ export function RootRouteComponent() {
     rigId: string | null,
   ): Promise<Workspace | null> {
     try {
-      const updated = await client.setWorkspaceDefaultRig(workspaceId, { rigId });
+      const updated = await client.setWorkspaceDefaultRig(workspaceId, {
+        rigId,
+      });
       setWorkspaces((current) => upsertWorkspace(current, updated));
       return updated;
     } catch (error) {
@@ -560,10 +570,16 @@ export function RootRouteComponent() {
     title: string,
   ): Promise<Session | null> {
     try {
-      const updated = await client.updateSession(workspaceId, sessionId, { title });
+      const updated = await client.updateSession(workspaceId, sessionId, {
+        title,
+      });
       setSession((current) =>
         current && current.id === updated.id
-          ? { ...current, title: updated.title, titleSource: updated.titleSource }
+          ? {
+              ...current,
+              title: updated.title,
+              titleSource: updated.titleSource,
+            }
           : current,
       );
       return updated;
@@ -708,7 +724,9 @@ export function RootRouteComponent() {
         // that the last-known installation or repository identities vanished.
         // Keep the last successful snapshot and readiness fence so draft
         // hydration cannot project it to [] and autosave destructive loss.
-        toast.error("GitHub status unavailable", { description: String(error) });
+        toast.error("GitHub status unavailable", {
+          description: String(error),
+        });
       } finally {
         if (githubRefreshId.current === refreshId) {
           setRepoBusy(false);
@@ -736,6 +754,9 @@ export function RootRouteComponent() {
     workspaceId: string,
     submission: TurnSubmission,
     options?: {
+      instructions?: string;
+      /** Exact session MCP policy. Omit to use the product UI's workspace selection. */
+      sessionTools?: ToolRef[];
       targetSandboxId?: string | null;
       workingDir?: string | null;
       omitWorkspaceResources?: boolean;
@@ -744,13 +765,16 @@ export function RootRouteComponent() {
   ): Promise<Session | null> {
     setBusy(true);
     try {
-      if (!workspaceMcpCatalogReady) {
+      const sessionTools = options?.sessionTools;
+      if (!workspaceMcpCatalogReady && !sessionTools) {
         toast.error("Tools are still loading", {
           description: "Wait for the workspace tool catalog to finish loading, then try again.",
         });
         return null;
       }
-      const selectedTools = buildOpenGeniUiTools(submission.tools, selectedCapabilityToolIds);
+      const selectedTools = sessionTools
+        ? [...sessionTools]
+        : buildOpenGeniUiTools(submission.tools, selectedCapabilityToolIds);
       const freshIdempotencyKey = crypto.randomUUID();
       const attempt = prepareCreateSessionAttempt({
         pending: pendingCreateAttempt.current,
@@ -760,6 +784,7 @@ export function RootRouteComponent() {
         request: buildCreateSessionRequest({
           currentResources,
           submission,
+          instructions: options?.instructions,
           omitWorkspaceResources: options?.omitWorkspaceResources,
           selectedTools,
           defaultModel: model,
@@ -905,7 +930,11 @@ export function RootRouteComponent() {
     if (mode === "signup") {
       await signUpEmail(input);
     } else {
-      await signInEmail({ email: input.email, password: input.password, rememberMe: true });
+      await signInEmail({
+        email: input.email,
+        password: input.password,
+        rememberMe: true,
+      });
     }
     const nextSession = await fetchAuthSession();
     setAuthSession(nextSession);

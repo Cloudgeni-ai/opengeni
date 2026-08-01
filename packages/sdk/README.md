@@ -32,6 +32,36 @@ for await (const event of client.streamEvents(workspaceId, session.id)) {
 }
 ```
 
+## Workspace artifacts
+
+Workspace artifacts are generic, immutable HTML publications. The SDK does not
+assign product types such as app, page, dashboard, or gallery. List pages are
+bounded and expose both `truncated` and an opaque `nextCursor` so callers never
+mistake a partial page for the complete workspace catalog.
+
+The initial web renderer supports semantic HTML, inline CSS, CSS-only
+interactions, and inline SVG. It removes JavaScript, event handlers, forms,
+embeds, external URLs, and other active or navigation-capable markup before
+rendering. Executable artifacts require a later, stronger isolation boundary.
+
+```ts
+let cursor: string | undefined;
+do {
+  const page = await client.listWorkspaceArtifacts(workspaceId, {
+    limit: 50,
+    ...(cursor ? { cursor } : {}),
+  });
+  for (const artifact of page.artifacts) console.log(artifact.title);
+  cursor = page.nextCursor ?? undefined;
+} while (cursor);
+```
+
+Creation and publication require a caller-supplied idempotency key. Reuse the
+same key only to retry the same logical mutation. Agent-authored versions also
+return the exact source session, turn, attempt, and execution generation that
+published them. Version and event history are bounded; inspect
+`versionsTruncated` and `eventsTruncated` on the detail response.
+
 Omit `firstPartyMcpTools` for the complete OpenGeni tool catalog. An explicit
 `[]` exposes no broad first-party tools; attached resources and separately
 selected `files`/`docs` MCP servers are unaffected.

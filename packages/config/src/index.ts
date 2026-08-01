@@ -1820,6 +1820,23 @@ export function getSettings(): Settings {
   return settings;
 }
 
+const LOCAL_FIRST_PARTY_DELEGATION_SECRET = "opengeni-local-first-party-delegation-secret-v1";
+
+/**
+ * First-party session tools need a shared HMAC identity even in the unauthenticated
+ * local product mode. A fixed local-only value is no broader than that mode's
+ * existing access boundary, while configured and managed deployments continue to
+ * require an operator-provided secret.
+ */
+export function resolveFirstPartyDelegationSecret(settings: Settings): string | undefined {
+  const explicit = settings.delegationSecret?.trim();
+  if (explicit) return explicit;
+  return settings.productAccessMode === "local" &&
+    (settings.environment === "local" || settings.environment === "test")
+    ? LOCAL_FIRST_PARTY_DELEGATION_SECRET
+    : undefined;
+}
+
 /**
  * The Modal sandbox idle timeout (seconds) the provider actually passes as
  * idleTimeoutMs (sandbox-file-persistence). When the operator did not pin
@@ -2271,8 +2288,16 @@ function builtinCredentialSource(settings: Settings): CredentialSourceV1 {
 }
 
 function staticRequestMetadataForDigest(provider: ResolvedModelProvider): {
-  headers: Array<{ name: string; classification: "public" | "secret"; value?: string }>;
-  query: Array<{ name: string; classification: "public" | "secret"; value?: string }>;
+  headers: Array<{
+    name: string;
+    classification: "public" | "secret";
+    value?: string;
+  }>;
+  query: Array<{
+    name: string;
+    classification: "public" | "secret";
+    value?: string;
+  }>;
 } {
   const publicHeaders = new Set(provider.publicDefaultHeaderNames ?? []);
   const publicQuery = new Set(provider.publicDefaultQueryNames ?? []);
@@ -2450,7 +2475,10 @@ export function withCodexCatalogProvider(settings: Settings): Settings {
       };
     }),
   };
-  return { ...settings, modelProvidersJson: JSON.stringify([...providers, provider]) };
+  return {
+    ...settings,
+    modelProvidersJson: JSON.stringify([...providers, provider]),
+  };
 }
 
 /**
@@ -2656,7 +2684,9 @@ export function configuredModels(settings: Settings): ConfiguredModel[] {
             : { contextWindowTokens: model.contextWindowTokens }),
           ...(model.effectiveContextWindowTokens === undefined
             ? {}
-            : { effectiveContextWindowTokens: model.effectiveContextWindowTokens }),
+            : {
+                effectiveContextWindowTokens: model.effectiveContextWindowTokens,
+              }),
           ...(model.autoCompactTokenLimit === undefined
             ? {}
             : { autoCompactTokenLimit: model.autoCompactTokenLimit }),
@@ -3435,7 +3465,9 @@ export function parseMcpServers(raw: string | undefined): unknown[] | undefined 
     return parsed;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`OPENGENI_MCP_SERVERS must be a JSON array: ${message}`, { cause: error });
+    throw new Error(`OPENGENI_MCP_SERVERS must be a JSON array: ${message}`, {
+      cause: error,
+    });
   }
 }
 

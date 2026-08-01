@@ -1,4 +1,4 @@
-export { OpenGeniClient } from "./client";
+export { OpenGeniClient } from "./artifact-client";
 export type {
   FetchLike,
   OpenGeniClientOptions,
@@ -56,6 +56,19 @@ export type {
 } from "./stream";
 export { streamWorkspaceControlEvents } from "./workspace-control-stream";
 export type { WorkspaceControlStreamTransport } from "./workspace-control-stream";
+export type {
+  CreateWorkspaceArtifactRequest,
+  PublishWorkspaceArtifactVersionRequest,
+  RollbackWorkspaceArtifactRequest,
+  WorkspaceArtifact,
+  WorkspaceArtifactContentResponse,
+  WorkspaceArtifactDetailResponse,
+  WorkspaceArtifactEvent,
+  WorkspaceArtifactListOptions,
+  WorkspaceArtifactListResponse,
+  WorkspaceArtifactMutationResponse,
+  WorkspaceArtifactVersion,
+} from "./workspace-artifacts";
 export { normalizeWorkspaceInstructionPolicyRoleKey } from "./workspace-instruction-policies";
 export type {
   ActivateWorkspaceInstructionPolicyRequest,

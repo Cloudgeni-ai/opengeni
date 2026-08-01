@@ -3165,7 +3165,7 @@ export class OpenGeniClient {
     );
   }
 
-  private async requestJson<T>(
+  protected async requestJson<T>(
     method: string,
     path: string,
     body?: unknown,

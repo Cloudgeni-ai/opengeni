@@ -14,7 +14,7 @@ const mobbinCapabilityId = "mcp:integrations-sh:mobbin-com-browser-fixture";
 const mobbinConnectionId = "00000000-0000-4000-8000-000000000120";
 const evidenceDir = new URL("../../.agent/evidence/capabilities-focus/", import.meta.url).pathname;
 const mobbinEvidenceDir = new URL("../../.agent/evidence/mobbin-mcp/", import.meta.url).pathname;
-const apiContractRevision = "2026-07-turn-instructions-v1";
+const apiContractRevision = "2026-07-workspace-artifacts-v1";
 
 type CapabilityState = {
   enabled: boolean;

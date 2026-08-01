@@ -8,6 +8,7 @@ import {
   AGENT_INSTRUCTIONS_CORE_PLACEHOLDER,
   collectSandboxEnvironment,
   firstPartyMcpBaseUrl,
+  resolveFirstPartyDelegationSecret,
   resolveModelProvider,
   sandboxLifecycleHookIds,
 } from "@opengeni/config";
@@ -1219,7 +1220,10 @@ export function compactionResponseDiagnostics(
   extractedText = extractResponseOutputText(response).trim(),
 ): Record<string, unknown> {
   if (!response || typeof response !== "object") {
-    return { responseShape: typeof response, extractedTextLength: extractedText.length };
+    return {
+      responseShape: typeof response,
+      extractedTextLength: extractedText.length,
+    };
   }
   const record = response as Record<string, unknown>;
   const output = Array.isArray(record.output) ? record.output : [];
@@ -1889,7 +1893,10 @@ export function buildOpenGeniAgent(
       if (resumedCallId && resumedCallId !== settled.toolCallId) {
         throw new Error("Human-input response does not belong to the resumed tool call");
       }
-      return JSON.stringify({ requestId: settled.requestId, ...settled.response });
+      return JSON.stringify({
+        requestId: settled.requestId,
+        ...settled.response,
+      });
     },
   });
   const agentTools = [...hostedTools, humanInputTool];
@@ -2374,7 +2381,9 @@ export function buildAgentCapabilities(
   }
   const caps: ReturnType<typeof Capabilities.default> = [
     filesystemCapability,
-    shell({ ...(toolCancellation ? {} : { configureTools: withExecOpCorrelation }) }),
+    shell({
+      ...(toolCancellation ? {} : { configureTools: withExecOpCorrelation }),
+    }),
   ];
   const sessionSkills = sessionSkillsForMaterialization(
     packSkills,
@@ -3272,7 +3281,8 @@ async function signFirstPartyDelegatedBearer(
   settings: Settings,
   options: PrepareToolsOptions,
 ): Promise<string | null> {
-  if (!settings.delegationSecret || !options.accountId || !options.workspaceId) {
+  const delegationSecret = resolveFirstPartyDelegationSecret(settings);
+  if (!delegationSecret || !options.accountId || !options.workspaceId) {
     return null;
   }
   const attemptClaims = [
@@ -3286,7 +3296,7 @@ async function signFirstPartyDelegatedBearer(
   if (hasAnyAttemptClaim && !hasExactAttemptClaims) {
     return null;
   }
-  return await signDelegatedAccessToken(settings.delegationSecret, {
+  return await signDelegatedAccessToken(delegationSecret, {
     accountId: options.accountId,
     workspaceId: options.workspaceId,
     subjectId: options.subjectId ?? "worker:first-party-mcp",
@@ -3975,7 +3985,10 @@ export function contextRobustnessFilterForSettings(
   options: ContextRobustnessFilterOptions = {},
 ): CallModelInputFilter {
   const thresholdTokens = compactionThresholdTokens(settings);
-  let previousRequest: { revision: number; footprint: CompleteModelInputFootprint } | null = null;
+  let previousRequest: {
+    revision: number;
+    footprint: CompleteModelInputFootprint;
+  } | null = null;
   let requestRevision = 0;
   return async ({ modelData, agent }) => {
     const input = modelData.input;
@@ -4215,7 +4228,9 @@ export async function runAgentStream(
             ? { contextCompactionSignal: overrides.contextCompactionSignal }
             : {}),
           ...(overrides.contextCompactionRequested
-            ? { contextCompactionRequested: overrides.contextCompactionRequested }
+            ? {
+                contextCompactionRequested: overrides.contextCompactionRequested,
+              }
             : {}),
         }),
       ].filter((f): f is CallModelInputFilter => Boolean(f)),
@@ -6280,7 +6295,10 @@ function gitCredentialBindingInventoryCommandLines(
       transport,
       repositories: [],
     };
-    entry.repositories.push({ uri: descriptor.uri, mountPath: descriptor.mountPath });
+    entry.repositories.push({
+      uri: descriptor.uri,
+      mountPath: descriptor.mountPath,
+    });
     entries.set(key, entry);
   }
   const inventory = `${JSON.stringify(
@@ -6643,7 +6661,10 @@ function gitCredentialHelperCommandLines(
     { direct: number; brokered: number }
   >();
   for (const binding of bindings) {
-    const counts = providerBindingKinds.get(binding.provider) ?? { direct: 0, brokered: 0 };
+    const counts = providerBindingKinds.get(binding.provider) ?? {
+      direct: 0,
+      brokered: 0,
+    };
     if (binding.transport?.kind === "http_broker") counts.brokered += 1;
     else counts.direct += 1;
     providerBindingKinds.set(binding.provider, counts);
@@ -6895,7 +6916,10 @@ export function gitCredentialBindingTokenRefreshCommand(
 export async function refreshGitProviderTokenFiles(
   session: GitCredentialTokenWriterSession,
   seeds: GitTokenSeeds,
-  options: { runAs?: string; commandRunner?: SandboxLifecycleCommandRunner } = {},
+  options: {
+    runAs?: string;
+    commandRunner?: SandboxLifecycleCommandRunner;
+  } = {},
 ): Promise<void> {
   const command = gitProviderTokenRefreshCommand(seeds);
   if (!command) {
@@ -6917,7 +6941,10 @@ export async function refreshGitProviderTokenFiles(
 export async function refreshGitCredentialBindingTokenFiles(
   session: GitCredentialTokenWriterSession,
   bindings: GitCredentialBindingSeed[],
-  options: { runAs?: string; commandRunner?: SandboxLifecycleCommandRunner } = {},
+  options: {
+    runAs?: string;
+    commandRunner?: SandboxLifecycleCommandRunner;
+  } = {},
 ): Promise<void> {
   const command = gitCredentialBindingTokenRefreshCommand(bindings);
   if (!command) return;

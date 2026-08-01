@@ -298,6 +298,7 @@ function authorityInput(
   workspace: { accountId: string; workspaceId: string },
   patch: Partial<Parameters<typeof bindAuthorizedGitHubInstallationRepositories>[1]> = {},
 ): Parameters<typeof bindAuthorizedGitHubInstallationRepositories>[1] {
+  const authorityCheckedAt = new Date();
   return {
     ...workspace,
     installationId: 7000,
@@ -308,8 +309,8 @@ function authorityInput(
     githubActorId: 9001,
     githubActorLogin: "owner",
     authorityKind: "personal_owner",
-    authorityCheckedAt: new Date(),
-    authorityExpiresAt: new Date(Date.now() + 10 * 60_000),
+    authorityCheckedAt,
+    authorityExpiresAt: new Date(authorityCheckedAt.getTime() + 10 * 60_000),
     authorityNonce: `authority-${crypto.randomUUID()}`,
     repositoryIds: [7001],
     ...patch,

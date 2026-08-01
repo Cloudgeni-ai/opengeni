@@ -81,7 +81,13 @@ describe("buildCreateSessionRequest", () => {
     expect(() =>
       build(
         [repository],
-        [{ ...repository, ref: "feature", mountPath: "repos/alternate-opengeni" }],
+        [
+          {
+            ...repository,
+            ref: "feature",
+            mountPath: "repos/alternate-opengeni",
+          },
+        ],
       ),
     ).toThrow("resource is already attached with different settings");
   });
@@ -95,6 +101,7 @@ describe("buildCreateSessionRequest", () => {
     const submissionBefore = structuredClone(submissionResources);
     const tools = [{ kind: "mcp" as const, id: "opengeni" }];
     const result = build(currentResources, submissionResources, {
+      instructions: "Hidden session guidance",
       selectedTools: tools,
       targetSandboxId: "00000000-0000-4000-8000-0000000000c3",
       workingDir: "/workspace/opengeni",
@@ -105,6 +112,7 @@ describe("buildCreateSessionRequest", () => {
     expect(submissionResources).toEqual(submissionBefore);
     expect(result).toMatchObject({
       resources: [...currentBefore, ...submissionBefore],
+      instructions: "Hidden session guidance",
       tools,
       targetSandboxId: "00000000-0000-4000-8000-0000000000c3",
       workingDir: "/workspace/opengeni",
@@ -206,8 +214,16 @@ describe("buildCreateSessionRequest", () => {
         workspaceId: "workspace-a",
         request: { ...firstRequest, initialMessage: "edited" },
       },
-      { client: firstClient, workspaceId: "workspace-b", request: firstRequest },
-      { client: secondClient, workspaceId: "workspace-a", request: firstRequest },
+      {
+        client: firstClient,
+        workspaceId: "workspace-b",
+        request: firstRequest,
+      },
+      {
+        client: secondClient,
+        workspaceId: "workspace-a",
+        request: firstRequest,
+      },
     ]) {
       const next = prepareCreateSessionAttempt({
         pending: first.pending,
