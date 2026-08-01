@@ -2604,13 +2604,14 @@ describe("workflow contracts", () => {
     expect(release.jobs.publish.permissions["pull-requests"]).toBe("read");
   });
 
-  test("dispatches trusted main CI and preserves ordinary CI events", () => {
+  test("dispatches trusted main CI and preserves ordinary plus scheduled safety events", () => {
     const dispatch = release.jobs.version.steps.find(
       (step: any) => step.name === "Dispatch exact-head Version PR CI",
     );
     expect(dispatch.run).toContain("dispatch-version-ci");
     expect(ci.on.push.branches).toEqual(["main"]);
     expect(ci.on.pull_request).not.toBeUndefined();
+    expect(ci.on.schedule).toEqual([{ cron: "0 3 * * *" }]);
     expect(ci.on.workflow_dispatch.inputs).toEqual(
       expect.objectContaining({
         automation_pr_number: expect.objectContaining({ required: true }),
@@ -2620,6 +2621,13 @@ describe("workflow contracts", () => {
         source_release_run_attempt: expect.objectContaining({ required: true }),
       }),
     );
+    expect(release.on.schedule).toBeUndefined();
+    expect(ci.jobs.deployment.if).toBe(
+      "${{ always() && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}",
+    );
+    expect(ci.jobs.images.if).toBe(ci.jobs.deployment.if);
+    for (const imageStep of ci.jobs.images.steps.filter((candidate: any) => candidate.with?.push))
+      expect(imageStep.with.push).toBe("${{ github.event_name == 'push' }}");
   });
 
   test("keeps admission least-privilege and candidate execution exact-head-bound", () => {
@@ -2794,6 +2802,7 @@ describe("workflow contracts", () => {
     expect(safety.if).toBe(
       "${{ always() && github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}",
     );
+    expect(safety.if).not.toContain("github.event_name != 'schedule'");
     const safetyStep = safety.steps.find((step: any) => step.name === "Test");
     expect(safetyStep.env).toEqual({ OPENGENI_REQUIRE_REAL_DB: "1" });
     expect(safetyStep.run).toBe("bun run test:unit");
@@ -2920,6 +2929,12 @@ describe("workflow contracts", () => {
     expect(aggregateResult("pull_request", pullRequestResults)).toBe(0);
     for (const eventName of ["push", "workflow_dispatch", "schedule"])
       expect(aggregateResult(eventName, nonPullRequestResults)).toBe(0);
+    expect(
+      aggregateResult("schedule", { ...nonPullRequestResults, UNIT_SHARDS_RESULT: "success" }),
+    ).not.toBe(0);
+    expect(
+      aggregateResult("schedule", { ...nonPullRequestResults, UNIT_SAFETY_RESULT: "skipped" }),
+    ).not.toBe(0);
     for (const result of ["failure", "skipped", "cancelled", ""]) {
       for (const variable of Object.keys(fixedResults)) {
         expect(

@@ -5,6 +5,8 @@ on:
     branches:
       - main
   pull_request:
+  schedule:
+    - cron: "0 3 * * *"
   workflow_dispatch:
     inputs:
       automation_pr_number:
