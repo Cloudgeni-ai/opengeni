@@ -151,7 +151,7 @@ learning, UI, release, deployment, or historical PR integration was added
 during reconciliation.
 
 Before merge, current main advanced to
-`8ffa77e74b64d345133471b0e83e98d56c2b121e` and allocated
+`9a1e72a420f5c7b21024df22d94ad437bfe53c55` and allocated
 `0151_slack_delivery_backoff.sql`. The final branch therefore moves the memory
 migration and PostgreSQL proof to the next free ordinal, `0152`. Correctness
 review also repaired relationship-revert CAS evidence so a revert now locks and
