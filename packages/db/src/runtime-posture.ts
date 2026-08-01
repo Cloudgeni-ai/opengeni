@@ -43,6 +43,8 @@ export const FORCE_RLS_TABLES = [
   "import_batches",
   "integration_oauth_state_nonces",
   "knowledge_memories",
+  "knowledge_memory_lifecycle_events",
+  "knowledge_memory_relationships",
   "machine_metrics_latest",
   "machine_metrics_series",
   "model_call_facts",
@@ -229,6 +231,8 @@ export const RUNTIME_FULL_DML_TABLES = [
 
 /** Configuration and lifecycle-owned audit rows are read-only at runtime. */
 export const RUNTIME_READ_ONLY_TABLES = [
+  "knowledge_memory_lifecycle_events",
+  "knowledge_memory_relationships",
   "nested_agent_depth_configuration",
   "preference_registry_events",
   "preference_registry_snapshots",

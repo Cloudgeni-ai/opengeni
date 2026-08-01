@@ -38,6 +38,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 | Workspace instruction policies | `docs/workspace-instruction-policies.md` | `docs/architecture.md`, API/SDK comments, and future runtime/UI work should link instead of weakening activation, audit, or legacy-fallback semantics. |
 | Workspace State read-only inventory | `docs/workspace-state.md` | `docs/architecture.md`, the Workspace State API/SDK/UI, and point-in-time reconciliation records should link here for bounds, authorization, and authority fences. |
 | Structured preference registry | `docs/preference-registry.md` | `docs/architecture.md`, API/MCP/SDK comments, and future runtime/UI work should link instead of weakening proposal-only imports, initiator binding, snapshot retrieval, or scope authorization. |
+| Hierarchical workspace memory foundation | `docs/hierarchical-memory.md` | `docs/architecture.md`, DB/domain comments, and future API/runtime/UI slices should link instead of weakening typed-scope RLS, immutable actor evidence, or maintenance-cutover semantics. |
 | MCP surface selection | `docs/mcp-surfaces.md` | `docs/architecture.md`, `docs/capabilities.md`, `docs/session-mcp-servers.md` should link. |
 | Toolspace programmatic tool access | `docs/mcp-surfaces.md`, `docs/architecture.md`; record design in `docs/design/toolspace.md` | Runtime/API/worker comments should link instead of restating security invariants. |
 | Client/server compatibility policy | `docs/architecture.md` §3.10 | `packages/sdk/README.md` links; release notes should link. |
