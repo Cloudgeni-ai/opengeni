@@ -1826,6 +1826,23 @@ export function getSettings(): Settings {
   return settings;
 }
 
+const LOCAL_FIRST_PARTY_DELEGATION_SECRET = "opengeni-local-first-party-delegation-secret-v1";
+
+/**
+ * First-party session tools need a shared HMAC identity even in the unauthenticated
+ * local product mode. A fixed local-only value is no broader than that mode's
+ * existing access boundary, while configured and managed deployments continue to
+ * require an operator-provided secret.
+ */
+export function resolveFirstPartyDelegationSecret(settings: Settings): string | undefined {
+  const explicit = settings.delegationSecret?.trim();
+  if (explicit) return explicit;
+  return settings.productAccessMode === "local" &&
+    (settings.environment === "local" || settings.environment === "test")
+    ? LOCAL_FIRST_PARTY_DELEGATION_SECRET
+    : undefined;
+}
+
 /**
  * The Modal sandbox idle timeout (seconds) the provider actually passes as
  * idleTimeoutMs (sandbox-file-persistence). When the operator did not pin

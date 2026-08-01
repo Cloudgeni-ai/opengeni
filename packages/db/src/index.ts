@@ -1190,6 +1190,8 @@ export const allWorkspacePermissions: Permission[] = [
   "goals:manage",
   "enrollments:read",
   "enrollments:manage",
+  "artifacts:read",
+  "artifacts:publish",
 ];
 
 export const allAccountPermissions: Permission[] = [
@@ -42371,3 +42373,4 @@ function shortHash(value: string): string {
 // evaluates under the index↔resolver module cycle.
 export * from "./codex-token-resolver";
 export * from "./connection-token-resolver";
+export * from "./workspace-artifacts";

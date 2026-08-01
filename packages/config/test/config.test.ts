@@ -875,6 +875,19 @@ describe("sandbox preparation profiles", () => {
     ).toThrow("OPENGENI_DELEGATION_SECRET is required when OPENGENI_TOOLSPACE_ENABLED=true");
   });
 
+  test("resolves a local-only first-party delegation secret without weakening configured mode", async () => {
+    const { resolveFirstPartyDelegationSecret } = await import("../src/index");
+    const local = withEnv({}, () => getSettings());
+    const configured = withEnv({ OPENGENI_PRODUCT_ACCESS_MODE: "configured" }, () => getSettings());
+    const explicit = withEnv({ OPENGENI_DELEGATION_SECRET: "operator-secret" }, () =>
+      getSettings(),
+    );
+
+    expect(resolveFirstPartyDelegationSecret(local)).toBeTruthy();
+    expect(resolveFirstPartyDelegationSecret(configured)).toBeUndefined();
+    expect(resolveFirstPartyDelegationSecret(explicit)).toBe("operator-secret");
+  });
+
   test("does not duplicate a custom files MCP profile", () => {
     withEnv(
       {

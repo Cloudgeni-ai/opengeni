@@ -122,6 +122,8 @@ export type SessionDraftSubmission = {
 export type BuildCreateSessionRequestInput = {
   currentResources: ResourceRef[];
   submission: TurnSubmission;
+  /** Session-scoped system guidance that is not rendered in the chat timeline. */
+  instructions?: string;
   omitWorkspaceResources?: boolean;
   selectedTools: ToolRef[];
   defaultModel: string;
@@ -179,6 +181,7 @@ export function buildCreateSessionRequest(
       : [...input.selectedTools];
   return {
     initialMessage: input.submission.text,
+    instructions: input.instructions || undefined,
     resources,
     ...(tools === undefined ? {} : { tools }),
     model: input.submission.model ?? input.defaultModel,
@@ -199,7 +202,9 @@ export function buildCreateSessionRequest(
     ...(input.targetSandboxId ? { targetSandboxId: input.targetSandboxId } : {}),
     ...(input.workingDir ? { workingDir: input.workingDir } : {}),
     ...(input.expectedNewSessionDraftRevision !== undefined
-      ? { expectedNewSessionDraftRevision: input.expectedNewSessionDraftRevision }
+      ? {
+          expectedNewSessionDraftRevision: input.expectedNewSessionDraftRevision,
+        }
       : {}),
   };
 }

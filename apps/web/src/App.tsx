@@ -80,6 +80,7 @@ const LazyWorkspaceStateRoute = lazyRouteComponent(
   () => import("@/routes/workspace-state"),
   "WorkspaceStateRoute",
 );
+const LazyArtifactsRoute = lazyRouteComponent(() => import("@/routes/artifacts"), "ArtifactsRoute");
 const LazyWorkspaceShellRoute = lazyRouteComponent(
   () => import("@/routes/workspace"),
   "WorkspaceShellRoute",
@@ -254,6 +255,16 @@ const workspaceStateRoute = createRoute({
   path: "state",
   component: WorkspaceState,
 });
+const workspaceArtifactsRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "artifacts",
+  component: Artifacts,
+});
+const workspaceArtifactDetailRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "artifacts/$artifactId",
+  component: ArtifactDetail,
+});
 const workspaceOrganizationRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "organization",
@@ -300,6 +311,8 @@ const routeTree = rootRoute.addChildren([
     workspaceDocumentsRoute,
     workspaceMemoryRoute,
     workspaceStateRoute,
+    workspaceArtifactsRoute,
+    workspaceArtifactDetailRoute,
     workspaceSettingsRoute,
     workspaceOrganizationRoute,
     workspaceAccountRoute,
@@ -442,6 +455,14 @@ function WorkspaceSettings() {
 function WorkspaceState() {
   const { workspaceId } = workspaceStateRoute.useParams();
   return <LazyWorkspaceStateRoute workspaceId={workspaceId} />;
+}
+
+function Artifacts() {
+  return <LazyArtifactsRoute {...workspaceArtifactsRoute.useParams()} />;
+}
+
+function ArtifactDetail() {
+  return <LazyArtifactsRoute {...workspaceArtifactDetailRoute.useParams()} />;
 }
 
 function Organization() {

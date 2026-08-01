@@ -1728,6 +1728,8 @@ export const KNOWN_PERMISSIONS = [
   "enrollments:manage",
   "rigs:use",
   "rigs:manage",
+  "artifacts:read",
+  "artifacts:publish",
 ] as const;
 
 export type KnownPermission = (typeof KNOWN_PERMISSIONS)[number];
@@ -1795,7 +1797,12 @@ export type FirstPartyMcpToolName =
   | "slack_bot_file_info"
   | "slack_bot_file_content"
   | "slack_bot_post_message"
-  | "slack_bot_delete_message";
+  | "slack_bot_delete_message"
+  | "artifacts_list"
+  | "artifacts_get_source"
+  | "artifacts_create"
+  | "artifacts_publish"
+  | "artifacts_rollback";
 
 export type ProductAccessMode = "local" | "configured" | "managed";
 
@@ -2160,7 +2167,7 @@ export type ClientAuthConfig =
 
 // Kept value-identical to @opengeni/contracts and pinned by the SDK contract
 // parity suite. The SDK has no runtime dependency on the Zod contracts package.
-export const OPENGENI_API_CONTRACT_REVISION = "2026-07-turn-instructions-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-07-workspace-artifacts-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
