@@ -38,6 +38,7 @@
     "format:check": "oxfmt --check",
     "test": "bun test --max-concurrency=8 --timeout=30000",
     "test:unit": "bun test --max-concurrency=8 --timeout=30000",
+    "test:unit:shard": "bun test --max-concurrency=1 --timeout=30000",
     "test:react:clean": "bun scripts/test-react-clean.ts",
     "test:control-algebra": "OPENGENI_REQUIRE_REAL_DB=1 bun test --timeout 120000 packages/db/test/session-control-algebra.test.ts packages/db/test/session-control-plane.test.ts packages/db/test/session-control-mega-migration.test.ts",
     "test:control-concurrency": "OPENGENI_REQUIRE_REAL_DB=1 bun test --timeout 120000 packages/db/test/session-control-plane.test.ts packages/db/test/queue-mutations.test.ts packages/db/test/agent-session-commands.test.ts packages/db/test/session-workflow-wake-outbox.test.ts",
