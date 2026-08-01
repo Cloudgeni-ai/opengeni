@@ -5107,6 +5107,21 @@ function connectionExactSubject(subjectId?: string | null): SQL {
     : isNull(schema.connections.subjectId);
 }
 
+function personalSlackCanonicalConnectionOrder(): SQL[] {
+  return [
+    sql`case ${schema.connections.status}
+      when 'active' then 0
+      when 'needs_reauth' then 1
+      when 'error' then 2
+      when 'revoked' then 3
+      else 4
+    end`,
+    desc(schema.connections.updatedAt),
+    desc(schema.connections.createdAt),
+    desc(schema.connections.id),
+  ];
+}
+
 async function withConnectionSubjectRls<T>(
   db: Database,
   workspaceId: string,
@@ -7080,13 +7095,25 @@ export async function loadConnectionCredentialForBroker(
     async (scopedDb) => {
       // Prefer active rows: a revoke bumps updatedAt, so recency alone would let a
       // freshly revoked connection shadow an active replacement for the provider.
+      // UUID-free Personal Slack lookup additionally mirrors the UI/reconnect
+      // canonical rule through createdAt and immutable UUID tie-breakers. Migration
+      // 0132 can stamp legacy duplicates with the same updatedAt in one transaction.
+      const personalSlackSubjectLookup =
+        !input.connectionId &&
+        input.allowSubjectOwned === true &&
+        input.providerDomain === "slack.com" &&
+        input.kind === "oauth2";
       const [row] = await scopedDb
         .select()
         .from(schema.connections)
         .where(and(...conditions))
         .orderBy(
-          desc(sql`(${schema.connections.status} = 'active')`),
-          desc(schema.connections.updatedAt),
+          ...(personalSlackSubjectLookup
+            ? personalSlackCanonicalConnectionOrder()
+            : [
+                desc(sql`(${schema.connections.status} = 'active')`),
+                desc(schema.connections.updatedAt),
+              ]),
         )
         .limit(1);
       if (!row) {
