@@ -5,7 +5,6 @@ import {
   advanceSlackInteractionDelivery,
   bindSlackInteractionSession,
   claimSlackInteractionDelivery,
-  claimSlackInteractionProgressDelivery,
   claimSlackInteractionInbox,
   closeSlackInteractionDelivery,
   deferSlackInteractionDelivery,
@@ -55,7 +54,6 @@ export const SLACK_DELIVERY_EVENT_TYPES = [
 
 const MAX_SLACK_TEXT_CHARS = 3_500;
 const MAX_SLACK_INPUT_CHARS = 8_000;
-const MAX_PROGRESS_MESSAGES = 3;
 const SLACK_USER_LINK_TTL_MS = 15 * 60_000;
 const INBOX_LEASE_MS = 30_000;
 const DELIVERY_LEASE_MS = 30_000;
@@ -613,29 +611,6 @@ async function deliverSlackSessionEvents(
     lastSequence = Math.max(lastSequence, event.sequence);
     if (event.type === "agent.message.completed") {
       latestAssistantText = safePayloadText(event.payload, "text");
-      if (latestAssistantText) {
-        const progress = await claimSlackInteractionProgressDelivery(deps.db, {
-          accountId: interaction.accountId,
-          workspaceId: interaction.workspaceId,
-          interactionId: interaction.id,
-          claimHolderId,
-          sessionEventSequence: event.sequence,
-          maxProgress: MAX_PROGRESS_MESSAGES,
-        });
-        if (progress.kind === "not_owned") {
-          throw new Error("Slack progress delivery lost its durable interaction claim");
-        }
-        if (progress.kind === "claimed") {
-          await postDelivery(
-            client,
-            interaction,
-            event,
-            latestAssistantText,
-            "progress",
-            progress.delivery.operationId,
-          );
-        }
-      }
     } else if (event.type === "session.humanInput.requested") {
       const requests = await listSessionHumanInputRequests(
         deps.db,
