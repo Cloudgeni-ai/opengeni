@@ -21,6 +21,7 @@ const TURN_B = "99999999-9999-4999-8999-999999999992";
 type RecordedRequest = {
   url: string;
   method: string;
+  credentials: RequestCredentials;
   headers: Record<string, string>;
   body: string | null;
   signal: AbortSignal;
@@ -36,6 +37,9 @@ function recordingFetch(responder: (request: RecordedRequest) => Response): {
     const recorded: RecordedRequest = {
       url: request.url,
       method: request.method,
+      // Bun's Request currently reports `include` regardless of the supplied
+      // RequestInit value, so record the caller's explicit policy directly.
+      credentials: init?.credentials ?? request.credentials,
       headers: Object.fromEntries(request.headers.entries()),
       body:
         init?.body !== undefined && init?.body !== null
@@ -431,6 +435,7 @@ describe("OpenGeniClient files", () => {
     const put = requests[1]!;
     expect(put.method).toBe("PUT");
     expect(put.url).toBe(begin.putUrl);
+    expect(put.credentials).toBe("omit");
     expect(put.headers["x-ms-blob-type"]).toBe("BlockBlob");
     // Regression guard: the PUT must send exactly ONE content-type value. If the
     // SDK redundantly sets a `Content-Type` key alongside the backend's lowercase

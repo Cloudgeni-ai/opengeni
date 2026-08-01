@@ -2366,6 +2366,11 @@ export class OpenGeniClient {
     });
     const putResponse = await this.fetchImpl(upload.putUrl, {
       method: "PUT",
+      // Signed object-storage URLs carry their own short-lived authority.
+      // Browser cookies and HTTP auth must never accompany this cross-origin
+      // request: credentialed fetches are incompatible with wildcard CORS and
+      // can leak ambient credentials to a caller-selected storage endpoint.
+      credentials: "omit",
       // The backend's requiredHeaders already carry the canonical lowercase
       // `content-type` for every storage backend (Azure/S3/GCS). Do NOT also set
       // a `Content-Type` key here: WHATWG Headers treats the two casings as the
