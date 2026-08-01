@@ -133,11 +133,14 @@ describe("release image workflow contract", () => {
     expect(() => Bun.YAML.parse(ci)).not.toThrow();
     expect(images).toContain("packages: write");
     expect(images.match(/push: \$\{\{ github\.event_name == 'push' \}\}/g)).toHaveLength(5);
-    expect(images.match(/:sha-\{0\}', github\.sha\)/g)).toHaveLength(5);
+    expect(images.match(/:dogfood-sha-\{0\}', github\.sha\)/g)).toHaveLength(5);
+    expect(images).not.toMatch(/format\('ghcr\.io\/cloudgeni-ai\/opengeni-[^']+:sha-\{0\}'/);
     expect(images.match(/OPENGENI_SERVER_VERSION=sha-\$\{\{ github\.sha \}\}/g)).toHaveLength(3);
     expect(images).toContain("OPENGENI_DEPLOYMENT_REVISION=${{ github.sha }}");
     expect(images).toContain("Write exact-main-SHA dogfood receipt");
     expect(images).toContain("Upload exact-main-SHA dogfood receipt");
+    expect(images).toContain('--arg tag "dogfood-sha-${GITHUB_SHA}"');
+    expect(images).not.toContain('--arg tag "sha-${GITHUB_SHA}"');
     expect(images).toContain("dogfood-images-${{ github.sha }}");
     expect(images).toContain("dogfood-images.sha256");
     expect(images).toContain("'^sha256:[0-9a-f]{64}$'");
