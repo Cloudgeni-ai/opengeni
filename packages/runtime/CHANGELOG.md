@@ -1,5 +1,16 @@
 # @opengeni/runtime
 
+## 0.15.2
+
+### Patch Changes
+
+- 3b8d653: Allow Modal-backed repository sessions to enumerate workspace skill directories so optional discovery does not fail before a turn and repository skills remain available after resume. Keep the shared filesystem confinement path functional on stock macOS as well as GNU/Linux.
+- Updated dependencies [d4d8960]
+- Updated dependencies [ec0bc02]
+- Updated dependencies [5a4c559]
+  - @opengeni/contracts@0.28.0
+  - @opengeni/config@0.9.0
+
 ## 0.15.1
 
 ### Patch Changes
