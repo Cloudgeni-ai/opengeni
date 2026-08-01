@@ -467,7 +467,6 @@ export function ModelPicker(props: ModelPickerProps) {
     [props.rows, props.codexOnly],
   );
   const [nav, setNav] = usePickerNavState(props.sessionKey, rows, props.model);
-  const selectedRow = findPickerRow(rows, props.model);
   const fastActive = props.latencyMode === "fast";
   const menuSide = props.menuSide ?? "bottom";
   // Hide speculative defaults (wrong rail / Fast wipe) until catalog + draft settle.
