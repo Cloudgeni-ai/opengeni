@@ -5,6 +5,7 @@ import { parseIntegrationsOauthClientsJson, type Settings } from "@opengeni/conf
 import {
   OPENGENI_PERSONAL_SLACK_MCP_URL,
   OAuthStartResponse,
+  selectCanonicalPersonalSlackConnection,
   type OAuthStartRequest,
 } from "@opengeni/contracts";
 import { hasPermission, requireEnvironmentEncryption } from "@opengeni/core";
@@ -161,6 +162,8 @@ export async function startMcpOAuth(
     workspaceId: context.workspaceId,
     subjectId: context.subjectId,
     providerDomain,
+    mcpUrl,
+    personalSlack,
     connectionId: context.payload.connectionId,
   });
   if (context.payload.connectionId && !existing) {
@@ -847,6 +850,8 @@ async function existingOAuthConnectionForStart(
     workspaceId: string;
     subjectId: string;
     providerDomain: string;
+    mcpUrl: string;
+    personalSlack: boolean;
     connectionId?: string | undefined;
   },
 ) {
@@ -859,20 +864,23 @@ async function existingOAuthConnectionForStart(
     );
     return connection?.subjectId === input.subjectId &&
       connection.kind === "oauth2" &&
-      connection.providerDomain === input.providerDomain
+      connection.providerDomain === input.providerDomain &&
+      (!input.personalSlack || connection.metadata.mcpUrl === input.mcpUrl)
       ? connection
       : null;
   }
   const visible = await listConnectionsMetadata(db, input.workspaceId, input.subjectId);
-  return (
-    visible.find(
-      (connection) =>
-        connection.subjectId === input.subjectId &&
-        connection.kind === "oauth2" &&
-        connection.status === "active" &&
-        connection.providerDomain === input.providerDomain,
-    ) ?? null
+  const matching = visible.filter(
+    (connection) =>
+      connection.subjectId === input.subjectId &&
+      connection.kind === "oauth2" &&
+      connection.providerDomain === input.providerDomain &&
+      (!input.personalSlack || connection.metadata.mcpUrl === input.mcpUrl),
   );
+  if (input.personalSlack) {
+    return selectCanonicalPersonalSlackConnection(matching);
+  }
+  return matching.find((connection) => connection.status === "active") ?? null;
 }
 
 function buildAuthorizationUrl(input: {

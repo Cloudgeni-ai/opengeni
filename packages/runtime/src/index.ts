@@ -172,6 +172,7 @@ import {
 import {
   createSandboxClient,
   desktopCapableBackend,
+  repairSerializedRunStateExposedPorts,
   restoredSandboxSessionStateFromEntry,
   setSelfhostedApplyDiff,
   toolspaceTokenFileFromEnvironment,
@@ -3757,7 +3758,11 @@ export async function prepareRunInput(
       "Cannot resume an interrupted tool: the session context was cleared, so the awaiting run state no longer exists.",
     );
   }
-  const state = await RunState.fromString(agent, input.serializedRunState);
+  const compatibleRunState = repairSerializedRunStateExposedPorts(input.serializedRunState);
+  for (const repair of compatibleRunState.repairs) {
+    console.warn("[runtime] repaired incompatible RunState exposedPorts", repair);
+  }
+  const state = await RunState.fromString(agent, compatibleRunState.serializedRunState);
   const interruptions = state.getInterruptions();
   const interruptionId = input.kind === "human_input" ? input.toolCallId : input.approvalId;
   const target = interruptions.find((item: any) => approvalIdentifier(item) === interruptionId);

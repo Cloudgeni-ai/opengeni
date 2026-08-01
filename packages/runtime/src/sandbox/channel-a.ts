@@ -546,9 +546,10 @@ export class SandboxChannelAService {
       ? `test ! -L ${shellQuote(abs)} || { printf '__OPENGENI_FS_SYMLINK__'; exit 68; }`
       : ":";
     const script = [
-      `root=$(realpath -e -- ${shellQuote(root)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
+      PORTABLE_REALPATH_EXISTING_FUNCTION,
+      `root=$(opengeni_realpath_existing ${shellQuote(root)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
       rejectLink,
-      `target=$(realpath -e -- ${shellQuote(abs)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
+      `target=$(opengeni_realpath_existing ${shellQuote(abs)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
       `case "$target" in "$root"|"$root"/*) ;; *) printf '__OPENGENI_FS_ESCAPE__'; exit 67 ;; esac`,
       `test -d "$target" || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
       `printf '__OPENGENI_FS_CONFINED_OK__'`,
@@ -573,11 +574,12 @@ export class SandboxChannelAService {
       ? ":"
       : 'test -d "$parent" || { printf "__OPENGENI_FS_NOT_FOUND__"; exit 66; }';
     const script = [
-      `root=$(realpath -e -- ${shellQuote(root)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
+      PORTABLE_REALPATH_EXISTING_FUNCTION,
+      `root=$(opengeni_realpath_existing ${shellQuote(root)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
       rejectLink,
       `parent=$(dirname -- ${shellQuote(abs)})`,
       locateParent,
-      `target=$(realpath -e -- "$probe") || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
+      `target=$(opengeni_realpath_existing "$probe") || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
       `case "$target" in "$root"|"$root"/*) ;; *) printf '__OPENGENI_FS_ESCAPE__'; exit 67 ;; esac`,
       requireParent,
       `printf '__OPENGENI_FS_CONFINED_OK__'`,
@@ -618,7 +620,8 @@ export class SandboxChannelAService {
     const root = this.workspaceRoot || ".";
     const abs = this.joinRoot(path);
     const script = [
-      `root=$(realpath -e -- ${shellQuote(root)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
+      PORTABLE_REALPATH_EXISTING_FUNCTION,
+      `root=$(opengeni_realpath_existing ${shellQuote(root)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
       `exec 3<${shellQuote(abs)} || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
       `target=$(readlink -f -- "/proc/$$/fd/3") || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
       `case "$target" in "$root"|"$root"/*) ;; *) printf '__OPENGENI_FS_ESCAPE__'; exit 67 ;; esac`,
@@ -1677,9 +1680,10 @@ export class SandboxChannelAService {
       const successSuffixPrefix = `__OPENGENI_FS_CONFINED_${frameId}_END__:`;
       const successSuffixTerminator = "__";
       const script = [
-        `root=$(realpath -e -- ${shellQuote(root)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
+        PORTABLE_REALPATH_EXISTING_FUNCTION,
+        `root=$(opengeni_realpath_existing ${shellQuote(root)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
         rejectLink,
-        `target=$(realpath -e -- ${shellQuote(abs)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
+        `target=$(opengeni_realpath_existing ${shellQuote(abs)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
         `case "$target" in "$root"|"$root"/*) ;; *) printf '__OPENGENI_FS_ESCAPE__'; exit 67 ;; esac`,
         `test -d "$target" || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
         `cd -P -- "$target"`,
@@ -1911,6 +1915,17 @@ export function assertSafeRelPath(p: string): string {
 function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
+
+// GNU realpath's `-e --` is not accepted by stock macOS. Require the candidate
+// to exist ourselves, prefix relative option-like paths, and then use the
+// common realpath invocation on both GNU and BSD implementations.
+const PORTABLE_REALPATH_EXISTING_FUNCTION = [
+  'opengeni_realpath_existing() { local candidate="$1"',
+  'case "$candidate" in /*) ;; *) candidate="./$candidate" ;; esac',
+  '[ -e "$candidate" ] || [ -L "$candidate" ] || return 1',
+  'realpath "$candidate"',
+  "}",
+].join("; ");
 
 /** Run control-plane-generated Bash without user/provider startup files. The
  * marker protocol is private control data; profile output must not corrupt it. */

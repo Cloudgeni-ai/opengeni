@@ -5325,6 +5325,70 @@ export const ConnectionMetadata = z.object({
 });
 export type ConnectionMetadata = z.infer<typeof ConnectionMetadata>;
 
+type PersonalSlackCanonicalConnection = Pick<
+  ConnectionMetadata,
+  "id" | "status" | "createdAt" | "updatedAt"
+>;
+
+const PERSONAL_SLACK_CONNECTION_STATUS_RANK = {
+  active: 0,
+  needs_reauth: 1,
+  error: 2,
+  revoked: 3,
+} as const satisfies Record<ConnectionStatus, number>;
+
+/**
+ * Canonical ordering for duplicate subject-owned Personal Slack rows.
+ *
+ * PostgreSQL broker lookup mirrors this exact sequence: usable status first,
+ * then newest update, newest creation, and immutable UUID descending.
+ */
+export function comparePersonalSlackCanonicalConnections(
+  left: PersonalSlackCanonicalConnection,
+  right: PersonalSlackCanonicalConnection,
+): number {
+  const statusDelta =
+    PERSONAL_SLACK_CONNECTION_STATUS_RANK[left.status] -
+    PERSONAL_SLACK_CONNECTION_STATUS_RANK[right.status];
+  if (statusDelta !== 0) return statusDelta;
+
+  const updatedAtDelta = compareDescending(
+    canonicalConnectionTimestamp(left.updatedAt),
+    canonicalConnectionTimestamp(right.updatedAt),
+  );
+  if (updatedAtDelta !== 0) return updatedAtDelta;
+
+  const createdAtDelta = compareDescending(
+    canonicalConnectionTimestamp(left.createdAt),
+    canonicalConnectionTimestamp(right.createdAt),
+  );
+  if (createdAtDelta !== 0) return createdAtDelta;
+
+  return compareDescending(left.id, right.id);
+}
+
+export function selectCanonicalPersonalSlackConnection<T extends PersonalSlackCanonicalConnection>(
+  connections: readonly T[],
+): T | null {
+  let selected: T | null = null;
+  for (const connection of connections) {
+    if (!selected || comparePersonalSlackCanonicalConnections(connection, selected) < 0) {
+      selected = connection;
+    }
+  }
+  return selected;
+}
+
+function canonicalConnectionTimestamp(value: string): number {
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : Number.NEGATIVE_INFINITY;
+}
+
+function compareDescending(left: number | string, right: number | string): number {
+  if (left === right) return 0;
+  return left > right ? -1 : 1;
+}
+
 export const ConnectionCredentialBundle = z.record(z.string(), z.unknown());
 export type ConnectionCredentialBundle = z.infer<typeof ConnectionCredentialBundle>;
 
