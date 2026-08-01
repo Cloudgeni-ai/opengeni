@@ -1888,6 +1888,7 @@ describe("useComposer durable draft and control binding", () => {
       resources: [],
       model: "model-x",
       reasoningEffort: "medium" as const,
+      latencyMode: "fast" as const,
       sourceTurnId: null,
       sourceTurnVersion: null,
       updatedAt: new Date().toISOString(),
@@ -1913,7 +1914,7 @@ describe("useComposer durable draft and control binding", () => {
           client,
           workspaceId: WORKSPACE_ID,
           effectiveControl: queueSnapshot([]).effectiveControl,
-          sendExtras: { model: "model-x", reasoningEffort: "medium" },
+          sendExtras: { model: "model-x", reasoningEffort: "medium", latencyMode: "fast" },
         }),
       undefined,
     );
@@ -1924,12 +1925,14 @@ describe("useComposer durable draft and control binding", () => {
     expect(saved.at(-1)).toMatchObject({
       expectedRevision: 4,
       text: "edited locally",
+      latencyMode: "fast",
     });
     await flushing(async () => expect(await hook.result.current.send()).toBe(true));
     expect(sent.at(-1)).toMatchObject({
       text: "edited locally",
       expectedDraftRevision: 5,
       controlEtag: "control-3",
+      latencyMode: "fast",
     });
     await hook.unmount();
   });

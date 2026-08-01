@@ -17,8 +17,10 @@
    Runs settle back to plain text once age ≥ INK_FADE_MS (zero span cost).
    -------------------------------------------------------------------------- */
 
+import { MOTION_INSPECT_SCALE } from "../lib/motion-inspect";
+
 /** Keep in sync with `--og-duration-stream` / `.og-stream-ink` in styles. */
-export const INK_FADE_MS = 1100;
+export const INK_FADE_MS = 420 * MOTION_INSPECT_SCALE;
 /** @deprecated Use {@link INK_FADE_MS}. */
 export const WORD_ANIMATION_MS = INK_FADE_MS;
 

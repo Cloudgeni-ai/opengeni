@@ -73,7 +73,14 @@ export type StreamPhase =
       /** Per-section pacing; omit for baseline env token delay. */
       pacing?: StreamPacingInput;
     }
-  | { kind: "tools"; tools: (ctx: StreamCtx) => ToolSpec[]; settleMs?: number }
+  | {
+      kind: "tools";
+      tools: (ctx: StreamCtx) => ToolSpec[];
+      /** Delay from tool created → output. Number or per-index. */
+      settleMs?: number | ((index: number) => number);
+      /** Pause after each tool settles, before the next. Number or per-index. */
+      gapMs?: number | ((index: number) => number);
+    }
   | { kind: "memory-save"; kindLabel: string; preview: string }
   | { kind: "memory-correct"; kindLabel: string; oldPreview: string; preview: string }
   | {
@@ -437,6 +444,104 @@ function mixedToolTour(ctx: StreamCtx): ToolSpec[] {
     writeStdin(ctx.id("t-stdin")),
   ];
 }
+
+/** Temporary: tools only, free-varying cadence — scrub tip-follow / row enter. */
+function verticalScrutinyTools(ctx: StreamCtx, count: number): ToolSpec[] {
+  const cmds = [
+    "git status -sb",
+    "bun install",
+    "bun run typecheck",
+    "rg -n SameSite apps packages",
+    "cat src/auth/middleware.ts | head -40",
+    "mkdir -p artifacts/stream",
+    "curl -fsS http://127.0.0.1:3000/healthz || true",
+    "docker ps --format '{{.Names}}'",
+    "bun test packages/react/test/tip-follow-glide.test.ts",
+    "git diff --stat",
+    "ls -la artifacts/stream",
+    "bun run lint",
+  ];
+  const out: ToolSpec[] = [];
+  for (let i = 0; i < count; i += 1) {
+    const id = ctx.id(`v-${i}`);
+    switch (i % 10) {
+      case 0:
+        out.push(execOk(id, cmds[i % cmds.length]!));
+        break;
+      case 1:
+        out.push(applyPatch(id, `src/stream/row-${i}.ts`, ctx.turnIndex + i));
+        break;
+      case 2:
+        out.push(webSearch(id, `vertical scroll scrutiny pulse ${i}`));
+        break;
+      case 3:
+        out.push(mcpOk(id));
+        break;
+      case 4:
+        out.push(genericTool(id));
+        break;
+      case 5:
+        out.push(writeStdin(id));
+        break;
+      case 6:
+        out.push(execFail(id, "curl -fsS http://missing.invalid/healthz"));
+        break;
+      case 7:
+        out.push(envSecret(id));
+        break;
+      case 8:
+        out.push(mcpIssue(id, `Scrutiny note ${i}`));
+        break;
+      default:
+        out.push(viewImage(id, i % 20 !== 19));
+        break;
+    }
+  }
+  return out;
+}
+
+/** Free-form settle: mix snappy, medium, and laggy tool completions. */
+function freeToolSettleMs(index: number): number {
+  const band = index % 7;
+  if (band === 0) return 35 + (index % 3) * 12;
+  if (band === 1) return 90 + (index % 5) * 18;
+  if (band === 2) return 160 + (index % 4) * 40;
+  if (band === 3) return 280 + (index % 3) * 60;
+  if (band === 4) return 420 + (index % 4) * 80;
+  if (band === 5) return 60 + ((index * 37) % 200);
+  return 520 + ((index * 53) % 380);
+}
+
+/** Free-form gap between tools (after settle). */
+function freeToolGapMs(index: number): number {
+  const band = index % 5;
+  if (band === 0) return 15 + (index % 4) * 8;
+  if (band === 1) return 80 + (index % 6) * 25;
+  if (band === 2) return 180 + (index % 5) * 45;
+  if (band === 3) return 40 + ((index * 41) % 160);
+  return 300 + ((index * 29) % 450);
+}
+
+/**
+ * TEMPORARY scrutiny scenario: only tool rows, one after another, free speed.
+ * Enable with `--tools-only` or `OPENGENI_SEED_STREAM_MODE=tools`.
+ */
+export const SCENARIO_TOOL_VERTICAL_SCRUTINY: StreamScenario = {
+  id: "tool-vertical-scrutiny",
+  title: "TEMP tools-only vertical scrutiny (free varying speed)",
+  userText: (ctx) =>
+    `TEMP scrutiny ${ctx.turnIndex}: stream tools only — watch tip-follow / row enter smoothness.`,
+  phases: [
+    { kind: "reason", text: "Tool marathon only — no prose wall. Varying settle + gap." },
+    { kind: "sleep", ms: 220 },
+    {
+      kind: "tools",
+      tools: (ctx) => verticalScrutinyTools(ctx, 36),
+      settleMs: freeToolSettleMs,
+      gapMs: freeToolGapMs,
+    },
+  ],
+};
 
 const SCENARIO_HUGE_FAST_WALL: StreamScenario = {
   id: "markdown-huge-fast-wall",
@@ -836,6 +941,24 @@ export const STREAM_SCENARIOS: StreamScenario[] = [
 
 export const SCENARIO_COUNT = STREAM_SCENARIOS.length;
 
-export function scenarioForTurn(turnIndex: number): StreamScenario {
+export type StreamScenarioMode = "all" | "tools";
+
+export function resolveStreamScenarioMode(
+  raw: string | undefined = process.env.OPENGENI_SEED_STREAM_MODE,
+): StreamScenarioMode {
+  const value = (raw ?? "all").trim().toLowerCase();
+  if (value === "tools" || value === "tools-only" || value === "tool") {
+    return "tools";
+  }
+  return "all";
+}
+
+export function scenarioForTurn(
+  turnIndex: number,
+  mode: StreamScenarioMode = resolveStreamScenarioMode(),
+): StreamScenario {
+  if (mode === "tools") {
+    return SCENARIO_TOOL_VERTICAL_SCRUTINY;
+  }
   return STREAM_SCENARIOS[(turnIndex - 1) % STREAM_SCENARIOS.length]!;
 }

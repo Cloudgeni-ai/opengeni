@@ -48,6 +48,7 @@ function mapNewSessionDraft(
     toolsProvided: newSessionDraftToolsProvided(row),
     model: row.model,
     reasoningEffort: row.reasoningEffort,
+    latencyMode: row.latencyMode,
     options: publicNewSessionDraftOptions(row),
     updatedAt: row.updatedAt.toISOString(),
   });
@@ -169,6 +170,7 @@ export async function getActorNewSessionDraft(
       toolsProvided: false,
       model: deps.settings.openaiModel,
       reasoningEffort: deps.settings.openaiReasoningEffort,
+      latencyMode: "standard",
       options: {},
       updatedAt: null,
     }
@@ -223,6 +225,7 @@ export async function saveActorNewSessionDraft(
           toolsProvided,
           model: input.model,
           reasoningEffort: input.reasoningEffort,
+          latencyMode: input.latencyMode,
           options: input.options,
           // Only managed people are removed through removeWorkspaceMember().
           // API keys and delegated service actors (for example the first-party

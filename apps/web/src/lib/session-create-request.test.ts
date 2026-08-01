@@ -29,6 +29,7 @@ function build(
     selectedTools: [],
     defaultModel: "gpt-5.4",
     defaultReasoningEffort: "medium",
+    defaultLatencyMode: "standard",
     clientEventId: "event-1",
     idempotencyKey: "create-1",
     ...overrides,
@@ -120,6 +121,14 @@ describe("buildCreateSessionRequest", () => {
     });
     expect(result.resources).not.toBe(currentResources);
     expect(result.tools).not.toBe(tools);
+  });
+
+  test("threads the selected latency mode into session creation", () => {
+    expect(
+      build([], [], {
+        submission: { text: "start", resources: [], latencyMode: "fast" },
+      }).latencyMode,
+    ).toBe("fast");
   });
 
   test("omits tools only when the ready catalog selection equals workspace defaults", () => {

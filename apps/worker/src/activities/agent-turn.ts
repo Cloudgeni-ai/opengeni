@@ -81,6 +81,7 @@ import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@
 import {
   sandboxStateEntryFromRunState,
   maxTurnsExceededRunState,
+  modelResponseServiceTierFromSdkEvent,
   modelResponseUsageFromSdkEvent,
   normalizeModelCallUsage,
   normalizeSdkEvent,
@@ -137,8 +138,10 @@ import {
   calculateModelUsageCostMicros,
   configuredModelPricing,
   configuredStaticUsageLimits,
+  responseSatisfiesLatencyMode,
   sandboxArchiveCaptureTimeoutMs,
   sandboxWarmRateMicrosPerSecond,
+  serviceTierForLatencyMode,
   settingsWithResolvedModelContext,
   resolveTurnExecutionPolicyV1,
   type ModelUsageInput,
@@ -182,6 +185,7 @@ import {
   buildModelResolver,
   CODEX_CLIENT_VERSION,
   CODEX_FALLBACK_MODEL_SLUGS,
+  CODEX_PROVIDER_ID,
   CodexReloginRequired,
   classifyCodexEncryptedArtifactRejection,
   classifyCodexResponseTimeoutError,
@@ -314,6 +318,7 @@ import {
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   evaluateWorkspaceModelPolicy,
   readTurnExecutionPolicyV1,
+  type LatencyMode,
   type ResourceRef,
   type SessionEvent,
   type SessionEventType,
@@ -396,7 +401,7 @@ export function turnExecutionPolicyBillingIdentity(policy: TurnExecutionPolicyV1
 }
 
 export function legacyTurnExecutionPolicyInput(
-  turn: Pick<SessionTurn, "source" | "model" | "reasoningEffort">,
+  turn: Pick<SessionTurn, "source" | "model" | "reasoningEffort" | "latencyMode">,
 ): Parameters<typeof resolveTurnExecutionPolicyV1>[1] {
   const explicit = turn.source === "user" || turn.source === "api";
   return {
@@ -405,6 +410,8 @@ export function legacyTurnExecutionPolicyInput(
     modelSource: explicit ? "explicit" : "continuation",
     reasoningEffort: turn.reasoningEffort,
     reasoningSource: explicit ? "explicit" : "continuation",
+    latencyMode: turn.latencyMode,
+    latencyModeSource: explicit ? "explicit" : "continuation",
   };
 }
 
@@ -1058,6 +1065,37 @@ export function modelResponseUsageContextSignal(
       };
 }
 
+export function assertModelResponseLatencyMode(input: {
+  event: Parameters<typeof modelResponseServiceTierFromSdkEvent>[0];
+  requested: LatencyMode;
+  model: string;
+  /** When set to Codex ChatGPT auth, response `service_tier` is not an honor signal. */
+  providerId?: string;
+}): void {
+  if (input.requested === "standard") {
+    return;
+  }
+  // ChatGPT-auth Codex (subscription): Fast maps to request `service_tier=priority`
+  // (see openai/codex ServiceTier::Fast.request_value). The backend may still return
+  // `response.service_tier=default`; OpenAI maintainers document that this does not
+  // mean Fast was ignored. Native CLI also does not fail closed on that field.
+  if (input.providerId === CODEX_PROVIDER_ID) {
+    return;
+  }
+  const serviceTierEvent = modelResponseServiceTierFromSdkEvent(input.event);
+  if (
+    !serviceTierEvent ||
+    (serviceTierEvent.source === "normalized" && serviceTierEvent.serviceTier === null)
+  ) {
+    return;
+  }
+  if (!responseSatisfiesLatencyMode(input.requested, serviceTierEvent.serviceTier)) {
+    throw new Error(
+      `Provider did not honor ${input.requested} latency mode for ${input.model}: response service_tier=${serviceTierEvent.serviceTier ?? "missing"}`,
+    );
+  }
+}
+
 /**
  * Process one SDK stream event through the exact production usage path.
  *
@@ -1085,6 +1123,7 @@ export async function processModelResponseUsageEvent(input: {
   provider: string;
   providerApi: ModelProviderApi;
   model: string;
+  latencyMode?: LatencyMode;
   metricProvider: string;
   externallyBilled: boolean;
   servingCredentialId: string | null;
@@ -1139,6 +1178,7 @@ export async function processModelResponseUsageEvent(input: {
         usage: responseUsage.usage,
         normalizedUsage,
         sourceKey,
+        ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
         observability: input.observability,
       });
       authoritative = await emitModelCallUsage({
@@ -3081,6 +3121,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         {
           modelId: turn.model,
           reasoningEffort: turn.reasoningEffort,
+          latencyMode: turn.latencyMode,
         },
       );
       const turnExecutionPolicy = verifiedExecutionPolicy.policy;
@@ -5403,8 +5444,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             }
           : {};
       const hostedWebSearch = hostedWebSearchForTurn(resolvedModel, runSettings.webSearchEnabled);
+      const serviceTier = serviceTierForLatencyMode(
+        turnExecutionPolicy.providerId,
+        turnExecutionPolicy.latencyMode,
+      );
       const agent = runtime.buildAgent(modelRunSettings, turnResources, {
         reasoningEffort: turn.reasoningEffort,
+        latencyMode: turnExecutionPolicy.latencyMode,
+        ...(serviceTier ? { serviceTier } : {}),
         ...(humanInputResume ? { humanInputResponse: humanInputResume } : {}),
         genesisTitleHint: isGenesisTurn,
         persistentSessionSettings: {
@@ -6263,6 +6310,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               provider: resolvedModel?.provider.id ?? settings.openaiProvider,
               providerApi: resolvedModel?.provider.api ?? "responses",
               model: turn.model,
+              latencyMode: turnExecutionPolicy.latencyMode,
               metricProvider: streamProvider,
               externallyBilled: isExternallyBilledTurn,
               servingCredentialId: effectiveCodexCredentialId,
@@ -6272,6 +6320,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               leaseLost: () => codexLeaseLost,
               leaseLostMessage: "Codex credential lease expired during the active turn",
               setLastInputTokens: setLastInputTokensFenced,
+            });
+            assertModelResponseLatencyMode({
+              event: next.value,
+              requested: turnExecutionPolicy.latencyMode,
+              model: turn.model,
+              ...(resolvedModel?.provider.id ? { providerId: resolvedModel.provider.id } : {}),
             });
             if (responseUsageResult.status === "processed") {
               currentToolBatchCallIds = new Set<string>();
@@ -6447,6 +6501,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   usage: aggregateUsage,
                   normalizedUsage: normalizedAggregateUsage,
                   sourceKey: aggregateSourceKey,
+                  latencyMode: turnExecutionPolicy.latencyMode,
                   observability,
                 });
                 const aggregateProvider = resolvedModel?.provider.id ?? settings.openaiProvider;
@@ -8899,6 +8954,7 @@ export async function recordModelUsageAndDebitCredits(
     usage?: ModelUsageInput | ModelCallUsageInput | null;
     normalizedUsage?: ModelCallUsageNormalization;
     sourceKey: string;
+    latencyMode?: LatencyMode;
     observability?: ActivityServices["observability"];
   },
 ): Promise<ModelUsageBillingRecord | null> {
@@ -8965,7 +9021,9 @@ export async function recordModelUsageAndDebitCredits(
   if (!configuredModelPricing(settings)[input.model]) {
     throw new Error(`Missing model pricing for ${input.model}`);
   }
-  const costMicros = calculateModelUsageCostMicros(settings, input.model, sanitizedUsage);
+  const costMicros = calculateModelUsageCostMicros(settings, input.model, sanitizedUsage, {
+    latencyMode: input.latencyMode ?? "standard",
+  });
   await recordUsageEvent(db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
@@ -8993,6 +9051,7 @@ export async function recordModelUsageAndDebitCredits(
         sessionId: input.sessionId,
         turnId: input.turnId,
         sourceKey: input.sourceKey,
+        latencyMode: input.latencyMode ?? "standard",
         inputTokens,
         outputTokens,
         totalTokens,

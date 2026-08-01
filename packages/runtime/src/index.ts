@@ -36,6 +36,7 @@ import {
   type McpServerConnectionRef,
   type Permission,
   type FirstPartyMcpToolName,
+  type LatencyMode,
   type ReasoningEffort,
   type ResourceRef,
   type SessionEventType,
@@ -350,6 +351,7 @@ export type NormalizedRuntimeEvent = {
 
 export type ModelResponseUsage = {
   responseId?: string;
+  serviceTier?: string;
   usage: {
     inputTokens?: number;
     outputTokens?: number;
@@ -1378,6 +1380,10 @@ export type BuildAgentOptions = {
     response: HumanInputResponse;
   };
   reasoningEffort?: ReasoningEffort;
+  /** Product latency selection frozen onto this turn. */
+  latencyMode?: LatencyMode;
+  /** Provider-specific wire value resolved by the worker (`fast` or `priority`). */
+  serviceTier?: "fast" | "priority";
   // Per-turn gating overrides for the multi-provider path. Each defaults to
   // today's settings-derived behaviour when omitted, so the legacy
   // global-client callers (no model resolution) are byte-for-byte unchanged.
@@ -1849,9 +1855,14 @@ export function buildOpenGeniAgent(
   // resolved provider's api/window/web-search instead.
   const hostedWebSearch = options.hostedWebSearch ?? settings.webSearchEnabled;
   const encryptedReasoning = options.encryptedReasoning ?? settings.openaiReasoningEncryptedContent;
+  // Wire value must be provider-mapped by the caller (OpenAI `fast`, Azure/Codex
+  // `priority`). Do not fall back to latencyMode itself — that would send
+  // invalid Azure tiers.
+  const serviceTier = options.serviceTier;
   const providerData = {
     ...(encryptedReasoning ? { include: ["reasoning.encrypted_content"] } : {}),
     ...(options.promptCacheKey ? { prompt_cache_key: options.promptCacheKey } : {}),
+    ...(serviceTier ? { service_tier: serviceTier } : {}),
   };
   // Native hosted tools attached to every constructed agent. webSearchEnabled
   // is ON by default and provider-unconditional on the built-in path (the live
@@ -5310,10 +5321,63 @@ export function modelResponseUsageFromResponse(response: unknown): ModelResponse
       : typeof (response as { responseId?: unknown } | null)?.responseId === "string"
         ? (response as { responseId: string }).responseId
         : undefined;
+  const serviceTier = modelResponseServiceTierFromResponse(response);
   return {
     ...(responseId ? { responseId } : {}),
+    ...(serviceTier ? { serviceTier } : {}),
     usage,
   };
+}
+
+export type ModelResponseServiceTierEvent = {
+  source: "normalized" | "provider";
+  serviceTier: string | null;
+};
+
+/**
+ * Read the provider's terminal service tier without depending on usage being
+ * present. The normalized terminal can omit provider-only fields, so callers
+ * should treat the raw provider response as the fail-closed authority.
+ */
+export function modelResponseServiceTierFromSdkEvent(
+  event: RunStreamEvent,
+): ModelResponseServiceTierEvent | null {
+  if (event.type === "raw_model_stream_event") {
+    const data = (event as any).data;
+    if (data?.type === "response_done") {
+      return {
+        source: "normalized",
+        serviceTier: modelResponseServiceTierFromResponse(data.response),
+      };
+    }
+  }
+  if (isOpenAIResponsesRawModelStreamEvent(event)) {
+    const raw = (event as any).data?.event;
+    if (raw?.type === "response.completed") {
+      return {
+        source: "provider",
+        serviceTier: modelResponseServiceTierFromResponse(raw.response),
+      };
+    }
+  }
+  return null;
+}
+
+function modelResponseServiceTierFromResponse(response: unknown): string | null {
+  if (!response || typeof response !== "object") {
+    return null;
+  }
+  const record = response as Record<string, unknown>;
+  const direct = record.service_tier ?? record.serviceTier;
+  if (typeof direct === "string" && direct.length > 0) {
+    return direct;
+  }
+  const providerData =
+    record.providerData && typeof record.providerData === "object"
+      ? (record.providerData as Record<string, unknown>)
+      : null;
+  const nested = providerData?.service_tier ?? providerData?.serviceTier;
+  return typeof nested === "string" && nested.length > 0 ? nested : null;
 }
 
 function modelResponseFromSdkEvent(event: RunStreamEvent): any {

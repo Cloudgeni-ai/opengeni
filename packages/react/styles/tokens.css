@@ -29,17 +29,19 @@
   --og-radius-full: 9999px;
 
   /* Motion — communicates state; never decorates ---------------------------- */
-  --og-duration-fast: 120ms;
-  --og-duration-base: 180ms;
-  --og-duration-slow: 320ms;
+  /* TEMP: set to 1 before landing — slows vertical CSS motion for eyeballing. */
+  --og-motion-inspect-scale: 1;
+  --og-duration-fast: calc(120ms * var(--og-motion-inspect-scale));
+  --og-duration-base: calc(180ms * var(--og-motion-inspect-scale));
+  --og-duration-slow: calc(320ms * var(--og-motion-inspect-scale));
   /* Timeline disclose: MANUAL expand/collapse stays chrome-fast; AUTOMATIC
      settle-fold is ~5–7× slower so the reader can register a change they
      did not ask for. Stream tip ink is an age window (same ms as fade). */
-  --og-duration-disclose: 120ms;
-  --og-duration-disclose-settle: 820ms;
-  --og-duration-stream: 1100ms;
+  --og-duration-disclose: calc(120ms * var(--og-motion-inspect-scale));
+  --og-duration-disclose-settle: calc(820ms * var(--og-motion-inspect-scale));
+  --og-duration-stream: calc(420ms * var(--og-motion-inspect-scale));
   /* Softened/partial markdown → final GFM (View Transition + settle breath). */
-  --og-duration-markdown-crystallize: 480ms;
+  --og-duration-markdown-crystallize: calc(480ms * var(--og-motion-inspect-scale));
   --og-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
   --og-ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
   --og-ease-stream: cubic-bezier(0.16, 1, 0.3, 1);

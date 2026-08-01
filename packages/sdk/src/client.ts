@@ -94,6 +94,7 @@ import type {
   SwapActiveSandboxResponse,
   ListWorkspaceMembersResponse,
   PackInstallation,
+  LatencyMode,
   ReasoningEffort,
   RetainedArtifactContent,
   RetainedArtifactContentOptions,
@@ -291,6 +292,7 @@ export type SendMessageInput = {
   tools?: ToolRef[];
   model?: string;
   reasoningEffort?: ReasoningEffort;
+  latencyMode?: LatencyMode;
   clientEventId?: string;
   controlEtag?: string;
   expectedDraftRevision?: number;

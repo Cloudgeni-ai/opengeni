@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 import { bootstrapWorkspace, createDb, createSession } from "../src/index";
 
-const migration = "0147_workspace_artifacts.sql";
+const migration = "0149_workspace_artifacts.sql";
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
@@ -18,11 +18,11 @@ let blank: BlankTestDatabase | null = null;
 let available = true;
 
 beforeAll(async () => {
-  blank = await acquireBlankTestDatabase("migration-0147-workspace-artifacts");
+  blank = await acquireBlankTestDatabase("migration-0149-workspace-artifacts");
   if (!blank) {
     if (requireRealDatabase) {
       throw new Error(
-        "[migration-0147-workspace-artifacts] OPENGENI_REQUIRE_REAL_DB=1 but the real PostgreSQL harness is unavailable",
+        "[migration-0149-workspace-artifacts] OPENGENI_REQUIRE_REAL_DB=1 but the real PostgreSQL harness is unavailable",
       );
     }
     available = false;
@@ -78,10 +78,10 @@ describe("workspace artifacts migration", () => {
       const access = await bootstrapWorkspace(db.db, {
         accountExternalSource: "migration-0147",
         accountExternalId: crypto.randomUUID(),
-        accountName: "Migration 0147 account",
+        accountName: "Migration 0149 account",
         workspaceExternalSource: "migration-0147",
         workspaceExternalId: crypto.randomUUID(),
-        workspaceName: "Migration 0147 workspace",
+        workspaceName: "Migration 0149 workspace",
         subjectId: "user:migration-0147",
       });
       const grant = access.workspaceGrants[0]!;

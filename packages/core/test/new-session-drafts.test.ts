@@ -160,6 +160,7 @@ describe("core new-session draft hydration", () => {
         toolsProvided: true,
         model: "scripted-model",
         reasoningEffort: "high",
+        latencyMode: "fast",
         options: {
           sandboxBackend: "selfhosted",
           targetSandboxId: crypto.randomUUID(),
@@ -178,5 +179,6 @@ describe("core new-session draft hydration", () => {
     expect(hydrated.options).toEqual({});
     expect(hydrated.model).toBe("scripted-model");
     expect(hydrated.reasoningEffort).toBe("high");
+    expect(hydrated.latencyMode).toBe("fast");
   }, 180_000);
 });
