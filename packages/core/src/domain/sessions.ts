@@ -1350,7 +1350,7 @@ export async function createSessionForRequest(
   }
   // Tool visibility is independent from permission authority. A child that
   // omits the field inherits the parent's exact effective selection; a
-  // top-level omission selects the complete catalog.
+  // top-level omission selects the safe non-connector default catalog.
   const firstPartyMcpTools = resolveFirstPartyMcpToolsForCreate(
     payload.firstPartyMcpTools,
     parentSession ? parentSession.firstPartyMcpTools : undefined,

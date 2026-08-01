@@ -28,6 +28,7 @@ import {
   createSlackUserLinkToken,
   drainSlackInteractionsOnce,
   registerSlackInteractionRoutes,
+  SLACK_TASK_FIRST_PARTY_MCP_TOOLS,
   verifySlackUserLinkToken,
 } from "../src/integrations/slack-interactions";
 
@@ -77,6 +78,10 @@ function fakeSlack(
     string,
     { error?: string; status?: number; retryAfterSeconds?: number }
   >();
+  const channelAccessFailures = new Map<
+    string,
+    { error?: string; status?: number; retryAfterSeconds?: number }
+  >();
   const acceptedByClientMessageId = new Map<string, SlackPost>();
   const failedAfterAccept = new Set<string>();
   let nextTimestamp = 1;
@@ -86,6 +91,21 @@ function fakeSlack(
     const form = new URLSearchParams(String(init?.body ?? ""));
     if (method === "conversations.info") {
       const channel = form.get("channel") ?? "";
+      const configuredFailure = channelAccessFailures.get(channel);
+      if (configuredFailure) {
+        const status = configuredFailure.status ?? 200;
+        return Response.json(
+          status === 200
+            ? { ok: false, error: configuredFailure.error ?? "unknown_error" }
+            : { ok: false },
+          {
+            status,
+            headers: configuredFailure.retryAfterSeconds
+              ? { "retry-after": String(configuredFailure.retryAfterSeconds) }
+              : undefined,
+          },
+        );
+      }
       return Response.json({
         ok: true,
         channel: {
@@ -142,7 +162,12 @@ function fakeSlack(
     }
     return Response.json({ ok: false, error: `unexpected_${method}` });
   };
-  return { fetch: fetch as typeof globalThis.fetch, posts, failuresByText };
+  return {
+    fetch: fetch as typeof globalThis.fetch,
+    posts,
+    failuresByText,
+    channelAccessFailures,
+  };
 }
 
 function encryptedBotCredential(settings: Settings): string {
@@ -405,6 +430,14 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     });
     expect(value.slack.posts[0]!.text).toContain("Open in OpenGeni:");
     expect(value.slack.posts[0]!.text).toContain("Reply in this thread to continue");
+    const [sessionPolicy] = await shared!.admin<{ first_party_mcp_tools: string[] }[]>`
+      select first_party_mcp_tools
+      from sessions
+      where workspace_id = ${value.owner.workspaceId}
+        and id = ${routes[0]!.session_id}`;
+    expect(sessionPolicy!.first_party_mcp_tools).toEqual([...SLACK_TASK_FIRST_PARTY_MCP_TOOLS]);
+    expect(sessionPolicy!.first_party_mcp_tools).not.toContain("slack_bot_post_message");
+    expect(sessionPolicy!.first_party_mcp_tools).not.toContain("slack_bot_delete_message");
 
     expect(
       (
@@ -580,6 +613,32 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       ]),
     );
     expect(new Set(routes.map((route) => route.session_id)).size).toBe(2);
+
+    const transientChannel = "C_TRANSIENT_PREFLIGHT";
+    value.slack.channelAccessFailures.set(transientChannel, {
+      status: 429,
+      retryAfterSeconds: 30,
+    });
+    const transientCommand = new URLSearchParams({
+      command: "/opengeni",
+      team_id: value.teamId,
+      user_id: value.ownerSlackUserId,
+      channel_id: transientChannel,
+      trigger_id: `transient-command-${crypto.randomUUID()}`,
+      text: "Preserve this task through a transient Slack preflight",
+    }).toString();
+    const transientResponse = await value.app.request(
+      signedRequest(
+        "/v1/integrations/slack/commands",
+        transientCommand,
+        "application/x-www-form-urlencoded",
+      ),
+    );
+    expect(transientResponse.status).toBe(200);
+    expect(await transientResponse.text()).toContain("accepted this task");
+    value.slack.channelAccessFailures.delete(transientChannel);
+    await drainAll(value.deps);
+    expect(await interactions(value.owner.workspaceId)).toHaveLength(3);
   });
 
   test("unmapped identities receive a link affordance, denied channels fail closed, and bot loops create nothing", async () => {
