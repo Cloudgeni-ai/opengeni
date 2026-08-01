@@ -2581,6 +2581,7 @@ describe("workflow contracts", () => {
   const ciText = readFileSync(ciWorkflowPath, "utf8");
   const sealText = readFileSync(sealWorkflowPath, "utf8");
   const releaseAutomationText = readFileSync(releaseAutomationPath, "utf8");
+  const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   const release = Bun.YAML.parse(releaseText) as any;
   const ci = Bun.YAML.parse(ciText) as any;
   const seal = Bun.YAML.parse(sealText) as any;
@@ -2635,6 +2636,8 @@ describe("workflow contracts", () => {
     expect(ciText).not.toMatch(/pulls\/.+\/reviews/);
     for (const jobName of [
       "source-contracts",
+      "unit-shards",
+      "unit-safety",
       "test-suite",
       "browser-acceptance",
       "package-contracts",
@@ -2676,7 +2679,7 @@ describe("workflow contracts", () => {
     ).toEqual([["Complete exact-head automation CI check", "${{ github.token }}"]]);
   });
 
-  test("runs all 29 source, test, browser, and package gates once behind a fail-closed aggregate", () => {
+  test("shards PR unit tests while preserving every non-unit gate and a monolithic non-PR safety net", () => {
     const laneNames = ["source-contracts", "test-suite", "browser-acceptance", "package-contracts"];
     const expectedGateNames = {
       "source-contracts": [
@@ -2690,7 +2693,6 @@ describe("workflow contracts", () => {
         "Public repository hygiene guard",
       ],
       "test-suite": [
-        "Test",
         "React warning-free test gate",
         "Real workspace capture acceptance",
         "Recovery integration regressions",
@@ -2718,8 +2720,8 @@ describe("workflow contracts", () => {
       ],
     } as const;
     const expectedGates = Object.values(expectedGateNames).flat();
-    expect(expectedGates).toHaveLength(29);
-    expect(new Set(expectedGates)).toHaveProperty("size", 29);
+    expect(expectedGates).toHaveLength(28);
+    expect(new Set(expectedGates)).toHaveProperty("size", 28);
     const allLaneSteps = laneNames.flatMap((jobName) =>
       ci.jobs[jobName].steps.map((step: any) => step.name).filter(Boolean),
     );
@@ -2732,9 +2734,9 @@ describe("workflow contracts", () => {
         expect(allLaneSteps.filter((stepName) => stepName === gateName)).toHaveLength(1);
       }
     }
-    expect(allLaneSteps.filter((stepName) => expectedGates.includes(stepName))).toHaveLength(29);
+    expect(allLaneSteps.filter((stepName) => expectedGates.includes(stepName))).toHaveLength(28);
 
-    const expensiveLaneNames = ["test-suite", "browser-acceptance"];
+    const expensiveLaneNames = ["unit-shards", "unit-safety", "test-suite", "browser-acceptance"];
     for (const jobName of expensiveLaneNames) {
       const lane = ci.jobs[jobName];
       const checkout = lane.steps.find((step: any) => step.name === "Check out repository");
@@ -2768,9 +2770,33 @@ describe("workflow contracts", () => {
       });
     }
 
-    const testStep = ci.jobs["test-suite"].steps.find((step: any) => step.name === "Test");
-    expect(testStep.env).toEqual({ OPENGENI_REQUIRE_REAL_DB: "1" });
-    expect(testStep.run).toBe("bun run test:unit");
+    expect(ci.jobs["test-suite"].name).toBe("Real-service and recovery tests");
+    expect(ci.jobs["test-suite"].steps.some((step: any) => step.name === "Test")).toBe(false);
+
+    const shards = ci.jobs["unit-shards"];
+    expect(shards.name).toBe("Unit tests (shard ${{ matrix.shard }}/4)");
+    expect(shards.needs).toBe("automation-admission");
+    expect(shards.if).toBe("${{ always() && github.event_name == 'pull_request' }}");
+    expect(shards.strategy).toEqual({
+      "fail-fast": false,
+      matrix: { shard: [1, 2, 3, 4] },
+    });
+    const shardStep = shards.steps.find((step: any) => step.name === "Unit test shard");
+    expect(shardStep.env).toEqual({ OPENGENI_REQUIRE_REAL_DB: "1" });
+    expect(shardStep.run).toBe("bun run test:unit:shard -- --shard=${{ matrix.shard }}/4");
+    expect(packageJson.scripts["test:unit:shard"]).toBe(
+      "bun test --max-concurrency=8 --timeout=30000",
+    );
+
+    const safety = ci.jobs["unit-safety"];
+    expect(safety.name).toBe("Unit tests (monolithic safety)");
+    expect(safety.needs).toBe("automation-admission");
+    expect(safety.if).toBe(
+      "${{ always() && github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}",
+    );
+    const safetyStep = safety.steps.find((step: any) => step.name === "Test");
+    expect(safetyStep.env).toEqual({ OPENGENI_REQUIRE_REAL_DB: "1" });
+    expect(safetyStep.run).toBe("bun run test:unit");
 
     const browser = ci.jobs["browser-acceptance"];
     expect(
@@ -2849,34 +2875,85 @@ describe("workflow contracts", () => {
 
     const aggregate = ci.jobs.test;
     expect(aggregate.name).toBe("Typecheck and unit tests");
-    expect(aggregate.needs).toEqual(laneNames);
+    expect(aggregate.needs).toEqual([
+      "source-contracts",
+      "unit-shards",
+      "unit-safety",
+      "test-suite",
+      "browser-acceptance",
+      "package-contracts",
+    ]);
     expect(aggregate.if).toBe("${{ always() }}");
     const requireLanes = aggregate.steps.find(
       (step: any) => step.name === "Require every split CI lane",
     );
     expect(requireLanes.env).toEqual({
+      EVENT_NAME: "${{ github.event_name }}",
       SOURCE_CONTRACTS_RESULT: "${{ needs.source-contracts.result }}",
+      UNIT_SHARDS_RESULT: "${{ needs.unit-shards.result }}",
+      UNIT_SAFETY_RESULT: "${{ needs.unit-safety.result }}",
       TEST_SUITE_RESULT: "${{ needs.test-suite.result }}",
       BROWSER_ACCEPTANCE_RESULT: "${{ needs.browser-acceptance.result }}",
       PACKAGE_CONTRACTS_RESULT: "${{ needs.package-contracts.result }}",
     });
     expect(requireLanes.run).toContain('if [ "$result" != "success" ]');
-    const aggregateResult = (results: Record<string, string>) =>
+    const aggregateResult = (eventName: string, results: Record<string, string>) =>
       Bun.spawnSync(["bash", "-c", requireLanes.run], {
-        env: { ...process.env, ...results },
+        env: { ...process.env, EVENT_NAME: eventName, ...results },
       }).exitCode;
-    const successfulResults = {
+    const fixedResults = {
       SOURCE_CONTRACTS_RESULT: "success",
       TEST_SUITE_RESULT: "success",
       BROWSER_ACCEPTANCE_RESULT: "success",
       PACKAGE_CONTRACTS_RESULT: "success",
     };
-    expect(aggregateResult(successfulResults)).toBe(0);
+    const pullRequestResults = {
+      ...fixedResults,
+      UNIT_SHARDS_RESULT: "success",
+      UNIT_SAFETY_RESULT: "skipped",
+    };
+    const nonPullRequestResults = {
+      ...fixedResults,
+      UNIT_SHARDS_RESULT: "skipped",
+      UNIT_SAFETY_RESULT: "success",
+    };
+    expect(aggregateResult("pull_request", pullRequestResults)).toBe(0);
+    for (const eventName of ["push", "workflow_dispatch", "schedule"])
+      expect(aggregateResult(eventName, nonPullRequestResults)).toBe(0);
     for (const result of ["failure", "skipped", "cancelled", ""]) {
-      for (const variable of Object.keys(successfulResults)) {
-        expect(aggregateResult({ ...successfulResults, [variable]: result })).not.toBe(0);
+      for (const variable of Object.keys(fixedResults)) {
+        expect(
+          aggregateResult("pull_request", { ...pullRequestResults, [variable]: result }),
+        ).not.toBe(0);
+        expect(aggregateResult("push", { ...nonPullRequestResults, [variable]: result })).not.toBe(
+          0,
+        );
       }
     }
+    for (const result of ["failure", "skipped", "cancelled", ""])
+      expect(
+        aggregateResult("pull_request", { ...pullRequestResults, UNIT_SHARDS_RESULT: result }),
+      ).not.toBe(0);
+    for (const result of ["success", "failure", "cancelled", ""])
+      expect(
+        aggregateResult("pull_request", { ...pullRequestResults, UNIT_SAFETY_RESULT: result }),
+      ).not.toBe(0);
+    for (const result of ["failure", "skipped", "cancelled", ""])
+      expect(
+        aggregateResult("push", { ...nonPullRequestResults, UNIT_SAFETY_RESULT: result }),
+      ).not.toBe(0);
+    for (const result of ["success", "failure", "cancelled", ""])
+      expect(
+        aggregateResult("push", { ...nonPullRequestResults, UNIT_SHARDS_RESULT: result }),
+      ).not.toBe(0);
+    expect(
+      aggregateResult("pull_request", {
+        ...pullRequestResults,
+        UNIT_SHARDS_RESULT: "skipped",
+        UNIT_SAFETY_RESULT: "skipped",
+      }),
+    ).not.toBe(0);
+    expect(aggregateResult("", nonPullRequestResults)).not.toBe(0);
     expect(ci.jobs["automation-report"].needs).toEqual([
       "automation-admission",
       "test",
