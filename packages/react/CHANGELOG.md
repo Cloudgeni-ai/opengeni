@@ -1,5 +1,13 @@
 # @opengeni/react
 
+## 0.33.1
+
+### Patch Changes
+
+- b5f2fb5: Keep live workbench acceptance aligned with the hosted controlled-panel contract and remove a real-time boundary from its related React regression coverage.
+- Updated dependencies [8243ffe]
+  - @opengeni/sdk@0.33.1
+
 ## 0.33.0
 
 ### Minor Changes

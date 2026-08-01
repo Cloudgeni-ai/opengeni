@@ -1300,6 +1300,13 @@ function callbackReturnPath(
   for (const [key, value] of Object.entries(params)) {
     url.searchParams.set(key, value);
   }
+  // Defense in depth: a `//host` pathname becomes a protocol-relative absolute
+  // Location — an open redirect from the unauthenticated callback.
+  if (url.pathname.startsWith("//")) {
+    const fallback = new URL("/integrations", "https://opengeni.local");
+    fallback.search = url.search;
+    return `${fallback.pathname}${fallback.search}`;
+  }
   return `${url.pathname}${url.search}${url.hash}`;
 }
 
@@ -1357,7 +1364,9 @@ function safeReturnPath(value: string): string {
     throw new HTTPException(400, { message: "OAuth returnPath must be a relative path" });
   }
   const parsed = new URL(value, "https://opengeni.local");
-  if (parsed.origin !== "https://opengeni.local") {
+  // `..` segments can normalize back into a `//host` prefix, which browsers
+  // resolve as a protocol-relative absolute URL. Reject the NORMALIZED path.
+  if (parsed.origin !== "https://opengeni.local" || parsed.pathname.startsWith("//")) {
     throw new HTTPException(400, { message: "OAuth returnPath must be a relative path" });
   }
   return `${parsed.pathname}${parsed.search}${parsed.hash}`;

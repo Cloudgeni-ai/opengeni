@@ -736,6 +736,11 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "social_connections_list",
   "social_posts_recent",
   "social_daily_analysis_context",
+  "social_search_live",
+  "social_mentions_live",
+  "social_thread_fetch",
+  "social_posts_sync",
+  "social_post_reply",
   "scheduled_tasks_list",
   "scheduled_tasks_get",
   "scheduled_tasks_create",
@@ -5189,6 +5194,7 @@ export type EnablePackRequest = z.infer<typeof EnablePackRequest>;
 
 export const SocialProvider = z.enum([
   "x",
+  "reddit",
   "linkedin",
   "instagram",
   "facebook",
@@ -5260,6 +5266,19 @@ export const CreateSocialPostRequest = z.object({
   raw: z.record(z.string(), z.unknown()).default({}),
 });
 export type CreateSocialPostRequest = z.infer<typeof CreateSocialPostRequest>;
+
+// Social OAuth is first-party (X / Reddit REST APIs), distinct from the MCP
+// integrations OAuth flow: these providers have no MCP resource metadata, so
+// endpoints are pinned per provider and tokens live in social_connections.
+export const SocialOAuthProviderId = z.enum(["x", "reddit"]);
+export type SocialOAuthProviderId = z.infer<typeof SocialOAuthProviderId>;
+
+export const SocialOAuthStartRequest = z.object({
+  provider: SocialOAuthProviderId,
+  scopes: z.array(z.string().min(1)).optional(),
+  returnPath: z.string().optional(),
+});
+export type SocialOAuthStartRequest = z.infer<typeof SocialOAuthStartRequest>;
 
 export const ConnectionKind = z.enum(["oauth2", "api_key", "app_install", "delegated"]);
 export type ConnectionKind = z.infer<typeof ConnectionKind>;
@@ -9330,6 +9349,35 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     }),
     productAccessMode: ProductAccessMode,
     auth: ClientAuthConfig.default({ mode: "none" }),
+    analytics: z
+      .object({
+        consentRequired: z.boolean(),
+        providers: z.object({
+          reo: z
+            .object({
+              clientId: z
+                .string()
+                .max(128)
+                .regex(/^[A-Za-z0-9_-]+$/u),
+            })
+            .optional(),
+          posthog: z
+            .object({
+              projectKey: z.string().min(1).max(256),
+              host: z.string().url().max(2_048),
+            })
+            .optional(),
+          ga4: z
+            .object({
+              measurementId: z
+                .string()
+                .max(32)
+                .regex(/^G-[A-Z0-9]+$/u),
+            })
+            .optional(),
+        }),
+      })
+      .default({ consentRequired: true, providers: {} }),
     // Server-wide hint: does this deployment support Channel-A structured services
     // at all (P4.4). Per-session availability is negotiated on /stream-capabilities
     // (it depends on the session's pinned backend); this is the coarse on/off the

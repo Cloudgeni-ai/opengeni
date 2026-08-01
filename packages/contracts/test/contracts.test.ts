@@ -944,9 +944,43 @@ describe("contracts", () => {
     expect(payload.fileUploads.enabled).toBe(true);
     expect(payload.auth.mode).toBe("managedSession");
     expect(payload.mcpServers[0]?.id).toBe("opengeni");
+    expect(payload.analytics).toEqual({ consentRequired: true, providers: {} });
     // models defaults to [] for back-compat (callers reading only allowedModels
     // are unaffected when the host hasn't populated the richer list).
     expect(payload.models).toEqual([]);
+  });
+
+  test("accepts allowlisted browser analytics providers", () => {
+    const payload = ClientConfig.parse({
+      apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
+      deploymentRevision: "test-sha",
+      defaultModel: "gpt-5.6-sol",
+      allowedModels: ["gpt-5.6-sol"],
+      defaultReasoningEffort: "high",
+      allowedReasoningEfforts: ["high"],
+      fileUploads: { enabled: true, maxSizeBytes: 5_000_000_000 },
+      productAccessMode: "managed",
+      analytics: {
+        consentRequired: true,
+        providers: {
+          reo: { clientId: "reo_client-1" },
+          posthog: { projectKey: "phc_test", host: "https://eu.i.posthog.com" },
+          ga4: { measurementId: "G-ABC123" },
+        },
+      },
+    });
+
+    expect(payload.analytics.providers.reo?.clientId).toBe("reo_client-1");
+    expect(payload.analytics.providers.ga4?.measurementId).toBe("G-ABC123");
+    expect(() =>
+      ClientConfig.parse({
+        ...payload,
+        analytics: {
+          consentRequired: true,
+          providers: { reo: { clientId: "r".repeat(129) } },
+        },
+      }),
+    ).toThrow();
   });
 
   test("round-trips the provider-grouped models list on client config", () => {

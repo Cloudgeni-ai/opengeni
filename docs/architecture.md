@@ -494,7 +494,25 @@ after provider deletion succeeds.
 
 ### 7.3 `apps/web` — operator console
 
-Bootstraps `/v1/config/client`, resolves the auth mode, gates, then loads access context + workspaces. The only bespoke HTTP it owns is client-config bootstrap + Better Auth `/v1/auth/*`; everything else goes through the SDK. Routes are **hand-written** in `App.tsx` (TanStack Router generation is OFF). `context.tsx` is the cross-route hub. Almost all session/streaming logic lives in `@opengeni/react`, not here. Workspace settings owns a single availability-aware voice-input enable/disable toggle; provider credentials stay server-side and ClientConfig only projects capability ceilings. Watch-outs: `/clear-view` is local/this-device-only; stale-bundle auto-reload on revision mismatch; the stock repository picker is GitHub-oriented even though session resources and credential bindings support multiple providers and accounts.
+Bootstraps `/v1/config/client`, resolves the auth mode, gates, then loads access context + workspaces. The only bespoke HTTP it owns is client-config bootstrap + Better Auth `/v1/auth/*`; everything else goes through the SDK. Routes are **hand-written** in `App.tsx` (TanStack Router generation is OFF). `context.tsx` is the cross-route hub. Almost all session/streaming logic lives in `@opengeni/react`, not here. Workspace settings owns a single availability-aware voice-input enable/disable toggle; provider credentials stay server-side and ClientConfig only projects capability ceilings.
+
+Browser analytics is provider-neutral and off by default. `/v1/config/client`
+exposes only validated public identifiers for allowlisted Reo, PostHog, and GA4
+adapters. The console loads provider code after hydration and, when
+`OPENGENI_ANALYTICS_CONSENT_REQUIRED=true`, only after the visitor opts in.
+Self-hosted deployments therefore emit no analytics unless their operator
+explicitly enables and configures it. OpenGeni's explicit route tracking sends
+pathnames only and suspends providers on public-auth or query-bearing routes.
+The Reo adapter initializes with clipboard/code-copy and supported AI-widget
+capture disabled. It does not send authenticated identity: adding an identify
+call requires a separate privacy review and explicit consent copy. Visitors can
+reopen analytics preferences and withdraw consent; provider cleanup must run
+without breaking the console even when browser storage or a third-party script
+fails. The event surface must never carry prompts, source code, repository
+content, tool arguments, logs, secrets, or document contents. Provider selection
+belongs to validated runtime configuration, never arbitrary script injection.
+
+Watch-outs: `/clear-view` is local/this-device-only; stale-bundle auto-reload on revision mismatch; the stock repository picker is GitHub-oriented even though session resources and credential bindings support multiple providers and accounts.
 
 ### 7.4 `contracts` + `config` — the foundation
 
@@ -723,6 +741,7 @@ A typed `DeploymentContract` (`@opengeni/deployment`) turns an abstract profile 
 | Secret variable-sets                                                        | `apps/api/src/routes` + `packages/db` env-crypto                                                                                                                                                                                                            | [`variable-sets.md`](variable-sets.md)                                             |
 | Rigs (versioned sandbox machine definitions, change verification/promotion) | `packages/core/src/rigs/index.ts`, `apps/api/src/routes/rigs.ts`, `apps/worker/src/activities/rig-verification.ts`                                                                                                                                          | [`rigs.md`](rigs.md)                                                               |
 | Integrations / connections / token broker                                   | `apps/api/src/routes/connections.ts`, `apps/api/src/integrations/oauth-client.ts`, `apps/api/src/integrations/slack-bot.ts`, `packages/db/src/connection-token-resolver.ts`, `packages/runtime/src/index.ts` (`connectionRef`), `scripts/import-integrations-catalog.ts` (reviewed catalog snapshots) | [`integrations-design.md`](integrations-design.md), [`slack-bot.md`](slack-bot.md) |
+| Social connectors (X / Reddit OAuth, live tools, token storage)             | `apps/api/src/integrations/social-oauth.ts`, `apps/api/src/integrations/social-api.ts`, `apps/api/src/routes/social.ts`, `social_connections.credential_encrypted` (migration 0141)                                                                                                              | [`social-connectors.md`](social-connectors.md)                                     |
 | Per-session MCP servers / credential rotation                               | `packages/contracts/src/index.ts`, `packages/core/src/domain/sessions.ts`, `apps/worker/src/activities/agent-turn.ts`                                                                                                                                       | [`session-mcp-servers.md`](session-mcp-servers.md)                                 |
 | Toolspace (`toolspace:call`) programmatic sandbox tool access               | `packages/contracts/src/index.ts`, `apps/api/src/mcp/toolspace.ts`, `apps/worker/src/activities/environment.ts`, `packages/runtime/src/index.ts`                                                                                                            | [`mcp-surfaces.md`](mcp-surfaces.md), [`design/toolspace.md`](design/toolspace.md) |
 | Capabilities / packs                                                        | `apps/api` capability routes                                                                                                                                                                                                                                | [`capabilities.md`](capabilities.md), [`packs.md`](packs.md)                       |

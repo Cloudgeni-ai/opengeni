@@ -218,6 +218,20 @@ const SettingsSchema = z.object({
   observabilityMetricsEnabled: EnvBoolean.default(true),
   observabilityOtlpEndpoint: z.string().url().optional(),
   observabilityOtlpHeaders: z.string().default(""),
+  analyticsEnabled: EnvBoolean.default(false),
+  analyticsConsentRequired: EnvBoolean.default(true),
+  analyticsReoClientId: z
+    .string()
+    .max(128)
+    .regex(/^[A-Za-z0-9_-]+$/u)
+    .optional(),
+  analyticsPosthogProjectKey: z.string().min(1).max(256).optional(),
+  analyticsPosthogHost: z.string().url().max(2_048).optional(),
+  analyticsGa4MeasurementId: z
+    .string()
+    .max(32)
+    .regex(/^G-[A-Z0-9]+$/u)
+    .optional(),
   publicBaseUrl: z.string().url().optional(),
   // Browser origin when the web app and API use separate origins in local
   // development. Production normally leaves this unset and uses publicBaseUrl.
@@ -275,6 +289,9 @@ const SettingsSchema = z.object({
   // Undefined is meaningful: the migration boundary persists the product
   // default of 3 when no deployment override is supplied.
   maxNestedAgentDepth: z.coerce.number().int().nonnegative().max(MAX_NESTED_AGENT_DEPTH).optional(),
+  // Operator OAuth apps for first-party social connectors, keyed by provider
+  // id ("x", "reddit"): {"x":{"clientId":"...","clientSecret":"..."}}.
+  socialOauthClientsJson: z.string().default("{}"),
   // Session goal guard rails. Goals are designed for runs that legitimately
   // span days, so length is bounded by pathology detection (no-progress
   // streaks, budget exhaustion), never by count. goalMaxAutoContinuations is
@@ -1571,6 +1588,12 @@ export function getSettings(): Settings {
       optional("OPENGENI_OTEL_EXPORTER_OTLP_ENDPOINT") ?? optional("OTEL_EXPORTER_OTLP_ENDPOINT"),
     observabilityOtlpHeaders:
       optional("OPENGENI_OTEL_EXPORTER_OTLP_HEADERS") ?? optional("OTEL_EXPORTER_OTLP_HEADERS"),
+    analyticsEnabled: optional("OPENGENI_ANALYTICS_ENABLED"),
+    analyticsConsentRequired: optional("OPENGENI_ANALYTICS_CONSENT_REQUIRED"),
+    analyticsReoClientId: optional("OPENGENI_ANALYTICS_REO_CLIENT_ID"),
+    analyticsPosthogProjectKey: optional("OPENGENI_ANALYTICS_POSTHOG_PROJECT_KEY"),
+    analyticsPosthogHost: optional("OPENGENI_ANALYTICS_POSTHOG_HOST"),
+    analyticsGa4MeasurementId: optional("OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID"),
     publicBaseUrl: optional("OPENGENI_PUBLIC_BASE_URL"),
     webBaseUrl: optional("OPENGENI_WEB_BASE_URL"),
     agentReleasesBaseUrl: optional("OPENGENI_AGENT_RELEASES_BASE_URL"),
@@ -1600,6 +1623,7 @@ export function getSettings(): Settings {
     googleDriveClientId: optional("OPENGENI_GOOGLE_DRIVE_CLIENT_ID"),
     googleDriveClientSecret: optional("OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET"),
     maxNestedAgentDepth: optional("OPENGENI_MAX_NESTED_AGENT_DEPTH"),
+    socialOauthClientsJson: optional("OPENGENI_SOCIAL_OAUTH_CLIENTS_JSON"),
     goalMaxAutoContinuations: optional("OPENGENI_GOAL_MAX_AUTO_CONTINUATIONS"),
     goalNoProgressLimit: optional("OPENGENI_GOAL_NO_PROGRESS_LIMIT"),
     agentMaxModelCallsPerTurn: optional("OPENGENI_AGENT_MAX_MODEL_CALLS_PER_TURN"),
@@ -3627,6 +3651,53 @@ export function parseIntegrationsOauthClientsJson(
   return out;
 }
 
+export const SocialOAuthClientConfigSchema = z.object({
+  clientId: z.string().min(1),
+  clientSecret: z.string().min(1).optional(),
+});
+export type SocialOAuthClientConfig = z.infer<typeof SocialOAuthClientConfigSchema>;
+
+const SOCIAL_OAUTH_PROVIDER_IDS = ["x", "reddit"] as const;
+
+export function parseSocialOauthClientsJson(
+  raw: string | undefined,
+): Partial<Record<(typeof SOCIAL_OAUTH_PROVIDER_IDS)[number], SocialOAuthClientConfig>> {
+  if (!raw?.trim() || raw.trim() === "{}") {
+    return {};
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`OPENGENI_SOCIAL_OAUTH_CLIENTS_JSON must be valid JSON: ${message}`, {
+      cause: error,
+    });
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(
+      "OPENGENI_SOCIAL_OAUTH_CLIENTS_JSON must be a JSON object keyed by social provider id",
+    );
+  }
+  const out: Partial<Record<(typeof SOCIAL_OAUTH_PROVIDER_IDS)[number], SocialOAuthClientConfig>> =
+    {};
+  for (const [key, value] of Object.entries(parsed)) {
+    if (!SOCIAL_OAUTH_PROVIDER_IDS.includes(key as (typeof SOCIAL_OAUTH_PROVIDER_IDS)[number])) {
+      throw new Error(
+        `OPENGENI_SOCIAL_OAUTH_CLIENTS_JSON provider ${key} is not supported (expected: ${SOCIAL_OAUTH_PROVIDER_IDS.join(", ")})`,
+      );
+    }
+    const result = SocialOAuthClientConfigSchema.safeParse(value);
+    if (!result.success) {
+      throw new Error(
+        `OPENGENI_SOCIAL_OAUTH_CLIENTS_JSON client for ${key} is invalid: ${result.error.message}`,
+      );
+    }
+    out[key as (typeof SOCIAL_OAUTH_PROVIDER_IDS)[number]] = result.data;
+  }
+  return out;
+}
+
 export function parseStaticUsageLimitsJson(raw: string): StaticUsageLimitsConfig {
   if (!raw.trim() || raw.trim() === "{}") {
     return {};
@@ -3912,6 +3983,7 @@ function validateSettings(settings: Settings): void {
     }
   }
   parseIntegrationsOauthClientsJson(settings.integrationsOauthClientsJson);
+  parseSocialOauthClientsJson(settings.socialOauthClientsJson);
   if (
     settings.productAccessMode === "configured" &&
     !["local", "test"].includes(settings.environment) &&

@@ -496,6 +496,7 @@ export function TurnSummary({
             </span>
           </Collapsible.Trigger>
           <Collapsible.Content
+            {...(nestSuppressLatch ? { forceMount: true as const } : {})}
             data-og-fold-content=""
             className={cn(
               "overflow-hidden",

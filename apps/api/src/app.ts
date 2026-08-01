@@ -392,6 +392,7 @@ export function createAppComposition(deps: AppDependencies): {
         },
         productAccessMode: deps.settings.productAccessMode,
         auth: clientAuthConfig(deps.settings),
+        analytics: clientAnalyticsConfig(deps.settings),
         // Channel-A structured services (P4.4) ride exec/readFile/createEditor,
         // available on every real backend; `none` has no box so they are all off.
         // Per-session availability is still negotiated on /stream-capabilities.
@@ -583,6 +584,31 @@ function clientAuthConfig(settings: AppDependencies["settings"]) {
     };
   }
   return { mode: "none" as const };
+}
+
+function clientAnalyticsConfig(settings: AppDependencies["settings"]) {
+  if (!settings.analyticsEnabled) {
+    return { consentRequired: true, providers: {} };
+  }
+  return {
+    consentRequired: settings.analyticsConsentRequired,
+    providers: {
+      ...(settings.analyticsReoClientId
+        ? { reo: { clientId: settings.analyticsReoClientId } }
+        : {}),
+      ...(settings.analyticsPosthogProjectKey && settings.analyticsPosthogHost
+        ? {
+            posthog: {
+              projectKey: settings.analyticsPosthogProjectKey,
+              host: settings.analyticsPosthogHost,
+            },
+          }
+        : {}),
+      ...(settings.analyticsGa4MeasurementId
+        ? { ga4: { measurementId: settings.analyticsGa4MeasurementId } }
+        : {}),
+    },
+  };
 }
 
 function structuredServicesHint(backend: string): {
@@ -1082,6 +1108,10 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
   {
     pattern: /^\/v1\/integrations\/slack\/callback$/,
     label: "/v1/integrations/slack/callback",
+  },
+  {
+    pattern: /^\/v1\/social\/oauth\/callback$/,
+    label: "/v1/social/oauth/callback",
   },
   {
     pattern: /^\/v1\/enrollments\/device\/start$/,

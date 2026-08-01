@@ -1263,6 +1263,7 @@ describe("composer reasoning-effort picker (full host enum)", () => {
       fileUploads: { enabled: false, maxSizeBytes: 0 },
       productAccessMode: "local",
       auth: { mode: "none" },
+      analytics: { consentRequired: true, providers: {} },
       structuredServices: {
         fileSystem: false,
         git: false,

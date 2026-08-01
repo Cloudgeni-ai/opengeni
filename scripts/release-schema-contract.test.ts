@@ -155,6 +155,7 @@ describe("release schema contract", () => {
         (migrations.has("0138_sandbox_checkpoint_artifacts_and_deadlines.sql") ? 1 : 0) +
         (migrations.has("0139_codex_provider_artifact_invalidations.sql") ? 1 : 0) +
         (migrations.has("0140_sandbox_restore_and_reaper_fences.sql") ? 1 : 0) +
+        (migrations.has("0141_social_connection_credentials.sql") ? 1 : 0) +
         (migrations.has("0142_sandbox_archive_capture_gate.sql") ? 1 : 0) +
         (migrations.has("0143_session_codex_compaction_mode.sql") ? 1 : 0) +
         (migrations.has("0144_sandbox_viewer_force_drain_gate.sql") ? 1 : 0) +
@@ -167,7 +168,7 @@ describe("release schema contract", () => {
         (migrations.has("0151_slack_delivery_backoff.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "eb12eb8a035aee09933b00f590e8883923bf6a8caf4bba9ad53b64caa55bddfd",
+      "171a437e8b37366767a21df8a5dba53d59e50285e52c275533c5462fa4645091",
     );
     expect(contract.latestMigration).toBe("0151_slack_delivery_backoff.sql");
     expect(migrations.get("0151_slack_delivery_backoff.sql")).toMatchObject({
@@ -249,6 +250,7 @@ describe("release schema contract", () => {
       "0138_sandbox_checkpoint_artifacts_and_deadlines.sql",
       "0139_codex_provider_artifact_invalidations.sql",
       "0140_sandbox_restore_and_reaper_fences.sql",
+      "0141_social_connection_credentials.sql",
       "0142_sandbox_archive_capture_gate.sql",
       "0143_session_codex_compaction_mode.sql",
       "0144_sandbox_viewer_force_drain_gate.sql",
@@ -366,6 +368,10 @@ describe("release schema contract", () => {
       sha256: "fe8441b669fd99fa0463378c34dd75ceca3077af7529c85c552a534c530828d8",
       deploymentMode: "rolling",
     });
+    expect(migrations.get("0141_social_connection_credentials.sql")).toMatchObject({
+      sha256: "d5a032bd8c6b61c45f48793963185bcab964de88981eba66d32b4f9de74e8edf",
+      deploymentMode: "rolling",
+    });
     expect(migrations.get("0142_sandbox_archive_capture_gate.sql")).toMatchObject({
       sha256: "48546fe4f106da0b36edf8a47da56e35b123fd0a63dc9c2eaed887756d35144f",
       deploymentMode: "maintenance",
@@ -389,10 +395,6 @@ describe("release schema contract", () => {
     expect(migrations.get("0148_session_turn_latency_mode.sql")).toMatchObject({
       sha256: "fe753b8b5866c4f619ae3b360442659db26f639db867b622b1f2a0520e9c80dd",
       deploymentMode: "rolling",
-    });
-    expect(migrations.get("0149_workspace_artifacts.sql")).toMatchObject({
-      sha256: "ae3bdf08e8a47e04dd0b025f143b40b0e31f31c9e7b3eb51c0d21233be265bd3",
-      deploymentMode: "maintenance",
     });
     expect(migrations.get("0149_workspace_artifacts.sql")).toMatchObject({
       sha256: "ae3bdf08e8a47e04dd0b025f143b40b0e31f31c9e7b3eb51c0d21233be265bd3",
