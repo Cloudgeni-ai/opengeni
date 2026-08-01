@@ -1,5 +1,15 @@
 # @opengeni/runtime
 
+## 0.15.2
+
+### Patch Changes
+
+- Updated dependencies [d4d8960]
+- Updated dependencies [ec0bc02]
+- Updated dependencies [5a4c559]
+  - @opengeni/contracts@0.28.0
+  - @opengeni/config@0.9.0
+
 ## 0.15.1
 
 ### Patch Changes
