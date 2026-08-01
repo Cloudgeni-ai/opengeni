@@ -165,7 +165,7 @@ describe("release schema contract", () => {
         (migrations.has("0149_slack_task_interactions.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "58897988c0943b26918891197a297488218f8f14d7c36e9d118e8ef6af664f47",
+      "17de68208f4a4d24c1dddb4e8db74e26a6837f225a248eb5364caf989694e333",
     );
     expect(contract.latestMigration).toBe("0149_slack_task_interactions.sql");
     expect(migrations.get("0128_github_installation_authority.sql")).toMatchObject({
@@ -257,7 +257,7 @@ describe("release schema contract", () => {
       deploymentMode: "rolling",
     });
     expect(migrations.get("0149_slack_task_interactions.sql")).toMatchObject({
-      sha256: "8b0cfea40b1a38c4eec763e8cd1d8a73d023e11fd706a95d9c78502c8655b50d",
+      sha256: "97f23742bedcc0131ae21ba08a02eb8b5a739dafe790d22477622bf01746eaf6",
       deploymentMode: "rolling",
     });
     expect(new Set(contract.migrations.map((migration) => migration.path)).size).toBe(

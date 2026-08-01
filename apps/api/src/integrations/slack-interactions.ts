@@ -5,6 +5,7 @@ import {
   advanceSlackInteractionDelivery,
   bindSlackInteractionSession,
   claimSlackInteractionDelivery,
+  claimSlackInteractionProgressDelivery,
   claimSlackInteractionInbox,
   closeSlackInteractionDelivery,
   deleteSlackBotUserLink,
@@ -419,6 +420,7 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
     return;
   }
   const session = await createSessionForRequest(deps, grant, entry.workspaceId, {
+    requestedSessionId: interaction.sessionReservationId,
     initialMessage: entry.text,
     turnInstructions: SLACK_TASK_INSTRUCTIONS,
     idempotencyKey: `slack:${entry.connectionId}:${entry.providerEventId}`,
@@ -557,7 +559,6 @@ async function deliverSlackSessionEvents(
     subjectId: interaction.owningSubjectId,
     sessionId: interaction.sessionId,
   });
-  let progressCount = interaction.progressCount;
   let lastSequence = interaction.lastDeliveredSessionEventSequence;
   let terminal: Exclude<SlackInteraction["terminalDeliveryState"], "open"> | null = null;
   let latestAssistantText = "";
@@ -568,9 +569,28 @@ async function deliverSlackSessionEvents(
     lastSequence = Math.max(lastSequence, event.sequence);
     if (event.type === "agent.message.completed") {
       latestAssistantText = safePayloadText(event.payload, "text");
-      if (latestAssistantText && progressCount < MAX_PROGRESS_MESSAGES) {
-        await postDelivery(client, interaction, event, latestAssistantText, "progress");
-        progressCount += 1;
+      if (latestAssistantText) {
+        const progress = await claimSlackInteractionProgressDelivery(deps.db, {
+          accountId: interaction.accountId,
+          workspaceId: interaction.workspaceId,
+          interactionId: interaction.id,
+          claimHolderId,
+          sessionEventSequence: event.sequence,
+          maxProgress: MAX_PROGRESS_MESSAGES,
+        });
+        if (progress.kind === "not_owned") {
+          throw new Error("Slack progress delivery lost its durable interaction claim");
+        }
+        if (progress.kind === "claimed") {
+          await postDelivery(
+            client,
+            interaction,
+            event,
+            latestAssistantText,
+            "progress",
+            progress.delivery.operationId,
+          );
+        }
       }
     } else if (event.type === "session.humanInput.requested") {
       const requests = await listSessionHumanInputRequests(
@@ -625,7 +645,6 @@ async function deliverSlackSessionEvents(
       ...interaction,
       claimHolderId,
       sequence: lastSequence,
-      incrementProgress: progressCount > interaction.progressCount,
     });
     await releaseSlackInteractionDelivery(deps.db, {
       ...interaction,
@@ -640,9 +659,10 @@ async function postDelivery(
   event: SessionEvent,
   text: string,
   kind: string,
+  operationId = deterministicUuid(`slack-delivery:${interaction.id}:${event.sequence}:${kind}`),
 ) {
   await client.postMessage({
-    operationId: deterministicUuid(`slack-delivery:${interaction.id}:${event.sequence}:${kind}`),
+    operationId,
     channelId: interaction.slackChannelId,
     threadTimestamp: interaction.slackThreadTs,
     text: boundedOutput(text),

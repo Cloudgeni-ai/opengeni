@@ -96,6 +96,7 @@ CREATE TABLE "slack_interactions" (
   "triggering_provider_event_id" text NOT NULL,
   "owning_subject_id" text NOT NULL,
   "visibility" text NOT NULL,
+  "session_reservation_id" uuid NOT NULL DEFAULT gen_random_uuid(),
   "session_id" uuid REFERENCES "sessions"("id") ON DELETE CASCADE,
   "last_delivered_session_event_sequence" integer NOT NULL DEFAULT 0,
   "delivery_claim_holder_id" uuid,
@@ -106,6 +107,7 @@ CREATE TABLE "slack_interactions" (
   "created_at" timestamptz NOT NULL DEFAULT now(),
   "updated_at" timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT "slack_interactions_route_uq" UNIQUE ("connection_id", "route_key"),
+  CONSTRAINT "slack_interactions_identity_uq" UNIQUE ("account_id", "workspace_id", "id"),
   CONSTRAINT "slack_interactions_bounds_check"
     CHECK (
       octet_length("slack_team_id") BETWEEN 1 AND 64
@@ -116,8 +118,10 @@ CREATE TABLE "slack_interactions" (
       AND octet_length("owning_subject_id") BETWEEN 1 AND 1024
       AND ("ack_slack_message_ts" IS NULL OR octet_length("ack_slack_message_ts") BETWEEN 1 AND 64)
       AND "last_delivered_session_event_sequence" >= 0
-      AND "progress_count" >= 0
+      AND "progress_count" BETWEEN 0 AND 3
     ),
+  CONSTRAINT "slack_interactions_session_binding_check"
+    CHECK ("session_id" IS NULL OR "session_id" = "session_reservation_id"),
   CONSTRAINT "slack_interactions_delivery_claim_check"
     CHECK (("delivery_claim_holder_id" IS NULL) = ("delivery_claim_expires_at" IS NULL)),
   CONSTRAINT "slack_interactions_visibility_check"
@@ -126,6 +130,8 @@ CREATE TABLE "slack_interactions" (
     CHECK ("terminal_delivery_state" IN ('open', 'completed', 'failed', 'cancelled', 'blocked'))
 );
 
+CREATE UNIQUE INDEX "slack_interactions_workspace_reservation_uq"
+  ON "slack_interactions" ("workspace_id", "session_reservation_id");
 CREATE UNIQUE INDEX "slack_interactions_workspace_session_uq"
   ON "slack_interactions" ("workspace_id", "session_id")
   WHERE "session_id" IS NOT NULL;
@@ -133,12 +139,37 @@ CREATE INDEX "slack_interactions_delivery_idx"
   ON "slack_interactions" ("terminal_delivery_state", "updated_at", "id")
   WHERE "session_id" IS NOT NULL AND "terminal_delivery_state" = 'open';
 
+CREATE TABLE "slack_interaction_progress_deliveries" (
+  "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  "account_id" uuid NOT NULL REFERENCES "managed_accounts"("id") ON DELETE CASCADE,
+  "workspace_id" uuid NOT NULL REFERENCES "workspaces"("id") ON DELETE CASCADE,
+  "interaction_id" uuid NOT NULL,
+  "session_event_sequence" integer NOT NULL,
+  "slot" integer NOT NULL,
+  "operation_id" uuid NOT NULL,
+  "created_at" timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT "slack_interaction_progress_deliveries_interaction_fk"
+    FOREIGN KEY ("account_id", "workspace_id", "interaction_id")
+    REFERENCES "slack_interactions" ("account_id", "workspace_id", "id")
+    ON DELETE CASCADE,
+  CONSTRAINT "slack_interaction_progress_deliveries_event_uq"
+    UNIQUE ("interaction_id", "session_event_sequence"),
+  CONSTRAINT "slack_interaction_progress_deliveries_slot_uq"
+    UNIQUE ("interaction_id", "slot"),
+  CONSTRAINT "slack_interaction_progress_deliveries_operation_uq"
+    UNIQUE ("workspace_id", "operation_id"),
+  CONSTRAINT "slack_interaction_progress_deliveries_bounds_check"
+    CHECK ("session_event_sequence" > 0 AND "slot" BETWEEN 1 AND 3)
+);
+
 ALTER TABLE "slack_bot_user_links" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "slack_bot_user_links" FORCE ROW LEVEL SECURITY;
 ALTER TABLE "slack_interaction_inbox" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "slack_interaction_inbox" FORCE ROW LEVEL SECURITY;
 ALTER TABLE "slack_interactions" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "slack_interactions" FORCE ROW LEVEL SECURITY;
+ALTER TABLE "slack_interaction_progress_deliveries" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "slack_interaction_progress_deliveries" FORCE ROW LEVEL SECURITY;
 
 CREATE POLICY workspace_isolation ON "slack_bot_user_links"
   USING (opengeni_private.workspace_rls_visible("account_id", "workspace_id"))
@@ -147,6 +178,9 @@ CREATE POLICY workspace_isolation ON "slack_interaction_inbox"
   USING (opengeni_private.workspace_rls_visible("account_id", "workspace_id"))
   WITH CHECK (opengeni_private.workspace_rls_visible("account_id", "workspace_id"));
 CREATE POLICY workspace_isolation ON "slack_interactions"
+  USING (opengeni_private.workspace_rls_visible("account_id", "workspace_id"))
+  WITH CHECK (opengeni_private.workspace_rls_visible("account_id", "workspace_id"));
+CREATE POLICY workspace_isolation ON "slack_interaction_progress_deliveries"
   USING (opengeni_private.workspace_rls_visible("account_id", "workspace_id"))
   WITH CHECK (opengeni_private.workspace_rls_visible("account_id", "workspace_id"));
 
@@ -298,6 +332,7 @@ BEGIN
     EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I.slack_bot_user_links TO opengeni_app', target_schema);
     EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I.slack_interaction_inbox TO opengeni_app', target_schema);
     EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I.slack_interactions TO opengeni_app', target_schema);
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I.slack_interaction_progress_deliveries TO opengeni_app', target_schema);
     GRANT EXECUTE ON FUNCTION opengeni_private.resolve_slack_installation(text) TO opengeni_app;
     GRANT EXECUTE ON FUNCTION opengeni_private.claim_slack_interaction_inbox(uuid, integer) TO opengeni_app;
     GRANT EXECUTE ON FUNCTION opengeni_private.claim_slack_interaction_delivery(uuid, integer) TO opengeni_app;

@@ -66,8 +66,13 @@ type SlackPost = {
   timestamp: string;
 };
 
-function fakeSlack(deniedChannels: Set<string> = new Set()) {
+function fakeSlack(
+  deniedChannels: Set<string> = new Set(),
+  options: { failAfterAcceptTexts?: Set<string> } = {},
+) {
   const posts: SlackPost[] = [];
+  const acceptedByClientMessageId = new Map<string, SlackPost>();
+  const failedAfterAccept = new Set<string>();
   let nextTimestamp = 1;
   const fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
@@ -86,14 +91,25 @@ function fakeSlack(deniedChannels: Set<string> = new Set()) {
       });
     }
     if (method === "chat.postMessage") {
+      const clientMessageId = form.get("client_msg_id");
+      const accepted = clientMessageId ? acceptedByClientMessageId.get(clientMessageId) : null;
+      if (accepted) {
+        return Response.json({ ok: true, channel: accepted.channel, ts: accepted.timestamp });
+      }
       const timestamp = `1800000000.${String(nextTimestamp++).padStart(6, "0")}`;
-      posts.push({
+      const post = {
         channel: form.get("channel") ?? "",
         text: form.get("text") ?? "",
         threadTimestamp: form.get("thread_ts"),
-        clientMessageId: form.get("client_msg_id"),
+        clientMessageId,
         timestamp,
-      });
+      };
+      posts.push(post);
+      if (clientMessageId) acceptedByClientMessageId.set(clientMessageId, post);
+      if (options.failAfterAcceptTexts?.has(post.text) && !failedAfterAccept.has(post.text)) {
+        failedAfterAccept.add(post.text);
+        throw new TypeError("simulated Slack response loss after provider acceptance");
+      }
       return Response.json({ ok: true, channel: form.get("channel"), ts: timestamp });
     }
     return Response.json({ ok: false, error: `unexpected_${method}` });
@@ -114,7 +130,13 @@ function encryptedBotCredential(settings: Settings): string {
   );
 }
 
-async function fixture(options: { deniedChannels?: string[]; linkOther?: boolean } = {}) {
+async function fixture(
+  options: {
+    deniedChannels?: string[];
+    linkOther?: boolean;
+    failAfterAcceptTexts?: string[];
+  } = {},
+) {
   const suffix = crypto.randomUUID();
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "slack-interactions-test",
@@ -205,7 +227,9 @@ async function fixture(options: { deniedChannels?: string[]; linkOther?: boolean
     });
   }
 
-  const slack = fakeSlack(new Set(options.deniedChannels ?? []));
+  const slack = fakeSlack(new Set(options.deniedChannels ?? []), {
+    failAfterAcceptTexts: new Set(options.failAfterAcceptTexts ?? []),
+  });
   const wakes: Array<{ sessionId: string }> = [];
   const noop = async () => undefined;
   const deps = {
@@ -295,10 +319,12 @@ async function interactions(workspaceId: string) {
       route_key: string;
       visibility: string;
       slack_thread_ts: string;
+      progress_count: number;
       terminal_delivery_state: string;
     }[]
   >`
-    select id, session_id, route_key, visibility, slack_thread_ts, terminal_delivery_state
+    select id, session_id, route_key, visibility, slack_thread_ts, progress_count,
+      terminal_delivery_state
     from slack_interactions
     where workspace_id = ${workspaceId}
     order by created_at, id`;
@@ -580,9 +606,9 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(inbox.map((row) => row.status)).toEqual(["processed", "failed"]);
   });
 
-  test("bounded progress and one final result route idempotently to the originating Slack thread", async () => {
+  test("caps durable progress globally across pages, response loss, retries, restarts, and replica claims", async () => {
     if (!available) return;
-    const value = await fixture();
+    const value = await fixture({ failAfterAcceptTexts: ["Progress 2"] });
     await postEvent(value.app, {
       teamId: value.teamId,
       eventId: `E_DELIVERY_${crypto.randomUUID()}`,
@@ -598,31 +624,95 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     await drainAll(value.deps);
     const [route] = await interactions(value.owner.workspaceId);
     await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
-      ...Array.from({ length: 4 }, (_, index) => ({
+      ...Array.from({ length: 3 }, (_, index) => ({
         type: "agent.message.completed",
         payload: { text: `Progress ${index + 1}` },
       })),
-      {
-        type: "turn.completed",
-        payload: { output: "Final bounded result" },
-      },
     ]);
     const postsBeforeDelivery = value.slack.posts.length;
+    // The provider accepts Progress 2, then the first process loses the response
+    // before the post ledger and delivery cursor can commit.
     expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
-    expect(await drainSlackInteractionsOnce(value.deps)).toBe(false);
-    const delivered = value.slack.posts.slice(postsBeforeDelivery);
-    expect(delivered).toHaveLength(4);
-    expect(delivered.slice(0, 3).map((post) => post.text)).toEqual([
+    expect(value.slack.posts.slice(postsBeforeDelivery).map((post) => post.text)).toEqual([
+      "Progress 1",
+      "Progress 2",
+    ]);
+
+    const restartedDeps = {
+      ...value.deps,
+      bus: new MemoryEventBus(),
+    } as ApiRouteDeps;
+    const replicaDeps = {
+      ...value.deps,
+      bus: new MemoryEventBus(),
+    } as ApiRouteDeps;
+    expect(
+      (
+        await Promise.all([
+          drainSlackInteractionsOnce(restartedDeps),
+          drainSlackInteractionsOnce(replicaDeps),
+        ])
+      ).sort(),
+    ).toEqual([false, true]);
+
+    let deliveredProgress = value.slack.posts
+      .slice(postsBeforeDelivery)
+      .filter((post) => post.text.startsWith("Progress"));
+    expect(deliveredProgress.map((post) => post.text)).toEqual([
       "Progress 1",
       "Progress 2",
       "Progress 3",
     ]);
+    expect(new Set(deliveredProgress.map((post) => post.clientMessageId)).size).toBe(3);
+    expect((await interactions(value.owner.workspaceId))[0]).toMatchObject({
+      progress_count: 3,
+      terminal_delivery_state: "open",
+    });
+
+    // Simulate replay after a crash that lost the page cursor commit. Every
+    // progress event reuses its durable operation UUID and provider identity.
+    await shared!.admin`
+      update slack_interactions
+      set last_delivered_session_event_sequence = 0,
+          delivery_claim_holder_id = null,
+          delivery_claim_expires_at = null,
+          updated_at = now()
+      where id = ${route!.id}`;
+    expect(await drainSlackInteractionsOnce(restartedDeps)).toBe(true);
+    deliveredProgress = value.slack.posts
+      .slice(postsBeforeDelivery)
+      .filter((post) => post.text.startsWith("Progress"));
+    expect(deliveredProgress).toHaveLength(3);
+
+    // A later delivery page cannot reserve or post a fourth progress message;
+    // terminal delivery remains independent and still reaches the thread.
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      { type: "agent.message.completed", payload: { text: "Progress 4" } },
+      { type: "turn.completed", payload: { output: "Final bounded result" } },
+    ]);
+    expect(await drainSlackInteractionsOnce(restartedDeps)).toBe(true);
+    expect(await drainSlackInteractionsOnce(restartedDeps)).toBe(false);
+    const delivered = value.slack.posts.slice(postsBeforeDelivery);
+    expect(delivered.filter((post) => post.text.startsWith("Progress"))).toHaveLength(3);
+    expect(delivered.some((post) => post.text === "Progress 4")).toBe(false);
     expect(delivered.at(-1)?.text).toContain("Final bounded result");
     expect(delivered.at(-1)?.text).toContain("Open in OpenGeni:");
     expect(delivered.every((post) => post.threadTimestamp === "1740000000.000001")).toBe(true);
-    expect(new Set(delivered.map((post) => post.clientMessageId)).size).toBe(4);
+    const progressLedger = await shared!.admin<
+      { session_event_sequence: number; slot: number; operation_id: string }[]
+    >`
+      select session_event_sequence, slot, operation_id
+      from slack_interaction_progress_deliveries
+      where interaction_id = ${route!.id}
+      order by slot`;
+    expect(progressLedger.map((row) => row.slot)).toEqual([1, 2, 3]);
+    expect(new Set(progressLedger.map((row) => row.session_event_sequence)).size).toBe(3);
+    expect(new Set(progressLedger.map((row) => row.operation_id))).toEqual(
+      new Set(deliveredProgress.map((post) => post.clientMessageId!)),
+    );
     expect((await interactions(value.owner.workspaceId))[0]).toMatchObject({
+      progress_count: 3,
       terminal_delivery_state: "completed",
     });
-  });
+  }, 60_000);
 });

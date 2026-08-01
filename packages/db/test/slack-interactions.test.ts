@@ -12,6 +12,7 @@ import {
   createConnection,
   createDb,
   createSession,
+  createSessionWithIdempotencyKeyResult,
   enqueueSlackInteractionInbox,
   getOrCreateSlackInteraction,
   getSessionForSubject,
@@ -129,8 +130,10 @@ describe("Slack interaction migration and durable database boundary", () => {
   test("declares rolling FORCE-RLS tables and bounded security-definer functions", async () => {
     const sql = await readFile(migrationPath, "utf8");
     expect(sql.startsWith("-- deployment-mode: rolling\n")).toBe(true);
-    expect(sql.match(/FORCE ROW LEVEL SECURITY/g)).toHaveLength(3);
+    expect(sql.match(/FORCE ROW LEVEL SECURITY/g)).toHaveLength(4);
     expect(sql).toContain("slack_interactions_visibility_check");
+    expect(sql).toContain("slack_interactions_session_binding_check");
+    expect(sql).toContain("slack_interaction_progress_deliveries_slot_uq");
     expect(sql).toContain("FOR UPDATE SKIP LOCKED");
     expect(sql).toContain("claim_slack_interaction_delivery");
     expect(sql.match(/\n\s+SECURITY DEFINER\n\s+SET search_path = pg_catalog/g)).toHaveLength(3);
@@ -165,10 +168,11 @@ describe("Slack interaction migration and durable database boundary", () => {
       where C.oid in (
         'slack_bot_user_links'::regclass,
         'slack_interaction_inbox'::regclass,
-        'slack_interactions'::regclass
+        'slack_interactions'::regclass,
+        'slack_interaction_progress_deliveries'::regclass
       )
       order by C.relname`;
-    expect(rows).toHaveLength(3);
+    expect(rows).toHaveLength(4);
     for (const row of rows) {
       expect(row).toMatchObject({
         relrowsecurity: true,
@@ -268,8 +272,20 @@ describe("Slack interaction migration and durable database boundary", () => {
       botId: "B_PRIVATE",
       botUserId: "U_PRIVATE_BOT",
     });
+    const { interaction } = await getOrCreateSlackInteraction(db, {
+      ...target,
+      connectionId: connection.id,
+      slackTeamId: "T_PRIVATE",
+      slackChannelId: "D_PRIVATE",
+      slackThreadTs: "1710000000.000010",
+      routeKey: "D_PRIVATE:1710000000.000010",
+      triggeringProviderEventId: "E_PRIVATE",
+      owningSubjectId: owner,
+      visibility: "private",
+    });
     const root = await createSession(db, {
       ...target,
+      requestedSessionId: interaction.sessionReservationId,
       initialMessage: "private root",
       resources: [],
       metadata: {},
@@ -286,17 +302,6 @@ describe("Slack interaction migration and durable database boundary", () => {
       model: "test-model",
       sandboxBackend: "none",
       parentSessionId: root.id,
-    });
-    const { interaction } = await getOrCreateSlackInteraction(db, {
-      ...target,
-      connectionId: connection.id,
-      slackTeamId: "T_PRIVATE",
-      slackChannelId: "D_PRIVATE",
-      slackThreadTs: "1710000000.000010",
-      routeKey: "D_PRIVATE:1710000000.000010",
-      triggeringProviderEventId: "E_PRIVATE",
-      owningSubjectId: owner,
-      visibility: "private",
     });
     expect(
       await bindSlackInteractionSession(db, {
@@ -323,4 +328,100 @@ describe("Slack interaction migration and durable database boundary", () => {
     expect(await getSessionForSubject(db, target.workspaceId, child.id, other)).toBeNull();
     expect(await getSessionForSubject(db, target.workspaceId, child.id, owner)).not.toBeNull();
   });
+
+  test("keeps a reserved private session unreadable before, during, and after bind across crash retry", async () => {
+    if (!available) return;
+    const target = await workspace("private-atomic");
+    const owner = `user:slack-atomic-owner-${crypto.randomUUID()}`;
+    const other = `user:slack-atomic-other-${crypto.randomUUID()}`;
+    await member(target, owner);
+    await member(target, other);
+    const connection = await botConnection(target, "T_PRIVATE_ATOMIC", {
+      botId: "B_PRIVATE_ATOMIC",
+      botUserId: "U_PRIVATE_ATOMIC_BOT",
+    });
+    const { interaction } = await getOrCreateSlackInteraction(db, {
+      ...target,
+      connectionId: connection.id,
+      slackTeamId: "T_PRIVATE_ATOMIC",
+      slackChannelId: "D_PRIVATE_ATOMIC",
+      slackThreadTs: "1710000000.000020",
+      routeKey: "D_PRIVATE_ATOMIC:1710000000.000020",
+      triggeringProviderEventId: "E_PRIVATE_ATOMIC",
+      owningSubjectId: owner,
+      visibility: "private",
+    });
+    const createInput = {
+      ...target,
+      requestedSessionId: interaction.sessionReservationId,
+      createIdempotencyKey: `slack-private-atomic:${interaction.id}`,
+      initialMessage: "private root with a durable reservation",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject" as const, subjectId: owner },
+      model: "test-model",
+      sandboxBackend: "none" as const,
+    };
+    const created = await createSessionWithIdempotencyKeyResult(db, createInput);
+    expect(created).toMatchObject({ created: true, denied: false });
+    if (created.denied) throw new Error("private session create unexpectedly denied");
+    expect(created.session.id).toBe(interaction.sessionReservationId);
+
+    const expectPrivate = async () => {
+      const ownerList = await listSessionsForSubject(db, target.workspaceId, {
+        subjectId: owner,
+        limit: 50,
+      });
+      const otherList = await listSessionsForSubject(db, target.workspaceId, {
+        subjectId: other,
+        limit: 50,
+      });
+      expect(ownerList.sessions.map((session) => session.id)).toContain(created.session.id);
+      expect(otherList.sessions.map((session) => session.id)).not.toContain(created.session.id);
+      expect(
+        await getSessionForSubject(db, target.workspaceId, created.session.id, other),
+      ).toBeNull();
+      expect(
+        await getSessionForSubject(db, target.workspaceId, created.session.id, owner),
+      ).not.toBeNull();
+    };
+
+    // Simulated process death after the session commit but before final binding.
+    await expectPrivate();
+    const replay = await createSessionWithIdempotencyKeyResult(db, createInput);
+    expect(replay).toMatchObject({ created: false, denied: false });
+    if (replay.denied) throw new Error("private session replay unexpectedly denied");
+    expect(replay.session.id).toBe(created.session.id);
+    await expectPrivate();
+
+    let releaseBindLock!: () => void;
+    let markBindLockReady!: () => void;
+    const bindLockReady = new Promise<void>((resolve) => {
+      markBindLockReady = resolve;
+    });
+    const bindLockGate = new Promise<void>((resolve) => {
+      releaseBindLock = resolve;
+    });
+    const lockTransaction = admin.begin(async (tx) => {
+      await tx`select id from slack_interactions where id = ${interaction.id} for update`;
+      markBindLockReady();
+      await bindLockGate;
+    });
+    await bindLockReady;
+    let bindSettled = false;
+    const binding = bindSlackInteractionSession(db, {
+      ...interaction,
+      owningSubjectId: owner,
+      sessionId: created.session.id,
+    }).finally(() => {
+      bindSettled = true;
+    });
+    await Bun.sleep(25);
+    expect(bindSettled).toBe(false);
+    await expectPrivate();
+    releaseBindLock();
+    await lockTransaction;
+    expect(await binding).toMatchObject({ sessionId: created.session.id, visibility: "private" });
+    await expectPrivate();
+  }, 60_000);
 });

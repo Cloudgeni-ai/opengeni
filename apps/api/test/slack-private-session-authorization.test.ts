@@ -123,27 +123,6 @@ async function fixture() {
   };
   await grantWorkspaceAccess(client.db, other);
 
-  const root = await createSession(client.db, {
-    accountId: owner.accountId,
-    workspaceId: owner.workspaceId,
-    initialMessage: "Private Slack DM root",
-    resources: [],
-    metadata: {},
-    createdBy: { kind: "subject", subjectId: owner.subjectId },
-    model: "test-model",
-    sandboxBackend: "none",
-  });
-  const child = await createSession(client.db, {
-    accountId: owner.accountId,
-    workspaceId: owner.workspaceId,
-    parentSessionId: root.id,
-    initialMessage: "Private Slack DM child",
-    resources: [],
-    metadata: {},
-    createdBy: { kind: "subject", subjectId: owner.subjectId },
-    model: "test-model",
-    sandboxBackend: "none",
-  });
   const [connection] = await shared!.admin<{ id: string }[]>`
     insert into connections (
       account_id, workspace_id, subject_id, provider_domain, kind,
@@ -172,6 +151,28 @@ async function fixture() {
     triggeringProviderEventId: `E_${suffix}`,
     owningSubjectId: owner.subjectId,
     visibility: "private",
+  });
+  const root = await createSession(client.db, {
+    accountId: owner.accountId,
+    workspaceId: owner.workspaceId,
+    requestedSessionId: interaction.sessionReservationId,
+    initialMessage: "Private Slack DM root",
+    resources: [],
+    metadata: {},
+    createdBy: { kind: "subject", subjectId: owner.subjectId },
+    model: "test-model",
+    sandboxBackend: "none",
+  });
+  const child = await createSession(client.db, {
+    accountId: owner.accountId,
+    workspaceId: owner.workspaceId,
+    parentSessionId: root.id,
+    initialMessage: "Private Slack DM child",
+    resources: [],
+    metadata: {},
+    createdBy: { kind: "subject", subjectId: owner.subjectId },
+    model: "test-model",
+    sandboxBackend: "none",
   });
   await bindSlackInteractionSession(client.db, {
     ...interaction,

@@ -655,6 +655,7 @@ export const slackInteractions = pgTable(
     triggeringProviderEventId: text("triggering_provider_event_id").notNull(),
     owningSubjectId: text("owning_subject_id").notNull(),
     visibility: text("visibility").$type<"private" | "workspace">().notNull(),
+    sessionReservationId: uuid("session_reservation_id").notNull().defaultRandom(),
     sessionId: uuid("session_id").references(() => sessions.id, {
       onDelete: "cascade",
     }),
@@ -676,6 +677,15 @@ export const slackInteractions = pgTable(
   },
   (table) => ({
     route: uniqueIndex("slack_interactions_route_uq").on(table.connectionId, table.routeKey),
+    identity: uniqueIndex("slack_interactions_identity_uq").on(
+      table.accountId,
+      table.workspaceId,
+      table.id,
+    ),
+    workspaceReservation: uniqueIndex("slack_interactions_workspace_reservation_uq").on(
+      table.workspaceId,
+      table.sessionReservationId,
+    ),
     workspaceSession: uniqueIndex("slack_interactions_workspace_session_uq")
       .on(table.workspaceId, table.sessionId)
       .where(sql`${table.sessionId} is not null`),
@@ -683,6 +693,47 @@ export const slackInteractions = pgTable(
       table.terminalDeliveryState,
       table.updatedAt,
       table.id,
+    ),
+  }),
+);
+
+export const slackInteractionProgressDeliveries = pgTable(
+  "slack_interaction_progress_deliveries",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    interactionId: uuid("interaction_id").notNull(),
+    sessionEventSequence: integer("session_event_sequence").notNull(),
+    slot: integer("slot").notNull(),
+    operationId: uuid("operation_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    interactionIdentity: foreignKey({
+      columns: [table.accountId, table.workspaceId, table.interactionId],
+      foreignColumns: [
+        slackInteractions.accountId,
+        slackInteractions.workspaceId,
+        slackInteractions.id,
+      ],
+      name: "slack_interaction_progress_deliveries_interaction_fk",
+    }).onDelete("cascade"),
+    event: uniqueIndex("slack_interaction_progress_deliveries_event_uq").on(
+      table.interactionId,
+      table.sessionEventSequence,
+    ),
+    slot: uniqueIndex("slack_interaction_progress_deliveries_slot_uq").on(
+      table.interactionId,
+      table.slot,
+    ),
+    operation: uniqueIndex("slack_interaction_progress_deliveries_operation_uq").on(
+      table.workspaceId,
+      table.operationId,
     ),
   }),
 );

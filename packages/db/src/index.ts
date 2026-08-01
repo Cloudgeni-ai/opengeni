@@ -5361,6 +5361,7 @@ export type SlackInteraction = {
   triggeringProviderEventId: string;
   owningSubjectId: string;
   visibility: "private" | "workspace";
+  sessionReservationId: string;
   sessionId: string | null;
   lastDeliveredSessionEventSequence: number;
   deliveryClaimHolderId: string | null;
@@ -5370,6 +5371,17 @@ export type SlackInteraction = {
   terminalDeliveryState: "open" | "completed" | "failed" | "cancelled" | "blocked";
   createdAt: Date;
   updatedAt: Date;
+};
+
+export type SlackInteractionProgressDelivery = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  interactionId: string;
+  sessionEventSequence: number;
+  slot: number;
+  operationId: string;
+  createdAt: Date;
 };
 
 export async function resolveSlackInstallationRoute(
@@ -5585,6 +5597,7 @@ export async function getOrCreateSlackInteraction(
   input: Omit<
     SlackInteraction,
     | "id"
+    | "sessionReservationId"
     | "sessionId"
     | "lastDeliveredSessionEventSequence"
     | "deliveryClaimHolderId"
@@ -5655,7 +5668,7 @@ export async function getSlackInteractionSessionAccess(
       .where(
         and(
           eq(schema.slackInteractions.workspaceId, workspaceId),
-          eq(schema.slackInteractions.sessionId, rootSessionId),
+          eq(schema.slackInteractions.sessionReservationId, rootSessionId),
         ),
       )
       .limit(1);
@@ -5723,7 +5736,7 @@ export async function getSlackInteractionSessionAccessForSession(
       left join ${schema.slackInteractions} interaction
         on interaction.account_id = ${input.accountId}
         and interaction.workspace_id = ${input.workspaceId}
-        and interaction.session_id = root.id
+        and interaction.session_reservation_id = root.id
     `);
     const root = rows[0];
     if (!root) return null;
@@ -5753,6 +5766,7 @@ export async function bindSlackInteractionSession(
         and(
           eq(schema.slackInteractions.id, input.id),
           eq(schema.slackInteractions.owningSubjectId, input.owningSubjectId),
+          eq(schema.slackInteractions.sessionReservationId, input.sessionId),
           isNull(schema.slackInteractions.sessionId),
         ),
       )
@@ -5764,6 +5778,125 @@ export async function bindSlackInteractionSession(
       .where(eq(schema.slackInteractions.id, input.id))
       .limit(1);
     return existing?.sessionId === input.sessionId ? mapSlackInteraction(existing) : null;
+  });
+}
+
+export type SlackInteractionProgressClaim =
+  | {
+      kind: "claimed";
+      created: boolean;
+      progressCount: number;
+      delivery: SlackInteractionProgressDelivery;
+    }
+  | { kind: "limit_reached"; progressCount: number }
+  | { kind: "not_owned" };
+
+/**
+ * Reserve one globally bounded progress slot before any Slack provider call.
+ * The interaction row lock serializes replicas and expired delivery claim
+ * successors; the event row preserves one operation UUID across every retry.
+ */
+export async function claimSlackInteractionProgressDelivery(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    interactionId: string;
+    claimHolderId: string;
+    sessionEventSequence: number;
+    maxProgress: number;
+  },
+): Promise<SlackInteractionProgressClaim> {
+  if (
+    !Number.isSafeInteger(input.sessionEventSequence) ||
+    input.sessionEventSequence < 1 ||
+    !Number.isSafeInteger(input.maxProgress) ||
+    input.maxProgress < 1 ||
+    input.maxProgress > 3
+  ) {
+    throw new RangeError("invalid Slack progress delivery claim bounds");
+  }
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const [interaction] = await scopedDb
+      .select({
+        progressCount: schema.slackInteractions.progressCount,
+        deliveryClaimHolderId: schema.slackInteractions.deliveryClaimHolderId,
+        terminalDeliveryState: schema.slackInteractions.terminalDeliveryState,
+      })
+      .from(schema.slackInteractions)
+      .where(
+        and(
+          eq(schema.slackInteractions.id, input.interactionId),
+          eq(schema.slackInteractions.accountId, input.accountId),
+          eq(schema.slackInteractions.workspaceId, input.workspaceId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (
+      !interaction ||
+      interaction.deliveryClaimHolderId !== input.claimHolderId ||
+      interaction.terminalDeliveryState !== "open"
+    ) {
+      return { kind: "not_owned" };
+    }
+
+    const [existing] = await scopedDb
+      .select()
+      .from(schema.slackInteractionProgressDeliveries)
+      .where(
+        and(
+          eq(schema.slackInteractionProgressDeliveries.interactionId, input.interactionId),
+          eq(
+            schema.slackInteractionProgressDeliveries.sessionEventSequence,
+            input.sessionEventSequence,
+          ),
+        ),
+      )
+      .limit(1);
+    if (existing) {
+      return {
+        kind: "claimed",
+        created: false,
+        progressCount: interaction.progressCount,
+        delivery: mapSlackInteractionProgressDelivery(existing),
+      };
+    }
+    if (interaction.progressCount >= input.maxProgress) {
+      return { kind: "limit_reached", progressCount: interaction.progressCount };
+    }
+
+    const slot = interaction.progressCount + 1;
+    const [delivery] = await scopedDb
+      .insert(schema.slackInteractionProgressDeliveries)
+      .values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        interactionId: input.interactionId,
+        sessionEventSequence: input.sessionEventSequence,
+        slot,
+        operationId: crypto.randomUUID(),
+      })
+      .returning();
+    if (!delivery) throw new Error("Slack progress delivery claim returned no row");
+    const [updated] = await scopedDb
+      .update(schema.slackInteractions)
+      .set({ progressCount: slot, updatedAt: sql`now()` })
+      .where(
+        and(
+          eq(schema.slackInteractions.id, input.interactionId),
+          eq(schema.slackInteractions.deliveryClaimHolderId, input.claimHolderId),
+          eq(schema.slackInteractions.progressCount, interaction.progressCount),
+        ),
+      )
+      .returning({ progressCount: schema.slackInteractions.progressCount });
+    if (!updated) throw new Error("Slack progress delivery lost its durable interaction claim");
+    return {
+      kind: "claimed",
+      created: true,
+      progressCount: updated.progressCount,
+      delivery: mapSlackInteractionProgressDelivery(delivery),
+    };
   });
 }
 
@@ -5821,7 +5954,6 @@ export async function advanceSlackInteractionDelivery(
     claimHolderId: string;
     sequence: number;
     ackSlackMessageTs?: string | null;
-    incrementProgress?: boolean;
   },
 ): Promise<boolean> {
   return await withRlsContext(db, input, async (scopedDb) => {
@@ -5831,11 +5963,6 @@ export async function advanceSlackInteractionDelivery(
         lastDeliveredSessionEventSequence: input.sequence,
         ...(input.ackSlackMessageTs !== undefined
           ? { ackSlackMessageTs: input.ackSlackMessageTs }
-          : {}),
-        ...(input.incrementProgress
-          ? {
-              progressCount: sql`${schema.slackInteractions.progressCount} + 1`,
-            }
           : {}),
         updatedAt: sql`now()`,
       })
@@ -5956,6 +6083,7 @@ function mapSlackInteraction(
     ),
     owningSubjectId: slackRowString(row, "owningSubjectId", "owning_subject_id"),
     visibility: slackRowString(row, "visibility", "visibility") as SlackInteraction["visibility"],
+    sessionReservationId: slackRowString(row, "sessionReservationId", "session_reservation_id"),
     sessionId: slackRowNullableString(row, "sessionId", "session_id"),
     lastDeliveredSessionEventSequence: slackRowNumber(
       row,
@@ -5981,6 +6109,21 @@ function mapSlackInteraction(
     ) as SlackInteraction["terminalDeliveryState"],
     createdAt: slackRowDate(row, "createdAt", "created_at"),
     updatedAt: slackRowDate(row, "updatedAt", "updated_at"),
+  };
+}
+
+function mapSlackInteractionProgressDelivery(
+  row: typeof schema.slackInteractionProgressDeliveries.$inferSelect | Record<string, unknown>,
+): SlackInteractionProgressDelivery {
+  return {
+    id: slackRowString(row, "id", "id"),
+    accountId: slackRowString(row, "accountId", "account_id"),
+    workspaceId: slackRowString(row, "workspaceId", "workspace_id"),
+    interactionId: slackRowString(row, "interactionId", "interaction_id"),
+    sessionEventSequence: slackRowNumber(row, "sessionEventSequence", "session_event_sequence"),
+    slot: slackRowNumber(row, "slot", "slot"),
+    operationId: slackRowString(row, "operationId", "operation_id"),
+    createdAt: slackRowDate(row, "createdAt", "created_at"),
   };
 }
 
@@ -16429,7 +16572,7 @@ function sessionFilters(
       select 1
       from ${schema.slackInteractions} private_slack_interaction
       where private_slack_interaction.workspace_id = ${schema.sessions.workspaceId}
-        and private_slack_interaction.session_id = ${schema.sessions.rootSessionId}
+        and private_slack_interaction.session_reservation_id = ${schema.sessions.rootSessionId}
         and private_slack_interaction.visibility = 'private'
         and private_slack_interaction.owning_subject_id <> ${options.subjectId}
     )`,
@@ -17054,7 +17197,7 @@ export async function getSessionForSubject(
             select 1
             from ${schema.slackInteractions} private_slack_interaction
             where private_slack_interaction.workspace_id = ${schema.sessions.workspaceId}
-              and private_slack_interaction.session_id = ${schema.sessions.rootSessionId}
+              and private_slack_interaction.session_reservation_id = ${schema.sessions.rootSessionId}
               and private_slack_interaction.visibility = 'private'
               and private_slack_interaction.owning_subject_id <> ${subjectId}
           )`,
