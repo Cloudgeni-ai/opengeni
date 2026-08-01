@@ -1,5 +1,11 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
-import type { AccessGrant, HumanInputQuestion, SessionEvent } from "@opengeni/contracts";
+import {
+  DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  type AccessGrant,
+  type FirstPartyMcpToolName,
+  type HumanInputQuestion,
+  type SessionEvent,
+} from "@opengeni/contracts";
 import {
   acceptSessionHumanInputResponse,
   advanceSlackInteractionDelivery,
@@ -67,6 +73,23 @@ export const SLACK_TASK_INSTRUCTIONS = [
   "Never expose private reasoning, credentials, secrets, raw logs, or unbounded output.",
   "Keep user-visible output concise, bounded, and safe to send back to Slack.",
 ].join(" ");
+
+/**
+ * Slack-originated tasks may retrieve the workspace bot's bounded read surface
+ * on demand. Connector tools are explicit-only, so freeze that narrow context
+ * selection at session creation while keeping Slack mutations out of the model
+ * surface; interaction delivery remains owned by the durable delivery pump.
+ */
+export const SLACK_TASK_FIRST_PARTY_MCP_TOOLS = [
+  ...DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  "slack_bot_list_channels",
+  "slack_bot_channel_history",
+  "slack_bot_thread_replies",
+  "slack_bot_list_users",
+  "slack_bot_list_files",
+  "slack_bot_file_info",
+  "slack_bot_file_content",
+] satisfies readonly FirstPartyMcpToolName[];
 
 export type NormalizedSlackInteraction = {
   providerEventId: string;
@@ -200,7 +223,13 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
           200,
         );
       }
-      throw error;
+      // Slash commands are not replayed through the Events API. A transient
+      // membership preflight failure must therefore fall through to the
+      // durable inbox, whose normal claim/backoff path retries the same task.
+      // Permanent provider/local failures remain an honest request failure.
+      if (!(error instanceof SlackBotProviderError) || permanentSlackDeliveryError(error)) {
+        throw error;
+      }
     }
     await enqueueNormalizedSlackInteraction(deps, installation, entry);
     return c.text("OpenGeni accepted this task and will reply in a thread.", 200);
@@ -467,6 +496,7 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
     requestedSessionId: interaction.sessionReservationId,
     initialMessage: entry.text,
     turnInstructions: SLACK_TASK_INSTRUCTIONS,
+    firstPartyMcpTools: [...SLACK_TASK_FIRST_PARTY_MCP_TOOLS],
     idempotencyKey: `slack:${entry.connectionId}:${entry.providerEventId}`,
     clientEventId: `slack:${entry.providerEventId}`,
   });
