@@ -475,7 +475,7 @@ Critical route discipline (canonical: `routes/sessions.ts`):
 - The desktop-stream **consent gate** must match exactly between the `GET /stream-capabilities` read path and the `POST /viewers` attach path — drift is an un-redacted-pixel-plane bypass.
 - `parentSessionId` comes only from the worker-signed grant claim, never caller-supplied (cross-session write escalation otherwise).
 - `firstPartyMcpPermissions` can never out-rank the creating grant. A child omission inherits that grant; it never re-expands to the deployment's standalone worker defaults.
-- `firstPartyMcpTools` is the OpenGeni portion of the session's unified model-visible tool selection. Top-level omission selects the full catalog, explicit `[]` stays empty, and child omission inherits the parent's exact effective selection. Visibility never substitutes for permission or target authorization.
+- `firstPartyMcpTools` is the OpenGeni portion of the session's unified model-visible tool selection. Top-level omission selects the safe non-connector catalog; connector-wide `social_*` and `slack_bot_*` tools require explicit selection plus their independent connection permission. Explicit `[]` stays empty, and child omission inherits the parent's exact effective selection. Visibility never substitutes for permission or target authorization.
 
 ### 7.2 `apps/worker` — orchestration + execution
 

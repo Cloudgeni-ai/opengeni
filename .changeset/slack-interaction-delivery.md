@@ -4,4 +4,4 @@
 "@opengeni/db": patch
 ---
 
-Harden Slack-triggered session delivery, identity linking, provider backoff, and connection-tool discovery while ensuring completed task output is posted only once.
+Harden Slack-triggered session delivery, identity linking, provider backoff, explicit connection-tool selection, and replay-safe bounded progress/final delivery.

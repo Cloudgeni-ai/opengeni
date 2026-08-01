@@ -667,9 +667,9 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(inbox.map((row) => row.status)).toEqual(["processed", "failed"]);
   });
 
-  test("delivers one terminal answer without duplicating completed assistant messages", async () => {
+  test("caps durable progress globally across pages, response loss, retries, restarts, and replica claims", async () => {
     if (!available) return;
-    const value = await fixture();
+    const value = await fixture({ failAfterAcceptTexts: ["Progress 2"] });
     await postEvent(value.app, {
       teamId: value.teamId,
       eventId: `E_DELIVERY_${crypto.randomUUID()}`,
@@ -679,24 +679,61 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         user: value.ownerSlackUserId,
         channel: "D_DELIVERY",
         ts: "1740000000.000001",
-        text: "Run a task with one Slack answer",
+        text: "Run a task with progress",
       },
     });
     await drainAll(value.deps);
     const [route] = await interactions(value.owner.workspaceId);
     await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
-      { type: "agent.message.completed", payload: { text: "Final bounded result" } },
+      ...Array.from({ length: 3 }, (_, index) => ({
+        type: "agent.message.completed",
+        payload: { text: `Progress ${index + 1}` },
+      })),
     ]);
     const postsBeforeDelivery = value.slack.posts.length;
+    // Slack accepts Progress 2 before the first process loses the response. The
+    // delivery is durably deferred without advancing its event cursor.
     expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
-    expect(value.slack.posts.slice(postsBeforeDelivery)).toHaveLength(0);
+    expect(value.slack.posts.slice(postsBeforeDelivery).map((post) => post.text)).toEqual([
+      "Progress 1",
+      "Progress 2",
+    ]);
 
     const restartedDeps = {
       ...value.deps,
       bus: new MemoryEventBus(),
     } as ApiRouteDeps;
-    // Replaying the assistant event after a lost cursor commit still does not
-    // create a Slack post. The terminal event owns the single user-visible answer.
+    const replicaDeps = {
+      ...value.deps,
+      bus: new MemoryEventBus(),
+    } as ApiRouteDeps;
+    await shared!.admin`
+      update slack_interactions set delivery_retry_at = now() where id = ${route!.id}`;
+    expect(
+      (
+        await Promise.all([
+          drainSlackInteractionsOnce(restartedDeps),
+          drainSlackInteractionsOnce(replicaDeps),
+        ])
+      ).sort(),
+    ).toEqual([false, true]);
+
+    let deliveredProgress = value.slack.posts
+      .slice(postsBeforeDelivery)
+      .filter((post) => post.text.startsWith("Progress"));
+    expect(deliveredProgress.map((post) => post.text)).toEqual([
+      "Progress 1",
+      "Progress 2",
+      "Progress 3",
+    ]);
+    expect(new Set(deliveredProgress.map((post) => post.clientMessageId)).size).toBe(3);
+    expect((await interactions(value.owner.workspaceId))[0]).toMatchObject({
+      progress_count: 3,
+      terminal_delivery_state: "open",
+    });
+
+    // Replaying after a crash that lost the page cursor reuses every durable
+    // progress operation UUID, so duplicate provider posts are not created.
     await shared!.admin`
       update slack_interactions
       set last_delivered_session_event_sequence = 0,
@@ -705,20 +742,39 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
           updated_at = now()
       where id = ${route!.id}`;
     expect(await drainSlackInteractionsOnce(restartedDeps)).toBe(true);
-    expect(value.slack.posts.slice(postsBeforeDelivery)).toHaveLength(0);
+    deliveredProgress = value.slack.posts
+      .slice(postsBeforeDelivery)
+      .filter((post) => post.text.startsWith("Progress"));
+    expect(deliveredProgress).toHaveLength(3);
 
+    // A later delivery page cannot reserve or post a fourth progress message;
+    // final delivery remains independent and still reaches the origin thread.
     await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      { type: "agent.message.completed", payload: { text: "Progress 4" } },
       { type: "turn.completed", payload: { output: "Final bounded result" } },
     ]);
     expect(await drainSlackInteractionsOnce(restartedDeps)).toBe(true);
     expect(await drainSlackInteractionsOnce(restartedDeps)).toBe(false);
     const delivered = value.slack.posts.slice(postsBeforeDelivery);
-    expect(delivered).toHaveLength(1);
+    expect(delivered.filter((post) => post.text.startsWith("Progress"))).toHaveLength(3);
+    expect(delivered.some((post) => post.text === "Progress 4")).toBe(false);
     expect(delivered.at(-1)?.text).toContain("Final bounded result");
     expect(delivered.at(-1)?.text).toContain("Open in OpenGeni:");
     expect(delivered.every((post) => post.threadTimestamp === "1740000000.000001")).toBe(true);
+    const progressLedger = await shared!.admin<
+      { session_event_sequence: number; slot: number; operation_id: string }[]
+    >`
+      select session_event_sequence, slot, operation_id
+      from slack_interaction_progress_deliveries
+      where interaction_id = ${route!.id}
+      order by slot`;
+    expect(progressLedger.map((row) => row.slot)).toEqual([1, 2, 3]);
+    expect(new Set(progressLedger.map((row) => row.session_event_sequence)).size).toBe(3);
+    expect(new Set(progressLedger.map((row) => row.operation_id))).toEqual(
+      new Set(deliveredProgress.map((post) => post.clientMessageId!)),
+    );
     expect((await interactions(value.owner.workspaceId))[0]).toMatchObject({
-      progress_count: 0,
+      progress_count: 3,
       terminal_delivery_state: "completed",
     });
   }, 60_000);
