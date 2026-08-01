@@ -6,8 +6,8 @@ import {
   assertFixtureCapture,
   assertDedicatedCanaryEmail,
   assertAcceptancePrincipalScopes,
+  assertChangesDefaultVisible,
   controlCancellationDurationMs,
-  ensureChangesTabVisible,
   fixturePrompt,
   openWorkspaceIfCollapsed,
   parseCookieHeader,
@@ -38,35 +38,35 @@ describe("workbench live acceptance preflight", () => {
     expect(lookedUpCollapseControl).toBe(false);
   });
 
-  test("selects Changes before requiring its layout to be visible", async () => {
+  test("observes the Changes default before requiring its layout to be visible", async () => {
     const calls: string[] = [];
-    let selected = "false";
     const page = {
       getByRole() {
         return {
           waitFor: async () => calls.push("tab.wait"),
-          getAttribute: async () => selected,
-          click: async () => {
-            calls.push("tab.click");
-            selected = "true";
-          },
         };
       },
       locator(selector: string) {
+        if (selector === '[role="tab"][aria-selected="true"]') {
+          return {
+            filter: () => ({
+              waitFor: async () => calls.push("selected-changes.wait"),
+            }),
+          };
+        }
         expect(selector).toBe("[data-workbench-changes-layout]");
         return {
           waitFor: async (options: { state?: string; timeout?: number }) => {
             expect(options).toEqual({ state: "visible", timeout: 20_000 });
-            expect(selected).toBe("true");
             calls.push("layout.wait");
           },
         };
       },
     } as never;
 
-    await ensureChangesTabVisible(page);
+    await assertChangesDefaultVisible(page);
 
-    expect(calls).toEqual(["tab.wait", "tab.click", "layout.wait"]);
+    expect(calls).toEqual(["tab.wait", "selected-changes.wait", "layout.wait"]);
   });
 
   test("rejects the protected manually used production account", () => {

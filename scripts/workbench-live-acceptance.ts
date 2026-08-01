@@ -347,7 +347,7 @@ async function main(): Promise<void> {
         timeout: 45_000,
       });
       await openWorkspaceIfCollapsed(page);
-      await ensureChangesTabVisible(page);
+      await assertChangesDefaultVisible(page);
       navigationSamples.push(performance.now() - started);
       assertNoProblems(problems, true);
       await context.close();
@@ -376,7 +376,7 @@ async function main(): Promise<void> {
         timeout: 45_000,
       });
       await openWorkspaceIfCollapsed(page);
-      await ensureChangesTabVisible(page);
+      await assertChangesDefaultVisible(page);
       await assertColdReview(page, marker);
       await assertAccessibility(page);
       await assertTouchTargets(page, device.mobile);
@@ -387,7 +387,7 @@ async function main(): Promise<void> {
       await assertScreenshotPainted(page, filesPng, `${device.name} cold Files`);
       artifacts.push(await artifact(filesScreenshot, args.outputDir));
 
-      await ensureChangesTabVisible(page);
+      await selectChangesTab(page);
       await assertAccessibility(page);
       await assertTouchTargets(page, device.mobile);
       assertNoProblems(problems, true);
@@ -920,7 +920,7 @@ async function runLiveWorkspaceFlow(input: {
       timeout: 45_000,
     });
     await openWorkspaceIfCollapsed(page);
-    await ensureChangesTabVisible(page);
+    await assertChangesDefaultVisible(page);
     await page.getByRole("tab", { name: "Files", exact: true }).click();
     await selectTreeFile(page, "api", "base.txt");
     await page.getByText("On machine", { exact: true }).waitFor();
@@ -1782,11 +1782,22 @@ export async function openWorkspaceIfCollapsed(page: Page): Promise<void> {
   await open.click();
 }
 
-export async function ensureChangesTabVisible(page: Page): Promise<void> {
+export async function assertChangesDefaultVisible(page: Page): Promise<void> {
   const changes = page.getByRole("tab", { name: /Changes/ });
   await changes.waitFor({ state: "visible", timeout: 20_000 });
-  if ((await changes.getAttribute("aria-selected")) !== "true") await changes.click();
+  await page
+    .locator('[role="tab"][aria-selected="true"]')
+    .filter({ hasText: /Changes/ })
+    .waitFor({ state: "visible", timeout: 20_000 });
 
+  await page.locator(CHANGES_LAYOUT_SELECTOR).waitFor({
+    state: "visible",
+    timeout: 20_000,
+  });
+}
+
+async function selectChangesTab(page: Page): Promise<void> {
+  await page.getByRole("tab", { name: /Changes/ }).click();
   await page.locator(CHANGES_LAYOUT_SELECTOR).waitFor({
     state: "visible",
     timeout: 20_000,
@@ -1803,7 +1814,7 @@ async function selectTreeFile(page: Page, directory: string, file: string): Prom
 }
 
 async function assertColdReview(page: Page, marker: string): Promise<void> {
-  await ensureChangesTabVisible(page);
+  await assertChangesDefaultVisible(page);
   await page.getByText("api", { exact: true }).first().waitFor();
   await page.getByText("web", { exact: true }).first().waitFor();
 
