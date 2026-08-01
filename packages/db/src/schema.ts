@@ -776,6 +776,7 @@ export const slackInteractionInbox = pgTable(
     claimHolderId: uuid("claim_holder_id"),
     claimExpiresAt: timestamp("claim_expires_at", { withTimezone: true }),
     attemptCount: integer("attempt_count").notNull().default(0),
+    retryAt: timestamp("retry_at", { withTimezone: true }),
     lastErrorCode: text("last_error_code"),
     processedAt: timestamp("processed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -792,6 +793,7 @@ export const slackInteractionInbox = pgTable(
     ),
     pending: index("slack_interaction_inbox_pending_idx").on(
       table.status,
+      table.retryAt,
       table.createdAt,
       table.id,
     ),
@@ -829,6 +831,9 @@ export const slackInteractions = pgTable(
     deliveryClaimExpiresAt: timestamp("delivery_claim_expires_at", {
       withTimezone: true,
     }),
+    deliveryAttemptCount: integer("delivery_attempt_count").notNull().default(0),
+    deliveryRetryAt: timestamp("delivery_retry_at", { withTimezone: true }),
+    deliveryLastErrorCode: text("delivery_last_error_code"),
     ackSlackMessageTs: text("ack_slack_message_ts"),
     progressCount: integer("progress_count").notNull().default(0),
     terminalDeliveryState: text("terminal_delivery_state")
@@ -854,6 +859,7 @@ export const slackInteractions = pgTable(
       .where(sql`${table.sessionId} is not null`),
     delivery: index("slack_interactions_delivery_idx").on(
       table.terminalDeliveryState,
+      table.deliveryRetryAt,
       table.updatedAt,
       table.id,
     ),

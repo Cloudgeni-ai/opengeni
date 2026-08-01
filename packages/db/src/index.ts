@@ -5345,6 +5345,7 @@ export type SlackInteractionInboxEntry = {
   claimHolderId: string | null;
   claimExpiresAt: Date | null;
   attemptCount: number;
+  retryAt: Date | null;
   lastErrorCode: string | null;
   processedAt: Date | null;
   createdAt: Date;
@@ -5368,6 +5369,9 @@ export type SlackInteraction = {
   lastDeliveredSessionEventSequence: number;
   deliveryClaimHolderId: string | null;
   deliveryClaimExpiresAt: Date | null;
+  deliveryAttemptCount: number;
+  deliveryRetryAt: Date | null;
+  deliveryLastErrorCode: string | null;
   ackSlackMessageTs: string | null;
   progressCount: number;
   terminalDeliveryState: "open" | "completed" | "failed" | "cancelled" | "blocked";
@@ -5486,6 +5490,7 @@ export async function enqueueSlackInteractionInbox(
     | "claimHolderId"
     | "claimExpiresAt"
     | "attemptCount"
+    | "retryAt"
     | "lastErrorCode"
     | "processedAt"
     | "createdAt"
@@ -5548,6 +5553,7 @@ export async function settleSlackInteractionInbox(
         status: input.outcome,
         claimHolderId: null,
         claimExpiresAt: null,
+        retryAt: null,
         processedAt: sql`now()`,
         lastErrorCode: input.errorCode ?? null,
         updatedAt: sql`now()`,
@@ -5570,6 +5576,7 @@ export async function releaseSlackInteractionInbox(
     entry: Pick<SlackInteractionInboxEntry, "id" | "accountId" | "workspaceId">;
     claimHolderId: string;
     errorCode: string;
+    retryAt: Date;
   },
 ): Promise<boolean> {
   return await withRlsContext(db, input.entry, async (scopedDb) => {
@@ -5579,6 +5586,7 @@ export async function releaseSlackInteractionInbox(
         status: "pending",
         claimHolderId: null,
         claimExpiresAt: null,
+        retryAt: input.retryAt,
         lastErrorCode: input.errorCode,
         updatedAt: sql`now()`,
       })
@@ -5604,6 +5612,9 @@ export async function getOrCreateSlackInteraction(
     | "lastDeliveredSessionEventSequence"
     | "deliveryClaimHolderId"
     | "deliveryClaimExpiresAt"
+    | "deliveryAttemptCount"
+    | "deliveryRetryAt"
+    | "deliveryLastErrorCode"
     | "ackSlackMessageTs"
     | "progressCount"
     | "terminalDeliveryState"
@@ -5943,7 +5954,13 @@ export async function reopenSlackInteractionDelivery(
   return await withRlsContext(db, input, async (scopedDb) => {
     const rows = await scopedDb
       .update(schema.slackInteractions)
-      .set({ terminalDeliveryState: "open", updatedAt: sql`now()` })
+      .set({
+        terminalDeliveryState: "open",
+        deliveryAttemptCount: 0,
+        deliveryRetryAt: null,
+        deliveryLastErrorCode: null,
+        updatedAt: sql`now()`,
+      })
       .where(eq(schema.slackInteractions.id, input.id))
       .returning({ id: schema.slackInteractions.id });
     return rows.length === 1;
@@ -5966,6 +5983,9 @@ export async function advanceSlackInteractionDelivery(
         ...(input.ackSlackMessageTs !== undefined
           ? { ackSlackMessageTs: input.ackSlackMessageTs }
           : {}),
+        deliveryAttemptCount: 0,
+        deliveryRetryAt: null,
+        deliveryLastErrorCode: null,
         updatedAt: sql`now()`,
       })
       .where(
@@ -6005,12 +6025,42 @@ export async function releaseSlackInteractionDelivery(
   });
 }
 
+export async function deferSlackInteractionDelivery(
+  db: Database,
+  input: Pick<SlackInteraction, "id" | "accountId" | "workspaceId"> & {
+    claimHolderId: string;
+    retryAt: Date;
+    errorCode: string;
+  },
+): Promise<boolean> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const rows = await scopedDb
+      .update(schema.slackInteractions)
+      .set({
+        deliveryClaimHolderId: null,
+        deliveryClaimExpiresAt: null,
+        deliveryRetryAt: input.retryAt,
+        deliveryLastErrorCode: input.errorCode.slice(0, 128),
+        updatedAt: sql`now()`,
+      })
+      .where(
+        and(
+          eq(schema.slackInteractions.id, input.id),
+          eq(schema.slackInteractions.deliveryClaimHolderId, input.claimHolderId),
+        ),
+      )
+      .returning({ id: schema.slackInteractions.id });
+    return rows.length === 1;
+  });
+}
+
 export async function closeSlackInteractionDelivery(
   db: Database,
   input: Pick<SlackInteraction, "id" | "accountId" | "workspaceId"> & {
     claimHolderId: string;
     sequence: number;
     state: Exclude<SlackInteraction["terminalDeliveryState"], "open">;
+    errorCode?: string | null;
   },
 ): Promise<boolean> {
   return await withRlsContext(db, input, async (scopedDb) => {
@@ -6021,6 +6071,8 @@ export async function closeSlackInteractionDelivery(
         terminalDeliveryState: input.state,
         deliveryClaimHolderId: null,
         deliveryClaimExpiresAt: null,
+        deliveryRetryAt: null,
+        deliveryLastErrorCode: input.errorCode?.slice(0, 128) ?? null,
         updatedAt: sql`now()`,
       })
       .where(
@@ -6059,6 +6111,7 @@ function mapSlackInteractionInbox(
     claimHolderId: slackRowNullableString(row, "claimHolderId", "claim_holder_id"),
     claimExpiresAt: slackRowNullableDate(row, "claimExpiresAt", "claim_expires_at"),
     attemptCount: slackRowNumber(row, "attemptCount", "attempt_count"),
+    retryAt: slackRowNullableDate(row, "retryAt", "retry_at"),
     lastErrorCode: slackRowNullableString(row, "lastErrorCode", "last_error_code"),
     processedAt: slackRowNullableDate(row, "processedAt", "processed_at"),
     createdAt: slackRowDate(row, "createdAt", "created_at"),
@@ -6101,6 +6154,13 @@ function mapSlackInteraction(
       row,
       "deliveryClaimExpiresAt",
       "delivery_claim_expires_at",
+    ),
+    deliveryAttemptCount: slackRowNumber(row, "deliveryAttemptCount", "delivery_attempt_count"),
+    deliveryRetryAt: slackRowNullableDate(row, "deliveryRetryAt", "delivery_retry_at"),
+    deliveryLastErrorCode: slackRowNullableString(
+      row,
+      "deliveryLastErrorCode",
+      "delivery_last_error_code",
     ),
     ackSlackMessageTs: slackRowNullableString(row, "ackSlackMessageTs", "ack_slack_message_ts"),
     progressCount: slackRowNumber(row, "progressCount", "progress_count"),

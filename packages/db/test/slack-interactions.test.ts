@@ -257,8 +257,18 @@ describe("Slack interaction migration and durable database boundary", () => {
         entry: reclaimed!,
         claimHolderId: holderB,
         errorCode: "retryable_test",
+        retryAt: new Date(Date.now() + 1_000),
       }),
     ).toBe(true);
+    expect(await claimSlackInteractionInbox(db, crypto.randomUUID(), 1_000)).toBeNull();
+    await admin`
+      update slack_interaction_inbox
+      set retry_at = now() - interval '1 second'
+      where id = ${first.entry.id}`;
+    expect(await claimSlackInteractionInbox(db, crypto.randomUUID(), 1_000)).toMatchObject({
+      id: first.entry.id,
+      attemptCount: 3,
+    });
   });
 
   test("binds one route to one session and keeps a private root lineage owner-only", async () => {
