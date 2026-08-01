@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   CreateScheduledTaskRequest,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
@@ -24,6 +25,8 @@ import {
   type SessionAuthorizationSurface,
   type Session,
   UpdateScheduledTaskRequest,
+  normalizeWorkspaceArtifactSlug,
+  WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES,
 } from "@opengeni/contracts";
 import {
   correctWorkspaceMemory,
@@ -70,6 +73,12 @@ import {
   upsertSessionGoalWithEvent,
   RigChangeAlreadyVerifyingError,
   RigChangeTransitionError,
+  createWorkspaceArtifact,
+  getWorkspaceArtifact,
+  getWorkspaceArtifactContentRef,
+  listWorkspaceArtifacts,
+  publishWorkspaceArtifactVersion,
+  rollbackWorkspaceArtifact,
 } from "@opengeni/db";
 import { appendAndPublishEvents, publishDurableSessionEvents } from "@opengeni/events";
 import {
@@ -236,6 +245,12 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   slack_bot_file_info: { allOf: ["connections:read"] },
   slack_bot_file_content: { allOf: ["connections:read"] },
   slack_bot_post_message: { allOf: ["connections:read"] },
+  slack_bot_delete_message: { allOf: ["connections:read"] },
+  artifacts_list: { sessionRequired: true, allOf: ["artifacts:read"] },
+  artifacts_get_source: { sessionRequired: true, allOf: ["artifacts:read"] },
+  artifacts_create: { sessionRequired: true, allOf: ["artifacts:publish"] },
+  artifacts_publish: { sessionRequired: true, allOf: ["artifacts:publish"] },
+  artifacts_rollback: { sessionRequired: true, allOf: ["artifacts:publish"] },
 } satisfies Record<FirstPartyMcpToolName, FirstPartyToolAuthorization>;
 
 const FIRST_PARTY_MCP_TOOL_NAME_SET = new Set<string>(FIRST_PARTY_MCP_TOOL_NAMES);
@@ -376,6 +391,9 @@ export function buildOpenGeniMcpServer(
   }
   if (!toolspaceMode && sessionId !== null && preferenceAttemptClaims(grant) !== null) {
     registerPreferenceRegistryTools(server, deps, grant, json);
+  }
+  if (!toolspaceMode && sessionId !== null && preferenceAttemptClaims(grant) !== null) {
+    registerWorkspaceArtifactTools(server, deps, grant, sessionId, json);
   }
 
   // Fleet tools (M7 bring-your-own-compute): list / attach / swap / run_on /
@@ -1001,6 +1019,24 @@ function registerSlackBotTools(
       );
     },
   );
+
+  server.registerTool(
+    "slack_bot_delete_message",
+    {
+      description:
+        "Delete a message authored by the workspace-shared OpenGeni bot. Pass the channel ID and exact message timestamp returned by a prior post or channel/thread read. Generate one operationId UUID per intended deletion and reuse it on every retry, including after an unknown outcome. Slack refuses deletion of messages not authored by this bot.",
+      inputSchema: {
+        connectionId: z4.string().uuid().optional(),
+        operationId: z4.string().uuid(),
+        channelId: z4.string().min(1).max(64),
+        timestamp: z4.string().min(1).max(64),
+      },
+    },
+    async ({ connectionId, operationId, channelId, timestamp }) =>
+      json(
+        await (await clientFor(connectionId)).deleteMessage({ operationId, channelId, timestamp }),
+      ),
+  );
 }
 
 function registerToolspaceProxyTools(server: McpServer, surface: ToolspaceMcpSurface | null): void {
@@ -1261,6 +1297,198 @@ async function authorizeFirstPartySession(
     operation,
     surface: "first_party_mcp",
   });
+}
+
+function registerWorkspaceArtifactTools(
+  server: McpServer,
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  sessionId: string,
+  json: JsonResult,
+): void {
+  const attempt = () => {
+    const claims = preferenceAttemptClaims(grant);
+    if (!claims) throw new Error("Exact signed artifact attempt authority is required.");
+    return claims;
+  };
+  const authorize = async () => {
+    await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+  };
+  const prepare = (html: string) => {
+    if (!deps.objectStorage) throw new Error("Object storage is not configured");
+    const bytes = new TextEncoder().encode(html);
+    if (bytes.byteLength < 1 || bytes.byteLength > WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES) {
+      throw new Error(
+        `Artifact HTML must be 1-${WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES} UTF-8 bytes`,
+      );
+    }
+    const contentSha256 = createHash("sha256").update(bytes).digest("hex");
+    const contentKey = `workspaces/${grant.workspaceId}/workspace-artifacts/blobs/${contentSha256}.html`;
+    return {
+      contentKey,
+      contentSha256,
+      sizeBytes: bytes.byteLength,
+      persistContent: async () => {
+        await deps.objectStorage!.putObject({
+          key: contentKey,
+          contentType: "text/html; charset=utf-8",
+          body: bytes,
+          sha256: contentSha256,
+        });
+      },
+    };
+  };
+  const provenance = (
+    idempotencyKey: string,
+    sourceToolName: "artifacts_create" | "artifacts_publish" | "artifacts_rollback",
+  ) => {
+    const claims = attempt();
+    return {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      operationKey: `attempt:${createHash("sha256")
+        .update(
+          `${claims.sessionId}:${claims.turnId}:${claims.attemptId}:${claims.executionGeneration}:${idempotencyKey}`,
+        )
+        .digest("hex")}`,
+      actorSubjectId: grant.subjectId,
+      sourceSessionId: claims.sessionId,
+      sourceTurnId: claims.turnId,
+      sourceAttemptId: claims.attemptId,
+      sourceExecutionGeneration: claims.executionGeneration,
+      sourceToolName,
+    };
+  };
+
+  server.registerTool(
+    "artifacts_list",
+    {
+      description:
+        "List the generic published artifacts in this workspace and their current versions.",
+      inputSchema: {},
+    },
+    async () => {
+      await authorize();
+      return json(await listWorkspaceArtifacts(deps.db, grant.workspaceId));
+    },
+  );
+
+  server.registerTool(
+    "artifacts_get_source",
+    {
+      description:
+        "Read an artifact's metadata and exact HTML source. Omit versionId for the current version.",
+      inputSchema: {
+        artifactId: z4.string().uuid(),
+        versionId: z4.string().uuid().optional(),
+      },
+    },
+    async ({ artifactId, versionId }) => {
+      await authorize();
+      if (!deps.objectStorage) throw new Error("Object storage is not configured");
+      const [detail, ref] = await Promise.all([
+        getWorkspaceArtifact(deps.db, grant.workspaceId, artifactId),
+        getWorkspaceArtifactContentRef(deps.db, grant.workspaceId, artifactId, versionId),
+      ]);
+      const object = await deps.objectStorage.getObjectBytes(ref.contentKey);
+      if (!object) throw new Error("Artifact content is unavailable");
+      const actualHash = createHash("sha256").update(object.bytes).digest("hex");
+      if (actualHash !== ref.version.contentSha256)
+        throw new Error("Artifact content failed integrity verification");
+      return json({ detail, version: ref.version, html: new TextDecoder().decode(object.bytes) });
+    },
+  );
+
+  server.registerTool(
+    "artifacts_create",
+    {
+      description:
+        "Create and publish a generic static workspace artifact from a complete, self-contained HTML document with inline CSS. JavaScript and active or navigation-capable markup do not render in the MVP.",
+      inputSchema: {
+        title: z4.string().min(1).max(120),
+        description: z4.string().max(2000).nullable().optional(),
+        slug: z4
+          .string()
+          .regex(/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/)
+          .max(96)
+          .optional(),
+        html: z4.string().min(1).max(WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES),
+        idempotencyKey: z4.string().min(1).max(200),
+      },
+    },
+    async ({ title, description, slug, html, idempotencyKey }) => {
+      await authorize();
+      const artifactId = crypto.randomUUID();
+      const slugBase = slug ?? (normalizeWorkspaceArtifactSlug(title) || "artifact");
+      const resolvedSlug = slug ?? `${slugBase.slice(0, 87)}-${artifactId.slice(0, 8)}`;
+      return json(
+        await createWorkspaceArtifact(deps.db, {
+          artifactId,
+          slug: resolvedSlug,
+          title,
+          description: description ?? null,
+          ...prepare(html),
+          ...provenance(idempotencyKey, "artifacts_create"),
+        }),
+      );
+    },
+  );
+
+  server.registerTool(
+    "artifacts_publish",
+    {
+      description:
+        "Publish a new immutable static HTML/CSS version. JavaScript and active or navigation-capable markup do not render in the MVP. First read the current source and pass its version id for optimistic concurrency.",
+      inputSchema: {
+        artifactId: z4.string().uuid(),
+        expectedCurrentVersionId: z4.string().uuid(),
+        title: z4.string().min(1).max(120).optional(),
+        description: z4.string().max(2000).nullable().optional(),
+        html: z4.string().min(1).max(WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES),
+        idempotencyKey: z4.string().min(1).max(200),
+      },
+    },
+    async ({ artifactId, expectedCurrentVersionId, title, description, html, idempotencyKey }) => {
+      await authorize();
+      return json(
+        await publishWorkspaceArtifactVersion(deps.db, {
+          artifactId,
+          expectedCurrentVersionId,
+          ...(title !== undefined ? { title } : {}),
+          ...(description !== undefined ? { description } : {}),
+          ...prepare(html),
+          ...provenance(idempotencyKey, "artifacts_publish"),
+        }),
+      );
+    },
+  );
+
+  server.registerTool(
+    "artifacts_rollback",
+    {
+      description:
+        "Promote an existing immutable artifact version back to current without rewriting history.",
+      inputSchema: {
+        artifactId: z4.string().uuid(),
+        versionId: z4.string().uuid(),
+        expectedCurrentVersionId: z4.string().uuid(),
+        reason: z4.string().min(1).max(4096),
+        idempotencyKey: z4.string().min(1).max(200),
+      },
+    },
+    async ({ artifactId, versionId, expectedCurrentVersionId, reason, idempotencyKey }) => {
+      await authorize();
+      return json(
+        await rollbackWorkspaceArtifact(deps.db, {
+          artifactId,
+          versionId,
+          expectedCurrentVersionId,
+          reason,
+          ...provenance(idempotencyKey, "artifacts_rollback"),
+        }),
+      );
+    },
+  );
 }
 
 function preferenceAttemptClaims(grant: AccessGrant): {
@@ -2002,6 +2230,7 @@ function registerWorkspaceOrchestrationTools(
           rigId: z4.string().uuid().optional(),
           model: z4.string().min(1).optional(),
           reasoningEffort: z4.string().optional(),
+          latencyMode: z4.enum(["standard", "priority", "fast"]).optional(),
           sandboxBackend: z4.string().optional(),
           // Create-time machine targeting: an enrolled sandbox id (from
           // sandboxes_list) to run the spawned session on. Seeds the active-sandbox

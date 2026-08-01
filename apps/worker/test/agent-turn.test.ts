@@ -33,6 +33,7 @@ import { testSettings } from "@opengeni/testing";
 import {
   acceptsPromptCacheKeyForTurn,
   agentRunFailurePayload,
+  assertModelResponseLatencyMode,
   assertPhysicalToolQuiescenceForCancellation,
   assertSessionAttemptQuiescenceRecoveryDurable,
   classifyContextWindowOverflowError,
@@ -76,6 +77,7 @@ import {
   stableHumanInputRequestId,
   turnExecutionPolicyBillingIdentity,
   turnOperationCancellationFailure,
+  unavailableMcpTurnInstructions,
   waitForTurnOperation,
   waitForTurnFinalizerStep,
   waitForTurnStreamCleanup,
@@ -87,6 +89,29 @@ import { settingsWithPackSandboxImage } from "../src/activities/packs";
 import { startGitCredentialRenewalLoop } from "../src/activities/git-credential-renewal";
 
 const OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE = "openai-responses";
+
+describe("disconnected MCP turn instructions", () => {
+  test("warns the model without exposing an unbounded unavailable registry", () => {
+    expect(
+      unavailableMcpTurnInstructions({
+        droppedIds: ["cap-linear", "cap-slack"],
+        droppedCount: 4,
+      }),
+    ).toBe(
+      'MCP capability availability for this turn: the following session-selected server(s) are disconnected or no longer registered and were skipped: "cap-linear", "cap-slack", plus 2 additional unavailable server(s). Do not claim to have read or updated those systems. If the task depends on one as a source of truth, explain the limitation and ask the user to reconnect it or select another authoritative source; continue with unaffected work only when safe.',
+    );
+  });
+
+  test("is absent when no selected server was dropped", () => {
+    expect(unavailableMcpTurnInstructions({ droppedIds: [], droppedCount: 0 })).toBeUndefined();
+  });
+
+  test("keeps a generic warning when legacy ids cannot be projected safely", () => {
+    expect(unavailableMcpTurnInstructions({ droppedIds: [], droppedCount: 1 })).toContain(
+      "1 unavailable server(s)",
+    );
+  });
+});
 
 // Item shapes mirror the SDK history representation persisted into
 // session_history_items (type discriminator, camelCase callId).
@@ -468,11 +493,14 @@ describe("accepted turn execution identity", () => {
           source,
           model: "xai/grok-4.5",
           reasoningEffort: "high",
+          latencyMode: "fast",
         }),
       ).toMatchObject({
         requestedModelId: "xai/grok-4.5",
         modelSource: "explicit",
         reasoningSource: "explicit",
+        latencyMode: "fast",
+        latencyModeSource: "explicit",
       });
     }
     for (const source of ["goal", "system", "compaction"] as const) {
@@ -481,11 +509,14 @@ describe("accepted turn execution identity", () => {
           source,
           model: "codex/gpt-5.6-sol",
           reasoningEffort: "xhigh",
+          latencyMode: "fast",
         }),
       ).toMatchObject({
         requestedModelId: null,
         modelSource: "continuation",
         reasoningSource: "continuation",
+        latencyMode: "fast",
+        latencyModeSource: "continuation",
       });
     }
   });
@@ -1001,6 +1032,53 @@ describe("completed model-call metering at ownership fences", () => {
 });
 
 describe("production model-response usage callback authority", () => {
+  test("fails Fast turns when the raw provider response omits or downgrades service_tier", () => {
+    const terminal = (serviceTier?: string) =>
+      new RunRawModelStreamEvent({
+        type: "model",
+        providerData: { rawModelEventSource: OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE },
+        event: {
+          type: "response.completed",
+          response: {
+            id: "resp-fast",
+            ...(serviceTier ? { service_tier: serviceTier } : {}),
+            usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+          },
+        },
+      } as any);
+
+    expect(() =>
+      assertModelResponseLatencyMode({
+        event: terminal("priority"),
+        requested: "fast",
+        model: "gpt-5.6-sol",
+      }),
+    ).not.toThrow();
+    expect(() =>
+      assertModelResponseLatencyMode({
+        event: terminal(),
+        requested: "fast",
+        model: "gpt-5.6-sol",
+      }),
+    ).toThrow(/service_tier=missing/);
+    expect(() =>
+      assertModelResponseLatencyMode({
+        event: terminal("default"),
+        requested: "fast",
+        model: "gpt-5.6-sol",
+      }),
+    ).toThrow(/service_tier=default/);
+    // Codex ChatGPT auth: response service_tier is not an end-to-end honor signal.
+    expect(() =>
+      assertModelResponseLatencyMode({
+        event: terminal("default"),
+        requested: "fast",
+        model: "codex/gpt-5.6-luna",
+        providerId: "codex-subscription",
+      }),
+    ).not.toThrow();
+  });
+
   test("claims the pinned SDK terminal pair once and cannot bind stale usage after restart", async () => {
     const response = {
       id: "resp-sdk-terminal-pair",

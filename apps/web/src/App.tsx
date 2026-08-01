@@ -14,11 +14,13 @@
 //   /workspaces/:id/schedules                → scheduled tasks + run history
 //   /workspaces/:id/documents                → document bases + search
 //   /workspaces/:id/memory                   → durable workspace memory
+//   /workspaces/:id/insights                 → workspace insights (admin usage rollup)
 //   /workspaces/:id/settings                 → workspace settings (name, API keys, danger zone)
 //   /workspaces/:id/organization             → organization settings (billing, usage, plan, members)
 //   /workspaces/:id/account                  → legacy redirect to /organization
 //   /billing?checkout=success|cancelled      → Stripe return → default organization
 //   /device?user_code=…                      → self-hosted enrollment approve page
+//   /dev/composer-chrome                     → DEV-only SessionChrome harness (mocked)
 import {
   Navigate,
   RouterProvider,
@@ -46,6 +48,7 @@ const LazyVariableSetsRoute = lazyRouteComponent(
   "VariableSetsRoute",
 );
 const LazyMachinesRoute = lazyRouteComponent(() => import("@/routes/machines"), "MachinesRoute");
+const LazyInsightsRoute = lazyRouteComponent(() => import("@/routes/insights"), "InsightsRoute");
 const LazyOrgSettingsRoute = lazyRouteComponent(
   () => import("@/routes/org-settings"),
   "OrgSettingsRoute",
@@ -77,9 +80,14 @@ const LazyWorkspaceStateRoute = lazyRouteComponent(
   () => import("@/routes/workspace-state"),
   "WorkspaceStateRoute",
 );
+const LazyArtifactsRoute = lazyRouteComponent(() => import("@/routes/artifacts"), "ArtifactsRoute");
 const LazyWorkspaceShellRoute = lazyRouteComponent(
   () => import("@/routes/workspace"),
   "WorkspaceShellRoute",
+);
+const LazyComposerChromeGalleryRoute = lazyRouteComponent(
+  () => import("@/routes/composer-chrome"),
+  "ComposerChromeGalleryRoute",
 );
 
 const rootRoute = createRootRoute({
@@ -131,6 +139,14 @@ const resetPasswordRoute = createRoute({
     typeof search.token === "string" && search.token ? { token: search.token } : {},
   component: ResetPassword,
 });
+// DEV-only visual harness for the Session composer chrome stack (queue / goal /
+// agents / composer). Public so it needs no live auth or session; omitted from
+// production route trees.
+const composerChromeGalleryRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "dev/composer-chrome",
+  component: ComposerChromeGallery,
+});
 const workspaceRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "workspaces/$workspaceId",
@@ -181,6 +197,11 @@ const workspaceMachinesRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "machines",
   component: Machines,
+});
+const workspaceInsightsRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "insights",
+  component: Insights,
 });
 // Legacy standalone Packs route: packs are now a subsection of Capabilities,
 // so this redirects there (focusing the Packs subsection) instead of mounting
@@ -234,6 +255,16 @@ const workspaceStateRoute = createRoute({
   path: "state",
   component: WorkspaceState,
 });
+const workspaceArtifactsRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "artifacts",
+  component: Artifacts,
+});
+const workspaceArtifactDetailRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "artifacts/$artifactId",
+  component: ArtifactDetail,
+});
 const workspaceOrganizationRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "organization",
@@ -262,6 +293,7 @@ const routeTree = rootRoute.addChildren([
   billingReturnRoute,
   deviceRoute,
   resetPasswordRoute,
+  ...(import.meta.env.DEV ? [composerChromeGalleryRoute] : []),
   workspaceRoute.addChildren([
     workspaceIndexRoute,
     workspaceAgentRoute,
@@ -272,12 +304,15 @@ const routeTree = rootRoute.addChildren([
     workspaceRigsRoute,
     workspaceRigDetailRoute,
     workspaceMachinesRoute,
+    workspaceInsightsRoute,
     workspacePacksRoute,
     workspaceCapabilitiesRoute,
     workspaceSchedulesRoute,
     workspaceDocumentsRoute,
     workspaceMemoryRoute,
     workspaceStateRoute,
+    workspaceArtifactsRoute,
+    workspaceArtifactDetailRoute,
     workspaceSettingsRoute,
     workspaceOrganizationRoute,
     workspaceAccountRoute,
@@ -362,6 +397,11 @@ function Machines() {
   return <LazyMachinesRoute workspaceId={workspaceId} />;
 }
 
+function Insights() {
+  const { workspaceId } = workspaceInsightsRoute.useParams();
+  return <LazyInsightsRoute workspaceId={workspaceId} />;
+}
+
 function PacksRedirect() {
   const { workspaceId } = workspacePacksRoute.useParams();
   return (
@@ -417,6 +457,14 @@ function WorkspaceState() {
   return <LazyWorkspaceStateRoute workspaceId={workspaceId} />;
 }
 
+function Artifacts() {
+  return <LazyArtifactsRoute {...workspaceArtifactsRoute.useParams()} />;
+}
+
+function ArtifactDetail() {
+  return <LazyArtifactsRoute {...workspaceArtifactDetailRoute.useParams()} />;
+}
+
 function Organization() {
   const { workspaceId } = workspaceOrganizationRoute.useParams();
   const { checkout } = workspaceOrganizationRoute.useSearch();
@@ -444,6 +492,10 @@ function Device() {
 function ResetPassword() {
   const { token } = resetPasswordRoute.useSearch();
   return <LazyResetPasswordRoute token={token} />;
+}
+
+function ComposerChromeGallery() {
+  return <LazyComposerChromeGalleryRoute />;
 }
 
 function BillingReturnRoute() {

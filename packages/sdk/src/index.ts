@@ -1,10 +1,11 @@
-export { OpenGeniClient } from "./client";
+export { OpenGeniClient } from "./artifact-client";
 export type {
   FetchLike,
   OpenGeniClientOptions,
   OpenGeniRequestOptions,
   SendMessageInput,
   SteerMessageResult,
+  TranscribeAudioInput,
   WorkspaceControlEventPage,
 } from "./client";
 export {
@@ -55,6 +56,19 @@ export type {
 } from "./stream";
 export { streamWorkspaceControlEvents } from "./workspace-control-stream";
 export type { WorkspaceControlStreamTransport } from "./workspace-control-stream";
+export type {
+  CreateWorkspaceArtifactRequest,
+  PublishWorkspaceArtifactVersionRequest,
+  RollbackWorkspaceArtifactRequest,
+  WorkspaceArtifact,
+  WorkspaceArtifactContentResponse,
+  WorkspaceArtifactDetailResponse,
+  WorkspaceArtifactEvent,
+  WorkspaceArtifactListOptions,
+  WorkspaceArtifactListResponse,
+  WorkspaceArtifactMutationResponse,
+  WorkspaceArtifactVersion,
+} from "./workspace-artifacts";
 export { normalizeWorkspaceInstructionPolicyRoleKey } from "./workspace-instruction-policies";
 export type {
   ActivateWorkspaceInstructionPolicyRequest,
@@ -118,6 +132,7 @@ export {
   DEFAULT_WORKSPACE_TRANSCRIPTION_POLICY,
   authorizeTranscriptionAdapter,
   createTranscriptionSessionRequest,
+  resolveWorkspaceVoiceInputEnabled,
   resolveWorkspaceTranscriptionPolicy,
 } from "./transcription";
 export type {
@@ -168,6 +183,19 @@ export type {
   BillingMode,
   BillingSummary,
   BillingUsageResponse,
+  InsightsRange,
+  InsightsBillingPath,
+  InsightsModelUsageRow,
+  InsightsSeriesPoint,
+  InsightsDepthBucket,
+  InsightsModelFacet,
+  InsightsSpendDriver,
+  InsightsWarmGroupRow,
+  InsightsLiveWarmLease,
+  InsightsFloorSession,
+  InsightsScheduleRow,
+  WorkspaceInsightsSnapshot,
+  WorkspaceInsightsResponse,
   CapabilityCatalogItem,
   CapabilityCatalogResponse,
   CapabilityInstallation,
@@ -185,6 +213,7 @@ export type {
   CapabilitySource,
   CapabilityUnavailableReason,
   ClientConfig,
+  ClientVoiceInputConfig,
   ClientModel,
   ModelAvailabilityV1,
   ModelBillingAttributionV1,
@@ -281,6 +310,15 @@ export type {
   GitHubInstallationBinding,
   GitHubInstallationLifecycle,
   GitHubRepositoriesResponse,
+  GoogleDriveBrowseItem,
+  GoogleDriveBrowseResponse,
+  GoogleDriveConnectionMetadata,
+  GoogleDriveOAuthStartRequest,
+  GoogleDriveOAuthStartResponse,
+  GoogleDriveReadPolicy,
+  GoogleDriveSelectedSource,
+  GoogleDriveSyncCadence,
+  GoogleDriveTargetScope,
   GitHubRepository,
   GitHubRepositoryScope,
   GoalSpec,
@@ -308,6 +346,7 @@ export type {
   PackInstallationStatus,
   Permission,
   ProductAccessMode,
+  LatencyMode,
   ReasoningEffort,
   RetainedArtifactContent,
   RetainedArtifactContentOptions,
@@ -326,6 +365,7 @@ export type {
   RegisterCapabilityPackRequest,
   RepositoryResourceRef,
   ResourceRef,
+  SaveGoogleDriveSourceRequest,
   SandboxBackend,
   SandboxCapabilityName,
   SandboxOs,
@@ -491,6 +531,7 @@ export type {
   UpdateWorkspaceMemberRequest,
   UpdateWorkspaceRequest,
   UpdateWorkspaceSettingsRequest,
+  TranscribeAudioResponse,
   UploadFileInput,
   UsageEvent,
   UsageEventType,
@@ -522,6 +563,7 @@ export type {
   WorkspaceMemorySearchResult,
   WorkspaceMemorySearchResponse,
   WorkspaceSettings,
+  WorkspaceVoiceInputSettings,
   WorkspaceRegisteredPack,
   // Bring-your-own-compute: Machines dashboard + per-machine metrics (M10).
   MetricSample,

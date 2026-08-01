@@ -11,7 +11,7 @@
 // The DB-coupled glue (readActiveSandbox / getSandbox / the selfhosted ControlRpc
 // over the events bus) lives here, not in the leaf (which stays db-free).
 
-import type { Settings } from "@opengeni/config";
+import { sandboxArchiveCaptureTimeoutMs, type Settings } from "@opengeni/config";
 import {
   advanceWorkspaceGenerationForDirectRequest,
   advanceWorkspaceGenerationForRetainedProcess,
@@ -188,6 +188,7 @@ export function wrapChannelABoxWithRouting(
           routeTargetId: backend.sandboxId,
           routeEpoch: backend.activeEpoch,
           operation: op,
+          captureWaitMs: sandboxArchiveCaptureTimeoutMs(settings),
         });
         return { admission, providerBinding };
       }
@@ -283,6 +284,7 @@ export function wrapChannelABoxWithRouting(
           sessionId: ids.sessionId,
           processId: process.id,
           operation: op,
+          captureWaitMs: sandboxArchiveCaptureTimeoutMs(settings),
         })
     : undefined;
   const afterProcessMutation = homeLease

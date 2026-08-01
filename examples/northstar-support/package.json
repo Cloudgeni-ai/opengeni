@@ -1,11 +1,12 @@
 {
   "name": "@opengeni/example-northstar-support",
-  "version": "0.0.35",
+  "version": "0.0.41",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 3101",
     "server": "bun --env-file=.env.local src/server.ts",
+    "start": "bun src/server.ts",
     "build": "vite build",
     "typecheck": "tsc --noEmit"
   },

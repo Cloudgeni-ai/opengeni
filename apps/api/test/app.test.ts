@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { ScheduleNotFoundError, ScheduleOverlapPolicy } from "@temporalio/client";
 import { HTTPException } from "hono/http-exception";
 import {
-  API_MAX_REQUEST_BODY_BYTES,
+  apiRequestBodyLimitBytes,
   allowedCorsOrigin,
   createApp,
   errorCodeForStatus,
@@ -357,6 +357,43 @@ describe("API helpers", () => {
     expect(allowedCorsOrigin(pattern, "https://evil.com/http://localhost:3000")).toBe(false);
   });
 
+  test("allows public bearer CORS without exposing credentialed browser sessions", async () => {
+    const app = createApp({
+      settings: testSettings(),
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+    });
+    const preflight = (origin: string) =>
+      app.request("http://localhost/v1/config/client", {
+        method: "OPTIONS",
+        headers: {
+          origin,
+          "access-control-request-method": "GET",
+          "access-control-request-headers": "authorization",
+        },
+      });
+
+    const external = await preflight("https://product.example");
+    expect(external.status).toBe(204);
+    expect(external.headers.get("access-control-allow-origin")).toBe("*");
+    expect(external.headers.get("access-control-allow-credentials")).toBeNull();
+    expect(external.headers.get("access-control-allow-headers")).toContain("Authorization");
+
+    const externalResponse = await app.request("http://localhost/v1/config/client", {
+      headers: { origin: "https://product.example" },
+    });
+    expect(externalResponse.status).toBe(200);
+    expect(externalResponse.headers.get("access-control-allow-origin")).toBe("*");
+    expect(externalResponse.headers.get("access-control-allow-credentials")).toBeNull();
+
+    const trusted = await preflight("http://localhost:5173");
+    expect(trusted.status).toBe(204);
+    expect(trusted.headers.get("access-control-allow-origin")).toBe("http://localhost:5173");
+    expect(trusted.headers.get("access-control-allow-credentials")).toBe("true");
+  });
+
   test("normalizes dynamic route labels for metrics", () => {
     const workspace = "00000000-0000-4000-8000-000000000001";
     expect(routeLabel(`/v1/workspaces/${workspace}/sessions/session-1/events/stream`)).toBe(
@@ -603,8 +640,9 @@ describe("API helpers", () => {
   });
 
   test("rejects oversized streamed request bodies before route parsing", async () => {
+    const settings = testSettings();
     const app = createApp({
-      settings: testSettings(),
+      settings,
       db: {} as never,
       bus: {} as never,
       workflowClient: {} as never,
@@ -612,7 +650,9 @@ describe("API helpers", () => {
     });
     const body = new ReadableStream<Uint8Array>({
       start(controller) {
-        controller.enqueue(new Uint8Array(API_MAX_REQUEST_BODY_BYTES));
+        // Exceed the effective limit (voice multipart can raise it above the
+        // plain JSON API ceiling).
+        controller.enqueue(new Uint8Array(apiRequestBodyLimitBytes(settings)));
         controller.enqueue(new Uint8Array([0x20]));
         controller.close();
       },

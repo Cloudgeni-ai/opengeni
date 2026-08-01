@@ -124,6 +124,10 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "turn_attempt_fence",
   },
+  "packages/db/src/index.ts#recordStartedContextCompaction": {
+    inserts: 1,
+    contract: "turn_attempt_fence",
+  },
   "packages/db/src/index.ts#recordSkippedContextCompaction": {
     inserts: 1,
     contract: "turn_attempt_fence",

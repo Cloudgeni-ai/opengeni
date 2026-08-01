@@ -1766,8 +1766,19 @@ function assertNoProblems(problems: BrowserProblems, requireZeroChannelA: boolea
 }
 
 async function openWorkspaceIfCollapsed(page: Page): Promise<void> {
-  const open = page.getByTitle("Open workspace");
-  if ((await open.count()) > 0 && (await open.first().isVisible())) await open.first().click();
+  const workbench = page.locator("[data-workbench-changes-layout]");
+  if (await workbench.isVisible()) return;
+
+  // The standalone SDK dock owns an "Open workspace" control. The hosted app
+  // controls the same collapsed state from its session header instead, so the
+  // dock intentionally omits that duplicate button. Acceptance must exercise
+  // whichever public affordance the mounted surface exposes.
+  const open = page
+    .getByRole("button", { name: "Show session panel" })
+    .or(page.getByTitle("Open workspace"))
+    .first();
+  await open.waitFor({ state: "visible", timeout: 20_000 });
+  await open.click();
 }
 
 async function selectTreeFile(page: Page, directory: string, file: string): Promise<void> {

@@ -1,5 +1,81 @@
 # @opengeni/config
 
+## 0.8.0
+
+### Minor Changes
+
+- 1ec9912: Add generic, versioned workspace artifacts with content-addressed HTML storage, a static HTML/CSS renderer, rollback history, and first-party agent publishing tools. JavaScript and active or navigation-capable markup are removed from the initial renderer until executable artifacts have a stronger isolation boundary.
+
+### Patch Changes
+
+- dcc35c5: Add authenticated Slack mentions, commands, message shortcuts, atomically private bot-DM sessions, durable thread continuation, and globally bounded idempotent progress delivery.
+- Updated dependencies [dcc35c5]
+- Updated dependencies [1ec9912]
+  - @opengeni/contracts@0.27.0
+
+## 0.7.22
+
+### Patch Changes
+
+- c52acc0: Ship Fast latency mode with turn-column inheritance, Codex ChatGPT honor-skip for response service_tier, and model picker UX polish.
+- Updated dependencies [c52acc0]
+  - @opengeni/codex@0.2.9
+  - @opengeni/contracts@0.26.1
+
+## 0.7.21
+
+### Patch Changes
+
+- Updated dependencies [f413e6c]
+  - @opengeni/contracts@0.26.0
+
+## 0.7.20
+
+### Patch Changes
+
+- b2e975f: Advance the merged knowledge release train to fresh publication identities without changing runtime behavior. This corrective source is derived from current main and does not reuse generated release output.
+- Updated dependencies [0199108]
+- Updated dependencies [42428a2]
+- Updated dependencies [b2e975f]
+- Updated dependencies [9f3b931]
+  - @opengeni/contracts@0.25.0
+
+## Unreleased
+
+### Minor Changes
+
+- Add declarative voice-input provider registry settings (`OPENGENI_VOICE_INPUT_*`) and
+  `resolveVoiceInputProviderRegistry` / `voiceInputDeploymentConfigured` helpers for
+  OpenAI, Azure OpenAI, and experimental Codex transcription.
+- Ignore template placeholder STT secrets (`your-key`, etc.) and prefer Codex
+  subscription STT by default when `OPENGENI_CODEX_SUBSCRIPTION_ENABLED` is on
+  (provider order `codex-subscription,openai,azure-openai`), even if OpenAI/Azure
+  keys exist. Omit `codex-subscription` from the order to keep subscription turns
+  without Codex voice.
+
+## 0.7.19
+
+### Patch Changes
+
+- b7df541: Prevent provider-native checkpoint capture from racing sandbox operations while
+  the provider has paused the source box. Capture now owns a durable
+  lease/epoch/instance/generation claim, blocks new holders and mutations, drains
+  provider-local reads before entering the exclusive snapshot call, and retains
+  ownership through late provider settlement and exact stale-claim recovery.
+  Modal's typed completed-exec stdin race is also normalized into a side-effect-free
+  terminal poll, so an exec that exits between local lookup and the provider write
+  settles its retained process instead of failing the enclosing turn.
+- Updated dependencies [710b081]
+  - @opengeni/contracts@0.24.3
+
+## 0.7.18
+
+### Patch Changes
+
+- 96eb64b: Advance the reviewed knowledge release package graph to fresh publishable identities after the previous version projection was invalidated. This changes release metadata only and does not alter runtime behavior.
+- Updated dependencies [96eb64b]
+  - @opengeni/contracts@0.24.2
+
 ## 0.7.17
 
 ### Patch Changes

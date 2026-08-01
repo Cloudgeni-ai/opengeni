@@ -168,6 +168,11 @@ The catalog describes:
 - SSE, Responses WebSocket, and realtime-audio transports; and
 - standard, priority, and fast latency modes.
 
+GPT-5.6 Sol, Terra, and Luna (including their Codex subscription variants)
+advertise runnable **Fast** mode. Fast requests set the provider service tier,
+use a 2× billing multiplier, and fail the turn if the provider response omits
+or downgrades that tier; OpenGeni never silently falls back to Standard.
+
 Upstream documentation alone never makes a capability runnable. For example,
 provider support for X search or Responses WebSocket remains `runnable: false`
 until OpenGeni has the request, recovery, and billing contracts to use it
@@ -357,6 +362,28 @@ Pricing is keyed by product model ID. A tiered schedule selects the greatest
 classification comes from the accepted policy: `external` usage must not spend
 OpenGeni model credits; `opengeni_credits` usage follows configured pricing and
 margin rules.
+
+### Price audit (llm-prices canary)
+
+OpenGeni debit authority is the hand-maintained
+`defaultModelPricing` map in `packages/config/src/index.ts` (plus registry /
+`OPENGENI_MODEL_PRICING_JSON` overrides). Do not generate that map from an
+external feed.
+
+When you add a billed model or want to verify list rates are still current:
+
+```bash
+bun run check:model-pricing
+```
+
+That fetches [llm-prices.com](https://www.llm-prices.com/current-v1.json) and
+compares Standard short- and long-context rates for the allow-listed GPT-5.6
+product ids. Treat mismatches as a prompt to re-check OpenAI (or the provider)
+and update `defaultModelPricing` — not as automatic truth to import.
+
+Not covered by the canary (OpenGeni-owned): Fast/priority multipliers,
+Fireworks GLM defaults, and the `marginBps` markup. Offline unit coverage uses
+`scripts/fixtures/llm-prices-current-v1.sample.json`.
 
 ## Evidence-bounded Grok 4.5 support
 

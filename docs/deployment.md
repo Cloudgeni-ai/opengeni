@@ -379,9 +379,24 @@ bun run deployment:conformance -- \
 
 The object-storage check performs a browser-style `OPTIONS` preflight before
 the signed `PUT`. Managed and external buckets must allow direct upload CORS
-for the deployed web origin. Prefer exact HTTPS origins in production; use `*`
-only for disposable private evaluation stacks where signed URLs and the
-OpenGeni access key are the real access boundaries.
+from `*` because the OpenGeni browser SDK is designed to run inside arbitrary
+customer products, whose origins are not known to the OpenGeni operator. CORS
+is transport policy, not upload authorization: the API first authenticates the
+workspace request, then returns a short-lived, object-scoped signed URL. The
+storage account/container remains private and browser PUTs carry no storage
+credentials or cookies beyond that signed URL.
+
+API CORS has a separate trust boundary. Public API requests are available from
+any browser origin with explicit bearer credentials, so the SDK can be embedded
+without per-application origin registration. `OPENGENI_CORS_ALLOW_ORIGIN_REGEX`
+is only the allowlist for origins that may send browser cookies cross-origin.
+Keep that regex narrow; unlisted origins receive wildcard, non-credentialed
+CORS responses and therefore cannot use a managed-login session cookie.
+
+For Azure Blob, the blob-service CORS rule must allow origin `*`, method `PUT`
+(plus `GET`, `HEAD`, and `OPTIONS` for the complete file flow), and all request
+and exposed headers. S3/GCS equivalents must express the same wildcard-origin
+contract. Do not add each embedding application to an origin allowlist.
 
 For S3-compatible storage on a split network, keep
 `OPENGENI_OBJECT_STORAGE_ENDPOINT` browser-reachable and set
@@ -713,6 +728,11 @@ It derives every unpublished publishable workspace package directly from the
 exact checkout and npm registry, so a caller-maintained list cannot omit a
 package. It builds API, worker, web, relay, and stock headless-sandbox images under
 full-source-SHA candidate tags. Migrations explicitly reuse the API manifest.
+Protected main CI uses the separate `dogfood-sha-<source>` namespace for its
+SHA-configured images and records that tag in the dogfood receipt. The
+release-owned `sha-<source>` namespace therefore remains available for the
+accepted product-version manifests even when the two build configurations
+produce different digests from the same source tree.
 Each manifest is built at most once; retries reuse existing partial results.
 Before acceptance, the same workflow packages the Helm chart twice through the
 deterministic release packager, requires byte-for-byte equality, and freezes the
@@ -1386,8 +1406,8 @@ It supports:
 - Managed Azure Blob storage when `object_storage.mode = "managed"` and `object_storage.api = "azure-blob"`.
 - Existing Azure Blob or S3-compatible object storage through runtime secrets.
 
-Set `object_storage.cors_allowed_origins` to every browser origin that will
-directly upload files to signed Blob URLs.
+Set `object_storage.cors_allowed_origins` to `["*"]` so browser SDK hosts can
+upload files to signed Blob URLs without per-application registration.
 
 Before applying anything in Azure:
 
@@ -1409,8 +1429,8 @@ The AWS Terraform root lives at `deploy/terraform/aws`.
 
 It supports EKS, ECR, S3, AWS Secrets Manager, optional RDS PostgreSQL, and existing Postgres/Temporal endpoints. Use `deploy/helm/opengeni/values.aws-managed.example.yaml` as the non-secret Helm values shape.
 
-Set `object_storage.cors_allowed_origins` to every browser origin that will
-directly upload files to signed S3 URLs.
+Set `object_storage.cors_allowed_origins` to `["*"]` so browser SDK hosts can
+upload files to signed S3 URLs without per-application registration.
 
 Before applying anything in AWS:
 
@@ -1432,8 +1452,8 @@ The GCP Terraform root lives at `deploy/terraform/gcp`.
 
 It supports GKE, Artifact Registry, GCS, Secret Manager, workload identity, optional Cloud SQL PostgreSQL, and existing Postgres/Temporal endpoints. Use `deploy/helm/opengeni/values.gcp-managed.example.yaml` as the non-secret Helm values shape.
 
-Set `object_storage.cors_allowed_origins` to every browser origin that will
-directly upload files to signed GCS URLs.
+Set `object_storage.cors_allowed_origins` to `["*"]` so browser SDK hosts can
+upload files to signed GCS URLs without per-application registration.
 
 Before applying anything in GCP:
 

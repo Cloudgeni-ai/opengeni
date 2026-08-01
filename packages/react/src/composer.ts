@@ -58,3 +58,9 @@ export type {
   ComposerTranscriptionControlProps,
   ComposerTranscriptionMessages,
 } from "./components/composer-transcription-control";
+export { useVoiceInput } from "./hooks/use-voice-input";
+export type {
+  UseVoiceInputOptions,
+  UseVoiceInputResult,
+  VoiceInputStatus,
+} from "./hooks/use-voice-input";

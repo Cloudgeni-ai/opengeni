@@ -227,6 +227,7 @@ function sessionFixture(overrides: Partial<Session> = {}): Session {
     lastSequence: 7,
     codexPinnedCredentialId: null,
     codexLastCredentialId: null,
+    codexCompactionMode: "portable",
     pinned: false,
     pinnedAt: null,
     pinVersion: 0,

@@ -14,7 +14,7 @@
 // target lookup), and the selfhosted ControlRpc built over the events bus's NATS
 // request/reply connection.
 
-import type { Settings } from "@opengeni/config";
+import { sandboxArchiveCaptureTimeoutMs, type Settings } from "@opengeni/config";
 import {
   advanceWorkspaceGenerationForRetainedProcess,
   advanceWorkspaceGeneration,
@@ -434,6 +434,7 @@ function beforePersistableHomeMutation(
       expectedEpoch: backend.leaseEpoch,
       expectedInstanceId: backend.providerInstanceId,
       operation: op,
+      captureWaitMs: sandboxArchiveCaptureTimeoutMs(services.settings),
     });
     return { admission, providerBinding };
   };
@@ -568,6 +569,7 @@ function beforeRetainedProcessMutation(
       sessionId: ids.sessionId,
       processId: process.id,
       operation: op,
+      captureWaitMs: sandboxArchiveCaptureTimeoutMs(services.settings),
     });
 }
 

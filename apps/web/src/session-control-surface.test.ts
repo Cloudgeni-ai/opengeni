@@ -5,11 +5,13 @@ async function source(path: string): Promise<string> {
 }
 
 describe("session control surface architecture", () => {
-  test("renders one queue above the compact goal and agents surfaces", async () => {
+  test("renders SessionChrome above the composer", async () => {
     const route = await source("routes/session.tsx");
-    expect(route.match(/<QueueSurface\b/g)).toHaveLength(1);
-    expect(route.indexOf("<QueueSurface")).toBeLessThan(route.indexOf("<GoalSurface"));
-    expect(route.indexOf("<GoalSurface")).toBeLessThan(route.indexOf("<ComposerAgentsPill"));
+    expect(route.match(/<SessionChrome\b/g)).toHaveLength(1);
+    expect(route).not.toContain("<QueueSurface");
+    expect(route).not.toContain("<GoalSurface");
+    expect(route).not.toContain("<ComposerAgentsPill");
+    expect(route.indexOf("<SessionChrome")).toBeLessThan(route.indexOf("<ConsoleComposer"));
   });
 
   test("has no second Agents home in the header or dock", async () => {

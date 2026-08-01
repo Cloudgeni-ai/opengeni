@@ -1,4 +1,4 @@
-import { CODEX_MODEL_ID_PREFIX } from "@opengeni/codex";
+import { CODEX_MODEL_ID_PREFIX, isCodexBilledModel } from "@opengeni/codex";
 import {
   canonicalizeConfiguredModelId,
   configuredAllowedModels,
@@ -16,6 +16,7 @@ import {
   ServiceTurnInitiator,
   ServiceTurnInitiatorContext,
   evaluateWorkspaceModelPolicy,
+  latencyModeForMetadata,
   reasoningEffortForMetadata,
   stableJson,
   type AccessGrant,
@@ -518,6 +519,8 @@ export async function createAndStartSession(input: {
   clientEventId?: string;
   model: string;
   reasoningEffort: Settings["openaiReasoningEffort"];
+  /** Session default Fast/standard; mirrored into metadata when set. */
+  latencyMode?: "standard" | "priority" | "fast";
   turnExecutionPolicy: TurnExecutionPolicyV1;
   sandboxBackend: Settings["sandboxBackend"];
   metadata: Record<string, unknown>;
@@ -587,6 +590,7 @@ export async function createAndStartSession(input: {
     ...input.metadata,
     model: input.model,
     reasoningEffort: input.reasoningEffort,
+    ...(input.latencyMode !== undefined ? { latencyMode: input.latencyMode } : {}),
   };
   // Keyed creation is intentionally handled only by the database admission
   // transaction below. Its workspace/key lock replays either the successful
@@ -834,6 +838,36 @@ export function assertConfiguredModel(settings: Settings, model: string | null |
   canonicalConfiguredModel(settings, model);
 }
 
+export const CODEX_COMPACTION_V2_PROVIDER_LOCKED = "codex_compaction_v2_provider_locked" as const;
+
+/** Session is frozen on Codex remote compaction v2; non-Codex models are refused. */
+export class CodexCompactionV2ProviderLockedError extends Error {
+  readonly code = CODEX_COMPACTION_V2_PROVIDER_LOCKED;
+  readonly productModelId: string;
+
+  constructor(productModelId: string) {
+    super(
+      `session is locked to Codex remote compaction v2; model "${productModelId}" is not a Codex subscription model`,
+    );
+    this.name = "CodexCompactionV2ProviderLockedError";
+    this.productModelId = productModelId;
+  }
+}
+
+/**
+ * Fail closed when a remote_v2 session would run a non-Codex product model.
+ * Portable sessions and non-Codex sessions keep free mid-session provider swap.
+ */
+export function assertSessionAllowsProductModel(
+  session: Pick<Session, "codexCompactionMode">,
+  productModelId: string | null | undefined,
+): void {
+  if (productModelId === null || productModelId === undefined) return;
+  if (session.codexCompactionMode !== "remote_v2") return;
+  if (isCodexBilledModel(productModelId)) return;
+  throw new CodexCompactionV2ProviderLockedError(productModelId);
+}
+
 /**
  * Reject a model the WORKSPACE's model policy blocks, at the same choke points
  * as assertConfiguredModel — a 422 at the edge instead of a queued turn the
@@ -902,6 +936,13 @@ export function reasoningEffortForSession(
   return reasoningEffortForMetadata(metadata, fallback);
 }
 
+export function latencyModeForSession(
+  metadata: Record<string, unknown>,
+  fallback: "standard" | "priority" | "fast" = "standard",
+): "standard" | "priority" | "fast" {
+  return latencyModeForMetadata(metadata, fallback);
+}
+
 /**
  * Appends a `user.message` to an existing session and enqueues the resulting
  * turn, merging requested resources/tools into the session and waking the
@@ -922,6 +963,7 @@ export async function postUserMessageTurn(input: {
   resources: ResourceRef[];
   model?: string | null;
   reasoningEffort?: Settings["openaiReasoningEffort"] | null;
+  latencyMode?: "standard" | "priority" | "fast" | null;
   clientEventId?: string;
   mcpCredentialUpdates?: UpdateSessionMcpServerCredentialsInput[];
   delivery?: "send" | "steer";
@@ -941,6 +983,16 @@ export async function postUserMessageTurn(input: {
   // model inherits the session's model downstream (always a configured id).
   assertConfiguredModel(settings, requestedModel);
   await assertWorkspaceModelPolicyAllows(db, settings, workspaceId, requestedModel);
+  const sessionForModelGate = await requireSession(db, workspaceId, sessionId);
+  const effectiveModelForGate = requestedModel ?? sessionForModelGate.model;
+  try {
+    assertSessionAllowsProductModel(sessionForModelGate, effectiveModelForGate);
+  } catch (error) {
+    if (error instanceof CodexCompactionV2ProviderLockedError) {
+      throw new HTTPException(422, { message: error.message, cause: error });
+    }
+    throw error;
+  }
   const operationKey = input.clientEventId ?? crypto.randomUUID();
   let result;
   try {
@@ -965,6 +1017,7 @@ export async function postUserMessageTurn(input: {
           resources: input.resources,
           model: requestedModel,
           reasoningEffort: requestedReasoningEffort,
+          latencyMode: input.latencyMode ?? null,
           reasoningEffortFallback: input.reasoningEffortFallback ?? settings.openaiReasoningEffort,
           turnExecutionPolicy: input.turnExecutionPolicy,
           source: input.origin === "operator" ? "api" : "user",
@@ -1220,12 +1273,15 @@ export async function createSessionForRequest(
   // default-model session would otherwise be born blocked).
   await assertWorkspaceModelPolicyAllows(db, settings, workspaceId, model);
   const reasoningEffort = payload.reasoningEffort ?? settings.openaiReasoningEffort;
+  const latencyMode = payload.latencyMode ?? "standard";
   const turnExecutionPolicy = resolveTurnExecutionPolicyV1(settings, {
     modelId: model,
     requestedModelId: payload.model ?? null,
     modelSource: payload.model === undefined ? "deployment" : "explicit",
     reasoningEffort,
     reasoningSource: payload.reasoningEffort === undefined ? "deployment" : "explicit",
+    latencyMode,
+    latencyModeSource: payload.latencyMode === undefined ? "deployment" : "explicit",
   });
   // Parent linkage was resolved above, before context validation. A child with
   // no explicit permission override inherits the creating session's effective
@@ -1547,6 +1603,7 @@ export async function createSessionForRequest(
       ...(payload.clientEventId ? { clientEventId: payload.clientEventId } : {}),
       model,
       reasoningEffort,
+      latencyMode,
       turnExecutionPolicy,
       // A shared spawn inherits the box's backend; a caller-supplied
       // sandboxBackend on a shared spawn is ignored (it is the same box). A
@@ -1644,6 +1701,7 @@ export async function acceptSessionUserMessage(
     resources?: ResourceRef[];
     model?: string | null;
     reasoningEffort?: ReasoningEffort | null;
+    latencyMode?: "standard" | "priority" | "fast" | null;
     clientEventId?: string;
     mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[];
     delivery?: "send" | "steer";
@@ -1668,17 +1726,29 @@ export async function acceptSessionUserMessage(
   if (effectiveModel === null) {
     throw new Error("effective follow-up model unexpectedly resolved to null");
   }
+  try {
+    assertSessionAllowsProductModel(existingSession, effectiveModel);
+  } catch (error) {
+    if (error instanceof CodexCompactionV2ProviderLockedError) {
+      throw new HTTPException(422, { message: error.message, cause: error });
+    }
+    throw error;
+  }
   const sessionReasoningEffort = reasoningEffortForSession(
     existingSession.metadata,
     settings.openaiReasoningEffort,
   );
   const effectiveReasoningEffort = input.reasoningEffort ?? sessionReasoningEffort;
+  const sessionLatencyMode = latencyModeForSession(existingSession.metadata, "standard");
+  const effectiveLatencyMode = input.latencyMode ?? sessionLatencyMode;
   const turnExecutionPolicy = resolveTurnExecutionPolicyV1(settings, {
     modelId: effectiveModel,
     requestedModelId: input.model ?? null,
     modelSource: input.model == null ? "session" : "explicit",
     reasoningEffort: effectiveReasoningEffort,
     reasoningSource: input.reasoningEffort == null ? "session" : "explicit",
+    latencyMode: effectiveLatencyMode,
+    latencyModeSource: input.latencyMode == null ? "session" : "explicit",
   });
   const requestedResources = normalizeResources(input.resources ?? []);
   await requireLimit(deps, {
@@ -1716,6 +1786,7 @@ export async function acceptSessionUserMessage(
     resources: requestedResources,
     model: input.model ?? null,
     reasoningEffort: input.reasoningEffort ?? null,
+    latencyMode: input.latencyMode ?? null,
     reasoningEffortFallback: sessionReasoningEffort,
     turnExecutionPolicy,
     mcpCredentialUpdates,

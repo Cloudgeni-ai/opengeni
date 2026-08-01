@@ -664,6 +664,7 @@ describe("api key permission options", () => {
       "GitHub",
       "Goals",
       "Rigs",
+      "Artifacts",
       "Admin & account",
     ]);
   });
@@ -1252,7 +1253,7 @@ describe("composer reasoning-effort picker (full host enum)", () => {
   function clientConfig(patch: Partial<ClientConfig> = {}): ClientConfig {
     return {
       deploymentRevision: "rev-1",
-      apiContractRevision: "2026-07-turn-instructions-v1",
+      apiContractRevision: "2026-07-workspace-artifacts-v1",
       defaultModel: "gpt-5.6-sol",
       allowedModels: ["gpt-5.6-sol"],
       models: [],
@@ -1835,6 +1836,7 @@ function session(patch: Partial<Session> = {}): Session {
     queueHeadPosition: patch.queueHeadPosition ?? 0,
     queueTailPosition: patch.queueTailPosition ?? 0,
     effectiveControl: patch.effectiveControl ?? activeControl(false),
+    codexCompactionMode: patch.codexCompactionMode ?? "portable",
   };
 }
 

@@ -5,6 +5,7 @@ import {
   resourceMountPath,
   stableJson,
   turnExecutionPolicyAuditMetadata,
+  type LatencyMode,
   type ReasoningEffort,
   type TurnExecutionPolicyV1,
 } from "@opengeni/contracts";
@@ -426,6 +427,7 @@ export async function saveComposerDraftInTransaction(
     resources: ResourceRef[];
     model: string;
     reasoningEffort: ReasoningEffort;
+    latencyMode?: LatencyMode;
   },
 ): Promise<ComposerDraftRow> {
   await lockWorkspaceInferenceControl(db, input.workspaceId, "share");
@@ -458,6 +460,7 @@ export async function saveComposerDraftInTransaction(
     toolsProvided: false,
     model: input.model,
     reasoningEffort: input.reasoningEffort,
+    latencyMode: input.latencyMode ?? "standard",
     // A queue edit is still the same accepted work item. Preserve its frozen
     // initiator through arbitrary draft saves; only a genuinely new compose or
     // Steer captures the submitting actor.
@@ -830,6 +833,7 @@ export async function editQueuedTurnInTransaction(
     toolsProvided: false,
     model: turn.model,
     reasoningEffort: turn.reasoningEffort,
+    latencyMode: turn.latencyMode,
     sourceTurnId: turn.id,
     sourceTurnVersion: turn.version,
     updatedAt: new Date(),
@@ -1145,6 +1149,7 @@ export async function submitHumanPromptInTransaction(
     resources: ResourceRef[];
     model?: string | null;
     reasoningEffort?: ReasoningEffort | null;
+    latencyMode?: LatencyMode | null;
     reasoningEffortFallback: ReasoningEffort;
     /** Trusted API/core admission snapshot. Omitted only by legacy low-level callers. */
     turnExecutionPolicy?: TurnExecutionPolicyV1;
@@ -1175,6 +1180,7 @@ export async function submitHumanPromptInTransaction(
     resources: withCanonicalResourceMountPaths(input.resources),
     model: input.model ?? null,
     reasoningEffort: input.reasoningEffort ?? null,
+    latencyMode: input.latencyMode ?? null,
     source: input.source,
     mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
     ...(input.actor.type === "service"
@@ -1282,12 +1288,14 @@ export async function submitHumanPromptInTransaction(
         resources: withCanonicalResourceMountPaths(draft.resources),
         model: draft.model,
         reasoningEffort: draft.reasoningEffort,
+        latencyMode: draft.latencyMode,
       }) !==
         canonicalSessionCommandHash({
           text: input.text,
           resources: withCanonicalResourceMountPaths(input.resources),
           model: input.model ?? session.model,
           reasoningEffort: input.reasoningEffort ?? input.reasoningEffortFallback,
+          latencyMode: input.turnExecutionPolicy?.latencyMode ?? input.latencyMode ?? "standard",
         })
     ) {
       throw new QueueCommandConflictError(
@@ -1407,6 +1415,7 @@ export async function submitHumanPromptInTransaction(
         ...(input.resources.length ? { resources: input.resources } : {}),
         ...(input.model ? { model: input.model } : {}),
         ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
+        ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
         delivery: input.delivery,
         initiator: frozenInitiator.initiator,
       }),
@@ -1436,6 +1445,7 @@ export async function submitHumanPromptInTransaction(
       toolsProvided: false,
       model: input.model ?? session.model,
       reasoningEffort: input.reasoningEffort ?? input.reasoningEffortFallback,
+      latencyMode: input.turnExecutionPolicy?.latencyMode ?? input.latencyMode ?? "standard",
       sandboxBackend: session.sandboxBackend,
       metadata: input.turnExecutionPolicy
         ? metadataWithTurnExecutionPolicyV1({}, input.turnExecutionPolicy)

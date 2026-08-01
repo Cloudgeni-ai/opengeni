@@ -5,11 +5,13 @@ import {
 } from "@opengeni/config";
 import {
   evaluateWorkspaceModelPolicy,
+  latencyModeForMetadata,
   mergeToolRefs,
   reasoningEffortForMetadata,
   type SessionGoal,
   type ToolRef,
 } from "@opengeni/contracts";
+import { isCodexBilledModel } from "@opengeni/codex";
 import {
   enqueueSessionWorkflowWakeIfRunnable,
   getBillingBalance,
@@ -65,6 +67,8 @@ export function createGoalActivities(services: () => Promise<ActivityServices>) 
     const continuationReasoningEffort =
       latestStartedTurn?.reasoningEffort ??
       reasoningEffortForMetadata(session.metadata, settings.openaiReasoningEffort);
+    const continuationLatencyMode =
+      latestStartedTurn?.latencyMode ?? latencyModeForMetadata(session.metadata, "standard");
     // Workspace model policy: a continuation inherits the last STARTED turn's
     // model, so a single policy-violating turn would otherwise re-arm itself on
     // every continuation (exactly how one bare-model turn kept a goal loop on
@@ -88,6 +92,15 @@ export function createGoalActivities(services: () => Promise<ActivityServices>) 
           modelPolicyBlocked = `workspace model policy blocks model "${continuationModel}"; pick an allowed model or change the workspace model policy`;
         }
       }
+    }
+    // remote_v2 sessions may only continue on Codex models — refuse synthesis
+    // that would leave the portable/non-Codex path (and mixed history shapes).
+    if (
+      !modelPolicyBlocked &&
+      session.codexCompactionMode === "remote_v2" &&
+      !isCodexBilledModel(continuationModel)
+    ) {
+      modelPolicyBlocked = `session is locked to Codex remote compaction v2; model "${continuationModel}" is not a Codex subscription model`;
     }
     // A codex-model goal continuation is paid by the user's ChatGPT/Codex plan,
     // so it must not be budget-paused for zero OpenGeni credits. This file uses
@@ -122,6 +135,7 @@ export function createGoalActivities(services: () => Promise<ActivityServices>) 
       policy: {
         model: continuationModel,
         reasoningEffort: continuationReasoningEffort,
+        latencyMode: continuationLatencyMode,
         tools: withFirstPartyTools(settings, session.tools),
         sandboxBackend: session.sandboxBackend,
       },

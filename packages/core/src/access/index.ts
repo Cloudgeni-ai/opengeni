@@ -1,4 +1,4 @@
-import type { Settings } from "@opengeni/config";
+import { resolveFirstPartyDelegationSecret, type Settings } from "@opengeni/config";
 import {
   verifyDelegatedAccessToken,
   type AccountGrant,
@@ -137,7 +137,9 @@ export function requirePermission(grant: AccessGrant, permission: Permission): v
         message: "missing permission: variable-sets:manage (deprecated alias: environments:manage)",
       });
     }
-    throw new HTTPException(403, { message: `missing permission: ${permission}` });
+    throw new HTTPException(403, {
+      message: `missing permission: ${permission}`,
+    });
   }
 }
 
@@ -208,7 +210,9 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
   }
 
   if (deps.managedAuth) {
-    const session = await deps.managedAuth.api.getSession({ headers: c.req.raw.headers });
+    const session = await deps.managedAuth.api.getSession({
+      headers: c.req.raw.headers,
+    });
     if (session?.user) {
       return await ensureManagedAccessForUser(deps.db, {
         userId: session.user.id,
@@ -275,10 +279,11 @@ async function delegatedAccessContext(
   mode: "local" | "configured" | "managed",
   token = bearerToken(c),
 ): Promise<AccessContext | null> {
-  if (!token || !deps.settings.delegationSecret) {
+  const delegationSecret = resolveFirstPartyDelegationSecret(deps.settings);
+  if (!token || !delegationSecret) {
     return null;
   }
-  const payload = await verifyDelegatedAccessToken(deps.settings.delegationSecret, token);
+  const payload = await verifyDelegatedAccessToken(delegationSecret, token);
   if (!payload) {
     return null;
   }

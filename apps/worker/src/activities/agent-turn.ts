@@ -42,6 +42,7 @@ import {
   countConsecutiveReactiveRotations,
   requireSession,
   recordUsageEvent,
+  recordModelCallFact,
   registerPendingSessionToolCall,
   recordPendingSessionToolCallResult,
   clearDurablePendingSessionToolCalls,
@@ -80,6 +81,7 @@ import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@
 import {
   sandboxStateEntryFromRunState,
   maxTurnsExceededRunState,
+  modelResponseServiceTierFromSdkEvent,
   modelResponseUsageFromSdkEvent,
   normalizeModelCallUsage,
   normalizeSdkEvent,
@@ -89,6 +91,9 @@ import {
   appendWorkspaceMemory,
   composeAgentInstructions,
   summarizeForCompaction,
+  requestRemoteCompactionV2,
+  REMOTE_COMPACTION_V2_BETA_FEATURE,
+  REMOTE_COMPACTION_V2_IMPLEMENTATION,
   CompactionProviderResponseError,
   EmptyCompactionSummaryError,
   ensureModalRegistryImage,
@@ -133,7 +138,10 @@ import {
   calculateModelUsageCostMicros,
   configuredModelPricing,
   configuredStaticUsageLimits,
+  responseSatisfiesLatencyMode,
+  sandboxArchiveCaptureTimeoutMs,
   sandboxWarmRateMicrosPerSecond,
+  serviceTierForLatencyMode,
   settingsWithResolvedModelContext,
   resolveTurnExecutionPolicyV1,
   type ModelUsageInput,
@@ -177,18 +185,24 @@ import {
   buildModelResolver,
   CODEX_CLIENT_VERSION,
   CODEX_FALLBACK_MODEL_SLUGS,
+  CODEX_PROVIDER_ID,
   CodexReloginRequired,
   classifyCodexEncryptedArtifactRejection,
   classifyCodexResponseTimeoutError,
   classifyCodexUsageLimitError,
   codexRequestStorage,
   isCodexTransportError,
+  withCodexRequestOverrides,
   type CodexRequestContext,
   type CodexUsageHeaderSnapshot,
 } from "@opengeni/codex";
 import { mergeResourceRefs } from "./common";
-import { defaultSessionMcpServerIds, resolveSessionToolPolicy } from "@opengeni/core";
-import { maybeCompactContext } from "./context-compaction";
+import {
+  assertSessionAllowsProductModel,
+  defaultSessionMcpServerIds,
+  resolveSessionToolPolicy,
+} from "@opengeni/core";
+import { maybeCompactContext, settleFailedContextCompactionLandmark } from "./context-compaction";
 import { TurnAttemptFencedError } from "./turn-attempt-fenced";
 import {
   assertGitCredentialRenewalTransportUnchanged,
@@ -291,7 +305,7 @@ import {
   prepareRecordingForSettlement,
   type ActiveRecording,
 } from "./recording";
-import { captureWorkspaceRevision } from "./workspace-capture";
+import { captureWorkspaceRevision, openFreshWorkspaceCaptureSession } from "./workspace-capture";
 import type { ChannelASession } from "@opengeni/runtime/sandbox";
 import { createObjectStorage, type ObjectStorage } from "@opengeni/storage";
 import {
@@ -304,6 +318,7 @@ import {
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   evaluateWorkspaceModelPolicy,
   readTurnExecutionPolicyV1,
+  type LatencyMode,
   type ResourceRef,
   type SessionEvent,
   type SessionEventType,
@@ -386,7 +401,7 @@ export function turnExecutionPolicyBillingIdentity(policy: TurnExecutionPolicyV1
 }
 
 export function legacyTurnExecutionPolicyInput(
-  turn: Pick<SessionTurn, "source" | "model" | "reasoningEffort">,
+  turn: Pick<SessionTurn, "source" | "model" | "reasoningEffort" | "latencyMode">,
 ): Parameters<typeof resolveTurnExecutionPolicyV1>[1] {
   const explicit = turn.source === "user" || turn.source === "api";
   return {
@@ -395,6 +410,8 @@ export function legacyTurnExecutionPolicyInput(
     modelSource: explicit ? "explicit" : "continuation",
     reasoningEffort: turn.reasoningEffort,
     reasoningSource: explicit ? "explicit" : "continuation",
+    latencyMode: turn.latencyMode,
+    latencyModeSource: explicit ? "explicit" : "continuation",
   };
 }
 
@@ -409,6 +426,27 @@ export function providerRecoveryResult(): {
     status: "recovering",
     continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS,
   };
+}
+
+/**
+ * Tell the model when durable MCP policy references are unavailable for this
+ * exact turn. The policy projection already bounds and validates these ids;
+ * this notice prevents a graceful runtime drop from becoming a silent source-
+ * of-truth substitution or a false claim that the disconnected system was read.
+ */
+export function unavailableMcpTurnInstructions(input: {
+  droppedIds: readonly string[];
+  droppedCount: number;
+}): string | undefined {
+  if (input.droppedCount <= 0) {
+    return undefined;
+  }
+  const omittedCount = Math.max(0, input.droppedCount - input.droppedIds.length);
+  const listed = input.droppedIds.map((id) => `"${id}"`).join(", ");
+  const inventory = listed
+    ? `${listed}${omittedCount > 0 ? `, plus ${omittedCount} additional unavailable server(s)` : ""}`
+    : `${input.droppedCount} unavailable server(s)`;
+  return `MCP capability availability for this turn: the following session-selected server(s) are disconnected or no longer registered and were skipped: ${inventory}. Do not claim to have read or updated those systems. If the task depends on one as a source of truth, explain the limitation and ask the user to reconnect it or select another authoritative source; continue with unaffected work only when safe.`;
 }
 
 /**
@@ -1027,6 +1065,37 @@ export function modelResponseUsageContextSignal(
       };
 }
 
+export function assertModelResponseLatencyMode(input: {
+  event: Parameters<typeof modelResponseServiceTierFromSdkEvent>[0];
+  requested: LatencyMode;
+  model: string;
+  /** When set to Codex ChatGPT auth, response `service_tier` is not an honor signal. */
+  providerId?: string;
+}): void {
+  if (input.requested === "standard") {
+    return;
+  }
+  // ChatGPT-auth Codex (subscription): Fast maps to request `service_tier=priority`
+  // (see openai/codex ServiceTier::Fast.request_value). The backend may still return
+  // `response.service_tier=default`; OpenAI maintainers document that this does not
+  // mean Fast was ignored. Native CLI also does not fail closed on that field.
+  if (input.providerId === CODEX_PROVIDER_ID) {
+    return;
+  }
+  const serviceTierEvent = modelResponseServiceTierFromSdkEvent(input.event);
+  if (
+    !serviceTierEvent ||
+    (serviceTierEvent.source === "normalized" && serviceTierEvent.serviceTier === null)
+  ) {
+    return;
+  }
+  if (!responseSatisfiesLatencyMode(input.requested, serviceTierEvent.serviceTier)) {
+    throw new Error(
+      `Provider did not honor ${input.requested} latency mode for ${input.model}: response service_tier=${serviceTierEvent.serviceTier ?? "missing"}`,
+    );
+  }
+}
+
 /**
  * Process one SDK stream event through the exact production usage path.
  *
@@ -1054,6 +1123,7 @@ export async function processModelResponseUsageEvent(input: {
   provider: string;
   providerApi: ModelProviderApi;
   model: string;
+  latencyMode?: LatencyMode;
   metricProvider: string;
   externallyBilled: boolean;
   servingCredentialId: string | null;
@@ -1097,7 +1167,7 @@ export async function processModelResponseUsageEvent(input: {
     leaseLost: input.leaseLost,
     leaseLostMessage: input.leaseLostMessage,
     recordUsage: async () => {
-      await recordModelUsageAndDebitCredits(input.settings, input.db, {
+      const billing = await recordModelUsageAndDebitCredits(input.settings, input.db, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
@@ -1108,6 +1178,7 @@ export async function processModelResponseUsageEvent(input: {
         usage: responseUsage.usage,
         normalizedUsage,
         sourceKey,
+        ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
         observability: input.observability,
       });
       authoritative = await emitModelCallUsage({
@@ -1127,6 +1198,22 @@ export async function processModelResponseUsageEvent(input: {
         accountChangedFromPrevCall: accountContext.accountChangedFromPrevCall,
         emittedSourceKeys: input.emittedSourceKeys,
       });
+      if (authoritative && billing) {
+        await recordAuthoritativeModelCallFact({
+          db: input.db,
+          observability: input.observability,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          turnAttemptId: input.turnAttemptId,
+          sourceKey,
+          provider: input.provider,
+          providerApi: input.providerApi,
+          model: input.model,
+          billing,
+        });
+      }
       const observedInput = normalizedUsage.telemetry.inputTokens;
       if (authoritative && observedInput !== null && observedInput > 0) {
         recordModelInputTokens(input.observability, input.metricProvider, observedInput);
@@ -1206,7 +1293,7 @@ export async function processCompactionModelUsageEvent(input: {
     leaseLost: input.leaseLost,
     leaseLostMessage: input.leaseLostMessage,
     recordUsage: async () => {
-      await recordModelUsageAndDebitCredits(input.settings, input.db, {
+      const billing = await recordModelUsageAndDebitCredits(input.settings, input.db, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
@@ -1236,6 +1323,22 @@ export async function processCompactionModelUsageEvent(input: {
         accountChangedFromPrevCall: accountContext.accountChangedFromPrevCall,
         emittedSourceKeys: input.emittedSourceKeys,
       });
+      if (authoritative && billing) {
+        await recordAuthoritativeModelCallFact({
+          db: input.db,
+          observability: input.observability,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          turnAttemptId: input.turnAttemptId,
+          sourceKey,
+          provider: input.provider,
+          providerApi: input.providerApi,
+          model: input.model,
+          billing,
+        });
+      }
     },
   });
   return { status: "processed", sourceKey, authoritative };
@@ -2405,6 +2508,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         expectedEpoch: sandbox.leaseEpoch,
         expectedInstanceId: sandbox.established.instanceId,
         operation,
+        captureWaitMs: sandboxArchiveCaptureTimeoutMs(settings),
       };
       const admission = await advanceWorkspaceGeneration(db, identity);
       let result: T;
@@ -2474,6 +2578,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // the atomic DB throttle discard the fresher one). Interval throttling
     // itself lives in maybePersistWarmWorkspaceSnapshot / persistWarmSnapshot.
     let snapshotInFlight: Promise<void> | null = null;
+    // Turn-end capture needs the lease heartbeat to keep its holder alive, but
+    // must prevent that same timer from starting another periodic snapshot
+    // while it reads. This gate separates those two responsibilities.
+    let turnEndCaptureInProgress = false;
     // Computer-use-only recording. Ordinary shell/filesystem turns leave this
     // null; the first actual computer action starts it after :0 is ready.
     let activeRecording: ActiveRecording | null = null;
@@ -2717,7 +2825,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // single-flight; throttling lives in the helper.
         const snapshotSession = setupBoxSession;
         const snapshotTurnId = turnId;
-        if (snapshotSession && snapshotTurnId && !snapshotInFlight) {
+        if (snapshotSession && snapshotTurnId && !snapshotInFlight && !turnEndCaptureInProgress) {
           snapshotInFlight = maybePersistWarmWorkspaceSnapshot(
             { db, settings },
             {
@@ -3013,9 +3121,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         {
           modelId: turn.model,
           reasoningEffort: turn.reasoningEffort,
+          latencyMode: turn.latencyMode,
         },
       );
       const turnExecutionPolicy = verifiedExecutionPolicy.policy;
+      assertSessionAllowsProductModel(session, turnExecutionPolicy.productModelId);
       const billingIdentity = turnExecutionPolicyBillingIdentity(turnExecutionPolicy);
       isExternallyBilledTurn = billingIdentity.externallyBilled;
       isCodexTurn = billingIdentity.codexSubscription;
@@ -4115,6 +4225,22 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           : null;
       const withCodex = <T>(fn: () => Promise<T>): Promise<T> =>
         codexContext ? codexRequestStorage.run(codexContext, fn) : fn();
+      const withCodexRemoteCompaction = <T>(fn: () => Promise<T>): Promise<T> =>
+        withCodex(() =>
+          withCodexRequestOverrides(
+            {
+              betaFeatures: [REMOTE_COMPACTION_V2_BETA_FEATURE],
+              turnMetadata: {
+                request_kind: "compaction",
+                compaction: {
+                  implementation: REMOTE_COMPACTION_V2_IMPLEMENTATION,
+                  strategy: "memento",
+                },
+              },
+            },
+            fn,
+          ),
+        );
       const promptCacheKey = acceptsPromptCacheKeyForTurn(resolvedModel)
         ? input.sessionId
         : undefined;
@@ -4169,6 +4295,41 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 ...(systemInstructions ? { systemInstructions } : {}),
                 ...(promptCacheKey ? { promptCacheKey } : {}),
               });
+      const remoteCompactionRequester =
+        resolvedModel && isCodexTurn
+          ? (s: Settings, m: Array<Record<string, unknown>>) =>
+              withCodexRemoteCompaction(() =>
+                requestRemoteCompactionV2(s, m, {
+                  client: resolvedModel.client,
+                  model: turnExecutionPolicy.upstreamModelId,
+                  onUsage: recordCompactionUsage,
+                  ...(promptCacheKey ? { promptCacheKey } : {}),
+                }),
+              )
+          : undefined;
+      const publishCompactionLiveEvents = async (events: SessionEvent[]) => {
+        await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, events);
+      };
+      const publishCompactionOutcomeEvents = async (events: SessionEvent[]) => {
+        // `compaction.started` was already fanout via publishCompactionLiveEvents.
+        await publishDurableSessionEvents(
+          bus,
+          input.workspaceId,
+          input.sessionId,
+          events.filter((event) => event.type !== "session.context.compaction.started"),
+        );
+      };
+      const compactionModeOptions = {
+        codexCompactionMode: session.codexCompactionMode,
+        isCodexSubscriptionTurn: isCodexTurn,
+        publishLiveEvents: publishCompactionLiveEvents,
+        ...(remoteCompactionRequester
+          ? { requestRemoteCompactionV2: remoteCompactionRequester }
+          : {}),
+        ...(effectiveCodexCredentialId
+          ? { producerCodexCredentialId: effectiveCodexCredentialId }
+          : {}),
+      } as const;
 
       if (turn.source === "compaction") {
         const persistentSessionSettings = {
@@ -4217,6 +4378,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   codexAccount: {
                     currentCodexCredentialId: effectiveCodexCredentialId,
                   },
+                  ...compactionModeOptions,
                 },
               ),
               cancellationSignal,
@@ -4228,6 +4390,24 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             // request pending and let the ordinary same-turn provider/capacity
             // recovery path re-dispatch this exact maintenance execution.
             if (shouldRecoverCompactionProviderFailure(error)) throw error;
+            if (error instanceof TurnAttemptFencedError) throw error;
+            // `compaction.started` may already be live — settle skipped before
+            // failing the turn so the timeline cannot stick on Compacting…
+            const landmark = await settleFailedContextCompactionLandmark(
+              db,
+              {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: turn.id,
+                executionGeneration,
+                attemptId: input.attemptId,
+              },
+              {
+                clearRequestedCompaction: true,
+                publishLiveEvents: publishCompactionLiveEvents,
+              },
+            );
             if (!isCompactionSummaryFailure(error)) throw error;
             const errorMessage = String(redact(compactionFailureReasonFromError(error)));
             if (
@@ -4251,7 +4431,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 turnStatus: "failed",
                 sessionStatus: "idle",
                 activeTurnId: null,
-                consumeRequestedCompactionFailure: true,
+                ...(landmark.requestConsumed ? {} : { consumeRequestedCompactionFailure: true }),
               }))
             ) {
               return claimedResult({ status: "cancelled" });
@@ -4265,12 +4445,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             if (outcome.compacted) {
               recordContextCompaction(observability, "operator");
             }
-            await publishDurableSessionEvents(
-              bus,
-              input.workspaceId,
-              input.sessionId,
-              outcome.events,
-            );
+            await publishCompactionOutcomeEvents(outcome.events);
           }
         }
         if (
@@ -4312,6 +4487,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         sessionTools: session.tools,
         availableMcpServerIds: runSettings.mcpServers.map((server) => server.id),
         defaultMcpServerIds: defaultSessionMcpServerIds(capabilitySettings.mcpServers),
+      });
+      const mcpAvailabilityInstructions = unavailableMcpTurnInstructions({
+        droppedIds: resolvedToolPolicy.effectivePolicy.droppedIds,
+        droppedCount: resolvedToolPolicy.effectivePolicy.counts.dropped,
       });
       const effectivePolicyTools = resolvedToolPolicy.toolRefs;
       const turnTools = withFirstPartyTools(runSettings, effectivePolicyTools);
@@ -5265,8 +5444,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             }
           : {};
       const hostedWebSearch = hostedWebSearchForTurn(resolvedModel, runSettings.webSearchEnabled);
+      const serviceTier = serviceTierForLatencyMode(
+        turnExecutionPolicy.providerId,
+        turnExecutionPolicy.latencyMode,
+      );
       const agent = runtime.buildAgent(modelRunSettings, turnResources, {
         reasoningEffort: turn.reasoningEffort,
+        latencyMode: turnExecutionPolicy.latencyMode,
+        ...(serviceTier ? { serviceTier } : {}),
         ...(humanInputResume ? { humanInputResponse: humanInputResume } : {}),
         genesisTitleHint: isGenesisTurn,
         persistentSessionSettings: {
@@ -5389,7 +5574,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         ...(session.instructions ? { sessionInstructions: session.instructions } : {}),
         // Exact host context captured when this turn was accepted. It is
         // system-level and disappears with the turn rather than entering chat.
-        ...(turn.turnInstructions ? { turnInstructions: turn.turnInstructions } : {}),
+        ...(turn.turnInstructions || mcpAvailabilityInstructions
+          ? {
+              turnInstructions: [turn.turnInstructions, mcpAvailabilityInstructions]
+                .filter((value): value is string => Boolean(value))
+                .join(" "),
+            }
+          : {}),
         ...workspaceEnvironmentOption,
         // RIG RUNTIME (M3): the doctrine block, the setup-script hook (only when
         // the frozen version carries a non-empty script), and the rig credential
@@ -5667,29 +5858,44 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     codexAccount: {
                       currentCodexCredentialId: effectiveCodexCredentialId,
                     },
+                    ...compactionModeOptions,
                   }
                 : {
                     trigger: "auto",
                     codexAccount: {
                       currentCodexCredentialId: effectiveCodexCredentialId,
                     },
+                    ...compactionModeOptions,
                   },
             ),
             cancellationSignal,
             undefined,
           );
-          if (outcome.compacted) {
-            const compactionTrigger = forced ? "operator" : undefined;
-            recordContextCompaction(observability, compactionTrigger ?? "auto");
-            await publishDurableSessionEvents(
-              bus,
-              input.workspaceId,
-              input.sessionId,
-              outcome.events,
-            );
+          if (outcome.events.length > 0) {
+            if (outcome.compacted) {
+              const compactionTrigger = forced ? "operator" : undefined;
+              recordContextCompaction(observability, compactionTrigger ?? "auto");
+            }
+            await publishCompactionOutcomeEvents(outcome.events);
           }
         } catch (compactError) {
           if (shouldRecoverCompactionProviderFailure(compactError)) throw compactError;
+          if (compactError instanceof TurnAttemptFencedError) throw compactError;
+          const landmark = await settleFailedContextCompactionLandmark(
+            db,
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: turnId!,
+              executionGeneration,
+              attemptId: input.attemptId,
+            },
+            {
+              clearRequestedCompaction: forced,
+              publishLiveEvents: publishCompactionLiveEvents,
+            },
+          );
           if (!isCompactionSummaryFailure(compactError)) throw compactError;
           const errorMessage = String(redact(compactionFailureReasonFromError(compactError)));
           observability.error("context compaction failed", {
@@ -5715,7 +5921,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               turnStatus: "failed",
               sessionStatus: "idle",
               activeTurnId: null,
-              ...(forced ? { consumeRequestedCompactionFailure: true } : {}),
+              ...(forced && !landmark.requestConsumed
+                ? { consumeRequestedCompactionFailure: true }
+                : {}),
             }))
           ) {
             return claimedResult({ status: "cancelled" });
@@ -5894,6 +6102,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               codexAccount: {
                 currentCodexCredentialId: effectiveCodexCredentialId,
               },
+              ...compactionModeOptions,
             },
           ),
           cancellationSignal,
@@ -5903,12 +6112,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           if (outcome.compacted) {
             recordContextCompaction(observability, triggerLabel);
           }
-          await publishDurableSessionEvents(
-            bus,
-            input.workspaceId,
-            input.sessionId,
-            outcome.events,
-          );
+          await publishCompactionOutcomeEvents(outcome.events);
         }
         return outcome;
       };
@@ -6106,6 +6310,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               provider: resolvedModel?.provider.id ?? settings.openaiProvider,
               providerApi: resolvedModel?.provider.api ?? "responses",
               model: turn.model,
+              latencyMode: turnExecutionPolicy.latencyMode,
               metricProvider: streamProvider,
               externallyBilled: isExternallyBilledTurn,
               servingCredentialId: effectiveCodexCredentialId,
@@ -6115,6 +6320,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               leaseLost: () => codexLeaseLost,
               leaseLostMessage: "Codex credential lease expired during the active turn",
               setLastInputTokens: setLastInputTokensFenced,
+            });
+            assertModelResponseLatencyMode({
+              event: next.value,
+              requested: turnExecutionPolicy.latencyMode,
+              model: turn.model,
+              ...(resolvedModel?.provider.id ? { providerId: resolvedModel.provider.id } : {}),
             });
             if (responseUsageResult.status === "processed") {
               currentToolBatchCallIds = new Set<string>();
@@ -6279,7 +6490,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               leaseLost: () => codexLeaseLost,
               leaseLostMessage: "Codex credential lease expired during the active turn",
               recordUsage: async () => {
-                await recordModelUsageAndDebitCredits(settings, db, {
+                const billing = await recordModelUsageAndDebitCredits(settings, db, {
                   accountId: input.accountId,
                   workspaceId: input.workspaceId,
                   sessionId: input.sessionId,
@@ -6290,8 +6501,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   usage: aggregateUsage,
                   normalizedUsage: normalizedAggregateUsage,
                   sourceKey: aggregateSourceKey,
+                  latencyMode: turnExecutionPolicy.latencyMode,
                   observability,
                 });
+                const aggregateProvider = resolvedModel?.provider.id ?? settings.openaiProvider;
+                const aggregateProviderApi = resolvedModel?.provider.api ?? "responses";
                 aggregateAuthoritative = await emitModelCallUsage({
                   observability,
                   publish,
@@ -6299,8 +6513,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   workspaceId: input.workspaceId,
                   sessionId: input.sessionId,
                   turnId: activeTurnId,
-                  provider: resolvedModel?.provider.id ?? settings.openaiProvider,
-                  providerApi: resolvedModel?.provider.api ?? "responses",
+                  provider: aggregateProvider,
+                  providerApi: aggregateProviderApi,
                   model: turn.model,
                   sourceKey: aggregateSourceKey,
                   usage: { usage: aggregateUsage },
@@ -6309,6 +6523,22 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   accountChangedFromPrevCall: aggregateAccountCtx.accountChangedFromPrevCall,
                   emittedSourceKeys: emittedModelUsageSourceKeys,
                 });
+                if (aggregateAuthoritative && billing) {
+                  await recordAuthoritativeModelCallFact({
+                    db,
+                    observability,
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: input.sessionId,
+                    turnId: activeTurnId,
+                    turnAttemptId: input.attemptId,
+                    sourceKey: aggregateSourceKey,
+                    provider: aggregateProvider,
+                    providerApi: aggregateProviderApi,
+                    model: turn.model,
+                    billing,
+                  });
+                }
                 if (aggregateAuthoritative && aggregateInput !== null && aggregateInput > 0) {
                   recordModelInputTokens(observability, streamProvider, aggregateInput);
                 }
@@ -6501,6 +6731,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           let compacted = false;
           let compactionHandled = false;
           let compactionFailureMessage: string | null = null;
+          let compactionRequestCleared = false;
           try {
             const outcome = await forceContextCompaction(
               recoveryKind,
@@ -6520,6 +6751,23 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             // turn through the normal provider/capacity path. They are not an
             // empty summary and must not create a new goal continuation.
             if (shouldRecoverCompactionProviderFailure(compactError)) throw compactError;
+            if (compactError instanceof TurnAttemptFencedError) throw compactError;
+            const landmark = await settleFailedContextCompactionLandmark(
+              db,
+              {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: activeTurnId!,
+                executionGeneration,
+                attemptId: input.attemptId,
+              },
+              {
+                clearRequestedCompaction: recoveryKind === "operator",
+                publishLiveEvents: publishCompactionLiveEvents,
+              },
+            );
+            compactionRequestCleared = landmark.requestConsumed;
             if (!isCompactionSummaryFailure(compactError)) throw compactError;
             compactionFailureMessage = String(
               redact(compactionFailureReasonFromError(compactError)),
@@ -6555,7 +6803,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 turnStatus: "failed",
                 sessionStatus: "idle",
                 activeTurnId: null,
-                ...(recoveryKind === "operator" ? { consumeRequestedCompactionFailure: true } : {}),
+                ...(recoveryKind === "operator" && !compactionRequestCleared
+                  ? { consumeRequestedCompactionFailure: true }
+                  : {}),
               }))
             ) {
               return claimedResult({ status: "cancelled" });
@@ -7886,7 +8136,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // gives capture the full live-box margin instead of racing the teardown
         // tail, which was dropping 100% of captures on real Modal desktop boxes
         // ("request cancelled due to container exiting", 0 rows). External module:
-        // self-capped at 60s, best-effort (never throws past its boundary),
+        // self-capped at 120s, best-effort (never throws past its boundary),
         // epoch-fenced, and it NEVER closes the box. The emitted
         // workspace.revision.captured event is ANNOUNCE-ONLY (metadata, never
         // content).
@@ -7906,13 +8156,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           setupBoxSession &&
           sandboxGroupId
         ) {
-          // Stop new heartbeat snapshot/meter ticks so a mid-turn snapshot cannot
-          // start concurrently with capture, then drain any in-flight snapshot
-          // (bounded) — capture and the warm snapshot both exec on the box, so
-          // sequence them, exactly as the turn-end snapshot placement did.
-          if (leaseHeartbeatTimer) {
-            stopLeaseHeartbeat();
-          }
+          // Block new periodic snapshots, then drain any one already in flight.
+          // Keep the lease heartbeat itself running: capture may legitimately
+          // exceed the 90s holder TTL, and the reaper must remain unable to drain
+          // the exact box while this holder still reads it.
+          turnEndCaptureInProgress = true;
           if (snapshotInFlight) {
             await waitForWarmSnapshot(
               snapshotInFlight,
@@ -7920,6 +8168,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               finalizerSignal,
             );
           }
+          const captureEstablished = resolvedSandbox.established;
           await captureWorkspaceRevision({
             db,
             objectStorage,
@@ -7928,6 +8177,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, events);
             },
             session: setupBoxSession as ChannelASession,
+            openReadSession: async () =>
+              await openFreshWorkspaceCaptureSession({
+                backendId: captureEstablished.backendId,
+                client: captureEstablished.client,
+                session: setupBoxSession as ChannelASession,
+                expectedInstanceId: captureEstablished.instanceId,
+              }),
             leaseEpoch: resolvedSandbox.leaseEpoch,
             sandboxGroupId,
             accountId: input.accountId,
@@ -8676,6 +8932,13 @@ export async function ensureRunAllowed(
   }
 }
 
+export type ModelUsageBillingRecord = {
+  billingPath: "opengeni_credits" | "external";
+  /** Same quantity written to usage_events.model.cost when present; else 0. */
+  pricedCostMicros: number;
+  normalizedUsage: ModelCallUsageNormalization;
+};
+
 // Exported for unit testing the external-billing bypass; not part of the activity surface.
 export async function recordModelUsageAndDebitCredits(
   settings: Settings,
@@ -8691,11 +8954,12 @@ export async function recordModelUsageAndDebitCredits(
     usage?: ModelUsageInput | ModelCallUsageInput | null;
     normalizedUsage?: ModelCallUsageNormalization;
     sourceKey: string;
+    latencyMode?: LatencyMode;
     observability?: ActivityServices["observability"];
   },
-): Promise<void> {
+): Promise<ModelUsageBillingRecord | null> {
   if (!input.usage) {
-    return;
+    return null;
   }
   const normalizedUsage = input.normalizedUsage ?? normalizeModelCallUsage(input.usage);
   const sanitizedUsage = sanitizedModelUsageInput(normalizedUsage);
@@ -8725,7 +8989,11 @@ export async function recordModelUsageAndDebitCredits(
       turnAttemptId: input.turnAttemptId,
       idempotencyKey: `usage:model.cost:${input.turnId}:${input.sourceKey}`,
     });
-    return;
+    return {
+      billingPath: "external",
+      pricedCostMicros: 0,
+      normalizedUsage,
+    };
   }
   if (totalTokens > 0) {
     await recordUsageEvent(db, {
@@ -8744,12 +9012,18 @@ export async function recordModelUsageAndDebitCredits(
   }
   const shouldDebit = settings.billingMode === "stripe" || settings.usageLimitsMode === "managed";
   if (!shouldDebit || totalTokens === 0) {
-    return;
+    return {
+      billingPath: "opengeni_credits",
+      pricedCostMicros: 0,
+      normalizedUsage,
+    };
   }
   if (!configuredModelPricing(settings)[input.model]) {
     throw new Error(`Missing model pricing for ${input.model}`);
   }
-  const costMicros = calculateModelUsageCostMicros(settings, input.model, sanitizedUsage);
+  const costMicros = calculateModelUsageCostMicros(settings, input.model, sanitizedUsage, {
+    latencyMode: input.latencyMode ?? "standard",
+  });
   await recordUsageEvent(db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
@@ -8777,6 +9051,7 @@ export async function recordModelUsageAndDebitCredits(
         sessionId: input.sessionId,
         turnId: input.turnId,
         sourceKey: input.sourceKey,
+        latencyMode: input.latencyMode ?? "standard",
         inputTokens,
         outputTokens,
         totalTokens,
@@ -8787,6 +9062,59 @@ export async function recordModelUsageAndDebitCredits(
       },
     });
     recordCreditMicros(input.observability, "usage", result.debitedMicros);
+  }
+  return {
+    billingPath: "opengeni_credits",
+    pricedCostMicros: costMicros,
+    normalizedUsage,
+  };
+}
+
+/** Soft-fail Insights fact write — never throws into the billing/emit path. */
+export async function recordAuthoritativeModelCallFact(input: {
+  db: ActivityServices["db"];
+  observability: ActivityServices["observability"];
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  turnAttemptId: string;
+  sourceKey: string;
+  provider: string;
+  providerApi: ModelProviderApi;
+  model: string;
+  billing: ModelUsageBillingRecord;
+}): Promise<void> {
+  try {
+    const telemetry = input.billing.normalizedUsage.telemetry;
+    await recordModelCallFact(input.db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      turnAttemptId: input.turnAttemptId,
+      sourceKey: input.sourceKey,
+      provider: input.provider,
+      providerApi: input.providerApi,
+      model: input.model,
+      billingPath: input.billing.billingPath,
+      pricedCostMicros: input.billing.pricedCostMicros,
+      inputTokens: telemetry.inputTokens,
+      outputTokens: telemetry.outputTokens,
+      cachedTokens: telemetry.cachedTokens,
+      cacheWriteTokens: telemetry.cacheWriteTokens,
+      reasoningTokens: telemetry.reasoningTokens,
+      totalTokens: input.billing.normalizedUsage.totalTokens,
+    });
+  } catch (error) {
+    input.observability.warn("model call fact persist failed", {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      sourceKey: input.sourceKey,
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
 }
 

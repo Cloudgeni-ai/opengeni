@@ -29,6 +29,8 @@ import type {
   CodexUsageMap,
   BillingSummary,
   BillingUsageResponse,
+  InsightsRange,
+  WorkspaceInsightsResponse,
   CapabilityCatalogItem,
   CapabilityCatalogResponse,
   CapabilityInstallation,
@@ -92,6 +94,7 @@ import type {
   SwapActiveSandboxResponse,
   ListWorkspaceMembersResponse,
   PackInstallation,
+  LatencyMode,
   ReasoningEffort,
   RetainedArtifactContent,
   RetainedArtifactContentOptions,
@@ -169,6 +172,7 @@ import type {
   PtyResizeRequest,
   PtyCloseRequest,
   ToolRef,
+  TranscribeAudioResponse,
   UpdateConnectionRequest,
   UpdateKnowledgeMemoryRequest,
   UpdateScheduledTaskRequest,
@@ -278,6 +282,7 @@ export type SendMessageInput = {
   tools?: ToolRef[];
   model?: string;
   reasoningEffort?: ReasoningEffort;
+  latencyMode?: LatencyMode;
   clientEventId?: string;
   controlEtag?: string;
   expectedDraftRevision?: number;
@@ -289,6 +294,13 @@ export type SteerMessageResult = {
   accepted: SessionEvent;
   /** The exact turn created for this message in the same server transaction. */
   turn: SessionTurn;
+};
+
+export type TranscribeAudioInput = {
+  audio: Blob | File | Uint8Array;
+  mimeType: string;
+  durationSeconds?: number | undefined;
+  signal?: AbortSignal | undefined;
 };
 
 /**
@@ -309,6 +321,60 @@ export class OpenGeniClient {
   }
 
   // --- Session lifecycle ---------------------------------------------------
+
+  /** Upload one ephemeral browser recording. This method never retries. */
+  async transcribeAudio(
+    workspaceId: string,
+    input: TranscribeAudioInput,
+  ): Promise<TranscribeAudioResponse> {
+    const correlationId = crypto.randomUUID();
+    const form = new FormData();
+    const filename = filenameForAudioMimeType(input.mimeType);
+    const audio =
+      input.audio instanceof File
+        ? input.audio
+        : input.audio instanceof Uint8Array
+          ? new File([Uint8Array.from(input.audio)], filename, { type: input.mimeType })
+          : new File([input.audio], filename, { type: input.mimeType || input.audio.type });
+    form.append("audio", audio, filename);
+    form.append("mimeType", input.mimeType);
+    if (input.durationSeconds !== undefined) {
+      form.append("durationSeconds", String(input.durationSeconds));
+    }
+    let response: Response;
+    try {
+      response = await this.fetchImpl(this.url(`/v1/workspaces/${workspaceId}/transcriptions`), {
+        method: "POST",
+        headers: { ...this.headers(correlationId), Accept: "application/json" },
+        body: form,
+        ...(input.signal ? { signal: input.signal } : {}),
+      });
+    } catch (error) {
+      if (input.signal?.aborted) throw error;
+      throw mutationTransportError(correlationId);
+    }
+    assertApiContractResponse(response);
+    if (!response.ok) throw await apiErrorFromResponse(response, { method: "POST", correlationId });
+    await assertJsonResponse(response, { method: "POST", correlationId });
+    let body: unknown;
+    try {
+      body = await response.json();
+    } catch {
+      throw new OpenGeniApiError(response.status, "Invalid transcription response.", {
+        code: "invalid_response",
+        mutation: true,
+        correlationId,
+      });
+    }
+    if (!isTranscribeAudioResponse(body)) {
+      throw new OpenGeniApiError(response.status, "Invalid transcription response.", {
+        code: "invalid_response",
+        mutation: true,
+        correlationId,
+      });
+    }
+    return body;
+  }
 
   async createSession(
     workspaceId: string,
@@ -499,7 +565,7 @@ export class OpenGeniClient {
   async listTurns(
     workspaceId: string,
     sessionId: string,
-    options: { limit?: number } = {},
+    options: { limit?: number; latestStarted?: boolean } = {},
   ): Promise<SessionTurn[]> {
     return await this.requestJson<SessionTurn[]>(
       "GET",
@@ -507,8 +573,15 @@ export class OpenGeniClient {
       undefined,
       {
         ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
+        ...(options.latestStarted ? { latestStarted: "1" } : {}),
       },
     );
+  }
+
+  /** Newest turn that durably emitted `turn.started`, or null before any admission. */
+  async getLatestStartedTurn(workspaceId: string, sessionId: string): Promise<SessionTurn | null> {
+    const turns = await this.listTurns(workspaceId, sessionId, { latestStarted: true });
+    return turns[0] ?? null;
   }
 
   // --- Bring-your-own-compute: Machines dashboard + metrics (M10) ------------
@@ -2888,6 +2961,26 @@ export class OpenGeniClient {
     });
   }
 
+  async getWorkspaceInsights(
+    workspaceId: string,
+    options: {
+      range?: InsightsRange;
+      provider?: string;
+      model?: string;
+    } = {},
+  ): Promise<WorkspaceInsightsResponse> {
+    return await this.requestJson<WorkspaceInsightsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/insights`,
+      undefined,
+      {
+        range: options.range ?? "week",
+        ...(options.provider !== undefined ? { provider: options.provider } : {}),
+        ...(options.model !== undefined ? { model: options.model } : {}),
+      },
+    );
+  }
+
   async getBillingEntitlements(
     options: { accountId?: string } = {},
   ): Promise<BillingEntitlementsResponse> {
@@ -3072,7 +3165,7 @@ export class OpenGeniClient {
     );
   }
 
-  private async requestJson<T>(
+  protected async requestJson<T>(
     method: string,
     path: string,
     body?: unknown,
@@ -3144,6 +3237,36 @@ function assertApiContractResponse(response: Response): void {
   const actual = response.headers.get(OPENGENI_API_CONTRACT_HEADER);
   if (actual && actual !== OPENGENI_API_CONTRACT_REVISION) {
     throw new OpenGeniApiContractMismatchError(OPENGENI_API_CONTRACT_REVISION, actual);
+  }
+}
+
+function isTranscribeAudioResponse(value: unknown): value is TranscribeAudioResponse {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record.text === "string" &&
+    Array.isArray(record.languages) &&
+    record.languages.every((language) => typeof language === "string")
+  );
+}
+
+function filenameForAudioMimeType(mimeType: string): string {
+  const bare = mimeType.trim().toLowerCase().split(";")[0] ?? "audio/webm";
+  switch (bare) {
+    case "audio/mp4":
+    case "audio/m4a":
+      return "audio.mp4";
+    case "audio/ogg":
+      return "audio.ogg";
+    case "audio/mpeg":
+    case "audio/mp3":
+      return "audio.mp3";
+    case "audio/wav":
+    case "audio/x-wav":
+      return "audio.wav";
+    case "audio/webm":
+    default:
+      return "audio.webm";
   }
 }
 

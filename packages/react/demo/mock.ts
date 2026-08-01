@@ -178,6 +178,26 @@ export class MockOpenGeniClient implements SessionClientLike {
     return CLIENT_CONFIG;
   }
 
+  async getWorkspaceModelCatalog(_workspaceId: string) {
+    return {
+      models: (CLIENT_CONFIG.models ?? []).map((model) => ({
+        ...model,
+        credentialReadiness: {
+          status: "ready" as const,
+          reason: null,
+          basis: "configuration" as const,
+          checkedAt: null,
+        },
+        availability: {
+          status: "available" as const,
+          selectable: true,
+          reason: null,
+          checkedAt: null,
+        },
+      })),
+    };
+  }
+
   async getSession(_workspaceId: string, sessionId: string): Promise<Session> {
     return this.fabricateSession(
       sessionId,
@@ -625,7 +645,15 @@ export class MockOpenGeniClient implements SessionClientLike {
     _workspaceId: string,
     sessionId: string,
   ): Promise<{ status: "completed" | "noop"; message: string }> {
-    this.bus(sessionId).append("session.context.compacted", { trigger: "operator" });
+    this.bus(sessionId).append("session.context.compaction.started", {
+      trigger: "operator",
+      estimatedTokensBefore: 120_000,
+    });
+    this.bus(sessionId).append("session.context.compacted", {
+      trigger: "operator",
+      estimatedTokensBefore: 120_000,
+      estimatedTokensAfter: 24_000,
+    });
     return { status: "completed", message: "Context compacted." };
   }
 
@@ -1605,6 +1633,7 @@ export class MockOpenGeniClient implements SessionClientLike {
       queueTailPosition: 0,
       effectiveControl: this.effectiveControl(sessionId),
       lastSequence: this.bus(sessionId).events.length,
+      codexCompactionMode: "portable",
       pinned: false,
       pinnedAt: null,
       pinVersion: 0,
@@ -1860,7 +1889,7 @@ const ACCOUNT_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
  */
 const CLIENT_CONFIG: ClientConfig = {
   deploymentRevision: "demo",
-  apiContractRevision: "2026-07-turn-instructions-v1",
+  apiContractRevision: "2026-07-workspace-artifacts-v1",
   defaultModel: "gpt-5.6-sol",
   allowedModels: ["gpt-5.6-sol", "accounts/fireworks/models/glm-5p2"],
   models: [
@@ -1907,6 +1936,7 @@ function fabricateTurn(sessionId: string, position: number, prompt: string): Ses
     toolsProvided: false,
     model: "gpt-5.2",
     reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "modal",
     sandboxOs: "linux",
     metadata: {},

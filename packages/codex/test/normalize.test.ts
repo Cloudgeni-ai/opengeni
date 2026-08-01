@@ -77,6 +77,23 @@ describe("normalizeCodexRequestBody", () => {
     expect(input[0]?.type).toBe("item_reference");
   });
 
+  test("preserves compaction_trigger and compaction items for remote v2", () => {
+    const body = normalizeCodexRequestBody(
+      {
+        input: [
+          { type: "message", role: "user", content: "hi", id: "msg_1" },
+          { type: "compaction_trigger" },
+          { type: "compaction", encrypted_content: "opaque", id: "cmp_1" },
+        ],
+      },
+      identity,
+    );
+    const input = body.input as Array<Record<string, unknown>>;
+    expect(input.map((item) => item.type)).toEqual(["message", "compaction_trigger", "compaction"]);
+    expect(input[2]?.encrypted_content).toBe("opaque");
+    expect("id" in (input[2] ?? {})).toBe(false);
+  });
+
   test("leaves tools / tool_choice / parallel_tool_calls / text untouched", () => {
     const original = {
       tools: [{ type: "function" }],
@@ -103,15 +120,15 @@ describe("normalizeCodexRequestBody", () => {
         reasoning: { effort: "medium" },
         text: { verbosity: "low" },
         prompt_cache_key: "thread_1",
-        // All of these are rejected by the ChatGPT/Codex backend (confirmed live:
-        // "Unsupported parameter: …" / "Unsupported service_tier") and MUST be stripped.
+        // Rejected by the ChatGPT/Codex backend and MUST be stripped. `service_tier`
+        // is allowlisted for Codex Fast (`priority` / `fast`).
         temperature: 0.7,
         top_p: 0.9,
         metadata: { a: "b" },
         previous_response_id: "resp_123",
         logprobs: true,
         top_logprobs: 5,
-        service_tier: "auto",
+        service_tier: "priority",
         user: "u",
         safety_identifier: "s",
         truncation: "auto",
@@ -134,9 +151,11 @@ describe("normalizeCodexRequestBody", () => {
       "include",
       "prompt_cache_key",
       "text",
+      "service_tier",
     ]) {
       expect(k in body).toBe(true); // allowlisted -> kept
     }
+    expect(body.service_tier).toBe("priority");
     for (const k of [
       "temperature",
       "top_p",
@@ -144,7 +163,6 @@ describe("normalizeCodexRequestBody", () => {
       "previous_response_id",
       "logprobs",
       "top_logprobs",
-      "service_tier",
       "user",
       "safety_identifier",
       "truncation",

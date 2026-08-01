@@ -43,7 +43,12 @@ function safePosture(): RuntimeDatabasePosture {
     },
     memberships: [],
     schemas: [
-      { name: "public", owner: "opengeni_migrator", usage: true, create: false },
+      {
+        name: "public",
+        owner: "opengeni_migrator",
+        usage: true,
+        create: false,
+      },
       {
         name: "opengeni_private",
         owner: "opengeni_migrator",
@@ -71,7 +76,11 @@ function safePosture(): RuntimeDatabasePosture {
       },
     ],
     privateRoutines: [
-      { name: "workspace_rls_visible(uuid, uuid)", owner: "opengeni_migrator", execute: true },
+      {
+        name: "workspace_rls_visible(uuid, uuid)",
+        owner: "opengeni_migrator",
+        execute: true,
+      },
     ],
   };
 }
@@ -79,13 +88,13 @@ function safePosture(): RuntimeDatabasePosture {
 describe("runtime database posture evaluator", () => {
   test("freezes the unique, sorted current-ledger table privilege classes", () => {
     const contracts = [
-      [FORCE_RLS_TABLES, 86],
+      [FORCE_RLS_TABLES, 95],
       [NON_RLS_RUNTIME_TABLES, 11],
-      [RUNTIME_FULL_DML_TABLES, 84],
+      [RUNTIME_FULL_DML_TABLES, 91],
       [RUNTIME_READ_ONLY_TABLES, 3],
-      [RUNTIME_READ_INSERT_TABLES, 5],
+      [RUNTIME_READ_INSERT_TABLES, 7],
       [PROTECTED_NO_DIRECT_DML_TABLES, 5],
-      [RUNTIME_DML_TABLES, 92],
+      [RUNTIME_DML_TABLES, 101],
     ] as const;
     for (const [tables, length] of contracts) {
       expect(tables).toHaveLength(length);
@@ -94,8 +103,8 @@ describe("runtime database posture evaluator", () => {
     }
 
     expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-    expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(97);
-    expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(97);
+    expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(106);
+    expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(106);
     expect(
       FORCE_RLS_TABLES.every(
         (table) =>

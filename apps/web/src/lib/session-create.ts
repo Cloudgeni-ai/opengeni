@@ -26,6 +26,7 @@ import type { CreateSessionRequest, NewSessionDraftOptions } from "@opengeni/sdk
 import { sessionMcpPermissionGroups } from "@/lib/permissions";
 import type {
   GoalSpec,
+  LatencyMode,
   ReasoningEffort,
   ResourceRef,
   SandboxBackend,
@@ -121,10 +122,13 @@ export type SessionDraftSubmission = {
 export type BuildCreateSessionRequestInput = {
   currentResources: ResourceRef[];
   submission: TurnSubmission;
+  /** Session-scoped system guidance that is not rendered in the chat timeline. */
+  instructions?: string;
   omitWorkspaceResources?: boolean;
   selectedTools: ToolRef[];
   defaultModel: string;
   defaultReasoningEffort: ReasoningEffort;
+  defaultLatencyMode: LatencyMode;
   clientEventId: string;
   idempotencyKey: string;
   targetSandboxId?: string | null;
@@ -177,10 +181,12 @@ export function buildCreateSessionRequest(
       : [...input.selectedTools];
   return {
     initialMessage: input.submission.text,
+    instructions: input.instructions || undefined,
     resources,
     ...(tools === undefined ? {} : { tools }),
     model: input.submission.model ?? input.defaultModel,
     reasoningEffort: input.submission.reasoningEffort ?? input.defaultReasoningEffort,
+    latencyMode: input.submission.latencyMode ?? input.defaultLatencyMode,
     clientEventId: input.clientEventId,
     idempotencyKey: input.idempotencyKey,
     ...(input.submission.sandboxBackend ? { sandboxBackend: input.submission.sandboxBackend } : {}),
@@ -196,7 +202,9 @@ export function buildCreateSessionRequest(
     ...(input.targetSandboxId ? { targetSandboxId: input.targetSandboxId } : {}),
     ...(input.workingDir ? { workingDir: input.workingDir } : {}),
     ...(input.expectedNewSessionDraftRevision !== undefined
-      ? { expectedNewSessionDraftRevision: input.expectedNewSessionDraftRevision }
+      ? {
+          expectedNewSessionDraftRevision: input.expectedNewSessionDraftRevision,
+        }
       : {}),
   };
 }

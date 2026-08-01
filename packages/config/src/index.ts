@@ -3,6 +3,7 @@ import {
   CAPABILITY_DESCRIPTORS,
   Entitlements,
   EntitlementsMode,
+  LatencyMode,
   MAX_NESTED_AGENT_DEPTH,
   ProductAccessMode,
   ReasoningEffort,
@@ -11,6 +12,7 @@ import {
   StaticUsageLimits,
   TurnExecutionPolicyV1,
   UsageLimitsMode,
+  type TurnExecutionLatencyModeSourceV1,
   type TurnExecutionModelSourceV1,
   type TurnExecutionReasoningSourceV1,
 } from "@opengeni/contracts";
@@ -231,6 +233,9 @@ const SettingsSchema = z.object({
     .regex(/^G-[A-Z0-9]+$/u)
     .optional(),
   publicBaseUrl: z.string().url().optional(),
+  // Browser origin when the web app and API use separate origins in local
+  // development. Production normally leaves this unset and uses publicBaseUrl.
+  webBaseUrl: z.string().url().optional(),
   // Base URL for the bring-your-own-compute agent release assets the get.<domain>
   // install routes redirect to. Defaults to this repo's GitHub Releases. The route
   // appends `/download/agent-v<ver>/<asset>`.
@@ -278,6 +283,9 @@ const SettingsSchema = z.object({
   integrationsOauthClientsJson: z.string().default("{}"),
   slackClientId: z.string().optional(),
   slackClientSecret: z.string().optional(),
+  slackSigningSecret: z.string().optional(),
+  googleDriveClientId: z.string().optional(),
+  googleDriveClientSecret: z.string().optional(),
   // Undefined is meaningful: the migration boundary persists the product
   // default of 3 when no deployment override is supplied.
   maxNestedAgentDepth: z.coerce.number().int().nonnegative().max(MAX_NESTED_AGENT_DEPTH).optional(),
@@ -335,12 +343,50 @@ const SettingsSchema = z.object({
   apiPort: z.coerce.number().int().positive().default(8000),
   workerHttpPort: z.coerce.number().int().positive().default(8001),
   opengeniMcpUrl: z.string().url().optional(),
+  // Origins allowed to send browser cookies cross-origin. Other origins may
+  // call the public API with bearer credentials, but never receive credentialed
+  // CORS responses.
   corsAllowOriginRegex: z.string().default(String.raw`^https?://(localhost|127\.0\.0\.1)(:\d+)?$`),
   openaiProvider: z.enum(["openai", "azure"]).default("openai"),
   openaiApiKey: z.string().optional(),
   openaiBaseUrl: z.string().optional(),
   openaiModel: z.string().default("gpt-5.6-sol"),
   openaiAllowedModels: z.string().default("gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna"),
+  // Native composer voice input (browser MediaRecorder → API transcription).
+  // Provider credentials stay server-side; ClientConfig only projects availability
+  // and hard ceilings. Selection happens once before audio is sent — never retry
+  // the same clip across vendors after an upstream request may have started.
+  voiceInputMaxDurationSeconds: z.coerce.number().int().positive().max(600).default(60),
+  voiceInputMaxSizeBytes: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(100 * 1024 * 1024)
+    .default(25 * 1024 * 1024),
+  // Preferred provider order (comma-separated ids). First configured+ready wins.
+  // Codex subscription STT is preferred by default when subscription routing is
+  // enabled; operators can put openai/azure-openai first explicitly.
+  // Supported: openai, azure-openai, codex-subscription.
+  voiceInputProviderOrder: z.string().default("codex-subscription,openai,azure-openai"),
+  // OpenAI public /v1/audio/transcriptions path. Reuses OPENGENI_OPENAI_API_KEY
+  // when voiceInputOpenaiApiKey is unset. Default model is gpt-transcribe.
+  voiceInputOpenaiEnabled: EnvBoolean.default(true),
+  voiceInputOpenaiApiKey: z.string().optional(),
+  voiceInputOpenaiBaseUrl: z.string().optional(),
+  voiceInputOpenaiModel: z.string().default("gpt-transcribe"),
+  // Azure OpenAI deployment-scoped audio transcriptions. Reuses the turn-model
+  // Azure endpoint/key/AD token when voice-specific overrides are unset.
+  voiceInputAzureEnabled: EnvBoolean.default(true),
+  voiceInputAzureEndpoint: z.string().optional(),
+  voiceInputAzureDeployment: z.string().optional(),
+  voiceInputAzureApiVersion: z.string().optional(),
+  voiceInputAzureApiKey: z.string().optional(),
+  voiceInputAzureAdToken: z.string().optional(),
+  // Legacy opt-in for undocumented ChatGPT /backend-api/transcribe. When
+  // OPENGENI_CODEX_SUBSCRIPTION_ENABLED is true, Codex STT is included without
+  // this flag. Set false and omit codex-subscription from PROVIDER_ORDER to
+  // keep subscription model routing while disabling Codex voice input.
+  voiceInputCodexExperimentalEnabled: EnvBoolean.default(false),
   modelPricingJson: z.string().default("{}"),
   // Extra (non-built-in) model providers, declared by the host as a JSON
   // provider registry. Each entry carries its own base URL, API key, wire API
@@ -844,6 +890,167 @@ const SettingsSchema = z.object({
 
 export type Settings = z.infer<typeof SettingsSchema>;
 export type McpServerConfig = Settings["mcpServers"][number];
+
+/** Declarative voice-input transcription provider ids. */
+export type VoiceInputProviderId = "openai" | "azure-openai" | "codex-subscription";
+
+export type VoiceInputProviderConfig =
+  | {
+      id: "openai";
+      kind: "openai";
+      apiKey: string;
+      baseUrl: string;
+      model: string;
+    }
+  | {
+      id: "azure-openai";
+      kind: "azure-openai";
+      endpoint: string;
+      deployment: string;
+      apiVersion: string;
+      apiKey: string | null;
+      adToken: string | null;
+    }
+  | {
+      id: "codex-subscription";
+      kind: "codex-subscription";
+      experimental: true;
+    };
+
+/**
+ * Reject empty / template secrets so `.env.example` placeholders like
+ * `your-key` cannot advertise voice input as available and then 401 upstream.
+ */
+export function isUsableVoiceInputSecret(value: string | null | undefined): value is string {
+  if (value == null) return false;
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  const normalized = trimmed.toLowerCase();
+  if (
+    normalized === "your-key" ||
+    normalized === "your_key" ||
+    normalized === "changeme" ||
+    normalized === "replace-me" ||
+    normalized === "xxx" ||
+    normalized.startsWith("your-") ||
+    normalized.startsWith("your_")
+  ) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Resolve the configured voice-input provider registry in selection order.
+ * Credentials stay in this server-side structure; ClientConfig only projects
+ * whether at least one non-experimental (or probed experimental) provider exists.
+ */
+export function resolveVoiceInputProviderRegistry(settings: Settings): VoiceInputProviderConfig[] {
+  const order = settings.voiceInputProviderOrder
+    .split(",")
+    .map((part) => part.trim())
+    .filter(
+      (part): part is VoiceInputProviderId =>
+        part === "openai" || part === "azure-openai" || part === "codex-subscription",
+    );
+  const seen = new Set<VoiceInputProviderId>();
+  const providers: VoiceInputProviderConfig[] = [];
+  for (const id of order) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    if (id === "openai") {
+      if (!settings.voiceInputOpenaiEnabled) continue;
+      const apiKey = settings.voiceInputOpenaiApiKey ?? settings.openaiApiKey;
+      if (!isUsableVoiceInputSecret(apiKey)) continue;
+      // When the turn provider is Azure-only and no voice-specific OpenAI key/URL
+      // was set, do not silently reuse a leftover OPENAI_API_KEY for voice.
+      if (
+        settings.openaiProvider === "azure" &&
+        !settings.voiceInputOpenaiApiKey &&
+        !settings.voiceInputOpenaiBaseUrl
+      ) {
+        continue;
+      }
+      providers.push({
+        id: "openai",
+        kind: "openai",
+        apiKey,
+        baseUrl: (
+          settings.voiceInputOpenaiBaseUrl ??
+          settings.openaiBaseUrl ??
+          "https://api.openai.com/v1"
+        ).replace(/\/+$/, ""),
+        model: settings.voiceInputOpenaiModel,
+      });
+      continue;
+    }
+    if (id === "azure-openai") {
+      if (!settings.voiceInputAzureEnabled) continue;
+      const endpoint = (
+        settings.voiceInputAzureEndpoint ??
+        settings.azureOpenaiEndpoint ??
+        ""
+      ).replace(/\/+$/, "");
+      const deployment = settings.voiceInputAzureDeployment ?? settings.azureOpenaiDeployment ?? "";
+      const apiVersion =
+        settings.voiceInputAzureApiVersion ??
+        settings.azureOpenaiApiVersion ??
+        "2025-04-01-preview";
+      const apiKey = settings.voiceInputAzureApiKey ?? settings.azureOpenaiApiKey ?? null;
+      const adToken = settings.voiceInputAzureAdToken ?? settings.azureOpenaiAdToken ?? null;
+      if (
+        !endpoint ||
+        !deployment ||
+        (!isUsableVoiceInputSecret(apiKey) && !isUsableVoiceInputSecret(adToken))
+      ) {
+        continue;
+      }
+      // When turn provider is OpenAI-only and no voice-specific Azure settings
+      // were provided, skip ambient Azure leftovers.
+      if (
+        settings.openaiProvider !== "azure" &&
+        !settings.voiceInputAzureEndpoint &&
+        !settings.voiceInputAzureDeployment &&
+        !settings.voiceInputAzureApiKey &&
+        !settings.voiceInputAzureAdToken
+      ) {
+        continue;
+      }
+      providers.push({
+        id: "azure-openai",
+        kind: "azure-openai",
+        endpoint,
+        deployment,
+        apiVersion,
+        apiKey: isUsableVoiceInputSecret(apiKey) ? apiKey : null,
+        adToken: isUsableVoiceInputSecret(adToken) ? adToken : null,
+      });
+      continue;
+    }
+    if (id === "codex-subscription") {
+      // Prefer Codex STT whenever subscription model routing is enabled.
+      // Operators who want OpenAI/Azure first should set PROVIDER_ORDER; omit
+      // `codex-subscription` from the order to disable Codex voice while keeping
+      // subscription turns. VOICE_INPUT_CODEX_EXPERIMENTAL is retained for
+      // back-compat docs/env but no longer gates inclusion.
+      if (!settings.codexSubscriptionEnabled) continue;
+      providers.push({
+        id: "codex-subscription",
+        kind: "codex-subscription",
+        experimental: true,
+      });
+    }
+  }
+  return providers;
+}
+
+/** True when the deployment has at least one supported (non-experimental) provider. */
+export function voiceInputDeploymentConfigured(settings: Settings): boolean {
+  return resolveVoiceInputProviderRegistry(settings).some(
+    (provider) => provider.kind !== "codex-subscription",
+  );
+}
+
 export type TemporalTlsConnectionConfig = {
   serverNameOverride?: string;
   serverRootCACertificate?: Uint8Array;
@@ -1192,88 +1399,91 @@ export interface ConfiguredModel {
   hostedWebSearch: boolean;
 }
 
-export const defaultModelPricing: Record<string, ModelPricing> = {
+/**
+ * Built-in OpenGeni credit pricing schedules.
+ *
+ * Rates are provider list prices in USD micros per 1M tokens. Debit applies
+ * `marginBps` (2_500 = +25%) on top. Long-context tiers follow OpenAI's
+ * ">272K input tokens" rule (threshold exclusive of 272_000).
+ *
+ * GPT-5.4 and older families are intentionally omitted — they are no longer
+ * offered. Codex / connected-subscription turns use `metering: external` and
+ * never consult this map.
+ *
+ * When adding or changing a billed model, run `bun run check:model-pricing`
+ * (see docs/model-providers.md § Price audit). That compares this map to
+ * llm-prices.com as a ground-truth canary; it does not generate this table.
+ */
+export const defaultModelPricing: Record<string, ModelPricingScheduleV1> = {
   "gpt-5.6-sol": {
-    inputMicrosPerMillionTokens: 5_000_000,
-    cachedInputMicrosPerMillionTokens: 500_000,
-    outputMicrosPerMillionTokens: 30_000_000,
-    marginBps: 2_500,
+    default: {
+      inputMicrosPerMillionTokens: 5_000_000,
+      cachedInputMicrosPerMillionTokens: 500_000,
+      outputMicrosPerMillionTokens: 30_000_000,
+      marginBps: 2_500,
+    },
+    inputTokenTiers: [
+      {
+        // OpenAI: prompts with >272K input tokens use the long-context rate.
+        minimumInputTokens: 272_001,
+        pricing: {
+          inputMicrosPerMillionTokens: 10_000_000,
+          cachedInputMicrosPerMillionTokens: 1_000_000,
+          outputMicrosPerMillionTokens: 45_000_000,
+          marginBps: 2_500,
+        },
+      },
+    ],
   },
   "gpt-5.6-terra": {
-    inputMicrosPerMillionTokens: 2_500_000,
-    cachedInputMicrosPerMillionTokens: 250_000,
-    outputMicrosPerMillionTokens: 15_000_000,
-    marginBps: 2_500,
+    default: {
+      inputMicrosPerMillionTokens: 2_000_000,
+      cachedInputMicrosPerMillionTokens: 200_000,
+      outputMicrosPerMillionTokens: 12_000_000,
+      marginBps: 2_500,
+    },
+    inputTokenTiers: [
+      {
+        minimumInputTokens: 272_001,
+        pricing: {
+          inputMicrosPerMillionTokens: 4_000_000,
+          cachedInputMicrosPerMillionTokens: 400_000,
+          outputMicrosPerMillionTokens: 18_000_000,
+          marginBps: 2_500,
+        },
+      },
+    ],
   },
   "gpt-5.6-luna": {
-    inputMicrosPerMillionTokens: 1_000_000,
-    cachedInputMicrosPerMillionTokens: 100_000,
-    outputMicrosPerMillionTokens: 6_000_000,
-    marginBps: 2_500,
-  },
-  "gpt-5.4": {
-    inputMicrosPerMillionTokens: 2_500_000,
-    cachedInputMicrosPerMillionTokens: 250_000,
-    outputMicrosPerMillionTokens: 15_000_000,
-    marginBps: 2_500,
-  },
-  "gpt-5.4-mini": {
-    inputMicrosPerMillionTokens: 750_000,
-    cachedInputMicrosPerMillionTokens: 75_000,
-    outputMicrosPerMillionTokens: 4_500_000,
-    marginBps: 2_500,
-  },
-  "gpt-5.2": {
-    inputMicrosPerMillionTokens: 1_750_000,
-    cachedInputMicrosPerMillionTokens: 175_000,
-    outputMicrosPerMillionTokens: 14_000_000,
-    marginBps: 2_500,
-  },
-  "gpt-5.2-chat-latest": {
-    inputMicrosPerMillionTokens: 1_750_000,
-    cachedInputMicrosPerMillionTokens: 175_000,
-    outputMicrosPerMillionTokens: 14_000_000,
-    marginBps: 2_500,
-  },
-  "gpt-5.2-codex": {
-    inputMicrosPerMillionTokens: 1_750_000,
-    cachedInputMicrosPerMillionTokens: 175_000,
-    outputMicrosPerMillionTokens: 14_000_000,
-    marginBps: 2_500,
-  },
-  "gpt-5.1": {
-    inputMicrosPerMillionTokens: 1_250_000,
-    cachedInputMicrosPerMillionTokens: 125_000,
-    outputMicrosPerMillionTokens: 10_000_000,
-    marginBps: 2_500,
-  },
-  "gpt-5": {
-    inputMicrosPerMillionTokens: 1_250_000,
-    cachedInputMicrosPerMillionTokens: 125_000,
-    outputMicrosPerMillionTokens: 10_000_000,
-    marginBps: 2_500,
-  },
-  "gpt-5-mini": {
-    inputMicrosPerMillionTokens: 250_000,
-    cachedInputMicrosPerMillionTokens: 25_000,
-    outputMicrosPerMillionTokens: 2_000_000,
-    marginBps: 2_500,
-  },
-  "gpt-5-nano": {
-    inputMicrosPerMillionTokens: 50_000,
-    cachedInputMicrosPerMillionTokens: 5_000,
-    outputMicrosPerMillionTokens: 400_000,
-    marginBps: 2_500,
+    default: {
+      inputMicrosPerMillionTokens: 200_000,
+      cachedInputMicrosPerMillionTokens: 20_000,
+      outputMicrosPerMillionTokens: 1_200_000,
+      marginBps: 2_500,
+    },
+    inputTokenTiers: [
+      {
+        minimumInputTokens: 272_001,
+        pricing: {
+          inputMicrosPerMillionTokens: 400_000,
+          cachedInputMicrosPerMillionTokens: 40_000,
+          outputMicrosPerMillionTokens: 1_800_000,
+          marginBps: 2_500,
+        },
+      },
+    ],
   },
   // Fireworks AI / GLM 5.2 — the first shipped non-OpenAI registry model. A
   // built-in default pricing entry makes managed billing work out of the box
   // for hosts that expose this model via OPENGENI_MODEL_PROVIDERS_JSON without
   // also setting OPENGENI_MODEL_PRICING_JSON.
   "accounts/fireworks/models/glm-5p2": {
-    inputMicrosPerMillionTokens: 1_400_000,
-    cachedInputMicrosPerMillionTokens: 260_000,
-    outputMicrosPerMillionTokens: 4_400_000,
-    marginBps: 2_500,
+    default: {
+      inputMicrosPerMillionTokens: 1_400_000,
+      cachedInputMicrosPerMillionTokens: 140_000,
+      outputMicrosPerMillionTokens: 4_400_000,
+      marginBps: 2_500,
+    },
   },
 };
 
@@ -1382,6 +1592,7 @@ export function getSettings(): Settings {
     analyticsPosthogHost: optional("OPENGENI_ANALYTICS_POSTHOG_HOST"),
     analyticsGa4MeasurementId: optional("OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID"),
     publicBaseUrl: optional("OPENGENI_PUBLIC_BASE_URL"),
+    webBaseUrl: optional("OPENGENI_WEB_BASE_URL"),
     agentReleasesBaseUrl: optional("OPENGENI_AGENT_RELEASES_BASE_URL"),
     agentStableVersion: optional("OPENGENI_AGENT_STABLE_VERSION"),
     productAccessMode: optional("OPENGENI_PRODUCT_ACCESS_MODE"),
@@ -1405,6 +1616,9 @@ export function getSettings(): Settings {
     integrationsOauthClientsJson: optional("OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON"),
     slackClientId: optional("OPENGENI_SLACK_CLIENT_ID"),
     slackClientSecret: optional("OPENGENI_SLACK_CLIENT_SECRET"),
+    slackSigningSecret: optional("OPENGENI_SLACK_SIGNING_SECRET"),
+    googleDriveClientId: optional("OPENGENI_GOOGLE_DRIVE_CLIENT_ID"),
+    googleDriveClientSecret: optional("OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET"),
     maxNestedAgentDepth: optional("OPENGENI_MAX_NESTED_AGENT_DEPTH"),
     goalMaxAutoContinuations: optional("OPENGENI_GOAL_MAX_AUTO_CONTINUATIONS"),
     goalNoProgressLimit: optional("OPENGENI_GOAL_NO_PROGRESS_LIMIT"),
@@ -1429,6 +1643,20 @@ export function getSettings(): Settings {
     openaiBaseUrl: optional("OPENGENI_OPENAI_BASE_URL") ?? optional("OPENAI_BASE_URL"),
     openaiModel: optional("OPENGENI_OPENAI_MODEL"),
     openaiAllowedModels: optional("OPENGENI_OPENAI_ALLOWED_MODELS"),
+    voiceInputMaxDurationSeconds: optional("OPENGENI_VOICE_INPUT_MAX_DURATION_SECONDS"),
+    voiceInputMaxSizeBytes: optional("OPENGENI_VOICE_INPUT_MAX_SIZE_BYTES"),
+    voiceInputProviderOrder: optional("OPENGENI_VOICE_INPUT_PROVIDER_ORDER"),
+    voiceInputOpenaiEnabled: optional("OPENGENI_VOICE_INPUT_OPENAI_ENABLED"),
+    voiceInputOpenaiApiKey: optional("OPENGENI_VOICE_INPUT_OPENAI_API_KEY"),
+    voiceInputOpenaiBaseUrl: optional("OPENGENI_VOICE_INPUT_OPENAI_BASE_URL"),
+    voiceInputOpenaiModel: optional("OPENGENI_VOICE_INPUT_OPENAI_MODEL"),
+    voiceInputAzureEnabled: optional("OPENGENI_VOICE_INPUT_AZURE_ENABLED"),
+    voiceInputAzureEndpoint: optional("OPENGENI_VOICE_INPUT_AZURE_ENDPOINT"),
+    voiceInputAzureDeployment: optional("OPENGENI_VOICE_INPUT_AZURE_DEPLOYMENT"),
+    voiceInputAzureApiVersion: optional("OPENGENI_VOICE_INPUT_AZURE_API_VERSION"),
+    voiceInputAzureApiKey: optional("OPENGENI_VOICE_INPUT_AZURE_API_KEY"),
+    voiceInputAzureAdToken: optional("OPENGENI_VOICE_INPUT_AZURE_AD_TOKEN"),
+    voiceInputCodexExperimentalEnabled: optional("OPENGENI_VOICE_INPUT_CODEX_EXPERIMENTAL"),
     modelPricingJson: optional("OPENGENI_MODEL_PRICING_JSON"),
     modelProvidersJson: optional("OPENGENI_MODEL_PROVIDERS_JSON"),
     codexSubscriptionEnabled: optional("OPENGENI_CODEX_SUBSCRIPTION_ENABLED"),
@@ -1621,6 +1849,23 @@ export function getSettings(): Settings {
   return settings;
 }
 
+const LOCAL_FIRST_PARTY_DELEGATION_SECRET = "opengeni-local-first-party-delegation-secret-v1";
+
+/**
+ * First-party session tools need a shared HMAC identity even in the unauthenticated
+ * local product mode. A fixed local-only value is no broader than that mode's
+ * existing access boundary, while configured and managed deployments continue to
+ * require an operator-provided secret.
+ */
+export function resolveFirstPartyDelegationSecret(settings: Settings): string | undefined {
+  const explicit = settings.delegationSecret?.trim();
+  if (explicit) return explicit;
+  return settings.productAccessMode === "local" &&
+    (settings.environment === "local" || settings.environment === "test")
+    ? LOCAL_FIRST_PARTY_DELEGATION_SECRET
+    : undefined;
+}
+
 /**
  * The Modal sandbox idle timeout (seconds) the provider actually passes as
  * idleTimeoutMs (sandbox-file-persistence). When the operator did not pin
@@ -1634,6 +1879,23 @@ export function getSettings(): Settings {
  */
 export function effectiveModalIdleTimeoutSeconds(settings: Settings): number {
   return settings.modalIdleTimeoutSeconds ?? settings.modalTimeoutSeconds;
+}
+
+/**
+ * One shared upper bound for the durable provider-capture claim and for command
+ * admission waiting behind it. The SDK request itself is bounded by
+ * sandboxSnapshotTimeoutMs; the extra window lets a non-cancellable provider
+ * response settle and release its exact claim without turning a normal
+ * checkpoint into a visible command failure. Database validation caps both
+ * consumers at one hour.
+ */
+export function sandboxArchiveCaptureTimeoutMs(
+  settings: Pick<Settings, "sandboxSnapshotTimeoutMs">,
+): number {
+  return Math.min(
+    60 * 60_000,
+    Math.max(settings.sandboxSnapshotTimeoutMs + 30_000, settings.sandboxSnapshotTimeoutMs * 2),
+  );
 }
 
 export function collectSandboxEnvironment(
@@ -1926,6 +2188,115 @@ function legacyModelCapabilities(
   });
 }
 
+/** OpenAI GPT-5.6 Fast mode is 2× Standard list rates (service_tier fast/priority). */
+const GPT56_FAST_BILLING_MULTIPLIER_BPS = 20_000;
+
+/**
+ * Product display label for catalog/picker UI.
+ * Same string for OpenAI and Codex copies of a slug (`gpt-5.6-luna` and
+ * `codex/gpt-5.6-luna` → `GPT-5.6 Luna`). Non-gpt ids pass through unchanged.
+ */
+export function productLabelForModelId(modelId: string): string {
+  const slug = modelId.startsWith(CODEX_MODEL_ID_PREFIX)
+    ? modelId.slice(CODEX_MODEL_ID_PREFIX.length)
+    : modelId;
+  const match = /^(gpt-\d+(?:\.\d+)?)(?:-(.+))?$/i.exec(slug);
+  if (!match) {
+    return slug;
+  }
+  const family = match[1]!.replace(/^gpt/i, "GPT");
+  const rest = match[2];
+  if (!rest) {
+    return family;
+  }
+  const suffix = rest
+    .split("-")
+    .filter((part) => part.length > 0)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+    .join(" ");
+  return suffix.length > 0 ? `${family} ${suffix}` : family;
+}
+
+function builtinLatencyModesForModel(modelId: string): Array<{
+  id: z.infer<typeof ModelLatencyModeV1>;
+  upstream: "supported" | "unsupported" | "unknown";
+  runnable: boolean;
+  billingMultiplierBps?: number;
+}> {
+  if (
+    modelId === "gpt-5.6-sol" ||
+    modelId === "gpt-5.6-terra" ||
+    modelId === "gpt-5.6-luna" ||
+    modelId.startsWith("codex/gpt-5.6-")
+  ) {
+    return [
+      { id: "standard", upstream: "supported", runnable: true },
+      {
+        id: "fast",
+        upstream: "supported",
+        runnable: true,
+        billingMultiplierBps: GPT56_FAST_BILLING_MULTIPLIER_BPS,
+      },
+    ];
+  }
+  return [{ id: "standard", upstream: "unknown", runnable: true }];
+}
+
+/**
+ * Map OpenGeni latency mode to the provider `service_tier` wire value.
+ * Azure and Codex ChatGPT accept `priority`; OpenAI API accepts `fast` (alias of priority).
+ * Standard omits the field.
+ */
+export function serviceTierForLatencyMode(
+  providerId: string,
+  latencyMode: LatencyMode,
+): "fast" | "priority" | undefined {
+  if (latencyMode === "standard") {
+    return undefined;
+  }
+  if (providerId === "azure" || providerId === CODEX_PROVIDER_ID) {
+    return "priority";
+  }
+  return "fast";
+}
+
+/** True when the response tier fulfills a non-standard Fast/priority request. */
+export function responseSatisfiesLatencyMode(
+  requested: LatencyMode,
+  responseServiceTier: string | null | undefined,
+): boolean {
+  if (requested === "standard") {
+    return true;
+  }
+  return responseServiceTier === "priority" || responseServiceTier === "fast";
+}
+
+export function runnableLatencyModesForModel(settings: Settings, modelId: string): LatencyMode[] {
+  const resolved = resolveModelProvider(
+    settingsForTurnExecutionPolicy(settings, modelId),
+    canonicalizeConfiguredModelId(settings, modelId),
+  );
+  if (!resolved) {
+    return ["standard"];
+  }
+  return resolved.model.capabilities.latencyModes
+    .filter((mode) => mode.runnable)
+    .map((mode) => LatencyMode.parse(mode.id));
+}
+
+function assertLatencyModeRunnable(
+  settings: Settings,
+  modelId: string,
+  latencyMode: LatencyMode,
+): void {
+  const runnable = runnableLatencyModesForModel(settings, modelId);
+  if (!runnable.includes(latencyMode)) {
+    throw new Error(
+      `latency mode ${latencyMode} is not runnable for model ${modelId} (allowed: ${runnable.join(", ")})`,
+    );
+  }
+}
+
 function registryCredentialSource(provider: RegistryProvider): CredentialSourceV1 {
   return provider.kind === "codex-subscription"
     ? { kind: "connected_subscription", provider: "codex" }
@@ -1946,8 +2317,16 @@ function builtinCredentialSource(settings: Settings): CredentialSourceV1 {
 }
 
 function staticRequestMetadataForDigest(provider: ResolvedModelProvider): {
-  headers: Array<{ name: string; classification: "public" | "secret"; value?: string }>;
-  query: Array<{ name: string; classification: "public" | "secret"; value?: string }>;
+  headers: Array<{
+    name: string;
+    classification: "public" | "secret";
+    value?: string;
+  }>;
+  query: Array<{
+    name: string;
+    classification: "public" | "secret";
+    value?: string;
+  }>;
 } {
   const publicHeaders = new Set(provider.publicDefaultHeaderNames ?? []);
   const publicQuery = new Set(provider.publicDefaultQueryNames ?? []);
@@ -2099,23 +2478,36 @@ export function withCodexCatalogProvider(settings: Settings): Settings {
     label: "Codex (ChatGPT subscription)",
     api: "responses",
     baseUrl: CODEX_PROVIDER_BASE_URL,
-    models: CODEX_FALLBACK_MODEL_SLUGS.map((slug) => ({
-      id: `${CODEX_MODEL_ID_PREFIX}${slug}`,
-      upstreamModelId: slug,
-      label: slug,
-      reasoningEffort: true,
-      // The ChatGPT/Codex Responses backend accepts the native web_search
-      // hosted tool (unlike hosted apply_patch/computer transports). Declaring
-      // this here makes provider resolution truthful; the worker still applies
-      // the durable session/turn policy gate before attaching it.
-      hostedWebSearch: true,
-      contextWindowTokens: CODEX_MODEL_CONTEXT_WINDOW_TOKENS,
-      effectiveContextWindowTokens: CODEX_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
-      autoCompactTokenLimit: CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
-      toolOutputTruncationTokens: CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
-    })),
+    models: CODEX_FALLBACK_MODEL_SLUGS.map((slug) => {
+      const capabilities = {
+        ...legacyModelCapabilities(settings, {
+          reasoningEffort: true,
+          hostedWebSearch: true,
+        }),
+        latencyModes: builtinLatencyModesForModel(`${CODEX_MODEL_ID_PREFIX}${slug}`),
+      };
+      return {
+        id: `${CODEX_MODEL_ID_PREFIX}${slug}`,
+        upstreamModelId: slug,
+        label: productLabelForModelId(slug),
+        reasoningEffort: true,
+        // The ChatGPT/Codex Responses backend accepts the native web_search
+        // hosted tool (unlike hosted apply_patch/computer transports). Declaring
+        // this here makes provider resolution truthful; the worker still applies
+        // the durable session/turn policy gate before attaching it.
+        hostedWebSearch: true,
+        capabilities,
+        contextWindowTokens: CODEX_MODEL_CONTEXT_WINDOW_TOKENS,
+        effectiveContextWindowTokens: CODEX_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
+        autoCompactTokenLimit: CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
+        toolOutputTruncationTokens: CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
+      };
+    }),
   };
-  return { ...settings, modelProvidersJson: JSON.stringify([...providers, provider]) };
+  return {
+    ...settings,
+    modelProvidersJson: JSON.stringify([...providers, provider]),
+  };
 }
 
 /**
@@ -2260,14 +2652,17 @@ export function configuredModels(settings: Settings): ConfiguredModel[] {
   ])
     .filter((id) => !isRegistryNamespaced(id))
     .map((id) => {
-      const capabilities = legacyModelCapabilities(settings, {
-        reasoningEffort: true,
-        hostedWebSearch: settings.webSearchEnabled,
-      });
+      const capabilities = {
+        ...legacyModelCapabilities(settings, {
+          reasoningEffort: true,
+          hostedWebSearch: settings.webSearchEnabled,
+        }),
+        latencyModes: builtinLatencyModesForModel(id),
+      };
       return finalizeConfiguredModel(settings, builtinProvider, {
         id,
         aliases: [],
-        label: id,
+        label: productLabelForModelId(id),
         providerId: builtinId,
         providerLabel: builtinLabel,
         api: "responses" as const,
@@ -2301,7 +2696,7 @@ export function configuredModels(settings: Settings): ConfiguredModel[] {
         finalizeConfiguredModel(settings, resolvedProvider, {
           id: model.id,
           aliases: [...(model.aliases ?? [])],
-          label: model.label ?? model.id,
+          label: model.label ?? productLabelForModelId(model.id),
           providerId: provider.id,
           providerLabel,
           api: provider.api,
@@ -2318,7 +2713,9 @@ export function configuredModels(settings: Settings): ConfiguredModel[] {
             : { contextWindowTokens: model.contextWindowTokens }),
           ...(model.effectiveContextWindowTokens === undefined
             ? {}
-            : { effectiveContextWindowTokens: model.effectiveContextWindowTokens }),
+            : {
+                effectiveContextWindowTokens: model.effectiveContextWindowTokens,
+              }),
           ...(model.autoCompactTokenLimit === undefined
             ? {}
             : { autoCompactTokenLimit: model.autoCompactTokenLimit }),
@@ -2388,6 +2785,8 @@ export type ResolveTurnExecutionPolicyV1Input = {
   modelSource: TurnExecutionModelSourceV1;
   reasoningEffort: Settings["openaiReasoningEffort"];
   reasoningSource: TurnExecutionReasoningSourceV1;
+  latencyMode?: LatencyMode;
+  latencyModeSource?: TurnExecutionLatencyModeSourceV1;
 };
 
 function settingsForTurnExecutionPolicy(settings: Settings, modelId: string): Settings {
@@ -2417,6 +2816,9 @@ export function resolveTurnExecutionPolicyV1(
   ) {
     throw new Error("Turn execution policy requested model does not canonicalize to its product");
   }
+  const latencyMode = LatencyMode.parse(input.latencyMode ?? "standard");
+  const latencyModeSource = input.latencyModeSource ?? "deployment";
+  assertLatencyModeRunnable(catalogSettings, productModelId, latencyMode);
   return TurnExecutionPolicyV1.parse({
     schemaVersion: 1,
     productModelId,
@@ -2424,6 +2826,8 @@ export function resolveTurnExecutionPolicyV1(
     modelSource: input.modelSource,
     reasoningEffort: input.reasoningEffort,
     reasoningSource: input.reasoningSource,
+    latencyMode,
+    latencyModeSource,
     providerId: resolved.provider.id,
     upstreamModelId: resolved.model.upstreamModelId,
     wireApi: resolved.model.api,
@@ -2444,6 +2848,7 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
   expected: {
     modelId: string;
     reasoningEffort: Settings["openaiReasoningEffort"];
+    latencyMode?: LatencyMode;
   },
 ): {
   policy: TurnExecutionPolicyV1;
@@ -2453,12 +2858,17 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
   const parsed = TurnExecutionPolicyV1.parse(policy);
   const catalogSettings = settingsForTurnExecutionPolicy(settings, parsed.productModelId);
   const canonicalExpectedModel = canonicalizeConfiguredModelId(catalogSettings, expected.modelId);
+  const expectedLatencyMode = expected.latencyMode ?? parsed.latencyMode;
   if (
     parsed.productModelId !== canonicalExpectedModel ||
-    parsed.reasoningEffort !== expected.reasoningEffort
+    parsed.reasoningEffort !== expected.reasoningEffort ||
+    parsed.latencyMode !== expectedLatencyMode
   ) {
-    throw new Error("Turn execution policy does not match the accepted turn model/reasoning");
+    throw new Error(
+      "Turn execution policy does not match the accepted turn model/reasoning/latency",
+    );
   }
+  assertLatencyModeRunnable(catalogSettings, parsed.productModelId, parsed.latencyMode);
   if (
     parsed.requestedModelId !== null &&
     canonicalizeConfiguredModelId(catalogSettings, parsed.requestedModelId) !==
@@ -2494,7 +2904,10 @@ export function configuredModelPricingSchedules(
   settings: Settings,
 ): Record<string, ModelPricingScheduleV1> {
   const defaults = Object.fromEntries(
-    Object.entries(defaultModelPricing).map(([model, pricing]) => [model, { default: pricing }]),
+    Object.entries(defaultModelPricing).map(([model, pricing]) => [
+      model,
+      normalizeModelPricingSchedule(pricing),
+    ]),
   );
   const registry: Record<string, ModelPricingScheduleV1> = {};
   for (const provider of parseModelProvidersJson(settings.modelProvidersJson)) {
@@ -2621,6 +3034,7 @@ export function calculateModelUsageCostMicros(
   settings: Settings,
   model: string,
   usage: ModelUsageInput,
+  options?: { latencyMode?: LatencyMode },
 ): number {
   const schedule = configuredModelPricingSchedules(settings)[model];
   if (!schedule) {
@@ -2642,6 +3056,20 @@ export function calculateModelUsageCostMicros(
   for (const [pricing, rawCost] of rawCostByPricing) {
     const marginBps = pricing.marginBps ?? 0;
     total += Math.ceil((rawCost * (10_000 + marginBps)) / 10_000);
+  }
+  const latencyMode = options?.latencyMode ?? "standard";
+  if (latencyMode !== "standard") {
+    const catalogSettings = settingsForTurnExecutionPolicy(settings, model);
+    const resolved = resolveModelProvider(
+      catalogSettings,
+      canonicalizeConfiguredModelId(catalogSettings, model),
+    );
+    const multiplierBps = resolved?.model.capabilities.latencyModes.find(
+      (mode) => mode.id === latencyMode && mode.runnable,
+    )?.billingMultiplierBps;
+    if (multiplierBps && multiplierBps > 0) {
+      total = Math.ceil((total * multiplierBps) / 10_000);
+    }
   }
   return total;
 }
@@ -3066,7 +3494,9 @@ export function parseMcpServers(raw: string | undefined): unknown[] | undefined 
     return parsed;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`OPENGENI_MCP_SERVERS must be a JSON array: ${message}`, { cause: error });
+    throw new Error(`OPENGENI_MCP_SERVERS must be a JSON array: ${message}`, {
+      cause: error,
+    });
   }
 }
 
@@ -3452,6 +3882,11 @@ function validateSettings(settings: Settings): void {
     );
   }
   if (settings.slackClientId) {
+    if (!settings.slackSigningSecret) {
+      throw new Error(
+        "OPENGENI_SLACK_SIGNING_SECRET is required when the OpenGeni Slack app is configured",
+      );
+    }
     if (!settings.publicBaseUrl) {
       throw new Error(
         "OPENGENI_PUBLIC_BASE_URL is required when the OpenGeni Slack app is configured",
@@ -3468,6 +3903,31 @@ function validateSettings(settings: Settings): void {
     if (!settings.integrationsStateSecret) {
       throw new Error(
         "OPENGENI_INTEGRATIONS_STATE_SECRET is required when the OpenGeni Slack app is configured",
+      );
+    }
+  }
+  if (Boolean(settings.googleDriveClientId) !== Boolean(settings.googleDriveClientSecret)) {
+    throw new Error(
+      "OPENGENI_GOOGLE_DRIVE_CLIENT_ID and OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET must be configured together",
+    );
+  }
+  if (settings.googleDriveClientId) {
+    if (!settings.publicBaseUrl) {
+      throw new Error(
+        "OPENGENI_PUBLIC_BASE_URL is required when the Google Drive integration is configured",
+      );
+    }
+    if (
+      !settings.publicBaseUrl.startsWith("https://") &&
+      !["local", "test"].includes(settings.environment)
+    ) {
+      throw new Error(
+        "OPENGENI_PUBLIC_BASE_URL must use https when the Google Drive integration is configured outside local/test",
+      );
+    }
+    if (!settings.integrationsStateSecret) {
+      throw new Error(
+        "OPENGENI_INTEGRATIONS_STATE_SECRET is required when the Google Drive integration is configured",
       );
     }
   }

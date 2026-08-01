@@ -1,5 +1,158 @@
 # @opengeni/worker-bundle
 
+## 0.13.6
+
+### Patch Changes
+
+- Updated dependencies [dcc35c5]
+- Updated dependencies [1ec9912]
+  - @opengeni/config@0.8.0
+  - @opengeni/contracts@0.27.0
+  - @opengeni/core@0.15.0
+  - @opengeni/db@0.17.0
+  - @opengeni/runtime@0.15.0
+  - @opengeni/documents@0.2.60
+  - @opengeni/github@0.4.10
+  - @opengeni/storage@0.2.47
+  - @opengeni/events@0.3.51
+
+## 0.13.5
+
+### Patch Changes
+
+- Updated dependencies [cb4d78d]
+  - @opengeni/runtime@0.14.16
+  - @opengeni/core@0.14.4
+
+## 0.13.4
+
+### Patch Changes
+
+- Updated dependencies [c52acc0]
+  - @opengeni/codex@0.2.9
+  - @opengeni/config@0.7.22
+  - @opengeni/contracts@0.26.1
+  - @opengeni/core@0.14.3
+  - @opengeni/db@0.16.2
+  - @opengeni/runtime@0.14.15
+  - @opengeni/documents@0.2.59
+  - @opengeni/github@0.4.9
+  - @opengeni/storage@0.2.46
+  - @opengeni/events@0.3.50
+
+## 0.13.3
+
+### Patch Changes
+
+- Updated dependencies [11cdf20]
+  - @opengeni/runtime@0.14.14
+  - @opengeni/core@0.14.2
+
+## 0.13.2
+
+### Patch Changes
+
+- 472b4d1: Reopen turn-end workspace capture through an exact-instance, non-owning sandbox read handle and allow a production-realistic capture deadline.
+
+## 0.13.1
+
+### Patch Changes
+
+- 02fb98c: Reconcile expired draining sandboxes after their exact provider instance has disappeared.
+- Updated dependencies [02fb98c]
+  - @opengeni/db@0.16.1
+  - @opengeni/core@0.14.1
+  - @opengeni/documents@0.2.58
+  - @opengeni/events@0.3.49
+
+## 0.13.0
+
+### Minor Changes
+
+- f413e6c: Add real Workspace Insights: durable `model_call_facts` after authoritative
+  `agent.model.usage`, a `workspace:admin` insights API over usage_events + facts +
+  live joins, SDK client, and a web console that drops mock rollups for honest
+  UTC credit/token/cache/warm/caps reporting.
+
+### Patch Changes
+
+- Updated dependencies [b5175a8]
+- Updated dependencies [f413e6c]
+  - @opengeni/db@0.16.0
+  - @opengeni/contracts@0.26.0
+  - @opengeni/core@0.14.0
+  - @opengeni/documents@0.2.57
+  - @opengeni/events@0.3.48
+  - @opengeni/config@0.7.21
+  - @opengeni/github@0.4.8
+  - @opengeni/runtime@0.14.13
+  - @opengeni/storage@0.2.45
+
+## 0.12.21
+
+### Patch Changes
+
+- 42428a2: Add per-session Codex remote compaction v2 (`remote_v2` / `portable`), with UI landmarks, Codex-only model locking, and opaque token accounting aligned to Codex CLI.
+- 7b65614: Keep over-limit viewer-only sandboxes drained until a fresh serialized balance
+  or monthly-cap evaluation clears a durable workspace admission gate. Viewer
+  reattach can no longer re-arm a draining box or spawn a cold successor, while a
+  turn-held sandbox remains viewable.
+- Updated dependencies [0199108]
+- Updated dependencies [42428a2]
+- Updated dependencies [7b65614]
+- Updated dependencies [b2e975f]
+- Updated dependencies [9f3b931]
+  - @opengeni/contracts@0.25.0
+  - @opengeni/core@0.13.10
+  - @opengeni/db@0.15.6
+  - @opengeni/runtime@0.14.12
+  - @opengeni/config@0.7.20
+  - @opengeni/github@0.4.7
+  - @opengeni/storage@0.2.44
+  - @opengeni/documents@0.2.56
+  - @opengeni/events@0.3.47
+
+## 0.12.20
+
+### Patch Changes
+
+- 710b081: Keep sessions usable when a previously selected MCP capability is disconnected or removed. Unavailable historical refs remain visible in effective policy but are omitted from executable tools, and the agent receives a bounded turn-level warning not to claim access to the missing source.
+- b7df541: Prevent provider-native checkpoint capture from racing sandbox operations while
+  the provider has paused the source box. Capture now owns a durable
+  lease/epoch/instance/generation claim, blocks new holders and mutations, drains
+  provider-local reads before entering the exclusive snapshot call, and retains
+  ownership through late provider settlement and exact stale-claim recovery.
+  Modal's typed completed-exec stdin race is also normalized into a side-effect-free
+  terminal poll, so an exec that exits between local lookup and the provider write
+  settles its retained process instead of failing the enclosing turn.
+- Updated dependencies [710b081]
+- Updated dependencies [b7df541]
+  - @opengeni/core@0.13.9
+  - @opengeni/contracts@0.24.3
+  - @opengeni/config@0.7.19
+  - @opengeni/db@0.15.5
+  - @opengeni/runtime@0.14.11
+  - @opengeni/documents@0.2.55
+  - @opengeni/events@0.3.46
+  - @opengeni/github@0.4.6
+  - @opengeni/storage@0.2.43
+
+## 0.12.19
+
+### Patch Changes
+
+- Updated dependencies [84fb671]
+- Updated dependencies [96eb64b]
+  - @opengeni/db@0.15.4
+  - @opengeni/config@0.7.18
+  - @opengeni/contracts@0.24.2
+  - @opengeni/github@0.4.5
+  - @opengeni/runtime@0.14.10
+  - @opengeni/storage@0.2.42
+  - @opengeni/core@0.13.8
+  - @opengeni/documents@0.2.54
+  - @opengeni/events@0.3.45
+
 ## 0.12.18
 
 ### Patch Changes

@@ -6,6 +6,33 @@ import {
   type SessionEventBoundarySurface,
 } from "./event-preview";
 
+export * from "./slack-bot-scopes";
+
+export {
+  CreateWorkspaceArtifactRequest,
+  PublishWorkspaceArtifactVersionRequest,
+  RollbackWorkspaceArtifactRequest,
+  WorkspaceArtifact,
+  WorkspaceArtifactContentResponse,
+  WorkspaceArtifactDetailResponse,
+  WorkspaceArtifactEvent,
+  WorkspaceArtifactEventType,
+  WorkspaceArtifactHtml,
+  WorkspaceArtifactListQuery,
+  WorkspaceArtifactListResponse,
+  WorkspaceArtifactMutationResponse,
+  WorkspaceArtifactSlug,
+  WorkspaceArtifactStatus,
+  WorkspaceArtifactVersion,
+  WORKSPACE_ARTIFACT_CURSOR_MAX_CHARS,
+  WORKSPACE_ARTIFACT_DESCRIPTION_MAX_CHARS,
+  WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES,
+  WORKSPACE_ARTIFACT_LIST_DEFAULT,
+  WORKSPACE_ARTIFACT_LIST_MAX,
+  WORKSPACE_ARTIFACT_TITLE_MAX_CHARS,
+  normalizeWorkspaceArtifactSlug,
+} from "./artifacts";
+
 export {
   SESSION_EVENT_PAYLOAD_MAX_BYTES,
   approximateSessionEventTokens,
@@ -477,6 +504,10 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
 };
 
 export const ReasoningEffort = z.enum(["none", "minimal", "low", "medium", "high", "xhigh"]);
+
+/** Provider service-tier / latency mode selected for a turn or session default. */
+export const LatencyMode = z.enum(["standard", "priority", "fast"]);
+export type LatencyMode = z.infer<typeof LatencyMode>;
 export type ReasoningEffort = z.infer<typeof ReasoningEffort>;
 
 export const ErrorCode = z.enum([
@@ -490,6 +521,7 @@ export const ErrorCode = z.enum([
   "limit_exceeded",
   "nested_agent_depth_exceeded",
   "nested_agent_depth_override_forbidden",
+  "codex_compaction_v2_provider_locked",
   "provider_verification_failed",
   "upstream_unavailable",
   "internal_error",
@@ -619,6 +651,10 @@ export const Permission = z.enum([
   // super-wildcard over both.
   "rigs:use",
   "rigs:manage",
+  // Workspace-published HTML artifacts. Read permits listing/source retrieval;
+  // publish permits create, version publication, and rollback.
+  "artifacts:read",
+  "artifacts:publish",
 ]);
 export type Permission = z.infer<typeof Permission>;
 
@@ -644,6 +680,8 @@ export const DEFAULT_FIRST_PARTY_MCP_PERMISSIONS = [
   "variable-sets:manage",
   "rigs:use",
   "github:use",
+  "artifacts:read",
+  "artifacts:publish",
 ] as const satisfies readonly Permission[];
 
 /**
@@ -711,6 +749,12 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "slack_bot_file_info",
   "slack_bot_file_content",
   "slack_bot_post_message",
+  "slack_bot_delete_message",
+  "artifacts_list",
+  "artifacts_get_source",
+  "artifacts_create",
+  "artifacts_publish",
+  "artifacts_rollback",
 ] as const;
 export const FirstPartyMcpToolName = z.enum(FIRST_PARTY_MCP_TOOL_NAMES);
 export type FirstPartyMcpToolName = z.infer<typeof FirstPartyMcpToolName>;
@@ -826,9 +870,16 @@ export const TranscriptionErrorCode = z.enum([
   "policy_blocked",
   "timeout",
   "cancelled",
+  "unavailable",
+  "too_large",
+  "invalid_audio",
   "unknown",
 ]);
 export type TranscriptionErrorCode = z.infer<typeof TranscriptionErrorCode>;
+
+/** Stable user-safe error codes for the native voice-input transcription path. */
+export const VoiceInputErrorCode = TranscriptionErrorCode;
+export type VoiceInputErrorCode = TranscriptionErrorCode;
 
 export const TranscriptionTimeSpan = z
   .object({
@@ -951,6 +1002,9 @@ export const TranscriptionEvent = z.discriminatedUnion("type", [
 export type TranscriptionEvent = z.infer<typeof TranscriptionEvent>;
 
 /**
+ * @deprecated Host-adapter transcription policy. Kept for one release so existing
+ * workspace settings remain readable. New writes use `WorkspaceVoiceInputSettings`.
+ *
  * Workspace-only policy for the distinct speech-to-text capability. It never
  * authorizes a turn model/provider and contains connection references rather
  * than secrets. `acceptanceId` changes whenever an admin accepts a new target
@@ -1067,16 +1121,77 @@ export const WorkspaceTranscriptionPolicy = z
   });
 export type WorkspaceTranscriptionPolicy = z.infer<typeof WorkspaceTranscriptionPolicy>;
 
+/**
+ * Workspace toggle for native browser voice input. Provider/model/credentials
+ * stay server-private; this only records whether the workspace allows the
+ * deployment-configured transcription path.
+ */
+export const WorkspaceVoiceInputSettings = z
+  .object({
+    enabled: z.boolean(),
+  })
+  .strict();
+export type WorkspaceVoiceInputSettings = z.infer<typeof WorkspaceVoiceInputSettings>;
+
+/** Client-safe voice-input capability projection. Never includes provider secrets. */
+export const ClientVoiceInputConfig = z
+  .object({
+    available: z.boolean(),
+    maxDurationSeconds: z.number().int().positive().max(600),
+    maxSizeBytes: z.number().int().positive(),
+    acceptedMimeTypes: z.array(z.string().trim().min(1).max(128)).min(1).max(32),
+  })
+  .strict();
+export type ClientVoiceInputConfig = z.infer<typeof ClientVoiceInputConfig>;
+
+/** Response from POST /v1/workspaces/:workspaceId/transcriptions. */
+export const TranscribeAudioResponse = z
+  .object({
+    text: z.string().max(1_000_000),
+    languages: z.array(z.string().trim().min(1).max(64)).max(16).default([]),
+  })
+  .strict();
+export type TranscribeAudioResponse = z.infer<typeof TranscribeAudioResponse>;
+
+/** Default ceilings for native voice input (hard-stop recording + upload). */
+export const VOICE_INPUT_MAX_DURATION_SECONDS = 60 as const;
+export const VOICE_INPUT_MAX_SIZE_BYTES = 25 * 1024 * 1024;
+export const VOICE_INPUT_ACCEPTED_MIME_TYPES = [
+  "audio/webm",
+  "audio/webm;codecs=opus",
+  "audio/mp4",
+  "audio/ogg",
+  "audio/ogg;codecs=opus",
+  "audio/mpeg",
+  "audio/wav",
+  "audio/x-wav",
+  "audio/mp3",
+  "audio/m4a",
+] as const;
+
+/** Per-session / workspace Codex compaction strategy. */
+export const CodexCompactionMode = z.enum(["remote_v2", "portable"]);
+export type CodexCompactionMode = z.infer<typeof CodexCompactionMode>;
+
 // Validates the KNOWN keys of workspaces.settings; passthrough keeps unknown
-// (future) keys rather than stripping them. memoryEnabled and transcription are
-// both default-off capabilities.
+// (future) keys rather than stripping them. memoryEnabled defaults off;
+// voiceInput defaults to enabled when the deployment has a provider.
 export const WorkspaceSettingsSchema = z
   .object({
     memoryEnabled: z.boolean().optional(),
+    /** Preferred workspace voice-input toggle. */
+    voiceInput: WorkspaceVoiceInputSettings.optional(),
+    /**
+     * @deprecated Legacy host-adapter policy. Read for compatibility; new writes
+     * should use `voiceInput`.
+     */
     transcription: WorkspaceTranscriptionPolicy.optional(),
     // null clears the workspace override and falls back to the persisted
     // deployment policy. The database boundary validates the same range.
     maxNestedAgentDepth: NestedAgentDepthValue.nullable().optional(),
+    // Default compaction strategy for NEW Codex sessions created in this
+    // workspace. Absent ⇒ remote_v2. Non-Codex sessions always freeze portable.
+    codexCompactionDefault: CodexCompactionMode.optional(),
   })
   .passthrough();
 export type WorkspaceSettings = z.infer<typeof WorkspaceSettingsSchema>;
@@ -1087,14 +1202,40 @@ export function resolveWorkspaceMemoryEnabled(settings: unknown): boolean {
   return parsed.success ? parsed.data.memoryEnabled === true : false;
 }
 
+/** Default Codex compaction mode for new Codex sessions (remote_v2 when unset). */
+export function resolveWorkspaceCodexCompactionDefault(settings: unknown): CodexCompactionMode {
+  const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
+  if (!parsed.success) return "remote_v2";
+  return parsed.data.codexCompactionDefault ?? "remote_v2";
+}
+
+/**
+ * Resolve whether voice input is enabled for a workspace.
+ *
+ * - Prefer `settings.voiceInput.enabled` when present.
+ * - Map legacy `settings.transcription.enabled` when voiceInput is absent.
+ * - Return `null` when neither is set so callers can default to deployment
+ *   availability (enabled when a provider is configured).
+ */
+export function resolveWorkspaceVoiceInputEnabled(settings: unknown): boolean | null {
+  const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
+  if (!parsed.success) return null;
+  if (parsed.data.voiceInput) return parsed.data.voiceInput.enabled;
+  if (parsed.data.transcription) return parsed.data.transcription.enabled;
+  return null;
+}
+
 // PATCH body for workspace settings: a partial top-level patch that merges into
-// the stored bag. Nested transcription policy updates are therefore full
-// replacements; passthrough carries forward-compatible unknown keys.
+// the stored bag. Nested voiceInput/transcription updates are full replacements;
+// passthrough carries forward-compatible unknown keys.
 export const UpdateWorkspaceSettingsRequest = z
   .object({
     memoryEnabled: z.boolean().optional(),
+    voiceInput: WorkspaceVoiceInputSettings.optional(),
+    /** @deprecated Prefer `voiceInput`. Kept for one compatibility release. */
     transcription: WorkspaceTranscriptionPolicy.optional(),
     maxNestedAgentDepth: NestedAgentDepthValue.nullable().optional(),
+    codexCompactionDefault: CodexCompactionMode.optional(),
   })
   .passthrough();
 export type UpdateWorkspaceSettingsRequest = z.infer<typeof UpdateWorkspaceSettingsRequest>;
@@ -1826,6 +1967,169 @@ export const UsageEvent = z.object({
   billingProviderEventId: z.string().nullable(),
 });
 export type UsageEvent = z.infer<typeof UsageEvent>;
+
+/** UTC Insights windows. "this month" aligns with billing's UTC month. */
+export const InsightsRange = z.enum(["today", "week", "month", "ytd"]);
+export type InsightsRange = z.infer<typeof InsightsRange>;
+
+export const InsightsBillingPath = z.enum(["opengeni_credits", "external"]);
+export type InsightsBillingPath = z.infer<typeof InsightsBillingPath>;
+
+export const InsightsModelUsageRow = z.object({
+  id: z.string().min(1),
+  model: z.string().min(1),
+  provider: z.string().min(1),
+  billing: InsightsBillingPath,
+  calls: z.number().int().nonnegative(),
+  inputTokens: z.number().nonnegative(),
+  outputTokens: z.number().nonnegative(),
+  cachedTokens: z.number().nonnegative(),
+  cacheWriteTokens: z.number().nonnegative(),
+  reasoningTokens: z.number().nonnegative(),
+  /** Priced OpenGeni credit $ for this model×provider (from model_call_facts). */
+  creditUsd: z.number().nonnegative(),
+});
+export type InsightsModelUsageRow = z.infer<typeof InsightsModelUsageRow>;
+
+export const InsightsSeriesPoint = z.object({
+  label: z.string().min(1),
+  /** Day-bucketed sum of usage_events.model.cost (workspace-wide) or filtered facts when provider/model set. */
+  modelCostUsd: z.number().nonnegative(),
+  warmSeconds: z.number().nonnegative(),
+  inputTokens: z.number().nonnegative(),
+  cachedTokens: z.number().nonnegative(),
+  cacheHitPct: z.number().int().min(0).max(100),
+  calls: z.number().int().nonnegative(),
+});
+export type InsightsSeriesPoint = z.infer<typeof InsightsSeriesPoint>;
+
+export const InsightsDepthBucket = z.object({
+  depth: z.number().int().nonnegative(),
+  sessions: z.number().int().nonnegative(),
+});
+export type InsightsDepthBucket = z.infer<typeof InsightsDepthBucket>;
+
+export const InsightsModelFacet = z.object({
+  provider: z.string().min(1),
+  model: z.string().min(1),
+});
+export type InsightsModelFacet = z.infer<typeof InsightsModelFacet>;
+
+export const InsightsSpendDriver = z.object({
+  id: z.string().min(1),
+  groupBy: z.enum(["root_session", "schedule"]),
+  label: z.string().min(1),
+  creditUsd: z.number().nonnegative(),
+  tokens: z.number().nonnegative(),
+  cacheHitPct: z.number().int().min(0).max(100),
+  pctOfCreditUsd: z.number().int().min(0).max(100),
+  deltaUsdVsPrior: z.number(),
+});
+export type InsightsSpendDriver = z.infer<typeof InsightsSpendDriver>;
+
+export const InsightsWarmGroupRow = z.object({
+  id: z.string().min(1),
+  groupId: z.string().uuid(),
+  label: z.string().min(1),
+  /** Live lease backend when known; null when only historical warm ticks exist. */
+  backend: z.string().nullable(),
+  warmSeconds: z.number().nonnegative(),
+  /** Currently attached sessions — not cost share. */
+  sessionsAttached: z.number().int().nonnegative(),
+});
+export type InsightsWarmGroupRow = z.infer<typeof InsightsWarmGroupRow>;
+
+export const InsightsLiveWarmLease = z.object({
+  id: z.string().uuid(),
+  groupId: z.string().uuid(),
+  backend: z.string().min(1),
+  turnHolders: z.number().int().nonnegative(),
+  viewerHolders: z.number().int().nonnegative(),
+  warmForLabel: z.string().min(1),
+  warmSeconds: z.number().nonnegative(),
+});
+export type InsightsLiveWarmLease = z.infer<typeof InsightsLiveWarmLease>;
+
+export const InsightsFloorSession = z.object({
+  id: z.string().uuid(),
+  title: z.string(),
+  state: z.enum(["running", "paused", "failed", "idle", "compacting", "waiting"]),
+  depth: z.number().int().nonnegative(),
+  model: z.string().nullable(),
+  provider: z.string().nullable(),
+  ageLabel: z.string(),
+  cacheHitPct: z.number().int().min(0).max(100).nullable(),
+  route: z.string().nullable(),
+});
+export type InsightsFloorSession = z.infer<typeof InsightsFloorSession>;
+
+export const InsightsScheduleRow = z.object({
+  id: z.string().uuid(),
+  name: z.string(),
+  fires: z.number().int().nonnegative(),
+  /** Null when no facts carry scheduled_task_id for this window. */
+  creditUsd: z.number().nonnegative().nullable(),
+  tokens: z.number().nonnegative().nullable(),
+  cacheHitPct: z.number().int().min(0).max(100).nullable(),
+  billing: InsightsBillingPath.nullable(),
+});
+export type InsightsScheduleRow = z.infer<typeof InsightsScheduleRow>;
+
+export const WorkspaceInsightsSnapshot = z.object({
+  range: InsightsRange,
+  rangeLabel: z.string().min(1),
+  priorLabel: z.string().min(1),
+  seriesLabel: z.string().min(1),
+  cacheSeriesLabel: z.string().min(1),
+  /** All ranges/series are UTC. */
+  timezone: z.literal("UTC"),
+  models: z.array(InsightsModelUsageRow),
+  /** Unfiltered provider×model pairs in the window — drives filter dropdowns. */
+  facets: z.array(InsightsModelFacet),
+  series: z.array(InsightsSeriesPoint),
+  depth: z.array(InsightsDepthBucket),
+  drivers: z.array(InsightsSpendDriver),
+  schedules: z.array(InsightsScheduleRow),
+  warmSeconds: z.number().nonnegative(),
+  priorWarmSeconds: z.number().nonnegative(),
+  warmGroups: z.array(InsightsWarmGroupRow),
+  liveWarm: z.array(InsightsLiveWarmLease),
+  floor: z.array(InsightsFloorSession),
+  selfhostedEnabled: z.boolean(),
+  machinesOnline: z.number().int().nonnegative(),
+  /** Workspace-wide OpenGeni credit $ from usage_events.model.cost (unfiltered). */
+  workspaceCreditUsd: z.number().nonnegative(),
+  priorWorkspaceCreditUsd: z.number().nonnegative(),
+  /** Model-filterable credit $ from facts (equals workspace when unfiltered, ignoring late-reject drift). */
+  creditUsd: z.number().nonnegative(),
+  priorCreditUsd: z.number().nonnegative(),
+  priorInputTokens: z.number().nonnegative(),
+  priorCacheHitPct: z.number().int().min(0).max(100),
+  priorCalls: z.number().int().nonnegative(),
+  /** Lifetime workspace topology (not scoped to the selected Insights range). */
+  goalsActive: z.number().int().nonnegative(),
+  goalsCompleted: z.number().int().nonnegative(),
+  sessionsTouched: z.number().int().nonnegative(),
+  rootSessions: z.number().int().nonnegative(),
+  deepestDepth: z.number().int().nonnegative(),
+  deepestSessionTitle: z.string(),
+  avgDepth: z.number().nonnegative(),
+  warmIdleNow: z.number().int().nonnegative(),
+  /** Billable credits-path tokens this UTC month (usage_events.model.tokens). */
+  billableTokensUsed: z.number().nonnegative(),
+  billableTokenCap: z.number().int().positive().nullable(),
+  /** Agent runs this UTC month (usage_events.agent_run.created). */
+  agentRunsUsed: z.number().nonnegative(),
+  agentRunCap: z.number().int().positive().nullable(),
+  /** True when provider/model filters exclude workspace-wide warm/caps meaning. */
+  modelFilterActive: z.boolean(),
+});
+export type WorkspaceInsightsSnapshot = z.infer<typeof WorkspaceInsightsSnapshot>;
+
+export const WorkspaceInsightsResponse = z.object({
+  snapshot: WorkspaceInsightsSnapshot,
+});
+export type WorkspaceInsightsResponse = z.infer<typeof WorkspaceInsightsResponse>;
 
 export const LimitAction = z.enum([
   "agent_run:create",
@@ -2986,11 +3290,14 @@ export const ToolRef = z.object({
   kind: z.literal("mcp"),
   id: z.string().min(1),
   // Non-fatal-on-connect marker for MCP server refs that can degrade
-  // gracefully. Absent/false is STRICT: the id must be configured and an
-  // unavailable server fails the turn. `optional:true` is preserved for known
-  // servers and makes runtime connect/list failures skip that server; if the
-  // deployment does not configure the id, validation drops the ref. The server
-  // also sets this for auto-attached workspace-default capability MCPs.
+  // gracefully. On new input, absent/false is STRICT: the id must be configured
+  // and an unavailable registered server fails the turn. Persisted refs are
+  // intersected with the current registry at each turn boundary, so a server
+  // disconnected after admission is retained in policy/audit truth but skipped
+  // until it is registered again. `optional:true` additionally makes runtime
+  // connect/list failures skip a known server; if the deployment does not
+  // configure the id, validation drops the ref. Auto-attached workspace-default
+  // capability MCPs also use this marker.
   optional: z.boolean().optional(),
 });
 export type ToolRef = z.infer<typeof ToolRef>;
@@ -3249,6 +3556,14 @@ export function reasoningEffortForMetadata(
     value === "xhigh"
     ? value
     : fallback;
+}
+
+export function latencyModeForMetadata(
+  metadata: Record<string, unknown>,
+  fallback: LatencyMode = "standard",
+): LatencyMode {
+  const value = metadata.latencyMode;
+  return value === "standard" || value === "priority" || value === "fast" ? value : fallback;
 }
 
 export function stableJson(value: unknown): string {
@@ -3685,6 +4000,7 @@ export const SessionTurn = z.object({
   toolsProvided: z.boolean().optional(),
   model: z.string().min(1),
   reasoningEffort: ReasoningEffort,
+  latencyMode: LatencyMode.default("standard"),
   sandboxBackend: SandboxBackend,
   // Per-turn OS override. NULL = inherit the session's sandboxOs.
   sandboxOs: SandboxOs.nullable(),
@@ -3773,6 +4089,7 @@ export const ComposerDraft = z.object({
   resources: z.array(ResourceRef),
   model: z.string().min(1),
   reasoningEffort: ReasoningEffort,
+  latencyMode: LatencyMode.default("standard"),
   sourceTurnId: z.string().uuid().nullable(),
   sourceTurnVersion: z.number().int().positive().nullable(),
   updatedAt: z.string().nullable(),
@@ -3813,6 +4130,7 @@ export const SaveComposerDraftRequest = ComposerDraft.pick({
   resources: true,
   model: true,
   reasoningEffort: true,
+  latencyMode: true,
 }).extend({ expectedRevision: z.number().int().nonnegative() });
 export type SaveComposerDraftRequest = z.infer<typeof SaveComposerDraftRequest>;
 
@@ -3843,6 +4161,7 @@ export const NewSessionDraft = z.object({
   toolsProvided: z.boolean().default(false),
   model: z.string().min(1),
   reasoningEffort: ReasoningEffort,
+  latencyMode: LatencyMode.default("standard"),
   options: NewSessionDraftOptions,
   updatedAt: z.string().nullable(),
 });
@@ -3855,6 +4174,7 @@ export const SaveNewSessionDraftRequest = NewSessionDraft.pick({
   toolsProvided: true,
   model: true,
   reasoningEffort: true,
+  latencyMode: true,
   options: true,
 }).extend({ expectedRevision: z.number().int().nonnegative() });
 export type SaveNewSessionDraftRequest = z.infer<typeof SaveNewSessionDraftRequest>;
@@ -4943,26 +5263,11 @@ export type ConnectionKind = z.infer<typeof ConnectionKind>;
 export const ConnectionStatus = z.enum(["active", "needs_reauth", "revoked", "error"]);
 export type ConnectionStatus = z.infer<typeof ConnectionStatus>;
 
+export const OPENGENI_PERSONAL_SLACK_MCP_URL = "https://mcp.slack.com/mcp" as const;
+
 export const OPENGENI_SLACK_BOT_CREDENTIAL_ROLE = "opengeni_slack_bot" as const;
 export const OPENGENI_SLACK_BOT_CREDENTIAL_LABEL = "OpenGeni Slack bot" as const;
 export const OPENGENI_SLACK_BOT_SESSION_METADATA_KEY = "opengeniSlackBotConnectionId" as const;
-export const OPENGENI_SLACK_BOT_REQUIRED_SCOPES = [
-  "canvases:read",
-  "channels:history",
-  "channels:read",
-  "chat:write",
-  "files:read",
-  "groups:history",
-  "groups:read",
-  "im:history",
-  "im:read",
-  "im:write",
-  "mpim:history",
-  "mpim:read",
-  "users:read",
-] as const;
-export const OPENGENI_SLACK_BOT_FORBIDDEN_SCOPES = ["channels:join", "chat:write.public"] as const;
-
 export const OpenGeniSlackBotConnectionMetadata = z
   .object({
     credentialRole: z.literal(OPENGENI_SLACK_BOT_CREDENTIAL_ROLE),
@@ -5381,6 +5686,10 @@ export const Session = z.object({
   // "Running on:" indicator's source). Both are credential-row ids, null until set.
   codexPinnedCredentialId: z.string().uuid().nullable(),
   codexLastCredentialId: z.string().uuid().nullable(),
+  // Frozen at session create. remote_v2 ⇒ Codex remote compaction + Codex-only
+  // model admission for the life of the session; portable ⇒ plaintext compaction
+  // and free mid-session provider switching (today's behavior).
+  codexCompactionMode: CodexCompactionMode,
   /** Personal (authenticated subject) workspace pin state, never workspace-global. */
   pinned: z.boolean().default(false),
   /** Stable pin ordering key; null when this subject has not pinned the session. */
@@ -5471,6 +5780,7 @@ export const SessionEventType = z.enum([
   "session.requiresAction",
   "session.humanInput.requested",
   "session.context.compaction.requested",
+  "session.context.compaction.started",
   "session.context.compacted",
   "session.context.compaction.skipped",
   "session.context.cleared",
@@ -5764,6 +6074,7 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
   ],
   checkpoint: [
     "session.context.compaction.requested",
+    "session.context.compaction.started",
     "session.context.compacted",
     "session.context.compaction.skipped",
     "session.context.cleared",
@@ -7590,6 +7901,7 @@ export const CreateSessionRequest = withVariableSetIdAlias({
   metadata: z.record(z.string(), z.unknown()).default({}),
   model: z.string().min(1).optional(),
   reasoningEffort: ReasoningEffort.optional(),
+  latencyMode: LatencyMode.optional(),
   sandboxBackend: SandboxBackend.optional(),
   // The enrolled machine (a sandbox id) to run this session on; seeds the
   // active-sandbox pointer at creation so the FIRST turn routes to the chosen
@@ -7859,6 +8171,7 @@ export const ClientSessionEvent = z.discriminatedUnion("type", [
         resources: z.array(ResourceRef).default([]),
         model: z.string().min(1).optional(),
         reasoningEffort: ReasoningEffort.optional(),
+        latencyMode: LatencyMode.optional(),
         controlEtag: z.string().min(1).optional(),
         expectedDraftRevision: z.number().int().nonnegative().optional(),
         // Header-value rotation only. URL/name/tool settings are immutable after
@@ -7895,6 +8208,7 @@ export const SteerSessionMessageRequest = z
     resources: z.array(ResourceRef).default([]),
     model: z.string().min(1).optional(),
     reasoningEffort: ReasoningEffort.optional(),
+    latencyMode: LatencyMode.optional(),
     clientEventId: SessionOperationKey.optional(),
     controlEtag: z.string().min(1).optional(),
     expectedDraftRevision: z.number().int().nonnegative().optional(),
@@ -8671,6 +8985,11 @@ export const TurnExecutionReasoningSourceV1 = /* @__PURE__ */ defineModelContrac
 );
 export type TurnExecutionReasoningSourceV1 = z.infer<typeof TurnExecutionReasoningSourceV1>;
 
+export const TurnExecutionLatencyModeSourceV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.enum(["explicit", "session", "deployment", "continuation"]),
+);
+export type TurnExecutionLatencyModeSourceV1 = z.infer<typeof TurnExecutionLatencyModeSourceV1>;
+
 /**
  * Secret-safe execution identity frozen onto one accepted logical turn.
  *
@@ -8678,6 +8997,9 @@ export type TurnExecutionReasoningSourceV1 = z.infer<typeof TurnExecutionReasoni
  * definition rather than a serialized provider client. It must never contain
  * a key/token, concrete connected credential id, account label, authorization
  * header, or credential-bearing URL/query value.
+ *
+ * `latencyMode` / `latencyModeSource` default to standard/deployment so legacy
+ * snapshots without those keys remain readable as Standard.
  */
 export const TurnExecutionPolicyV1 = /* @__PURE__ */ defineModelContractSchema(() =>
   z
@@ -8688,6 +9010,8 @@ export const TurnExecutionPolicyV1 = /* @__PURE__ */ defineModelContractSchema((
       modelSource: TurnExecutionModelSourceV1,
       reasoningEffort: ReasoningEffort,
       reasoningSource: TurnExecutionReasoningSourceV1,
+      latencyMode: LatencyMode.default("standard"),
+      latencyModeSource: TurnExecutionLatencyModeSourceV1.default("deployment"),
       providerId: z.string().min(1),
       upstreamModelId: z.string().min(1),
       wireApi: z.enum(["responses", "chat"]),
@@ -8778,6 +9102,8 @@ export function turnExecutionPolicyAuditMetadata(
     modelSource: parsed.modelSource,
     effectiveReasoningEffort: parsed.reasoningEffort,
     reasoningSource: parsed.reasoningSource,
+    effectiveLatencyMode: parsed.latencyMode,
+    latencyModeSource: parsed.latencyModeSource,
     providerId: parsed.providerId,
     credentialSourceKind: parsed.credentialSource.kind,
     credentialSourceMechanism:
@@ -8958,7 +9284,7 @@ export type WorkspaceModelCatalogResponse = z.infer<typeof WorkspaceModelCatalog
  * that rollout boundary. Mutating clients send this value in
  * `x-opengeni-api-contract`; the API rejects any other value before routing.
  */
-export const OPENGENI_API_CONTRACT_REVISION = "2026-07-turn-instructions-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-07-workspace-artifacts-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
@@ -8989,6 +9315,14 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     fileUploads: z.object({
       enabled: z.boolean(),
       maxSizeBytes: z.number().int().positive(),
+    }),
+    // Native voice-input capability. Provider/model/credentials stay server-private;
+    // clients only learn whether a deployment can transcribe and the hard ceilings.
+    voiceInput: ClientVoiceInputConfig.default({
+      available: false,
+      maxDurationSeconds: VOICE_INPUT_MAX_DURATION_SECONDS,
+      maxSizeBytes: VOICE_INPUT_MAX_SIZE_BYTES,
+      acceptedMimeTypes: [...VOICE_INPUT_ACCEPTED_MIME_TYPES],
     }),
     productAccessMode: ProductAccessMode,
     auth: ClientAuthConfig.default({ mode: "none" }),
