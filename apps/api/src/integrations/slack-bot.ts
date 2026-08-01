@@ -153,7 +153,10 @@ type SlackBotContext = {
 };
 
 export class SlackBotProviderError extends Error {
-  constructor(readonly code: string) {
+  constructor(
+    readonly code: string,
+    readonly retryAfterMs: number | null = null,
+  ) {
     super(`Slack bot request failed: ${safeSlackCode(code)}`);
     this.name = "SlackBotProviderError";
   }
@@ -735,7 +738,10 @@ export class OpenGeniSlackBotClient {
       channel: channelId,
     });
     const projected = projectChannel(payload.channel);
-    if (!projected || projected.isMember !== true) {
+    // Slack omits `is_member` for a bot's one-to-one App Home conversation.
+    // A successful conversations.info response with `is_im` is itself proof
+    // that this installation can address that direct conversation.
+    if (!projected || (projected.isMember !== true && projected.isDirectMessage !== true)) {
       throw new SlackBotProviderError("not_in_channel");
     }
     return projected;
@@ -1186,8 +1192,9 @@ async function slackApiFetchWithHeaders(
     throw new SlackBotProviderError("transport_error");
   }
   if (!response.ok) {
+    const retryAfterMs = slackRetryAfterMs(response);
     await response.body?.cancel().catch(() => undefined);
-    throw new SlackBotProviderError(`http_${response.status}`);
+    throw new SlackBotProviderError(`http_${response.status}`, retryAfterMs);
   }
   let payload: SlackPayload;
   try {
@@ -1203,6 +1210,15 @@ async function slackApiFetchWithHeaders(
     throw new SlackBotProviderError(slackString(payload.error) || "unknown_error");
   }
   return { response, payload };
+}
+
+function slackRetryAfterMs(response: Response): number | null {
+  if (response.status !== 429) return null;
+  const raw = response.headers.get("retry-after");
+  if (!raw || !/^\d+$/.test(raw)) return null;
+  const seconds = Number(raw);
+  if (!Number.isSafeInteger(seconds) || seconds < 1) return null;
+  return Math.min(seconds, 3_600) * 1_000;
 }
 
 function assertOpenGeniSlackBotScopes(grantedScopes: string[]): void {
@@ -1245,6 +1261,7 @@ function projectChannel(value: unknown) {
     name: boundedSlackString(channel.name, 256),
     isPrivate: channel.is_private === true,
     isMember: channel.is_member === true,
+    isDirectMessage: channel.is_im === true,
     isArchived: channel.is_archived === true,
     topic: boundedSlackString(slackRecord(channel.topic)?.value, 1_024),
     purpose: boundedSlackString(slackRecord(channel.purpose)?.value, 1_024),

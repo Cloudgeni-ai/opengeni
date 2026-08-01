@@ -74,6 +74,7 @@ import {
   preferredOpenGeniSlackBotConnection,
 } from "@/lib/slack-bot";
 import { cn } from "@/lib/utils";
+import { request } from "@/api";
 
 const GoogleDriveConnectorCard = lazy(async () => {
   const module = await import("@/components/capabilities/google-drive-connector-card");
@@ -170,9 +171,11 @@ export function SlackBotInstallControls({
 export function CapabilitiesRoute({
   workspaceId,
   initialSection,
+  slackLinkToken,
 }: {
   workspaceId: string;
   initialSection?: "packs";
+  slackLinkToken?: string;
 }) {
   const context = useAppContext();
   const client = context.client;
@@ -284,6 +287,30 @@ export function CapabilitiesRoute({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId]);
+
+  const slackUserLinkHandled = useRef(false);
+  useEffect(() => {
+    if (!slackLinkToken || slackUserLinkHandled.current) return;
+    slackUserLinkHandled.current = true;
+    window.history.replaceState(null, "", window.location.pathname);
+    void request(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/integrations/slack/user-links`,
+      {
+        method: "POST",
+        body: JSON.stringify({ linkToken: slackLinkToken }),
+      },
+    )
+      .then(() => {
+        toast.success("Slack identity linked", {
+          description: "You can return to Slack and invoke OpenGeni again.",
+        });
+      })
+      .catch((error) => {
+        toast.error("Couldn't link your Slack identity", {
+          description: error instanceof Error ? error.message : String(error),
+        });
+      });
+  }, [slackLinkToken, workspaceId]);
 
   // Reset the incremental window whenever the result set changes.
   useEffect(() => setVisibleCount(PAGE_SIZE), [filter, query]);

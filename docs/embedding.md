@@ -465,12 +465,14 @@ creation; later deployment-default changes do not rewrite existing sessions.
 
 Model-visible first-party tool selection is a separate field:
 `CreateSessionRequest.firstPartyMcpTools`. It accepts only names from
-`FIRST_PARTY_MCP_TOOL_NAMES`; omission uses the complete catalog,
-while explicit `[]` remains empty. A child omission snapshots its parent's exact
-effective selection. Tool selection never grants a permission, and permissions
-never implicitly select a tool. This separation lets a host keep a broad
-delegated authorization envelope while exposing only the tools appropriate to
-one embedded session.
+`FIRST_PARTY_MCP_TOOL_NAMES`; omission uses the safe default catalog and excludes
+connector-wide `social_*` and `slack_bot_*` tools, while explicit `[]` remains
+empty. Connector tools require an explicit selection and their independent
+connection permission. A child omission snapshots its parent's exact effective
+selection. Tool selection never grants a permission, and permissions never
+implicitly select a tool. This separation lets a host keep a broad delegated
+authorization envelope while exposing only the tools appropriate to one
+embedded session.
 
 Resources are unaffected by that selection. File/document/repository
 attachments still materialize when `firstPartyMcpTools` is empty or contains

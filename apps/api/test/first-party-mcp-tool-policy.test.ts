@@ -19,6 +19,23 @@ const workspaceId = crypto.randomUUID();
 const sessionId = crypto.randomUUID();
 const turnId = crypto.randomUUID();
 const attemptId = crypto.randomUUID();
+const DEFAULT_AUTHORIZED_CONNECTOR_TOOLS = [
+  "social_connections_list",
+  "social_posts_recent",
+  "social_daily_analysis_context",
+  "social_search_live",
+  "social_mentions_live",
+  "social_thread_fetch",
+  "slack_bot_list_channels",
+  "slack_bot_channel_history",
+  "slack_bot_thread_replies",
+  "slack_bot_list_users",
+  "slack_bot_list_files",
+  "slack_bot_file_info",
+  "slack_bot_file_content",
+  "slack_bot_post_message",
+  "slack_bot_delete_message",
+] as const satisfies readonly FirstPartyMcpToolName[];
 
 function deps(): ApiRouteDeps {
   return {
@@ -67,7 +84,7 @@ function registeredToolNames(server: unknown): string[] {
 }
 
 describe("first-party MCP tool visibility policy", () => {
-  test("omission selects the complete default catalog when the grant authorizes every tool", () => {
+  test("omission selects the complete safe default catalog when the grant authorizes every tool", () => {
     const server = buildOpenGeniMcpServer(deps(), grant([...Permission.options]), {
       workspaceMemoryEnabled: true,
     });
@@ -83,6 +100,25 @@ describe("first-party MCP tool visibility policy", () => {
     );
 
     expect(registeredToolNames(server)).toEqual(["set_session_title"]);
+  });
+
+  test("ordinary omission excludes connector tools while explicit authorized selection stays exact", () => {
+    const ordinary = buildOpenGeniMcpServer(
+      deps(),
+      grant([...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS]),
+    );
+    const connectorSet = new Set<FirstPartyMcpToolName>(DEFAULT_AUTHORIZED_CONNECTOR_TOOLS);
+    expect(
+      registeredToolNames(ordinary).filter((name) =>
+        connectorSet.has(name as FirstPartyMcpToolName),
+      ),
+    ).toEqual([]);
+
+    const explicit = buildOpenGeniMcpServer(
+      deps(),
+      grant([...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS], [...DEFAULT_AUTHORIZED_CONNECTOR_TOOLS]),
+    );
+    expect(registeredToolNames(explicit)).toEqual([...DEFAULT_AUTHORIZED_CONNECTOR_TOOLS].sort());
   });
 
   test("visibility never substitutes for authorization", () => {
