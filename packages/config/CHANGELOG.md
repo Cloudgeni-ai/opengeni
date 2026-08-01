@@ -1,5 +1,14 @@
 # @opengeni/config
 
+## 0.7.22
+
+### Patch Changes
+
+- c52acc0: Ship Fast latency mode with turn-column inheritance, Codex ChatGPT honor-skip for response service_tier, and model picker UX polish.
+- Updated dependencies [c52acc0]
+  - @opengeni/codex@0.2.9
+  - @opengeni/contracts@0.26.1
+
 ## 0.7.21
 
 ### Patch Changes
