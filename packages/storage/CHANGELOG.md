@@ -1,5 +1,13 @@
 # @opengeni/storage
 
+## 0.2.50
+
+### Patch Changes
+
+- Updated dependencies [659b3ff]
+  - @opengeni/contracts@0.28.1
+  - @opengeni/config@0.9.1
+
 ## 0.2.49
 
 ### Patch Changes

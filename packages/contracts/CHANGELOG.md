@@ -1,5 +1,11 @@
 # @opengeni/contracts
 
+## 0.28.1
+
+### Patch Changes
+
+- 659b3ff: Harden Slack-triggered session delivery, identity linking, provider backoff, explicit connection-tool selection, and replay-safe bounded progress/final delivery.
+
 ## 0.28.0
 
 ### Minor Changes
