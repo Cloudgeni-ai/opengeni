@@ -4,6 +4,7 @@ import {
   type ModalSandboxSession,
   type ModalSandboxSessionState,
 } from "@openai/agents-extensions/sandbox/modal";
+import type { SandboxDirectoryEntry } from "@openai/agents/sandbox";
 import { effectiveModalIdleTimeoutSeconds } from "@opengeni/config";
 import type { Settings } from "@opengeni/config";
 import {
@@ -11,6 +12,7 @@ import {
   type ModalCheckpointProviderBinding,
 } from "@opengeni/contracts";
 import { CAPABILITY_DESCRIPTORS } from "../capabilities";
+import { SandboxChannelAService, type ChannelASession } from "../channel-a";
 import { SandboxConfigError } from "../errors";
 import type { ProviderRegistration } from "./types";
 
@@ -18,6 +20,7 @@ export type { ModalCheckpointProviderBinding } from "@opengeni/contracts";
 
 const MODAL_ORPHAN_SWEEP_LIMIT = 50;
 const OPENGENI_MODAL_SDK_VERSION = "0.9.0";
+const MODAL_LIST_DIR_MAX_ENTRIES = 20_000;
 // A provider box is invisible to the lease until Modal create + manifest
 // materialization returns and the creation callback records its instance id.
 // Production baseline (2026-07-15, all 8 turn workers): 155/155 completed creates
@@ -84,9 +87,13 @@ type MutableModalSandboxSession = {
   modal?: { version?: () => string };
   sandbox?: MutableModalSnapshotSandbox;
   state?: {
+    manifest?: { root?: string };
     workspacePersistence?: string;
     snapshotFilesystemTimeoutMs?: number;
   };
+  execCommand?: ChannelASession["execCommand"];
+  readFile?: ChannelASession["readFile"];
+  listDir?: (args: { path: string; runAs?: string }) => Promise<SandboxDirectoryEntry[]>;
   persistWorkspace?: () => Promise<Uint8Array>;
   writeStdin?: (args: {
     sessionId: number;
@@ -99,6 +106,58 @@ type MutableModalSandboxSession = {
 const modalRetentionWrappedSessions = new WeakSet<object>();
 const modalFilesystemRetentionWrappedSandboxes = new WeakSet<object>();
 const modalDirectoryRetentionWrappedSandboxes = new WeakSet<object>();
+
+function modalWorkspaceRelativePath(path: string, workspaceRoot: string): string {
+  if (!path.startsWith("/")) return path;
+  const root = workspaceRoot.replace(/\/+$/, "") || "/";
+  const normalized = path.replace(/\/+$/, "") || "/";
+  if (normalized === root) return "";
+  if (root === "/") return normalized.slice(1);
+  if (normalized.startsWith(`${root}/`)) return normalized.slice(root.length + 1);
+  throw new Error(`Modal listDir path is outside the workspace root: ${path}`);
+}
+
+function modalWorkspaceAbsolutePath(path: string, workspaceRoot: string): string {
+  const root = workspaceRoot.replace(/\/+$/, "") || "/";
+  if (!path) return root;
+  return root === "/" ? `/${path}` : `${root}/${path}`;
+}
+
+function installModalListDirCompatibility(session: MutableModalSandboxSession): void {
+  if (typeof session.listDir === "function") return;
+  if (typeof session.execCommand !== "function" || typeof session.readFile !== "function") return;
+  const workspaceRoot = session.state?.manifest?.root;
+  if (!workspaceRoot) {
+    throw new Error("Modal listDir compatibility requires a manifest workspace root");
+  }
+  session.listDir = async (args) => {
+    const absoluteResultPaths = args.path.startsWith("/");
+    const relativePath = modalWorkspaceRelativePath(args.path, workspaceRoot);
+    const service = new SandboxChannelAService({
+      session: session as ChannelASession,
+      workspaceRoot,
+      ...(args.runAs ? { runAs: args.runAs } : {}),
+    });
+    const listed = await service.fsList({
+      path: relativePath,
+      depth: 1,
+      maxEntries: MODAL_LIST_DIR_MAX_ENTRIES,
+      includeHidden: true,
+    });
+    if (listed.truncated || listed.root.truncated) {
+      throw new Error(
+        `Modal listDir exceeded the ${MODAL_LIST_DIR_MAX_ENTRIES}-entry safety bound`,
+      );
+    }
+    return (listed.root.children ?? []).map((entry) => ({
+      name: entry.name,
+      path: absoluteResultPaths
+        ? modalWorkspaceAbsolutePath(entry.path, workspaceRoot)
+        : entry.path,
+      type: entry.type === "file" || entry.type === "dir" ? entry.type : "other",
+    }));
+  };
+}
 
 const MODAL_EXEC_STDIN_WRITE_PATH =
   "/modal.task_command_router.TaskCommandRouter/TaskExecStdinWrite";
@@ -235,6 +294,7 @@ export function installOpenGeniModalSnapshotPolicy<T extends object>(session: T)
     throw new Error("Modal session does not expose workspace persistence");
   }
   assertPinnedModalSdk(mutable);
+  installModalListDirCompatibility(mutable);
   installModalNativeSnapshotRetention(mutable);
   installModalExecCompletionRecovery(mutable);
 

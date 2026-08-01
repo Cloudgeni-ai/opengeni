@@ -1,9 +1,14 @@
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, mock, test } from "bun:test";
+import { Manifest, type SandboxSessionLike } from "@openai/agents/sandbox";
 import { ModalClient } from "modal";
 import {
   installOpenGeniModalSnapshotPolicy,
   isModalExecAlreadyCompletedError,
 } from "../src/sandbox/providers/modal";
+import { discoverWorkspaceSkills } from "../src/workspace-skills";
 
 type Persistence = "tar" | "snapshot_filesystem" | "snapshot_directory";
 
@@ -36,6 +41,45 @@ function fakeSession(
     }),
   };
   return session;
+}
+
+function modalExecResponse(output: string, exitCode: number): string {
+  return [
+    "Chunk ID: modal-test",
+    "Wall time: 0.0001 seconds",
+    `Process exited with code ${exitCode}`,
+    "Output:",
+    output,
+  ].join("\n");
+}
+
+function fakeModalFilesystemSession(root: string) {
+  const read = async ({ path, maxBytes }: { path: string; maxBytes?: number }) => {
+    const bytes = new Uint8Array(await readFile(path.startsWith("/") ? path : join(root, path)));
+    return typeof maxBytes === "number" ? bytes.subarray(0, maxBytes) : bytes;
+  };
+  const session = Object.assign(fakeSession("tar"), {
+    state: {
+      ...fakeSession("tar").state,
+      manifest: new Manifest({ root }),
+    },
+    readFile: read,
+    execCommand: async ({ cmd }: { cmd: string }) => {
+      const child = Bun.spawn(["/bin/bash", "--noprofile", "--norc", "-c", cmd], {
+        cwd: root,
+        env: process.env,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+        child.exited,
+      ]);
+      return modalExecResponse(`${stdout}${stderr}`, exitCode);
+    },
+  });
+  return { session, read };
 }
 
 describe("OpenGeni Modal 0.9 snapshot policy", () => {
@@ -113,6 +157,59 @@ describe("OpenGeni Modal 0.9 snapshot policy", () => {
     await session.persistWorkspace();
 
     expect(originalPersistWorkspace).toHaveBeenCalledTimes(1);
+  });
+
+  test("adds the missing directory capability required by workspace skill discovery", async () => {
+    const root = await mkdtemp(join(tmpdir(), "opengeni-modal-skills-"));
+    try {
+      const { session, read } = fakeModalFilesystemSession(root);
+      const searchPaths = [{ path: ".agents/skills", source: ".agents/skills" }];
+
+      await expect(
+        discoverWorkspaceSkills(session as unknown as SandboxSessionLike, searchPaths),
+      ).rejects.toThrow(
+        "Workspace skill discovery requires sandbox listDir() and readFile() support",
+      );
+
+      installOpenGeniModalSnapshotPolicy(session);
+      expect(session.readFile).toBe(read);
+      expect(typeof (session as unknown as SandboxSessionLike).listDir).toBe("function");
+      await mkdir(join(root, ".agents/skills"), { recursive: true });
+      const listDir = (session as unknown as Required<Pick<SandboxSessionLike, "listDir">>).listDir;
+      await expect(listDir({ path: join(root, ".agents/skills") })).resolves.toEqual([]);
+      await expect(listDir({ path: join(tmpdir(), "outside-workspace") })).rejects.toThrow(
+        "outside the workspace root",
+      );
+      await expect(
+        discoverWorkspaceSkills(session as unknown as SandboxSessionLike, searchPaths),
+      ).resolves.toEqual([]);
+
+      await mkdir(join(root, ".agents/skills/release"), { recursive: true });
+      await writeFile(
+        join(root, ".agents/skills/release/SKILL.md"),
+        "---\nname: release\ndescription: Prepare a safe release.\n---\n",
+      );
+      await expect(
+        discoverWorkspaceSkills(session as unknown as SandboxSessionLike, searchPaths),
+      ).resolves.toEqual([
+        expect.objectContaining({
+          name: "release",
+          description: "Prepare a safe release.",
+          path: ".agents/skills/release/SKILL.md",
+        }),
+      ]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("preserves a provider-native listDir implementation", () => {
+    const listDir = mock(async () => []);
+    const session = Object.assign(fakeSession("tar"), { listDir });
+
+    installOpenGeniModalSnapshotPolicy(session);
+
+    expect(session.listDir).toBe(listDir);
   });
 
   test("turns Modal's exact completed-exec stdin race into an ordinary terminal poll", async () => {
