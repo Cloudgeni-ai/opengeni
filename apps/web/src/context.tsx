@@ -40,6 +40,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { sameSessionForContext } from "@/lib/session-context";
+import { runSingleFlight } from "@/lib/single-flight";
 import {
   buildCreateSessionRequest,
   prepareCreateSessionAttempt,
@@ -69,6 +70,8 @@ import { upsertWorkspace } from "@/lib/workspaces";
 import type {
   AccessContext,
   AuthSession,
+  CapabilityCatalogItem,
+  CapabilityCatalogResponse,
   ClientConfig,
   CreateWorkspaceRequest,
   GitHubAppInfo,
@@ -153,6 +156,8 @@ export type AppContextValue = {
   workspaceDefaultToolIds: string[];
   /** True once the workspace capability catalog has completed its authoritative load. */
   workspaceMcpCatalogReady: boolean;
+  /** The authoritative workspace catalog, shared by tool policy and timeline presentation. */
+  workspaceCapabilityCatalog: CapabilityCatalogItem[];
   currentResources: ResourceRef[];
   addManualRepository: () => void;
   forgetAccessKey: () => void;
@@ -273,6 +278,9 @@ export function RootRouteComponent() {
   const [githubAppOpen, setGithubAppOpen] = useState(false);
   const [githubOrg, setGithubOrg] = useState("");
   const [workspaceMcpServers, setWorkspaceMcpServers] = useState<McpServerOption[]>([]);
+  const [workspaceCapabilityCatalog, setWorkspaceCapabilityCatalog] = useState<
+    CapabilityCatalogItem[]
+  >([]);
   const [workspaceMcpCatalogReady, setWorkspaceMcpCatalogReady] = useState(false);
   const [selectedCapabilityToolIds, setSelectedCapabilityToolIds] = useState<Set<string>>(
     () => new Set(),
@@ -282,6 +290,7 @@ export function RootRouteComponent() {
   const previousCapabilityToolIds = useRef<Set<string>>(new Set());
   const githubRefreshId = useRef(0);
   const mcpRefreshId = useRef(0);
+  const mcpCatalogRequests = useRef(new Map<string, Promise<CapabilityCatalogResponse>>());
   // Stable CREATE idempotency key for the in-flight session create. Generated
   // lazily and reused across retries (and across a double-click that re-enters
   // startSession before busy flips), so duplicate creates collapse to one
@@ -749,14 +758,20 @@ export function RootRouteComponent() {
     async (workspaceId: string, signal?: AbortSignal) => {
       const refreshId = mcpRefreshId.current + 1;
       mcpRefreshId.current = refreshId;
-      const catalog = await client.listCapabilities(workspaceId);
+      const requestKey = `${accessKeyVersion}:${workspaceId}`;
+      const catalog = await runSingleFlight(
+        mcpCatalogRequests.current,
+        requestKey,
+        async () => await client.listCapabilities(workspaceId),
+      );
       if (signal?.aborted || mcpRefreshId.current !== refreshId) {
         return;
       }
       setWorkspaceMcpServers(enabledWorkspaceCapabilityMcpServers(catalog.items));
+      setWorkspaceCapabilityCatalog(catalog.items);
       setWorkspaceMcpCatalogReady(true);
     },
-    [client],
+    [accessKeyVersion, client],
   );
 
   async function startSession(
@@ -1015,6 +1030,7 @@ export function RootRouteComponent() {
     setGithubRepos([]);
     setGithubCatalogReady(false);
     setWorkspaceMcpServers([]);
+    setWorkspaceCapabilityCatalog([]);
     setWorkspaceMcpCatalogReady(false);
   }, []);
 
@@ -1091,6 +1107,7 @@ export function RootRouteComponent() {
           toolMcpServers,
           workspaceDefaultToolIds: toolMcpServers.map((server) => server.id),
           workspaceMcpCatalogReady,
+          workspaceCapabilityCatalog,
           currentResources,
           addManualRepository: contextAddManualRepository,
           forgetAccessKey: contextForgetAccessKey,
@@ -1172,6 +1189,7 @@ export function RootRouteComponent() {
     setSession,
     toolMcpServers,
     workspaceMcpCatalogReady,
+    workspaceCapabilityCatalog,
     workspaces,
   ]);
 

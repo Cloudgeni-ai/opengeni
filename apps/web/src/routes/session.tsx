@@ -259,70 +259,26 @@ export function SessionRoute({
     [context.client, workspaceId],
   );
 
-  // One lazy catalog fetch feeds two timeline resolvers: provider logos for any
-  // inline reconnect card, and real capability names for the tool chips on user
-  // messages. Both resolve only through the workspace catalog, so fetch it once —
-  // when EITHER an auth-needed card OR a message carrying tool chips is in view —
-  // and reuse the single response. Logos serve from our own catalog-assets route
-  // via `catalogAssetUrl`, never an off-origin favicon (the CSP forbids it and it
-  // would leak which providers are connected).
-  const hasAuthNeeded = useMemo(
-    () => timeline.some((item) => item.kind === "auth-needed"),
-    [timeline],
-  );
-  const hasToolChips = useMemo(
-    () => timeline.some((item) => item.kind === "user-message" && item.tools.length > 0),
-    [timeline],
-  );
-  const [providerLogos, setProviderLogos] = useState<Map<string, string>>(() => new Map());
-  // mcpServerId -> human capability name, so a chip reads "Linear" instead of a
-  // best-effort parse of the raw server id.
-  const [capabilityNames, setCapabilityNames] = useState<Map<string, string>>(() => new Map());
-  const catalogRequestedRef = useRef(false);
-  useEffect(() => {
-    if ((!hasAuthNeeded && !hasToolChips) || catalogRequestedRef.current) {
-      return;
+  // The workspace shell already needs the capability catalog for session tool
+  // policy. Reuse that authoritative read for timeline names and logos instead
+  // of downloading the same large catalog again from the session route.
+  const { providerLogos, capabilityNames } = useMemo(() => {
+    const logos = new Map<string, string>();
+    const names = new Map<string, string>();
+    for (const capability of context.workspaceCapabilityCatalog) {
+      const domain = capability.providerDomain ?? capability.connectionRef?.providerDomain ?? null;
+      const url = context.client.catalogAssetUrl(capability.logoAssetPath);
+      if (domain && url) {
+        const key = normalizeProviderDomain(domain);
+        if (!logos.has(key)) logos.set(key, url);
+      }
+      const mcpServerId = capability.runtime.mcpServerId;
+      if (mcpServerId && capability.name && !names.has(mcpServerId)) {
+        names.set(mcpServerId, capability.name);
+      }
     }
-    catalogRequestedRef.current = true;
-    let cancelled = false;
-    void context.client
-      .listCapabilities(workspaceId)
-      .then((catalog) => {
-        if (cancelled) {
-          return;
-        }
-        const logos = new Map<string, string>();
-        const names = new Map<string, string>();
-        for (const cap of catalog.items) {
-          const domain = cap.providerDomain ?? cap.connectionRef?.providerDomain ?? null;
-          const url = context.client.catalogAssetUrl(cap.logoAssetPath);
-          if (domain && url) {
-            const key = normalizeProviderDomain(domain);
-            if (!logos.has(key)) {
-              logos.set(key, url);
-            }
-          }
-          // A chip's tool.id IS the capability's runtime mcpServerId — map it to
-          // the item's human name so the chip resolves to the real label.
-          const mcpServerId = cap.runtime.mcpServerId;
-          if (mcpServerId && cap.name && !names.has(mcpServerId)) {
-            names.set(mcpServerId, cap.name);
-          }
-        }
-        setProviderLogos(logos);
-        setCapabilityNames(names);
-      })
-      .catch(() => {
-        // Leave the card on its monogram fallback and the chips on their
-        // best-effort labels, and allow a later retry.
-        if (!cancelled) {
-          catalogRequestedRef.current = false;
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [hasAuthNeeded, hasToolChips, context.client, workspaceId]);
+    return { providerLogos: logos, capabilityNames: names };
+  }, [context.client, context.workspaceCapabilityCatalog]);
   const resolveProviderLogo = useCallback(
     (domain: string) => providerLogos.get(normalizeProviderDomain(domain)) ?? null,
     [providerLogos],

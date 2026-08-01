@@ -5,6 +5,7 @@ import { HTTPException } from "hono/http-exception";
 import {
   apiRequestBodyLimitBytes,
   allowedCorsOrigin,
+  appendVary,
   createApp,
   errorCodeForStatus,
   httpStatusForError,
@@ -45,6 +46,14 @@ import {
 } from "@opengeni/contracts";
 
 describe("API helpers", () => {
+  test("appends response negotiation without duplicating Vary fields", () => {
+    expect(appendVary(null, "Accept-Encoding")).toBe("Accept-Encoding");
+    expect(appendVary("Origin", "Accept-Encoding")).toBe("Origin, Accept-Encoding");
+    expect(appendVary("Origin, accept-encoding", "Accept-Encoding")).toBe(
+      "Origin, accept-encoding",
+    );
+  });
+
   test("protects product mutations while leaving external protocol callbacks alone", () => {
     expect(isApiContractProtectedMutation("POST", "/v1/workspaces/ws/sessions/s/events")).toBe(
       true,
@@ -1288,6 +1297,24 @@ describe("GET /v1/config/client", () => {
     expect(response.headers.get(OPENGENI_API_CONTRACT_HEADER)).toBe(OPENGENI_API_CONTRACT_REVISION);
     return ClientConfig.parse(await response.json());
   }
+
+  test("compresses JSON responses without changing their decoded contract", async () => {
+    const response = await appFor(testSettings()).request("/v1/config/client", {
+      headers: { "accept-encoding": "gzip" },
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-encoding")).toBe("gzip");
+    expect(response.headers.get("vary")?.toLowerCase().split(/,\s*/)).toContain("accept-encoding");
+    expect(response.body).not.toBeNull();
+    const decoded = new Response(response.body!.pipeThrough(new DecompressionStream("gzip")));
+    expect(ClientConfig.parse(await decoded.json()).apiContractRevision).toBe(
+      OPENGENI_API_CONTRACT_REVISION,
+    );
+
+    const identity = await appFor(testSettings()).request("/v1/config/client");
+    expect(identity.headers.get("content-encoding")).toBeNull();
+    expect(identity.headers.get("vary")?.toLowerCase().split(/,\s*/)).toContain("accept-encoding");
+  });
 
   test("rejects a stale production mutation before route state can change", async () => {
     const settings = testSettings({ environment: "production" });
