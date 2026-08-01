@@ -1,5 +1,11 @@
 # @opengeni/codex
 
+## 0.2.9
+
+### Patch Changes
+
+- c52acc0: Ship Fast latency mode with turn-column inheritance, Codex ChatGPT honor-skip for response service_tier, and model picker UX polish.
+
 ## 0.2.8
 
 ### Patch Changes
