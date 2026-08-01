@@ -33,6 +33,7 @@ import {
 } from "react";
 import { cn } from "../lib/cn";
 import { formatRelativeTime, truncate } from "../lib/format";
+import { prefersReducedMotion } from "../lib/motion";
 import { Markdown } from "./markdown";
 import {
   ActivityRail,
@@ -141,30 +142,25 @@ export type MessageTimelineProps = {
  * rows are memoized, so a full mount is cheap; the drip-feed machinery this
  * replaces was the "content is hidden, then pops in in batches" wobble.)
  *
- * The whole invariant is one sentence: pinned means we snap to the bottom
- * after every content change, and a scroll event that lands far from the
- * bottom unpins. Because every programmatic write lands AT the bottom, its
- * echo scroll event reads gap ≈ 0 and stays pinned — so there is no need to
- * count echoes, model glide physics, or reverse-engineer reader intent from
- * wheel/touch/pointer/key events. Any far-from-bottom scroll event is
- * necessarily the reader (or something acting for them, like find-in-page),
- * and unpinning is then the correct response. The previous scripted-glide +
- * echo-debt + intent-detection design is deliberately gone; the "flow in"
- * feel lives in the row entrance CSS, not in scripted scrollTop motion.
- *
- * - Pinned at the tip → snap: `scrollTop = scrollHeight - clientHeight` after
- *   every commit (layout effect) and every observed resize. Native scroll
- *   anchoring is off while pinned so it cannot fight the snap. Shrink-clamps
- *   land at the bottom too, so settle-fold collapses stay pinned by the same
- *   rule.
- * - Scrolled up reading → native scroll anchoring helps with late layout, but
- *   history prepends are restored in script: loadOlder can also truncate the
- *   tip (oldest-directed window), so scrollHeight delta alone is wrong, and
- *   anchoring often fails near y=0. We re-anchor on the retained group that
- *   held the previous first item (stable React key + offsetTop delta), falling
- *   back to scrollHeight growth when no anchor node is measurable.
+ * Scroll invariant:
+ * - A far-from-bottom scroll event unpins (reader left the tip).
+ * - Pinned at the live tip → soft-follow: ease `scrollTop` toward the bottom
+ *   so each new line/tool shifts the viewport smoothly instead of ratcheting
+ *   one line-height per append. Hard snap only for first paint, Jump to
+ *   latest, reduced motion, and oversized jumps. Native overflow-anchor is
+ *   off while pinned so the browser cannot instant-correct (that IS the tick).
+ * - Mid-glide scroll echoes must not unpin (gap is temporarily large). An
+ *   upward scrollTop while gliding is the reader — cancel + unpin. Downward
+ *   glide writes and settle-fold clamps (still near-bottom) stay pinned.
+ * - Scrolled up → history prepends restore via the retained group anchor
+ *   (offsetTop delta); loadOlder can truncate the tip, so scrollHeight delta
+ *   alone is wrong. Late layout while unpinned stays browser-owned.
  */
 const PIN_THRESHOLD_PX = 48;
+/** Tip-follow ease: remaining distance shrinks ~63% every tau ms. */
+const TIP_GLIDE_TAU_MS = 200;
+/** Larger than this snaps (session switch / huge fold), not eases. */
+const TIP_GLIDE_MAX_DISTANCE_PX = 480;
 /**
  * Prefetch older history when the top sentinel is this far from the viewport.
  * After a page loads we stay cool until the reader leaves this band (scrolls
@@ -306,11 +302,94 @@ export function MessageTimeline({
     }
   }, []);
 
-  // Every programmatic scroll is this one snap. Its echo scroll event lands
-  // with gap ≈ 0, so it re-reads as pinned — no echo accounting needed.
-  const snapToBottom = useCallback((node: HTMLElement) => {
-    node.scrollTop = Math.max(0, node.scrollHeight - node.clientHeight);
+  const revealedRef = useRef(revealed);
+  revealedRef.current = revealed;
+
+  // Soft tip-follow glide. While active, onScroll must not treat the temporary
+  // tip-debt as a reader unpin (see onScroll). Cancelled on upward scroll or
+  // when the pin drops.
+  const glideFrameRef = useRef<number | null>(null);
+  const glideLastTsRef = useRef(0);
+  const glidingRef = useRef(false);
+
+  const stopGlide = useCallback(() => {
+    glidingRef.current = false;
+    if (glideFrameRef.current !== null) {
+      cancelFrame(glideFrameRef.current);
+      glideFrameRef.current = null;
+    }
   }, []);
+
+  const snapToBottom = useCallback(
+    (node: HTMLElement) => {
+      stopGlide();
+      node.scrollTop = Math.max(0, node.scrollHeight - node.clientHeight);
+      lastScrollTopRef.current = node.scrollTop;
+    },
+    [stopGlide],
+  );
+
+  const glideStep = useCallback(() => {
+    glideFrameRef.current = null;
+    const node = scrollRef.current;
+    if (!node || !pinnedRef.current || hasNewerRef.current) {
+      glidingRef.current = false;
+      return;
+    }
+    const target = Math.max(0, node.scrollHeight - node.clientHeight);
+    const delta = target - node.scrollTop;
+    if (Math.abs(delta) <= 1) {
+      if (delta !== 0) {
+        node.scrollTop = target;
+      }
+      lastScrollTopRef.current = node.scrollTop;
+      glidingRef.current = false;
+      return;
+    }
+    const nowTs = typeof performance !== "undefined" ? performance.now() : Date.now();
+    const dt =
+      glideLastTsRef.current === 0
+        ? 16
+        : Math.min(64, Math.max(8, nowTs - glideLastTsRef.current));
+    glideLastTsRef.current = nowTs;
+    const alpha = 1 - Math.exp(-dt / TIP_GLIDE_TAU_MS);
+    const step = delta * alpha;
+    node.scrollTop = node.scrollTop + (Math.abs(step) < 0.5 ? Math.sign(delta) : step);
+    lastScrollTopRef.current = node.scrollTop;
+    glidingRef.current = true;
+    glideFrameRef.current = requestFrame(glideStep);
+  }, []);
+
+  const startGlide = useCallback(() => {
+    glidingRef.current = true;
+    if (glideFrameRef.current === null) {
+      glideLastTsRef.current = 0;
+      glideFrameRef.current = requestFrame(glideStep);
+    }
+  }, [glideStep]);
+
+  useEffect(() => stopGlide, [stopGlide]);
+
+  /** Soft tip-follow while pinned; hard snap for first paint / big jumps. */
+  const followTip = useCallback(
+    (node: HTMLElement) => {
+      const target = Math.max(0, node.scrollHeight - node.clientHeight);
+      const delta = target - node.scrollTop;
+      if (Math.abs(delta) <= 1) {
+        return;
+      }
+      if (
+        !revealedRef.current ||
+        Math.abs(delta) > TIP_GLIDE_MAX_DISTANCE_PX ||
+        prefersReducedMotion()
+      ) {
+        snapToBottom(node);
+        return;
+      }
+      startGlide();
+    },
+    [snapToBottom, startGlide],
+  );
 
   // The single post-commit scroll authority. Runs after EVERY commit (no dep
   // list): any commit may change content height, and the decision is cheap.
@@ -333,6 +412,7 @@ export function MessageTimeline({
       // The oldest window landed — jump against the NEW DOM, and skip the
       // prepend correction (it would shift the reader away from the top).
       pendingJumpToStartRef.current = false;
+      stopGlide();
       node.scrollTop = 0;
     } else if (wantPinRef.current && !hasNewer) {
       // Jump-to-latest was pressed on a history window and the tip window is
@@ -344,10 +424,8 @@ export function MessageTimeline({
         snapToBottom(node);
       }
     } else if (autoFollow && pinnedRef.current && !hasNewer) {
-      // Live tip only. A history-page bottom (`hasNewer`) must not follow
-      // appends from loadNewer — that path leaves scrollTop alone, like an
-      // unpinned reader watching growth below the viewport.
-      snapToBottom(node);
+      // Live tip: ease toward the bottom (hard snap only first paint / jumps).
+      followTip(node);
     } else if (prepended) {
       // Keep the reader on the same retained rows. Prefer the offsetTop delta
       // of the group that still holds the previous first item — that stays
@@ -517,10 +595,9 @@ export function MessageTimeline({
   }, [hasNewer, loadingNewer, onLoadNewer, firstGroupKey]);
 
   // Late layout that React commits cannot see (images decoding, fonts, code
-  // blocks) grows content without a commit. While pinned we keep snapping to
-  // the bottom; while unpinned we deliberately do NOTHING — chasing those
-  // shifts with scroll corrections was the wobble. Coalesce RO into one rAF so
-  // a tool/markdown reflow storm re-snaps at most once per frame.
+  // blocks) grows content without a commit. While pinned, soft-follow the tip;
+  // unpinned: do nothing — chasing those shifts was the wobble. Coalesce RO
+  // into one rAF.
   useEffect(() => {
     const node = scrollRef.current;
     const inner = node?.firstElementChild;
@@ -538,7 +615,7 @@ export function MessageTimeline({
           return;
         }
         if (autoFollow && pinnedRef.current && !hasNewerRef.current) {
-          snapToBottom(current);
+          followTip(current);
         }
       });
     });
@@ -553,7 +630,7 @@ export function MessageTimeline({
         resizeFollowRafRef.current = null;
       }
     };
-  }, [autoFollow, snapToBottom]);
+  }, [autoFollow, followTip]);
 
   // Entering a non-tip history window: drop any live pin so the page bottom
   // cannot re-stick follow across loadNewer. Leaving it (the tip window
@@ -562,6 +639,7 @@ export function MessageTimeline({
   // strand them unpinned watching new content grow below.
   useEffect(() => {
     if (hasNewer) {
+      stopGlide();
       applyPinned(false);
       return;
     }
@@ -580,26 +658,46 @@ export function MessageTimeline({
     if (autoFollow && !pinnedRef.current && isNearBottom(node)) {
       applyPinned(true);
     }
-  }, [hasNewer, autoFollow, applyPinned, snapToBottom]);
+  }, [hasNewer, autoFollow, applyPinned, snapToBottom, stopGlide]);
 
-  // The one unpin/repin decision, purely geometric. Our own writes always land
-  // at the bottom, so their echoes stay pinned; any far-from-bottom scroll
-  // event is necessarily the reader moving and unpins. Settle-fold shrinks are
-  // safe by the same rule: the browser clamps scrollTop to the new max, which
-  // IS the bottom. No wheel/touch/pointer/key/gutter inference exists anymore.
+  // Unpin/repin. Hard snaps land at the bottom so their echoes stay pinned.
+  // Soft tip-follow temporarily leaves a tip-debt: while gliding, ignore that
+  // gap — only an upward scrollTop (reader) cancels. Settle-fold clamps shrink
+  // scrollTop but land near-bottom, so they stay pinned.
   const onScroll = () => {
     const node = scrollRef.current;
     if (!node) {
       return;
     }
-    lastScrollTopRef.current = node.scrollTop;
+    const previousTop = lastScrollTopRef.current;
+    const nextTop = node.scrollTop;
+    lastScrollTopRef.current = nextTop;
+
+    if (glidingRef.current) {
+      if (nextTop < previousTop - 1 && !isNearBottom(node)) {
+        stopGlide();
+        applyPinned(false);
+        if (wantPinRef.current) {
+          wantPinRef.current = false;
+        }
+        if (!olderPrefetchArmedRef.current) {
+          olderPrefetchArmedRef.current = true;
+          setOlderPrefetchArmed(true);
+        }
+      }
+      return;
+    }
+
     const nearBottom = isNearBottom(node);
     const nextPinned = !hasNewer && nearBottom;
+    if (!nextPinned) {
+      stopGlide();
+    }
     applyPinned(nextPinned);
     // A far-from-bottom scroll while a Jump-to-latest is pending is the reader
     // changing their mind: drop the latch, or a stale one (host rejected or
     // never flipped hasNewer) would fire a surprise pin + snap whenever the
-    // reader later pages to the tip themselves. Our own writes land AT the
+    // reader later pages to the tip themselves. Our own snaps land AT the
     // bottom, so their echoes read nearBottom and keep a live latch.
     if (wantPinRef.current && !nearBottom) {
       wantPinRef.current = false;
@@ -623,9 +721,8 @@ export function MessageTimeline({
       <EntranceAnimationProvider value={!bulkRender}>
         <TooltipProvider delayDuration={400}>
         <div className={cn("og-root relative flex min-h-0 flex-col", className)}>
-          {/* Pinned: anchoring off so it cannot fight the bottom snap.
-          Unpinned: native scroll anchoring holds the reader's place through
-          prepends and late layout — the wobble-free path. */}
+          {/* Pinned: anchoring off so the soft tip-follow owns the motion.
+          Unpinned: native scroll anchoring holds the reader's place. */}
           <div
             ref={scrollRef}
             tabIndex={-1}

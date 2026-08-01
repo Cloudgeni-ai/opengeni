@@ -484,14 +484,14 @@ describe("MessageTimeline pagination affordances", () => {
     await r.unmount();
   });
 
-  test("native scroll anchoring owns unpinned mode; the bottom-snap owns pinned mode", async () => {
+  test("native scroll anchoring is off while pinned; on when unpinned", async () => {
     const r = await renderComponent(<MessageTimeline events={manyEvents(6)} />);
     await flush();
     const scroller = r.container.querySelector(".overflow-y-auto");
     if (!(scroller instanceof HTMLElement)) {
       throw new Error("expected timeline scroller");
     }
-    // Pinned (default): anchoring disabled so it cannot fight the snap.
+    // Pinned: anchoring off so soft tip-follow owns the motion.
     expect(scroller.className).toContain("[overflow-anchor:none]");
     expect(scroller.className).not.toContain("[overflow-anchor:auto]");
 
@@ -534,7 +534,7 @@ describe("MessageTimeline pagination affordances", () => {
     expect(layout.tipBottomGap()).toBeLessThan(2);
 
     // Grow content first (stale scrollTop leaves tip above the bottom), then
-    // let the live append's commit snap the tip back to the bottom.
+    // let the live append's soft tip-follow ease back to the bottom.
     layout.setContentHeight(2080);
     expect(layout.tipBottomGap()).toBeGreaterThan(2);
     await r.rerender(
@@ -863,11 +863,10 @@ describe("MessageTimeline pagination affordances", () => {
     await r.unmount();
   });
 
-  test("pinned appends snap in the same commit; a later scroll-up wins with no echoes to fight", async () => {
-    // Overlay scrollbars / coalesced trackpad deliver scroll-only events (no
-    // wheel). Unpinning is purely geometric now, so a mid-stream scroll-up is
-    // honored immediately — there is no glide write queue that could swallow
-    // it as an echo and yank the reader back to the tip.
+  test("pinned appends soft-follow the tip; a later scroll-up cancels the glide", async () => {
+    // Soft tip-follow eases toward the bottom. Mid-glide upward scrollTop is
+    // treated as the reader and unpins immediately — glide echoes (downward)
+    // must not swallow that intent.
     const frames: FrameRequestCallback[] = [];
     globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
       frames.push(cb);
@@ -893,12 +892,12 @@ describe("MessageTimeline pagination affordances", () => {
       scroller.dispatchEvent(new Event("scroll"));
     });
 
-    // Tip growth + commit snap to the bottom synchronously — no animation
-    // frames needed, nothing left in flight afterwards.
+    // Tip growth + soft follow reaches the bottom after glide frames drain.
     layout.setContentHeight(2300);
     await r.rerender(
       <MessageTimeline events={[...initial, agentDelta(21, "world")]} status="running" />,
     );
+    await drainFrames(frames);
     expect(distanceFromBottom(scroller)).toBeLessThan(2);
 
     const freedTop = 900;
@@ -973,8 +972,8 @@ describe("MessageTimeline pagination affordances", () => {
     expect(scroller.scrollTop).toBe(1000);
 
     // The tip window lands (hasNewer false): pin + snap. (The button itself
-    // may linger through its exit animation under happy-dom, so assert the
-    // pinned mode via the anchor class.)
+    // may linger through its exit animation under happy-dom, so assert pin via
+    // overflow-anchor:none + near-bottom.)
     layout.setContentHeight(2400);
     await r.rerender(<MessageTimeline events={initial} onJumpToLatest={onJumpToLatest} />);
     await flush();
@@ -985,6 +984,13 @@ describe("MessageTimeline pagination affordances", () => {
   });
 
   test("paging forward to the tip re-pins a reader parked at the bottom", async () => {
+    const frames: FrameRequestCallback[] = [];
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      frames.push(cb);
+      return frames.length;
+    };
+    globalThis.cancelAnimationFrame = () => undefined;
+
     const initial = manyEvents(20);
     const r = await renderComponent(
       <MessageTimeline events={initial} hasNewer onLoadNewer={() => undefined} />,
@@ -1009,14 +1015,15 @@ describe("MessageTimeline pagination affordances", () => {
 
     // The last page merges into the live tip: hasNewer flips false and the
     // reader at the bottom is following again — no stranded unpinned state
-    // with new content growing below. (Pinned mode shows as the anchor class;
-    // the button may linger through its exit animation under happy-dom.)
+    // with new content growing below. (Pin = overflow-anchor:none; the Jump
+    // button may linger through its exit animation under happy-dom.)
     await r.rerender(<MessageTimeline events={initial} />);
     await flush();
     expect(scroller.className).toContain("[overflow-anchor:none]");
 
     layout.setContentHeight(2100);
     await r.rerender(<MessageTimeline events={[...initial, event(21)]} />);
+    await drainFrames(frames);
     await flush();
     expect(distanceFromBottom(scroller)).toBeLessThan(2);
     layout.restore();

@@ -191,16 +191,14 @@
   }
 }
 
-/* Live activity rows: soft rise into the tip as scroll eases them into view.
-   Keep the offset small — large translateY fought scroll and felt like ticks. */
+/* Live activity rows: opacity only. translateY stacked with tip stick and
+   read as a second one-line tick on every tool/message append. */
 @keyframes og-row-enter {
   from {
     opacity: 0;
-    transform: translateY(6px);
   }
   to {
     opacity: 1;
-    transform: translateY(0);
   }
 }
 .animate-og-row-enter {
