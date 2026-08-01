@@ -1,5 +1,11 @@
 # @opengeni/api-router
 
+## 0.15.4
+
+### Patch Changes
+
+- 8ffa77e: Compress large JSON API responses and serve the production web application with precompressed, immutable hashed assets.
+
 ## 0.15.3
 
 ### Patch Changes
