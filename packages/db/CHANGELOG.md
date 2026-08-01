@@ -1,5 +1,11 @@
 # @opengeni/db
 
+## 0.16.1
+
+### Patch Changes
+
+- 02fb98c: Reconcile expired draining sandboxes after their exact provider instance has disappeared.
+
 ## 0.16.0
 
 ### Minor Changes
