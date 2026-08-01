@@ -81,10 +81,6 @@ const LazyWorkspaceStateRoute = lazyRouteComponent(
   "WorkspaceStateRoute",
 );
 const LazyArtifactsRoute = lazyRouteComponent(() => import("@/routes/artifacts"), "ArtifactsRoute");
-const LazyArtifactDetailRoute = lazyRouteComponent(
-  () => import("@/routes/artifacts"),
-  "ArtifactDetailRoute",
-);
 const LazyWorkspaceShellRoute = lazyRouteComponent(
   () => import("@/routes/workspace"),
   "WorkspaceShellRoute",
@@ -462,13 +458,11 @@ function WorkspaceState() {
 }
 
 function Artifacts() {
-  const { workspaceId } = workspaceArtifactsRoute.useParams();
-  return <LazyArtifactsRoute workspaceId={workspaceId} />;
+  return <LazyArtifactsRoute {...workspaceArtifactsRoute.useParams()} />;
 }
 
 function ArtifactDetail() {
-  const { workspaceId, artifactId } = workspaceArtifactDetailRoute.useParams();
-  return <LazyArtifactDetailRoute workspaceId={workspaceId} artifactId={artifactId} />;
+  return <LazyArtifactsRoute {...workspaceArtifactDetailRoute.useParams()} />;
 }
 
 function Organization() {

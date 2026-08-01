@@ -2,7 +2,6 @@ import { describe, expect, test } from "bun:test";
 import { ResourceRefConflictError, type ResourceRef } from "@opengeni/contracts";
 import {
   buildCreateSessionRequest,
-  applyNewSessionModelPreference,
   emptySessionDraft,
   newSessionDraftOptionsFromSessionDraft,
   prepareCreateSessionAttempt,
@@ -233,36 +232,6 @@ describe("buildCreateSessionRequest", () => {
       });
       expect(next.request.idempotencyKey).toBe("fresh-changed");
     }
-  });
-});
-
-describe("applyNewSessionModelPreference", () => {
-  test("uses the durable provider choice for programmatic new sessions", () => {
-    expect(
-      applyNewSessionModelPreference(
-        { text: "Edit this artifact" },
-        { model: "codex/gpt-5.6-sol", reasoningEffort: "medium" },
-      ),
-    ).toMatchObject({
-      model: "codex/gpt-5.6-sol",
-      reasoningEffort: "medium",
-    });
-  });
-
-  test("preserves an explicit caller selection", () => {
-    expect(
-      applyNewSessionModelPreference(
-        {
-          text: "Edit this artifact",
-          model: "azure/gpt-5.6-terra",
-          reasoningEffort: "high",
-        },
-        { model: "codex/gpt-5.6-sol", reasoningEffort: "medium" },
-      ),
-    ).toMatchObject({
-      model: "azure/gpt-5.6-terra",
-      reasoningEffort: "high",
-    });
   });
 });
 

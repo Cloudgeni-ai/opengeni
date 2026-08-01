@@ -36,5 +36,12 @@ export default defineConfig({
     tanstackRouter({ target: "react", enableRouteGeneration: false }),
     viteReact(),
     tailwindcss(),
+    {
+      name: "compact-index-html",
+      transformIndexHtml: {
+        order: "post",
+        handler: (html) => html.replace(/>\s+</g, "><").trim(),
+      },
+    },
   ],
 });

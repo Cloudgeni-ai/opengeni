@@ -216,16 +216,6 @@ import type {
 } from "./workspace-instruction-policies";
 import type { WorkspaceStateResponse } from "./workspace-state";
 import type {
-  CreateWorkspaceArtifactRequest,
-  PublishWorkspaceArtifactVersionRequest,
-  RollbackWorkspaceArtifactRequest,
-  WorkspaceArtifactContentResponse,
-  WorkspaceArtifactDetailResponse,
-  WorkspaceArtifactListOptions,
-  WorkspaceArtifactListResponse,
-  WorkspaceArtifactMutationResponse,
-} from "./workspace-artifacts";
-import type {
   ActivatePreferenceRegistryRevisionRequest,
   ChangePreferenceRegistryScopeRequest,
   CorrectPreferenceRegistryRequest,
@@ -1731,77 +1721,6 @@ export class OpenGeniClient {
     );
   }
 
-  async listWorkspaceArtifacts(
-    workspaceId: string,
-    options: WorkspaceArtifactListOptions = {},
-  ): Promise<WorkspaceArtifactListResponse> {
-    const query = new URLSearchParams();
-    if (options.limit !== undefined) query.set("limit", String(options.limit));
-    if (options.cursor) query.set("cursor", options.cursor);
-    const suffix = query.size > 0 ? `?${query.toString()}` : "";
-    return await this.requestJson<WorkspaceArtifactListResponse>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/published-artifacts${suffix}`,
-    );
-  }
-
-  async getWorkspaceArtifact(
-    workspaceId: string,
-    artifactId: string,
-  ): Promise<WorkspaceArtifactDetailResponse> {
-    return await this.requestJson<WorkspaceArtifactDetailResponse>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/published-artifacts/${encodeURIComponent(artifactId)}`,
-    );
-  }
-
-  async getWorkspaceArtifactContent(
-    workspaceId: string,
-    artifactId: string,
-    versionId?: string,
-  ): Promise<WorkspaceArtifactContentResponse> {
-    const query = versionId ? `?versionId=${encodeURIComponent(versionId)}` : "";
-    return await this.requestJson<WorkspaceArtifactContentResponse>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/published-artifacts/${encodeURIComponent(artifactId)}/content${query}`,
-    );
-  }
-
-  async createWorkspaceArtifact(
-    workspaceId: string,
-    request: CreateWorkspaceArtifactRequest,
-  ): Promise<WorkspaceArtifactMutationResponse> {
-    return await this.requestJson<WorkspaceArtifactMutationResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/published-artifacts`,
-      request,
-    );
-  }
-
-  async publishWorkspaceArtifactVersion(
-    workspaceId: string,
-    artifactId: string,
-    request: PublishWorkspaceArtifactVersionRequest,
-  ): Promise<WorkspaceArtifactMutationResponse> {
-    return await this.requestJson<WorkspaceArtifactMutationResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/published-artifacts/${encodeURIComponent(artifactId)}/versions`,
-      request,
-    );
-  }
-
-  async rollbackWorkspaceArtifact(
-    workspaceId: string,
-    artifactId: string,
-    request: RollbackWorkspaceArtifactRequest,
-  ): Promise<WorkspaceArtifactMutationResponse> {
-    return await this.requestJson<WorkspaceArtifactMutationResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/published-artifacts/${encodeURIComponent(artifactId)}/rollback`,
-      request,
-    );
-  }
-
   async updateWorkspace(workspaceId: string, request: UpdateWorkspaceRequest): Promise<Workspace> {
     return await this.requestJson<Workspace>("PATCH", `/v1/workspaces/${workspaceId}`, request);
   }
@@ -3246,7 +3165,7 @@ export class OpenGeniClient {
     );
   }
 
-  private async requestJson<T>(
+  protected async requestJson<T>(
     method: string,
     path: string,
     body?: unknown,

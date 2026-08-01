@@ -1,5 +1,7 @@
 import type { FirstPartyMcpToolName, Permission, ToolRef } from "@opengeni/contracts";
 
+import type { ReasoningEffort, TurnSubmission } from "@/types";
+
 /**
  * Artifact authoring needs only OpenGeni's mandatory first-party MCP server.
  * Keep this explicit so workspace-default Files/docs servers are not attached
@@ -47,4 +49,16 @@ export function artifactEditInstructions(input: {
   currentVersionId: string;
 }): string {
   return `You are editing the workspace artifact "${input.title}" (artifact id ${input.artifactId}). Ask me what I want changed. After I answer, call artifacts_get_source yourself, make the requested changes, and call artifacts_publish yourself in this same session with current version ${input.currentVersionId} for optimistic concurrency. Do not create, spawn, or delegate to another session, and do not stop after merely writing or validating a file. Publish the complete updated HTML before replying that the work is complete. ${ARTIFACT_RUNTIME_CONTRACT}`;
+}
+
+/** Apply the actor's durable new-session model preference without replacing an explicit choice. */
+export function applyNewSessionModelPreference(
+  submission: TurnSubmission,
+  preference: { model: string; reasoningEffort: ReasoningEffort },
+): TurnSubmission {
+  return {
+    ...submission,
+    model: submission.model ?? preference.model,
+    reasoningEffort: submission.reasoningEffort ?? preference.reasoningEffort,
+  };
 }

@@ -1,4 +1,4 @@
-export { OpenGeniClient } from "./client";
+export { OpenGeniClient } from "./artifact-client";
 export type {
   FetchLike,
   OpenGeniClientOptions,

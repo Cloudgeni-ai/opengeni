@@ -1,6 +1,8 @@
 import type {
   WorkspaceArtifactContentResponse,
   WorkspaceArtifactDetailResponse,
+  WorkspaceArtifactListResponse,
+  WorkspaceArtifactMutationResponse,
 } from "@opengeni/sdk";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
@@ -14,6 +16,7 @@ import {
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 
+import { request } from "@/api";
 import { EmptyState, LoadErrorState, PageHeader } from "@/components/common";
 import { ArtifactSandbox } from "@/components/artifacts/artifact-sandbox";
 import { Button } from "@/components/ui/button";
@@ -26,6 +29,7 @@ import {
   ARTIFACT_EDIT_PERMISSIONS,
   ARTIFACT_EDIT_TOOLS,
   ARTIFACT_SESSION_TOOLS,
+  applyNewSessionModelPreference,
   artifactCreateInstructions,
   artifactCreateOpeningMessage,
   artifactEditInstructions,
@@ -42,41 +46,64 @@ function asError(error: unknown): Error {
 }
 
 function useArtifacts(workspaceId: string) {
-  const { client } = useAppContext();
-  const [data, setData] = useState<Awaited<
-    ReturnType<typeof client.listWorkspaceArtifacts>
-  > | null>(null);
+  const [data, setData] = useState<WorkspaceArtifactListResponse | null>(null);
   const [error, setError] = useState<unknown>(null);
   const load = useCallback(async () => {
     try {
       setError(null);
-      setData(await client.listWorkspaceArtifacts(workspaceId));
+      setData(
+        await request<WorkspaceArtifactListResponse>(
+          `/v1/workspaces/${workspaceId}/published-artifacts`,
+        ),
+      );
     } catch (nextError) {
       setError(nextError);
     }
-  }, [client, workspaceId]);
+  }, [workspaceId]);
   useEffect(() => void load(), [load]);
   return { data, error, load };
 }
 
-export function ArtifactsRoute({ workspaceId }: { workspaceId: string }) {
+export function ArtifactsRoute({
+  workspaceId,
+  artifactId,
+}: {
+  workspaceId: string;
+  artifactId?: string;
+}) {
+  return artifactId ? (
+    <ArtifactDetailRoute workspaceId={workspaceId} artifactId={artifactId} />
+  ) : (
+    <ArtifactListRoute workspaceId={workspaceId} />
+  );
+}
+
+function ArtifactListRoute({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
   const navigate = useNavigate();
   const { data, error, load } = useArtifacts(workspaceId);
   const createWithGeni = async () => {
-    const created = await context.startSession(
-      workspaceId,
-      {
+    const submission = await context.client
+      .getNewSessionDraft(workspaceId)
+      .then((draft) =>
+        applyNewSessionModelPreference(
+          {
+            text: artifactCreateOpeningMessage(),
+            firstPartyMcpPermissions: [...ARTIFACT_CREATE_PERMISSIONS],
+            firstPartyMcpTools: [...ARTIFACT_CREATE_TOOLS],
+          },
+          draft,
+        ),
+      )
+      .catch(() => ({
         text: artifactCreateOpeningMessage(),
         firstPartyMcpPermissions: [...ARTIFACT_CREATE_PERMISSIONS],
         firstPartyMcpTools: [...ARTIFACT_CREATE_TOOLS],
-      },
-      {
-        instructions: artifactCreateInstructions(),
-        sessionTools: [...ARTIFACT_SESSION_TOOLS],
-        usePersistedModelPreference: true,
-      },
-    );
+      }));
+    const created = await context.startSession(workspaceId, submission, {
+      instructions: artifactCreateInstructions(),
+      sessionTools: [...ARTIFACT_SESSION_TOOLS],
+    });
     if (created)
       await navigate({
         to: "/workspaces/$workspaceId/sessions/$sessionId",
@@ -121,7 +148,7 @@ export function ArtifactsRoute({ workspaceId }: { workspaceId: string }) {
               key={artifact.id}
               to="/workspaces/$workspaceId/artifacts/$artifactId"
               params={{ workspaceId, artifactId: artifact.id }}
-              className="group rounded-lg border border-border bg-surface p-4 transition hover:border-brand/50 hover:bg-surface-2/40"
+              className="rounded-lg border border-border bg-surface p-4 transition hover:bg-surface-2/40"
             >
               <div className="flex items-start justify-between gap-3">
                 <div className="rounded-md bg-brand/10 p-2 text-brand">
@@ -131,9 +158,7 @@ export function ArtifactsRoute({ workspaceId }: { workspaceId: string }) {
                   {artifact.currentVersion ? `v${artifact.currentVersion.revision}` : "Draft"}
                 </span>
               </div>
-              <h2 className="mt-4 font-semibold text-fg group-hover:text-brand">
-                {artifact.title}
-              </h2>
+              <h2 className="mt-4 font-semibold text-fg">{artifact.title}</h2>
               <p className="mt-1 line-clamp-2 text-sm text-fg-muted">
                 {artifact.description || "No description"}
               </p>
@@ -165,36 +190,45 @@ export function ArtifactDetailRoute({
   const load = useCallback(async () => {
     try {
       setError(null);
-      const nextDetail = await context.client.getWorkspaceArtifact(workspaceId, artifactId);
+      const basePath = `/v1/workspaces/${workspaceId}/published-artifacts/${encodeURIComponent(artifactId)}`;
+      const nextDetail = await request<WorkspaceArtifactDetailResponse>(basePath);
       setDetail(nextDetail);
-      setContent(await context.client.getWorkspaceArtifactContent(workspaceId, artifactId));
+      setContent(await request<WorkspaceArtifactContentResponse>(`${basePath}/content`));
     } catch (nextError) {
       setError(nextError);
     }
-  }, [artifactId, context.client, workspaceId]);
+  }, [artifactId, workspaceId]);
   useEffect(() => void load(), [load]);
   const editWithGeni = async () => {
     const currentVersion = detail?.artifact.currentVersion;
     if (!detail || !currentVersion) return;
     const artifact = detail.artifact;
     const currentVersionId = currentVersion.id;
-    const created = await context.startSession(
-      workspaceId,
-      {
+    const submission = await context.client
+      .getNewSessionDraft(workspaceId)
+      .then((draft) =>
+        applyNewSessionModelPreference(
+          {
+            text: artifactEditOpeningMessage(artifact.title),
+            firstPartyMcpPermissions: [...ARTIFACT_EDIT_PERMISSIONS],
+            firstPartyMcpTools: [...ARTIFACT_EDIT_TOOLS],
+          },
+          draft,
+        ),
+      )
+      .catch(() => ({
         text: artifactEditOpeningMessage(artifact.title),
         firstPartyMcpPermissions: [...ARTIFACT_EDIT_PERMISSIONS],
         firstPartyMcpTools: [...ARTIFACT_EDIT_TOOLS],
-      },
-      {
-        instructions: artifactEditInstructions({
-          artifactId: artifact.id,
-          title: artifact.title,
-          currentVersionId,
-        }),
-        sessionTools: [...ARTIFACT_SESSION_TOOLS],
-        usePersistedModelPreference: true,
-      },
-    );
+      }));
+    const created = await context.startSession(workspaceId, submission, {
+      instructions: artifactEditInstructions({
+        artifactId: artifact.id,
+        title: artifact.title,
+        currentVersionId,
+      }),
+      sessionTools: [...ARTIFACT_SESSION_TOOLS],
+    });
     if (created)
       await navigate({
         to: "/workspaces/$workspaceId/sessions/$sessionId",
@@ -206,12 +240,18 @@ export function ArtifactDetailRoute({
     if (!current || current.id === versionId) return;
     setBusyVersion(versionId);
     try {
-      await context.client.rollbackWorkspaceArtifact(workspaceId, artifactId, {
-        versionId,
-        expectedCurrentVersionId: current.id,
-        reason: `Restored from the artifact history by ${context.authSession?.user?.name ?? "a workspace member"}`,
-        idempotencyKey: crypto.randomUUID(),
-      });
+      await request<WorkspaceArtifactMutationResponse>(
+        `/v1/workspaces/${workspaceId}/published-artifacts/${encodeURIComponent(artifactId)}/rollback`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            versionId,
+            expectedCurrentVersionId: current.id,
+            reason: `Restored from the artifact history by ${context.authSession?.user?.name ?? "a workspace member"}`,
+            idempotencyKey: crypto.randomUUID(),
+          }),
+        },
+      );
       toast.success("Artifact version restored");
       await load();
     } catch (nextError) {
@@ -243,7 +283,7 @@ export function ArtifactDetailRoute({
           </Button>
         }
       />
-      {!detail && !error ? <Skeleton className="h-[62vh] w-full" /> : null}
+      {!detail && !error ? <Skeleton className="h-96 w-full" /> : null}
       {error ? (
         <LoadErrorState
           title="Couldn't load artifact"

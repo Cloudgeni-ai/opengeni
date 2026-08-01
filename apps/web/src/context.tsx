@@ -2,7 +2,7 @@
 // token / managed session), workspace access, and the cross-route console
 // state (model choice, repo selection, tool toggles). Everything below the
 // workspace shell consumes this through `useAppContext`.
-import { OpenGeniApiError, type OpenGeniClient } from "@opengeni/sdk";
+import { OpenGeniApiError, type OpenGeniCoreClient } from "@opengeni/sdk/core";
 import { composerSubmissionErrorMessage, type SessionEventsConnectionState } from "@opengeni/react";
 import { Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import { TanStackRouterDevtools } from "@tanstack/react-router-devtools";
@@ -39,7 +39,6 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { sameSessionForContext } from "@/lib/session-context";
 import {
-  applyNewSessionModelPreference,
   buildCreateSessionRequest,
   prepareCreateSessionAttempt,
   type PendingCreateAttempt,
@@ -82,7 +81,7 @@ import type {
 } from "@/types";
 
 export type AppContextValue = {
-  client: OpenGeniClient;
+  client: OpenGeniCoreClient;
   clientConfig: ClientConfig;
   authSession: AuthSession | null;
   accessContext: AccessContext;
@@ -191,8 +190,6 @@ export type AppContextValue = {
       instructions?: string;
       /** Exact session MCP policy. Omit to use the product UI's workspace selection. */
       sessionTools?: ToolRef[];
-      /** Use this actor's durable new-session model/provider preference. */
-      usePersistedModelPreference?: boolean;
       targetSandboxId?: string | null;
       workingDir?: string | null;
       omitWorkspaceResources?: boolean;
@@ -305,7 +302,9 @@ export function RootRouteComponent() {
   // Public routes render ahead of every auth/config gate: a user completing a
   // password reset is signed out by definition, so `/reset-password` must never
   // be intercepted by the sign-in panel or workspace-access loading.
-  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const pathname = useRouterState({
+    select: (state) => state.location.pathname,
+  });
   // Public surfaces render ahead of auth/config gates. `/reset-password` is
   // always public; the SessionChrome DEV harness is public and needs no session.
   const isPublicAuthRoute =
@@ -758,8 +757,6 @@ export function RootRouteComponent() {
       instructions?: string;
       /** Exact session MCP policy. Omit to use the product UI's workspace selection. */
       sessionTools?: ToolRef[];
-      /** Use this actor's durable new-session model/provider preference. */
-      usePersistedModelPreference?: boolean;
       targetSandboxId?: string | null;
       workingDir?: string | null;
       omitWorkspaceResources?: boolean;
@@ -768,21 +765,16 @@ export function RootRouteComponent() {
   ): Promise<Session | null> {
     setBusy(true);
     try {
-      if (!workspaceMcpCatalogReady && options?.sessionTools === undefined) {
+      const sessionTools = options?.sessionTools;
+      if (!workspaceMcpCatalogReady && !sessionTools) {
         toast.error("Tools are still loading", {
           description: "Wait for the workspace tool catalog to finish loading, then try again.",
         });
         return null;
       }
-      const effectiveSubmission = options?.usePersistedModelPreference
-        ? await client
-            .getNewSessionDraft(workspaceId)
-            .then((draft) => applyNewSessionModelPreference(submission, draft))
-            .catch(() => submission)
-        : submission;
-      const selectedTools = options?.sessionTools
-        ? [...options.sessionTools]
-        : buildOpenGeniUiTools(effectiveSubmission.tools, selectedCapabilityToolIds);
+      const selectedTools = sessionTools
+        ? [...sessionTools]
+        : buildOpenGeniUiTools(submission.tools, selectedCapabilityToolIds);
       const freshIdempotencyKey = crypto.randomUUID();
       const attempt = prepareCreateSessionAttempt({
         pending: pendingCreateAttempt.current,
@@ -791,7 +783,7 @@ export function RootRouteComponent() {
         freshIdempotencyKey,
         request: buildCreateSessionRequest({
           currentResources,
-          submission: effectiveSubmission,
+          submission,
           instructions: options?.instructions,
           omitWorkspaceResources: options?.omitWorkspaceResources,
           selectedTools,

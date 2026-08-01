@@ -530,11 +530,11 @@ export function ArtifactSandbox(props: {
     <section
       className={cn(
         "overflow-hidden rounded-lg border border-border bg-white",
-        focused && "fixed inset-0 z-50 flex flex-col rounded-none border-0 bg-surface",
+        focused && "fixed inset-0 z-50 flex flex-col border-0 bg-surface",
         props.className,
       )}
     >
-      <div className="flex min-h-10 shrink-0 items-center justify-between gap-2 border-b border-border bg-surface px-2 py-1.5 sm:px-3">
+      <div className="flex h-10 shrink-0 items-center justify-between gap-2 border-b border-border bg-surface px-2 py-1.5">
         <div className="flex min-w-0 items-center gap-2">
           {focused ? (
             <Button
@@ -543,7 +543,7 @@ export function ArtifactSandbox(props: {
               className="h-7 shrink-0 px-2"
               onClick={() => setFocused(false)}
             >
-              <ArrowLeftIcon className="mr-1.5 size-3.5" />
+              <ArrowLeftIcon className="mr-2 size-3.5" />
               Back
             </Button>
           ) : null}
@@ -563,7 +563,7 @@ export function ArtifactSandbox(props: {
               disabled={props.editDisabled}
               onClick={props.onEdit}
             >
-              <SparklesIcon className="mr-1.5 size-3.5" />
+              <SparklesIcon className="mr-2 size-3.5" />
               <span className="hidden sm:inline">Edit with Geni</span>
               <span className="sm:hidden">Edit</span>
             </Button>

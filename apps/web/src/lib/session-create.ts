@@ -148,26 +148,6 @@ export type PendingCreateAttempt = {
 };
 
 /**
- * Apply the actor's durable new-session model preference without overriding a
- * model explicitly chosen by the caller. Programmatic session entry points
- * (such as artifact Create/Edit with Geni) use this because they can be opened
- * directly, before the new-session route has hydrated its draft into context.
- */
-export function applyNewSessionModelPreference(
-  submission: TurnSubmission,
-  preference: {
-    model: string;
-    reasoningEffort: ReasoningEffort;
-  },
-): TurnSubmission {
-  return {
-    ...submission,
-    model: submission.model ?? preference.model,
-    reasoningEffort: submission.reasoningEffort ?? preference.reasoningEffort,
-  };
-}
-
-/**
  * Build the one canonical create payload without mutating UI state. Resource
  * identity and mount conflicts are resolved by the shared contract helper;
  * exact duplicates collapse while order remains first-seen stable.
@@ -201,7 +181,7 @@ export function buildCreateSessionRequest(
       : [...input.selectedTools];
   return {
     initialMessage: input.submission.text,
-    ...(input.instructions ? { instructions: input.instructions } : {}),
+    instructions: input.instructions || undefined,
     resources,
     ...(tools === undefined ? {} : { tools }),
     model: input.submission.model ?? input.defaultModel,

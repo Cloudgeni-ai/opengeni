@@ -6,6 +6,7 @@ import {
   ARTIFACT_EDIT_PERMISSIONS,
   ARTIFACT_EDIT_TOOLS,
   ARTIFACT_SESSION_TOOLS,
+  applyNewSessionModelPreference,
   artifactCreateInstructions,
   artifactCreateOpeningMessage,
   artifactEditInstructions,
@@ -46,5 +47,30 @@ describe("artifact authoring sessions", () => {
     expect(instructions).toContain("artifact id artifact-1");
     expect(instructions).toContain("current version version-2");
     expect(instructions).toContain("call artifacts_publish yourself in this same session");
+  });
+
+  test("applies the durable model preference without replacing an explicit choice", () => {
+    expect(
+      applyNewSessionModelPreference(
+        { text: "Edit this artifact" },
+        { model: "codex/gpt-5.6-sol", reasoningEffort: "medium" },
+      ),
+    ).toMatchObject({
+      model: "codex/gpt-5.6-sol",
+      reasoningEffort: "medium",
+    });
+    expect(
+      applyNewSessionModelPreference(
+        {
+          text: "Edit this artifact",
+          model: "azure/gpt-5.6-terra",
+          reasoningEffort: "high",
+        },
+        { model: "codex/gpt-5.6-sol", reasoningEffort: "medium" },
+      ),
+    ).toMatchObject({
+      model: "azure/gpt-5.6-terra",
+      reasoningEffort: "high",
+    });
   });
 });

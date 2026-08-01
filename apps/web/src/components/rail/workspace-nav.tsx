@@ -11,7 +11,6 @@ import {
   GaugeIcon,
   LaptopIcon,
   MapIcon,
-  PanelsTopLeftIcon,
   PlugIcon,
   ServerCogIcon,
   SettingsIcon,
@@ -90,7 +89,7 @@ const CONFIG_ITEMS: Array<{ to: NavTarget; icon: LucideIcon; label: string; desc
     },
     {
       to: "/workspaces/$workspaceId/artifacts",
-      icon: PanelsTopLeftIcon,
+      icon: BoxIcon,
       label: "Artifacts",
       description: "Live pages and tools built with Geni",
     },
