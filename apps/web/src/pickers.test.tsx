@@ -326,16 +326,18 @@ describe("catalog-backed ModelPicker", () => {
       }),
     ]);
     let selected = "gpt-5.6-sol";
-    let effort: "low" | "high" | "xhigh" = "low";
-    let latency: "standard" | "fast" = "standard";
+    const selection = {
+      effort: "low" as "low" | "high" | "xhigh",
+      latency: "standard" as "standard" | "fast",
+    };
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
 
     function Harness() {
       const [model, setModel] = useState(selected);
-      const [effortState, setEffortState] = useState(effort);
-      const [latencyMode, setLatencyMode] = useState(latency);
+      const [effortState, setEffortState] = useState(selection.effort);
+      const [latencyMode, setLatencyMode] = useState(selection.latency);
       return (
         <ModelPickerMenu
           rows={rows}
@@ -347,12 +349,12 @@ describe("catalog-backed ModelPicker", () => {
             setModel(id);
           }}
           onEffortChange={(value) => {
-            effort = value as typeof effort;
-            setEffortState(effort);
+            selection.effort = value as typeof selection.effort;
+            setEffortState(selection.effort);
           }}
           onLatencyModeChange={(mode) => {
-            latency = mode === "fast" ? "fast" : "standard";
-            setLatencyMode(latency);
+            selection.latency = mode === "fast" ? "fast" : "standard";
+            setLatencyMode(selection.latency);
           }}
         />
       );
@@ -401,13 +403,13 @@ describe("catalog-backed ModelPicker", () => {
         high!.click();
       });
       expect(selected).toBe("codex/gpt-5.6-luna");
-      expect(effort).toBe("high");
+      expect(selection.effort).toBe("high");
       expect(container.querySelector('[data-testid="model-picker-fast"]')).toBeTruthy();
 
       await act(async () => {
         container.querySelector<HTMLElement>('[data-testid="model-picker-fast"]')!.click();
       });
-      expect(latency).toBe("fast");
+      expect(selection.latency).toBe("fast");
 
       // Back leaves Thinking without changing the committed selection.
       await act(async () => {
@@ -423,12 +425,13 @@ describe("catalog-backed ModelPicker", () => {
   });
 
   test("hides Fast toggle when the focused model cannot run it", async () => {
+    const baseCapabilities = catalogModel({ id: "x", label: "x" }).capabilities!;
     const rows = projectPickerRows([
       catalogModel({
         id: "slow-only",
         label: "Slow",
         capabilities: {
-          ...catalogModel({ id: "x", label: "x" }).capabilities,
+          ...baseCapabilities,
           latencyModes: [{ id: "standard", upstream: "supported", runnable: true }],
         },
       }),

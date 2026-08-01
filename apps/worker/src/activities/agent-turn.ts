@@ -6325,7 +6325,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               event: next.value,
               requested: turnExecutionPolicy.latencyMode,
               model: turn.model,
-              providerId: resolvedModel?.provider.id,
+              ...(resolvedModel?.provider.id
+                ? { providerId: resolvedModel.provider.id }
+                : {}),
             });
             if (responseUsageResult.status === "processed") {
               currentToolBatchCallIds = new Set<string>();
