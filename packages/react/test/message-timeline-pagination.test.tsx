@@ -64,9 +64,10 @@ function manyEvents(count: number): SessionEvent[] {
 }
 
 async function readerScrollUp(scroller: HTMLElement, scrollTop = 0): Promise<void> {
-  // Unpinning is purely geometric: a scroll event landing far from the bottom
-  // IS the reader moving — no synthetic wheel/touch intent is needed.
+  // Wheel marks reader intent (fold clamps never synthesize wheel). Scroll
+  // position then lands far from the tip.
   await actRun(() => {
+    scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -40, bubbles: true }));
     scroller.scrollTop = scrollTop;
     scroller.dispatchEvent(new Event("scroll"));
   });
@@ -80,6 +81,13 @@ async function armOlderPrefetch(container: HTMLElement): Promise<void> {
   }
   Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 2400 });
   Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 400 });
+  // Park at the tip first so scroll-up is a real upward delta. (Pinned + tall
+  // mock height with scrollTop already 0 is tip-debt recovery, not reader intent.)
+  await actRun(() => {
+    scroller.scrollTop = 2000;
+    scroller.dispatchEvent(new Event("scroll"));
+  });
+  await flush();
   await readerScrollUp(scroller, 0);
 }
 
@@ -109,6 +117,7 @@ afterEach(() => {
   if (originalCssDescriptor) {
     Object.defineProperty(globalThis, "CSS", originalCssDescriptor);
   }
+  frameClockMs = 0;
 });
 
 describe("MessageTimeline pagination affordances", () => {
@@ -491,12 +500,17 @@ describe("MessageTimeline pagination affordances", () => {
     if (!(scroller instanceof HTMLElement)) {
       throw new Error("expected timeline scroller");
     }
-    // Pinned: anchoring off so soft tip-follow owns the motion.
+    // Pinned: anchoring off so the tip-follow camera owns the motion.
     expect(scroller.className).toContain("[overflow-anchor:none]");
     expect(scroller.className).not.toContain("[overflow-anchor:auto]");
 
     Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 2400 });
     Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 400 });
+    await actRun(() => {
+      scroller.scrollTop = 2000;
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    await flush();
     await readerScrollUp(scroller, 0);
     // Unpinned: the browser holds the reader's place.
     expect(scroller.className).toContain("[overflow-anchor:auto]");
@@ -534,7 +548,7 @@ describe("MessageTimeline pagination affordances", () => {
     expect(layout.tipBottomGap()).toBeLessThan(2);
 
     // Grow content first (stale scrollTop leaves tip above the bottom), then
-    // let the live append's soft tip-follow ease back to the bottom.
+    // let the tip-follow camera ease back to the bottom.
     layout.setContentHeight(2080);
     expect(layout.tipBottomGap()).toBeGreaterThan(2);
     await r.rerender(
@@ -641,6 +655,50 @@ describe("MessageTimeline pagination affordances", () => {
     await r.unmount();
   });
 
+  test("mid-turn fold + tip growth does not unpin when maxScroll stays flat", async () => {
+    // tools→message→tools: cluster collapse and narration growth cancel in
+    // maxScroll while scrollTop still drops — old conservation false-unpinned.
+    const frames: FrameRequestCallback[] = [];
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      frames.push(cb);
+      return frames.length;
+    };
+    globalThis.cancelAnimationFrame = () => undefined;
+
+    const prefix = manyEvents(19);
+    const initial = [...prefix, agentDelta(20, "hello ")];
+    const r = await renderComponent(<MessageTimeline events={initial} status="running" />);
+    const scroller = r.container.querySelector(".overflow-y-auto");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+    const layout = mockScrollerLayout(scroller, {
+      clientHeight: 400,
+      contentHeight: 2000,
+      tipHeight: 80,
+      paddingBottom: 24,
+    });
+    layout.syncTipAtBottom();
+    await actRun(() => {
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    expect(r.container.textContent).not.toContain("Jump to latest");
+
+    // Same scrollHeight + same maxScroll, but scrollTop drops (fold above +
+    // growth below). Must stay pinned and recover tip — not Jump to latest.
+    await actRun(() => {
+      scroller.scrollTop = 1400;
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    await drainFrames(frames);
+    await flush();
+    expect(r.container.textContent).not.toContain("Jump to latest");
+    expect(distanceFromBottom(scroller)).toBeLessThan(48);
+
+    layout.restore();
+    await r.unmount();
+  });
+
   test("layout height shrink while pinned does not unpin (settle-fold / scenario spawn)", async () => {
     const frames: FrameRequestCallback[] = [];
     globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
@@ -670,15 +728,15 @@ describe("MessageTimeline pagination affordances", () => {
     expect(distanceFromBottom(scroller)).toBeLessThan(48);
     expect(r.container.textContent).not.toContain("Jump to latest");
 
-    // Settle-fold collapse: content above the tip shrinks. A transient
-    // far-from-tip scroll (including the ResizeObserver race where height
-    // baseline already matches) must re-stick, not show Jump to latest.
+    // Settle-fold collapse: content above the tip shrinks. Browser clamp
+    // lowers scrollTop to the new max (not below — that would be reader intent).
+    // Clamp conservation: top fall ≈ maxScroll fall → stay pinned.
     layout.setContentHeight(1500);
     await actRun(() => {
+      scroller.scrollTop = 1100; // new max = 1500 - 400
       scroller.dispatchEvent(new Event("scroll"));
     });
-    // Same-height second scroll: baseline already matches, gap still large —
-    // the old height-delta guard missed this and unpinned.
+    // Same-height second scroll after stick: still pinned at tip.
     await actRun(() => {
       scroller.dispatchEvent(new Event("scroll"));
     });
@@ -694,6 +752,142 @@ describe("MessageTimeline pagination affordances", () => {
     await flush();
     expect(r.container.textContent).not.toContain("Jump to latest");
     expect(distanceFromBottom(scroller)).toBeLessThan(48);
+    layout.restore();
+    await r.unmount();
+  });
+
+  test("pointer-armed scroll-up during growth unpins without a wheel event", async () => {
+    const frames: FrameRequestCallback[] = [];
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      frames.push(cb);
+      return frames.length;
+    };
+    globalThis.cancelAnimationFrame = () => undefined;
+
+    const prefix = manyEvents(19);
+    const initial = [...prefix, agentDelta(20, "hello ")];
+    const r = await renderComponent(<MessageTimeline events={initial} status="running" />);
+    const scroller = r.container.querySelector(".overflow-y-auto");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+    const layout = mockScrollerLayout(scroller, {
+      clientHeight: 400,
+      contentHeight: 2000,
+      tipHeight: 80,
+      paddingBottom: 24,
+    });
+    layout.syncTipAtBottom();
+    await actRun(() => {
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    expect(r.container.textContent).not.toContain("Jump to latest");
+
+    // Streaming growth, then pointer-drag the scroller up (scrollbar / touch).
+    // Bare scroll without pointer arm must NOT unpin — that's mid-turn fold noise.
+    layout.setContentHeight(2400);
+    await actRun(() => {
+      scroller.dispatchEvent(
+        new PointerEvent("pointerdown", {
+          button: 0,
+          pointerType: "mouse",
+          bubbles: true,
+        }),
+      );
+      scroller.scrollTop = 1200;
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    await drainFrames(frames);
+    await flush();
+    expect(r.container.textContent).toContain("Jump to latest");
+    layout.restore();
+    await r.unmount();
+  });
+
+  test("settle-fold clamp does not re-pin an unpinned reader", async () => {
+    const frames: FrameRequestCallback[] = [];
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      frames.push(cb);
+      return frames.length;
+    };
+    globalThis.cancelAnimationFrame = () => undefined;
+
+    const prefix = manyEvents(19);
+    const initial = [...prefix, agentDelta(20, "hello ")];
+    const r = await renderComponent(<MessageTimeline events={initial} status="running" />);
+    const scroller = r.container.querySelector(".overflow-y-auto");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+    const layout = mockScrollerLayout(scroller, {
+      clientHeight: 400,
+      contentHeight: 2000,
+      tipHeight: 80,
+      paddingBottom: 24,
+    });
+    layout.syncTipAtBottom();
+    await actRun(() => {
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    await readerScrollUp(scroller, 1300);
+    expect(r.container.textContent).toContain("Jump to latest");
+
+    // Fold removes content below the reader → clamp onto nearBottom. Must
+    // stay unpinned (not silently re-stick and yank on the next delta).
+    layout.setContentHeight(1500);
+    await actRun(() => {
+      scroller.scrollTop = 1100;
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    await drainFrames(frames);
+    await flush();
+    expect(r.container.textContent).toContain("Jump to latest");
+    layout.restore();
+    await r.unmount();
+  });
+
+  test("wheel over a nested overflow scroller does not unpin the timeline", async () => {
+    const r = await renderComponent(
+      <MessageTimeline events={[...manyEvents(19), agentDelta(20, "hello ")]} status="running" />,
+    );
+    const scroller = r.container.querySelector(".overflow-y-auto");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+    const layout = mockScrollerLayout(scroller, {
+      clientHeight: 400,
+      contentHeight: 2000,
+      tipHeight: 80,
+      paddingBottom: 24,
+    });
+    layout.syncTipAtBottom();
+    await actRun(() => {
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+
+    const nested = document.createElement("pre");
+    nested.className = "max-h-64 overflow-auto";
+    Object.defineProperty(nested, "scrollHeight", { configurable: true, value: 800 });
+    Object.defineProperty(nested, "clientHeight", { configurable: true, value: 200 });
+    nested.scrollTop = 120;
+    scroller.appendChild(nested);
+
+    window.getComputedStyle = ((el: Element) => {
+      if (el === nested) {
+        return { overflowY: "auto" } as CSSStyleDeclaration;
+      }
+      return originalGetComputedStyle(el);
+    }) as typeof window.getComputedStyle;
+
+    await actRun(() => {
+      nested.dispatchEvent(
+        new WheelEvent("wheel", { deltaY: -40, deltaX: 0, bubbles: true }),
+      );
+    });
+    await flush();
+    expect(r.container.textContent).not.toContain("Jump to latest");
+    window.getComputedStyle = originalGetComputedStyle;
+    nested.remove();
     layout.restore();
     await r.unmount();
   });
@@ -849,9 +1043,10 @@ describe("MessageTimeline pagination affordances", () => {
     });
     expect(distanceFromBottom(scroller)).toBeLessThan(48);
 
-    // Scroll event with decreasing scrollTop (no wheel) must unpin — the old
-    // path called followTip and fought the reader back to the tip.
+    // Wheel toward older history unpins — fold clamps never synthesize wheel,
+    // so this is the reliable reader-intent edge.
     await actRun(() => {
+      scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -40, bubbles: true }));
       scroller.scrollTop = 1200;
       layout.placeTipAt(1200);
       scroller.dispatchEvent(new Event("scroll"));
@@ -863,10 +1058,7 @@ describe("MessageTimeline pagination affordances", () => {
     await r.unmount();
   });
 
-  test("pinned appends soft-follow the tip; a later scroll-up cancels the glide", async () => {
-    // Soft tip-follow eases toward the bottom. Mid-glide upward scrollTop is
-    // treated as the reader and unpins immediately — glide echoes (downward)
-    // must not swallow that intent.
+  test("pinned tip-debt from growth does not unpin without a reader scroll-up", async () => {
     const frames: FrameRequestCallback[] = [];
     globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
       frames.push(cb);
@@ -892,7 +1084,49 @@ describe("MessageTimeline pagination affordances", () => {
       scroller.dispatchEvent(new Event("scroll"));
     });
 
-    // Tip growth + soft follow reaches the bottom after glide frames drain.
+    // Content grew under a pinned reader; scrollTop stale ⇒ tip-debt. A scroll
+    // echo must keep the pin and recover — not show Jump to latest.
+    layout.setContentHeight(2300);
+    await actRun(() => {
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    await drainFrames(frames);
+    await flush();
+    expect(r.container.textContent).not.toContain("Jump to latest");
+    expect(distanceFromBottom(scroller)).toBeLessThan(48);
+    layout.restore();
+    await r.unmount();
+  });
+
+  test("pinned appends soft-follow the tip; a later scroll-up cancels the camera", async () => {
+    // Tip-follow eases toward the bottom. Mid-follow wheel-up unpins —
+    // camera echoes (downward scrollTop) must not swallow that intent.
+    const frames: FrameRequestCallback[] = [];
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      frames.push(cb);
+      return frames.length;
+    };
+    globalThis.cancelAnimationFrame = () => undefined;
+
+    const prefix = manyEvents(19);
+    const initial = [...prefix, agentDelta(20, "hello ")];
+    const r = await renderComponent(<MessageTimeline events={initial} status="running" />);
+    const scroller = r.container.querySelector(".overflow-y-auto");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+    const layout = mockScrollerLayout(scroller, {
+      clientHeight: 400,
+      contentHeight: 2000,
+      tipHeight: 80,
+      paddingBottom: 24,
+    });
+    layout.syncTipAtBottom();
+    await actRun(() => {
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+
+    // Tip growth + tip-follow reaches the bottom after camera frames drain.
     layout.setContentHeight(2300);
     await r.rerender(
       <MessageTimeline events={[...initial, agentDelta(21, "world")]} status="running" />,
@@ -902,6 +1136,7 @@ describe("MessageTimeline pagination affordances", () => {
 
     const freedTop = 900;
     await actRun(() => {
+      scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -40, bubbles: true }));
       scroller.scrollTop = freedTop;
       layout.placeTipAt(freedTop + 200);
       scroller.dispatchEvent(new Event("scroll"));
@@ -1327,12 +1562,22 @@ describe("MessageTimeline pagination affordances", () => {
   });
 });
 
+/**
+ * Synthetic vsync clock for tip-follow. Seeded from performance.now() so it
+ * stays on the same timeline as layout/RO driveFollow calls.
+ */
+let frameClockMs = 0;
+
 async function runNextFrame(frames: FrameRequestCallback[]): Promise<void> {
   const frame = frames.shift();
   if (!frame) {
     throw new Error("expected a scheduled animation frame");
   }
-  await actRun(() => frame(performance.now()));
+  if (frameClockMs === 0) {
+    frameClockMs = performance.now();
+  }
+  frameClockMs += 16;
+  await actRun(() => frame(frameClockMs));
 }
 
 async function drainFrames(frames: FrameRequestCallback[]): Promise<void> {
@@ -1340,7 +1585,8 @@ async function drainFrames(frames: FrameRequestCallback[]): Promise<void> {
   while (frames.length > 0) {
     await runNextFrame(frames);
     count += 1;
-    if (count > 100) {
+    // Calm tip-follow (~42 px/s) needs headroom for multi-hundred-px debt.
+    if (count > 800) {
       throw new Error("animation-frame queue did not settle");
     }
   }

@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { registerDom, renderComponent, flush } from "./render-hook";
 import { createStreamReveal, INK_FADE_MS } from "../src/components/stream-reveal";
+import { MOTION_INSPECT_SCALE } from "../src/lib/motion-inspect";
+
+/** Keep in sync with markdown.tsx REVEAL_LINGER_MS / MARKDOWN_SETTLE_MS. */
+const REVEAL_LINGER_MS = 480 * MOTION_INSPECT_SCALE;
+const MARKDOWN_SETTLE_MS = 480 * MOTION_INSPECT_SCALE;
 import { Markdown } from "../src/components/markdown";
 
 registerDom();
@@ -15,8 +20,7 @@ describe("createStreamReveal", () => {
     expect(first).not.toBeNull();
     expect(last).toBe(first);
 
-    // A later append animates only the new suffix (still inside the first
-    // batch's age window at +900ms with the current fade length).
+    // A later append animates only the new suffix.
     reveal.observe("hello world and beyond", 1900);
     expect(reveal.delayFor(12, 1900)).not.toBeNull();
 
@@ -98,15 +102,19 @@ describe("Markdown streaming tip ink", () => {
     await r.unmount();
   });
 
-  test("after streaming ends, the body unwinds to plain markdown", async () => {
-    const r = await renderComponent(<Markdown streaming>hello world</Markdown>);
-    expect(r.container.querySelector(".og-stream-ink")).not.toBeNull();
-    await r.rerender(<Markdown streaming={false}>hello world</Markdown>);
-    await flush(1000);
-    expect(r.container.querySelector(".og-stream-ink")).toBeNull();
-    expect(r.container.textContent).toContain("hello world");
-    await r.unmount();
-  });
+  test(
+    "after streaming ends, the body unwinds to plain markdown",
+    async () => {
+      const r = await renderComponent(<Markdown streaming>hello world</Markdown>);
+      expect(r.container.querySelector(".og-stream-ink")).not.toBeNull();
+      await r.rerender(<Markdown streaming={false}>hello world</Markdown>);
+      await flush(REVEAL_LINGER_MS + 100);
+      expect(r.container.querySelector(".og-stream-ink")).toBeNull();
+      expect(r.container.textContent).toContain("hello world");
+      await r.unmount();
+    },
+    15_000,
+  );
 
   test("non-streaming bodies never carry ink spans", async () => {
     const r = await renderComponent(<Markdown>hello world</Markdown>);
@@ -114,15 +122,19 @@ describe("Markdown streaming tip ink", () => {
     await r.unmount();
   });
 
-  test("stream end crystallizes when the reveal pipeline tears down", async () => {
-    const r = await renderComponent(<Markdown streaming>**bold** text</Markdown>);
-    expect(r.container.querySelector(".og-markdown-settle")).toBeNull();
-    await r.rerender(<Markdown streaming={false}>**bold** text</Markdown>);
-    expect(r.container.querySelector(".og-markdown-settle")).toBeNull();
-    await flush(950);
-    expect(r.container.querySelector(".og-markdown-settle")).not.toBeNull();
-    await flush(600);
-    expect(r.container.querySelector(".og-markdown-settle")).toBeNull();
-    await r.unmount();
-  });
+  test(
+    "stream end crystallizes when the reveal pipeline tears down",
+    async () => {
+      const r = await renderComponent(<Markdown streaming>**bold** text</Markdown>);
+      expect(r.container.querySelector(".og-markdown-settle")).toBeNull();
+      await r.rerender(<Markdown streaming={false}>**bold** text</Markdown>);
+      expect(r.container.querySelector(".og-markdown-settle")).toBeNull();
+      await flush(REVEAL_LINGER_MS + 100);
+      expect(r.container.querySelector(".og-markdown-settle")).not.toBeNull();
+      await flush(MARKDOWN_SETTLE_MS + 100);
+      expect(r.container.querySelector(".og-markdown-settle")).toBeNull();
+      await r.unmount();
+    },
+    15_000,
+  );
 });

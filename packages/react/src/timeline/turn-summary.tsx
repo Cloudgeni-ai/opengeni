@@ -12,8 +12,10 @@ import {
 import { Collapsible } from "radix-ui";
 import { CopyButton } from "../components/copy-button";
 import { cn } from "../lib/cn";
+import { MOTION_INSPECT_SCALE } from "../lib/motion-inspect";
 import { useForcedDefaultOpen } from "./disclosure-context";
 import { useEntranceAnimation } from "./entrance";
+import { useFoldMemory, type FoldRestingState } from "./fold-memory";
 import { applyPatchOps, isApplyPatch, mediaPreviewFact, screenshotDataUrl } from "./parsers";
 import { rawTypeOf } from "./registry";
 import type { ActivityItem, ToolCallItem, TurnOutcome } from "./types";
@@ -35,11 +37,10 @@ export type { TurnOutcome } from "./types";
 const TurnSettleChromeContext = createContext(false);
 
 /**
- * Suppress nested cluster chips while the settle choreography (or a latch
- * after cancel-close) is flattening the body. Nested chips must not remount
- * when `open` flips false mid-collapse — that remount yanked height (snap).
- * Also stays true briefly after the reader cancels settle, through the fast
- * collapse window, so cancel does not reintroduce the same remount.
+ * True while settle chrome is active (open beat, slow collapse, or the short
+ * cancel-close latch). Nested cluster chips stay mounted and forced OPEN for
+ * this window so the body keeps a stable height — never flat-map to bare
+ * rails, and never remount closed nested chips mid-collapse (that yanked).
  */
 export function useTurnSettleOpen(): boolean {
   return useContext(TurnSettleChromeContext);
@@ -146,6 +147,17 @@ export type TurnSummaryProps = {
    */
   settleFold?: boolean | undefined;
   /**
+   * Durable identity (timeline group id) for cross-remount fold memory. When
+   * an ancestor provides a {@link FoldMemoryProvider} map, reaching a resting
+   * state is recorded under this key: "closed" when the settle choreography
+   * completes its collapse or the reader closes the chip, "open" when the
+   * reader expands it. A later remount under the same key restores that
+   * resting state and never replays the open settle beat — the activity→turn
+   * wrap and the nested force-open during settle chrome must not re-expand a
+   * fold that already settled closed.
+   */
+  foldKey?: string | undefined;
+  /**
    * When set, a hover/focus copy control sits on the chip row (outside the
    * disclosure trigger) so the reader can copy the turn's assistant prose
    * without toggling the fold.
@@ -158,11 +170,11 @@ export type TurnSummaryProps = {
 };
 
 /** How long a settling fold stays open before gliding closed. */
-const SETTLE_FOLD_BEAT_MS = 1100;
+const SETTLE_FOLD_BEAT_MS = 1100 * MOTION_INSPECT_SCALE;
 /** Keep in sync with `--og-duration-disclose-settle`. */
-const SETTLE_COLLAPSE_MS = 820;
+const SETTLE_COLLAPSE_MS = 820 * MOTION_INSPECT_SCALE;
 /** Keep in sync with `--og-duration-disclose` (manual / cancel-close). */
-const DISCLOSE_MS = 120;
+const DISCLOSE_MS = 120 * MOTION_INSPECT_SCALE;
 
 export function TurnSummary({
   items,
@@ -173,6 +185,7 @@ export function TurnSummary({
   bare,
   facets: facetConfiguration,
   settleFold,
+  foldKey,
   copyText,
   contextCompactionCount,
   children,
@@ -180,16 +193,27 @@ export function TurnSummary({
   // An explicit `defaultOpen` always wins; otherwise an ancestor may seed it
   // (screenshot instrumentation); otherwise the turn starts folded.
   const forcedDefaultOpen = useForcedDefaultOpen();
-  const restingOpen = defaultOpen ?? forcedDefaultOpen ?? false;
-  const initialSettle = Boolean(settleFold) && !restingOpen;
+  const foldMemory = useFoldMemory();
+  // A remembered resting state outranks author defaults: a fold that already
+  // finished its settle collapse (or that the reader closed) mounts closed
+  // even when a remount asks for the settle beat or a forced defaultOpen —
+  // and one the reader expanded mounts open instead of snapping shut.
+  const remembered = foldKey !== undefined ? foldMemory?.get(foldKey) : undefined;
+  const restingOpen =
+    remembered === "closed"
+      ? false
+      : remembered === "open"
+        ? true
+        : (defaultOpen ?? forcedDefaultOpen ?? false);
+  const initialSettle = Boolean(settleFold) && !restingOpen && remembered === undefined;
   const [settling, setSettling] = useState(initialSettle);
   const [open, setOpen] = useState(initialSettle ? true : restingOpen);
   // While true, a close uses the slow settle collapse. Cleared after that
   // auto-collapse finishes (or on first user interaction) so later manual
   // closes are the fast disclose pair.
   const [settlePhase, setSettlePhase] = useState(initialSettle);
-  // Separate from settlePhase CSS: keep nested chips flat through cancel-close
-  // (fast collapse) without forcing the slow settle-collapse animation.
+  // Separate from settlePhase CSS: keep nested chips force-open through
+  // cancel-close (fast collapse) without forcing the slow settle-collapse.
   const [nestSuppressLatch, setNestSuppressLatch] = useState(initialSettle);
   // Expand animation must NOT run on the settle mount (rows were already
   // visible — a height sweep would flash them). Armed once we leave that
@@ -217,6 +241,11 @@ export function TurnSummary({
     }
     clearNestLatchTimer();
   };
+  const rememberResting = (state: FoldRestingState) => {
+    if (foldKey !== undefined && foldMemory) {
+      foldMemory.set(foldKey, state);
+    }
+  };
   const armSettleCollapse = () => {
     if (settleArmedRef.current) {
       return;
@@ -232,6 +261,9 @@ export function TurnSummary({
       settleTimerRef.current = null;
       setExpandReady(true);
       setOpen(false);
+      // The glide toward closed IS the choreography completing — record it
+      // now, so a wrap that lands mid-collapse still remounts this fold shut.
+      rememberResting("closed");
       settleCloseDoneRef.current = setTimeout(() => {
         settleCloseDoneRef.current = null;
         settleArmedRef.current = false;
@@ -260,16 +292,24 @@ export function TurnSummary({
     const was = settleFoldSeenRef.current;
     settleFoldSeenRef.current = Boolean(settleFold);
     if (!was && settleFold) {
+      // A remembered resting state means this fold's story already resolved
+      // once (choreography closed it, or the reader chose a state). Replaying
+      // the open beat would re-expand it — the exact reopen this guards.
+      if (foldKey !== undefined && foldMemory?.get(foldKey) !== undefined) {
+        return;
+      }
       armSettleCollapse();
     }
   }, [settleFold]);
   const onOpenChange = (next: boolean) => {
     // The reader took over — cancel the pending auto-collapse for good.
     // Clear settle CSS phase immediately (fast collapse) but keep nest latch
-    // through the disclose window so nested chips do not remount mid-close.
+    // through the disclose window so nested chips stay force-open mid-close
+    // (remounting them closed here yanks height).
     const wasNestFlat = settling || settlePhase || nestSuppressLatch;
     clearSettleTimers();
     settleArmedRef.current = false;
+    rememberResting(next ? "open" : "closed");
     setExpandReady(true);
     setSettlePhase(false);
     setSettling(false);
@@ -333,7 +373,7 @@ export function TurnSummary({
   // but quiet it until there is an outcome or a settle beat.
   const liveShell = outcome === undefined && open && !settlePhase && !bare;
   // Settle CSS phase OR cancel-close latch — see useTurnSettleOpen.
-  // Nested chips must not remount when open flips false mid-collapse.
+  // Nested chips stay force-open for this window (stable height).
   const settleChrome = settling || settlePhase || nestSuppressLatch;
 
   // Copy only on the collapsed chip — when open, per-message copy is enough

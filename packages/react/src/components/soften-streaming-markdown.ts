@@ -18,10 +18,16 @@ export function softenStreamingMarkdown(source: string): string {
   let text = source;
 
   // Unclosed fenced code block: an odd count of ``` line-openers means the
-  // trailing fence is still in flight. Close it so the body paints as a code
-  // block instead of leaking ``` into prose.
+  // trailing fence is still in flight. Always soft-close — including an empty
+  // opener — so code chrome (padding/tint) appears once at ``` and lines only
+  // grow the body. Stripping empty openers deferred chrome until the first
+  // body line, which landed as one fat height spike (yank around fences).
+  //
+  // If the body already ends with `\n`, append only ``` — a second `\n``` would
+  // invent a blank line that vanishes when the real closer lands (height shrink
+  // → tip-follow compensate + mid soft-rise cancel = up/down flicker).
   if (countFences(text) % 2 === 1) {
-    text += "\n```";
+    text += text.endsWith("\n") ? "```" : "\n```";
   }
 
   // Work outside fenced blocks so we don't "fix" markers that are literal
@@ -59,11 +65,22 @@ function splitByFences(text: string): Segment[] {
   const lines = text.split("\n");
   let buf: string[] = [];
   let inFence = false;
-  const flush = (kind: Segment["kind"]) => {
+  /**
+   * `boundary`: prose → fence. `join` alone drops a blank line before ```
+   * (`["a",""].join` → `"a\n"`, need `"a\n\n"`), so append an extra `\n`.
+   * `end`: final segment. Trailing `""` from `split("\n")` already encodes a
+   * terminating newline — do NOT append another (that was inventing `\n\n`
+   * on every streamed line and shrinking it away at crystallize).
+   */
+  const flush = (kind: Segment["kind"], mode: "boundary" | "end") => {
     if (buf.length === 0) {
       return;
     }
-    segments.push({ kind, value: buf.join("\n") });
+    let value = buf.join("\n");
+    if (mode === "boundary") {
+      value += "\n";
+    }
+    segments.push({ kind, value });
     buf = [];
   };
   for (const line of lines) {
@@ -71,10 +88,10 @@ function splitByFences(text: string): Segment[] {
     if (isFence) {
       if (inFence) {
         buf.push(line);
-        flush("fence");
+        flush("fence", "end");
         inFence = false;
       } else {
-        flush("prose");
+        flush("prose", "boundary");
         buf.push(line);
         inFence = true;
       }
@@ -82,7 +99,7 @@ function splitByFences(text: string): Segment[] {
     }
     buf.push(line);
   }
-  flush(inFence ? "fence" : "prose");
+  flush(inFence ? "fence" : "prose", "end");
   return segments;
 }
 
@@ -117,7 +134,16 @@ function closeDelimiter(text: string, delimiter: string): string {
     }
     i += 1;
   }
-  return count % 2 === 1 ? text + delimiter : text;
+  return count % 2 === 1 ? insertBeforeTrailingNewlines(text, delimiter) : text;
+}
+
+/** Soft closers belong before trailing `\n`s so restore/round-trip stay stable. */
+function insertBeforeTrailingNewlines(text: string, suffix: string): string {
+  let end = text.length;
+  while (end > 0 && text[end - 1] === "\n") {
+    end -= 1;
+  }
+  return text.slice(0, end) + suffix + text.slice(end);
 }
 
 function closeSingleBackticks(text: string): string {
@@ -138,7 +164,7 @@ function closeSingleBackticks(text: string): string {
       count += 1;
     }
   }
-  return count % 2 === 1 ? `${text}\`` : text;
+  return count % 2 === 1 ? insertBeforeTrailingNewlines(text, "`") : text;
 }
 
 function closeSingleAsterisks(text: string): string {
@@ -157,7 +183,7 @@ function closeSingleAsterisks(text: string): string {
       count += 1;
     }
   }
-  return count % 2 === 1 ? `${text}*` : text;
+  return count % 2 === 1 ? insertBeforeTrailingNewlines(text, "*") : text;
 }
 
 function closeUnfinishedLink(text: string): string {
@@ -175,5 +201,5 @@ function closeUnfinishedLink(text: string): string {
   if (after.includes("[")) {
     return text;
   }
-  return `${text})`;
+  return insertBeforeTrailingNewlines(text, ")");
 }

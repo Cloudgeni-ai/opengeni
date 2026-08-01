@@ -36,6 +36,16 @@ import { formatRelativeTime, truncate } from "../lib/format";
 import { prefersReducedMotion } from "../lib/motion";
 import { Markdown } from "./markdown";
 import {
+  createTipFollowState,
+  readerScrollUpPx,
+  tipFollowCancel,
+  tipFollowCompensateShrink,
+  tipFollowStep,
+  TIP_FOLLOW_READER_UP_EPS_PX,
+  TIP_FOLLOW_SHRINK_EPS_PX,
+  type TipFollowState,
+} from "./tip-follow";
+import {
   ActivityRail,
   buildTimeline,
   defaultToolRegistry,
@@ -53,13 +63,18 @@ import {
   type ToolRegistry,
   type TurnSummaryOptions,
   type UserMessageItem,
+  type FoldRestingState,
   type WorkerCompletionItem,
+  FoldMemoryProvider,
+  inheritFoldRestingState,
   TurnSummary,
+  useFoldMemory,
   useTurnSettleOpen,
 } from "../timeline";
 import { CopyHoverFrame } from "./copy-button";
 import { SESSION_STATUS_META, StatusDot } from "./session-status";
 import { EntranceAnimationProvider, useEntranceAnimation } from "../timeline/entrance";
+import { SeenActivityIdsProvider } from "../timeline/seen-activity-ids";
 import { TooltipProvider } from "./tooltip";
 
 export type MessageTimelineProps = {
@@ -67,7 +82,7 @@ export type MessageTimelineProps = {
   events?: SessionEvent[] | undefined;
   /** … or pre-projected items (e.g. from `useSessionEvents().timeline`). */
   items?: TimelineItem[] | undefined;
-  /** Current session status; drives the live "working" indicator. */
+  /** Current session status (reserved; tip "Working…" chrome removed for now). */
   status?: SessionStatus | null | undefined;
   /** Plug a markdown renderer for message bodies (e.g. streamdown). */
   renderMessageText?:
@@ -142,25 +157,19 @@ export type MessageTimelineProps = {
  * rows are memoized, so a full mount is cheap; the drip-feed machinery this
  * replaces was the "content is hidden, then pops in in batches" wobble.)
  *
- * Scroll invariant:
- * - A far-from-bottom scroll event unpins (reader left the tip).
- * - Pinned at the live tip → soft-follow: ease `scrollTop` toward the bottom
- *   so each new line/tool shifts the viewport smoothly instead of ratcheting
- *   one line-height per append. Hard snap only for first paint, Jump to
- *   latest, reduced motion, and oversized jumps. Native overflow-anchor is
- *   off while pinned so the browser cannot instant-correct (that IS the tick).
- * - Mid-glide scroll echoes must not unpin (gap is temporarily large). An
- *   upward scrollTop while gliding is the reader — cancel + unpin. Downward
- *   glide writes and settle-fold clamps (still near-bottom) stay pinned.
+ * Scroll invariant (tip-follow camera — see `./tip-follow.ts`):
+ * - DOM truth mounts immediately; the camera eases down to the tip (not
+ *   tip-glued feed-forward — that is the one-line yank).
+ * - One continuous follow while hot (faster τ when behind); sleeps when cold.
+ * - While pinned, tip-debt from growth/collapse must NEVER unpin — only
+ *   wheel/keys/pointer-armed scroll-up. Height shrink compensates scrollTop
+ *   by Δh (collapse owns motion); tip-ease pauses briefly so the two don't fight.
+ * - overflow-anchor off while pinned so the browser cannot instant-correct.
  * - Scrolled up → history prepends restore via the retained group anchor
  *   (offsetTop delta); loadOlder can truncate the tip, so scrollHeight delta
  *   alone is wrong. Late layout while unpinned stays browser-owned.
  */
 const PIN_THRESHOLD_PX = 48;
-/** Tip-follow ease: remaining distance shrinks ~63% every tau ms. */
-const TIP_GLIDE_TAU_MS = 200;
-/** Larger than this snaps (session switch / huge fold), not eases. */
-const TIP_GLIDE_MAX_DISTANCE_PX = 480;
 /**
  * Prefetch older history when the top sentinel is this far from the viewport.
  * After a page loads we stay cool until the reader leaves this band (scrolls
@@ -177,8 +186,43 @@ const OLDER_PREFETCH_ROOT_MARGIN = `${OLDER_PREFETCH_MARGIN_PX}px 0px 0px 0px`;
  * making the very top of a short window count as scrolled up. A window that
  * cannot scroll at all is always pinned.
  */
+function maxScrollOf(node: HTMLElement): number {
+  return Math.max(0, node.scrollHeight - node.clientHeight);
+}
+
+/**
+ * Wheel bubbled from a nested overflow scroller that can still move up — not
+ * timeline intent (code blocks / notice `<pre>`).
+ */
+function wheelConsumedByNestedScrollable(event: {
+  deltaY: number;
+  target: EventTarget | null;
+  currentTarget: EventTarget | null;
+}): boolean {
+  if (event.deltaY >= 0) {
+    return false;
+  }
+  let el = event.target instanceof Element ? event.target : null;
+  const root = event.currentTarget instanceof Element ? event.currentTarget : null;
+  while (el && el !== root) {
+    if (el instanceof HTMLElement) {
+      const style = getComputedStyle(el);
+      const overflowY = style.overflowY;
+      if (
+        (overflowY === "auto" || overflowY === "scroll" || overflowY === "overlay") &&
+        el.scrollHeight > el.clientHeight + 1 &&
+        el.scrollTop > 0
+      ) {
+        return true;
+      }
+    }
+    el = el.parentElement;
+  }
+  return false;
+}
+
 function isNearBottom(node: HTMLElement): boolean {
-  const maxScroll = node.scrollHeight - node.clientHeight;
+  const maxScroll = maxScrollOf(node);
   if (maxScroll <= 1) {
     return true;
   }
@@ -203,7 +247,7 @@ function cssEscapeAttribute(value: string): string {
 export function MessageTimeline({
   events,
   items,
-  status,
+  status: _status,
   renderMessageText,
   onOpenSession,
   onMemoryClick,
@@ -275,16 +319,25 @@ export function MessageTimeline({
   const previousFirstItemIdRef = useRef<string | null>(null);
   const previousScrollHeightRef = useRef(0);
   // Per-commit place memory for unpinned prepend restore (see layout effect).
+  // Paired with max/height/client for clamp-conservation reader-intent math.
   const lastScrollTopRef = useRef(0);
+  const lastMaxScrollRef = useRef(0);
+  const lastScrollHeightRef = useRef(0);
+  const lastClientHeightRef = useRef(0);
+  /**
+   * Armed by pointerdown on the scroller. Geometric scroll-up only unpins
+   * while armed — mid-turn fold+growth also drops scrollTop with a flat
+   * maxScroll and must NOT count as leave. Wheel/keys unpin directly.
+   */
+  const readerIntentArmRef = useRef(false);
+  // Resting fold state per durable group id (see fold-memory.ts). Outlives the
+  // deliberate chip remounts (activity→turn wrap, nested key flips) so a fold
+  // that already settled closed — or that the reader closed — never reopens.
+  const foldMemoryRef = useRef<Map<string, FoldRestingState>>(new Map());
+  const seenActivityIdsRef = useRef<Set<string>>(new Set());
   const groupKeyByItemIdRef = useRef<Map<string, string>>(new Map());
   const groupOffsetByKeyRef = useRef<Map<string, number>>(new Map());
   const firstItemId = resolvedItems[0]?.id ?? null;
-  const lastItem = resolvedItems[resolvedItems.length - 1];
-  const streaming =
-    lastItem !== undefined &&
-    (lastItem.kind === "agent-message" || lastItem.kind === "reasoning") &&
-    lastItem.streaming;
-  const working = status === "running" && !streaming;
   // Bulk paints (the initial tail window, a prepended older window — detected
   // by the first group key changing) must not run per-row entrance animations.
   const firstKeyChangedForBulk =
@@ -305,91 +358,206 @@ export function MessageTimeline({
   const revealedRef = useRef(revealed);
   revealedRef.current = revealed;
 
-  // Soft tip-follow glide. While active, onScroll must not treat the temporary
-  // tip-debt as a reader unpin (see onScroll). Cancelled on upward scroll or
-  // when the pin drops.
-  const glideFrameRef = useRef<number | null>(null);
-  const glideLastTsRef = useRef(0);
-  const glidingRef = useRef(false);
+  // Pure tip-follow camera. Pin intent uses clamp conservation, not timers.
+  const followRef = useRef<TipFollowState>(createTipFollowState());
+  const followFrameRef = useRef<number | null>(null);
 
-  const stopGlide = useCallback(() => {
-    glidingRef.current = false;
-    if (glideFrameRef.current !== null) {
-      cancelFrame(glideFrameRef.current);
-      glideFrameRef.current = null;
+  const syncScrollBaseline = useCallback((node: HTMLElement) => {
+    lastScrollTopRef.current = node.scrollTop;
+    lastMaxScrollRef.current = maxScrollOf(node);
+    lastScrollHeightRef.current = node.scrollHeight;
+    lastClientHeightRef.current = node.clientHeight;
+  }, []);
+
+  const stopFollow = useCallback(() => {
+    followRef.current = tipFollowCancel(followRef.current);
+    if (followFrameRef.current !== null) {
+      cancelFrame(followFrameRef.current);
+      followFrameRef.current = null;
     }
   }, []);
+
+  /** Reader left the tip — wheel, keyboard, or pointer-armed scroll-up. */
+  const releasePinFromReader = useCallback(
+    (node?: HTMLElement | null) => {
+      if (!autoFollow || !pinnedRef.current || hasNewerRef.current) {
+        return;
+      }
+      // Unscrollable window: unpin strands Jump-to-latest with no way back.
+      if (node && maxScrollOf(node) <= 1) {
+        return;
+      }
+      readerIntentArmRef.current = false;
+      stopFollow();
+      applyPinned(false);
+      if (wantPinRef.current) {
+        wantPinRef.current = false;
+      }
+      if (!olderPrefetchArmedRef.current) {
+        olderPrefetchArmedRef.current = true;
+        setOlderPrefetchArmed(true);
+      }
+    },
+    [autoFollow, applyPinned, stopFollow],
+  );
+
+  const onWheel = (event: {
+    deltaY: number;
+    deltaX: number;
+    target: EventTarget | null;
+    currentTarget: EventTarget | null;
+  }) => {
+    // Nested overflow (code / notice pre) or mostly-horizontal pan: not tip leave.
+    if (event.deltaY >= 0) {
+      return;
+    }
+    if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) {
+      return;
+    }
+    if (wheelConsumedByNestedScrollable(event)) {
+      return;
+    }
+    const node =
+      event.currentTarget instanceof HTMLElement ? event.currentTarget : scrollRef.current;
+    releasePinFromReader(node);
+  };
+
+  /** Touch / stylus / mouse drag on the scroller — explicit leave (not layout). */
+  const onPointerDown = (event: {
+    button: number;
+    pointerType: string;
+    target: EventTarget | null;
+  }) => {
+    // Primary button / touch / pen only. Ignore right-click etc.
+    if (event.button !== 0 && event.pointerType === "mouse") {
+      return;
+    }
+    // Clicks on chips/buttons/links must not arm — their settle collapse
+    // also drops scrollTop and would false-unpin. Drag on prose/scroller may.
+    if (
+      event.target instanceof Element &&
+      event.target.closest("button, a, input, textarea, select, [role='button']")
+    ) {
+      return;
+    }
+    readerIntentArmRef.current = true;
+  };
+
+  const onKeyDown = (event: { key: string; currentTarget: EventTarget | null }) => {
+    if (event.key !== "ArrowUp" && event.key !== "PageUp" && event.key !== "Home") {
+      return;
+    }
+    const node =
+      event.currentTarget instanceof HTMLElement ? event.currentTarget : scrollRef.current;
+    releasePinFromReader(node);
+  };
 
   const snapToBottom = useCallback(
     (node: HTMLElement) => {
-      stopGlide();
+      stopFollow();
       node.scrollTop = Math.max(0, node.scrollHeight - node.clientHeight);
-      lastScrollTopRef.current = node.scrollTop;
+      syncScrollBaseline(node);
+      followRef.current = {
+        ...followRef.current,
+        lastHeight: node.scrollHeight,
+      };
     },
-    [stopGlide],
+    [stopFollow, syncScrollBaseline],
   );
 
-  const glideStep = useCallback(() => {
-    glideFrameRef.current = null;
-    const node = scrollRef.current;
-    if (!node || !pinnedRef.current || hasNewerRef.current) {
-      glidingRef.current = false;
-      return;
-    }
-    const target = Math.max(0, node.scrollHeight - node.clientHeight);
-    const delta = target - node.scrollTop;
-    if (Math.abs(delta) <= 1) {
-      if (delta !== 0) {
-        node.scrollTop = target;
-      }
-      lastScrollTopRef.current = node.scrollTop;
-      glidingRef.current = false;
-      return;
-    }
-    const nowTs = typeof performance !== "undefined" ? performance.now() : Date.now();
-    const dt =
-      glideLastTsRef.current === 0
-        ? 16
-        : Math.min(64, Math.max(8, nowTs - glideLastTsRef.current));
-    glideLastTsRef.current = nowTs;
-    const alpha = 1 - Math.exp(-dt / TIP_GLIDE_TAU_MS);
-    const step = delta * alpha;
-    node.scrollTop = node.scrollTop + (Math.abs(step) < 0.5 ? Math.sign(delta) : step);
-    lastScrollTopRef.current = node.scrollTop;
-    glidingRef.current = true;
-    glideFrameRef.current = requestFrame(glideStep);
-  }, []);
-
-  const startGlide = useCallback(() => {
-    glidingRef.current = true;
-    if (glideFrameRef.current === null) {
-      glideLastTsRef.current = 0;
-      glideFrameRef.current = requestFrame(glideStep);
-    }
-  }, [glideStep]);
-
-  useEffect(() => stopGlide, [stopGlide]);
-
-  /** Soft tip-follow while pinned; hard snap for first paint / big jumps. */
-  const followTip = useCallback(
-    (node: HTMLElement) => {
-      const target = Math.max(0, node.scrollHeight - node.clientHeight);
-      const delta = target - node.scrollTop;
-      if (Math.abs(delta) <= 1) {
+  const driveFollowRef = useRef<(node: HTMLElement, now?: number) => void>(() => undefined);
+  const driveFollow = useCallback(
+    (node: HTMLElement, nowMs?: number) => {
+      if (!pinnedRef.current || hasNewerRef.current) {
+        stopFollow();
         return;
       }
+      // Prefer the rAF timestamp so ease integrates against vsync (and tests
+      // can advance a synthetic clock via requestAnimationFrame callbacks).
+      const now =
+        typeof nowMs === "number"
+          ? nowMs
+          : typeof performance !== "undefined"
+            ? performance.now()
+            : Date.now();
+      const previousHeight = followRef.current.lastHeight;
+      // Settle-collapse: compensate Δh from the pre-shrink baseline (browser
+      // may already have clamped — don't double-subtract). Keep the follow rAF
+      // alive so when collapse ends (or stream resumes) we ease instead of a
+      // hard stop → flick. Do NOT tip-ease on the same frame as a real shrink
+      // (that fight was the top-of-viewport flicker).
       if (
-        !revealedRef.current ||
-        Math.abs(delta) > TIP_GLIDE_MAX_DISTANCE_PX ||
-        prefersReducedMotion()
+        previousHeight > 0 &&
+        node.scrollHeight < previousHeight - TIP_FOLLOW_SHRINK_EPS_PX
       ) {
-        snapToBottom(node);
+        const nextTop = tipFollowCompensateShrink(
+          lastScrollTopRef.current,
+          previousHeight,
+          node.scrollHeight,
+          node.clientHeight,
+        );
+        if (node.scrollTop !== nextTop) {
+          node.scrollTop = nextTop;
+        }
+        syncScrollBaseline(node);
+        followRef.current = {
+          ...followRef.current,
+          lastHeight: node.scrollHeight,
+          running: true,
+          lastTs: now,
+        };
+        if (followFrameRef.current === null) {
+          followFrameRef.current = requestFrame((frameNow) => {
+            followFrameRef.current = null;
+            const current = scrollRef.current;
+            if (current) {
+              driveFollowRef.current(current, frameNow);
+            }
+          });
+        }
         return;
       }
-      startGlide();
+      // Sub-eps height noise: adopt height without moving the camera.
+      if (previousHeight > 0 && node.scrollHeight < previousHeight) {
+        followRef.current = {
+          ...followRef.current,
+          lastHeight: node.scrollHeight,
+        };
+      }
+      const result = tipFollowStep(followRef.current, {
+        scrollTop: node.scrollTop,
+        scrollHeight: node.scrollHeight,
+        clientHeight: node.clientHeight,
+        now,
+        pinned: true,
+        reducedMotion: prefersReducedMotion(),
+        revealed: revealedRef.current,
+      });
+      followRef.current = result.state;
+      if (node.scrollTop !== result.scrollTop) {
+        node.scrollTop = result.scrollTop;
+      }
+      syncScrollBaseline(node);
+      if (result.state.running) {
+        if (followFrameRef.current === null) {
+          followFrameRef.current = requestFrame((frameNow) => {
+            followFrameRef.current = null;
+            const current = scrollRef.current;
+            if (current) {
+              driveFollowRef.current(current, frameNow);
+            }
+          });
+        }
+      } else if (followFrameRef.current !== null) {
+        cancelFrame(followFrameRef.current);
+        followFrameRef.current = null;
+      }
     },
-    [snapToBottom, startGlide],
+    [stopFollow, syncScrollBaseline],
   );
+  driveFollowRef.current = driveFollow;
+
+  useEffect(() => stopFollow, [stopFollow]);
 
   // The single post-commit scroll authority. Runs after EVERY commit (no dep
   // list): any commit may change content height, and the decision is cheap.
@@ -412,7 +580,7 @@ export function MessageTimeline({
       // The oldest window landed — jump against the NEW DOM, and skip the
       // prepend correction (it would shift the reader away from the top).
       pendingJumpToStartRef.current = false;
-      stopGlide();
+      stopFollow();
       node.scrollTop = 0;
     } else if (wantPinRef.current && !hasNewer) {
       // Jump-to-latest was pressed on a history window and the tip window is
@@ -424,8 +592,8 @@ export function MessageTimeline({
         snapToBottom(node);
       }
     } else if (autoFollow && pinnedRef.current && !hasNewer) {
-      // Live tip: ease toward the bottom (hard snap only first paint / jumps).
-      followTip(node);
+      // Live tip: tip-follow camera eases down (snap only first paint / jumps).
+      driveFollow(node);
     } else if (prepended) {
       // Keep the reader on the same retained rows. Prefer the offsetTop delta
       // of the group that still holds the previous first item — that stays
@@ -474,20 +642,29 @@ export function MessageTimeline({
     }
     previousFirstItemIdRef.current = firstItemId;
     previousScrollHeightRef.current = node.scrollHeight;
-    lastScrollTopRef.current = node.scrollTop;
+    syncScrollBaseline(node);
+    // Item→group keys are cheap (data only). offsetTop queries are O(groups)
+    // layout reads — skip while pinned at the live tip (every stream token
+    // used to remeasure the whole timeline; that was the long-run lag).
     const nextKeyByItemId = new Map<string, string>();
-    const nextOffsetByKey = new Map<string, number>();
     for (const { group, key } of groups) {
       for (const itemId of timelineGroupItemIds(group)) {
         nextKeyByItemId.set(itemId, key);
       }
-      const el = node.querySelector(`[data-og-group-key="${cssEscapeAttribute(key)}"]`);
-      if (el instanceof HTMLElement) {
-        nextOffsetByKey.set(key, el.offsetTop);
-      }
     }
     groupKeyByItemIdRef.current = nextKeyByItemId;
-    groupOffsetByKeyRef.current = nextOffsetByKey;
+    const needOffsets =
+      prepended || firstItemChanged || !pinnedRef.current || Boolean(hasNewer);
+    if (needOffsets) {
+      const nextOffsetByKey = new Map<string, number>();
+      for (const { key } of groups) {
+        const el = node.querySelector(`[data-og-group-key="${cssEscapeAttribute(key)}"]`);
+        if (el instanceof HTMLElement) {
+          nextOffsetByKey.set(key, el.offsetTop);
+        }
+      }
+      groupOffsetByKeyRef.current = nextOffsetByKey;
+    }
     if (!revealed && groups.length > 0) {
       setRevealed(true);
     }
@@ -512,8 +689,13 @@ export function MessageTimeline({
     previousFirstItemIdRef.current = null;
     previousScrollHeightRef.current = 0;
     lastScrollTopRef.current = 0;
+    lastMaxScrollRef.current = 0;
+    lastScrollHeightRef.current = 0;
+    lastClientHeightRef.current = 0;
     groupKeyByItemIdRef.current = new Map();
     groupOffsetByKeyRef.current = new Map();
+    foldMemoryRef.current.clear();
+    seenActivityIdsRef.current.clear();
     applyPinned(true);
   }, [allGroups.length, revealed, applyPinned]);
 
@@ -615,7 +797,7 @@ export function MessageTimeline({
           return;
         }
         if (autoFollow && pinnedRef.current && !hasNewerRef.current) {
-          followTip(current);
+          driveFollow(current);
         }
       });
     });
@@ -630,7 +812,7 @@ export function MessageTimeline({
         resizeFollowRafRef.current = null;
       }
     };
-  }, [autoFollow, followTip]);
+  }, [autoFollow, driveFollow]);
 
   // Entering a non-tip history window: drop any live pin so the page bottom
   // cannot re-stick follow across loadNewer. Leaving it (the tip window
@@ -639,7 +821,7 @@ export function MessageTimeline({
   // strand them unpinned watching new content grow below.
   useEffect(() => {
     if (hasNewer) {
-      stopGlide();
+      stopFollow();
       applyPinned(false);
       return;
     }
@@ -658,40 +840,72 @@ export function MessageTimeline({
     if (autoFollow && !pinnedRef.current && isNearBottom(node)) {
       applyPinned(true);
     }
-  }, [hasNewer, autoFollow, applyPinned, snapToBottom, stopGlide]);
+  }, [hasNewer, autoFollow, applyPinned, snapToBottom, stopFollow]);
 
-  // Unpin/repin. Hard snaps land at the bottom so their echoes stay pinned.
-  // Soft tip-follow temporarily leaves a tip-debt: while gliding, ignore that
-  // gap — only an upward scrollTop (reader) cancels. Settle-fold clamps shrink
-  // scrollTop but land near-bottom, so they stay pinned.
+  // Unpin: wheel / keys always; pointer-armed geometric scroll-up only.
+  // Mid-turn fold + narration drops scrollTop while maxScroll stays flat —
+  // treating that as reader-up was the Jump-to-latest bug on soft-follow.
   const onScroll = () => {
     const node = scrollRef.current;
     if (!node) {
       return;
     }
     const previousTop = lastScrollTopRef.current;
+    const previousMaxScroll = lastMaxScrollRef.current;
     const nextTop = node.scrollTop;
-    lastScrollTopRef.current = nextTop;
+    const nextMaxScroll = maxScrollOf(node);
+    const nextHeight = node.scrollHeight;
+    const readerUp = readerScrollUpPx(previousTop, nextTop, previousMaxScroll, nextMaxScroll);
+    const maxFell = nextMaxScroll < previousMaxScroll - 1;
+    const readerArmed = readerIntentArmRef.current;
+    const heightShrunk =
+      followRef.current.lastHeight > 0 &&
+      nextHeight < followRef.current.lastHeight - TIP_FOLLOW_SHRINK_EPS_PX;
 
-    if (glidingRef.current) {
-      if (nextTop < previousTop - 1 && !isNearBottom(node)) {
-        stopGlide();
-        applyPinned(false);
-        if (wantPinRef.current) {
-          wantPinRef.current = false;
+    if (autoFollow && pinnedRef.current && !hasNewer) {
+      // Fold / composer shrink: compensate before baseline sync so driveFollow
+      // still sees the pre-shrink scrollTop (avoid double-subtract after clamp).
+      if (heightShrunk || maxFell) {
+        readerIntentArmRef.current = false;
+        driveFollow(node);
+        return;
+      }
+      syncScrollBaseline(node);
+      const nearBottomPinned = isNearBottom(node);
+      // Pointer-dragged scroll-up away from tip. Layout churn never arms this.
+      if (
+        readerArmed &&
+        readerUp > TIP_FOLLOW_READER_UP_EPS_PX &&
+        !nearBottomPinned
+      ) {
+        readerIntentArmRef.current = false;
+        releasePinFromReader(node);
+        if (olderLoadGateRef.current === "cooling" && node.scrollTop > OLDER_PREFETCH_MARGIN_PX) {
+          olderLoadGateRef.current = "armed";
         }
-        if (!olderPrefetchArmedRef.current) {
-          olderPrefetchArmedRef.current = true;
-          setOlderPrefetchArmed(true);
-        }
+        return;
+      }
+      // Growth debt / fold noise / camera echo: stay pinned and recover tip.
+      if (!nearBottomPinned || readerUp > TIP_FOLLOW_READER_UP_EPS_PX) {
+        driveFollow(node);
+      } else {
+        followRef.current = {
+          ...followRef.current,
+          lastHeight: nextHeight,
+        };
       }
       return;
     }
 
+    syncScrollBaseline(node);
     const nearBottom = isNearBottom(node);
-    const nextPinned = !hasNewer && nearBottom;
+
+    // Re-pin only when the reader moved toward/at the tip — not when a fold
+    // clamp dragged scrollTop down onto nearBottom.
+    const nextPinned =
+      !hasNewer && nearBottom && nextTop >= previousTop - TIP_FOLLOW_READER_UP_EPS_PX;
     if (!nextPinned) {
-      stopGlide();
+      stopFollow();
     }
     applyPinned(nextPinned);
     // A far-from-bottom scroll while a Jump-to-latest is pending is the reader
@@ -718,15 +932,20 @@ export function MessageTimeline({
 
   return (
     <LightboxProvider>
+      <FoldMemoryProvider value={foldMemoryRef.current}>
+      <SeenActivityIdsProvider value={seenActivityIdsRef.current}>
       <EntranceAnimationProvider value={!bulkRender}>
         <TooltipProvider delayDuration={400}>
         <div className={cn("og-root relative flex min-h-0 flex-col", className)}>
-          {/* Pinned: anchoring off so the soft tip-follow owns the motion.
+          {/* Pinned: anchoring off so the tip-follow camera owns the motion.
           Unpinned: native scroll anchoring holds the reader's place. */}
           <div
             ref={scrollRef}
             tabIndex={-1}
             onScroll={onScroll}
+            onWheel={onWheel}
+            onPointerDown={onPointerDown}
+            onKeyDown={onKeyDown}
             style={groups.length > 0 && !revealed ? { visibility: "hidden" } : undefined}
             className={cn(
               // tabIndex=-1 is programmatic only — never paint a focus ring on
@@ -738,7 +957,7 @@ export function MessageTimeline({
             )}
           >
             <div className="relative mx-auto flex w-full max-w-3xl flex-col gap-5">
-              {groups.length === 0 && !working
+              {groups.length === 0
                 ? (emptyState ?? (
                     <p className="py-10 text-center text-sm text-og-fg-subtle">No activity yet.</p>
                   ))
@@ -793,11 +1012,6 @@ export function MessageTimeline({
                   aria-hidden="true"
                   className="h-px w-full"
                 />
-              ) : null}
-              {working ? (
-                <div className="flex items-center gap-2 text-sm">
-                  <span className="og-shimmer-text font-medium">Working…</span>
-                </div>
               ) : null}
             </div>
           </div>
@@ -954,6 +1168,8 @@ export function MessageTimeline({
         </div>
         </TooltipProvider>
       </EntranceAnimationProvider>
+      </SeenActivityIdsProvider>
+      </FoldMemoryProvider>
     </LightboxProvider>
   );
 }
@@ -1071,7 +1287,8 @@ const TimelineGroupView = memo(function TimelineGroupView({
   /**
    * Parent turn has ≥2 foldable activity clusters. Only then do we wrap settled
    * clusters in nested chips — a single cluster under "N steps" is redundant.
-   * Suppressed while the outer settle beat is open so collapse is one layer.
+   * During outer settle chrome, nested chips stay force-open (structure kept,
+   * height stable) instead of flat-mapping to bare rails.
    */
   nestClusterChips?: boolean;
   /**
@@ -1084,7 +1301,8 @@ const TimelineGroupView = memo(function TimelineGroupView({
   contextCompactionCount?: number | undefined;
 }) {
   const enter = useEntranceAnimation();
-  const settleOpen = useTurnSettleOpen();
+  const settleChrome = useTurnSettleOpen();
+  const foldMemory = useFoldMemory();
   // Settled (or live-fold) activity clusters get a chip. Inside an expanded
   // turn that is the second layer — quiet nested chips under the outer turn
   // summary when contiguous activity naturally clusters (≥2 only).
@@ -1095,16 +1313,31 @@ const TimelineGroupView = memo(function TimelineGroupView({
   // start the settle beat without remounting bare rail → wrapper.
   const liveActivitySettle = useLiveSettleFold(activityShouldFold && !insideTurn);
   const turnDefaultOpen = !insideTurn && group.kind === "turn" && group.outcome === "failed";
+  // activity-* → turn-* remount: carry resting state so settleFold does not
+  // re-open a chip the reader already watched collapse.
+  if (group.kind === "turn" && foldMemory && !insideTurn) {
+    inheritFoldRestingState(
+      foldMemory,
+      group.id,
+      group.groups.flatMap((child) => (child.kind === "activity" ? [child.id] : [])),
+    );
+  }
   const settleFold =
     group.kind === "turn" ? Boolean(enter && !insideTurn && !turnDefaultOpen) : liveActivitySettle;
   switch (group.kind) {
     case "activity":
       if (insideTurn) {
-        // Nested chips only when the parent has ≥2 clusters AND the outer
-        // settle choreography is done. While settling (beat + collapse) the
-        // body stays a flat rail — one height to animate. Remounting closed
-        // nested chips when `open` flips false was the mid-collapse snap.
-        const useNestedChip = nestClusterChips && activityShouldFold && !settleOpen;
+        // Nested chips whenever the parent has ≥2 clusters. During outer settle
+        // chrome they stay force-open so structure is visible and height stays
+        // stable through collapse — never flat-map to bare rails (that flash
+        // was the "inner steps vanish then reappear nested" bug). Key flips
+        // when chrome clears so they remount closed inside the already-hidden
+        // parent (safe; mid-collapse remount of closed chips was the snap).
+        // foldKey memory overrides the force-open: a cluster that already
+        // settled closed pre-wrap was showing as a CHIP, so mounting it closed
+        // is both the stable height and the honest state — force-opening it
+        // was the "already-collapsed cluster auto-expands at the end" reopen.
+        const useNestedChip = nestClusterChips && activityShouldFold;
         if (!useNestedChip) {
           return (
             <ActivityRail
@@ -1118,10 +1351,13 @@ const TimelineGroupView = memo(function TimelineGroupView({
         }
         return (
           <TurnSummary
+            key={settleChrome ? "settle" : "rest"}
             items={group.items}
             outcome={group.outcome}
             failureText={undefined}
             bare
+            defaultOpen={settleChrome ? true : undefined}
+            foldKey={group.id}
             facets={turnSummary?.facets}
             contextCompactionCount={contextCompactionCount}
           >
@@ -1143,6 +1379,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
           outcome={group.outcome}
           failureText={group.failureText}
           defaultOpen={!activityShouldFold || group.outcome === "failed" ? true : undefined}
+          foldKey={group.id}
           facets={turnSummary?.facets}
           settleFold={settleFold}
           contextCompactionCount={contextCompactionCount}
@@ -1190,6 +1427,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
           durationMs={durationBetween(group.startedAt, group.endedAt)}
           defaultOpen={turnDefaultOpen ? true : undefined}
           bare={insideTurn}
+          foldKey={group.id}
           facets={turnSummary?.facets}
           settleFold={settleFold}
           copyText={insideTurn ? undefined : turnCopyText}
@@ -1221,14 +1459,12 @@ const TimelineGroupView = memo(function TimelineGroupView({
 });
 
 /**
- * Rows revealed by a disclosure — expanding a chip, or the settle-fold beat —
- * must not run per-row entrance animations: the disclosure's height animation
- * owns the motion, and rows that were ALREADY visible when a live cluster
- * folds would otherwise flash as they remount inside the summary. Entrance
- * stays reserved for rows arriving in the live timeline flow.
+ * Body under a turn/activity chip. Remount flashes are gated by the timeline
+ * seen-activity-id map (not by killing entrance): FoldBody used to force
+ * entrance off, which made every live tool pop with no fade.
  */
 function FoldBody({ children }: { children: ReactNode }) {
-  return <EntranceAnimationProvider value={false}>{children}</EntranceAnimationProvider>;
+  return <>{children}</>;
 }
 
 /** Stable left rule for turn/activity bodies — always present so settle wrap
@@ -1597,8 +1833,7 @@ function AgentMessageRow({
 }) {
   const enter = useEntranceAnimation();
   // No streaming caret: it fought the trailing block layout (inline ↔ block)
-  // and snapped on exit. Live text already carries the stream via word-entrance
-  // + "Working…" when the tip isn't a streaming message.
+  // and snapped on exit. Live text carries the stream via tip ink.
   const body = renderMessageText ? (
     renderMessageText(item.text, item)
   ) : (

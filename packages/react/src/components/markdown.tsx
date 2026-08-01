@@ -14,6 +14,7 @@ import remarkGfm from "remark-gfm";
 import { cn } from "../lib/cn";
 import { tableElementToTsv } from "../lib/clipboard";
 import { prefersReducedMotion } from "../lib/motion";
+import { MOTION_INSPECT_SCALE } from "../lib/motion-inspect";
 import { CopyButton } from "./copy-button";
 import { softenStreamingMarkdown } from "./soften-streaming-markdown";
 import { createStreamReveal, rehypeStreamReveal, type StreamReveal } from "./stream-reveal";
@@ -156,13 +157,13 @@ const components: Components = {
   // the `pre` renderer), so a `code` reaching here is treated as inline.
   code: ({ children, className: _className, ...props }) => (
     <code
-      className="rounded-og-xs border border-og-border bg-og-surface-1 px-1 py-0.5 font-og-mono text-og-sm text-og-fg"
+      className="rounded-og-xs bg-og-surface-1 px-1 py-0.5 font-og-mono text-og-sm text-og-fg"
       {...props}
     >
       {children}
     </code>
   ),
-  // Fenced code — bordered mono block with language chip + copy.
+  // Fenced code — quiet mono block (no card / no nested vertical scroll).
   pre: ({ children }) => <MarkdownCodeBlock>{children}</MarkdownCodeBlock>,
   // Tables stay unboxed (hairline rules); hover reveals a TSV copy control.
   table: ({ children, ...props }) => <MarkdownTable {...props}>{children}</MarkdownTable>,
@@ -193,9 +194,10 @@ const components: Components = {
 };
 
 /** How long after the stream ends the reveal pipeline stays for trailing animations. */
-const REVEAL_LINGER_MS = 900;
+/** Trailing ink window after stream end — keep ≥ {@link INK_FADE_MS}. */
+const REVEAL_LINGER_MS = 480 * MOTION_INSPECT_SCALE;
 /** Keep in sync with `--og-duration-markdown-crystallize` / view-transition CSS. */
-const MARKDOWN_SETTLE_MS = 480;
+const MARKDOWN_SETTLE_MS = 480 * MOTION_INSPECT_SCALE;
 
 function nodeText(node: ReactNode): string {
   if (node == null || typeof node === "boolean") {
@@ -230,9 +232,12 @@ function fenceLanguage(children: ReactNode): string | null {
 function MarkdownCodeBlock({ children }: { children?: ReactNode }) {
   const code = nodeText(children).replace(/\n$/, "");
   const language = fenceLanguage(children);
+  // mt-only (no mb / last:mb-0): next sibling streaming in used to flip a
+  // previous block's bottom margin on and yank tip-follow. Copy is overlay-only.
+  // Fixed leading + overflow-x:auto with stable block chrome so wide ASCII lines
+  // don't pop a scrollbar gutters mid-stream (another tip bob).
   return (
-    <div className="group/copy relative my-3 first:mt-0 last:mb-0">
-      {/* Overlay only — no reserved header row / extra vertical space. */}
+    <div className="group/copy relative mt-3 first:mt-0">
       <div className="pointer-events-none absolute top-1.5 right-1.5 z-10 flex items-center gap-1">
         {language ? (
           <span className="rounded px-1 py-0.5 font-og-mono text-[10px] uppercase tracking-wide text-og-fg-subtle/80 opacity-0 transition-opacity group-hover/copy:opacity-100 pointer-coarse:opacity-70">
@@ -243,7 +248,7 @@ function MarkdownCodeBlock({ children }: { children?: ReactNode }) {
           <CopyButton text={code} label="Copy code" reveal="group-hover" />
         </div>
       </div>
-      <pre className="max-h-96 overflow-auto rounded-og-md border border-og-border bg-og-bg/60 p-3 font-og-mono text-og-sm text-og-fg-muted [&>code]:border-0 [&>code]:bg-transparent [&>code]:p-0 [&>code]:text-inherit">
+      <pre className="overflow-x-auto overflow-y-hidden rounded-og-md bg-og-surface-1/70 px-3 py-2.5 font-og-mono text-og-sm leading-5 text-og-fg-muted [scrollbar-gutter:stable] [&>code]:block [&>code]:border-0 [&>code]:bg-transparent [&>code]:p-0 [&>code]:leading-5 [&>code]:text-inherit">
         {children}
       </pre>
     </div>
@@ -253,7 +258,7 @@ function MarkdownCodeBlock({ children }: { children?: ReactNode }) {
 function MarkdownTable({ children, className, ...props }: ComponentPropsWithoutRef<"table">) {
   const tableRef = useRef<HTMLTableElement | null>(null);
   return (
-    <div className="group/copy relative my-3 max-w-full first:mt-0 last:mb-0">
+    <div className="group/copy relative mt-3 max-w-full first:mt-0">
       <div className="pointer-events-none absolute top-0 right-0 z-10">
         <div className="pointer-events-auto">
           <CopyButton

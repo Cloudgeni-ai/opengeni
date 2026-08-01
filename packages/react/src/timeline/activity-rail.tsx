@@ -11,8 +11,9 @@ import { Markdown } from "../components/markdown";
 import { cn } from "../lib/cn";
 import { truncate } from "../lib/format";
 import { defaultToolRegistry } from "./tool-renderers";
-import { useEntranceAnimation } from "./entrance";
+import { useEntranceAnimation, useEntranceAnimationLive } from "./entrance";
 import type { ToolRegistry } from "./registry";
+import { useSeenActivityIds } from "./seen-activity-ids";
 import { BodyNote, PayloadBlock, ActivityDisclosure } from "./shared";
 import { toolDisplayName } from "./tool-display-name";
 import type { ActivityItem, MemoryItem, ReasoningItem, SandboxItem, WorkerItem } from "./types";
@@ -67,23 +68,33 @@ export function ActivityRail({
   bare,
   className,
 }: ActivityRailProps) {
-  const enter = useEntranceAnimation();
-  // Per-row soft entrance for items that APPEND while this rail is live.
-  // First paint of the rail (history, bulk hydrate, settle-fold remount)
-  // must NOT animate every row — that was the hard "outer steps snap"
-  // when a whole cluster remounted. Only ids that appear after the rail
-  // already had a previous commit earn the row-enter breath.
+  const enterMounted = useEntranceAnimation();
+  // Live gate: rails born during bulk capture enter=false forever; with a
+  // seen-id map we still want later live appends to fade (ids gate remounts).
+  const enterLive = useEntranceAnimationLive();
+  const seenIds = useSeenActivityIds();
+  const enter = seenIds ? enterLive : enterMounted;
   const previousIdsRef = useRef<Set<string> | null>(null);
   const enteringIds = new Set<string>();
-  if (enter && previousIdsRef.current !== null) {
+  if (enter) {
     for (const item of items) {
-      if (!previousIdsRef.current.has(item.id)) {
+      if (seenIds) {
+        if (!seenIds.has(item.id)) {
+          enteringIds.add(item.id);
+        }
+      } else if (previousIdsRef.current !== null && !previousIdsRef.current.has(item.id)) {
+        // Standalone ActivityRail (tests / demo): append-only, no remount map.
         enteringIds.add(item.id);
       }
     }
   }
   useLayoutEffect(() => {
     previousIdsRef.current = new Set(items.map((item) => item.id));
+    if (seenIds) {
+      for (const item of items) {
+        seenIds.add(item.id);
+      }
+    }
   });
   return (
     <div
@@ -93,9 +104,9 @@ export function ActivityRail({
         // so a long rail reads as a few clusters, not a metronome of rows.
         "flex flex-col gap-0.5",
         !bare && "border-l-2 border-og-border pl-3 sm:pl-4",
-        // Whole-rail enter only on the rail's first live paint (no prior ids).
-        // Subsequent appends animate the new row alone — softer, no re-flash.
-        !bare && enter && previousIdsRef.current === null && "animate-og-enter",
+        // Whole-rail enter: standalone rails only (no seen-id map). Inside
+        // MessageTimeline, unknown ids take per-row enter — remounts stay quiet.
+        !bare && enter && !seenIds && previousIdsRef.current === null && "animate-og-enter",
         className,
       )}
     >
