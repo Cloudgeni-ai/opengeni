@@ -96,10 +96,14 @@ export async function exchangeOpenGeniSlackAuthorizationCode(
       signal: AbortSignal.timeout(SLACK_TIMEOUT_MS),
     });
   } catch {
-    throw new HTTPException(502, { message: "Slack installation token exchange failed" });
+    throw new HTTPException(502, {
+      message: "Slack installation token exchange failed",
+    });
   }
   if (!response.ok) {
-    throw new HTTPException(502, { message: "Slack installation token exchange failed" });
+    throw new HTTPException(502, {
+      message: "Slack installation token exchange failed",
+    });
   }
   const payload = await readResponseJsonBounded<unknown>(
     response,
@@ -112,7 +116,9 @@ export async function exchangeOpenGeniSlackAuthorizationCode(
   }
   const accessToken = slackString(record.access_token);
   if (!accessToken?.startsWith("xoxb-")) {
-    throw new HTTPException(502, { message: "Slack installation did not return a bot token" });
+    throw new HTTPException(502, {
+      message: "Slack installation did not return a bot token",
+    });
   }
   return accessToken;
 }
@@ -342,6 +348,11 @@ export class OpenGeniSlackBotClient {
     });
   }
 
+  async verifyChannelAccess(channelId: string) {
+    const headers = await this.headersFor("channel_history.read");
+    return await this.requireMemberChannel(headers, channelId);
+  }
+
   async channelHistory(input: { channelId: string; limit?: number; cursor?: string }) {
     return await this.withAudit("channel_history.read", async (headers) => {
       const info = await this.requireMemberChannel(headers, input.channelId);
@@ -484,7 +495,9 @@ export class OpenGeniSlackBotClient {
       const headers = await this.headersFor(operation);
       let channelId = input.channelId;
       if (input.userId) {
-        const opened = await this.call(headers, "conversations.open", { users: input.userId });
+        const opened = await this.call(headers, "conversations.open", {
+          users: input.userId,
+        });
         channelId = requiredSlackString(slackRecord(opened.channel)?.id, "channel.id");
       } else if (channelId) {
         await this.requireMemberChannel(headers, channelId);
@@ -704,7 +717,10 @@ export class OpenGeniSlackBotClient {
       `${SLACK_API_BASE}chat.getPermalink`,
     );
     try {
-      await this.call(headers, "chat.getPermalink", { channel: channelId, message_ts: timestamp });
+      await this.call(headers, "chat.getPermalink", {
+        channel: channelId,
+        message_ts: timestamp,
+      });
       return true;
     } catch (error) {
       if (error instanceof SlackBotProviderError && error.code === "message_not_found") {
@@ -715,7 +731,9 @@ export class OpenGeniSlackBotClient {
   }
 
   private async requireMemberChannel(headers: Record<string, string>, channelId: string) {
-    const payload = await this.call(headers, "conversations.info", { channel: channelId });
+    const payload = await this.call(headers, "conversations.info", {
+      channel: channelId,
+    });
     const projected = projectChannel(payload.channel);
     if (!projected || projected.isMember !== true) {
       throw new SlackBotProviderError("not_in_channel");
@@ -946,7 +964,10 @@ export class OpenGeniSlackBotClient {
   }
 
   private completedDeleteResult(
-    operation: { slackChannelId: string | null; slackMessageTimestamp: string | null },
+    operation: {
+      slackChannelId: string | null;
+      slackMessageTimestamp: string | null;
+    },
     operationId: string,
   ) {
     if (!operation.slackChannelId || !operation.slackMessageTimestamp) {
@@ -1008,9 +1029,15 @@ export class OpenGeniSlackBotClient {
       return { type: "subject", id: this.context.subjectId };
     }
     if (this.context.scheduledTaskId) {
-      return { type: "service", id: `scheduler:${this.context.scheduledTaskId}` };
+      return {
+        type: "service",
+        id: `scheduler:${this.context.scheduledTaskId}`,
+      };
     }
-    return { type: "service", id: `session:${this.context.sessionId ?? "workspace"}` };
+    return {
+      type: "service",
+      id: `session:${this.context.sessionId ?? "workspace"}`,
+    };
   }
 
   private fileListPage(input: {
@@ -1020,13 +1047,19 @@ export class OpenGeniSlackBotClient {
   }): SlackFilesListPage {
     const key = environmentsEncryptionKeyBytes(this.settings);
     if (!key) throw new Error("connection encryption is not configured");
-    return resolveSlackFilesListPage(input, { connectionId: this.connection.id, key });
+    return resolveSlackFilesListPage(input, {
+      connectionId: this.connection.id,
+      key,
+    });
   }
 
   private fileListCursor(input: { channelId: string; count: number; page: number }): string {
     const key = environmentsEncryptionKeyBytes(this.settings);
     if (!key) throw new Error("connection encryption is not configured");
-    return createSlackFilesListCursor(input, { connectionId: this.connection.id, key });
+    return createSlackFilesListCursor(input, {
+      connectionId: this.connection.id,
+      key,
+    });
   }
 
   private async recordAudit(
@@ -1072,6 +1105,42 @@ export function createOpenGeniSlackBotClient(
     resolved.connection,
     resolved.metadata,
     resolved.context,
+    deps.slackFetch,
+  );
+}
+
+export async function createOpenGeniSlackBotInteractionClient(
+  deps: { db: Database; settings: Settings; slackFetch?: typeof fetch },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    connectionId: string;
+    subjectId: string;
+    sessionId?: string | null;
+  },
+): Promise<OpenGeniSlackBotClient> {
+  const connection = await requireOpenGeniSlackBotConnection(
+    deps.db,
+    input.workspaceId,
+    input.connectionId,
+  );
+  if (connection.accountId !== input.accountId) {
+    throw new Error("OpenGeni Slack bot connection tenant mismatch");
+  }
+  const metadata = openGeniSlackBotMetadata(connection.metadata);
+  if (!metadata) throw new Error("OpenGeni Slack bot connection metadata is invalid");
+  return new OpenGeniSlackBotClient(
+    deps.db,
+    deps.settings,
+    connection,
+    metadata,
+    {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      subjectId: input.subjectId,
+      sessionId: input.sessionId ?? null,
+      scheduledTaskId: null,
+    },
     deps.slackFetch,
   );
 }

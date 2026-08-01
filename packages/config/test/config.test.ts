@@ -90,11 +90,38 @@ describe("Google Drive integration settings", () => {
   });
 });
 
+describe("OpenGeni Slack interaction settings", () => {
+  const slackEnv = {
+    OPENGENI_ENVIRONMENT: "local",
+    OPENGENI_PUBLIC_BASE_URL: "http://127.0.0.1:8000",
+    OPENGENI_INTEGRATIONS_STATE_SECRET: "state-secret",
+    OPENGENI_SLACK_CLIENT_ID: "slack-client-id",
+    OPENGENI_SLACK_CLIENT_SECRET: "slack-client-secret",
+  };
+
+  test("requires the request signing secret whenever the Slack app is configured", () => {
+    expect(() => withEnv(slackEnv, () => getSettings())).toThrow(
+      "OPENGENI_SLACK_SIGNING_SECRET is required when the OpenGeni Slack app is configured",
+    );
+  });
+
+  test("loads the signing secret without projecting it into any public contract", () => {
+    const settings = withEnv(
+      { ...slackEnv, OPENGENI_SLACK_SIGNING_SECRET: "slack-signing-secret" },
+      () => getSettings(),
+    );
+    expect(settings.slackSigningSecret).toBe("slack-signing-secret");
+  });
+});
+
 describe("Docker workspace materialization", () => {
   test("parses the optional shared workspace base directory", () => {
     expect(
-      withEnv({ OPENGENI_DOCKER_WORKSPACE_BASE_DIR: "/var/lib/opengeni/docker-workspaces" }, () =>
-        getSettings(),
+      withEnv(
+        {
+          OPENGENI_DOCKER_WORKSPACE_BASE_DIR: "/var/lib/opengeni/docker-workspaces",
+        },
+        () => getSettings(),
       ).dockerWorkspaceBaseDir,
     ).toBe("/var/lib/opengeni/docker-workspaces");
   });
@@ -1050,7 +1077,10 @@ describe("sandbox preparation profiles", () => {
     const limits = parseStaticUsageLimitsJson(
       '{"maxWorkspacesPerAccount":2,"maxFileUploadBytes":1048576}',
     );
-    expect(limits).toEqual({ maxWorkspacesPerAccount: 2, maxFileUploadBytes: 1048576 });
+    expect(limits).toEqual({
+      maxWorkspacesPerAccount: 2,
+      maxFileUploadBytes: 1048576,
+    });
 
     withEnv(
       {
@@ -1058,7 +1088,9 @@ describe("sandbox preparation profiles", () => {
         OPENGENI_STATIC_USAGE_LIMITS_JSON: '{"maxApiKeysPerWorkspace":1}',
       },
       () => {
-        expect(configuredStaticUsageLimits(getSettings())).toEqual({ maxApiKeysPerWorkspace: 1 });
+        expect(configuredStaticUsageLimits(getSettings())).toEqual({
+          maxApiKeysPerWorkspace: 1,
+        });
       },
     );
 
@@ -1295,8 +1327,12 @@ describe("backend-gated sandbox required-credential validation", () => {
   test("the modal token stays a both-or-neither pair regardless of the active backend", () => {
     // Half-configured Modal token while backend=docker: still a misconfig.
     expect(() =>
-      withEnv({ OPENGENI_SANDBOX_BACKEND: "docker", OPENGENI_MODAL_TOKEN_ID: "only-id" }, () =>
-        getSettings(),
+      withEnv(
+        {
+          OPENGENI_SANDBOX_BACKEND: "docker",
+          OPENGENI_MODAL_TOKEN_ID: "only-id",
+        },
+        () => getSettings(),
       ),
     ).toThrow(
       "OPENGENI_MODAL_TOKEN_ID and OPENGENI_MODAL_TOKEN_SECRET must both be set or both omitted",

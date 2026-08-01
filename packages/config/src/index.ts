@@ -267,6 +267,7 @@ const SettingsSchema = z.object({
   integrationsOauthClientsJson: z.string().default("{}"),
   slackClientId: z.string().optional(),
   slackClientSecret: z.string().optional(),
+  slackSigningSecret: z.string().optional(),
   googleDriveClientId: z.string().optional(),
   googleDriveClientSecret: z.string().optional(),
   // Undefined is meaningful: the migration boundary persists the product
@@ -1014,7 +1015,11 @@ export function resolveVoiceInputProviderRegistry(settings: Settings): VoiceInpu
       // subscription turns. VOICE_INPUT_CODEX_EXPERIMENTAL is retained for
       // back-compat docs/env but no longer gates inclusion.
       if (!settings.codexSubscriptionEnabled) continue;
-      providers.push({ id: "codex-subscription", kind: "codex-subscription", experimental: true });
+      providers.push({
+        id: "codex-subscription",
+        kind: "codex-subscription",
+        experimental: true,
+      });
     }
   }
   return providers;
@@ -1583,6 +1588,7 @@ export function getSettings(): Settings {
     integrationsOauthClientsJson: optional("OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON"),
     slackClientId: optional("OPENGENI_SLACK_CLIENT_ID"),
     slackClientSecret: optional("OPENGENI_SLACK_CLIENT_SECRET"),
+    slackSigningSecret: optional("OPENGENI_SLACK_SIGNING_SECRET"),
     googleDriveClientId: optional("OPENGENI_GOOGLE_DRIVE_CLIENT_ID"),
     googleDriveClientSecret: optional("OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET"),
     maxNestedAgentDepth: optional("OPENGENI_MAX_NESTED_AGENT_DEPTH"),
@@ -2157,8 +2163,16 @@ function builtinCredentialSource(settings: Settings): CredentialSourceV1 {
 }
 
 function staticRequestMetadataForDigest(provider: ResolvedModelProvider): {
-  headers: Array<{ name: string; classification: "public" | "secret"; value?: string }>;
-  query: Array<{ name: string; classification: "public" | "secret"; value?: string }>;
+  headers: Array<{
+    name: string;
+    classification: "public" | "secret";
+    value?: string;
+  }>;
+  query: Array<{
+    name: string;
+    classification: "public" | "secret";
+    value?: string;
+  }>;
 } {
   const publicHeaders = new Set(provider.publicDefaultHeaderNames ?? []);
   const publicQuery = new Set(provider.publicDefaultQueryNames ?? []);
@@ -2326,7 +2340,10 @@ export function withCodexCatalogProvider(settings: Settings): Settings {
       toolOutputTruncationTokens: CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
     })),
   };
-  return { ...settings, modelProvidersJson: JSON.stringify([...providers, provider]) };
+  return {
+    ...settings,
+    modelProvidersJson: JSON.stringify([...providers, provider]),
+  };
 }
 
 /**
@@ -2529,7 +2546,9 @@ export function configuredModels(settings: Settings): ConfiguredModel[] {
             : { contextWindowTokens: model.contextWindowTokens }),
           ...(model.effectiveContextWindowTokens === undefined
             ? {}
-            : { effectiveContextWindowTokens: model.effectiveContextWindowTokens }),
+            : {
+                effectiveContextWindowTokens: model.effectiveContextWindowTokens,
+              }),
           ...(model.autoCompactTokenLimit === undefined
             ? {}
             : { autoCompactTokenLimit: model.autoCompactTokenLimit }),
@@ -3277,7 +3296,9 @@ export function parseMcpServers(raw: string | undefined): unknown[] | undefined 
     return parsed;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`OPENGENI_MCP_SERVERS must be a JSON array: ${message}`, { cause: error });
+    throw new Error(`OPENGENI_MCP_SERVERS must be a JSON array: ${message}`, {
+      cause: error,
+    });
   }
 }
 
@@ -3663,6 +3684,11 @@ function validateSettings(settings: Settings): void {
     );
   }
   if (settings.slackClientId) {
+    if (!settings.slackSigningSecret) {
+      throw new Error(
+        "OPENGENI_SLACK_SIGNING_SECRET is required when the OpenGeni Slack app is configured",
+      );
+    }
     if (!settings.publicBaseUrl) {
       throw new Error(
         "OPENGENI_PUBLIC_BASE_URL is required when the OpenGeni Slack app is configured",

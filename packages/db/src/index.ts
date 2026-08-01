@@ -5294,6 +5294,528 @@ export async function revokeConnection(
   );
 }
 
+export type SlackInstallationRoute = {
+  accountId: string;
+  workspaceId: string;
+  connectionId: string;
+  botId: string;
+  botUserId: string;
+};
+
+export type SlackBotUserLink = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  connectionId: string;
+  slackTeamId: string;
+  slackUserId: string;
+  subjectId: string;
+  linkedBySubjectId: string;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+export type SlackInteractionTriggerKind =
+  | "app_mention"
+  | "dm"
+  | "slash_command"
+  | "message_shortcut"
+  | "thread_reply";
+
+export type SlackInteractionInboxEntry = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  connectionId: string;
+  providerEventId: string;
+  providerMessageId: string;
+  slackTeamId: string;
+  slackUserId: string;
+  slackChannelId: string;
+  slackMessageTs: string;
+  slackThreadTs: string | null;
+  triggerKind: SlackInteractionTriggerKind;
+  text: string;
+  status: "pending" | "processing" | "processed" | "failed";
+  claimHolderId: string | null;
+  claimExpiresAt: Date | null;
+  attemptCount: number;
+  lastErrorCode: string | null;
+  processedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+export type SlackInteraction = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  connectionId: string;
+  slackTeamId: string;
+  slackChannelId: string;
+  slackThreadTs: string;
+  routeKey: string;
+  triggeringProviderEventId: string;
+  owningSubjectId: string;
+  sessionId: string | null;
+  lastDeliveredSessionEventSequence: number;
+  deliveryClaimHolderId: string | null;
+  deliveryClaimExpiresAt: Date | null;
+  ackSlackMessageTs: string | null;
+  progressCount: number;
+  terminalDeliveryState: "open" | "completed" | "failed" | "cancelled" | "blocked";
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+export async function resolveSlackInstallationRoute(
+  db: Database,
+  slackTeamId: string,
+): Promise<SlackInstallationRoute | null> {
+  const rows = await db.execute<{
+    account_id: string;
+    workspace_id: string;
+    connection_id: string;
+    bot_id: string;
+    bot_user_id: string;
+  }>(sql`select * from opengeni_private.resolve_slack_installation(${slackTeamId})`);
+  const row = rows[0];
+  return row
+    ? {
+        accountId: row.account_id,
+        workspaceId: row.workspace_id,
+        connectionId: row.connection_id,
+        botId: row.bot_id,
+        botUserId: row.bot_user_id,
+      }
+    : null;
+}
+
+export async function saveSlackBotUserLink(
+  db: Database,
+  input: Omit<SlackBotUserLink, "id" | "createdAt" | "updatedAt">,
+): Promise<SlackBotUserLink> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .insert(schema.slackBotUserLinks)
+      .values(input)
+      .onConflictDoUpdate({
+        target: [schema.slackBotUserLinks.connectionId, schema.slackBotUserLinks.slackUserId],
+        set: {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          slackTeamId: input.slackTeamId,
+          subjectId: input.subjectId,
+          linkedBySubjectId: input.linkedBySubjectId,
+          updatedAt: sql`now()`,
+        },
+      })
+      .returning();
+    if (!row) throw new Error("Slack identity link write returned no row");
+    return mapSlackBotUserLink(row);
+  });
+}
+
+export async function getSlackBotUserLink(
+  db: Database,
+  workspaceId: string,
+  connectionId: string,
+  slackUserId: string,
+): Promise<SlackBotUserLink | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.slackBotUserLinks)
+      .where(
+        and(
+          eq(schema.slackBotUserLinks.workspaceId, workspaceId),
+          eq(schema.slackBotUserLinks.connectionId, connectionId),
+          eq(schema.slackBotUserLinks.slackUserId, slackUserId),
+        ),
+      )
+      .limit(1);
+    return row ? mapSlackBotUserLink(row) : null;
+  });
+}
+
+export async function deleteSlackBotUserLink(
+  db: Database,
+  workspaceId: string,
+  connectionId: string,
+  slackUserId: string,
+): Promise<boolean> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .delete(schema.slackBotUserLinks)
+      .where(
+        and(
+          eq(schema.slackBotUserLinks.workspaceId, workspaceId),
+          eq(schema.slackBotUserLinks.connectionId, connectionId),
+          eq(schema.slackBotUserLinks.slackUserId, slackUserId),
+        ),
+      )
+      .returning({ id: schema.slackBotUserLinks.id });
+    return rows.length > 0;
+  });
+}
+
+export async function enqueueSlackInteractionInbox(
+  db: Database,
+  input: Omit<
+    SlackInteractionInboxEntry,
+    | "id"
+    | "status"
+    | "claimHolderId"
+    | "claimExpiresAt"
+    | "attemptCount"
+    | "lastErrorCode"
+    | "processedAt"
+    | "createdAt"
+    | "updatedAt"
+  >,
+): Promise<{ inserted: boolean; entry: SlackInteractionInboxEntry }> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [created] = await scopedDb
+        .insert(schema.slackInteractionInbox)
+        .values(input)
+        .onConflictDoNothing()
+        .returning();
+      if (created) return { inserted: true, entry: mapSlackInteractionInbox(created) };
+      const [existing] = await scopedDb
+        .select()
+        .from(schema.slackInteractionInbox)
+        .where(
+          and(
+            eq(schema.slackInteractionInbox.connectionId, input.connectionId),
+            or(
+              eq(schema.slackInteractionInbox.providerEventId, input.providerEventId),
+              eq(schema.slackInteractionInbox.providerMessageId, input.providerMessageId),
+            ),
+          ),
+        )
+        .limit(1);
+      if (!existing) throw new Error("Slack inbox idempotency conflict could not be resolved");
+      return { inserted: false, entry: mapSlackInteractionInbox(existing) };
+    },
+  );
+}
+
+export async function claimSlackInteractionInbox(
+  db: Database,
+  claimHolderId: string,
+  claimLeaseMs: number,
+): Promise<SlackInteractionInboxEntry | null> {
+  const rows = await db.execute<typeof schema.slackInteractionInbox.$inferSelect>(
+    sql`select * from opengeni_private.claim_slack_interaction_inbox(${claimHolderId}::uuid, ${claimLeaseMs})`,
+  );
+  return rows[0] ? mapSlackInteractionInbox(rows[0]) : null;
+}
+
+export async function settleSlackInteractionInbox(
+  db: Database,
+  input: {
+    entry: Pick<SlackInteractionInboxEntry, "id" | "accountId" | "workspaceId">;
+    claimHolderId: string;
+    outcome: "processed" | "failed";
+    errorCode?: string | null;
+  },
+): Promise<boolean> {
+  return await withRlsContext(db, input.entry, async (scopedDb) => {
+    const rows = await scopedDb
+      .update(schema.slackInteractionInbox)
+      .set({
+        status: input.outcome,
+        claimHolderId: null,
+        claimExpiresAt: null,
+        processedAt: sql`now()`,
+        lastErrorCode: input.errorCode ?? null,
+        updatedAt: sql`now()`,
+      })
+      .where(
+        and(
+          eq(schema.slackInteractionInbox.id, input.entry.id),
+          eq(schema.slackInteractionInbox.claimHolderId, input.claimHolderId),
+          eq(schema.slackInteractionInbox.status, "processing"),
+        ),
+      )
+      .returning({ id: schema.slackInteractionInbox.id });
+    return rows.length === 1;
+  });
+}
+
+export async function releaseSlackInteractionInbox(
+  db: Database,
+  input: {
+    entry: Pick<SlackInteractionInboxEntry, "id" | "accountId" | "workspaceId">;
+    claimHolderId: string;
+    errorCode: string;
+  },
+): Promise<boolean> {
+  return await withRlsContext(db, input.entry, async (scopedDb) => {
+    const rows = await scopedDb
+      .update(schema.slackInteractionInbox)
+      .set({
+        status: "pending",
+        claimHolderId: null,
+        claimExpiresAt: null,
+        lastErrorCode: input.errorCode,
+        updatedAt: sql`now()`,
+      })
+      .where(
+        and(
+          eq(schema.slackInteractionInbox.id, input.entry.id),
+          eq(schema.slackInteractionInbox.claimHolderId, input.claimHolderId),
+          eq(schema.slackInteractionInbox.status, "processing"),
+        ),
+      )
+      .returning({ id: schema.slackInteractionInbox.id });
+    return rows.length === 1;
+  });
+}
+
+export async function getOrCreateSlackInteraction(
+  db: Database,
+  input: Omit<
+    SlackInteraction,
+    | "id"
+    | "sessionId"
+    | "lastDeliveredSessionEventSequence"
+    | "deliveryClaimHolderId"
+    | "deliveryClaimExpiresAt"
+    | "ackSlackMessageTs"
+    | "progressCount"
+    | "terminalDeliveryState"
+    | "createdAt"
+    | "updatedAt"
+  >,
+): Promise<{ created: boolean; interaction: SlackInteraction }> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const [created] = await scopedDb
+      .insert(schema.slackInteractions)
+      .values(input)
+      .onConflictDoNothing()
+      .returning();
+    if (created) return { created: true, interaction: mapSlackInteraction(created) };
+    const [existing] = await scopedDb
+      .select()
+      .from(schema.slackInteractions)
+      .where(
+        and(
+          eq(schema.slackInteractions.connectionId, input.connectionId),
+          eq(schema.slackInteractions.routeKey, input.routeKey),
+        ),
+      )
+      .limit(1);
+    if (!existing) throw new Error("Slack route idempotency conflict could not be resolved");
+    return { created: false, interaction: mapSlackInteraction(existing) };
+  });
+}
+
+export async function getSlackInteractionByRoute(
+  db: Database,
+  workspaceId: string,
+  connectionId: string,
+  routeKey: string,
+): Promise<SlackInteraction | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.slackInteractions)
+      .where(
+        and(
+          eq(schema.slackInteractions.workspaceId, workspaceId),
+          eq(schema.slackInteractions.connectionId, connectionId),
+          eq(schema.slackInteractions.routeKey, routeKey),
+        ),
+      )
+      .limit(1);
+    return row ? mapSlackInteraction(row) : null;
+  });
+}
+
+export async function bindSlackInteractionSession(
+  db: Database,
+  input: Pick<SlackInteraction, "id" | "accountId" | "workspaceId" | "owningSubjectId"> & {
+    sessionId: string;
+  },
+): Promise<SlackInteraction | null> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const [row] = await scopedDb
+      .update(schema.slackInteractions)
+      .set({ sessionId: input.sessionId, updatedAt: sql`now()` })
+      .where(
+        and(
+          eq(schema.slackInteractions.id, input.id),
+          eq(schema.slackInteractions.owningSubjectId, input.owningSubjectId),
+          isNull(schema.slackInteractions.sessionId),
+        ),
+      )
+      .returning();
+    if (row) return mapSlackInteraction(row);
+    const [existing] = await scopedDb
+      .select()
+      .from(schema.slackInteractions)
+      .where(eq(schema.slackInteractions.id, input.id))
+      .limit(1);
+    return existing?.sessionId === input.sessionId ? mapSlackInteraction(existing) : null;
+  });
+}
+
+export async function rekeySlackInteractionRoute(
+  db: Database,
+  input: Pick<SlackInteraction, "id" | "accountId" | "workspaceId"> & {
+    routeKey: string;
+    slackThreadTs: string;
+    ackSlackMessageTs: string;
+  },
+): Promise<SlackInteraction | null> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const [row] = await scopedDb
+      .update(schema.slackInteractions)
+      .set({
+        routeKey: input.routeKey,
+        slackThreadTs: input.slackThreadTs,
+        ackSlackMessageTs: input.ackSlackMessageTs,
+        updatedAt: sql`now()`,
+      })
+      .where(eq(schema.slackInteractions.id, input.id))
+      .returning();
+    return row ? mapSlackInteraction(row) : null;
+  });
+}
+
+export async function claimSlackInteractionDelivery(
+  db: Database,
+  claimHolderId: string,
+  claimLeaseMs: number,
+): Promise<SlackInteraction | null> {
+  const rows = await db.execute<typeof schema.slackInteractions.$inferSelect>(
+    sql`select * from opengeni_private.claim_slack_interaction_delivery(${claimHolderId}::uuid, ${claimLeaseMs})`,
+  );
+  return rows[0] ? mapSlackInteraction(rows[0]) : null;
+}
+
+export async function reopenSlackInteractionDelivery(
+  db: Database,
+  input: Pick<SlackInteraction, "id" | "accountId" | "workspaceId">,
+): Promise<boolean> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const rows = await scopedDb
+      .update(schema.slackInteractions)
+      .set({ terminalDeliveryState: "open", updatedAt: sql`now()` })
+      .where(eq(schema.slackInteractions.id, input.id))
+      .returning({ id: schema.slackInteractions.id });
+    return rows.length === 1;
+  });
+}
+
+export async function advanceSlackInteractionDelivery(
+  db: Database,
+  input: Pick<SlackInteraction, "id" | "accountId" | "workspaceId"> & {
+    claimHolderId: string;
+    sequence: number;
+    ackSlackMessageTs?: string | null;
+    incrementProgress?: boolean;
+  },
+): Promise<boolean> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const rows = await scopedDb
+      .update(schema.slackInteractions)
+      .set({
+        lastDeliveredSessionEventSequence: input.sequence,
+        ...(input.ackSlackMessageTs !== undefined
+          ? { ackSlackMessageTs: input.ackSlackMessageTs }
+          : {}),
+        ...(input.incrementProgress
+          ? {
+              progressCount: sql`${schema.slackInteractions.progressCount} + 1`,
+            }
+          : {}),
+        updatedAt: sql`now()`,
+      })
+      .where(
+        and(
+          eq(schema.slackInteractions.id, input.id),
+          eq(schema.slackInteractions.deliveryClaimHolderId, input.claimHolderId),
+          lte(schema.slackInteractions.lastDeliveredSessionEventSequence, input.sequence),
+        ),
+      )
+      .returning({ id: schema.slackInteractions.id });
+    return rows.length === 1;
+  });
+}
+
+export async function releaseSlackInteractionDelivery(
+  db: Database,
+  input: Pick<SlackInteraction, "id" | "accountId" | "workspaceId"> & {
+    claimHolderId: string;
+  },
+): Promise<boolean> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const rows = await scopedDb
+      .update(schema.slackInteractions)
+      .set({
+        deliveryClaimHolderId: null,
+        deliveryClaimExpiresAt: null,
+        updatedAt: sql`now()`,
+      })
+      .where(
+        and(
+          eq(schema.slackInteractions.id, input.id),
+          eq(schema.slackInteractions.deliveryClaimHolderId, input.claimHolderId),
+        ),
+      )
+      .returning({ id: schema.slackInteractions.id });
+    return rows.length === 1;
+  });
+}
+
+export async function closeSlackInteractionDelivery(
+  db: Database,
+  input: Pick<SlackInteraction, "id" | "accountId" | "workspaceId"> & {
+    claimHolderId: string;
+    sequence: number;
+    state: Exclude<SlackInteraction["terminalDeliveryState"], "open">;
+  },
+): Promise<boolean> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const rows = await scopedDb
+      .update(schema.slackInteractions)
+      .set({
+        lastDeliveredSessionEventSequence: input.sequence,
+        terminalDeliveryState: input.state,
+        deliveryClaimHolderId: null,
+        deliveryClaimExpiresAt: null,
+        updatedAt: sql`now()`,
+      })
+      .where(
+        and(
+          eq(schema.slackInteractions.id, input.id),
+          eq(schema.slackInteractions.deliveryClaimHolderId, input.claimHolderId),
+        ),
+      )
+      .returning({ id: schema.slackInteractions.id });
+    return rows.length === 1;
+  });
+}
+
+function mapSlackBotUserLink(row: typeof schema.slackBotUserLinks.$inferSelect): SlackBotUserLink {
+  return row;
+}
+
+function mapSlackInteractionInbox(
+  row: typeof schema.slackInteractionInbox.$inferSelect,
+): SlackInteractionInboxEntry {
+  return row;
+}
+
+function mapSlackInteraction(row: typeof schema.slackInteractions.$inferSelect): SlackInteraction {
+  return row;
+}
+
 export class SlackBotLifecycleSuccessAuditError extends Error {
   constructor() {
     super("OpenGeni Slack bot lifecycle success audit failed");
@@ -5886,7 +6408,10 @@ export async function claimSlackBotDeleteOperation(
           })
           .returning();
         if (created) {
-          return { kind: "claimed", operation: mapSlackBotDeleteOperation(created) } as const;
+          return {
+            kind: "claimed",
+            operation: mapSlackBotDeleteOperation(created),
+          } as const;
         }
 
         const [existing] = await tx
@@ -6027,7 +6552,11 @@ export async function releaseSlackBotDeleteOperationClaim(
 }
 
 export type CompleteSlackBotDeleteOperationResult =
-  | { kind: "completed"; operation: SlackBotDeleteOperation; newlyCompleted: boolean }
+  | {
+      kind: "completed";
+      operation: SlackBotDeleteOperation;
+      newlyCompleted: boolean;
+    }
   | { kind: "not_found" | "not_owned" };
 
 export async function completeSlackBotDeleteOperation(
@@ -15677,9 +16206,17 @@ export async function sessionTreeStatsForSessions(
 }
 
 function sessionFilters(
-  options: Pick<ListSessionsForSubjectOptions, "authorizationScope" | "parentSessionId" | "search">,
+  options: Pick<
+    ListSessionsForSubjectOptions,
+    "authorizationScope" | "parentSessionId" | "search" | "subjectId"
+  >,
 ): SQL[] {
-  const filters: SQL[] = [];
+  const filters: SQL[] = [
+    or(
+      sql`coalesce(${schema.sessions.metadata} #>> '{slackInteraction,visibility}', 'workspace') <> 'private'`,
+      sql`${schema.sessions.metadata} #>> '{slackInteraction,ownerSubjectId}' = ${options.subjectId}`,
+    )!,
+  ];
   if (options.authorizationScope) {
     filters.push(sessionAuthorizationScopeFilter(options.authorizationScope));
   }
@@ -16292,7 +16829,16 @@ export async function getSessionForSubject(
           eq(schema.sessionPins.sessionId, schema.sessions.id),
         ),
       )
-      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, workspaceId),
+          eq(schema.sessions.id, sessionId),
+          or(
+            sql`coalesce(${schema.sessions.metadata} #>> '{slackInteraction,visibility}', 'workspace') <> 'private'`,
+            sql`${schema.sessions.metadata} #>> '{slackInteraction,ownerSubjectId}' = ${subjectId}`,
+          ),
+        ),
+      )
       .limit(1);
     if (!row) return null;
     const mcpServers = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, [
@@ -19433,7 +19979,10 @@ export async function recordSkippedContextCompaction(
         });
         if (!fence.allowed) return { recorded: false as const, reason: fence.reason };
         if (requirePendingRequest && !fence.session.compactRequested) {
-          return { recorded: false as const, reason: "request_not_pending" as const };
+          return {
+            recorded: false as const,
+            reason: "request_not_pending" as const,
+          };
         }
         const inserted = await tx
           .insert(schema.sessionEvents)
@@ -27563,7 +28112,11 @@ export type WorkspaceArchiveCaptureClaim = {
 };
 
 export type ClaimWorkspaceArchiveCaptureResult =
-  | { status: "claimed"; claim: WorkspaceArchiveCaptureClaim; lease: LeaseSnapshot }
+  | {
+      status: "claimed";
+      claim: WorkspaceArchiveCaptureClaim;
+      lease: LeaseSnapshot;
+    }
   | {
       status:
         | "lease_fenced"

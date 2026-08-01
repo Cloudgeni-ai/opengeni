@@ -1,8 +1,10 @@
 export const OPENGENI_SLACK_BOT_REQUIRED_SCOPES = [
+  "app_mentions:read",
   "canvases:read",
   "channels:history",
   "channels:read",
   "chat:write",
+  "commands",
   "files:read",
   "groups:history",
   "groups:read",
