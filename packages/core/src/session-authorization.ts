@@ -11,7 +11,7 @@ import {
   getSession,
   getSessionRootId,
   getSessionTurnForAttempt,
-  getSlackInteractionSessionAccess,
+  getSlackInteractionSessionAccessForSession,
   type Database,
 } from "@opengeni/db";
 import type { AppDependencies } from "./dependencies";
@@ -67,15 +67,17 @@ export async function requireSessionAuthorization(
   },
 ): Promise<ResolvedSessionAuthorization | null> {
   const port = deps.sessionAuthorization;
-  const [actor, target] = await Promise.all([
-    resolveSessionAuthorizationActor(deps.db, grant),
-    resolveSessionAuthorizationTarget(deps.db, grant, input.sessionId),
-  ]);
-  const slackAccess = await getSlackInteractionSessionAccess(
-    deps.db,
-    grant.workspaceId,
-    target.rootSessionId,
-  );
+  const slackAccess = await getSlackInteractionSessionAccessForSession(deps.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    sessionId: input.sessionId,
+  });
+  if (!port && slackAccess?.visibility !== "private") return null;
+
+  const actor = await resolveSessionAuthorizationActor(deps.db, grant);
+  const target = slackAccess
+    ? { sessionId: input.sessionId, rootSessionId: slackAccess.rootSessionId }
+    : await resolveSessionAuthorizationTarget(deps.db, grant, input.sessionId);
   if (slackAccess?.visibility === "private") {
     const allowed =
       actor.kind === "subject"

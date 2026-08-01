@@ -12,9 +12,14 @@ import {
   createSession,
   getOrCreateSlackInteraction,
   grantWorkspaceAccess,
+  type Database,
   type DbClient,
 } from "@opengeni/db";
-import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
+import {
+  requireSessionAuthorization,
+  type ApiRouteDeps,
+  type SessionWorkflowClient,
+} from "@opengeni/core";
 import {
   acquireSharedTestDatabase,
   MemoryEventBus,
@@ -184,6 +189,58 @@ async function fixture() {
 }
 
 describe("private Slack session authorization without an embedding-host port", () => {
+  test("preserves the legacy no-port path for definitively unmapped and missing sessions", async () => {
+    if (!available) return;
+    const value = await fixture();
+    const ordinary = await createSession(client.db, {
+      accountId: value.owner.accountId,
+      workspaceId: value.owner.workspaceId,
+      initialMessage: "Ordinary workspace session",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: value.owner.subjectId },
+      model: "test-model",
+      sandboxBackend: "none",
+    });
+    for (const sessionId of [ordinary.id, crypto.randomUUID()]) {
+      await expect(
+        requireSessionAuthorization({ db: client.db }, value.owner, {
+          sessionId,
+          operation: "session.read",
+          surface: "core",
+        }),
+      ).resolves.toBeNull();
+    }
+  });
+
+  test("fails closed when the durable Slack mapping lookup errors", async () => {
+    const lookupFailure = new Error("Slack mapping lookup unavailable");
+    const db = new Proxy(
+      {},
+      {
+        get() {
+          throw lookupFailure;
+        },
+      },
+    ) as Database;
+    await expect(
+      requireSessionAuthorization(
+        { db },
+        {
+          accountId: crypto.randomUUID(),
+          workspaceId: crypto.randomUUID(),
+          subjectId: "user:lookup-failure",
+          permissions: ["sessions:read"],
+        },
+        {
+          sessionId: crypto.randomUUID(),
+          operation: "session.read",
+          surface: "core",
+        },
+      ),
+    ).rejects.toThrow(lookupFailure.message);
+  });
+
   test("denies another workspace member across session, events, control, and human-input surfaces", async () => {
     if (!available) return;
     const value = await fixture();
@@ -219,6 +276,13 @@ describe("private Slack session authorization without an embedding-host port", (
       }),
     });
     expect(message.status).toBe(404);
+
+    const codexAccount = await api.request(`http://x${base}/codex-account`, {
+      method: "POST",
+      headers: headers(value.otherBearer, true),
+      body: JSON.stringify({ target: "auto" }),
+    });
+    expect(codexAccount.status).toBe(404);
 
     const humanInput = await api.request(`http://x${base}/events`, {
       method: "POST",

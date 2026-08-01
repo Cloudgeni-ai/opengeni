@@ -159,12 +159,13 @@ describe("release schema contract", () => {
         (migrations.has("0143_session_codex_compaction_mode.sql") ? 1 : 0) +
         (migrations.has("0144_sandbox_viewer_force_drain_gate.sql") ? 1 : 0) +
         (migrations.has("0145_model_call_facts.sql") ? 1 : 0) +
-        (migrations.has("0146_slack_bot_delete_idempotency.sql") ? 1 : 0),
+        (migrations.has("0146_slack_bot_delete_idempotency.sql") ? 1 : 0) +
+        (migrations.has("0147_slack_task_interactions.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "0bc0b4c83d95301f3c29daca63c79d9aebe655292582642a82c1837d8c98ace5",
+      "824ed9c1d1d08857a7efbd1f77ea26f40ec8460ec9114ce6ced1b99c826d36c8",
     );
-    expect(contract.latestMigration).toBe("0146_slack_bot_delete_idempotency.sql");
+    expect(contract.latestMigration).toBe("0147_slack_task_interactions.sql");
     expect(migrations.get("0128_github_installation_authority.sql")).toMatchObject({
       sha256: "365793b2a204a70e214adb90298b522acbb6dcfae22a46681a58f41a6938e6f0",
       deploymentMode: "rolling",
@@ -245,9 +246,14 @@ describe("release schema contract", () => {
       "0144_sandbox_viewer_force_drain_gate.sql",
       "0145_model_call_facts.sql",
       "0146_slack_bot_delete_idempotency.sql",
+      "0147_slack_task_interactions.sql",
     ]);
     expect(migrations.get("0143_session_codex_compaction_mode.sql")).toMatchObject({
       sha256: "574cfe6fc5ab24135e84d3932fd936e134ebe28bce8ac3cb5db97a549683906f",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0147_slack_task_interactions.sql")).toMatchObject({
+      sha256: "8b0cfea40b1a38c4eec763e8cd1d8a73d023e11fd706a95d9c78502c8655b50d",
       deploymentMode: "rolling",
     });
     expect(new Set(contract.migrations.map((migration) => migration.path)).size).toBe(

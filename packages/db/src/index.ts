@@ -5660,6 +5660,82 @@ export async function getSlackInteractionSessionAccess(
   });
 }
 
+export async function getSlackInteractionSessionAccessForSession(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+  },
+): Promise<
+  (Pick<SlackInteraction, "owningSubjectId" | "visibility"> & { rootSessionId: string }) | null
+> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const rows = await scopedDb.execute<{
+      rootSessionId: string;
+      parentSessionId: string | null;
+      depth: number;
+      cycle: boolean;
+      owningSubjectId: string | null;
+      visibility: SlackInteraction["visibility"] | null;
+    }>(sql`
+      with recursive lineage(id, parent_session_id, depth, path, cycle) as (
+        select
+          ${schema.sessions.id},
+          ${schema.sessions.parentSessionId},
+          0,
+          array[${schema.sessions.id}],
+          false
+        from ${schema.sessions}
+        where ${schema.sessions.accountId} = ${input.accountId}
+          and ${schema.sessions.workspaceId} = ${input.workspaceId}
+          and ${schema.sessions.id} = ${input.sessionId}
+        union all
+        select
+          parent.id,
+          parent.parent_session_id,
+          lineage.depth + 1,
+          lineage.path || parent.id,
+          parent.id = any(lineage.path)
+        from ${schema.sessions} parent
+        join lineage on lineage.parent_session_id = parent.id
+        where parent.account_id = ${input.accountId}
+          and parent.workspace_id = ${input.workspaceId}
+          and not lineage.cycle
+          and lineage.depth < 64
+      ), root as (
+        select id, parent_session_id, depth, cycle
+        from lineage
+        order by depth desc
+        limit 1
+      )
+      select
+        root.id as "rootSessionId",
+        root.parent_session_id as "parentSessionId",
+        root.depth,
+        root.cycle,
+        interaction.owning_subject_id as "owningSubjectId",
+        interaction.visibility
+      from root
+      left join ${schema.slackInteractions} interaction
+        on interaction.account_id = ${input.accountId}
+        and interaction.workspace_id = ${input.workspaceId}
+        and interaction.session_id = root.id
+    `);
+    const root = rows[0];
+    if (!root) return null;
+    if (root.cycle || root.parentSessionId !== null || Number(root.depth) >= 64) {
+      throw new Error(`session lineage for ${input.sessionId} has no valid workspace root`);
+    }
+    if (!root.owningSubjectId || !root.visibility) return null;
+    return {
+      rootSessionId: root.rootSessionId,
+      owningSubjectId: root.owningSubjectId,
+      visibility: root.visibility,
+    };
+  });
+}
+
 export async function bindSlackInteractionSession(
   db: Database,
   input: Pick<SlackInteraction, "id" | "accountId" | "workspaceId" | "owningSubjectId"> & {
