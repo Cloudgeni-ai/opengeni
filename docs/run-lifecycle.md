@@ -288,6 +288,10 @@ attempt-fenced and detachable. While either logical interruption or the exact
 physical receipt remains pending, `effectiveControl.settlement` stays typed as
 `stopping` and reports `attemptCount`, `interruptionPendingCount`, and
 `quiescencePendingCount`; Resume does not clear or bypass that receipt gate.
+Hosted POSIX process cancellation still validates the exact PID, process group,
+and randomized command token before signalling; it reads those facts through
+`ps` when available and Linux `/proc` when a minimal image omits procps. Missing
+or malformed identity remains fail-closed.
 
 The direct receipt remains the preferred path. If its three Postgres attempts
 exhaust, `runAgentTurn` does not suppress the failure or infer a receipt from

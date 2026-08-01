@@ -7,7 +7,7 @@ const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle"
 
 describe("workspace artifacts migration", () => {
   test("is maintenance-gated, FORCE-RLS protected, immutable, and least privilege", async () => {
-    const sql = await readFile(join(migrationsDir, "0144_workspace_artifacts.sql"), "utf8");
+    const sql = await readFile(join(migrationsDir, "0147_workspace_artifacts.sql"), "utf8");
     expect(sql.split(/\r?\n/, 1)[0]).toBe("-- deployment-mode: maintenance");
     expect(sql).toContain('CREATE TABLE "workspace_artifacts"');
     expect(sql).toContain('CREATE TABLE "workspace_artifact_versions"');

@@ -42,6 +42,7 @@ import {
   countConsecutiveReactiveRotations,
   requireSession,
   recordUsageEvent,
+  recordModelCallFact,
   registerPendingSessionToolCall,
   recordPendingSessionToolCallResult,
   clearDurablePendingSessionToolCalls,
@@ -300,7 +301,7 @@ import {
   prepareRecordingForSettlement,
   type ActiveRecording,
 } from "./recording";
-import { captureWorkspaceRevision } from "./workspace-capture";
+import { captureWorkspaceRevision, openFreshWorkspaceCaptureSession } from "./workspace-capture";
 import type { ChannelASession } from "@opengeni/runtime/sandbox";
 import { createObjectStorage, type ObjectStorage } from "@opengeni/storage";
 import {
@@ -1127,7 +1128,7 @@ export async function processModelResponseUsageEvent(input: {
     leaseLost: input.leaseLost,
     leaseLostMessage: input.leaseLostMessage,
     recordUsage: async () => {
-      await recordModelUsageAndDebitCredits(input.settings, input.db, {
+      const billing = await recordModelUsageAndDebitCredits(input.settings, input.db, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
@@ -1157,6 +1158,22 @@ export async function processModelResponseUsageEvent(input: {
         accountChangedFromPrevCall: accountContext.accountChangedFromPrevCall,
         emittedSourceKeys: input.emittedSourceKeys,
       });
+      if (authoritative && billing) {
+        await recordAuthoritativeModelCallFact({
+          db: input.db,
+          observability: input.observability,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          turnAttemptId: input.turnAttemptId,
+          sourceKey,
+          provider: input.provider,
+          providerApi: input.providerApi,
+          model: input.model,
+          billing,
+        });
+      }
       const observedInput = normalizedUsage.telemetry.inputTokens;
       if (authoritative && observedInput !== null && observedInput > 0) {
         recordModelInputTokens(input.observability, input.metricProvider, observedInput);
@@ -1236,7 +1253,7 @@ export async function processCompactionModelUsageEvent(input: {
     leaseLost: input.leaseLost,
     leaseLostMessage: input.leaseLostMessage,
     recordUsage: async () => {
-      await recordModelUsageAndDebitCredits(input.settings, input.db, {
+      const billing = await recordModelUsageAndDebitCredits(input.settings, input.db, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
@@ -1266,6 +1283,22 @@ export async function processCompactionModelUsageEvent(input: {
         accountChangedFromPrevCall: accountContext.accountChangedFromPrevCall,
         emittedSourceKeys: input.emittedSourceKeys,
       });
+      if (authoritative && billing) {
+        await recordAuthoritativeModelCallFact({
+          db: input.db,
+          observability: input.observability,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          turnAttemptId: input.turnAttemptId,
+          sourceKey,
+          provider: input.provider,
+          providerApi: input.providerApi,
+          model: input.model,
+          billing,
+        });
+      }
     },
   });
   return { status: "processed", sourceKey, authoritative };
@@ -2505,6 +2538,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // the atomic DB throttle discard the fresher one). Interval throttling
     // itself lives in maybePersistWarmWorkspaceSnapshot / persistWarmSnapshot.
     let snapshotInFlight: Promise<void> | null = null;
+    // Turn-end capture needs the lease heartbeat to keep its holder alive, but
+    // must prevent that same timer from starting another periodic snapshot
+    // while it reads. This gate separates those two responsibilities.
+    let turnEndCaptureInProgress = false;
     // Computer-use-only recording. Ordinary shell/filesystem turns leave this
     // null; the first actual computer action starts it after :0 is ready.
     let activeRecording: ActiveRecording | null = null;
@@ -2748,7 +2785,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // single-flight; throttling lives in the helper.
         const snapshotSession = setupBoxSession;
         const snapshotTurnId = turnId;
-        if (snapshotSession && snapshotTurnId && !snapshotInFlight) {
+        if (snapshotSession && snapshotTurnId && !snapshotInFlight && !turnEndCaptureInProgress) {
           snapshotInFlight = maybePersistWarmWorkspaceSnapshot(
             { db, settings },
             {
@@ -6399,7 +6436,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               leaseLost: () => codexLeaseLost,
               leaseLostMessage: "Codex credential lease expired during the active turn",
               recordUsage: async () => {
-                await recordModelUsageAndDebitCredits(settings, db, {
+                const billing = await recordModelUsageAndDebitCredits(settings, db, {
                   accountId: input.accountId,
                   workspaceId: input.workspaceId,
                   sessionId: input.sessionId,
@@ -6412,6 +6449,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   sourceKey: aggregateSourceKey,
                   observability,
                 });
+                const aggregateProvider = resolvedModel?.provider.id ?? settings.openaiProvider;
+                const aggregateProviderApi = resolvedModel?.provider.api ?? "responses";
                 aggregateAuthoritative = await emitModelCallUsage({
                   observability,
                   publish,
@@ -6419,8 +6458,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   workspaceId: input.workspaceId,
                   sessionId: input.sessionId,
                   turnId: activeTurnId,
-                  provider: resolvedModel?.provider.id ?? settings.openaiProvider,
-                  providerApi: resolvedModel?.provider.api ?? "responses",
+                  provider: aggregateProvider,
+                  providerApi: aggregateProviderApi,
                   model: turn.model,
                   sourceKey: aggregateSourceKey,
                   usage: { usage: aggregateUsage },
@@ -6429,6 +6468,22 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   accountChangedFromPrevCall: aggregateAccountCtx.accountChangedFromPrevCall,
                   emittedSourceKeys: emittedModelUsageSourceKeys,
                 });
+                if (aggregateAuthoritative && billing) {
+                  await recordAuthoritativeModelCallFact({
+                    db,
+                    observability,
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: input.sessionId,
+                    turnId: activeTurnId,
+                    turnAttemptId: input.attemptId,
+                    sourceKey: aggregateSourceKey,
+                    provider: aggregateProvider,
+                    providerApi: aggregateProviderApi,
+                    model: turn.model,
+                    billing,
+                  });
+                }
                 if (aggregateAuthoritative && aggregateInput !== null && aggregateInput > 0) {
                   recordModelInputTokens(observability, streamProvider, aggregateInput);
                 }
@@ -8026,7 +8081,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // gives capture the full live-box margin instead of racing the teardown
         // tail, which was dropping 100% of captures on real Modal desktop boxes
         // ("request cancelled due to container exiting", 0 rows). External module:
-        // self-capped at 60s, best-effort (never throws past its boundary),
+        // self-capped at 120s, best-effort (never throws past its boundary),
         // epoch-fenced, and it NEVER closes the box. The emitted
         // workspace.revision.captured event is ANNOUNCE-ONLY (metadata, never
         // content).
@@ -8046,13 +8101,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           setupBoxSession &&
           sandboxGroupId
         ) {
-          // Stop new heartbeat snapshot/meter ticks so a mid-turn snapshot cannot
-          // start concurrently with capture, then drain any in-flight snapshot
-          // (bounded) — capture and the warm snapshot both exec on the box, so
-          // sequence them, exactly as the turn-end snapshot placement did.
-          if (leaseHeartbeatTimer) {
-            stopLeaseHeartbeat();
-          }
+          // Block new periodic snapshots, then drain any one already in flight.
+          // Keep the lease heartbeat itself running: capture may legitimately
+          // exceed the 90s holder TTL, and the reaper must remain unable to drain
+          // the exact box while this holder still reads it.
+          turnEndCaptureInProgress = true;
           if (snapshotInFlight) {
             await waitForWarmSnapshot(
               snapshotInFlight,
@@ -8060,6 +8113,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               finalizerSignal,
             );
           }
+          const captureEstablished = resolvedSandbox.established;
           await captureWorkspaceRevision({
             db,
             objectStorage,
@@ -8068,6 +8122,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, events);
             },
             session: setupBoxSession as ChannelASession,
+            openReadSession: async () =>
+              await openFreshWorkspaceCaptureSession({
+                backendId: captureEstablished.backendId,
+                client: captureEstablished.client,
+                session: setupBoxSession as ChannelASession,
+                expectedInstanceId: captureEstablished.instanceId,
+              }),
             leaseEpoch: resolvedSandbox.leaseEpoch,
             sandboxGroupId,
             accountId: input.accountId,
@@ -8816,6 +8877,13 @@ export async function ensureRunAllowed(
   }
 }
 
+export type ModelUsageBillingRecord = {
+  billingPath: "opengeni_credits" | "external";
+  /** Same quantity written to usage_events.model.cost when present; else 0. */
+  pricedCostMicros: number;
+  normalizedUsage: ModelCallUsageNormalization;
+};
+
 // Exported for unit testing the external-billing bypass; not part of the activity surface.
 export async function recordModelUsageAndDebitCredits(
   settings: Settings,
@@ -8833,9 +8901,9 @@ export async function recordModelUsageAndDebitCredits(
     sourceKey: string;
     observability?: ActivityServices["observability"];
   },
-): Promise<void> {
+): Promise<ModelUsageBillingRecord | null> {
   if (!input.usage) {
-    return;
+    return null;
   }
   const normalizedUsage = input.normalizedUsage ?? normalizeModelCallUsage(input.usage);
   const sanitizedUsage = sanitizedModelUsageInput(normalizedUsage);
@@ -8865,7 +8933,11 @@ export async function recordModelUsageAndDebitCredits(
       turnAttemptId: input.turnAttemptId,
       idempotencyKey: `usage:model.cost:${input.turnId}:${input.sourceKey}`,
     });
-    return;
+    return {
+      billingPath: "external",
+      pricedCostMicros: 0,
+      normalizedUsage,
+    };
   }
   if (totalTokens > 0) {
     await recordUsageEvent(db, {
@@ -8884,7 +8956,11 @@ export async function recordModelUsageAndDebitCredits(
   }
   const shouldDebit = settings.billingMode === "stripe" || settings.usageLimitsMode === "managed";
   if (!shouldDebit || totalTokens === 0) {
-    return;
+    return {
+      billingPath: "opengeni_credits",
+      pricedCostMicros: 0,
+      normalizedUsage,
+    };
   }
   if (!configuredModelPricing(settings)[input.model]) {
     throw new Error(`Missing model pricing for ${input.model}`);
@@ -8927,6 +9003,59 @@ export async function recordModelUsageAndDebitCredits(
       },
     });
     recordCreditMicros(input.observability, "usage", result.debitedMicros);
+  }
+  return {
+    billingPath: "opengeni_credits",
+    pricedCostMicros: costMicros,
+    normalizedUsage,
+  };
+}
+
+/** Soft-fail Insights fact write — never throws into the billing/emit path. */
+export async function recordAuthoritativeModelCallFact(input: {
+  db: ActivityServices["db"];
+  observability: ActivityServices["observability"];
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  turnAttemptId: string;
+  sourceKey: string;
+  provider: string;
+  providerApi: ModelProviderApi;
+  model: string;
+  billing: ModelUsageBillingRecord;
+}): Promise<void> {
+  try {
+    const telemetry = input.billing.normalizedUsage.telemetry;
+    await recordModelCallFact(input.db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      turnAttemptId: input.turnAttemptId,
+      sourceKey: input.sourceKey,
+      provider: input.provider,
+      providerApi: input.providerApi,
+      model: input.model,
+      billingPath: input.billing.billingPath,
+      pricedCostMicros: input.billing.pricedCostMicros,
+      inputTokens: telemetry.inputTokens,
+      outputTokens: telemetry.outputTokens,
+      cachedTokens: telemetry.cachedTokens,
+      cacheWriteTokens: telemetry.cacheWriteTokens,
+      reasoningTokens: telemetry.reasoningTokens,
+      totalTokens: input.billing.normalizedUsage.totalTokens,
+    });
+  } catch (error) {
+    input.observability.warn("model call fact persist failed", {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      sourceKey: input.sourceKey,
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
 }
 

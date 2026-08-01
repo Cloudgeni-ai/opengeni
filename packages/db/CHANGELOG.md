@@ -1,5 +1,46 @@
 # @opengeni/db
 
+## 0.16.1
+
+### Patch Changes
+
+- 02fb98c: Reconcile expired draining sandboxes after their exact provider instance has disappeared.
+
+## 0.16.0
+
+### Minor Changes
+
+- f413e6c: Add real Workspace Insights: durable `model_call_facts` after authoritative
+  `agent.model.usage`, a `workspace:admin` insights API over usage_events + facts +
+  live joins, SDK client, and a web console that drops mock rollups for honest
+  UTC credit/token/cache/warm/caps reporting.
+
+### Patch Changes
+
+- b5175a8: Move the unapplied Slack delete-operation migration after the already-deployed
+  sandbox migration history, while accepting only the exact legacy staging
+  receipt for an idempotent replay.
+- Updated dependencies [f413e6c]
+  - @opengeni/contracts@0.26.0
+  - @opengeni/config@0.7.21
+
+## 0.15.6
+
+### Patch Changes
+
+- 0199108: Harden the workspace Slack bot with one fail-closed scope policy, deterministic legacy connection selection, and durable replay-safe message deletion operation identities.
+- 42428a2: Add per-session Codex remote compaction v2 (`remote_v2` / `portable`), with UI landmarks, Codex-only model locking, and opaque token accounting aligned to Codex CLI.
+- 7b65614: Keep over-limit viewer-only sandboxes drained until a fresh serialized balance
+  or monthly-cap evaluation clears a durable workspace admission gate. Viewer
+  reattach can no longer re-arm a draining box or spawn a cold successor, while a
+  turn-held sandbox remains viewable.
+- Updated dependencies [0199108]
+- Updated dependencies [42428a2]
+- Updated dependencies [b2e975f]
+- Updated dependencies [9f3b931]
+  - @opengeni/contracts@0.25.0
+  - @opengeni/config@0.7.20
+
 ## 0.15.5
 
 ### Patch Changes

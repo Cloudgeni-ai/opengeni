@@ -248,6 +248,7 @@ export {
 } from "./event-payload-sanitizer";
 export * from "./persistence-errors";
 export * from "./runtime-posture";
+export * from "./insights";
 export { sanitizeMemoryText } from "./memory-domain";
 // Re-exported so external consumers can `import { migrate } from "@opengeni/db"`.
 // The `@opengeni/db/migrate` subpath stays available too (internal callers + the
@@ -2734,6 +2735,211 @@ export async function recordUsageEvent(
         return mapUsageEvent(row);
       }
       throw new Error("Failed to record usage event");
+    },
+  );
+}
+
+export type ModelCallBillingPath = "opengeni_credits" | "external";
+
+export type ModelCallFact = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  turnAttemptId: string | null;
+  sourceKey: string;
+  provider: string;
+  providerApi: string;
+  model: string;
+  billingPath: ModelCallBillingPath;
+  turnSource: string | null;
+  initiatorKind: string | null;
+  initiatorSubjectId: string | null;
+  scheduledTaskId: string | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cachedTokens: number | null;
+  cacheWriteTokens: number | null;
+  reasoningTokens: number | null;
+  totalTokens: number | null;
+  pricedCostMicros: number;
+  occurredAt: Date;
+  recordedAt: Date;
+};
+
+function mapModelCallFact(row: typeof schema.modelCallFacts.$inferSelect): ModelCallFact {
+  const billingPath = row.billingPath;
+  if (billingPath !== "opengeni_credits" && billingPath !== "external") {
+    throw new Error(`model_call_facts: invalid billing_path ${billingPath}`);
+  }
+  return {
+    id: row.id,
+    accountId: row.accountId,
+    workspaceId: row.workspaceId,
+    sessionId: row.sessionId,
+    turnId: row.turnId,
+    turnAttemptId: row.turnAttemptId,
+    sourceKey: row.sourceKey,
+    provider: row.provider,
+    providerApi: row.providerApi,
+    model: row.model,
+    billingPath,
+    turnSource: row.turnSource,
+    initiatorKind: row.initiatorKind,
+    initiatorSubjectId: row.initiatorSubjectId,
+    scheduledTaskId: row.scheduledTaskId,
+    inputTokens: row.inputTokens,
+    outputTokens: row.outputTokens,
+    cachedTokens: row.cachedTokens,
+    cacheWriteTokens: row.cacheWriteTokens,
+    reasoningTokens: row.reasoningTokens,
+    totalTokens: row.totalTokens,
+    pricedCostMicros: row.pricedCostMicros,
+    occurredAt: row.occurredAt,
+    recordedAt: row.recordedAt,
+  };
+}
+
+function scheduledRunIdsFromContext(context: unknown): string[] {
+  if (!context || typeof context !== "object" || Array.isArray(context)) return [];
+  const raw = (context as Record<string, unknown>).scheduledRunIds;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((value): value is string => typeof value === "string" && value.length > 0);
+}
+
+async function resolveScheduledTaskIdForTurn(
+  scopedDb: Database,
+  input: {
+    workspaceId: string;
+    initiatorSubjectId: string | null;
+    initiatorContext: unknown;
+  },
+): Promise<string | null> {
+  // initiatorSubjectId is intentionally unused: any turn that carries
+  // scheduledRunIds is eligible for schedule attribution (scheduler wakes and
+  // inherited contexts alike). Mis-bucketing by turn.source remains forbidden.
+  void input.initiatorSubjectId;
+  const runIds = scheduledRunIdsFromContext(input.initiatorContext);
+  if (runIds.length === 0) return null;
+  // Prefer the earliest run when a batch somehow carries multiple ids so
+  // attribution is deterministic across retries.
+  const [run] = await scopedDb
+    .select({ taskId: schema.scheduledTaskRuns.taskId })
+    .from(schema.scheduledTaskRuns)
+    .where(
+      and(
+        eq(schema.scheduledTaskRuns.workspaceId, input.workspaceId),
+        inArray(schema.scheduledTaskRuns.id, runIds),
+      ),
+    )
+    .orderBy(schema.scheduledTaskRuns.createdAt)
+    .limit(1);
+  return run?.taskId ?? null;
+}
+
+/**
+ * Idempotent Insights fact for one authoritative model call. Soft-callers must
+ * never let failures affect billing; this writer itself is safe to retry.
+ */
+export async function recordModelCallFact(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    turnAttemptId?: string | null;
+    sourceKey: string;
+    provider: string;
+    providerApi: string;
+    model: string;
+    billingPath: ModelCallBillingPath;
+    pricedCostMicros: number;
+    inputTokens?: number | null;
+    outputTokens?: number | null;
+    cachedTokens?: number | null;
+    cacheWriteTokens?: number | null;
+    reasoningTokens?: number | null;
+    totalTokens?: number | null;
+    occurredAt?: Date;
+  },
+): Promise<ModelCallFact> {
+  if (input.pricedCostMicros < 0 || !Number.isSafeInteger(input.pricedCostMicros)) {
+    throw new Error("recordModelCallFact: pricedCostMicros must be a non-negative safe integer");
+  }
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [turn] = await scopedDb
+        .select({
+          source: schema.sessionTurns.source,
+          initiatorKind: schema.sessionTurns.initiatorKind,
+          initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
+          initiatorContext: schema.sessionTurns.initiatorContext,
+        })
+        .from(schema.sessionTurns)
+        .where(
+          and(
+            eq(schema.sessionTurns.workspaceId, input.workspaceId),
+            eq(schema.sessionTurns.id, input.turnId),
+          ),
+        )
+        .limit(1);
+      const scheduledTaskId = turn
+        ? await resolveScheduledTaskIdForTurn(scopedDb, {
+            workspaceId: input.workspaceId,
+            initiatorSubjectId: turn.initiatorSubjectId,
+            initiatorContext: turn.initiatorContext,
+          })
+        : null;
+      const occurredAt = input.occurredAt ?? new Date();
+      const [row] = await scopedDb
+        .insert(schema.modelCallFacts)
+        .values({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          turnAttemptId: input.turnAttemptId ?? null,
+          sourceKey: input.sourceKey,
+          provider: input.provider,
+          providerApi: input.providerApi,
+          model: input.model,
+          billingPath: input.billingPath,
+          turnSource: turn?.source ?? null,
+          initiatorKind: turn?.initiatorKind ?? null,
+          initiatorSubjectId: turn?.initiatorSubjectId ?? null,
+          scheduledTaskId,
+          inputTokens: input.inputTokens ?? null,
+          outputTokens: input.outputTokens ?? null,
+          cachedTokens: input.cachedTokens ?? null,
+          cacheWriteTokens: input.cacheWriteTokens ?? null,
+          reasoningTokens: input.reasoningTokens ?? null,
+          totalTokens: input.totalTokens ?? null,
+          pricedCostMicros: input.pricedCostMicros,
+          occurredAt,
+        })
+        .onConflictDoUpdate({
+          target: [
+            schema.modelCallFacts.workspaceId,
+            schema.modelCallFacts.turnId,
+            schema.modelCallFacts.sourceKey,
+          ],
+          set: {
+            turnAttemptId: sql`coalesce(${schema.modelCallFacts.turnAttemptId}, excluded.turn_attempt_id)`,
+            scheduledTaskId: sql`coalesce(${schema.modelCallFacts.scheduledTaskId}, excluded.scheduled_task_id)`,
+            initiatorKind: sql`coalesce(${schema.modelCallFacts.initiatorKind}, excluded.initiator_kind)`,
+            initiatorSubjectId: sql`coalesce(${schema.modelCallFacts.initiatorSubjectId}, excluded.initiator_subject_id)`,
+            turnSource: sql`coalesce(${schema.modelCallFacts.turnSource}, excluded.turn_source)`,
+          },
+        })
+        .returning();
+      if (!row) {
+        throw new Error("Failed to record model call fact");
+      }
+      return mapModelCallFact(row);
     },
   );
 }
@@ -20428,6 +20634,24 @@ export class SandboxLeaseSupersededError extends Error {
   }
 }
 
+export type SandboxViewerForceDrainReason = "balance" | "warm_cap";
+
+export class SandboxViewerAdmissionBlockedError extends Error {
+  readonly name = "SandboxViewerAdmissionBlockedError";
+
+  constructor(
+    public readonly workspaceId: string,
+    public readonly sandboxGroupId: string,
+    public readonly reason: SandboxViewerForceDrainReason,
+  ) {
+    super(
+      reason === "balance"
+        ? "Sandbox viewer admission is blocked because the workspace has no managed credits"
+        : "Sandbox viewer admission is blocked because the workspace warm allowance is exhausted",
+    );
+  }
+}
+
 export class SandboxLeaseRecoveryBlockedError extends Error {
   readonly name = "SandboxLeaseRecoveryBlockedError";
 
@@ -20884,6 +21108,26 @@ async function acquireLeaseOnce(
         if (!row) throw new Error(`Lease row vanished post-insert: ${sandboxGroupId}`);
 
         const liveness = row.liveness;
+
+        // A workspace-wide billing/cap drain survives this lease becoming cold.
+        // Viewer-only admission must consult it while holding the exact lease
+        // row lock, otherwise a dashboard heartbeat can re-arm the draining box
+        // between holder deletion and provider teardown. A live turn remains
+        // viewable: the reaper intentionally drains only boxes with no turn
+        // holder, and this same lock makes the distinction race-free.
+        if (kind === "viewer" && Number(row.turn_holders) === 0) {
+          const workspaceRows = await tx.execute<{
+            sandbox_viewer_force_drain_reason: SandboxViewerForceDrainReason | null;
+          }>(sql`
+            select sandbox_viewer_force_drain_reason
+            from workspaces
+            where id = ${workspaceId}
+          `);
+          const reason = workspaceRows[0]?.sandbox_viewer_force_drain_reason ?? null;
+          if (reason !== null) {
+            throw new SandboxViewerAdmissionBlockedError(workspaceId, sandboxGroupId, reason);
+          }
+        }
 
         // Provider-native capture may temporarily pause the box. Do not attach
         // another holder while that operation owns the exact lease: the caller
@@ -24687,6 +24931,17 @@ export async function listMeterableWarmLeases(db: Database): Promise<MeterableWa
   }));
 }
 
+/** Workspaces whose durable viewer-drain admission intent must be reevaluated
+ * even after every affected sandbox lease has become cold. */
+export async function listSandboxViewerForceDrainWorkspaceIds(db: Database): Promise<string[]> {
+  const rows = await rawRows<{ workspace_id: string }>(
+    db,
+    sql`select workspace_id
+        from opengeni_private.list_sandbox_viewer_force_drain_workspaces()`,
+  );
+  return rows.map((row) => row.workspace_id);
+}
+
 export async function countQueuedTurns(db: Database): Promise<number> {
   const rows = await rawRows<{ count: number | string }>(
     db,
@@ -24843,6 +25098,38 @@ export async function confirmDrainCold(
         // -> resume_state is nulled as before. The archive then rides the COLD lease's
         // resume_state until the next spawner reads + hydrates it; it is re-superseded
         // (GC'd) on the next drain and finally cleared on workspace teardown.
+        const observedRows = await tx.execute<LeaseRow>(sql`
+          select * from sandbox_leases
+          where workspace_id = ${input.workspaceId}
+            and sandbox_group_id = ${input.sandboxGroupId}
+        `);
+        const observed = observedRows[0];
+        if (
+          !observed ||
+          observed.liveness !== "draining" ||
+          observed.refcount !== 0 ||
+          Number(observed.lease_epoch) !== input.expectedEpoch
+        ) {
+          return { wentCold: false };
+        }
+        const blockerScope =
+          input.providerMissingBeforeCapture && observed.instance_id
+            ? {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                leaseId: observed.id,
+                sandboxGroupId: input.sandboxGroupId,
+                lostEpoch: input.expectedEpoch,
+                lostInstanceId: observed.instance_id,
+              }
+            : null;
+        // Provider loss settles process/admission/PTY rows before taking the
+        // lease lock, matching the canonical blocker -> lease lock order used
+        // by retained-process settlement. Revalidate the lease after locking
+        // the entire exact provider-owned blocker set.
+        if (blockerScope) {
+          await lockExactLostProviderWorkspaceBlockersTx(tx, blockerScope);
+        }
         const locked = await tx.execute<LeaseRow>(sql`
           select * from sandbox_leases
           where workspace_id = ${input.workspaceId}
@@ -24852,11 +25139,16 @@ export async function confirmDrainCold(
         const row = locked[0];
         if (
           !row ||
+          row.id !== observed.id ||
           row.liveness !== "draining" ||
           row.refcount !== 0 ||
-          Number(row.lease_epoch) !== input.expectedEpoch
+          Number(row.lease_epoch) !== input.expectedEpoch ||
+          (blockerScope && row.instance_id !== blockerScope.lostInstanceId)
         ) {
           return { wentCold: false };
+        }
+        if (blockerScope) {
+          await settleExactLostProviderWorkspaceBlockersTx(tx, blockerScope);
         }
         const current = recoveryStateFromLeaseRow(row);
         const hasArchive = current.archive.status !== "none";
@@ -31498,7 +31790,7 @@ export interface ForceDrainResult {
   /** Whether the workspace was over a limit (0 balance or over the warm cap). */
   overLimit: boolean;
   /** The reason, for observability. */
-  reason: "balance" | "warm_cap" | null;
+  reason: SandboxViewerForceDrainReason | null;
   /** The (workspaceId, sandboxGroupId) viewer-only boxes CASed warm->draining. */
   drained: { workspaceId: string; sandboxGroupId: string }[];
 }
@@ -31529,7 +31821,7 @@ export async function forceDrainOverLimitViewerOnlyBoxes(
   return await withWorkspaceUsageLock(db, input.workspaceId, async (scopedDb) => {
     // Determine over-limit under the lock (so the cap read + the drain are one
     // serialized critical section per workspace).
-    let reason: "balance" | "warm_cap" | null = null;
+    let reason: SandboxViewerForceDrainReason | null = null;
     if (input.enforceBalance && input.balanceMicros <= 0) {
       reason = "balance";
     } else if (input.maxWarmSecondsPerWorkspace > 0) {
@@ -31552,8 +31844,39 @@ export async function forceDrainOverLimitViewerOnlyBoxes(
     }
 
     if (!reason) {
+      // A top-up, a monthly-cap rollover, or a deployment policy change clears
+      // the durable admission gate only after this fresh serialized evaluation.
+      await scopedDb.execute(sql`
+        update workspaces set
+          sandbox_viewer_force_drain_reason = null,
+          sandbox_viewer_force_drain_requested_at = null,
+          updated_at = now()
+        where id = ${input.workspaceId}
+          and sandbox_viewer_force_drain_reason is not null
+      `);
       return { overLimit: false, reason: null, drained: [] };
     }
+
+    // Publish the workspace-wide admission gate before touching any holder.
+    // A concurrent viewer that already owns the lease lock may complete first;
+    // the locked drain below then deletes that holder. Every later viewer sees
+    // this committed intent before it can re-arm or spawn a provider box.
+    await scopedDb.execute(sql`
+      update workspaces set
+        sandbox_viewer_force_drain_reason = ${reason},
+        sandbox_viewer_force_drain_requested_at =
+          case
+            when sandbox_viewer_force_drain_reason is distinct from ${reason}
+              then now()
+            else coalesce(sandbox_viewer_force_drain_requested_at, now())
+          end,
+        updated_at = now()
+      where id = ${input.workspaceId}
+        and (
+          sandbox_viewer_force_drain_reason is distinct from ${reason}
+          or sandbox_viewer_force_drain_requested_at is null
+        )
+    `);
 
     // Canonical holder-mutation order is lease -> holder. Lock the exact
     // viewer-only candidates before deleting their holder rows so this path

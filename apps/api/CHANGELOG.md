@@ -1,5 +1,71 @@
 # @opengeni/api-router
 
+## 0.14.2
+
+### Patch Changes
+
+- Updated dependencies [11cdf20]
+  - @opengeni/runtime@0.14.14
+  - @opengeni/core@0.14.2
+
+## 0.14.1
+
+### Patch Changes
+
+- Updated dependencies [02fb98c]
+  - @opengeni/db@0.16.1
+  - @opengeni/core@0.14.1
+  - @opengeni/documents@0.2.58
+  - @opengeni/events@0.3.49
+
+## 0.14.0
+
+### Minor Changes
+
+- f413e6c: Add real Workspace Insights: durable `model_call_facts` after authoritative
+  `agent.model.usage`, a `workspace:admin` insights API over usage_events + facts +
+  live joins, SDK client, and a web console that drops mock rollups for honest
+  UTC credit/token/cache/warm/caps reporting.
+
+### Patch Changes
+
+- Updated dependencies [b5175a8]
+- Updated dependencies [f413e6c]
+  - @opengeni/db@0.16.0
+  - @opengeni/contracts@0.26.0
+  - @opengeni/core@0.14.0
+  - @opengeni/documents@0.2.57
+  - @opengeni/events@0.3.48
+  - @opengeni/config@0.7.21
+  - @opengeni/github@0.4.8
+  - @opengeni/runtime@0.14.13
+  - @opengeni/storage@0.2.45
+
+## 0.13.6
+
+### Patch Changes
+
+- 0199108: Harden the workspace Slack bot with one fail-closed scope policy, deterministic legacy connection selection, and durable replay-safe message deletion operation identities.
+- 42428a2: Add per-session Codex remote compaction v2 (`remote_v2` / `portable`), with UI landmarks, Codex-only model locking, and opaque token accounting aligned to Codex CLI.
+- 7b65614: Keep over-limit viewer-only sandboxes drained until a fresh serialized balance
+  or monthly-cap evaluation clears a durable workspace admission gate. Viewer
+  reattach can no longer re-arm a draining box or spawn a cold successor, while a
+  turn-held sandbox remains viewable.
+- Updated dependencies [0199108]
+- Updated dependencies [42428a2]
+- Updated dependencies [7b65614]
+- Updated dependencies [b2e975f]
+- Updated dependencies [9f3b931]
+  - @opengeni/contracts@0.25.0
+  - @opengeni/core@0.13.10
+  - @opengeni/db@0.15.6
+  - @opengeni/runtime@0.14.12
+  - @opengeni/config@0.7.20
+  - @opengeni/github@0.4.7
+  - @opengeni/storage@0.2.44
+  - @opengeni/documents@0.2.56
+  - @opengeni/events@0.3.47
+
 ## Unreleased
 
 ### Minor Changes
