@@ -85,6 +85,22 @@ describe("first-party MCP tool visibility policy", () => {
     expect(registeredToolNames(server)).toEqual(["set_session_title"]);
   });
 
+  test("the default worker grant exposes installed-connection tools", () => {
+    const server = buildOpenGeniMcpServer(
+      deps(),
+      grant(
+        [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS],
+        ["slack_bot_list_channels", "slack_bot_channel_history", "slack_bot_thread_replies"],
+      ),
+    );
+
+    expect(registeredToolNames(server)).toEqual([
+      "slack_bot_channel_history",
+      "slack_bot_list_channels",
+      "slack_bot_thread_replies",
+    ]);
+  });
+
   test("visibility never substitutes for authorization", () => {
     const denied = buildOpenGeniMcpServer(deps(), grant(["sessions:read"], ["session_create"]));
     expect(registeredToolNames(denied)).toEqual([]);

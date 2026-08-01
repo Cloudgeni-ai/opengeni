@@ -676,6 +676,10 @@ export const DEFAULT_FIRST_PARTY_MCP_PERMISSIONS = [
   "sessions:read",
   "sessions:create",
   "sessions:control",
+  // Read-only connection discovery lets the selected first-party connector
+  // tools resolve an already-installed workspace principal. Credentials stay
+  // inside the broker and remain subject to each tool's own authorization.
+  "connections:read",
   "variable-sets:use",
   "variable-sets:manage",
   "rigs:use",
