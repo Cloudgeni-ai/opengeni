@@ -28,6 +28,7 @@
     "dompurify": "3.4.12",
     "lucide-react": "^1.8.0",
     "motion": "^12.43.0",
+    "posthog-js": "^1.408.2",
     "radix-ui": "^1.4.3",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",

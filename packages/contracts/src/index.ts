@@ -9345,6 +9345,35 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     }),
     productAccessMode: ProductAccessMode,
     auth: ClientAuthConfig.default({ mode: "none" }),
+    analytics: z
+      .object({
+        consentRequired: z.boolean(),
+        providers: z.object({
+          reo: z
+            .object({
+              clientId: z
+                .string()
+                .max(128)
+                .regex(/^[A-Za-z0-9_-]+$/u),
+            })
+            .optional(),
+          posthog: z
+            .object({
+              projectKey: z.string().min(1).max(256),
+              host: z.string().url().max(2_048),
+            })
+            .optional(),
+          ga4: z
+            .object({
+              measurementId: z
+                .string()
+                .max(32)
+                .regex(/^G-[A-Z0-9]+$/u),
+            })
+            .optional(),
+        }),
+      })
+      .default({ consentRequired: true, providers: {} }),
     // Server-wide hint: does this deployment support Channel-A structured services
     // at all (P4.4). Per-session availability is negotiated on /stream-capabilities
     // (it depends on the session's pinned backend); this is the coarse on/off the

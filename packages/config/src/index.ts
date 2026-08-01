@@ -218,6 +218,20 @@ const SettingsSchema = z.object({
   observabilityMetricsEnabled: EnvBoolean.default(true),
   observabilityOtlpEndpoint: z.string().url().optional(),
   observabilityOtlpHeaders: z.string().default(""),
+  analyticsEnabled: EnvBoolean.default(false),
+  analyticsConsentRequired: EnvBoolean.default(true),
+  analyticsReoClientId: z
+    .string()
+    .max(128)
+    .regex(/^[A-Za-z0-9_-]+$/u)
+    .optional(),
+  analyticsPosthogProjectKey: z.string().min(1).max(256).optional(),
+  analyticsPosthogHost: z.string().url().max(2_048).optional(),
+  analyticsGa4MeasurementId: z
+    .string()
+    .max(32)
+    .regex(/^G-[A-Z0-9]+$/u)
+    .optional(),
   publicBaseUrl: z.string().url().optional(),
   // Browser origin when the web app and API use separate origins in local
   // development. Production normally leaves this unset and uses publicBaseUrl.
@@ -1574,6 +1588,12 @@ export function getSettings(): Settings {
       optional("OPENGENI_OTEL_EXPORTER_OTLP_ENDPOINT") ?? optional("OTEL_EXPORTER_OTLP_ENDPOINT"),
     observabilityOtlpHeaders:
       optional("OPENGENI_OTEL_EXPORTER_OTLP_HEADERS") ?? optional("OTEL_EXPORTER_OTLP_HEADERS"),
+    analyticsEnabled: optional("OPENGENI_ANALYTICS_ENABLED"),
+    analyticsConsentRequired: optional("OPENGENI_ANALYTICS_CONSENT_REQUIRED"),
+    analyticsReoClientId: optional("OPENGENI_ANALYTICS_REO_CLIENT_ID"),
+    analyticsPosthogProjectKey: optional("OPENGENI_ANALYTICS_POSTHOG_PROJECT_KEY"),
+    analyticsPosthogHost: optional("OPENGENI_ANALYTICS_POSTHOG_HOST"),
+    analyticsGa4MeasurementId: optional("OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID"),
     publicBaseUrl: optional("OPENGENI_PUBLIC_BASE_URL"),
     webBaseUrl: optional("OPENGENI_WEB_BASE_URL"),
     agentReleasesBaseUrl: optional("OPENGENI_AGENT_RELEASES_BASE_URL"),

@@ -1,5 +1,20 @@
 # @opengeni/api-router
 
+## 0.15.1
+
+### Patch Changes
+
+- 8243ffe: Allow browser SDK clients to call the public API from arbitrary origins with explicit bearer credentials while keeping cross-origin cookie sessions limited to operator-configured trusted origins.
+- Updated dependencies [8243ffe]
+  - @opengeni/config@0.8.1
+  - @opengeni/core@0.15.1
+  - @opengeni/db@0.17.1
+  - @opengeni/documents@0.2.61
+  - @opengeni/github@0.4.11
+  - @opengeni/runtime@0.15.1
+  - @opengeni/storage@0.2.48
+  - @opengeni/events@0.3.52
+
 ## 0.15.0
 
 ### Minor Changes

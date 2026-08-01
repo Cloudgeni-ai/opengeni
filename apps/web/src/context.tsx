@@ -9,6 +9,8 @@ import { TanStackRouterDevtools } from "@tanstack/react-router-devtools";
 import { CheckIcon, Loader2Icon, LockIcon, RefreshCwIcon, UserIcon } from "lucide-react";
 import {
   createContext,
+  lazy,
+  Suspense,
   type Dispatch,
   type SetStateAction,
   useCallback,
@@ -79,6 +81,12 @@ import type {
   UpdateWorkspaceSettingsRequest,
   Workspace,
 } from "@/types";
+
+const AnalyticsManager = lazy(() =>
+  import("@/components/analytics-consent").then((module) => ({
+    default: module.AnalyticsManager,
+  })),
+);
 
 export type AppContextValue = {
   client: OpenGeniCoreClient;
@@ -302,8 +310,9 @@ export function RootRouteComponent() {
   // Public routes render ahead of every auth/config gate: a user completing a
   // password reset is signed out by definition, so `/reset-password` must never
   // be intercepted by the sign-in panel or workspace-access loading.
-  const pathname = useRouterState({
-    select: (state) => state.location.pathname,
+  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const hasSearchParameters = useRouterState({
+    select: (state) => Object.keys(state.location.search).length > 0,
   });
   // Public surfaces render ahead of auth/config gates. `/reset-password` is
   // always public; the SessionChrome DEV harness is public and needs no session.
@@ -1169,6 +1178,16 @@ export function RootRouteComponent() {
   return (
     <main className="flex h-dvh min-h-screen flex-col overflow-x-hidden bg-bg text-fg">
       <Toaster richColors theme="dark" />
+      {clientConfig ? (
+        <Suspense fallback={null}>
+          <AnalyticsManager
+            config={clientConfig.analytics}
+            hasSearchParameters={hasSearchParameters}
+            isPublicAuthRoute={isPublicAuthRoute}
+            pathname={pathname}
+          />
+        </Suspense>
+      ) : null}
       {isPublicAuthRoute ? (
         // Self-contained public page (e.g. /reset-password): rendered before the
         // config/auth gates and outside AppContext, so it works for a signed-out

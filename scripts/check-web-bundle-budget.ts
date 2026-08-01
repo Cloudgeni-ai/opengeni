@@ -10,15 +10,13 @@ type ManifestEntry = {
 
 const kib = 1024;
 const budgets = {
-  // Social connector types join the shared application shell while provider
-  // implementations remain lazy. Keep a measured 1 KiB allowance for that surface.
-  initialRaw: 771 * kib,
+  // The consent manager and social connector types join the shared application
+  // shell while provider SDKs remain lazy. Keep a measured 2 KiB allowance.
+  initialRaw: 772 * kib,
   initialGzip: 210 * kib,
   initialFileGzip: 70 * kib,
   directSessionRaw: 1900 * kib,
-  // 550 KiB was exceeded by 19 bytes when the social-connector contract/SDK
-  // surface (tool catalog entries + OAuth types) joined the session graph.
-  directSessionGzip: 551 * kib,
+  directSessionGzip: 552 * kib,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,
   cssGzip: 30 * kib,
