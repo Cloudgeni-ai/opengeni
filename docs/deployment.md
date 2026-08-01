@@ -721,6 +721,11 @@ It derives every unpublished publishable workspace package directly from the
 exact checkout and npm registry, so a caller-maintained list cannot omit a
 package. It builds API, worker, web, relay, and stock headless-sandbox images under
 full-source-SHA candidate tags. Migrations explicitly reuse the API manifest.
+Protected main CI uses the separate `dogfood-sha-<source>` namespace for its
+SHA-configured images and records that tag in the dogfood receipt. The
+release-owned `sha-<source>` namespace therefore remains available for the
+accepted product-version manifests even when the two build configurations
+produce different digests from the same source tree.
 Each manifest is built at most once; retries reuse existing partial results.
 Before acceptance, the same workflow packages the Helm chart twice through the
 deterministic release packager, requires byte-for-byte equality, and freezes the
