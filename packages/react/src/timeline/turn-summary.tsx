@@ -275,6 +275,8 @@ export function TurnSummary({
   };
   const mountSettleRef = useRef(initialSettle);
   // Mount-time settle (new turn wrap).
+  // Mount-once settle arm + unmount timer cleanup — re-running on foldMemory
+  // identity churn would restart the beat mid-choreography.
   useEffect(() => {
     if (mountSettleRef.current) {
       armSettleCollapse();
@@ -283,11 +285,13 @@ export function TurnSummary({
       clearSettleTimers();
       settleArmedRef.current = false;
     };
+    // oxlint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   // Live shell already open: settleFold rises later without remounting.
   // Do not require !restingOpen — live shells mount with defaultOpen and
   // only later receive settleFold. Failed turns mount with both at once
   // (seen=true), so they never take this edge.
+  // Edge-trigger on settleFold only; foldMemory/foldKey are reopen guards.
   useEffect(() => {
     const was = settleFoldSeenRef.current;
     settleFoldSeenRef.current = Boolean(settleFold);
@@ -300,6 +304,7 @@ export function TurnSummary({
       }
       armSettleCollapse();
     }
+    // oxlint-disable-next-line react-hooks/exhaustive-deps
   }, [settleFold]);
   const onOpenChange = (next: boolean) => {
     // The reader took over — cancel the pending auto-collapse for good.
