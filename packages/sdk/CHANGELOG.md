@@ -1,5 +1,11 @@
 # @opengeni/sdk
 
+## 0.34.1
+
+### Patch Changes
+
+- 408543f: Keep signed object-storage uploads credential-free so browser integrations can use provider CORS safely without sending ambient API or session credentials.
+
 ## 0.34.0
 
 ### Minor Changes
