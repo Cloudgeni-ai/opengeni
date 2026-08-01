@@ -1,9 +1,11 @@
+import type { SVGProps } from "react";
+
 /**
  * The OpenGeni brand mark — the geometric glyph from the marketing site
  * (Cloudgeni-ai/agent-heartbeat-03, landing Nav + favicon), rendered with
  * currentColor so it inherits whatever brand tint its container sets.
  */
-export function BrandMark({ className }: { className?: string }) {
+export function BrandMark({ className, ...props }: SVGProps<SVGSVGElement>) {
   return (
     <svg
       viewBox="0 0 140 133"
@@ -13,6 +15,7 @@ export function BrandMark({ className }: { className?: string }) {
       strokeWidth={1.2}
       strokeLinejoin="round"
       aria-hidden="true"
+      {...props}
     >
       <g transform="translate(-17.5,-20.999893188476562) scale(1.75)">
         <g transform="translate(0,-952.36218)">

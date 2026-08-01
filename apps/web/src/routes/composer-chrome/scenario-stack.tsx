@@ -176,6 +176,7 @@ export function ScenarioStack({
                   model={model}
                   effort={effort}
                   latencyMode="standard"
+                  menuSide="top"
                   onModelChange={setModel}
                   onEffortChange={setEffort}
                   onLatencyModeChange={() => {}}
@@ -184,6 +185,7 @@ export function ScenarioStack({
                   servers={galleryToolServers}
                   firstPartyTools={galleryFirstPartyTools}
                   selection={toolSelection}
+                  menuSide="top"
                   onChange={setToolSelection}
                 />
               </div>

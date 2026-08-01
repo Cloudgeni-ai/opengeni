@@ -3,7 +3,6 @@ export {
   advancedSourceSummary,
   coerceReasoningEffortForModel,
   effortOptionsForModel,
-  ensureSelectedModelRow,
   findPickerRow,
   groupPickerRowsByBillingClass,
   labelLatencyMode,

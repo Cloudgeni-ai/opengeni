@@ -92,11 +92,12 @@ export type AppContextValue = {
   /**
    * The model chosen for a specific open session. Composer state (draft, mode)
    * is session-scoped, and so is the model: each session remembers its own pick
-   * in-memory. Until seeded, falls back to the frozen deployment default — never
-   * the mutable new-session {@link model} pick (that would cross-bleed).
+   * in-memory. Until seeded, uses `fallback` when provided (typically durable
+   * `session.model`), else the frozen deployment default — never the mutable
+   * new-session {@link model} pick (that would cross-bleed).
    * Seed with {@link ensureModelForSession} from `session.model` / draft.
    */
-  modelForSession: (sessionId: string) => string;
+  modelForSession: (sessionId: string, fallback?: string) => string;
   setModelForSession: (sessionId: string, value: string) => void;
   /** Write only when this session has no override yet (safe metadata/draft seed). */
   ensureModelForSession: (sessionId: string, value: string) => void;
@@ -934,7 +935,8 @@ export function RootRouteComponent() {
   // picks — those change while other sessions are open and would bleed across.
   const deploymentDefaultModel = clientConfig?.defaultModel ?? model;
   const modelForSession = useCallback(
-    (sessionId: string): string => modelBySession[sessionId] ?? deploymentDefaultModel,
+    (sessionId: string, fallback?: string): string =>
+      modelBySession[sessionId] ?? fallback ?? deploymentDefaultModel,
     [deploymentDefaultModel, modelBySession],
   );
   const setModelForSession = useCallback((sessionId: string, value: string): void => {

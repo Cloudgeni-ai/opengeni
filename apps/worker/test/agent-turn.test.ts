@@ -1068,6 +1068,15 @@ describe("production model-response usage callback authority", () => {
         model: "gpt-5.6-sol",
       }),
     ).toThrow(/service_tier=default/);
+    // Codex ChatGPT auth: response service_tier is not an end-to-end honor signal.
+    expect(() =>
+      assertModelResponseLatencyMode({
+        event: terminal("default"),
+        requested: "fast",
+        model: "codex/gpt-5.6-luna",
+        providerId: "codex-subscription",
+      }),
+    ).not.toThrow();
   });
 
   test("claims the pinned SDK terminal pair once and cannot bind stale usage after restart", async () => {

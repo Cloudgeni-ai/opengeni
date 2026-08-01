@@ -523,7 +523,7 @@ function SessionControlStrip({
   return (
     <div className="flex min-w-0 items-center gap-1.5">
       <ModelPicker
-        rows={modelCatalog.rowsForSelection(context.model)}
+        rows={modelCatalog.rows}
         model={context.model}
         effort={context.reasoningEffort}
         latencyMode={context.latencyMode}

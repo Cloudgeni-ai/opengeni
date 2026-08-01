@@ -2145,6 +2145,32 @@ function legacyModelCapabilities(
 /** OpenAI GPT-5.6 Fast mode is 2× Standard list rates (service_tier fast/priority). */
 const GPT56_FAST_BILLING_MULTIPLIER_BPS = 20_000;
 
+/**
+ * Product display label for catalog/picker UI.
+ * Same string for OpenAI and Codex copies of a slug (`gpt-5.6-luna` and
+ * `codex/gpt-5.6-luna` → `GPT-5.6 Luna`). Non-gpt ids pass through unchanged.
+ */
+export function productLabelForModelId(modelId: string): string {
+  const slug = modelId.startsWith(CODEX_MODEL_ID_PREFIX)
+    ? modelId.slice(CODEX_MODEL_ID_PREFIX.length)
+    : modelId;
+  const match = /^(gpt-\d+(?:\.\d+)?)(?:-(.+))?$/i.exec(slug);
+  if (!match) {
+    return slug;
+  }
+  const family = match[1]!.replace(/^gpt/i, "GPT");
+  const rest = match[2];
+  if (!rest) {
+    return family;
+  }
+  const suffix = rest
+    .split("-")
+    .filter((part) => part.length > 0)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+    .join(" ");
+  return suffix.length > 0 ? `${family} ${suffix}` : family;
+}
+
 function builtinLatencyModesForModel(
   modelId: string,
 ): Array<{
@@ -2414,7 +2440,7 @@ export function withCodexCatalogProvider(settings: Settings): Settings {
       return {
         id: `${CODEX_MODEL_ID_PREFIX}${slug}`,
         upstreamModelId: slug,
-        label: slug,
+        label: productLabelForModelId(slug),
         reasoningEffort: true,
         // The ChatGPT/Codex Responses backend accepts the native web_search
         // hosted tool (unlike hosted apply_patch/computer transports). Declaring
@@ -2584,7 +2610,7 @@ export function configuredModels(settings: Settings): ConfiguredModel[] {
       return finalizeConfiguredModel(settings, builtinProvider, {
         id,
         aliases: [],
-        label: id,
+        label: productLabelForModelId(id),
         providerId: builtinId,
         providerLabel: builtinLabel,
         api: "responses" as const,
@@ -2618,7 +2644,7 @@ export function configuredModels(settings: Settings): ConfiguredModel[] {
         finalizeConfiguredModel(settings, resolvedProvider, {
           id: model.id,
           aliases: [...(model.aliases ?? [])],
-          label: model.label ?? model.id,
+          label: model.label ?? productLabelForModelId(model.id),
           providerId: provider.id,
           providerLabel,
           api: provider.api,

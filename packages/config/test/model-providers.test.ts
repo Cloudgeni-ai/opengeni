@@ -12,12 +12,14 @@ import {
   getSettings,
   parseModelProvidersJson,
   policyProviderIdForModel,
+  productLabelForModelId,
   resolveModelProvider,
   resolveProviderApiKey,
   resolveTurnExecutionPolicyV1,
   responseSatisfiesLatencyMode,
   selectModelPricing,
   serviceTierForLatencyMode,
+  withCodexCatalogProvider,
 } from "../src";
 
 // A reusable Fireworks/GLM-5.2 registry JSON mirroring the doc's host example.
@@ -454,7 +456,33 @@ describe("configuredProviders", () => {
   });
 });
 
+describe("productLabelForModelId", () => {
+  test("formats GPT family slugs the same for OpenAI and Codex ids", () => {
+    expect(productLabelForModelId("gpt-5.6-luna")).toBe("GPT-5.6 Luna");
+    expect(productLabelForModelId("codex/gpt-5.6-luna")).toBe("GPT-5.6 Luna");
+    expect(productLabelForModelId("gpt-5.6-sol")).toBe("GPT-5.6 Sol");
+    expect(productLabelForModelId("codex/gpt-5.6-sol")).toBe("GPT-5.6 Sol");
+    expect(productLabelForModelId("gpt-5.6-terra")).toBe("GPT-5.6 Terra");
+    expect(productLabelForModelId("gpt-5.4-mini")).toBe("GPT-5.4 Mini");
+  });
+});
+
 describe("configuredModels", () => {
+  test("Codex catalog overlay uses the same product labels as OpenAI", () => {
+    const settings = withEnv(
+      {
+        OPENGENI_OPENAI_API_KEY: "sk-test",
+        OPENGENI_OPENAI_MODEL: "gpt-5.6-sol",
+        OPENGENI_OPENAI_ALLOWED_MODELS: "gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna",
+        OPENGENI_CODEX_SUBSCRIPTION_ENABLED: "true",
+      },
+      () => withCodexCatalogProvider(getSettings()),
+    );
+    const models = configuredModels(settings);
+    expect(models.find((model) => model.id === "gpt-5.6-luna")?.label).toBe("GPT-5.6 Luna");
+    expect(models.find((model) => model.id === "codex/gpt-5.6-luna")?.label).toBe("GPT-5.6 Luna");
+  });
+
   test("with no registry returns exactly the built-in allow-list, default model first", () => {
     const settings = withEnv(
       {
@@ -468,7 +496,7 @@ describe("configuredModels", () => {
     expect(models.map((model) => model.id)).toEqual(["gpt-5.6-sol", "gpt-5.4", "gpt-5.4-mini"]);
     expect(models[0]).toMatchObject({
       id: "gpt-5.6-sol",
-      label: "gpt-5.6-sol",
+      label: "GPT-5.6 Sol",
       providerId: "openai",
       providerLabel: "OpenAI",
       api: "responses",
@@ -476,6 +504,11 @@ describe("configuredModels", () => {
       reasoningEffort: true,
       hostedWebSearch: settings.webSearchEnabled,
     });
+    expect(models.map((model) => model.label)).toEqual([
+      "GPT-5.6 Sol",
+      "GPT-5.4",
+      "GPT-5.4 Mini",
+    ]);
   });
 
   test("unions built-in models first, then registry models in declaration order", () => {

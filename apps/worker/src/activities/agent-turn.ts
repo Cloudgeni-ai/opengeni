@@ -185,6 +185,7 @@ import {
   buildModelResolver,
   CODEX_CLIENT_VERSION,
   CODEX_FALLBACK_MODEL_SLUGS,
+  CODEX_PROVIDER_ID,
   CodexReloginRequired,
   classifyCodexEncryptedArtifactRejection,
   classifyCodexResponseTimeoutError,
@@ -1068,8 +1069,17 @@ export function assertModelResponseLatencyMode(input: {
   event: Parameters<typeof modelResponseServiceTierFromSdkEvent>[0];
   requested: LatencyMode;
   model: string;
+  /** When set to Codex ChatGPT auth, response `service_tier` is not an honor signal. */
+  providerId?: string;
 }): void {
   if (input.requested === "standard") {
+    return;
+  }
+  // ChatGPT-auth Codex (subscription): Fast maps to request `service_tier=priority`
+  // (see openai/codex ServiceTier::Fast.request_value). The backend may still return
+  // `response.service_tier=default`; OpenAI maintainers document that this does not
+  // mean Fast was ignored. Native CLI also does not fail closed on that field.
+  if (input.providerId === CODEX_PROVIDER_ID) {
     return;
   }
   const serviceTierEvent = modelResponseServiceTierFromSdkEvent(input.event);
@@ -6315,6 +6325,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               event: next.value,
               requested: turnExecutionPolicy.latencyMode,
               model: turn.model,
+              providerId: resolvedModel?.provider.id,
             });
             if (responseUsageResult.status === "processed") {
               currentToolBatchCallIds = new Set<string>();

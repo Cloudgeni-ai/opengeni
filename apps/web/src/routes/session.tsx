@@ -642,9 +642,11 @@ function SessionChatPane(props: {
   const durableToolsSessionId = useRef(props.session.id);
   const [durableToolsSaving, setDurableToolsSaving] = useState(false);
   const [durableToolsError, setDurableToolsError] = useState<string | null>(null);
-  // Session-scoped pick (seeded from durable session.model). On remote_v2,
-  // never keep a stale non-Codex override over the durable Codex model.
-  const requestedModel = context.modelForSession(props.session.id);
+  // Session-scoped pick (seeded from durable session.model). Prefer that
+  // durable id before ensure/draft hydrate — never flash the deployment default
+  // (wrong provider) on an open Codex session. On remote_v2, never keep a stale
+  // non-Codex override over the durable Codex model.
+  const requestedModel = context.modelForSession(props.session.id, props.session.model);
   const model = resolveSessionComposerModel({
     requested: requestedModel,
     durableSessionModel: props.session.model,
@@ -666,10 +668,20 @@ function SessionChatPane(props: {
     if (isIntelligenceEffort(metaEffort)) {
       ensureEffortForSession(props.session.id, metaEffort);
     }
+    // Seed latency from durable session metadata until the composer draft
+    // applies (draft wins). Avoids flashing the global leftover/standard mode.
+    if (!pickerTouchedRef.current) {
+      const metaLatency = props.session.metadata.latencyMode;
+      if (metaLatency === "fast" || metaLatency === "priority" || metaLatency === "standard") {
+        context.setLatencyMode(metaLatency);
+      }
+    }
   }, [
+    context.setLatencyMode,
     ensureEffortForSession,
     ensureModelForSession,
     props.session.id,
+    props.session.metadata.latencyMode,
     props.session.metadata.reasoningEffort,
     props.session.model,
   ]);
@@ -1057,13 +1069,15 @@ function SessionChatPane(props: {
             controls={
               <div className="flex min-w-0 items-center gap-1.5">
                 <ModelPicker
-                  rows={modelCatalog.rowsForSelection(model)}
+                  rows={modelCatalog.rows}
                   model={model}
                   effort={reasoningEffort}
                   latencyMode={latencyMode}
                   disabled={composer.sending}
-                  loading={modelCatalog.loading}
+                  loading={modelCatalog.loading || composer.draftLoading}
                   error={modelCatalog.error}
+                  sessionKey={props.session.id}
+                  menuSide="top"
                   codexOnly={props.session.codexCompactionMode === "remote_v2"}
                   onModelChange={(value) => {
                     pickerTouchedRef.current = true;
@@ -1079,6 +1093,7 @@ function SessionChatPane(props: {
                   }}
                 />
                 <SessionToolPicker
+                  menuSide="top"
                   servers={selectableSessionMcpServers}
                   firstPartyTools={firstPartySessionToolOptions}
                   selection={durableToolSelection}

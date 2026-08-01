@@ -2,21 +2,15 @@ import type { WorkspaceModelCatalogModel } from "@opengeni/sdk";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { useAppContext } from "@/context";
-import { displayModel } from "@/lib/format";
-import {
-  ensureSelectedModelRow,
-  projectPickerRows,
-  sortPickerRows,
-  type PickerModelRow,
-} from "@/lib/model-policy";
+import { projectPickerRows, sortPickerRows, type PickerModelRow } from "@/lib/model-policy";
 
 export type WorkspaceModelCatalogState = {
   models: WorkspaceModelCatalogModel[];
+  /** Real catalog projection only — never invents rows for a missing selection. */
   rows: PickerModelRow[];
   loading: boolean;
   error: string | null;
   refresh: () => Promise<void>;
-  rowsForSelection: (selectedModelId: string) => PickerModelRow[];
 };
 
 export function useWorkspaceModelCatalog(workspaceId: string | null): WorkspaceModelCatalogState {
@@ -80,11 +74,6 @@ export function useWorkspaceModelCatalog(workspaceId: string | null): WorkspaceM
   }, [client, workspaceId]);
 
   const rows = useMemo(() => sortPickerRows(projectPickerRows(models)), [models]);
-  const rowsForSelection = useCallback(
-    (selectedModelId: string) =>
-      sortPickerRows(ensureSelectedModelRow(rows, selectedModelId, displayModel(selectedModelId))),
-    [rows],
-  );
 
   return {
     models,
@@ -92,6 +81,5 @@ export function useWorkspaceModelCatalog(workspaceId: string | null): WorkspaceM
     loading,
     error,
     refresh,
-    rowsForSelection,
   };
 }
