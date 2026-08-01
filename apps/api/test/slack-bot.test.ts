@@ -78,7 +78,10 @@ afterAll(async () => {
   await shared?.release();
 });
 
-async function freshWorkspace(): Promise<{ accountId: string; workspaceId: string }> {
+async function freshWorkspace(): Promise<{
+  accountId: string;
+  workspaceId: string;
+}> {
   const [account] = await shared!.admin<{ id: string }[]>`
     insert into managed_accounts (name) values ('slack bot acct') returning id`;
   const [workspace] = await shared!.admin<{ id: string }[]>`
@@ -172,7 +175,9 @@ function fakeSlack(
     });
     const headers =
       method === "auth.test"
-        ? { "x-oauth-scopes": (options.scopes ?? OPENGENI_SLACK_BOT_REQUIRED_SCOPES).join(",") }
+        ? {
+            "x-oauth-scopes": (options.scopes ?? OPENGENI_SLACK_BOT_REQUIRED_SCOPES).join(","),
+          }
         : undefined;
     if (url.hostname === "files.slack.com") {
       if (url.pathname.includes("huddle-transcript") && options.transcriptRequiresUserSession) {
@@ -217,7 +222,10 @@ function fakeSlack(
           id: options.botUserId ?? "U_OPEN_GENI",
           is_bot: true,
           deleted: false,
-          profile: { display_name: options.displayName ?? "OpenGeni", real_name: "OpenGeni" },
+          profile: {
+            display_name: options.displayName ?? "OpenGeni",
+            real_name: "OpenGeni",
+          },
         },
       });
     }
@@ -225,8 +233,18 @@ function fakeSlack(
       return Response.json({
         ok: true,
         channels: [
-          { id: "C_MEMBER", name: "general", is_private: false, is_member: true },
-          { id: "G_PRIVATE", name: "private", is_private: true, is_member: false },
+          {
+            id: "C_MEMBER",
+            name: "general",
+            is_private: false,
+            is_member: true,
+          },
+          {
+            id: "G_PRIVATE",
+            name: "private",
+            is_private: true,
+            is_member: false,
+          },
         ],
         response_metadata: { next_cursor: "" },
       });
@@ -280,7 +298,12 @@ function fakeSlack(
       return Response.json({
         ok: true,
         messages: [
-          { ts: "1.000", user: "U_MEMBER", text: "bounded history", thread_ts: "1.000" },
+          {
+            ts: "1.000",
+            user: "U_MEMBER",
+            text: "bounded history",
+            thread_ts: "1.000",
+          },
           {
             ts: "1.001",
             user: "U_REPLY",
@@ -310,7 +333,10 @@ function fakeSlack(
       const count = Number(params.get("count"));
       const page = Number(params.get("page"));
       if (options.fileListResponse) {
-        return Response.json({ ok: true, ...options.fileListResponse({ count, page }) });
+        return Response.json({
+          ok: true,
+          ...options.fileListResponse({ count, page }),
+        });
       }
       return Response.json({
         ok: true,
@@ -393,7 +419,11 @@ function fakeSlack(
       if (options.loseFirstPostResponse && postAttempts === 1) {
         throw new Error("fixture Slack response lost after commit");
       }
-      return Response.json({ ok: true, channel: committed.channel, ts: committed.timestamp });
+      return Response.json({
+        ok: true,
+        channel: committed.channel,
+        ts: committed.timestamp,
+      });
     }
     if (method === "chat.delete") {
       const channel = params.get("channel");
@@ -422,7 +452,11 @@ function fakeSlack(
       }
       return committedDeletes.has(`${channel}:${timestamp}`)
         ? Response.json({ ok: false, error: "message_not_found" })
-        : Response.json({ ok: true, channel, permalink: "https://fixture.slack.com/message" });
+        : Response.json({
+            ok: true,
+            channel,
+            permalink: "https://fixture.slack.com/message",
+          });
     }
     return Response.json({ ok: false, error: "unexpected_method" });
   };
@@ -544,7 +578,10 @@ describe("Slack files.list pagination adapter", () => {
     const replacement = cursor.endsWith("A") ? "B" : "A";
     expect(() =>
       resolveSlackFilesListPage(
-        { channelId: "C_MEMBER", cursor: `${cursor.slice(0, -1)}${replacement}` },
+        {
+          channelId: "C_MEMBER",
+          cursor: `${cursor.slice(0, -1)}${replacement}`,
+        },
         context,
       ),
     ).toThrow("invalid_files_cursor");
@@ -610,10 +647,12 @@ describe("OpenGeni Slack bot credential verification", () => {
 
   test("accepts only required plus canonical safe optional scopes", async () => {
     expect(OPENGENI_SLACK_BOT_REQUIRED_SCOPES).toEqual([
+      "app_mentions:read",
       "canvases:read",
       "channels:history",
       "channels:read",
       "chat:write",
+      "commands",
       "files:read",
       "groups:history",
       "groups:read",
@@ -700,7 +739,11 @@ async function startBotInstall(
   slackFetch: typeof globalThis.fetch,
   connectionId?: string,
   subjectId = "subject-a",
-): Promise<{ response: Response; state: string | null; authorizationUrl: string | null }> {
+): Promise<{
+  response: Response;
+  state: string | null;
+  authorizationUrl: string | null;
+}> {
   const response = await app(slackFetch).request(
     `/v1/workspaces/${workspace.workspaceId}/connections/slack-bot/install`,
     {
@@ -741,7 +784,10 @@ async function connectBot(
 ) {
   const start = await startBotInstall(workspace, slackFetch, connectionId);
   if (start.response.status !== 200 || !start.state) {
-    return { response: start.response, body: { connection: { id: "", grantedScopes: [] } } };
+    return {
+      response: start.response,
+      body: { connection: { id: "", grantedScopes: [] } },
+    };
   }
   const response = await completeBotInstall(slackFetch, start.state);
   const connections = await listConnectionsMetadata(client.db, workspace.workspaceId, "subject-a");
@@ -1055,7 +1101,10 @@ describe("OpenGeni Slack bot connection", () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const cases = [
-      { slack: fakeSlack({ displayName: "Not OpenGeni" }), reason: "identity_mismatch" },
+      {
+        slack: fakeSlack({ displayName: "Not OpenGeni" }),
+        reason: "identity_mismatch",
+      },
       {
         slack: fakeSlack({
           scopes: OPENGENI_SLACK_BOT_REQUIRED_SCOPES.filter((scope) => scope !== "im:write"),
@@ -1243,7 +1292,11 @@ describe("OpenGeni Slack bot connection", () => {
       grantedScopes: [...original.grantedScopes],
       verifiedInstallAt: new Date(original.verifiedInstallAt!),
       verifiedInstallVersion: 1,
-      metadata: { ...original.metadata, botId: "B_OTHER", botUserId: "U_OTHER" },
+      metadata: {
+        ...original.metadata,
+        botId: "B_OTHER",
+        botUserId: "U_OTHER",
+      },
       createdBySubjectId: "subject-a",
     });
     await expect(
@@ -1367,7 +1420,10 @@ describe("OpenGeni Slack bot connection", () => {
     const exchangeFailure = (async (input: string | URL | Request, init?: RequestInit) => {
       const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
       if (url.pathname.endsWith("/oauth.v2.access")) {
-        return Response.json({ ok: false, error: "fixture_provider_exchange_payload" });
+        return Response.json({
+          ok: false,
+          error: "fixture_provider_exchange_payload",
+        });
       }
       return await exchangeSlack.fetch(input, init);
     }) as typeof globalThis.fetch;
@@ -1546,7 +1602,10 @@ describe("OpenGeni Slack bot connection", () => {
         connected.body.connection.id,
         "subject-a",
       ),
-    ).toMatchObject({ version: before!.version + 1, verifiedInstallVersion: before!.version + 1 });
+    ).toMatchObject({
+      version: before!.version + 1,
+      verifiedInstallVersion: before!.version + 1,
+    });
   });
 
   test("rolls back disconnect when its success audit fails and remains usable", async () => {
@@ -1863,7 +1922,9 @@ describe("OpenGeni Slack bot connection", () => {
     });
 
     const first = await bot.listFiles({ channelId: "C_MEMBER", limit: 1 });
-    expect(first).toMatchObject({ files: [{ id: "F_PAGE_1", title: "Page 1" }] });
+    expect(first).toMatchObject({
+      files: [{ id: "F_PAGE_1", title: "Page 1" }],
+    });
     expect(first.nextCursor).toMatch(/^files-v1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
     const second = await bot.listFiles({
       channelId: "C_MEMBER",
@@ -1877,13 +1938,23 @@ describe("OpenGeni Slack bot connection", () => {
 
     const fileCalls = slack.calls.filter((call) => call.method === "files.list");
     expect(fileCalls).toMatchObject([
-      { channel: "C_MEMBER", count: "200", page: "1", cursor: null, limit: null },
+      {
+        channel: "C_MEMBER",
+        count: "200",
+        page: "1",
+        cursor: null,
+        limit: null,
+      },
       { channel: "C_MEMBER", count: "1", page: "1", cursor: null, limit: null },
       { channel: "C_MEMBER", count: "1", page: "2", cursor: null, limit: null },
     ]);
 
     await expect(
-      bot.listFiles({ channelId: "C_MEMBER", cursor: first.nextCursor!, limit: 2 }),
+      bot.listFiles({
+        channelId: "C_MEMBER",
+        cursor: first.nextCursor!,
+        limit: 2,
+      }),
     ).rejects.toThrow("invalid_files_cursor");
     await expect(
       bot.listFiles({ channelId: "C_OTHER", cursor: first.nextCursor! }),
@@ -1951,7 +2022,10 @@ describe("OpenGeni Slack bot connection", () => {
       { db: client.db, settings, slackFetch: firstPageSlack.fetch },
       resolved,
     );
-    const first = await firstPageBot.listFiles({ channelId: "C_MEMBER", limit: 1 });
+    const first = await firstPageBot.listFiles({
+      channelId: "C_MEMBER",
+      limit: 1,
+    });
     expect(first.nextCursor).toBeString();
 
     const repeatedPageSlack = fakeSlack({
@@ -1965,7 +2039,10 @@ describe("OpenGeni Slack bot connection", () => {
       resolved,
     );
     await expect(
-      repeatedPageBot.listFiles({ channelId: "C_MEMBER", cursor: first.nextCursor! }),
+      repeatedPageBot.listFiles({
+        channelId: "C_MEMBER",
+        cursor: first.nextCursor!,
+      }),
     ).rejects.toThrow("invalid_files_paging");
     expect(repeatedPageSlack.calls.filter((call) => call.method === "files.list")).toMatchObject([
       { count: "1", page: "2", cursor: null, limit: null },
@@ -2051,8 +2128,16 @@ describe("OpenGeni Slack bot connection", () => {
     const channels = await bot.listChannels();
     expect(channels.channels).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ id: "C_MEMBER", isMember: true, isPrivate: false }),
-        expect.objectContaining({ id: "G_PRIVATE", isMember: false, isPrivate: true }),
+        expect.objectContaining({
+          id: "C_MEMBER",
+          isMember: true,
+          isPrivate: false,
+        }),
+        expect.objectContaining({
+          id: "G_PRIVATE",
+          isMember: false,
+          isPrivate: true,
+        }),
       ]),
     );
     await expect(bot.channelHistory({ channelId: "G_PRIVATE" })).rejects.toThrow("not_in_channel");
@@ -2089,8 +2174,16 @@ describe("OpenGeni Slack bot connection", () => {
     expect(thread).toMatchObject({
       threadTimestamp: "1.000",
       messages: [
-        { timestamp: "1.000", threadTimestamp: "1.000", text: "bounded history" },
-        { timestamp: "1.001", threadTimestamp: "1.000", text: "bounded thread reply" },
+        {
+          timestamp: "1.000",
+          threadTimestamp: "1.000",
+          text: "bounded history",
+        },
+        {
+          timestamp: "1.001",
+          threadTimestamp: "1.000",
+          text: "bounded thread reply",
+        },
       ],
       nextCursor: null,
     });
@@ -2116,7 +2209,10 @@ describe("OpenGeni Slack bot connection", () => {
     await expect(bot.fileInfo({ channelId: "C_MEMBER", fileId: "F_OTHER" })).rejects.toThrow(
       "file_not_found",
     );
-    const file = await bot.fileInfo({ channelId: "C_MEMBER", fileId: "F_CANVAS" });
+    const file = await bot.fileInfo({
+      channelId: "C_MEMBER",
+      fileId: "F_CANVAS",
+    });
     expect(file).toMatchObject({
       channel: { id: "C_MEMBER", isMember: true },
       file: {
@@ -2130,7 +2226,10 @@ describe("OpenGeni Slack bot connection", () => {
     expect(
       slack.calls.find((call) => call.method === "files.info" && call.fileId === "F_CANVAS"),
     ).toBeDefined();
-    const content = await bot.fileContent({ channelId: "C_MEMBER", fileId: "F_CANVAS" });
+    const content = await bot.fileContent({
+      channelId: "C_MEMBER",
+      fileId: "F_CANVAS",
+    });
     expect(content).toMatchObject({
       file: { id: "F_CANVAS", title: "Meeting notes", mode: "canvas" },
       contentType: "text/html",
@@ -2160,7 +2259,9 @@ describe("OpenGeni Slack bot connection", () => {
       nextOffset: null,
       truncated: false,
     });
-    const participantOnlySlack = fakeSlack({ transcriptRequiresUserSession: true });
+    const participantOnlySlack = fakeSlack({
+      transcriptRequiresUserSession: true,
+    });
     const participantOnlyBot = createOpenGeniSlackBotClient(
       { db: client.db, settings, slackFetch: participantOnlySlack.fetch },
       resolved,
@@ -2280,7 +2381,11 @@ describe("OpenGeni Slack bot connection", () => {
     expect(second.response.status).toBe(302);
     expect(second.body.connection.id).toBe(connected.body.connection.id);
     expect(
-      await resolveSlackBotConnectionForTool({ db: client.db, grant, sessionId: null }),
+      await resolveSlackBotConnectionForTool({
+        db: client.db,
+        grant,
+        sessionId: null,
+      }),
     ).toMatchObject({ connection: { id: connected.body.connection.id } });
   });
 
@@ -2311,7 +2416,11 @@ describe("OpenGeni Slack bot connection", () => {
       resolved,
     );
     const operationId = crypto.randomUUID();
-    const post = { operationId, channelId: "C_MEMBER", text: "idempotent fixture text" };
+    const post = {
+      operationId,
+      channelId: "C_MEMBER",
+      text: "idempotent fixture text",
+    };
 
     await expect(bot.postMessage(post)).rejects.toThrow("transport_error");
     expect(slack.committedPosts.size).toBe(1);
@@ -2338,7 +2447,11 @@ describe("OpenGeni Slack bot connection", () => {
     expect(slack.calls.filter((call) => call.method === "chat.postMessage")).toHaveLength(2);
     expect(
       await getSlackBotPostOperation(client.db, workspace.workspaceId, connection!.id, operationId),
-    ).toMatchObject({ status: "completed", attemptCount: 2, slackMessageTimestamp: "2.000" });
+    ).toMatchObject({
+      status: "completed",
+      attemptCount: 2,
+      slackMessageTimestamp: "2.000",
+    });
 
     await expect(bot.postMessage({ ...post, text: "different message" })).rejects.toThrow(
       "already bound",
@@ -2473,7 +2586,11 @@ describe("OpenGeni Slack bot connection", () => {
         resolved,
       );
       const operationId = crypto.randomUUID();
-      const request = { operationId, channelId: "C_MEMBER", timestamp: "3.500" };
+      const request = {
+        operationId,
+        channelId: "C_MEMBER",
+        timestamp: "3.500",
+      };
 
       await expect(bot.deleteMessage(request)).rejects.toThrow("transport_error");
       expect(
@@ -2483,7 +2600,11 @@ describe("OpenGeni Slack bot connection", () => {
           connected.body.connection.id,
           operationId,
         ),
-      ).toMatchObject({ status: "outcome_unknown", claimHolderId: null, attemptCount: 1 });
+      ).toMatchObject({
+        status: "outcome_unknown",
+        claimHolderId: null,
+        attemptCount: 1,
+      });
       expect(slack.committedDeletes).toContain("C_MEMBER:3.500");
 
       if (failure === "headers") {
@@ -2515,7 +2636,11 @@ describe("OpenGeni Slack bot connection", () => {
           connected.body.connection.id,
           operationId,
         ),
-      ).toMatchObject({ status: "outcome_unknown", claimHolderId: null, attemptCount: 2 });
+      ).toMatchObject({
+        status: "outcome_unknown",
+        claimHolderId: null,
+        attemptCount: 2,
+      });
 
       if (failure === "headers") {
         const connection = await getConnectionMetadata(
@@ -2534,7 +2659,9 @@ describe("OpenGeni Slack bot connection", () => {
         ).toBe(true);
       }
 
-      await expect(bot.deleteMessage(request)).resolves.toMatchObject({ deleted: true });
+      await expect(bot.deleteMessage(request)).resolves.toMatchObject({
+        deleted: true,
+      });
       expect(slack.calls.filter((call) => call.method === "chat.getPermalink")).toHaveLength(1);
       expect(slack.calls.filter((call) => call.method === "chat.delete")).toHaveLength(1);
       expect(
@@ -2575,7 +2702,9 @@ describe("OpenGeni Slack bot connection", () => {
     };
     await expect(bot.deleteMessage(request)).rejects.toThrow("transport_error");
     expect(slack.committedDeletes).not.toContain("C_MEMBER:5.000");
-    await expect(bot.deleteMessage(request)).resolves.toMatchObject({ deleted: true });
+    await expect(bot.deleteMessage(request)).resolves.toMatchObject({
+      deleted: true,
+    });
     expect(slack.calls.filter((call) => call.method === "chat.getPermalink")).toHaveLength(1);
     expect(slack.calls.filter((call) => call.method === "chat.delete")).toHaveLength(2);
     expect(slack.committedDeletes).toContain("C_MEMBER:5.000");
@@ -2603,7 +2732,11 @@ describe("OpenGeni Slack bot connection", () => {
     );
     const operationId = crypto.randomUUID();
     await expect(
-      bot.deleteMessage({ operationId, channelId: "C_MEMBER", timestamp: "6.000" }),
+      bot.deleteMessage({
+        operationId,
+        channelId: "C_MEMBER",
+        timestamp: "6.000",
+      }),
     ).rejects.toThrow("cant_delete_message");
     expect(
       await getSlackBotDeleteOperation(
@@ -2612,7 +2745,10 @@ describe("OpenGeni Slack bot connection", () => {
         connected.body.connection.id,
         operationId,
       ),
-    ).toMatchObject({ status: "pending", lastFailureCode: "cant_delete_message" });
+    ).toMatchObject({
+      status: "pending",
+      lastFailureCode: "cant_delete_message",
+    });
   });
 
   test("fences in-flight delete claims by tenant, principal, connection, tool, and request", async () => {
@@ -2736,7 +2872,10 @@ describe("OpenGeni Slack bot connection", () => {
       claimHolderId: firstHolder,
       claimLeaseMs: 30_000,
     });
-    expect(first).toMatchObject({ kind: "claimed", operation: { attemptCount: 1 } });
+    expect(first).toMatchObject({
+      kind: "claimed",
+      operation: { attemptCount: 1 },
+    });
     const otherWorkspace = await freshWorkspace();
     expect(
       await getSlackBotPostOperation(
@@ -2848,7 +2987,11 @@ describe("OpenGeni Slack bot connection", () => {
         before insert on audit_events
         for each row execute function ${functionName}();
     `);
-    const post = { operationId, channelId: "C_MEMBER", text: "audit rollback fixture" };
+    const post = {
+      operationId,
+      channelId: "C_MEMBER",
+      text: "audit rollback fixture",
+    };
     try {
       await expect(bot.postMessage(post)).rejects.toThrow();
     } finally {
@@ -2863,7 +3006,10 @@ describe("OpenGeni Slack bot connection", () => {
     ).toMatchObject({ status: "provider_started", claimHolderId: null });
 
     const retried = await bot.postMessage(post);
-    expect(retried.receipt).toMatchObject({ operationId, clientMessageId: operationId });
+    expect(retried.receipt).toMatchObject({
+      operationId,
+      clientMessageId: operationId,
+    });
     expect(slack.committedPosts.size).toBe(1);
     expect(slack.calls.filter((call) => call.method === "chat.postMessage")).toHaveLength(2);
     const [successCount] = await shared!.admin<Array<{ count: number }>>`

@@ -86,6 +86,10 @@ export const FORCE_RLS_TABLES = [
   "sessions",
   "slack_bot_delete_operations",
   "slack_bot_post_operations",
+  "slack_bot_user_links",
+  "slack_interaction_inbox",
+  "slack_interaction_progress_deliveries",
+  "slack_interactions",
   "social_connections",
   "social_posts",
   "usage_events",
@@ -201,6 +205,10 @@ export const RUNTIME_FULL_DML_TABLES = [
   "sessions",
   "slack_bot_delete_operations",
   "slack_bot_post_operations",
+  "slack_bot_user_links",
+  "slack_interaction_inbox",
+  "slack_interaction_progress_deliveries",
+  "slack_interactions",
   "social_connections",
   "social_posts",
   "stripe_webhook_events",
@@ -563,7 +571,11 @@ export async function inspectRuntimeDatabasePosture(
             and p.prokind in ('f', 'p')
           order by p.proname, pg_get_function_identity_arguments(p.oid)
         `),
-      ).map((row) => ({ name: row.name, owner: row.owner, execute: row.can_execute }));
+      ).map((row) => ({
+        name: row.name,
+        owner: row.owner,
+        execute: row.can_execute,
+      }));
 
       return {
         identity: mappedIdentity,

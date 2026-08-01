@@ -69,16 +69,28 @@ features:
   bot_user:
     display_name: OpenGeni
     always_online: false
+  slash_commands:
+    - command: /opengeni
+      description: Start an OpenGeni task in this channel
+      should_escape: false
+      url: https://app.opengeni.ai/v1/integrations/slack/commands
+  shortcuts:
+    - callback_id: opengeni_message
+      description: Start an OpenGeni task from this Slack message
+      name: Open in OpenGeni
+      type: message
 oauth_config:
   redirect_urls:
     - https://app.opengeni.ai/v1/integrations/oauth/callback
     - https://app.opengeni.ai/v1/integrations/slack/callback
   scopes:
     bot:
+      - app_mentions:read
       - canvases:read
       - channels:history
       - channels:read
       - chat:write
+      - commands
       - files:read
       - groups:history
       - groups:read
@@ -89,12 +101,23 @@ oauth_config:
       - mpim:read
       - users:read
 settings:
+  event_subscriptions:
+    bot_events:
+      - app_mention
+      - message.channels
+      - message.groups
+      - message.im
+      - message.mpim
+    request_url: https://app.opengeni.ai/v1/integrations/slack/events
+  interactivity:
+    is_enabled: true
+    request_url: https://app.opengeni.ai/v1/integrations/slack/interactions
   org_deploy_enabled: false
   socket_mode_enabled: false
   token_rotation_enabled: false
 ```
 
-Self-hosted deployments replace `https://app.opengeni.ai` with their stable HTTPS `OPENGENI_PUBLIC_BASE_URL`. Keep bot `user_scope` empty. The manifest requests only the scopes required by the shipped workspace-bot tools; it does not pre-authorize future mention, slash-command, canvas/file mutation, or reaction-mutation behavior. Event Subscriptions remain disabled because no event handlers are shipped. Do not enable Socket Mode, token rotation, or add `app_mentions:read`, `commands`, `canvases:write`, `files:write`, `reactions:write`, `channels:join`, `chat:write.public`, `chat:write.customize`, `users:read.email`, channel-management, administrative, or enterprise-search scopes. The canonical allowlist accepts the required manifest scopes plus the explicitly safe read-only identity extra `team:read`; every other extra or unknown future scope fails closed across installation verification, core routing, and browser Installed-state projection.
+Self-hosted deployments replace `https://app.opengeni.ai` with their stable HTTPS `OPENGENI_PUBLIC_BASE_URL`. Keep bot `user_scope` empty. The manifest requests only the scopes and event types required by the shipped workspace-bot tools and Slack task interaction surface. Do not enable Socket Mode, token rotation, or add canvas/file/reaction mutation, `channels:join`, `chat:write.public`, `chat:write.customize`, `users:read.email`, channel-management, administrative, or enterprise-search scopes. The canonical allowlist accepts the required manifest scopes plus the explicitly safe read-only identity extra `team:read`; every other extra or unknown future scope fails closed across installation verification, core routing, and browser Installed-state projection.
 
 ## Install and connect the workspace bot
 
@@ -107,6 +130,24 @@ Self-hosted deployments replace `https://app.opengeni.ai` with their stable HTTP
 Slack's bot installation endpoint is protected by the bound one-time state and exact redirect URI. The implementation does not claim or add PKCE to this provider-specific bot flow unless Slack documents support for it.
 
 The bot connection is a workspace-shared `app_install` row (`subjectId = null`) in exactly the OpenGeni workspace that initiated installation. It is not organization-wide and is never implicitly shared to another OpenGeni workspace. API responses, browser URLs, events, tool results, and audit metadata contain only non-secret connection and principal facts.
+
+## Start and continue OpenGeni work from Slack
+
+Authenticated Slack users can start work through three configured entry points:
+
+- mention `@OpenGeni` in a channel or existing thread;
+- invoke `/opengeni <task>` in a channel;
+- direct-message the OpenGeni bot, or use the **Open in OpenGeni** message shortcut when explicitly sending a human-to-human DM message.
+
+Every top-level bot DM durably reserves a new private OpenGeni session ID for the linked OpenGeni subject before session creation begins. Authorization and listing use that reservation until the same ID is bound as the session root, so a crash or concurrent read before binding cannot expose the session to another workspace subject. A reply in its Slack thread continues that exact session; a separate top-level DM creates a separate session. Installing the bot for a workspace never converts private DM sessions into workspace-visible sessions.
+
+A channel mention, command, or message shortcut creates one workspace-visible session whose authorization follows both the Slack channel and live OpenGeni workspace grants. Mentioning OpenGeni inside an unmapped existing thread adopts that thread as the session surface. Once mapped, linked and authorized OpenGeni workspace participants can continue the same session by replying in that thread. An ordinary unmapped thread reply is ignored rather than creating work implicitly.
+
+The bot acknowledges accepted work and keeps at most three progress posts globally per interaction, plus durable human-input questions, stop/cancellation, failures, blockers, and the final result in the originating thread. Each progress event durably claims one of those three slots and a stable Slack post-operation identity before provider delivery, so pages, retries, restarts, replicas, and duplicate claims cannot exceed the cap. Messages include an **Open in OpenGeni** session link. Reply `stop` in the mapped thread to pause the workstream; start a new top-level DM or invoke OpenGeni again to create a new session.
+
+Slack identities must be explicitly linked to an OpenGeni subject in the same account and workspace. An unmapped identity receives an account-linking URL and no session is created. Invalid signatures or timestamps, replayed/duplicate provider identities, inactive or ambiguous installations, missing bot channel access, revoked OpenGeni access, malformed payloads, and cross-tenant ambiguity fail closed. Slack retries, reconnects, worker restarts, and session resumes converge through the durable inbox, private session reservation, route binding, session idempotency key, delivery cursor, per-event progress ledger, and Slack post-operation ledger.
+
+Slack message and thread text is task-local input only. The interaction path does not automatically write it to Documents, Knowledge, Memory, preferences, Workspace Charter, instructions, or policy. Delivery excludes private reasoning, secrets, credentials, raw logs, raw provider responses, and unbounded output, and bot/self/subtype events are suppressed to prevent notification loops.
 
 ## Channel access and tools
 

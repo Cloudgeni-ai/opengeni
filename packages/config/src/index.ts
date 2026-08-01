@@ -269,6 +269,7 @@ const SettingsSchema = z.object({
   integrationsOauthClientsJson: z.string().default("{}"),
   slackClientId: z.string().optional(),
   slackClientSecret: z.string().optional(),
+  slackSigningSecret: z.string().optional(),
   googleDriveClientId: z.string().optional(),
   googleDriveClientSecret: z.string().optional(),
   // Undefined is meaningful: the migration boundary persists the product
@@ -1016,7 +1017,11 @@ export function resolveVoiceInputProviderRegistry(settings: Settings): VoiceInpu
       // subscription turns. VOICE_INPUT_CODEX_EXPERIMENTAL is retained for
       // back-compat docs/env but no longer gates inclusion.
       if (!settings.codexSubscriptionEnabled) continue;
-      providers.push({ id: "codex-subscription", kind: "codex-subscription", experimental: true });
+      providers.push({
+        id: "codex-subscription",
+        kind: "codex-subscription",
+        experimental: true,
+      });
     }
   }
   return providers;
@@ -1588,6 +1593,7 @@ export function getSettings(): Settings {
     integrationsOauthClientsJson: optional("OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON"),
     slackClientId: optional("OPENGENI_SLACK_CLIENT_ID"),
     slackClientSecret: optional("OPENGENI_SLACK_CLIENT_SECRET"),
+    slackSigningSecret: optional("OPENGENI_SLACK_SIGNING_SECRET"),
     googleDriveClientId: optional("OPENGENI_GOOGLE_DRIVE_CLIENT_ID"),
     googleDriveClientSecret: optional("OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET"),
     maxNestedAgentDepth: optional("OPENGENI_MAX_NESTED_AGENT_DEPTH"),
@@ -3853,6 +3859,11 @@ function validateSettings(settings: Settings): void {
     );
   }
   if (settings.slackClientId) {
+    if (!settings.slackSigningSecret) {
+      throw new Error(
+        "OPENGENI_SLACK_SIGNING_SECRET is required when the OpenGeni Slack app is configured",
+      );
+    }
     if (!settings.publicBaseUrl) {
       throw new Error(
         "OPENGENI_PUBLIC_BASE_URL is required when the OpenGeni Slack app is configured",

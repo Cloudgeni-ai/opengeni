@@ -74,6 +74,7 @@ import { registerInsightsRoutes } from "./routes/insights";
 import { registerTranscriptionRoutes } from "./routes/transcriptions";
 import { projectClientModel } from "./model-catalog";
 import { createTranscriptionService } from "./transcription/service";
+import { registerSlackInteractionRoutes } from "./integrations/slack-interactions";
 
 export type {
   ApiRouteDeps,
@@ -105,6 +106,13 @@ export function apiRequestBodyLimitBytes(settings: { voiceInputMaxSizeBytes: num
 const API_PUBLIC_ERROR_MESSAGE_MAX_BYTES = 512;
 
 export function createApp(deps: AppDependencies): Hono {
+  return createAppComposition(deps).app;
+}
+
+export function createAppComposition(deps: AppDependencies): {
+  app: Hono;
+  routeDeps: ApiRouteDeps;
+} {
   const managedAuth = deps.managedAuth ?? createManagedAuth(deps.settings, deps.db);
   const objectStorage =
     deps.objectStorage === undefined ? createObjectStorage(deps.settings) : deps.objectStorage;
@@ -393,7 +401,9 @@ export function createApp(deps: AppDependencies): Hono {
       boundedRequest = await boundedMcpRequest(c.req.raw);
     } catch (error) {
       if (error instanceof McpPayloadTooLargeError) {
-        throw new HTTPException(413, { message: "MCP request body exceeds the safety limit" });
+        throw new HTTPException(413, {
+          message: "MCP request body exceeds the safety limit",
+        });
       }
       throw error;
     }
@@ -415,7 +425,9 @@ export function createApp(deps: AppDependencies): Hono {
           throw new HTTPException(404, { message: "session not found" });
         }
         if (error instanceof SessionAuthorizationUnavailableError) {
-          throw new HTTPException(503, { message: "session authorization is unavailable" });
+          throw new HTTPException(503, {
+            message: "session authorization is unavailable",
+          });
         }
         throw error;
       }
@@ -423,10 +435,15 @@ export function createApp(deps: AppDependencies): Hono {
     let toolspace: Awaited<ReturnType<typeof prepareToolspaceMcpSurface>> = null;
     if (toolspaceGrant) {
       try {
-        toolspace = await prepareToolspaceMcpSurface({ deps: routeDeps, grant });
+        toolspace = await prepareToolspaceMcpSurface({
+          deps: routeDeps,
+          grant,
+        });
       } catch (error) {
         if (error instanceof McpPayloadTooLargeError) {
-          throw new HTTPException(413, { message: "MCP tool list exceeds the safety limit" });
+          throw new HTTPException(413, {
+            message: "MCP tool list exceeds the safety limit",
+          });
         }
         throw error;
       }
@@ -474,6 +491,7 @@ export function createApp(deps: AppDependencies): Hono {
   registerScheduledTaskRoutes(app, routeDeps);
   registerCodexRoutes(app, routeDeps);
   registerTranscriptionRoutes(app, routeDeps);
+  registerSlackInteractionRoutes(app, routeDeps);
 
   app.notFound((c) => {
     if (!new URL(c.req.url).pathname.startsWith("/v1/")) return c.text("Not Found", 404);
@@ -515,7 +533,7 @@ export function createApp(deps: AppDependencies): Hono {
     return c.json(envelope, status as ContentfulStatusCode);
   });
 
-  return app;
+  return { app, routeDeps };
 }
 
 async function requireMcpAccessGrant(
@@ -696,7 +714,9 @@ async function runReadinessChecks<const Checks extends Readonly<Record<string, R
       }
     }),
   );
-  const result = Object.fromEntries(entries) as { [Name in keyof Checks]: ReadinessCheckResult };
+  const result = Object.fromEntries(entries) as {
+    [Name in keyof Checks]: ReadinessCheckResult;
+  };
   return {
     ok: Object.values(result).every((check) => check.ok),
     checks: result,
@@ -1124,6 +1144,9 @@ export function isApiContractProtectedMutation(method: string, pathname: string)
     pathname.startsWith("/v1/auth/") ||
     pathname.startsWith("/v1/webhooks/") ||
     pathname.startsWith("/v1/integrations/oauth/") ||
+    pathname === "/v1/integrations/slack/events" ||
+    pathname === "/v1/integrations/slack/commands" ||
+    pathname === "/v1/integrations/slack/interactions" ||
     pathname.startsWith("/v1/github/") ||
     pathname === "/v1/enrollments/device/start" ||
     pathname === "/v1/enrollments/device/poll" ||

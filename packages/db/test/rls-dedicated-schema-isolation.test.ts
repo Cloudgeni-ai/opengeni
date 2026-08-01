@@ -6,6 +6,7 @@ import {
   assertRuntimeDatabasePosture,
   createApiKey,
   createDb,
+  FORCE_RLS_TABLES,
   listApiKeys,
   PROTECTED_NO_DIRECT_DML_TABLES,
   RUNTIME_FULL_DML_TABLES,
@@ -194,8 +195,10 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
     expect(posture.memberships).toEqual([]);
     expect(posture.ownedSchemas).toEqual([]);
     expect(posture.ownedRelations).toEqual([]);
-    expect(posture.tables.filter((table) => table.rlsEnabled)).toHaveLength(91);
-    expect(posture.tables.filter((table) => table.rlsActive)).toHaveLength(91);
+    expect(posture.tables.filter((table) => table.rlsEnabled)).toHaveLength(
+      FORCE_RLS_TABLES.length,
+    );
+    expect(posture.tables.filter((table) => table.rlsActive)).toHaveLength(FORCE_RLS_TABLES.length);
     expect(
       posture.tables.filter(
         (table) => table.select && table.insert && table.update && table.delete,

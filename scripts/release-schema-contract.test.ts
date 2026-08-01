@@ -162,12 +162,13 @@ describe("release schema contract", () => {
         (migrations.has("0146_slack_bot_delete_idempotency.sql") ? 1 : 0) +
         (migrations.has("0147_draft_latency_mode.sql") ? 1 : 0) +
         (migrations.has("0148_session_turn_latency_mode.sql") ? 1 : 0) +
-        (migrations.has("0149_workspace_artifacts.sql") ? 1 : 0),
+        (migrations.has("0149_workspace_artifacts.sql") ? 1 : 0) +
+        (migrations.has("0150_slack_task_interactions.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "d804a83bfa6b04805f54ee72a55dc40ba278497edebf9ef784ceef8286b7b16a",
+      "7bd016352fff16074927cacfa2ce529487dd53298c6f6d62cfffdc41f1cb38bf",
     );
-    expect(contract.latestMigration).toBe("0149_workspace_artifacts.sql");
+    expect(contract.latestMigration).toBe("0150_slack_task_interactions.sql");
     expect(migrations.get("0128_github_installation_authority.sql")).toMatchObject({
       sha256: "365793b2a204a70e214adb90298b522acbb6dcfae22a46681a58f41a6938e6f0",
       deploymentMode: "rolling",
@@ -213,7 +214,7 @@ describe("release schema contract", () => {
     expect(
       contract.migrations
         .map((migration) => migration.path)
-        .filter((path) => /^(?:010[3-9]|011[0-9]|012[0-9]|013[0-9]|014[0-9])_/.test(path)),
+        .filter((path) => /^(?:010[3-9]|011[0-9]|012[0-9]|013[0-9]|014[0-9]|0150)_/.test(path)),
     ).toEqual([
       "0103_host_export_root_session.sql",
       "0104_host_export_root_session_backfill.sql",
@@ -251,9 +252,14 @@ describe("release schema contract", () => {
       "0147_draft_latency_mode.sql",
       "0148_session_turn_latency_mode.sql",
       "0149_workspace_artifacts.sql",
+      "0150_slack_task_interactions.sql",
     ]);
     expect(migrations.get("0143_session_codex_compaction_mode.sql")).toMatchObject({
       sha256: "574cfe6fc5ab24135e84d3932fd936e134ebe28bce8ac3cb5db97a549683906f",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0150_slack_task_interactions.sql")).toMatchObject({
+      sha256: "97f23742bedcc0131ae21ba08a02eb8b5a739dafe790d22477622bf01746eaf6",
       deploymentMode: "rolling",
     });
     expect(new Set(contract.migrations.map((migration) => migration.path)).size).toBe(
@@ -378,6 +384,10 @@ describe("release schema contract", () => {
     expect(migrations.get("0148_session_turn_latency_mode.sql")).toMatchObject({
       sha256: "fe753b8b5866c4f619ae3b360442659db26f639db867b622b1f2a0520e9c80dd",
       deploymentMode: "rolling",
+    });
+    expect(migrations.get("0149_workspace_artifacts.sql")).toMatchObject({
+      sha256: "ae3bdf08e8a47e04dd0b025f143b40b0e31f31c9e7b3eb51c0d21233be265bd3",
+      deploymentMode: "maintenance",
     });
     expect(migrations.get("0149_workspace_artifacts.sql")).toMatchObject({
       sha256: "ae3bdf08e8a47e04dd0b025f143b40b0e31f31c9e7b3eb51c0d21233be265bd3",

@@ -296,16 +296,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     ),
   });
 
-  // A host-bound deployment has one fail-closed authorization seam for every
-  // HTTP session surface. Register it before the routes so a newly added path
-  // cannot accidentally inherit workspace access without an explicit operation
-  // classification. The long-lived event stream performs its own initial check
-  // and bounded reauthorization below.
+  // Every deployment has one fail-closed authorization seam for every HTTP
+  // session surface. The core boundary always enforces durable OpenGeni-owned
+  // private-session rules; an embedding host port can add narrower policy.
+  // Register it before the routes so a newly added path cannot accidentally
+  // inherit workspace access without an explicit operation classification. The
+  // long-lived event stream performs its own initial check and bounded
+  // reauthorization below.
   const authorizeSessionHttp: MiddlewareHandler = async (c, next) => {
-    if (!deps.sessionAuthorization) {
-      await next();
-      return;
-    }
     const workspaceId = c.req.param("workspaceId") ?? "";
     const sessionId = c.req.param("sessionId") ?? "";
     const operation = sessionAuthorizationOperationForHttp(
@@ -319,6 +317,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }
     if (!operation) {
       throw sessionAuthorizationHttpError(new SessionAuthorizationUnavailableError());
+    }
+    if (operation === "session.codex_account.write" && !deps.sessionAuthorization) {
+      await next();
+      return;
     }
     const grant = await requireAccessGrant(c, deps, workspaceId);
     try {
@@ -587,7 +589,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   // account id isn't in the workspace.
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/codex-account", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
     const body = (await c.req.json()) as { target?: string };
     const target = typeof body.target === "string" ? body.target : "";
@@ -595,6 +597,17 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       throw new HTTPException(400, {
         message: 'target is required ("auto" or an account id)',
       });
+    }
+    if (!deps.sessionAuthorization) {
+      try {
+        await requireSessionAuthorization(deps, grant, {
+          sessionId,
+          operation: "session.codex_account.write",
+          surface: "http",
+        });
+      } catch (error) {
+        throw sessionAuthorizationHttpError(error);
+      }
     }
     const pinned = target === "auto" ? null : target;
     const mutation = await withCodexCapacityMutation(
