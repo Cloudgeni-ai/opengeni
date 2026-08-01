@@ -386,6 +386,13 @@ workspace request, then returns a short-lived, object-scoped signed URL. The
 storage account/container remains private and browser PUTs carry no storage
 credentials or cookies beyond that signed URL.
 
+API CORS has a separate trust boundary. Public API requests are available from
+any browser origin with explicit bearer credentials, so the SDK can be embedded
+without per-application origin registration. `OPENGENI_CORS_ALLOW_ORIGIN_REGEX`
+is only the allowlist for origins that may send browser cookies cross-origin.
+Keep that regex narrow; unlisted origins receive wildcard, non-credentialed
+CORS responses and therefore cannot use a managed-login session cookie.
+
 For Azure Blob, the blob-service CORS rule must allow origin `*`, method `PUT`
 (plus `GET`, `HEAD`, and `OPTIONS` for the complete file flow), and all request
 and exposed headers. S3/GCS equivalents must express the same wildcard-origin
@@ -1399,8 +1406,8 @@ It supports:
 - Managed Azure Blob storage when `object_storage.mode = "managed"` and `object_storage.api = "azure-blob"`.
 - Existing Azure Blob or S3-compatible object storage through runtime secrets.
 
-Set `object_storage.cors_allowed_origins` to every browser origin that will
-directly upload files to signed Blob URLs.
+Set `object_storage.cors_allowed_origins` to `["*"]` so browser SDK hosts can
+upload files to signed Blob URLs without per-application registration.
 
 Before applying anything in Azure:
 
@@ -1422,8 +1429,8 @@ The AWS Terraform root lives at `deploy/terraform/aws`.
 
 It supports EKS, ECR, S3, AWS Secrets Manager, optional RDS PostgreSQL, and existing Postgres/Temporal endpoints. Use `deploy/helm/opengeni/values.aws-managed.example.yaml` as the non-secret Helm values shape.
 
-Set `object_storage.cors_allowed_origins` to every browser origin that will
-directly upload files to signed S3 URLs.
+Set `object_storage.cors_allowed_origins` to `["*"]` so browser SDK hosts can
+upload files to signed S3 URLs without per-application registration.
 
 Before applying anything in AWS:
 
@@ -1445,8 +1452,8 @@ The GCP Terraform root lives at `deploy/terraform/gcp`.
 
 It supports GKE, Artifact Registry, GCS, Secret Manager, workload identity, optional Cloud SQL PostgreSQL, and existing Postgres/Temporal endpoints. Use `deploy/helm/opengeni/values.gcp-managed.example.yaml` as the non-secret Helm values shape.
 
-Set `object_storage.cors_allowed_origins` to every browser origin that will
-directly upload files to signed GCS URLs.
+Set `object_storage.cors_allowed_origins` to `["*"]` so browser SDK hosts can
+upload files to signed GCS URLs without per-application registration.
 
 Before applying anything in GCP:
 
