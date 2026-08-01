@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { Tool } from "@openai/agents";
 import { shell } from "@openai/agents/sandbox";
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   cancellableShellCommand,
@@ -59,26 +61,62 @@ async function pendingAfterMicrotasks(promise: Promise<unknown>): Promise<boolea
 }
 
 describe("turn sandbox-tool physical cancellation fence", () => {
-  test("promotes a provider shell into an isolated process group before user code", async () => {
-    const markerPath = `/tmp/opengeni-turn-shell/test-${crypto.randomUUID()}`;
-    const command = cancellableShellCommand(
-      'test "$$" = "$(ps -o pgid= -p "$$" | tr -d \'[:space:]\')" && printf isolated',
-      markerPath,
-    );
-    const process = Bun.spawn(["/bin/sh", "-c", command], {
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(process.stdout).text(),
-      new Response(process.stderr).text(),
-      process.exited,
-    ]);
-    expect(exitCode, stderr).toBe(0);
-    expect(stdout).toBe("isolated");
-    expect(existsSync(markerPath)).toBe(false);
-  });
+  test.skipIf(Bun.which("setsid") === null)(
+    "promotes a provider shell into an isolated process group before user code",
+    async () => {
+      const markerPath = `/tmp/opengeni-turn-shell/test-${crypto.randomUUID()}`;
+      const command = cancellableShellCommand(
+        'test "$$" = "$(ps -o pgid= -p "$$" | tr -d \'[:space:]\')" && printf isolated',
+        markerPath,
+      );
+      const process = Bun.spawn(["/bin/sh", "-c", command], {
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(process.stdout).text(),
+        new Response(process.stderr).text(),
+        process.exited,
+      ]);
+      expect(exitCode, stderr).toBe(0);
+      expect(stdout).toBe("isolated");
+      expect(existsSync(markerPath)).toBe(false);
+    },
+  );
+
+  test.skipIf(!existsSync("/proc/self/stat") || Bun.which("setsid") === null)(
+    "uses Linux procfs when a minimal sandbox image omits ps",
+    async () => {
+      const markerPath = `/tmp/opengeni-turn-shell/test-${crypto.randomUUID()}`;
+      const command = cancellableShellCommand("printf isolated", markerPath);
+      const binDir = mkdtempSync(join(tmpdir(), "opengeni-procless-"));
+      try {
+        for (const executable of ["mkdir", "rm", "setsid"]) {
+          const resolved = Bun.which(executable);
+          expect(resolved).not.toBeNull();
+          symlinkSync(resolved!, join(binDir, executable));
+        }
+        const child = Bun.spawn(["/bin/sh", "-c", command], {
+          env: { ...process.env, PATH: binDir },
+          stdin: "ignore",
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const [stdout, stderr, exitCode] = await Promise.all([
+          new Response(child.stdout).text(),
+          new Response(child.stderr).text(),
+          child.exited,
+        ]);
+        expect(exitCode, stderr).toBe(0);
+        expect(stdout).toBe("isolated");
+        expect(command).toContain("/proc/$__opengeni_lookup_pid/stat");
+        expect(existsSync(markerPath)).toBe(false);
+      } finally {
+        rmSync(binDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   test("forces a short PTY yield and escalates ignored Ctrl-C/TERM to a confirmed group KILL", async () => {
     const abort = new AbortController();
@@ -243,6 +281,12 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     expect(helperCommands.some((command) => command.includes("command cat"))).toBe(true);
     expect(helperCommands.some((command) => command.includes("command kill -TERM"))).toBe(true);
     expect(helperCommands.some((command) => command.includes("command kill -KILL"))).toBe(true);
+    expect(
+      helperCommands.some((command) => command.includes("/proc/$__opengeni_lookup_pid/cmdline")),
+    ).toBe(true);
+    expect(
+      helperCommands.some((command) => command.includes("/proc/$__opengeni_lookup_pid/stat")),
+    ).toBe(true);
     expect(processAlive).toBe(false);
     expect(settlementOrder.lastIndexOf("provider-control")).toBeGreaterThan(
       settlementOrder.indexOf("group-absent"),
