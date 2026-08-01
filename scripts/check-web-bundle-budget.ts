@@ -10,9 +10,9 @@ type ManifestEntry = {
 
 const kib = 1024;
 const budgets = {
-  // The consent manager belongs to the shared application shell; provider SDKs
-  // remain lazy. Keep a small, explicit allowance for that orchestration.
-  initialRaw: 771 * kib,
+  // The consent manager and social connector types join the shared application
+  // shell while provider SDKs remain lazy. Keep a measured 2 KiB allowance.
+  initialRaw: 772 * kib,
   initialGzip: 210 * kib,
   initialFileGzip: 70 * kib,
   directSessionRaw: 1900 * kib,

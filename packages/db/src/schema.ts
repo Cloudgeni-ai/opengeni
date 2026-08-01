@@ -5119,6 +5119,10 @@ export const socialConnections = pgTable(
     status: text("status").notNull().default("connected"),
     scopes: jsonb("scopes").$type<string[]>().notNull().default([]),
     credentialRef: text("credential_ref"),
+    // AES-256-GCM envelope (environment-crypto v1 format) holding the OAuth
+    // token bundle. Never exposed through contracts or MCP tools; only the
+    // host-side social API client decrypts it.
+    credentialEncrypted: text("credential_encrypted"),
     tokenMetadata: jsonb("token_metadata").$type<Record<string, unknown>>().notNull().default({}),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

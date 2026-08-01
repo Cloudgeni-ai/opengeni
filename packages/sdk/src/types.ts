@@ -525,6 +525,41 @@ export type OAuthStartResponse = {
   expiresAt: string;
 };
 
+export type SocialProvider =
+  | "x"
+  | "reddit"
+  | "linkedin"
+  | "instagram"
+  | "facebook"
+  | "tiktok"
+  | "youtube"
+  | "custom";
+
+export type SocialConnectionStatus = "connected" | "needs_reauth" | "disabled";
+
+export type SocialConnection = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  provider: SocialProvider;
+  accountHandle: string;
+  accountName: string | null;
+  externalAccountId: string | null;
+  status: SocialConnectionStatus;
+  scopes: string[];
+  credentialRef: string | null;
+  tokenMetadata: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type SocialOAuthStartRequest = {
+  provider: "x" | "reddit";
+  scopes?: string[] | undefined;
+  returnPath?: string | undefined;
+};
+
 /** The immutable principal whose authority accepted a session or turn. */
 export type TurnInitiator = {
   kind: "subject" | "service";
@@ -1780,6 +1815,11 @@ export type FirstPartyMcpToolName =
   | "social_connections_list"
   | "social_posts_recent"
   | "social_daily_analysis_context"
+  | "social_search_live"
+  | "social_mentions_live"
+  | "social_thread_fetch"
+  | "social_posts_sync"
+  | "social_post_reply"
   | "scheduled_tasks_list"
   | "scheduled_tasks_get"
   | "scheduled_tasks_create"

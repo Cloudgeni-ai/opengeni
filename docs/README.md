@@ -32,6 +32,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 | GitHub App workspace binding | `docs/github-app.md` | `README.md`, `docs/architecture.md`, API/MCP/UI copy should summarize without weakening the authority matrix. |
 | Google Drive source preview | `docs/google-drive.md` | Capabilities UI and connector code should link instead of restating OAuth scope and no-ingestion boundaries. |
 | OpenGeni Slack bot connection | `docs/slack-bot.md` | Capabilities/scheduled-task UI and architecture should link instead of restating manifest or routing rules. |
+| Social connectors (X / Reddit) | `docs/social-connectors.md` | `docs/architecture.md`, pack/capability UI copy, and marketing-pack docs should link instead of restating OAuth endpoints, scopes, or token-handling rules. |
 | Rigs (versioned sandbox machine definitions) | `docs/rigs.md` | `docs/architecture.md`, `docs/packs.md`, `docs/variable-sets.md`, `docs/capabilities.md` should link instead of restating verification/promotion rules. |
 | Nested-agent depth policy | `docs/nested-agent-depth.md` | `docs/architecture.md`, API/session comments, and release notes should link instead of restating admission and denial semantics. |
 | Workspace instruction policies | `docs/workspace-instruction-policies.md` | `docs/architecture.md`, API/SDK comments, and future runtime/UI work should link instead of weakening activation, audit, or legacy-fallback semantics. |

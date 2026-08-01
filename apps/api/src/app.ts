@@ -1110,6 +1110,10 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
     label: "/v1/integrations/slack/callback",
   },
   {
+    pattern: /^\/v1\/social\/oauth\/callback$/,
+    label: "/v1/social/oauth/callback",
+  },
+  {
     pattern: /^\/v1\/enrollments\/device\/start$/,
     label: "/v1/enrollments/device/start",
   },
