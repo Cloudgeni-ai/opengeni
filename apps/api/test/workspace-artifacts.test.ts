@@ -5,6 +5,7 @@ import {
   WorkspaceArtifactListResponse,
   WorkspaceArtifactMutationResponse,
   signDelegatedAccessToken,
+  type FirstPartyMcpToolName,
   type Permission,
 } from "@opengeni/contracts";
 import type { ApiRouteDeps, ObjectStorageDependency } from "@opengeni/core";
@@ -287,7 +288,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     expect(String(immutableError)).toContain("workspace artifact history is immutable");
   }, 60_000);
 
-  test("exposes exact agent create and source tools through the first-party MCP surface", async () => {
+  test("carries exact attempt provenance through create, publish, rollback, and replay", async () => {
     const attempt = await seedAttempt(grant);
     const server = buildOpenGeniMcpServer(
       {
@@ -307,7 +308,12 @@ describe("workspace artifact API and PostgreSQL authority", () => {
           turnId: attempt.turnId,
           attemptId: attempt.attemptId,
           executionGeneration: attempt.executionGeneration,
-          firstPartyMcpTools: ["artifacts_create", "artifacts_get_source"],
+          firstPartyMcpTools: [
+            "artifacts_create",
+            "artifacts_get_source",
+            "artifacts_publish",
+            "artifacts_rollback",
+          ],
         },
       },
     );
@@ -319,6 +325,8 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       expect((await mcp.listTools()).tools.map((tool) => tool.name).sort()).toEqual([
         "artifacts_create",
         "artifacts_get_source",
+        "artifacts_publish",
+        "artifacts_rollback",
       ]);
       const createdResult = await mcp.callTool({
         name: "artifacts_create",
@@ -330,11 +338,28 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       });
       const createdText = createdResult.content.find((item) => item.type === "text");
       if (!createdText || createdText.type !== "text") throw new Error("missing MCP text result");
+      if (createdResult.isError) throw new Error(createdText.text);
       const created = WorkspaceArtifactMutationResponse.parse(JSON.parse(createdText.text));
       expect(created.version.sourceSessionId).toBe(attempt.sessionId);
       expect(created.version.sourceTurnId).toBe(attempt.turnId);
       expect(created.version.sourceAttemptId).toBe(attempt.attemptId);
       expect(created.version.sourceExecutionGeneration).toBe(attempt.executionGeneration);
+
+      const putsAfterCreate = objectPutCount;
+      const replayResult = await mcp.callTool({
+        name: "artifacts_create",
+        arguments: {
+          title: "Agent-created map",
+          html: "<!doctype html><main>Created through MCP</main>",
+          idempotencyKey: "agent-create-map",
+        },
+      });
+      const replayText = replayResult.content.find((item) => item.type === "text");
+      if (!replayText || replayText.type !== "text") throw new Error("missing MCP replay result");
+      const replayed = WorkspaceArtifactMutationResponse.parse(JSON.parse(replayText.text));
+      expect(replayed.replayed).toBe(true);
+      expect(replayed.artifact.id).toBe(created.artifact.id);
+      expect(objectPutCount).toBe(putsAfterCreate);
 
       const sourceResult = await mcp.callTool({
         name: "artifacts_get_source",
@@ -343,6 +368,39 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       const sourceText = sourceResult.content.find((item) => item.type === "text");
       if (!sourceText || sourceText.type !== "text") throw new Error("missing MCP source result");
       expect(JSON.parse(sourceText.text).html).toContain("Created through MCP");
+
+      const publishedResult = await mcp.callTool({
+        name: "artifacts_publish",
+        arguments: {
+          artifactId: created.artifact.id,
+          expectedCurrentVersionId: created.version.id,
+          html: "<!doctype html><main>Published through MCP</main>",
+          idempotencyKey: "agent-publish-map",
+        },
+      });
+      const publishedText = publishedResult.content.find((item) => item.type === "text");
+      if (!publishedText || publishedText.type !== "text")
+        throw new Error("missing MCP publish result");
+      const published = WorkspaceArtifactMutationResponse.parse(JSON.parse(publishedText.text));
+      expect(published.version.sourceAttemptId).toBe(attempt.attemptId);
+      expect(published.version.sourceExecutionGeneration).toBe(attempt.executionGeneration);
+
+      const rollbackResult = await mcp.callTool({
+        name: "artifacts_rollback",
+        arguments: {
+          artifactId: created.artifact.id,
+          versionId: created.version.id,
+          expectedCurrentVersionId: published.version.id,
+          reason: "Exact attempt rollback",
+          idempotencyKey: "agent-rollback-map",
+        },
+      });
+      const rollbackText = rollbackResult.content.find((item) => item.type === "text");
+      if (!rollbackText || rollbackText.type !== "text")
+        throw new Error("missing MCP rollback result");
+      const rolledBack = WorkspaceArtifactMutationResponse.parse(JSON.parse(rollbackText.text));
+      expect(rolledBack.event.sourceAttemptId).toBe(attempt.attemptId);
+      expect(rolledBack.event.sourceExecutionGeneration).toBe(attempt.executionGeneration);
 
       await supersedeAttempt(attempt);
       const putsBeforeStaleAttempt = objectPutCount;
@@ -360,6 +418,83 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       await Promise.all([mcp.close(), server.close()]);
     }
   }, 60_000);
+
+  test("rejects signed attempt claims that lack durable tool or permission authority", async () => {
+    const cases: Array<{
+      name: string;
+      permissions: Permission[] | null;
+      tools: FirstPartyMcpToolName[];
+      generationDelta?: number;
+      wrongTurn?: boolean;
+    }> = [
+      { name: "empty permissions", permissions: [], tools: ["artifacts_create"] },
+      {
+        name: "narrow permissions",
+        permissions: ["artifacts:read"],
+        tools: ["artifacts_create"],
+      },
+      { name: "empty tools", permissions: ["artifacts:publish"], tools: [] },
+      {
+        name: "replacement generation",
+        permissions: ["artifacts:publish"],
+        tools: ["artifacts_create"],
+        generationDelta: 1,
+      },
+      {
+        name: "session turn association mismatch",
+        permissions: ["artifacts:publish"],
+        tools: ["artifacts_create"],
+        wrongTurn: true,
+      },
+    ];
+    for (const fixture of cases) {
+      const attempt = await seedAttempt(grant, {
+        permissions: fixture.permissions,
+        tools: fixture.tools,
+      });
+      const server = buildOpenGeniMcpServer(
+        {
+          settings: testSettings(),
+          db: client.db,
+          objectStorage,
+          bus: new MemoryEventBus(),
+        } as ApiRouteDeps,
+        {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          subjectId: "worker:first-party-mcp",
+          permissions: ["artifacts:publish"],
+          principalKind: "agent_attempt",
+          metadata: {
+            sessionId: attempt.sessionId,
+            turnId: fixture.wrongTurn ? crypto.randomUUID() : attempt.turnId,
+            attemptId: attempt.attemptId,
+            executionGeneration: attempt.executionGeneration + (fixture.generationDelta ?? 0),
+            firstPartyMcpTools: ["artifacts_create"],
+          },
+        },
+      );
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      const mcp = new Client({ name: `workspace-artifact-${fixture.name}`, version: "1" });
+      await server.connect(serverTransport);
+      await mcp.connect(clientTransport);
+      const putsBefore = objectPutCount;
+      try {
+        const result = await mcp.callTool({
+          name: "artifacts_create",
+          arguments: {
+            title: fixture.name,
+            html: "<!doctype html><main>Must not persist</main>",
+            idempotencyKey: `denied-${fixture.name}`,
+          },
+        });
+        expect(result.isError).toBe(true);
+        expect(objectPutCount).toBe(putsBefore);
+      } finally {
+        await Promise.all([mcp.close(), server.close()]);
+      }
+    }
+  }, 60_000);
 });
 
 type Attempt = {
@@ -369,7 +504,13 @@ type Attempt = {
   executionGeneration: number;
 };
 
-async function seedAttempt(targetGrant: Grant): Promise<Attempt> {
+async function seedAttempt(
+  targetGrant: Grant,
+  options: {
+    permissions?: Permission[] | null;
+    tools?: FirstPartyMcpToolName[];
+  } = {},
+): Promise<Attempt> {
   const session = await createSession(client.db, {
     accountId: targetGrant.accountId,
     workspaceId: targetGrant.workspaceId,
@@ -379,6 +520,8 @@ async function seedAttempt(targetGrant: Grant): Promise<Attempt> {
     metadata: {},
     model: "gpt-5.6-sol",
     sandboxBackend: "none",
+    ...(options.permissions === undefined ? {} : { firstPartyMcpPermissions: options.permissions }),
+    ...(options.tools === undefined ? {} : { firstPartyMcpTools: options.tools }),
   });
   const executionGeneration = 3;
   const [turn] = await shared.admin<{ id: string }[]>`

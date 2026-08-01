@@ -13,6 +13,7 @@ import * as schema from "./schema";
 type ArtifactRow = typeof schema.workspaceArtifacts.$inferSelect;
 type VersionRow = typeof schema.workspaceArtifactVersions.$inferSelect;
 type EventRow = typeof schema.workspaceArtifactEvents.$inferSelect;
+type ArtifactMutationToolName = "artifacts_create" | "artifacts_publish" | "artifacts_rollback";
 
 export class WorkspaceArtifactNotFoundError extends Error {
   readonly name = "WorkspaceArtifactNotFoundError";
@@ -270,6 +271,7 @@ type PublishMetadata = {
   sourceTurnId: string | null;
   sourceAttemptId: string | null;
   sourceExecutionGeneration: number | null;
+  sourceToolName: ArtifactMutationToolName | null;
   persistContent: () => Promise<void>;
 };
 
@@ -284,6 +286,7 @@ async function assertAttemptAuthority(
     | "sourceTurnId"
     | "sourceAttemptId"
     | "sourceExecutionGeneration"
+    | "sourceToolName"
   >,
 ): Promise<void> {
   const provenance = [
@@ -293,18 +296,31 @@ async function assertAttemptAuthority(
     input.sourceExecutionGeneration,
   ];
   if (provenance.every((value) => value === null)) return;
-  if (provenance.some((value) => value === null)) {
+  if (provenance.some((value) => value === null) || input.sourceToolName === null) {
     throw new WorkspaceArtifactOperationError("Artifact attempt provenance is incomplete");
   }
   const rows = (await scopedDb.execute(sql`
-    WITH locked_session AS MATERIALIZED (
-      SELECT session.id, session.account_id, session.workspace_id, session.active_turn_id
+    WITH locked_workspace AS MATERIALIZED (
+      SELECT workspace.id, workspace.account_id
+      FROM workspaces workspace
+      WHERE workspace.id = ${input.workspaceId}::uuid
+        AND workspace.account_id = ${input.accountId}::uuid
+      FOR KEY SHARE OF workspace
+    ), locked_session AS MATERIALIZED (
+      SELECT session.id, session.account_id, session.workspace_id, session.active_turn_id,
+        session.first_party_mcp_tools, session.first_party_mcp_permissions
       FROM sessions session
+      JOIN locked_workspace workspace
+        ON workspace.id = session.workspace_id
+        AND workspace.account_id = session.account_id
       WHERE session.id = ${input.sourceSessionId}::uuid
-        AND session.workspace_id = ${input.workspaceId}::uuid
-        AND session.account_id = ${input.accountId}::uuid
         AND session.active_turn_id = ${input.sourceTurnId}::uuid
-      FOR SHARE OF session
+        AND session.first_party_mcp_tools @> jsonb_build_array(${input.sourceToolName}::text)
+        AND (
+          session.first_party_mcp_permissions IS NULL
+          OR session.first_party_mcp_permissions @> '["artifacts:publish"]'::jsonb
+        )
+      FOR UPDATE OF session
     ), locked_turn AS MATERIALIZED (
       SELECT turn.id, turn.account_id, turn.workspace_id, turn.session_id,
         turn.active_attempt_id, turn.execution_generation, turn.initiator_subject_id
@@ -319,7 +335,7 @@ async function assertAttemptAuthority(
         AND turn.status IN ('running', 'requires_action', 'recovering', 'waiting_capacity')
         AND turn.initiator_kind = 'subject'
         AND length(btrim(turn.initiator_subject_id)) BETWEEN 1 AND 1024
-      FOR SHARE OF turn
+      FOR UPDATE OF turn
     ), locked_attempt AS MATERIALIZED (
       SELECT attempt.id, attempt.account_id, attempt.workspace_id,
         attempt.session_id, attempt.turn_id, attempt.execution_generation
@@ -338,7 +354,7 @@ async function assertAttemptAuthority(
             AND interruption.attempt_id = attempt.id
             AND interruption.state IN ('pending', 'delivered', 'acknowledged')
         )
-      FOR SHARE OF attempt
+      FOR UPDATE OF attempt
     )
     SELECT attempt.id
     FROM locked_session session
@@ -576,6 +592,9 @@ export async function publishWorkspaceArtifactVersion(
         }
         const artifact = await artifactRow(tx, input.workspaceId, input.artifactId, true);
         if (!artifact) throw new WorkspaceArtifactNotFoundError("Artifact not found");
+        if (artifact.status !== "active") {
+          throw new WorkspaceArtifactOperationError("Archived artifacts cannot be published");
+        }
         if (artifact.currentVersionId !== input.expectedCurrentVersionId) {
           throw new WorkspaceArtifactConflictError(
             "Artifact changed in another request",
@@ -682,6 +701,9 @@ export async function rollbackWorkspaceArtifact(
         }
         const artifact = await artifactRow(tx, input.workspaceId, input.artifactId, true);
         if (!artifact) throw new WorkspaceArtifactNotFoundError("Artifact not found");
+        if (artifact.status !== "active") {
+          throw new WorkspaceArtifactOperationError("Archived artifacts cannot be rolled back");
+        }
         if (artifact.currentVersionId !== input.expectedCurrentVersionId)
           throw new WorkspaceArtifactConflictError(
             "Artifact changed in another request",

@@ -107,6 +107,7 @@ function provenance(subjectId: string, idempotencyKey: string) {
     sourceTurnId: null,
     sourceAttemptId: null,
     sourceExecutionGeneration: null,
+    sourceToolName: null,
   };
 }
 

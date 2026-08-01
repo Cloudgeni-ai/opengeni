@@ -1338,7 +1338,10 @@ function registerWorkspaceArtifactTools(
       },
     };
   };
-  const provenance = (idempotencyKey: string) => {
+  const provenance = (
+    idempotencyKey: string,
+    sourceToolName: "artifacts_create" | "artifacts_publish" | "artifacts_rollback",
+  ) => {
     const claims = attempt();
     return {
       accountId: grant.accountId,
@@ -1353,6 +1356,7 @@ function registerWorkspaceArtifactTools(
       sourceTurnId: claims.turnId,
       sourceAttemptId: claims.attemptId,
       sourceExecutionGeneration: claims.executionGeneration,
+      sourceToolName,
     };
   };
 
@@ -1424,7 +1428,7 @@ function registerWorkspaceArtifactTools(
           title,
           description: description ?? null,
           ...prepare(html),
-          ...provenance(idempotencyKey),
+          ...provenance(idempotencyKey, "artifacts_create"),
         }),
       );
     },
@@ -1453,7 +1457,7 @@ function registerWorkspaceArtifactTools(
           ...(title !== undefined ? { title } : {}),
           ...(description !== undefined ? { description } : {}),
           ...prepare(html),
-          ...provenance(idempotencyKey),
+          ...provenance(idempotencyKey, "artifacts_publish"),
         }),
       );
     },
@@ -1480,7 +1484,7 @@ function registerWorkspaceArtifactTools(
           versionId,
           expectedCurrentVersionId,
           reason,
-          ...provenance(idempotencyKey),
+          ...provenance(idempotencyKey, "artifacts_rollback"),
         }),
       );
     },

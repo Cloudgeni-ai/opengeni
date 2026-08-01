@@ -81,7 +81,7 @@ describe("runtime database posture evaluator", () => {
     const contracts = [
       [FORCE_RLS_TABLES, 91],
       [NON_RLS_RUNTIME_TABLES, 11],
-      [RUNTIME_FULL_DML_TABLES, 86],
+      [RUNTIME_FULL_DML_TABLES, 87],
       [RUNTIME_READ_ONLY_TABLES, 3],
       [RUNTIME_READ_INSERT_TABLES, 7],
       [PROTECTED_NO_DIRECT_DML_TABLES, 5],

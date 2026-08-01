@@ -3,6 +3,96 @@
 -- retain their immutable capability policy; only newly created sessions use
 -- the artifact tools added to the application default catalog.
 
+-- NULL meant "the then-current worker default" before artifact permissions
+-- existed. Freeze that exact historical default before the application default
+-- widens. Explicit [] and every explicit narrow array remain byte-for-byte
+-- unchanged. first_party_mcp_tools has been explicit and NOT NULL since 0136;
+-- do not append the new artifact tools to any historical selection.
+UPDATE "sessions"
+SET "first_party_mcp_permissions" = '[
+  "workspace:read",
+  "files:read",
+  "documents:search",
+  "scheduled_tasks:manage",
+  "scheduled_tasks:run",
+  "goals:manage",
+  "sessions:read",
+  "sessions:create",
+  "sessions:control",
+  "variable-sets:use",
+  "variable-sets:manage",
+  "rigs:use",
+  "github:use"
+]'::jsonb
+WHERE "first_party_mcp_permissions" IS NULL;
+
+ALTER TABLE "sessions"
+  ALTER COLUMN "first_party_mcp_tools"
+  SET DEFAULT '[
+    "set_session_title",
+    "goal_set",
+    "goal_update",
+    "goal_complete",
+    "goal_pause",
+    "memory_search",
+    "memory_save",
+    "memory_correct",
+    "preference_registry_summary",
+    "preference_registry_get",
+    "sandboxes_list",
+    "sandbox_attach",
+    "sandbox_swap",
+    "run_on",
+    "sandbox_provision",
+    "rig_list",
+    "rig_get",
+    "rig_propose_change",
+    "rig_verify",
+    "rig_promote",
+    "sessions_list",
+    "session_get",
+    "session_events",
+    "session_create",
+    "session_send_message",
+    "session_pause",
+    "session_resume",
+    "session_steer",
+    "set_other_session_title",
+    "variable_set_list",
+    "environment_list",
+    "variable_set_set_variable",
+    "environment_set_variable",
+    "github_connect_link",
+    "github_token",
+    "github_repositories_list",
+    "social_connections_list",
+    "social_posts_recent",
+    "social_daily_analysis_context",
+    "scheduled_tasks_list",
+    "scheduled_tasks_get",
+    "scheduled_tasks_create",
+    "scheduled_tasks_update",
+    "scheduled_tasks_pause",
+    "scheduled_tasks_resume",
+    "scheduled_tasks_trigger",
+    "scheduled_tasks_delete",
+    "scheduled_task_runs_list",
+    "slack_bot_list_channels",
+    "slack_bot_channel_history",
+    "slack_bot_thread_replies",
+    "slack_bot_list_users",
+    "slack_bot_list_files",
+    "slack_bot_file_info",
+    "slack_bot_file_content",
+    "slack_bot_post_message",
+    "slack_bot_delete_message",
+    "artifacts_list",
+    "artifacts_get_source",
+    "artifacts_create",
+    "artifacts_publish",
+    "artifacts_rollback"
+  ]'::jsonb;
+
 CREATE TABLE "workspace_artifacts" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   "account_id" uuid NOT NULL REFERENCES "managed_accounts"("id") ON DELETE CASCADE,

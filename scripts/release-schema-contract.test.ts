@@ -163,7 +163,7 @@ describe("release schema contract", () => {
         (migrations.has("0147_workspace_artifacts.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "REPLACE_WITH_CURRENT_SCHEMA_CONTRACT_SHA256",
+      "a5d6da55590b3c1793084470367a26fc5f782cdf9104413ac0157bdc6b7c6c23",
     );
     expect(contract.latestMigration).toBe("0147_workspace_artifacts.sql");
     expect(migrations.get("0128_github_installation_authority.sql")).toMatchObject({
@@ -368,7 +368,7 @@ describe("release schema contract", () => {
       deploymentMode: "rolling",
     });
     expect(migrations.get("0147_workspace_artifacts.sql")).toMatchObject({
-      sha256: "REPLACE_WITH_WORKSPACE_ARTIFACTS_SHA256",
+      sha256: "ae3bdf08e8a47e04dd0b025f143b40b0e31f31c9e7b3eb51c0d21233be265bd3",
       deploymentMode: "maintenance",
     });
   });
