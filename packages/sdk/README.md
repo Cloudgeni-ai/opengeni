@@ -8,6 +8,11 @@ helpers for proxying the stream through your own API.
 Zero runtime dependencies. Needs only WHATWG `fetch` and streams, so it runs in
 Node 18+, Bun, Deno, browsers, and edge runtimes.
 
+Browser clients may call the public API from any origin with an API key or
+other bearer credential. Browser cookies are accepted cross-origin only from
+operator-configured trusted origins; arbitrary embedding origins never receive
+credentialed CORS responses.
+
 ## Quick start
 
 ```ts

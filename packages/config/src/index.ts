@@ -329,6 +329,9 @@ const SettingsSchema = z.object({
   apiPort: z.coerce.number().int().positive().default(8000),
   workerHttpPort: z.coerce.number().int().positive().default(8001),
   opengeniMcpUrl: z.string().url().optional(),
+  // Origins allowed to send browser cookies cross-origin. Other origins may
+  // call the public API with bearer credentials, but never receive credentialed
+  // CORS responses.
   corsAllowOriginRegex: z.string().default(String.raw`^https?://(localhost|127\.0\.0\.1)(:\d+)?$`),
   openaiProvider: z.enum(["openai", "azure"]).default("openai"),
   openaiApiKey: z.string().optional(),

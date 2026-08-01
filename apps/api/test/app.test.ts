@@ -357,6 +357,43 @@ describe("API helpers", () => {
     expect(allowedCorsOrigin(pattern, "https://evil.com/http://localhost:3000")).toBe(false);
   });
 
+  test("allows public bearer CORS without exposing credentialed browser sessions", async () => {
+    const app = createApp({
+      settings: testSettings(),
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+    });
+    const preflight = (origin: string) =>
+      app.request("http://localhost/v1/config/client", {
+        method: "OPTIONS",
+        headers: {
+          origin,
+          "access-control-request-method": "GET",
+          "access-control-request-headers": "authorization",
+        },
+      });
+
+    const external = await preflight("https://product.example");
+    expect(external.status).toBe(204);
+    expect(external.headers.get("access-control-allow-origin")).toBe("*");
+    expect(external.headers.get("access-control-allow-credentials")).toBeNull();
+    expect(external.headers.get("access-control-allow-headers")).toContain("Authorization");
+
+    const externalResponse = await app.request("http://localhost/v1/config/client", {
+      headers: { origin: "https://product.example" },
+    });
+    expect(externalResponse.status).toBe(200);
+    expect(externalResponse.headers.get("access-control-allow-origin")).toBe("*");
+    expect(externalResponse.headers.get("access-control-allow-credentials")).toBeNull();
+
+    const trusted = await preflight("http://localhost:5173");
+    expect(trusted.status).toBe(204);
+    expect(trusted.headers.get("access-control-allow-origin")).toBe("http://localhost:5173");
+    expect(trusted.headers.get("access-control-allow-credentials")).toBe("true");
+  });
+
   test("normalizes dynamic route labels for metrics", () => {
     const workspace = "00000000-0000-4000-8000-000000000001";
     expect(routeLabel(`/v1/workspaces/${workspace}/sessions/session-1/events/stream`)).toBe(

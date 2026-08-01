@@ -264,15 +264,11 @@ if (args.skipStorage) {
     const uploadId = stringField(upload, "uploadId");
     const fileId = stringField(upload, "fileId");
     const headers = recordField(upload, "requiredHeaders");
-    await preflightObjectPut(
-      putUrl,
-      // The browser SDK is embeddable in arbitrary products. Storage CORS must
-      // therefore accept an origin that is unrelated to the OpenGeni web app;
-      // the short-lived signed URL remains the upload authorization boundary.
-      "https://sdk-conformance.invalid",
-      Object.keys(headers),
-      args.objectConnectTo,
-    );
+    // The browser SDK is embeddable in arbitrary products. Use an unpredictable
+    // unrelated origin so a deployment cannot pass by allowlisting a fixed
+    // conformance hostname; the signed URL remains the authorization boundary.
+    const browserOrigin = `https://${crypto.randomUUID()}.sdk-conformance.invalid`;
+    await preflightObjectPut(putUrl, browserOrigin, Object.keys(headers), args.objectConnectTo);
     await putObject(putUrl, content, headers, args.objectConnectTo);
     await postJson(workspaceUrl(`/files/uploads/${uploadId}/complete`), {});
     const download = await postJson(workspaceUrl(`/files/${fileId}/download-url`), {});
@@ -428,9 +424,12 @@ async function preflightObjectPut(
     );
   }
   const allowedOrigin = response.headers.get("access-control-allow-origin");
-  if (allowedOrigin !== "*") {
+  // Some object stores preserve the literal wildcard while others echo the
+  // requesting origin after matching a wildcard rule. Both are valid browser
+  // CORS responses; deployment automation separately verifies provider config.
+  if (allowedOrigin !== "*" && allowedOrigin !== origin) {
     throw new Error(
-      `browser upload CORS preflight allowed origin ${allowedOrigin ?? "<missing>"}, expected * for the embeddable SDK`,
+      `browser upload CORS preflight allowed origin ${allowedOrigin ?? "<missing>"}, expected ${origin} or * for the embeddable SDK`,
     );
   }
   const allowedMethods = (response.headers.get("access-control-allow-methods") ?? "")

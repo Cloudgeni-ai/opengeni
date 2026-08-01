@@ -195,28 +195,34 @@ export function createAppComposition(deps: AppDependencies): {
     await next();
   });
 
-  app.use(
-    "*",
-    cors({
-      credentials: true,
-      allowHeaders: [
-        "Accept",
-        "Authorization",
-        "Content-Type",
-        "X-OpenGeni-Access-Key",
-        "X-OpenGeni-Api-Contract",
-        "X-OpenGeni-Correlation-Id",
-        "X-OpenGeni-Subject",
-      ],
-      exposeHeaders: ["X-OpenGeni-Api-Contract", "X-OpenGeni-Correlation-Id"],
-      origin: (origin) => {
-        if (!origin) {
-          return null;
-        }
-        return allowedCorsOrigin(deps.settings.corsAllowOriginRegex, origin) ? origin : null;
-      },
-    }),
-  );
+  const corsHeaders = {
+    allowHeaders: [
+      "Accept",
+      "Authorization",
+      "Content-Type",
+      "X-OpenGeni-Access-Key",
+      "X-OpenGeni-Api-Contract",
+      "X-OpenGeni-Correlation-Id",
+      "X-OpenGeni-Subject",
+    ],
+    exposeHeaders: ["X-OpenGeni-Api-Contract", "X-OpenGeni-Correlation-Id"],
+  };
+  const publicApiCors = cors({ ...corsHeaders, credentials: false, origin: "*" });
+  const credentialedCors = cors({
+    ...corsHeaders,
+    credentials: true,
+    origin: (origin) =>
+      allowedCorsOrigin(deps.settings.corsAllowOriginRegex, origin) ? origin : null,
+  });
+
+  app.use("*", (c, next) => {
+    const origin = c.req.header("origin");
+    const middleware =
+      origin && allowedCorsOrigin(deps.settings.corsAllowOriginRegex, origin)
+        ? credentialedCors
+        : publicApiCors;
+    return middleware(c, next);
+  });
 
   app.use(
     "*",
