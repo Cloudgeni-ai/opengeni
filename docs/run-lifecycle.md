@@ -560,6 +560,11 @@ wrong one is the classic mistake.
    structured-input tool call (`requires_action`); neither a half-finished tool
    approval nor an unanswered tool call can be represented as plain history
    items. The blob is written only for those cases.
+   Historical sandbox envelopes receive one exact-path compatibility repair before
+   SDK validation: invalid non-record `exposedPorts` values are removed only from
+   the root and `sessionsByAgent[*]` session envelopes, while provider state and
+   every unrelated RunState field remain intact. Provider predeclared-port arrays
+   stay in provider state and are never emitted as SDK endpoint records.
    Do not use it as conversation memory.
 3. **`session_events` — the redacted human/audit timeline.** Append-only,
    per-session sequence numbers, drives replay/SSE/UI. It is **secret-redacted
