@@ -728,12 +728,12 @@ describe("MessageTimeline — settled turn folding", () => {
     expect(r.container.textContent).toContain("Mid-turn checkpoint");
     expect(r.container.textContent).toContain("step one");
 
-    // Mid-collapse: nested chips stay force-open (same height) — remounting
-    // them closed here would yank height and read as a hard snap.
+    // The outer fold must close after its beat. Do not assert the transient
+    // nested DOM at a real-time boundary here: a loaded shard may resume this
+    // timer after the full collapse has elapsed. The dedicated settle-fold
+    // suite covers the nest latch deterministically through user interaction.
     await flush(1150);
     expect(outer?.getAttribute("data-state")).toBe("closed");
-    expect(turnSummaryTriggers(r.container)).toHaveLength(3);
-    expect(r.container.textContent).toContain("step one");
 
     // Settle chrome clears after the slow collapse; nested remount closed.
     await flush(900);
