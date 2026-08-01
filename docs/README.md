@@ -41,6 +41,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 | Toolspace programmatic tool access | `docs/mcp-surfaces.md`, `docs/architecture.md`; record design in `docs/design/toolspace.md` | Runtime/API/worker comments should link instead of restating security invariants. |
 | Client/server compatibility policy | `docs/architecture.md` §3.10 | `packages/sdk/README.md` links; release notes should link. |
 | Typecheck/lint/format toolchain | `docs/toolchain.md` | `CONTRIBUTING.md` links; other docs should not restate tool choice or version. |
+| Model catalog pricing audit | `docs/model-providers.md` § Price audit (`bun run check:model-pricing`) | Debit authority stays in `packages/config` `defaultModelPricing`; llm-prices is a canary only. |
 
 ## Rules
 

@@ -175,8 +175,10 @@ export function ScenarioStack({
                   rows={galleryModelRows}
                   model={model}
                   effort={effort}
+                  latencyMode="standard"
                   onModelChange={setModel}
                   onEffortChange={setEffort}
+                  onLatencyModeChange={() => {}}
                 />
                 <SessionToolPicker
                   servers={galleryToolServers}

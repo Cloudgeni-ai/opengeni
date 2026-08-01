@@ -33,6 +33,7 @@ import { testSettings } from "@opengeni/testing";
 import {
   acceptsPromptCacheKeyForTurn,
   agentRunFailurePayload,
+  assertModelResponseLatencyMode,
   assertPhysicalToolQuiescenceForCancellation,
   assertSessionAttemptQuiescenceRecoveryDurable,
   classifyContextWindowOverflowError,
@@ -492,11 +493,14 @@ describe("accepted turn execution identity", () => {
           source,
           model: "xai/grok-4.5",
           reasoningEffort: "high",
+          latencyMode: "fast",
         }),
       ).toMatchObject({
         requestedModelId: "xai/grok-4.5",
         modelSource: "explicit",
         reasoningSource: "explicit",
+        latencyMode: "fast",
+        latencyModeSource: "explicit",
       });
     }
     for (const source of ["goal", "system", "compaction"] as const) {
@@ -505,11 +509,14 @@ describe("accepted turn execution identity", () => {
           source,
           model: "codex/gpt-5.6-sol",
           reasoningEffort: "xhigh",
+          latencyMode: "fast",
         }),
       ).toMatchObject({
         requestedModelId: null,
         modelSource: "continuation",
         reasoningSource: "continuation",
+        latencyMode: "fast",
+        latencyModeSource: "continuation",
       });
     }
   });
@@ -1025,6 +1032,44 @@ describe("completed model-call metering at ownership fences", () => {
 });
 
 describe("production model-response usage callback authority", () => {
+  test("fails Fast turns when the raw provider response omits or downgrades service_tier", () => {
+    const terminal = (serviceTier?: string) =>
+      new RunRawModelStreamEvent({
+        type: "model",
+        providerData: { rawModelEventSource: OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE },
+        event: {
+          type: "response.completed",
+          response: {
+            id: "resp-fast",
+            ...(serviceTier ? { service_tier: serviceTier } : {}),
+            usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+          },
+        },
+      } as any);
+
+    expect(() =>
+      assertModelResponseLatencyMode({
+        event: terminal("priority"),
+        requested: "fast",
+        model: "gpt-5.6-sol",
+      }),
+    ).not.toThrow();
+    expect(() =>
+      assertModelResponseLatencyMode({
+        event: terminal(),
+        requested: "fast",
+        model: "gpt-5.6-sol",
+      }),
+    ).toThrow(/service_tier=missing/);
+    expect(() =>
+      assertModelResponseLatencyMode({
+        event: terminal("default"),
+        requested: "fast",
+        model: "gpt-5.6-sol",
+      }),
+    ).toThrow(/service_tier=default/);
+  });
+
   test("claims the pinned SDK terminal pair once and cannot bind stale usage after restart", async () => {
     const response = {
       id: "resp-sdk-terminal-pair",

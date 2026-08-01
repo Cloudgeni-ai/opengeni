@@ -119,6 +119,7 @@ export function galleryTurn(index: number, prompt: string): SessionTurn {
     toolsProvided: false,
     model: "gpt-5.6-sol",
     reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "modal",
     sandboxOs: null,
     metadata: {},

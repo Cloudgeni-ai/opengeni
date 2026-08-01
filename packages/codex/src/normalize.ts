@@ -16,9 +16,11 @@ const MINIMAL = "minimal";
 // The ChatGPT/Codex backend is a STRICT ALLOWLIST: it 400s on ANY top-level field
 // the Codex CLI itself does not send (confirmed live against the backend —
 // "Unsupported parameter: temperature / top_p / metadata / previous_response_id /
-// logprobs / service_tier / user / safety_identifier / truncation / max_tool_calls /
-// background / conversation", and "Unsupported tool type: mcp"). Our @openai/agents
-// stack adds several of these, so after our transforms we keep ONLY the codex
+// logprobs / user / safety_identifier / truncation / max_tool_calls /
+// background / conversation", and "Unsupported tool type: mcp").
+// `service_tier` is allowlisted for Codex Fast mode (`priority`; config may say
+// `fast` and maps to the same request value). Our @openai/agents stack adds
+// several other fields, so after our transforms we keep ONLY the codex
 // Responses payload fields (CODEX-SUBSCRIPTION-SPEC §1 field table).
 const CODEX_ALLOWED_TOP_LEVEL_KEYS = new Set<string>([
   "model",
@@ -33,6 +35,7 @@ const CODEX_ALLOWED_TOP_LEVEL_KEYS = new Set<string>([
   "include",
   "prompt_cache_key",
   "text",
+  "service_tier",
 ]);
 
 /** Mutates a parsed Responses request body in place and returns it. Pure + synchronous + unit-testable. */

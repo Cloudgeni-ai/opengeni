@@ -86,6 +86,7 @@ function fakeTurn(overrides: Partial<SessionTurn>): SessionTurn {
     tools: [],
     model: "model-x",
     reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "none",
     sandboxOs: null,
     metadata: {},

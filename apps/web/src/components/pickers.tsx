@@ -1,6 +1,6 @@
 import { CheckIcon, ChevronDownIcon, PlugIcon } from "lucide-react";
 import type { FirstPartyMcpToolName } from "@opengeni/contracts";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -12,19 +12,17 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
-  advancedSourceSummary,
   coerceReasoningEffortForModel,
   effortOptionsForModel,
   findPickerRow,
   groupPickerRowsByBillingClass,
-  labelLatencyMode,
-  payerSummaryForModel,
   runnableLatencyModesForModel,
   type PickerModelRow,
 } from "@/lib/model-policy";
 import { isCodexProductModel } from "@/lib/session-model";
 import { labelEffort, type IntelligenceEffort, type McpServerOption } from "@/lib/session-tools";
 import { cn } from "@/lib/utils";
+import type { LatencyMode } from "@/types";
 
 export type { PickerModelRow };
 
@@ -53,6 +51,7 @@ export function ModelPicker(props: {
   rows: PickerModelRow[];
   model: string;
   effort: IntelligenceEffort;
+  latencyMode: LatencyMode;
   disabled?: boolean;
   loading?: boolean;
   error?: string | null;
@@ -60,8 +59,8 @@ export function ModelPicker(props: {
   codexOnly?: boolean;
   onModelChange: (value: string) => void;
   onEffortChange: (value: IntelligenceEffort) => void;
+  onLatencyModeChange: (value: LatencyMode) => void;
 }) {
-  const [advancedOpen, setAdvancedOpen] = useState(false);
   const rows = useMemo(
     () => applyCodexOnly(props.rows, props.codexOnly === true),
     [props.rows, props.codexOnly],
@@ -72,13 +71,12 @@ export function ModelPicker(props: {
     ? effortOptionsForModel(selectedRow.catalog)
     : (["low"] as IntelligenceEffort[]);
   const latencyModes = selectedRow ? runnableLatencyModesForModel(selectedRow.catalog) : [];
-  // Catalog advertises non-default latency modes; selection is not wired yet,
-  // so surface as read-only context — never as disabled fake menu items.
-  const speedSummary =
-    latencyModes.length > 1 || latencyModes.some((mode) => mode !== "standard")
-      ? latencyModes.map(labelLatencyMode).join(" · ")
-      : null;
-  const routeDetails = selectedRow ? advancedSourceSummary(selectedRow.catalog) : null;
+  const fastRunnable = latencyModes.includes("fast");
+  useEffect(() => {
+    if (!fastRunnable && props.latencyMode !== "standard") {
+      props.onLatencyModeChange("standard");
+    }
+  }, [fastRunnable, props.latencyMode, props.onLatencyModeChange]);
 
   return (
     <DropdownMenu>
@@ -97,6 +95,7 @@ export function ModelPicker(props: {
               : selectedRowLabel(rows, props.model)}
           </span>
           <span>{labelEffort(props.effort)}</span>
+          {props.latencyMode === "fast" ? <span>Fast</span> : null}
           <ChevronDownIcon className="size-3 shrink-0" />
         </Button>
       </DropdownMenuTrigger>
@@ -128,10 +127,23 @@ export function ModelPicker(props: {
             {option === props.effort ? <CheckIcon className="ml-auto size-4" /> : null}
           </DropdownMenuItem>
         ))}
-        {speedSummary ? (
-          <p className="px-2 pt-1 pb-0.5 text-2xs text-fg-subtle">
-            Speed (catalog): {speedSummary}
-          </p>
+        {fastRunnable ? (
+          <>
+            <DropdownMenuSeparator className="my-2 bg-border" />
+            <DropdownMenuLabel className="px-2 pt-0 pb-1 text-xs font-normal text-fg-subtle">
+              Speed
+            </DropdownMenuLabel>
+            <DropdownMenuItem
+              disabled={!selectedRow?.selectable}
+              onSelect={() =>
+                props.onLatencyModeChange(props.latencyMode === "fast" ? "standard" : "fast")
+              }
+              className="h-8 cursor-pointer rounded-md px-2 text-sm"
+            >
+              <span>Fast · 2× rate</span>
+              {props.latencyMode === "fast" ? <CheckIcon className="ml-auto size-4" /> : null}
+            </DropdownMenuItem>
+          </>
         ) : null}
         <DropdownMenuSeparator className="my-2 bg-border" />
         <DropdownMenuLabel className="px-2 pt-0 pb-1 text-xs font-normal text-fg-subtle">
@@ -158,30 +170,6 @@ export function ModelPicker(props: {
             ))}
           </div>
         ))}
-        {selectedRow ? (
-          <>
-            <DropdownMenuSeparator className="my-2 bg-border" />
-            <div className="space-y-1 px-2 pb-1 text-xs text-fg-subtle">
-              <p>{payerSummaryForModel(selectedRow.catalog)}</p>
-              {routeDetails ? (
-                <button
-                  type="button"
-                  className="text-left text-fg-muted underline-offset-2 hover:underline"
-                  onClick={(event) => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    setAdvancedOpen((open) => !open);
-                  }}
-                >
-                  {advancedOpen ? "Hide route details" : "Show route details"}
-                </button>
-              ) : null}
-              {advancedOpen && routeDetails ? (
-                <p className="text-fg-muted">{routeDetails}</p>
-              ) : null}
-            </div>
-          </>
-        ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
   );

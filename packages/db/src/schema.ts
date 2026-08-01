@@ -1585,6 +1585,8 @@ export const sessionTurns = pgTable(
     toolsProvided: boolean("tools_provided").notNull().default(false),
     model: text("model").notNull(),
     reasoningEffort: text("reasoning_effort").notNull(),
+    // Peer of model + reasoning_effort for Fast/priority inheritance.
+    latencyMode: text("latency_mode").notNull().default("standard"),
     sandboxBackend: text("sandbox_backend").notNull(),
     // Per-turn OS override. NULL = inherit the session's sandbox_os. CHECK-
     // constrained to the SandboxOs enum (or NULL) in migration 0018.
@@ -1631,6 +1633,10 @@ export const sessionTurns = pgTable(
     oneCurrentInference: uniqueIndex("session_turns_one_current_inference_uq")
       .on(table.workspaceId, table.sessionId)
       .where(sql`${table.status} in ('running','requires_action','recovering','waiting_capacity')`),
+    latencyModeValid: check(
+      "session_turns_latency_mode_check",
+      sql`${table.latencyMode} in ('standard', 'priority', 'fast')`,
+    ),
   }),
 );
 
@@ -1940,6 +1946,7 @@ export const composerDrafts = pgTable(
     toolsProvided: boolean("tools_provided").notNull().default(false),
     model: text("model").notNull(),
     reasoningEffort: text("reasoning_effort").notNull(),
+    latencyMode: text("latency_mode").notNull().default("standard"),
     sourceTurnId: uuid("source_turn_id"),
     sourceTurnVersion: integer("source_turn_version"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -1971,6 +1978,10 @@ export const composerDrafts = pgTable(
       sql`length(btrim(${table.subjectId})) > 0`,
     ),
     revisionValid: check("composer_drafts_revision_check", sql`${table.revision} >= 1`),
+    latencyModeValid: check(
+      "composer_drafts_latency_mode_check",
+      sql`${table.latencyMode} in ('standard', 'priority', 'fast')`,
+    ),
   }),
 );
 
@@ -1989,6 +2000,7 @@ export const newSessionDrafts = pgTable(
     tools: jsonb("tools").$type<unknown[]>().notNull().default([]),
     model: text("model").notNull(),
     reasoningEffort: text("reasoning_effort").notNull(),
+    latencyMode: text("latency_mode").notNull().default("standard"),
     sessionOptions: jsonb("session_options").$type<Record<string, unknown>>().notNull().default({}),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -2008,6 +2020,10 @@ export const newSessionDrafts = pgTable(
       sql`length(btrim(${table.subjectId})) > 0`,
     ),
     revisionValid: check("new_session_drafts_revision_check", sql`${table.revision} >= 1`),
+    latencyModeValid: check(
+      "new_session_drafts_latency_mode_check",
+      sql`${table.latencyMode} in ('standard', 'priority', 'fast')`,
+    ),
   }),
 );
 

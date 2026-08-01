@@ -74,6 +74,7 @@ export function fakeTurn(overrides: Partial<SessionTurn> = {}): SessionTurn {
     toolsProvided: false,
     model: "model-x",
     reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "none",
     sandboxOs: null,
     metadata: {},

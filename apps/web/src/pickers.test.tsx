@@ -196,8 +196,10 @@ describe("catalog-backed ModelPicker", () => {
             rows={rows}
             model="gpt-5.6-sol"
             effort="xhigh"
+            latencyMode="standard"
             onModelChange={() => {}}
             onEffortChange={() => {}}
+            onLatencyModeChange={() => {}}
           />,
         ),
       );

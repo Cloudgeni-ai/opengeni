@@ -1935,6 +1935,7 @@ function fabricateTurn(sessionId: string, position: number, prompt: string): Ses
     toolsProvided: false,
     model: "gpt-5.2",
     reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "modal",
     sandboxOs: "linux",
     metadata: {},

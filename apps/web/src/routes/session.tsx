@@ -621,7 +621,7 @@ function SessionChatPane(props: {
   // Workspace-scoped: the provider (mounted on the workspace route) supplies
   // the workspaceId, so the hook needs no positional argument.
   const attachments = useFileAttachments();
-  const { effortForSession } = context;
+  const { effortForSession, latencyMode } = context;
   const selectableSessionMcpServers = context.toolMcpServers;
   const selectableToolIds = useMemo(
     () => selectableSessionMcpServers.map((server) => server.id),
@@ -799,8 +799,9 @@ function SessionChatPane(props: {
       }
       setModelForSession(props.session.id, draft.model);
       setEffortForSession(props.session.id, draft.reasoningEffort);
+      context.setLatencyMode(draft.latencyMode ?? "standard");
     },
-    [props.session.id, setEffortForSession, setModelForSession],
+    [context.setLatencyMode, props.session.id, setEffortForSession, setModelForSession],
   );
   const composer = useComposer(props.session.id, {
     events: props.events,
@@ -809,6 +810,7 @@ function SessionChatPane(props: {
         resources: attachments.readyResources,
         model,
         reasoningEffort,
+        latencyMode,
       };
     },
     sendBlocked: () => attachments.hasUnresolved,
@@ -1058,6 +1060,7 @@ function SessionChatPane(props: {
                   rows={modelCatalog.rowsForSelection(model)}
                   model={model}
                   effort={reasoningEffort}
+                  latencyMode={latencyMode}
                   disabled={composer.sending}
                   loading={modelCatalog.loading}
                   error={modelCatalog.error}
@@ -1069,6 +1072,10 @@ function SessionChatPane(props: {
                   onEffortChange={(value) => {
                     pickerTouchedRef.current = true;
                     context.setEffortForSession(props.session.id, value);
+                  }}
+                  onLatencyModeChange={(value) => {
+                    pickerTouchedRef.current = true;
+                    context.setLatencyMode(value);
                   }}
                 />
                 <SessionToolPicker

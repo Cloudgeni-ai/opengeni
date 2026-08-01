@@ -15,7 +15,9 @@ import {
   resolveModelProvider,
   resolveProviderApiKey,
   resolveTurnExecutionPolicyV1,
+  responseSatisfiesLatencyMode,
   selectModelPricing,
+  serviceTierForLatencyMode,
 } from "../src";
 
 // A reusable Fireworks/GLM-5.2 registry JSON mirroring the doc's host example.
@@ -1147,11 +1149,59 @@ describe("resolveModelProvider", () => {
 describe("configuredModelPricing", () => {
   test("includes the built-in GLM-5.2 default pricing entry", () => {
     expect(defaultModelPricing["accounts/fireworks/models/glm-5p2"]).toEqual({
-      inputMicrosPerMillionTokens: 1_400_000,
-      cachedInputMicrosPerMillionTokens: 260_000,
-      outputMicrosPerMillionTokens: 4_400_000,
+      default: {
+        inputMicrosPerMillionTokens: 1_400_000,
+        cachedInputMicrosPerMillionTokens: 140_000,
+        outputMicrosPerMillionTokens: 4_400_000,
+        marginBps: 2_500,
+      },
+    });
+  });
+
+  test("keeps current GPT-5.6 OpenAI list rates and long-context tiers", () => {
+    expect(defaultModelPricing["gpt-5.6-terra"]?.default).toEqual({
+      inputMicrosPerMillionTokens: 2_000_000,
+      cachedInputMicrosPerMillionTokens: 200_000,
+      outputMicrosPerMillionTokens: 12_000_000,
       marginBps: 2_500,
     });
+    expect(defaultModelPricing["gpt-5.6-luna"]?.default).toEqual({
+      inputMicrosPerMillionTokens: 200_000,
+      cachedInputMicrosPerMillionTokens: 20_000,
+      outputMicrosPerMillionTokens: 1_200_000,
+      marginBps: 2_500,
+    });
+    expect(defaultModelPricing["gpt-5.4"]).toBeUndefined();
+    expect(defaultModelPricing["gpt-5"]).toBeUndefined();
+
+    const settings = withEnv({ OPENGENI_OPENAI_API_KEY: "sk-test" }, () => getSettings());
+    // 100k input @ $0.20/M = 20_000 micros, then +25% margin → 25_000
+    expect(calculateModelUsageCostMicros(settings, "gpt-5.6-luna", { inputTokens: 100_000 })).toBe(
+      25_000,
+    );
+    // >272K uses long-context luna ($0.40/M input): ceil(272001*400000/1e6)=108801, +25% → 136002
+    expect(calculateModelUsageCostMicros(settings, "gpt-5.6-luna", { inputTokens: 272_001 })).toBe(
+      136_002,
+    );
+    expect(
+      calculateModelUsageCostMicros(
+        settings,
+        "gpt-5.6-luna",
+        { inputTokens: 100_000 },
+        { latencyMode: "fast" },
+      ),
+    ).toBe(50_000);
+  });
+
+  test("maps and verifies provider Fast service tiers", () => {
+    expect(serviceTierForLatencyMode("openai", "fast")).toBe("fast");
+    expect(serviceTierForLatencyMode("azure", "fast")).toBe("priority");
+    expect(serviceTierForLatencyMode("codex-subscription", "fast")).toBe("priority");
+    expect(serviceTierForLatencyMode("openai", "standard")).toBeUndefined();
+    expect(responseSatisfiesLatencyMode("fast", "fast")).toBe(true);
+    expect(responseSatisfiesLatencyMode("fast", "priority")).toBe(true);
+    expect(responseSatisfiesLatencyMode("fast", "default")).toBe(false);
+    expect(responseSatisfiesLatencyMode("fast", undefined)).toBe(false);
   });
 
   test("merge precedence: registry model pricing overrides defaults, explicit JSON overrides registry", () => {
@@ -1203,8 +1253,8 @@ describe("configuredModelPricing", () => {
       inputMicrosPerMillionTokens: 111_000,
       outputMicrosPerMillionTokens: 222_000,
     });
-    // an untouched default stays intact.
-    expect(pricing["gpt-5.6-sol"]).toEqual(defaultModelPricing["gpt-5.6-sol"]!);
+    // an untouched default stays intact (flat projection = schedule.default).
+    expect(pricing["gpt-5.6-sol"]).toEqual(defaultModelPricing["gpt-5.6-sol"]!.default);
   });
 });
 

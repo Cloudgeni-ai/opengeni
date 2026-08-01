@@ -26,6 +26,7 @@ import type { CreateSessionRequest, NewSessionDraftOptions } from "@opengeni/sdk
 import { sessionMcpPermissionGroups } from "@/lib/permissions";
 import type {
   GoalSpec,
+  LatencyMode,
   ReasoningEffort,
   ResourceRef,
   SandboxBackend,
@@ -125,6 +126,7 @@ export type BuildCreateSessionRequestInput = {
   selectedTools: ToolRef[];
   defaultModel: string;
   defaultReasoningEffort: ReasoningEffort;
+  defaultLatencyMode: LatencyMode;
   clientEventId: string;
   idempotencyKey: string;
   targetSandboxId?: string | null;
@@ -181,6 +183,7 @@ export function buildCreateSessionRequest(
     ...(tools === undefined ? {} : { tools }),
     model: input.submission.model ?? input.defaultModel,
     reasoningEffort: input.submission.reasoningEffort ?? input.defaultReasoningEffort,
+    latencyMode: input.submission.latencyMode ?? input.defaultLatencyMode,
     clientEventId: input.clientEventId,
     idempotencyKey: input.idempotencyKey,
     ...(input.submission.sandboxBackend ? { sandboxBackend: input.submission.sandboxBackend } : {}),

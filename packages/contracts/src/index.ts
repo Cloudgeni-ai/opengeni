@@ -479,6 +479,10 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
 };
 
 export const ReasoningEffort = z.enum(["none", "minimal", "low", "medium", "high", "xhigh"]);
+
+/** Provider service-tier / latency mode selected for a turn or session default. */
+export const LatencyMode = z.enum(["standard", "priority", "fast"]);
+export type LatencyMode = z.infer<typeof LatencyMode>;
 export type ReasoningEffort = z.infer<typeof ReasoningEffort>;
 
 export const ErrorCode = z.enum([
@@ -3518,6 +3522,14 @@ export function reasoningEffortForMetadata(
     : fallback;
 }
 
+export function latencyModeForMetadata(
+  metadata: Record<string, unknown>,
+  fallback: LatencyMode = "standard",
+): LatencyMode {
+  const value = metadata.latencyMode;
+  return value === "standard" || value === "priority" || value === "fast" ? value : fallback;
+}
+
 export function stableJson(value: unknown): string {
   return JSON.stringify(sortJson(value));
 }
@@ -3952,6 +3964,7 @@ export const SessionTurn = z.object({
   toolsProvided: z.boolean().optional(),
   model: z.string().min(1),
   reasoningEffort: ReasoningEffort,
+  latencyMode: LatencyMode.default("standard"),
   sandboxBackend: SandboxBackend,
   // Per-turn OS override. NULL = inherit the session's sandboxOs.
   sandboxOs: SandboxOs.nullable(),
@@ -4040,6 +4053,7 @@ export const ComposerDraft = z.object({
   resources: z.array(ResourceRef),
   model: z.string().min(1),
   reasoningEffort: ReasoningEffort,
+  latencyMode: LatencyMode.default("standard"),
   sourceTurnId: z.string().uuid().nullable(),
   sourceTurnVersion: z.number().int().positive().nullable(),
   updatedAt: z.string().nullable(),
@@ -4080,6 +4094,7 @@ export const SaveComposerDraftRequest = ComposerDraft.pick({
   resources: true,
   model: true,
   reasoningEffort: true,
+  latencyMode: true,
 }).extend({ expectedRevision: z.number().int().nonnegative() });
 export type SaveComposerDraftRequest = z.infer<typeof SaveComposerDraftRequest>;
 
@@ -4110,6 +4125,7 @@ export const NewSessionDraft = z.object({
   toolsProvided: z.boolean().default(false),
   model: z.string().min(1),
   reasoningEffort: ReasoningEffort,
+  latencyMode: LatencyMode.default("standard"),
   options: NewSessionDraftOptions,
   updatedAt: z.string().nullable(),
 });
@@ -4122,6 +4138,7 @@ export const SaveNewSessionDraftRequest = NewSessionDraft.pick({
   toolsProvided: true,
   model: true,
   reasoningEffort: true,
+  latencyMode: true,
   options: true,
 }).extend({ expectedRevision: z.number().int().nonnegative() });
 export type SaveNewSessionDraftRequest = z.infer<typeof SaveNewSessionDraftRequest>;
@@ -7848,6 +7865,7 @@ export const CreateSessionRequest = withVariableSetIdAlias({
   metadata: z.record(z.string(), z.unknown()).default({}),
   model: z.string().min(1).optional(),
   reasoningEffort: ReasoningEffort.optional(),
+  latencyMode: LatencyMode.optional(),
   sandboxBackend: SandboxBackend.optional(),
   // The enrolled machine (a sandbox id) to run this session on; seeds the
   // active-sandbox pointer at creation so the FIRST turn routes to the chosen
@@ -8117,6 +8135,7 @@ export const ClientSessionEvent = z.discriminatedUnion("type", [
         resources: z.array(ResourceRef).default([]),
         model: z.string().min(1).optional(),
         reasoningEffort: ReasoningEffort.optional(),
+        latencyMode: LatencyMode.optional(),
         controlEtag: z.string().min(1).optional(),
         expectedDraftRevision: z.number().int().nonnegative().optional(),
         // Header-value rotation only. URL/name/tool settings are immutable after
@@ -8153,6 +8172,7 @@ export const SteerSessionMessageRequest = z
     resources: z.array(ResourceRef).default([]),
     model: z.string().min(1).optional(),
     reasoningEffort: ReasoningEffort.optional(),
+    latencyMode: LatencyMode.optional(),
     clientEventId: SessionOperationKey.optional(),
     controlEtag: z.string().min(1).optional(),
     expectedDraftRevision: z.number().int().nonnegative().optional(),
@@ -8929,6 +8949,11 @@ export const TurnExecutionReasoningSourceV1 = /* @__PURE__ */ defineModelContrac
 );
 export type TurnExecutionReasoningSourceV1 = z.infer<typeof TurnExecutionReasoningSourceV1>;
 
+export const TurnExecutionLatencyModeSourceV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.enum(["explicit", "session", "deployment", "continuation"]),
+);
+export type TurnExecutionLatencyModeSourceV1 = z.infer<typeof TurnExecutionLatencyModeSourceV1>;
+
 /**
  * Secret-safe execution identity frozen onto one accepted logical turn.
  *
@@ -8936,6 +8961,9 @@ export type TurnExecutionReasoningSourceV1 = z.infer<typeof TurnExecutionReasoni
  * definition rather than a serialized provider client. It must never contain
  * a key/token, concrete connected credential id, account label, authorization
  * header, or credential-bearing URL/query value.
+ *
+ * `latencyMode` / `latencyModeSource` default to standard/deployment so legacy
+ * snapshots without those keys remain readable as Standard.
  */
 export const TurnExecutionPolicyV1 = /* @__PURE__ */ defineModelContractSchema(() =>
   z
@@ -8946,6 +8974,8 @@ export const TurnExecutionPolicyV1 = /* @__PURE__ */ defineModelContractSchema((
       modelSource: TurnExecutionModelSourceV1,
       reasoningEffort: ReasoningEffort,
       reasoningSource: TurnExecutionReasoningSourceV1,
+      latencyMode: LatencyMode.default("standard"),
+      latencyModeSource: TurnExecutionLatencyModeSourceV1.default("deployment"),
       providerId: z.string().min(1),
       upstreamModelId: z.string().min(1),
       wireApi: z.enum(["responses", "chat"]),
@@ -9036,6 +9066,8 @@ export function turnExecutionPolicyAuditMetadata(
     modelSource: parsed.modelSource,
     effectiveReasoningEffort: parsed.reasoningEffort,
     reasoningSource: parsed.reasoningSource,
+    effectiveLatencyMode: parsed.latencyMode,
+    latencyModeSource: parsed.latencyModeSource,
     providerId: parsed.providerId,
     credentialSourceKind: parsed.credentialSource.kind,
     credentialSourceMechanism:
