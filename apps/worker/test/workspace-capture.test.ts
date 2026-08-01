@@ -27,6 +27,7 @@ import {
   isUnderResidueDir,
   joinRepoPath,
   KEEP_LATEST_REVISIONS,
+  openFreshWorkspaceCaptureSession,
   PER_FILE_CONTENT_GUARD_BYTES,
   PER_FILE_DIFF_GUARD_BYTES,
   readCaptureRepository,
@@ -519,6 +520,77 @@ describe("workspace-capture — pre-service skip gates", () => {
         session: throwingSession,
       }),
     ).resolves.toBeUndefined();
+  });
+});
+
+describe("workspace-capture — fresh provider read handle", () => {
+  test("resumes the same instance with the current exact provider state", async () => {
+    const state = { sandboxId: "sb-exact" };
+    const original = { state } as unknown as ChannelASession;
+    const reopened = { state: { sandboxId: "sb-exact" } } as unknown as ChannelASession;
+    let receivedState: unknown;
+    const selected = await openFreshWorkspaceCaptureSession({
+      backendId: "modal",
+      client: {
+        resume: async (value: unknown) => {
+          receivedState = value;
+          return reopened;
+        },
+      },
+      session: original,
+      expectedInstanceId: "sb-exact",
+    });
+    expect(receivedState).toEqual({ sandboxId: "sb-exact", ownsSandbox: false });
+    expect(receivedState).not.toBe(state);
+    expect(selected).toBe(reopened);
+  });
+
+  test("fails closed when resume returns a different provider instance", async () => {
+    const original = {
+      state: { sandboxId: "sb-expected" },
+    } as unknown as ChannelASession;
+    await expect(
+      openFreshWorkspaceCaptureSession({
+        backendId: "modal",
+        client: {
+          resume: async () => ({ state: { sandboxId: "sb-rival" } }),
+        },
+        session: original,
+        expectedInstanceId: "sb-expected",
+      }),
+    ).rejects.toThrow(
+      "workspace capture reopened provider instance sb-rival, expected sb-expected",
+    );
+  });
+
+  test("uses the existing handle when its provider cannot resume", async () => {
+    const original = {} as ChannelASession;
+    await expect(
+      openFreshWorkspaceCaptureSession({
+        backendId: "modal",
+        client: {},
+        session: original,
+        expectedInstanceId: "selfhosted-agent",
+      }),
+    ).resolves.toBe(original);
+  });
+
+  test("never invokes a non-Modal provider's potentially mutating resume contract", async () => {
+    const original = { state: { containerId: "container-exact" } } as unknown as ChannelASession;
+    let resumeCalled = false;
+    const selected = await openFreshWorkspaceCaptureSession({
+      backendId: "docker",
+      client: {
+        resume: async () => {
+          resumeCalled = true;
+          return { state: { containerId: "container-replacement" } };
+        },
+      },
+      session: original,
+      expectedInstanceId: "container-exact",
+    });
+    expect(selected).toBe(original);
+    expect(resumeCalled).toBe(false);
   });
 });
 

@@ -301,7 +301,7 @@ import {
   prepareRecordingForSettlement,
   type ActiveRecording,
 } from "./recording";
-import { captureWorkspaceRevision } from "./workspace-capture";
+import { captureWorkspaceRevision, openFreshWorkspaceCaptureSession } from "./workspace-capture";
 import type { ChannelASession } from "@opengeni/runtime/sandbox";
 import { createObjectStorage, type ObjectStorage } from "@opengeni/storage";
 import {
@@ -2538,6 +2538,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // the atomic DB throttle discard the fresher one). Interval throttling
     // itself lives in maybePersistWarmWorkspaceSnapshot / persistWarmSnapshot.
     let snapshotInFlight: Promise<void> | null = null;
+    // Turn-end capture needs the lease heartbeat to keep its holder alive, but
+    // must prevent that same timer from starting another periodic snapshot
+    // while it reads. This gate separates those two responsibilities.
+    let turnEndCaptureInProgress = false;
     // Computer-use-only recording. Ordinary shell/filesystem turns leave this
     // null; the first actual computer action starts it after :0 is ready.
     let activeRecording: ActiveRecording | null = null;
@@ -2781,7 +2785,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // single-flight; throttling lives in the helper.
         const snapshotSession = setupBoxSession;
         const snapshotTurnId = turnId;
-        if (snapshotSession && snapshotTurnId && !snapshotInFlight) {
+        if (snapshotSession && snapshotTurnId && !snapshotInFlight && !turnEndCaptureInProgress) {
           snapshotInFlight = maybePersistWarmWorkspaceSnapshot(
             { db, settings },
             {
@@ -8077,7 +8081,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // gives capture the full live-box margin instead of racing the teardown
         // tail, which was dropping 100% of captures on real Modal desktop boxes
         // ("request cancelled due to container exiting", 0 rows). External module:
-        // self-capped at 60s, best-effort (never throws past its boundary),
+        // self-capped at 120s, best-effort (never throws past its boundary),
         // epoch-fenced, and it NEVER closes the box. The emitted
         // workspace.revision.captured event is ANNOUNCE-ONLY (metadata, never
         // content).
@@ -8097,13 +8101,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           setupBoxSession &&
           sandboxGroupId
         ) {
-          // Stop new heartbeat snapshot/meter ticks so a mid-turn snapshot cannot
-          // start concurrently with capture, then drain any in-flight snapshot
-          // (bounded) — capture and the warm snapshot both exec on the box, so
-          // sequence them, exactly as the turn-end snapshot placement did.
-          if (leaseHeartbeatTimer) {
-            stopLeaseHeartbeat();
-          }
+          // Block new periodic snapshots, then drain any one already in flight.
+          // Keep the lease heartbeat itself running: capture may legitimately
+          // exceed the 90s holder TTL, and the reaper must remain unable to drain
+          // the exact box while this holder still reads it.
+          turnEndCaptureInProgress = true;
           if (snapshotInFlight) {
             await waitForWarmSnapshot(
               snapshotInFlight,
@@ -8111,6 +8113,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               finalizerSignal,
             );
           }
+          const captureEstablished = resolvedSandbox.established;
           await captureWorkspaceRevision({
             db,
             objectStorage,
@@ -8119,6 +8122,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, events);
             },
             session: setupBoxSession as ChannelASession,
+            openReadSession: async () =>
+              await openFreshWorkspaceCaptureSession({
+                backendId: captureEstablished.backendId,
+                client: captureEstablished.client,
+                session: setupBoxSession as ChannelASession,
+                expectedInstanceId: captureEstablished.instanceId,
+              }),
             leaseEpoch: resolvedSandbox.leaseEpoch,
             sandboxGroupId,
             accountId: input.accountId,
