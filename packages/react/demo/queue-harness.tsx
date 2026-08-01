@@ -70,6 +70,7 @@ function makeTurn(index: number): SessionTurn {
     tools: [],
     model: "gpt-5.3-codex",
     reasoningEffort: "high",
+    latencyMode: "standard",
     sandboxBackend: "modal",
     sandboxOs: null,
     metadata: {},

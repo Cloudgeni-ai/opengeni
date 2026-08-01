@@ -16,6 +16,7 @@ import {
   ServiceTurnInitiator,
   ServiceTurnInitiatorContext,
   evaluateWorkspaceModelPolicy,
+  latencyModeForMetadata,
   reasoningEffortForMetadata,
   stableJson,
   type AccessGrant,
@@ -518,6 +519,8 @@ export async function createAndStartSession(input: {
   clientEventId?: string;
   model: string;
   reasoningEffort: Settings["openaiReasoningEffort"];
+  /** Session default Fast/standard; mirrored into metadata when set. */
+  latencyMode?: "standard" | "priority" | "fast";
   turnExecutionPolicy: TurnExecutionPolicyV1;
   sandboxBackend: Settings["sandboxBackend"];
   metadata: Record<string, unknown>;
@@ -587,6 +590,7 @@ export async function createAndStartSession(input: {
     ...input.metadata,
     model: input.model,
     reasoningEffort: input.reasoningEffort,
+    ...(input.latencyMode !== undefined ? { latencyMode: input.latencyMode } : {}),
   };
   // Keyed creation is intentionally handled only by the database admission
   // transaction below. Its workspace/key lock replays either the successful
@@ -932,6 +936,13 @@ export function reasoningEffortForSession(
   return reasoningEffortForMetadata(metadata, fallback);
 }
 
+export function latencyModeForSession(
+  metadata: Record<string, unknown>,
+  fallback: "standard" | "priority" | "fast" = "standard",
+): "standard" | "priority" | "fast" {
+  return latencyModeForMetadata(metadata, fallback);
+}
+
 /**
  * Appends a `user.message` to an existing session and enqueues the resulting
  * turn, merging requested resources/tools into the session and waking the
@@ -952,6 +963,7 @@ export async function postUserMessageTurn(input: {
   resources: ResourceRef[];
   model?: string | null;
   reasoningEffort?: Settings["openaiReasoningEffort"] | null;
+  latencyMode?: "standard" | "priority" | "fast" | null;
   clientEventId?: string;
   mcpCredentialUpdates?: UpdateSessionMcpServerCredentialsInput[];
   delivery?: "send" | "steer";
@@ -1005,6 +1017,7 @@ export async function postUserMessageTurn(input: {
           resources: input.resources,
           model: requestedModel,
           reasoningEffort: requestedReasoningEffort,
+          latencyMode: input.latencyMode ?? null,
           reasoningEffortFallback: input.reasoningEffortFallback ?? settings.openaiReasoningEffort,
           turnExecutionPolicy: input.turnExecutionPolicy,
           source: input.origin === "operator" ? "api" : "user",
@@ -1260,12 +1273,15 @@ export async function createSessionForRequest(
   // default-model session would otherwise be born blocked).
   await assertWorkspaceModelPolicyAllows(db, settings, workspaceId, model);
   const reasoningEffort = payload.reasoningEffort ?? settings.openaiReasoningEffort;
+  const latencyMode = payload.latencyMode ?? "standard";
   const turnExecutionPolicy = resolveTurnExecutionPolicyV1(settings, {
     modelId: model,
     requestedModelId: payload.model ?? null,
     modelSource: payload.model === undefined ? "deployment" : "explicit",
     reasoningEffort,
     reasoningSource: payload.reasoningEffort === undefined ? "deployment" : "explicit",
+    latencyMode,
+    latencyModeSource: payload.latencyMode === undefined ? "deployment" : "explicit",
   });
   // Parent linkage was resolved above, before context validation. A child with
   // no explicit permission override inherits the creating session's effective
@@ -1587,6 +1603,7 @@ export async function createSessionForRequest(
       ...(payload.clientEventId ? { clientEventId: payload.clientEventId } : {}),
       model,
       reasoningEffort,
+      latencyMode,
       turnExecutionPolicy,
       // A shared spawn inherits the box's backend; a caller-supplied
       // sandboxBackend on a shared spawn is ignored (it is the same box). A
@@ -1684,6 +1701,7 @@ export async function acceptSessionUserMessage(
     resources?: ResourceRef[];
     model?: string | null;
     reasoningEffort?: ReasoningEffort | null;
+    latencyMode?: "standard" | "priority" | "fast" | null;
     clientEventId?: string;
     mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[];
     delivery?: "send" | "steer";
@@ -1721,12 +1739,16 @@ export async function acceptSessionUserMessage(
     settings.openaiReasoningEffort,
   );
   const effectiveReasoningEffort = input.reasoningEffort ?? sessionReasoningEffort;
+  const sessionLatencyMode = latencyModeForSession(existingSession.metadata, "standard");
+  const effectiveLatencyMode = input.latencyMode ?? sessionLatencyMode;
   const turnExecutionPolicy = resolveTurnExecutionPolicyV1(settings, {
     modelId: effectiveModel,
     requestedModelId: input.model ?? null,
     modelSource: input.model == null ? "session" : "explicit",
     reasoningEffort: effectiveReasoningEffort,
     reasoningSource: input.reasoningEffort == null ? "session" : "explicit",
+    latencyMode: effectiveLatencyMode,
+    latencyModeSource: input.latencyMode == null ? "session" : "explicit",
   });
   const requestedResources = normalizeResources(input.resources ?? []);
   await requireLimit(deps, {
@@ -1764,6 +1786,7 @@ export async function acceptSessionUserMessage(
     resources: requestedResources,
     model: input.model ?? null,
     reasoningEffort: input.reasoningEffort ?? null,
+    latencyMode: input.latencyMode ?? null,
     reasoningEffortFallback: sessionReasoningEffort,
     turnExecutionPolicy,
     mcpCredentialUpdates,

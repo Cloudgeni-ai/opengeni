@@ -3,6 +3,7 @@ import {
   CAPABILITY_DESCRIPTORS,
   Entitlements,
   EntitlementsMode,
+  LatencyMode,
   MAX_NESTED_AGENT_DEPTH,
   ProductAccessMode,
   ReasoningEffort,
@@ -11,6 +12,7 @@ import {
   StaticUsageLimits,
   TurnExecutionPolicyV1,
   UsageLimitsMode,
+  type TurnExecutionLatencyModeSourceV1,
   type TurnExecutionModelSourceV1,
   type TurnExecutionReasoningSourceV1,
 } from "@opengeni/contracts";
@@ -1375,88 +1377,91 @@ export interface ConfiguredModel {
   hostedWebSearch: boolean;
 }
 
-export const defaultModelPricing: Record<string, ModelPricing> = {
+/**
+ * Built-in OpenGeni credit pricing schedules.
+ *
+ * Rates are provider list prices in USD micros per 1M tokens. Debit applies
+ * `marginBps` (2_500 = +25%) on top. Long-context tiers follow OpenAI's
+ * ">272K input tokens" rule (threshold exclusive of 272_000).
+ *
+ * GPT-5.4 and older families are intentionally omitted — they are no longer
+ * offered. Codex / connected-subscription turns use `metering: external` and
+ * never consult this map.
+ *
+ * When adding or changing a billed model, run `bun run check:model-pricing`
+ * (see docs/model-providers.md § Price audit). That compares this map to
+ * llm-prices.com as a ground-truth canary; it does not generate this table.
+ */
+export const defaultModelPricing: Record<string, ModelPricingScheduleV1> = {
   "gpt-5.6-sol": {
-    inputMicrosPerMillionTokens: 5_000_000,
-    cachedInputMicrosPerMillionTokens: 500_000,
-    outputMicrosPerMillionTokens: 30_000_000,
-    marginBps: 2_500,
+    default: {
+      inputMicrosPerMillionTokens: 5_000_000,
+      cachedInputMicrosPerMillionTokens: 500_000,
+      outputMicrosPerMillionTokens: 30_000_000,
+      marginBps: 2_500,
+    },
+    inputTokenTiers: [
+      {
+        // OpenAI: prompts with >272K input tokens use the long-context rate.
+        minimumInputTokens: 272_001,
+        pricing: {
+          inputMicrosPerMillionTokens: 10_000_000,
+          cachedInputMicrosPerMillionTokens: 1_000_000,
+          outputMicrosPerMillionTokens: 45_000_000,
+          marginBps: 2_500,
+        },
+      },
+    ],
   },
   "gpt-5.6-terra": {
-    inputMicrosPerMillionTokens: 2_500_000,
-    cachedInputMicrosPerMillionTokens: 250_000,
-    outputMicrosPerMillionTokens: 15_000_000,
-    marginBps: 2_500,
+    default: {
+      inputMicrosPerMillionTokens: 2_000_000,
+      cachedInputMicrosPerMillionTokens: 200_000,
+      outputMicrosPerMillionTokens: 12_000_000,
+      marginBps: 2_500,
+    },
+    inputTokenTiers: [
+      {
+        minimumInputTokens: 272_001,
+        pricing: {
+          inputMicrosPerMillionTokens: 4_000_000,
+          cachedInputMicrosPerMillionTokens: 400_000,
+          outputMicrosPerMillionTokens: 18_000_000,
+          marginBps: 2_500,
+        },
+      },
+    ],
   },
   "gpt-5.6-luna": {
-    inputMicrosPerMillionTokens: 1_000_000,
-    cachedInputMicrosPerMillionTokens: 100_000,
-    outputMicrosPerMillionTokens: 6_000_000,
-    marginBps: 2_500,
-  },
-  "gpt-5.4": {
-    inputMicrosPerMillionTokens: 2_500_000,
-    cachedInputMicrosPerMillionTokens: 250_000,
-    outputMicrosPerMillionTokens: 15_000_000,
-    marginBps: 2_500,
-  },
-  "gpt-5.4-mini": {
-    inputMicrosPerMillionTokens: 750_000,
-    cachedInputMicrosPerMillionTokens: 75_000,
-    outputMicrosPerMillionTokens: 4_500_000,
-    marginBps: 2_500,
-  },
-  "gpt-5.2": {
-    inputMicrosPerMillionTokens: 1_750_000,
-    cachedInputMicrosPerMillionTokens: 175_000,
-    outputMicrosPerMillionTokens: 14_000_000,
-    marginBps: 2_500,
-  },
-  "gpt-5.2-chat-latest": {
-    inputMicrosPerMillionTokens: 1_750_000,
-    cachedInputMicrosPerMillionTokens: 175_000,
-    outputMicrosPerMillionTokens: 14_000_000,
-    marginBps: 2_500,
-  },
-  "gpt-5.2-codex": {
-    inputMicrosPerMillionTokens: 1_750_000,
-    cachedInputMicrosPerMillionTokens: 175_000,
-    outputMicrosPerMillionTokens: 14_000_000,
-    marginBps: 2_500,
-  },
-  "gpt-5.1": {
-    inputMicrosPerMillionTokens: 1_250_000,
-    cachedInputMicrosPerMillionTokens: 125_000,
-    outputMicrosPerMillionTokens: 10_000_000,
-    marginBps: 2_500,
-  },
-  "gpt-5": {
-    inputMicrosPerMillionTokens: 1_250_000,
-    cachedInputMicrosPerMillionTokens: 125_000,
-    outputMicrosPerMillionTokens: 10_000_000,
-    marginBps: 2_500,
-  },
-  "gpt-5-mini": {
-    inputMicrosPerMillionTokens: 250_000,
-    cachedInputMicrosPerMillionTokens: 25_000,
-    outputMicrosPerMillionTokens: 2_000_000,
-    marginBps: 2_500,
-  },
-  "gpt-5-nano": {
-    inputMicrosPerMillionTokens: 50_000,
-    cachedInputMicrosPerMillionTokens: 5_000,
-    outputMicrosPerMillionTokens: 400_000,
-    marginBps: 2_500,
+    default: {
+      inputMicrosPerMillionTokens: 200_000,
+      cachedInputMicrosPerMillionTokens: 20_000,
+      outputMicrosPerMillionTokens: 1_200_000,
+      marginBps: 2_500,
+    },
+    inputTokenTiers: [
+      {
+        minimumInputTokens: 272_001,
+        pricing: {
+          inputMicrosPerMillionTokens: 400_000,
+          cachedInputMicrosPerMillionTokens: 40_000,
+          outputMicrosPerMillionTokens: 1_800_000,
+          marginBps: 2_500,
+        },
+      },
+    ],
   },
   // Fireworks AI / GLM 5.2 — the first shipped non-OpenAI registry model. A
   // built-in default pricing entry makes managed billing work out of the box
   // for hosts that expose this model via OPENGENI_MODEL_PROVIDERS_JSON without
   // also setting OPENGENI_MODEL_PRICING_JSON.
   "accounts/fireworks/models/glm-5p2": {
-    inputMicrosPerMillionTokens: 1_400_000,
-    cachedInputMicrosPerMillionTokens: 260_000,
-    outputMicrosPerMillionTokens: 4_400_000,
-    marginBps: 2_500,
+    default: {
+      inputMicrosPerMillionTokens: 1_400_000,
+      cachedInputMicrosPerMillionTokens: 140_000,
+      outputMicrosPerMillionTokens: 4_400_000,
+      marginBps: 2_500,
+    },
   },
 };
 
@@ -2137,6 +2142,115 @@ function legacyModelCapabilities(
   });
 }
 
+/** OpenAI GPT-5.6 Fast mode is 2× Standard list rates (service_tier fast/priority). */
+const GPT56_FAST_BILLING_MULTIPLIER_BPS = 20_000;
+
+/**
+ * Product display label for catalog/picker UI.
+ * Same string for OpenAI and Codex copies of a slug (`gpt-5.6-luna` and
+ * `codex/gpt-5.6-luna` → `GPT-5.6 Luna`). Non-gpt ids pass through unchanged.
+ */
+export function productLabelForModelId(modelId: string): string {
+  const slug = modelId.startsWith(CODEX_MODEL_ID_PREFIX)
+    ? modelId.slice(CODEX_MODEL_ID_PREFIX.length)
+    : modelId;
+  const match = /^(gpt-\d+(?:\.\d+)?)(?:-(.+))?$/i.exec(slug);
+  if (!match) {
+    return slug;
+  }
+  const family = match[1]!.replace(/^gpt/i, "GPT");
+  const rest = match[2];
+  if (!rest) {
+    return family;
+  }
+  const suffix = rest
+    .split("-")
+    .filter((part) => part.length > 0)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+    .join(" ");
+  return suffix.length > 0 ? `${family} ${suffix}` : family;
+}
+
+function builtinLatencyModesForModel(modelId: string): Array<{
+  id: z.infer<typeof ModelLatencyModeV1>;
+  upstream: "supported" | "unsupported" | "unknown";
+  runnable: boolean;
+  billingMultiplierBps?: number;
+}> {
+  if (
+    modelId === "gpt-5.6-sol" ||
+    modelId === "gpt-5.6-terra" ||
+    modelId === "gpt-5.6-luna" ||
+    modelId.startsWith("codex/gpt-5.6-")
+  ) {
+    return [
+      { id: "standard", upstream: "supported", runnable: true },
+      {
+        id: "fast",
+        upstream: "supported",
+        runnable: true,
+        billingMultiplierBps: GPT56_FAST_BILLING_MULTIPLIER_BPS,
+      },
+    ];
+  }
+  return [{ id: "standard", upstream: "unknown", runnable: true }];
+}
+
+/**
+ * Map OpenGeni latency mode to the provider `service_tier` wire value.
+ * Azure and Codex ChatGPT accept `priority`; OpenAI API accepts `fast` (alias of priority).
+ * Standard omits the field.
+ */
+export function serviceTierForLatencyMode(
+  providerId: string,
+  latencyMode: LatencyMode,
+): "fast" | "priority" | undefined {
+  if (latencyMode === "standard") {
+    return undefined;
+  }
+  if (providerId === "azure" || providerId === CODEX_PROVIDER_ID) {
+    return "priority";
+  }
+  return "fast";
+}
+
+/** True when the response tier fulfills a non-standard Fast/priority request. */
+export function responseSatisfiesLatencyMode(
+  requested: LatencyMode,
+  responseServiceTier: string | null | undefined,
+): boolean {
+  if (requested === "standard") {
+    return true;
+  }
+  return responseServiceTier === "priority" || responseServiceTier === "fast";
+}
+
+export function runnableLatencyModesForModel(settings: Settings, modelId: string): LatencyMode[] {
+  const resolved = resolveModelProvider(
+    settingsForTurnExecutionPolicy(settings, modelId),
+    canonicalizeConfiguredModelId(settings, modelId),
+  );
+  if (!resolved) {
+    return ["standard"];
+  }
+  return resolved.model.capabilities.latencyModes
+    .filter((mode) => mode.runnable)
+    .map((mode) => LatencyMode.parse(mode.id));
+}
+
+function assertLatencyModeRunnable(
+  settings: Settings,
+  modelId: string,
+  latencyMode: LatencyMode,
+): void {
+  const runnable = runnableLatencyModesForModel(settings, modelId);
+  if (!runnable.includes(latencyMode)) {
+    throw new Error(
+      `latency mode ${latencyMode} is not runnable for model ${modelId} (allowed: ${runnable.join(", ")})`,
+    );
+  }
+}
+
 function registryCredentialSource(provider: RegistryProvider): CredentialSourceV1 {
   return provider.kind === "codex-subscription"
     ? { kind: "connected_subscription", provider: "codex" }
@@ -2310,21 +2424,31 @@ export function withCodexCatalogProvider(settings: Settings): Settings {
     label: "Codex (ChatGPT subscription)",
     api: "responses",
     baseUrl: CODEX_PROVIDER_BASE_URL,
-    models: CODEX_FALLBACK_MODEL_SLUGS.map((slug) => ({
-      id: `${CODEX_MODEL_ID_PREFIX}${slug}`,
-      upstreamModelId: slug,
-      label: slug,
-      reasoningEffort: true,
-      // The ChatGPT/Codex Responses backend accepts the native web_search
-      // hosted tool (unlike hosted apply_patch/computer transports). Declaring
-      // this here makes provider resolution truthful; the worker still applies
-      // the durable session/turn policy gate before attaching it.
-      hostedWebSearch: true,
-      contextWindowTokens: CODEX_MODEL_CONTEXT_WINDOW_TOKENS,
-      effectiveContextWindowTokens: CODEX_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
-      autoCompactTokenLimit: CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
-      toolOutputTruncationTokens: CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
-    })),
+    models: CODEX_FALLBACK_MODEL_SLUGS.map((slug) => {
+      const capabilities = {
+        ...legacyModelCapabilities(settings, {
+          reasoningEffort: true,
+          hostedWebSearch: true,
+        }),
+        latencyModes: builtinLatencyModesForModel(`${CODEX_MODEL_ID_PREFIX}${slug}`),
+      };
+      return {
+        id: `${CODEX_MODEL_ID_PREFIX}${slug}`,
+        upstreamModelId: slug,
+        label: productLabelForModelId(slug),
+        reasoningEffort: true,
+        // The ChatGPT/Codex Responses backend accepts the native web_search
+        // hosted tool (unlike hosted apply_patch/computer transports). Declaring
+        // this here makes provider resolution truthful; the worker still applies
+        // the durable session/turn policy gate before attaching it.
+        hostedWebSearch: true,
+        capabilities,
+        contextWindowTokens: CODEX_MODEL_CONTEXT_WINDOW_TOKENS,
+        effectiveContextWindowTokens: CODEX_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
+        autoCompactTokenLimit: CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
+        toolOutputTruncationTokens: CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
+      };
+    }),
   };
   return { ...settings, modelProvidersJson: JSON.stringify([...providers, provider]) };
 }
@@ -2471,14 +2595,17 @@ export function configuredModels(settings: Settings): ConfiguredModel[] {
   ])
     .filter((id) => !isRegistryNamespaced(id))
     .map((id) => {
-      const capabilities = legacyModelCapabilities(settings, {
-        reasoningEffort: true,
-        hostedWebSearch: settings.webSearchEnabled,
-      });
+      const capabilities = {
+        ...legacyModelCapabilities(settings, {
+          reasoningEffort: true,
+          hostedWebSearch: settings.webSearchEnabled,
+        }),
+        latencyModes: builtinLatencyModesForModel(id),
+      };
       return finalizeConfiguredModel(settings, builtinProvider, {
         id,
         aliases: [],
-        label: id,
+        label: productLabelForModelId(id),
         providerId: builtinId,
         providerLabel: builtinLabel,
         api: "responses" as const,
@@ -2512,7 +2639,7 @@ export function configuredModels(settings: Settings): ConfiguredModel[] {
         finalizeConfiguredModel(settings, resolvedProvider, {
           id: model.id,
           aliases: [...(model.aliases ?? [])],
-          label: model.label ?? model.id,
+          label: model.label ?? productLabelForModelId(model.id),
           providerId: provider.id,
           providerLabel,
           api: provider.api,
@@ -2599,6 +2726,8 @@ export type ResolveTurnExecutionPolicyV1Input = {
   modelSource: TurnExecutionModelSourceV1;
   reasoningEffort: Settings["openaiReasoningEffort"];
   reasoningSource: TurnExecutionReasoningSourceV1;
+  latencyMode?: LatencyMode;
+  latencyModeSource?: TurnExecutionLatencyModeSourceV1;
 };
 
 function settingsForTurnExecutionPolicy(settings: Settings, modelId: string): Settings {
@@ -2628,6 +2757,9 @@ export function resolveTurnExecutionPolicyV1(
   ) {
     throw new Error("Turn execution policy requested model does not canonicalize to its product");
   }
+  const latencyMode = LatencyMode.parse(input.latencyMode ?? "standard");
+  const latencyModeSource = input.latencyModeSource ?? "deployment";
+  assertLatencyModeRunnable(catalogSettings, productModelId, latencyMode);
   return TurnExecutionPolicyV1.parse({
     schemaVersion: 1,
     productModelId,
@@ -2635,6 +2767,8 @@ export function resolveTurnExecutionPolicyV1(
     modelSource: input.modelSource,
     reasoningEffort: input.reasoningEffort,
     reasoningSource: input.reasoningSource,
+    latencyMode,
+    latencyModeSource,
     providerId: resolved.provider.id,
     upstreamModelId: resolved.model.upstreamModelId,
     wireApi: resolved.model.api,
@@ -2655,6 +2789,7 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
   expected: {
     modelId: string;
     reasoningEffort: Settings["openaiReasoningEffort"];
+    latencyMode?: LatencyMode;
   },
 ): {
   policy: TurnExecutionPolicyV1;
@@ -2664,12 +2799,17 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
   const parsed = TurnExecutionPolicyV1.parse(policy);
   const catalogSettings = settingsForTurnExecutionPolicy(settings, parsed.productModelId);
   const canonicalExpectedModel = canonicalizeConfiguredModelId(catalogSettings, expected.modelId);
+  const expectedLatencyMode = expected.latencyMode ?? parsed.latencyMode;
   if (
     parsed.productModelId !== canonicalExpectedModel ||
-    parsed.reasoningEffort !== expected.reasoningEffort
+    parsed.reasoningEffort !== expected.reasoningEffort ||
+    parsed.latencyMode !== expectedLatencyMode
   ) {
-    throw new Error("Turn execution policy does not match the accepted turn model/reasoning");
+    throw new Error(
+      "Turn execution policy does not match the accepted turn model/reasoning/latency",
+    );
   }
+  assertLatencyModeRunnable(catalogSettings, parsed.productModelId, parsed.latencyMode);
   if (
     parsed.requestedModelId !== null &&
     canonicalizeConfiguredModelId(catalogSettings, parsed.requestedModelId) !==
@@ -2705,7 +2845,10 @@ export function configuredModelPricingSchedules(
   settings: Settings,
 ): Record<string, ModelPricingScheduleV1> {
   const defaults = Object.fromEntries(
-    Object.entries(defaultModelPricing).map(([model, pricing]) => [model, { default: pricing }]),
+    Object.entries(defaultModelPricing).map(([model, pricing]) => [
+      model,
+      normalizeModelPricingSchedule(pricing),
+    ]),
   );
   const registry: Record<string, ModelPricingScheduleV1> = {};
   for (const provider of parseModelProvidersJson(settings.modelProvidersJson)) {
@@ -2832,6 +2975,7 @@ export function calculateModelUsageCostMicros(
   settings: Settings,
   model: string,
   usage: ModelUsageInput,
+  options?: { latencyMode?: LatencyMode },
 ): number {
   const schedule = configuredModelPricingSchedules(settings)[model];
   if (!schedule) {
@@ -2853,6 +2997,20 @@ export function calculateModelUsageCostMicros(
   for (const [pricing, rawCost] of rawCostByPricing) {
     const marginBps = pricing.marginBps ?? 0;
     total += Math.ceil((rawCost * (10_000 + marginBps)) / 10_000);
+  }
+  const latencyMode = options?.latencyMode ?? "standard";
+  if (latencyMode !== "standard") {
+    const catalogSettings = settingsForTurnExecutionPolicy(settings, model);
+    const resolved = resolveModelProvider(
+      catalogSettings,
+      canonicalizeConfiguredModelId(catalogSettings, model),
+    );
+    const multiplierBps = resolved?.model.capabilities.latencyModes.find(
+      (mode) => mode.id === latencyMode && mode.runnable,
+    )?.billingMultiplierBps;
+    if (multiplierBps && multiplierBps > 0) {
+      total = Math.ceil((total * multiplierBps) / 10_000);
+    }
   }
   return total;
 }

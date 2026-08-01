@@ -137,6 +137,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
           toolsProvided: remote.toolsProvided,
           model: remote.model,
           reasoningEffort: remote.reasoningEffort,
+          latencyMode: remote.latencyMode ?? "standard",
           options: remote.options,
         },
         files,
@@ -495,7 +496,11 @@ function normalizeLegacyNewSessionDraft(remote: NewSessionDraft): NewSessionDraf
   // old request contract made that array the user's complete selection, so an
   // absent marker must remain explicit (including an empty array) on a new
   // client rather than inheriting current workspace defaults.
-  return Object.hasOwn(remote, "toolsProvided") ? remote : { ...remote, toolsProvided: true };
+  return {
+    ...remote,
+    toolsProvided: Object.hasOwn(remote, "toolsProvided") ? remote.toolsProvided : true,
+    latencyMode: remote.latencyMode ?? "standard",
+  };
 }
 
 function draftSignature(value: NewSessionDraftEditable): string {

@@ -2021,6 +2021,7 @@ function registerWorkspaceOrchestrationTools(
           rigId: z4.string().uuid().optional(),
           model: z4.string().min(1).optional(),
           reasoningEffort: z4.string().optional(),
+          latencyMode: z4.enum(["standard", "priority", "fast"]).optional(),
           sandboxBackend: z4.string().optional(),
           // Create-time machine targeting: an enrolled sandbox id (from
           // sandboxes_list) to run the spawned session on. Seeds the active-sandbox

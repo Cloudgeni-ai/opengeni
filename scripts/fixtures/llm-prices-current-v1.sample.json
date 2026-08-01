@@ -1,0 +1,53 @@
+{
+  "updated_at": "2026-07-30",
+  "prices": [
+    {
+      "id": "gpt-5.6-sol",
+      "vendor": "openai",
+      "name": "GPT-5.6 Sol",
+      "input": 5,
+      "output": 30,
+      "input_cached": 0.5
+    },
+    {
+      "id": "gpt-5.6-sol-272k",
+      "vendor": "openai",
+      "name": "GPT-5.6 Sol (long context)",
+      "input": 10,
+      "output": 45,
+      "input_cached": 1
+    },
+    {
+      "id": "gpt-5.6-terra",
+      "vendor": "openai",
+      "name": "GPT-5.6 Terra",
+      "input": 2,
+      "output": 12,
+      "input_cached": 0.2
+    },
+    {
+      "id": "gpt-5.6-terra-272k",
+      "vendor": "openai",
+      "name": "GPT-5.6 Terra (long context)",
+      "input": 4,
+      "output": 18,
+      "input_cached": 0.4
+    },
+    {
+      "id": "gpt-5.6-luna",
+      "vendor": "openai",
+      "name": "GPT-5.6 Luna",
+      "input": 0.2,
+      "output": 1.2,
+      "input_cached": 0.02
+    },
+    {
+      "id": "gpt-5.6-luna-272k",
+      "vendor": "openai",
+      "name": "GPT-5.6 Luna (long context)",
+      "input": 0.4,
+      "output": 1.8,
+      "input_cached": 0.04
+    }
+  ]
+}

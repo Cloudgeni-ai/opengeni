@@ -63,6 +63,7 @@ import {
   mcpToolErrorOutput,
   modelCallUsageTelemetry,
   normalizeModelCallUsage,
+  modelResponseServiceTierFromSdkEvent,
   modelResponseUsageFromSdkEvent,
   normalizeSdkEvent,
   normalizeToolOutputForEvent,
@@ -372,6 +373,7 @@ describe("runtime event normalization", () => {
         type: "response.completed",
         response: {
           id: "resp-2",
+          service_tier: "priority",
           usage: {
             input_tokens: 20,
             output_tokens: 8,
@@ -386,6 +388,7 @@ describe("runtime event normalization", () => {
 
     expect(usage).toEqual({
       responseId: "resp-2",
+      serviceTier: "priority",
       usage: {
         inputTokens: 20,
         outputTokens: 8,
@@ -393,6 +396,10 @@ describe("runtime event normalization", () => {
         inputTokensDetails: { cached_tokens: 4 },
         outputTokensDetails: { reasoning_tokens: 6 },
       },
+    });
+    expect(modelResponseServiceTierFromSdkEvent(event)).toEqual({
+      source: "provider",
+      serviceTier: "priority",
     });
     expect(normalizeSdkEvent(event)).toEqual([]);
   });

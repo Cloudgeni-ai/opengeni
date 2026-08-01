@@ -11,8 +11,24 @@ export function localDateTimeValue(date: Date): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
+/** Product label for a model id (`gpt-5.6-luna` / `codex/gpt-5.6-luna` → `GPT-5.6 Luna`). */
 export function displayModel(value: string): string {
-  return value.startsWith("gpt-") ? value.replace("gpt-", "").toUpperCase() : value;
+  const slug = value.startsWith("codex/") ? value.slice("codex/".length) : value;
+  const match = /^(gpt-\d+(?:\.\d+)?)(?:-(.+))?$/i.exec(slug);
+  if (!match) {
+    return value;
+  }
+  const family = match[1]!.replace(/^gpt/i, "GPT");
+  const rest = match[2];
+  if (!rest) {
+    return family;
+  }
+  const suffix = rest
+    .split("-")
+    .filter((part) => part.length > 0)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+    .join(" ");
+  return suffix.length > 0 ? `${family} ${suffix}` : family;
 }
 
 export function formatMoneyMicros(amountMicros: number, currency: string): string {

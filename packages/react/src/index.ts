@@ -401,7 +401,6 @@ export {
   coerceReasoningEffortForModel,
   defaultEffortForModel,
   effortOptionsForModel,
-  ensureSelectedModelRow,
   findPickerRow,
   groupPickerRowsByBillingClass,
   labelLatencyMode,

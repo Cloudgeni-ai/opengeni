@@ -23,8 +23,8 @@ const BILLING_CLASS_ORDER: PickerBillingClass[] = [
 ];
 
 const BILLING_CLASS_LABELS: Record<PickerBillingClass, string> = {
-  opengeni_credits: "OpenGeni credits",
-  codex_subscription: "Codex subscription",
+  opengeni_credits: "OpenGeni",
+  codex_subscription: "Codex",
   byok: "Bring your own key",
 };
 
@@ -183,48 +183,6 @@ export function sortPickerRows(rows: PickerModelRow[]): PickerModelRow[] {
 
 export function findPickerRow(rows: PickerModelRow[], modelId: string): PickerModelRow | null {
   return rows.find((row) => row.id === modelId) ?? null;
-}
-
-export function ensureSelectedModelRow(
-  rows: PickerModelRow[],
-  selectedId: string,
-  fallbackLabel?: string,
-): PickerModelRow[] {
-  if (rows.some((row) => row.id === selectedId)) {
-    return rows;
-  }
-  return [
-    {
-      id: selectedId,
-      label: fallbackLabel ?? selectedId,
-      billingClass: "opengeni_credits",
-      billingClassLabel: billingClassLabel("opengeni_credits"),
-      selectable: false,
-      unavailableReason: "No longer available",
-      provider: "unknown",
-      providerLabel: "Unavailable",
-      catalog: {
-        id: selectedId,
-        label: fallbackLabel ?? selectedId,
-        provider: "unknown",
-        providerLabel: "Unavailable",
-        api: "responses",
-        credentialReadiness: {
-          status: "not_ready",
-          reason: "prerequisites_missing",
-          basis: "configuration",
-          checkedAt: null,
-        },
-        availability: {
-          status: "unavailable",
-          selectable: false,
-          reason: "unsupported",
-          checkedAt: null,
-        },
-      },
-    },
-    ...rows,
-  ];
 }
 
 export function groupPickerRowsByBillingClass(

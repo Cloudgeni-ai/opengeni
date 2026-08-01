@@ -8,6 +8,7 @@ import { createRoot } from "react-dom/client";
 
 import {
   ModelPicker,
+  ModelPickerMenu,
   SessionToolPicker,
   visibleSessionToolSelection,
   type PickerModelRow,
@@ -19,6 +20,20 @@ beforeAll(() => {
   (
     globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
   ).IS_REACT_ACT_ENVIRONMENT = true;
+  // Instant page swaps in tests (no slide exit delay).
+  window.matchMedia = ((query: string) =>
+    ({
+      matches: query.includes("prefers-reduced-motion"),
+      media: query,
+      onchange: null,
+      addListener() {},
+      removeListener() {},
+      addEventListener() {},
+      removeEventListener() {},
+      dispatchEvent() {
+        return false;
+      },
+    }) as MediaQueryList) as typeof window.matchMedia;
 });
 
 afterAll(() => {
@@ -196,8 +211,10 @@ describe("catalog-backed ModelPicker", () => {
             rows={rows}
             model="gpt-5.6-sol"
             effort="xhigh"
+            latencyMode="standard"
             onModelChange={() => {}}
             onEffortChange={() => {}}
+            onLatencyModeChange={() => {}}
           />,
         ),
       );
@@ -206,8 +223,299 @@ describe("catalog-backed ModelPicker", () => {
       );
       expect(trigger?.textContent).toContain("Sol");
       expect(trigger?.textContent).toContain("Extra high");
+      expect(trigger?.textContent).not.toContain("Fast");
+      expect(container.querySelector('[data-testid="model-picker-fast-icon"]')).toBeNull();
+      expect(
+        trigger?.querySelector('[data-testid="billing-class-icon-opengeni_credits"]'),
+      ).toBeTruthy();
     } finally {
       await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("collapsed Fast uses a lightning icon, not the word Fast", async () => {
+    const rows = projectPickerRows([catalogModel({ id: "gpt-5.6-sol", label: "Sol" })]);
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <ModelPicker
+            rows={rows}
+            model="gpt-5.6-sol"
+            effort="low"
+            latencyMode="fast"
+            onModelChange={() => {}}
+            onEffortChange={() => {}}
+            onLatencyModeChange={() => {}}
+          />,
+        ),
+      );
+      const trigger = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Model and effort"]',
+      );
+      expect(trigger?.textContent).not.toContain("Fast");
+      expect(container.querySelector('[data-testid="model-picker-fast-icon"]')).toBeTruthy();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("opens on Thinking; only that leaf shows a selection check", async () => {
+    const rows = projectPickerRows([
+      catalogModel({ id: "gpt-5.6-sol", label: "Sol" }),
+      catalogModel({
+        id: "codex/gpt-5.6-luna",
+        label: "Luna",
+        provider: "codex-subscription",
+        providerLabel: "Codex",
+        credentialSource: { kind: "connected_subscription", provider: "codex" },
+        billing: { upstreamPayer: "connected_subscription", metering: "external" },
+      }),
+    ]);
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <ModelPickerMenu
+            rows={rows}
+            model="gpt-5.6-sol"
+            effort="low"
+            latencyMode="standard"
+            onModelChange={() => {}}
+            onEffortChange={() => {}}
+            onLatencyModeChange={() => {}}
+          />,
+        ),
+      );
+      expect(container.querySelector('[data-testid="model-picker-reasoning"]')).toBeTruthy();
+      expect(container.textContent).toContain("Thinking");
+      expect(
+        container.querySelector('[data-testid="billing-class-icon-opengeni_credits"]'),
+      ).toBeTruthy();
+      expect(container.querySelector('[data-testid="model-picker-fast"]')).toBeTruthy();
+      expect(container.querySelectorAll('[data-testid="model-picker-effort-check"]')).toHaveLength(
+        1,
+      );
+      // Provider/model pages are not mounted on the leaf page.
+      expect(
+        container.querySelector('[data-testid="model-picker-rail-opengeni_credits"]'),
+      ).toBeNull();
+      expect(container.querySelector('[data-testid="model-picker-choice-gpt-5.6-sol"]')).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("slides providers → models → thinking; Thinking commits the model", async () => {
+    const rows = projectPickerRows([
+      catalogModel({ id: "gpt-5.6-sol", label: "Sol" }),
+      catalogModel({
+        id: "codex/gpt-5.6-luna",
+        label: "Luna",
+        provider: "codex-subscription",
+        providerLabel: "Codex",
+        credentialSource: { kind: "connected_subscription", provider: "codex" },
+        billing: { upstreamPayer: "connected_subscription", metering: "external" },
+      }),
+    ]);
+    let selected = "gpt-5.6-sol";
+    const selection = {
+      effort: "low" as "low" | "high" | "xhigh",
+      latency: "standard" as "standard" | "fast",
+    };
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    function Harness() {
+      const [model, setModel] = useState(selected);
+      const [effortState, setEffortState] = useState(selection.effort);
+      const [latencyMode, setLatencyMode] = useState(selection.latency);
+      return (
+        <ModelPickerMenu
+          rows={rows}
+          model={model}
+          effort={effortState}
+          latencyMode={latencyMode}
+          onModelChange={(id) => {
+            selected = id;
+            setModel(id);
+          }}
+          onEffortChange={(value) => {
+            selection.effort = value as typeof selection.effort;
+            setEffortState(selection.effort);
+          }}
+          onLatencyModeChange={(mode) => {
+            selection.latency = mode === "fast" ? "fast" : "standard";
+            setLatencyMode(selection.latency);
+          }}
+        />
+      );
+    }
+
+    try {
+      await act(async () => root.render(<Harness />));
+      // Back from Thinking → models
+      await act(async () => {
+        container.querySelector<HTMLElement>('[data-testid="model-picker-back"]')!.click();
+      });
+      expect(container.querySelector('[data-testid="model-picker-models"]')).toBeTruthy();
+      expect(selected).toBe("gpt-5.6-sol");
+
+      // Back → providers
+      await act(async () => {
+        container.querySelector<HTMLElement>('[data-testid="model-picker-back"]')!.click();
+      });
+      expect(
+        container.querySelector('[data-testid="model-picker-rail-codex_subscription"]'),
+      ).toBeTruthy();
+
+      await act(async () => {
+        container
+          .querySelector<HTMLElement>('[data-testid="model-picker-rail-codex_subscription"]')!
+          .click();
+      });
+      expect(
+        container.querySelector('[data-testid="model-picker-choice-codex/gpt-5.6-luna"]'),
+      ).toBeTruthy();
+      expect(selected).toBe("gpt-5.6-sol");
+
+      await act(async () => {
+        container
+          .querySelector<HTMLElement>('[data-testid="model-picker-choice-codex/gpt-5.6-luna"]')!
+          .click();
+      });
+      expect(selected).toBe("gpt-5.6-sol");
+      expect(container.querySelector('[data-testid="model-picker-reasoning"]')).toBeTruthy();
+
+      await act(async () => {
+        const thinking = container.querySelector('[data-testid="model-picker-reasoning"]')!;
+        const high = [...thinking.querySelectorAll("button")].find(
+          (button) => button.textContent?.trim() === "High",
+        );
+        high!.click();
+      });
+      expect(selected).toBe("codex/gpt-5.6-luna");
+      expect(selection.effort).toBe("high");
+      expect(container.querySelector('[data-testid="model-picker-fast"]')).toBeTruthy();
+
+      await act(async () => {
+        container.querySelector<HTMLElement>('[data-testid="model-picker-fast"]')!.click();
+      });
+      expect(selection.latency).toBe("fast");
+
+      // Back leaves Thinking without changing the committed selection.
+      await act(async () => {
+        container.querySelector<HTMLElement>('[data-testid="model-picker-back"]')!.click();
+      });
+      expect(container.querySelector('[data-testid="model-picker-reasoning"]')).toBeNull();
+      expect(container.querySelector('[data-testid="model-picker-models"]')).toBeTruthy();
+      expect(selected).toBe("codex/gpt-5.6-luna");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("hides Fast toggle when the focused model cannot run it", async () => {
+    const baseCapabilities = catalogModel({ id: "x", label: "x" }).capabilities!;
+    const rows = projectPickerRows([
+      catalogModel({
+        id: "slow-only",
+        label: "Slow",
+        capabilities: {
+          ...baseCapabilities,
+          latencyModes: [{ id: "standard", upstream: "supported", runnable: true }],
+        },
+      }),
+    ]);
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <ModelPickerMenu
+            rows={rows}
+            model="slow-only"
+            effort="low"
+            latencyMode="standard"
+            onModelChange={() => {}}
+            onEffortChange={() => {}}
+            onLatencyModeChange={() => {}}
+          />,
+        ),
+      );
+      expect(container.querySelector('[data-testid="model-picker-reasoning"]')).toBeTruthy();
+      expect(container.querySelector('[data-testid="model-picker-fast"]')).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("keeps client nav while mounted; remount resets to selected Thinking", async () => {
+    const rows = projectPickerRows([
+      catalogModel({ id: "gpt-5.6-sol", label: "Sol" }),
+      catalogModel({
+        id: "codex/gpt-5.6-luna",
+        label: "Luna",
+        provider: "codex-subscription",
+        providerLabel: "Codex",
+        credentialSource: { kind: "connected_subscription", provider: "codex" },
+        billing: { upstreamPayer: "connected_subscription", metering: "external" },
+      }),
+    ]);
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const menu = (
+      <ModelPickerMenu
+        rows={rows}
+        model="gpt-5.6-sol"
+        effort="low"
+        latencyMode="standard"
+        sessionKey="session-a"
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />
+    );
+    try {
+      await act(async () => root.render(menu));
+      expect(container.querySelector('[data-testid="model-picker-reasoning"]')).toBeTruthy();
+
+      await act(async () => {
+        container.querySelector<HTMLElement>('[data-testid="model-picker-back"]')!.click();
+      });
+      await act(async () => {
+        container.querySelector<HTMLElement>('[data-testid="model-picker-back"]')!.click();
+      });
+      expect(
+        container.querySelector('[data-testid="model-picker-rail-codex_subscription"]'),
+      ).toBeTruthy();
+
+      // Still mounted → stay on providers (close/reopen equivalent).
+      await act(async () => root.render(menu));
+      expect(
+        container.querySelector('[data-testid="model-picker-rail-codex_subscription"]'),
+      ).toBeTruthy();
+
+      // Fresh mount (refresh) → selected Thinking leaf again.
+      await act(async () => root.unmount());
+      const root2 = createRoot(container);
+      await act(async () => root2.render(menu));
+      expect(container.querySelector('[data-testid="model-picker-reasoning"]')).toBeTruthy();
+      expect(container.textContent).toContain("Thinking");
+      await act(async () => root2.unmount());
+    } finally {
       container.remove();
     }
   });

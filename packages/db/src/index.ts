@@ -122,10 +122,12 @@ import {
   SESSION_EVENT_TYPE_MAX_BYTES,
   resolveSessionEventTypeFilters,
   capabilityCatalogItemIsTrustedForExposure,
+  latencyModeForMetadata,
   metadataWithTurnExecutionPolicyV1,
   readTurnExecutionPolicyV1,
   reasoningEffortForMetadata,
   resolveWorkspaceCodexCompactionDefault,
+  type LatencyMode,
   resolveWorkspaceMemoryEnabled,
   RigChange as RigChangeContract,
   SessionGoal as SessionGoalContract,
@@ -3698,6 +3700,7 @@ export type EnqueueSessionTurnInput = {
   toolsProvided?: boolean;
   model: string;
   reasoningEffort: ReasoningEffort;
+  latencyMode?: LatencyMode;
   sandboxBackend: SandboxBackend;
   sandboxOs?: SandboxOs | null;
   metadata: Record<string, unknown>;
@@ -33332,6 +33335,7 @@ export async function materializeGoalContinuation(
     policy: {
       model: string;
       reasoningEffort: ReasoningEffort;
+      latencyMode: LatencyMode;
       tools: ToolRef[];
       sandboxBackend: SandboxBackend;
     };
@@ -33974,6 +33978,9 @@ export async function initializeSessionStartAtomically(
                 session.metadata,
                 input.reasoningEffortFallback,
               ),
+              latencyMode:
+                input.turnExecutionPolicy?.latencyMode ??
+                latencyModeForMetadata(session.metadata, "standard"),
               sandboxBackend: session.sandboxBackend,
               sandboxOs: session.sandboxOs,
               metadata: input.turnExecutionPolicy
@@ -34132,6 +34139,7 @@ export async function enqueueSessionTurn(
             toolsProvided: input.toolsProvided ?? false,
             model: input.model,
             reasoningEffort: input.reasoningEffort,
+            latencyMode: input.latencyMode ?? "standard",
             sandboxBackend: input.sandboxBackend,
             sandboxOs: input.sandboxOs ?? null,
             metadata: input.metadata,
@@ -34969,6 +34977,7 @@ export async function claimSessionWorkForAttempt(
               .select({
                 model: schema.sessionTurns.model,
                 reasoningEffort: schema.sessionTurns.reasoningEffort,
+                latencyMode: schema.sessionTurns.latencyMode,
                 sandboxBackend: schema.sessionTurns.sandboxBackend,
                 sandboxOs: schema.sessionTurns.sandboxOs,
               })
@@ -35004,6 +35013,10 @@ export async function claimSessionWorkForAttempt(
                 reasoningEffort: reasoningEffortForMetadata(
                   { reasoningEffort: latestStarted?.reasoningEffort },
                   reasoningEffortForMetadata(session.metadata, "medium"),
+                ),
+                latencyMode: latencyModeForMetadata(
+                  { latencyMode: latestStarted?.latencyMode },
+                  latencyModeForMetadata(session.metadata, "standard"),
                 ),
                 sandboxBackend: latestStarted?.sandboxBackend ?? session.sandboxBackend,
                 sandboxOs: latestStarted?.sandboxOs ?? session.sandboxOs,
@@ -35255,6 +35268,7 @@ export async function claimSessionWorkForAttempt(
             .select({
               model: schema.sessionTurns.model,
               reasoningEffort: schema.sessionTurns.reasoningEffort,
+              latencyMode: schema.sessionTurns.latencyMode,
               tools: schema.sessionTurns.tools,
               sandboxBackend: schema.sessionTurns.sandboxBackend,
               sandboxOs: schema.sessionTurns.sandboxOs,
@@ -35278,6 +35292,12 @@ export async function claimSessionWorkForAttempt(
               reasoningEffort: goalPolicy?.reasoningEffort ?? latestStarted?.reasoningEffort,
             },
             reasoningEffortForMetadata(session.metadata, "medium"),
+          );
+          const latencyMode = latencyModeForMetadata(
+            {
+              latencyMode: goalPolicy?.latencyMode ?? latestStarted?.latencyMode,
+            },
+            latencyModeForMetadata(session.metadata, "standard"),
           );
           const tools = Array.isArray(goalPolicy?.tools)
             ? goalPolicy.tools
@@ -35306,6 +35326,7 @@ export async function claimSessionWorkForAttempt(
               tools,
               model,
               reasoningEffort,
+              latencyMode,
               sandboxBackend,
               sandboxOs: latestStarted?.sandboxOs ?? session.sandboxOs,
               metadata: metadataWithTurnDispatchAttempt(
@@ -40691,6 +40712,7 @@ function mapSessionTurn(row: typeof schema.sessionTurns.$inferSelect): SessionTu
     toolsProvided: row.toolsProvided,
     model: row.model,
     reasoningEffort: row.reasoningEffort as ReasoningEffort,
+    latencyMode: (row.latencyMode as LatencyMode | null | undefined) ?? "standard",
     sandboxBackend: row.sandboxBackend as SandboxBackend,
     sandboxOs: (row.sandboxOs as SandboxOs | null) ?? null,
     metadata: row.metadata,

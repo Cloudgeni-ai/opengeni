@@ -175,13 +175,17 @@ export function ScenarioStack({
                   rows={galleryModelRows}
                   model={model}
                   effort={effort}
+                  latencyMode="standard"
+                  menuSide="top"
                   onModelChange={setModel}
                   onEffortChange={setEffort}
+                  onLatencyModeChange={() => {}}
                 />
                 <SessionToolPicker
                   servers={galleryToolServers}
                   firstPartyTools={galleryFirstPartyTools}
                   selection={toolSelection}
+                  menuSide="top"
                   onChange={setToolSelection}
                 />
               </div>
