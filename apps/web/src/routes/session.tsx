@@ -653,8 +653,13 @@ function SessionChatPane(props: {
     codexCompactionMode: props.session.codexCompactionMode,
   });
   const reasoningEffort = effortForSession(props.session.id);
-  const { setModelForSession, setEffortForSession, ensureModelForSession, ensureEffortForSession } =
-    context;
+  const {
+    setModelForSession,
+    setEffortForSession,
+    ensureModelForSession,
+    ensureEffortForSession,
+    setLatencyMode,
+  } = context;
   // Once the operator touches the picker, draft reloads must not stomp it.
   const pickerTouchedRef = useRef(false);
   useEffect(() => {
@@ -673,11 +678,11 @@ function SessionChatPane(props: {
     if (!pickerTouchedRef.current) {
       const metaLatency = props.session.metadata.latencyMode;
       if (metaLatency === "fast" || metaLatency === "priority" || metaLatency === "standard") {
-        context.setLatencyMode(metaLatency);
+        setLatencyMode(metaLatency);
       }
     }
   }, [
-    context.setLatencyMode,
+    setLatencyMode,
     ensureEffortForSession,
     ensureModelForSession,
     props.session.id,
@@ -811,9 +816,9 @@ function SessionChatPane(props: {
       }
       setModelForSession(props.session.id, draft.model);
       setEffortForSession(props.session.id, draft.reasoningEffort);
-      context.setLatencyMode(draft.latencyMode ?? "standard");
+      setLatencyMode(draft.latencyMode ?? "standard");
     },
-    [context.setLatencyMode, props.session.id, setEffortForSession, setModelForSession],
+    [setLatencyMode, props.session.id, setEffortForSession, setModelForSession],
   );
   const composer = useComposer(props.session.id, {
     events: props.events,

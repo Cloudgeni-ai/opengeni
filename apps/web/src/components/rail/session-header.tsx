@@ -168,7 +168,7 @@ export function SessionHeader({
               {providerControl}
               <span className="min-w-0 truncate font-normal">
                 {policyBits.map((bit, index) => (
-                  <span key={`${index}:${bit}`}>
+                  <span key={bit}>
                     {index > 0 ? " · " : null}
                     {bit}
                   </span>

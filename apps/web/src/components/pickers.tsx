@@ -112,7 +112,9 @@ function usePickerNavState(
 
   useEffect(() => {
     setState(defaultNavState(rows, model));
-  }, [sessionKey]); // session switch / fresh mount scope
+    // Only reset nav on session scope change — not every rows/model churn.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionKey]);
 
   return [state, setState];
 }
@@ -238,17 +240,18 @@ export function ModelPickerMenu(
     nav.modelId === null ? undefined : findPickerRow(rows, nav.modelId);
   const selectedRow = findPickerRow(rows, props.model);
 
+  const { latencyMode, loading, onLatencyModeChange } = props;
   useEffect(() => {
     // Never coerce latency off a loading catalog or an ensure-selected stub —
     // that briefly cleared Fast / switched rails before real capabilities arrived.
-    if (props.loading || !selectedRow?.selectable) {
+    if (loading || !selectedRow?.selectable) {
       return;
     }
     const selectedFast = runnableLatencyModesForModel(selectedRow.catalog).includes("fast");
-    if (!selectedFast && props.latencyMode !== "standard") {
-      props.onLatencyModeChange("standard");
+    if (!selectedFast && latencyMode !== "standard") {
+      onLatencyModeChange("standard");
     }
-  }, [props.latencyMode, props.loading, props.onLatencyModeChange, selectedRow]);
+  }, [latencyMode, loading, onLatencyModeChange, selectedRow]);
 
   const go = (next: PickerNavState, dir: 1 | -1) => {
     setDirection(dir);
