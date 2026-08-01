@@ -5357,6 +5357,7 @@ export type SlackInteraction = {
   routeKey: string;
   triggeringProviderEventId: string;
   owningSubjectId: string;
+  visibility: "private" | "workspace";
   sessionId: string | null;
   lastDeliveredSessionEventSequence: number;
   deliveryClaimHolderId: string | null;
@@ -5636,6 +5637,29 @@ export async function getSlackInteractionByRoute(
   });
 }
 
+export async function getSlackInteractionSessionAccess(
+  db: Database,
+  workspaceId: string,
+  rootSessionId: string,
+): Promise<Pick<SlackInteraction, "owningSubjectId" | "visibility"> | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        owningSubjectId: schema.slackInteractions.owningSubjectId,
+        visibility: schema.slackInteractions.visibility,
+      })
+      .from(schema.slackInteractions)
+      .where(
+        and(
+          eq(schema.slackInteractions.workspaceId, workspaceId),
+          eq(schema.slackInteractions.sessionId, rootSessionId),
+        ),
+      )
+      .limit(1);
+    return row ?? null;
+  });
+}
+
 export async function bindSlackInteractionSession(
   db: Database,
   input: Pick<SlackInteraction, "id" | "accountId" | "workspaceId" | "owningSubjectId"> & {
@@ -5807,13 +5831,123 @@ function mapSlackBotUserLink(row: typeof schema.slackBotUserLinks.$inferSelect):
 }
 
 function mapSlackInteractionInbox(
-  row: typeof schema.slackInteractionInbox.$inferSelect,
+  row: typeof schema.slackInteractionInbox.$inferSelect | Record<string, unknown>,
 ): SlackInteractionInboxEntry {
-  return row;
+  return {
+    id: slackRowString(row, "id", "id"),
+    accountId: slackRowString(row, "accountId", "account_id"),
+    workspaceId: slackRowString(row, "workspaceId", "workspace_id"),
+    connectionId: slackRowString(row, "connectionId", "connection_id"),
+    providerEventId: slackRowString(row, "providerEventId", "provider_event_id"),
+    providerMessageId: slackRowString(row, "providerMessageId", "provider_message_id"),
+    slackTeamId: slackRowString(row, "slackTeamId", "slack_team_id"),
+    slackUserId: slackRowString(row, "slackUserId", "slack_user_id"),
+    slackChannelId: slackRowString(row, "slackChannelId", "slack_channel_id"),
+    slackMessageTs: slackRowString(row, "slackMessageTs", "slack_message_ts"),
+    slackThreadTs: slackRowNullableString(row, "slackThreadTs", "slack_thread_ts"),
+    triggerKind: slackRowString(row, "triggerKind", "trigger_kind") as SlackInteractionTriggerKind,
+    text: slackRowString(row, "text", "text"),
+    status: slackRowString(row, "status", "status") as SlackInteractionInboxEntry["status"],
+    claimHolderId: slackRowNullableString(row, "claimHolderId", "claim_holder_id"),
+    claimExpiresAt: slackRowNullableDate(row, "claimExpiresAt", "claim_expires_at"),
+    attemptCount: slackRowNumber(row, "attemptCount", "attempt_count"),
+    lastErrorCode: slackRowNullableString(row, "lastErrorCode", "last_error_code"),
+    processedAt: slackRowNullableDate(row, "processedAt", "processed_at"),
+    createdAt: slackRowDate(row, "createdAt", "created_at"),
+    updatedAt: slackRowDate(row, "updatedAt", "updated_at"),
+  };
 }
 
-function mapSlackInteraction(row: typeof schema.slackInteractions.$inferSelect): SlackInteraction {
-  return row;
+function mapSlackInteraction(
+  row: typeof schema.slackInteractions.$inferSelect | Record<string, unknown>,
+): SlackInteraction {
+  return {
+    id: slackRowString(row, "id", "id"),
+    accountId: slackRowString(row, "accountId", "account_id"),
+    workspaceId: slackRowString(row, "workspaceId", "workspace_id"),
+    connectionId: slackRowString(row, "connectionId", "connection_id"),
+    slackTeamId: slackRowString(row, "slackTeamId", "slack_team_id"),
+    slackChannelId: slackRowString(row, "slackChannelId", "slack_channel_id"),
+    slackThreadTs: slackRowString(row, "slackThreadTs", "slack_thread_ts"),
+    routeKey: slackRowString(row, "routeKey", "route_key"),
+    triggeringProviderEventId: slackRowString(
+      row,
+      "triggeringProviderEventId",
+      "triggering_provider_event_id",
+    ),
+    owningSubjectId: slackRowString(row, "owningSubjectId", "owning_subject_id"),
+    visibility: slackRowString(row, "visibility", "visibility") as SlackInteraction["visibility"],
+    sessionId: slackRowNullableString(row, "sessionId", "session_id"),
+    lastDeliveredSessionEventSequence: slackRowNumber(
+      row,
+      "lastDeliveredSessionEventSequence",
+      "last_delivered_session_event_sequence",
+    ),
+    deliveryClaimHolderId: slackRowNullableString(
+      row,
+      "deliveryClaimHolderId",
+      "delivery_claim_holder_id",
+    ),
+    deliveryClaimExpiresAt: slackRowNullableDate(
+      row,
+      "deliveryClaimExpiresAt",
+      "delivery_claim_expires_at",
+    ),
+    ackSlackMessageTs: slackRowNullableString(row, "ackSlackMessageTs", "ack_slack_message_ts"),
+    progressCount: slackRowNumber(row, "progressCount", "progress_count"),
+    terminalDeliveryState: slackRowString(
+      row,
+      "terminalDeliveryState",
+      "terminal_delivery_state",
+    ) as SlackInteraction["terminalDeliveryState"],
+    createdAt: slackRowDate(row, "createdAt", "created_at"),
+    updatedAt: slackRowDate(row, "updatedAt", "updated_at"),
+  };
+}
+
+function slackRowValue(row: Record<string, unknown>, camelKey: string, snakeKey: string): unknown {
+  return row[camelKey] ?? row[snakeKey];
+}
+
+function slackRowString(row: Record<string, unknown>, camelKey: string, snakeKey: string): string {
+  const value = slackRowValue(row, camelKey, snakeKey);
+  if (typeof value !== "string") throw new Error(`Slack row omitted ${snakeKey}`);
+  return value;
+}
+
+function slackRowNullableString(
+  row: Record<string, unknown>,
+  camelKey: string,
+  snakeKey: string,
+): string | null {
+  const value = slackRowValue(row, camelKey, snakeKey);
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "string") throw new Error(`Slack row malformed ${snakeKey}`);
+  return value;
+}
+
+function slackRowNumber(row: Record<string, unknown>, camelKey: string, snakeKey: string): number {
+  const value = slackRowValue(row, camelKey, snakeKey);
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isSafeInteger(parsed)) throw new Error(`Slack row malformed ${snakeKey}`);
+  return parsed;
+}
+
+function slackRowDate(row: Record<string, unknown>, camelKey: string, snakeKey: string): Date {
+  const value = slackRowValue(row, camelKey, snakeKey);
+  const parsed = value instanceof Date ? value : new Date(String(value));
+  if (Number.isNaN(parsed.getTime())) throw new Error(`Slack row malformed ${snakeKey}`);
+  return parsed;
+}
+
+function slackRowNullableDate(
+  row: Record<string, unknown>,
+  camelKey: string,
+  snakeKey: string,
+): Date | null {
+  const value = slackRowValue(row, camelKey, snakeKey);
+  if (value === null || value === undefined) return null;
+  return slackRowDate(row, camelKey, snakeKey);
 }
 
 export class SlackBotLifecycleSuccessAuditError extends Error {
@@ -16212,10 +16346,14 @@ function sessionFilters(
   >,
 ): SQL[] {
   const filters: SQL[] = [
-    or(
-      sql`coalesce(${schema.sessions.metadata} #>> '{slackInteraction,visibility}', 'workspace') <> 'private'`,
-      sql`${schema.sessions.metadata} #>> '{slackInteraction,ownerSubjectId}' = ${options.subjectId}`,
-    )!,
+    sql`not exists (
+      select 1
+      from ${schema.slackInteractions} private_slack_interaction
+      where private_slack_interaction.workspace_id = ${schema.sessions.workspaceId}
+        and private_slack_interaction.session_id = ${schema.sessions.rootSessionId}
+        and private_slack_interaction.visibility = 'private'
+        and private_slack_interaction.owning_subject_id <> ${options.subjectId}
+    )`,
   ];
   if (options.authorizationScope) {
     filters.push(sessionAuthorizationScopeFilter(options.authorizationScope));
@@ -16833,10 +16971,14 @@ export async function getSessionForSubject(
         and(
           eq(schema.sessions.workspaceId, workspaceId),
           eq(schema.sessions.id, sessionId),
-          or(
-            sql`coalesce(${schema.sessions.metadata} #>> '{slackInteraction,visibility}', 'workspace') <> 'private'`,
-            sql`${schema.sessions.metadata} #>> '{slackInteraction,ownerSubjectId}' = ${subjectId}`,
-          ),
+          sql`not exists (
+            select 1
+            from ${schema.slackInteractions} private_slack_interaction
+            where private_slack_interaction.workspace_id = ${schema.sessions.workspaceId}
+              and private_slack_interaction.session_id = ${schema.sessions.rootSessionId}
+              and private_slack_interaction.visibility = 'private'
+              and private_slack_interaction.owning_subject_id <> ${subjectId}
+          )`,
         ),
       )
       .limit(1);

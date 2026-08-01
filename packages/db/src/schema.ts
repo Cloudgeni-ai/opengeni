@@ -654,6 +654,7 @@ export const slackInteractions = pgTable(
     routeKey: text("route_key").notNull(),
     triggeringProviderEventId: text("triggering_provider_event_id").notNull(),
     owningSubjectId: text("owning_subject_id").notNull(),
+    visibility: text("visibility").$type<"private" | "workspace">().notNull(),
     sessionId: uuid("session_id").references(() => sessions.id, {
       onDelete: "cascade",
     }),

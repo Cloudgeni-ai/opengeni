@@ -11,6 +11,7 @@ import {
   getSession,
   getSessionRootId,
   getSessionTurnForAttempt,
+  getSlackInteractionSessionAccess,
   type Database,
 } from "@opengeni/db";
 import type { AppDependencies } from "./dependencies";
@@ -51,8 +52,10 @@ export type ResolvedSessionAuthorization = {
  * an immediate target id and signed attempt claims, but can never nominate a
  * lineage root or frozen initiator.
  *
- * Returns null when no host port is bound so standalone behavior stays byte-
- * for-byte unchanged and pays no additional lineage lookup.
+ * Slack-owned private sessions are enforced here even when no embedding-host
+ * authorization port is bound. That durable ownership fence covers every
+ * session surface which uses this shared seam, rather than relying on list/UI
+ * filtering or caller-controlled session metadata.
  */
 export async function requireSessionAuthorization(
   deps: SessionAuthorizationDependencies,
@@ -64,12 +67,24 @@ export async function requireSessionAuthorization(
   },
 ): Promise<ResolvedSessionAuthorization | null> {
   const port = deps.sessionAuthorization;
-  if (!port) return null;
-
   const [actor, target] = await Promise.all([
     resolveSessionAuthorizationActor(deps.db, grant),
     resolveSessionAuthorizationTarget(deps.db, grant, input.sessionId),
   ]);
+  const slackAccess = await getSlackInteractionSessionAccess(
+    deps.db,
+    grant.workspaceId,
+    target.rootSessionId,
+  );
+  if (slackAccess?.visibility === "private") {
+    const allowed =
+      actor.kind === "subject"
+        ? actor.subjectId === slackAccess.owningSubjectId
+        : actor.callerRootSessionId === target.rootSessionId;
+    if (!allowed) throw new SessionAuthorizationDeniedError("forbidden");
+  }
+  if (!port) return null;
+
   let rawDecision: unknown;
   try {
     rawDecision = await port.authorizeSession({

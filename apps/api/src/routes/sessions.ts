@@ -296,16 +296,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     ),
   });
 
-  // A host-bound deployment has one fail-closed authorization seam for every
-  // HTTP session surface. Register it before the routes so a newly added path
-  // cannot accidentally inherit workspace access without an explicit operation
-  // classification. The long-lived event stream performs its own initial check
-  // and bounded reauthorization below.
+  // Every deployment has one fail-closed authorization seam for every HTTP
+  // session surface. The core boundary always enforces durable OpenGeni-owned
+  // private-session rules; an embedding host port can add narrower policy.
+  // Register it before the routes so a newly added path cannot accidentally
+  // inherit workspace access without an explicit operation classification. The
+  // long-lived event stream performs its own initial check and bounded
+  // reauthorization below.
   const authorizeSessionHttp: MiddlewareHandler = async (c, next) => {
-    if (!deps.sessionAuthorization) {
-      await next();
-      return;
-    }
     const workspaceId = c.req.param("workspaceId") ?? "";
     const sessionId = c.req.param("sessionId") ?? "";
     const operation = sessionAuthorizationOperationForHttp(

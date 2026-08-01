@@ -408,28 +408,17 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
     routeKey,
     triggeringProviderEventId: entry.providerEventId,
     owningSubjectId: grant.subjectId,
+    visibility: entry.triggerKind === "dm" ? "private" : "workspace",
   });
   if (interaction.sessionId) {
     await continueSlackSession(deps, grant, interaction, entry);
     return;
   }
-  const isPrivateDm = entry.triggerKind === "dm";
   const session = await createSessionForRequest(deps, grant, entry.workspaceId, {
     initialMessage: entry.text,
     turnInstructions: SLACK_TASK_INSTRUCTIONS,
     idempotencyKey: `slack:${entry.connectionId}:${entry.providerEventId}`,
     clientEventId: `slack:${entry.providerEventId}`,
-    metadata: {
-      slackInteraction: {
-        connectionId: entry.connectionId,
-        teamId: entry.slackTeamId,
-        channelId: entry.slackChannelId,
-        threadTs: interaction.slackThreadTs,
-        visibility: isPrivateDm ? "private" : "workspace",
-        ownerSubjectId: grant.subjectId,
-        taskLocalOnly: true,
-      },
-    },
   });
   const bound = await bindSlackInteractionSession(deps.db, {
     ...interaction,
@@ -461,7 +450,10 @@ async function continueSlackSession(
   interaction: SlackInteraction,
   entry: SlackInteractionInboxEntry,
 ) {
-  if (!interaction.sessionId || interaction.owningSubjectId !== grant.subjectId) {
+  if (
+    !interaction.sessionId ||
+    (interaction.visibility === "private" && interaction.owningSubjectId !== grant.subjectId)
+  ) {
     throw new SlackInteractionPermanentError("session_owner_mismatch");
   }
   await reopenSlackInteractionDelivery(deps.db, interaction);

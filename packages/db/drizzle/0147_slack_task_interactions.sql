@@ -95,6 +95,7 @@ CREATE TABLE "slack_interactions" (
   "route_key" text NOT NULL,
   "triggering_provider_event_id" text NOT NULL,
   "owning_subject_id" text NOT NULL,
+  "visibility" text NOT NULL,
   "session_id" uuid REFERENCES "sessions"("id") ON DELETE CASCADE,
   "last_delivered_session_event_sequence" integer NOT NULL DEFAULT 0,
   "delivery_claim_holder_id" uuid,
@@ -119,6 +120,8 @@ CREATE TABLE "slack_interactions" (
     ),
   CONSTRAINT "slack_interactions_delivery_claim_check"
     CHECK (("delivery_claim_holder_id" IS NULL) = ("delivery_claim_expires_at" IS NULL)),
+  CONSTRAINT "slack_interactions_visibility_check"
+    CHECK ("visibility" IN ('private', 'workspace')),
   CONSTRAINT "slack_interactions_terminal_check"
     CHECK ("terminal_delivery_state" IN ('open', 'completed', 'failed', 'cancelled', 'blocked'))
 );
