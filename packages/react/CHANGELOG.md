@@ -1,5 +1,14 @@
 # @opengeni/react
 
+## 0.32.1
+
+### Patch Changes
+
+- c52acc0: Ship Fast latency mode with turn-column inheritance, Codex ChatGPT honor-skip for response service_tier, and model picker UX polish.
+- 48ae722: Smooth tip-follow camera and streaming timeline motion (settle folds, tool enter, fence soft-close).
+- Updated dependencies [c52acc0]
+  - @opengeni/sdk@0.32.1
+
 ## 0.32.0
 
 ### Patch Changes

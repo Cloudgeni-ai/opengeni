@@ -1,4 +1,4 @@
-import type { ReasoningEffort, SessionEvent, SessionTurn } from "@opengeni/sdk";
+import type { LatencyMode, ReasoningEffort, SessionEvent, SessionTurn } from "@opengeni/sdk";
 import { useCallback, useEffect } from "react";
 import { useOpenGeni, type ClientOverride } from "../session-context";
 import { usePolledValue, useSessionEventTrigger, type SessionEventFeedOptions } from "./internal";
@@ -11,6 +11,7 @@ export function isLastStartedTurnPolicyEvent(event: Pick<SessionEvent, "type">):
 export type LastStartedTurnPolicy = {
   model: string;
   reasoningEffort: ReasoningEffort;
+  latencyMode: LatencyMode;
   turnId: string;
 };
 
@@ -32,14 +33,15 @@ function policyFromTurn(turn: SessionTurn | null | undefined): LastStartedTurnPo
   return {
     model: turn.model,
     reasoningEffort: turn.reasoningEffort,
+    latencyMode: turn.latencyMode ?? "standard",
     turnId: turn.id,
   };
 }
 
 /**
- * Model·effort of the newest admitted turn (`turn.started`). This is historical
- * runtime truth for the session header — not the composer next-turn picker and
- * not the frozen session creation defaults.
+ * Model·effort·latency of the newest admitted turn (`turn.started`). This is
+ * historical runtime truth for the session header — not the composer next-turn
+ * picker and not the frozen session creation defaults.
  */
 export function useLastStartedTurnPolicy(
   sessionId: string | null | undefined,

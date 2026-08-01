@@ -71,6 +71,7 @@ import type {
   CreateWorkspaceRequest,
   GitHubAppInfo,
   GitHubRepository,
+  LatencyMode,
   ResourceRef,
   Session,
   TurnSubmission,
@@ -91,11 +92,12 @@ export type AppContextValue = {
   /**
    * The model chosen for a specific open session. Composer state (draft, mode)
    * is session-scoped, and so is the model: each session remembers its own pick
-   * in-memory. Until seeded, falls back to the frozen deployment default — never
-   * the mutable new-session {@link model} pick (that would cross-bleed).
+   * in-memory. Until seeded, uses `fallback` when provided (typically durable
+   * `session.model`), else the frozen deployment default — never the mutable
+   * new-session {@link model} pick (that would cross-bleed).
    * Seed with {@link ensureModelForSession} from `session.model` / draft.
    */
-  modelForSession: (sessionId: string) => string;
+  modelForSession: (sessionId: string, fallback?: string) => string;
   setModelForSession: (sessionId: string, value: string) => void;
   /** Write only when this session has no override yet (safe metadata/draft seed). */
   ensureModelForSession: (sessionId: string, value: string) => void;
@@ -106,6 +108,8 @@ export type AppContextValue = {
   setEffortForSession: (sessionId: string, value: IntelligenceEffort) => void;
   /** Write only when this session has no override yet (safe metadata/draft seed). */
   ensureEffortForSession: (sessionId: string, value: IntelligenceEffort) => void;
+  latencyMode: LatencyMode;
+  setLatencyMode: Dispatch<SetStateAction<LatencyMode>>;
   inspectorOpen: boolean;
   setInspectorOpen: Dispatch<SetStateAction<boolean>>;
   session: Session | null;
@@ -241,6 +245,7 @@ export function RootRouteComponent() {
     Record<string, IntelligenceEffort>
   >({});
   const [reasoningEffort, setReasoningEffort] = useState<IntelligenceEffort>("low");
+  const [latencyMode, setLatencyMode] = useState<LatencyMode>("standard");
   // Changes/Files dock starts collapsed; user opens via the session-panel toggle.
   // No localStorage — only an in-memory default (toggle still works for the session).
   const [inspectorOpen, setInspectorOpen] = useState(false);
@@ -332,6 +337,7 @@ export function RootRouteComponent() {
         // the "low" placeholder (which the server treated as an override beating
         // the deployer's configured default — a silent billing footgun).
         setReasoningEffort(initialReasoningEffort(config));
+        setLatencyMode("standard");
       })
       .catch((error) => {
         if (cancelled) {
@@ -758,6 +764,7 @@ export function RootRouteComponent() {
           selectedTools,
           defaultModel: model,
           defaultReasoningEffort: reasoningEffort,
+          defaultLatencyMode: latencyMode,
           clientEventId: crypto.randomUUID(),
           idempotencyKey: freshIdempotencyKey,
           workspaceDefaultMcpServerIds: ["files", ...toolMcpServers.map((server) => server.id)],
@@ -928,7 +935,8 @@ export function RootRouteComponent() {
   // picks — those change while other sessions are open and would bleed across.
   const deploymentDefaultModel = clientConfig?.defaultModel ?? model;
   const modelForSession = useCallback(
-    (sessionId: string): string => modelBySession[sessionId] ?? deploymentDefaultModel,
+    (sessionId: string, fallback?: string): string =>
+      modelBySession[sessionId] ?? fallback ?? deploymentDefaultModel,
     [deploymentDefaultModel, modelBySession],
   );
   const setModelForSession = useCallback((sessionId: string, value: string): void => {
@@ -1012,6 +1020,8 @@ export function RootRouteComponent() {
           effortForSession,
           setEffortForSession,
           ensureEffortForSession,
+          latencyMode,
+          setLatencyMode,
           inspectorOpen,
           setInspectorOpen,
           session,
@@ -1103,6 +1113,7 @@ export function RootRouteComponent() {
     model,
     modelForSession,
     ensureModelForSession,
+    latencyMode,
     reasoningEffort,
     effortForSession,
     setEffortForSession,

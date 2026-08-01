@@ -3,7 +3,7 @@
 // overlay drawer (<1024px), and the slim canvas top strip that carries
 // session-contextual actions on session routes. The rail itself is composed
 // from the brand, switcher, workspace nav, session list, and footer sections.
-import { useLastStartedTurnPolicy, useSessionLineage } from "@opengeni/react";
+import { findPickerRow, useLastStartedTurnPolicy, useSessionLineage } from "@opengeni/react";
 import type { SessionSummary } from "@opengeni/sdk";
 import { Link, useRouterState } from "@tanstack/react-router";
 import { MenuIcon, MessagesSquareIcon, Settings2Icon, XIcon } from "lucide-react";
@@ -38,7 +38,9 @@ import { WorkspaceNav } from "@/components/rail/workspace-nav";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 import { useAppContext } from "@/context";
+import { isCodexProductModel } from "@/lib/session-model";
 import { isIntelligenceEffort } from "@/lib/session-tools";
 import type { Session } from "@/types";
 import { cn } from "@/lib/utils";
@@ -472,7 +474,14 @@ function SessionRouteHeader({
   const lastStartedReasoningEffort = isIntelligenceEffort(lastStarted.policy?.reasoningEffort)
     ? lastStarted.policy.reasoningEffort
     : undefined;
-  const displayModel = lastStartedModel || session.model;
+  const lastStartedLatencyMode = lastStarted.policy?.latencyMode;
+  // Wait for last-started fetch before trusting session.model — creation default
+  // can be a different rail than the newest admitted turn.
+  const policyReady = !lastStarted.loading;
+  const displayModelId = policyReady ? lastStartedModel || session.model : session.model;
+  const catalog = useWorkspaceModelCatalog(session.workspaceId);
+  const selectedRow = findPickerRow(catalog.rows, displayModelId);
+  const policyLoading = lastStarted.loading || catalog.loading;
 
   return (
     <SessionHeader
@@ -496,17 +505,24 @@ function SessionRouteHeader({
       leading={hamburger}
       lastStartedModel={lastStartedModel}
       lastStartedReasoningEffort={lastStartedReasoningEffort}
+      lastStartedLatencyMode={lastStartedLatencyMode}
+      billingClass={selectedRow?.billingClass}
+      modelLabel={selectedRow?.label}
+      policyLoading={policyLoading}
       sandboxSlot={
         sessionSupportsFleetSwitching(session.sandboxBackend) ? (
           <SessionSandboxSwitcher workspaceId={session.workspaceId} sessionId={session.id} />
         ) : null
       }
       codexSlot={
-        <CodexAccountIndicator
-          workspaceId={session.workspaceId}
-          sessionId={session.id}
-          model={displayModel}
-        />
+        policyReady && isCodexProductModel(displayModelId) ? (
+          <CodexAccountIndicator
+            workspaceId={session.workspaceId}
+            sessionId={session.id}
+            model={displayModelId}
+            modelReady={policyReady}
+          />
+        ) : null
       }
     />
   );

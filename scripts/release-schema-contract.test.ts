@@ -160,12 +160,14 @@ describe("release schema contract", () => {
         (migrations.has("0144_sandbox_viewer_force_drain_gate.sql") ? 1 : 0) +
         (migrations.has("0145_model_call_facts.sql") ? 1 : 0) +
         (migrations.has("0146_slack_bot_delete_idempotency.sql") ? 1 : 0) +
-        (migrations.has("0147_slack_task_interactions.sql") ? 1 : 0),
+        (migrations.has("0147_draft_latency_mode.sql") ? 1 : 0) +
+        (migrations.has("0148_session_turn_latency_mode.sql") ? 1 : 0) +
+        (migrations.has("0149_slack_task_interactions.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "824ed9c1d1d08857a7efbd1f77ea26f40ec8460ec9114ce6ced1b99c826d36c8",
+      "58897988c0943b26918891197a297488218f8f14d7c36e9d118e8ef6af664f47",
     );
-    expect(contract.latestMigration).toBe("0147_slack_task_interactions.sql");
+    expect(contract.latestMigration).toBe("0149_slack_task_interactions.sql");
     expect(migrations.get("0128_github_installation_authority.sql")).toMatchObject({
       sha256: "365793b2a204a70e214adb90298b522acbb6dcfae22a46681a58f41a6938e6f0",
       deploymentMode: "rolling",
@@ -246,13 +248,15 @@ describe("release schema contract", () => {
       "0144_sandbox_viewer_force_drain_gate.sql",
       "0145_model_call_facts.sql",
       "0146_slack_bot_delete_idempotency.sql",
-      "0147_slack_task_interactions.sql",
+      "0147_draft_latency_mode.sql",
+      "0148_session_turn_latency_mode.sql",
+      "0149_slack_task_interactions.sql",
     ]);
     expect(migrations.get("0143_session_codex_compaction_mode.sql")).toMatchObject({
       sha256: "574cfe6fc5ab24135e84d3932fd936e134ebe28bce8ac3cb5db97a549683906f",
       deploymentMode: "rolling",
     });
-    expect(migrations.get("0147_slack_task_interactions.sql")).toMatchObject({
+    expect(migrations.get("0149_slack_task_interactions.sql")).toMatchObject({
       sha256: "8b0cfea40b1a38c4eec763e8cd1d8a73d023e11fd706a95d9c78502c8655b50d",
       deploymentMode: "rolling",
     });
@@ -369,6 +373,14 @@ describe("release schema contract", () => {
     });
     expect(migrations.get("0146_slack_bot_delete_idempotency.sql")).toMatchObject({
       sha256: "9084b0cd13c1924dd23af09b80d65b58223721259a23b1240e75f5af91b8cfb5",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0147_draft_latency_mode.sql")).toMatchObject({
+      sha256: "8269cfad28f1fc8d943f55b89ef5715bc18e9817283ac3a36502127f12935fca",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0148_session_turn_latency_mode.sql")).toMatchObject({
+      sha256: "fe753b8b5866c4f619ae3b360442659db26f639db867b622b1f2a0520e9c80dd",
       deploymentMode: "rolling",
     });
   });

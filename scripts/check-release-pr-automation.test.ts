@@ -2636,6 +2636,7 @@ describe("workflow contracts", () => {
     for (const jobName of [
       "source-contracts",
       "test-suite",
+      "browser-acceptance",
       "package-contracts",
       "deployment",
       "images",
@@ -2675,8 +2676,8 @@ describe("workflow contracts", () => {
     ).toEqual([["Complete exact-head automation CI check", "${{ github.token }}"]]);
   });
 
-  test("runs preserved source, test, and package gates in parallel behind a fail-closed aggregate", () => {
-    const laneNames = ["source-contracts", "test-suite", "package-contracts"];
+  test("runs all 29 source, test, browser, and package gates once behind a fail-closed aggregate", () => {
+    const laneNames = ["source-contracts", "test-suite", "browser-acceptance", "package-contracts"];
     const expectedGateNames = {
       "source-contracts": [
         "Validate changeset release plan",
@@ -2691,18 +2692,20 @@ describe("workflow contracts", () => {
       "test-suite": [
         "Test",
         "React warning-free test gate",
+        "Real workspace capture acceptance",
+        "Recovery integration regressions",
+      ],
+      "browser-acceptance": [
         "Install pinned Playwright Chromium runtime",
         "Codex quota Codex quota and entitlement browser acceptance",
         "Queue surface browser acceptance",
         "Session pin browser acceptance",
         "Responsive knowledge surfaces browser acceptance",
         "Workbench browser acceptance",
-        "Real workspace capture acceptance",
         "Upload session pin visual evidence",
         "Upload Codex quota visual evidence",
         "Upload responsive knowledge-surface evidence",
         "Upload workbench visual evidence",
-        "Recovery integration regressions",
       ],
       "package-contracts": [
         "Build client packages (contracts + SDK + React)",
@@ -2714,6 +2717,9 @@ describe("workflow contracts", () => {
         "Web bundle budget",
       ],
     } as const;
+    const expectedGates = Object.values(expectedGateNames).flat();
+    expect(expectedGates).toHaveLength(29);
+    expect(new Set(expectedGates)).toHaveProperty("size", 29);
     const allLaneSteps = laneNames.flatMap((jobName) =>
       ci.jobs[jobName].steps.map((step: any) => step.name).filter(Boolean),
     );
@@ -2726,6 +2732,120 @@ describe("workflow contracts", () => {
         expect(allLaneSteps.filter((stepName) => stepName === gateName)).toHaveLength(1);
       }
     }
+    expect(allLaneSteps.filter((stepName) => expectedGates.includes(stepName))).toHaveLength(29);
+
+    const expensiveLaneNames = ["test-suite", "browser-acceptance"];
+    for (const jobName of expensiveLaneNames) {
+      const lane = ci.jobs[jobName];
+      const checkout = lane.steps.find((step: any) => step.name === "Check out repository");
+      expect(lane.permissions ?? ci.permissions).toEqual({ contents: "read" });
+      expect(checkout).toEqual({
+        name: "Check out repository",
+        uses: "actions/checkout@v6",
+        with: {
+          ref: "${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.sha }}",
+          "fetch-depth": 0,
+          "persist-credentials": false,
+        },
+      });
+      expect(lane.steps.find((step: any) => step.name === "Set up Bun")).toEqual({
+        name: "Set up Bun",
+        uses: "oven-sh/setup-bun@v2",
+        with: { "bun-version": "1.3.14" },
+      });
+      expect(lane.steps.find((step: any) => step.name === "Cache Bun dependencies")).toEqual({
+        name: "Cache Bun dependencies",
+        uses: "actions/cache@v6.1.0",
+        with: {
+          path: "~/.bun/install/cache",
+          key: "bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}",
+          "restore-keys": "bun-${{ runner.os }}-\n",
+        },
+      });
+      expect(lane.steps.find((step: any) => step.name === "Install dependencies")).toEqual({
+        name: "Install dependencies",
+        run: "bun install --frozen-lockfile",
+      });
+    }
+
+    const testStep = ci.jobs["test-suite"].steps.find((step: any) => step.name === "Test");
+    expect(testStep.env).toEqual({ OPENGENI_REQUIRE_REAL_DB: "1" });
+    expect(testStep.run).toBe("bun run test:unit");
+
+    const browser = ci.jobs["browser-acceptance"];
+    expect(
+      browser.steps.find(
+        (step: any) => step.name === "Codex quota Codex quota and entitlement browser acceptance",
+      ).env,
+    ).toEqual({
+      OPENGENI_REQUIRE_REAL_DB: "1",
+      OPENGENI_CODEX_QUOTA_EVIDENCE_DIR: "/tmp/codex-quota-evidence",
+    });
+    for (const stepName of [
+      "Session pin browser acceptance",
+      "Responsive knowledge surfaces browser acceptance",
+    ])
+      expect(browser.steps.find((step: any) => step.name === stepName).env).toEqual({
+        OPENGENI_REQUIRE_REAL_DB: "1",
+      });
+
+    const expectedEvidence = {
+      "Upload session pin visual evidence": {
+        if: "${{ always() && (steps.session_pin_browser.outcome == 'success' || steps.session_pin_browser.outcome == 'failure') }}",
+        name: "sessionpin-session-pin-visual-evidence",
+        path: [
+          "/tmp/sessionpin-session-pin-desktop-light.png",
+          "/tmp/sessionpin-session-pin-desktop-dark.png",
+          "/tmp/sessionpin-session-pin-mobile-light.png",
+          "/tmp/sessionpin-session-pin-mobile-dark.png",
+          "/tmp/sessionpin-session-pin-mobile-375-light.png",
+          "/tmp/sessionpin-session-pin-mobile-375-dark.png",
+        ],
+      },
+      "Upload Codex quota visual evidence": {
+        if: "${{ always() }}",
+        name: "codex-quota-codex-quota-entitlement-visual-evidence",
+        path: [
+          "/tmp/codex-quota-evidence/codex-quota-desktop-light.png",
+          "/tmp/codex-quota-evidence/codex-quota-desktop-dark.png",
+          "/tmp/codex-quota-evidence/codex-quota-mobile-light.png",
+          "/tmp/codex-quota-evidence/codex-quota-mobile-dark.png",
+        ],
+      },
+      "Upload responsive knowledge-surface evidence": {
+        if: "${{ always() }}",
+        name: "responsive-knowledge-surface-evidence",
+        path: [
+          "/tmp/knowledge-surfaces-320-light-memory.png",
+          "/tmp/knowledge-surfaces-320-dark-memory.png",
+          "/tmp/knowledge-surfaces-375-light-variable-sets.png",
+          "/tmp/knowledge-surfaces-375-dark-variable-sets.png",
+          "/tmp/knowledge-surfaces-768-light-documents.png",
+          "/tmp/knowledge-surfaces-768-dark-documents.png",
+          "/tmp/knowledge-surfaces-desktop-light-memory.png",
+          "/tmp/knowledge-surfaces-desktop-dark-memory.png",
+        ],
+      },
+      "Upload workbench visual evidence": {
+        if: "${{ always() && (steps.workbench_browser.outcome == 'success' || steps.workbench_browser.outcome == 'failure') }}",
+        name: "workbench-visual-evidence",
+        path: [
+          "/tmp/workbench-mobile-dark-dense.png",
+          "/tmp/workbench-tablet-light-offline.png",
+          "/tmp/workbench-desktop-dark-changes.png",
+          "/tmp/workbench-desktop-light-files.png",
+        ],
+      },
+    } as const;
+    for (const [stepName, expected] of Object.entries(expectedEvidence)) {
+      const upload = browser.steps.find((step: any) => step.name === stepName);
+      expect(upload.uses).toBe("actions/upload-artifact@v7.0.1");
+      expect(upload.if).toBe(expected.if);
+      expect(upload.with.name).toBe(expected.name);
+      expect(upload.with["if-no-files-found"]).toBe("error");
+      expect(upload.with["retention-days"]).toBe(14);
+      expect(upload.with.path.trim().split("\n")).toEqual(expected.path);
+    }
 
     const aggregate = ci.jobs.test;
     expect(aggregate.name).toBe("Typecheck and unit tests");
@@ -2737,9 +2857,26 @@ describe("workflow contracts", () => {
     expect(requireLanes.env).toEqual({
       SOURCE_CONTRACTS_RESULT: "${{ needs.source-contracts.result }}",
       TEST_SUITE_RESULT: "${{ needs.test-suite.result }}",
+      BROWSER_ACCEPTANCE_RESULT: "${{ needs.browser-acceptance.result }}",
       PACKAGE_CONTRACTS_RESULT: "${{ needs.package-contracts.result }}",
     });
     expect(requireLanes.run).toContain('if [ "$result" != "success" ]');
+    const aggregateResult = (results: Record<string, string>) =>
+      Bun.spawnSync(["bash", "-c", requireLanes.run], {
+        env: { ...process.env, ...results },
+      }).exitCode;
+    const successfulResults = {
+      SOURCE_CONTRACTS_RESULT: "success",
+      TEST_SUITE_RESULT: "success",
+      BROWSER_ACCEPTANCE_RESULT: "success",
+      PACKAGE_CONTRACTS_RESULT: "success",
+    };
+    expect(aggregateResult(successfulResults)).toBe(0);
+    for (const result of ["failure", "skipped", "cancelled", ""]) {
+      for (const variable of Object.keys(successfulResults)) {
+        expect(aggregateResult({ ...successfulResults, [variable]: result })).not.toBe(0);
+      }
+    }
     expect(ci.jobs["automation-report"].needs).toEqual([
       "automation-admission",
       "test",

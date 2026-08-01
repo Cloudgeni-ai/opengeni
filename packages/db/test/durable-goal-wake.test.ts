@@ -155,6 +155,7 @@ function materialize(ctx: GoalFixture) {
     policy: {
       model: "scripted-model",
       reasoningEffort: "low",
+      latencyMode: "standard",
       tools: [],
       sandboxBackend: "none",
     },

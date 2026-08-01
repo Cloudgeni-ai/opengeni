@@ -333,6 +333,7 @@ export type {
   PackInstallationStatus,
   Permission,
   ProductAccessMode,
+  LatencyMode,
   ReasoningEffort,
   RetainedArtifactContent,
   RetainedArtifactContentOptions,

@@ -229,6 +229,7 @@ export type ViewerHeartbeatRequest = { leaseEpoch: number };
 export type ViewerHeartbeatResponse = { alive: boolean };
 
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+export type LatencyMode = "standard" | "priority" | "fast";
 export type GitCredentialProvider = "github" | "gitlab" | "azure_devops";
 export type GitCredentialBindingId = string;
 export type GitRepositoryAccess = "read" | "write";
@@ -700,6 +701,7 @@ export type SessionTurn = {
   toolsProvided?: boolean | undefined;
   model: string;
   reasoningEffort: ReasoningEffort;
+  latencyMode: LatencyMode;
   sandboxBackend: SandboxBackend;
   sandboxOs: SandboxOs | null;
   metadata: Record<string, unknown>;
@@ -1645,6 +1647,7 @@ export type CreateSessionRequest = {
   metadata?: Record<string, unknown> | undefined;
   model?: string | undefined;
   reasoningEffort?: ReasoningEffort | undefined;
+  latencyMode?: LatencyMode | undefined;
   sandboxBackend?: SandboxBackend | undefined;
   // The enrolled machine (a sandbox id) to run this session on; seeds the
   // active-sandbox pointer at creation so the first turn lands on it.
@@ -2502,6 +2505,7 @@ export type ComposerDraft = {
   resources: ResourceRef[];
   model: string;
   reasoningEffort: ReasoningEffort;
+  latencyMode?: LatencyMode | undefined;
   sourceTurnId: string | null;
   sourceTurnVersion: number | null;
   updatedAt: string | null;
@@ -2527,6 +2531,7 @@ export type NewSessionDraft = {
   toolsProvided: boolean;
   model: string;
   reasoningEffort: ReasoningEffort;
+  latencyMode?: LatencyMode | undefined;
   options: NewSessionDraftOptions;
   updatedAt: string | null;
 };
@@ -3869,6 +3874,7 @@ export type UserMessageEventInput = {
     resources?: ResourceRef[] | undefined;
     model?: string | undefined;
     reasoningEffort?: ReasoningEffort | undefined;
+    latencyMode?: LatencyMode | undefined;
     mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[] | undefined;
   };
 };

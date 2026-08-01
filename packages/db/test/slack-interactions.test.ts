@@ -25,7 +25,7 @@ import {
 } from "../src/index";
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
-const migrationPath = new URL("../drizzle/0147_slack_task_interactions.sql", import.meta.url)
+const migrationPath = new URL("../drizzle/0149_slack_task_interactions.sql", import.meta.url)
   .pathname;
 
 let available = true;
