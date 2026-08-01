@@ -683,7 +683,7 @@ jobs:
           target: api
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name == 'push' }}
-          tags: ${{ github.event_name == 'push' && format('ghcr.io/cloudgeni-ai/opengeni-api:sha-{0}', github.sha) || 'opengeni-api:ci' }}
+          tags: ${{ github.event_name == 'push' && format('ghcr.io/cloudgeni-ai/opengeni-api:dogfood-sha-{0}', github.sha) || 'opengeni-api:ci' }}
           build-args: |
             OPENGENI_SERVER_VERSION=sha-${{ github.sha }}
 
@@ -696,7 +696,7 @@ jobs:
           target: worker
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name == 'push' }}
-          tags: ${{ github.event_name == 'push' && format('ghcr.io/cloudgeni-ai/opengeni-worker:sha-{0}', github.sha) || 'opengeni-worker:ci' }}
+          tags: ${{ github.event_name == 'push' && format('ghcr.io/cloudgeni-ai/opengeni-worker:dogfood-sha-{0}', github.sha) || 'opengeni-worker:ci' }}
           build-args: |
             OPENGENI_SERVER_VERSION=sha-${{ github.sha }}
 
@@ -709,7 +709,7 @@ jobs:
           target: web
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name == 'push' }}
-          tags: ${{ github.event_name == 'push' && format('ghcr.io/cloudgeni-ai/opengeni-web:sha-{0}', github.sha) || 'opengeni-web:ci' }}
+          tags: ${{ github.event_name == 'push' && format('ghcr.io/cloudgeni-ai/opengeni-web:dogfood-sha-{0}', github.sha) || 'opengeni-web:ci' }}
           build-args: |
             OPENGENI_SERVER_VERSION=sha-${{ github.sha }}
             OPENGENI_DEPLOYMENT_REVISION=${{ github.sha }}
@@ -722,7 +722,7 @@ jobs:
           file: docker/sandbox.Dockerfile
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name == 'push' }}
-          tags: ${{ github.event_name == 'push' && format('ghcr.io/cloudgeni-ai/opengeni-sandbox:sha-{0}', github.sha) || 'opengeni-sandbox:ci' }}
+          tags: ${{ github.event_name == 'push' && format('ghcr.io/cloudgeni-ai/opengeni-sandbox:dogfood-sha-{0}', github.sha) || 'opengeni-sandbox:ci' }}
 
       - name: Build relay image
         id: relay_image
@@ -732,7 +732,7 @@ jobs:
           file: agent/crates/opengeni-relay/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name == 'push' }}
-          tags: ${{ github.event_name == 'push' && format('ghcr.io/cloudgeni-ai/opengeni-relay:sha-{0}', github.sha) || 'opengeni-relay:ci' }}
+          tags: ${{ github.event_name == 'push' && format('ghcr.io/cloudgeni-ai/opengeni-relay:dogfood-sha-{0}', github.sha) || 'opengeni-relay:ci' }}
 
       - name: Write exact-main-SHA dogfood receipt
         if: ${{ github.event_name == 'push' }}
@@ -763,7 +763,7 @@ jobs:
             --arg runId "${GITHUB_RUN_ID}" \
             --arg runAttempt "${GITHUB_RUN_ATTEMPT}" \
             --arg chartVersion "$chart_version" \
-            --arg tag "sha-${GITHUB_SHA}" \
+            --arg tag "dogfood-sha-${GITHUB_SHA}" \
             --arg apiDigest "$API_DIGEST" \
             --arg workerDigest "$WORKER_DIGEST" \
             --arg webDigest "$WEB_DIGEST" \
