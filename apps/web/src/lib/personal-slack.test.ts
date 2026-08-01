@@ -120,6 +120,27 @@ describe("personal Slack account linking", () => {
     expect(preferredPersonalSlackConnection([revoked])?.id).toBe(revoked.id);
   });
 
+  test("uses creation time and UUID to break equal migration timestamp ties", () => {
+    const lowerUuid = connection({
+      id: "22222222-2222-4222-8222-222222222222",
+      createdAt: new Date("2026-07-31T11:00:00Z").toISOString(),
+      updatedAt: new Date("2026-08-01T12:00:00Z").toISOString(),
+    });
+    const canonical = connection({
+      id: "33333333-3333-4333-8333-333333333333",
+      createdAt: lowerUuid.createdAt,
+      updatedAt: lowerUuid.updatedAt,
+    });
+    const older = connection({
+      id: "ffffffff-ffff-4fff-bfff-ffffffffffff",
+      createdAt: new Date("2026-07-31T10:00:00Z").toISOString(),
+      updatedAt: lowerUuid.updatedAt,
+    });
+
+    expect(preferredPersonalSlackConnection([lowerUuid, older, canonical])?.id).toBe(canonical.id);
+    expect(preferredPersonalSlackConnection([canonical, older, lowerUuid])?.id).toBe(canonical.id);
+  });
+
   test("keeps refreshable expiry distinct from reconnect-required and revoked states", () => {
     const now = new Date("2026-07-31T12:00:00Z");
     const expiredAt = new Date("2026-07-31T11:00:00Z").toISOString();
