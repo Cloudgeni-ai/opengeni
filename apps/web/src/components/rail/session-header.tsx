@@ -1,8 +1,8 @@
 // The session header bar — the slim canvas top strip's contents on a session
 // route. Split out of rail-shell as a PURE, presentational component: it takes
 // plain session data + callbacks and renders the two-line identity block
-// (breadcrumb → title → model·effort · sandbox · codex) on the left and the
-// live-status cluster (connection, status, lock, panel toggle) on the right.
+// (breadcrumb → title) on the left and the action cluster on the right
+// (provider+model·effort·speed, sandbox, pin, connection, status, panel).
 // The live children that need their own hooks — the sandbox switcher and the
 // codex account indicator — arrive as slots so the whole bar can be rendered
 // (and screenshotted) in isolation. `CanvasTopStrip` in rail-shell owns the
@@ -16,16 +16,21 @@ import type { SessionSummary } from "@opengeni/sdk";
 import { LockIcon, PanelRightIcon, PauseIcon, PencilIcon, PinIcon, PlayIcon } from "lucide-react";
 import { useCallback, useRef, useState, type ReactNode } from "react";
 
+import { BillingClassMark, type BillingClass } from "@/components/billing-class-mark";
 import { ConnectionPill } from "@/components/common";
 import { SessionAncestryBreadcrumb } from "@/components/session/subagents";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
+import { displayModel } from "@/lib/format";
+import { isCodexProductModel } from "@/lib/session-model";
 import {
   SESSION_TITLE_MAX_LENGTH,
   sessionDisplayTitle,
   useInlineRename,
 } from "@/lib/session-rename";
 import { pinLiveAnnouncement } from "@/lib/pin-live-announcement";
-import type { Session } from "@/types";
+import { isIntelligenceEffort, labelEffort, type IntelligenceEffort } from "@/lib/session-tools";
+import type { LatencyMode, Session } from "@/types";
 
 export function SessionHeader({
   session,
@@ -43,6 +48,12 @@ export function SessionHeader({
   sandboxSlot,
   codexSlot,
   leading,
+  lastStartedModel,
+  lastStartedReasoningEffort,
+  lastStartedLatencyMode,
+  billingClass,
+  modelLabel,
+  policyLoading,
 }: {
   session: Session;
   /** Root-to-direct-parent order. */
@@ -59,11 +70,63 @@ export function SessionHeader({
   onPin: (session: Session, pinned: boolean) => Promise<Session | null>;
   /** The "Run on <machine>" control — a live component in production. */
   sandboxSlot?: ReactNode;
-  /** The codex-account indicator — absent for host-credit sessions. */
+  /**
+   * Replaces the static provider mark when the session is on Codex — same icon,
+   * clickable for account status/switch. Absent for host-credit sessions.
+   */
   codexSlot?: ReactNode;
   /** Leading control (the mobile hamburger); absent on desktop. */
   leading?: ReactNode;
+  /**
+   * Model·effort·latency from the newest turn that durably emitted `turn.started`.
+   * Historical — does not follow the composer next-turn picker. Falls back to
+   * session creation defaults before any turn has admitted.
+   */
+  lastStartedModel?: string;
+  lastStartedReasoningEffort?: IntelligenceEffort;
+  lastStartedLatencyMode?: LatencyMode;
+  /** Billing rail for the provider mark (OpenGeni / Codex / BYOK). */
+  billingClass?: BillingClass;
+  /** Product model label (e.g. GPT-5.6 Luna). */
+  modelLabel?: string;
+  /**
+   * True while last-started policy and/or model catalog are still resolving.
+   * Avoids flashing session defaults (wrong provider) before admitted truth.
+   */
+  policyLoading?: boolean;
 }) {
+  const modelId = lastStartedModel?.trim() || session.model;
+  const resolvedBilling: BillingClass =
+    billingClass ?? (isCodexProductModel(modelId) ? "codex_subscription" : "opengeni_credits");
+  const resolvedModel = modelLabel?.trim() || displayModel(modelId);
+  const sessionEffort = session.metadata.reasoningEffort;
+  const displayEffort: IntelligenceEffort =
+    lastStartedReasoningEffort ?? (isIntelligenceEffort(sessionEffort) ? sessionEffort : "low");
+  const sessionLatency = session.metadata.latencyMode;
+  const displayLatency: LatencyMode =
+    lastStartedLatencyMode ??
+    (sessionLatency === "fast" || sessionLatency === "priority" || sessionLatency === "standard"
+      ? sessionLatency
+      : "standard");
+  // Codex → clickable account chip. Other rails → static provider icon only
+  // (never invent a text "OpenGeni"/"BYOK" word). Don't key off `codexSlot != null`.
+  const isCodexRail = resolvedBilling === "codex_subscription";
+  const policyBits = [
+    resolvedModel,
+    labelEffort(displayEffort),
+    displayLatency === "fast" ? "Fast" : displayLatency === "priority" ? "Priority" : null,
+  ].filter((bit): bit is string => Boolean(bit));
+  const providerControl = isCodexRail ? (
+    (codexSlot ?? (
+      <BillingClassMark
+        billingClass="codex_subscription"
+        className="size-3.5 shrink-0 text-fg-muted"
+        aria-label=""
+      />
+    ))
+  ) : (
+    <BillingClassMark billingClass={resolvedBilling} className="size-3.5 shrink-0 text-fg-muted" />
+  );
   return (
     // An elevated band, not just canvas-with-a-hairline: reading as a real top
     // bar was the light-theme fix — a near-white header on a near-white canvas
@@ -83,23 +146,34 @@ export function SessionHeader({
           />
         </div>
         <SessionTitleEditor session={session} onRename={onRename} />
-        {/* One quiet metadata voice: no label-colon grammar, no separator
-            soup — the model·effort token (the model earns a touch more weight,
-            the effort stays quiet), then the sandbox pill (its own shape, no
-            interposed dot), then the codex indicator. */}
-        <div className="hidden min-w-0 items-center gap-2 overflow-hidden text-2xs leading-4 text-fg-muted sm:flex">
-          <span className="min-w-0 shrink truncate font-medium text-fg-muted">
-            {session.model}
-            <span className="font-normal text-fg-muted">
-              {" "}
-              · {String(session.metadata.reasoningEffort ?? "low")}
-            </span>
-          </span>
-          {sandboxSlot}
-          {codexSlot}
-        </div>
       </div>
-      <div className="ml-auto flex min-w-0 max-w-full flex-wrap items-center justify-end gap-1 sm:gap-2">
+      <div className="ml-auto flex min-w-0 max-w-full flex-wrap items-center justify-end gap-1.5 sm:gap-2">
+        {/* Provider + model · effort · speed stay one cluster on the action side. */}
+        <div className="hidden min-w-0 max-w-[min(100%,18rem)] items-center gap-1.5 overflow-hidden text-2xs leading-4 text-fg-muted sm:flex md:max-w-[22rem]">
+          {policyLoading ? (
+            <span
+              className="inline-flex items-center gap-1.5"
+              aria-busy="true"
+              aria-label="Loading model"
+            >
+              <Skeleton className="h-6 w-11 shrink-0 rounded-full" />
+              <Skeleton className="h-3 w-36" />
+            </span>
+          ) : (
+            <span className="inline-flex min-w-0 items-center gap-1.5 truncate font-medium text-fg-muted">
+              {providerControl}
+              <span className="min-w-0 truncate font-normal">
+                {policyBits.map((bit, index) => (
+                  <span key={bit}>
+                    {index > 0 ? " · " : null}
+                    {bit}
+                  </span>
+                ))}
+              </span>
+            </span>
+          )}
+        </div>
+        {sandboxSlot}
         <SessionPinButton session={session} onPin={onPin} />
         <div className="hidden items-center gap-2 md:flex">
           <ConnectionPill state={connectionState} />

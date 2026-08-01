@@ -7,11 +7,8 @@ import {
   type SlashCommandContext,
   type UseFileAttachmentsResult,
 } from "@opengeni/react";
-import {
-  resolveWorkspaceTranscriptionPolicy,
-  type EffectiveSessionControl,
-  type TranscriptionAdapter,
-} from "@opengeni/sdk";
+import { resolveWorkspaceVoiceInputEnabled } from "@opengeni/sdk/core";
+import type { EffectiveSessionControl } from "@opengeni/sdk";
 import { type ReactNode } from "react";
 import { useAppContext } from "@/context";
 
@@ -37,12 +34,10 @@ export function ConsoleComposer(props: {
   controls?: ReactNode;
   commandContext?: SlashCommandContext;
   onClearView?: () => void;
-  /** Optional approved host adapter; the web bundle ships no paid provider adapter. */
-  transcriptionAdapter?: TranscriptionAdapter | null;
 }) {
   const context = useAppContext();
   const workspace = context.workspaces.find((candidate) => candidate.id === props.workspaceId);
-  const transcriptionPolicy = resolveWorkspaceTranscriptionPolicy(workspace?.settings);
+  const voiceInputEnabled = resolveWorkspaceVoiceInputEnabled(workspace?.settings) ?? true;
   return (
     <ChatComposer
       composer={props.composer}
@@ -57,10 +52,16 @@ export function ConsoleComposer(props: {
       {...(props.commandContext ? { commandContext: props.commandContext } : {})}
       {...(props.onClearView ? { onClearView: props.onClearView } : {})}
       controlsStart={props.controls}
-      transcription={{
-        adapter: props.transcriptionAdapter ?? null,
-        policy: transcriptionPolicy,
-      }}
+      {...(context.clientConfig.voiceInput?.available
+        ? {
+            transcription: {
+              client: context.client,
+              workspaceId: props.workspaceId,
+              capability: context.clientConfig.voiceInput,
+              workspaceEnabled: voiceInputEnabled,
+            },
+          }
+        : {})}
     />
   );
 }

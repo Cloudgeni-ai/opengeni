@@ -35,6 +35,15 @@ Changing Slack app metadata is provider administration outside this repository. 
 
 Personal Slack uses the provider's official hosted MCP resource, exactly `https://mcp.slack.com/mcp`. The normal authenticated MCP OAuth start endpoint performs discovery, uses the deployment-managed Slack client, creates signed single-use state bound to the exact OpenGeni account, workspace, and subject, and uses authorization-code OAuth with PKCE S256. The callback rechecks the subject's live workspace grant before consuming the nonce, exchanging the code, verifying MCP tool discovery, or writing the connection.
 
+The signed-in user's account-linking surface is **Capabilities → Slack connections → Your Slack account**. It is deliberately separate from the adjacent **OpenGeni workspace bot** installation card:
+
+1. **Connect my Slack account** starts the existing hosted-MCP OAuth flow. The browser sends only the official resource/provider target and the return path; Slack client credentials remain deployment-managed.
+2. The card shows only non-secret subject-owned metadata: connection health, granted personal scopes, last use, and access-token expiry. It never shows the private connection UUID, token, client credential, or workspace-bot installation details.
+3. **Reconnect my Slack account** reuses the current subject's row when it still exists. The callback preserves the generic subject-scoped capability reference and never publishes that row's UUID into workspace capability configuration.
+4. **Disconnect** requires an explicit confirmation and revokes local OpenGeni use of that subject-owned row. It does not disconnect the workspace bot or revoke provider-side access in Slack.
+
+Status copy follows the broker's actual lifecycle. An active row whose access token reached its expiry time remains connected with refresh pending because the broker refreshes on use. `needs_reauth` after an expired/rejected refresh and `error` require reconnect. `revoked` is shown as disconnected and remains an eligible in-place reconnect target. Raw provider errors are not rendered in the browser.
+
 The resulting `connections` row has `subjectId` and `createdBySubjectId` set to the authenticating OpenGeni subject. Subject-owned capability configuration stores only a generic `{ providerDomain: "slack.com", kind: "oauth2", subjectScope: "subject" }` reference; it never publishes or persists the private connection UUID in a workspace capability projection.
 
 Enforcement is fail-closed across the full lifecycle:
@@ -60,16 +69,28 @@ features:
   bot_user:
     display_name: OpenGeni
     always_online: false
+  slash_commands:
+    - command: /opengeni
+      description: Start an OpenGeni task in this channel
+      should_escape: false
+      url: https://app.opengeni.ai/v1/integrations/slack/commands
+  shortcuts:
+    - callback_id: opengeni_message
+      description: Start an OpenGeni task from this Slack message
+      name: Open in OpenGeni
+      type: message
 oauth_config:
   redirect_urls:
     - https://app.opengeni.ai/v1/integrations/oauth/callback
     - https://app.opengeni.ai/v1/integrations/slack/callback
   scopes:
     bot:
+      - app_mentions:read
       - canvases:read
       - channels:history
       - channels:read
       - chat:write
+      - commands
       - files:read
       - groups:history
       - groups:read
@@ -80,16 +101,27 @@ oauth_config:
       - mpim:read
       - users:read
 settings:
+  event_subscriptions:
+    bot_events:
+      - app_mention
+      - message.channels
+      - message.groups
+      - message.im
+      - message.mpim
+    request_url: https://app.opengeni.ai/v1/integrations/slack/events
+  interactivity:
+    is_enabled: true
+    request_url: https://app.opengeni.ai/v1/integrations/slack/interactions
   org_deploy_enabled: false
   socket_mode_enabled: false
   token_rotation_enabled: false
 ```
 
-Self-hosted deployments replace `https://app.opengeni.ai` with their stable HTTPS `OPENGENI_PUBLIC_BASE_URL`. Keep bot `user_scope` empty. The manifest requests only the scopes required by the shipped workspace-bot tools; it does not pre-authorize future mention, slash-command, canvas/file mutation, or reaction-mutation behavior. Event Subscriptions remain disabled because no event handlers are shipped. Do not enable Socket Mode, token rotation, or add `app_mentions:read`, `commands`, `canvases:write`, `files:write`, `reactions:write`, `channels:join`, `chat:write.public`, `chat:write.customize`, `users:read.email`, channel-management, administrative, or enterprise-search scopes. OpenGeni rejects an installation whose reported bot scopes do not exactly match the manifest.
+Self-hosted deployments replace `https://app.opengeni.ai` with their stable HTTPS `OPENGENI_PUBLIC_BASE_URL`. Keep bot `user_scope` empty. The manifest requests only the scopes and event types required by the shipped workspace-bot tools and Slack task interaction surface. Do not enable Socket Mode, token rotation, or add canvas/file/reaction mutation, `channels:join`, `chat:write.public`, `chat:write.customize`, `users:read.email`, channel-management, administrative, or enterprise-search scopes. The canonical allowlist accepts the required manifest scopes plus the explicitly safe read-only identity extra `team:read`; every other extra or unknown future scope fails closed across installation verification, core routing, and browser Installed-state projection.
 
 ## Install and connect the workspace bot
 
-1. In the intended OpenGeni workspace, open **Capabilities → OpenGeni Slack bot**.
+1. In the intended OpenGeni workspace, open **Capabilities → Slack connections → OpenGeni workspace bot**.
 2. Choose the official **Add to Slack** visual. The button calls OpenGeni's authenticated OAuth-start API; it is not a static provider link.
 3. OpenGeni creates high-entropy, signed, single-use state bound to the exact account, workspace, subject, and install or reinstall action, then redirects to Slack workspace selection and consent.
 4. Slack returns the browser to `/v1/integrations/slack/callback`. OpenGeni consumes the state once and exchanges the temporary code server-side.
@@ -98,6 +130,24 @@ Self-hosted deployments replace `https://app.opengeni.ai` with their stable HTTP
 Slack's bot installation endpoint is protected by the bound one-time state and exact redirect URI. The implementation does not claim or add PKCE to this provider-specific bot flow unless Slack documents support for it.
 
 The bot connection is a workspace-shared `app_install` row (`subjectId = null`) in exactly the OpenGeni workspace that initiated installation. It is not organization-wide and is never implicitly shared to another OpenGeni workspace. API responses, browser URLs, events, tool results, and audit metadata contain only non-secret connection and principal facts.
+
+## Start and continue OpenGeni work from Slack
+
+Authenticated Slack users can start work through three configured entry points:
+
+- mention `@OpenGeni` in a channel or existing thread;
+- invoke `/opengeni <task>` in a channel;
+- direct-message the OpenGeni bot, or use the **Open in OpenGeni** message shortcut when explicitly sending a human-to-human DM message.
+
+Every top-level bot DM durably reserves a new private OpenGeni session ID for the linked OpenGeni subject before session creation begins. Authorization and listing use that reservation until the same ID is bound as the session root, so a crash or concurrent read before binding cannot expose the session to another workspace subject. A reply in its Slack thread continues that exact session; a separate top-level DM creates a separate session. Installing the bot for a workspace never converts private DM sessions into workspace-visible sessions.
+
+A channel mention, command, or message shortcut creates one workspace-visible session whose authorization follows both the Slack channel and live OpenGeni workspace grants. Mentioning OpenGeni inside an unmapped existing thread adopts that thread as the session surface. Once mapped, linked and authorized OpenGeni workspace participants can continue the same session by replying in that thread. An ordinary unmapped thread reply is ignored rather than creating work implicitly.
+
+The bot acknowledges accepted work and keeps at most three progress posts globally per interaction, plus durable human-input questions, stop/cancellation, failures, blockers, and the final result in the originating thread. Each progress event durably claims one of those three slots and a stable Slack post-operation identity before provider delivery, so pages, retries, restarts, replicas, and duplicate claims cannot exceed the cap. Messages include an **Open in OpenGeni** session link. Reply `stop` in the mapped thread to pause the workstream; start a new top-level DM or invoke OpenGeni again to create a new session.
+
+Slack identities must be explicitly linked to an OpenGeni subject in the same account and workspace. An unmapped identity receives an account-linking URL and no session is created. Invalid signatures or timestamps, replayed/duplicate provider identities, inactive or ambiguous installations, missing bot channel access, revoked OpenGeni access, malformed payloads, and cross-tenant ambiguity fail closed. Slack retries, reconnects, worker restarts, and session resumes converge through the durable inbox, private session reservation, route binding, session idempotency key, delivery cursor, per-event progress ledger, and Slack post-operation ledger.
+
+Slack message and thread text is task-local input only. The interaction path does not automatically write it to Documents, Knowledge, Memory, preferences, Workspace Charter, instructions, or policy. Delivery excludes private reasoning, secrets, credentials, raw logs, raw provider responses, and unbounded output, and bot/self/subtype events are suppressed to prevent notification loops.
 
 ## Channel access and tools
 
@@ -109,11 +159,13 @@ The bot connection is a workspace-shared `app_install` row (`subjectId = null`) 
 - Thread replies are read through their top-level message timestamp and may be posted by supplying that same timestamp.
 - File and canvas reads are limited to channels where the bot is already a member. Results expose bounded file metadata and text content, never Slack private-file URLs or credentials.
 
-The first-party tools are `slack_bot_list_channels`, `slack_bot_channel_history`, `slack_bot_thread_replies`, `slack_bot_list_users`, `slack_bot_list_files`, `slack_bot_file_info`, `slack_bot_file_content`, and `slack_bot_post_message`. Outside a scheduled session, calls require `connections:read`; the connection ID is optional when exactly one eligible active OpenGeni bot is installed, and required when multiple eligible bots exist. A scheduled session can use only its immutable selected bot connection ID.
+The first-party tools are `slack_bot_list_channels`, `slack_bot_channel_history`, `slack_bot_thread_replies`, `slack_bot_list_users`, `slack_bot_list_files`, `slack_bot_file_info`, `slack_bot_file_content`, `slack_bot_post_message`, and `slack_bot_delete_message`. Threaded posts pass the parent message timestamp as `threadTimestamp` and return it in the result so placement can be verified. Message deletion accepts an operation UUID, the exact channel ID, and the exact message timestamp; Slack permits the bot token to delete only messages authored by that bot. Outside a scheduled session, calls require `connections:read`; the connection ID is optional when exactly one eligible active OpenGeni bot is installed, and required when multiple eligible bots exist. Legacy duplicate rows for one workspace/team/bot/bot-user principal collapse deterministically by `createdAt DESC, id DESC`; a different principal still requires an explicit connection ID, and no row crosses a workspace boundary. A scheduled session can use only its immutable selected bot connection ID.
 
 Slack AI huddle notes are canvases. Sharing that canvas into a channel where the bot is a member lets OpenGeni read the notes and exposes the associated `huddleTranscriptFileId`. For transcript content, OpenGeni requests the expanded `files.info` projection with `include_transcription=true` and reads the returned `huddle_transcription` object from the transcript or parent canvas. If Slack omits that projection and redirects the private download to an interactive user page, OpenGeni reports `huddle_transcript_requires_participant_access` and never treats Slack web-client HTML as transcript content.
 
 Each post requires an `operationId` UUID. Generate one per intended message and reuse the same UUID for every timeout or unknown-outcome retry. OpenGeni binds it to the connection, target, and protected request digest and sends it as Slack `client_msg_id`; reusing it for different content or a different target is rejected.
+
+Each deletion also requires an `operationId` UUID. OpenGeni durably binds it to the tenant, initiating subject or scheduler principal, exact connection, `slack_bot_delete_message` tool, channel, timestamp, and protected request digest before `chat.delete`. Completed retries replay the stored result. Concurrent retries observe the live claim. If the process or response is lost after provider admission, the row becomes outcome-unknown and the retry first reconciles the exact Slack message through `chat.getPermalink`: an absent message completes as already deleted, while a still-present message permits one new delete attempt. OpenGeni never blindly sends `chat.delete` twice.
 
 ## Scheduled tasks
 
@@ -129,4 +181,4 @@ Slack authentication errors that prove invalid, inactive, expired, or revoked cr
 
 ## Audit evidence
 
-Connect, reinstall, disconnect, channel-list, history, thread-reply, user-list, file-list, file-info, file-content, and post operations write connection-targeted audit events. Receipts identify the non-secret credential role, connection UUID, Slack team ID, operation, outcome, and applicable task/session IDs. Post receipts include the non-secret operation/client-message UUID. They never include tokens, authorization headers, posted text, channel history, file contents, private-file URLs, protected request digests, or raw provider responses.
+Connect, reinstall, disconnect, channel-list, history, thread-reply, user-list, file-list, file-info, file-content, post, and deletion operations write connection-targeted audit events. Receipts identify the non-secret credential role, connection UUID, Slack team ID, operation, outcome, and applicable task/session IDs. Post receipts include the non-secret operation/client-message UUID; deletion receipts include only their operation UUID. They never include tokens, authorization headers, posted text, channel history, file contents, private-file URLs, protected request digests, or raw provider responses.

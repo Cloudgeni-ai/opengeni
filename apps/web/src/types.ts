@@ -43,6 +43,14 @@ export type {
   GitHubBindingStatus,
   GitHubInstallationBinding,
   GitHubRepository,
+  GoogleDriveBrowseItem,
+  GoogleDriveBrowseResponse,
+  GoogleDriveConnectionMetadata,
+  GoogleDriveOAuthStartResponse,
+  GoogleDriveReadPolicy,
+  GoogleDriveSelectedSource,
+  GoogleDriveSyncCadence,
+  GoogleDriveTargetScope,
   GoalSpec,
   CreateKnowledgeMemoryRequest,
   KnowledgeMemory,
@@ -51,6 +59,7 @@ export type {
   KnowledgeSourceKind,
   PackInstallation,
   Permission as SdkPermission,
+  LatencyMode,
   ReasoningEffort,
   ResourceRef,
   Rig,
@@ -92,6 +101,7 @@ export type WorkspaceVariableSetVariableMetadata = VariableSetVariableMetadata;
 export type { CreateCapabilityCatalogItemRequest as CreateCapabilityInput } from "@opengeni/sdk";
 import type {
   GoalSpec,
+  LatencyMode,
   ReasoningEffort,
   ResourceRef,
   SandboxBackend,
@@ -107,6 +117,7 @@ export type TurnSubmission = {
   tools?: ToolRef[];
   model?: string;
   reasoningEffort?: ReasoningEffort;
+  latencyMode?: LatencyMode;
   sandboxBackend?: SandboxBackend;
   variableSetId?: string;
   /**  use variableSetId */

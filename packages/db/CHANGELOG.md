@@ -1,5 +1,96 @@
 # @opengeni/db
 
+## 0.17.0
+
+### Minor Changes
+
+- 1ec9912: Add generic, versioned workspace artifacts with content-addressed HTML storage, a static HTML/CSS renderer, rollback history, and first-party agent publishing tools. JavaScript and active or navigation-capable markup are removed from the initial renderer until executable artifacts have a stronger isolation boundary.
+
+### Patch Changes
+
+- dcc35c5: Add authenticated Slack mentions, commands, message shortcuts, atomically private bot-DM sessions, durable thread continuation, and globally bounded idempotent progress delivery.
+- Updated dependencies [dcc35c5]
+- Updated dependencies [1ec9912]
+  - @opengeni/config@0.8.0
+  - @opengeni/contracts@0.27.0
+
+## 0.16.2
+
+### Patch Changes
+
+- c52acc0: Ship Fast latency mode with turn-column inheritance, Codex ChatGPT honor-skip for response service_tier, and model picker UX polish.
+- Updated dependencies [c52acc0]
+  - @opengeni/codex@0.2.9
+  - @opengeni/config@0.7.22
+  - @opengeni/contracts@0.26.1
+
+## 0.16.1
+
+### Patch Changes
+
+- 02fb98c: Reconcile expired draining sandboxes after their exact provider instance has disappeared.
+
+## 0.16.0
+
+### Minor Changes
+
+- f413e6c: Add real Workspace Insights: durable `model_call_facts` after authoritative
+  `agent.model.usage`, a `workspace:admin` insights API over usage_events + facts +
+  live joins, SDK client, and a web console that drops mock rollups for honest
+  UTC credit/token/cache/warm/caps reporting.
+
+### Patch Changes
+
+- b5175a8: Move the unapplied Slack delete-operation migration after the already-deployed
+  sandbox migration history, while accepting only the exact legacy staging
+  receipt for an idempotent replay.
+- Updated dependencies [f413e6c]
+  - @opengeni/contracts@0.26.0
+  - @opengeni/config@0.7.21
+
+## 0.15.6
+
+### Patch Changes
+
+- 0199108: Harden the workspace Slack bot with one fail-closed scope policy, deterministic legacy connection selection, and durable replay-safe message deletion operation identities.
+- 42428a2: Add per-session Codex remote compaction v2 (`remote_v2` / `portable`), with UI landmarks, Codex-only model locking, and opaque token accounting aligned to Codex CLI.
+- 7b65614: Keep over-limit viewer-only sandboxes drained until a fresh serialized balance
+  or monthly-cap evaluation clears a durable workspace admission gate. Viewer
+  reattach can no longer re-arm a draining box or spawn a cold successor, while a
+  turn-held sandbox remains viewable.
+- Updated dependencies [0199108]
+- Updated dependencies [42428a2]
+- Updated dependencies [b2e975f]
+- Updated dependencies [9f3b931]
+  - @opengeni/contracts@0.25.0
+  - @opengeni/config@0.7.20
+
+## 0.15.5
+
+### Patch Changes
+
+- b7df541: Prevent provider-native checkpoint capture from racing sandbox operations while
+  the provider has paused the source box. Capture now owns a durable
+  lease/epoch/instance/generation claim, blocks new holders and mutations, drains
+  provider-local reads before entering the exclusive snapshot call, and retains
+  ownership through late provider settlement and exact stale-claim recovery.
+  Modal's typed completed-exec stdin race is also normalized into a side-effect-free
+  terminal poll, so an exec that exits between local lookup and the provider write
+  settles its retained process instead of failing the enclosing turn.
+- Updated dependencies [710b081]
+- Updated dependencies [b7df541]
+  - @opengeni/contracts@0.24.3
+  - @opengeni/config@0.7.19
+
+## 0.15.4
+
+### Patch Changes
+
+- 84fb671: Prevent a ready file restored during reconnect from being counted twice across the durable composer draft and the still-live attachment card. Canonical duplicate refs are removed before draft persistence and composer submission while custom mounts and exact draft revision/content conflict protection remain intact.
+- Updated dependencies [96eb64b]
+  - @opengeni/config@0.7.18
+  - @opengeni/contracts@0.24.2
+
 ## 0.15.3
 
 ### Patch Changes

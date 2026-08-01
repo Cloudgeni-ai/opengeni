@@ -155,12 +155,21 @@ describe("release schema contract", () => {
         (migrations.has("0138_sandbox_checkpoint_artifacts_and_deadlines.sql") ? 1 : 0) +
         (migrations.has("0139_codex_provider_artifact_invalidations.sql") ? 1 : 0) +
         (migrations.has("0140_sandbox_restore_and_reaper_fences.sql") ? 1 : 0) +
-        (migrations.has("0141_social_connection_credentials.sql") ? 1 : 0),
+        (migrations.has("0141_social_connection_credentials.sql") ? 1 : 0) +
+        (migrations.has("0142_sandbox_archive_capture_gate.sql") ? 1 : 0) +
+        (migrations.has("0143_session_codex_compaction_mode.sql") ? 1 : 0) +
+        (migrations.has("0144_sandbox_viewer_force_drain_gate.sql") ? 1 : 0) +
+        (migrations.has("0145_model_call_facts.sql") ? 1 : 0) +
+        (migrations.has("0146_slack_bot_delete_idempotency.sql") ? 1 : 0) +
+        (migrations.has("0147_draft_latency_mode.sql") ? 1 : 0) +
+        (migrations.has("0148_session_turn_latency_mode.sql") ? 1 : 0) +
+        (migrations.has("0149_workspace_artifacts.sql") ? 1 : 0) +
+        (migrations.has("0150_slack_task_interactions.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "ede5262e94f37309858668b7ffc80015e4ca0ce31bd0143946c19a1eeae3444e",
+      "59757daa51f3bdabafebf93a7576ef324bc1bf850750fbb4953402992f240c6e",
     );
-    expect(contract.latestMigration).toBe("0141_social_connection_credentials.sql");
+    expect(contract.latestMigration).toBe("0150_slack_task_interactions.sql");
     expect(migrations.get("0128_github_installation_authority.sql")).toMatchObject({
       sha256: "365793b2a204a70e214adb90298b522acbb6dcfae22a46681a58f41a6938e6f0",
       deploymentMode: "rolling",
@@ -206,7 +215,7 @@ describe("release schema contract", () => {
     expect(
       contract.migrations
         .map((migration) => migration.path)
-        .filter((path) => /^(?:010[3-9]|011[0-9]|012[0-9]|013[0-9])_/.test(path)),
+        .filter((path) => /^(?:010[3-9]|011[0-9]|012[0-9]|013[0-9]|014[0-9]|0150)_/.test(path)),
     ).toEqual([
       "0103_host_export_root_session.sql",
       "0104_host_export_root_session_backfill.sql",
@@ -235,7 +244,26 @@ describe("release schema contract", () => {
       "0137_preference_registry.sql",
       "0138_sandbox_checkpoint_artifacts_and_deadlines.sql",
       "0139_codex_provider_artifact_invalidations.sql",
+      "0140_sandbox_restore_and_reaper_fences.sql",
+      "0141_social_connection_credentials.sql",
+      "0142_sandbox_archive_capture_gate.sql",
+      "0143_session_codex_compaction_mode.sql",
+      "0144_sandbox_viewer_force_drain_gate.sql",
+      "0145_model_call_facts.sql",
+      "0146_slack_bot_delete_idempotency.sql",
+      "0147_draft_latency_mode.sql",
+      "0148_session_turn_latency_mode.sql",
+      "0149_workspace_artifacts.sql",
+      "0150_slack_task_interactions.sql",
     ]);
+    expect(migrations.get("0143_session_codex_compaction_mode.sql")).toMatchObject({
+      sha256: "574cfe6fc5ab24135e84d3932fd936e134ebe28bce8ac3cb5db97a549683906f",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0150_slack_task_interactions.sql")).toMatchObject({
+      sha256: "97f23742bedcc0131ae21ba08a02eb8b5a739dafe790d22477622bf01746eaf6",
+      deploymentMode: "rolling",
+    });
     expect(new Set(contract.migrations.map((migration) => migration.path)).size).toBe(
       contract.fileCount,
     );
@@ -338,6 +366,34 @@ describe("release schema contract", () => {
     expect(migrations.get("0141_social_connection_credentials.sql")).toMatchObject({
       sha256: "d5a032bd8c6b61c45f48793963185bcab964de88981eba66d32b4f9de74e8edf",
       deploymentMode: "rolling",
+    });
+    expect(migrations.get("0142_sandbox_archive_capture_gate.sql")).toMatchObject({
+      sha256: "48546fe4f106da0b36edf8a47da56e35b123fd0a63dc9c2eaed887756d35144f",
+      deploymentMode: "maintenance",
+    });
+    expect(migrations.get("0144_sandbox_viewer_force_drain_gate.sql")).toMatchObject({
+      sha256: "0b03627860a310eb27caa94cf7f67d614f0198a7a01d36b383c7874edba41b38",
+      deploymentMode: "maintenance",
+    });
+    expect(migrations.get("0145_model_call_facts.sql")).toMatchObject({
+      sha256: "93bb3f262f465ca2128b6dadc5e166bfdc78ded610e57a803ce1d3e6a8599dde",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0146_slack_bot_delete_idempotency.sql")).toMatchObject({
+      sha256: "9084b0cd13c1924dd23af09b80d65b58223721259a23b1240e75f5af91b8cfb5",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0147_draft_latency_mode.sql")).toMatchObject({
+      sha256: "8269cfad28f1fc8d943f55b89ef5715bc18e9817283ac3a36502127f12935fca",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0148_session_turn_latency_mode.sql")).toMatchObject({
+      sha256: "fe753b8b5866c4f619ae3b360442659db26f639db867b622b1f2a0520e9c80dd",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0149_workspace_artifacts.sql")).toMatchObject({
+      sha256: "ae3bdf08e8a47e04dd0b025f143b40b0e31f31c9e7b3eb51c0d21233be265bd3",
+      deploymentMode: "maintenance",
     });
   });
 });

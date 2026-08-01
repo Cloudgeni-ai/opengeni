@@ -88,11 +88,45 @@ type MutableModalSandboxSession = {
     snapshotFilesystemTimeoutMs?: number;
   };
   persistWorkspace?: () => Promise<Uint8Array>;
+  writeStdin?: (args: {
+    sessionId: number;
+    chars?: string;
+    yieldTimeMs?: number;
+    maxOutputTokens?: number;
+  }) => Promise<string>;
 };
 
 const modalRetentionWrappedSessions = new WeakSet<object>();
 const modalFilesystemRetentionWrappedSandboxes = new WeakSet<object>();
 const modalDirectoryRetentionWrappedSandboxes = new WeakSet<object>();
+
+const MODAL_EXEC_STDIN_WRITE_PATH =
+  "/modal.task_command_router.TaskCommandRouter/TaskExecStdinWrite";
+const MODAL_EXEC_ALREADY_COMPLETED_DETAILS =
+  /^Exec has already completed; stdin is no longer accepting writes(?: \(Error code: [A-Z0-9]+\))?$/;
+
+/**
+ * Modal proves that the exact exec has already terminated with a typed
+ * FAILED_PRECONDITION from its stdin-write RPC. Keep this deliberately
+ * structural and exact: other FAILED_PRECONDITION errors are not process
+ * lifetime authority.
+ */
+export function isModalExecAlreadyCompletedError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const record = error as {
+    name?: unknown;
+    path?: unknown;
+    code?: unknown;
+    details?: unknown;
+  };
+  return (
+    record.name === "ClientError" &&
+    record.path === MODAL_EXEC_STDIN_WRITE_PATH &&
+    record.code === 9 &&
+    typeof record.details === "string" &&
+    MODAL_EXEC_ALREADY_COMPLETED_DETAILS.test(record.details)
+  );
+}
 
 function assertPinnedModalSdk(session: MutableModalSandboxSession): void {
   const actualVersion = session.modal?.version?.();
@@ -157,10 +191,42 @@ function installModalNativeSnapshotRetention(session: MutableModalSandboxSession
   modalDirectoryRetentionWrappedSandboxes.add(sandbox);
 }
 
+function installModalExecCompletionRecovery(session: MutableModalSandboxSession): void {
+  const writeStdin = session.writeStdin;
+  if (typeof writeStdin !== "function") return;
+  session.writeStdin = async (args) => {
+    try {
+      return await writeStdin.call(session, args);
+    } catch (error) {
+      if (
+        !isModalExecAlreadyCompletedError(error) ||
+        !Number.isSafeInteger(args.sessionId) ||
+        args.sessionId <= 0
+      ) {
+        throw error;
+      }
+      // Agents Extensions checks its local active-process map before writing,
+      // but the process can finish before Modal receives TaskExecStdinWrite.
+      // An empty retry performs no side effect: it lets the adapter observe the
+      // already-terminal process, delete its stale map entry, and return the
+      // ordinary exact exit banner consumed by OpenGeni's durable settlement.
+      // If that cleanup poll itself loses transport, the original typed
+      // completion is still authoritative and the canonical lost-session
+      // result lets OpenGeni close the exact retained process without failing
+      // the turn or replaying stdin.
+      try {
+        return await writeStdin.call(session, { ...args, chars: "" });
+      } catch {
+        return `write_stdin failed: session not found: ${args.sessionId}`;
+      }
+    }
+  };
+}
+
 /**
- * Bridge the pinned Agents Extensions Modal adapter to Modal 0.9's snapshot
- * options. The wrapper re-checks the private provider sandbox on every capture
- * because snapshot_filesystem hydration replaces that object.
+ * Bridge the pinned Agents Extensions Modal adapter to Modal 0.9's provider
+ * contracts. The wrapper re-checks the private provider sandbox on every
+ * capture because snapshot_filesystem hydration replaces that object.
  */
 export function installOpenGeniModalSnapshotPolicy<T extends object>(session: T): T {
   const mutable = session as MutableModalSandboxSession;
@@ -170,6 +236,7 @@ export function installOpenGeniModalSnapshotPolicy<T extends object>(session: T)
   }
   assertPinnedModalSdk(mutable);
   installModalNativeSnapshotRetention(mutable);
+  installModalExecCompletionRecovery(mutable);
 
   const persistWorkspace = mutable.persistWorkspace.bind(session);
   mutable.persistWorkspace = async () => {

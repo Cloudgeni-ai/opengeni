@@ -898,26 +898,27 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
 
       const managerUrl = `${webBaseUrl}/workspaces/${workspaceId}/sessions/${manager.id}`;
       await desktopPage.goto(managerUrl);
-      const queue = desktopPage.getByTestId("queue-surface");
-      const goal = desktopPage.getByTestId("goal-surface");
-      const agents = desktopPage.getByTestId("composer-agents-pill");
+      const chrome = desktopPage.getByTestId("session-chrome");
+      const queueChip = desktopPage.getByTestId("session-chrome-queue");
+      const goalChip = desktopPage.getByTestId("session-chrome-goal");
+      const agentsChip = desktopPage.getByTestId("session-chrome-agents");
       const composer = desktopPage.getByLabel("Message the agent");
-      await queue.getByText("1 queued prompt", { exact: true }).waitFor();
-      await goal.waitFor();
-      await agents.waitFor();
+      await queueChip.getByText("1 queued prompt", { exact: true }).waitFor();
+      await goalChip.waitFor();
+      await agentsChip.waitFor();
       await composer.waitFor();
-      expect(await desktopPage.getByTestId("queue-surface").count()).toBe(1);
-      expect(await desktopPage.getByTestId("composer-agents-pill").count()).toBe(1);
+      expect(await desktopPage.getByTestId("session-chrome").count()).toBe(1);
+      expect(await desktopPage.getByTestId("session-chrome-agents").count()).toBe(1);
 
       // Enter appends an ordinary human prompt to the one visible queue. The
       // inert workflow client keeps both rows waiting so the browser can inspect
       // the exact server-authoritative order.
       await composer.fill("A second prompt queued from the composer");
       await composer.press("Enter");
-      await queue.getByText("2 queued prompts", { exact: true }).waitFor({ timeout: 10_000 });
-      await queue.getByRole("button", { name: /2 queued prompts/ }).click();
-      await queue.getByRole("list", { name: "Queued prompts" }).waitFor();
-      const queuedRows = queue.getByRole("listitem");
+      await queueChip.getByText("2 queued prompts", { exact: true }).waitFor({ timeout: 10_000 });
+      await queueChip.click();
+      await chrome.getByRole("list", { name: "Queued prompts" }).waitFor();
+      const queuedRows = chrome.getByRole("list", { name: "Queued prompts" }).getByRole("listitem");
       expect(await queuedRows.count()).toBe(2);
       expect(await queuedRows.nth(0).innerText()).toContain(
         "Inspect the full session-control surface",
@@ -932,36 +933,18 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       for (const theme of ["light", "dark"] as const) {
         await setTheme(desktopPage, theme);
         await expectNoPageOverflow(desktopPage);
-        await expectNoAxeViolations(desktopPage, ["[data-testid=queue-surface]"]);
+        await expectNoAxeViolations(desktopPage, ["[data-testid=session-chrome]"]);
         await desktopPage.screenshot({
           path: `/tmp/opengeni-session-control-queue-expanded-${theme}.png`,
           fullPage: true,
         });
       }
 
-      // Menu reorder and keyboard drag both mutate the one durable queue. The
-      // server remains the order authority after every operation.
-      await queue.getByRole("button", { name: "More actions for queued prompt 2" }).click();
-      await desktopPage.getByRole("menuitem", { name: "Move to top" }).click();
+      // Move controls mutate the one durable queue. The server remains the
+      // order authority after every operation.
+      await chrome.getByRole("button", { name: "Move queued prompt 2 up" }).click();
       await expectRowPrompt(queuedRows, 0, "A second prompt queued from the composer");
-      const secondHandle = queue.getByRole("button", {
-        name: "Reorder queued prompt 2",
-      });
-      await secondHandle.focus();
-      await desktopPage.keyboard.press("Space");
-      await queue
-        .getByText(
-          "Lifted queued prompt 2 of 2. Use arrow keys to move it, then press Space to drop.",
-          { exact: true },
-        )
-        .waitFor();
-      // Keep focus on the lifted handle for the full gesture. The projected
-      // order is visible immediately, but remains local until Space commits
-      // the move to the durable server-owned queue.
-      await desktopPage.keyboard.press("ArrowUp");
-      await expectRowPrompt(queuedRows, 0, "Inspect the full session-control surface");
-      await desktopPage.keyboard.press("Space");
-      await queue.getByText("Queued prompt moved to position 1.", { exact: true }).waitFor();
+      await chrome.getByRole("button", { name: "Move queued prompt 1 down" }).click();
       await expectRowPrompt(queuedRows, 0, "Inspect the full session-control surface");
 
       // Edit is a checkout: it removes the exact queue row and restores the
@@ -969,41 +952,39 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       // A pre-existing draft is never silently destroyed: the queue row stays
       // put until the user explicitly confirms replacement.
       await composer.fill("Unsent local draft that must not be overwritten");
-      await queue.getByRole("button", { name: "More actions for queued prompt 2" }).click();
-      await desktopPage.getByRole("menuitem", { name: "Edit in composer" }).click();
-      await queue.getByText("Replace it with this queued prompt?").waitFor();
+      await chrome.getByRole("button", { name: "Edit queued prompt 2" }).click();
+      await chrome.getByText("Replace it with this queued prompt?").waitFor();
       expect(await queuedRows.count()).toBe(2);
       expect(await composer.inputValue()).toBe("Unsent local draft that must not be overwritten");
-      await queue.getByRole("button", { name: "Keep current draft" }).click();
+      await chrome.getByRole("button", { name: "Keep current draft" }).click();
       expect(await queuedRows.count()).toBe(2);
       await composer.fill("");
       await waitForComposerDraftText(desktopPage, apiBaseUrl, workspaceId, manager.id, "");
-      await queue.getByRole("button", { name: "More actions for queued prompt 2" }).click();
-      await desktopPage.getByRole("menuitem", { name: "Edit in composer" }).click();
+      await chrome.getByRole("button", { name: "Edit queued prompt 2" }).click();
       await waitFor(
         async () => (await composer.inputValue()) === "A second prompt queued from the composer",
         { timeoutMs: 10_000 },
       );
-      await queue.getByText("1 queued prompt", { exact: true }).waitFor();
+      await queueChip.getByText("1 queued prompt", { exact: true }).waitFor();
       await composer.fill("A second prompt queued from the composer (edited)");
       await composer.press("Enter");
-      await queue.getByText("2 queued prompts", { exact: true }).waitFor();
+      await queueChip.getByText("2 queued prompts", { exact: true }).waitFor();
 
       // Pause is a durable workstream barrier. Row Steer is one atomic action:
       // it preserves that row, moves it to the head, and resumes the branch.
       await desktopPage.getByRole("button", { name: "Pause this workstream" }).click();
       await desktopPage.getByRole("button", { name: "Resume this workstream" }).waitFor();
-      await queue.getByRole("button", { name: "Steer queued prompt 2" }).click();
+      await chrome.getByRole("button", { name: "Steer queued prompt 2" }).click();
       await desktopPage.getByRole("button", { name: "Pause this workstream" }).waitFor();
       await expectRowPrompt(queuedRows, 0, "A second prompt queued from the composer (edited)");
 
-      // Delete removes only the selected waiting prompt. Add one final prompt so
+      // Remove deletes only the selected waiting prompt. Add one final prompt so
       // the same two-row surface can still be exercised in the mobile pass.
-      await queue.getByRole("button", { name: "Delete queued prompt 2" }).click();
-      await queue.getByText("1 queued prompt", { exact: true }).waitFor();
+      await chrome.getByRole("button", { name: "Remove queued prompt 2" }).click();
+      await queueChip.getByText("1 queued prompt", { exact: true }).waitFor();
       await composer.fill("A replacement prompt after delete");
       await composer.press("Enter");
-      await queue.getByText("2 queued prompts", { exact: true }).waitFor();
+      await queueChip.getByText("2 queued prompts", { exact: true }).waitFor();
       const timeline = desktopPage.getByTestId("session-timeline");
       expect(await timeline.getByText("Inspect the full session-control surface").count()).toBe(0);
       expect(await timeline.getByText("A second prompt queued from the composer").count()).toBe(0);
@@ -1035,7 +1016,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await deepComposer.press("Enter");
       await desktopPage.getByRole("button", { name: "Pause this workstream" }).waitFor();
       await desktopPage
-        .getByTestId("queue-surface")
+        .getByTestId("session-chrome-queue")
         .getByText("1 queued prompt", { exact: true })
         .waitFor();
 
@@ -1046,24 +1027,17 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await desktopPage.getByRole("button", { name: "Resume this workstream" }).click();
       await desktopPage.getByRole("button", { name: "Pause this workstream" }).waitFor();
 
-      const boxes = await Promise.all([
-        queue.boundingBox(),
-        goal.boundingBox(),
-        agents.boundingBox(),
-        composer.boundingBox(),
-      ]);
+      const boxes = await Promise.all([chrome.boundingBox(), composer.boundingBox()]);
       for (const box of boxes) expect(box).not.toBeNull();
       expect(boxes[0]!.y).toBeLessThan(boxes[1]!.y);
-      expect(boxes[1]!.y).toBeLessThan(boxes[2]!.y);
-      expect(boxes[2]!.y).toBeLessThan(boxes[3]!.y);
+      expect(await goalChip.count()).toBe(1);
+      expect(await agentsChip.count()).toBe(1);
 
       for (const theme of ["light", "dark"] as const) {
         await setTheme(desktopPage, theme);
         await expectNoPageOverflow(desktopPage);
         await expectNoAxeViolations(desktopPage, [
-          "[data-testid=queue-surface]",
-          "[data-testid=goal-surface]",
-          "[data-testid=composer-agents-pill]",
+          "[data-testid=session-chrome]",
           "textarea[aria-label='Message the agent']",
         ]);
         await desktopPage.screenshot({
@@ -1088,14 +1062,12 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await expectContainedInViewport(mobileAncestry, 390);
       await expectNoPageOverflow(mobilePage);
       await mobilePage.goto(managerUrl);
-      await mobilePage.getByTestId("queue-surface").waitFor();
-      await mobilePage.getByTestId("goal-surface").waitFor();
-      await mobilePage.getByTestId("composer-agents-pill").waitFor();
+      await mobilePage.getByTestId("session-chrome").waitFor();
+      await mobilePage.getByTestId("session-chrome-goal").waitFor();
+      await mobilePage.getByTestId("session-chrome-agents").waitFor();
       await expectNoPageOverflow(mobilePage);
-      await expectTouchTarget(
-        mobilePage.getByTestId("queue-surface").getByRole("button", { name: /2 queued prompts/ }),
-      );
-      await expectTouchTarget(mobilePage.getByTestId("composer-agents-pill"));
+      await expectTouchTarget(mobilePage.getByTestId("session-chrome-queue"));
+      await expectTouchTarget(mobilePage.getByTestId("session-chrome-agents"));
       await mobilePage.screenshot({
         path: "/tmp/opengeni-session-control-stack-mobile.png",
         fullPage: true,

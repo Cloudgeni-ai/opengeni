@@ -1,5 +1,66 @@
 # @opengeni/react
 
+## 0.33.0
+
+### Minor Changes
+
+- 1ec9912: Add generic, versioned workspace artifacts with content-addressed HTML storage, a static HTML/CSS renderer, rollback history, and first-party agent publishing tools. JavaScript and active or navigation-capable markup are removed from the initial renderer until executable artifacts have a stronger isolation boundary.
+
+### Patch Changes
+
+- Updated dependencies [1ec9912]
+  - @opengeni/sdk@0.33.0
+
+## 0.32.1
+
+### Patch Changes
+
+- c52acc0: Ship Fast latency mode with turn-column inheritance, Codex ChatGPT honor-skip for response service_tier, and model picker UX polish.
+- 48ae722: Smooth tip-follow camera and streaming timeline motion (settle folds, tool enter, fence soft-close).
+- Updated dependencies [c52acc0]
+  - @opengeni/sdk@0.32.1
+
+## 0.32.0
+
+### Patch Changes
+
+- Updated dependencies [f413e6c]
+  - @opengeni/sdk@0.32.0
+
+## 0.31.0
+
+### Minor Changes
+
+- 42428a2: Add per-session Codex remote compaction v2 (`remote_v2` / `portable`), with UI landmarks, Codex-only model locking, and opaque token accounting aligned to Codex CLI.
+
+### Patch Changes
+
+- b2e975f: Advance the merged knowledge release train to fresh publication identities without changing runtime behavior. This corrective source is derived from current main and does not reuse generated release output.
+- Updated dependencies [0199108]
+- Updated dependencies [42428a2]
+- Updated dependencies [b2e975f]
+  - @opengeni/sdk@0.31.0
+
+## Unreleased
+
+- Copy affordances: fenced code + tables in `Markdown`, hover copy on user/assistant messages, and "Copy turn" on settled turn chips (includes the lifted final answer).
+- Session timeline history navigation: `loadOldest` / `loadNewer` / `jumpToLatest` on `useSessionEvents`, plus Jump to start / Jump to latest chrome on `MessageTimeline` (bounded windows; no middle gap walk).
+- Add `SessionChrome` — production/embed session-signal dock (incoming / queue / goal / agents) with token overrides (`--og-session-chrome-*`), token tooltips, crossfade panel switches, and queue hover actions wired to `UseTurnQueueResult`. Replaces stacked `QueueSurface` + host goal/agents chrome in the web session route.
+- Export shared `Tooltip*` primitives used by SessionChrome (portal-token aware).
+- Fix SessionChrome tooltips: inverted tip surface uses inline fg/bg so `.og-root` cannot blank the text; tip only icon actions; Steer copy matches QueueSurface (`Make this the next direction`).
+- Light ChatComposer spacing/token freshen (quieter focus border, tighter footer/input padding).
+- Replace host-adapter composer transcription with native MediaRecorder capture and immediate server transcription.
+- Compact composer voice chrome: live/fallback waveform, separate cancel vs stop-and-transcribe actions, and a quieter transcribing state.
+
+## 0.30.2
+
+### Patch Changes
+
+- 84fb671: Prevent a ready file restored during reconnect from being counted twice across the durable composer draft and the still-live attachment card. Canonical duplicate refs are removed before draft persistence and composer submission while custom mounts and exact draft revision/content conflict protection remain intact.
+- 96eb64b: Advance the reviewed knowledge release package graph to fresh publishable identities after the previous version projection was invalidated. This changes release metadata only and does not alter runtime behavior.
+- Updated dependencies [96eb64b]
+  - @opengeni/sdk@0.30.2
+
 ## 0.30.1
 
 ### Patch Changes

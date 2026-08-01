@@ -122,9 +122,12 @@ import {
   SESSION_EVENT_TYPE_MAX_BYTES,
   resolveSessionEventTypeFilters,
   capabilityCatalogItemIsTrustedForExposure,
+  latencyModeForMetadata,
   metadataWithTurnExecutionPolicyV1,
   readTurnExecutionPolicyV1,
   reasoningEffortForMetadata,
+  resolveWorkspaceCodexCompactionDefault,
+  type LatencyMode,
   resolveWorkspaceMemoryEnabled,
   RigChange as RigChangeContract,
   SessionGoal as SessionGoalContract,
@@ -248,6 +251,7 @@ export {
 } from "./event-payload-sanitizer";
 export * from "./persistence-errors";
 export * from "./runtime-posture";
+export * from "./insights";
 export { sanitizeMemoryText } from "./memory-domain";
 // Re-exported so external consumers can `import { migrate } from "@opengeni/db"`.
 // The `@opengeni/db/migrate` subpath stays available too (internal callers + the
@@ -1187,6 +1191,8 @@ export const allWorkspacePermissions: Permission[] = [
   "goals:manage",
   "enrollments:read",
   "enrollments:manage",
+  "artifacts:read",
+  "artifacts:publish",
 ];
 
 export const allAccountPermissions: Permission[] = [
@@ -2736,6 +2742,211 @@ export async function recordUsageEvent(
   );
 }
 
+export type ModelCallBillingPath = "opengeni_credits" | "external";
+
+export type ModelCallFact = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  turnAttemptId: string | null;
+  sourceKey: string;
+  provider: string;
+  providerApi: string;
+  model: string;
+  billingPath: ModelCallBillingPath;
+  turnSource: string | null;
+  initiatorKind: string | null;
+  initiatorSubjectId: string | null;
+  scheduledTaskId: string | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cachedTokens: number | null;
+  cacheWriteTokens: number | null;
+  reasoningTokens: number | null;
+  totalTokens: number | null;
+  pricedCostMicros: number;
+  occurredAt: Date;
+  recordedAt: Date;
+};
+
+function mapModelCallFact(row: typeof schema.modelCallFacts.$inferSelect): ModelCallFact {
+  const billingPath = row.billingPath;
+  if (billingPath !== "opengeni_credits" && billingPath !== "external") {
+    throw new Error(`model_call_facts: invalid billing_path ${billingPath}`);
+  }
+  return {
+    id: row.id,
+    accountId: row.accountId,
+    workspaceId: row.workspaceId,
+    sessionId: row.sessionId,
+    turnId: row.turnId,
+    turnAttemptId: row.turnAttemptId,
+    sourceKey: row.sourceKey,
+    provider: row.provider,
+    providerApi: row.providerApi,
+    model: row.model,
+    billingPath,
+    turnSource: row.turnSource,
+    initiatorKind: row.initiatorKind,
+    initiatorSubjectId: row.initiatorSubjectId,
+    scheduledTaskId: row.scheduledTaskId,
+    inputTokens: row.inputTokens,
+    outputTokens: row.outputTokens,
+    cachedTokens: row.cachedTokens,
+    cacheWriteTokens: row.cacheWriteTokens,
+    reasoningTokens: row.reasoningTokens,
+    totalTokens: row.totalTokens,
+    pricedCostMicros: row.pricedCostMicros,
+    occurredAt: row.occurredAt,
+    recordedAt: row.recordedAt,
+  };
+}
+
+function scheduledRunIdsFromContext(context: unknown): string[] {
+  if (!context || typeof context !== "object" || Array.isArray(context)) return [];
+  const raw = (context as Record<string, unknown>).scheduledRunIds;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((value): value is string => typeof value === "string" && value.length > 0);
+}
+
+async function resolveScheduledTaskIdForTurn(
+  scopedDb: Database,
+  input: {
+    workspaceId: string;
+    initiatorSubjectId: string | null;
+    initiatorContext: unknown;
+  },
+): Promise<string | null> {
+  // initiatorSubjectId is intentionally unused: any turn that carries
+  // scheduledRunIds is eligible for schedule attribution (scheduler wakes and
+  // inherited contexts alike). Mis-bucketing by turn.source remains forbidden.
+  void input.initiatorSubjectId;
+  const runIds = scheduledRunIdsFromContext(input.initiatorContext);
+  if (runIds.length === 0) return null;
+  // Prefer the earliest run when a batch somehow carries multiple ids so
+  // attribution is deterministic across retries.
+  const [run] = await scopedDb
+    .select({ taskId: schema.scheduledTaskRuns.taskId })
+    .from(schema.scheduledTaskRuns)
+    .where(
+      and(
+        eq(schema.scheduledTaskRuns.workspaceId, input.workspaceId),
+        inArray(schema.scheduledTaskRuns.id, runIds),
+      ),
+    )
+    .orderBy(schema.scheduledTaskRuns.createdAt)
+    .limit(1);
+  return run?.taskId ?? null;
+}
+
+/**
+ * Idempotent Insights fact for one authoritative model call. Soft-callers must
+ * never let failures affect billing; this writer itself is safe to retry.
+ */
+export async function recordModelCallFact(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    turnAttemptId?: string | null;
+    sourceKey: string;
+    provider: string;
+    providerApi: string;
+    model: string;
+    billingPath: ModelCallBillingPath;
+    pricedCostMicros: number;
+    inputTokens?: number | null;
+    outputTokens?: number | null;
+    cachedTokens?: number | null;
+    cacheWriteTokens?: number | null;
+    reasoningTokens?: number | null;
+    totalTokens?: number | null;
+    occurredAt?: Date;
+  },
+): Promise<ModelCallFact> {
+  if (input.pricedCostMicros < 0 || !Number.isSafeInteger(input.pricedCostMicros)) {
+    throw new Error("recordModelCallFact: pricedCostMicros must be a non-negative safe integer");
+  }
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [turn] = await scopedDb
+        .select({
+          source: schema.sessionTurns.source,
+          initiatorKind: schema.sessionTurns.initiatorKind,
+          initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
+          initiatorContext: schema.sessionTurns.initiatorContext,
+        })
+        .from(schema.sessionTurns)
+        .where(
+          and(
+            eq(schema.sessionTurns.workspaceId, input.workspaceId),
+            eq(schema.sessionTurns.id, input.turnId),
+          ),
+        )
+        .limit(1);
+      const scheduledTaskId = turn
+        ? await resolveScheduledTaskIdForTurn(scopedDb, {
+            workspaceId: input.workspaceId,
+            initiatorSubjectId: turn.initiatorSubjectId,
+            initiatorContext: turn.initiatorContext,
+          })
+        : null;
+      const occurredAt = input.occurredAt ?? new Date();
+      const [row] = await scopedDb
+        .insert(schema.modelCallFacts)
+        .values({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          turnAttemptId: input.turnAttemptId ?? null,
+          sourceKey: input.sourceKey,
+          provider: input.provider,
+          providerApi: input.providerApi,
+          model: input.model,
+          billingPath: input.billingPath,
+          turnSource: turn?.source ?? null,
+          initiatorKind: turn?.initiatorKind ?? null,
+          initiatorSubjectId: turn?.initiatorSubjectId ?? null,
+          scheduledTaskId,
+          inputTokens: input.inputTokens ?? null,
+          outputTokens: input.outputTokens ?? null,
+          cachedTokens: input.cachedTokens ?? null,
+          cacheWriteTokens: input.cacheWriteTokens ?? null,
+          reasoningTokens: input.reasoningTokens ?? null,
+          totalTokens: input.totalTokens ?? null,
+          pricedCostMicros: input.pricedCostMicros,
+          occurredAt,
+        })
+        .onConflictDoUpdate({
+          target: [
+            schema.modelCallFacts.workspaceId,
+            schema.modelCallFacts.turnId,
+            schema.modelCallFacts.sourceKey,
+          ],
+          set: {
+            turnAttemptId: sql`coalesce(${schema.modelCallFacts.turnAttemptId}, excluded.turn_attempt_id)`,
+            scheduledTaskId: sql`coalesce(${schema.modelCallFacts.scheduledTaskId}, excluded.scheduled_task_id)`,
+            initiatorKind: sql`coalesce(${schema.modelCallFacts.initiatorKind}, excluded.initiator_kind)`,
+            initiatorSubjectId: sql`coalesce(${schema.modelCallFacts.initiatorSubjectId}, excluded.initiator_subject_id)`,
+            turnSource: sql`coalesce(${schema.modelCallFacts.turnSource}, excluded.turn_source)`,
+          },
+        })
+        .returning();
+      if (!row) {
+        throw new Error("Failed to record model call fact");
+      }
+      return mapModelCallFact(row);
+    },
+  );
+}
+
 export async function listUsageEvents(
   db: Database,
   input: {
@@ -3272,6 +3483,30 @@ export type SlackBotPostOperation = {
   updatedAt: Date;
 };
 
+export type SlackBotDeleteOperation = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  connectionId: string;
+  operationId: string;
+  principalType: "subject" | "service";
+  principalId: string;
+  toolName: "slack_bot_delete_message";
+  channelId: string;
+  messageTimestamp: string;
+  requestDigest: string;
+  status: "pending" | "provider_started" | "outcome_unknown" | "completed";
+  claimHolderId: string | null;
+  claimExpiresAt: Date | null;
+  attemptCount: number;
+  lastFailureCode: string | null;
+  slackChannelId: string | null;
+  slackMessageTimestamp: string | null;
+  completedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
 export type ConnectionCredentialForBroker = {
   id: string;
   accountId: string;
@@ -3489,6 +3724,7 @@ export type EnqueueSessionTurnInput = {
   toolsProvided?: boolean;
   model: string;
   reasoningEffort: ReasoningEffort;
+  latencyMode?: LatencyMode;
   sandboxBackend: SandboxBackend;
   sandboxOs?: SandboxOs | null;
   metadata: Record<string, unknown>;
@@ -4942,7 +5178,10 @@ export async function listConnectionsMetadata(
           connectionSubjectVisibility(subjectId),
         ),
       )
-      .orderBy(desc(schema.connections.createdAt));
+      // Legacy rows can share created_at. UUID DESC is the immutable stable
+      // tie-breaker, so every caller that intentionally selects the first row
+      // collapses duplicates in the same documented direction.
+      .orderBy(desc(schema.connections.createdAt), desc(schema.connections.id));
     return rows.map(mapConnectionMetadata);
   });
 }
@@ -5080,6 +5319,881 @@ export async function revokeConnection(
     async (scopedDb) =>
       await revokeConnectionInScope(scopedDb, workspaceId, connectionId, updatedBySubjectId),
   );
+}
+
+export type SlackInstallationRoute = {
+  accountId: string;
+  workspaceId: string;
+  connectionId: string;
+  botId: string;
+  botUserId: string;
+};
+
+export type SlackBotUserLink = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  connectionId: string;
+  slackTeamId: string;
+  slackUserId: string;
+  subjectId: string;
+  linkedBySubjectId: string;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+export type SlackInteractionTriggerKind =
+  | "app_mention"
+  | "dm"
+  | "slash_command"
+  | "message_shortcut"
+  | "thread_reply";
+
+export type SlackInteractionInboxEntry = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  connectionId: string;
+  providerEventId: string;
+  providerMessageId: string;
+  slackTeamId: string;
+  slackUserId: string;
+  slackChannelId: string;
+  slackMessageTs: string;
+  slackThreadTs: string | null;
+  triggerKind: SlackInteractionTriggerKind;
+  text: string;
+  status: "pending" | "processing" | "processed" | "failed";
+  claimHolderId: string | null;
+  claimExpiresAt: Date | null;
+  attemptCount: number;
+  lastErrorCode: string | null;
+  processedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+export type SlackInteraction = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  connectionId: string;
+  slackTeamId: string;
+  slackChannelId: string;
+  slackThreadTs: string;
+  routeKey: string;
+  triggeringProviderEventId: string;
+  owningSubjectId: string;
+  visibility: "private" | "workspace";
+  sessionReservationId: string;
+  sessionId: string | null;
+  lastDeliveredSessionEventSequence: number;
+  deliveryClaimHolderId: string | null;
+  deliveryClaimExpiresAt: Date | null;
+  ackSlackMessageTs: string | null;
+  progressCount: number;
+  terminalDeliveryState: "open" | "completed" | "failed" | "cancelled" | "blocked";
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+export type SlackInteractionProgressDelivery = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  interactionId: string;
+  sessionEventSequence: number;
+  slot: number;
+  operationId: string;
+  createdAt: Date;
+};
+
+export async function resolveSlackInstallationRoute(
+  db: Database,
+  slackTeamId: string,
+): Promise<SlackInstallationRoute | null> {
+  const rows = await db.execute<{
+    account_id: string;
+    workspace_id: string;
+    connection_id: string;
+    bot_id: string;
+    bot_user_id: string;
+  }>(sql`select * from opengeni_private.resolve_slack_installation(${slackTeamId})`);
+  const row = rows[0];
+  return row
+    ? {
+        accountId: row.account_id,
+        workspaceId: row.workspace_id,
+        connectionId: row.connection_id,
+        botId: row.bot_id,
+        botUserId: row.bot_user_id,
+      }
+    : null;
+}
+
+export async function saveSlackBotUserLink(
+  db: Database,
+  input: Omit<SlackBotUserLink, "id" | "createdAt" | "updatedAt">,
+): Promise<SlackBotUserLink> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .insert(schema.slackBotUserLinks)
+      .values(input)
+      .onConflictDoUpdate({
+        target: [schema.slackBotUserLinks.connectionId, schema.slackBotUserLinks.slackUserId],
+        set: {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          slackTeamId: input.slackTeamId,
+          subjectId: input.subjectId,
+          linkedBySubjectId: input.linkedBySubjectId,
+          updatedAt: sql`now()`,
+        },
+      })
+      .returning();
+    if (!row) throw new Error("Slack identity link write returned no row");
+    return mapSlackBotUserLink(row);
+  });
+}
+
+export async function getSlackBotUserLink(
+  db: Database,
+  workspaceId: string,
+  connectionId: string,
+  slackUserId: string,
+): Promise<SlackBotUserLink | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.slackBotUserLinks)
+      .where(
+        and(
+          eq(schema.slackBotUserLinks.workspaceId, workspaceId),
+          eq(schema.slackBotUserLinks.connectionId, connectionId),
+          eq(schema.slackBotUserLinks.slackUserId, slackUserId),
+        ),
+      )
+      .limit(1);
+    return row ? mapSlackBotUserLink(row) : null;
+  });
+}
+
+export async function deleteSlackBotUserLink(
+  db: Database,
+  workspaceId: string,
+  connectionId: string,
+  slackUserId: string,
+): Promise<boolean> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .delete(schema.slackBotUserLinks)
+      .where(
+        and(
+          eq(schema.slackBotUserLinks.workspaceId, workspaceId),
+          eq(schema.slackBotUserLinks.connectionId, connectionId),
+          eq(schema.slackBotUserLinks.slackUserId, slackUserId),
+        ),
+      )
+      .returning({ id: schema.slackBotUserLinks.id });
+    return rows.length > 0;
+  });
+}
+
+export async function enqueueSlackInteractionInbox(
+  db: Database,
+  input: Omit<
+    SlackInteractionInboxEntry,
+    | "id"
+    | "status"
+    | "claimHolderId"
+    | "claimExpiresAt"
+    | "attemptCount"
+    | "lastErrorCode"
+    | "processedAt"
+    | "createdAt"
+    | "updatedAt"
+  >,
+): Promise<{ inserted: boolean; entry: SlackInteractionInboxEntry }> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [created] = await scopedDb
+        .insert(schema.slackInteractionInbox)
+        .values(input)
+        .onConflictDoNothing()
+        .returning();
+      if (created) return { inserted: true, entry: mapSlackInteractionInbox(created) };
+      const [existing] = await scopedDb
+        .select()
+        .from(schema.slackInteractionInbox)
+        .where(
+          and(
+            eq(schema.slackInteractionInbox.connectionId, input.connectionId),
+            or(
+              eq(schema.slackInteractionInbox.providerEventId, input.providerEventId),
+              eq(schema.slackInteractionInbox.providerMessageId, input.providerMessageId),
+            ),
+          ),
+        )
+        .limit(1);
+      if (!existing) throw new Error("Slack inbox idempotency conflict could not be resolved");
+      return { inserted: false, entry: mapSlackInteractionInbox(existing) };
+    },
+  );
+}
+
+export async function claimSlackInteractionInbox(
+  db: Database,
+  claimHolderId: string,
+  claimLeaseMs: number,
+): Promise<SlackInteractionInboxEntry | null> {
+  const rows = await db.execute<typeof schema.slackInteractionInbox.$inferSelect>(
+    sql`select * from opengeni_private.claim_slack_interaction_inbox(${claimHolderId}::uuid, ${claimLeaseMs})`,
+  );
+  return rows[0] ? mapSlackInteractionInbox(rows[0]) : null;
+}
+
+export async function settleSlackInteractionInbox(
+  db: Database,
+  input: {
+    entry: Pick<SlackInteractionInboxEntry, "id" | "accountId" | "workspaceId">;
+    claimHolderId: string;
+    outcome: "processed" | "failed";
+    errorCode?: string | null;
+  },
+): Promise<boolean> {
+  return await withRlsContext(db, input.entry, async (scopedDb) => {
+    const rows = await scopedDb
+      .update(schema.slackInteractionInbox)
+      .set({
+        status: input.outcome,
+        claimHolderId: null,
+        claimExpiresAt: null,
+        processedAt: sql`now()`,
+        lastErrorCode: input.errorCode ?? null,
+        updatedAt: sql`now()`,
+      })
+      .where(
+        and(
+          eq(schema.slackInteractionInbox.id, input.entry.id),
+          eq(schema.slackInteractionInbox.claimHolderId, input.claimHolderId),
+          eq(schema.slackInteractionInbox.status, "processing"),
+        ),
+      )
+      .returning({ id: schema.slackInteractionInbox.id });
+    return rows.length === 1;
+  });
+}
+
+export async function releaseSlackInteractionInbox(
+  db: Database,
+  input: {
+    entry: Pick<SlackInteractionInboxEntry, "id" | "accountId" | "workspaceId">;
+    claimHolderId: string;
+    errorCode: string;
+  },
+): Promise<boolean> {
+  return await withRlsContext(db, input.entry, async (scopedDb) => {
+    const rows = await scopedDb
+      .update(schema.slackInteractionInbox)
+      .set({
+        status: "pending",
+        claimHolderId: null,
+        claimExpiresAt: null,
+        lastErrorCode: input.errorCode,
+        updatedAt: sql`now()`,
+      })
+      .where(
+        and(
+          eq(schema.slackInteractionInbox.id, input.entry.id),
+          eq(schema.slackInteractionInbox.claimHolderId, input.claimHolderId),
+          eq(schema.slackInteractionInbox.status, "processing"),
+        ),
+      )
+      .returning({ id: schema.slackInteractionInbox.id });
+    return rows.length === 1;
+  });
+}
+
+export async function getOrCreateSlackInteraction(
+  db: Database,
+  input: Omit<
+    SlackInteraction,
+    | "id"
+    | "sessionReservationId"
+    | "sessionId"
+    | "lastDeliveredSessionEventSequence"
+    | "deliveryClaimHolderId"
+    | "deliveryClaimExpiresAt"
+    | "ackSlackMessageTs"
+    | "progressCount"
+    | "terminalDeliveryState"
+    | "createdAt"
+    | "updatedAt"
+  >,
+): Promise<{ created: boolean; interaction: SlackInteraction }> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const [created] = await scopedDb
+      .insert(schema.slackInteractions)
+      .values(input)
+      .onConflictDoNothing()
+      .returning();
+    if (created) return { created: true, interaction: mapSlackInteraction(created) };
+    const [existing] = await scopedDb
+      .select()
+      .from(schema.slackInteractions)
+      .where(
+        and(
+          eq(schema.slackInteractions.connectionId, input.connectionId),
+          eq(schema.slackInteractions.routeKey, input.routeKey),
+        ),
+      )
+      .limit(1);
+    if (!existing) throw new Error("Slack route idempotency conflict could not be resolved");
+    return { created: false, interaction: mapSlackInteraction(existing) };
+  });
+}
+
+export async function getSlackInteractionByRoute(
+  db: Database,
+  workspaceId: string,
+  connectionId: string,
+  routeKey: string,
+): Promise<SlackInteraction | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.slackInteractions)
+      .where(
+        and(
+          eq(schema.slackInteractions.workspaceId, workspaceId),
+          eq(schema.slackInteractions.connectionId, connectionId),
+          eq(schema.slackInteractions.routeKey, routeKey),
+        ),
+      )
+      .limit(1);
+    return row ? mapSlackInteraction(row) : null;
+  });
+}
+
+export async function getSlackInteractionSessionAccess(
+  db: Database,
+  workspaceId: string,
+  rootSessionId: string,
+): Promise<Pick<SlackInteraction, "owningSubjectId" | "visibility"> | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        owningSubjectId: schema.slackInteractions.owningSubjectId,
+        visibility: schema.slackInteractions.visibility,
+      })
+      .from(schema.slackInteractions)
+      .where(
+        and(
+          eq(schema.slackInteractions.workspaceId, workspaceId),
+          eq(schema.slackInteractions.sessionReservationId, rootSessionId),
+        ),
+      )
+      .limit(1);
+    return row ?? null;
+  });
+}
+
+export async function getSlackInteractionSessionAccessForSession(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+  },
+): Promise<
+  (Pick<SlackInteraction, "owningSubjectId" | "visibility"> & { rootSessionId: string }) | null
+> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const rows = await scopedDb.execute<{
+      rootSessionId: string;
+      parentSessionId: string | null;
+      depth: number;
+      cycle: boolean;
+      owningSubjectId: string | null;
+      visibility: SlackInteraction["visibility"] | null;
+    }>(sql`
+      with recursive lineage(id, parent_session_id, depth, path, cycle) as (
+        select
+          ${schema.sessions.id},
+          ${schema.sessions.parentSessionId},
+          0,
+          array[${schema.sessions.id}],
+          false
+        from ${schema.sessions}
+        where ${schema.sessions.accountId} = ${input.accountId}
+          and ${schema.sessions.workspaceId} = ${input.workspaceId}
+          and ${schema.sessions.id} = ${input.sessionId}
+        union all
+        select
+          parent.id,
+          parent.parent_session_id,
+          lineage.depth + 1,
+          lineage.path || parent.id,
+          parent.id = any(lineage.path)
+        from ${schema.sessions} parent
+        join lineage on lineage.parent_session_id = parent.id
+        where parent.account_id = ${input.accountId}
+          and parent.workspace_id = ${input.workspaceId}
+          and not lineage.cycle
+          and lineage.depth < 64
+      ), root as (
+        select id, parent_session_id, depth, cycle
+        from lineage
+        order by depth desc
+        limit 1
+      )
+      select
+        root.id as "rootSessionId",
+        root.parent_session_id as "parentSessionId",
+        root.depth,
+        root.cycle,
+        interaction.owning_subject_id as "owningSubjectId",
+        interaction.visibility
+      from root
+      left join ${schema.slackInteractions} interaction
+        on interaction.account_id = ${input.accountId}
+        and interaction.workspace_id = ${input.workspaceId}
+        and interaction.session_reservation_id = root.id
+    `);
+    const root = rows[0];
+    if (!root) return null;
+    if (root.cycle || root.parentSessionId !== null || Number(root.depth) >= 64) {
+      throw new Error(`session lineage for ${input.sessionId} has no valid workspace root`);
+    }
+    if (!root.owningSubjectId || !root.visibility) return null;
+    return {
+      rootSessionId: root.rootSessionId,
+      owningSubjectId: root.owningSubjectId,
+      visibility: root.visibility,
+    };
+  });
+}
+
+export async function bindSlackInteractionSession(
+  db: Database,
+  input: Pick<SlackInteraction, "id" | "accountId" | "workspaceId" | "owningSubjectId"> & {
+    sessionId: string;
+  },
+): Promise<SlackInteraction | null> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const [row] = await scopedDb
+      .update(schema.slackInteractions)
+      .set({ sessionId: input.sessionId, updatedAt: sql`now()` })
+      .where(
+        and(
+          eq(schema.slackInteractions.id, input.id),
+          eq(schema.slackInteractions.owningSubjectId, input.owningSubjectId),
+          eq(schema.slackInteractions.sessionReservationId, input.sessionId),
+          isNull(schema.slackInteractions.sessionId),
+        ),
+      )
+      .returning();
+    if (row) return mapSlackInteraction(row);
+    const [existing] = await scopedDb
+      .select()
+      .from(schema.slackInteractions)
+      .where(eq(schema.slackInteractions.id, input.id))
+      .limit(1);
+    return existing?.sessionId === input.sessionId ? mapSlackInteraction(existing) : null;
+  });
+}
+
+export type SlackInteractionProgressClaim =
+  | {
+      kind: "claimed";
+      created: boolean;
+      progressCount: number;
+      delivery: SlackInteractionProgressDelivery;
+    }
+  | { kind: "limit_reached"; progressCount: number }
+  | { kind: "not_owned" };
+
+/**
+ * Reserve one globally bounded progress slot before any Slack provider call.
+ * The interaction row lock serializes replicas and expired delivery claim
+ * successors; the event row preserves one operation UUID across every retry.
+ */
+export async function claimSlackInteractionProgressDelivery(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    interactionId: string;
+    claimHolderId: string;
+    sessionEventSequence: number;
+    maxProgress: number;
+  },
+): Promise<SlackInteractionProgressClaim> {
+  if (
+    !Number.isSafeInteger(input.sessionEventSequence) ||
+    input.sessionEventSequence < 1 ||
+    !Number.isSafeInteger(input.maxProgress) ||
+    input.maxProgress < 1 ||
+    input.maxProgress > 3
+  ) {
+    throw new RangeError("invalid Slack progress delivery claim bounds");
+  }
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const [interaction] = await scopedDb
+      .select({
+        progressCount: schema.slackInteractions.progressCount,
+        deliveryClaimHolderId: schema.slackInteractions.deliveryClaimHolderId,
+        terminalDeliveryState: schema.slackInteractions.terminalDeliveryState,
+      })
+      .from(schema.slackInteractions)
+      .where(
+        and(
+          eq(schema.slackInteractions.id, input.interactionId),
+          eq(schema.slackInteractions.accountId, input.accountId),
+          eq(schema.slackInteractions.workspaceId, input.workspaceId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (
+      !interaction ||
+      interaction.deliveryClaimHolderId !== input.claimHolderId ||
+      interaction.terminalDeliveryState !== "open"
+    ) {
+      return { kind: "not_owned" };
+    }
+
+    const [existing] = await scopedDb
+      .select()
+      .from(schema.slackInteractionProgressDeliveries)
+      .where(
+        and(
+          eq(schema.slackInteractionProgressDeliveries.interactionId, input.interactionId),
+          eq(
+            schema.slackInteractionProgressDeliveries.sessionEventSequence,
+            input.sessionEventSequence,
+          ),
+        ),
+      )
+      .limit(1);
+    if (existing) {
+      return {
+        kind: "claimed",
+        created: false,
+        progressCount: interaction.progressCount,
+        delivery: mapSlackInteractionProgressDelivery(existing),
+      };
+    }
+    if (interaction.progressCount >= input.maxProgress) {
+      return { kind: "limit_reached", progressCount: interaction.progressCount };
+    }
+
+    const slot = interaction.progressCount + 1;
+    const [delivery] = await scopedDb
+      .insert(schema.slackInteractionProgressDeliveries)
+      .values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        interactionId: input.interactionId,
+        sessionEventSequence: input.sessionEventSequence,
+        slot,
+        operationId: crypto.randomUUID(),
+      })
+      .returning();
+    if (!delivery) throw new Error("Slack progress delivery claim returned no row");
+    const [updated] = await scopedDb
+      .update(schema.slackInteractions)
+      .set({ progressCount: slot, updatedAt: sql`now()` })
+      .where(
+        and(
+          eq(schema.slackInteractions.id, input.interactionId),
+          eq(schema.slackInteractions.deliveryClaimHolderId, input.claimHolderId),
+          eq(schema.slackInteractions.progressCount, interaction.progressCount),
+        ),
+      )
+      .returning({ progressCount: schema.slackInteractions.progressCount });
+    if (!updated) throw new Error("Slack progress delivery lost its durable interaction claim");
+    return {
+      kind: "claimed",
+      created: true,
+      progressCount: updated.progressCount,
+      delivery: mapSlackInteractionProgressDelivery(delivery),
+    };
+  });
+}
+
+export async function rekeySlackInteractionRoute(
+  db: Database,
+  input: Pick<SlackInteraction, "id" | "accountId" | "workspaceId"> & {
+    routeKey: string;
+    slackThreadTs: string;
+    ackSlackMessageTs: string;
+  },
+): Promise<SlackInteraction | null> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const [row] = await scopedDb
+      .update(schema.slackInteractions)
+      .set({
+        routeKey: input.routeKey,
+        slackThreadTs: input.slackThreadTs,
+        ackSlackMessageTs: input.ackSlackMessageTs,
+        updatedAt: sql`now()`,
+      })
+      .where(eq(schema.slackInteractions.id, input.id))
+      .returning();
+    return row ? mapSlackInteraction(row) : null;
+  });
+}
+
+export async function claimSlackInteractionDelivery(
+  db: Database,
+  claimHolderId: string,
+  claimLeaseMs: number,
+): Promise<SlackInteraction | null> {
+  const rows = await db.execute<typeof schema.slackInteractions.$inferSelect>(
+    sql`select * from opengeni_private.claim_slack_interaction_delivery(${claimHolderId}::uuid, ${claimLeaseMs})`,
+  );
+  return rows[0] ? mapSlackInteraction(rows[0]) : null;
+}
+
+export async function reopenSlackInteractionDelivery(
+  db: Database,
+  input: Pick<SlackInteraction, "id" | "accountId" | "workspaceId">,
+): Promise<boolean> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const rows = await scopedDb
+      .update(schema.slackInteractions)
+      .set({ terminalDeliveryState: "open", updatedAt: sql`now()` })
+      .where(eq(schema.slackInteractions.id, input.id))
+      .returning({ id: schema.slackInteractions.id });
+    return rows.length === 1;
+  });
+}
+
+export async function advanceSlackInteractionDelivery(
+  db: Database,
+  input: Pick<SlackInteraction, "id" | "accountId" | "workspaceId"> & {
+    claimHolderId: string;
+    sequence: number;
+    ackSlackMessageTs?: string | null;
+  },
+): Promise<boolean> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const rows = await scopedDb
+      .update(schema.slackInteractions)
+      .set({
+        lastDeliveredSessionEventSequence: input.sequence,
+        ...(input.ackSlackMessageTs !== undefined
+          ? { ackSlackMessageTs: input.ackSlackMessageTs }
+          : {}),
+        updatedAt: sql`now()`,
+      })
+      .where(
+        and(
+          eq(schema.slackInteractions.id, input.id),
+          eq(schema.slackInteractions.deliveryClaimHolderId, input.claimHolderId),
+          lte(schema.slackInteractions.lastDeliveredSessionEventSequence, input.sequence),
+        ),
+      )
+      .returning({ id: schema.slackInteractions.id });
+    return rows.length === 1;
+  });
+}
+
+export async function releaseSlackInteractionDelivery(
+  db: Database,
+  input: Pick<SlackInteraction, "id" | "accountId" | "workspaceId"> & {
+    claimHolderId: string;
+  },
+): Promise<boolean> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const rows = await scopedDb
+      .update(schema.slackInteractions)
+      .set({
+        deliveryClaimHolderId: null,
+        deliveryClaimExpiresAt: null,
+        updatedAt: sql`now()`,
+      })
+      .where(
+        and(
+          eq(schema.slackInteractions.id, input.id),
+          eq(schema.slackInteractions.deliveryClaimHolderId, input.claimHolderId),
+        ),
+      )
+      .returning({ id: schema.slackInteractions.id });
+    return rows.length === 1;
+  });
+}
+
+export async function closeSlackInteractionDelivery(
+  db: Database,
+  input: Pick<SlackInteraction, "id" | "accountId" | "workspaceId"> & {
+    claimHolderId: string;
+    sequence: number;
+    state: Exclude<SlackInteraction["terminalDeliveryState"], "open">;
+  },
+): Promise<boolean> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const rows = await scopedDb
+      .update(schema.slackInteractions)
+      .set({
+        lastDeliveredSessionEventSequence: input.sequence,
+        terminalDeliveryState: input.state,
+        deliveryClaimHolderId: null,
+        deliveryClaimExpiresAt: null,
+        updatedAt: sql`now()`,
+      })
+      .where(
+        and(
+          eq(schema.slackInteractions.id, input.id),
+          eq(schema.slackInteractions.deliveryClaimHolderId, input.claimHolderId),
+        ),
+      )
+      .returning({ id: schema.slackInteractions.id });
+    return rows.length === 1;
+  });
+}
+
+function mapSlackBotUserLink(row: typeof schema.slackBotUserLinks.$inferSelect): SlackBotUserLink {
+  return row;
+}
+
+function mapSlackInteractionInbox(
+  row: typeof schema.slackInteractionInbox.$inferSelect | Record<string, unknown>,
+): SlackInteractionInboxEntry {
+  return {
+    id: slackRowString(row, "id", "id"),
+    accountId: slackRowString(row, "accountId", "account_id"),
+    workspaceId: slackRowString(row, "workspaceId", "workspace_id"),
+    connectionId: slackRowString(row, "connectionId", "connection_id"),
+    providerEventId: slackRowString(row, "providerEventId", "provider_event_id"),
+    providerMessageId: slackRowString(row, "providerMessageId", "provider_message_id"),
+    slackTeamId: slackRowString(row, "slackTeamId", "slack_team_id"),
+    slackUserId: slackRowString(row, "slackUserId", "slack_user_id"),
+    slackChannelId: slackRowString(row, "slackChannelId", "slack_channel_id"),
+    slackMessageTs: slackRowString(row, "slackMessageTs", "slack_message_ts"),
+    slackThreadTs: slackRowNullableString(row, "slackThreadTs", "slack_thread_ts"),
+    triggerKind: slackRowString(row, "triggerKind", "trigger_kind") as SlackInteractionTriggerKind,
+    text: slackRowString(row, "text", "text"),
+    status: slackRowString(row, "status", "status") as SlackInteractionInboxEntry["status"],
+    claimHolderId: slackRowNullableString(row, "claimHolderId", "claim_holder_id"),
+    claimExpiresAt: slackRowNullableDate(row, "claimExpiresAt", "claim_expires_at"),
+    attemptCount: slackRowNumber(row, "attemptCount", "attempt_count"),
+    lastErrorCode: slackRowNullableString(row, "lastErrorCode", "last_error_code"),
+    processedAt: slackRowNullableDate(row, "processedAt", "processed_at"),
+    createdAt: slackRowDate(row, "createdAt", "created_at"),
+    updatedAt: slackRowDate(row, "updatedAt", "updated_at"),
+  };
+}
+
+function mapSlackInteraction(
+  row: typeof schema.slackInteractions.$inferSelect | Record<string, unknown>,
+): SlackInteraction {
+  return {
+    id: slackRowString(row, "id", "id"),
+    accountId: slackRowString(row, "accountId", "account_id"),
+    workspaceId: slackRowString(row, "workspaceId", "workspace_id"),
+    connectionId: slackRowString(row, "connectionId", "connection_id"),
+    slackTeamId: slackRowString(row, "slackTeamId", "slack_team_id"),
+    slackChannelId: slackRowString(row, "slackChannelId", "slack_channel_id"),
+    slackThreadTs: slackRowString(row, "slackThreadTs", "slack_thread_ts"),
+    routeKey: slackRowString(row, "routeKey", "route_key"),
+    triggeringProviderEventId: slackRowString(
+      row,
+      "triggeringProviderEventId",
+      "triggering_provider_event_id",
+    ),
+    owningSubjectId: slackRowString(row, "owningSubjectId", "owning_subject_id"),
+    visibility: slackRowString(row, "visibility", "visibility") as SlackInteraction["visibility"],
+    sessionReservationId: slackRowString(row, "sessionReservationId", "session_reservation_id"),
+    sessionId: slackRowNullableString(row, "sessionId", "session_id"),
+    lastDeliveredSessionEventSequence: slackRowNumber(
+      row,
+      "lastDeliveredSessionEventSequence",
+      "last_delivered_session_event_sequence",
+    ),
+    deliveryClaimHolderId: slackRowNullableString(
+      row,
+      "deliveryClaimHolderId",
+      "delivery_claim_holder_id",
+    ),
+    deliveryClaimExpiresAt: slackRowNullableDate(
+      row,
+      "deliveryClaimExpiresAt",
+      "delivery_claim_expires_at",
+    ),
+    ackSlackMessageTs: slackRowNullableString(row, "ackSlackMessageTs", "ack_slack_message_ts"),
+    progressCount: slackRowNumber(row, "progressCount", "progress_count"),
+    terminalDeliveryState: slackRowString(
+      row,
+      "terminalDeliveryState",
+      "terminal_delivery_state",
+    ) as SlackInteraction["terminalDeliveryState"],
+    createdAt: slackRowDate(row, "createdAt", "created_at"),
+    updatedAt: slackRowDate(row, "updatedAt", "updated_at"),
+  };
+}
+
+function mapSlackInteractionProgressDelivery(
+  row: typeof schema.slackInteractionProgressDeliveries.$inferSelect | Record<string, unknown>,
+): SlackInteractionProgressDelivery {
+  return {
+    id: slackRowString(row, "id", "id"),
+    accountId: slackRowString(row, "accountId", "account_id"),
+    workspaceId: slackRowString(row, "workspaceId", "workspace_id"),
+    interactionId: slackRowString(row, "interactionId", "interaction_id"),
+    sessionEventSequence: slackRowNumber(row, "sessionEventSequence", "session_event_sequence"),
+    slot: slackRowNumber(row, "slot", "slot"),
+    operationId: slackRowString(row, "operationId", "operation_id"),
+    createdAt: slackRowDate(row, "createdAt", "created_at"),
+  };
+}
+
+function slackRowValue(row: Record<string, unknown>, camelKey: string, snakeKey: string): unknown {
+  return row[camelKey] ?? row[snakeKey];
+}
+
+function slackRowString(row: Record<string, unknown>, camelKey: string, snakeKey: string): string {
+  const value = slackRowValue(row, camelKey, snakeKey);
+  if (typeof value !== "string") throw new Error(`Slack row omitted ${snakeKey}`);
+  return value;
+}
+
+function slackRowNullableString(
+  row: Record<string, unknown>,
+  camelKey: string,
+  snakeKey: string,
+): string | null {
+  const value = slackRowValue(row, camelKey, snakeKey);
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "string") throw new Error(`Slack row malformed ${snakeKey}`);
+  return value;
+}
+
+function slackRowNumber(row: Record<string, unknown>, camelKey: string, snakeKey: string): number {
+  const value = slackRowValue(row, camelKey, snakeKey);
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isSafeInteger(parsed)) throw new Error(`Slack row malformed ${snakeKey}`);
+  return parsed;
+}
+
+function slackRowDate(row: Record<string, unknown>, camelKey: string, snakeKey: string): Date {
+  const value = slackRowValue(row, camelKey, snakeKey);
+  const parsed = value instanceof Date ? value : new Date(String(value));
+  if (Number.isNaN(parsed.getTime())) throw new Error(`Slack row malformed ${snakeKey}`);
+  return parsed;
+}
+
+function slackRowNullableDate(
+  row: Record<string, unknown>,
+  camelKey: string,
+  snakeKey: string,
+): Date | null {
+  const value = slackRowValue(row, camelKey, snakeKey);
+  if (value === null || value === undefined) return null;
+  return slackRowDate(row, camelKey, snakeKey);
 }
 
 export class SlackBotLifecycleSuccessAuditError extends Error {
@@ -5597,6 +6711,329 @@ export async function getSlackBotPostOperation(
       )
       .limit(1);
     return row ? mapSlackBotPostOperation(row) : null;
+  });
+}
+
+export type ClaimSlackBotDeleteOperationResult =
+  | {
+      kind: "claimed" | "reconcile" | "in_progress" | "completed";
+      operation: SlackBotDeleteOperation;
+    }
+  | { kind: "conflict" | "connection_not_found" };
+
+export async function claimSlackBotDeleteOperation(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    connectionId: string;
+    operationId: string;
+    principalType: "subject" | "service";
+    principalId: string;
+    toolName: "slack_bot_delete_message";
+    channelId: string;
+    messageTimestamp: string;
+    requestDigest: string;
+    claimHolderId: string;
+    claimLeaseMs: number;
+  },
+): Promise<ClaimSlackBotDeleteOperationResult> {
+  if (input.toolName !== "slack_bot_delete_message") {
+    return { kind: "conflict" };
+  }
+  const claimLeaseMs = Math.max(1, Math.min(Math.trunc(input.claimLeaseMs), 120_000));
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        const [connection] = await tx
+          .select({ id: schema.connections.id })
+          .from(schema.connections)
+          .where(
+            and(
+              eq(schema.connections.accountId, input.accountId),
+              eq(schema.connections.workspaceId, input.workspaceId),
+              eq(schema.connections.id, input.connectionId),
+            ),
+          )
+          .for("share")
+          .limit(1);
+        if (!connection) return { kind: "connection_not_found" } as const;
+
+        const [created] = await tx
+          .insert(schema.slackBotDeleteOperations)
+          .values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            connectionId: input.connectionId,
+            operationId: input.operationId,
+            principalType: input.principalType,
+            principalId: input.principalId,
+            toolName: input.toolName,
+            channelId: input.channelId,
+            messageTimestamp: input.messageTimestamp,
+            requestDigest: input.requestDigest,
+            status: "pending",
+            claimHolderId: input.claimHolderId,
+            claimExpiresAt: sql`now() + (${claimLeaseMs} * interval '1 millisecond')`,
+            attemptCount: 1,
+          })
+          .onConflictDoNothing({
+            target: [
+              schema.slackBotDeleteOperations.workspaceId,
+              schema.slackBotDeleteOperations.operationId,
+            ],
+          })
+          .returning();
+        if (created) {
+          return {
+            kind: "claimed",
+            operation: mapSlackBotDeleteOperation(created),
+          } as const;
+        }
+
+        const [existing] = await tx
+          .select()
+          .from(schema.slackBotDeleteOperations)
+          .where(
+            and(
+              eq(schema.slackBotDeleteOperations.workspaceId, input.workspaceId),
+              eq(schema.slackBotDeleteOperations.operationId, input.operationId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!existing) throw new Error("Slack delete operation disappeared after conflict");
+        if (
+          existing.accountId !== input.accountId ||
+          existing.connectionId !== input.connectionId ||
+          existing.principalType !== input.principalType ||
+          existing.principalId !== input.principalId ||
+          existing.toolName !== input.toolName ||
+          existing.channelId !== input.channelId ||
+          existing.messageTimestamp !== input.messageTimestamp ||
+          existing.requestDigest !== input.requestDigest
+        ) {
+          return { kind: "conflict" } as const;
+        }
+        if (existing.status === "completed") {
+          return {
+            kind: "completed",
+            operation: mapSlackBotDeleteOperation(existing),
+          } as const;
+        }
+        if (
+          existing.claimHolderId &&
+          existing.claimExpiresAt &&
+          existing.claimExpiresAt > new Date()
+        ) {
+          return {
+            kind: "in_progress",
+            operation: mapSlackBotDeleteOperation(existing),
+          } as const;
+        }
+        const nextStatus =
+          existing.status === "provider_started" ? "outcome_unknown" : existing.status;
+        const [reclaimed] = await tx
+          .update(schema.slackBotDeleteOperations)
+          .set({
+            status: nextStatus,
+            claimHolderId: input.claimHolderId,
+            claimExpiresAt: sql`now() + (${claimLeaseMs} * interval '1 millisecond')`,
+            attemptCount: sql`${schema.slackBotDeleteOperations.attemptCount} + 1`,
+            updatedAt: sql`now()`,
+          })
+          .where(eq(schema.slackBotDeleteOperations.id, existing.id))
+          .returning();
+        if (!reclaimed) throw new Error("Slack delete operation reclaim returned no row");
+        return {
+          kind: nextStatus === "outcome_unknown" ? "reconcile" : "claimed",
+          operation: mapSlackBotDeleteOperation(reclaimed),
+        } as const;
+      }),
+  );
+}
+
+export async function markSlackBotDeleteOperationProviderStarted(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    connectionId: string;
+    operationId: string;
+    claimHolderId: string;
+  },
+): Promise<boolean> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb
+        .update(schema.slackBotDeleteOperations)
+        .set({ status: "provider_started", updatedAt: sql`now()` })
+        .where(
+          and(
+            eq(schema.slackBotDeleteOperations.workspaceId, input.workspaceId),
+            eq(schema.slackBotDeleteOperations.connectionId, input.connectionId),
+            eq(schema.slackBotDeleteOperations.operationId, input.operationId),
+            eq(schema.slackBotDeleteOperations.claimHolderId, input.claimHolderId),
+            or(
+              eq(schema.slackBotDeleteOperations.status, "pending"),
+              eq(schema.slackBotDeleteOperations.status, "outcome_unknown"),
+            ),
+          ),
+        )
+        .returning({ id: schema.slackBotDeleteOperations.id });
+      return rows.length === 1;
+    },
+  );
+}
+
+export async function releaseSlackBotDeleteOperationClaim(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    connectionId: string;
+    operationId: string;
+    claimHolderId: string;
+    outcomeUnknown: boolean;
+    failureCode: string;
+  },
+): Promise<boolean> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb
+        .update(schema.slackBotDeleteOperations)
+        .set({
+          status: input.outcomeUnknown ? "outcome_unknown" : "pending",
+          claimHolderId: null,
+          claimExpiresAt: null,
+          lastFailureCode: input.failureCode.slice(0, 128),
+          updatedAt: sql`now()`,
+        })
+        .where(
+          and(
+            eq(schema.slackBotDeleteOperations.workspaceId, input.workspaceId),
+            eq(schema.slackBotDeleteOperations.connectionId, input.connectionId),
+            eq(schema.slackBotDeleteOperations.operationId, input.operationId),
+            ne(schema.slackBotDeleteOperations.status, "completed"),
+            eq(schema.slackBotDeleteOperations.claimHolderId, input.claimHolderId),
+          ),
+        )
+        .returning({ id: schema.slackBotDeleteOperations.id });
+      return rows.length === 1;
+    },
+  );
+}
+
+export type CompleteSlackBotDeleteOperationResult =
+  | {
+      kind: "completed";
+      operation: SlackBotDeleteOperation;
+      newlyCompleted: boolean;
+    }
+  | { kind: "not_found" | "not_owned" };
+
+export async function completeSlackBotDeleteOperation(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    connectionId: string;
+    operationId: string;
+    claimHolderId: string;
+    slackChannelId: string;
+    slackMessageTimestamp: string;
+    subjectId?: string | null;
+    auditMetadata: Record<string, unknown>;
+  },
+): Promise<CompleteSlackBotDeleteOperationResult> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        const [current] = await tx
+          .select()
+          .from(schema.slackBotDeleteOperations)
+          .where(
+            and(
+              eq(schema.slackBotDeleteOperations.workspaceId, input.workspaceId),
+              eq(schema.slackBotDeleteOperations.connectionId, input.connectionId),
+              eq(schema.slackBotDeleteOperations.operationId, input.operationId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!current) return { kind: "not_found" } as const;
+        if (current.status === "completed") {
+          return {
+            kind: "completed",
+            operation: mapSlackBotDeleteOperation(current),
+            newlyCompleted: false,
+          } as const;
+        }
+        if (current.claimHolderId !== input.claimHolderId) {
+          return { kind: "not_owned" } as const;
+        }
+        const [completed] = await tx
+          .update(schema.slackBotDeleteOperations)
+          .set({
+            status: "completed",
+            claimHolderId: null,
+            claimExpiresAt: null,
+            lastFailureCode: null,
+            slackChannelId: input.slackChannelId,
+            slackMessageTimestamp: input.slackMessageTimestamp,
+            completedAt: sql`now()`,
+            updatedAt: sql`now()`,
+          })
+          .where(eq(schema.slackBotDeleteOperations.id, current.id))
+          .returning();
+        if (!completed) throw new Error("Slack delete completion returned no row");
+        await tx.insert(schema.auditEvents).values({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: input.subjectId ?? null,
+          action: "slack_bot.message.delete",
+          targetType: "connection",
+          targetId: input.connectionId,
+          metadata: input.auditMetadata,
+        });
+        return {
+          kind: "completed",
+          operation: mapSlackBotDeleteOperation(completed),
+          newlyCompleted: true,
+        } as const;
+      }),
+  );
+}
+
+export async function getSlackBotDeleteOperation(
+  db: Database,
+  workspaceId: string,
+  connectionId: string,
+  operationId: string,
+): Promise<SlackBotDeleteOperation | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.slackBotDeleteOperations)
+      .where(
+        and(
+          eq(schema.slackBotDeleteOperations.workspaceId, workspaceId),
+          eq(schema.slackBotDeleteOperations.connectionId, connectionId),
+          eq(schema.slackBotDeleteOperations.operationId, operationId),
+        ),
+      )
+      .limit(1);
+    return row ? mapSlackBotDeleteOperation(row) : null;
   });
 }
 
@@ -14637,6 +16074,11 @@ async function createSessionInTransaction(
       effectiveMaxNestedAgentDepth: decision.effectiveMaxNestedAgentDepth,
       nestedAgentDepthPolicySource: decision.nestedAgentDepthPolicySource,
       nestedAgentDepthPolicySessionId: decision.nestedAgentDepthPolicySessionId,
+      // Freeze once at create from the effective create model + workspace
+      // default. Later workspace setting changes never move existing sessions.
+      codexCompactionMode: isCodexBilledModel(input.model)
+        ? resolveWorkspaceCodexCompactionDefault(workspace.settings)
+        : "portable",
       status: "queued",
     })
     .onConflictDoNothing()
@@ -15321,9 +16763,21 @@ export async function sessionTreeStatsForSessions(
 }
 
 function sessionFilters(
-  options: Pick<ListSessionsForSubjectOptions, "authorizationScope" | "parentSessionId" | "search">,
+  options: Pick<
+    ListSessionsForSubjectOptions,
+    "authorizationScope" | "parentSessionId" | "search" | "subjectId"
+  >,
 ): SQL[] {
-  const filters: SQL[] = [];
+  const filters: SQL[] = [
+    sql`not exists (
+      select 1
+      from ${schema.slackInteractions} private_slack_interaction
+      where private_slack_interaction.workspace_id = ${schema.sessions.workspaceId}
+        and private_slack_interaction.session_reservation_id = ${schema.sessions.rootSessionId}
+        and private_slack_interaction.visibility = 'private'
+        and private_slack_interaction.owning_subject_id <> ${options.subjectId}
+    )`,
+  ];
   if (options.authorizationScope) {
     filters.push(sessionAuthorizationScopeFilter(options.authorizationScope));
   }
@@ -15936,7 +17390,20 @@ export async function getSessionForSubject(
           eq(schema.sessionPins.sessionId, schema.sessions.id),
         ),
       )
-      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, workspaceId),
+          eq(schema.sessions.id, sessionId),
+          sql`not exists (
+            select 1
+            from ${schema.slackInteractions} private_slack_interaction
+            where private_slack_interaction.workspace_id = ${schema.sessions.workspaceId}
+              and private_slack_interaction.session_reservation_id = ${schema.sessions.rootSessionId}
+              and private_slack_interaction.visibility = 'private'
+              and private_slack_interaction.owning_subject_id <> ${subjectId}
+          )`,
+        ),
+      )
       .limit(1);
     if (!row) return null;
     const mcpServers = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, [
@@ -18831,6 +20298,8 @@ export async function applyContextCompaction(
     replacementInputTokens: number;
     clearRequestedCompaction?: boolean;
     eventPayload?: Record<string, unknown>;
+    /** Tag inserted history rows with the Codex credential that produced them. */
+    producerCodexCredentialId?: string | null;
   },
 ): Promise<ApplyContextCompactionResult> {
   return await withRlsContext(
@@ -18880,6 +20349,9 @@ export async function applyContextCompaction(
               position: supersededFrom + index,
               item: sanitizeModelPayload(item),
               active: true,
+              ...(input.producerCodexCredentialId
+                ? { producerCodexCredentialId: input.producerCodexCredentialId }
+                : {}),
             })),
           );
         }
@@ -18892,6 +20364,9 @@ export async function applyContextCompaction(
           position: summaryPosition,
           item: sanitizeModelPayload(input.summaryItem),
           active: true,
+          ...(input.producerCodexCredentialId
+            ? { producerCodexCredentialId: input.producerCodexCredentialId }
+            : {}),
         });
         const insertedEvents = input.eventPayload
           ? await tx
@@ -18944,6 +20419,80 @@ export async function applyContextCompaction(
 }
 
 /**
+ * Attempt-fenced visible start of a compaction provider call. Emitted before
+ * the summarizer / remote-v2 request so the timeline can show progress while
+ * the opaque checkpoint is being built. A fenced attempt writes nothing.
+ */
+export async function recordStartedContextCompaction(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    expectedExecutionGeneration: number;
+    expectedAttemptId: string;
+    trigger: "auto" | "operator" | "proactive" | "overflow";
+    implementation?: string;
+    estimatedTokensBefore?: number;
+  },
+): Promise<
+  | { recorded: true; events: SessionEvent[] }
+  | { recorded: false; reason: TurnAttemptFenceRejectReason }
+> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const fence = await lockTurnAttemptWriteFenceTx(tx, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          executionGeneration: input.expectedExecutionGeneration,
+          attemptId: input.expectedAttemptId,
+        });
+        if (!fence.allowed) return { recorded: false as const, reason: fence.reason };
+        const inserted = await tx
+          .insert(schema.sessionEvents)
+          .values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            turnGeneration: input.expectedExecutionGeneration,
+            turnAttemptId: input.expectedAttemptId,
+            turnAssociation: "current",
+            sequence: fence.session.lastSequence + 1,
+            type: "session.context.compaction.started",
+            payload: sanitizeEventPayload({
+              trigger: input.trigger,
+              ...(input.implementation ? { implementation: input.implementation } : {}),
+              ...(typeof input.estimatedTokensBefore === "number"
+                ? { estimatedTokensBefore: input.estimatedTokensBefore }
+                : {}),
+            }),
+            occurredAt: new Date(),
+          })
+          .returning();
+        await tx
+          .update(schema.sessions)
+          .set({
+            lastSequence: fence.session.lastSequence + 1,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          );
+        return { recorded: true as const, events: inserted.map(mapEvent) };
+      }),
+  );
+}
+
+/**
  * Atomically record that an operator compaction request needed no replacement
  * and consume it. The exact running attempt owns both the visible event and
  * the clear, just like a successful replacement; a paused, recovered, or
@@ -18963,6 +20512,14 @@ export async function recordSkippedContextCompaction(
       | "replacement_not_smaller"
       | "replacement_unchanged"
       | "summarization_failed";
+    /**
+     * When false, record the visible skip even if no operator `/compact` is
+     * pending (auto/overflow paths that already emitted `compaction.started`).
+     * Defaults to true so idle-operator consumption stays request-gated.
+     */
+    requirePendingRequest?: boolean;
+    /** When false, leave `compactRequested` untouched. Defaults to true. */
+    clearRequestedCompaction?: boolean;
   },
 ): Promise<
   | { recorded: true; events: SessionEvent[] }
@@ -18971,6 +20528,8 @@ export async function recordSkippedContextCompaction(
       reason: TurnAttemptFenceRejectReason | "request_not_pending";
     }
 > {
+  const requirePendingRequest = input.requirePendingRequest !== false;
+  const clearRequestedCompaction = input.clearRequestedCompaction !== false;
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -18984,7 +20543,7 @@ export async function recordSkippedContextCompaction(
           attemptId: input.expectedAttemptId,
         });
         if (!fence.allowed) return { recorded: false as const, reason: fence.reason };
-        if (!fence.session.compactRequested) {
+        if (requirePendingRequest && !fence.session.compactRequested) {
           return {
             recorded: false as const,
             reason: "request_not_pending" as const,
@@ -19009,7 +20568,7 @@ export async function recordSkippedContextCompaction(
         await tx
           .update(schema.sessions)
           .set({
-            compactRequested: false,
+            ...(clearRequestedCompaction ? { compactRequested: false } : {}),
             lastSequence: fence.session.lastSequence + 1,
             updatedAt: new Date(),
           })
@@ -19017,7 +20576,7 @@ export async function recordSkippedContextCompaction(
             and(
               eq(schema.sessions.workspaceId, input.workspaceId),
               eq(schema.sessions.id, input.sessionId),
-              eq(schema.sessions.compactRequested, true),
+              ...(clearRequestedCompaction ? [eq(schema.sessions.compactRequested, true)] : []),
             ),
           );
         return { recorded: true as const, events: inserted.map(mapEvent) };
@@ -20033,6 +21592,10 @@ type LeaseRow = {
   lease_epoch: number | string;
   workspace_generation: number | string;
   archive_generation: number | string | null;
+  archive_capture_id: string | null;
+  archive_capture_generation: number | string | null;
+  archive_capture_started_at: Date | string | null;
+  archive_capture_deadline_at: Date | string | null;
   resume_backend_id: string | null;
   resume_state: Record<string, unknown> | null;
   last_meter_at: Date | string | null;
@@ -20078,6 +21641,13 @@ export interface LeaseSnapshot {
   /** True only when the current verified archive represents the exact current
    * workspace generation. This is numeric/boolean truth, never archive content. */
   archiveComplete: boolean;
+  /** Exact provider capture currently holding the lease-local admission gate. */
+  archiveCapture: {
+    id: string;
+    workspaceGeneration: number;
+    startedAt: Date;
+    deadlineAt: Date;
+  } | null;
   resumeBackendId: string | null;
   resumeState: Record<string, unknown> | null;
   /** Provider/archive/restore/workspace truth, deliberately separate from the
@@ -20139,6 +21709,9 @@ export interface AcquireLeaseInput {
   // Optional epoch fence for a re-establishing turn holder: when set, the
   // turn-arrival increment is gated on lease_epoch == expectedEpoch (split-brain).
   expectedEpoch?: number;
+  /** Bounded wait for an exact provider-native capture claim to settle. The
+   * transaction is released between retries; every retry re-reads the lease. */
+  captureWaitMs?: number;
 }
 
 export type AcquireLeaseResult =
@@ -20170,6 +21743,24 @@ export class SandboxLeaseSupersededError extends Error {
   ) {
     super(`Sandbox lease superseded for group ${sandboxGroupId} (epoch ${leaseEpoch})`);
     this.name = "SandboxLeaseSupersededError";
+  }
+}
+
+export type SandboxViewerForceDrainReason = "balance" | "warm_cap";
+
+export class SandboxViewerAdmissionBlockedError extends Error {
+  readonly name = "SandboxViewerAdmissionBlockedError";
+
+  constructor(
+    public readonly workspaceId: string,
+    public readonly sandboxGroupId: string,
+    public readonly reason: SandboxViewerForceDrainReason,
+  ) {
+    super(
+      reason === "balance"
+        ? "Sandbox viewer admission is blocked because the workspace has no managed credits"
+        : "Sandbox viewer admission is blocked because the workspace warm allowance is exhausted",
+    );
   }
 }
 
@@ -20256,6 +21847,24 @@ function mapLeaseRow(row: LeaseRow): LeaseSnapshot {
       recovery.archive.status === "available" &&
       archiveGeneration !== null &&
       archiveGeneration === workspaceGeneration,
+    archiveCapture:
+      row.archive_capture_id === null ||
+      row.archive_capture_generation === null ||
+      row.archive_capture_started_at === null ||
+      row.archive_capture_deadline_at === null
+        ? null
+        : {
+            id: row.archive_capture_id,
+            workspaceGeneration: Number(row.archive_capture_generation),
+            startedAt:
+              row.archive_capture_started_at instanceof Date
+                ? row.archive_capture_started_at
+                : new Date(row.archive_capture_started_at),
+            deadlineAt:
+              row.archive_capture_deadline_at instanceof Date
+                ? row.archive_capture_deadline_at
+                : new Date(row.archive_capture_deadline_at),
+          },
     resumeBackendId: row.resume_backend_id,
     resumeState: row.resume_state,
     recovery,
@@ -20564,7 +22173,7 @@ async function upsertLeaseHolder(
 // §4.1 — the get-or-create critical section. ONE transaction:
 // insert-or-nothing -> SELECT … FOR UPDATE (block, not skip) -> branch -> bump.
 // The single most load-bearing function: the sole double-spawn guard.
-export async function acquireLease(
+async function acquireLeaseOnce(
   db: Database,
   input: AcquireLeaseInput,
 ): Promise<AcquireLeaseResult> {
@@ -20611,6 +22220,33 @@ export async function acquireLease(
         if (!row) throw new Error(`Lease row vanished post-insert: ${sandboxGroupId}`);
 
         const liveness = row.liveness;
+
+        // A workspace-wide billing/cap drain survives this lease becoming cold.
+        // Viewer-only admission must consult it while holding the exact lease
+        // row lock, otherwise a dashboard heartbeat can re-arm the draining box
+        // between holder deletion and provider teardown. A live turn remains
+        // viewable: the reaper intentionally drains only boxes with no turn
+        // holder, and this same lock makes the distinction race-free.
+        if (kind === "viewer" && Number(row.turn_holders) === 0) {
+          const workspaceRows = await tx.execute<{
+            sandbox_viewer_force_drain_reason: SandboxViewerForceDrainReason | null;
+          }>(sql`
+            select sandbox_viewer_force_drain_reason
+            from workspaces
+            where id = ${workspaceId}
+          `);
+          const reason = workspaceRows[0]?.sandbox_viewer_force_drain_reason ?? null;
+          if (reason !== null) {
+            throw new SandboxViewerAdmissionBlockedError(workspaceId, sandboxGroupId, reason);
+          }
+        }
+
+        // Provider-native capture may temporarily pause the box. Do not attach
+        // another holder while that operation owns the exact lease: the caller
+        // retries after the claim clears, before it can reach the provider.
+        if (row.archive_capture_id !== null) {
+          return { role: "fenced" as const, lease: mapLeaseRow(row) };
+        }
 
         // A finite-lifetime provider instance is already being replaced. Do not
         // admit another holder onto the old box: the current holders own its
@@ -20763,6 +22399,34 @@ export async function acquireLease(
         return { role: "attached" as const, lease: mapLeaseRow(updated) };
       }),
   );
+}
+
+function waitForLeaseArchiveCapture(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export async function acquireLease(
+  db: Database,
+  input: AcquireLeaseInput,
+): Promise<AcquireLeaseResult> {
+  const captureWaitMs = input.captureWaitMs ?? 0;
+  if (!Number.isSafeInteger(captureWaitMs) || captureWaitMs < 0 || captureWaitMs > 60 * 60_000) {
+    throw new Error("Sandbox lease archive capture wait is invalid");
+  }
+  const deadline = Date.now() + captureWaitMs;
+  let delayMs = 25;
+  for (;;) {
+    const result = await acquireLeaseOnce(db, input);
+    if (
+      result.role !== "fenced" ||
+      result.lease.archiveCapture === null ||
+      Date.now() >= deadline
+    ) {
+      return result;
+    }
+    await waitForLeaseArchiveCapture(Math.min(delayMs, Math.max(1, deadline - Date.now())));
+    delayMs = Math.min(500, delayMs * 2);
+  }
 }
 
 export type SandboxCheckpointRestoreArtifact = {
@@ -21305,6 +22969,10 @@ export async function failSandboxRematerialization(
             provider_deadline_at = null,
             rotation_requested_at = null,
             rotation_reason = null,
+            archive_capture_id = null,
+            archive_capture_generation = null,
+            archive_capture_started_at = null,
+            archive_capture_deadline_at = null,
             updated_at = now()
           where id = ${row.id}
             and liveness = 'warming'
@@ -23470,6 +25138,10 @@ export async function markWarmLeaseInstanceLost(
             provider_deadline_at = null,
             rotation_requested_at = null,
             rotation_reason = null,
+            archive_capture_id = null,
+            archive_capture_generation = null,
+            archive_capture_started_at = null,
+            archive_capture_deadline_at = null,
             updated_at = now()
           where id = ${current.id}
           returning *
@@ -23773,6 +25445,10 @@ export async function failWarmingToCold(
             provider_deadline_at = null,
             rotation_requested_at = null,
             rotation_reason = null,
+            archive_capture_id = null,
+            archive_capture_generation = null,
+            archive_capture_started_at = null,
+            archive_capture_deadline_at = null,
             updated_at = now()
           where id = ${row.id}
             and liveness = 'warming'
@@ -24182,7 +25858,10 @@ export async function reapStaleLeaseHolders(
             resume_state = ${resetResumeState ? JSON.stringify(resetResumeState) : null}::jsonb,
             data_plane_url = null, terminal_data_plane_url = null,
             provider_created_at = null, provider_deadline_at = null,
-            rotation_requested_at = null, rotation_reason = null, updated_at = now()
+            rotation_requested_at = null, rotation_reason = null,
+            archive_capture_id = null, archive_capture_generation = null,
+            archive_capture_started_at = null, archive_capture_deadline_at = null,
+            updated_at = now()
           where id = ${row.id}
             and liveness = 'warming'
             and lease_epoch = ${Number(row.lease_epoch)}
@@ -24364,6 +26043,17 @@ export async function listMeterableWarmLeases(db: Database): Promise<MeterableWa
   }));
 }
 
+/** Workspaces whose durable viewer-drain admission intent must be reevaluated
+ * even after every affected sandbox lease has become cold. */
+export async function listSandboxViewerForceDrainWorkspaceIds(db: Database): Promise<string[]> {
+  const rows = await rawRows<{ workspace_id: string }>(
+    db,
+    sql`select workspace_id
+        from opengeni_private.list_sandbox_viewer_force_drain_workspaces()`,
+  );
+  return rows.map((row) => row.workspace_id);
+}
+
 export async function countQueuedTurns(db: Database): Promise<number> {
   const rows = await rawRows<{ count: number | string }>(
     db,
@@ -24474,6 +26164,7 @@ export async function reArmDrainingLease(
         where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
           and liveness = 'draining'
           and expires_at > now()
+          and archive_capture_id is null
         returning id
       `);
       return { rearmed: rows.length > 0 };
@@ -24519,6 +26210,38 @@ export async function confirmDrainCold(
         // -> resume_state is nulled as before. The archive then rides the COLD lease's
         // resume_state until the next spawner reads + hydrates it; it is re-superseded
         // (GC'd) on the next drain and finally cleared on workspace teardown.
+        const observedRows = await tx.execute<LeaseRow>(sql`
+          select * from sandbox_leases
+          where workspace_id = ${input.workspaceId}
+            and sandbox_group_id = ${input.sandboxGroupId}
+        `);
+        const observed = observedRows[0];
+        if (
+          !observed ||
+          observed.liveness !== "draining" ||
+          observed.refcount !== 0 ||
+          Number(observed.lease_epoch) !== input.expectedEpoch
+        ) {
+          return { wentCold: false };
+        }
+        const blockerScope =
+          input.providerMissingBeforeCapture && observed.instance_id
+            ? {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                leaseId: observed.id,
+                sandboxGroupId: input.sandboxGroupId,
+                lostEpoch: input.expectedEpoch,
+                lostInstanceId: observed.instance_id,
+              }
+            : null;
+        // Provider loss settles process/admission/PTY rows before taking the
+        // lease lock, matching the canonical blocker -> lease lock order used
+        // by retained-process settlement. Revalidate the lease after locking
+        // the entire exact provider-owned blocker set.
+        if (blockerScope) {
+          await lockExactLostProviderWorkspaceBlockersTx(tx, blockerScope);
+        }
         const locked = await tx.execute<LeaseRow>(sql`
           select * from sandbox_leases
           where workspace_id = ${input.workspaceId}
@@ -24528,11 +26251,16 @@ export async function confirmDrainCold(
         const row = locked[0];
         if (
           !row ||
+          row.id !== observed.id ||
           row.liveness !== "draining" ||
           row.refcount !== 0 ||
-          Number(row.lease_epoch) !== input.expectedEpoch
+          Number(row.lease_epoch) !== input.expectedEpoch ||
+          (blockerScope && row.instance_id !== blockerScope.lostInstanceId)
         ) {
           return { wentCold: false };
+        }
+        if (blockerScope) {
+          await settleExactLostProviderWorkspaceBlockersTx(tx, blockerScope);
         }
         const current = recoveryStateFromLeaseRow(row);
         const hasArchive = current.archive.status !== "none";
@@ -24604,6 +26332,10 @@ export async function confirmDrainCold(
           provider_deadline_at = null,
           rotation_requested_at = null,
           rotation_reason = null,
+          archive_capture_id = null,
+          archive_capture_generation = null,
+          archive_capture_started_at = null,
+          archive_capture_deadline_at = null,
           updated_at = now()
         where id = ${row.id}
           and liveness = 'draining'
@@ -24648,6 +26380,7 @@ export class SandboxWorkspaceMutationFencedError extends Error {
       | "lease_fenced"
       | "route_fenced"
       | "process_fenced"
+      | "capture_in_progress"
       | "admission_fenced"
       | "operation_invalid"
       | "generation_exhausted",
@@ -25244,7 +26977,7 @@ async function lockWorkspaceMutationAuthorityTx(
   };
 }
 
-async function advanceWorkspaceGenerationForAuthority(
+async function advanceWorkspaceGenerationForAuthorityOnce(
   db: Database,
   authority: WorkspaceMutationAuthority,
   operationInput: string,
@@ -25284,6 +27017,7 @@ async function advanceWorkspaceGenerationForAuthority(
               and lease.sandbox_group_id = ${locked.sandboxGroupId}
               and lease.liveness = 'warm'
               and lease.rotation_requested_at is null
+              and lease.archive_capture_id is null
               and lease.lease_epoch = ${locked.expectedEpoch}
               and lease.instance_id = ${locked.expectedInstanceId}
               and (${locked.expectedLeaseId}::uuid is null or lease.id = ${locked.expectedLeaseId}::uuid)
@@ -25324,6 +27058,7 @@ async function advanceWorkspaceGenerationForAuthority(
             workspace_generation: number | string;
             lease_current: boolean;
             holder_current: boolean;
+            capture_in_progress: boolean;
           }>(sql`
             select lease.workspace_generation,
               (
@@ -25335,6 +27070,7 @@ async function advanceWorkspaceGenerationForAuthority(
                 and (${locked.expectedLeaseId}::uuid is null or lease.id = ${locked.expectedLeaseId}::uuid)
                 and (${locked.expectedBackend}::text is null or lease.backend = ${locked.expectedBackend}::text)
               ) as lease_current,
+              (lease.archive_capture_id is not null) as capture_in_progress,
               exists (
                 select 1 from sandbox_lease_holders as holder
                 where holder.lease_id = lease.id
@@ -25362,6 +27098,12 @@ async function advanceWorkspaceGenerationForAuthority(
               "Workspace mutation rejected because the exact lease holder is absent",
             );
           }
+          if (current[0]?.lease_current && current[0].capture_in_progress) {
+            throw new SandboxWorkspaceMutationFencedError(
+              "capture_in_progress",
+              "Workspace mutation is waiting for the exact provider archive capture to settle",
+            );
+          }
           throw new SandboxWorkspaceMutationFencedError(
             "lease_fenced",
             "Workspace mutation rejected by lease epoch/provider fence",
@@ -25370,6 +27112,40 @@ async function advanceWorkspaceGenerationForAuthority(
         return mapWorkspaceMutationAdmission(row);
       }),
   );
+}
+
+function waitForWorkspaceArchiveCapturePoll(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function advanceWorkspaceGenerationForAuthority(
+  db: Database,
+  authority: WorkspaceMutationAuthority,
+  operationInput: string,
+  captureWaitMs = 0,
+): Promise<SandboxWorkspaceMutationAdmission> {
+  if (!Number.isSafeInteger(captureWaitMs) || captureWaitMs < 0 || captureWaitMs > 60 * 60_000) {
+    throw new Error("Workspace archive capture wait is invalid");
+  }
+  const deadline = Date.now() + captureWaitMs;
+  let delayMs = 25;
+  for (;;) {
+    try {
+      return await advanceWorkspaceGenerationForAuthorityOnce(db, authority, operationInput);
+    } catch (error) {
+      if (
+        !(error instanceof SandboxWorkspaceMutationFencedError) ||
+        error.code !== "capture_in_progress" ||
+        Date.now() >= deadline
+      ) {
+        throw error;
+      }
+      await waitForWorkspaceArchiveCapturePoll(
+        Math.min(delayMs, Math.max(1, deadline - Date.now())),
+      );
+      delayMs = Math.min(500, delayMs * 2);
+    }
+  }
 }
 
 /**
@@ -25393,6 +27169,9 @@ export async function advanceWorkspaceGeneration(
     expectedEpoch: number;
     expectedInstanceId: string;
     operation: string;
+    /** Wait before provider admission while an exact archive capture owns this
+     * lease. The attempt/route fences are re-read on every bounded retry. */
+    captureWaitMs?: number;
     /** Active-routed mutations bind to the exact session pointer. Omitted means
      * an intentional home-provider write outside the routing surface. */
     routeKind?: "home" | "active";
@@ -25420,6 +27199,7 @@ export async function advanceWorkspaceGeneration(
       ...(input.routeEpoch === undefined ? {} : { routeEpoch: input.routeEpoch }),
     },
     input.operation,
+    input.captureWaitMs,
   );
 }
 
@@ -25440,12 +27220,14 @@ export async function advanceWorkspaceGenerationForDirectRequest(
     routeTargetId: string | null;
     routeEpoch: number;
     operation: string;
+    captureWaitMs?: number;
   },
 ): Promise<SandboxWorkspaceMutationAdmission> {
   return await advanceWorkspaceGenerationForAuthority(
     db,
     { kind: "direct", routeKind: "active", ...input },
     input.operation,
+    input.captureWaitMs,
   );
 }
 
@@ -25460,12 +27242,14 @@ export async function advanceWorkspaceGenerationForRetainedProcess(
     sessionId: string;
     processId: string;
     operation: string;
+    captureWaitMs?: number;
   },
 ): Promise<SandboxWorkspaceMutationAdmission> {
   return await advanceWorkspaceGenerationForAuthority(
     db,
     { kind: "process", ...input },
     input.operation,
+    input.captureWaitMs,
   );
 }
 
@@ -26880,6 +28664,423 @@ export async function readWorkspaceArchiveCapturePreflight(
   );
 }
 
+export type WorkspaceArchiveCaptureClaim = {
+  id: string;
+  leaseId: string;
+  leaseEpoch: number;
+  instanceId: string;
+  workspaceGeneration: number;
+  archiveGeneration: number | null;
+  archiveComplete: boolean;
+  startedAt: Date;
+  deadlineAt: Date;
+};
+
+export type ClaimWorkspaceArchiveCaptureResult =
+  | {
+      status: "claimed";
+      claim: WorkspaceArchiveCaptureClaim;
+      lease: LeaseSnapshot;
+    }
+  | {
+      status:
+        | "lease_fenced"
+        | "attempt_fenced"
+        | "capture_in_progress"
+        | "holder_in_progress"
+        | "mutation_in_progress"
+        | "throttled";
+    };
+
+/**
+ * Atomically reserve one live provider for archive capture. Modal pauses a box
+ * during native snapshot creation, so a read-only generation preflight is not
+ * sufficient: every later holder acquisition and mutation admission must see
+ * this durable claim before provider capture begins.
+ */
+export async function claimWorkspaceArchiveCapture(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    captureId: string;
+    expectedEpoch: number;
+    expectedInstanceId: string;
+    liveness: "warm" | "draining";
+    captureTimeoutMs: number;
+    minIntervalMs: number;
+    warmAttempt?: {
+      sessionId: string;
+      turnId: string;
+      attemptId: string;
+      holderId: string;
+    };
+  },
+): Promise<ClaimWorkspaceArchiveCaptureResult> {
+  if (
+    !Number.isSafeInteger(input.captureTimeoutMs) ||
+    input.captureTimeoutMs <= 0 ||
+    input.captureTimeoutMs > 60 * 60_000
+  ) {
+    throw new Error("Workspace archive capture timeout is invalid");
+  }
+  if (
+    !Number.isSafeInteger(input.minIntervalMs) ||
+    input.minIntervalMs < 0 ||
+    input.minIntervalMs > 24 * 60 * 60_000
+  ) {
+    throw new Error("Workspace archive capture interval is invalid");
+  }
+  if ((input.liveness === "warm") !== (input.warmAttempt !== undefined)) {
+    throw new Error("Warm workspace archive capture requires its exact turn attempt");
+  }
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      if (input.warmAttempt) {
+        await lockWorkspaceInferenceControl(scopedDb, input.workspaceId, "share");
+        const [attempt] = await scopedDb
+          .select({
+            accountId: schema.sessionTurnAttempts.accountId,
+            state: schema.sessionTurnAttempts.state,
+            outcome: schema.sessionTurnAttempts.outcome,
+            activeAttemptId: schema.sessionTurns.activeAttemptId,
+            sandboxGroupId: schema.sessions.sandboxGroupId,
+          })
+          .from(schema.sessionTurnAttempts)
+          .innerJoin(
+            schema.sessionTurns,
+            and(
+              eq(schema.sessionTurns.workspaceId, schema.sessionTurnAttempts.workspaceId),
+              eq(schema.sessionTurns.sessionId, schema.sessionTurnAttempts.sessionId),
+              eq(schema.sessionTurns.id, schema.sessionTurnAttempts.turnId),
+              eq(
+                schema.sessionTurns.executionGeneration,
+                schema.sessionTurnAttempts.executionGeneration,
+              ),
+            ),
+          )
+          .innerJoin(
+            schema.sessions,
+            and(
+              eq(schema.sessions.workspaceId, schema.sessionTurnAttempts.workspaceId),
+              eq(schema.sessions.id, schema.sessionTurnAttempts.sessionId),
+            ),
+          )
+          .where(
+            and(
+              eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
+              eq(schema.sessionTurnAttempts.sessionId, input.warmAttempt.sessionId),
+              eq(schema.sessionTurnAttempts.turnId, input.warmAttempt.turnId),
+              eq(schema.sessionTurnAttempts.id, input.warmAttempt.attemptId),
+            ),
+          )
+          .limit(1);
+        const [interruption] = attempt
+          ? await scopedDb
+              .select({ id: schema.sessionAttemptInterruptions.id })
+              .from(schema.sessionAttemptInterruptions)
+              .where(
+                and(
+                  eq(schema.sessionAttemptInterruptions.workspaceId, input.workspaceId),
+                  eq(schema.sessionAttemptInterruptions.sessionId, input.warmAttempt.sessionId),
+                  eq(schema.sessionAttemptInterruptions.attemptId, input.warmAttempt.attemptId),
+                ),
+              )
+              .limit(1)
+          : [];
+        const attemptMayCapture =
+          attempt !== undefined &&
+          attempt.accountId === input.accountId &&
+          attempt.sandboxGroupId === input.sandboxGroupId &&
+          attempt.activeAttemptId === input.warmAttempt.attemptId &&
+          !interruption &&
+          (attempt.state === "claimed" || attempt.state === "running"
+            ? attempt.outcome === null
+            : attempt.state === "closed" &&
+              (attempt.outcome === "completed" ||
+                attempt.outcome === "failed" ||
+                attempt.outcome === "requires_action"));
+        if (!attemptMayCapture) return { status: "attempt_fenced" as const };
+      }
+
+      const rows = await scopedDb.execute<LeaseRow>(sql`
+        select lease.*
+        from sandbox_leases lease
+        where lease.account_id = ${input.accountId}
+          and lease.workspace_id = ${input.workspaceId}
+          and lease.sandbox_group_id = ${input.sandboxGroupId}
+        for update
+      `);
+      const row = rows[0];
+      if (
+        !row ||
+        row.liveness !== input.liveness ||
+        (input.liveness === "draining" && Number(row.refcount) !== 0) ||
+        Number(row.lease_epoch) !== input.expectedEpoch ||
+        row.instance_id !== input.expectedInstanceId
+      ) {
+        return { status: "lease_fenced" as const };
+      }
+      if (row.archive_capture_id !== null) {
+        return { status: "capture_in_progress" as const };
+      }
+      const holderCounts = input.warmAttempt
+        ? await scopedDb.execute<{
+            total: number;
+            exact: number;
+          }>(sql`
+            select
+              count(*)::integer as total,
+              count(*) filter (
+                where kind = 'turn'
+                  and holder_id = ${input.warmAttempt.holderId}
+              )::integer as exact
+            from sandbox_lease_holders
+            where lease_id = ${row.id}
+          `)
+        : await scopedDb.execute<{
+            total: number;
+            exact: number;
+          }>(sql`
+            select count(*)::integer as total, 0::integer as exact
+            from sandbox_lease_holders
+            where lease_id = ${row.id}
+          `);
+      if (input.warmAttempt && holderCounts[0]?.exact !== 1) {
+        return { status: "attempt_fenced" as const };
+      }
+      // The durable claim blocks new acquisitions. Requiring the warm owner to
+      // be the sole holder means every other worker/session has relinquished its
+      // provider handle before capture can pause the box. A viewer is not
+      // passive: its scoped noVNC/PTY tunnel can mutate the workspace without a
+      // control-plane generation admission. Never delete a live viewer receipt
+      // and snapshot behind that still-valid tunnel. A skipped turn-end capture
+      // is recovered by the zero-holder drain capture after the viewer detaches.
+      const expectedHolderCount = input.warmAttempt ? 1 : 0;
+      if ((holderCounts[0]?.total ?? 0) !== expectedHolderCount) {
+        return { status: "holder_in_progress" as const };
+      }
+      const unsettled = await scopedDb.execute<{ present: boolean }>(sql`
+        select exists (
+          select 1
+          from sandbox_workspace_mutation_admissions admission
+          left join session_turn_attempts attempt
+            on attempt.account_id = admission.account_id
+           and attempt.workspace_id = admission.workspace_id
+           and attempt.session_id = admission.session_id
+           and attempt.turn_id = admission.turn_id
+           and attempt.id = admission.attempt_id
+           and attempt.execution_generation = admission.execution_generation
+           and admission.actor_kind = 'turn'
+          where admission.lease_id = ${row.id}
+            and admission.lease_epoch = ${input.expectedEpoch}
+            and admission.provider_backend = ${row.backend}
+            and admission.provider_instance_id = ${input.expectedInstanceId}
+            and admission.workspace_generation <= ${Number(row.workspace_generation)}
+            and admission.settled_at is null
+            and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
+        ) as present
+      `);
+      if (unsettled[0]?.present) {
+        return { status: "mutation_in_progress" as const };
+      }
+      const sessionState =
+        row.resume_state?.sessionState && typeof row.resume_state.sessionState === "object"
+          ? (row.resume_state.sessionState as Record<string, unknown>)
+          : null;
+      const priorAtRaw = sessionState?.workspaceArchiveAt;
+      const priorAtMs = typeof priorAtRaw === "string" ? Date.parse(priorAtRaw) : Number.NaN;
+      const archiveGeneration =
+        row.archive_generation === null ? null : Number(row.archive_generation);
+      const archiveComplete =
+        archiveGeneration !== null &&
+        archiveGeneration === Number(row.workspace_generation) &&
+        recoveryStateFromLeaseRow(row).archive.status === "available";
+      if (
+        input.minIntervalMs > 0 &&
+        archiveComplete &&
+        Number.isFinite(priorAtMs) &&
+        Date.now() - priorAtMs < input.minIntervalMs
+      ) {
+        return { status: "throttled" as const };
+      }
+
+      const startedAt = new Date();
+      // The deadline is diagnostic/reconciliation truth, never permission to
+      // clear a possibly still-running provider operation. Normal completion
+      // clears the exact claim; stale recovery must first prove provider safety.
+      const deadlineAt = new Date(startedAt.getTime() + input.captureTimeoutMs);
+      const claimed = await scopedDb.execute<LeaseRow>(sql`
+        update sandbox_leases set
+          archive_capture_id = ${input.captureId}::uuid,
+          archive_capture_generation = workspace_generation,
+          archive_capture_started_at = ${startedAt.toISOString()}::timestamptz,
+          archive_capture_deadline_at = ${deadlineAt.toISOString()}::timestamptz,
+          updated_at = now()
+        where id = ${row.id}
+          and archive_capture_id is null
+          and workspace_generation = ${Number(row.workspace_generation)}
+        returning *
+      `);
+      const lease = claimed[0];
+      if (!lease) return { status: "capture_in_progress" as const };
+      const instanceId = lease.instance_id;
+      if (!instanceId) {
+        throw new Error("Workspace archive capture claim returned no provider instance");
+      }
+      return {
+        status: "claimed" as const,
+        claim: {
+          id: input.captureId,
+          leaseId: lease.id,
+          leaseEpoch: Number(lease.lease_epoch),
+          instanceId,
+          workspaceGeneration: Number(lease.workspace_generation),
+          archiveGeneration,
+          archiveComplete,
+          startedAt,
+          deadlineAt,
+        },
+        lease: mapLeaseRow(lease),
+      };
+    },
+  );
+}
+
+/** Clear only the exact capture owner. A stale callback cannot release a
+ * successor claim or a replacement provider epoch. */
+export async function releaseWorkspaceArchiveCapture(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    captureId: string;
+    expectedEpoch: number;
+    expectedInstanceId: string;
+  },
+): Promise<boolean> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb.execute<{ id: string }>(sql`
+        update sandbox_leases set
+          archive_capture_id = null,
+          archive_capture_generation = null,
+          archive_capture_started_at = null,
+          archive_capture_deadline_at = null,
+          updated_at = now()
+        where workspace_id = ${input.workspaceId}
+          and sandbox_group_id = ${input.sandboxGroupId}
+          and lease_epoch = ${input.expectedEpoch}
+          and instance_id = ${input.expectedInstanceId}
+          and archive_capture_id = ${input.captureId}::uuid
+        returning id
+      `);
+      return rows.length === 1;
+    },
+  );
+}
+
+/**
+ * Replace an expired capture claim without ever opening the admission gate.
+ * This is reserved for the zero-holder drain reaper after it has independently
+ * proved the exact provider is command-ready (and therefore no longer paused by
+ * the dead owner's capture). The old claim remains authoritative on every miss.
+ */
+export async function replaceExpiredWorkspaceArchiveCapture(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    priorCaptureId: string;
+    captureId: string;
+    expectedEpoch: number;
+    expectedInstanceId: string;
+    captureTimeoutMs: number;
+  },
+): Promise<WorkspaceArchiveCaptureClaim | null> {
+  if (
+    !Number.isSafeInteger(input.captureTimeoutMs) ||
+    input.captureTimeoutMs <= 0 ||
+    input.captureTimeoutMs > 60 * 60_000
+  ) {
+    throw new Error("Workspace archive capture timeout is invalid");
+  }
+  const startedAt = new Date();
+  const deadlineAt = new Date(startedAt.getTime() + input.captureTimeoutMs);
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb.execute<LeaseRow>(sql`
+        update sandbox_leases as lease set
+          archive_capture_id = ${input.captureId}::uuid,
+          archive_capture_generation = lease.workspace_generation,
+          archive_capture_started_at = ${startedAt.toISOString()}::timestamptz,
+          archive_capture_deadline_at = ${deadlineAt.toISOString()}::timestamptz,
+          updated_at = now()
+        where lease.workspace_id = ${input.workspaceId}
+          and lease.sandbox_group_id = ${input.sandboxGroupId}
+          and lease.liveness = 'draining'
+          and lease.refcount = 0
+          and lease.lease_epoch = ${input.expectedEpoch}
+          and lease.instance_id = ${input.expectedInstanceId}
+          and lease.archive_capture_id = ${input.priorCaptureId}::uuid
+          and lease.archive_capture_generation = lease.workspace_generation
+          and lease.archive_capture_deadline_at <= now()
+          and not exists (
+            select 1 from sandbox_lease_holders holder
+            where holder.lease_id = lease.id
+          )
+          and not exists (
+            select 1
+            from sandbox_workspace_mutation_admissions admission
+            left join session_turn_attempts attempt
+              on attempt.account_id = admission.account_id
+             and attempt.workspace_id = admission.workspace_id
+             and attempt.session_id = admission.session_id
+             and attempt.turn_id = admission.turn_id
+             and attempt.id = admission.attempt_id
+             and attempt.execution_generation = admission.execution_generation
+             and admission.actor_kind = 'turn'
+            where admission.lease_id = lease.id
+              and admission.lease_epoch = lease.lease_epoch
+              and admission.provider_backend = lease.backend
+              and admission.provider_instance_id = lease.instance_id
+              and admission.workspace_generation <= lease.workspace_generation
+              and admission.settled_at is null
+              and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
+          )
+        returning lease.*
+      `);
+      const lease = rows[0];
+      if (!lease) return null;
+      const instanceId = lease.instance_id;
+      if (!instanceId) {
+        throw new Error("Replacement workspace archive capture returned no provider instance");
+      }
+      return {
+        id: input.captureId,
+        leaseId: lease.id,
+        leaseEpoch: Number(lease.lease_epoch),
+        instanceId,
+        workspaceGeneration: Number(lease.workspace_generation),
+        archiveGeneration:
+          lease.archive_generation === null ? null : Number(lease.archive_generation),
+        archiveComplete: hasCompleteWorkspaceArchive(lease),
+        startedAt,
+        deadlineAt,
+      };
+    },
+  );
+}
+
 export type SandboxCheckpointArtifactState =
   | "candidate"
   | "current"
@@ -27540,6 +29741,7 @@ export async function persistDrainSnapshot(
     expectedEpoch: number;
     expectedInstanceId: string;
     expectedWorkspaceGeneration: number;
+    captureId: string;
   } & (
     | {
         /** Null performs only the epoch/instance/generation CAS check. */
@@ -27607,6 +29809,8 @@ export async function persistDrainSnapshot(
           and lease.lease_epoch = ${input.expectedEpoch}
           and lease.instance_id = ${input.expectedInstanceId}
           and lease.workspace_generation = ${input.expectedWorkspaceGeneration}
+          and lease.archive_capture_id = ${input.captureId}::uuid
+          and lease.archive_capture_generation = ${input.expectedWorkspaceGeneration}
           and not exists (
             select 1
             from sandbox_workspace_mutation_admissions as admission
@@ -27639,6 +29843,19 @@ export async function persistDrainSnapshot(
       // null workspaceArchive = pure CAS-check (re-arm guard for no-archive backends).
       // The FOR UPDATE lock above is the only synchronization needed; no write.
       if (input.workspaceArchive === null) {
+        await scopedDb.execute(sql`
+          update sandbox_leases set
+            archive_capture_id = null,
+            archive_capture_generation = null,
+            archive_capture_started_at = null,
+            archive_capture_deadline_at = null,
+            updated_at = now()
+          where workspace_id = ${input.workspaceId}
+            and sandbox_group_id = ${input.sandboxGroupId}
+            and lease_epoch = ${input.expectedEpoch}
+            and instance_id = ${input.expectedInstanceId}
+            and archive_capture_id = ${input.captureId}::uuid
+        `);
         return {
           wrote: true,
           archiveRevision: null,
@@ -27661,6 +29878,7 @@ export async function persistDrainSnapshot(
         expectedEpoch: input.expectedEpoch,
         expectedInstanceId: input.expectedInstanceId,
         expectedWorkspaceGeneration: input.expectedWorkspaceGeneration,
+        captureId: input.captureId,
         workspaceArchive: input.workspaceArchive,
         workspaceArchiveMeta,
         resumeState: guard[0]!.resume_state,
@@ -27751,6 +29969,7 @@ async function foldWorkspaceArchiveOntoLease(
     expectedEpoch: number;
     expectedInstanceId: string;
     expectedWorkspaceGeneration: number;
+    captureId: string;
     workspaceArchive: string;
     workspaceArchiveMeta: SandboxArchiveRevision | null;
     resumeState: Record<string, unknown> | null;
@@ -27815,6 +30034,10 @@ async function foldWorkspaceArchiveOntoLease(
       archive_generation = ${input.expectedWorkspaceGeneration},
       current_checkpoint_artifact_id = ${input.checkpointArtifactId}::uuid,
       previous_checkpoint_artifact_id = ${input.previousCheckpointArtifactId}::uuid,
+      archive_capture_id = null,
+      archive_capture_generation = null,
+      archive_capture_started_at = null,
+      archive_capture_deadline_at = null,
       updated_at = now()
     where lease.workspace_id = ${input.workspaceId}
       and lease.sandbox_group_id = ${input.sandboxGroupId}
@@ -27822,6 +30045,8 @@ async function foldWorkspaceArchiveOntoLease(
       and lease.lease_epoch = ${input.expectedEpoch}
       and lease.instance_id = ${input.expectedInstanceId}
       and lease.workspace_generation = ${input.expectedWorkspaceGeneration}
+      and lease.archive_capture_id = ${input.captureId}::uuid
+      and lease.archive_capture_generation = ${input.expectedWorkspaceGeneration}
       and (
         ${input.checkpointArtifactId}::uuid is null
         or exists (
@@ -27929,6 +30154,7 @@ export async function persistWarmSnapshot(
     expectedEpoch: number;
     expectedInstanceId: string;
     expectedWorkspaceGeneration: number;
+    captureId: string;
     /** base64 of the provider snapshot-ref / tar archive from persistWorkspace(). */
     workspaceArchive: string;
     /** Exact verified archive/tree descriptor produced by the runtime capture. */
@@ -28054,6 +30280,8 @@ export async function persistWarmSnapshot(
           and lease.lease_epoch = ${input.expectedEpoch}
           and lease.instance_id = ${input.expectedInstanceId}
           and lease.workspace_generation = ${input.expectedWorkspaceGeneration}
+          and lease.archive_capture_id = ${input.captureId}::uuid
+          and lease.archive_capture_generation = ${input.expectedWorkspaceGeneration}
           and not exists (
             select 1
             from sandbox_workspace_mutation_admissions as admission
@@ -28133,6 +30361,7 @@ export async function persistWarmSnapshot(
         expectedEpoch: input.expectedEpoch,
         expectedInstanceId: input.expectedInstanceId,
         expectedWorkspaceGeneration: input.expectedWorkspaceGeneration,
+        captureId: input.captureId,
         workspaceArchive: input.workspaceArchive,
         workspaceArchiveMeta,
         resumeState: guard[0]!.resume_state,
@@ -30677,7 +32906,7 @@ export interface ForceDrainResult {
   /** Whether the workspace was over a limit (0 balance or over the warm cap). */
   overLimit: boolean;
   /** The reason, for observability. */
-  reason: "balance" | "warm_cap" | null;
+  reason: SandboxViewerForceDrainReason | null;
   /** The (workspaceId, sandboxGroupId) viewer-only boxes CASed warm->draining. */
   drained: { workspaceId: string; sandboxGroupId: string }[];
 }
@@ -30708,7 +32937,7 @@ export async function forceDrainOverLimitViewerOnlyBoxes(
   return await withWorkspaceUsageLock(db, input.workspaceId, async (scopedDb) => {
     // Determine over-limit under the lock (so the cap read + the drain are one
     // serialized critical section per workspace).
-    let reason: "balance" | "warm_cap" | null = null;
+    let reason: SandboxViewerForceDrainReason | null = null;
     if (input.enforceBalance && input.balanceMicros <= 0) {
       reason = "balance";
     } else if (input.maxWarmSecondsPerWorkspace > 0) {
@@ -30731,8 +32960,39 @@ export async function forceDrainOverLimitViewerOnlyBoxes(
     }
 
     if (!reason) {
+      // A top-up, a monthly-cap rollover, or a deployment policy change clears
+      // the durable admission gate only after this fresh serialized evaluation.
+      await scopedDb.execute(sql`
+        update workspaces set
+          sandbox_viewer_force_drain_reason = null,
+          sandbox_viewer_force_drain_requested_at = null,
+          updated_at = now()
+        where id = ${input.workspaceId}
+          and sandbox_viewer_force_drain_reason is not null
+      `);
       return { overLimit: false, reason: null, drained: [] };
     }
+
+    // Publish the workspace-wide admission gate before touching any holder.
+    // A concurrent viewer that already owns the lease lock may complete first;
+    // the locked drain below then deletes that holder. Every later viewer sees
+    // this committed intent before it can re-arm or spawn a provider box.
+    await scopedDb.execute(sql`
+      update workspaces set
+        sandbox_viewer_force_drain_reason = ${reason},
+        sandbox_viewer_force_drain_requested_at =
+          case
+            when sandbox_viewer_force_drain_reason is distinct from ${reason}
+              then now()
+            else coalesce(sandbox_viewer_force_drain_requested_at, now())
+          end,
+        updated_at = now()
+      where id = ${input.workspaceId}
+        and (
+          sandbox_viewer_force_drain_reason is distinct from ${reason}
+          or sandbox_viewer_force_drain_requested_at is null
+        )
+    `);
 
     // Canonical holder-mutation order is lease -> holder. Lock the exact
     // viewer-only candidates before deleting their holder rows so this path
@@ -32190,6 +34450,7 @@ export async function materializeGoalContinuation(
     policy: {
       model: string;
       reasoningEffort: ReasoningEffort;
+      latencyMode: LatencyMode;
       tools: ToolRef[];
       sandboxBackend: SandboxBackend;
     };
@@ -32832,6 +35093,9 @@ export async function initializeSessionStartAtomically(
                 session.metadata,
                 input.reasoningEffortFallback,
               ),
+              latencyMode:
+                input.turnExecutionPolicy?.latencyMode ??
+                latencyModeForMetadata(session.metadata, "standard"),
               sandboxBackend: session.sandboxBackend,
               sandboxOs: session.sandboxOs,
               metadata: input.turnExecutionPolicy
@@ -32990,6 +35254,7 @@ export async function enqueueSessionTurn(
             toolsProvided: input.toolsProvided ?? false,
             model: input.model,
             reasoningEffort: input.reasoningEffort,
+            latencyMode: input.latencyMode ?? "standard",
             sandboxBackend: input.sandboxBackend,
             sandboxOs: input.sandboxOs ?? null,
             metadata: input.metadata,
@@ -33827,6 +36092,7 @@ export async function claimSessionWorkForAttempt(
               .select({
                 model: schema.sessionTurns.model,
                 reasoningEffort: schema.sessionTurns.reasoningEffort,
+                latencyMode: schema.sessionTurns.latencyMode,
                 sandboxBackend: schema.sessionTurns.sandboxBackend,
                 sandboxOs: schema.sessionTurns.sandboxOs,
               })
@@ -33862,6 +36128,10 @@ export async function claimSessionWorkForAttempt(
                 reasoningEffort: reasoningEffortForMetadata(
                   { reasoningEffort: latestStarted?.reasoningEffort },
                   reasoningEffortForMetadata(session.metadata, "medium"),
+                ),
+                latencyMode: latencyModeForMetadata(
+                  { latencyMode: latestStarted?.latencyMode },
+                  latencyModeForMetadata(session.metadata, "standard"),
                 ),
                 sandboxBackend: latestStarted?.sandboxBackend ?? session.sandboxBackend,
                 sandboxOs: latestStarted?.sandboxOs ?? session.sandboxOs,
@@ -34113,6 +36383,7 @@ export async function claimSessionWorkForAttempt(
             .select({
               model: schema.sessionTurns.model,
               reasoningEffort: schema.sessionTurns.reasoningEffort,
+              latencyMode: schema.sessionTurns.latencyMode,
               tools: schema.sessionTurns.tools,
               sandboxBackend: schema.sessionTurns.sandboxBackend,
               sandboxOs: schema.sessionTurns.sandboxOs,
@@ -34136,6 +36407,12 @@ export async function claimSessionWorkForAttempt(
               reasoningEffort: goalPolicy?.reasoningEffort ?? latestStarted?.reasoningEffort,
             },
             reasoningEffortForMetadata(session.metadata, "medium"),
+          );
+          const latencyMode = latencyModeForMetadata(
+            {
+              latencyMode: goalPolicy?.latencyMode ?? latestStarted?.latencyMode,
+            },
+            latencyModeForMetadata(session.metadata, "standard"),
           );
           const tools = Array.isArray(goalPolicy?.tools)
             ? goalPolicy.tools
@@ -34164,6 +36441,7 @@ export async function claimSessionWorkForAttempt(
               tools,
               model,
               reasoningEffort,
+              latencyMode,
               sandboxBackend,
               sandboxOs: latestStarted?.sandboxOs ?? session.sandboxOs,
               metadata: metadataWithTurnDispatchAttempt(
@@ -39478,6 +41756,10 @@ function mapSession(
     lastSequence: row.lastSequence,
     codexPinnedCredentialId: row.codexPinnedCredentialId ?? null,
     codexLastCredentialId: row.codexLastCredentialId ?? null,
+    codexCompactionMode:
+      row.codexCompactionMode === "remote_v2" || row.codexCompactionMode === "portable"
+        ? row.codexCompactionMode
+        : "portable",
     ...pin,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -39545,6 +41827,7 @@ function mapSessionTurn(row: typeof schema.sessionTurns.$inferSelect): SessionTu
     toolsProvided: row.toolsProvided,
     model: row.model,
     reasoningEffort: row.reasoningEffort as ReasoningEffort,
+    latencyMode: (row.latencyMode as LatencyMode | null | undefined) ?? "standard",
     sandboxBackend: row.sandboxBackend as SandboxBackend,
     sandboxOs: (row.sandboxOs as SandboxOs | null) ?? null,
     metadata: row.metadata,
@@ -40001,6 +42284,34 @@ function mapSlackBotPostOperation(
   };
 }
 
+function mapSlackBotDeleteOperation(
+  row: typeof schema.slackBotDeleteOperations.$inferSelect,
+): SlackBotDeleteOperation {
+  return {
+    id: row.id,
+    accountId: row.accountId,
+    workspaceId: row.workspaceId,
+    connectionId: row.connectionId,
+    operationId: row.operationId,
+    principalType: row.principalType,
+    principalId: row.principalId,
+    toolName: row.toolName as "slack_bot_delete_message",
+    channelId: row.channelId,
+    messageTimestamp: row.messageTimestamp,
+    requestDigest: row.requestDigest,
+    status: row.status,
+    claimHolderId: row.claimHolderId,
+    claimExpiresAt: row.claimExpiresAt,
+    attemptCount: row.attemptCount,
+    lastFailureCode: row.lastFailureCode,
+    slackChannelId: row.slackChannelId,
+    slackMessageTimestamp: row.slackMessageTimestamp,
+    completedAt: row.completedAt,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
 function mapKnowledgeMemory(row: typeof schema.knowledgeMemories.$inferSelect): KnowledgeMemory {
   return {
     id: row.id,
@@ -40263,3 +42574,4 @@ function shortHash(value: string): string {
 // evaluates under the index↔resolver module cycle.
 export * from "./codex-token-resolver";
 export * from "./connection-token-resolver";
+export * from "./workspace-artifacts";

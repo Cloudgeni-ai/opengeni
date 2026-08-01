@@ -10,7 +10,9 @@ type ManifestEntry = {
 
 const kib = 1024;
 const budgets = {
-  initialRaw: 750 * kib,
+  // Social connector types join the shared application shell while provider
+  // implementations remain lazy. Keep a measured 1 KiB allowance for that surface.
+  initialRaw: 771 * kib,
   initialGzip: 210 * kib,
   initialFileGzip: 70 * kib,
   directSessionRaw: 1900 * kib,

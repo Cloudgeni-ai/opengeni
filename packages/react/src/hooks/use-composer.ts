@@ -19,7 +19,7 @@ export type UseComposerOptions = EmbeddedSessionClientOverride &
     /** Called with the exact accepted wire input after a successful send. */
     onSent?: ((text: string, input: SendMessageInput) => void) | undefined;
     /**
-     * Extra message fields (resources, tools, model, reasoningEffort) merged
+     * Extra message fields (resources, tools, model, reasoningEffort, latencyMode) merged
      * into every send. A function is evaluated at send time so it can read the
      * surrounding UI state (attachment pickers, model selectors, ...).
      */
@@ -448,12 +448,21 @@ export function useComposer(
             replaceLocal ||
             (!localWasDirtyAtStart && localAtStart === localEditRevision.current)
           ) {
+            // Model/effort ride in sendExtras (outside localEditRevision). If
+            // the picker changed during this fetch, skip onDraftApplied so a
+            // stale server model/effort cannot undo the operator's pick.
+            const extrasNow = resolveSendExtras(sendExtrasRef.current);
+            const pickerChangedDuringFetch =
+              extrasNow.model !== extrasAtStart.model ||
+              extrasNow.reasoningEffort !== extrasAtStart.reasoningEffort;
             valueRef.current = fetched.text;
             restoredResourcesRef.current = fetched.resources;
             lastSavedSignature.current = draftSignature(draftPayload(fetched));
             setValue(fetched.text);
             setRestoredResources(fetched.resources);
-            onDraftAppliedRef.current?.(fetched);
+            if (replaceLocal || !pickerChangedDuringFetch) {
+              onDraftAppliedRef.current?.(fetched);
+            }
           }
         }
       } catch (cause) {
@@ -1194,6 +1203,7 @@ function draftPayload(draft: ComposerDraft): SaveComposerDraftRequest {
     resources: draft.resources,
     model: draft.model,
     reasoningEffort: draft.reasoningEffort,
+    latencyMode: draft.latencyMode ?? "standard",
   };
 }
 
@@ -1209,6 +1219,7 @@ function composerDraftPayload(
     resources: mergeResources(restoredResources, extras.resources ?? []),
     model: extras.model ?? base.model,
     reasoningEffort: extras.reasoningEffort ?? base.reasoningEffort,
+    latencyMode: extras.latencyMode ?? base.latencyMode ?? "standard",
   };
 }
 

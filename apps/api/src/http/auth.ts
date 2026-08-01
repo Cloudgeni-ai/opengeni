@@ -50,7 +50,10 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   if (
     path === "/v1/integrations/oauth/callback" ||
     path === "/v1/integrations/oauth/client-metadata.json" ||
-    path === "/v1/integrations/slack/callback"
+    path === "/v1/integrations/slack/callback" ||
+    path === "/v1/integrations/slack/events" ||
+    path === "/v1/integrations/slack/commands" ||
+    path === "/v1/integrations/slack/interactions"
   ) {
     return true;
   }

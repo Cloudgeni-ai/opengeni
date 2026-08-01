@@ -1,5 +1,63 @@
 # @opengeni/contracts
 
+## 0.27.0
+
+### Minor Changes
+
+- 1ec9912: Add generic, versioned workspace artifacts with content-addressed HTML storage, a static HTML/CSS renderer, rollback history, and first-party agent publishing tools. JavaScript and active or navigation-capable markup are removed from the initial renderer until executable artifacts have a stronger isolation boundary.
+
+### Patch Changes
+
+- dcc35c5: Add authenticated Slack mentions, commands, message shortcuts, atomically private bot-DM sessions, durable thread continuation, and globally bounded idempotent progress delivery.
+
+## 0.26.1
+
+### Patch Changes
+
+- c52acc0: Ship Fast latency mode with turn-column inheritance, Codex ChatGPT honor-skip for response service_tier, and model picker UX polish.
+
+## 0.26.0
+
+### Minor Changes
+
+- f413e6c: Add real Workspace Insights: durable `model_call_facts` after authoritative
+  `agent.model.usage`, a `workspace:admin` insights API over usage_events + facts +
+  live joins, SDK client, and a web console that drops mock rollups for honest
+  UTC credit/token/cache/warm/caps reporting.
+
+## 0.25.0
+
+### Minor Changes
+
+- 42428a2: Add per-session Codex remote compaction v2 (`remote_v2` / `portable`), with UI landmarks, Codex-only model locking, and opaque token accounting aligned to Codex CLI.
+
+### Patch Changes
+
+- 0199108: Harden the workspace Slack bot with one fail-closed scope policy, deterministic legacy connection selection, and durable replay-safe message deletion operation identities.
+- b2e975f: Advance the merged knowledge release train to fresh publication identities without changing runtime behavior. This corrective source is derived from current main and does not reuse generated release output.
+- 9f3b931: Add the canonical personal Slack hosted-MCP resource constant and a dedicated account-linking experience that keeps subject-owned OAuth status, reconnect, and disconnect controls separate from workspace bot installation.
+
+## Unreleased
+
+### Minor Changes
+
+- Add native voice-input contracts: `ClientConfig.voiceInput`, `WorkspaceVoiceInputSettings`,
+  `TranscribeAudioResponse`, MIME/duration/size ceilings, and
+  `resolveWorkspaceVoiceInputEnabled` (maps legacy `transcription.enabled` for one release).
+  Expand transcription error codes with `unavailable` / `too_large` / `invalid_audio`.
+
+## 0.24.3
+
+### Patch Changes
+
+- 710b081: Keep sessions usable when a previously selected MCP capability is disconnected or removed. Unavailable historical refs remain visible in effective policy but are omitted from executable tools, and the agent receives a bounded turn-level warning not to claim access to the missing source.
+
+## 0.24.2
+
+### Patch Changes
+
+- 96eb64b: Advance the reviewed knowledge release package graph to fresh publishable identities after the previous version projection was invalidated. This changes release metadata only and does not alter runtime behavior.
+
 ## 0.24.1
 
 ### Patch Changes

@@ -1,5 +1,47 @@
 # @opengeni/sdk
 
+## 0.33.0
+
+### Minor Changes
+
+- 1ec9912: Add generic, versioned workspace artifacts with content-addressed HTML storage, a static HTML/CSS renderer, rollback history, and first-party agent publishing tools. JavaScript and active or navigation-capable markup are removed from the initial renderer until executable artifacts have a stronger isolation boundary.
+
+## 0.32.1
+
+### Patch Changes
+
+- c52acc0: Ship Fast latency mode with turn-column inheritance, Codex ChatGPT honor-skip for response service_tier, and model picker UX polish.
+
+## 0.32.0
+
+### Minor Changes
+
+- f413e6c: Add real Workspace Insights: durable `model_call_facts` after authoritative
+  `agent.model.usage`, a `workspace:admin` insights API over usage_events + facts +
+  live joins, SDK client, and a web console that drops mock rollups for honest
+  UTC credit/token/cache/warm/caps reporting.
+
+## 0.31.0
+
+### Minor Changes
+
+- 42428a2: Add per-session Codex remote compaction v2 (`remote_v2` / `portable`), with UI landmarks, Codex-only model locking, and opaque token accounting aligned to Codex CLI.
+
+### Patch Changes
+
+- 0199108: Harden the workspace Slack bot with one fail-closed scope policy, deterministic legacy connection selection, and durable replay-safe message deletion operation identities.
+- b2e975f: Advance the merged knowledge release train to fresh publication identities without changing runtime behavior. This corrective source is derived from current main and does not reuse generated release output.
+
+## Unreleased
+
+- Add native voice-input configuration mirrors, workspace toggle resolution, and one-shot multipart `transcribeAudio` uploads.
+
+## 0.30.2
+
+### Patch Changes
+
+- 96eb64b: Advance the reviewed knowledge release package graph to fresh publishable identities after the previous version projection was invalidated. This changes release metadata only and does not alter runtime behavior.
+
 ## 0.30.1
 
 ### Patch Changes

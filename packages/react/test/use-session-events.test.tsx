@@ -41,6 +41,7 @@ type ListOptions = {
   before?: number;
   limit?: number;
   compact?: boolean;
+  direction?: "after" | "before";
   payloadMode?: SessionEventPayloadMode;
 };
 
@@ -876,6 +877,73 @@ describe("useSessionEvents", () => {
     ).toBeTrue();
     expect(sequences).toContain(10_001);
     expect(sequences).toContain(10_051);
+
+    await hook.unmount();
+  });
+
+  test("loadOldest jumps to the durable start without walking the middle gap", async () => {
+    const store = Array.from({ length: 5_000 }, (_, index) => event(index + 1));
+    const { client, listCalls, streamCalls } = scriptedClient({ store });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush(20);
+
+    expect(hook.result.current.events[0]?.sequence).toBe(4_001);
+    expect(hook.result.current.hasOlder).toBe(true);
+    expect(hook.result.current.hasNewer).toBe(false);
+    expect(streamCalls).toEqual([5_000]);
+
+    const jumped = await actRun(() => hook.result.current.loadOldest());
+    await flush(20);
+
+    expect(jumped).toBe(true);
+    expect(listCalls).toEqual([
+      { before: Number.MAX_SAFE_INTEGER, limit: 1000, compact: true, payloadMode: "full" },
+      { after: 0, limit: 1000, compact: true, direction: "after", payloadMode: "full" },
+    ]);
+    expect(hook.result.current.events[0]?.sequence).toBe(1);
+    expect(hook.result.current.events.at(-1)?.sequence).toBeLessThan(5_000);
+    expect(hook.result.current.hasOlder).toBe(false);
+    expect(hook.result.current.hasNewer).toBe(true);
+    // History view must not reopen SSE from the start window (that would
+    // replay the whole middle into the browser).
+    expect(streamCalls).toEqual([5_000]);
+
+    await hook.unmount();
+  });
+
+  test("loadNewer pages forward; jumpToLatest reloads the live tip", async () => {
+    const store = Array.from({ length: 12_000 }, (_, index) => event(index + 1));
+    const { client, listCalls, streamCalls } = scriptedClient({ store });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush(20);
+
+    await actRun(() => hook.result.current.loadOldest());
+    await flush(20);
+    const afterOldest = hook.result.current.events.at(-1)!.sequence;
+    expect(hook.result.current.hasNewer).toBe(true);
+
+    const more = await actRun(() => hook.result.current.loadNewer());
+    await flush(20);
+    expect(more).toBe(true);
+    expect(hook.result.current.events.at(-1)!.sequence).toBeGreaterThan(afterOldest);
+    expect(hook.result.current.hasNewer).toBe(true);
+    expect(
+      listCalls.some(
+        (call) => call.after === afterOldest && call.direction === "after" && call.compact === true,
+      ),
+    ).toBe(true);
+
+    await actRun(() => hook.result.current.jumpToLatest());
+    await flush(20);
+    expect(hook.result.current.hasNewer).toBe(false);
+    expect(hook.result.current.events.at(-1)?.sequence).toBe(12_000);
+    expect(streamCalls.at(-1)).toBe(12_000);
 
     await hook.unmount();
   });

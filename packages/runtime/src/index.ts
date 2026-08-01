@@ -8,6 +8,7 @@ import {
   AGENT_INSTRUCTIONS_CORE_PLACEHOLDER,
   collectSandboxEnvironment,
   firstPartyMcpBaseUrl,
+  resolveFirstPartyDelegationSecret,
   resolveModelProvider,
   sandboxLifecycleHookIds,
 } from "@opengeni/config";
@@ -35,6 +36,7 @@ import {
   type McpServerConnectionRef,
   type Permission,
   type FirstPartyMcpToolName,
+  type LatencyMode,
   type ReasoningEffort,
   type ResourceRef,
   type SessionEventType,
@@ -157,6 +159,8 @@ import {
   CompactionProviderResponseError,
   EmptyCompactionSummaryError,
   SUMMARY_BUFFER_TOKENS,
+  buildRemoteCompactionV2PromptInput,
+  extractRemoteCompactionV2OutputItem,
   compactionThresholdTokens,
   estimateCompleteModelInput,
   estimateSerializedValueTokens,
@@ -279,8 +283,13 @@ export {
   clampCompactionThresholdRatio,
   decideCompaction,
   buildSummaryItem,
+  buildRemoteCompactionV2PromptInput,
+  buildRemoteV2ReplacementHistory,
+  extractRemoteCompactionV2OutputItem,
   findCompactionNeededError,
   isCompactionSummary,
+  isRemoteCompactionItem,
+  isRetainedRemoteV2Message,
   latestCompactionReplacementFingerprint,
   prepareCompactionPromptInput,
   isUserMessage,
@@ -288,6 +297,9 @@ export {
   estimateTokensBreakdown,
   estimateItemTokens,
   estimateItemTokenBreakdown,
+  estimateOpaqueEncryptedModelVisibleBytes,
+  estimateOpaqueEncryptedTokens,
+  opaqueEncryptedContentLength,
   estimateNativeImageTokens,
   estimateCompleteModelInput,
   estimateSerializedValueTokens,
@@ -296,6 +308,9 @@ export {
   COMPACTION_SUMMARY_MARKER,
   COMPACTION_PROMPT,
   COMPACT_USER_MESSAGE_MAX_TOKENS,
+  REMOTE_V2_RETAINED_MESSAGE_TOKEN_BUDGET,
+  REMOTE_COMPACTION_V2_IMPLEMENTATION,
+  REMOTE_COMPACTION_V2_BETA_FEATURE,
   DEFAULT_COMPACTION_THRESHOLD_RATIO,
   MIN_COMPACTION_THRESHOLD_RATIO,
   MAX_COMPACTION_THRESHOLD_RATIO,
@@ -336,6 +351,7 @@ export type NormalizedRuntimeEvent = {
 
 export type ModelResponseUsage = {
   responseId?: string;
+  serviceTier?: string;
   usage: {
     inputTokens?: number;
     outputTokens?: number;
@@ -1012,6 +1028,67 @@ export async function summarizeForCompaction(
   return summary;
 }
 
+/**
+ * Codex remote compaction v2: send active history + `compaction_trigger`, collect
+ * exactly one `{ type: "compaction", encrypted_content }` output item.
+ * Must run inside Codex ALS with `remote_compaction_v2` beta + turn metadata.
+ */
+export async function requestRemoteCompactionV2(
+  settings: Settings,
+  input: Array<Record<string, unknown>>,
+  options: {
+    client: OpenAI;
+    model: string;
+    promptCacheKey?: string;
+    onUsage?: (usage: ModelResponseUsage) => void | Promise<void>;
+  },
+): Promise<Record<string, unknown>> {
+  const promptInput = buildRemoteCompactionV2PromptInput(input);
+  const request: ModelRequest = {
+    systemInstructions: "",
+    input: promptInput as AgentInputItem[],
+    modelSettings: {
+      // Azure rejects store:false; Codex transport enforces store:false itself.
+      ...(settings.openaiProvider === "azure" ? {} : { store: false }),
+      ...(options.promptCacheKey
+        ? { providerData: { prompt_cache_key: options.promptCacheKey } }
+        : {}),
+    },
+    tools: [],
+    toolsExplicitlyProvided: true,
+    outputType: "text",
+    handoffs: [],
+    tracing: false,
+  };
+  let response: unknown;
+  try {
+    response = await new CompactionResponsesModel(options.client, options.model).fetchResponse(
+      request,
+    );
+  } catch (error) {
+    throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
+  }
+  const usage = modelResponseUsageFromResponse(response);
+  if (usage) {
+    await options.onUsage?.(usage);
+  }
+  if (isFailedCompactionProviderResponse(response)) {
+    throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(response));
+  }
+  try {
+    return extractRemoteCompactionV2OutputItem(response);
+  } catch (error) {
+    if (error instanceof EmptyCompactionSummaryError) {
+      throw new EmptyCompactionSummaryError({
+        ...compactionResponseDiagnostics(response, ""),
+        ...error.diagnostics,
+        stage: "remote_v2_extract",
+      });
+    }
+    throw error;
+  }
+}
+
 function isFailedCompactionProviderResponse(response: unknown): boolean {
   if (!response || typeof response !== "object") return false;
   const record = response as Record<string, unknown>;
@@ -1143,7 +1220,10 @@ export function compactionResponseDiagnostics(
   extractedText = extractResponseOutputText(response).trim(),
 ): Record<string, unknown> {
   if (!response || typeof response !== "object") {
-    return { responseShape: typeof response, extractedTextLength: extractedText.length };
+    return {
+      responseShape: typeof response,
+      extractedTextLength: extractedText.length,
+    };
   }
   const record = response as Record<string, unknown>;
   const output = Array.isArray(record.output) ? record.output : [];
@@ -1300,6 +1380,10 @@ export type BuildAgentOptions = {
     response: HumanInputResponse;
   };
   reasoningEffort?: ReasoningEffort;
+  /** Product latency selection frozen onto this turn. */
+  latencyMode?: LatencyMode;
+  /** Provider-specific wire value resolved by the worker (`fast` or `priority`). */
+  serviceTier?: "fast" | "priority";
   // Per-turn gating overrides for the multi-provider path. Each defaults to
   // today's settings-derived behaviour when omitted, so the legacy
   // global-client callers (no model resolution) are byte-for-byte unchanged.
@@ -1771,9 +1855,14 @@ export function buildOpenGeniAgent(
   // resolved provider's api/window/web-search instead.
   const hostedWebSearch = options.hostedWebSearch ?? settings.webSearchEnabled;
   const encryptedReasoning = options.encryptedReasoning ?? settings.openaiReasoningEncryptedContent;
+  // Wire value must be provider-mapped by the caller (OpenAI `fast`, Azure/Codex
+  // `priority`). Do not fall back to latencyMode itself — that would send
+  // invalid Azure tiers.
+  const serviceTier = options.serviceTier;
   const providerData = {
     ...(encryptedReasoning ? { include: ["reasoning.encrypted_content"] } : {}),
     ...(options.promptCacheKey ? { prompt_cache_key: options.promptCacheKey } : {}),
+    ...(serviceTier ? { service_tier: serviceTier } : {}),
   };
   // Native hosted tools attached to every constructed agent. webSearchEnabled
   // is ON by default and provider-unconditional on the built-in path (the live
@@ -1804,7 +1893,10 @@ export function buildOpenGeniAgent(
       if (resumedCallId && resumedCallId !== settled.toolCallId) {
         throw new Error("Human-input response does not belong to the resumed tool call");
       }
-      return JSON.stringify({ requestId: settled.requestId, ...settled.response });
+      return JSON.stringify({
+        requestId: settled.requestId,
+        ...settled.response,
+      });
     },
   });
   const agentTools = [...hostedTools, humanInputTool];
@@ -2289,7 +2381,9 @@ export function buildAgentCapabilities(
   }
   const caps: ReturnType<typeof Capabilities.default> = [
     filesystemCapability,
-    shell({ ...(toolCancellation ? {} : { configureTools: withExecOpCorrelation }) }),
+    shell({
+      ...(toolCancellation ? {} : { configureTools: withExecOpCorrelation }),
+    }),
   ];
   const sessionSkills = sessionSkillsForMaterialization(
     packSkills,
@@ -3187,7 +3281,8 @@ async function signFirstPartyDelegatedBearer(
   settings: Settings,
   options: PrepareToolsOptions,
 ): Promise<string | null> {
-  if (!settings.delegationSecret || !options.accountId || !options.workspaceId) {
+  const delegationSecret = resolveFirstPartyDelegationSecret(settings);
+  if (!delegationSecret || !options.accountId || !options.workspaceId) {
     return null;
   }
   const attemptClaims = [
@@ -3201,7 +3296,7 @@ async function signFirstPartyDelegatedBearer(
   if (hasAnyAttemptClaim && !hasExactAttemptClaims) {
     return null;
   }
-  return await signDelegatedAccessToken(settings.delegationSecret, {
+  return await signDelegatedAccessToken(delegationSecret, {
     accountId: options.accountId,
     workspaceId: options.workspaceId,
     subjectId: options.subjectId ?? "worker:first-party-mcp",
@@ -3890,7 +3985,10 @@ export function contextRobustnessFilterForSettings(
   options: ContextRobustnessFilterOptions = {},
 ): CallModelInputFilter {
   const thresholdTokens = compactionThresholdTokens(settings);
-  let previousRequest: { revision: number; footprint: CompleteModelInputFootprint } | null = null;
+  let previousRequest: {
+    revision: number;
+    footprint: CompleteModelInputFootprint;
+  } | null = null;
   let requestRevision = 0;
   return async ({ modelData, agent }) => {
     const input = modelData.input;
@@ -4130,7 +4228,9 @@ export async function runAgentStream(
             ? { contextCompactionSignal: overrides.contextCompactionSignal }
             : {}),
           ...(overrides.contextCompactionRequested
-            ? { contextCompactionRequested: overrides.contextCompactionRequested }
+            ? {
+                contextCompactionRequested: overrides.contextCompactionRequested,
+              }
             : {}),
         }),
       ].filter((f): f is CallModelInputFilter => Boolean(f)),
@@ -5036,6 +5136,72 @@ export function normalizeToolOutputForEvent(output: unknown): unknown {
   return output;
 }
 
+/**
+ * Hosted web_search progresses on the raw Responses stream
+ * (`response.output_item.added/done` with `web_search_call`) long before the SDK
+ * materializes a `RunToolCallItem` at `response_done`. Without this mapping the
+ * timeline only sees search cards after the whole model round finishes — or
+ * never mid-turn — while assistant prose ("Search 1/5") streams live.
+ */
+function hostedWebSearchToolCallFromResponsesEvent(raw: unknown): NormalizedRuntimeEvent | null {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+  const event = raw as {
+    type?: unknown;
+    item?: {
+      id?: unknown;
+      type?: unknown;
+      status?: unknown;
+      action?: unknown;
+      [key: string]: unknown;
+    };
+  };
+  const eventType = typeof event.type === "string" ? event.type : "";
+  if (
+    !(
+      (eventType === "response.output_item.added" || eventType === "response.output_item.done") &&
+      event.item?.type === "web_search_call"
+    )
+  ) {
+    // Progress-only `response.web_search_call.*` events lack the action
+    // payload; added/done are enough for a live, query-bearing card.
+    return null;
+  }
+  const item = event.item;
+  const itemId = typeof item.id === "string" ? item.id : null;
+  if (!itemId) {
+    return null;
+  }
+  const status =
+    typeof item.status === "string"
+      ? item.status
+      : eventType === "response.output_item.done"
+        ? "completed"
+        : "in_progress";
+  const action = item.action ?? null;
+  // Codex frequently emits `output_item.added` for web_search_call before the
+  // action payload exists. Persist that so the timeline can show "Searching…",
+  // then the matching `done` (same id) fills in query/queries via merge.
+  const { status: _status, ...providerData } = item;
+
+  return {
+    type: "agent.toolCall.created",
+    payload: {
+      id: itemId,
+      name: "web_search_call",
+      arguments: action,
+      raw: {
+        type: "hosted_tool_call",
+        id: itemId,
+        name: "web_search_call",
+        status,
+        providerData,
+      },
+    },
+  };
+}
+
 export function normalizeSdkEvent(event: RunStreamEvent): NormalizedRuntimeEvent[] {
   const out: NormalizedRuntimeEvent[] = [];
   if (event.type === "raw_model_stream_event") {
@@ -5052,6 +5218,10 @@ export function normalizeSdkEvent(event: RunStreamEvent): NormalizedRuntimeEvent
     const raw = (event as any).data?.event;
     if (raw?.type === "response.reasoning_summary_text.delta" && typeof raw.delta === "string") {
       out.push({ type: "agent.reasoning.delta", payload: { text: raw.delta } });
+    }
+    const webSearch = hostedWebSearchToolCallFromResponsesEvent(raw);
+    if (webSearch) {
+      out.push(webSearch);
     }
     return out;
   }
@@ -5151,10 +5321,63 @@ export function modelResponseUsageFromResponse(response: unknown): ModelResponse
       : typeof (response as { responseId?: unknown } | null)?.responseId === "string"
         ? (response as { responseId: string }).responseId
         : undefined;
+  const serviceTier = modelResponseServiceTierFromResponse(response);
   return {
     ...(responseId ? { responseId } : {}),
+    ...(serviceTier ? { serviceTier } : {}),
     usage,
   };
+}
+
+export type ModelResponseServiceTierEvent = {
+  source: "normalized" | "provider";
+  serviceTier: string | null;
+};
+
+/**
+ * Read the provider's terminal service tier without depending on usage being
+ * present. The normalized terminal can omit provider-only fields, so callers
+ * should treat the raw provider response as the fail-closed authority.
+ */
+export function modelResponseServiceTierFromSdkEvent(
+  event: RunStreamEvent,
+): ModelResponseServiceTierEvent | null {
+  if (event.type === "raw_model_stream_event") {
+    const data = (event as any).data;
+    if (data?.type === "response_done") {
+      return {
+        source: "normalized",
+        serviceTier: modelResponseServiceTierFromResponse(data.response),
+      };
+    }
+  }
+  if (isOpenAIResponsesRawModelStreamEvent(event)) {
+    const raw = (event as any).data?.event;
+    if (raw?.type === "response.completed") {
+      return {
+        source: "provider",
+        serviceTier: modelResponseServiceTierFromResponse(raw.response),
+      };
+    }
+  }
+  return null;
+}
+
+function modelResponseServiceTierFromResponse(response: unknown): string | null {
+  if (!response || typeof response !== "object") {
+    return null;
+  }
+  const record = response as Record<string, unknown>;
+  const direct = record.service_tier ?? record.serviceTier;
+  if (typeof direct === "string" && direct.length > 0) {
+    return direct;
+  }
+  const providerData =
+    record.providerData && typeof record.providerData === "object"
+      ? (record.providerData as Record<string, unknown>)
+      : null;
+  const nested = providerData?.service_tier ?? providerData?.serviceTier;
+  return typeof nested === "string" && nested.length > 0 ? nested : null;
 }
 
 function modelResponseFromSdkEvent(event: RunStreamEvent): any {
@@ -6072,7 +6295,10 @@ function gitCredentialBindingInventoryCommandLines(
       transport,
       repositories: [],
     };
-    entry.repositories.push({ uri: descriptor.uri, mountPath: descriptor.mountPath });
+    entry.repositories.push({
+      uri: descriptor.uri,
+      mountPath: descriptor.mountPath,
+    });
     entries.set(key, entry);
   }
   const inventory = `${JSON.stringify(
@@ -6435,7 +6661,10 @@ function gitCredentialHelperCommandLines(
     { direct: number; brokered: number }
   >();
   for (const binding of bindings) {
-    const counts = providerBindingKinds.get(binding.provider) ?? { direct: 0, brokered: 0 };
+    const counts = providerBindingKinds.get(binding.provider) ?? {
+      direct: 0,
+      brokered: 0,
+    };
     if (binding.transport?.kind === "http_broker") counts.brokered += 1;
     else counts.direct += 1;
     providerBindingKinds.set(binding.provider, counts);
@@ -6687,7 +6916,10 @@ export function gitCredentialBindingTokenRefreshCommand(
 export async function refreshGitProviderTokenFiles(
   session: GitCredentialTokenWriterSession,
   seeds: GitTokenSeeds,
-  options: { runAs?: string; commandRunner?: SandboxLifecycleCommandRunner } = {},
+  options: {
+    runAs?: string;
+    commandRunner?: SandboxLifecycleCommandRunner;
+  } = {},
 ): Promise<void> {
   const command = gitProviderTokenRefreshCommand(seeds);
   if (!command) {
@@ -6709,7 +6941,10 @@ export async function refreshGitProviderTokenFiles(
 export async function refreshGitCredentialBindingTokenFiles(
   session: GitCredentialTokenWriterSession,
   bindings: GitCredentialBindingSeed[],
-  options: { runAs?: string; commandRunner?: SandboxLifecycleCommandRunner } = {},
+  options: {
+    runAs?: string;
+    commandRunner?: SandboxLifecycleCommandRunner;
+  } = {},
 ): Promise<void> {
   const command = gitCredentialBindingTokenRefreshCommand(bindings);
   if (!command) return;

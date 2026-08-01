@@ -20,6 +20,7 @@ import {
   resolveStreamTokenSecret,
   retryStartupDependency,
   SANDBOX_REQUIRED_ENV,
+  sandboxArchiveCaptureTimeoutMs,
   sandboxEnvironmentVariableNames,
   sandboxLifecycleHookIds,
   stableSandboxEnvironmentForRun,
@@ -55,11 +56,72 @@ describe(".env.example", () => {
   });
 });
 
+describe("Google Drive integration settings", () => {
+  test("loads the split localhost browser and API origins", () => {
+    const settings = withEnv(
+      {
+        OPENGENI_ENVIRONMENT: "local",
+        OPENGENI_INTEGRATIONS_ENABLED: "true",
+        OPENGENI_PUBLIC_BASE_URL: "http://127.0.0.1:8000",
+        OPENGENI_WEB_BASE_URL: "http://127.0.0.1:3000",
+        OPENGENI_INTEGRATIONS_STATE_SECRET: "state-secret",
+        OPENGENI_GOOGLE_DRIVE_CLIENT_ID: "client.apps.googleusercontent.com",
+        OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET: "client-secret",
+      },
+      () => getSettings(),
+    );
+    expect(settings.publicBaseUrl).toBe("http://127.0.0.1:8000");
+    expect(settings.webBaseUrl).toBe("http://127.0.0.1:3000");
+    expect(settings.googleDriveClientId).toBe("client.apps.googleusercontent.com");
+    expect(settings.googleDriveClientSecret).toBe("client-secret");
+  });
+
+  test("requires the Google OAuth client id and secret together", () => {
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_GOOGLE_DRIVE_CLIENT_ID: "client.apps.googleusercontent.com",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow(
+      "OPENGENI_GOOGLE_DRIVE_CLIENT_ID and OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET must be configured together",
+    );
+  });
+});
+
+describe("OpenGeni Slack interaction settings", () => {
+  const slackEnv = {
+    OPENGENI_ENVIRONMENT: "local",
+    OPENGENI_PUBLIC_BASE_URL: "http://127.0.0.1:8000",
+    OPENGENI_INTEGRATIONS_STATE_SECRET: "state-secret",
+    OPENGENI_SLACK_CLIENT_ID: "slack-client-id",
+    OPENGENI_SLACK_CLIENT_SECRET: "slack-client-secret",
+  };
+
+  test("requires the request signing secret whenever the Slack app is configured", () => {
+    expect(() => withEnv(slackEnv, () => getSettings())).toThrow(
+      "OPENGENI_SLACK_SIGNING_SECRET is required when the OpenGeni Slack app is configured",
+    );
+  });
+
+  test("loads the signing secret without projecting it into any public contract", () => {
+    const settings = withEnv(
+      { ...slackEnv, OPENGENI_SLACK_SIGNING_SECRET: "slack-signing-secret" },
+      () => getSettings(),
+    );
+    expect(settings.slackSigningSecret).toBe("slack-signing-secret");
+  });
+});
+
 describe("Docker workspace materialization", () => {
   test("parses the optional shared workspace base directory", () => {
     expect(
-      withEnv({ OPENGENI_DOCKER_WORKSPACE_BASE_DIR: "/var/lib/opengeni/docker-workspaces" }, () =>
-        getSettings(),
+      withEnv(
+        {
+          OPENGENI_DOCKER_WORKSPACE_BASE_DIR: "/var/lib/opengeni/docker-workspaces",
+        },
+        () => getSettings(),
       ).dockerWorkspaceBaseDir,
     ).toBe("/var/lib/opengeni/docker-workspaces");
   });
@@ -813,6 +875,19 @@ describe("sandbox preparation profiles", () => {
     ).toThrow("OPENGENI_DELEGATION_SECRET is required when OPENGENI_TOOLSPACE_ENABLED=true");
   });
 
+  test("resolves a local-only first-party delegation secret without weakening configured mode", async () => {
+    const { resolveFirstPartyDelegationSecret } = await import("../src/index");
+    const local = withEnv({}, () => getSettings());
+    const configured = withEnv({ OPENGENI_PRODUCT_ACCESS_MODE: "configured" }, () => getSettings());
+    const explicit = withEnv({ OPENGENI_DELEGATION_SECRET: "operator-secret" }, () =>
+      getSettings(),
+    );
+
+    expect(resolveFirstPartyDelegationSecret(local)).toBeTruthy();
+    expect(resolveFirstPartyDelegationSecret(configured)).toBeUndefined();
+    expect(resolveFirstPartyDelegationSecret(explicit)).toBe("operator-secret");
+  });
+
   test("does not duplicate a custom files MCP profile", () => {
     withEnv(
       {
@@ -1015,7 +1090,10 @@ describe("sandbox preparation profiles", () => {
     const limits = parseStaticUsageLimitsJson(
       '{"maxWorkspacesPerAccount":2,"maxFileUploadBytes":1048576}',
     );
-    expect(limits).toEqual({ maxWorkspacesPerAccount: 2, maxFileUploadBytes: 1048576 });
+    expect(limits).toEqual({
+      maxWorkspacesPerAccount: 2,
+      maxFileUploadBytes: 1048576,
+    });
 
     withEnv(
       {
@@ -1023,7 +1101,9 @@ describe("sandbox preparation profiles", () => {
         OPENGENI_STATIC_USAGE_LIMITS_JSON: '{"maxApiKeysPerWorkspace":1}',
       },
       () => {
-        expect(configuredStaticUsageLimits(getSettings())).toEqual({ maxApiKeysPerWorkspace: 1 });
+        expect(configuredStaticUsageLimits(getSettings())).toEqual({
+          maxApiKeysPerWorkspace: 1,
+        });
       },
     );
 
@@ -1260,8 +1340,12 @@ describe("backend-gated sandbox required-credential validation", () => {
   test("the modal token stays a both-or-neither pair regardless of the active backend", () => {
     // Half-configured Modal token while backend=docker: still a misconfig.
     expect(() =>
-      withEnv({ OPENGENI_SANDBOX_BACKEND: "docker", OPENGENI_MODAL_TOKEN_ID: "only-id" }, () =>
-        getSettings(),
+      withEnv(
+        {
+          OPENGENI_SANDBOX_BACKEND: "docker",
+          OPENGENI_MODAL_TOKEN_ID: "only-id",
+        },
+        () => getSettings(),
       ),
     ).toThrow(
       "OPENGENI_MODAL_TOKEN_ID and OPENGENI_MODAL_TOKEN_SECRET must both be set or both omitted",
@@ -1285,6 +1369,12 @@ describe("backend-gated sandbox required-credential validation", () => {
 });
 
 describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)", () => {
+  test("the durable capture gate outlives provider snapshot settlement but remains bounded", () => {
+    expect(sandboxArchiveCaptureTimeoutMs({ sandboxSnapshotTimeoutMs: 10_000 })).toBe(40_000);
+    expect(sandboxArchiveCaptureTimeoutMs({ sandboxSnapshotTimeoutMs: 40_000 })).toBe(80_000);
+    expect(sandboxArchiveCaptureTimeoutMs({ sandboxSnapshotTimeoutMs: 3_590_000 })).toBe(3_600_000);
+  });
+
   test("idle timeout defaults to the hard lifetime and the default cadence passes boot", () => {
     const settings = withEnv({}, () => getSettings());
     // Default config: idleGrace 900s + reaper 30s = 930s warm window must fit under

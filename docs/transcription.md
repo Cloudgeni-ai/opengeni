@@ -1,153 +1,114 @@
-# Composer transcription capability
+# Composer voice input
 
-Voice transcription is a distinct, provider-agnostic capability for turning host-captured audio
-into editable composer text. It is not a turn-model feature, does not authorize a coding model, and
-does not send a message by itself.
+Native voice input turns browser-captured audio into editable composer text. It is
+not a turn-model feature, does not authorize a coding model, and does not send a
+message by itself.
 
 ## Product contract
 
-- The ordinary composer presents **one microphone control** and **one editable draft**. Provider,
-  model, credential, region, retention, privacy, fallback, and cost choices do not appear beside the
-  microphone; they live only in Workspace settings.
-- Partial transcripts are ephemeral UI state. They are cleared on reconnect, cancellation, error,
-  close, policy replacement, or component unmount and are never inserted into the message draft.
-- Each accepted final is deduplicated by the adapter's stable acceptance ID and appended to the
-  draft exactly once. An empty/whitespace final is not an acceptance and does not consume its ID,
-  so a later non-empty correction with the same ID can still be inserted once. The user can edit or
-  delete accepted text before using the ordinary Send action.
-- Partial and final events may carry provider-neutral detected-language, result-span, confidence,
-  speaker, and word-span metadata. Unsupported fields are omitted; provider-specific payload bags
-  and display strings are not part of the event contract.
-- Escape cancels an active session. Cancellation and policy replacement locally fence late adapter
-  callbacks even if remote cleanup fails. Pending starts receive an abort signal, start has a local
-  deadline, and detached `cancel`/`close` cleanup is invoked independently under bounded waits.
-- Adapter errors reach the composer only as controlled error codes mapped to local UI copy. Raw
-  adapter detail is never rendered; an optional diagnostic callback receives only bounded,
-  redacted non-UI detail.
-- Transcription is disabled and unaccepted by default. Missing, malformed, or mismatched policy and
-  adapter state fails closed.
+- The ordinary composer presents **one microphone control** (idle) and **one editable
+  draft**. While recording, chrome shows a compact waveform plus separate **Cancel**
+  (discard) and **Stop** (transcribe) actions. Provider, model, credential, and region
+  choices never appear beside the microphone or in Workspace settings for end users.
+- Click microphone → record locally → press stop → **immediately** upload and
+  transcribe with no extra click → append the transcript to the editable draft.
+  Cancel (or Escape) discards without uploading.
+- The transcript does **not** auto-submit as an agent message. Ordinary Send still
+  sends the message.
+- Escape cancels or discards an in-flight recording/transcription. Recording hard-stops
+  at 60 seconds (`ClientConfig.voiceInput.maxDurationSeconds`).
+- Audio exists only in browser memory and the in-flight API request buffer. It is never
+  persisted, logged, or written to object storage. Transcript text is returned once to
+  the client and is not stored server-side by the transcription path.
+- Controlled error codes map to local UI copy. Provider names, secrets, and raw upstream
+  detail never appear in client config or composer chrome.
 
 ## Trust boundary and data flow
 
 ```text
-workspace.settings.transcription
-  -> strict policy validation + exact acceptanceId
-  -> host selects and injects an exact matching TranscriptionAdapter
-  -> host adapter owns microphone/audio transport/provider credentials
-  -> partial events render ephemerally beside the composer
-  -> accepted final events append once to the editable draft
-  -> the user edits and invokes ordinary Send
-  -> only then does normal message/session handling begin
+Browser MediaRecorder
+  -> OpenGeni SDK transcribeAudio (multipart, no retry)
+  -> POST /v1/workspaces/:workspaceId/transcriptions
+  -> server provider registry (select once before send)
+  -> OpenAI gpt-transcribe | Azure deployment transcriptions
+     | experimental Codex /backend-api/transcribe
+  -> { text, languages } appended to editable composer draft
+  -> user edits and invokes ordinary Send
 ```
 
-The workspace policy and adapter descriptor must match on provider, model, credential mode, and
-region. The session request also carries the exact accepted policy identity; fixed-language or
-explicit automatic-language acceptance; diarization acceptance and optional speaker limit;
-retention, privacy, and cost commitments; target selection; and sequence floor. An enabled policy
-must accept exactly one of a fixed BCP 47 language or automatic detection. Speaker diarization is
-off unless explicitly accepted, and a maximum-speaker value is valid only when diarization is on.
-Changing any accepted policy field revokes the active session; a new session must bind the new
-acceptance ID.
+Deployment credentials and provider selection stay server-private.
+`GET /v1/config/client` projects only:
 
-This authorization is intentionally separate from workspace turn-model policy and from the model
-chosen for an agent turn. A transcription target cannot inherit agent model-routing permission,
-and no audio is routed through coding-model inference. A Codex-subscription transcription adapter
-is not included because no stable authorized audio-transcription entitlement has been established.
+```ts
+voiceInput: {
+  available: boolean;
+  maxDurationSeconds: number;
+  maxSizeBytes: number;
+  acceptedMimeTypes: string[];
+}
+```
 
-The policy contains only a workspace connection UUID for a BYOK target, never a credential value.
-The current client seam does not resolve that reference itself: an authorized host adapter must use
-its own credential broker without exposing secrets to the composer or public event payloads.
+Workspace settings store only `{ voiceInput: { enabled: boolean } }`. When unset, voice
+input defaults to enabled whenever the deployment has a working provider. Legacy
+`settings.transcription.enabled` maps forward for one compatibility release; new writes
+use `voiceInput`.
 
 ## Canonical implementation
 
 | Concern | Canonical source |
 | --- | --- |
-| Stored workspace schema and PATCH validation | `packages/contracts/src/index.ts` (`WorkspaceTranscriptionPolicy`) |
-| Browser-global-free adapter, authorization, event, and session contracts | `packages/sdk/src/transcription.ts` |
-| React lifecycle, sequence/generation fences, and final insertion | `packages/react/src/hooks/use-transcription.ts` |
-| One accessible microphone control | `packages/react/src/components/composer-transcription-control.tsx` |
-| Ordinary composer integration | `packages/react/src/components/chat-composer.tsx` |
-| Workspace-only policy editor | `apps/web/src/components/transcription-settings.tsx` |
-| Deterministic browser fixture | `packages/react/demo/transcription-harness.tsx` |
+| Client capability + workspace toggle + response | `packages/contracts/src/index.ts` |
+| Provider registry config | `packages/config/src/index.ts` (`resolveVoiceInputProviderRegistry`) |
+| Service port | `packages/core/src/transcription.ts` |
+| API providers + route | `apps/api/src/transcription/`, `apps/api/src/routes/transcriptions.ts` |
+| SDK binary call | `packages/sdk/src/client.ts` (`transcribeAudio`) |
+| React MediaRecorder lifecycle | `packages/react/src/hooks/use-voice-input.ts` |
+| Microphone control | `packages/react/src/components/composer-transcription-control.tsx` |
+| Workspace toggle UI | `apps/web/src/components/transcription-settings.tsx` |
 
-`@opengeni/sdk` deliberately references no browser or native microphone API. Web, desktop, native,
-and mobile hosts implement the same `TranscriptionAdapter`/`TranscriptionSession` seam and emit the
-same ordered lifecycle events. `@opengeni/react` supplies the web composer lifecycle and UI; a
-native UI can consume the SDK contract directly.
+Deprecated host-adapter types remain exported from `packages/sdk/src/transcription.ts`
+for one release and will be removed afterward.
 
-The OpenGeni web bundle currently injects no production adapter. Its microphone therefore explains
-that an approved adapter is required rather than touching a microphone, network, provider, or
-credential. The demo/e2e adapter is local deterministic fixture code only.
+## Provider paths
 
-## Lifecycle requirements for host adapters
+| Provider | When selected | Notes |
+| --- | --- | --- |
+| `codex-subscription` | `OPENGENI_CODEX_SUBSCRIPTION_ENABLED=true` and a workspace has an active attached Codex credential | Undocumented ChatGPT `/backend-api/transcribe`; preferred by default when attached; skipped at selection time when no workspace credential |
+| `openai` | usable `OPENGENI_OPENAI_API_KEY` (or voice-specific key; template placeholders like `your-key` are ignored) and OpenAI path enabled | `POST /v1/audio/transcriptions`, default model `gpt-transcribe` |
+| `azure-openai` | Azure endpoint + deployment + key/AD token configured | Deployment-scoped `/openai/deployments/{deployment}/audio/transcriptions` |
 
-1. `start` receives an already-authorized, immutable session request, an event listener, and a
-   `TranscriptionAdapterStartContext`. The context's `AbortSignal` is aborted on local cancellation,
-   policy replacement, start timeout, or component unmount. Adapters must stop microphone/audio and
-   network acquisition promptly when it aborts and must consume any later provider settlement.
-2. Events use one `localSessionId` and a strictly increasing safe-integer `sequence`, including
-   reconnects. Replayed or stale sequences are ignored.
-3. Partials are replaceable hints. Finals need a stable `providerAcceptanceId`; replaying a
-   non-empty final with that ID must not create a second insertion. Empty/whitespace finals do not
-   reserve the ID.
-4. Optional `metadata` on partials and finals uses only neutral structures: `detectedLanguage`, a
-   nonnegative ordered result `span`, confidence in the inclusive 0–1 range, a session-local
-   `speaker`, and ordered `words` whose spans fit inside the result span. Metadata is informational
-   and does not change final acceptance or draft insertion semantics.
-5. Recoverable errors enter reconnecting state. Non-recoverable errors and closed sessions are
-   terminal and release the stored session handle. Events carry a controlled error code and
-   recoverability only, never adapter-owned display text.
-6. `cancel` and `close` must be idempotent. React invokes them independently, does not await them to
-   restore idle UI/focus, and bounds each detached cleanup observation (2 seconds by default). A
-   hanging or rejected method must not prevent the other from being invoked.
-7. React bounds `start` locally (15 seconds by default). A timeout aborts the start context, fences
-   late callbacks, and maps to controlled retry UI. A handle that resolves after a timeout,
-   cancellation, policy replacement, or unmount is detached and cleaned rather than retained.
-8. `reportDiagnostic` is an observability seam, not a UI channel. React strips control characters,
-   redacts bearer/token/key/secret patterns, caps detail at 512 characters, and contains callback
-   failures. Hosts must still avoid submitting unnecessary provider payloads or credentials.
-9. A fallback is never selected silently. The workspace must accept explicit fallback targets and
-   the host must request one exact accepted index.
-10. The host adapter is responsible for enforcing provider-specific retention/privacy commitments
-   and cost ceilings before and during capture. The generic SDK passes these values through but has
-   no provider meter or billing integration of its own.
+Selection uses `OPENGENI_VOICE_INPUT_PROVIDER_ORDER` (default
+`codex-subscription,openai,azure-openai`). The first ready provider wins **before**
+audio is sent. When Codex subscription routing is enabled, Codex is preferred over
+OpenAI/Azure even if API keys exist; workspaces without an attached subscription
+credential fall through to OpenAI/Azure. Operators can put `openai` or
+`azure-openai` first explicitly, or omit `codex-subscription` from the order to
+disable Codex voice while keeping subscription model routing. The same clip is
+never retried across vendors after an upstream request may have started.
 
-## Provider research matrix
+## Operator configuration
 
-Research below is limited to the vendors' public documentation, accessed **2026-07-21**. It is an
-integration-planning matrix, not an endorsement or a claim of verified runtime behavior.
+See `.env.example` for:
 
-| Candidate | Documented integration shape | OpenGeni adapter considerations | Current status |
-| --- | --- | --- | --- |
-| OpenAI speech/transcription | Hosted speech-to-text APIs plus documented realtime transcription; separate data-control and API-pricing documentation | A future host adapter would need an authorized API credential path, exact model binding, documented retention/privacy acceptance, and independent cost enforcement. A coding-model or Codex subscription is not a substitute. | No adapter; no entitlement, provider call, or benchmark verified. |
-| Deepgram | Hosted live-streaming audio interface with separate published pricing | A host adapter would own live audio transport, credential brokerage, reconnect ordering, region/privacy review, and usage/cost enforcement. | No adapter or benchmark. |
-| Azure Speech | Speech-to-text SDK/service documentation and a separately documented container option | OpenGeni policy permits `azure-speech` only with a workspace BYOK connection. Region and deployment mode must be exact; selecting Azure Speech never authorizes Azure-hosted model inference. | No adapter, container integration, or benchmark. |
-| AssemblyAI | Hosted streaming transcription interface with separate published pricing | A host adapter would own streaming transport, credential brokerage, reconnect/dedupe behavior, privacy review, and usage/cost enforcement. | No adapter or benchmark. |
-| Self-hosted Whisper-class | Open-source Whisper model/code suitable for operator-owned inference; the upstream repository does not establish an OpenGeni streaming service contract | A host must own model packaging, audio capture, segmentation/streaming strategy, compute, region, observability, and stable acceptance IDs. Self-hosting reduces vendor coupling but does not by itself prove privacy, latency, or cost. | No packaged service or adapter; no hardware benchmark. |
+- `OPENGENI_VOICE_INPUT_MAX_DURATION_SECONDS` / `OPENGENI_VOICE_INPUT_MAX_SIZE_BYTES`
+- `OPENGENI_VOICE_INPUT_PROVIDER_ORDER`
+- `OPENGENI_VOICE_INPUT_OPENAI_*` / `OPENGENI_VOICE_INPUT_AZURE_*`
+- `OPENGENI_CODEX_SUBSCRIPTION_ENABLED` (includes Codex in the voice registry)
+- `OPENGENI_VOICE_INPUT_CODEX_EXPERIMENTAL` (legacy; no longer required for inclusion)
 
-Official references:
+Supported paths reuse ordinary OpenAI/Azure turn credentials when voice-specific
+overrides are unset. Codex transcription requires subscription routing enabled and
+an active workspace Codex credential at selection/request time.
 
-- OpenAI: [speech to text](https://platform.openai.com/docs/guides/speech-to-text),
-  [realtime transcription](https://platform.openai.com/docs/guides/realtime-transcription),
-  [data controls](https://platform.openai.com/docs/guides/your-data), and
-  [API pricing](https://openai.com/api/pricing/)
-- Deepgram: [live streaming audio](https://developers.deepgram.com/docs/getting-started-with-live-streaming-audio)
-  and [pricing](https://deepgram.com/pricing)
-- Microsoft: [Azure Speech to text](https://learn.microsoft.com/en-us/azure/ai-services/speech-service/get-started-speech-to-text),
-  [Speech containers](https://learn.microsoft.com/en-us/azure/ai-services/speech-service/speech-container-howto),
-  and [Speech pricing](https://azure.microsoft.com/en-us/pricing/details/cognitive-services/speech-services/)
-- AssemblyAI: [streaming transcription](https://www.assemblyai.com/docs/getting-started/transcribe-streaming-audio)
-  and [pricing](https://www.assemblyai.com/pricing)
-- OpenAI Whisper: [source repository and model card](https://github.com/openai/whisper)
+## Lifecycle requirements
 
-## Honest runtime gaps
-
-- No production browser, desktop, native, mobile, server, or provider adapter ships today.
-- No provider credential has been resolved through this seam, and no paid/provider call was made
-  while implementing or testing it.
-- Provider accuracy, language coverage, latency, reconnect behavior, region availability, privacy,
-  retention, and cost have not been benchmarked or operationally verified.
-- Cost policy is carried to an adapter but cannot be metered or enforced without a real adapter and
-  provider-specific usage accounting.
-- The workspace editor currently accepts one explicit fallback target; the underlying contract can
-  represent more, but there is no automatic fallback coordinator.
+1. Browser requests microphone permission, then records with a negotiated MIME type
+   (`webm/opus`, then `mp4`, then `ogg/opus`).
+2. Stop (user click or 60s hard-stop) finalizes the `MediaRecorder` blob and immediately
+   calls `transcribeAudio`.
+3. React fences callbacks by generation so late responses after Escape/unmount/replace
+   cannot append to the draft.
+4. Tracks are stopped on every exit path.
+5. Empty/whitespace transcripts do not change the draft.
+6. Workspace disablement and missing deployment configuration hide or block the mic
+   without inventing provider controls in product UI.

@@ -229,6 +229,7 @@ export type ViewerHeartbeatRequest = { leaseEpoch: number };
 export type ViewerHeartbeatResponse = { alive: boolean };
 
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+export type LatencyMode = "standard" | "priority" | "fast";
 export type GitCredentialProvider = "github" | "gitlab" | "azure_devops";
 export type GitCredentialBindingId = string;
 export type GitRepositoryAccess = "read" | "write";
@@ -418,6 +419,71 @@ export type OpenGeniSlackBotInstallStart = {
   expiresAt: string;
 };
 
+export type GoogleDriveTargetScope = "user" | "workspace" | "organization";
+export type GoogleDriveSyncCadence = "manual" | "hourly" | "daily";
+export type GoogleDriveReadPolicy = "allow" | "ask" | "block";
+
+export type GoogleDriveSelectedSource = {
+  id: string;
+  name: string;
+  mimeType: string;
+  driveId: string | null;
+  targetScope: GoogleDriveTargetScope;
+  syncCadence: GoogleDriveSyncCadence;
+  readPolicy: GoogleDriveReadPolicy;
+  selectedAt: string;
+};
+
+export type GoogleDriveConnectionMetadata = {
+  credentialRole: "google_drive_metadata";
+  credentialLabel: "Google Drive metadata browser";
+  googlePermissionId: string;
+  googleEmail: string;
+  googleDisplayName: string | null;
+  verifiedAt: string;
+  accessMode: "metadata_readonly" | "readonly";
+  selectedSources?: GoogleDriveSelectedSource[] | undefined;
+  /** @deprecated Read selectedSources; retained while existing connections migrate. */
+  selectedSource?: GoogleDriveSelectedSource | null | undefined;
+  [key: string]: unknown;
+};
+
+export type GoogleDriveOAuthStartRequest = {
+  connectionId?: string | undefined;
+};
+
+export type GoogleDriveOAuthStartResponse = {
+  authorizationUrl: string;
+  expiresAt: string;
+};
+
+export type GoogleDriveBrowseItem = {
+  id: string;
+  name: string;
+  mimeType: string;
+  kind: "folder" | "file";
+  driveId: string | null;
+  modifiedTime: string | null;
+  size: string | null;
+  webViewLink: string | null;
+};
+
+export type GoogleDriveBrowseResponse = {
+  connection: ConnectionMetadata;
+  parentId: string;
+  current: GoogleDriveBrowseItem | null;
+  items: GoogleDriveBrowseItem[];
+  nextPageToken: string | null;
+  incompleteSearch: boolean;
+};
+
+export type SaveGoogleDriveSourceRequest = {
+  sources: Array<Pick<GoogleDriveBrowseItem, "id" | "name" | "mimeType" | "driveId">>;
+  targetScope: GoogleDriveTargetScope;
+  syncCadence: GoogleDriveSyncCadence;
+  readPolicy: GoogleDriveReadPolicy;
+};
+
 export type UpdateConnectionRequest = {
   providerDomain?: string | undefined;
   subjectId?: string | null | undefined;
@@ -574,6 +640,11 @@ export type Session = {
   codexPinnedCredentialId?: string | null;
   /** Multi-account Codex (P1): the account the most recent turn ran on (the "Running on:" indicator). */
   codexLastCredentialId?: string | null;
+  /**
+   * Frozen at create. `remote_v2` ⇒ Codex remote compaction + Codex-only model
+   * admission; `portable` ⇒ plaintext compaction and free provider switching.
+   */
+  codexCompactionMode: "remote_v2" | "portable";
   /** Personal (authenticated subject) workspace pin state, never workspace-global. */
   pinned?: boolean;
   /** Stable pin ordering key; null when this subject has not pinned the session. */
@@ -665,6 +736,7 @@ export type SessionTurn = {
   toolsProvided?: boolean | undefined;
   model: string;
   reasoningEffort: ReasoningEffort;
+  latencyMode: LatencyMode;
   sandboxBackend: SandboxBackend;
   sandboxOs: SandboxOs | null;
   metadata: Record<string, unknown>;
@@ -751,6 +823,7 @@ export const SESSION_EVENT_TYPES = [
   "session.requiresAction",
   "session.humanInput.requested",
   "session.context.compaction.requested",
+  "session.context.compaction.started",
   "session.context.compacted",
   "session.context.compaction.skipped",
   "session.context.cleared",
@@ -1609,6 +1682,7 @@ export type CreateSessionRequest = {
   metadata?: Record<string, unknown> | undefined;
   model?: string | undefined;
   reasoningEffort?: ReasoningEffort | undefined;
+  latencyMode?: LatencyMode | undefined;
   sandboxBackend?: SandboxBackend | undefined;
   // The enrolled machine (a sandbox id) to run this session on; seeds the
   // active-sandbox pointer at creation so the first turn lands on it.
@@ -1689,6 +1763,8 @@ export const KNOWN_PERMISSIONS = [
   "enrollments:manage",
   "rigs:use",
   "rigs:manage",
+  "artifacts:read",
+  "artifacts:publish",
 ] as const;
 
 export type KnownPermission = (typeof KNOWN_PERMISSIONS)[number];
@@ -1760,7 +1836,13 @@ export type FirstPartyMcpToolName =
   | "slack_bot_list_files"
   | "slack_bot_file_info"
   | "slack_bot_file_content"
-  | "slack_bot_post_message";
+  | "slack_bot_post_message"
+  | "slack_bot_delete_message"
+  | "artifacts_list"
+  | "artifacts_get_source"
+  | "artifacts_create"
+  | "artifacts_publish"
+  | "artifacts_rollback";
 
 export type ProductAccessMode = "local" | "configured" | "managed";
 
@@ -2125,7 +2207,7 @@ export type ClientAuthConfig =
 
 // Kept value-identical to @opengeni/contracts and pinned by the SDK contract
 // parity suite. The SDK has no runtime dependency on the Zod contracts package.
-export const OPENGENI_API_CONTRACT_REVISION = "2026-07-turn-instructions-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-07-workspace-artifacts-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
@@ -2148,6 +2230,8 @@ export type ClientConfig = {
   allowedReasoningEfforts: ReasoningEffort[];
   mcpServers: { id: string; name: string }[];
   fileUploads: { enabled: boolean; maxSizeBytes: number };
+  /** Native browser microphone capture + server-side transcription capability. */
+  voiceInput?: ClientVoiceInputConfig | undefined;
   productAccessMode: ProductAccessMode;
   auth: ClientAuthConfig;
   // Server-wide hint: does this deployment support Channel-A structured services
@@ -2159,6 +2243,20 @@ export type ClientConfig = {
     git: boolean;
     terminalEvents: boolean;
   };
+};
+
+/** Client-safe voice-input capability projection. */
+export type ClientVoiceInputConfig = {
+  available: boolean;
+  maxDurationSeconds: number;
+  maxSizeBytes: number;
+  acceptedMimeTypes: string[];
+};
+
+/** Response from POST /v1/workspaces/:workspaceId/transcriptions. */
+export type TranscribeAudioResponse = {
+  text: string;
+  languages: string[];
 };
 
 export type AccountRole = "owner" | "admin" | "member";
@@ -2224,15 +2322,24 @@ export type Workspace = {
 
 export type WorkspaceSettings = {
   memoryEnabled?: boolean | undefined;
+  voiceInput?: WorkspaceVoiceInputSettings | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   maxNestedAgentDepth?: number | null | undefined;
+  /** Default for new Codex sessions; absent ⇒ remote_v2. */
+  codexCompactionDefault?: "remote_v2" | "portable" | undefined;
   [key: string]: unknown;
+};
+
+export type WorkspaceVoiceInputSettings = {
+  enabled: boolean;
 };
 
 export type UpdateWorkspaceSettingsRequest = {
   memoryEnabled?: boolean | undefined;
+  voiceInput?: WorkspaceVoiceInputSettings | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   maxNestedAgentDepth?: number | null | undefined;
+  codexCompactionDefault?: "remote_v2" | "portable" | undefined;
   [key: string]: unknown;
 };
 
@@ -2445,6 +2552,7 @@ export type ComposerDraft = {
   resources: ResourceRef[];
   model: string;
   reasoningEffort: ReasoningEffort;
+  latencyMode?: LatencyMode | undefined;
   sourceTurnId: string | null;
   sourceTurnVersion: number | null;
   updatedAt: string | null;
@@ -2470,6 +2578,7 @@ export type NewSessionDraft = {
   toolsProvided: boolean;
   model: string;
   reasoningEffort: ReasoningEffort;
+  latencyMode?: LatencyMode | undefined;
   options: NewSessionDraftOptions;
   updatedAt: string | null;
 };
@@ -3648,6 +3757,142 @@ export type BillingUsageResponse = {
   usage: UsageEvent[];
 };
 
+export type InsightsRange = "today" | "week" | "month" | "ytd";
+
+export type InsightsBillingPath = "opengeni_credits" | "external";
+
+export type InsightsModelUsageRow = {
+  id: string;
+  model: string;
+  provider: string;
+  billing: InsightsBillingPath;
+  calls: number;
+  inputTokens: number;
+  outputTokens: number;
+  cachedTokens: number;
+  cacheWriteTokens: number;
+  reasoningTokens: number;
+  creditUsd: number;
+};
+
+export type InsightsSeriesPoint = {
+  label: string;
+  modelCostUsd: number;
+  warmSeconds: number;
+  inputTokens: number;
+  cachedTokens: number;
+  cacheHitPct: number;
+  calls: number;
+};
+
+export type InsightsDepthBucket = {
+  depth: number;
+  sessions: number;
+};
+
+export type InsightsModelFacet = {
+  provider: string;
+  model: string;
+};
+
+export type InsightsSpendDriver = {
+  id: string;
+  groupBy: "root_session" | "schedule";
+  label: string;
+  creditUsd: number;
+  tokens: number;
+  cacheHitPct: number;
+  pctOfCreditUsd: number;
+  deltaUsdVsPrior: number;
+};
+
+export type InsightsWarmGroupRow = {
+  id: string;
+  groupId: string;
+  label: string;
+  backend: string | null;
+  warmSeconds: number;
+  sessionsAttached: number;
+};
+
+export type InsightsLiveWarmLease = {
+  id: string;
+  groupId: string;
+  backend: string;
+  turnHolders: number;
+  viewerHolders: number;
+  warmForLabel: string;
+  warmSeconds: number;
+};
+
+export type InsightsFloorSession = {
+  id: string;
+  title: string;
+  state: "running" | "paused" | "failed" | "idle" | "compacting" | "waiting";
+  depth: number;
+  model: string | null;
+  provider: string | null;
+  ageLabel: string;
+  cacheHitPct: number | null;
+  route: string | null;
+};
+
+export type InsightsScheduleRow = {
+  id: string;
+  name: string;
+  fires: number;
+  creditUsd: number | null;
+  tokens: number | null;
+  cacheHitPct: number | null;
+  billing: InsightsBillingPath | null;
+};
+
+export type WorkspaceInsightsSnapshot = {
+  range: InsightsRange;
+  rangeLabel: string;
+  priorLabel: string;
+  seriesLabel: string;
+  cacheSeriesLabel: string;
+  timezone: "UTC";
+  models: InsightsModelUsageRow[];
+  facets: InsightsModelFacet[];
+  series: InsightsSeriesPoint[];
+  depth: InsightsDepthBucket[];
+  drivers: InsightsSpendDriver[];
+  schedules: InsightsScheduleRow[];
+  warmSeconds: number;
+  priorWarmSeconds: number;
+  warmGroups: InsightsWarmGroupRow[];
+  liveWarm: InsightsLiveWarmLease[];
+  floor: InsightsFloorSession[];
+  selfhostedEnabled: boolean;
+  machinesOnline: number;
+  workspaceCreditUsd: number;
+  priorWorkspaceCreditUsd: number;
+  creditUsd: number;
+  priorCreditUsd: number;
+  priorInputTokens: number;
+  priorCacheHitPct: number;
+  priorCalls: number;
+  goalsActive: number;
+  goalsCompleted: number;
+  sessionsTouched: number;
+  rootSessions: number;
+  deepestDepth: number;
+  deepestSessionTitle: string;
+  avgDepth: number;
+  warmIdleNow: number;
+  billableTokensUsed: number;
+  billableTokenCap: number | null;
+  agentRunsUsed: number;
+  agentRunCap: number | null;
+  modelFilterActive: boolean;
+};
+
+export type WorkspaceInsightsResponse = {
+  snapshot: WorkspaceInsightsSnapshot;
+};
+
 export type BillingEntitlementsResponse = {
   accountId: string;
   mode: EntitlementsMode;
@@ -3676,6 +3921,7 @@ export type UserMessageEventInput = {
     resources?: ResourceRef[] | undefined;
     model?: string | undefined;
     reasoningEffort?: ReasoningEffort | undefined;
+    latencyMode?: LatencyMode | undefined;
     mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[] | undefined;
   };
 };

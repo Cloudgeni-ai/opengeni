@@ -28,6 +28,7 @@ function build(
     selectedTools: [],
     defaultModel: "gpt-5.4",
     defaultReasoningEffort: "medium",
+    defaultLatencyMode: "standard",
     clientEventId: "event-1",
     idempotencyKey: "create-1",
     ...overrides,
@@ -80,7 +81,13 @@ describe("buildCreateSessionRequest", () => {
     expect(() =>
       build(
         [repository],
-        [{ ...repository, ref: "feature", mountPath: "repos/alternate-opengeni" }],
+        [
+          {
+            ...repository,
+            ref: "feature",
+            mountPath: "repos/alternate-opengeni",
+          },
+        ],
       ),
     ).toThrow("resource is already attached with different settings");
   });
@@ -94,6 +101,7 @@ describe("buildCreateSessionRequest", () => {
     const submissionBefore = structuredClone(submissionResources);
     const tools = [{ kind: "mcp" as const, id: "opengeni" }];
     const result = build(currentResources, submissionResources, {
+      instructions: "Hidden session guidance",
       selectedTools: tools,
       targetSandboxId: "00000000-0000-4000-8000-0000000000c3",
       workingDir: "/workspace/opengeni",
@@ -104,6 +112,7 @@ describe("buildCreateSessionRequest", () => {
     expect(submissionResources).toEqual(submissionBefore);
     expect(result).toMatchObject({
       resources: [...currentBefore, ...submissionBefore],
+      instructions: "Hidden session guidance",
       tools,
       targetSandboxId: "00000000-0000-4000-8000-0000000000c3",
       workingDir: "/workspace/opengeni",
@@ -111,6 +120,14 @@ describe("buildCreateSessionRequest", () => {
     });
     expect(result.resources).not.toBe(currentResources);
     expect(result.tools).not.toBe(tools);
+  });
+
+  test("threads the selected latency mode into session creation", () => {
+    expect(
+      build([], [], {
+        submission: { text: "start", resources: [], latencyMode: "fast" },
+      }).latencyMode,
+    ).toBe("fast");
   });
 
   test("omits tools only when the ready catalog selection equals workspace defaults", () => {
@@ -197,8 +214,16 @@ describe("buildCreateSessionRequest", () => {
         workspaceId: "workspace-a",
         request: { ...firstRequest, initialMessage: "edited" },
       },
-      { client: firstClient, workspaceId: "workspace-b", request: firstRequest },
-      { client: secondClient, workspaceId: "workspace-a", request: firstRequest },
+      {
+        client: firstClient,
+        workspaceId: "workspace-b",
+        request: firstRequest,
+      },
+      {
+        client: secondClient,
+        workspaceId: "workspace-a",
+        request: firstRequest,
+      },
     ]) {
       const next = prepareCreateSessionAttempt({
         pending: first.pending,

@@ -120,6 +120,39 @@ describe("first-party MCP tool visibility policy", () => {
     expect(registeredToolNames(files)).toEqual(["files_get_download_url"]);
   });
 
+  test("Slack write schemas expose threaded posting and bot-owned deletion", async () => {
+    const server = buildOpenGeniMcpServer(
+      deps(),
+      grant(["connections:read"], ["slack_bot_post_message", "slack_bot_delete_message"]),
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "slack-write-schema-test", version: "1" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      const tools = (await client.listTools()).tools;
+      const post = tools.find((tool) => tool.name === "slack_bot_post_message");
+      const remove = tools.find((tool) => tool.name === "slack_bot_delete_message");
+      expect(post?.inputSchema).toMatchObject({
+        required: expect.arrayContaining(["operationId", "text"]),
+        properties: {
+          channelId: { type: "string" },
+          threadTimestamp: { type: "string" },
+        },
+      });
+      expect(remove?.inputSchema).toMatchObject({
+        required: expect.arrayContaining(["operationId", "channelId", "timestamp"]),
+        properties: {
+          operationId: { type: "string" },
+          channelId: { type: "string" },
+          timestamp: { type: "string" },
+        },
+      });
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
+  });
+
   test("the dedicated files tool is also permission-gated at registration", () => {
     const files = buildFilesMcpServer(deps(), {
       accountId,

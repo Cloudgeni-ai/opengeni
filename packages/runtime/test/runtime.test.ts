@@ -63,6 +63,7 @@ import {
   mcpToolErrorOutput,
   modelCallUsageTelemetry,
   normalizeModelCallUsage,
+  modelResponseServiceTierFromSdkEvent,
   modelResponseUsageFromSdkEvent,
   normalizeSdkEvent,
   normalizeToolOutputForEvent,
@@ -372,6 +373,7 @@ describe("runtime event normalization", () => {
         type: "response.completed",
         response: {
           id: "resp-2",
+          service_tier: "priority",
           usage: {
             input_tokens: 20,
             output_tokens: 8,
@@ -386,6 +388,7 @@ describe("runtime event normalization", () => {
 
     expect(usage).toEqual({
       responseId: "resp-2",
+      serviceTier: "priority",
       usage: {
         inputTokens: 20,
         outputTokens: 8,
@@ -393,6 +396,10 @@ describe("runtime event normalization", () => {
         inputTokensDetails: { cached_tokens: 4 },
         outputTokensDetails: { reasoning_tokens: 6 },
       },
+    });
+    expect(modelResponseServiceTierFromSdkEvent(event)).toEqual({
+      source: "provider",
+      serviceTier: "priority",
     });
     expect(normalizeSdkEvent(event)).toEqual([]);
   });
@@ -733,6 +740,70 @@ describe("runtime event normalization", () => {
         payload: { text: "Checking credentials" },
       },
     ]);
+  });
+
+  test("maps live Responses web_search_call output items into tool events", () => {
+    const [created] = normalizeSdkEvent(
+      new RunRawModelStreamEvent({
+        type: "model",
+        providerData: {
+          rawModelEventSource: OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE,
+        },
+        event: {
+          type: "response.output_item.added",
+          output_index: 1,
+          item: {
+            type: "web_search_call",
+            id: "ws_live_1",
+            status: "in_progress",
+            action: { type: "search", query: "hexagonal diamond" },
+          },
+        },
+      } as any),
+    );
+
+    expect(created).toEqual({
+      type: "agent.toolCall.created",
+      payload: {
+        id: "ws_live_1",
+        name: "web_search_call",
+        arguments: { type: "search", query: "hexagonal diamond" },
+        raw: {
+          type: "hosted_tool_call",
+          id: "ws_live_1",
+          name: "web_search_call",
+          status: "in_progress",
+          providerData: {
+            type: "web_search_call",
+            id: "ws_live_1",
+            action: { type: "search", query: "hexagonal diamond" },
+          },
+        },
+      },
+    });
+
+    const [completed] = normalizeSdkEvent(
+      new RunRawModelStreamEvent({
+        type: "model",
+        providerData: {
+          rawModelEventSource: OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE,
+        },
+        event: {
+          type: "response.output_item.done",
+          output_index: 1,
+          item: {
+            type: "web_search_call",
+            id: "ws_live_1",
+            status: "completed",
+            action: { type: "search", query: "hexagonal diamond" },
+          },
+        },
+      } as any),
+    );
+
+    expect((completed?.payload as { raw?: { status?: string } } | undefined)?.raw?.status).toBe(
+      "completed",
+    );
   });
 
   test("does not persist raw SDK reasoning items", () => {

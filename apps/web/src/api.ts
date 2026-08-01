@@ -1,12 +1,12 @@
-// The console's only bespoke HTTP surface: client config bootstrap and the
-// Better Auth (managed session) endpoints, which sit outside the public API
-// the SDK covers. Everything else goes through `@opengeni/sdk`.
+// The console primarily uses `@opengeni/sdk`. Bootstrap, managed-session,
+// and optional connector routes share this authenticated request helper so
+// connector-only code does not increase the core session bundle.
 import {
   OpenGeniApiError,
-  OpenGeniClient,
+  OpenGeniCoreClient,
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
-} from "@opengeni/sdk";
+} from "@opengeni/sdk/core";
 
 import type { AuthSession, ClientConfig } from "./types";
 
@@ -45,8 +45,8 @@ export function isApiErrorStatus(error: unknown, status: number): boolean {
  * request (the stored access key can change at runtime) and cookies ride
  * along for managed-session deployments.
  */
-export function createOpenGeniClient(): OpenGeniClient {
-  return new OpenGeniClient({
+export function createOpenGeniClient(): OpenGeniCoreClient {
+  return new OpenGeniCoreClient({
     baseUrl: apiBaseUrl,
     headers: () => authHeaders(),
     fetch: async (input, init) => {
@@ -103,7 +103,7 @@ function authHeaders(): Record<string, string> {
   return authHeadersForAccessKey(getStoredAccessKey());
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${apiBaseUrl}${path}`, {
     ...init,
     credentials: "include",
@@ -139,7 +139,9 @@ async function authRequest<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export async function fetchAuthSession(): Promise<AuthSession | null> {
-  return await authRequest<AuthSession | null>("/get-session", { method: "GET" });
+  return await authRequest<AuthSession | null>("/get-session", {
+    method: "GET",
+  });
 }
 
 export async function signUpEmail(input: {

@@ -480,6 +480,9 @@ describe("SDK / contracts parity", () => {
       cost: { currency: "USD", maxPerHour: 1, maxPerMonth: 10 },
     };
     expect(ContractUpdateWorkspaceSettingsRequest.safeParse({ transcription }).success).toBe(true);
+    expect(
+      ContractUpdateWorkspaceSettingsRequest.safeParse({ voiceInput: { enabled: true } }).success,
+    ).toBe(true);
     const transcriptEvent: TranscriptionEvent = {
       type: "transcript.final",
       localSessionId: "local-session-1",
