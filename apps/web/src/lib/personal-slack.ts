@@ -1,4 +1,7 @@
-import { OPENGENI_PERSONAL_SLACK_MCP_URL } from "@opengeni/contracts";
+import {
+  OPENGENI_PERSONAL_SLACK_MCP_URL,
+  selectCanonicalPersonalSlackConnection,
+} from "@opengeni/contracts";
 
 import type { CapabilityCatalogItem, ConnectionMetadata } from "@/types";
 
@@ -57,14 +60,7 @@ export function personalSlackConnections(connections: ConnectionMetadata[]): Con
 export function preferredPersonalSlackConnection(
   connections: ConnectionMetadata[],
 ): ConnectionMetadata | null {
-  const candidates = personalSlackConnections(connections);
-  return (
-    candidates.slice().sort((left, right) => {
-      const statusDelta = connectionStatusRank(left.status) - connectionStatusRank(right.status);
-      if (statusDelta !== 0) return statusDelta;
-      return Date.parse(right.updatedAt) - Date.parse(left.updatedAt);
-    })[0] ?? null
-  );
+  return selectCanonicalPersonalSlackConnection(personalSlackConnections(connections));
 }
 
 /**
@@ -106,19 +102,6 @@ export function personalSlackOAuthTarget(item: CapabilityCatalogItem | null): {
     providerDomain: PERSONAL_SLACK_PROVIDER_DOMAIN,
     mcpUrl: OPENGENI_PERSONAL_SLACK_MCP_URL,
   };
-}
-
-function connectionStatusRank(status: ConnectionMetadata["status"]): number {
-  switch (status) {
-    case "active":
-      return 0;
-    case "needs_reauth":
-      return 1;
-    case "error":
-      return 2;
-    case "revoked":
-      return 3;
-  }
 }
 
 function connectionExpiresAtOrBefore(connection: ConnectionMetadata, now: Date): boolean {
