@@ -10,11 +10,13 @@ type ManifestEntry = {
 
 const kib = 1024;
 const budgets = {
-  initialRaw: 770 * kib,
+  // The consent manager belongs to the shared application shell; provider SDKs
+  // remain lazy. Keep a small, explicit allowance for that orchestration.
+  initialRaw: 771 * kib,
   initialGzip: 210 * kib,
   initialFileGzip: 70 * kib,
   directSessionRaw: 1900 * kib,
-  directSessionGzip: 551 * kib,
+  directSessionGzip: 552 * kib,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,
   cssGzip: 30 * kib,

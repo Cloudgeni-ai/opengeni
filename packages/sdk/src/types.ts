@@ -2194,6 +2194,14 @@ export type ClientConfig = {
   voiceInput?: ClientVoiceInputConfig | undefined;
   productAccessMode: ProductAccessMode;
   auth: ClientAuthConfig;
+  analytics: {
+    consentRequired: boolean;
+    providers: {
+      reo?: { clientId: string } | undefined;
+      posthog?: { projectKey: string; host: string } | undefined;
+      ga4?: { measurementId: string } | undefined;
+    };
+  };
   // Server-wide hint: does this deployment support Channel-A structured services
   // at all (P4.4). Per-session availability is negotiated on /stream-capabilities;
   // this is the coarse on/off the client uses to decide whether to even attempt
