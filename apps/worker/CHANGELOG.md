@@ -1,5 +1,11 @@
 # @opengeni/worker-bundle
 
+## 0.13.2
+
+### Patch Changes
+
+- 472b4d1: Reopen turn-end workspace capture through an exact-instance, non-owning sandbox read handle and allow a production-realistic capture deadline.
+
 ## 0.13.1
 
 ### Patch Changes
