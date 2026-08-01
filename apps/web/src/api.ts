@@ -50,7 +50,13 @@ export function createOpenGeniClient(): OpenGeniCoreClient {
     baseUrl: apiBaseUrl,
     headers: () => authHeaders(),
     fetch: async (input, init) => {
-      const response = await fetch(input, { ...init, credentials: "include" });
+      const response = await fetch(input, {
+        ...init,
+        // API requests need managed-session cookies. The SDK explicitly marks
+        // signed object-storage requests as credential-free; preserve that
+        // narrower policy instead of overriding it at the console boundary.
+        credentials: init?.credentials ?? "include",
+      });
       handleApiContractResponse(response);
       return response;
     },

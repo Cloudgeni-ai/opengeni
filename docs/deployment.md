@@ -500,6 +500,12 @@ filesystems even though Docker accepts the mount.
 
 ## Build Images
 
+The production web image serves the built SPA through the repository-owned Bun
+server, not Vite's preview server. The build precompresses text assets;
+content-hashed `/assets/*` responses are served with immutable one-year caching,
+while the HTML shell revalidates. The API compresses JSON responses and leaves
+SSE and other streaming transports uncompressed.
+
 Build local OpenGeni workload images:
 
 ```bash

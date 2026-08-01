@@ -12,7 +12,7 @@ import {
 } from "drizzle-orm/pg-core";
 
 // Foreign keys, immutable-history triggers, and lifecycle-only mutation guards
-// live in migration 0151. Keeping this leaf cycle-free lets schema.ts expose the
+// live in migration 0152. Keeping this leaf cycle-free lets schema.ts expose the
 // additive memory governance tables without importing knowledgeMemories here.
 export const knowledgeMemoryRelationships = pgTable(
   "knowledge_memory_relationships",

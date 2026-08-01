@@ -25,8 +25,11 @@ import {
 } from "@opengeni/testing";
 import { Hono } from "hono";
 import {
+  createSlackUserLinkToken,
   drainSlackInteractionsOnce,
   registerSlackInteractionRoutes,
+  SLACK_TASK_FIRST_PARTY_MCP_TOOLS,
+  verifySlackUserLinkToken,
 } from "../src/integrations/slack-interactions";
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
@@ -71,6 +74,14 @@ function fakeSlack(
   options: { failAfterAcceptTexts?: Set<string> } = {},
 ) {
   const posts: SlackPost[] = [];
+  const failuresByText = new Map<
+    string,
+    { error?: string; status?: number; retryAfterSeconds?: number }
+  >();
+  const channelAccessFailures = new Map<
+    string,
+    { error?: string; status?: number; retryAfterSeconds?: number }
+  >();
   const acceptedByClientMessageId = new Map<string, SlackPost>();
   const failedAfterAccept = new Set<string>();
   let nextTimestamp = 1;
@@ -80,15 +91,35 @@ function fakeSlack(
     const form = new URLSearchParams(String(init?.body ?? ""));
     if (method === "conversations.info") {
       const channel = form.get("channel") ?? "";
+      const configuredFailure = channelAccessFailures.get(channel);
+      if (configuredFailure) {
+        const status = configuredFailure.status ?? 200;
+        return Response.json(
+          status === 200
+            ? { ok: false, error: configuredFailure.error ?? "unknown_error" }
+            : { ok: false },
+          {
+            status,
+            headers: configuredFailure.retryAfterSeconds
+              ? { "retry-after": String(configuredFailure.retryAfterSeconds) }
+              : undefined,
+          },
+        );
+      }
       return Response.json({
         ok: true,
         channel: {
           id: channel,
           name: channel,
           is_member: !deniedChannels.has(channel),
+          is_im: channel.startsWith("D"),
           is_private: channel.startsWith("D") || channel.startsWith("G"),
         },
       });
+    }
+    if (method === "conversations.open") {
+      const user = form.get("users") ?? "";
+      return Response.json({ ok: true, channel: { id: `D_${user}` } });
     }
     if (method === "chat.postMessage") {
       const clientMessageId = form.get("client_msg_id");
@@ -105,6 +136,23 @@ function fakeSlack(
         timestamp,
       };
       posts.push(post);
+      const configuredFailure = [...failuresByText.entries()].find(([fragment]) =>
+        post.text.includes(fragment),
+      )?.[1];
+      if (configuredFailure) {
+        const status = configuredFailure.status ?? 200;
+        return Response.json(
+          status === 200
+            ? { ok: false, error: configuredFailure.error ?? "unknown_error" }
+            : { ok: false },
+          {
+            status,
+            headers: configuredFailure.retryAfterSeconds
+              ? { "retry-after": String(configuredFailure.retryAfterSeconds) }
+              : undefined,
+          },
+        );
+      }
       if (clientMessageId) acceptedByClientMessageId.set(clientMessageId, post);
       if (options.failAfterAcceptTexts?.has(post.text) && !failedAfterAccept.has(post.text)) {
         failedAfterAccept.add(post.text);
@@ -114,7 +162,12 @@ function fakeSlack(
     }
     return Response.json({ ok: false, error: `unexpected_${method}` });
   };
-  return { fetch: fetch as typeof globalThis.fetch, posts };
+  return {
+    fetch: fetch as typeof globalThis.fetch,
+    posts,
+    failuresByText,
+    channelAccessFailures,
+  };
 }
 
 function encryptedBotCredential(settings: Settings): string {
@@ -331,6 +384,20 @@ async function interactions(workspaceId: string) {
 }
 
 describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
+  test("Slack identity link tokens are scoped, tamper-evident, and short-lived", () => {
+    const now = 1_800_000_000_000;
+    const input = {
+      workspaceId: crypto.randomUUID(),
+      connectionId: crypto.randomUUID(),
+      slackTeamId: "T_LINK",
+      slackUserId: "U_LINK",
+    };
+    const token = createSlackUserLinkToken(signingMaterial, input, now);
+    expect(verifySlackUserLinkToken(signingMaterial, token, now)).toMatchObject(input);
+    expect(verifySlackUserLinkToken(signingMaterial, `${token}x`, now)).toBeNull();
+    expect(verifySlackUserLinkToken(signingMaterial, token, now + 16 * 60_000)).toBeNull();
+  });
+
   test("top-level bot DMs create separate private sessions while thread replies and retries converge", async () => {
     if (!available) return;
     const value = await fixture();
@@ -363,6 +430,14 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     });
     expect(value.slack.posts[0]!.text).toContain("Open in OpenGeni:");
     expect(value.slack.posts[0]!.text).toContain("Reply in this thread to continue");
+    const [sessionPolicy] = await shared!.admin<{ first_party_mcp_tools: string[] }[]>`
+      select first_party_mcp_tools
+      from sessions
+      where workspace_id = ${value.owner.workspaceId}
+        and id = ${routes[0]!.session_id}`;
+    expect(sessionPolicy!.first_party_mcp_tools).toEqual([...SLACK_TASK_FIRST_PARTY_MCP_TOOLS]);
+    expect(sessionPolicy!.first_party_mcp_tools).not.toContain("slack_bot_post_message");
+    expect(sessionPolicy!.first_party_mcp_tools).not.toContain("slack_bot_delete_message");
 
     expect(
       (
@@ -538,6 +613,32 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       ]),
     );
     expect(new Set(routes.map((route) => route.session_id)).size).toBe(2);
+
+    const transientChannel = "C_TRANSIENT_PREFLIGHT";
+    value.slack.channelAccessFailures.set(transientChannel, {
+      status: 429,
+      retryAfterSeconds: 30,
+    });
+    const transientCommand = new URLSearchParams({
+      command: "/opengeni",
+      team_id: value.teamId,
+      user_id: value.ownerSlackUserId,
+      channel_id: transientChannel,
+      trigger_id: `transient-command-${crypto.randomUUID()}`,
+      text: "Preserve this task through a transient Slack preflight",
+    }).toString();
+    const transientResponse = await value.app.request(
+      signedRequest(
+        "/v1/integrations/slack/commands",
+        transientCommand,
+        "application/x-www-form-urlencoded",
+      ),
+    );
+    expect(transientResponse.status).toBe(200);
+    expect(await transientResponse.text()).toContain("accepted this task");
+    value.slack.channelAccessFailures.delete(transientChannel);
+    await drainAll(value.deps);
+    expect(await interactions(value.owner.workspaceId)).toHaveLength(3);
   });
 
   test("unmapped identities receive a link affordance, denied channels fail closed, and bot loops create nothing", async () => {
@@ -561,6 +662,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     await drainAll(value.deps);
     expect(value.slack.posts.at(-1)?.text).toContain("Link your Slack identity");
     expect(value.slack.posts.at(-1)?.text).toContain("No session was created");
+    expect(value.slack.posts.at(-1)?.channel).toBe("D_U_UNMAPPED");
 
     expect(
       (
@@ -577,9 +679,27 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         })
       ).status,
     ).toBe(200);
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
-    }
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(false);
+
+    const deniedCommand = new URLSearchParams({
+      command: "/opengeni",
+      team_id: value.teamId,
+      user_id: value.ownerSlackUserId,
+      channel_id: "C_DENIED",
+      trigger_id: `denied-command-${crypto.randomUUID()}`,
+      text: "Do not accept this command",
+    }).toString();
+    const deniedCommandResponse = await value.app.request(
+      signedRequest(
+        "/v1/integrations/slack/commands",
+        deniedCommand,
+        "application/x-www-form-urlencoded",
+      ),
+    );
+    expect(deniedCommandResponse.status).toBe(200);
+    expect(await deniedCommandResponse.text()).toContain("not a member of this channel");
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(false);
 
     expect(
       (
@@ -630,8 +750,8 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       })),
     ]);
     const postsBeforeDelivery = value.slack.posts.length;
-    // The provider accepts Progress 2, then the first process loses the response
-    // before the post ledger and delivery cursor can commit.
+    // Slack accepts Progress 2 before the first process loses the response. The
+    // delivery is durably deferred without advancing its event cursor.
     expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
     expect(value.slack.posts.slice(postsBeforeDelivery).map((post) => post.text)).toEqual([
       "Progress 1",
@@ -646,6 +766,8 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       ...value.deps,
       bus: new MemoryEventBus(),
     } as ApiRouteDeps;
+    await shared!.admin`
+      update slack_interactions set delivery_retry_at = now() where id = ${route!.id}`;
     expect(
       (
         await Promise.all([
@@ -669,8 +791,8 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       terminal_delivery_state: "open",
     });
 
-    // Simulate replay after a crash that lost the page cursor commit. Every
-    // progress event reuses its durable operation UUID and provider identity.
+    // Replaying after a crash that lost the page cursor reuses every durable
+    // progress operation UUID, so duplicate provider posts are not created.
     await shared!.admin`
       update slack_interactions
       set last_delivered_session_event_sequence = 0,
@@ -685,7 +807,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(deliveredProgress).toHaveLength(3);
 
     // A later delivery page cannot reserve or post a fourth progress message;
-    // terminal delivery remains independent and still reaches the thread.
+    // final delivery remains independent and still reaches the origin thread.
     await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
       { type: "agent.message.completed", payload: { text: "Progress 4" } },
       { type: "turn.completed", payload: { output: "Final bounded result" } },
@@ -715,4 +837,106 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       terminal_delivery_state: "completed",
     });
   }, 60_000);
+
+  test("terminalizes permanent Slack delivery errors without retrying", async () => {
+    if (!available) return;
+    const value = await fixture();
+    await postEvent(value.app, {
+      teamId: value.teamId,
+      eventId: `E_PERMANENT_${crypto.randomUUID()}`,
+      event: {
+        type: "message",
+        channel_type: "im",
+        user: value.ownerSlackUserId,
+        channel: "D_PERMANENT",
+        ts: "1750000000.000001",
+        text: "Start a task before permanent delivery failure",
+      },
+    });
+    await drainAll(value.deps);
+    const [route] = await interactions(value.owner.workspaceId);
+    value.slack.failuresByText.set("Permanent delivery result", {
+      error: "cannot_reply_to_message",
+    });
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      { type: "turn.completed", payload: { output: "Permanent delivery result" } },
+    ]);
+
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(false);
+    expect(
+      value.slack.posts.filter((post) => post.text.includes("Permanent delivery result")),
+    ).toHaveLength(1);
+    const [delivery] = await shared!.admin<
+      {
+        terminal_delivery_state: string;
+        delivery_attempt_count: number;
+        delivery_last_error_code: string;
+      }[]
+    >`
+      select terminal_delivery_state, delivery_attempt_count, delivery_last_error_code
+      from slack_interactions where id = ${route!.id}`;
+    expect(delivery).toEqual({
+      terminal_delivery_state: "failed",
+      delivery_attempt_count: 1,
+      delivery_last_error_code: "cannot_reply_to_message",
+    });
+  });
+
+  test("durably honors Slack Retry-After before retrying a rate-limited delivery", async () => {
+    if (!available) return;
+    const value = await fixture();
+    await postEvent(value.app, {
+      teamId: value.teamId,
+      eventId: `E_RATE_LIMIT_${crypto.randomUUID()}`,
+      event: {
+        type: "message",
+        channel_type: "im",
+        user: value.ownerSlackUserId,
+        channel: "D_RATE_LIMIT",
+        ts: "1760000000.000001",
+        text: "Start a task before a rate limit",
+      },
+    });
+    await drainAll(value.deps);
+    const [route] = await interactions(value.owner.workspaceId);
+    value.slack.failuresByText.set("Rate limited result", {
+      status: 429,
+      retryAfterSeconds: 30,
+    });
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      { type: "turn.completed", payload: { output: "Rate limited result" } },
+    ]);
+
+    const before = Date.now();
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(false);
+    const [deferred] = await shared!.admin<
+      {
+        terminal_delivery_state: string;
+        delivery_retry_at: Date;
+        delivery_last_error_code: string;
+      }[]
+    >`
+      select terminal_delivery_state, delivery_retry_at, delivery_last_error_code
+      from slack_interactions where id = ${route!.id}`;
+    expect(deferred!.terminal_delivery_state).toBe("open");
+    expect(new Date(deferred!.delivery_retry_at).getTime()).toBeGreaterThanOrEqual(before + 29_000);
+    expect(deferred!.delivery_last_error_code).toBe("http_429");
+    expect(
+      value.slack.posts.filter((post) => post.text.includes("Rate limited result")),
+    ).toHaveLength(1);
+
+    value.slack.failuresByText.delete("Rate limited result");
+    await shared!.admin`
+      update slack_interactions set delivery_retry_at = now() where id = ${route!.id}`;
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(false);
+    expect(
+      value.slack.posts.filter((post) => post.text.includes("Rate limited result")),
+    ).toHaveLength(2);
+    expect((await interactions(value.owner.workspaceId))[0]).toMatchObject({
+      terminal_delivery_state: "completed",
+    });
+  });
 });

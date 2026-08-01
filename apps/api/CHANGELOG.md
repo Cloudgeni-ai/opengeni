@@ -1,5 +1,40 @@
 # @opengeni/api-router
 
+## 0.15.3
+
+### Patch Changes
+
+- 659b3ff: Harden Slack-triggered session delivery, identity linking, provider backoff, explicit connection-tool selection, and replay-safe bounded progress/final delivery.
+- Updated dependencies [659b3ff]
+  - @opengeni/contracts@0.28.1
+  - @opengeni/db@0.18.1
+  - @opengeni/config@0.9.1
+  - @opengeni/core@0.16.1
+  - @opengeni/documents@0.2.63
+  - @opengeni/events@0.3.54
+  - @opengeni/github@0.4.13
+  - @opengeni/runtime@0.15.3
+  - @opengeni/storage@0.2.50
+
+## 0.15.2
+
+### Patch Changes
+
+- d4d8960: Keep Personal Slack UI, reconnect, and broker credential selection on one deterministic legacy-duplicate ordering.
+- Updated dependencies [d4d8960]
+- Updated dependencies [ec0bc02]
+- Updated dependencies [3b8d653]
+- Updated dependencies [5a4c559]
+  - @opengeni/contracts@0.28.0
+  - @opengeni/db@0.18.0
+  - @opengeni/config@0.9.0
+  - @opengeni/runtime@0.15.2
+  - @opengeni/core@0.16.0
+  - @opengeni/documents@0.2.62
+  - @opengeni/events@0.3.53
+  - @opengeni/github@0.4.12
+  - @opengeni/storage@0.2.49
+
 ## 0.15.1
 
 ### Patch Changes

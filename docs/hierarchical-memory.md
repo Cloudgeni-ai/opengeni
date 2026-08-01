@@ -10,7 +10,7 @@ retrieval/injection, prompt composition, automatic learning, or UI behavior.
 ## Data model
 
 `knowledge_memories` remains the canonical memory row. Migration
-`0151_hierarchical_memory_foundation.sql` adds:
+`0152_hierarchical_memory_foundation.sql` adds:
 
 - one typed scope selector: `workspace`, `user`, `role`, `session`,
   `ephemeral`, or fail-closed `legacy`;
@@ -128,8 +128,8 @@ evidence are immutable.
 
 ## Deployment boundary
 
-Migration 0151 is a maintenance cutover. All `opengeni_app` API/control/turn
-sessions must be stopped before activation, and no pre-0151 writer may restart
+Migration 0152 is a maintenance cutover. All `opengeni_app` API/control/turn
+sessions must be stopped before activation, and no pre-0152 writer may restart
 afterward. The cutover replaces the old workspace-global visible-text unique
 index with the typed-scope-local index; old writers neither understand the new
 selectors nor recognize the replacement constraint name.
@@ -152,7 +152,7 @@ a preference-registry record or instruction-policy activation.
 
 Canonical source anchors:
 
-- `packages/db/drizzle/0151_hierarchical_memory_foundation.sql`
+- `packages/db/drizzle/0152_hierarchical_memory_foundation.sql`
 - `packages/db/src/memory-domain.ts`
 - `packages/db/src/memory-governance.ts`
 - `packages/db/src/memory-governance-schema.ts`

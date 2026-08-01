@@ -1,5 +1,36 @@
 # @opengeni/config
 
+## 0.9.1
+
+### Patch Changes
+
+- Updated dependencies [659b3ff]
+  - @opengeni/contracts@0.28.1
+
+## 0.9.0
+
+### Minor Changes
+
+- ec0bc02: Add an opt-in browser analytics runtime contract with consent-gated, allowlisted
+  Reo, PostHog, and GA4 provider configuration. Self-hosted deployments remain
+  disabled by default, and public client configuration exposes no provider
+  administrative credentials. Third-party modules load lazily, Reo clipboard/AI
+  capture is disabled, query-bearing routes are excluded, and consent can be
+  withdrawn without destabilizing the console.
+- 5a4c559: Add first-party X and Reddit social connectors: OAuth connect flows (X PKCE
+  S256, Reddit permanent grant) with encrypted token storage and just-in-time
+  refresh, live first-party MCP tools (search, mentions, thread fetch, own-post
+  sync, permission-gated reply publishing), a reddit provider in the marketing
+  pack, operator config via OPENGENI_SOCIAL_OAUTH_CLIENTS_JSON, and SDK
+  startSocialOAuth/listSocialConnections.
+
+### Patch Changes
+
+- Updated dependencies [d4d8960]
+- Updated dependencies [ec0bc02]
+- Updated dependencies [5a4c559]
+  - @opengeni/contracts@0.28.0
+
 ## 0.8.1
 
 ### Patch Changes

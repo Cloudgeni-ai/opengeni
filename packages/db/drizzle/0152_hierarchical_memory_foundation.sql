@@ -237,7 +237,9 @@ CREATE OR REPLACE FUNCTION opengeni_private.knowledge_memory_row_guard()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
-DECLARE typed_change boolean;
+DECLARE
+  typed_change boolean;
+  lifecycle_writer boolean;
 BEGIN
   IF TG_OP = 'INSERT' THEN
     IF NEW.scope_type IS NULL
@@ -279,10 +281,20 @@ BEGIN
       USING ERRCODE = '55000';
   END IF;
 
+  SELECT current_user = pg_get_userbyid(procedure_row.proowner)
+  INTO lifecycle_writer
+  FROM pg_proc procedure_row
+  WHERE procedure_row.oid = to_regprocedure(format(
+    '%I.knowledge_memory_apply_operation(jsonb,text,text,text,uuid,uuid,uuid,integer)',
+    TG_TABLE_SCHEMA
+  ));
+  lifecycle_writer := coalesce(lifecycle_writer, false)
+    AND nullif(current_setting('opengeni.memory_lifecycle_operation', true), '') = '1';
+
   IF NEW.scope IS DISTINCT FROM OLD.scope
     AND ROW(NEW.scope_type, NEW.scope_subject_id, NEW.scope_role_key, NEW.scope_session_id)
       IS NOT DISTINCT FROM ROW(OLD.scope_type, OLD.scope_subject_id, OLD.scope_role_key, OLD.scope_session_id)
-    AND nullif(current_setting('opengeni.memory_lifecycle_operation', true), '') IS DISTINCT FROM '1'
+    AND NOT lifecycle_writer
   THEN
     NEW.scope_type := CASE WHEN NEW.scope = 'workspace' THEN 'workspace' ELSE 'legacy' END;
     NEW.scope_subject_id := NULL;
@@ -296,8 +308,7 @@ BEGIN
   ) IS DISTINCT FROM ROW(
     OLD.scope_type, OLD.scope_subject_id, OLD.scope_role_key,
     OLD.scope_session_id, OLD.namespace_key, OLD.labels
-  ) AND nullif(current_setting('opengeni.memory_lifecycle_operation', true), '')
-    IS DISTINCT FROM '1'
+  ) AND NOT lifecycle_writer
   THEN
     RAISE EXCEPTION 'typed memory governance fields mutate only through lifecycle operations'
       USING ERRCODE = '55000';
@@ -504,9 +515,19 @@ CREATE OR REPLACE FUNCTION opengeni_private.knowledge_memory_relationship_guard(
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
+DECLARE
+  lifecycle_writer boolean;
 BEGIN
-  IF nullif(current_setting('opengeni.memory_lifecycle_operation', true), '') IS DISTINCT FROM '1'
-  THEN
+  SELECT current_user = pg_get_userbyid(procedure_row.proowner)
+  INTO lifecycle_writer
+  FROM pg_proc procedure_row
+  WHERE procedure_row.oid = to_regprocedure(format(
+    '%I.knowledge_memory_apply_operation(jsonb,text,text,text,uuid,uuid,uuid,integer)',
+    TG_TABLE_SCHEMA
+  ));
+  lifecycle_writer := coalesce(lifecycle_writer, false)
+    AND nullif(current_setting('opengeni.memory_lifecycle_operation', true), '') = '1';
+  IF NOT lifecycle_writer THEN
     RAISE EXCEPTION 'knowledge memory relationships mutate only through lifecycle operations'
       USING ERRCODE = '55000';
   END IF;
@@ -997,9 +1018,15 @@ BEGIN
             relationship_id, context_account_id, context_workspace_id, target_id, related_id,
             v_relationship_type, new_event_id
           );
-          before_state := jsonb_build_object('active', false, 'relationshipId', relationship_id);
+          before_state := jsonb_build_object(
+            'active', false, 'relationshipId', relationship_id,
+            'targetMemoryVersion', target.memory_version,
+            'relatedMemoryVersion', related.memory_version
+          );
           after_state := jsonb_build_object(
-            'active', true, 'relationshipId', relationship_id, 'relationshipVersion', 1
+            'active', true, 'relationshipId', relationship_id, 'relationshipVersion', 1,
+            'targetMemoryVersion', target.memory_version,
+            'relatedMemoryVersion', related.memory_version
           );
         ELSE
           SELECT * INTO relationship
@@ -1016,7 +1043,9 @@ BEGIN
           relationship_id := relationship.id;
           before_state := jsonb_build_object(
             'active', true, 'relationshipId', relationship.id,
-            'relationshipVersion', relationship.version
+            'relationshipVersion', relationship.version,
+            'targetMemoryVersion', target.memory_version,
+            'relatedMemoryVersion', related.memory_version
           );
           UPDATE knowledge_memory_relationships SET
             removed_by_event_id = new_event_id,
@@ -1025,7 +1054,9 @@ BEGIN
           RETURNING * INTO relationship;
           after_state := jsonb_build_object(
             'active', false, 'relationshipId', relationship.id,
-            'relationshipVersion', relationship.version
+            'relationshipVersion', relationship.version,
+            'targetMemoryVersion', target.memory_version,
+            'relatedMemoryVersion', related.memory_version
           );
         END IF;
       ELSE
@@ -1135,6 +1166,7 @@ BEGIN
         p_actor_attempt_id, p_actor_execution_generation, p_plan_hash, before_state, after_state
       );
 
+      PERFORM set_config('opengeni.memory_lifecycle_operation', '', true);
       RETURN QUERY SELECT new_event_id;
     END;
     $body$;
@@ -1387,12 +1419,35 @@ BEGIN
           'supersededById', target.superseded_by_id
         );
       ELSIF applied.operation_type IN ('relationship_add', 'relationship_remove') THEN
+        PERFORM 1 FROM knowledge_memories candidate
+        WHERE candidate.id IN (applied.target_memory_id, applied.related_memory_id)
+          AND candidate.account_id = context_account_id
+          AND candidate.workspace_id = context_workspace_id
+        ORDER BY candidate.id FOR UPDATE;
+        SELECT * INTO target FROM knowledge_memories
+        WHERE id = applied.target_memory_id
+          AND account_id = context_account_id
+          AND workspace_id = context_workspace_id;
+        SELECT * INTO related FROM knowledge_memories
+        WHERE id = applied.related_memory_id
+          AND account_id = context_account_id
+          AND workspace_id = context_workspace_id;
+        IF target.memory_version <>
+            (applied.after_state->>'targetMemoryVersion')::integer
+          OR related.memory_version <>
+            (applied.after_state->>'relatedMemoryVersion')::integer
+        THEN
+          RAISE EXCEPTION 'relationship endpoints changed after apply'
+            USING ERRCODE = '40001';
+        END IF;
         SELECT * INTO relationship FROM knowledge_memory_relationships
         WHERE id = applied.relationship_id AND workspace_id = context_workspace_id FOR UPDATE;
         revert_before := jsonb_build_object(
           'active', relationship.removed_by_event_id IS NULL,
           'relationshipId', relationship.id,
-          'relationshipVersion', relationship.version
+          'relationshipVersion', relationship.version,
+          'targetMemoryVersion', target.memory_version,
+          'relatedMemoryVersion', related.memory_version
         );
         IF applied.operation_type = 'relationship_add' THEN
           IF relationship.created_by_event_id <> applied.id
@@ -1419,7 +1474,9 @@ BEGIN
         revert_after := jsonb_build_object(
           'active', relationship.removed_by_event_id IS NULL,
           'relationshipId', relationship.id,
-          'relationshipVersion', relationship.version
+          'relationshipVersion', relationship.version,
+          'targetMemoryVersion', target.memory_version,
+          'relatedMemoryVersion', related.memory_version
         );
       ELSE
         PERFORM 1 FROM knowledge_memories candidate
@@ -1499,6 +1556,7 @@ BEGIN
         p_actor_session_id, p_actor_turn_id, p_actor_attempt_id,
         p_actor_execution_generation, p_plan_hash, revert_before, revert_after, applied.id
       );
+      PERFORM set_config('opengeni.memory_lifecycle_operation', '', true);
       RETURN QUERY SELECT new_event_id;
     END;
     $body$;

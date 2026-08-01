@@ -14,7 +14,7 @@ import {
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 
-const migrationPath = new URL("../drizzle/0151_hierarchical_memory_foundation.sql", import.meta.url)
+const migrationPath = new URL("../drizzle/0152_hierarchical_memory_foundation.sql", import.meta.url)
   .pathname;
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
@@ -190,28 +190,28 @@ beforeAll(async () => {
       },
     };
   } else {
-    shared = await acquireSharedTestDatabase("migration-0151-hierarchical-memory");
+    shared = await acquireSharedTestDatabase("migration-0152-hierarchical-memory");
   }
   if (!shared) {
     if (requireRealDatabase)
-      throw new Error("real PostgreSQL is required for migration 0151 proof");
+      throw new Error("real PostgreSQL is required for migration 0152 proof");
     available = false;
-    console.warn("[migration-0151] PostgreSQL unavailable, skipping FORCE-RLS assertions");
+    console.warn("[migration-0152] PostgreSQL unavailable, skipping FORCE-RLS assertions");
     return;
   }
   client = createDb(shared.appUrl, { max: 4 });
   app = postgres(shared.appUrl, { max: 2, prepare: false });
 
   const [accountA] = await shared.admin<{ id: string }[]>`
-    insert into managed_accounts (name) values ('migration 0151 account A') returning id`;
+    insert into managed_accounts (name) values ('migration 0152 account A') returning id`;
   const [accountB] = await shared.admin<{ id: string }[]>`
-    insert into managed_accounts (name) values ('migration 0151 account B') returning id`;
+    insert into managed_accounts (name) values ('migration 0152 account B') returning id`;
   const [workspaceA] = await shared.admin<{ id: string }[]>`
     insert into workspaces (account_id, name)
-    values (${accountA!.id}, 'migration 0151 workspace A') returning id`;
+    values (${accountA!.id}, 'migration 0152 workspace A') returning id`;
   const [workspaceB] = await shared.admin<{ id: string }[]>`
     insert into workspaces (account_id, name)
-    values (${accountB!.id}, 'migration 0151 workspace B') returning id`;
+    values (${accountB!.id}, 'migration 0152 workspace B') returning id`;
   await shared.admin`
     insert into workspace_inference_controls (workspace_id, account_id)
     values (${workspaceA!.id}, ${accountA!.id}), (${workspaceB!.id}, ${accountB!.id})`;
@@ -338,10 +338,10 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
-describe("0151 hierarchical memory foundation", () => {
+describe("0152 hierarchical memory foundation", () => {
   test("is a maintenance migration with the live-ledger allocation and explicit writer fence", () => {
     expect(migrationSql.startsWith("-- deployment-mode: maintenance\n")).toBe(true);
-    expect(migrationPath.endsWith("0151_hierarchical_memory_foundation.sql")).toBe(true);
+    expect(migrationPath.endsWith("0152_hierarchical_memory_foundation.sql")).toBe(true);
     expect(migrationSql.match(/opengeni_app sessions to be stopped/g)).toHaveLength(2);
     expect(migrationSql).toContain("LOCK TABLE knowledge_memories IN ACCESS EXCLUSIVE MODE");
     expect(migrationSql).toContain(
@@ -728,6 +728,77 @@ describe("0151 hierarchical memory foundation", () => {
         }),
       ),
     ).toBe("40001");
+
+    const endpointVersionTarget = await seedMemory({
+      accountId: fixture.accountA,
+      workspaceId: fixture.workspaceA,
+      name: "relationship endpoint version target",
+      scopeType: "workspace",
+    });
+    const endpointVersionRelated = await seedMemory({
+      accountId: fixture.accountA,
+      workspaceId: fixture.workspaceA,
+      name: "relationship endpoint version related",
+      scopeType: "workspace",
+    });
+    const endpointVersionOperationId = crypto.randomUUID();
+    const endpointVersionApplied = await applyKnowledgeMemoryOperation(client.db, {
+      authority: {
+        kind: "subject",
+        accountId: fixture.accountA,
+        workspaceId: fixture.workspaceA,
+        subjectId: "subject-alice",
+      },
+      plan: {
+        operationId: endpointVersionOperationId,
+        operationType: "relationship_add",
+        targetMemoryId: endpointVersionTarget,
+        expectedTargetVersion: 1,
+        relatedMemoryId: endpointVersionRelated,
+        expectedRelatedVersion: 1,
+        relationshipType: "derived_from",
+      },
+    });
+    const [endpointVersionEvidence] = await shared!.admin<
+      Array<{ afterState: Record<string, unknown> }>
+    >`
+      select after_state as "afterState"
+      from knowledge_memory_lifecycle_events where id = ${endpointVersionApplied.eventId}`;
+    expect(endpointVersionEvidence?.afterState).toMatchObject({
+      targetMemoryVersion: 1,
+      relatedMemoryVersion: 1,
+      relationshipVersion: 1,
+    });
+    await applyKnowledgeMemoryOperation(client.db, {
+      authority: {
+        kind: "subject",
+        accountId: fixture.accountA,
+        workspaceId: fixture.workspaceA,
+        subjectId: "subject-alice",
+      },
+      plan: {
+        operationId: crypto.randomUUID(),
+        operationType: "archive",
+        targetMemoryId: endpointVersionTarget,
+        expectedTargetVersion: 1,
+      },
+    });
+    expect(
+      await capturedSqlState(() =>
+        revertKnowledgeMemoryOperation(client.db, {
+          authority: {
+            kind: "subject",
+            accountId: fixture.accountA,
+            workspaceId: fixture.workspaceA,
+            subjectId: "subject-alice",
+          },
+          plan: {
+            operationId: crypto.randomUUID(),
+            appliedOperationId: endpointVersionOperationId,
+          },
+        }),
+      ),
+    ).toBe("40001");
   }, 120_000);
 
   test("uses exact-attempt role authority, CAS versions, deterministic revert, and safe creator facts", async () => {
@@ -869,6 +940,26 @@ describe("0151 hierarchical memory foundation", () => {
           (sql) => sql`
             update knowledge_memories set namespace_key = 'forbidden-direct-update'
             where id = ${fixture.memories.aliceUser}`,
+        ),
+      ),
+    ).toBe("55000");
+    expect(
+      await capturedSqlState(() =>
+        contextRows(
+          {
+            accountId: fixture.accountA,
+            workspaceId: fixture.workspaceA,
+            subjectId: "subject-alice",
+            sessionId: fixture.aliceSessionId,
+            roleKey: "operator",
+          },
+          (sql) => sql`
+            with forged_flag as materialized (
+              select set_config('opengeni.memory_lifecycle_operation', '1', true) as value
+            )
+            update knowledge_memories set namespace_key = 'forged-lifecycle-flag'
+            where id = ${fixture.memories.aliceUser}
+              and (select value from forged_flag) = '1'`,
         ),
       ),
     ).toBe("55000");

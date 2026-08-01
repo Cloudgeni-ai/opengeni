@@ -676,6 +676,10 @@ export const DEFAULT_FIRST_PARTY_MCP_PERMISSIONS = [
   "sessions:read",
   "sessions:create",
   "sessions:control",
+  // Read-only connection discovery lets the selected first-party connector
+  // tools resolve an already-installed workspace principal. Credentials stay
+  // inside the broker and remain subject to each tool's own authorization.
+  "connections:read",
   "variable-sets:use",
   "variable-sets:manage",
   "rigs:use",
@@ -765,12 +769,13 @@ export const FirstPartyMcpToolName = z.enum(FIRST_PARTY_MCP_TOOL_NAMES);
 export type FirstPartyMcpToolName = z.infer<typeof FirstPartyMcpToolName>;
 
 /**
- * Every catalogued OpenGeni tool is selected by default. Registration-time
- * authorization remains the independent access boundary; an explicit session
- * policy may narrow this model-visible set.
+ * Connector-wide tools are explicit-only. Ordinary session omission selects
+ * the non-connector catalog, while an explicit session policy may still select
+ * any catalogued connector tool and remains independently permission-gated.
  */
-export const DEFAULT_FIRST_PARTY_MCP_TOOLS =
-  FIRST_PARTY_MCP_TOOL_NAMES satisfies readonly FirstPartyMcpToolName[];
+export const DEFAULT_FIRST_PARTY_MCP_TOOLS = FIRST_PARTY_MCP_TOOL_NAMES.filter(
+  (name) => !name.startsWith("social_") && !name.startsWith("slack_bot_"),
+) satisfies readonly FirstPartyMcpToolName[];
 
 export function prefixedMcpToolName(registryId: string, toolName: string): string {
   return `${registryId}__${toolName}`;
@@ -5729,8 +5734,8 @@ export const Session = z.object({
   // Non-default first-party MCP token permissions (manager-style sessions);
   // null means the fixed worker default set.
   firstPartyMcpPermissions: z.array(Permission).nullable(),
-  // Exact model-visible OpenGeni selection. All catalogued tools are selected
-  // by default; [] intentionally selects none.
+  // Exact model-visible OpenGeni selection. The default omits connector-wide
+  // tools; [] intentionally selects none.
   firstPartyMcpTools: z.array(FirstPartyMcpToolName),
   // Per-session third-party MCP servers, metadata only. Credential values are
   // write-only and never appear here.
@@ -8031,7 +8036,8 @@ export const CreateSessionRequest = withVariableSetIdAlias({
   // rejected; creation never silently expands a child beyond that set.
   firstPartyMcpPermissions: z.array(Permission).optional(),
   // Exact model-visible selection from the broad first-party OpenGeni MCP
-  // catalog. Omission selects the full catalog; [] intentionally exposes none.
+  // catalog. Omission selects the safe non-connector default; [] intentionally
+  // exposes none.
   // This does not grant authority: every registered tool is permission-gated.
   firstPartyMcpTools: z.array(FirstPartyMcpToolName).optional(),
   // Third-party MCP servers attached only to this session. For an agent-created

@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite dev --port 3000 --host 0.0.0.0",
-    "build": "vite build && bun ../../scripts/check-web-bundle-budget.ts",
-    "start": "vite preview --port 3000 --host 0.0.0.0",
+    "build": "vite build && bun ../../scripts/precompress-web-dist.ts dist && bun ../../scripts/check-web-bundle-budget.ts",
+    "start": "bun src/server.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

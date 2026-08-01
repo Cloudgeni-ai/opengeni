@@ -89,7 +89,7 @@ describe("workspace artifacts migration", () => {
         (name) => !name.startsWith("artifacts_"),
       );
       const historicalPermissions = DEFAULT_FIRST_PARTY_MCP_PERMISSIONS.filter(
-        (permission) => !permission.startsWith("artifacts:"),
+        (permission) => permission !== "connections:read" && !permission.startsWith("artifacts:"),
       );
       const create = async (suffix: string, permissions?: string[], tools = historicalTools) =>
         await createSession(db!.db, {

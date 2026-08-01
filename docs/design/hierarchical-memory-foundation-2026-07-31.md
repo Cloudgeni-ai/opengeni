@@ -123,16 +123,16 @@ migration and its PostgreSQL proof moved from ordinal `0146` to `0151`. The SQL
 bytes were otherwise unchanged and retain SHA-256
 `6fa855d1a09e65088bf2cc63b9cf45673b41b9efa9426590b839c2b79a4aa335`.
 
-The final patch contains 35 hunks across 17 paths. Every hunk is accounted for
-below against the current-main base:
+The original recovered patch contained 35 hunks across 17 paths. Every retained
+hunk was accounted for below against that current-main base:
 
 | Path | Hunks | Reconciliation record |
 | --- | ---: | --- |
 | `AGENTS.md` | 1 | Extends the current Workspace Memory V1 invariant with the recovered typed-selector, FORCE-RLS, immutable-lifecycle, and no-inferred-authority guardrails. |
 | `docs/README.md` | 1 | Adds the canonical hierarchical-memory document to the current docs map. |
-| `docs/architecture.md` | 2 | Adds the bounded memory-foundation overview; updates the current DB map to 98 Drizzle tables, 97 FORCE-RLS tables, 91 full-DML, five read-only, seven read-insert, 103 runtime-DML tables, and the `0151` maintenance boundary while preserving all current-main migration and Slack/artifact text. |
+| `docs/architecture.md` | 2 | Adds the bounded memory-foundation overview; updates the current DB map to 98 Drizzle tables, 97 FORCE-RLS tables, 91 full-DML, five read-only, seven read-insert, 103 runtime-DML tables, and the then-current `0151` maintenance boundary while preserving all current-main migration and Slack/artifact text. |
 | `docs/design/hierarchical-memory-foundation-2026-07-31.md` | 1 | Adds the point-in-time authority/design record and this complete recovery manifest. |
-| `docs/hierarchical-memory.md` | 1 | Adds the current operational contract with the reconciled `0151` anchors. |
+| `docs/hierarchical-memory.md` | 1 | Adds the then-current operational contract with the reconciled `0151` anchors. |
 | `packages/db/drizzle/0151_hierarchical_memory_foundation.sql` | 1 | Adds the recovered maintenance migration byte-for-byte under the next free ledger ordinal. |
 | `packages/db/src/index.ts` | 6 | Exports the governance API and makes visible-text uniqueness detection accept both the legacy and typed-scope index names, including PostgreSQL cause metadata. |
 | `packages/db/src/memory-domain.ts` | 2 | Adds typed scopes, namespaces, labels, relationship canonicalization, deterministic apply/revert plans, and stable plan hashes; the import hunk switches to the hash-capable crypto import. |
@@ -149,3 +149,15 @@ below against the current-main base:
 No API, SDK, MCP, worker retrieval/injection, prompt composition, automatic
 learning, UI, release, deployment, or historical PR integration was added
 during reconciliation.
+
+Before merge, current main advanced to
+`8ffa77e74b64d345133471b0e83e98d56c2b121e` and allocated
+`0151_slack_delivery_backoff.sql`. The final branch therefore moves the memory
+migration and PostgreSQL proof to the next free ordinal, `0152`. Correctness
+review also repaired relationship-revert CAS evidence so a revert now locks and
+checks both endpoint memory versions as well as the edge version. That bounded
+repair changes the final migration SQL SHA-256 to
+`bf3c4ee84a4d9bce7503607d3f34c7046890e5daddeaf0f8390cbd06fb468cdc`.
+The combined 145-file migration ledger ends at `0152` with schema-contract
+SHA-256
+`8a8cfe345f4d749ce10b102fa4326a4d6293fa8e71807daed59f6c856f5949d2`.

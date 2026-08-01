@@ -776,6 +776,7 @@ export const slackInteractionInbox = pgTable(
     claimHolderId: uuid("claim_holder_id"),
     claimExpiresAt: timestamp("claim_expires_at", { withTimezone: true }),
     attemptCount: integer("attempt_count").notNull().default(0),
+    retryAt: timestamp("retry_at", { withTimezone: true }),
     lastErrorCode: text("last_error_code"),
     processedAt: timestamp("processed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -792,6 +793,7 @@ export const slackInteractionInbox = pgTable(
     ),
     pending: index("slack_interaction_inbox_pending_idx").on(
       table.status,
+      table.retryAt,
       table.createdAt,
       table.id,
     ),
@@ -829,6 +831,9 @@ export const slackInteractions = pgTable(
     deliveryClaimExpiresAt: timestamp("delivery_claim_expires_at", {
       withTimezone: true,
     }),
+    deliveryAttemptCount: integer("delivery_attempt_count").notNull().default(0),
+    deliveryRetryAt: timestamp("delivery_retry_at", { withTimezone: true }),
+    deliveryLastErrorCode: text("delivery_last_error_code"),
     ackSlackMessageTs: text("ack_slack_message_ts"),
     progressCount: integer("progress_count").notNull().default(0),
     terminalDeliveryState: text("terminal_delivery_state")
@@ -854,6 +859,7 @@ export const slackInteractions = pgTable(
       .where(sql`${table.sessionId} is not null`),
     delivery: index("slack_interactions_delivery_idx").on(
       table.terminalDeliveryState,
+      table.deliveryRetryAt,
       table.updatedAt,
       table.id,
     ),
@@ -1879,7 +1885,7 @@ export const knowledgeMemories = pgTable(
     supersededById: uuid("superseded_by_id"),
     validFrom: timestamp("valid_from", { withTimezone: true }).notNull().defaultNow(),
     validUntil: timestamp("valid_until", { withTimezone: true }),
-    // Hierarchical memory foundation (migration 0151). `scope` remains the V1
+    // Hierarchical memory foundation (migration 0152). `scope` remains the V1
     // compatibility projection; typed selectors are the fail-closed authority.
     scopeType: text("scope_type").notNull().default("workspace"),
     scopeSubjectId: text("scope_subject_id"),
@@ -1935,7 +1941,7 @@ export const knowledgeMemories = pgTable(
       table.textHash,
     ),
     // Drizzle 0.45 cannot encode PostgreSQL `NULLS NOT DISTINCT`; migration
-    // 0151 owns that option so nullable scope selectors remain one identity.
+    // 0152 owns that option so nullable scope selectors remain one identity.
     scopeVisibleTextHashUnique: uniqueIndex("knowledge_memories_scope_visible_text_hash_uq")
       .on(
         table.workspaceId,

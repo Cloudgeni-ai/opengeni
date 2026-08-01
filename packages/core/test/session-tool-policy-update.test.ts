@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
+  DEFAULT_FIRST_PARTY_MCP_TOOLS,
   FIRST_PARTY_MCP_TOOL_NAMES,
   type AccessGrant,
   type SessionToolPolicy,
@@ -347,7 +348,12 @@ describe("durable session tool-policy updates", () => {
       deps(firstDb, bus),
       grant(owner.workspaceId, owner.accountId),
       child.id,
-      explicitTools([OPENGENI, DOCS], 1),
+      {
+        mode: "explicit",
+        tools: [OPENGENI, DOCS],
+        firstPartyMcpTools: [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+        expectedVersion: 1,
+      },
     );
 
     const payload = bus.published[0]![0]!.payload as {

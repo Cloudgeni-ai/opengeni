@@ -26,11 +26,13 @@ setting is true. The REST/UI memory audit and seed surfaces remain available whe
 the setting is off.
 
 `CreateSessionRequest.firstPartyMcpTools` is an exact allowlist over the exported
-`FIRST_PARTY_MCP_TOOL_NAMES` catalog. Omission selects the complete catalog;
-explicit `[]` means no tools from the broad server. Unknown names fail validation. This field
-does not grant authority: every catalog entry also has an explicit
-registration-time permission predicate, and target-scoped authorization still
-runs on calls. Child omission inherits the parent's exact effective selection.
+`FIRST_PARTY_MCP_TOOL_NAMES` catalog. Omission selects the safe default catalog,
+which excludes connector-wide `social_*` and `slack_bot_*` tools; those require
+explicit selection plus their normal connection permission. Explicit `[]` means
+no tools from the broad server. Unknown names fail validation. This field does
+not grant authority: every catalog entry also has an explicit registration-time
+permission predicate, and target-scoped authorization still runs on calls.
+Child omission inherits the parent's exact effective selection.
 
 File and document resources are independent from this broad-server selection.
 Attaching a resource still materializes it for the session when
