@@ -238,10 +238,7 @@ export function tipFollowMaxStepPx(
   }
   if (hot && growthVelocityPxPerSec > TIP_FOLLOW_CALM_MAX_PX_S) {
     // Live stream: slightly outrun the EMA so tip-debt cannot ratchet forever.
-    maxPxS = Math.max(
-      maxPxS,
-      Math.min(TIP_FOLLOW_BURST_MAX_PX_S, growthVelocityPxPerSec * 1.25),
-    );
+    maxPxS = Math.max(maxPxS, Math.min(TIP_FOLLOW_BURST_MAX_PX_S, growthVelocityPxPerSec * 1.25));
   }
   if (hot && absDebt > 8) {
     // Continuous debt horizon (no catch-up cliff at CATCHUP_DEBT).

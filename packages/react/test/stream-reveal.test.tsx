@@ -102,19 +102,15 @@ describe("Markdown streaming tip ink", () => {
     await r.unmount();
   });
 
-  test(
-    "after streaming ends, the body unwinds to plain markdown",
-    async () => {
-      const r = await renderComponent(<Markdown streaming>hello world</Markdown>);
-      expect(r.container.querySelector(".og-stream-ink")).not.toBeNull();
-      await r.rerender(<Markdown streaming={false}>hello world</Markdown>);
-      await flush(REVEAL_LINGER_MS + 100);
-      expect(r.container.querySelector(".og-stream-ink")).toBeNull();
-      expect(r.container.textContent).toContain("hello world");
-      await r.unmount();
-    },
-    15_000,
-  );
+  test("after streaming ends, the body unwinds to plain markdown", async () => {
+    const r = await renderComponent(<Markdown streaming>hello world</Markdown>);
+    expect(r.container.querySelector(".og-stream-ink")).not.toBeNull();
+    await r.rerender(<Markdown streaming={false}>hello world</Markdown>);
+    await flush(REVEAL_LINGER_MS + 100);
+    expect(r.container.querySelector(".og-stream-ink")).toBeNull();
+    expect(r.container.textContent).toContain("hello world");
+    await r.unmount();
+  }, 15_000);
 
   test("non-streaming bodies never carry ink spans", async () => {
     const r = await renderComponent(<Markdown>hello world</Markdown>);
@@ -122,19 +118,15 @@ describe("Markdown streaming tip ink", () => {
     await r.unmount();
   });
 
-  test(
-    "stream end crystallizes when the reveal pipeline tears down",
-    async () => {
-      const r = await renderComponent(<Markdown streaming>**bold** text</Markdown>);
-      expect(r.container.querySelector(".og-markdown-settle")).toBeNull();
-      await r.rerender(<Markdown streaming={false}>**bold** text</Markdown>);
-      expect(r.container.querySelector(".og-markdown-settle")).toBeNull();
-      await flush(REVEAL_LINGER_MS + 100);
-      expect(r.container.querySelector(".og-markdown-settle")).not.toBeNull();
-      await flush(MARKDOWN_SETTLE_MS + 100);
-      expect(r.container.querySelector(".og-markdown-settle")).toBeNull();
-      await r.unmount();
-    },
-    15_000,
-  );
+  test("stream end crystallizes when the reveal pipeline tears down", async () => {
+    const r = await renderComponent(<Markdown streaming>**bold** text</Markdown>);
+    expect(r.container.querySelector(".og-markdown-settle")).toBeNull();
+    await r.rerender(<Markdown streaming={false}>**bold** text</Markdown>);
+    expect(r.container.querySelector(".og-markdown-settle")).toBeNull();
+    await flush(REVEAL_LINGER_MS + 100);
+    expect(r.container.querySelector(".og-markdown-settle")).not.toBeNull();
+    await flush(MARKDOWN_SETTLE_MS + 100);
+    expect(r.container.querySelector(".og-markdown-settle")).toBeNull();
+    await r.unmount();
+  }, 15_000);
 });

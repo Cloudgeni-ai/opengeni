@@ -757,9 +757,7 @@ describe("MessageTimeline — settled turn folding", () => {
     await r.unmount();
   });
 
-  test(
-    "a cluster that finished its settle fold stays closed as siblings append and the turn wraps",
-    async () => {
+  test("a cluster that finished its settle fold stays closed as siblings append and the turn wraps", async () => {
     resetTimelineEvents();
     // Grand finale choreography, streamed live: tool marathon → narration
     // (cluster one settle-folds) → more tools → finale text (cluster two
@@ -839,9 +837,7 @@ describe("MessageTimeline — settled turn folding", () => {
     expect(triggers.slice(1).every((t) => t.getAttribute("data-state") === "closed")).toBe(true);
 
     await r.unmount();
-  },
-    15_000,
-  );
+  }, 15_000);
 
   test("a failed turn keeps nested cluster chips quiet under the outer failure", async () => {
     resetTimelineEvents();

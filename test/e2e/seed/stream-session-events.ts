@@ -109,7 +109,11 @@ Default cycles ${SCENARIO_COUNT} rich scenarios (DB append + NATS) until Ctrl+C.
   return { workspaceId, sessionId, mode };
 }
 
-function resolveMs(value: number | ((index: number) => number) | undefined, index: number, fallback: number): number {
+function resolveMs(
+  value: number | ((index: number) => number) | undefined,
+  index: number,
+  fallback: number,
+): number {
   if (value === undefined) return fallback;
   return typeof value === "function" ? value(index) : value;
 }

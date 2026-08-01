@@ -87,11 +87,7 @@ export { LightboxProvider, useLightbox, useLightboxOptional } from "./screenshot
 export { DisclosureDefaultsProvider, useForcedDefaultOpen } from "./disclosure-context";
 
 // fold memory (cross-remount resting state so wraps never reopen settled folds)
-export {
-  FoldMemoryProvider,
-  inheritFoldRestingState,
-  useFoldMemory,
-} from "./fold-memory";
+export { FoldMemoryProvider, inheritFoldRestingState, useFoldMemory } from "./fold-memory";
 export type { FoldRestingState } from "./fold-memory";
 
 // seen activity ids (live tool enter across rail remounts)

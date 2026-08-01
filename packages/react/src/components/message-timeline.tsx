@@ -486,10 +486,7 @@ export function MessageTimeline({
       // alive so when collapse ends (or stream resumes) we ease instead of a
       // hard stop → flick. Do NOT tip-ease on the same frame as a real shrink
       // (that fight was the top-of-viewport flicker).
-      if (
-        previousHeight > 0 &&
-        node.scrollHeight < previousHeight - TIP_FOLLOW_SHRINK_EPS_PX
-      ) {
+      if (previousHeight > 0 && node.scrollHeight < previousHeight - TIP_FOLLOW_SHRINK_EPS_PX) {
         const nextTop = tipFollowCompensateShrink(
           lastScrollTopRef.current,
           previousHeight,
@@ -653,8 +650,7 @@ export function MessageTimeline({
       }
     }
     groupKeyByItemIdRef.current = nextKeyByItemId;
-    const needOffsets =
-      prepended || firstItemChanged || !pinnedRef.current || Boolean(hasNewer);
+    const needOffsets = prepended || firstItemChanged || !pinnedRef.current || Boolean(hasNewer);
     if (needOffsets) {
       const nextOffsetByKey = new Map<string, number>();
       for (const { key } of groups) {
@@ -873,11 +869,7 @@ export function MessageTimeline({
       syncScrollBaseline(node);
       const nearBottomPinned = isNearBottom(node);
       // Pointer-dragged scroll-up away from tip. Layout churn never arms this.
-      if (
-        readerArmed &&
-        readerUp > TIP_FOLLOW_READER_UP_EPS_PX &&
-        !nearBottomPinned
-      ) {
+      if (readerArmed && readerUp > TIP_FOLLOW_READER_UP_EPS_PX && !nearBottomPinned) {
         readerIntentArmRef.current = false;
         releasePinFromReader(node);
         if (olderLoadGateRef.current === "cooling" && node.scrollTop > OLDER_PREFETCH_MARGIN_PX) {
@@ -933,242 +925,246 @@ export function MessageTimeline({
   return (
     <LightboxProvider>
       <FoldMemoryProvider value={foldMemoryRef.current}>
-      <SeenActivityIdsProvider value={seenActivityIdsRef.current}>
-      <EntranceAnimationProvider value={!bulkRender}>
-        <TooltipProvider delayDuration={400}>
-        <div className={cn("og-root relative flex min-h-0 flex-col", className)}>
-          {/* Pinned: anchoring off so the tip-follow camera owns the motion.
+        <SeenActivityIdsProvider value={seenActivityIdsRef.current}>
+          <EntranceAnimationProvider value={!bulkRender}>
+            <TooltipProvider delayDuration={400}>
+              <div className={cn("og-root relative flex min-h-0 flex-col", className)}>
+                {/* Pinned: anchoring off so the tip-follow camera owns the motion.
           Unpinned: native scroll anchoring holds the reader's place. */}
-          <div
-            ref={scrollRef}
-            tabIndex={-1}
-            onScroll={onScroll}
-            onWheel={onWheel}
-            onPointerDown={onPointerDown}
-            onKeyDown={onKeyDown}
-            style={groups.length > 0 && !revealed ? { visibility: "hidden" } : undefined}
-            className={cn(
-              // tabIndex=-1 is programmatic only — never paint a focus ring on
-              // the whole scroller (click + Shift used to flash a blue outline).
-              "min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-6 sm:px-6 outline-none",
-              autoFollow && pinned && !hasNewer
-                ? "[overflow-anchor:none]"
-                : "[overflow-anchor:auto]",
-            )}
-          >
-            <div className="relative mx-auto flex w-full max-w-3xl flex-col gap-5">
-              {groups.length === 0
-                ? (emptyState ?? (
-                    <p className="py-10 text-center text-sm text-og-fg-subtle">No activity yet.</p>
-                  ))
-                : null}
-              {hasOlder && olderPrefetchArmed ? (
-                // Overlaid, not a layout row: mounting/unmounting the sentinel
-                // must never shift content (that shift was itself a wobble).
                 <div
-                  ref={topSentinelRef}
-                  data-og-top-sentinel=""
-                  data-og-timeline-chrome=""
-                  aria-hidden="true"
-                  className="pointer-events-none absolute inset-x-0 top-0 h-px"
-                />
-              ) : null}
-              {groups.map(({ group, key }, index) => {
-                const next = groups[index + 1]?.group;
-                const contextCompactionCount =
-                  group.kind === "turn"
-                    ? (group.contextCompactionCount ?? 0)
-                    : group.kind === "activity" &&
-                        next?.kind === "item" &&
-                        next.item.kind === "context-compaction" &&
-                        next.item.phase === "compacted"
-                      ? 1
-                      : 0;
-                return (
-                  <div key={key} data-og-timeline-group-anchor="" data-og-group-key={key}>
-                    <TimelineGroupView
-                      group={group}
-                      renderMessageText={renderMessageText}
-                      onOpenSession={onOpenSession}
-                      onMemoryClick={onMemoryClick}
-                      onReconnect={onReconnect}
-                      resolveProviderLogo={resolveProviderLogo}
-                      toolRegistry={toolRegistry}
-                      turnSummary={turnSummary}
-                      foldLiveCluster={isAgentProgress(next)}
-                      trailingAgentText={trailingAgentTextAfterTurn(group, next)}
-                      contextCompactionCount={
-                        contextCompactionCount > 0 ? contextCompactionCount : undefined
-                      }
-                    />
-                  </div>
-                );
-              })}
-              {hasNewer ? (
-                <div
-                  ref={bottomSentinelRef}
-                  data-og-bottom-sentinel=""
-                  data-og-timeline-chrome=""
-                  aria-hidden="true"
-                  className="h-px w-full"
-                />
-              ) : null}
-            </div>
-          </div>
-          <AnimatePresence>
-            {loadingOlder || loadingOldest || (hasOlder && onJumpToStart && olderPrefetchArmed) ? (
-              // Floating over the scroller (not a timeline row) so showing and
-              // hiding it never reflows history under the reader.
-              <motion.div
-                initial={{ opacity: 0, y: -6 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -6 }}
-                transition={{ duration: 0.15, ease: "easeOut" }}
-                data-og-loading-older=""
-                aria-live="polite"
-                className="absolute inset-x-0 top-3 z-10 flex justify-center gap-2"
-              >
-                {loadingOlder || loadingOldest ? (
-                  <span className="pointer-events-none inline-flex items-center rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1 text-xs font-medium shadow-og-md backdrop-blur">
-                    <span className="og-shimmer-text">
-                      {loadingOldest ? "Jumping to start…" : "Loading earlier activity…"}
-                    </span>
-                  </span>
-                ) : null}
-                {hasOlder && onJumpToStart && !loadingOldest ? (
-                  <button
-                    type="button"
-                    data-og-jump-to-start=""
-                    disabled={loadingOlder}
-                    onClick={() => {
-                      applyPinned(false);
-                      pendingJumpToStartRef.current = true;
-                      const seq = ++jumpToStartSeqRef.current;
-                      const node = scrollRef.current;
-                      void Promise.resolve(onJumpToStart()).then(
-                        () => {
-                          // The commit that swaps in the oldest window consumes
-                          // the flag against the new DOM; this write covers the
-                          // already-committed order and the no-window-change
-                          // case (jumping within the current window).
-                          const scroller = scrollRef.current ?? node;
-                          if (scroller) {
-                            scroller.scrollTop = 0;
-                          }
-                          // A host may resolve without ever changing the
-                          // window (already on the oldest page). Any swap
-                          // commit runs its layout effect before the next
-                          // frame, so a flag still armed by then is the
-                          // no-change case — clear it, or a LATER prepend
-                          // would spuriously jump the reader to the top.
-                          requestFrame(() => {
-                            if (jumpToStartSeqRef.current === seq) {
-                              pendingJumpToStartRef.current = false;
+                  ref={scrollRef}
+                  tabIndex={-1}
+                  onScroll={onScroll}
+                  onWheel={onWheel}
+                  onPointerDown={onPointerDown}
+                  onKeyDown={onKeyDown}
+                  style={groups.length > 0 && !revealed ? { visibility: "hidden" } : undefined}
+                  className={cn(
+                    // tabIndex=-1 is programmatic only — never paint a focus ring on
+                    // the whole scroller (click + Shift used to flash a blue outline).
+                    "min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-6 sm:px-6 outline-none",
+                    autoFollow && pinned && !hasNewer
+                      ? "[overflow-anchor:none]"
+                      : "[overflow-anchor:auto]",
+                  )}
+                >
+                  <div className="relative mx-auto flex w-full max-w-3xl flex-col gap-5">
+                    {groups.length === 0
+                      ? (emptyState ?? (
+                          <p className="py-10 text-center text-sm text-og-fg-subtle">
+                            No activity yet.
+                          </p>
+                        ))
+                      : null}
+                    {hasOlder && olderPrefetchArmed ? (
+                      // Overlaid, not a layout row: mounting/unmounting the sentinel
+                      // must never shift content (that shift was itself a wobble).
+                      <div
+                        ref={topSentinelRef}
+                        data-og-top-sentinel=""
+                        data-og-timeline-chrome=""
+                        aria-hidden="true"
+                        className="pointer-events-none absolute inset-x-0 top-0 h-px"
+                      />
+                    ) : null}
+                    {groups.map(({ group, key }, index) => {
+                      const next = groups[index + 1]?.group;
+                      const contextCompactionCount =
+                        group.kind === "turn"
+                          ? (group.contextCompactionCount ?? 0)
+                          : group.kind === "activity" &&
+                              next?.kind === "item" &&
+                              next.item.kind === "context-compaction" &&
+                              next.item.phase === "compacted"
+                            ? 1
+                            : 0;
+                      return (
+                        <div key={key} data-og-timeline-group-anchor="" data-og-group-key={key}>
+                          <TimelineGroupView
+                            group={group}
+                            renderMessageText={renderMessageText}
+                            onOpenSession={onOpenSession}
+                            onMemoryClick={onMemoryClick}
+                            onReconnect={onReconnect}
+                            resolveProviderLogo={resolveProviderLogo}
+                            toolRegistry={toolRegistry}
+                            turnSummary={turnSummary}
+                            foldLiveCluster={isAgentProgress(next)}
+                            trailingAgentText={trailingAgentTextAfterTurn(group, next)}
+                            contextCompactionCount={
+                              contextCompactionCount > 0 ? contextCompactionCount : undefined
                             }
-                          });
-                        },
-                        () => {
-                          if (jumpToStartSeqRef.current === seq) {
-                            pendingJumpToStartRef.current = false;
-                          }
-                        },
+                          />
+                        </div>
                       );
-                    }}
-                    className={cn(
-                      "inline-flex items-center gap-1.5 rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1.5",
-                      "text-xs font-medium text-og-fg shadow-og-md backdrop-blur",
-                      "hover:border-og-border-strong disabled:opacity-60",
-                    )}
-                  >
-                    <ArrowUpToLineIcon className="size-3.5" />
-                    Jump to start
-                  </button>
-                ) : null}
-              </motion.div>
-            ) : null}
-          </AnimatePresence>
-          <AnimatePresence>
-            {loadingNewer ? (
-              <motion.div
-                initial={{ opacity: 0, y: 6 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: 6 }}
-                transition={{ duration: 0.15, ease: "easeOut" }}
-                data-og-loading-newer=""
-                aria-live="polite"
-                className="pointer-events-none absolute inset-x-0 bottom-14 z-10 flex justify-center"
-              >
-                <span className="inline-flex items-center rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1 text-xs font-medium shadow-og-md backdrop-blur">
-                  <span className="og-shimmer-text">Loading later activity…</span>
-                </span>
-              </motion.div>
-            ) : null}
-          </AnimatePresence>
-          <AnimatePresence>
-            {((!pinned && autoFollow) || hasNewer) && autoFollow ? (
-              <motion.button
-                type="button"
-                initial={{ opacity: 0, y: 8 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: 8 }}
-                transition={{ duration: 0.15, ease: "easeOut" }}
-                onClick={() => {
-                  if (hasNewer) {
-                    // Do not pin against the current history page — its bottom
-                    // is not the tip. The pin + snap run when the tip window
-                    // actually lands (`hasNewer` flips false).
-                    wantPinRef.current = true;
-                    const node = scrollRef.current;
-                    if (onJumpToLatest) {
-                      void Promise.resolve(onJumpToLatest()).then(
-                        () => {
-                          // Covers a host that flipped hasNewer before
-                          // resolving; otherwise the tip-window commit
-                          // consumes the flag.
-                          const current = scrollRef.current;
-                          if (current && wantPinRef.current && !hasNewerRef.current) {
-                            wantPinRef.current = false;
-                            applyPinned(true);
-                            snapToBottom(current);
+                    })}
+                    {hasNewer ? (
+                      <div
+                        ref={bottomSentinelRef}
+                        data-og-bottom-sentinel=""
+                        data-og-timeline-chrome=""
+                        aria-hidden="true"
+                        className="h-px w-full"
+                      />
+                    ) : null}
+                  </div>
+                </div>
+                <AnimatePresence>
+                  {loadingOlder ||
+                  loadingOldest ||
+                  (hasOlder && onJumpToStart && olderPrefetchArmed) ? (
+                    // Floating over the scroller (not a timeline row) so showing and
+                    // hiding it never reflows history under the reader.
+                    <motion.div
+                      initial={{ opacity: 0, y: -6 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: -6 }}
+                      transition={{ duration: 0.15, ease: "easeOut" }}
+                      data-og-loading-older=""
+                      aria-live="polite"
+                      className="absolute inset-x-0 top-3 z-10 flex justify-center gap-2"
+                    >
+                      {loadingOlder || loadingOldest ? (
+                        <span className="pointer-events-none inline-flex items-center rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1 text-xs font-medium shadow-og-md backdrop-blur">
+                          <span className="og-shimmer-text">
+                            {loadingOldest ? "Jumping to start…" : "Loading earlier activity…"}
+                          </span>
+                        </span>
+                      ) : null}
+                      {hasOlder && onJumpToStart && !loadingOldest ? (
+                        <button
+                          type="button"
+                          data-og-jump-to-start=""
+                          disabled={loadingOlder}
+                          onClick={() => {
+                            applyPinned(false);
+                            pendingJumpToStartRef.current = true;
+                            const seq = ++jumpToStartSeqRef.current;
+                            const node = scrollRef.current;
+                            void Promise.resolve(onJumpToStart()).then(
+                              () => {
+                                // The commit that swaps in the oldest window consumes
+                                // the flag against the new DOM; this write covers the
+                                // already-committed order and the no-window-change
+                                // case (jumping within the current window).
+                                const scroller = scrollRef.current ?? node;
+                                if (scroller) {
+                                  scroller.scrollTop = 0;
+                                }
+                                // A host may resolve without ever changing the
+                                // window (already on the oldest page). Any swap
+                                // commit runs its layout effect before the next
+                                // frame, so a flag still armed by then is the
+                                // no-change case — clear it, or a LATER prepend
+                                // would spuriously jump the reader to the top.
+                                requestFrame(() => {
+                                  if (jumpToStartSeqRef.current === seq) {
+                                    pendingJumpToStartRef.current = false;
+                                  }
+                                });
+                              },
+                              () => {
+                                if (jumpToStartSeqRef.current === seq) {
+                                  pendingJumpToStartRef.current = false;
+                                }
+                              },
+                            );
+                          }}
+                          className={cn(
+                            "inline-flex items-center gap-1.5 rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1.5",
+                            "text-xs font-medium text-og-fg shadow-og-md backdrop-blur",
+                            "hover:border-og-border-strong disabled:opacity-60",
+                          )}
+                        >
+                          <ArrowUpToLineIcon className="size-3.5" />
+                          Jump to start
+                        </button>
+                      ) : null}
+                    </motion.div>
+                  ) : null}
+                </AnimatePresence>
+                <AnimatePresence>
+                  {loadingNewer ? (
+                    <motion.div
+                      initial={{ opacity: 0, y: 6 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: 6 }}
+                      transition={{ duration: 0.15, ease: "easeOut" }}
+                      data-og-loading-newer=""
+                      aria-live="polite"
+                      className="pointer-events-none absolute inset-x-0 bottom-14 z-10 flex justify-center"
+                    >
+                      <span className="inline-flex items-center rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1 text-xs font-medium shadow-og-md backdrop-blur">
+                        <span className="og-shimmer-text">Loading later activity…</span>
+                      </span>
+                    </motion.div>
+                  ) : null}
+                </AnimatePresence>
+                <AnimatePresence>
+                  {((!pinned && autoFollow) || hasNewer) && autoFollow ? (
+                    <motion.button
+                      type="button"
+                      initial={{ opacity: 0, y: 8 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: 8 }}
+                      transition={{ duration: 0.15, ease: "easeOut" }}
+                      onClick={() => {
+                        if (hasNewer) {
+                          // Do not pin against the current history page — its bottom
+                          // is not the tip. The pin + snap run when the tip window
+                          // actually lands (`hasNewer` flips false).
+                          wantPinRef.current = true;
+                          const node = scrollRef.current;
+                          if (onJumpToLatest) {
+                            void Promise.resolve(onJumpToLatest()).then(
+                              () => {
+                                // Covers a host that flipped hasNewer before
+                                // resolving; otherwise the tip-window commit
+                                // consumes the flag.
+                                const current = scrollRef.current;
+                                if (current && wantPinRef.current && !hasNewerRef.current) {
+                                  wantPinRef.current = false;
+                                  applyPinned(true);
+                                  snapToBottom(current);
+                                }
+                              },
+                              () => {
+                                // The tip reload failed (ordinary network error):
+                                // an armed latch would fire a surprise snap when
+                                // the reader later pages to the tip themselves.
+                                wantPinRef.current = false;
+                              },
+                            );
+                          } else if (node) {
+                            // No tip reload available: jump within the in-memory
+                            // window so the newer sentinel can page forward; the
+                            // latch pins if the tip window eventually lands.
+                            snapToBottom(node);
                           }
-                        },
-                        () => {
-                          // The tip reload failed (ordinary network error):
-                          // an armed latch would fire a surprise snap when
-                          // the reader later pages to the tip themselves.
-                          wantPinRef.current = false;
-                        },
-                      );
-                    } else if (node) {
-                      // No tip reload available: jump within the in-memory
-                      // window so the newer sentinel can page forward; the
-                      // latch pins if the tip window eventually lands.
-                      snapToBottom(node);
-                    }
-                    return;
-                  }
-                  const node = scrollRef.current;
-                  if (node) {
-                    applyPinned(true);
-                    snapToBottom(node);
-                  }
-                }}
-                className={cn(
-                  "absolute bottom-4 left-1/2 -translate-x-1/2",
-                  "inline-flex items-center gap-1.5 rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1.5",
-                  "text-xs font-medium text-og-fg shadow-og-md backdrop-blur",
-                  "hover:border-og-border-strong",
-                )}
-              >
-                <ArrowDownIcon className="size-3.5" />
-                Jump to latest
-              </motion.button>
-            ) : null}
-          </AnimatePresence>
-        </div>
-        </TooltipProvider>
-      </EntranceAnimationProvider>
-      </SeenActivityIdsProvider>
+                          return;
+                        }
+                        const node = scrollRef.current;
+                        if (node) {
+                          applyPinned(true);
+                          snapToBottom(node);
+                        }
+                      }}
+                      className={cn(
+                        "absolute bottom-4 left-1/2 -translate-x-1/2",
+                        "inline-flex items-center gap-1.5 rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1.5",
+                        "text-xs font-medium text-og-fg shadow-og-md backdrop-blur",
+                        "hover:border-og-border-strong",
+                      )}
+                    >
+                      <ArrowDownIcon className="size-3.5" />
+                      Jump to latest
+                    </motion.button>
+                  ) : null}
+                </AnimatePresence>
+              </div>
+            </TooltipProvider>
+          </EntranceAnimationProvider>
+        </SeenActivityIdsProvider>
       </FoldMemoryProvider>
     </LightboxProvider>
   );

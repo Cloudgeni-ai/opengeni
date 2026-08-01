@@ -880,9 +880,7 @@ describe("MessageTimeline pagination affordances", () => {
     }) as typeof window.getComputedStyle;
 
     await actRun(() => {
-      nested.dispatchEvent(
-        new WheelEvent("wheel", { deltaY: -40, deltaX: 0, bubbles: true }),
-      );
+      nested.dispatchEvent(new WheelEvent("wheel", { deltaY: -40, deltaX: 0, bubbles: true }));
     });
     await flush();
     expect(r.container.textContent).not.toContain("Jump to latest");
