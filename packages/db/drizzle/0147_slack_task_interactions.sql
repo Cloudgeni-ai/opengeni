@@ -150,132 +150,146 @@ CREATE POLICY workspace_isolation ON "slack_interactions"
   USING (opengeni_private.workspace_rls_visible("account_id", "workspace_id"))
   WITH CHECK (opengeni_private.workspace_rls_visible("account_id", "workspace_id"));
 
--- Resolve one Slack team to exactly one active, currently verified OpenGeni
--- workspace-bot principal. Legacy duplicate rows for the same workspace/team/
--- bot/bot-user collapse newest-first; any cross-workspace or principal ambiguity
--- returns no row and therefore fails ingress closed.
-CREATE OR REPLACE FUNCTION opengeni_private.resolve_slack_installation(p_team_id text)
-RETURNS TABLE (
-  account_id uuid,
-  workspace_id uuid,
-  connection_id uuid,
-  bot_id text,
-  bot_user_id text
-)
-LANGUAGE sql
-SECURITY DEFINER
-AS $$
-  WITH eligible AS (
-    SELECT
-      C.account_id,
-      C.workspace_id,
-      C.id AS connection_id,
-      C.metadata->>'botId' AS bot_id,
-      C.metadata->>'botUserId' AS bot_user_id,
-      C.created_at
-    FROM connections C
-    WHERE C.provider_domain = 'slack.com'
-      AND C.kind = 'app_install'
-      AND C.subject_id IS NULL
-      AND C.status = 'active'
-      AND C.verified_install_at IS NOT NULL
-      AND C.verified_install_version = C.version
-      AND C.metadata->>'credentialRole' = 'opengeni_workspace_bot'
-      AND C.metadata->>'slackTeamId' = p_team_id
-      AND octet_length(C.metadata->>'botId') BETWEEN 1 AND 64
-      AND octet_length(C.metadata->>'botUserId') BETWEEN 1 AND 64
-  ), unambiguous AS (
-    SELECT count(DISTINCT (workspace_id, bot_id, bot_user_id)) AS principal_count
-    FROM eligible
-  )
-  SELECT E.account_id, E.workspace_id, E.connection_id, E.bot_id, E.bot_user_id
-  FROM eligible E, unambiguous U
-  WHERE U.principal_count = 1
-  ORDER BY E.created_at DESC, E.connection_id DESC
-  LIMIT 1;
-$$;
-
-CREATE OR REPLACE FUNCTION opengeni_private.claim_slack_interaction_inbox(
-  p_holder uuid,
-  p_lease_ms integer
-)
-RETURNS SETOF slack_interaction_inbox
-LANGUAGE plpgsql
-SECURITY DEFINER
-AS $$
+-- Resolve and claim through SECURITY DEFINER without trusting the caller's
+-- search_path (including pg_temp). The migration may target public or a
+-- dedicated embed schema, so bind current_schema() into every relation and
+-- return type at creation time, then expose only pg_catalog at execution time.
+DO $privileged_functions$
+DECLARE data_schema text := current_schema();
 BEGIN
-  IF p_lease_ms < 1000 OR p_lease_ms > 300000 THEN
-    RAISE EXCEPTION 'invalid Slack inbox claim lease';
-  END IF;
-  RETURN QUERY
-  WITH candidate AS (
-    SELECT I.id
-    FROM slack_interaction_inbox I
-    WHERE I.status = 'pending'
-       OR (I.status = 'processing' AND I.claim_expires_at <= now())
-    ORDER BY I.created_at, I.id
-    FOR UPDATE SKIP LOCKED
-    LIMIT 1
-  )
-  UPDATE slack_interaction_inbox I
-  SET status = 'processing',
-      claim_holder_id = p_holder,
-      claim_expires_at = now() + make_interval(secs => p_lease_ms::double precision / 1000),
-      attempt_count = I.attempt_count + 1,
-      updated_at = now()
-  FROM candidate C
-  WHERE I.id = C.id
-  RETURNING I.*;
-END
-$$;
-
-CREATE OR REPLACE FUNCTION opengeni_private.claim_slack_interaction_delivery(
-  p_holder uuid,
-  p_lease_ms integer
-)
-RETURNS SETOF slack_interactions
-LANGUAGE plpgsql
-SECURITY DEFINER
-AS $$
-BEGIN
-  IF p_lease_ms < 1000 OR p_lease_ms > 300000 THEN
-    RAISE EXCEPTION 'invalid Slack delivery claim lease';
-  END IF;
-  RETURN QUERY
-  WITH candidate AS (
-    SELECT I.id
-    FROM slack_interactions I
-    WHERE I.session_id IS NOT NULL
-      AND I.terminal_delivery_state = 'open'
-      AND (I.delivery_claim_holder_id IS NULL OR I.delivery_claim_expires_at <= now())
-      AND EXISTS (
-        SELECT 1
-        FROM session_events E
-        WHERE E.workspace_id = I.workspace_id
-          AND E.session_id = I.session_id
-          AND E.sequence > I.last_delivered_session_event_sequence
-          AND E.type IN (
-            'agent.message.completed',
-            'session.humanInput.requested',
-            'turn.completed',
-            'turn.failed',
-            'turn.cancelled',
-            'session.status.changed'
-          )
+  EXECUTE format($ddl$
+    CREATE OR REPLACE FUNCTION opengeni_private.resolve_slack_installation(p_team_id text)
+    RETURNS TABLE (
+      account_id uuid,
+      workspace_id uuid,
+      connection_id uuid,
+      bot_id text,
+      bot_user_id text
+    )
+    LANGUAGE sql
+    SECURITY DEFINER
+    SET search_path = pg_catalog
+    AS $function$
+      WITH eligible AS (
+        SELECT
+          C.account_id,
+          C.workspace_id,
+          C.id AS connection_id,
+          C.metadata->>'botId' AS bot_id,
+          C.metadata->>'botUserId' AS bot_user_id,
+          C.created_at
+        FROM %1$I.connections C
+        WHERE C.provider_domain = 'slack.com'
+          AND C.kind = 'app_install'
+          AND C.subject_id IS NULL
+          AND C.status = 'active'
+          AND C.verified_install_at IS NOT NULL
+          AND C.verified_install_version = C.version
+          AND C.metadata->>'credentialRole' = 'opengeni_slack_bot'
+          AND C.metadata->>'slackTeamId' = p_team_id
+          AND octet_length(C.metadata->>'botId') BETWEEN 1 AND 64
+          AND octet_length(C.metadata->>'botUserId') BETWEEN 1 AND 64
+      ), unambiguous AS (
+        SELECT count(DISTINCT (workspace_id, bot_id, bot_user_id)) AS principal_count
+        FROM eligible
       )
-    ORDER BY I.updated_at, I.id
-    FOR UPDATE SKIP LOCKED
-    LIMIT 1
-  )
-  UPDATE slack_interactions I
-  SET delivery_claim_holder_id = p_holder,
-      delivery_claim_expires_at = now() + make_interval(secs => p_lease_ms::double precision / 1000),
-      updated_at = now()
-  FROM candidate C
-  WHERE I.id = C.id
-  RETURNING I.*;
+      SELECT E.account_id, E.workspace_id, E.connection_id, E.bot_id, E.bot_user_id
+      FROM eligible E, unambiguous U
+      WHERE U.principal_count = 1
+      ORDER BY E.created_at DESC, E.connection_id DESC
+      LIMIT 1
+    $function$
+  $ddl$, data_schema);
+
+  EXECUTE format($ddl$
+    CREATE OR REPLACE FUNCTION opengeni_private.claim_slack_interaction_inbox(
+      p_holder uuid,
+      p_lease_ms integer
+    )
+    RETURNS SETOF %1$I.slack_interaction_inbox
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog
+    AS $function$
+    BEGIN
+      IF p_lease_ms < 1000 OR p_lease_ms > 300000 THEN
+        RAISE EXCEPTION 'invalid Slack inbox claim lease';
+      END IF;
+      RETURN QUERY
+      WITH candidate AS (
+        SELECT I.id
+        FROM %1$I.slack_interaction_inbox I
+        WHERE I.status = 'pending'
+           OR (I.status = 'processing' AND I.claim_expires_at <= now())
+        ORDER BY I.created_at, I.id
+        FOR UPDATE SKIP LOCKED
+        LIMIT 1
+      )
+      UPDATE %1$I.slack_interaction_inbox I
+      SET status = 'processing',
+          claim_holder_id = p_holder,
+          claim_expires_at = now() + make_interval(secs => p_lease_ms::double precision / 1000),
+          attempt_count = I.attempt_count + 1,
+          updated_at = now()
+      FROM candidate C
+      WHERE I.id = C.id
+      RETURNING I.*;
+    END
+    $function$
+  $ddl$, data_schema);
+
+  EXECUTE format($ddl$
+    CREATE OR REPLACE FUNCTION opengeni_private.claim_slack_interaction_delivery(
+      p_holder uuid,
+      p_lease_ms integer
+    )
+    RETURNS SETOF %1$I.slack_interactions
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog
+    AS $function$
+    BEGIN
+      IF p_lease_ms < 1000 OR p_lease_ms > 300000 THEN
+        RAISE EXCEPTION 'invalid Slack delivery claim lease';
+      END IF;
+      RETURN QUERY
+      WITH candidate AS (
+        SELECT I.id
+        FROM %1$I.slack_interactions I
+        WHERE I.session_id IS NOT NULL
+          AND I.terminal_delivery_state = 'open'
+          AND (I.delivery_claim_holder_id IS NULL OR I.delivery_claim_expires_at <= now())
+          AND EXISTS (
+            SELECT 1
+            FROM %1$I.session_events E
+            WHERE E.workspace_id = I.workspace_id
+              AND E.session_id = I.session_id
+              AND E.sequence > I.last_delivered_session_event_sequence
+              AND E.type IN (
+                'agent.message.completed',
+                'session.humanInput.requested',
+                'turn.completed',
+                'turn.failed',
+                'turn.cancelled',
+                'session.status.changed'
+              )
+          )
+        ORDER BY I.updated_at, I.id
+        FOR UPDATE SKIP LOCKED
+        LIMIT 1
+      )
+      UPDATE %1$I.slack_interactions I
+      SET delivery_claim_holder_id = p_holder,
+          delivery_claim_expires_at = now() + make_interval(secs => p_lease_ms::double precision / 1000),
+          updated_at = now()
+      FROM candidate C
+      WHERE I.id = C.id
+      RETURNING I.*;
+    END
+    $function$
+  $ddl$, data_schema);
 END
-$$;
+$privileged_functions$;
 
 DO $grants$
 DECLARE target_schema text := current_schema();

@@ -1,5 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
+import {
+  OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
+  OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
+} from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
 import {
@@ -86,10 +90,14 @@ async function botConnection(
     verifiedInstallAt: new Date(),
     verifiedInstallVersion: 1,
     metadata: {
-      credentialRole: "opengeni_workspace_bot",
+      credentialRole: OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
+      credentialLabel: OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
       slackTeamId: teamId,
+      slackTeamName: "Slack interaction database test",
       botId: principal.botId,
       botUserId: principal.botUserId,
+      botDisplayName: "OpenGeni",
+      verifiedAt: new Date().toISOString(),
     },
   });
 }
@@ -125,6 +133,9 @@ describe("Slack interaction migration and durable database boundary", () => {
     expect(sql).toContain("slack_interactions_visibility_check");
     expect(sql).toContain("FOR UPDATE SKIP LOCKED");
     expect(sql).toContain("claim_slack_interaction_delivery");
+    expect(sql.match(/\n\s+SECURITY DEFINER\n\s+SET search_path = pg_catalog/g)).toHaveLength(3);
+    expect(sql.match(/SET search_path = pg_catalog/g)).toHaveLength(3);
+    expect(sql).toContain("credentialRole' = 'opengeni_slack_bot'");
   });
 
   test("enforces FORCE RLS and grants only the declared runtime DML", async () => {

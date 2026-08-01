@@ -122,7 +122,11 @@ export function slackEventInboxEntry(
   if (!userId || !channelId || !timestamp || !text) return null;
   let triggerKind: SlackInteractionTriggerKind;
   if (event.type === "app_mention") {
-    triggerKind = threadTimestamp ? "thread_reply" : "app_mention";
+    // A mention is always an explicit invocation. In particular, a mention in
+    // an otherwise-unmapped existing thread adopts that thread as the new
+    // OpenGeni session surface; only ordinary message replies require a
+    // pre-existing route.
+    triggerKind = "app_mention";
   } else if (event.type === "message" && threadTimestamp) {
     triggerKind = "thread_reply";
   } else if (event.type === "message" && event.channel_type === "im") {
@@ -557,7 +561,10 @@ async function deliverSlackSessionEvents(
   let lastSequence = interaction.lastDeliveredSessionEventSequence;
   let terminal: Exclude<SlackInteraction["terminalDeliveryState"], "open"> | null = null;
   let latestAssistantText = "";
-  for (const event of page.events) {
+  // Monitoring pages are newest-first. Slack delivery is a timeline surface:
+  // replay oldest-to-newest so progress cannot appear after a terminal result
+  // and the final message remains the final message in the thread.
+  for (const event of [...page.events].sort((left, right) => left.sequence - right.sequence)) {
     lastSequence = Math.max(lastSequence, event.sequence);
     if (event.type === "agent.message.completed") {
       latestAssistantText = safePayloadText(event.payload, "text");

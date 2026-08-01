@@ -1,5 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { signDelegatedAccessToken, type AccessGrant } from "@opengeni/contracts";
+import {
+  OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
+  OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
+  signDelegatedAccessToken,
+  type AccessGrant,
+} from "@opengeni/contracts";
 import {
   bindSlackInteractionSession,
   bootstrapWorkspace,
@@ -141,10 +146,14 @@ async function fixture() {
     ) values (
       ${owner.accountId}, ${owner.workspaceId}, null, 'slack.com', 'app_install',
       repeat('x', 32), now(), 1, ${shared!.admin.json({
-        credentialRole: "opengeni_workspace_bot",
+        credentialRole: OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
+        credentialLabel: OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
         slackTeamId: `T_${suffix}`,
+        slackTeamName: "Slack private authorization",
         botId: `B_${suffix}`,
         botUserId: `U_${suffix}`,
+        botDisplayName: "OpenGeni",
+        verifiedAt: new Date().toISOString(),
       })}
     ) returning id`;
   const { interaction } = await getOrCreateSlackInteraction(client.db, {

@@ -3,6 +3,8 @@ import { describe, expect, test } from "bun:test";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { MemoryEventBus, testSettings } from "@opengeni/testing";
 import { Hono } from "hono";
+import { isApiContractProtectedMutation } from "../src/app";
+import { requireAccessKey } from "../src/http/auth";
 import {
   registerSlackInteractionRoutes,
   slackEventInboxEntry,
@@ -122,6 +124,30 @@ describe("Slack interaction signature boundary", () => {
     );
     expect(oversized.status).toBe(413);
   });
+
+  test("exempts only the three exact signed Slack ingress paths from product API auth", async () => {
+    const paths = [
+      "/v1/integrations/slack/events",
+      "/v1/integrations/slack/commands",
+      "/v1/integrations/slack/interactions",
+    ];
+    const app = new Hono();
+    app.use("*", requireAccessKey(testSettings({ authRequired: true, accessKey: "required" })));
+    app.all("*", (c) => c.json({ ok: true }));
+    for (const path of paths) {
+      expect((await app.request(path, { method: "POST" })).status).toBe(200);
+      expect(isApiContractProtectedMutation("POST", path)).toBe(false);
+    }
+    for (const path of [
+      "/v1/integrations/slack/events/",
+      "/v1/integrations/slack/events/replay",
+      "/v1/integrations/slack/commands-extra",
+      "/v1/integrations/slack/interactions/extra",
+    ]) {
+      expect((await app.request(path, { method: "POST" })).status).toBe(401);
+      expect(isApiContractProtectedMutation("POST", path)).toBe(true);
+    }
+  });
 });
 
 describe("Slack event classification and safe projection", () => {
@@ -142,6 +168,19 @@ describe("Slack event classification and safe projection", () => {
           channel: "C1",
           ts: "1.1",
           text: "help",
+        }),
+        bot,
+      )?.triggerKind,
+    ).toBe("app_mention");
+    expect(
+      slackEventInboxEntry(
+        envelope({
+          type: "app_mention",
+          user: "U1",
+          channel: "C1",
+          ts: "1.2",
+          thread_ts: "1.1",
+          text: "adopt this existing thread",
         }),
         bot,
       )?.triggerKind,
