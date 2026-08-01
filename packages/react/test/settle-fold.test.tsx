@@ -1,10 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import { registerDom, renderComponent, actRun, flush } from "./render-hook";
-import { TurnSummary } from "../src/timeline/turn-summary";
+import { TurnSummary, useTurnSettleOpen } from "../src/timeline/turn-summary";
 
 registerDom();
 
 const BEAT_AND_MARGIN_MS = 1400;
+/** Keep in sync with `--og-duration-disclose` / TurnSummary DISCLOSE_MS. */
+const DISCLOSE_MS = 120;
+
+function NestFlatProbe() {
+  const nestFlat = useTurnSettleOpen();
+  return <span data-testid="nest-flat">{nestFlat ? "flat" : "nested"}</span>;
+}
 
 describe("TurnSummary settle fold", () => {
   test("mounts open, holds the beat, then auto-collapses", async () => {
@@ -42,6 +49,30 @@ describe("TurnSummary settle fold", () => {
     expect(trigger?.getAttribute("data-state")).toBe("open");
     await flush(BEAT_AND_MARGIN_MS);
     expect(trigger?.getAttribute("data-state")).toBe("open");
+    await r.unmount();
+  });
+
+  test("cancel-close keeps nest-flat through fast collapse; reopen clears it", async () => {
+    const r = await renderComponent(
+      <TurnSummary items={[]} outcome="complete" settleFold>
+        <NestFlatProbe />
+      </TurnSummary>,
+    );
+    const probe = () => r.container.querySelector("[data-testid='nest-flat']")?.textContent;
+    expect(probe()).toBe("flat");
+    const trigger = r.container.querySelector("button");
+    expect(trigger?.getAttribute("data-state")).toBe("open");
+    // Cancel mid-beat: settle CSS phase clears, but nest latch must hold
+    // through the fast collapse so nested chips do not remount mid-height.
+    await actRun(() => trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(trigger?.getAttribute("data-state")).toBe("closed");
+    expect(probe()).toBe("flat");
+    await flush(DISCLOSE_MS + 40);
+    expect(probe()).toBe("nested");
+    // Reader reopens: nested chrome may appear immediately.
+    await actRun(() => trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(trigger?.getAttribute("data-state")).toBe("open");
+    expect(probe()).toBe("nested");
     await r.unmount();
   });
 

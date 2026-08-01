@@ -21,6 +21,8 @@
 //   OPENGENI_SEED_STREAM_TOKEN_MS   baseline delay between token deltas (default 28)
 //   OPENGENI_SEED_STREAM_BURST_MS   pause between phase beats (default 160)
 //   OPENGENI_SEED_STREAM_TURN_MS    pause between scenarios (default 900)
+//   OPENGENI_SEED_STREAM_MODE=tools  TEMP: only the tools-only vertical scrutiny loop
+// Flags: --tools-only
 // Per-message pacing presets (fast/slow/crawl/laggy/burst/yank) override the
 // baseline so one loop exercises fast models, slow models, and stalling streams.
 import {
@@ -36,11 +38,13 @@ import { BASE_URL, WEB_URL } from "./harness";
 import {
   SCENARIO_COUNT,
   resolveStreamPacing,
+  resolveStreamScenarioMode,
   scenarioForTurn,
   type StreamCtx,
   type StreamPacing,
   type StreamPhase,
   type StreamScenario,
+  type StreamScenarioMode,
 } from "./stream-scenarios.ts";
 import type { ToolSpec } from "./monster/payloads.ts";
 
@@ -63,7 +67,11 @@ function resolveNatsUrl(): string {
   return process.env.OPENGENI_NATS_URL ?? "nats://127.0.0.1:4222";
 }
 
-function parseArgs(argv: string[]): { workspaceId: string; sessionId: string } {
+function parseArgs(argv: string[]): {
+  workspaceId: string;
+  sessionId: string;
+  mode: StreamScenarioMode;
+} {
   let workspaceId =
     process.env.OPENGENI_SEED_WORKSPACE_ID ??
     process.env.OPENGENI_STREAM_WORKSPACE_ID ??
@@ -72,6 +80,7 @@ function parseArgs(argv: string[]): { workspaceId: string; sessionId: string } {
     process.env.OPENGENI_SEED_SESSION_ID ??
     process.env.OPENGENI_STREAM_SESSION_ID ??
     DEFAULT_SESSION;
+  let mode = resolveStreamScenarioMode();
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]!;
     const next = argv[i + 1];
@@ -81,13 +90,28 @@ function parseArgs(argv: string[]): { workspaceId: string; sessionId: string } {
     } else if ((arg === "--session" || arg === "-s") && next) {
       sessionId = next;
       i += 1;
+    } else if (arg === "--tools-only" || arg === "--tools") {
+      mode = "tools";
+    } else if ((arg === "--mode" || arg === "-m") && next) {
+      mode = resolveStreamScenarioMode(next);
+      i += 1;
     } else if (arg === "--help" || arg === "-h") {
-      console.log(`Usage: bun test/e2e/seed/stream-session-events.ts [--workspace UUID] [--session UUID]
-Cycles ${SCENARIO_COUNT} rich scenarios with mixed pacing (DB append + NATS) until Ctrl+C.`);
+      console.log(`Usage: bun test/e2e/seed/stream-session-events.ts [options]
+  --workspace UUID / -w   target workspace
+  --session UUID / -s     target session
+  --tools-only            TEMP: loop tools-only vertical scrutiny (free varying speed)
+  --mode all|tools        same as OPENGENI_SEED_STREAM_MODE
+
+Default cycles ${SCENARIO_COUNT} rich scenarios (DB append + NATS) until Ctrl+C.`);
       process.exit(0);
     }
   }
-  return { workspaceId, sessionId };
+  return { workspaceId, sessionId, mode };
+}
+
+function resolveMs(value: number | ((index: number) => number) | undefined, index: number, fallback: number): number {
+  if (value === undefined) return fallback;
+  return typeof value === "function" ? value(index) : value;
 }
 
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
@@ -268,20 +292,26 @@ async function playPhase(
     case "tools": {
       let published = 0;
       const tools = phase.tools(ctx);
-      const settleMs = phase.settleMs ?? TOOL_SETTLE_DEFAULT_MS;
-      for (const tool of tools) {
+      for (let i = 0; i < tools.length; i += 1) {
         if (signal.aborted) return published;
+        const settleMs = Math.max(20, resolveMs(phase.settleMs, i, TOOL_SETTLE_DEFAULT_MS));
+        const gapMs = Math.max(
+          0,
+          resolveMs(phase.gapMs, i, Math.max(80, Math.floor(settleMs * 0.6))),
+        );
         published += await streamTool(
           db,
           bus,
           workspaceId,
           sessionId,
           ctx.turnId,
-          tool,
+          tools[i]!,
           signal,
           settleMs,
         );
-        await sleep(Math.max(80, Math.floor(settleMs * 0.6)), signal);
+        if (i < tools.length - 1) {
+          await sleep(gapMs, signal);
+        }
       }
       return published;
     }
@@ -431,7 +461,7 @@ async function streamScenario(
 }
 
 async function main(): Promise<void> {
-  const { workspaceId, sessionId } = parseArgs(process.argv.slice(2));
+  const { workspaceId, sessionId, mode } = parseArgs(process.argv.slice(2));
   const databaseUrl = resolveDatabaseUrl();
   const natsUrl = resolveNatsUrl();
   const dbClient = createDb(databaseUrl);
@@ -450,7 +480,9 @@ async function main(): Promise<void> {
   console.log(`[stream] session=${sessionId} status=${session.status}`);
   console.log(`[stream] open: ${link}`);
   console.log(
-    `[stream] ${SCENARIO_COUNT} scenarios · token=${TOKEN_MS}ms burst=${BURST_MS}ms turn=${TURN_MS}ms — Ctrl+C to stop`,
+    mode === "tools"
+      ? `[stream] MODE=tools (TEMP vertical scrutiny) · burst=${BURST_MS}ms turn=${TURN_MS}ms — Ctrl+C to stop`
+      : `[stream] ${SCENARIO_COUNT} scenarios · token=${TOKEN_MS}ms burst=${BURST_MS}ms turn=${TURN_MS}ms — Ctrl+C to stop`,
   );
 
   const ac = new AbortController();
@@ -468,7 +500,7 @@ async function main(): Promise<void> {
   try {
     while (!ac.signal.aborted) {
       turnIndex += 1;
-      const scenario = scenarioForTurn(turnIndex);
+      const scenario = scenarioForTurn(turnIndex, mode);
       console.log(`[stream] ▶ ${scenario.id} — ${scenario.title}`);
       const n = await streamScenario(
         dbClient.db,

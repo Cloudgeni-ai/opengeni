@@ -17,6 +17,7 @@ import { prefersReducedMotion } from "../lib/motion";
 import { CopyButton } from "./copy-button";
 import { softenStreamingMarkdown } from "./soften-streaming-markdown";
 import { createStreamReveal, rehypeStreamReveal, type StreamReveal } from "./stream-reveal";
+import { TooltipProvider } from "./tooltip";
 
 /**
  * The default renderer for chat message bodies in {@link MessageTimeline}.
@@ -365,25 +366,27 @@ function MarkdownImpl({ children, className, streaming = false }: MarkdownProps)
   // Reveal identity still tracks the true source (`children`).
   const parseText = streaming || revealActive ? softenStreamingMarkdown(children) : children;
 
+  // `min-w-0` lets the prose shrink inside flex parents (message bubbles) so
+  // long links and code blocks wrap/scroll instead of forcing overflow.
   return (
-    // `min-w-0` lets the prose shrink inside flex parents (message bubbles) so
-    // long links and code blocks wrap/scroll instead of forcing overflow.
-    <div
-      ref={bodyRef}
-      className={cn(
-        "og-markdown-body min-w-0 break-words",
-        settling && "og-markdown-settle",
-        className,
-      )}
-    >
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        rehypePlugins={rehypePlugins}
-        components={components}
+    <TooltipProvider delayDuration={400}>
+      <div
+        ref={bodyRef}
+        className={cn(
+          "og-markdown-body min-w-0 break-words",
+          settling && "og-markdown-settle",
+          className,
+        )}
       >
-        {parseText}
-      </ReactMarkdown>
-    </div>
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm]}
+          rehypePlugins={rehypePlugins}
+          components={components}
+        >
+          {parseText}
+        </ReactMarkdown>
+      </div>
+    </TooltipProvider>
   );
 }
 

@@ -33,7 +33,6 @@ import {
 } from "react";
 import { cn } from "../lib/cn";
 import { formatRelativeTime, truncate } from "../lib/format";
-import { prefersReducedMotion } from "../lib/motion";
 import { Markdown } from "./markdown";
 import {
   ActivityRail,
@@ -60,6 +59,7 @@ import {
 import { CopyHoverFrame } from "./copy-button";
 import { SESSION_STATUS_META, StatusDot } from "./session-status";
 import { EntranceAnimationProvider, useEntranceAnimation } from "../timeline/entrance";
+import { TooltipProvider } from "./tooltip";
 
 export type MessageTimelineProps = {
   /** Raw session events (projected internally) … */
@@ -141,54 +141,61 @@ export type MessageTimelineProps = {
  * rows are memoized, so a full mount is cheap; the drip-feed machinery this
  * replaces was the "content is hidden, then pops in in batches" wobble.)
  *
- * Exactly one authority writes scrollTop, depending on mode:
- * - Pinned at the tip → we own it: ease toward the bottom after every commit
- *   (and on ResizeObserver ticks for late layout like images). Native scroll
- *   anchoring is disabled in this mode so it cannot fight the glide.
- * - Scrolled up reading → the BROWSER owns it: native scroll anchoring
- *   (`overflow-anchor: auto`) holds the reader's viewport through history
- *   prepends, image/font late layout, and fold reflows at the compositor
- *   level — no script, nothing to wobble. Where the engine lacks scroll
- *   anchoring, the one scripted exception is a history prepend, corrected
- *   once per commit by the exact scrollHeight delta.
+ * The whole invariant is one sentence: pinned means we snap to the bottom
+ * after every content change, and a scroll event that lands far from the
+ * bottom unpins. Because every programmatic write lands AT the bottom, its
+ * echo scroll event reads gap ≈ 0 and stays pinned — so there is no need to
+ * count echoes, model glide physics, or reverse-engineer reader intent from
+ * wheel/touch/pointer/key events. Any far-from-bottom scroll event is
+ * necessarily the reader (or something acting for them, like find-in-page),
+ * and unpinning is then the correct response. The previous scripted-glide +
+ * echo-debt + intent-detection design is deliberately gone; the "flow in"
+ * feel lives in the row entrance CSS, not in scripted scrollTop motion.
+ *
+ * - Pinned at the tip → snap: `scrollTop = scrollHeight - clientHeight` after
+ *   every commit (layout effect) and every observed resize. Native scroll
+ *   anchoring is off while pinned so it cannot fight the snap. Shrink-clamps
+ *   land at the bottom too, so settle-fold collapses stay pinned by the same
+ *   rule.
+ * - Scrolled up reading → native scroll anchoring helps with late layout, but
+ *   history prepends are restored in script: loadOlder can also truncate the
+ *   tip (oldest-directed window), so scrollHeight delta alone is wrong, and
+ *   anchoring often fails near y=0. We re-anchor on the retained group that
+ *   held the previous first item (stable React key + offsetTop delta), falling
+ *   back to scrollHeight growth when no anchor node is measurable.
  */
 const PIN_THRESHOLD_PX = 48;
+/**
+ * Prefetch older history when the top sentinel is this far from the viewport.
+ * After a page loads we stay cool until the reader leaves this band (scrolls
+ * down into content) — never re-fire from continued scroll toward y=0.
+ */
+const OLDER_PREFETCH_MARGIN_PX = 400;
+const OLDER_PREFETCH_ROOT_MARGIN = `${OLDER_PREFETCH_MARGIN_PX}px 0px 0px 0px`;
 
 /**
- * Adaptive tip-follow glide. Remaining distance shrinks by ~63% every tau ms.
- * Tau is dynamic:
- * - Slow / sparse growth → longer tau (calm float; no strange laggy chase
- *   after a single line).
- * - Fast bursts or stacked debt → shorter tau (catch up without rattling).
- * Velocity is an EMA of scrollHeight growth; debt is distance-to-bottom.
+ * Pinned = the viewport bottom is within PIN_THRESHOLD_PX of the content
+ * bottom. When the scroll range itself is shorter than the threshold, the
+ * whole range would count as "at the bottom" and the reader could never unpin
+ * to reach older history — so the effective threshold shrinks to the range,
+ * making the very top of a short window count as scrolled up. A window that
+ * cannot scroll at all is always pinned.
  */
-const GLIDE_TAU_MIN_MS = 100;
-const GLIDE_TAU_MAX_MS = 420;
-/** At this tip-debt, urgency saturates toward the fast tau. */
-const GLIDE_CATCHUP_DEBT_PX = 140;
-/** Growth speed (px/s) that saturates urgency toward the fast tau. */
-const GLIDE_VELOCITY_REF_PX_S = 380;
-/** Idle this long without growth → velocity decays (slow stream calms). */
-const GLIDE_VELOCITY_IDLE_MS = 180;
-/** Growth beyond this snaps instead of gliding (session switches, huge folds). */
-const GLIDE_MAX_DISTANCE_PX = 600;
-
-function glideTauMs(debtPx: number, velocityPxPerSec: number): number {
-  const debtT = Math.min(1, Math.abs(debtPx) / GLIDE_CATCHUP_DEBT_PX);
-  const velT = Math.min(1, Math.max(0, velocityPxPerSec) / GLIDE_VELOCITY_REF_PX_S);
-  const urgency = Math.max(debtT, velT);
-  return GLIDE_TAU_MAX_MS + (GLIDE_TAU_MIN_MS - GLIDE_TAU_MAX_MS) * urgency;
+function isNearBottom(node: HTMLElement): boolean {
+  const maxScroll = node.scrollHeight - node.clientHeight;
+  if (maxScroll <= 1) {
+    return true;
+  }
+  const gap = maxScroll - node.scrollTop;
+  return gap < Math.min(PIN_THRESHOLD_PX, maxScroll);
 }
 
-/** Detects native scroll anchoring; a hook so tests can exercise the fallback. */
-function useNativeScrollAnchoring(): boolean {
-  return useMemo(
-    () =>
-      typeof CSS !== "undefined" &&
-      typeof CSS.supports === "function" &&
-      CSS.supports("overflow-anchor: auto"),
-    [],
-  );
+/** Escape a value for use inside a CSS attribute selector. */
+function cssEscapeAttribute(value: string): string {
+  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
+    return CSS.escape(value);
+  }
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
 /**
@@ -235,13 +242,19 @@ export function MessageTimeline({
   // history forever while the reader sits at the tip. Arm on first scroll-up.
   const olderPrefetchArmedRef = useRef(false);
   const [olderPrefetchArmed, setOlderPrefetchArmed] = useState(false);
+  // One loadOlder per visit to the top band. Re-arm only after the reader
+  // leaves that band (scrolls down / sentinel exits) — never from scrolling
+  // further toward y=0 (that was the batch-top load loop).
+  const olderLoadGateRef = useRef<"armed" | "cooling">("armed");
+  const resizeFollowRafRef = useRef<number | null>(null);
   const firstGroupKey = allGroups[0] ? timelineGroupKey(allGroups[0]) : null;
   // Content stays invisible until its first bottom-anchored frame, so a flash
   // of the window's TOP while a large timeline lays out is structurally
   // impossible — the reader only ever sees it already at the bottom.
   const [revealed, setRevealed] = useState(false);
-  // Mirror `pinned` into a ref so ResizeObserver/layout callbacks (stable
-  // closures) always read the live value without re-subscribing.
+  // Mirror `pinned` into a ref, written ONLY by applyPinned, so the
+  // ResizeObserver rAF (a stable closure) reads the live value and a snap can
+  // never race a just-unpinned reader across a pending React commit.
   const pinnedRef = useRef(true);
   // History windows (`hasNewer`) have a bottom that is not the live tip.
   // Pin/follow must ignore that floor — otherwise loadNewer appends yank the
@@ -249,19 +262,26 @@ export function MessageTimeline({
   // the reader is unpinned and scroll anchoring / delta correction owns place.
   const hasNewerRef = useRef(hasNewer);
   hasNewerRef.current = hasNewer;
-  // Our own scrollTop writes echo back as delayed scroll events. We only ever
-  // write "to the bottom" while pinned (echo reads as pinned — harmless) or a
-  // prepend delta while unpinned (echo reads as unpinned — harmless), so no
-  // target bookkeeping is needed; a small counter just stops a late echo of a
-  // bottom-follow from unpinning a reader who has not touched the wheel.
-  const pendingEchoesRef = useRef(0);
+  // Jump-to-latest pressed while a history window is showing: the pin must
+  // wait for the tip window to actually land (`hasNewer` → false) — pinning
+  // immediately would snap to the bottom of the CURRENT history page and
+  // page-crawl forward through the gap.
+  const wantPinRef = useRef(false);
+  // Jump-to-start pressed: consume on the commit that swaps the window so the
+  // scroll-to-top write races neither the old DOM nor the prepend correction.
+  const pendingJumpToStartRef = useRef(false);
+  // Identifies the newest Jump-to-start click so a settling promise callback
+  // from an earlier click can never clear a re-click's pending flag.
+  const jumpToStartSeqRef = useRef(0);
   // Prepend detection: the oldest loaded item's id changes exactly when older
   // history lands (including the merge-into-first-group case where the first
   // GROUP key is retained). Item ids, not group keys, are the durable signal.
-  // Only consulted where the engine lacks native scroll anchoring.
-  const nativeScrollAnchoring = useNativeScrollAnchoring();
   const previousFirstItemIdRef = useRef<string | null>(null);
   const previousScrollHeightRef = useRef(0);
+  // Per-commit place memory for unpinned prepend restore (see layout effect).
+  const lastScrollTopRef = useRef(0);
+  const groupKeyByItemIdRef = useRef<Map<string, string>>(new Map());
+  const groupOffsetByKeyRef = useRef<Map<string, number>>(new Map());
   const firstItemId = resolvedItems[0]?.id ?? null;
   const lastItem = resolvedItems[resolvedItems.length - 1];
   const streaming =
@@ -276,121 +296,26 @@ export function MessageTimeline({
     previousBulkFirstKeyRef.current !== firstGroupKey;
   const bulkRender = allGroups.length > 0 && (bulkActive || firstKeyChangedForBulk);
 
-  // Mirrors `revealed` for the stable follow callbacks: the very first
-  // bottom-anchored frame must SNAP (the reader hasn't seen anything yet);
-  // everything after it may glide.
-  const revealedRef = useRef(false);
-
-  const writeScrollTop = useCallback((node: HTMLElement, value: number) => {
-    const previous = node.scrollTop;
-    node.scrollTop = value;
-    if (node.scrollTop !== previous) {
-      pendingEchoesRef.current = Math.min(pendingEchoesRef.current + 1, 32);
+  // The ONLY writer of the pinned flag. Ref and state move together, so
+  // behavior (refs read by rAF callbacks) and rendering (the anchor class,
+  // the Jump-to-latest button) can never desync.
+  const applyPinned = useCallback((value: boolean) => {
+    if (pinnedRef.current !== value) {
+      pinnedRef.current = value;
+      setPinned(value);
     }
   }, []);
 
-  // Soft follow glide: while pinned, the tip eases toward the bottom with an
-  // exponential approach (frame-rate independent) instead of teleporting per
-  // commit. Tau adapts to recent growth velocity + tip debt — slow streams
-  // stay calm, fast bursts catch up. Target re-read every frame so mid-glide
-  // growth extends the same motion. Self-terminates when the pin releases.
-  const glideFrameRef = useRef<number | null>(null);
-  const glideLastTsRef = useRef(0);
-  const growthTrackerRef = useRef({ height: 0, at: 0, velocity: 0 });
-
-  const noteContentGrowth = useCallback((height: number) => {
-    const tracker = growthTrackerRef.current;
-    const nowTs = typeof performance !== "undefined" ? performance.now() : Date.now();
-    if (tracker.height > 0 && nowTs > tracker.at) {
-      const dh = height - tracker.height;
-      const dt = nowTs - tracker.at;
-      if (dh > 0 && dt > 0) {
-        const instant = (dh / dt) * 1000;
-        tracker.velocity = tracker.velocity * 0.65 + instant * 0.35;
-      } else if (dt > GLIDE_VELOCITY_IDLE_MS) {
-        // Sparse stream: forget burst urgency so the next line floats calmly.
-        tracker.velocity *= 0.45;
-      }
-    }
-    tracker.height = height;
-    tracker.at = nowTs;
+  // Every programmatic scroll is this one snap. Its echo scroll event lands
+  // with gap ≈ 0, so it re-reads as pinned — no echo accounting needed.
+  const snapToBottom = useCallback((node: HTMLElement) => {
+    node.scrollTop = Math.max(0, node.scrollHeight - node.clientHeight);
   }, []);
-
-  const stopGlide = useCallback(() => {
-    if (glideFrameRef.current !== null) {
-      cancelFrame(glideFrameRef.current);
-      glideFrameRef.current = null;
-    }
-  }, []);
-
-  const glideStep = useCallback(() => {
-    glideFrameRef.current = null;
-    const node = scrollRef.current;
-    if (!node || !pinnedRef.current) {
-      return;
-    }
-    noteContentGrowth(node.scrollHeight);
-    const target = node.scrollHeight - node.clientHeight;
-    const delta = target - node.scrollTop;
-    if (Math.abs(delta) <= 1) {
-      if (delta !== 0) {
-        writeScrollTop(node, target);
-      }
-      return;
-    }
-    const nowTs = typeof performance !== "undefined" ? performance.now() : Date.now();
-    const dt =
-      glideLastTsRef.current === 0 ? 16 : Math.min(64, Math.max(8, nowTs - glideLastTsRef.current));
-    glideLastTsRef.current = nowTs;
-    // Decay velocity while gliding without new growth so catch-up eases out.
-    const tracker = growthTrackerRef.current;
-    if (nowTs - tracker.at > GLIDE_VELOCITY_IDLE_MS) {
-      tracker.velocity *= 0.85;
-      tracker.at = nowTs;
-    }
-    const tau = glideTauMs(delta, tracker.velocity);
-    const alpha = 1 - Math.exp(-dt / tau);
-    const step = delta * alpha;
-    writeScrollTop(node, node.scrollTop + (Math.abs(step) < 1 ? Math.sign(delta) : step));
-    glideFrameRef.current = requestFrame(glideStep);
-  }, [noteContentGrowth, writeScrollTop]);
-
-  const startGlide = useCallback(() => {
-    if (glideFrameRef.current === null) {
-      glideLastTsRef.current = 0;
-      glideFrameRef.current = requestFrame(glideStep);
-    }
-  }, [glideStep]);
-
-  useEffect(() => stopGlide, [stopGlide]);
-
-  const followTip = useCallback(
-    (node: HTMLElement) => {
-      noteContentGrowth(node.scrollHeight);
-      const target = node.scrollHeight - node.clientHeight;
-      const delta = target - node.scrollTop;
-      if (Math.abs(delta) <= 1) {
-        return;
-      }
-      // Glide only for ordinary streaming-scale growth after the first paint.
-      // The initial reveal, session switches, and layout jumps larger than a
-      // viewport-ish distance snap — animating those would feel like lag.
-      if (
-        revealedRef.current &&
-        Math.abs(delta) <= GLIDE_MAX_DISTANCE_PX &&
-        !prefersReducedMotion()
-      ) {
-        startGlide();
-      } else {
-        stopGlide();
-        writeScrollTop(node, target);
-      }
-    },
-    [noteContentGrowth, startGlide, stopGlide, writeScrollTop],
-  );
 
   // The single post-commit scroll authority. Runs after EVERY commit (no dep
   // list): any commit may change content height, and the decision is cheap.
+  // Also the ONLY writer of the prepend-correction baselines
+  // (previousFirstItemIdRef / previousScrollHeightRef / group offset maps).
   // oxlint-disable-next-line react-hooks/exhaustive-deps -- Deliberately runs after every commit.
   useLayoutEffect(() => {
     const node = scrollRef.current;
@@ -398,29 +323,94 @@ export function MessageTimeline({
       return;
     }
     const previousFirstItemId = previousFirstItemIdRef.current;
+    const previousGroupKeyByItemId = groupKeyByItemIdRef.current;
+    const previousGroupOffsetByKey = groupOffsetByKeyRef.current;
+    const previousScrollTop = lastScrollTopRef.current;
+    const firstItemChanged = previousFirstItemId !== null && firstItemId !== previousFirstItemId;
     const prepended =
-      previousFirstItemId !== null &&
-      firstItemId !== previousFirstItemId &&
-      resolvedItems.some((item) => item.id === previousFirstItemId);
-    // Live tip only. A history-page bottom (`hasNewer`) must not follow appends
-    // from loadNewer — that path should leave scrollTop alone, like an unpinned
-    // reader watching growth below the viewport.
-    if (autoFollow && pinnedRef.current && !hasNewerRef.current) {
-      followTip(node);
-    } else if (prepended && !nativeScrollAnchoring) {
-      // Fallback engines only: one exact correction per prepend commit, whole
-      // pixels. Anchoring engines already adjusted during layout — correcting
-      // again here would double-shift. Growth below the viewport (a live tip
-      // streaming while the reader is up in history) never lands here.
-      const delta = Math.round(node.scrollHeight - previousScrollHeightRef.current);
-      if (delta > 0) {
-        writeScrollTop(node, node.scrollTop + delta);
+      firstItemChanged && resolvedItems.some((item) => item.id === previousFirstItemId);
+    if (pendingJumpToStartRef.current && firstItemChanged) {
+      // The oldest window landed — jump against the NEW DOM, and skip the
+      // prepend correction (it would shift the reader away from the top).
+      pendingJumpToStartRef.current = false;
+      node.scrollTop = 0;
+    } else if (wantPinRef.current && !hasNewer) {
+      // Jump-to-latest was pressed on a history window and the tip window is
+      // in THIS commit — consume pre-paint so the first tip frame is already
+      // at the bottom (post-paint consumption flashed one clamped frame).
+      wantPinRef.current = false;
+      if (autoFollow) {
+        applyPinned(true);
+        snapToBottom(node);
       }
+    } else if (autoFollow && pinnedRef.current && !hasNewer) {
+      // Live tip only. A history-page bottom (`hasNewer`) must not follow
+      // appends from loadNewer — that path leaves scrollTop alone, like an
+      // unpinned reader watching growth below the viewport.
+      snapToBottom(node);
+    } else if (prepended) {
+      // Keep the reader on the same retained rows. Prefer the offsetTop delta
+      // of the group that still holds the previous first item — that stays
+      // correct when loadOlder also truncates the tip (height delta then lies).
+      // If native anchoring already applied the same shift, leave scrollTop.
+      const anchorKey =
+        previousFirstItemId !== null
+          ? previousGroupKeyByItemId.get(previousFirstItemId)
+          : undefined;
+      const previousAnchorTop =
+        anchorKey !== undefined ? previousGroupOffsetByKey.get(anchorKey) : undefined;
+      const anchorEl =
+        anchorKey !== undefined
+          ? node.querySelector(`[data-og-group-key="${cssEscapeAttribute(anchorKey)}"]`)
+          : null;
+      let delta: number | null = null;
+      if (anchorEl instanceof HTMLElement && previousAnchorTop !== undefined) {
+        const moved = Math.round(anchorEl.offsetTop - previousAnchorTop);
+        if (moved !== 0) {
+          delta = moved;
+        }
+      }
+      if (delta === null) {
+        const heightDelta = Math.round(node.scrollHeight - previousScrollHeightRef.current);
+        if (heightDelta > 0) {
+          delta = heightDelta;
+        }
+      }
+      if (delta !== null) {
+        const expected = previousScrollTop + delta;
+        if (Math.abs(node.scrollTop - expected) > 2) {
+          node.scrollTop = expected;
+        }
+      }
+    }
+    // After a prepend, if restore left us below the top prefetch band,
+    // re-arm so a later approach can load again. Still cooling while parked
+    // inside the band (short pages) — that stops the y=0 load loop.
+    if (
+      prepended &&
+      !pinnedRef.current &&
+      olderLoadGateRef.current === "cooling" &&
+      node.scrollTop > OLDER_PREFETCH_MARGIN_PX
+    ) {
+      olderLoadGateRef.current = "armed";
     }
     previousFirstItemIdRef.current = firstItemId;
     previousScrollHeightRef.current = node.scrollHeight;
+    lastScrollTopRef.current = node.scrollTop;
+    const nextKeyByItemId = new Map<string, string>();
+    const nextOffsetByKey = new Map<string, number>();
+    for (const { group, key } of groups) {
+      for (const itemId of timelineGroupItemIds(group)) {
+        nextKeyByItemId.set(itemId, key);
+      }
+      const el = node.querySelector(`[data-og-group-key="${cssEscapeAttribute(key)}"]`);
+      if (el instanceof HTMLElement) {
+        nextOffsetByKey.set(key, el.offsetTop);
+      }
+    }
+    groupKeyByItemIdRef.current = nextKeyByItemId;
+    groupOffsetByKeyRef.current = nextOffsetByKey;
     if (!revealed && groups.length > 0) {
-      revealedRef.current = true;
       setRevealed(true);
     }
   });
@@ -431,8 +421,6 @@ export function MessageTimeline({
     if (allGroups.length > 0) {
       return;
     }
-    stopGlide();
-    revealedRef.current = false;
     if (revealed) {
       setRevealed(false);
     }
@@ -440,11 +428,16 @@ export function MessageTimeline({
       olderPrefetchArmedRef.current = false;
       setOlderPrefetchArmed(false);
     }
-    if (!pinnedRef.current) {
-      pinnedRef.current = true;
-      setPinned(true);
-    }
-  }, [allGroups.length, revealed, stopGlide]);
+    olderLoadGateRef.current = "armed";
+    wantPinRef.current = false;
+    pendingJumpToStartRef.current = false;
+    previousFirstItemIdRef.current = null;
+    previousScrollHeightRef.current = 0;
+    lastScrollTopRef.current = 0;
+    groupKeyByItemIdRef.current = new Map();
+    groupOffsetByKeyRef.current = new Map();
+    applyPinned(true);
+  }, [allGroups.length, revealed, applyPinned]);
 
   // Clear the bulk-paint marker a frame after it renders, so rows appended
   // live (streams, new turns) animate exactly as before.
@@ -459,8 +452,9 @@ export function MessageTimeline({
   }, [bulkRender, firstGroupKey]);
 
   // Prefetch older history only after the reader scrolls up from the tip.
-  // Once armed, the sentinel trips 1600px early so backfill is usually
-  // rendered (and its scroll delta corrected) before the reader reaches it.
+  // Once armed, the sentinel trips early so backfill is usually rendered
+  // (and its scroll delta corrected) before the reader reaches it. Gated so
+  // a short prepend that leaves the sentinel intersecting cannot loop.
   useEffect(() => {
     const root = scrollRef.current;
     const target = topSentinelRef.current;
@@ -477,11 +471,19 @@ export function MessageTimeline({
     }
     const observer = new IntersectionObserver(
       (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) {
-          onLoadOlder();
+        const intersecting = entries.some((entry) => entry.isIntersecting);
+        if (!intersecting) {
+          // Left the top band — next approach may load once.
+          olderLoadGateRef.current = "armed";
+          return;
         }
+        if (olderLoadGateRef.current !== "armed") {
+          return;
+        }
+        olderLoadGateRef.current = "cooling";
+        onLoadOlder();
       },
-      { root, rootMargin: "1600px 0px 0px 0px" },
+      { root, rootMargin: OLDER_PREFETCH_ROOT_MARGIN },
     );
     observer.observe(target);
     return () => observer.disconnect();
@@ -515,10 +517,10 @@ export function MessageTimeline({
   }, [hasNewer, loadingNewer, onLoadNewer, firstGroupKey]);
 
   // Late layout that React commits cannot see (images decoding, fonts, code
-  // blocks) grows content without a commit. While pinned we keep following the
-  // bottom; while unpinned we deliberately do NOTHING — chasing those shifts
-  // with scroll corrections was the wobble. We only refresh the height
-  // baseline so the next prepend delta stays exact.
+  // blocks) grows content without a commit. While pinned we keep snapping to
+  // the bottom; while unpinned we deliberately do NOTHING — chasing those
+  // shifts with scroll corrections was the wobble. Coalesce RO into one rAF so
+  // a tool/markdown reflow storm re-snaps at most once per frame.
   useEffect(() => {
     const node = scrollRef.current;
     const inner = node?.firstElementChild;
@@ -526,181 +528,108 @@ export function MessageTimeline({
       return;
     }
     const observer = new ResizeObserver(() => {
-      const current = scrollRef.current;
-      if (!current) {
+      if (resizeFollowRafRef.current !== null) {
         return;
       }
-      if (autoFollow && pinnedRef.current && !hasNewerRef.current) {
-        followTip(current);
-      }
-      previousScrollHeightRef.current = current.scrollHeight;
+      resizeFollowRafRef.current = requestFrame(() => {
+        resizeFollowRafRef.current = null;
+        const current = scrollRef.current;
+        if (!current) {
+          return;
+        }
+        if (autoFollow && pinnedRef.current && !hasNewerRef.current) {
+          snapToBottom(current);
+        }
+      });
     });
     observer.observe(inner);
-    return () => observer.disconnect();
-  }, [autoFollow, followTip]);
+    // The scroller's own box moves the bottom too (window resize, composer
+    // growing): clientHeight changes with no inner resize and no commit.
+    observer.observe(node);
+    return () => {
+      observer.disconnect();
+      if (resizeFollowRafRef.current !== null) {
+        cancelFrame(resizeFollowRafRef.current);
+        resizeFollowRafRef.current = null;
+      }
+    };
+  }, [autoFollow, snapToBottom]);
 
   // Entering a non-tip history window: drop any live pin so the page bottom
-  // cannot re-stick follow across loadNewer.
+  // cannot re-stick follow across loadNewer. Leaving it (the tip window
+  // landed): honor a pending Jump-to-latest, or re-pin a reader already parked
+  // at what just became the live bottom — paging forward to the tip must not
+  // strand them unpinned watching new content grow below.
   useEffect(() => {
-    if (!hasNewer) {
+    if (hasNewer) {
+      applyPinned(false);
       return;
     }
-    stopGlide();
-    if (pinnedRef.current) {
-      pinnedRef.current = false;
-      setPinned(false);
-    }
-  }, [hasNewer, stopGlide]);
-
-  // While the glide is writing scrollTop every frame, its echoes could mask
-  // the reader's own upward scroll events — so upward INTENT (wheel up, finger
-  // drag down, scrollbar gutter, keys) releases the pin directly. Layout
-  // scrolls during settle-fold / scenario spawns must NEVER unpin from
-  // onScroll alone — that was the recurring "Jump to latest" trap.
-  const releasePin = useCallback(() => {
     const node = scrollRef.current;
-    if (!node || node.scrollHeight - node.clientHeight <= 1) {
-      return; // nothing to scroll — no pin to release
+    if (!node) {
+      return;
     }
-    stopGlide();
-    if (pinnedRef.current) {
-      pinnedRef.current = false;
-      setPinned(false);
+    if (wantPinRef.current) {
+      wantPinRef.current = false;
+      if (autoFollow) {
+        applyPinned(true);
+        snapToBottom(node);
+      }
+      return;
     }
-    if (!olderPrefetchArmedRef.current) {
-      olderPrefetchArmedRef.current = true;
-      setOlderPrefetchArmed(true);
+    if (autoFollow && !pinnedRef.current && isNearBottom(node)) {
+      applyPinned(true);
     }
-  }, [stopGlide]);
+  }, [hasNewer, autoFollow, applyPinned, snapToBottom]);
 
-  const scrollbarDragRef = useRef(false);
-  const touchYRef = useRef<number | null>(null);
-
+  // The one unpin/repin decision, purely geometric. Our own writes always land
+  // at the bottom, so their echoes stay pinned; any far-from-bottom scroll
+  // event is necessarily the reader moving and unpins. Settle-fold shrinks are
+  // safe by the same rule: the browser clamps scrollTop to the new max, which
+  // IS the bottom. No wheel/touch/pointer/key/gutter inference exists anymore.
   const onScroll = () => {
     const node = scrollRef.current;
     if (!node) {
       return;
     }
-    const echo = pendingEchoesRef.current > 0;
-    if (echo) {
-      pendingEchoesRef.current -= 1;
+    lastScrollTopRef.current = node.scrollTop;
+    const nearBottom = isNearBottom(node);
+    const nextPinned = !hasNewer && nearBottom;
+    applyPinned(nextPinned);
+    // A far-from-bottom scroll while a Jump-to-latest is pending is the reader
+    // changing their mind: drop the latch, or a stale one (host rejected or
+    // never flipped hasNewer) would fire a surprise pin + snap whenever the
+    // reader later pages to the tip themselves. Our own writes land AT the
+    // bottom, so their echoes read nearBottom and keep a live latch.
+    if (wantPinRef.current && !nearBottom) {
+      wantPinRef.current = false;
     }
-    const gap = node.scrollHeight - node.scrollTop - node.clientHeight;
-    // Near-bottom (re)pins only for the live tip. History-window bottoms are
-    // loadNewer triggers, not follow targets.
-    const nextPinned = !hasNewerRef.current && gap < PIN_THRESHOLD_PX;
-    previousScrollHeightRef.current = node.scrollHeight;
-    // Near-bottom always (re)pins — including echoes of our own writes.
     if (nextPinned) {
-      if (!pinnedRef.current) {
-        pinnedRef.current = true;
-        setPinned(true);
-      }
-      return;
-    }
-    if (echo) {
-      return;
-    }
-    // Still pinned but far from the tip. Either layout moved the floor
-    // (collapse / append / images) or the reader is dragging the scrollbar.
-    // Wheel/touch/keys already called releasePin. Scrollbar sets the drag
-    // flag below. Everything else is layout — re-stick, never drop the pin.
-    // History mode never re-sticks: drop the pin instead.
-    if (pinnedRef.current) {
-      if (hasNewerRef.current || scrollbarDragRef.current) {
-        releasePin();
-        return;
-      }
-      followTip(node);
       return;
     }
     if (!olderPrefetchArmedRef.current) {
       olderPrefetchArmedRef.current = true;
       setOlderPrefetchArmed(true);
     }
-  };
-
-  // Native wheel listener: React's onWheel is unreliable under some test
-  // doms, and we want the same intent path in production.
-  useEffect(() => {
-    const node = scrollRef.current;
-    if (!node) {
-      return;
+    // Re-arm older prefetch only after leaving the top band (scroll down into
+    // content). Never re-arm/load from continued scroll toward y=0.
+    if (olderLoadGateRef.current === "cooling" && node.scrollTop > OLDER_PREFETCH_MARGIN_PX) {
+      olderLoadGateRef.current = "armed";
     }
-    const onWheelNative = (event: WheelEvent) => {
-      if (event.deltaY < 0) {
-        releasePin();
-      }
-    };
-    const onKeyDownNative = (event: KeyboardEvent) => {
-      if (event.key === "ArrowUp" || event.key === "PageUp" || event.key === "Home") {
-        releasePin();
-      }
-    };
-    node.addEventListener("wheel", onWheelNative, { passive: true });
-    node.addEventListener("keydown", onKeyDownNative);
-    return () => {
-      node.removeEventListener("wheel", onWheelNative);
-      node.removeEventListener("keydown", onKeyDownNative);
-    };
-  }, [releasePin]);
-
-  const onWheel = (event: React.WheelEvent) => {
-    if (event.deltaY < 0) {
-      releasePin();
-    }
-  };
-  const onPointerDown = (event: React.PointerEvent) => {
-    const node = scrollRef.current;
-    if (!node) {
-      return;
-    }
-    // Only the classic overlay scrollbar gutter counts as reader intent —
-    // clicks on fold chevrons / messages must not arm unpin.
-    const gutter = node.offsetWidth - node.clientWidth;
-    if (gutter <= 0) {
-      return;
-    }
-    const rect = node.getBoundingClientRect();
-    if (event.clientX >= rect.right - gutter - 2) {
-      scrollbarDragRef.current = true;
-    }
-  };
-  const onPointerUp = () => {
-    scrollbarDragRef.current = false;
-  };
-  const onTouchStart = (event: React.TouchEvent) => {
-    touchYRef.current = event.touches[0]?.clientY ?? null;
-  };
-  const onTouchMove = (event: React.TouchEvent) => {
-    const y = event.touches[0]?.clientY;
-    if (y === undefined) {
-      return;
-    }
-    const previous = touchYRef.current;
-    if (previous !== null && y - previous > 6) {
-      releasePin();
-    }
-    touchYRef.current = y;
   };
 
   return (
     <LightboxProvider>
       <EntranceAnimationProvider value={!bulkRender}>
+        <TooltipProvider delayDuration={400}>
         <div className={cn("og-root relative flex min-h-0 flex-col", className)}>
-          {/* Pinned: anchoring off so the soft tip-follow glide is the only
-          authority. Unpinned: native scroll anchoring holds the reader's
-          place through prepends and late layout — the wobble-free path. */}
+          {/* Pinned: anchoring off so it cannot fight the bottom snap.
+          Unpinned: native scroll anchoring holds the reader's place through
+          prepends and late layout — the wobble-free path. */}
           <div
             ref={scrollRef}
             tabIndex={-1}
             onScroll={onScroll}
-            onWheel={onWheel}
-            onPointerDown={onPointerDown}
-            onPointerUp={onPointerUp}
-            onPointerCancel={onPointerUp}
-            onTouchStart={onTouchStart}
-            onTouchMove={onTouchMove}
             style={groups.length > 0 && !revealed ? { visibility: "hidden" } : undefined}
             className={cn(
               // tabIndex=-1 is programmatic only — never paint a focus ring on
@@ -740,7 +669,7 @@ export function MessageTimeline({
                       ? 1
                       : 0;
                 return (
-                  <div key={key} data-og-timeline-group-anchor="">
+                  <div key={key} data-og-timeline-group-anchor="" data-og-group-key={key}>
                     <TimelineGroupView
                       group={group}
                       renderMessageText={renderMessageText}
@@ -801,16 +730,38 @@ export function MessageTimeline({
                     data-og-jump-to-start=""
                     disabled={loadingOlder}
                     onClick={() => {
-                      stopGlide();
-                      pinnedRef.current = false;
-                      setPinned(false);
+                      applyPinned(false);
+                      pendingJumpToStartRef.current = true;
+                      const seq = ++jumpToStartSeqRef.current;
                       const node = scrollRef.current;
-                      void Promise.resolve(onJumpToStart()).then(() => {
-                        const scroller = scrollRef.current ?? node;
-                        if (scroller) {
-                          writeScrollTop(scroller, 0);
-                        }
-                      });
+                      void Promise.resolve(onJumpToStart()).then(
+                        () => {
+                          // The commit that swaps in the oldest window consumes
+                          // the flag against the new DOM; this write covers the
+                          // already-committed order and the no-window-change
+                          // case (jumping within the current window).
+                          const scroller = scrollRef.current ?? node;
+                          if (scroller) {
+                            scroller.scrollTop = 0;
+                          }
+                          // A host may resolve without ever changing the
+                          // window (already on the oldest page). Any swap
+                          // commit runs its layout effect before the next
+                          // frame, so a flag still armed by then is the
+                          // no-change case — clear it, or a LATER prepend
+                          // would spuriously jump the reader to the top.
+                          requestFrame(() => {
+                            if (jumpToStartSeqRef.current === seq) {
+                              pendingJumpToStartRef.current = false;
+                            }
+                          });
+                        },
+                        () => {
+                          if (jumpToStartSeqRef.current === seq) {
+                            pendingJumpToStartRef.current = false;
+                          }
+                        },
+                      );
                     }}
                     className={cn(
                       "inline-flex items-center gap-1.5 rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1.5",
@@ -851,27 +802,45 @@ export function MessageTimeline({
                 exit={{ opacity: 0, y: 8 }}
                 transition={{ duration: 0.15, ease: "easeOut" }}
                 onClick={() => {
-                  const finish = () => {
-                    // Re-pin, then let the glide carry the trip: its writes are
-                    // echo-counted (a native smooth scrollTo's are not, and its
-                    // mid-flight events would read as the reader unpinning).
-                    pinnedRef.current = true;
-                    setPinned(true);
+                  if (hasNewer) {
+                    // Do not pin against the current history page — its bottom
+                    // is not the tip. The pin + snap run when the tip window
+                    // actually lands (`hasNewer` flips false).
+                    wantPinRef.current = true;
                     const node = scrollRef.current;
-                    if (!node) {
-                      return;
+                    if (onJumpToLatest) {
+                      void Promise.resolve(onJumpToLatest()).then(
+                        () => {
+                          // Covers a host that flipped hasNewer before
+                          // resolving; otherwise the tip-window commit
+                          // consumes the flag.
+                          const current = scrollRef.current;
+                          if (current && wantPinRef.current && !hasNewerRef.current) {
+                            wantPinRef.current = false;
+                            applyPinned(true);
+                            snapToBottom(current);
+                          }
+                        },
+                        () => {
+                          // The tip reload failed (ordinary network error):
+                          // an armed latch would fire a surprise snap when
+                          // the reader later pages to the tip themselves.
+                          wantPinRef.current = false;
+                        },
+                      );
+                    } else if (node) {
+                      // No tip reload available: jump within the in-memory
+                      // window so the newer sentinel can page forward; the
+                      // latch pins if the tip window eventually lands.
+                      snapToBottom(node);
                     }
-                    if (prefersReducedMotion()) {
-                      writeScrollTop(node, node.scrollHeight - node.clientHeight);
-                    } else {
-                      startGlide();
-                    }
-                  };
-                  if (onJumpToLatest && hasNewer) {
-                    void Promise.resolve(onJumpToLatest()).then(finish);
                     return;
                   }
-                  finish();
+                  const node = scrollRef.current;
+                  if (node) {
+                    applyPinned(true);
+                    snapToBottom(node);
+                  }
                 }}
                 className={cn(
                   "absolute bottom-4 left-1/2 -translate-x-1/2",
@@ -886,6 +855,7 @@ export function MessageTimeline({
             ) : null}
           </AnimatePresence>
         </div>
+        </TooltipProvider>
       </EntranceAnimationProvider>
     </LightboxProvider>
   );
@@ -1287,11 +1257,36 @@ function collectAgentMessageText(groups: readonly TimelineGroup[]): string {
   return parts.join("\n\n");
 }
 
+/** Non-null turnIds projected into a turn body (activity + nested messages). */
+function collectTurnIdsFromGroups(groups: readonly TimelineGroup[]): Set<string> {
+  const ids = new Set<string>();
+  for (const group of groups) {
+    if (group.kind === "item") {
+      const turnId = "turnId" in group.item ? group.item.turnId : null;
+      if (typeof turnId === "string" && turnId.length > 0) {
+        ids.add(turnId);
+      }
+    } else if (group.kind === "activity") {
+      for (const item of group.items) {
+        if (item.turnId) {
+          ids.add(item.turnId);
+        }
+      }
+    } else if (group.kind === "turn") {
+      for (const nested of collectTurnIdsFromGroups(group.groups)) {
+        ids.add(nested);
+      }
+    }
+  }
+  return ids;
+}
+
 /**
  * Settled turns lift the final agent answer out as a sibling group. Include it
  * in "Copy turn" when present so the chip copies the full assistant reply.
+ * Fenced by turnId so the next turn's answer is never stolen.
  */
-function trailingAgentTextAfterTurn(
+export function trailingAgentTextAfterTurn(
   group: TimelineGroup,
   next: TimelineGroup | undefined,
 ): string | undefined {
@@ -1299,6 +1294,14 @@ function trailingAgentTextAfterTurn(
     return undefined;
   }
   if (next?.kind === "item" && next.item.kind === "agent-message") {
+    const turnIds = collectTurnIdsFromGroups(group.groups);
+    // Degenerate body with no turnIds: do not guess — safer than lifting wrong.
+    if (turnIds.size === 0) {
+      return undefined;
+    }
+    if (!next.item.turnId || !turnIds.has(next.item.turnId)) {
+      return undefined;
+    }
     const text = next.item.text.trim();
     return text.length > 0 ? text : undefined;
   }
@@ -1473,7 +1476,7 @@ function UserMessageRow({
           label="Copy message"
           className="w-fit max-w-full min-w-0"
         >
-          <div className="w-fit max-w-full min-w-0 rounded-og-lg rounded-br-og-xs border border-og-border bg-og-surface-2 px-4 py-2.5 pr-10 text-og-md leading-6 text-og-fg">
+          <div className="w-fit max-w-full min-w-0 rounded-og-lg rounded-br-og-xs border border-og-border bg-og-surface-2 px-4 py-2.5 text-og-md leading-6 text-og-fg">
             {renderMessageText ? (
               renderMessageText(item.text, item)
             ) : (
@@ -1510,7 +1513,7 @@ function AgentMessageRow({
       copyText={item.text}
       label="Copy message"
       align="end"
-      className={cn(enter && "animate-og-enter", "min-w-0 pr-9 text-og-md leading-7 text-og-fg")}
+      className={cn(enter && "animate-og-enter", "min-w-0 text-og-md leading-7 text-og-fg")}
     >
       {body}
     </CopyHoverFrame>

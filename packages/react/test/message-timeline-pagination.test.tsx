@@ -64,10 +64,9 @@ function manyEvents(count: number): SessionEvent[] {
 }
 
 async function readerScrollUp(scroller: HTMLElement, scrollTop = 0): Promise<void> {
-  // Pin release is intent-only (wheel/touch/scrollbar/keys). A bare scrollTop
-  // jump looks like settle-fold layout and must re-stick, not unpin.
+  // Unpinning is purely geometric: a scroll event landing far from the bottom
+  // IS the reader moving — no synthetic wheel/touch intent is needed.
   await actRun(() => {
-    scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -40, bubbles: true }));
     scroller.scrollTop = scrollTop;
     scroller.dispatchEvent(new Event("scroll"));
   });
@@ -333,16 +332,13 @@ describe("MessageTimeline pagination affordances", () => {
     await r.unmount();
   });
 
-  test("unpinned fallback (no native anchoring): only a genuine prepend moves scrollTop, by one exact delta", async () => {
+  test("unpinned prepend restores place by height delta when group offsets are unavailable", async () => {
     const frames: FrameRequestCallback[] = [];
     globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
       frames.push(cb);
       return frames.length;
     };
     globalThis.cancelAnimationFrame = () => undefined;
-    // Force the manual-correction path: engines WITH native scroll anchoring
-    // never script scrollTop while unpinned (the browser holds the anchor).
-    stubNativeScrollAnchoringUnsupported();
 
     const settled = manyEvents(12).map((evt) => event(evt.sequence + 8)); // 9..20
     const r = await renderComponent(
@@ -357,7 +353,8 @@ describe("MessageTimeline pagination affordances", () => {
     }
 
     // Reader is near the top — the historical wobble zone while the next
-    // older page inserts.
+    // older page inserts. Happy-dom group offsetTops are 0, so restore uses
+    // the scrollHeight-delta fallback.
     let contentHeight = 2000;
     const clientHeight = 400;
     let currentScrollTop = 24;
@@ -420,6 +417,73 @@ describe("MessageTimeline pagination affordances", () => {
     await r.unmount();
   });
 
+  test("near-top prepend restores place when scrollHeight is unchanged (tip truncated)", async () => {
+    // loadOlder uses an oldest-directed window: older rows prepend AND the live
+    // tip can be evicted. Net scrollHeight may not grow, so height-delta restore
+    // alone leaves scrollTop at 0 — the "jumped to top of materialised page" bug.
+    // Anchor the previous first group's offsetTop instead.
+    const settled = manyEvents(12).map((evt) => event(evt.sequence + 8)); // 9..20
+    const r = await renderComponent(
+      <MessageTimeline events={settled} hasOlder loadingOlder={false} />,
+    );
+    await armOlderPrefetch(r.container);
+    const scroller = r.container.querySelector(".overflow-y-auto");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+    let height = 2000;
+    let top = 0;
+    Object.defineProperty(scroller, "clientHeight", {
+      configurable: true,
+      get: () => 400,
+    });
+    Object.defineProperty(scroller, "scrollHeight", {
+      configurable: true,
+      get: () => height,
+    });
+    Object.defineProperty(scroller, "scrollTop", {
+      configurable: true,
+      get: () => top,
+      set: (value: number) => {
+        top = Math.max(0, Math.min(height - 400, value));
+      },
+    });
+    await actRun(() => {
+      scroller.scrollTop = 0;
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    await r.rerender(<MessageTimeline events={settled} hasOlder loadingOlder={false} />);
+    await flush();
+
+    const originalOffset = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetTop");
+    Object.defineProperty(HTMLElement.prototype, "offsetTop", {
+      configurable: true,
+      get(this: HTMLElement) {
+        if (this.getAttribute("data-og-group-key") !== "evt-9") {
+          return 0;
+        }
+        // Post-prepend DOM includes older rows (evt-1); that is when the
+        // retained evt-9 group has shifted down.
+        return scroller.querySelector('[data-og-group-key="evt-1"]') ? 600 : 0;
+      },
+    });
+    try {
+      height = 2000; // tip truncated — no net growth
+      await r.rerender(
+        <MessageTimeline events={manyEvents(20)} hasOlder loadingOlder={false} status="running" />,
+      );
+      await flush();
+      expect(scroller.scrollTop).toBe(600);
+    } finally {
+      if (originalOffset) {
+        Object.defineProperty(HTMLElement.prototype, "offsetTop", originalOffset);
+      } else {
+        delete (HTMLElement.prototype as { offsetTop?: unknown }).offsetTop;
+      }
+    }
+    await r.unmount();
+  });
+
   test("native scroll anchoring owns unpinned mode; the bottom-snap owns pinned mode", async () => {
     const r = await renderComponent(<MessageTimeline events={manyEvents(6)} />);
     await flush();
@@ -470,13 +534,14 @@ describe("MessageTimeline pagination affordances", () => {
     expect(layout.tipBottomGap()).toBeLessThan(2);
 
     // Grow content first (stale scrollTop leaves tip above the bottom), then
-    // let the live append's soft-follow glide settle to the tip.
+    // let the live append's commit snap the tip back to the bottom.
     layout.setContentHeight(2080);
     expect(layout.tipBottomGap()).toBeGreaterThan(2);
     await r.rerender(
       <MessageTimeline events={[...initial, agentDelta(21, " world")]} status="running" />,
     );
     await drainFrames(frames);
+    await flush();
 
     expect(r.container.textContent).toContain("hello  world");
     expect(distanceFromBottom(scroller)).toBeLessThan(48);
@@ -639,7 +704,7 @@ describe("MessageTimeline pagination affordances", () => {
     const observed: Element[] = [];
     globalThis.IntersectionObserver = class implements IntersectionObserver {
       readonly root: Element | Document | null = null;
-      readonly rootMargin = "1600px 0px 0px 0px";
+      readonly rootMargin = "400px 0px 0px 0px";
       readonly scrollMargin = "0px 0px 0px 0px";
       readonly thresholds = [0];
       constructor(cb: IntersectionObserverCallback) {
@@ -683,6 +748,281 @@ describe("MessageTimeline pagination affordances", () => {
     await r.unmount();
   });
 
+  test("older prefetch does not loop at the batch top", async () => {
+    let callback: IntersectionObserverCallback = () => undefined;
+    let instance: IntersectionObserver | null = null;
+    const observed: Element[] = [];
+    globalThis.IntersectionObserver = class implements IntersectionObserver {
+      readonly root: Element | Document | null = null;
+      readonly rootMargin = "400px 0px 0px 0px";
+      readonly scrollMargin = "0px 0px 0px 0px";
+      readonly thresholds = [0];
+      constructor(cb: IntersectionObserverCallback) {
+        callback = cb;
+        instance = this;
+      }
+      observe(target: Element): void {
+        observed.push(target);
+      }
+      unobserve(): void {}
+      disconnect(): void {}
+      takeRecords(): IntersectionObserverEntry[] {
+        return [];
+      }
+    };
+
+    let calls = 0;
+    const r = await renderComponent(
+      <MessageTimeline
+        events={manyEvents(4)}
+        hasOlder
+        onLoadOlder={() => {
+          calls += 1;
+        }}
+      />,
+    );
+    await armOlderPrefetch(r.container);
+    const scroller = r.container.querySelector(".overflow-y-auto");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+    scroller.scrollTop = 200;
+
+    const hit = async () => {
+      await actRun(() =>
+        callback(
+          [{ isIntersecting: true, target: observed[0]! } as IntersectionObserverEntry],
+          instance!,
+        ),
+      );
+    };
+    await hit();
+    expect(calls).toBe(1);
+    // Still intersecting / scrolling toward y=0 must not chain-load.
+    await hit();
+    await hit();
+    expect(calls).toBe(1);
+    await actRun(() => {
+      scroller.scrollTop = 0;
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    await flush();
+    await hit();
+    expect(calls).toBe(1);
+
+    // Leave the top band (scroll down into content) re-arms.
+    await actRun(() => {
+      scroller.scrollTop = 500;
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    await flush();
+    await hit();
+    expect(calls).toBe(2);
+
+    // Sentinel exit also re-arms.
+    await actRun(() =>
+      callback(
+        [{ isIntersecting: false, target: observed[0]! } as IntersectionObserverEntry],
+        instance!,
+      ),
+    );
+    await hit();
+    expect(calls).toBe(3);
+    await r.unmount();
+  });
+
+  test("pinned scroll-up intent releases pin instead of yanking back to tip", async () => {
+    const r = await renderComponent(<MessageTimeline events={manyEvents(8)} status="running" />);
+    const scroller = r.container.querySelector(".overflow-y-auto");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+    const layout = mockScrollerLayout(scroller, {
+      clientHeight: 400,
+      contentHeight: 2000,
+      tipHeight: 80,
+      paddingBottom: 24,
+    });
+    layout.syncTipAtBottom();
+    await actRun(() => {
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    expect(distanceFromBottom(scroller)).toBeLessThan(48);
+
+    // Scroll event with decreasing scrollTop (no wheel) must unpin — the old
+    // path called followTip and fought the reader back to the tip.
+    await actRun(() => {
+      scroller.scrollTop = 1200;
+      layout.placeTipAt(1200);
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    await flush();
+    expect(r.container.textContent).toContain("Jump to latest");
+    expect(scroller.scrollTop).toBe(1200);
+    layout.restore();
+    await r.unmount();
+  });
+
+  test("pinned appends snap in the same commit; a later scroll-up wins with no echoes to fight", async () => {
+    // Overlay scrollbars / coalesced trackpad deliver scroll-only events (no
+    // wheel). Unpinning is purely geometric now, so a mid-stream scroll-up is
+    // honored immediately — there is no glide write queue that could swallow
+    // it as an echo and yank the reader back to the tip.
+    const frames: FrameRequestCallback[] = [];
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      frames.push(cb);
+      return frames.length;
+    };
+    globalThis.cancelAnimationFrame = () => undefined;
+
+    const prefix = manyEvents(19);
+    const initial = [...prefix, agentDelta(20, "hello ")];
+    const r = await renderComponent(<MessageTimeline events={initial} status="running" />);
+    const scroller = r.container.querySelector(".overflow-y-auto");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+    const layout = mockScrollerLayout(scroller, {
+      clientHeight: 400,
+      contentHeight: 2000,
+      tipHeight: 80,
+      paddingBottom: 24,
+    });
+    layout.syncTipAtBottom();
+    await actRun(() => {
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+
+    // Tip growth + commit snap to the bottom synchronously — no animation
+    // frames needed, nothing left in flight afterwards.
+    layout.setContentHeight(2300);
+    await r.rerender(
+      <MessageTimeline events={[...initial, agentDelta(21, "world")]} status="running" />,
+    );
+    expect(distanceFromBottom(scroller)).toBeLessThan(2);
+
+    const freedTop = 900;
+    await actRun(() => {
+      scroller.scrollTop = freedTop;
+      layout.placeTipAt(freedTop + 200);
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    await flush();
+
+    expect(r.container.textContent).toContain("Jump to latest");
+    expect(scroller.scrollTop).toBe(freedTop);
+
+    // Further streaming must not re-stick / yank.
+    const before = scroller.scrollTop;
+    layout.setContentHeight(2600);
+    await r.rerender(
+      <MessageTimeline
+        events={[...initial, agentDelta(21, "world"), agentDelta(22, "!")]}
+        status="running"
+      />,
+    );
+    await drainFrames(frames);
+    await flush();
+    expect(scroller.scrollTop).toBe(before);
+    expect(r.container.textContent).toContain("Jump to latest");
+
+    layout.restore();
+    await r.unmount();
+  });
+
+  test("Jump to latest with hasNewer pins only when the tip window lands", async () => {
+    // Pinning against the current history page would snap to ITS bottom and
+    // page-crawl forward through the gap; the pin must wait for hasNewer to
+    // flip false.
+    let jumps = 0;
+    const onJumpToLatest = () => {
+      jumps += 1;
+    };
+    const initial = manyEvents(20);
+    const r = await renderComponent(
+      <MessageTimeline events={initial} hasNewer onJumpToLatest={onJumpToLatest} />,
+    );
+    const scroller = r.container.querySelector(".overflow-y-auto");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+    const layout = mockScrollerLayout(scroller, {
+      clientHeight: 400,
+      contentHeight: 2000,
+      tipHeight: 80,
+      paddingBottom: 24,
+    });
+    scroller.scrollTop = 1000;
+    await actRun(() => {
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    await flush();
+
+    const button = Array.from(r.container.querySelectorAll("button")).find((candidate) =>
+      candidate.textContent?.includes("Jump to latest"),
+    );
+    if (!button) {
+      throw new Error("expected Jump to latest button");
+    }
+    await actRun(() => {
+      button.click();
+    });
+    await flush();
+    expect(jumps).toBe(1);
+    // History window still showing: no snap to the page bottom.
+    expect(scroller.scrollTop).toBe(1000);
+
+    // The tip window lands (hasNewer false): pin + snap. (The button itself
+    // may linger through its exit animation under happy-dom, so assert the
+    // pinned mode via the anchor class.)
+    layout.setContentHeight(2400);
+    await r.rerender(<MessageTimeline events={initial} onJumpToLatest={onJumpToLatest} />);
+    await flush();
+    expect(distanceFromBottom(scroller)).toBeLessThan(2);
+    expect(scroller.className).toContain("[overflow-anchor:none]");
+    layout.restore();
+    await r.unmount();
+  });
+
+  test("paging forward to the tip re-pins a reader parked at the bottom", async () => {
+    const initial = manyEvents(20);
+    const r = await renderComponent(
+      <MessageTimeline events={initial} hasNewer onLoadNewer={() => undefined} />,
+    );
+    const scroller = r.container.querySelector(".overflow-y-auto");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+    const layout = mockScrollerLayout(scroller, {
+      clientHeight: 400,
+      contentHeight: 2000,
+      tipHeight: 80,
+      paddingBottom: 24,
+    });
+    // Parked at the bottom of the last history page.
+    scroller.scrollTop = 1600;
+    await actRun(() => {
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    await flush();
+    expect(r.container.textContent).toContain("Jump to latest");
+
+    // The last page merges into the live tip: hasNewer flips false and the
+    // reader at the bottom is following again — no stranded unpinned state
+    // with new content growing below. (Pinned mode shows as the anchor class;
+    // the button may linger through its exit animation under happy-dom.)
+    await r.rerender(<MessageTimeline events={initial} />);
+    await flush();
+    expect(scroller.className).toContain("[overflow-anchor:none]");
+
+    layout.setContentHeight(2100);
+    await r.rerender(<MessageTimeline events={[...initial, event(21)]} />);
+    await flush();
+    expect(distanceFromBottom(scroller)).toBeLessThan(2);
+    layout.restore();
+    await r.unmount();
+  });
+
   test("rows born in the initial bulk paint never animate; rows appended live do", async () => {
     const frames: FrameRequestCallback[] = [];
     globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
@@ -711,6 +1051,271 @@ describe("MessageTimeline pagination affordances", () => {
     const animated = Array.from(r.container.querySelectorAll(".animate-og-enter"));
     expect(animated).toHaveLength(1);
     expect(animated[0]?.textContent).toContain("message 2");
+    await r.unmount();
+  });
+
+  test("a rejected onJumpToLatest clears the pending pin latch", async () => {
+    // A rejecting tip reload is an ordinary network failure. The latch must
+    // not survive it: minutes later, when the reader pages to the tip
+    // themselves, a stale latch would force pin + snap from wherever they are.
+    const initial = manyEvents(20);
+    const r = await renderComponent(
+      <MessageTimeline
+        events={initial}
+        hasNewer
+        onJumpToLatest={() => Promise.reject(new Error("tip reload failed"))}
+      />,
+    );
+    const scroller = r.container.querySelector(".overflow-y-auto");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+    const layout = mockScrollerLayout(scroller, {
+      clientHeight: 400,
+      contentHeight: 2000,
+      tipHeight: 80,
+      paddingBottom: 24,
+    });
+    scroller.scrollTop = 1000;
+    await actRun(() => {
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    await flush();
+
+    const button = Array.from(r.container.querySelectorAll("button")).find((candidate) =>
+      candidate.textContent?.includes("Jump to latest"),
+    );
+    if (!button) {
+      throw new Error("expected Jump to latest button");
+    }
+    await actRun(() => {
+      button.click();
+    });
+    await flush();
+    expect(scroller.scrollTop).toBe(1000);
+
+    // The reader later reaches the tip window on their own: no surprise snap.
+    await r.rerender(
+      <MessageTimeline
+        events={initial}
+        onJumpToLatest={() => Promise.reject(new Error("tip reload failed"))}
+      />,
+    );
+    await flush();
+    expect(scroller.scrollTop).toBe(1000);
+    expect(scroller.className).toContain("[overflow-anchor:auto]");
+    layout.restore();
+    await r.unmount();
+  });
+
+  test("Jump to latest without a reload handler: scrolls the window; a scroll away expires the latch", async () => {
+    const initial = manyEvents(20);
+    const r = await renderComponent(
+      <MessageTimeline events={initial} hasNewer onLoadNewer={() => undefined} />,
+    );
+    const scroller = r.container.querySelector(".overflow-y-auto");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+    const layout = mockScrollerLayout(scroller, {
+      clientHeight: 400,
+      contentHeight: 2000,
+      tipHeight: 80,
+      paddingBottom: 24,
+    });
+    scroller.scrollTop = 1000;
+    await actRun(() => {
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    await flush();
+
+    const button = Array.from(r.container.querySelectorAll("button")).find((candidate) =>
+      candidate.textContent?.includes("Jump to latest"),
+    );
+    if (!button) {
+      throw new Error("expected Jump to latest button");
+    }
+    // Without onJumpToLatest the click still jumps within the in-memory
+    // window (its bottom is where the newer sentinel pages forward from).
+    await actRun(() => {
+      button.click();
+    });
+    await flush();
+    expect(scroller.scrollTop).toBe(1600);
+
+    // The reader changes their mind and scrolls back into history: the
+    // pending latch expires with them.
+    await readerScrollUp(scroller, 200);
+
+    // The tip window lands much later: no stale force pin + snap.
+    await r.rerender(<MessageTimeline events={initial} onLoadNewer={() => undefined} />);
+    await flush();
+    expect(scroller.scrollTop).toBe(200);
+    expect(scroller.className).toContain("[overflow-anchor:auto]");
+    layout.restore();
+    await r.unmount();
+  });
+
+  test("Jump to start consumes its pending flag on the window-swap commit, once", async () => {
+    const frames: FrameRequestCallback[] = [];
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      frames.push(cb);
+      return frames.length;
+    };
+    globalThis.cancelAnimationFrame = () => undefined;
+    // The fallback prepend-correction path is the observable alternative to
+    // the jump: a leaked flag shows up as scrollTop 0 instead of a correction.
+    stubNativeScrollAnchoringUnsupported();
+
+    const settled = manyEvents(12).map((evt) => event(evt.sequence + 8)); // 9..20
+    const r = await renderComponent(
+      <MessageTimeline events={settled} hasOlder onJumpToStart={() => undefined} />,
+    );
+    await armOlderPrefetch(r.container);
+    await drainFrames(frames);
+    const scroller = r.container.querySelector(".overflow-y-auto");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+    let contentHeight = 2000;
+    const clientHeight = 400;
+    let currentScrollTop = 600;
+    Object.defineProperty(scroller, "clientHeight", {
+      configurable: true,
+      get: () => clientHeight,
+    });
+    Object.defineProperty(scroller, "scrollHeight", {
+      configurable: true,
+      get: () => contentHeight,
+    });
+    Object.defineProperty(scroller, "scrollTop", {
+      configurable: true,
+      get: () => currentScrollTop,
+      set: (value: number) => {
+        const max = Math.max(0, contentHeight - clientHeight);
+        currentScrollTop = Math.max(0, Math.min(max, value));
+      },
+    });
+    await actRun(() => {
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    // Sync the height baseline at the mocked 2000.
+    await r.rerender(<MessageTimeline events={settled} hasOlder onJumpToStart={() => undefined} />);
+    await flush();
+
+    const button = Array.from(r.container.querySelectorAll("button")).find((candidate) =>
+      candidate.textContent?.includes("Jump to start"),
+    );
+    if (!button) {
+      throw new Error("expected Jump to start button");
+    }
+    await actRun(() => {
+      button.click();
+    });
+    await flush();
+
+    // The oldest window lands (first item id changes): jump to the top of the
+    // NEW DOM — the prepend correction (which would land at 600) must not run.
+    contentHeight = 2600;
+    await r.rerender(
+      <MessageTimeline events={manyEvents(20)} hasOlder onJumpToStart={() => undefined} />,
+    );
+    await flush();
+    expect(scroller.scrollTop).toBe(0);
+    await drainFrames(frames);
+
+    // Consumed exactly once: a LATER prepend gets the ordinary correction, not
+    // a spurious jump back to the top.
+    await readerScrollUp(scroller, 24);
+    await r.rerender(
+      <MessageTimeline events={manyEvents(20)} hasOlder onJumpToStart={() => undefined} />,
+    );
+    await flush();
+    contentHeight = 3000;
+    await r.rerender(
+      <MessageTimeline
+        events={[event(0), ...manyEvents(20)]}
+        hasOlder
+        onJumpToStart={() => undefined}
+      />,
+    );
+    await flush();
+    expect(scroller.scrollTop).toBe(424); // 24 + (3000 - 2600)
+    await drainFrames(frames);
+    await r.unmount();
+  });
+
+  test("Jump to start resolving without a window change clears the pending flag", async () => {
+    const frames: FrameRequestCallback[] = [];
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      frames.push(cb);
+      return frames.length;
+    };
+    globalThis.cancelAnimationFrame = () => undefined;
+    stubNativeScrollAnchoringUnsupported();
+
+    const settled = manyEvents(12).map((evt) => event(evt.sequence + 8)); // 9..20
+    const r = await renderComponent(
+      <MessageTimeline events={settled} hasOlder onJumpToStart={() => undefined} />,
+    );
+    await armOlderPrefetch(r.container);
+    await drainFrames(frames);
+    const scroller = r.container.querySelector(".overflow-y-auto");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+    let contentHeight = 2000;
+    const clientHeight = 400;
+    let currentScrollTop = 600;
+    Object.defineProperty(scroller, "clientHeight", {
+      configurable: true,
+      get: () => clientHeight,
+    });
+    Object.defineProperty(scroller, "scrollHeight", {
+      configurable: true,
+      get: () => contentHeight,
+    });
+    Object.defineProperty(scroller, "scrollTop", {
+      configurable: true,
+      get: () => currentScrollTop,
+      set: (value: number) => {
+        const max = Math.max(0, contentHeight - clientHeight);
+        currentScrollTop = Math.max(0, Math.min(max, value));
+      },
+    });
+    await actRun(() => {
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    await r.rerender(<MessageTimeline events={settled} hasOlder onJumpToStart={() => undefined} />);
+    await flush();
+
+    const button = Array.from(r.container.querySelectorAll("button")).find((candidate) =>
+      candidate.textContent?.includes("Jump to start"),
+    );
+    if (!button) {
+      throw new Error("expected Jump to start button");
+    }
+    await actRun(() => {
+      button.click();
+    });
+    await flush();
+    // Resolved against the CURRENT window: scrolled to its top…
+    expect(scroller.scrollTop).toBe(0);
+    // …and the pending flag expires by the next frame (no swap commit came).
+    await drainFrames(frames);
+
+    // The next genuine prepend must get the ordinary correction — a leaked
+    // flag would consume it as a spurious jump to the top.
+    await readerScrollUp(scroller, 24);
+    await r.rerender(<MessageTimeline events={settled} hasOlder onJumpToStart={() => undefined} />);
+    await flush();
+    contentHeight = 2500;
+    await r.rerender(
+      <MessageTimeline events={manyEvents(20)} hasOlder onJumpToStart={() => undefined} />,
+    );
+    await flush();
+    expect(scroller.scrollTop).toBe(524); // 24 + (2500 - 2000)
+    await drainFrames(frames);
     await r.unmount();
   });
 });

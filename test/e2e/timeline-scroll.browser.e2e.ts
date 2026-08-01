@@ -256,9 +256,9 @@ describe("timeline scroll ownership browser regression", () => {
     expect(before.gap).toBeLessThan(48);
 
     await page.evaluate(() => window.timelineScrollHarness!.append());
-    // The follow is a soft glide (an exponential approach, ~80ms time
-    // constant), not an instant snap — wait for it to settle at the bottom
-    // instead of sampling mid-flight.
+    // The follow snaps to the bottom on the commit (and on the next frame
+    // for resize-observed growth) — wait for it to land instead of sampling
+    // between the append and the snap.
     await page.waitForFunction(
       () => {
         const node = document.querySelector("[data-timeline-test] .og-root > div");

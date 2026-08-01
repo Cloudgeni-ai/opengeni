@@ -191,19 +191,16 @@
   }
 }
 
-/* Live activity rows appended mid-turn: softer than og-enter so a tool
-   marathon doesn't tick-tick-tick as hard pops. Blur stays subtle — filter
-   on a short row is cheap and reads as "arriving", not as a glitch. */
+/* Live activity rows: soft rise into the tip as scroll eases them into view.
+   Keep the offset small — large translateY fought scroll and felt like ticks. */
 @keyframes og-row-enter {
   from {
     opacity: 0;
-    transform: translateY(10px);
-    filter: blur(3px);
+    transform: translateY(6px);
   }
   to {
     opacity: 1;
     transform: translateY(0);
-    filter: blur(0);
   }
 }
 .animate-og-row-enter {

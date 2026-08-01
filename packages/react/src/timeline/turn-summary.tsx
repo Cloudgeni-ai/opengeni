@@ -35,10 +35,11 @@ export type { TurnOutcome } from "./types";
 const TurnSettleChromeContext = createContext(false);
 
 /**
- * True for the whole settle choreography — open beat AND the slow collapse.
- * Nested cluster chips must stay suppressed until this clears: the moment
- * collapse starts (`open` flips false) used to remount closed inner chips and
- * yank the content height mid-animation (the ugly snap).
+ * Suppress nested cluster chips while the settle choreography (or a latch
+ * after cancel-close) is flattening the body. Nested chips must not remount
+ * when `open` flips false mid-collapse — that remount yanked height (snap).
+ * Also stays true briefly after the reader cancels settle, through the fast
+ * collapse window, so cancel does not reintroduce the same remount.
  */
 export function useTurnSettleOpen(): boolean {
   return useContext(TurnSettleChromeContext);
@@ -160,6 +161,8 @@ export type TurnSummaryProps = {
 const SETTLE_FOLD_BEAT_MS = 1100;
 /** Keep in sync with `--og-duration-disclose-settle`. */
 const SETTLE_COLLAPSE_MS = 820;
+/** Keep in sync with `--og-duration-disclose` (manual / cancel-close). */
+const DISCLOSE_MS = 120;
 
 export function TurnSummary({
   items,
@@ -185,14 +188,24 @@ export function TurnSummary({
   // auto-collapse finishes (or on first user interaction) so later manual
   // closes are the fast disclose pair.
   const [settlePhase, setSettlePhase] = useState(initialSettle);
+  // Separate from settlePhase CSS: keep nested chips flat through cancel-close
+  // (fast collapse) without forcing the slow settle-collapse animation.
+  const [nestSuppressLatch, setNestSuppressLatch] = useState(initialSettle);
   // Expand animation must NOT run on the settle mount (rows were already
   // visible — a height sweep would flash them). Armed once we leave that
   // initial open, so a later manual reopen animates instead of snapping.
   const [expandReady, setExpandReady] = useState(!initialSettle);
   const settleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const settleCloseDoneRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const nestLatchClearRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const settleFoldSeenRef = useRef(Boolean(settleFold));
   const settleArmedRef = useRef(false);
+  const clearNestLatchTimer = () => {
+    if (nestLatchClearRef.current !== null) {
+      clearTimeout(nestLatchClearRef.current);
+      nestLatchClearRef.current = null;
+    }
+  };
   const clearSettleTimers = () => {
     if (settleTimerRef.current !== null) {
       clearTimeout(settleTimerRef.current);
@@ -202,6 +215,7 @@ export function TurnSummary({
       clearTimeout(settleCloseDoneRef.current);
       settleCloseDoneRef.current = null;
     }
+    clearNestLatchTimer();
   };
   const armSettleCollapse = () => {
     if (settleArmedRef.current) {
@@ -210,6 +224,7 @@ export function TurnSummary({
     settleArmedRef.current = true;
     setSettling(true);
     setSettlePhase(true);
+    setNestSuppressLatch(true);
     setExpandReady(false);
     setOpen(true);
     clearSettleTimers();
@@ -222,6 +237,7 @@ export function TurnSummary({
         settleArmedRef.current = false;
         setSettlePhase(false);
         setSettling(false);
+        setNestSuppressLatch(false);
       }, SETTLE_COLLAPSE_MS);
     }, SETTLE_FOLD_BEAT_MS);
   };
@@ -249,12 +265,29 @@ export function TurnSummary({
   }, [settleFold]);
   const onOpenChange = (next: boolean) => {
     // The reader took over — cancel the pending auto-collapse for good.
+    // Clear settle CSS phase immediately (fast collapse) but keep nest latch
+    // through the disclose window so nested chips do not remount mid-close.
+    const wasNestFlat = settling || settlePhase || nestSuppressLatch;
     clearSettleTimers();
     settleArmedRef.current = false;
     setExpandReady(true);
     setSettlePhase(false);
     setSettling(false);
-    setOpen(next);
+    if (next) {
+      setNestSuppressLatch(false);
+      setOpen(true);
+      return;
+    }
+    setOpen(false);
+    if (wasNestFlat) {
+      setNestSuppressLatch(true);
+      nestLatchClearRef.current = setTimeout(() => {
+        nestLatchClearRef.current = null;
+        setNestSuppressLatch(false);
+      }, DISCLOSE_MS);
+    } else {
+      setNestSuppressLatch(false);
+    }
   };
   const enter = useEntranceAnimation();
   // Capture once: after a settle choreography the chip is already on screen.
@@ -299,9 +332,9 @@ export function TurnSummary({
   // Live open shell: keep the chip in-flow (so settle never inserts layout)
   // but quiet it until there is an outcome or a settle beat.
   const liveShell = outcome === undefined && open && !settlePhase && !bare;
-  // Full settle window (beat + collapse), not merely while open — see
-  // useTurnSettleOpen. Nested chips must not remount when open flips false.
-  const settleChrome = settling || settlePhase;
+  // Settle CSS phase OR cancel-close latch — see useTurnSettleOpen.
+  // Nested chips must not remount when open flips false mid-collapse.
+  const settleChrome = settling || settlePhase || nestSuppressLatch;
 
   // Copy only on the collapsed chip — when open, per-message copy is enough
   // and a second control on the summary row felt crowded / off.

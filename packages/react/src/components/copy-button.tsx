@@ -2,7 +2,7 @@ import { CheckIcon, CopyIcon } from "lucide-react";
 import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { cn } from "../lib/cn";
 import { copyTextToClipboard } from "../lib/clipboard";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./tooltip";
+import { Tooltip, TooltipContent, TooltipTrigger } from "./tooltip";
 
 const COPIED_MS = 1600;
 
@@ -61,36 +61,34 @@ export function CopyButton({
   const tip = copied ? "Copied" : label;
 
   return (
-    <TooltipProvider delayDuration={400}>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <button
-            type="button"
-            data-og-copy=""
-            data-state={copied ? "copied" : "idle"}
-            aria-label={tip}
-            onClick={onClick}
-            className={cn(
-              "inline-flex size-7 shrink-0 items-center justify-center rounded-og-sm",
-              "text-og-fg-subtle transition-[opacity,color,background-color] duration-150",
-              "hover:bg-og-surface-2/80 hover:text-og-fg",
-              "focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent/40",
-              reveal === "group-hover" &&
-                "opacity-0 group-hover/copy:opacity-100 group-focus-within/copy:opacity-100 pointer-coarse:opacity-70",
-              copied && "opacity-100 text-og-accent",
-              className,
-            )}
-          >
-            {copied ? (
-              <CheckIcon className="size-3.5" aria-hidden />
-            ) : (
-              <CopyIcon className="size-3.5" aria-hidden />
-            )}
-          </button>
-        </TooltipTrigger>
-        <TooltipContent side="top">{tip}</TooltipContent>
-      </Tooltip>
-    </TooltipProvider>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          data-og-copy=""
+          data-state={copied ? "copied" : "idle"}
+          aria-label={tip}
+          onClick={onClick}
+          className={cn(
+            "inline-flex size-7 shrink-0 items-center justify-center rounded-og-sm",
+            "text-og-fg-subtle transition-[opacity,color,background-color] duration-150",
+            "hover:bg-og-surface-2/80 hover:text-og-fg",
+            "focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent/40",
+            reveal === "group-hover" &&
+              "opacity-0 group-hover/copy:opacity-100 group-focus-within/copy:opacity-100 pointer-coarse:opacity-70",
+            copied && "opacity-100 text-og-accent",
+            className,
+          )}
+        >
+          {copied ? (
+            <CheckIcon className="size-3.5" aria-hidden />
+          ) : (
+            <CopyIcon className="size-3.5" aria-hidden />
+          )}
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="top">{tip}</TooltipContent>
+    </Tooltip>
   );
 }
 
