@@ -163,12 +163,17 @@ describe("release schema contract", () => {
         (migrations.has("0147_draft_latency_mode.sql") ? 1 : 0) +
         (migrations.has("0148_session_turn_latency_mode.sql") ? 1 : 0) +
         (migrations.has("0149_workspace_artifacts.sql") ? 1 : 0) +
-        (migrations.has("0150_slack_task_interactions.sql") ? 1 : 0),
+        (migrations.has("0150_slack_task_interactions.sql") ? 1 : 0) +
+        (migrations.has("0151_slack_delivery_backoff.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "7bd016352fff16074927cacfa2ce529487dd53298c6f6d62cfffdc41f1cb38bf",
+      "eb12eb8a035aee09933b00f590e8883923bf6a8caf4bba9ad53b64caa55bddfd",
     );
-    expect(contract.latestMigration).toBe("0150_slack_task_interactions.sql");
+    expect(contract.latestMigration).toBe("0151_slack_delivery_backoff.sql");
+    expect(migrations.get("0151_slack_delivery_backoff.sql")).toMatchObject({
+      sha256: "787a92127bb43c1beee6506c087e4bd9e53d933d06db2609afcd97e7c6642679",
+      deploymentMode: "rolling",
+    });
     expect(migrations.get("0128_github_installation_authority.sql")).toMatchObject({
       sha256: "365793b2a204a70e214adb90298b522acbb6dcfae22a46681a58f41a6938e6f0",
       deploymentMode: "rolling",
