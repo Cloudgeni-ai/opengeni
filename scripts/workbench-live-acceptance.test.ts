@@ -7,7 +7,9 @@ import {
   assertDedicatedCanaryEmail,
   assertAcceptancePrincipalScopes,
   controlCancellationDurationMs,
+  ensureChangesTabVisible,
   fixturePrompt,
+  openWorkspaceIfCollapsed,
   parseCookieHeader,
   parseLiveAcceptanceArgs,
   parseProtectedEmails,
@@ -16,6 +18,57 @@ import {
 } from "./workbench-live-acceptance";
 
 describe("workbench live acceptance preflight", () => {
+  test("keeps an open workspace open when Files hides the Changes panel", async () => {
+    const selectors: string[] = [];
+    let lookedUpCollapseControl = false;
+    const page = {
+      locator(selector: string) {
+        selectors.push(selector);
+        return { isVisible: async () => true };
+      },
+      getByRole() {
+        lookedUpCollapseControl = true;
+        throw new Error("should not look up a reopen control");
+      },
+    } as never;
+
+    await openWorkspaceIfCollapsed(page);
+
+    expect(selectors).toEqual(["[data-workspace-surface]"]);
+    expect(lookedUpCollapseControl).toBe(false);
+  });
+
+  test("selects Changes before requiring its layout to be visible", async () => {
+    const calls: string[] = [];
+    let selected = "false";
+    const page = {
+      getByRole() {
+        return {
+          waitFor: async () => calls.push("tab.wait"),
+          getAttribute: async () => selected,
+          click: async () => {
+            calls.push("tab.click");
+            selected = "true";
+          },
+        };
+      },
+      locator(selector: string) {
+        expect(selector).toBe("[data-workbench-changes-layout]");
+        return {
+          waitFor: async (options: { state?: string; timeout?: number }) => {
+            expect(options).toEqual({ state: "visible", timeout: 20_000 });
+            expect(selected).toBe("true");
+            calls.push("layout.wait");
+          },
+        };
+      },
+    } as never;
+
+    await ensureChangesTabVisible(page);
+
+    expect(calls).toEqual(["tab.wait", "tab.click", "layout.wait"]);
+  });
+
   test("rejects the protected manually used production account", () => {
     const protectedEmails = parseProtectedEmails("manually-used@example.com");
     expect(() =>

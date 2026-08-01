@@ -31,6 +31,8 @@ const OBSERVABILITY_PROBE_PERMISSIONS = [
 ] as const;
 const SETTLED = new Set(["idle", "failed", "error", "cancelled"]);
 const CHANNEL_A_PATH = /\/sessions\/[^/]+\/(?:fs|git|terminal)\//;
+const WORKSPACE_SURFACE_SELECTOR = "[data-workspace-surface]";
+const CHANGES_LAYOUT_SELECTOR = "[data-workbench-changes-layout]";
 const shaPattern = /^[0-9a-f]{40}$/;
 const runIdPattern = /^[a-z0-9][a-z0-9-]{2,63}$/;
 
@@ -345,7 +347,7 @@ async function main(): Promise<void> {
         timeout: 45_000,
       });
       await openWorkspaceIfCollapsed(page);
-      await page.locator("[data-workbench-changes-layout]").waitFor({ timeout: 20_000 });
+      await ensureChangesTabVisible(page);
       navigationSamples.push(performance.now() - started);
       assertNoProblems(problems, true);
       await context.close();
@@ -374,7 +376,7 @@ async function main(): Promise<void> {
         timeout: 45_000,
       });
       await openWorkspaceIfCollapsed(page);
-      await page.locator("[data-workbench-changes-layout]").waitFor({ timeout: 20_000 });
+      await ensureChangesTabVisible(page);
       await assertColdReview(page, marker);
       await assertAccessibility(page);
       await assertTouchTargets(page, device.mobile);
@@ -385,8 +387,7 @@ async function main(): Promise<void> {
       await assertScreenshotPainted(page, filesPng, `${device.name} cold Files`);
       artifacts.push(await artifact(filesScreenshot, args.outputDir));
 
-      await page.getByRole("tab", { name: /Changes/ }).click();
-      await page.locator("[data-workbench-changes-layout]").waitFor();
+      await ensureChangesTabVisible(page);
       await assertAccessibility(page);
       await assertTouchTargets(page, device.mobile);
       assertNoProblems(problems, true);
@@ -919,7 +920,7 @@ async function runLiveWorkspaceFlow(input: {
       timeout: 45_000,
     });
     await openWorkspaceIfCollapsed(page);
-    await page.locator("[data-workbench-changes-layout]").waitFor({ timeout: 20_000 });
+    await ensureChangesTabVisible(page);
     await page.getByRole("tab", { name: "Files", exact: true }).click();
     await selectTreeFile(page, "api", "base.txt");
     await page.getByText("On machine", { exact: true }).waitFor();
@@ -1765,9 +1766,9 @@ function assertNoProblems(problems: BrowserProblems, requireZeroChannelA: boolea
   }
 }
 
-async function openWorkspaceIfCollapsed(page: Page): Promise<void> {
-  const workbench = page.locator("[data-workbench-changes-layout]");
-  if (await workbench.isVisible()) return;
+export async function openWorkspaceIfCollapsed(page: Page): Promise<void> {
+  const workspace = page.locator(WORKSPACE_SURFACE_SELECTOR);
+  if (await workspace.isVisible()) return;
 
   // The standalone SDK dock owns an "Open workspace" control. The hosted app
   // controls the same collapsed state from its session header instead, so the
@@ -1781,6 +1782,17 @@ async function openWorkspaceIfCollapsed(page: Page): Promise<void> {
   await open.click();
 }
 
+export async function ensureChangesTabVisible(page: Page): Promise<void> {
+  const changes = page.getByRole("tab", { name: /Changes/ });
+  await changes.waitFor({ state: "visible", timeout: 20_000 });
+  if ((await changes.getAttribute("aria-selected")) !== "true") await changes.click();
+
+  await page.locator(CHANGES_LAYOUT_SELECTOR).waitFor({
+    state: "visible",
+    timeout: 20_000,
+  });
+}
+
 async function selectTreeFile(page: Page, directory: string, file: string): Promise<void> {
   const directoryItem = page.getByRole("treeitem").filter({ hasText: directory }).first();
   const directoryButton = directoryItem.getByRole("button").first();
@@ -1791,9 +1803,7 @@ async function selectTreeFile(page: Page, directory: string, file: string): Prom
 }
 
 async function assertColdReview(page: Page, marker: string): Promise<void> {
-  const changes = page.getByRole("tab", { name: /Changes/ });
-  if ((await changes.getAttribute("aria-selected")) !== "true") await changes.click();
-  await page.locator("[data-workbench-changes-layout]").waitFor();
+  await ensureChangesTabVisible(page);
   await page.getByText("api", { exact: true }).first().waitFor();
   await page.getByText("web", { exact: true }).first().waitFor();
 
