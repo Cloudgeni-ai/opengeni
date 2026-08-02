@@ -13,6 +13,8 @@ import {
 import { assertScreenshotPainted } from "@opengeni/testing";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 
+import { NUMERIC_PERFORMANCE_BUDGETS } from "./workbench-acceptance-contract";
+
 const WORKBENCH_CANARY_PERMISSIONS = [
   "workspace:read",
   "sessions:create",
@@ -33,7 +35,11 @@ const SETTLED = new Set(["idle", "failed", "error", "cancelled"]);
 const CHANNEL_A_PATH = /\/sessions\/[^/]+\/(?:fs|git|terminal)\//;
 const WORKSPACE_SURFACE_SELECTOR = "[data-workspace-surface]";
 const CHANGES_LAYOUT_SELECTOR = "[data-workbench-changes-layout]";
-const CAPTURE_USABLE_WORKBENCH_P95_MS = 5_000;
+const CAPTURE_API_P95_MS = maximumMillisecondBudget("performance.capture-api-response", "p95");
+const CAPTURE_USABLE_WORKBENCH_P95_MS = maximumMillisecondBudget(
+  "performance.capture-usable-workbench",
+  "p95",
+);
 const shaPattern = /^[0-9a-f]{40}$/;
 const runIdPattern = /^[a-z0-9][a-z0-9-]{2,63}$/;
 
@@ -327,8 +333,8 @@ async function main(): Promise<void> {
     args.repetitions,
   );
   const captureApiResponse = measurement(captureApiSamples);
-  if (captureApiResponse.p95 > 200) {
-    throw new Error(`capture API p95 ${captureApiResponse.p95}ms exceeds 200ms`);
+  if (captureApiResponse.p95 > CAPTURE_API_P95_MS) {
+    throw new Error(`capture API p95 ${captureApiResponse.p95}ms exceeds ${CAPTURE_API_P95_MS}ms`);
   }
 
   const browser = await chromium.launch();
@@ -456,6 +462,19 @@ async function main(): Promise<void> {
   process.stdout.write(
     `${JSON.stringify({ status: "passed", receipt: receiptPath, sha256: receiptArtifact.sha256 })}\n`,
   );
+}
+
+function maximumMillisecondBudget(requirementId: string, statistic: "p95" | "worst"): number {
+  const budget = NUMERIC_PERFORMANCE_BUDGETS[requirementId];
+  if (
+    !budget ||
+    budget.direction !== "maximum" ||
+    budget.unit !== "ms" ||
+    budget.statistic !== statistic
+  ) {
+    throw new Error(`missing maximum millisecond budget for ${requirementId}`);
+  }
+  return budget.limit;
 }
 
 export function fixturePrompt(marker: string): string {
