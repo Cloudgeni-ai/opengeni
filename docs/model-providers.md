@@ -124,20 +124,23 @@ endpoint provider.
 
 | Product | Exact route | Supplier input / cache read / output | OpenGeni retail (+25%) |
 | --- | --- | --- | --- |
-| DeepSeek V4 Flash 0731 | `deepseek/deepseek-v4-flash-0731` → Baseten only | $0.13 / $0.028 / $0.26 per 1M | $0.1625 / $0.035 / $0.325 per 1M |
+| DeepSeek V4 Flash 0731 | `deepseek/deepseek-v4-flash-0731` → DeepInfra only | $0.09 / $0.018 / $0.18 per 1M | $0.1125 / $0.0225 / $0.225 per 1M |
 | Kimi K3 Fast | `moonshotai/kimi-k3-fast` → Wafer only | $4.50 / $0.45 / $22.50 per 1M | $5.625 / $0.5625 / $28.125 per 1M |
 
 Prices are a reviewed 2026-08-02 snapshot from the public Gateway endpoint
-metadata. They are intentionally static: adding a model or changing a route
+metadata. DeepInfra replaced Baseten for DeepSeek after both supported API
+surfaces and both DeepSeek slugs returned a provider-pinned 503 from Baseten;
+DeepInfra passed Responses text, two parallel tool calls, continuation, and
+implicit cache reporting. Prices are intentionally static: adding a model or changing a route
 requires reviewing its Responses tool-call transport and updating its
 definition, price, and tests together. Wafer's discovery boolean currently
 conflicts with its live response: a provider-pinned continuation returned
 `cached_tokens` and charged $0.45/M cached input. OpenGeni therefore preserves
 and bills that reported cache-read slice. Kimi may emit parallel function calls;
 before the next Responses request, OpenGeni interleaves each complete call/result
-batch without changing any item. Gateway otherwise remaps the continuation away
-from Kimi Fast, and the Wafer-only fence correctly rejects that remap instead of
-falling back.
+batch without changing any item. Without that wire-order normalization, Gateway
+returns a 400 whose error metadata unexpectedly names base Kimi. The internal
+cause is not observable; the Wafer-only fence prevents any fallback.
 
 Every Gateway request replaces caller routing options with an exact one-item
 `only` and `order` list, sends no model fallback list, and disables OpenAI SDK
@@ -145,15 +148,13 @@ retries. Unknown Gateway model slugs fail before network I/O. Keep Gateway accou
 rewrite rules disabled for the managed key because those rules operate outside
 the request body.
 
-Both models request Gateway automatic caching. Kimi Fast remains image-capable.
-The 2026-08-02 live boundary is provider-specific: Wafer accepts an HTTPS image
-URL on both Responses and Chat and returns cache-token detail, while a data URL
-causes Gateway to reclassify the request as base Kimi before provider routing.
-For Kimi Gateway turns, OpenGeni therefore verifies the finalized object bytes
-and checksum as usual, then projects a one-hour signed HTTPS object URL into the
-model-only run history. The URL is never persisted and is regenerated on
-recovery. Development-only local object-store URLs are not leaked to Gateway;
-they remain inline because an external provider cannot reach localhost.
+Both models request Gateway automatic caching. Kimi Fast remains catalogued as
+image-capable. OpenGeni verifies finalized attachment bytes and checksums, then
+sends images inline as data URLs; it never gives Gateway or Wafer an object-store
+URL. A 2026-08-02 provider-pinned data-URL probe returned a Gateway 400 whose
+metadata named base Kimi, while an HTTPS-image probe succeeded on Wafer. That is
+recorded as an unresolved Gateway compatibility defect, not worked around by
+granting the provider storage access.
 
 A workspace admin can instead connect **Vercel AI Gateway** in workspace Settings.
 The key is stored in the encrypted workspace connection table, resolved only in

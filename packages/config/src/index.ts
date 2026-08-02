@@ -1433,7 +1433,7 @@ export const OPENGENI_GATEWAY_MODELS = {
     workspaceProductId: `${WORKSPACE_GATEWAY_MODEL_ID_PREFIX}deepseek-v4-flash-0731`,
     upstreamModelId: "deepseek/deepseek-v4-flash-0731",
     label: "DeepSeek V4 Flash 0731",
-    provider: "baseten",
+    provider: "deepinfra",
     implicitCaching: true,
   },
   kimi: {
@@ -1527,9 +1527,9 @@ export const defaultModelPricing: Record<string, ModelPricingScheduleV1> = {
   // the response-backed rate, not that inconsistent boolean.
   [OPENGENI_GATEWAY_MODELS.deepseek.productId]: {
     default: {
-      inputMicrosPerMillionTokens: 130_000,
-      cachedInputMicrosPerMillionTokens: 28_000,
-      outputMicrosPerMillionTokens: 260_000,
+      inputMicrosPerMillionTokens: 90_000,
+      cachedInputMicrosPerMillionTokens: 18_000,
+      outputMicrosPerMillionTokens: 180_000,
       marginBps: 2_500,
     },
   },

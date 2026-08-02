@@ -49,27 +49,32 @@ describe("Vercel AI Gateway request fence", () => {
     expect(partial.input).toEqual([callA, callB, resultA]);
   });
 
-  test("replaces caller routing with the exact reviewed provider and cache policy", async () => {
-    let captured: Record<string, unknown> | null = null;
-    const inner = (async (_input: RequestInfo | URL, init?: RequestInit) => {
-      captured = JSON.parse(String(init?.body)) as Record<string, unknown>;
-      return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
-    }) as typeof fetch;
-    const routed = vercelGatewayRoutingFetch("vercel-gateway-managed", inner);
-    await routed("https://ai-gateway.vercel.sh/v1/responses", {
-      method: "POST",
-      body: JSON.stringify({
-        model: "deepseek/deepseek-v4-flash-0731",
-        providerOptions: {
-          gateway: { only: ["somewhere-else"], models: ["fallback/model"] },
-          deepseek: { includeReasoning: true },
-        },
-      }),
-    });
-    expect(captured?.providerOptions).toEqual({
-      gateway: { only: ["baseten"], order: ["baseten"], caching: "auto" },
-      deepseek: { includeReasoning: true },
-    });
+  test("replaces caller routing for both Gateway billing paths", async () => {
+    for (const kind of ["vercel-gateway-managed", "vercel-gateway-workspace"] as const) {
+      let captured: Record<string, unknown> | null = null;
+      const inner = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+        captured = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response("{}", {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }) as typeof fetch;
+      const routed = vercelGatewayRoutingFetch(kind, inner);
+      await routed("https://ai-gateway.vercel.sh/v1/responses", {
+        method: "POST",
+        body: JSON.stringify({
+          model: "deepseek/deepseek-v4-flash-0731",
+          providerOptions: {
+            gateway: { only: ["somewhere-else"], models: ["fallback/model"] },
+            deepseek: { includeReasoning: true },
+          },
+        }),
+      });
+      expect(captured?.providerOptions).toEqual({
+        gateway: { only: ["deepinfra"], order: ["deepinfra"], caching: "auto" },
+        deepseek: { includeReasoning: true },
+      });
+    }
   });
 
   test("pins Kimi to Wafer with its live-proven implicit cache policy", async () => {

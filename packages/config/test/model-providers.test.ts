@@ -82,7 +82,7 @@ describe("curated AI Gateway catalogue", () => {
     const kimi = models.find((model) => model.id === OPENGENI_GATEWAY_MODELS.kimi.productId)!;
     expect(deepseek.upstreamModelId).toBe(OPENGENI_GATEWAY_MODELS.deepseek.upstreamModelId);
     expect(deepseek.requestPolicy).toEqual({
-      gateway: { only: ["baseten"], caching: "auto" },
+      gateway: { only: ["deepinfra"], caching: "auto" },
     });
     expect(deepseek.capabilities.promptCaching).toEqual({
       upstream: "supported",
@@ -98,9 +98,9 @@ describe("curated AI Gateway catalogue", () => {
     expect(kimi.capabilities.latencyModes.map((mode) => mode.id)).toEqual(["standard"]);
 
     expect(configuredModelPricing(settings)[deepseek.id]).toEqual({
-      inputMicrosPerMillionTokens: 130_000,
-      cachedInputMicrosPerMillionTokens: 28_000,
-      outputMicrosPerMillionTokens: 260_000,
+      inputMicrosPerMillionTokens: 90_000,
+      cachedInputMicrosPerMillionTokens: 18_000,
+      outputMicrosPerMillionTokens: 180_000,
       marginBps: 2_500,
     });
     expect(configuredModelPricing(settings)[kimi.id]).toEqual({
@@ -133,7 +133,7 @@ describe("curated AI Gateway catalogue", () => {
     ).toBe("vck_workspace");
   });
 
-  test("managed debit applies Baseten cache-read price and the existing 25% margin", () => {
+  test("managed debit applies DeepInfra cache-read price and the existing 25% margin", () => {
     const settings = {
       ...getSettings(),
       modelProvidersJson: "[]",
@@ -145,7 +145,7 @@ describe("curated AI Gateway catalogue", () => {
         outputTokens: 1_000_000,
         inputTokensDetails: { cached_tokens: 1_000_000 },
       }),
-    ).toBe(360_000);
+    ).toBe(247_500);
   });
 
   test("managed debit applies Wafer's response-backed cache-read price", () => {

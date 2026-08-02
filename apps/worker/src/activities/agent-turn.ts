@@ -141,7 +141,6 @@ import {
   calculateModelUsageCostMicros,
   configuredModelPricing,
   configuredStaticUsageLimits,
-  OPENGENI_GATEWAY_MODELS,
   responseSatisfiesLatencyMode,
   sandboxArchiveCaptureTimeoutMs,
   sandboxWarmRateMicrosPerSecond,
@@ -1910,33 +1909,6 @@ export function modelAcceptsTypedAttachmentContentForTurn(
   resolvedModel: { provider: { api: ModelProviderApi } } | null,
 ): boolean {
   return resolvedModel === null || resolvedModel.provider.api === "responses";
-}
-
-/**
- * Kimi Fast on Wafer accepts vision over HTTPS object URLs. Vercel currently
- * reclassifies data-URL image requests as base Kimi before applying the exact
- * Wafer fence. Other providers retain the verified inline projection.
- */
-export function modelNeedsRemoteImageUrlForTurn(
-  resolvedModel: {
-    provider: { kind: RegistryProviderKind };
-    configured: { upstreamModelId: string };
-  } | null,
-): boolean {
-  if (!resolvedModel) return false;
-  return (
-    ["vercel-gateway-managed", "vercel-gateway-workspace"].includes(resolvedModel.provider.kind) &&
-    resolvedModel.configured.upstreamModelId === OPENGENI_GATEWAY_MODELS.kimi.upstreamModelId
-  );
-}
-
-export function externallyReachableModelImageUrl(value: string): string | null {
-  try {
-    const parsed = new URL(value);
-    return parsed.protocol === "https:" && !parsed.username && !parsed.password ? value : null;
-  } catch {
-    return null;
-  }
 }
 
 export type TurnSandboxProvisioner<T> = {
@@ -6288,17 +6260,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             ...(modelAcceptsTypedAttachmentContentForTurn(resolvedModel) && objectStorage
               ? {
                   readFileBytesForModel: (file) => objectStorage.getFileBytes(file),
-                  ...(modelNeedsRemoteImageUrlForTurn(resolvedModel)
-                    ? {
-                        imageUrlForModel: async (file) => {
-                          const signed = await objectStorage.createGetUrl({
-                            key: file.objectKey,
-                            expiresInSeconds: 60 * 60,
-                          });
-                          return externallyReachableModelImageUrl(signed.url);
-                        },
-                      }
-                    : {}),
                 }
               : {}),
           },

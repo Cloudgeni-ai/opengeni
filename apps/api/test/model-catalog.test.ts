@@ -27,6 +27,7 @@ describe("workspace model catalog availability", () => {
     });
     expect(managed.deployment).toBeUndefined();
     expect(managed.credentialSource).toBeUndefined();
+    expect(JSON.stringify(managed)).not.toContain("deepinfra");
     expect(JSON.stringify(managed)).not.toContain("baseten");
     expect(JSON.stringify(managed)).not.toContain("ai-gateway.vercel.sh");
 

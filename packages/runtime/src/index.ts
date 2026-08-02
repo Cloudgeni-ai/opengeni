@@ -698,9 +698,11 @@ export class WorkspaceGatewayUnavailableError extends Error {
 
 /**
  * Kimi Fast/Wafer currently returns parallel function calls, but Gateway
- * reclassifies a Responses continuation containing the canonical
- * `call A, call B, result A, result B` batch as the base Kimi model. That model
- * has no Wafer endpoint, so the exact-provider fence correctly rejects it.
+ * rejects a Responses continuation containing the canonical
+ * `call A, call B, result A, result B` batch with error metadata that names the
+ * base Kimi model. Whether that is internal normalization or incorrect error
+ * metadata is not observable. The exact-provider fence correctly prevents any
+ * fallback.
  * Interleave only complete, contiguous batches into
  * `call A, result A, call B, result B`: same calls, ids, arguments, outputs,
  * and order; no item is dropped or invented. Partial/ambiguous batches remain

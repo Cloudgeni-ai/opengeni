@@ -2,7 +2,7 @@ import { describe, expect, mock, spyOn, test } from "bun:test";
 import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
 import { RunRawModelStreamEvent, Usage } from "@openai/agents-core";
 import { ModelItem } from "@openai/agents-core/types";
-import { OPENGENI_GATEWAY_MODELS, type Settings } from "@opengeni/config";
+import type { Settings } from "@opengeni/config";
 import { TurnExecutionPolicyV1 } from "@opengeni/contracts";
 import { createObservability } from "@opengeni/observability";
 import * as opengeniDb from "@opengeni/db";
@@ -48,7 +48,6 @@ import {
   emitModelCallUsage,
   ensureTurnModalRegistryImage,
   escapedMcpTimeoutRecoveryFailure,
-  externallyReachableModelImageUrl,
   filterUnmaterializedSandboxFileDownloads,
   headerSecretRedactions,
   historyRowsToAppend,
@@ -58,7 +57,6 @@ import {
   isWorkerShutdownCancellation,
   legacyTurnExecutionPolicyInput,
   modelAcceptsTypedAttachmentContentForTurn,
-  modelNeedsRemoteImageUrlForTurn,
   recordCompletedModelCallBeforeOwnershipFences,
   modelUsageSourceKey,
   modelResponseUsageContextSignal,
@@ -3334,34 +3332,6 @@ describe("modelAcceptsTypedAttachmentContentForTurn", () => {
 
   test("keeps chat-completions providers on the sandbox-path fallback", () => {
     expect(modelAcceptsTypedAttachmentContentForTurn(resolved("chat"))).toBe(false);
-  });
-});
-
-describe("Gateway model image delivery", () => {
-  const resolved = (kind: RegistryProviderKind, upstreamModelId: string) =>
-    ({ provider: { kind }, configured: { upstreamModelId } }) as Parameters<
-      typeof modelNeedsRemoteImageUrlForTurn
-    >[0];
-
-  test("uses remote images only for Kimi Fast through either Gateway credential path", () => {
-    const kimi = OPENGENI_GATEWAY_MODELS.kimi.upstreamModelId;
-    expect(modelNeedsRemoteImageUrlForTurn(resolved("vercel-gateway-managed", kimi))).toBe(true);
-    expect(modelNeedsRemoteImageUrlForTurn(resolved("vercel-gateway-workspace", kimi))).toBe(true);
-    expect(modelNeedsRemoteImageUrlForTurn(resolved("api-key", kimi))).toBe(false);
-    expect(
-      modelNeedsRemoteImageUrlForTurn(
-        resolved("vercel-gateway-managed", OPENGENI_GATEWAY_MODELS.deepseek.upstreamModelId),
-      ),
-    ).toBe(false);
-  });
-
-  test("accepts only credential-free HTTPS URLs for external model fetches", () => {
-    expect(externallyReachableModelImageUrl("https://storage.example/file?signature=x")).toBe(
-      "https://storage.example/file?signature=x",
-    );
-    expect(externallyReachableModelImageUrl("http://127.0.0.1:9000/file")).toBeNull();
-    expect(externallyReachableModelImageUrl("https://user:pass@storage.example/file")).toBeNull();
-    expect(externallyReachableModelImageUrl("not a URL")).toBeNull();
   });
 });
 

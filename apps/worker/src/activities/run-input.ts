@@ -162,7 +162,6 @@ export type TurnInputOptions = {
   unavailableSandboxFilesNote?: string;
   runCredentialsNote?: string;
   readFileBytesForModel?: (file: FileAsset) => Promise<Uint8Array>;
-  imageUrlForModel?: (file: FileAsset) => Promise<string | null>;
 };
 
 export const MAX_INLINE_MODEL_ATTACHMENT_BYTES = 20 * 1024 * 1024;
@@ -173,7 +172,6 @@ export type ModelAttachmentContent = {
   filename: string;
   contentType: string;
   dataUrl: string;
-  imageUrl?: string;
 };
 
 const MODEL_IMAGE_CONTENT_TYPES = new Set(["image/gif", "image/jpeg", "image/png", "image/webp"]);
@@ -220,7 +218,6 @@ function modelAttachmentDescriptor(
 export async function modelAttachmentContentForFiles(
   files: FileAsset[],
   readFileBytes: (file: FileAsset) => Promise<Uint8Array>,
-  imageUrlForModel?: (file: FileAsset) => Promise<string | null>,
 ): Promise<ModelAttachmentContent[]> {
   const attachments: ModelAttachmentContent[] = [];
   let remainingBytes = MAX_INLINE_MODEL_ATTACHMENT_BYTES;
@@ -251,23 +248,12 @@ export async function modelAttachmentContentForFiles(
         });
         continue;
       }
-      const imageUrl =
-        descriptor.kind === "image" && imageUrlForModel
-          ? await imageUrlForModel(file).catch((error) => {
-              console.error("model attachment URL creation failed; using verified inline bytes", {
-                fileId: file.id,
-                errorType: safeErrorType(error),
-              });
-              return null;
-            })
-          : null;
       attachments.push({
         kind: descriptor.kind,
         fileId: file.id,
         filename: file.safeFilename,
         contentType: descriptor.contentType,
         dataUrl: `data:${descriptor.contentType};base64,${Buffer.from(bytes).toString("base64")}`,
-        ...(imageUrl ? { imageUrl } : {}),
       });
       remainingBytes -= bytes.byteLength;
     } catch (error) {
@@ -309,7 +295,7 @@ export function withCurrentUserAttachmentContent(
     : [{ type: "input_text", text: String(currentUser.content ?? "") }];
   const attachmentContent = attachments.map((attachment) =>
     attachment.kind === "image"
-      ? { type: "input_image", image: attachment.imageUrl ?? attachment.dataUrl }
+      ? { type: "input_image", image: attachment.dataUrl }
       : {
           type: "input_file",
           file: attachment.dataUrl,
@@ -375,7 +361,6 @@ export async function turnInput(
       ? await modelAttachmentContentForFiles(
           fileAttachments.map((attachment) => attachment.file),
           options.readFileBytesForModel,
-          options.imageUrlForModel,
         )
       : [];
     return await messageInput(
