@@ -29,6 +29,10 @@ if [ -z "${OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY:-}" ]; then
   echo "Generated and persisted a local environments encryption key in .env."
 fi
 
+# The local UI exposes Codex connection management, so its model-catalog and
+# runtime gates must agree by default. An explicit false still disables it.
+export OPENGENI_CODEX_SUBSCRIPTION_ENABLED="${OPENGENI_CODEX_SUBSCRIPTION_ENABLED:-true}"
+
 slugify() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//; s/-+/-/g'
 }

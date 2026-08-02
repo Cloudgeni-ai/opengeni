@@ -587,14 +587,14 @@ function SessionChatPane(props: {
       candidate.provider === "codex-subscription" &&
       candidate.credentialReadiness.status === "ready",
   );
-  const synchronousRealtimeLock = useMemo(
-    () =>
-      sessionCodexRealtimeSynchronousLock(
-        props.events,
-        props.session.workspaceId,
-        props.session.id,
-      ),
-    [props.events, props.session.id, props.session.workspaceId],
+  // This projection also reads browser owner proof from sessionStorage. Do not
+  // memoize solely by events: stop clears that proof before the parent receives
+  // the controller lock update, and that render must release controls even when
+  // the SSE event array has not changed yet.
+  const synchronousRealtimeLock = sessionCodexRealtimeSynchronousLock(
+    props.events,
+    props.session.workspaceId,
+    props.session.id,
   );
   const [controllerRealtimeLock, setControllerRealtimeLock] = useState(false);
   const ordinaryControlsLocked = synchronousRealtimeLock || controllerRealtimeLock;
