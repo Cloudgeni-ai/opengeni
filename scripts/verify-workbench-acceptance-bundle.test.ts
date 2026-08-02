@@ -296,6 +296,15 @@ describe("workbench acceptance bundle", () => {
     capture.measurement!.p95 = 201;
     expect(() => validate(slow)).toThrow("exceeds 200 ms");
 
+    const slowWorkbench = validBundle();
+    const workbench = slowWorkbench.results.find(
+      (item) => item.requirementId === "performance.capture-usable-workbench",
+    )!;
+    workbench.measurement!.p95 = 5_001;
+    workbench.measurement!.p99 = 5_001;
+    workbench.measurement!.worst = 5_001;
+    expect(() => validate(slowWorkbench)).toThrow("exceeds 5000 ms");
+
     const secret = validBundle() as any;
     secret.cookie = "session=not-allowed";
     expect(() => validate(secret)).toThrow("forbidden secret field");
