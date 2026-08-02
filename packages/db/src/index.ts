@@ -239,6 +239,7 @@ export * from "./new-session-drafts";
 export * from "./workspace-instruction-policies";
 export * from "./preference-registry";
 export * from "./memory-governance";
+export * from "./scoped-knowledge";
 export { interruptedToolCallResult } from "./session-tool-call-settlement";
 export { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
 export {

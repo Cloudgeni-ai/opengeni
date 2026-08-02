@@ -9539,3 +9539,4 @@ export * from "./secret-redaction";
 export * from "./workspace-instruction-policies";
 export * from "./workspace-state";
 export * from "./preference-registry";
+export * from "./scoped-knowledge";

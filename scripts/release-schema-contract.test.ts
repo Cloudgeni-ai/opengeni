@@ -166,12 +166,17 @@ describe("release schema contract", () => {
         (migrations.has("0149_workspace_artifacts.sql") ? 1 : 0) +
         (migrations.has("0150_slack_task_interactions.sql") ? 1 : 0) +
         (migrations.has("0151_slack_delivery_backoff.sql") ? 1 : 0) +
-        (migrations.has("0152_hierarchical_memory_foundation.sql") ? 1 : 0),
+        (migrations.has("0152_hierarchical_memory_foundation.sql") ? 1 : 0) +
+        (migrations.has("0153_scoped_knowledge_foundation.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "8a8cfe345f4d749ce10b102fa4326a4d6293fa8e71807daed59f6c856f5949d2",
+      "83cea8202c02fde3f0d72fc380ee3f079ad44a7304cafac7c367869bd82878c0",
     );
-    expect(contract.latestMigration).toBe("0152_hierarchical_memory_foundation.sql");
+    expect(contract.latestMigration).toBe("0153_scoped_knowledge_foundation.sql");
+    expect(migrations.get("0153_scoped_knowledge_foundation.sql")).toMatchObject({
+      sha256: "a1773d964c96d8fc115e1e1711cb3f2b17a6f4f338ed3eda0c8a1dc1816dc0f9",
+      deploymentMode: "rolling",
+    });
     expect(migrations.get("0152_hierarchical_memory_foundation.sql")).toMatchObject({
       sha256: "bf3c4ee84a4d9bce7503607d3f34c7046890e5daddeaf0f8390cbd06fb468cdc",
       deploymentMode: "maintenance",
@@ -225,7 +230,7 @@ describe("release schema contract", () => {
     expect(
       contract.migrations
         .map((migration) => migration.path)
-        .filter((path) => /^(?:010[3-9]|011[0-9]|012[0-9]|013[0-9]|014[0-9]|015[0-2])_/.test(path)),
+        .filter((path) => /^(?:010[3-9]|011[0-9]|012[0-9]|013[0-9]|014[0-9]|015[0-3])_/.test(path)),
     ).toEqual([
       "0103_host_export_root_session.sql",
       "0104_host_export_root_session_backfill.sql",
@@ -267,6 +272,7 @@ describe("release schema contract", () => {
       "0150_slack_task_interactions.sql",
       "0151_slack_delivery_backoff.sql",
       "0152_hierarchical_memory_foundation.sql",
+      "0153_scoped_knowledge_foundation.sql",
     ]);
     expect(migrations.get("0143_session_codex_compaction_mode.sql")).toMatchObject({
       sha256: "574cfe6fc5ab24135e84d3932fd936e134ebe28bce8ac3cb5db97a549683906f",
