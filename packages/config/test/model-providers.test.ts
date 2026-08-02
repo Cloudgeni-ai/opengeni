@@ -73,7 +73,7 @@ describe("curated AI Gateway catalogue", () => {
     const providers = configuredProviders(settings);
     const gateway = providers.find((provider) => provider.id === OPENGENI_GATEWAY_PROVIDER_ID)!;
     expect(gateway.kind).toBe("vercel-gateway-managed");
-    expect(gateway.api).toBe("responses");
+    expect(gateway.api).toBe("chat");
 
     const models = configuredModels(settings);
     const deepseek = models.find(

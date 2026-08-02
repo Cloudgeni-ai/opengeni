@@ -41,7 +41,7 @@ describe("Vercel AI Gateway request fence", () => {
       return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
     }) as typeof fetch;
     const routed = vercelGatewayRoutingFetch("vercel-gateway-managed", inner);
-    await routed("https://ai-gateway.vercel.sh/v1/responses", {
+    await routed("https://ai-gateway.vercel.sh/v1/chat/completions", {
       method: "POST",
       body: JSON.stringify({
         model: "deepseek/deepseek-v4-flash-0731",
@@ -66,7 +66,7 @@ describe("Vercel AI Gateway request fence", () => {
       captured = JSON.parse(String(init?.body)) as Record<string, unknown>;
       return new Response("{}", { status: 200 });
     }) as typeof fetch);
-    await routed("https://ai-gateway.vercel.sh/v1/responses", {
+    await routed("https://ai-gateway.vercel.sh/v1/chat/completions", {
       method: "POST",
       body: JSON.stringify({ model: "moonshotai/kimi-k3-fast" }),
     });
@@ -82,7 +82,7 @@ describe("Vercel AI Gateway request fence", () => {
       return new Response("{}");
     }) as typeof fetch);
     await expect(
-      routed("https://ai-gateway.vercel.sh/v1/responses", {
+      routed("https://ai-gateway.vercel.sh/v1/chat/completions", {
         method: "POST",
         body: JSON.stringify({ model: "unreviewed/model" }),
       }),

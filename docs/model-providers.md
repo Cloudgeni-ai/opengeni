@@ -129,7 +129,8 @@ endpoint provider.
 
 Prices are a reviewed 2026-08-02 snapshot from the public Gateway endpoint
 metadata. They are intentionally static: adding a model or changing a route
-requires updating its definition, price, and tests together. Wafer publishes a
+requires reviewing its Chat Completions tool-call transport and updating its
+definition, price, and tests together. Wafer publishes a
 Kimi cache-read price in aggregate metadata but currently reports
 `supports_implicit_caching: false`; OpenGeni therefore makes no Kimi cache-hit
 promise and bills all Wafer input at the normal input rate. Baseten reports

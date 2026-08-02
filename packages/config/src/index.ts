@@ -2321,7 +2321,12 @@ function gatewayRegistryProvider(
     kind: input.kind,
     id: workspace ? WORKSPACE_GATEWAY_PROVIDER_ID : OPENGENI_GATEWAY_PROVIDER_ID,
     label: workspace ? "Your Gateway" : "OpenGeni",
-    api: "responses",
+    // Gateway-backed open models use Chat Completions. Vercel's Responses
+    // compatibility can complete a first Wafer/Kimi call but rejects the
+    // follow-up that replays reasoning plus function-call results; Baseten's
+    // DeepSeek deployment currently rejects the Responses request outright.
+    // Chat is the stable cross-provider tool-call wire format for both routes.
+    api: "chat",
     baseUrl: VERCEL_AI_GATEWAY_BASE_URL,
     ...(input.apiKey ? { apiKey: input.apiKey } : {}),
     models,
