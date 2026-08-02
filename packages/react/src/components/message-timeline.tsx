@@ -1159,7 +1159,18 @@ export function MessageTimeline({
                             : 0;
                       return (
                         <div key={key} data-og-timeline-group-anchor="" data-og-group-key={key}>
-                          <TimelineGroupRenderBoundary>
+                          <TimelineGroupRenderBoundary
+                            resetKeys={[
+                              group,
+                              renderMessageText,
+                              onOpenSession,
+                              onMemoryClick,
+                              onReconnect,
+                              resolveProviderLogo,
+                              toolRegistry,
+                              turnSummary,
+                            ]}
+                          >
                             <TimelineGroupView
                               group={group}
                               renderMessageText={renderMessageText}
@@ -1425,11 +1436,23 @@ function cancelFrame(id: number): void {
 
 type TimelineGroupRenderBoundaryProps = {
   children: ReactNode;
+  resetKeys: readonly unknown[];
 };
 
 type TimelineGroupRenderBoundaryState = {
   failed: boolean;
+  resetKeys: readonly unknown[];
 };
+
+function timelineRenderResetKeysChanged(
+  previous: readonly unknown[],
+  next: readonly unknown[],
+): boolean {
+  return (
+    previous.length !== next.length ||
+    previous.some((key, index) => !Object.is(key, next[index]))
+  );
+}
 
 /**
  * A malformed historical payload or consumer renderer must not take down the
@@ -1440,10 +1463,23 @@ class TimelineGroupRenderBoundary extends Component<
   TimelineGroupRenderBoundaryProps,
   TimelineGroupRenderBoundaryState
 > {
-  state: TimelineGroupRenderBoundaryState = { failed: false };
+  state: TimelineGroupRenderBoundaryState = {
+    failed: false,
+    resetKeys: this.props.resetKeys,
+  };
 
-  static getDerivedStateFromError(): TimelineGroupRenderBoundaryState {
+  static getDerivedStateFromError(): Partial<TimelineGroupRenderBoundaryState> {
     return { failed: true };
+  }
+
+  static getDerivedStateFromProps(
+    props: TimelineGroupRenderBoundaryProps,
+    state: TimelineGroupRenderBoundaryState,
+  ): Partial<TimelineGroupRenderBoundaryState> | null {
+    if (timelineRenderResetKeysChanged(state.resetKeys, props.resetKeys)) {
+      return { failed: false, resetKeys: props.resetKeys };
+    }
+    return null;
   }
 
   render(): ReactNode {
@@ -1632,7 +1668,19 @@ const TimelineGroupView = memo(function TimelineGroupView({
       const body = group.groups.map((child) => {
         const key = timelineGroupKey(child);
         return (
-          <TimelineGroupRenderBoundary key={key}>
+          <TimelineGroupRenderBoundary
+            key={key}
+            resetKeys={[
+              child,
+              renderMessageText,
+              onOpenSession,
+              onMemoryClick,
+              onReconnect,
+              resolveProviderLogo,
+              toolRegistry,
+              turnSummary,
+            ]}
+          >
             <TimelineGroupView
               group={child}
               renderMessageText={renderMessageText}

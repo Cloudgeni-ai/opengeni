@@ -217,7 +217,7 @@ function fleetDecisionEventPayload(): Record<string, unknown> {
 }
 
 describe("timeline renderer isolation", () => {
-  test("keeps neighboring conversation groups visible when a renderer resolves undefined", async () => {
+  test("keeps neighboring groups visible and recovers when an undefined renderer is replaced", async () => {
     const items: TimelineItem[] = [
       {
         kind: "user-message",
@@ -263,6 +263,17 @@ describe("timeline renderer isolation", () => {
       expect(
         r.container.querySelectorAll('[data-testid="timeline-group-render-error"]'),
       ).toHaveLength(1);
+
+      await r.rerender(<MessageTimeline items={items} toolRegistry={defaultToolRegistry} />);
+      await flush();
+
+      const recoveredText = r.container.textContent ?? "";
+      expect(recoveredText).toContain("Message before the broken renderer");
+      expect(recoveredText).toContain("Consumer tool with missing renderer");
+      expect(recoveredText).toContain("Message after the broken renderer");
+      expect(
+        r.container.querySelectorAll('[data-testid="timeline-group-render-error"]'),
+      ).toHaveLength(0);
 
       await r.unmount();
     } finally {
