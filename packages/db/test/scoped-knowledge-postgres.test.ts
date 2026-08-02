@@ -9,10 +9,12 @@ import {
   appendKnowledgeClaimReview,
   appendKnowledgeDocumentVersion,
   appendKnowledgeSourceAclVersion,
+  attachKnowledgeEntityAlias,
   beginKnowledgeSyncRun,
   completeKnowledgeSyncRun,
   createDb,
   getEligibleKnowledgeClaim,
+  linkKnowledgeClaims,
   migrate,
   provisionRoles,
   recordKnowledgeLifecycleEvent,
@@ -488,6 +490,136 @@ describe("scoped knowledge (real PostgreSQL + FORCE RLS)", () => {
         (select count(*)::int from knowledge_facts where account_id = ${workspace.accountId})
           as facts`;
     expect(counts).toEqual({ entities: 1, facts: 1 });
+  });
+
+  test("checks alias operation replay before natural-key convergence", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace("alias-idempotency");
+    const actor = human("user:alice");
+    const createEntity = async (label: string) =>
+      await upsertKnowledgeEntity(db, {
+        ...workspace,
+        scope: workspaceScope(workspace.workspaceId),
+        operationId: `alias-entity-${label}`,
+        actor,
+        entityType: "customer",
+        normalizedKey: label,
+        displayName: label,
+      });
+    const [entityA, entityB] = await Promise.all([createEntity("a"), createEntity("b")]);
+    const aliasAInput = {
+      ...workspace,
+      operationId: "alias-operation-x",
+      actor,
+      entityId: entityA.id,
+      alias: "Alpha alias",
+    } as const;
+    const aliasA = await attachKnowledgeEntityAlias(db, aliasAInput);
+    expect((await attachKnowledgeEntityAlias(db, aliasAInput)).id).toBe(aliasA.id);
+    const aliasBInput = {
+      ...workspace,
+      operationId: "alias-operation-y",
+      actor,
+      entityId: entityB.id,
+      alias: "Beta alias",
+    } as const;
+    const aliasB = await attachKnowledgeEntityAlias(db, aliasBInput);
+    await expect(
+      attachKnowledgeEntityAlias(db, {
+        ...aliasBInput,
+        operationId: aliasAInput.operationId,
+      }),
+    ).rejects.toBeInstanceOf(ScopedKnowledgeConflictError);
+    const [concurrentAliasA, concurrentAliasB] = await Promise.all([
+      attachKnowledgeEntityAlias(db, {
+        ...workspace,
+        operationId: "alias-converge-a",
+        actor,
+        entityId: entityA.id,
+        alias: "Shared alias",
+      }),
+      attachKnowledgeEntityAlias(db, {
+        ...workspace,
+        operationId: "alias-converge-b",
+        actor,
+        entityId: entityA.id,
+        alias: "Shared alias",
+      }),
+    ]);
+    expect(concurrentAliasA.id).toBe(concurrentAliasB.id);
+
+    const [counts] = await admin<Array<{ aliases: number }>>`
+      select count(*)::int as aliases
+      from knowledge_entity_aliases
+      where account_id = ${workspace.accountId}`;
+    expect(counts).toEqual({ aliases: 3 });
+    expect(aliasB.id).not.toBe(aliasA.id);
+  });
+
+  test("checks relation operation replay before natural-key convergence", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace("relation-idempotency");
+    const actor = human("user:alice");
+    const claims = await Promise.all(
+      ["a", "b", "c", "d"].map((label) =>
+        createClaimFixture(workspace, {
+          label: `relation-${label}`,
+          actor,
+          versionIds: [],
+        }),
+      ),
+    );
+    const relationAInput = {
+      ...workspace,
+      operationId: "relation-operation-x",
+      actor,
+      relationType: "conflicts_with",
+      fromClaimId: claims[0]!.id,
+      toClaimId: claims[1]!.id,
+    } as const;
+    const relationA = await linkKnowledgeClaims(db, relationAInput);
+    expect((await linkKnowledgeClaims(db, relationAInput)).id).toBe(relationA.id);
+    const relationBInput = {
+      ...workspace,
+      operationId: "relation-operation-y",
+      actor,
+      relationType: "conflicts_with",
+      fromClaimId: claims[2]!.id,
+      toClaimId: claims[3]!.id,
+    } as const;
+    const relationB = await linkKnowledgeClaims(db, relationBInput);
+    await expect(
+      linkKnowledgeClaims(db, {
+        ...relationBInput,
+        operationId: relationAInput.operationId,
+      }),
+    ).rejects.toBeInstanceOf(ScopedKnowledgeConflictError);
+    const [concurrentRelationA, concurrentRelationB] = await Promise.all([
+      linkKnowledgeClaims(db, {
+        ...workspace,
+        operationId: "relation-converge-a",
+        actor,
+        relationType: "conflicts_with",
+        fromClaimId: claims[0]!.id,
+        toClaimId: claims[2]!.id,
+      }),
+      linkKnowledgeClaims(db, {
+        ...workspace,
+        operationId: "relation-converge-b",
+        actor,
+        relationType: "conflicts_with",
+        fromClaimId: claims[0]!.id,
+        toClaimId: claims[2]!.id,
+      }),
+    ]);
+    expect(concurrentRelationA.id).toBe(concurrentRelationB.id);
+
+    const [counts] = await admin<Array<{ relations: number }>>`
+      select count(*)::int as relations
+      from knowledge_claim_relations
+      where account_id = ${workspace.accountId}`;
+    expect(counts).toEqual({ relations: 3 });
+    expect(relationB.id).not.toBe(relationA.id);
   });
 
   test("serializes ACL/version generations and keeps lifecycle/sync replay idempotent", async () => {

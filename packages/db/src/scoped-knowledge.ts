@@ -1451,28 +1451,71 @@ export async function attachKnowledgeEntityAlias(
           })
           .onConflictDoNothing()
           .returning();
-        const row =
-          created ??
-          (
-            await scopedDb
-              .select()
-              .from(schema.knowledgeEntityAliases)
-              .where(
-                and(
-                  eq(schema.knowledgeEntityAliases.scopeKey, entity.scopeKey),
-                  eq(schema.knowledgeEntityAliases.entityType, entity.entityType),
-                  eq(schema.knowledgeEntityAliases.normalizedAlias, normalizedAlias),
-                ),
-              )
-              .limit(1)
-          )[0];
+        if (created) {
+          return {
+            id: created.id,
+            entityId: created.entityId,
+            alias: created.alias,
+            normalizedAlias: created.normalizedAlias,
+          };
+        }
+        const [operationRow] = await scopedDb
+          .select()
+          .from(schema.knowledgeEntityAliases)
+          .where(
+            and(
+              eq(schema.knowledgeEntityAliases.accountId, input.accountId),
+              eq(schema.knowledgeEntityAliases.operationId, input.operationId),
+            ),
+          )
+          .limit(1);
+        if (operationRow) {
+          if (
+            operationRow.inputHash !== inputHash ||
+            operationRow.scopeKind !== entity.scopeKind ||
+            operationRow.scopeWorkspaceId !== entity.scopeWorkspaceId ||
+            operationRow.scopeSubjectId !== entity.scopeSubjectId ||
+            operationRow.scopeKey !== entity.scopeKey ||
+            operationRow.entityId !== entity.id ||
+            operationRow.entityType !== entity.entityType ||
+            operationRow.alias !== alias ||
+            operationRow.normalizedAlias !== normalizedAlias
+          ) {
+            throw new ScopedKnowledgeConflictError(
+              "Entity-alias operation id was replayed with different immutable input",
+            );
+          }
+          return {
+            id: operationRow.id,
+            entityId: operationRow.entityId,
+            alias: operationRow.alias,
+            normalizedAlias: operationRow.normalizedAlias,
+          };
+        }
+        const [row] = await scopedDb
+          .select()
+          .from(schema.knowledgeEntityAliases)
+          .where(
+            and(
+              eq(schema.knowledgeEntityAliases.accountId, input.accountId),
+              eq(schema.knowledgeEntityAliases.scopeKey, entity.scopeKey),
+              eq(schema.knowledgeEntityAliases.entityType, entity.entityType),
+              eq(schema.knowledgeEntityAliases.normalizedAlias, normalizedAlias),
+            ),
+          )
+          .limit(1);
         if (!row) throw new ScopedKnowledgeConflictError("Entity alias identity conflicted");
         if (row.entityId !== entity.id) {
           throw new ScopedKnowledgeConflictError(
             "Entity alias is already bound to a different entity",
           );
         }
-        return { id: row.id, entityId: row.entityId, alias: row.alias, normalizedAlias };
+        return {
+          id: row.id,
+          entityId: row.entityId,
+          alias: row.alias,
+          normalizedAlias: row.normalizedAlias,
+        };
       } catch (error) {
         if (error instanceof Error && error.name.startsWith("ScopedKnowledge")) throw error;
         translatePersistenceError(error, "Knowledge entity-alias attach conflicted");
@@ -1763,23 +1806,66 @@ export async function linkKnowledgeClaims(
           })
           .onConflictDoNothing()
           .returning();
-        const row =
-          created ??
-          (
-            await scopedDb
-              .select()
-              .from(schema.knowledgeClaimRelations)
-              .where(
-                and(
-                  eq(schema.knowledgeClaimRelations.relationType, input.relationType),
-                  eq(schema.knowledgeClaimRelations.fromClaimId, fromClaimId),
-                  eq(schema.knowledgeClaimRelations.toClaimId, toClaimId),
-                ),
-              )
-              .limit(1)
-          )[0];
+        if (created) {
+          return {
+            id: created.id,
+            relationType: created.relationType as KnowledgeClaimRelationType,
+            fromClaimId: created.fromClaimId,
+            toClaimId: created.toClaimId,
+          };
+        }
+        const [operationRow] = await scopedDb
+          .select()
+          .from(schema.knowledgeClaimRelations)
+          .where(
+            and(
+              eq(schema.knowledgeClaimRelations.accountId, input.accountId),
+              eq(schema.knowledgeClaimRelations.operationId, input.operationId),
+            ),
+          )
+          .limit(1);
+        if (operationRow) {
+          if (
+            operationRow.inputHash !== inputHash ||
+            operationRow.scopeKind !== claim.scopeKind ||
+            operationRow.scopeWorkspaceId !== claim.scopeWorkspaceId ||
+            operationRow.scopeSubjectId !== claim.scopeSubjectId ||
+            operationRow.scopeKey !== claim.scopeKey ||
+            operationRow.relationType !== input.relationType ||
+            operationRow.fromClaimId !== fromClaimId ||
+            operationRow.toClaimId !== toClaimId
+          ) {
+            throw new ScopedKnowledgeConflictError(
+              "Claim-relation operation id was replayed with different immutable input",
+            );
+          }
+          return {
+            id: operationRow.id,
+            relationType: operationRow.relationType as KnowledgeClaimRelationType,
+            fromClaimId: operationRow.fromClaimId,
+            toClaimId: operationRow.toClaimId,
+          };
+        }
+        const [row] = await scopedDb
+          .select()
+          .from(schema.knowledgeClaimRelations)
+          .where(
+            and(
+              eq(schema.knowledgeClaimRelations.accountId, input.accountId),
+              eq(schema.knowledgeClaimRelations.scopeKey, claim.scopeKey),
+              eq(schema.knowledgeClaimRelations.relationType, input.relationType),
+              eq(schema.knowledgeClaimRelations.fromClaimId, fromClaimId),
+              eq(schema.knowledgeClaimRelations.toClaimId, toClaimId),
+            ),
+          )
+          .limit(1);
         if (!row) throw new ScopedKnowledgeConflictError("Claim relation identity conflicted");
-        return { id: row.id, relationType: input.relationType, fromClaimId, toClaimId };
+        return {
+          id: row.id,
+          relationType: row.relationType as KnowledgeClaimRelationType,
+          fromClaimId: row.fromClaimId,
+          toClaimId: row.toClaimId,
+        };
       } catch (error) {
         if (error instanceof Error && error.name.startsWith("ScopedKnowledge")) throw error;
         translatePersistenceError(error, "Knowledge claim relation conflicted");
