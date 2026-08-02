@@ -1777,14 +1777,13 @@ describe("useComposer durable draft and control binding", () => {
     expect(reads).toBe(2);
     expect(hook.result.current.draftLoading).toBe(false);
     expect(releaseSecond).not.toBeNull();
-    // Soft reload must not flip draftLoading. Keep the deferred read's state
-    // commits inside act — on slower CI hosts a bare resolve can land after
-    // the synchronous act callback returns and trip the warning-free gate.
+    // Soft reload must not flip draftLoading. Resolve + settle under one act so
+    // the deferred read's setState commits never escape the warning-free gate.
     await flushing(async () => {
       releaseSecond!();
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await Promise.resolve();
+      await Promise.resolve();
     });
-    await flush();
     expect(hook.result.current.draftLoading).toBe(false);
     expect(hook.result.current.value).toBe("read-2");
     await hook.unmount();
@@ -1828,8 +1827,11 @@ describe("useComposer durable draft and control binding", () => {
     expect(hook.result.current.draftLoading).toBe(true);
     expect(reads).toBe(2);
     expect(releaseReload).not.toBeNull();
-    releaseReload!();
-    await flushing(async () => await reloadDone);
+    // Resolving outside act was the clean-gate failure: draft setState escaped.
+    await flushing(async () => {
+      releaseReload!();
+      await reloadDone;
+    });
     expect(hook.result.current.draftLoading).toBe(false);
     await hook.unmount();
   });
