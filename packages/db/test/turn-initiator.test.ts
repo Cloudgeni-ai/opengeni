@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
   addSessionSystemUpdate,
+  applySessionTurnSettlement,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   createDb,
@@ -12,7 +13,10 @@ import {
   editQueuedTurnInTransaction,
   frozenInitiatorForCommandActor,
   getSessionTurn,
+  getSessionTurnPersonalConnectionDelegations,
   initializeSessionStartAtomically,
+  listOutstandingSessionSystemUpdates,
+  listSessionSystemUpdatesForTurn,
   saveComposerDraftInTransaction,
   SessionIdConflictError,
   submitHumanPromptInTransaction,
@@ -136,8 +140,18 @@ describe("immutable session turn initiators", () => {
   test("initial-turn repair uses the frozen session creator, not the retrying caller", async () => {
     const grant = await fixture();
     const idempotencyKey = crypto.randomUUID();
+    const winningDelegations = [
+      {
+        serverId: "linear",
+        connectionId: crypto.randomUUID(),
+        ownerSubjectId: grant.subjectId,
+        providerDomain: "linear.app",
+        kind: "oauth2" as const,
+      },
+    ];
     const first = await createSessionWithIdempotencyKey(client.db, {
       ...sessionInput(grant),
+      personalConnectionDelegations: winningDelegations,
       createIdempotencyKey: idempotencyKey,
     });
     expect(first.created).toBe(true);
@@ -145,6 +159,12 @@ describe("immutable session turn initiators", () => {
     const retry = await createSessionWithIdempotencyKey(client.db, {
       ...sessionInput(grant),
       createdBy: { kind: "subject", subjectId: "user:different-retry" },
+      personalConnectionDelegations: [
+        {
+          ...winningDelegations[0]!,
+          connectionId: crypto.randomUUID(),
+        },
+      ],
       createIdempotencyKey: idempotencyKey,
     });
     expect(retry.created).toBe(false);
@@ -172,6 +192,14 @@ describe("immutable session turn initiators", () => {
     expect((queuedEvent.payload as Record<string, unknown>).initiator).toEqual(
       retry.session.createdBy,
     );
+    expect(
+      await getSessionTurnPersonalConnectionDelegations(
+        client.db,
+        grant.workspaceId!,
+        retry.session.id,
+        started.turn!.id,
+      ),
+    ).toEqual(winningDelegations);
   });
 
   test("initial-turn repair uses the winning create instructions, not the retrying caller", async () => {
@@ -217,6 +245,15 @@ describe("immutable session turn initiators", () => {
     const sender = "user:sender";
     const editor = "user:editor";
 
+    const originalDelegations = [
+      {
+        serverId: "linear",
+        connectionId: crypto.randomUUID(),
+        ownerSubjectId: sender,
+        providerDomain: "linear.app",
+        kind: "oauth2" as const,
+      },
+    ];
     const sent = await withWorkspaceSubjectRls(client.db, grant.workspaceId!, sender, (db) =>
       db.transaction((tx) =>
         submitHumanPromptInTransaction(tx as typeof db, {
@@ -232,6 +269,7 @@ describe("immutable session turn initiators", () => {
           resources: [],
           reasoningEffortFallback: "low",
           source: "user",
+          personalConnectionDelegations: originalDelegations,
         }),
       ),
     );
@@ -291,9 +329,20 @@ describe("immutable session turn initiators", () => {
           reasoningEffort: "low",
           reasoningEffortFallback: "low",
           source: "user",
+          personalConnectionDelegations: [
+            { ...originalDelegations[0]!, connectionId: crypto.randomUUID() },
+          ],
         }),
       ),
     );
+    expect(
+      await getSessionTurnPersonalConnectionDelegations(
+        client.db,
+        grant.workspaceId!,
+        session.id,
+        resubmitted.turnId,
+      ),
+    ).toEqual(originalDelegations);
     expect(
       (await getSessionTurn(client.db, grant.workspaceId!, resubmitted.turnId))?.initiator,
     ).toEqual(original?.initiator);
@@ -436,7 +485,19 @@ describe("immutable session turn initiators", () => {
 
   test("agent work inherits across coalesced notices while service batches stay explicit", async () => {
     const grant = await fixture();
-    const source = await createSession(client.db, sessionInput(grant));
+    const sourceDelegations = [
+      {
+        serverId: "linear",
+        connectionId: crypto.randomUUID(),
+        ownerSubjectId: grant.subjectId,
+        providerDomain: "linear.app",
+        kind: "oauth2" as const,
+      },
+    ];
+    const source = await createSession(client.db, {
+      ...sessionInput(grant),
+      personalConnectionDelegations: sourceDelegations,
+    });
     const sourceStart = await initializeSessionStartAtomically(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId!,
@@ -488,6 +549,7 @@ describe("immutable session turn initiators", () => {
         callerAttemptId,
         callerExecutionGeneration: 1,
       },
+      personalConnectionDelegations: sourceDelegations,
     });
     const coalescedGoal = await createSessionGoal(client.db, {
       accountId: grant.accountId,
@@ -542,6 +604,7 @@ describe("immutable session turn initiators", () => {
     expect(steeredClaim.turn.initiator).toEqual(sourceTurn.initiator);
     expect(steeredClaim.turn.source).toBe("system");
     expect(steeredClaim.turn.model).toBe("scripted-model");
+    expect(steeredClaim.turn.personalConnectionDelegations).toEqual(sourceDelegations);
 
     const malformedTarget = await createSession(client.db, sessionInput(grant));
     await addSessionSystemUpdate(client.db, {
@@ -578,6 +641,7 @@ describe("immutable session turn initiators", () => {
     expect(malformedClaim.turn.initiatorContext.provenanceError).toBe(
       "agent_steer_lineage_incomplete",
     );
+    expect(malformedClaim.turn.personalConnectionDelegations).toEqual([]);
 
     const scheduledTarget = await createSession(client.db, {
       ...sessionInput(grant),
@@ -680,5 +744,127 @@ describe("immutable session turn initiators", () => {
     expect(mixedClaim.turn.source).toBe("goal");
     expect(mixedClaim.turn.model).toBe("goal-routed-model");
     expect(mixedClaim.turn.reasoningEffort).toBe("high");
+  });
+
+  test("ordinary machine inputs batch only across the same frozen personal authority", async () => {
+    const grant = await fixture();
+    const target = await createSession(client.db, sessionInput(grant));
+    const firstDelegations = [
+      {
+        serverId: "linear",
+        connectionId: crypto.randomUUID(),
+        ownerSubjectId: grant.subjectId,
+        providerDomain: "linear.app",
+        kind: "oauth2" as const,
+      },
+    ];
+    const secondDelegations = [
+      {
+        serverId: "github",
+        connectionId: crypto.randomUUID(),
+        ownerSubjectId: grant.subjectId,
+        providerDomain: "github.com",
+        kind: "oauth2" as const,
+      },
+    ];
+    const addNotice = async (
+      text: string,
+      personalConnectionDelegations: typeof firstDelegations,
+    ) => {
+      const result = await addSessionSystemUpdate(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: target.id,
+        kind: "agent_message",
+        classification: "info",
+        sourceId: `source-${text}`,
+        dedupeKey: crypto.randomUUID(),
+        summary: text,
+        payload: {
+          type: "agent_message",
+          text,
+          operationId: crypto.randomUUID(),
+        },
+        lineage: {},
+        personalConnectionDelegations,
+      });
+      if (!result.added) throw new Error(`failed to add ${text}: ${result.reason}`);
+      return result.update.id;
+    };
+
+    const firstId = await addNotice("first same-authority notice", firstDelegations);
+    const secondId = await addNotice("second same-authority notice", firstDelegations);
+    const heldId = await addNotice("different-authority notice", secondDelegations);
+    await shared.admin`
+      update session_system_updates
+      set created_at = case id
+        when ${firstId}::uuid then timestamp with time zone '2026-01-01 00:00:01+00'
+        when ${secondId}::uuid then timestamp with time zone '2026-01-01 00:00:02+00'
+        when ${heldId}::uuid then timestamp with time zone '2026-01-01 00:00:03+00'
+        else created_at
+      end
+      where id in (${firstId}::uuid, ${secondId}::uuid, ${heldId}::uuid)
+    `;
+
+    const firstAttemptId = crypto.randomUUID();
+    const firstClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: target.id,
+      workflowId: `session-${target.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: firstAttemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (firstClaim.action !== "claimed") throw new Error("first authority batch was not claimed");
+    expect(firstClaim.turn.personalConnectionDelegations).toEqual(firstDelegations);
+    expect(
+      (
+        await listSessionSystemUpdatesForTurn(
+          client.db,
+          grant.workspaceId!,
+          target.id,
+          firstClaim.turn.id,
+        )
+      ).map((update) => update.id),
+    ).toEqual([firstId, secondId]);
+    expect(
+      (await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, target.id)).map(
+        (update) => update.id,
+      ),
+    ).toEqual([heldId]);
+
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: target.id,
+      turnId: firstClaim.turn.id,
+      triggerEventId: firstClaim.turn.triggerEventId,
+      attemptId: firstAttemptId,
+      turnStatus: "completed",
+      sessionStatus: "queued",
+      activeTurnId: null,
+      events: [],
+    });
+
+    const secondClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: target.id,
+      workflowId: `session-${target.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (secondClaim.action !== "claimed") {
+      throw new Error("second authority batch was not claimed");
+    }
+    expect(secondClaim.turn.personalConnectionDelegations).toEqual(secondDelegations);
+    expect(
+      (
+        await listSessionSystemUpdatesForTurn(
+          client.db,
+          grant.workspaceId!,
+          target.id,
+          secondClaim.turn.id,
+        )
+      ).map((update) => update.id),
+    ).toEqual([heldId]);
   });
 });

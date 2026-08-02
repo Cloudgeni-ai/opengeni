@@ -1486,7 +1486,10 @@ const TimelineGroupView = memo(function TimelineGroupView({
   // Latch live→folded so a top-level shell that was already mounted open can
   // start the settle beat without remounting bare rail → wrapper.
   const liveActivitySettle = useLiveSettleFold(activityShouldFold && !insideTurn);
-  const turnDefaultOpen = !insideTurn && group.kind === "turn" && group.outcome === "failed";
+  const turnDefaultOpen =
+    !insideTurn &&
+    group.kind === "turn" &&
+    (group.outcome === "failed" || timelineGroupContainsAuthNeeded(group));
   // activity-* → turn-* remount: carry resting state so settleFold does not
   // re-open a chip the reader already watched collapse.
   if (group.kind === "turn" && foldMemory && !insideTurn) {
@@ -1676,6 +1679,17 @@ function timelineGroupKey(group: TimelineGroup): string {
       return group.id;
     case "turn":
       return group.id;
+  }
+}
+
+function timelineGroupContainsAuthNeeded(group: TimelineGroup): boolean {
+  switch (group.kind) {
+    case "item":
+      return group.item.kind === "auth-needed";
+    case "activity":
+      return false;
+    case "turn":
+      return group.groups.some(timelineGroupContainsAuthNeeded);
   }
 }
 
@@ -2433,7 +2447,9 @@ function AuthNeededRow({
   const [failed, setFailed] = useState(false);
   const provider = providerLabel(item.providerDomain);
   const unavailable =
-    item.reason === "unsupported_auth" || item.reason === "resource_scope_unavailable";
+    item.reason === "personal_authority_unavailable" ||
+    item.reason === "unsupported_auth" ||
+    item.reason === "resource_scope_unavailable";
   const missing = item.reason === "missing_connection";
   const actionLabel = missing ? "Connect" : "Reconnect";
 
@@ -2587,6 +2603,8 @@ function authReasonLine(reason: AuthNeededItem["reason"]): string {
     case "expired":
     case "refresh_failed":
       return "Its access expired.";
+    case "personal_authority_unavailable":
+      return "This automation was not granted access to your personal connection.";
     case "unsupported_auth":
       return "This connection cannot authenticate the configured tool endpoint.";
     case "resource_scope_unavailable":

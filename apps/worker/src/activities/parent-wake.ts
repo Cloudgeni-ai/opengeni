@@ -3,6 +3,7 @@ import type { Session, SessionGoal, SessionSystemUpdatePayload } from "@opengeni
 import {
   getSession,
   getSessionGoal,
+  getSessionParentPersonalConnectionDelegations,
   addSessionSystemUpdateWithSourceMutation,
   claimPendingSessionSystemUpdateOutbox,
   claimPendingSessionWorkflowWakes,
@@ -57,6 +58,11 @@ export async function notifyParentOfChildIdle(
     // guard so a nudge that slips through still cannot revive the goal.
     const clientEventId = `child-completion:${childSessionId}:${episodeKey}`;
     const payload = childCompletionPayload(child, goal);
+    const personalConnectionDelegations = await getSessionParentPersonalConnectionDelegations(
+      svc.db,
+      workspaceId,
+      childSessionId,
+    );
     const outbox = await getOrCreateSessionSystemUpdateOutbox(svc.db, {
       accountId: child.accountId,
       workspaceId,
@@ -69,6 +75,7 @@ export async function notifyParentOfChildIdle(
       summary: childCompletionSummary(child, goal, "idle"),
       payload,
       lineage: { childSessionId: child.id, parentSessionId: child.parentSessionId },
+      personalConnectionDelegations,
     });
     if (outbox.status === "delivered") {
       return;
@@ -138,6 +145,7 @@ async function deliverParentSystemUpdateOutbox(
         summary: outbox.summary,
         payload: outbox.payload,
         lineage: outbox.lineage,
+        personalConnectionDelegations: outbox.personalConnectionDelegations,
       },
       async (tx) => {
         await markSessionSystemUpdateOutboxDeliveredInTransaction(tx, outbox);

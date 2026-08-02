@@ -506,6 +506,9 @@ export function buildConnectionTokenResolver(
 
   return async (input) => {
     const ref = input.connectionRef;
+    if (ref.subjectScope === "subject" && !input.subjectId) {
+      return authNeeded(ref, "personal_authority_unavailable", ref.connectionId);
+    }
     // Repository-scoped provider bindings require a broker that can prove the
     // selected-resource boundary. The generic standalone credential store has
     // no provider-specific containment adapter, so it must fail closed instead

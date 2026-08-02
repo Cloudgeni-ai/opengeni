@@ -43,16 +43,43 @@ subject and permissions still authorize the command; the asserted service is
 only the immutable initiator of the newly created work. It cannot assert a
 human subject or override a worker-signed exact agent attempt.
 
+Connection ownership is a different axis. Capability setup defaults to a
+workspace-owned OAuth/API-key connection, available under normal workspace
+authorization; **Connect only for me** explicitly creates a subject-owned row.
+A turn can execute a personal row only when it carries an exact immutable
+`McpPersonalConnectionDelegation` containing the selected MCP server, connection,
+owner, provider, and kind. Those private identifiers never enter public queue,
+turn, or task payloads: the disclosure there is only `{serverId,
+providerDomain}`.
+
+Direct session creation, Send, and Steer freeze the authenticated subject's
+currently selected active personal rows. Queue editing preserves that snapshot.
+Agent Message and Agent Steer copy the calling turn's snapshot through the
+worker-signed exact turn reference. A child session stores immutable
+`parent_turn_id` and copies that spawning turn, rather than consulting whichever
+turn is latest later. Approval, structured input, capacity recovery, and worker
+recovery remain the same logical turn and therefore retain the same snapshot.
+No path infers personal authority from the session creator, current user,
+service initiator, latest connection, latest queue head, or an unrelated newer
+turn.
+
 Synthesized goal continuations inherit the model and reasoning effort from the
 newest turn with a durable `turn.started` event. The session default is used
 only when no turn has actually started. This keeps routing and billing
 ownership aligned after an explicit per-turn switch and excludes turns rejected
 during admission, whose `started_at` claim timestamp alone is not proof that
-their policy ran. Spawned-child terminal results enter the parent's bounded
-typed internal-update batch without injecting a synthetic `user.message` or a
-human queue row. Claim persists the exact deterministic batch in
-`session_history_items` before inference and links every member to that row.
-Recovery reuses it; later reconciliation never filters it from model memory.
+their policy ran. The continuation records the exact latest finished
+`causalTurnId` and copies that turn's personal delegation snapshot when it is
+materialized; a later unrelated human turn cannot mutate the frozen update.
+Spawned-child terminal results retain the spawning parent-turn snapshot in the
+outbox and enter the parent's bounded typed internal-update batch without
+injecting a synthetic `user.message` or a human queue row. Ordinary internal
+updates coalesce only when their personal delegation snapshots match; Agent
+Steer remains the authoritative initiator and delegation source when compatible
+notices join it. Claim persists the exact deterministic batch and authority in
+`session_history_items`/the claimed turn before inference and links every member
+to that row. Recovery reuses it; later reconciliation never filters it from
+model memory.
 
 Immediately after claim, the exact owning attempt installs or reads the
 logical turn's accepted execution policy before credit admission, credential
@@ -188,11 +215,20 @@ Before model/tool work, a claimed turn inserts a first-class
 `session_turn_attempts` row containing its exact Temporal activity id, current
 trigger, monotonic dispatch generation, verified control revision, and write
 lease. The same claim snapshots every per-session MCP approval policy under the
-session lock. A real Temporal activity retry retains the activity id; a
+session lock and adopts the selected machine-input batch's exact personal-MCP
+delegation snapshot. A real Temporal activity retry retains the activity id; a
 re-dispatch creates a new attempt and captures the then-current policy. Every
 event, model-history write, run-state write, compaction transition, tool receipt,
 and terminal settlement must match that attempt. A typed schedule-to-start
 timeout is the only no-attempt recovery case because its activity never ran.
+
+Before a personal MCP is attached, the worker/Toolspace boundary revalidates the
+delegation's exact workspace membership, connection id, provider domain, kind,
+owner subject, and active status. A missing, revoked, transferred, or otherwise
+invalid row is never replaced with another subject's connection. Only that MCP
+is omitted, `tool.auth_needed` reports `personal_authority_unavailable`, and the
+turn receives a bounded visible instruction explaining that the source was not
+available and must not be claimed as used; unrelated tools and work continue.
 
 Session creation persists skill selection but never starts a sandbox. At turn
 execution, bundled, curated, pack, and inline session skills remain SDK-lazy:
@@ -516,7 +552,8 @@ Agents stop prematurely. A **goal** flips the default so terminal settlement of
 the last turn arms one durable Postgres continuation obligation and the agent
 must explicitly `goal_complete` or `goal_pause` to stop. A locked transaction
 materializes one revision as one typed goal-continuation update, its audit
-events and usage fact, and the next workflow wake. The stable
+events and usage fact, the exact latest finished causal turn plus its personal
+delegation snapshot, and the next workflow wake. The stable
 `goal-continuation:<goalId>:wake:<revision>` identity makes a lost commit
 response/retry a no-op rather than another logical continuation. The update
 joins the next bounded internal batch and never appears as a human queue row.

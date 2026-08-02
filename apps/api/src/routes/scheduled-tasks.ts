@@ -14,6 +14,7 @@ import { requireAccessGrant } from "@opengeni/core";
 import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
+  captureScheduledTaskRestoreState,
   createValidatedScheduledTask,
   manualScheduledTaskTriggerUsageKey,
   manualScheduledTaskTriggerWorkflowId,
@@ -69,6 +70,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:manage");
     const taskId = c.req.param("taskId");
     const existing = await requireScheduledTaskForApi(db, workspaceId, taskId);
+    const previous = await captureScheduledTaskRestoreState(db, existing);
     const rawPayload = await c.req.json();
     const payload = UpdateScheduledTaskRequest.parse(rawPayload);
     const update = await validatedScheduledTaskUpdate({
@@ -81,7 +83,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       toolsProvided: scheduledTaskToolsProvided(rawPayload),
     });
     const task = await updateScheduledTask(db, workspaceId, taskId, update);
-    await syncUpdatedScheduledTask({ db, workflowClient, previous: existing, task });
+    await syncUpdatedScheduledTask({ db, workflowClient, previous, task });
     return c.json(task);
   });
 
@@ -89,8 +91,9 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:manage");
     const existing = await requireScheduledTaskForApi(db, workspaceId, c.req.param("taskId"));
+    const previous = await captureScheduledTaskRestoreState(db, existing);
     const task = await updateScheduledTask(db, workspaceId, existing.id, { status: "paused" });
-    await syncUpdatedScheduledTask({ db, workflowClient, previous: existing, task });
+    await syncUpdatedScheduledTask({ db, workflowClient, previous, task });
     return c.json(task);
   });
 
@@ -98,8 +101,9 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:manage");
     const existing = await requireScheduledTaskForApi(db, workspaceId, c.req.param("taskId"));
+    const previous = await captureScheduledTaskRestoreState(db, existing);
     const task = await updateScheduledTask(db, workspaceId, existing.id, { status: "active" });
-    await syncUpdatedScheduledTask({ db, workflowClient, previous: existing, task });
+    await syncUpdatedScheduledTask({ db, workflowClient, previous, task });
     return c.json(task);
   });
 

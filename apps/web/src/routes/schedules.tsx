@@ -19,6 +19,7 @@ import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import { LoadErrorState, PageHeader } from "@/components/common";
+import { SchedulePersonalConnectionDisclosure } from "@/components/capabilities/schedule-personal-connection-disclosure";
 import { ScheduledTaskRepositoryPicker } from "@/components/repository-picker";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
@@ -324,6 +325,7 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
                     <div className="mt-1 text-xs text-fg-subtle">
                       {scheduleLabel(task.schedule)} · {task.runMode.replaceAll("_", " ")}
                     </div>
+                    <SchedulePersonalConnectionDisclosure connections={task.personalConnections} />
                     {lastRun ? (
                       <div
                         className={cn(

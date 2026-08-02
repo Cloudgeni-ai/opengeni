@@ -371,42 +371,43 @@ describe("connectionBrokerFetch response lifecycle", () => {
 });
 
 describe("prepareToolspaceMcpSurface", () => {
-  test("service turns cannot reach subject-owned resolvers or upstream transport", () => {
+  test("service turns degrade subject-owned MCPs without reaching credentials or transport", async () => {
     let fetchCalls = 0;
     const baseFetch = async () => {
       fetchCalls += 1;
       return new Response("unexpected");
     };
-    expect(() =>
-      connectionBrokerFetch(baseFetch, {
-        deps: { settings: testSettings() } as ApiRouteDeps,
-        grant: {
-          accountId: "account-1",
-          workspaceId: "workspace-1",
-          subjectId: "sandbox:scheduled",
-          permissions: ["toolspace:call"],
-        } as AccessGrant,
-        config: {
-          id: "personal-slack",
-          url: "https://mcp.slack.com/mcp",
-          cacheToolsList: false,
-          connectionRef: {
-            providerDomain: "slack.com",
-            kind: "oauth2",
-            subjectScope: "subject",
-          },
-        } as McpServerConfig,
-        sessionId: "session-1",
-        rootSessionId: "session-1",
-        turn: {
-          id: "turn-1",
-          activeAttemptId: "attempt-1",
-          executionGeneration: 1,
-          initiator: { kind: "service", subjectId: "scheduler" },
-          initiatorContext: {},
-        } as SessionTurn,
-      }),
-    ).toThrow("requires a human turn initiator");
+    const broker = connectionBrokerFetch(baseFetch, {
+      deps: { settings: testSettings() } as ApiRouteDeps,
+      grant: {
+        accountId: "account-1",
+        workspaceId: "workspace-1",
+        subjectId: "sandbox:scheduled",
+        permissions: ["toolspace:call"],
+      } as AccessGrant,
+      config: {
+        id: "personal-slack",
+        url: "https://mcp.slack.com/mcp",
+        cacheToolsList: false,
+        connectionRef: {
+          providerDomain: "slack.com",
+          kind: "oauth2",
+          subjectScope: "subject",
+        },
+      } as McpServerConfig,
+      sessionId: "session-1",
+      rootSessionId: "session-1",
+      turn: {
+        id: "turn-1",
+        activeAttemptId: "attempt-1",
+        executionGeneration: 1,
+        initiator: { kind: "service", subjectId: "scheduler" },
+        initiatorContext: {},
+      } as SessionTurn,
+    });
+    const response = await broker("https://mcp.slack.com/mcp", { method: "GET" });
+    expect(response.status).toBe(401);
+    expect(await response.text()).toContain("Authentication required");
     expect(fetchCalls).toBe(0);
   });
 
