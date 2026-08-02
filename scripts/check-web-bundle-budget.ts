@@ -18,7 +18,7 @@ const budgets = {
   initialFiles: 12,
   directSessionRaw: 1900 * kib,
   directSessionGzip: 552 * kib,
-  directSessionFiles: 20,
+  directSessionFiles: 18,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,
   cssGzip: 30 * kib,
