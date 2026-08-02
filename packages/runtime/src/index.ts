@@ -2576,14 +2576,6 @@ export async function prepareAgentTools(
     return { mcpServers: [], close: async () => {}, codexConnectorNamespaces };
   }
   const registry = new Map(settings.mcpServers.map((server) => [server.id, server]));
-  const subjectOwnedTool = tools.find(
-    (tool) => registry.get(tool.id)?.connectionRef?.subjectScope === "subject",
-  );
-  if (subjectOwnedTool && !options.credentialSubjectId) {
-    throw new Error(
-      `subject-owned connection for MCP server ${subjectOwnedTool.id} requires a human turn initiator`,
-    );
-  }
   const aggregateToolBudget = new McpAggregateToolListBudget();
   // npm Undici's dispatcher transport can hang indefinitely under Bun even
   // after an AbortSignal fires. Bun's native fetch is the supported runtime

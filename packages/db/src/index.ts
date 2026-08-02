@@ -33,6 +33,7 @@ import type {
   HostUsageExport,
   HostUsageExportBatch,
   ManagedAccount,
+  McpPersonalConnectionDelegation,
   Permission,
   PackInstallation,
   PackInstallationStatus,
@@ -103,6 +104,7 @@ import type {
 } from "@opengeni/contracts";
 import {
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  McpPersonalConnectionDelegations,
   SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS,
   backendForNativeSnapshotProvider,
   canonicalModalCheckpointProviderBinding,
@@ -110,6 +112,7 @@ import {
   parseWorkspaceArchiveDescriptor,
   stableJson,
 } from "@opengeni/contracts";
+
 import {
   approvalIdentifier,
   boundWorkspaceControlEvent,
@@ -287,6 +290,17 @@ export * from "./memory-domain";
 // `userLookup` is the injection seam for hosts on a different driver.
 // `PostgresJsDatabase<typeof schema>` is assignable to this, so standalone is
 // unaffected.
+function parsedPersonalConnectionDelegations(
+  value: unknown,
+  context: string,
+): McpPersonalConnectionDelegation[] {
+  const parsed = McpPersonalConnectionDelegations.safeParse(value);
+  if (!parsed.success) {
+    throw new Error(`Invalid personal MCP delegation snapshot at ${context}`);
+  }
+  return parsed.data.map((delegation) => ({ ...delegation }));
+}
+
 export type Database = PgDatabase<any, typeof schema>;
 
 /** Raised when a durable session tool-policy write lost its version fence. */
@@ -3297,6 +3311,10 @@ export type CreateScheduledTaskInput = {
   runMode: ScheduledTaskRunMode;
   overlapPolicy: ScheduledTaskOverlapPolicy;
   agentConfig: ScheduledTaskAgentConfig;
+  createdBy?: TurnInitiator;
+  createdByContext?: TurnInitiatorContext;
+  createdByActor?: AgentSessionCreationActor | null;
+  personalConnectionDelegations?: McpPersonalConnectionDelegation[];
   variableSetId?: string | null;
   // The rig each run binds to (M3); active version resolved per fire at dispatch.
   rigId?: string | null;
@@ -3310,6 +3328,7 @@ export type UpdateScheduledTaskInput = Partial<{
   runMode: ScheduledTaskRunMode;
   overlapPolicy: ScheduledTaskOverlapPolicy;
   agentConfig: ScheduledTaskAgentConfig;
+  personalConnectionDelegations: McpPersonalConnectionDelegation[];
   reusableSessionId: string | null;
   variableSetId: string | null;
   rigId: string | null;
@@ -3733,6 +3752,7 @@ export type EnqueueSessionTurnInput = {
   lineage?: Record<string, unknown>;
   initiator: TurnInitiator;
   initiatorContext?: TurnInitiatorContext;
+  personalConnectionDelegations?: McpPersonalConnectionDelegation[];
   /** Steer inserts before all waiting prompts; Send appends after them. */
   placement?: "head" | "tail";
 };
@@ -3743,6 +3763,7 @@ export type EnqueueSessionTurnInput = {
  */
 export type SessionTurnForExecution = SessionTurn & {
   turnInstructions: string | null;
+  personalConnectionDelegations: McpPersonalConnectionDelegation[];
 };
 
 export async function createFileUpload(
@@ -7145,7 +7166,9 @@ export async function loadConnectionCredentialForBroker(
   if (input.connectionId) {
     conditions.push(eq(schema.connections.id, input.connectionId));
   } else {
-    conditions.push(eq(schema.connections.providerDomain, input.providerDomain));
+    conditions.push(
+      sql`lower(${schema.connections.providerDomain}) = lower(${input.providerDomain})`,
+    );
     if (input.kind) {
       conditions.push(eq(schema.connections.kind, input.kind));
     }
@@ -7175,6 +7198,8 @@ export async function loadConnectionCredentialForBroker(
             : [
                 desc(sql`(${schema.connections.status} = 'active')`),
                 desc(schema.connections.updatedAt),
+                desc(schema.connections.createdAt),
+                desc(schema.connections.id),
               ]),
         )
         .limit(1);
@@ -9019,7 +9044,27 @@ export async function createScheduledTask(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
-      const [row] = await scopedDb.insert(schema.scheduledTasks).values(input).returning();
+      const frozenCreator = await frozenSessionCreatorForInsert(scopedDb, input);
+      const [row] = await scopedDb
+        .insert(schema.scheduledTasks)
+        .values({
+          id: input.id,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          name: input.name,
+          status: input.status,
+          schedule: input.schedule,
+          temporalScheduleId: input.temporalScheduleId,
+          runMode: input.runMode,
+          overlapPolicy: input.overlapPolicy,
+          agentConfig: input.agentConfig,
+          ...creatorColumns(frozenCreator),
+          personalConnectionDelegations: input.personalConnectionDelegations ?? [],
+          variableSetId: input.variableSetId ?? null,
+          rigId: input.rigId ?? null,
+          metadata: input.metadata,
+        })
+        .returning();
       if (!row) {
         throw new Error("Failed to create scheduled task");
       }
@@ -9044,6 +9089,9 @@ export async function updateScheduledTask(
         ...(input.runMode !== undefined ? { runMode: input.runMode } : {}),
         ...(input.overlapPolicy !== undefined ? { overlapPolicy: input.overlapPolicy } : {}),
         ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
+        ...(input.personalConnectionDelegations !== undefined
+          ? { personalConnectionDelegations: input.personalConnectionDelegations }
+          : {}),
         ...(input.reusableSessionId !== undefined
           ? { reusableSessionId: input.reusableSessionId }
           : {}),
@@ -9083,6 +9131,31 @@ export async function getScheduledTask(
       )
       .limit(1);
     return row ? mapScheduledTask(row) : null;
+  });
+}
+
+export async function getScheduledTaskPersonalConnectionDelegations(
+  db: Database,
+  workspaceId: string,
+  taskId: string,
+): Promise<McpPersonalConnectionDelegation[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({ delegations: schema.scheduledTasks.personalConnectionDelegations })
+      .from(schema.scheduledTasks)
+      .where(
+        and(
+          eq(schema.scheduledTasks.workspaceId, workspaceId),
+          eq(schema.scheduledTasks.id, taskId),
+        ),
+      )
+      .limit(1);
+    return row
+      ? parsedPersonalConnectionDelegations(
+          row.delegations,
+          `scheduled_tasks:${workspaceId}:${taskId}`,
+        )
+      : [];
   });
 }
 
@@ -15760,6 +15833,7 @@ export type SessionCreateInput = {
   sandboxGroupId?: string | null;
   sandboxOs?: SandboxOs;
   mcpServers?: CreateSessionMcpServerInput[];
+  personalConnectionDelegations?: McpPersonalConnectionDelegation[];
   maxNestedAgentDepthOverride?: number | null;
   allowNestedAgentDepthIncrease?: boolean;
   subjectId?: string | null;
@@ -16132,6 +16206,11 @@ async function createSessionInTransaction(
 
   // Do not run mutable creator validation before keyed denial replay above.
   const frozenCreator = await frozenSessionCreatorForInsert(tx, input);
+  const parentTurnId = input.parentSessionId
+    ? input.createdByActor?.sessionId === input.parentSessionId
+      ? input.createdByActor.turnId
+      : null
+    : null;
   const [inserted] = await tx
     .insert(schema.sessions)
     .values({
@@ -16158,8 +16237,10 @@ async function createSessionInTransaction(
       rigVersionId: input.rigVersionId ?? null,
       firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
       firstPartyMcpTools: input.firstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+      initialPersonalConnectionDelegations: input.personalConnectionDelegations ?? [],
       instructions: input.instructions ?? null,
       parentSessionId: input.parentSessionId ?? null,
+      parentTurnId,
       createIdempotencyKey,
       rootSessionId: decision.rootSessionId,
       nestedAgentDepth: decision.nestedAgentDepth,
@@ -16327,6 +16408,76 @@ export async function getSession(
     if (!row) return null;
     const grouped = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, [row.id]);
     return await mapSessionWithControl(scopedDb, row, grouped.get(row.id) ?? []);
+  });
+}
+
+async function personalConnectionDelegationsForTurnInTransaction(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  turnId: string,
+): Promise<McpPersonalConnectionDelegation[]> {
+  const [row] = await db
+    .select({ delegations: schema.sessionTurns.personalConnectionDelegations })
+    .from(schema.sessionTurns)
+    .where(
+      and(
+        eq(schema.sessionTurns.workspaceId, workspaceId),
+        eq(schema.sessionTurns.sessionId, sessionId),
+        eq(schema.sessionTurns.id, turnId),
+      ),
+    )
+    .limit(1);
+  return row
+    ? parsedPersonalConnectionDelegations(
+        row.delegations,
+        `session_turns:${workspaceId}:${sessionId}:${turnId}`,
+      )
+    : [];
+}
+
+export async function getSessionTurnPersonalConnectionDelegations(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  turnId: string,
+): Promise<McpPersonalConnectionDelegation[]> {
+  return await withWorkspaceRls(
+    db,
+    workspaceId,
+    async (scopedDb) =>
+      await personalConnectionDelegationsForTurnInTransaction(
+        scopedDb,
+        workspaceId,
+        sessionId,
+        turnId,
+      ),
+  );
+}
+
+export async function getSessionParentPersonalConnectionDelegations(
+  db: Database,
+  workspaceId: string,
+  childSessionId: string,
+): Promise<McpPersonalConnectionDelegation[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [child] = await scopedDb
+      .select({
+        parentSessionId: schema.sessions.parentSessionId,
+        parentTurnId: schema.sessions.parentTurnId,
+      })
+      .from(schema.sessions)
+      .where(
+        and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, childSessionId)),
+      )
+      .limit(1);
+    if (!child?.parentSessionId || !child.parentTurnId) return [];
+    return await personalConnectionDelegationsForTurnInTransaction(
+      scopedDb,
+      workspaceId,
+      child.parentSessionId,
+      child.parentTurnId,
+    );
   });
 }
 
@@ -17690,6 +17841,56 @@ export async function listSessions(
       if (!control) throw new Error(`Effective control missing for session ${row.id}`);
       return mapSession(row, control, grouped.get(row.id) ?? []);
     });
+  });
+}
+
+/**
+ * Return the model most recently chosen by one human subject in their own
+ * workspace sessions. A later subject-initiated turn supersedes the session's
+ * creation-time default; sessions with no such turn fall back to sessions.model.
+ * Turn timestamp ties use queue position then UUID, and session ties use the
+ * immutable session timestamp/UUID. Other subjects' turns never influence the
+ * result. The workspace filter remains authoritative under FORCE RLS.
+ */
+export async function getLatestSessionModelForSubject(
+  db: Database,
+  workspaceId: string,
+  subjectId: string,
+): Promise<string | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.execute<{ model: string }>(sql`
+      select coalesce(latest_subject_turn.model, subject_session.model) as model
+      from ${schema.sessions} subject_session
+      left join lateral (
+        select
+          subject_turn.id,
+          subject_turn.model,
+          subject_turn.position,
+          subject_turn.created_at
+        from ${schema.sessionTurns} subject_turn
+        where subject_turn.workspace_id = ${workspaceId}
+          and subject_turn.session_id = subject_session.id
+          and subject_turn.initiator_kind = 'subject'
+          and subject_turn.initiator_subject_id = ${subjectId}
+        order by
+          subject_turn.created_at desc,
+          subject_turn.position desc,
+          subject_turn.id desc
+        limit 1
+      ) latest_subject_turn on true
+      where subject_session.workspace_id = ${workspaceId}
+        and subject_session.created_by_kind = 'subject'
+        and subject_session.created_by_subject_id = ${subjectId}
+      order by
+        coalesce(latest_subject_turn.created_at, subject_session.created_at) desc,
+        (latest_subject_turn.id is not null) desc,
+        subject_session.created_at desc,
+        subject_session.id desc,
+        latest_subject_turn.position desc nulls last,
+        latest_subject_turn.id desc nulls last
+      limit 1
+    `);
+    return rows[0]?.model ?? null;
   });
 }
 
@@ -34813,6 +35014,32 @@ export async function materializeGoalContinuation(
           return { action: "paused", events: [mapEvent(event)] } as const;
         }
 
+        const [causalTurn] = await tx
+          .select({
+            id: schema.sessionTurns.id,
+            personalConnectionDelegations: schema.sessionTurns.personalConnectionDelegations,
+          })
+          .from(schema.sessionTurns)
+          .where(
+            and(
+              eq(schema.sessionTurns.workspaceId, input.workspaceId),
+              eq(schema.sessionTurns.sessionId, input.sessionId),
+              sql`${schema.sessionTurns.finishedAt} is not null`,
+            ),
+          )
+          .orderBy(
+            desc(schema.sessionTurns.position),
+            desc(schema.sessionTurns.createdAt),
+            desc(schema.sessionTurns.id),
+          )
+          .limit(1);
+        const personalConnectionDelegations = causalTurn
+          ? parsedPersonalConnectionDelegations(
+              causalTurn.personalConnectionDelegations,
+              `session_turns:${input.workspaceId}:${input.sessionId}:${causalTurn.id}`,
+            )
+          : [];
+
         const prompt = input.prompt(decision.goal, decision.autoContinuation, decision.cap);
         const payload = {
           type: "goal_continuation" as const,
@@ -34842,7 +35069,12 @@ export async function materializeGoalContinuation(
             dedupeKey: `goal-continuation:${decision.goal.id}:wake:${goalWakeRevision}`,
             summary: prompt,
             payload,
-            lineage: { goalId: decision.goal.id, goalWakeRevision },
+            lineage: {
+              goalId: decision.goal.id,
+              goalWakeRevision,
+              ...(causalTurn ? { causalTurnId: causalTurn.id } : {}),
+            },
+            personalConnectionDelegations,
             state: "pending",
           })
           .returning();
@@ -35196,6 +35428,10 @@ export async function initializeSessionStartAtomically(
                 : {},
               lineage: {},
               ...initiatorColumns(creator),
+              personalConnectionDelegations: parsedPersonalConnectionDelegations(
+                session.initialPersonalConnectionDelegations,
+                `sessions:${session.workspaceId}:${session.id}:initial`,
+              ),
             })
             .returning();
           if (!turn) throw new Error("Failed to create initial session turn");
@@ -35356,6 +35592,7 @@ export async function enqueueSessionTurn(
               initiator: input.initiator,
               context: input.initiatorContext ?? {},
             }),
+            personalConnectionDelegations: input.personalConnectionDelegations ?? [],
           })
           .returning();
         if (!row) {
@@ -35393,7 +35630,14 @@ const MAX_INTERNAL_UPDATE_EVENT_SOURCE_BYTES = 256;
 
 type BoundedSystemUpdate = Pick<
   typeof schema.sessionSystemUpdates.$inferSelect,
-  "id" | "kind" | "classification" | "sourceId" | "summary" | "payload" | "lineage"
+  | "id"
+  | "kind"
+  | "classification"
+  | "sourceId"
+  | "summary"
+  | "payload"
+  | "lineage"
+  | "personalConnectionDelegations"
 >;
 
 function boundedInternalUpdateEventText(
@@ -35432,10 +35676,14 @@ function internalUpdateEventMember(update: BoundedSystemUpdate) {
   };
 }
 
-function selectBoundedSystemUpdateBatch<T extends BoundedSystemUpdate>(updates: readonly T[]): T[] {
+function selectBoundedSystemUpdateBatch<T extends BoundedSystemUpdate>(
+  updates: readonly T[],
+  canCoalesce: (first: T, candidate: T) => boolean = () => true,
+): T[] {
   const selected: T[] = [];
   let selectedBytes = 0;
   for (const update of updates) {
+    if (selected[0] && !canCoalesce(selected[0], update)) break;
     const updateBytes = Buffer.byteLength(
       JSON.stringify({
         id: update.id,
@@ -35595,7 +35843,17 @@ export async function claimSessionWorkForAttempt(
             }
             validUpdates.push(update);
           }
-          const deliverable = selectBoundedSystemUpdateBatch(validUpdates);
+          const delegationKey = (update: (typeof validUpdates)[number]): string =>
+            stableJson(
+              parsedPersonalConnectionDelegations(
+                update.personalConnectionDelegations,
+                `session_system_updates:${workspaceId}:${sessionId}:${update.id}`,
+              ),
+            );
+          const deliverable = selectBoundedSystemUpdateBatch(
+            validUpdates,
+            (first, candidate) => delegationKey(first) === delegationKey(candidate),
+          );
           if (deliverable.length === 0) {
             const cancellationEvent =
               cancelledUpdateIds.length > 0
@@ -36237,6 +36495,7 @@ export async function claimSessionWorkForAttempt(
                   },
                 ),
                 ...initiatorColumns(compactionInitiator),
+                personalConnectionDelegations: [],
                 startedAt: now,
               })
               .returning();
@@ -36384,6 +36643,12 @@ export async function claimSessionWorkForAttempt(
             },
           });
           let internalInitiator: FrozenTurnInitiator;
+          const authorityUpdate = delivered.updates[0];
+          if (!authorityUpdate) throw new Error("Delivered update batch has no authority source");
+          const internalPersonalConnectionDelegations = parsedPersonalConnectionDelegations(
+            authorityUpdate.personalConnectionDelegations,
+            `session_system_updates:${workspaceId}:${sessionId}:${authorityUpdate.id}`,
+          );
           // Agent Steer is the causal command for this inference. Ordinary
           // machine notices may coalesce into the same batch as context, but
           // their timing must not erase the steering subject's authority.
@@ -36545,6 +36810,7 @@ export async function claimSessionWorkForAttempt(
                 { id: input.dispatchId, generation: 1, triggerEventId },
               ),
               ...initiatorColumns(internalInitiator),
+              personalConnectionDelegations: internalPersonalConnectionDelegations,
               startedAt: now,
             })
             .returning();
@@ -37878,6 +38144,14 @@ export async function settleSessionIdleWithParentOutbox(
         } as const;
       }
       const dedupeKey = `child-completion:${session.id}:${episodeKey}`;
+      const personalConnectionDelegations = session.parentTurnId
+        ? await personalConnectionDelegationsForTurnInTransaction(
+            tx as unknown as Database,
+            workspaceId,
+            session.parentSessionId,
+            session.parentTurnId,
+          )
+        : [];
       await tx
         .insert(schema.sessionSystemUpdateOutbox)
         .values({
@@ -37898,7 +38172,9 @@ export async function settleSessionIdleWithParentOutbox(
           lineage: {
             childSessionId: session.id,
             parentSessionId: session.parentSessionId,
+            ...(session.parentTurnId ? { parentTurnId: session.parentTurnId } : {}),
           },
+          personalConnectionDelegations,
         })
         .onConflictDoNothing({
           target: [
@@ -39983,6 +40259,16 @@ export async function getSessionQueueSnapshot(
       .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
       .limit(1);
     if (!session) return null;
+    const activePersonalConnections = session.activeTurnId
+      ? (
+          await personalConnectionDelegationsForTurnInTransaction(
+            scopedDb,
+            workspaceId,
+            sessionId,
+            session.activeTurnId,
+          )
+        ).map(({ serverId, providerDomain }) => ({ serverId, providerDomain }))
+      : [];
     const rows = await scopedDb
       .select()
       .from(schema.sessionTurns)
@@ -40026,6 +40312,7 @@ export async function getSessionQueueSnapshot(
     return {
       version: session.queueVersion,
       effectiveControl: serializeEffectiveSessionControl(effectiveControl),
+      activePersonalConnections,
       stoppingPreviousAttempt:
         latestInterruption !== null &&
         latestInterruption.interruptionState !== "rejected_stale" &&
@@ -40074,11 +40361,19 @@ function queuedSteerReplacementAttemptId(metadata: Record<string, unknown>): str
 async function enqueueFailedChildOutboxForTurnTx(
   tx: Database,
   workspaceId: string,
-  session: Pick<typeof schema.sessions.$inferSelect, "id" | "parentSessionId">,
+  session: Pick<typeof schema.sessions.$inferSelect, "id" | "parentSessionId" | "parentTurnId">,
   turn: Pick<typeof schema.sessionTurns.$inferSelect, "id" | "accountId" | "sessionId">,
 ): Promise<void> {
   if (!session.parentSessionId) return;
   const dedupeKey = `child-completion:${turn.sessionId}:turn:${turn.id}`;
+  const personalConnectionDelegations = session.parentTurnId
+    ? await personalConnectionDelegationsForTurnInTransaction(
+        tx,
+        workspaceId,
+        session.parentSessionId,
+        session.parentTurnId,
+      )
+    : [];
   await tx
     .insert(schema.sessionSystemUpdateOutbox)
     .values({
@@ -40100,8 +40395,10 @@ async function enqueueFailedChildOutboxForTurnTx(
       lineage: {
         childSessionId: turn.sessionId,
         parentSessionId: session.parentSessionId,
+        ...(session.parentTurnId ? { parentTurnId: session.parentTurnId } : {}),
         turnId: turn.id,
       },
+      personalConnectionDelegations,
     })
     .onConflictDoNothing({
       target: [
@@ -40138,6 +40435,7 @@ export type SessionSystemUpdateOutboxDelivery = {
   summary: string;
   payload: ChildTerminalResultPayload;
   lineage: Record<string, unknown>;
+  personalConnectionDelegations: McpPersonalConnectionDelegation[];
 };
 
 function mapSystemUpdateOutboxRow(row: {
@@ -40153,6 +40451,7 @@ function mapSystemUpdateOutboxRow(row: {
   summary: string;
   payload: Record<string, unknown>;
   lineage: Record<string, unknown>;
+  personal_connection_delegations: unknown;
 }): SessionSystemUpdateOutboxDelivery {
   if (row.kind !== "child_terminal_result") {
     throw new Error(`System-update outbox contains retired kind ${row.kind}`);
@@ -40171,6 +40470,10 @@ function mapSystemUpdateOutboxRow(row: {
     summary: row.summary,
     payload: parseChildTerminalResultPayload(row.payload),
     lineage: row.lineage,
+    personalConnectionDelegations: parsedPersonalConnectionDelegations(
+      row.personal_connection_delegations,
+      `session_system_update_outbox:${row.workspace_id}:${row.id}`,
+    ),
   };
 }
 
@@ -40215,6 +40518,10 @@ export async function getSessionSystemUpdateOutboxByDedupeKey(
         summary: row.summary,
         payload: parseChildTerminalResultPayload(row.payload),
         lineage: row.lineage,
+        personalConnectionDelegations: parsedPersonalConnectionDelegations(
+          row.personalConnectionDelegations,
+          `session_system_update_outbox:${row.workspaceId}:${row.id}`,
+        ),
       };
     },
   );
@@ -40237,6 +40544,7 @@ export async function claimPendingSessionSystemUpdateOutbox(
     summary: string;
     payload: Record<string, unknown>;
     lineage: Record<string, unknown>;
+    personal_connection_delegations: unknown;
   }>(db, sql`select * from opengeni_private.claim_session_system_update_outbox(${limit})`);
   return rows.map(mapSystemUpdateOutboxRow);
 }
@@ -40587,6 +40895,7 @@ export async function getOrCreateSessionSystemUpdateOutbox(
         summary: input.summary,
         payload: input.payload,
         lineage: input.lineage,
+        personalConnectionDelegations: input.personalConnectionDelegations,
       })
       .onConflictDoUpdate({
         target: [
@@ -40619,6 +40928,10 @@ export async function getOrCreateSessionSystemUpdateOutbox(
       summary: row.summary,
       payload: parseChildTerminalResultPayload(row.payload),
       lineage: row.lineage,
+      personalConnectionDelegations: parsedPersonalConnectionDelegations(
+        row.personalConnectionDelegations,
+        `session_system_update_outbox:${row.workspaceId}:${row.id}`,
+      ),
     };
   });
 }
@@ -40700,6 +41013,7 @@ export type AddSessionSystemUpdateInput = {
   dedupeKey: string;
   summary: string;
   lineage?: Record<string, unknown>;
+  personalConnectionDelegations?: McpPersonalConnectionDelegation[];
 } & SessionSystemUpdateInputVariant;
 
 export type AddSessionSystemUpdateResult =
@@ -40776,6 +41090,7 @@ export async function addSessionSystemUpdateWithSourceMutation(
             summary: input.summary,
             payload: input.payload,
             lineage: input.lineage ?? {},
+            personalConnectionDelegations: input.personalConnectionDelegations ?? [],
             state: "pending",
           })
           .onConflictDoNothing({
@@ -41934,6 +42249,10 @@ function mapSessionTurn(row: typeof schema.sessionTurns.$inferSelect): SessionTu
       row.initiatorContext ?? {},
     ),
     initiatorContext: row.initiatorContext ?? {},
+    personalConnections: parsedPersonalConnectionDelegations(
+      row.personalConnectionDelegations,
+      `session_turns:${row.workspaceId}:${row.sessionId}:${row.id}`,
+    ).map(({ serverId, providerDomain }) => ({ serverId, providerDomain })),
     cancelledBy: row.cancelledBy,
     cancelReason: row.cancelReason,
     startedAt: row.startedAt ? row.startedAt.toISOString() : null,
@@ -41949,6 +42268,10 @@ function mapSessionTurnForExecution(
   return {
     ...mapSessionTurn(row),
     turnInstructions: row.turnInstructions ?? null,
+    personalConnectionDelegations: parsedPersonalConnectionDelegations(
+      row.personalConnectionDelegations,
+      `session_turns:${row.workspaceId}:${row.sessionId}:${row.id}`,
+    ),
   };
 }
 
@@ -42012,6 +42335,16 @@ function mapScheduledTask(row: typeof schema.scheduledTasks.$inferSelect): Sched
     runMode: row.runMode as ScheduledTaskRunMode,
     overlapPolicy: row.overlapPolicy as ScheduledTaskOverlapPolicy,
     agentConfig: row.agentConfig as ScheduledTaskAgentConfig,
+    createdBy: initiatorFromStorage(
+      row.createdByKind,
+      row.createdBySubjectId,
+      row.createdByContext as TurnInitiatorContext,
+    ),
+    createdByContext: row.createdByContext as TurnInitiatorContext,
+    personalConnections: parsedPersonalConnectionDelegations(
+      row.personalConnectionDelegations,
+      `scheduled_tasks:${row.workspaceId}:${row.id}`,
+    ).map(({ serverId, providerDomain }) => ({ serverId, providerDomain })),
     reusableSessionId: row.reusableSessionId,
     variableSetId: row.variableSetId,
     environmentId: row.variableSetId,

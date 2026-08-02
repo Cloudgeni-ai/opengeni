@@ -10,7 +10,7 @@ Canonical implementation:
 - Drizzle declarations: `packages/db/src/scoped-knowledge-schema.ts`
 - repository/domain API: `packages/db/src/scoped-knowledge.ts`
 - migration and PostgreSQL invariants:
-  `packages/db/drizzle/0153_scoped_knowledge_foundation.sql`
+  `packages/db/drizzle/0154_scoped_knowledge_foundation.sql`
 
 ## Authority boundaries
 

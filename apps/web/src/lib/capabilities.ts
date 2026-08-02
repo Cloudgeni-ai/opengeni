@@ -3,6 +3,7 @@ import type {
   CapabilityKind,
   CapabilitySource,
   ConnectionMetadata,
+  ConnectionOwnership,
   CreateCapabilityInput,
 } from "@/types";
 
@@ -396,8 +397,8 @@ export function connectionHealth(
  * surviving row to reuse, or null when it was deleted (repair mints a fresh one).
  */
 export type ReconnectPlan =
-  | { kind: "oauth"; connectionId: string | null }
-  | { kind: "api_key"; connectionId: string | null };
+  | { kind: "oauth"; connectionId: string | null; ownership: ConnectionOwnership }
+  | { kind: "api_key"; connectionId: string | null; ownership: ConnectionOwnership };
 
 export function capabilityReconnectPlan(
   item: CapabilityCatalogItem,
@@ -408,8 +409,16 @@ export function capabilityReconnectPlan(
   if (!ref) return null;
   const connectionId = health.connection?.id ?? null;
   return ref.kind === "oauth2"
-    ? { kind: "oauth", connectionId }
-    : { kind: "api_key", connectionId };
+    ? {
+        kind: "oauth",
+        connectionId,
+        ownership: ref.subjectScope === "subject" ? "personal" : "workspace",
+      }
+    : {
+        kind: "api_key",
+        connectionId,
+        ownership: ref.subjectScope === "subject" ? "personal" : "workspace",
+      };
 }
 
 /** The generic single credential field for an api-key reconnect when the catalog
@@ -450,11 +459,17 @@ export function connectionToReuseForApiKey(
   item: CapabilityCatalogItem,
   connections: ConnectionMetadata[],
   providerDomain: string,
+  ownership: ConnectionOwnership = "workspace",
 ): string | null {
+  const target = normalizeProviderDomain(providerDomain);
+  const matching = connections.find(
+    (connection) =>
+      (ownership === "personal" ? connection.subjectId !== null : connection.subjectId === null) &&
+      connection.kind === "api_key" &&
+      normalizeProviderDomain(connection.providerDomain) === target,
+  );
   return (
-    item.connectionRef?.connectionId ??
-    workspaceConnectionForDomain(connections, providerDomain)?.id ??
-    null
+    (ownership === "workspace" ? item.connectionRef?.connectionId : null) ?? matching?.id ?? null
   );
 }
 
@@ -519,6 +534,45 @@ export function subjectOAuthConnectionRef(providerDomain: string): {
   subjectScope: "subject";
 } {
   return { providerDomain, kind: "oauth2", subjectScope: "subject" };
+}
+
+/** Build the capability binding that matches the OAuth row's explicit ownership. */
+export function oauthConnectionRef(
+  ownership: ConnectionOwnership,
+  connectionId: string,
+  providerDomain: string,
+):
+  | ReturnType<typeof subjectOAuthConnectionRef>
+  | {
+      connectionId: string;
+      providerDomain: string;
+      kind: "oauth2";
+      subjectScope: "workspace";
+    } {
+  return ownership === "personal"
+    ? subjectOAuthConnectionRef(providerDomain)
+    : { connectionId, providerDomain, kind: "oauth2", subjectScope: "workspace" };
+}
+
+export function apiKeyConnectionRef(
+  ownership: ConnectionOwnership,
+  connectionId: string,
+  providerDomain: string,
+):
+  | { providerDomain: string; kind: "api_key"; subjectScope: "subject" }
+  | {
+      connectionId: string;
+      providerDomain: string;
+      kind: "api_key";
+      subjectScope: "workspace";
+    } {
+  return ownership === "personal"
+    ? { providerDomain, kind: "api_key", subjectScope: "subject" }
+    : { connectionId, providerDomain, kind: "api_key", subjectScope: "workspace" };
+}
+
+export function oauthConnectionOwnership(value: string | null): ConnectionOwnership | null {
+  return value === "workspace" || value === "personal" ? value : null;
 }
 
 /** First one or two initials for the logo monogram fallback. */

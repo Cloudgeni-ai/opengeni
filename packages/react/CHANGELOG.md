@@ -1,5 +1,19 @@
 # @opengeni/react
 
+## 0.35.0
+
+### Minor Changes
+
+- dd71248: Make workspace-owned MCP OAuth connections the default, add explicit personal
+  connection ownership, and preserve exact delegated personal authority across
+  turns, child sessions, goals, schedules, retries, and recovery with safe
+  tool-level degradation when a personal connection is unavailable.
+
+### Patch Changes
+
+- Updated dependencies [dd71248]
+  - @opengeni/sdk@0.35.0
+
 ## 0.34.3
 
 ### Patch Changes

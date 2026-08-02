@@ -107,6 +107,7 @@ function queueSnapshot(
     pendingInputs: [],
     pendingInputAttachment: null,
     ...overrides,
+    activePersonalConnections: overrides.activePersonalConnections ?? [],
   };
 }
 

@@ -174,6 +174,7 @@ export function galleryQueue(overrides: Partial<UseTurnQueueResult> = {}): UseTu
     mutationError: null,
     clearMutationError: () => {},
     ...overrides,
+    activePersonalConnections: overrides.activePersonalConnections ?? [],
   };
 }
 

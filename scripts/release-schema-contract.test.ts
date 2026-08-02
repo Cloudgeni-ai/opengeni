@@ -167,14 +167,19 @@ describe("release schema contract", () => {
         (migrations.has("0150_slack_task_interactions.sql") ? 1 : 0) +
         (migrations.has("0151_slack_delivery_backoff.sql") ? 1 : 0) +
         (migrations.has("0152_hierarchical_memory_foundation.sql") ? 1 : 0) +
-        (migrations.has("0153_scoped_knowledge_foundation.sql") ? 1 : 0),
+        (migrations.has("0153_mcp_personal_connection_delegations.sql") ? 1 : 0) +
+        (migrations.has("0154_scoped_knowledge_foundation.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "83cea8202c02fde3f0d72fc380ee3f079ad44a7304cafac7c367869bd82878c0",
+      "01db239d0d89a15a2b80ca1b76e30a03ee7be5e7024435ca1cc763f9dbcbfe27",
     );
-    expect(contract.latestMigration).toBe("0153_scoped_knowledge_foundation.sql");
-    expect(migrations.get("0153_scoped_knowledge_foundation.sql")).toMatchObject({
+    expect(contract.latestMigration).toBe("0154_scoped_knowledge_foundation.sql");
+    expect(migrations.get("0154_scoped_knowledge_foundation.sql")).toMatchObject({
       sha256: "a1773d964c96d8fc115e1e1711cb3f2b17a6f4f338ed3eda0c8a1dc1816dc0f9",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0153_mcp_personal_connection_delegations.sql")).toMatchObject({
+      sha256: "e27385280b8342ddd2bad9fea000d823e0e96c46b1c340403afaca81613610cf",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0152_hierarchical_memory_foundation.sql")).toMatchObject({
@@ -230,7 +235,7 @@ describe("release schema contract", () => {
     expect(
       contract.migrations
         .map((migration) => migration.path)
-        .filter((path) => /^(?:010[3-9]|011[0-9]|012[0-9]|013[0-9]|014[0-9]|015[0-3])_/.test(path)),
+        .filter((path) => /^(?:010[3-9]|011[0-9]|012[0-9]|013[0-9]|014[0-9]|015[0-4])_/.test(path)),
     ).toEqual([
       "0103_host_export_root_session.sql",
       "0104_host_export_root_session_backfill.sql",
@@ -272,7 +277,8 @@ describe("release schema contract", () => {
       "0150_slack_task_interactions.sql",
       "0151_slack_delivery_backoff.sql",
       "0152_hierarchical_memory_foundation.sql",
-      "0153_scoped_knowledge_foundation.sql",
+      "0153_mcp_personal_connection_delegations.sql",
+      "0154_scoped_knowledge_foundation.sql",
     ]);
     expect(migrations.get("0143_session_codex_compaction_mode.sql")).toMatchObject({
       sha256: "574cfe6fc5ab24135e84d3932fd936e134ebe28bce8ac3cb5db97a549683906f",

@@ -1,5 +1,14 @@
 # @opengeni/sdk
 
+## 0.35.0
+
+### Minor Changes
+
+- dd71248: Make workspace-owned MCP OAuth connections the default, add explicit personal
+  connection ownership, and preserve exact delegated personal authority across
+  turns, child sessions, goals, schedules, retries, and recovery with safe
+  tool-level degradation when a personal connection is unavailable.
+
 ## 0.34.1
 
 ### Patch Changes

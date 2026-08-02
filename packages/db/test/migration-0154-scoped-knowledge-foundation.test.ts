@@ -25,7 +25,7 @@ const tables = [
 
 describe("scoped-knowledge foundation migration", () => {
   test("is additive, rolling, FORCE-RLS protected, and uses the current free ordinal", async () => {
-    const sql = await readFile(join(migrationsDir, "0153_scoped_knowledge_foundation.sql"), "utf8");
+    const sql = await readFile(join(migrationsDir, "0154_scoped_knowledge_foundation.sql"), "utf8");
     expect(sql.split(/\r?\n/, 1)[0]).toBe("-- deployment-mode: rolling");
     for (const table of tables) {
       expect(sql).toContain(`CREATE TABLE "${table}"`);
@@ -49,7 +49,7 @@ describe("scoped-knowledge foundation migration", () => {
   });
 
   test("keeps provenance immutable and lifecycle restoration explicit", async () => {
-    const sql = await readFile(join(migrationsDir, "0153_scoped_knowledge_foundation.sql"), "utf8");
+    const sql = await readFile(join(migrationsDir, "0154_scoped_knowledge_foundation.sql"), "utf8");
     expect(sql).toContain("scoped_knowledge_reject_immutable_mutation");
     expect(sql).toContain("scoped_knowledge_guard_head_insert");
     expect(sql).toContain("scoped_knowledge_guard_acl_insert");
@@ -68,7 +68,7 @@ describe("scoped-knowledge foundation migration", () => {
   });
 
   test("creates proposals only and does not duplicate or activate existing authorities", async () => {
-    const sql = await readFile(join(migrationsDir, "0153_scoped_knowledge_foundation.sql"), "utf8");
+    const sql = await readFile(join(migrationsDir, "0154_scoped_knowledge_foundation.sql"), "utf8");
     expect(sql).toContain("\"status\" text NOT NULL DEFAULT 'proposed'");
     expect(sql).not.toContain("workspace_charters");
     expect(sql).not.toContain("knowledge_bank_state");
