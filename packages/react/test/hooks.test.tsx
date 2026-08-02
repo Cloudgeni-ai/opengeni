@@ -1739,6 +1739,103 @@ describe("useComposer durable draft and control binding", () => {
     await hook.unmount();
   });
 
+  test("soft draft reload after settle does not assert draftLoading", async () => {
+    let reads = 0;
+    let releaseSecond: (() => void) | null = null;
+    const client = fakeClient({
+      getComposerDraft: async () => {
+        reads += 1;
+        if (reads === 2) {
+          await new Promise<void>((resolve) => {
+            releaseSecond = resolve;
+          });
+        }
+        return {
+          revision: reads,
+          text: `read-${reads}`,
+          resources: [],
+          model: "model-x",
+          reasoningEffort: "medium",
+          sourceTurnId: null,
+          sourceTurnVersion: null,
+          updatedAt: new Date().toISOString(),
+        } satisfies ComposerDraft;
+      },
+    });
+    const hook = await renderHook(
+      (events: SessionEvent[]) =>
+        useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+      noEvents,
+    );
+    await flush();
+    expect(reads).toBe(1);
+    expect(hook.result.current.draftLoading).toBe(false);
+
+    // Reconcile / queue-changed soft reload (loadOlder SSE reconnect path).
+    await hook.rerender([makeEvent(1, "session.queue.changed", { operation: "edit" })]);
+    await flush();
+    expect(reads).toBe(2);
+    expect(hook.result.current.draftLoading).toBe(false);
+    expect(releaseSecond).not.toBeNull();
+    // Soft reload must not flip draftLoading. Resolve + settle under one act so
+    // the deferred read's setState commits never escape the warning-free gate.
+    await flushing(async () => {
+      releaseSecond!();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(hook.result.current.draftLoading).toBe(false);
+    expect(hook.result.current.value).toBe("read-2");
+    await hook.unmount();
+  });
+
+  test("explicit reloadDraft still asserts draftLoading while in flight", async () => {
+    let reads = 0;
+    let releaseReload: (() => void) | null = null;
+    const client = fakeClient({
+      getComposerDraft: async () => {
+        reads += 1;
+        if (reads === 2) {
+          await new Promise<void>((resolve) => {
+            releaseReload = resolve;
+          });
+        }
+        return {
+          revision: reads,
+          text: `read-${reads}`,
+          resources: [],
+          model: "model-x",
+          reasoningEffort: "medium",
+          sourceTurnId: null,
+          sourceTurnVersion: null,
+          updatedAt: new Date().toISOString(),
+        } satisfies ComposerDraft;
+      },
+    });
+    const hook = await renderHook(
+      () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+    expect(hook.result.current.draftLoading).toBe(false);
+
+    let reloadDone: Promise<void> = Promise.resolve();
+    await flushing(() => {
+      reloadDone = hook.result.current.reloadDraft();
+    });
+    // In-flight hard reload must blank the picker (unlike soft reconcile).
+    expect(hook.result.current.draftLoading).toBe(true);
+    expect(reads).toBe(2);
+    expect(releaseReload).not.toBeNull();
+    // Resolving outside act was the clean-gate failure: draft setState escaped.
+    await flushing(async () => {
+      releaseReload!();
+      await reloadDone;
+    });
+    expect(hook.result.current.draftLoading).toBe(false);
+    await hook.unmount();
+  });
+
   test("history already present at mount is treated as a projection, not live traffic", async () => {
     let reads = 0;
     const client = fakeClient({

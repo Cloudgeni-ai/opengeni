@@ -14,7 +14,7 @@ export type CopyButtonProps = {
   className?: string | undefined;
   /**
    * `always` — visible control.
-   * `group-hover` — parent must use `group/copy`; fades in on hover/focus.
+   * `group-hover` — parent must use `group/copy`; fades in on hover/focus-visible.
    */
   reveal?: "always" | "group-hover" | undefined;
 };
@@ -30,6 +30,7 @@ export function CopyButton({
   reveal = "group-hover",
 }: CopyButtonProps) {
   const [copied, setCopied] = useState(false);
+  const [tipOpen, setTipOpen] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -49,19 +50,34 @@ export function CopyButton({
       return;
     }
     setCopied(true);
+    setTipOpen(true);
+    // Pointer activation focuses the button and leaves `group-focus-within`
+    // stuck after the cursor leaves — chrome never "unhovers". Keyboard
+    // activation (`detail === 0`) keeps focus for a11y.
+    if (event.detail > 0) {
+      event.currentTarget.blur();
+    }
     if (timerRef.current !== null) {
       clearTimeout(timerRef.current);
     }
     timerRef.current = setTimeout(() => {
       timerRef.current = null;
       setCopied(false);
+      setTipOpen(false);
     }, COPIED_MS);
   };
 
   const tip = copied ? "Copied" : label;
 
   return (
-    <Tooltip>
+    <Tooltip
+      open={copied ? true : tipOpen}
+      onOpenChange={(next) => {
+        if (!copied) {
+          setTipOpen(next);
+        }
+      }}
+    >
       <TooltipTrigger asChild>
         <button
           type="button"
@@ -99,28 +115,31 @@ export function CopyHoverFrame({
   copyText,
   label,
   align = "end",
+  trailing,
 }: {
   children: ReactNode;
   className?: string | undefined;
   copyText: string;
   label: string;
   align?: "start" | "end" | undefined;
+  /** Optional footer meta (e.g. sent/finished clock) — immediately after the copy control. */
+  trailing?: ReactNode | undefined;
 }) {
   if (copyText.trim().length === 0) {
     return <div className={className}>{children}</div>;
   }
   return (
-    <div className={cn("group/copy relative", className)}>
+    <div className={cn("group/copy", className)}>
       {children}
+      {/* Sit under the body — top-right overlay collided with the first line. */}
       <div
         className={cn(
-          "pointer-events-none absolute top-1 z-10",
-          align === "end" ? "right-1" : "left-1",
+          "mt-1 flex h-7 items-center gap-1.5",
+          align === "end" ? "justify-end" : "justify-start",
         )}
       >
-        <div className="pointer-events-auto">
-          <CopyButton text={copyText} label={label} reveal="group-hover" />
-        </div>
+        <CopyButton text={copyText} label={label} reveal="group-hover" />
+        {trailing}
       </div>
     </div>
   );

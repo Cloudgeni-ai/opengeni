@@ -5,27 +5,41 @@ import { cn } from "@/lib/utils";
 /**
  * Width-, height-, and overflow-safe page frame for workspace content surfaces.
  *
+ * Scroll ownership and column width are deliberately split:
+ * - Outer (`data-slot="content-page"`) is the full-width flex child that owns
+ *   vertical scroll + overscroll containment inside the fixed app canvas.
+ * - Inner (`data-slot="content-page-inner"`) is the centered max-width column.
+ *
+ * Putting `overflow-y-auto` on the max-width box itself left gutters outside
+ * the scrollport; wheel there scrolled the document and shoved the whole app
+ * up (empty band + floating DevTools). Never merge those two again.
+ *
  * The `min-w-0` chain is intentional: pages live inside a flex shell and must
  * be allowed to shrink before a long untrusted name can widen the viewport.
- * The frame is also the intentional vertical scroll owner inside the fixed
- * application canvas, so long pages remain reachable without changing the
- * shell's sticky/navigation behavior.
  */
 export function ContentPage({
   className,
   width = "wide",
+  children,
   ...props
 }: ComponentProps<"div"> & { width?: "standard" | "wide" }) {
   return (
     <div
       data-slot="content-page"
-      className={cn(
-        "mx-auto flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-x-hidden overflow-y-auto overscroll-y-contain px-4 py-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] sm:px-6 lg:px-8",
-        width === "standard" ? "max-w-5xl" : "max-w-7xl",
-        className,
-      )}
+      className="flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-x-hidden overflow-y-auto overscroll-y-contain"
       {...props}
-    />
+    >
+      <div
+        data-slot="content-page-inner"
+        className={cn(
+          "mx-auto flex w-full min-w-0 flex-col px-4 py-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] sm:px-6 lg:px-8",
+          width === "standard" ? "max-w-5xl" : "max-w-7xl",
+          className,
+        )}
+      >
+        {children}
+      </div>
+    </div>
   );
 }
 

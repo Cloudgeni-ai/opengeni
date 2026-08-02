@@ -310,7 +310,7 @@ function ExistingSources({ workspaceId }: { workspaceId: string }) {
     },
     {
       to: "/workspaces/$workspaceId/settings" as const,
-      label: "Workspace settings",
+      label: "Workspace",
       icon: SettingsIcon,
     },
   ];

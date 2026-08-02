@@ -122,8 +122,8 @@ body {
   padding: 0;
   background-color: var(--color-bg);
   color: var(--color-fg);
-  min-height: 100vh;
-  overflow-x: hidden;
+  height: 100%;
+  overflow: hidden;
   font-family: var(--font-sans);
   font-feature-settings: "cv11", "ss01", "ss03";
   -webkit-font-smoothing: antialiased;

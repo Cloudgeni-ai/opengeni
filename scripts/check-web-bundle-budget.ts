@@ -11,9 +11,12 @@ type ManifestEntry = {
 const kib = 1024;
 const budgets = {
   // Shared consent, connector, and response-deduplication code remains in the
-  // application shell while provider SDKs stay lazy. Keep the measured ceiling.
-  initialRaw: 773 * kib,
-  initialGzip: 210 * kib,
+  // application shell while provider SDKs stay lazy. The Workspace hub densifies
+  // rail + settings against the session graph; a dedicated Radix vendor chunk
+  // keeps Popper scopes intact (otherwise /settings crashes) and lands ~885–905
+  // KiB initial raw — raise the ceiling to the measured densified shell.
+  initialRaw: 910 * kib,
+  initialGzip: 245 * kib,
   initialFileGzip: 70 * kib,
   initialFiles: 11,
   directSessionRaw: 1900 * kib,

@@ -4,6 +4,7 @@ import type { SlashCommand } from "../commands/types";
 import type { ComposerState } from "../hooks/use-composer";
 import type { UseFileAttachmentsResult } from "../hooks/use-file-attachments";
 import type { SlashCommandContext } from "../hooks/use-slash-commands";
+import { OPEN_WORKSTREAM_CONTROL_EVENT } from "../workstream-control-event";
 import {
   Actions,
   AttachButton,
@@ -17,7 +18,6 @@ import {
   Hint,
   Input,
   ModelPicker,
-  OPEN_WORKSTREAM_CONTROL_EVENT,
   PauseButton,
   PausedState,
   RestoredResources,

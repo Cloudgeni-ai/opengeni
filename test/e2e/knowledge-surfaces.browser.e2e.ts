@@ -258,7 +258,12 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
               await expectOwnedTouchTargets(page, surface);
             }
             if (matrixCase.label === "desktop") {
+              // Workspace destinations live in the upward Settings hub menu.
               const workspaceNav = page.getByRole("navigation", { name: "Workspace" });
+              const menu = workspaceNav.locator("details");
+              if (!(await menu.evaluate((node) => (node as HTMLDetailsElement).open))) {
+                await menu.locator("summary").click();
+              }
               await workspaceNav.getByRole("link", { name: "Memory", exact: true }).waitFor();
             }
             if (surface === "variable-sets") {

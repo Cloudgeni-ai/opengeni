@@ -128,6 +128,25 @@ describe("TurnSummary settle fold", () => {
     await r.unmount();
   });
 
+  test("a live-open shell stays clickable so the reader can collapse mid-turn", async () => {
+    const memory = new Map<string, FoldRestingState>();
+    const r = await renderComponent(
+      <FoldMemoryProvider value={memory}>
+        <TurnSummary items={[]} defaultOpen foldKey="live-1">
+          <div data-testid="body">the rows</div>
+        </TurnSummary>
+      </FoldMemoryProvider>,
+    );
+    const trigger = r.container.querySelector("button");
+    expect(trigger?.getAttribute("data-state")).toBe("open");
+    // Quieter live chrome must not disable the disclosure trigger.
+    expect(trigger?.className).not.toContain("pointer-events-none");
+    await actRun(() => trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(trigger?.getAttribute("data-state")).toBe("closed");
+    expect(memory.get("live-1")).toBe("closed");
+    await r.unmount();
+  });
+
   test("after auto-settle, a manual reopen uses the fast expand class", async () => {
     const r = await renderComponent(
       <TurnSummary items={[]} outcome="complete" settleFold>

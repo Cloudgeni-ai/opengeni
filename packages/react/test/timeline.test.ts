@@ -21,21 +21,21 @@ import {
 } from "../src/timeline";
 
 describe("toolDisplayName", () => {
-  test("strips the MCP server-id prefix and shows only the tool", () => {
+  test("strips the MCP server-id prefix and title-cases the leaf", () => {
     // Catalog-imported MCP server: <opaque slug+hash>__<tool>.
     expect(
       toolDisplayName("mcp-integrations-sh-supabase-com-34ed9dcf1390-0i6tcf8__list_organizations"),
-    ).toBe("list organizations");
-    expect(toolDisplayName("opengeni__set_session_title")).toBe("set session title");
+    ).toBe("List organizations");
+    expect(toolDisplayName("opengeni__set_session_title")).toBe("Set session title");
   });
 
-  test("plain built-in tool names (no __ boundary) are just de-slugged", () => {
-    expect(toolDisplayName("session_create")).toBe("session create");
-    expect(toolDisplayName("bash")).toBe("bash");
+  test("plain built-in tool names (no __ boundary) are de-slugged and title-cased", () => {
+    expect(toolDisplayName("session_create")).toBe("Session create");
+    expect(toolDisplayName("bash")).toBe("Bash");
   });
 
   test("splits on the FIRST __ so a tool name containing __ survives whole", () => {
-    expect(toolDisplayName("mcp-supabase-abc123__do__thing")).toBe("do thing");
+    expect(toolDisplayName("mcp-supabase-abc123__do__thing")).toBe("Do thing");
   });
 });
 
@@ -361,16 +361,18 @@ describe("buildTimeline", () => {
 
   test("accumulates streaming deltas into one agent message and finalizes on completed", () => {
     reset();
-    const items = buildTimeline([
-      event("user.message", { text: "Deploy staging" }),
-      event("agent.message.delta", { text: "On it — " }),
-      event("agent.message.delta", { text: "checking the cluster." }),
-      event("agent.message.completed", { text: "On it — checking the cluster." }),
-    ]);
+    const user = event("user.message", { text: "Deploy staging" });
+    const deltaA = event("agent.message.delta", { text: "On it — " });
+    const deltaB = event("agent.message.delta", { text: "checking the cluster." });
+    const done = event("agent.message.completed", { text: "On it — checking the cluster." });
+    const items = buildTimeline([user, deltaA, deltaB, done]);
     expect(items.map((item) => item.kind)).toEqual(["user-message", "agent-message"]);
     const message = items[1] as AgentMessageItem;
     expect(message.text).toBe("On it — checking the cluster.");
     expect(message.streaming).toBe(false);
+    // Footer "finished at" uses the completed event time, not the first delta.
+    expect(message.occurredAt).toBe(done.occurredAt);
+    expect(message.occurredAt).not.toBe(deltaA.occurredAt);
   });
 
   test("keeps accumulated text when completed text does not extend it", () => {
@@ -1497,6 +1499,88 @@ describe("buildTimeline", () => {
     expect(items[0]).toMatchObject({ kind: "goal", action: "set", text: "Keep staging green" });
   });
 
+  test("agent goal tool stays in the activity cluster; landmark is suppressed", () => {
+    reset();
+    const groups = groupTimeline(
+      buildTimeline([
+        event("agent.toolCall.created", {
+          id: "call-mem",
+          name: "opengeni__memory_search",
+          arguments: { query: "tokens" },
+        }),
+        event("agent.toolCall.output", { id: "call-mem", output: "ok" }),
+        event("agent.toolCall.created", {
+          id: "call-goal",
+          name: "opengeni__goal_set",
+          arguments: { text: "Explain the MCP token flow" },
+        }),
+        event("agent.toolCall.output", { id: "call-goal", output: "ok" }),
+        event("goal.set", {
+          goalId: "goal-1",
+          text: "Explain the MCP token flow",
+          actor: "agent",
+          version: 1,
+        }),
+        event("agent.toolCall.created", {
+          id: "call-box",
+          name: "opengeni__sandboxes_list",
+          arguments: {},
+        }),
+        event("agent.toolCall.output", { id: "call-box", output: "[]" }),
+      ]),
+    );
+    expect(groups.filter((group) => group.kind === "item")).toHaveLength(0);
+    const activities = collectActivityGroups(groups);
+    expect(activities).toHaveLength(1);
+    expect(activities[0]!.items.map((item) => item.kind)).toEqual([
+      "tool-call",
+      "tool-call",
+      "tool-call",
+    ]);
+    expect(
+      activities[0]!.items
+        .filter((item): item is ToolCallItem => item.kind === "tool-call")
+        .map((item) => item.name),
+    ).toEqual(["opengeni__memory_search", "opengeni__goal_set", "opengeni__sandboxes_list"]);
+  });
+
+  test("non-agent goal.set still renders a landmark (API / create-session)", () => {
+    reset();
+    const items = buildTimeline([
+      event("goal.set", {
+        goalId: "goal-1",
+        text: "Keep staging green",
+        actor: "api",
+        version: 1,
+      }),
+    ]);
+    expect(items[0]).toMatchObject({ kind: "goal", action: "set", text: "Keep staging green" });
+  });
+
+  test("system goal.paused still renders a landmark", () => {
+    reset();
+    const items = buildTimeline([
+      event("goal.paused", {
+        goalId: "goal-1",
+        actor: "system",
+        reason: "no_progress",
+      }),
+    ]);
+    expect(items[0]).toMatchObject({ kind: "goal", action: "paused" });
+  });
+
+  test("goal.continuation still renders a landmark", () => {
+    reset();
+    const items = buildTimeline([
+      event("goal.continuation", { text: "still working toward the goal" }),
+    ]);
+    expect(items[0]).toMatchObject({
+      kind: "goal",
+      action: "continuation",
+      text: "still working toward the goal",
+    });
+  });
+
   test("goal.cleared is tolerated as a goal landmark", () => {
     reset();
     const items = buildTimeline([event("goal.cleared", { goalId: "goal-1" })]);
@@ -2308,17 +2392,44 @@ describe("buildTimeline — memory writes", () => {
     expect(items).toEqual([]);
   });
 
-  test("clusters memory writes as activity steps alongside tool calls", () => {
+  test("memory_save tool calls are suppressed; the memory.* landmark owns the row", () => {
     reset();
     const groups = groupTimeline(
       buildTimeline([
-        event("agent.toolCall.created", { id: "call-1", name: "memory_save", arguments: {} }),
+        event("agent.toolCall.created", {
+          id: "call-1",
+          name: "opengeni__memory_save",
+          arguments: {},
+        }),
         event("agent.toolCall.output", { id: "call-1", output: "ok" }),
         event("memory.saved", { memoryId: "mem-1", kind: "preference", preview: "A preference." }),
       ]),
     );
     const activities = collectActivityGroups(groups);
     expect(activities).toHaveLength(1);
-    expect(activities[0]!.items.map((item) => item.kind)).toEqual(["tool-call", "memory"]);
+    expect(activities[0]!.items.map((item) => item.kind)).toEqual(["memory"]);
+  });
+
+  test("prefixed opengeni__session_create projects as a worker item", () => {
+    reset();
+    const worker = {
+      id: "0b3ba745-1111-4222-8333-9c76ad9e0000",
+      workspaceId: "ws-1",
+      status: "queued",
+    };
+    const items = buildTimeline([
+      event("agent.toolCall.created", {
+        id: "call-1",
+        name: "opengeni__session_create",
+        arguments: JSON.stringify({ initialMessage: "Run the drift check on prod" }),
+      }),
+      event("agent.toolCall.output", {
+        id: "call-1",
+        output: { content: [{ type: "text", text: JSON.stringify(worker) }] },
+      }),
+    ]);
+    expect(items).toHaveLength(1);
+    expect((items[0] as WorkerItem).kind).toBe("worker");
+    expect((items[0] as WorkerItem).workerSessionId).toBe(worker.id);
   });
 });

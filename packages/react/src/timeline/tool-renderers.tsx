@@ -1,23 +1,35 @@
 import type { GitFileDiff } from "@opengeni/sdk";
 import {
+  BoxIcon,
+  BrainCircuitIcon,
+  CalendarClockIcon,
   CameraIcon,
   CameraOffIcon,
   FileDiffIcon,
+  FileSearchIcon,
+  FolderGitIcon,
   GlobeIcon,
   ImageIcon,
   KeyboardIcon,
   KeyRoundIcon,
   LockIcon,
+  MessagesSquareIcon,
+  MessageSquareIcon,
   MousePointer2Icon,
+  PanelsTopLeftIcon,
   PlugIcon,
   SearchIcon,
+  ServerCogIcon,
+  ServerIcon,
+  Share2Icon,
+  TargetIcon,
   TerminalIcon,
   WrenchIcon,
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { stringifyPayload, tryParseJson } from "../lib/format";
 import {
-  applyPatchOps,
+  applyPatchOpsFromToolItem,
   controlCaret,
   execTruncated,
   isExecSessionLostBanner,
@@ -52,7 +64,7 @@ import {
   type DisclosureChip,
 } from "./shared";
 import { RawPatch, ToolDiff } from "./tool-diff";
-import { toolDisplayName } from "./tool-display-name";
+import { mcpToolLeaf, toolDisplayName } from "./tool-display-name";
 
 /* ----------------------------------------------------------------------------
    Per-tool renderers
@@ -318,7 +330,7 @@ function PathPreview({
 }
 
 function ApplyPatchRenderer({ item }: ToolRendererProps) {
-  const ops = applyPatchOps(item.raw);
+  const ops = applyPatchOpsFromToolItem(item);
   const failed = item.status === "failed";
   const cancelled = item.status === "cancelled";
   const running = item.status === "running";
@@ -1008,21 +1020,264 @@ function SecretSetRenderer({ item }: ToolRendererProps) {
   );
 }
 
-/* ---- generic fallback (first-party MCP, external MCP, unknown) ------------- */
+/* ---- docs / knowledge search ----------------------------------------------- */
 
-function GenericRenderer({ item }: ToolRendererProps) {
+function DocsSearchRenderer({ item }: ToolRendererProps) {
+  const args = parseToolArgs(item.arguments);
+  const query = typeof args.query === "string" ? args.query.trim() : "";
+  const title = query ? `Search “${truncatePreview(query, 48)}”` : toolDisplayName(item.name);
   const running = item.status === "running";
-  const args = redactSecrets(parseToolArgs(item.arguments));
-  const display = toolDisplayName(item.name);
 
   if (running) {
     return (
       <ActivityDisclosure
-        icon={<PlugIcon className={ICON_SIZE} />}
+        icon={<FileSearchIcon className={ICON_SIZE} />}
+        iconTone="running"
+        title={title}
+        running
+        preview={<RunningPreview>Searching…</RunningPreview>}
+      >
+        <PayloadBlock label="Arguments" value={redactSecrets(args)} />
+      </ActivityDisclosure>
+    );
+  }
+
+  const { text: outText, isError } = unwrapMcpOutput(item.output);
+  if ((isError || item.status === "failed") && item.status !== "cancelled") {
+    return (
+      <ActivityDisclosure
+        icon={<FileSearchIcon className={ICON_SIZE} />}
+        iconTone="failed"
+        title={title}
+        failed
+        preview={truncatePreview(outText, 80) || "Search failed"}
+      >
+        <PayloadBlock label="Arguments" value={redactSecrets(args)} />
+        <PayloadBlock label="Error" value={outText} failed />
+      </ActivityDisclosure>
+    );
+  }
+
+  const hits = parseSearchHits(outText);
+  const preview =
+    item.status === "cancelled"
+      ? undefined
+      : hits
+        ? hits.length === 0
+          ? "No hits"
+          : `${hits.length} hit${hits.length === 1 ? "" : "s"}`
+        : "Done";
+
+  return (
+    <ActivityDisclosure
+      icon={<FileSearchIcon className={ICON_SIZE} />}
+      iconTone="muted"
+      title={title}
+      cancelled={item.status === "cancelled"}
+      preview={preview}
+    >
+      {hits && hits.length > 0 ? (
+        <ul className="grid gap-2">
+          {hits.slice(0, 8).map((hit) => (
+            <li key={`${hit.title}\u0000${hit.snippet}`} className="min-w-0">
+              <div className="truncate text-og-sm font-medium text-og-fg">{hit.title}</div>
+              {hit.snippet ? (
+                <div className="mt-0.5 line-clamp-2 text-og-xs text-og-fg-muted">{hit.snippet}</div>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      <PayloadBlock label="Arguments" value={redactSecrets(args)} />
+      <PayloadBlock label="Result" value={outText} />
+    </ActivityDisclosure>
+  );
+}
+
+/* ---- set_session_title / set_other_session_title --------------------------- */
+
+function SetSessionTitleRenderer({ item }: ToolRendererProps) {
+  const args = parseToolArgs(item.arguments);
+  const titleArg = typeof args.title === "string" ? args.title.trim() : "";
+  const display = toolDisplayName(item.name);
+  const previewTitle = titleArg ? truncatePreview(titleArg, 72) : "";
+  const icon = <MessagesSquareIcon className={ICON_SIZE} />;
+
+  if (item.status === "running") {
+    return (
+      <ActivityDisclosure
+        icon={icon}
         iconTone="running"
         title={display}
         running
-        preview={<RunningPreview>{compactArgs(args) || "running…"}</RunningPreview>}
+        preview={
+          previewTitle ? (
+            <RunningPreview>{previewTitle}</RunningPreview>
+          ) : (
+            <RunningPreview>Setting title…</RunningPreview>
+          )
+        }
+      >
+        <PayloadBlock label="Arguments" value={redactSecrets(args)} />
+      </ActivityDisclosure>
+    );
+  }
+
+  const { text: outText, isError } = unwrapMcpOutput(item.output);
+  if ((isError || item.status === "failed") && item.status !== "cancelled") {
+    return (
+      <ActivityDisclosure
+        icon={icon}
+        iconTone="failed"
+        title={display}
+        failed
+        preview={truncatePreview(outText, 80) || "Rename failed"}
+      >
+        <PayloadBlock label="Arguments" value={redactSecrets(args)} />
+        <PayloadBlock label="Error" value={outText} failed />
+      </ActivityDisclosure>
+    );
+  }
+
+  // Prefer the submitted title; fall back to a title field in the tool result.
+  let settledTitle = previewTitle;
+  if (!settledTitle) {
+    const parsed = tryParseJson(outText);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const fromResult = (parsed as { title?: unknown }).title;
+      if (typeof fromResult === "string" && fromResult.trim()) {
+        settledTitle = truncatePreview(fromResult.trim(), 72);
+      }
+    }
+  }
+
+  return (
+    <ActivityDisclosure
+      icon={icon}
+      iconTone="muted"
+      title={display}
+      cancelled={item.status === "cancelled"}
+      preview={item.status === "cancelled" ? undefined : settledTitle || undefined}
+    >
+      <PayloadBlock label="Arguments" value={redactSecrets(args)} />
+      {outText ? <PayloadBlock label="Result" value={outText} /> : null}
+    </ActivityDisclosure>
+  );
+}
+
+type SearchHit = { title: string; snippet: string };
+
+function parseSearchHits(outText: string): SearchHit[] | null {
+  const parsed = tryParseJson(outText);
+  if (parsed == null) {
+    return null;
+  }
+  const list = Array.isArray(parsed)
+    ? parsed
+    : parsed &&
+        typeof parsed === "object" &&
+        Array.isArray((parsed as { results?: unknown }).results)
+      ? (parsed as { results: unknown[] }).results
+      : parsed && typeof parsed === "object" && Array.isArray((parsed as { hits?: unknown }).hits)
+        ? (parsed as { hits: unknown[] }).hits
+        : null;
+  if (!list) {
+    return null;
+  }
+  return list.map((row) => {
+    const r = row && typeof row === "object" ? (row as Record<string, unknown>) : {};
+    const title =
+      (typeof r.title === "string" && r.title) ||
+      (typeof r.name === "string" && r.name) ||
+      (typeof r.documentTitle === "string" && r.documentTitle) ||
+      (typeof r.path === "string" && r.path) ||
+      (typeof r.id === "string" && r.id) ||
+      "Result";
+    const snippet =
+      (typeof r.snippet === "string" && r.snippet) ||
+      (typeof r.text === "string" && r.text) ||
+      (typeof r.content === "string" && r.content) ||
+      "";
+    return { title, snippet: truncatePreview(snippet, 160) };
+  });
+}
+
+/* ---- company memory propose (docs MCP) ------------------------------------- */
+
+function MemoryProposeRenderer({ item }: ToolRendererProps) {
+  const args = parseToolArgs(item.arguments);
+  const text = typeof args.text === "string" ? args.text.trim() : "";
+  const title = "Propose memory";
+  const running = item.status === "running";
+
+  if (running) {
+    return (
+      <ActivityDisclosure
+        icon={<BrainCircuitIcon className={ICON_SIZE} />}
+        iconTone="running"
+        title={title}
+        running
+        preview={<RunningPreview>Proposing…</RunningPreview>}
+      >
+        <PayloadBlock label="Arguments" value={redactSecrets(args)} />
+      </ActivityDisclosure>
+    );
+  }
+
+  const { text: outText, isError } = unwrapMcpOutput(item.output);
+  if ((isError || item.status === "failed") && item.status !== "cancelled") {
+    return (
+      <ActivityDisclosure
+        icon={<BrainCircuitIcon className={ICON_SIZE} />}
+        iconTone="failed"
+        title={title}
+        failed
+        preview={truncatePreview(outText, 80) || "Propose failed"}
+      >
+        {text ? <BodyNote>{text}</BodyNote> : null}
+        <PayloadBlock label="Error" value={outText} failed />
+      </ActivityDisclosure>
+    );
+  }
+
+  return (
+    <ActivityDisclosure
+      icon={<BrainCircuitIcon className={ICON_SIZE} />}
+      iconTone="muted"
+      title={title}
+      cancelled={item.status === "cancelled"}
+      preview={text ? truncatePreview(text, 90) : "Done"}
+    >
+      {text ? <BodyNote>{text}</BodyNote> : null}
+      <PayloadBlock label="Result" value={outText} />
+    </ActivityDisclosure>
+  );
+}
+
+/* ---- generic fallback (first-party MCP, external MCP, unknown) ------------- */
+
+/**
+ * Baseline craft for unmatched tools: family icon + title-cased leaf + honest
+ * status preview (Running… / Done / error snippet). No argument-field sniffing —
+ * JSON stays in the expandable body only.
+ */
+function GenericRenderer({ item }: ToolRendererProps) {
+  const running = item.status === "running";
+  const args = redactSecrets(parseToolArgs(item.arguments));
+  const display = toolDisplayName(item.name);
+  const icon = <GenericToolIcon name={item.name} />;
+  // Goal tools: surface the objective text on the collapsed row so the in-cluster
+  // tool replaces the old breakaway GoalRow pill without losing the gist.
+  const goalPreview = goalToolPreview(item.name, args);
+
+  if (running) {
+    return (
+      <ActivityDisclosure
+        icon={icon}
+        iconTone="running"
+        title={display}
+        running
+        preview={goalPreview ?? <RunningPreview>Running…</RunningPreview>}
       >
         <PayloadBlock label="Arguments" value={args} />
       </ActivityDisclosure>
@@ -1036,11 +1291,11 @@ function GenericRenderer({ item }: ToolRendererProps) {
   if ((isError || item.status === "failed") && item.status !== "cancelled") {
     return (
       <ActivityDisclosure
-        icon={<WrenchIcon className={ICON_SIZE} />}
+        icon={icon}
         iconTone="failed"
         title={display}
         chip={{ tone: "bad", text: "error" }}
-        preview={outText.slice(0, 80)}
+        preview={truncatePreview(outText, 80) || "Error"}
       >
         <PayloadBlock label="Arguments" value={args} />
         <PayloadBlock label="Error" value={outText} failed />
@@ -1050,11 +1305,11 @@ function GenericRenderer({ item }: ToolRendererProps) {
 
   return (
     <ActivityDisclosure
-      icon={<WrenchIcon className={ICON_SIZE} />}
+      icon={icon}
       iconTone="muted"
       title={display}
       cancelled={item.status === "cancelled"}
-      preview={compactArgs(args)}
+      preview={item.status === "cancelled" ? undefined : (goalPreview ?? "Done")}
     >
       <PayloadBlock label="Arguments" value={args} />
       <PayloadBlock label="Result" value={outText} />
@@ -1062,9 +1317,81 @@ function GenericRenderer({ item }: ToolRendererProps) {
   );
 }
 
-function compactArgs(args: unknown): string {
-  const text = stringifyPayload(args).replace(/\s+/g, " ").trim();
-  return text === "{}" ? "" : text.length > 90 ? `${text.slice(0, 89)}…` : text;
+function goalToolPreview(name: string, args: unknown): string | null {
+  const leaf = mcpToolLeaf(name);
+  if (
+    leaf !== "goal_set" &&
+    leaf !== "goal_update" &&
+    leaf !== "goal_complete" &&
+    leaf !== "goal_pause"
+  ) {
+    return null;
+  }
+  const record = args && typeof args === "object" ? (args as Record<string, unknown>) : null;
+  if (!record) {
+    return null;
+  }
+  const text =
+    typeof record.text === "string"
+      ? record.text
+      : typeof record.evidence === "string"
+        ? record.evidence
+        : typeof record.rationale === "string"
+          ? record.rationale
+          : typeof record.progressNote === "string"
+            ? record.progressNote
+            : null;
+  return text ? truncatePreview(text, 90) : null;
+}
+
+function truncatePreview(text: string, max: number): string {
+  const cleaned = text.replace(/\s+/g, " ").trim();
+  if (!cleaned) {
+    return "";
+  }
+  return cleaned.length > max ? `${cleaned.slice(0, max - 1)}…` : cleaned;
+}
+
+/** Explicit first-party leaf/prefix → canonical product icons (match nav/pages). */
+function GenericToolIcon({ name }: { name: string }) {
+  const leaf = mcpToolLeaf(name);
+  const Icon = leaf.startsWith("goal_")
+    ? TargetIcon
+    : leaf.startsWith("memory_") ||
+        leaf === "preference_registry_summary" ||
+        leaf === "preference_registry_get"
+      ? BrainCircuitIcon
+      : leaf.startsWith("session_") ||
+          leaf === "sessions_list" ||
+          leaf === "set_session_title" ||
+          leaf === "set_other_session_title"
+        ? MessagesSquareIcon
+        : leaf.startsWith("sandbox") || leaf === "sandboxes_list" || leaf === "run_on"
+          ? ServerIcon
+          : leaf.startsWith("rig_")
+            ? ServerCogIcon
+            : leaf.startsWith("scheduled_")
+              ? CalendarClockIcon
+              : leaf.startsWith("artifacts_")
+                ? PanelsTopLeftIcon
+                : leaf.startsWith("social_")
+                  ? Share2Icon
+                  : leaf.startsWith("slack_")
+                    ? MessageSquareIcon
+                    : leaf.startsWith("github_")
+                      ? FolderGitIcon
+                      : leaf.startsWith("variable_")
+                        ? BoxIcon
+                        : leaf.startsWith("environment_")
+                          ? KeyRoundIcon
+                          : leaf.includes("document") ||
+                              leaf.includes("knowledge") ||
+                              leaf === "list_document_bases"
+                            ? FileSearchIcon
+                            : leaf === "tool_search" || leaf === "load_skill"
+                              ? PlugIcon
+                              : WrenchIcon;
+  return <Icon className={ICON_SIZE} />;
 }
 
 /* ---- the default registry -------------------------------------------------- */
@@ -1075,13 +1402,11 @@ const BASE_ENTRIES: ToolRegistryEntry[] = [
   { match: "rawType", type: "apply_patch_call", render: ApplyPatchRenderer },
   { match: "rawType", type: "computer_call", render: ComputerCallRenderer },
   { match: "rawType", type: "hosted_tool_call", render: WebSearchRenderer },
-  // First-party sandbox + MCP tools resolve by name. `apply_patch_call` /
-  // `computer_call` are intentionally repeated by name as a fallback only for
-  // first-party replays that omit `raw` (the rawType entries above win whenever
-  // `raw.type` is present, which is the live-wire case).
+  // First-party sandbox + MCP tools resolve by name (exact or MCP leaf).
   { match: "name", name: "exec_command", render: ExecRenderer },
   { match: "name", name: "write_stdin", render: WriteStdinRenderer },
   { match: "name", name: "apply_patch_call", render: ApplyPatchRenderer },
+  { match: "name", name: "apply_patch", render: ApplyPatchRenderer },
   { match: "name", name: "computer_call", render: ComputerCallRenderer },
   // Function-mode computer tools (codex / chat-wire transports).
   { match: "name", name: "computer_screenshot", render: ComputerCallRenderer },
@@ -1095,6 +1420,12 @@ const BASE_ENTRIES: ToolRegistryEntry[] = [
   { match: "name", name: "web_search_call", render: WebSearchRenderer },
   { match: "name", name: "view_image", render: ViewImageRenderer },
   { match: "name", name: "environment_set_variable", render: SecretSetRenderer },
+  { match: "name", name: "variable_set_set_variable", render: SecretSetRenderer },
+  { match: "name", name: "search_documents", render: DocsSearchRenderer },
+  { match: "name", name: "knowledge_search", render: DocsSearchRenderer },
+  { match: "name", name: "memory_propose", render: MemoryProposeRenderer },
+  { match: "name", name: "set_session_title", render: SetSessionTitleRenderer },
+  { match: "name", name: "set_other_session_title", render: SetSessionTitleRenderer },
 ];
 
 /** The built-in tool renderer registry: every first-party tool plus a fallback. */

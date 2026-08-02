@@ -418,9 +418,20 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     await page.goto(`http://127.0.0.1:${publicPort}/workspaces/${workspaceId}/settings`, {
       waitUntil: "domcontentloaded",
     });
-    await page.getByRole("heading", { name: "Codex subscriptions" }).waitFor({ timeout: 20_000 });
+    const subscriptionsHeading = page.locator("#codex-subscriptions-heading");
+    await subscriptionsHeading.waitFor({ timeout: 20_000 });
+    await subscriptionsHeading.scrollIntoViewIfNeeded();
     const accountCard = (name: string) =>
       page.getByRole("article", { name: `${name} Codex subscription` });
+    const expandAccount = async (name: string) => {
+      const card = accountCard(name);
+      const show = card.getByRole("button", { name: `Show details for ${name}` });
+      if (await show.isVisible()) {
+        await show.click();
+      }
+      await card.getByRole("button", { name: `Hide details for ${name}` }).waitFor();
+    };
+    await expandAccount("Detailed account");
     await accountCard("Detailed account")
       .getByText("Provider detail is complete.")
       .waitFor({ timeout: 20_000 });
@@ -439,25 +450,32 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
         .getByText(/available again\./)
         .count(),
     ).toBe(1);
+    await expandAccount("Count-only account");
     await accountCard("Count-only account")
       .getByText(/individual details are unavailable\. View only\./)
       .waitFor();
+    await expandAccount("Capped account");
     await accountCard("Capped account")
       .getByText("The provider returned fewer details than its count. View only.")
       .waitFor();
+    await expandAccount("Unknown account");
     await accountCard("Unknown account")
       .getByText("The provider returned reset data OpenGeni does not recognize. View only.")
       .waitFor();
+    await expandAccount("Unsupported account");
     await accountCard("Unsupported account")
       .getByText("This subscription does not expose reset-credit details.")
       .waitFor();
+    await expandAccount("Error account");
     await accountCard("Error account")
       .getByText("Reset-credit inventory is unavailable. Refresh to retry.")
       .waitFor();
+    await expandAccount("Cached account");
     await accountCard("Cached account")
       .getByText(/OpenGeni cache · stale/)
       .waitFor();
     expect(provider.maxActiveOverviewCalls).toBeLessThanOrEqual(4);
+    await expandAccount("Detailed account");
     expect(await page.getByRole("button", { name: /^Redeem / }).count()).toBe(1);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
       true,
@@ -496,10 +514,18 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     await mobile.goto(`http://127.0.0.1:${publicPort}/workspaces/${workspaceId}/settings`, {
       waitUntil: "domcontentloaded",
     });
-    await mobile.getByRole("heading", { name: "Codex subscriptions" }).waitFor({ timeout: 20_000 });
+    const mobileSubscriptionsHeading = mobile.locator("#codex-subscriptions-heading");
+    await mobileSubscriptionsHeading.waitFor({ timeout: 20_000 });
+    await mobileSubscriptionsHeading.scrollIntoViewIfNeeded();
     const mobileDetailed = mobile.getByRole("article", {
       name: "Detailed account Codex subscription",
     });
+    const mobileShow = mobileDetailed.getByRole("button", {
+      name: "Show details for Detailed account",
+    });
+    if (await mobileShow.isVisible()) {
+      await mobileShow.tap();
+    }
     await mobileDetailed.getByRole("button", { name: "Redeem Full reset" }).waitFor();
     expect(
       (await mobileDetailed.getByRole("button", { name: "Redeem Full reset" }).boundingBox())
@@ -603,9 +629,9 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     await recoveryPage.goto(`http://127.0.0.1:${publicPort}/workspaces/${workspaceId}/settings`, {
       waitUntil: "domcontentloaded",
     });
-    await recoveryPage
-      .getByRole("heading", { name: "Codex subscriptions" })
-      .waitFor({ timeout: 20_000 });
+    const recoverySubscriptionsHeading = recoveryPage.locator("#codex-subscriptions-heading");
+    await recoverySubscriptionsHeading.waitFor({ timeout: 20_000 });
+    await recoverySubscriptionsHeading.scrollIntoViewIfNeeded();
     // Usage/count caches are still fresh, but detailed rows are never cached as
     // authority. A remount must therefore issue one live overview and restore the
     // durable same-attempt resume affordance rather than rendering no inventory.
@@ -620,6 +646,15 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     // The provider has removed the credit after the ambiguous first call. The
     // browser exposes only the durable same-attempt resume path. With no stale
     // local provider title, the fallback label remains deliberately generic.
+    const recoveryDetailed = recoveryPage.getByRole("article", {
+      name: "Detailed account Codex subscription",
+    });
+    const recoveryShow = recoveryDetailed.getByRole("button", {
+      name: "Show details for Detailed account",
+    });
+    if (await recoveryShow.isVisible()) {
+      await recoveryShow.click();
+    }
     await recoveryPage
       .getByRole("button", {
         name: "Resume uncertain redemption of usage limit reset",
@@ -671,7 +706,20 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     await completedPage.goto(`http://127.0.0.1:${publicPort}/workspaces/${workspaceId}/settings`, {
       waitUntil: "domcontentloaded",
     });
-    await completedPage
+    const completedSubscriptionsHeading = completedPage.locator("#codex-subscriptions-heading");
+    await completedSubscriptionsHeading.waitFor({ timeout: 20_000 });
+    await completedSubscriptionsHeading.scrollIntoViewIfNeeded();
+    // Dense rows keep reset outcomes inside collapsed details.
+    const completedDetailed = completedPage.getByRole("article", {
+      name: "Detailed account Codex subscription",
+    });
+    const completedShow = completedDetailed.getByRole("button", {
+      name: "Show details for Detailed account",
+    });
+    if (await completedShow.isVisible()) {
+      await completedShow.click();
+    }
+    await completedDetailed
       .getByText("The earlier redemption succeeded; usage was refreshed.")
       .waitFor({ timeout: 20_000 });
     expect(

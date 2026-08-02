@@ -23,6 +23,15 @@ export default defineConfig({
         codeSplitting: {
           groups: [
             {
+              // Keep every Radix package in one chunk. entriesAware session
+              // merging otherwise splits Popper scopes across lazy route
+              // share-chunks and crashes /settings
+              // (`createPopperScope is not a function`).
+              name: "radix",
+              test: /(?:node_modules|\.bun)[\\/](?:@radix-ui(?:\+|\/)|radix-ui(?:@|\/))/,
+              priority: 15,
+            },
+            {
               // The session workbench is the primary interactive route. Keep
               // its static graph route-aware, but coalesce tiny shared groups
               // so a cold navigation does not fan out into dozens of requests.
@@ -50,6 +59,7 @@ export default defineConfig({
     alias: {
       "@": path.resolve(dirname, "src"),
     },
+    dedupe: ["react", "react-dom", "radix-ui"],
   },
   plugins: [
     tanstackRouter({ target: "react", enableRouteGeneration: false }),

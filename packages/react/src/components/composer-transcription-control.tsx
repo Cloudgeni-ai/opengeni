@@ -6,10 +6,20 @@ import type {
 } from "@opengeni/sdk";
 import { LoaderCircleIcon, MicIcon, SquareIcon, XIcon } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useEffect, useState, type MouseEvent } from "react";
+import { useEffect, useState, type MouseEvent, type ReactElement } from "react";
 import { cn } from "../lib/cn";
 import { useVoiceInput } from "../hooks/use-voice-input";
 import { useChatComposer } from "./composer";
+import { Tooltip, TooltipContent, TooltipTrigger } from "./tooltip";
+
+function Tip({ tip, children }: { tip: string; children: ReactElement }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{children}</TooltipTrigger>
+      <TooltipContent side="top">{tip}</TooltipContent>
+    </Tooltip>
+  );
+}
 
 export type ComposerTranscriptionMessages = {
   start: string;
@@ -161,33 +171,35 @@ export function ComposerTranscriptionControl({
             )}
             {status === "recording" ? (
               <>
-                <button
-                  type="button"
-                  onClick={() => transcription.cancel()}
-                  aria-label={messages.cancel}
-                  aria-keyshortcuts="Escape"
-                  title={messages.cancel}
-                  className={cn(
-                    "inline-flex size-7 shrink-0 items-center justify-center rounded-og-sm",
-                    "text-og-fg-muted transition-colors duration-150 motion-reduce:transition-none",
-                    "hover:bg-og-surface-3 hover:text-og-fg pointer-coarse:size-9",
-                  )}
-                >
-                  <XIcon className="size-3.5" />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => transcription.stop()}
-                  aria-label={messages.stop}
-                  title={messages.stop}
-                  className={cn(
-                    "inline-flex size-7 shrink-0 items-center justify-center rounded-og-sm",
-                    "bg-og-fg text-og-bg transition-colors duration-150 motion-reduce:transition-none",
-                    "hover:bg-og-fg-muted pointer-coarse:size-9",
-                  )}
-                >
-                  <SquareIcon className="size-2.5 fill-current" />
-                </button>
+                <Tip tip={messages.cancel}>
+                  <button
+                    type="button"
+                    onClick={() => transcription.cancel()}
+                    aria-label={messages.cancel}
+                    aria-keyshortcuts="Escape"
+                    className={cn(
+                      "inline-flex size-7 shrink-0 items-center justify-center rounded-og-sm",
+                      "text-og-fg-muted transition-colors duration-150 motion-reduce:transition-none",
+                      "hover:bg-og-surface-3 hover:text-og-fg pointer-coarse:size-9",
+                    )}
+                  >
+                    <XIcon className="size-3.5" />
+                  </button>
+                </Tip>
+                <Tip tip={messages.stop}>
+                  <button
+                    type="button"
+                    onClick={() => transcription.stop()}
+                    aria-label={messages.stop}
+                    className={cn(
+                      "inline-flex size-7 shrink-0 items-center justify-center rounded-og-sm",
+                      "bg-og-fg text-og-bg transition-colors duration-150 motion-reduce:transition-none",
+                      "hover:bg-og-fg-muted pointer-coarse:size-9",
+                    )}
+                  >
+                    <SquareIcon className="size-2.5 fill-current" />
+                  </button>
+                </Tip>
               </>
             ) : status === "transcribing" ? (
               <span className="og-shimmer-text px-1.5 text-og-xs font-medium whitespace-nowrap">
@@ -200,38 +212,39 @@ export function ComposerTranscriptionControl({
             )}
           </motion.span>
         ) : (
-          <motion.button
-            key="idle"
-            type="button"
-            initial={{ opacity: 0, scale: 0.96 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 0.96 }}
-            transition={{ duration: 0.14, ease: [0.22, 1, 0.36, 1] }}
-            onClick={start}
-            aria-label={idleLabel}
-            aria-pressed={false}
-            aria-disabled={unavailableMessage !== null}
-            title={idleLabel}
-            className={cn(
-              "inline-flex size-8 shrink-0 items-center justify-center rounded-og-md pointer-coarse:size-11",
-              "text-og-fg-muted transition-colors duration-150 motion-reduce:transition-none",
-              unavailableMessage
-                ? "cursor-not-allowed opacity-45"
-                : "hover:bg-og-surface-2 hover:text-og-fg",
-            )}
-          >
-            <MicIcon className="size-4" />
-          </motion.button>
+          <Tip key="idle" tip={idleLabel}>
+            <motion.button
+              type="button"
+              initial={{ opacity: 0, scale: 0.96 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.96 }}
+              transition={{ duration: 0.14, ease: [0.22, 1, 0.36, 1] }}
+              onClick={start}
+              aria-label={idleLabel}
+              aria-pressed={false}
+              aria-disabled={unavailableMessage !== null}
+              className={cn(
+                "inline-flex size-8 shrink-0 items-center justify-center rounded-og-md pointer-coarse:size-11",
+                "text-og-fg-muted transition-colors duration-150 motion-reduce:transition-none",
+                unavailableMessage
+                  ? "cursor-not-allowed opacity-45"
+                  : "hover:bg-og-surface-2 hover:text-og-fg",
+              )}
+            >
+              <MicIcon className="size-4" />
+            </motion.button>
+          </Tip>
         )}
       </AnimatePresence>
       {status === "error" && errorMessage ? (
-        <span
-          aria-hidden="true"
-          title={errorMessage}
-          className="max-w-40 truncate text-og-xs text-og-status-failed max-sm:max-w-24"
-        >
-          {errorMessage}
-        </span>
+        <Tip tip={errorMessage}>
+          <span
+            aria-hidden="true"
+            className="max-w-40 truncate text-og-xs text-og-status-failed max-sm:max-w-24"
+          >
+            {errorMessage}
+          </span>
+        </Tip>
       ) : null}
       <span className="sr-only" role={status === "error" ? "alert" : "status"} aria-live="polite">
         {announcement}

@@ -375,7 +375,10 @@ export function TurnSummary({
   );
 
   // Live open shell: keep the chip in-flow (so settle never inserts layout)
-  // but quiet it until there is an outcome or a settle beat.
+  // and quieter until there is an outcome or a settle beat — but still
+  // clickable. `pointer-events-none` here trapped readers who expanded (or
+  // who landed on the default-open live rail) with no way to collapse while
+  // the turn was still running.
   const liveShell = outcome === undefined && open && !settlePhase && !bare;
   // Settle CSS phase OR cancel-close latch — see useTurnSettleOpen.
   // Nested chips stay force-open for this window (stable height).
@@ -419,7 +422,7 @@ export function TurnSummary({
               outcome === "failed"
                 ? "hover:bg-og-status-failed/[0.06] hover:text-og-fg"
                 : "hover:bg-og-surface-1 hover:text-og-fg",
-              liveShell && "pointer-events-none text-og-fg-subtle",
+              liveShell && "text-og-fg-subtle",
             )}
           >
             {/* Disclosure grammar matches the rows: chevron leads (far left), then any

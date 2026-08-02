@@ -95,7 +95,7 @@ describe("session-only entry", () => {
     expect(reactSources.some((id) => id.includes("/src/commands/"))).toBe(false);
     // Keep the session-only closure explicit: adding a source requires reviewing
     // whether it belongs to this provider-neutral public subpath.
-    expect(reactSources.length).toBe(18);
+    expect(reactSources.length).toBe(19);
 
     const chunks = result.output.filter((item) => item.type === "chunk");
     expect(chunks).toHaveLength(1);

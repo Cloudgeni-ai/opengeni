@@ -227,6 +227,19 @@ export function applyPatchOps(raw: unknown): ApplyPatchOperation[] {
   return r.operation ? [r.operation] : [];
 }
 
+/** Ops from provider `raw`, or from function-tool arguments when raw is empty. */
+export function applyPatchOpsFromToolItem(item: {
+  raw: unknown;
+  arguments: unknown;
+}): ApplyPatchOperation[] {
+  const fromRaw = applyPatchOps(item.raw);
+  if (fromRaw.length > 0) {
+    return fromRaw;
+  }
+  const args = parseToolArgs(item.arguments);
+  return applyPatchOps(args);
+}
+
 /**
  * True when a tool item is an `apply_patch_call` — by its provider-native
  * `raw.type` (the live-wire source of truth) or by tool `name` (first-party
@@ -235,7 +248,11 @@ export function applyPatchOps(raw: unknown): ApplyPatchOperation[] {
 export function isApplyPatch(item: { name: string; raw: unknown }): boolean {
   const type =
     item.raw && typeof item.raw === "object" ? (item.raw as { type?: unknown }).type : undefined;
-  return type === "apply_patch_call" || item.name === "apply_patch_call";
+  if (type === "apply_patch_call") {
+    return true;
+  }
+  const name = item.name;
+  return name === "apply_patch_call" || name === "apply_patch" || name.endsWith("__apply_patch");
 }
 
 /* --- secret redaction ------------------------------------------------------- */

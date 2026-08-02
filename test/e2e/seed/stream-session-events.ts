@@ -388,6 +388,35 @@ async function playPhase(
       return publish(db, bus, workspaceId, sessionId, [
         { type: "goal.updated", payload: { text: phase.text }, turnId: ctx.turnId },
       ]);
+    case "worker-completion": {
+      const childSessionId = phase.childSessionId(ctx);
+      const goal = phase.goal
+        ? {
+            status: phase.goal.status,
+            ...(phase.goal.text !== undefined ? { text: phase.goal.text } : {}),
+            ...(phase.goal.evidence !== undefined ? { evidence: phase.goal.evidence } : {}),
+            ...(phase.goal.pausedReason !== undefined
+              ? { pausedReason: phase.goal.pausedReason }
+              : {}),
+            ...(phase.goal.rationale !== undefined ? { rationale: phase.goal.rationale } : {}),
+          }
+        : undefined;
+      return publish(db, bus, workspaceId, sessionId, [
+        {
+          type: "user.message",
+          // Real inbound completions are turn-less machine notices on the parent.
+          payload: {
+            text: phase.text,
+            childCompletion: {
+              childSessionId,
+              status: phase.childStatus,
+              ...(goal !== undefined ? { goal } : {}),
+            },
+          },
+          turnId: null,
+        },
+      ]);
+    }
     case "raw":
       return publish(db, bus, workspaceId, sessionId, phase.events(ctx));
   }
@@ -407,6 +436,7 @@ async function streamScenario(
     turnIndex,
     turnId,
     id: (label) => `stream-${turnIndex}-${label}-${crypto.randomUUID().slice(0, 8)}`,
+    scratch: {},
   };
   let published = 0;
   const messageAcc = { text: "" };

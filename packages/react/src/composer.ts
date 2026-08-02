@@ -3,6 +3,7 @@
  *
  * `import * as Composer from "@opengeni/react/composer"`.
  */
+export { OPEN_WORKSTREAM_CONTROL_EVENT } from "./workstream-control-event";
 export {
   Actions,
   AttachButton,
@@ -16,7 +17,6 @@ export {
   Hint,
   Input,
   ModelPicker,
-  OPEN_WORKSTREAM_CONTROL_EVENT,
   PauseButton,
   PausedState,
   RestoredResources,

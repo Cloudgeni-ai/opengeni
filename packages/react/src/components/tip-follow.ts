@@ -81,6 +81,21 @@ export const TIP_FOLLOW_VELOCITY_ARM_DEBT_PX = 72;
 export const TIP_FOLLOW_VELOCITY_DECAY_MS = _t(180);
 /** Reader-up pixels above clamp budget that count as leaving the tip. */
 export const TIP_FOLLOW_READER_UP_EPS_PX = 2;
+
+/** Test-only override for scrollend feature detection (`null` = probe DOM). */
+let scrollEndSupportOverride: boolean | null = null;
+
+/** @internal */ export function setScrollEndSupportForTests(value: boolean | null): void {
+  scrollEndSupportOverride = value;
+}
+
+/** True when the engine exposes element `scrollend` (prefer over rAF leave). */
+export function supportsScrollEndEvent(): boolean {
+  if (scrollEndSupportOverride !== null) {
+    return scrollEndSupportOverride;
+  }
+  return typeof HTMLElement !== "undefined" && "onscrollend" in HTMLElement.prototype;
+}
 /** @deprecated Shrink lock removed; kept so old imports do not break. */
 export const TIP_FOLLOW_SHRINK_LOCK_MS = 0;
 /** @deprecated Absorb thresholds removed — growth track is continuous. */

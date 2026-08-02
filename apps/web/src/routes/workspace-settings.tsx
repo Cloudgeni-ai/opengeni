@@ -1,8 +1,7 @@
-// Workspace settings: workspace name/rename, "People with access" (workspace
-// members on the workspace_memberships model), the workspace-scoped API keys
-// (moved here out of the old account page), a link to Variable sets, and a
-// danger zone with workspace deletion. The org/billing console lives at
-// Organization settings.
+// Workspace settings hub: browse links to workspace config surfaces, then
+// name/rename, members, API keys, memory/transcription/Codex policy, Codex
+// subscriptions, and a danger zone with workspace deletion. The org/billing
+// console lives at Organization settings.
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
   BoxIcon,
@@ -15,6 +14,7 @@ import {
   PencilIcon,
   PlusIcon,
   SettingsIcon,
+  ShrinkIcon,
   Trash2Icon,
   TriangleAlertIcon,
   UserPlusIcon,
@@ -24,8 +24,12 @@ import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import { CodexSubscriptionsCard } from "@/components/codex-connection";
-import { LoadErrorState, PageHeader } from "@/components/common";
-import { TranscriptionSettingsSection } from "@/components/transcription-settings";
+import { LoadErrorState } from "@/components/common";
+import {
+  WORKSPACE_BROWSE_ITEMS,
+  type WorkspaceConfigItem,
+} from "@/components/rail/workspace-nav-data";
+import { PreferenceToggleRow, VoiceInputPreferenceRow } from "@/components/transcription-settings";
 import { PermissionGroupPicker } from "@/components/permission-picker";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
@@ -41,6 +45,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/ui/notice";
+import { ContentPage } from "@/components/ui/content-layout";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
 import { orgLabel } from "@/lib/org";
@@ -54,6 +59,35 @@ import {
   workspaceMemberPermissionGroups,
 } from "@/lib/permissions";
 import type { ApiKey, WorkspaceMember } from "@/types";
+
+function BrowseWorkspaceStrip(props: { workspaceId: string; canReadInsights: boolean }) {
+  const items = WORKSPACE_BROWSE_ITEMS.filter(
+    (item: WorkspaceConfigItem) => !item.requiresAdmin || props.canReadInsights,
+  );
+  // Leaf catalog only (workspace-nav-data). Do not import workspace-nav.tsx or
+  // workspace-nav-icons — that Lucide map shares into the shell and blows the
+  // initial bundle. Keep a single BoxIcon use so Rolldown's Lucide grouping
+  // stays aligned with the previous Variable-sets card.
+  return (
+    <nav aria-label="Browse workspace" className="flex flex-wrap items-center gap-x-1 gap-y-1.5">
+      <span className="mr-1 text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
+        Browse
+      </span>
+      {items.map((item) => (
+        <Link
+          key={item.to}
+          to={item.to}
+          params={{ workspaceId: props.workspaceId }}
+          title={item.description}
+          className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg"
+        >
+          {item.icon === "box" ? <BoxIcon className="size-3.5 shrink-0 text-brand" /> : null}
+          {item.label}
+        </Link>
+      ))}
+    </nav>
+  );
+}
 
 export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
@@ -97,6 +131,8 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
   const [createdToken, setCreatedToken] = useState<string | null>(null);
   const [revokingKey, setRevokingKey] = useState<ApiKey | null>(null);
   const [busy, setBusy] = useState(false);
+  const [editingName, setEditingName] = useState(false);
+  const [apiKeysOpen, setApiKeysOpen] = useState(false);
   const canManageApiKeys = hasWorkspacePermission(
     context.accessContext,
     workspaceId,
@@ -168,6 +204,7 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
       });
       setCreatedToken(result.token);
       setApiKeys((current) => [result.apiKey, ...current]);
+      setApiKeysOpen(true);
       toast.success("API key created");
     } catch (error) {
       toast.error("Failed to create API key", {
@@ -238,232 +275,266 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
     return true;
   }
 
+  const activeApiKeyCount = apiKeys.filter((key) => !key.revokedAt).length;
+
+  async function finishRename() {
+    const name = nameDraft.trim();
+    if (!name || name === activeWorkspace?.name) {
+      setNameDraft(activeWorkspace?.name ?? "");
+      setEditingName(false);
+      return;
+    }
+    await submitRename();
+    setEditingName(false);
+  }
+
   return (
-    <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col overflow-y-auto px-4 py-5 sm:px-6 lg:px-8">
-      <section className="grid gap-5 text-left">
-        <PageHeader
-          icon={<SettingsIcon className="size-4" />}
-          title="Workspace settings"
-          description={
-            activeWorkspace ? `${activeWorkspace.name} · ${organizationLabel}` : organizationLabel
-          }
-        />
-
-        {/* Workspace name / rename */}
-        <section className="grid gap-3 rounded-lg border border-border bg-surface p-4">
-          <div>
-            <h2 className="flex items-center gap-1.5 text-sm font-medium">
-              <PencilIcon className="size-3.5 text-brand" />
-              Workspace name
-            </h2>
-            <p className="mt-1 text-xs text-fg-muted">
-              The name shows everywhere this workspace appears.
-            </p>
+    <ContentPage width="standard">
+      <section className="grid gap-6 text-left">
+        <header className="grid gap-3 border-b border-border pb-4">
+          <div className="flex min-w-0 items-center gap-2 text-sm text-fg-muted">
+            <SettingsIcon className="size-4 shrink-0 text-brand" />
+            <span>Workspace</span>
+            <span className="text-fg-subtle">·</span>
+            <span className="truncate">{organizationLabel}</span>
           </div>
-          {canRename ? (
-            <form
-              className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]"
-              onSubmit={(event) => {
-                event.preventDefault();
-                void submitRename();
-              }}
-            >
-              <Input
-                value={nameDraft}
-                onChange={(event) => setNameDraft(event.target.value)}
-                className="h-9"
-                placeholder="production"
-              />
-              <Button
-                type="submit"
-                disabled={
-                  renaming || !nameDraft.trim() || nameDraft.trim() === activeWorkspace?.name
-                }
+          <div className="flex min-w-0 items-center gap-2">
+            {editingName && canRename ? (
+              <form
+                className="flex min-w-0 flex-1 items-center gap-2"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void finishRename();
+                }}
               >
-                {renaming ? (
-                  <Loader2Icon className="size-3.5 animate-spin" />
-                ) : (
-                  <CheckIcon className="size-3.5" />
-                )}
-                Save
-              </Button>
-            </form>
-          ) : (
-            <p className="text-xs text-fg-subtle">
-              Only workspace admins can rename this workspace.
-            </p>
-          )}
-        </section>
+                <Input
+                  autoFocus
+                  value={nameDraft}
+                  onChange={(event) => setNameDraft(event.target.value)}
+                  onBlur={() => void finishRename()}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") {
+                      setNameDraft(activeWorkspace?.name ?? "");
+                      setEditingName(false);
+                    }
+                  }}
+                  className="h-9 max-w-md text-base font-semibold"
+                  placeholder="Workspace name"
+                  aria-label="Workspace name"
+                />
+                <Button
+                  type="submit"
+                  size="icon-sm"
+                  variant="ghost"
+                  disabled={renaming || !nameDraft.trim()}
+                  aria-label="Save workspace name"
+                >
+                  {renaming ? (
+                    <Loader2Icon className="size-3.5 animate-spin" />
+                  ) : (
+                    <CheckIcon className="size-3.5" />
+                  )}
+                </Button>
+              </form>
+            ) : (
+              <>
+                <h1 className="min-w-0 truncate text-xl font-semibold tracking-tight">
+                  {activeWorkspace?.name ?? "Workspace"}
+                </h1>
+                {canRename ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    aria-label="Rename workspace"
+                    onClick={() => {
+                      setNameDraft(activeWorkspace?.name ?? "");
+                      setEditingName(true);
+                    }}
+                  >
+                    <PencilIcon className="size-3.5" />
+                  </Button>
+                ) : null}
+              </>
+            )}
+          </div>
+          <BrowseWorkspaceStrip workspaceId={workspaceId} canReadInsights={canDeleteWorkspace} />
+        </header>
 
-        {/* People with access (workspace members) */}
         <MembersSection workspaceId={workspaceId} canManage={canManageMembers} />
 
-        {/* Variable sets link */}
-        <section className="flex items-center justify-between gap-3 rounded-lg border border-border bg-surface p-4">
-          <div className="min-w-0">
-            <h2 className="flex items-center gap-1.5 text-sm font-medium">
-              <BoxIcon className="size-3.5 text-brand" />
-              Variable sets
-            </h2>
-            <p className="mt-1 text-xs text-fg-muted">
-              Variable sets injected into sandboxes at session start.
-            </p>
+        <section aria-labelledby="workspace-preferences-heading" className="grid gap-1">
+          <h2 id="workspace-preferences-heading" className="text-sm font-medium">
+            Preferences
+          </h2>
+          <div className="divide-y divide-border/70 rounded-lg border border-border px-3">
+            <MemoryPreferenceRow workspaceId={workspaceId} canManage={canRename} />
+            <VoiceInputPreferenceRow workspaceId={workspaceId} canManage={canRename} />
+            <CodexCompactionPreferenceRow workspaceId={workspaceId} canManage={canRename} />
           </div>
-          <Button asChild type="button" variant="secondary" size="sm">
-            <Link to="/workspaces/$workspaceId/variable-sets" params={{ workspaceId }}>
-              Manage variable sets
-            </Link>
-          </Button>
         </section>
 
-        {/* Workspace memory (long-lived agent memory) */}
-        <MemorySettingsSection workspaceId={workspaceId} canManage={canRename} />
-
-        {/* Provider-agnostic composer transcription policy */}
-        <TranscriptionSettingsSection workspaceId={workspaceId} canManage={canRename} />
-
-        {/* Codex compaction default for new Codex sessions */}
-        <CodexCompactionSettingsSection workspaceId={workspaceId} canManage={canRename} />
-
-        {/* Codex (ChatGPT) subscriptions (multi-account) */}
-        {/* Its live provider overview is intentionally once-per-mount. Remount at
-            the tenant boundary so stale async state can never cross workspaces. */}
+        {/* Codex live overview is intentionally once-per-mount; remount at tenant boundary. */}
         <CodexSubscriptionsCard
           key={workspaceId}
           workspaceId={workspaceId}
           canManage={canDeleteWorkspace}
         />
 
-        {/* API keys (moved from the old account page) */}
-        <section className="grid gap-3 rounded-lg border border-border bg-surface p-4">
-          <div>
-            <h2 className="flex items-center gap-1.5 text-sm font-medium">
-              <KeyRoundIcon className="size-3.5 text-brand" />
-              API keys
-            </h2>
-            <p className="mt-1 text-xs text-fg-muted">
+        <details
+          className="rounded-lg border border-border"
+          open={apiKeysOpen || createdToken != null}
+          onToggle={(event) => {
+            const next = event.currentTarget.open;
+            if (createdToken != null && !next) {
+              event.currentTarget.open = true;
+              return;
+            }
+            setApiKeysOpen(next);
+          }}
+        >
+          <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5 text-left transition-colors hover:bg-surface-2/60 [&::-webkit-details-marker]:hidden">
+            <KeyRoundIcon className="size-3.5 shrink-0 text-brand" />
+            <span className="min-w-0 flex-1 text-sm font-medium">API keys</span>
+            <span className="text-2xs text-fg-subtle">
+              {!apiKeysLoaded
+                ? "…"
+                : activeApiKeyCount === 0
+                  ? "None"
+                  : `${activeApiKeyCount} active`}
+            </span>
+            <ChevronDownIcon
+              className={cn(
+                "size-4 shrink-0 text-fg-subtle transition-transform",
+                apiKeysOpen || createdToken != null ? "rotate-180" : "",
+              )}
+            />
+          </summary>
+          <div className="grid gap-3 border-t border-border px-3 py-3">
+            <p className="text-2xs text-fg-subtle">
               Workspace-scoped keys for calling OpenGeni from another product.
             </p>
-          </div>
-          {createdToken ? (
-            <Notice tone="success" title="Copy this token now — it won't be shown again.">
-              <div className="mt-2 flex min-w-0 items-center gap-2">
-                <code className="min-w-0 flex-1 truncate rounded bg-bg px-2 py-1.5 text-xs text-fg">
-                  {createdToken}
-                </code>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-sm"
-                  aria-label="Copy token"
-                  onClick={() => void copyToken(createdToken)}
-                >
-                  <CopyIcon className="size-3.5" />
-                </Button>
-              </div>
-            </Notice>
-          ) : null}
-          {canManageApiKeys ? (
-            <>
-              <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
-                <Input
-                  value={apiKeyName}
-                  onChange={(event) => setApiKeyName(event.target.value)}
-                  className="h-9"
-                />
-                <Button type="button" disabled={busy} onClick={() => void createKey()}>
-                  {busy ? (
-                    <Loader2Icon className="size-3.5 animate-spin" />
-                  ) : (
-                    <PlusIcon className="size-3.5" />
-                  )}
-                  Create
-                </Button>
-              </div>
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <p className="text-xs text-fg-subtle">
-                  A key can only carry permissions your own grant can delegate.
-                </p>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  disabled={delegablePermissions.size === 0}
-                  onClick={() => setSelectedPermissions(new Set(delegablePermissions))}
-                >
-                  Select all delegable
-                </Button>
-              </div>
-              <PermissionGroupPicker
-                groups={apiKeyPermissionGroups}
-                selected={selectedPermissions}
-                delegable={delegablePermissions}
-                onToggle={togglePermission}
-              />
-            </>
-          ) : (
-            <p className="text-xs text-fg-subtle">
-              You don't have permission to manage API keys here.
-            </p>
-          )}
-          <div className="grid gap-2">
-            {apiKeysError ? (
-              <LoadErrorState
-                title="Couldn't load API keys"
-                error={apiKeysError}
-                onRetry={() => void refreshApiKeys()}
-              />
-            ) : !apiKeysLoaded ? (
-              <>
-                {[0, 1].map((key) => (
-                  <div
-                    key={key}
-                    className="flex items-center justify-between gap-3 rounded-lg border border-border bg-bg/35 px-3 py-2"
+            {createdToken ? (
+              <Notice tone="success" title="Copy this token now — it won't be shown again.">
+                <div className="mt-2 flex min-w-0 items-center gap-2">
+                  <code className="min-w-0 flex-1 truncate rounded bg-bg px-2 py-1.5 text-xs text-fg">
+                    {createdToken}
+                  </code>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    aria-label="Copy token"
+                    onClick={() => void copyToken(createdToken)}
                   >
-                    <div className="min-w-0 space-y-1.5">
-                      <Skeleton className="h-4 w-32" />
-                      <Skeleton className="h-3 w-24" />
-                    </div>
-                    <Skeleton className="h-8 w-20 rounded-md" />
-                  </div>
-                ))}
-              </>
-            ) : apiKeys.length === 0 ? (
-              <EmptyState
-                title="No API keys yet"
-                description={
-                  canManageApiKeys
-                    ? "Create one above to call OpenGeni from another product."
-                    : "Keys created here call OpenGeni from another product."
-                }
-              />
-            ) : (
-              apiKeys.map((apiKey) => (
-                <div
-                  key={apiKey.id}
-                  className="flex min-w-0 items-center justify-between gap-3 rounded-lg border border-border bg-bg/35 px-3 py-2"
-                >
-                  <div className="min-w-0">
-                    <div className="truncate text-sm font-medium">{apiKey.name}</div>
-                    <div className="mt-1 truncate text-xs text-fg-subtle">
-                      {apiKey.prefix}… · {apiKey.revokedAt ? "revoked" : "active"}
-                    </div>
-                  </div>
+                    <CopyIcon className="size-3.5" />
+                  </Button>
+                </div>
+              </Notice>
+            ) : null}
+            {canManageApiKeys ? (
+              <>
+                <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+                  <Input
+                    value={apiKeyName}
+                    onChange={(event) => setApiKeyName(event.target.value)}
+                    className="h-9"
+                  />
+                  <Button type="button" disabled={busy} onClick={() => void createKey()}>
+                    {busy ? (
+                      <Loader2Icon className="size-3.5 animate-spin" />
+                    ) : (
+                      <PlusIcon className="size-3.5" />
+                    )}
+                    Create
+                  </Button>
+                </div>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-xs text-fg-subtle">
+                    A key can only carry permissions your own grant can delegate.
+                  </p>
                   <Button
                     type="button"
                     variant="ghost"
                     size="sm"
-                    disabled={busy || Boolean(apiKey.revokedAt)}
-                    onClick={() => setRevokingKey(apiKey)}
+                    disabled={delegablePermissions.size === 0}
+                    onClick={() => setSelectedPermissions(new Set(delegablePermissions))}
                   >
-                    <Trash2Icon className="size-3.5" />
-                    Revoke
+                    Select all delegable
                   </Button>
                 </div>
-              ))
+                <PermissionGroupPicker
+                  groups={apiKeyPermissionGroups}
+                  selected={selectedPermissions}
+                  delegable={delegablePermissions}
+                  onToggle={togglePermission}
+                />
+              </>
+            ) : (
+              <p className="text-xs text-fg-subtle">
+                You don't have permission to manage API keys here.
+              </p>
             )}
+            <div className="divide-y divide-border/70 rounded-md border border-border/70">
+              {apiKeysError ? (
+                <div className="p-2">
+                  <LoadErrorState
+                    title="Couldn't load API keys"
+                    error={apiKeysError}
+                    onRetry={() => void refreshApiKeys()}
+                  />
+                </div>
+              ) : !apiKeysLoaded ? (
+                <>
+                  {[0, 1].map((key) => (
+                    <div key={key} className="flex items-center justify-between gap-3 px-3 py-2">
+                      <div className="min-w-0 space-y-1.5">
+                        <Skeleton className="h-4 w-32" />
+                        <Skeleton className="h-3 w-24" />
+                      </div>
+                      <Skeleton className="h-8 w-20 rounded-md" />
+                    </div>
+                  ))}
+                </>
+              ) : apiKeys.length === 0 ? (
+                <div className="p-2">
+                  <EmptyState
+                    title="No API keys yet"
+                    description={
+                      canManageApiKeys
+                        ? "Create one above to call OpenGeni from another product."
+                        : "Keys created here call OpenGeni from another product."
+                    }
+                  />
+                </div>
+              ) : (
+                apiKeys.map((apiKey) => (
+                  <div
+                    key={apiKey.id}
+                    className="flex min-w-0 items-center justify-between gap-3 px-3 py-2"
+                  >
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-medium">{apiKey.name}</div>
+                      <div className="truncate text-2xs text-fg-subtle">
+                        {apiKey.prefix}… · {apiKey.revokedAt ? "revoked" : "active"}
+                      </div>
+                    </div>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      disabled={busy || Boolean(apiKey.revokedAt)}
+                      onClick={() => setRevokingKey(apiKey)}
+                    >
+                      <Trash2Icon className="size-3.5" />
+                      Revoke
+                    </Button>
+                  </div>
+                ))
+              )}
+            </div>
           </div>
-        </section>
+        </details>
 
         <ConfirmDialog
           open={revokingKey !== null}
@@ -474,7 +545,6 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
           onConfirm={() => (revokingKey ? revokeKey(revokingKey.id) : false)}
         />
 
-        {/* Danger zone */}
         <DangerZone
           workspaceName={activeWorkspace?.name ?? ""}
           canDelete={canDeleteWorkspace}
@@ -482,7 +552,7 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
           onDelete={deleteWorkspace}
         />
       </section>
-    </div>
+    </ContentPage>
   );
 }
 
@@ -611,15 +681,19 @@ function MembersSection({ workspaceId, canManage }: { workspaceId: string; canMa
   }
 
   return (
-    <section className="grid gap-3 rounded-lg border border-border bg-surface p-4">
-      <div>
+    <section className="grid gap-2">
+      <div className="flex items-baseline justify-between gap-3">
         <h2 className="flex items-center gap-1.5 text-sm font-medium">
           <UsersIcon className="size-3.5 text-brand" />
           People with access
         </h2>
-        <p className="mt-1 text-xs text-fg-muted">
-          People who can act in this workspace, and what each one can do.
-        </p>
+        <span className="text-2xs text-fg-subtle">
+          {!loaded
+            ? ""
+            : userMembers.length === 0
+              ? "just you"
+              : `${userMembers.length} member${userMembers.length === 1 ? "" : "s"}`}
+        </span>
       </div>
 
       {canManage ? (
@@ -644,40 +718,31 @@ function MembersSection({ workspaceId, canManage }: { workspaceId: string; canMa
             ) : (
               <UserPlusIcon className="size-3.5" />
             )}
-            Add member
+            Add
           </Button>
         </form>
-      ) : (
-        <p className="text-xs text-fg-subtle">
-          Only members who can manage people can add or remove access.
-        </p>
-      )}
+      ) : null}
 
-      <div className="grid gap-2">
-        {error ? (
-          <LoadErrorState
-            title="Couldn't load members"
-            error={error}
-            onRetry={() => void refresh()}
-          />
-        ) : !loaded ? (
-          <div className="flex items-center gap-2 text-xs text-fg-muted">
-            <Loader2Icon className="size-3.5 animate-spin" />
-            Loading members
-          </div>
-        ) : userMembers.length === 0 ? (
-          <EmptyState
-            title="Only you have access"
-            description={
-              canManage ? "Add a teammate by email above to share this workspace." : undefined
-            }
-          />
-        ) : (
-          userMembers.map((member) => (
-            <div
-              key={member.subjectId}
-              className="grid gap-2 rounded-lg border border-border bg-bg/35 px-3 py-2"
-            >
+      {error ? (
+        <LoadErrorState
+          title="Couldn't load members"
+          error={error}
+          onRetry={() => void refresh()}
+        />
+      ) : !loaded ? (
+        <div className="flex items-center gap-2 text-xs text-fg-muted">
+          <Loader2Icon className="size-3.5 animate-spin" />
+          Loading members
+        </div>
+      ) : userMembers.length === 0 ? (
+        <p className="text-2xs text-fg-subtle">
+          Only you right now
+          {canManage ? " — add a teammate above." : "."}
+        </p>
+      ) : (
+        <div className="divide-y divide-border/70 overflow-hidden rounded-lg border border-border">
+          {userMembers.map((member) => (
+            <div key={member.subjectId} className="grid gap-2 px-3 py-2">
               <div className="flex min-w-0 items-center justify-between gap-3">
                 <div className="min-w-0">
                   <div className="truncate text-sm font-medium">
@@ -686,7 +751,7 @@ function MembersSection({ workspaceId, canManage }: { workspaceId: string; canMa
                       <span className="ml-1.5 text-fg-subtle">(you)</span>
                     ) : null}
                   </div>
-                  <div className="mt-1 truncate text-xs text-fg-subtle">
+                  <div className="truncate text-2xs text-fg-subtle">
                     {member.role} · {member.permissions.length} permission
                     {member.permissions.length === 1 ? "" : "s"}
                   </div>
@@ -710,18 +775,18 @@ function MembersSection({ workspaceId, canManage }: { workspaceId: string; canMa
                     <Button
                       type="button"
                       variant="ghost"
-                      size="sm"
+                      size="icon-sm"
                       disabled={busy || member.subjectId === callerSubjectId}
+                      aria-label={`Remove ${member.subjectLabel ?? member.subjectId}`}
                       onClick={() => setRemovingMember(member)}
                     >
                       <Trash2Icon className="size-3.5" />
-                      Remove
                     </Button>
                   </div>
                 ) : null}
               </div>
               {canManage && editing === member.subjectId ? (
-                <div className="grid gap-3 border-t border-border pt-3">
+                <div className="grid gap-3 border-t border-border pt-2">
                   <PermissionGroupPicker
                     groups={workspaceMemberPermissionGroups}
                     selected={editPermissions}
@@ -748,15 +813,15 @@ function MembersSection({ workspaceId, canManage }: { workspaceId: string; canMa
                       ) : (
                         <CheckIcon className="size-3.5" />
                       )}
-                      Save permissions
+                      Save
                     </Button>
                   </div>
                 </div>
               ) : null}
             </div>
-          ))
-        )}
-      </div>
+          ))}
+        </div>
+      )}
 
       <ConfirmDialog
         open={removingMember !== null}
@@ -770,8 +835,7 @@ function MembersSection({ workspaceId, canManage }: { workspaceId: string; canMa
   );
 }
 
-/** Workspace memory: a per-workspace toggle for the long-lived agent memory. */
-function MemorySettingsSection({
+function MemoryPreferenceRow({
   workspaceId,
   canManage,
 }: {
@@ -796,55 +860,23 @@ function MemorySettingsSection({
   }
 
   return (
-    <section className="grid gap-3 rounded-lg border border-border bg-surface p-4">
-      <div className="flex items-start justify-between gap-4">
-        <div className="min-w-0">
-          <h2 className="flex items-center gap-1.5 text-sm font-medium">
-            <BrainCircuitIcon className="size-3.5 text-brand" />
-            Workspace memory
-          </h2>
-          <p className="mt-1 text-xs text-fg-muted">
-            Lets agents remember durable facts — preferences, environment details, decisions —
-            across sessions in this workspace. Everything saved is visible and editable on the
-            Documents page.
-          </p>
-        </div>
-        <div className="flex shrink-0 items-center gap-2 pt-0.5">
-          {saving ? <Loader2Icon className="size-3.5 animate-spin text-fg-subtle" /> : null}
-          <button
-            type="button"
-            role="switch"
-            aria-checked={enabled}
-            aria-label="Workspace memory"
-            disabled={saving || !canManage}
-            onClick={() => void toggle(!enabled)}
-            className={cn(
-              "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors disabled:cursor-not-allowed disabled:opacity-50",
-              enabled ? "border-brand bg-brand" : "border-border bg-surface-2",
-            )}
-          >
-            <span
-              className={cn(
-                "inline-block size-3.5 rounded-full bg-white shadow-sm transition-transform",
-                enabled ? "translate-x-4" : "translate-x-0.5",
-              )}
-            />
-          </button>
-        </div>
-      </div>
-      {!canManage ? (
-        <p className="text-xs text-fg-subtle">Only workspace admins can change this.</p>
-      ) : null}
-    </section>
+    <PreferenceToggleRow
+      icon={<BrainCircuitIcon className="size-3.5 text-brand" />}
+      label="Workspace memory"
+      description="Durable facts agents carry across sessions — editable on Documents."
+      checked={enabled}
+      disabled={saving || !canManage}
+      saving={saving}
+      onToggle={() => void toggle(!enabled)}
+    />
   );
 }
 
 /**
- * Default compaction strategy for NEW Codex sessions. Off (= remote_v2) keeps
- * Codex remote compaction and locks the session to Codex models; on (= portable)
- * uses plaintext compaction and allows mid-session provider switches.
+ * Default for NEW Codex sessions. Off (= remote_v2): best ChatGPT compaction,
+ * Codex-only. On (= portable): can switch to other models mid-session.
  */
-function CodexCompactionSettingsSection({
+function CodexCompactionPreferenceRow({
   workspaceId,
   canManage,
 }: {
@@ -865,8 +897,8 @@ function CodexCompactionSettingsSection({
       if (updated) {
         toast.success(
           nextPortable
-            ? "New Codex sessions will use portable compaction"
-            : "New Codex sessions will use remote compaction v2",
+            ? "New Codex sessions can switch to other providers"
+            : "New Codex sessions stay on Codex",
         );
       }
     } finally {
@@ -875,42 +907,15 @@ function CodexCompactionSettingsSection({
   }
 
   return (
-    <section className="grid gap-3 rounded-lg border border-border bg-surface p-4">
-      <div className="flex items-start justify-between gap-4">
-        <div className="min-w-0">
-          <h2 className="flex items-center gap-1.5 text-sm font-medium">Codex compaction</h2>
-          <p className="mt-1 text-xs text-fg-muted">
-            Use portable Codex compaction (allows switching away from Codex mid-session). When off,
-            new Codex sessions use remote compaction v2 and stay locked to Codex models.
-          </p>
-        </div>
-        <div className="flex shrink-0 items-center gap-2 pt-0.5">
-          {saving ? <Loader2Icon className="size-3.5 animate-spin text-fg-subtle" /> : null}
-          <button
-            type="button"
-            role="switch"
-            aria-checked={portable}
-            aria-label="Use portable Codex compaction"
-            disabled={saving || !canManage}
-            onClick={() => void toggle(!portable)}
-            className={cn(
-              "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors disabled:cursor-not-allowed disabled:opacity-50",
-              portable ? "border-brand bg-brand" : "border-border bg-surface-2",
-            )}
-          >
-            <span
-              className={cn(
-                "inline-block size-3.5 rounded-full bg-white shadow-sm transition-transform",
-                portable ? "translate-x-4" : "translate-x-0.5",
-              )}
-            />
-          </button>
-        </div>
-      </div>
-      {!canManage ? (
-        <p className="text-xs text-fg-subtle">Only workspace admins can change this.</p>
-      ) : null}
-    </section>
+    <PreferenceToggleRow
+      icon={<ShrinkIcon className="size-3.5 text-brand" />}
+      label="Allow other providers (Codex only)"
+      description="On: switch from Codex models to other providers mid-session. Off (recommended): better compaction."
+      checked={portable}
+      disabled={saving || !canManage}
+      saving={saving}
+      onToggle={() => void toggle(!portable)}
+    />
   );
 }
 
@@ -949,7 +954,7 @@ function DangerZone(props: {
   }
 
   return (
-    <section className="grid gap-3 rounded-lg border border-status-failed/30 bg-status-failed/5 p-4">
+    <section className="grid gap-2 rounded-lg border border-status-failed/30 bg-status-failed/5 px-3 py-3">
       <div>
         <h2 className="flex items-center gap-1.5 text-sm font-medium text-status-failed">
           <TriangleAlertIcon className="size-3.5" />

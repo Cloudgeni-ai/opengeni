@@ -1194,7 +1194,10 @@ export function RootRouteComponent() {
   ]);
 
   return (
-    <main className="flex h-dvh min-h-screen flex-col overflow-x-hidden bg-bg text-fg">
+    // Fixed app canvas: never let the document scroll. Page surfaces own
+    // overflow via ContentPage / session panes. `min-h-screen` used to let
+    // main grow past the viewport when a child mis-owned scroll.
+    <main className="flex h-dvh max-h-dvh flex-col overflow-hidden bg-bg text-fg">
       <Toaster richColors theme="dark" />
       {clientConfig ? (
         <Suspense fallback={null}>

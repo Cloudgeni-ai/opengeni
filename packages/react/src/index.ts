@@ -100,7 +100,7 @@ export type {
   SessionChromeSignalTone,
 } from "./components/session-chrome";
 export { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./components/tooltip";
-export { OPEN_WORKSTREAM_CONTROL_EVENT } from "./components/chat-composer";
+export { OPEN_WORKSTREAM_CONTROL_EVENT } from "./workstream-control-event";
 export { useGoal, isGoalEvent } from "./hooks/use-goal";
 export type { UseGoalOptions, UseGoalResult } from "./hooks/use-goal";
 export { useSessionControl } from "./hooks/use-session-control";
@@ -486,6 +486,7 @@ export { cn } from "./lib/cn";
 export {
   CREDIT_EXHAUSTION_MESSAGE,
   formatBytes,
+  formatClockTime,
   formatRelativeTime,
   humanizeFailureReason,
   isCreditExhaustion,

@@ -280,7 +280,8 @@ export function mcpIssue(id: string, title: string): ToolSpec {
 
 export function sessionCreate(id: string, childSessionId: string, message: string): ToolSpec {
   return {
-    name: "session_create",
+    // Live wire uses the prefixed first-party MCP name.
+    name: "opengeni__session_create",
     id,
     arguments: { initialMessage: message },
     output: {
@@ -296,7 +297,7 @@ export function sessionCreate(id: string, childSessionId: string, message: strin
 
 export function sessionCreateRunning(id: string, message: string): ToolSpec {
   return {
-    name: "session_create",
+    name: "opengeni__session_create",
     id,
     arguments: { initialMessage: message },
     running: true,
@@ -305,7 +306,7 @@ export function sessionCreateRunning(id: string, message: string): ToolSpec {
 
 export function sessionSendMessage(id: string, childSessionId: string, text: string): ToolSpec {
   return {
-    name: "session_send_message",
+    name: "opengeni__session_send_message",
     id,
     arguments: { sessionId: childSessionId, text },
     output: {
