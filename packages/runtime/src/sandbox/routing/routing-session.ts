@@ -30,7 +30,7 @@
 import type { ExposedPortEndpoint } from "../stream-port";
 import { SelfhostedControlError } from "../selfhosted/control-rpc";
 import { renderSelfhostedFault } from "../selfhosted/fault-rendering";
-import { isExecSessionLostBanner } from "../channel-a";
+import { isExecSessionLostBanner, stripExecBanner } from "../channel-a";
 import { parseExecBannerExitCode, parseExecBannerSessionId } from "../exec-banner";
 import { withSandboxProviderOperation } from "../provider-operation-gate";
 
@@ -428,6 +428,34 @@ function formatExecResult(result: unknown): string {
     return `Process exited with code ${exitCode}\n\nOutput:\n${output}`;
   }
   throw new Error("sandbox process-control exec reported neither session id nor exit code");
+}
+
+/** Preserve the structural `exec()` contract when the active backend exposes
+ * only the SDK's banner-returning `execCommand()` surface (Modal's current
+ * shape). The routing proxy itself always exposes `exec()`, so returning the
+ * raw banner string from that fallback makes downstream structural consumers
+ * treat a string as `SandboxExecResult` and silently lose stdout, exit status,
+ * and a yielded PTY's provider session id. */
+function structuredExecResultFromBanner(result: string): {
+  output: string;
+  stdout: string;
+  stderr: string;
+  wallTimeSeconds: number;
+  exitCode?: number | null;
+  sessionId?: number;
+} {
+  const output = stripExecBanner(result);
+  const sessionId = positiveProviderSessionId(parseExecBannerSessionId(result));
+  if (sessionId !== null) {
+    return { output, stdout: output, stderr: "", wallTimeSeconds: 0, sessionId };
+  }
+  return {
+    output,
+    stdout: output,
+    stderr: "",
+    wallTimeSeconds: 0,
+    exitCode: parseExecBannerExitCode(result),
+  };
 }
 
 /**
@@ -1123,7 +1151,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       }
       // Some backends (selfhosted) only expose exec; others only execCommand.
       if (s.execCommand) {
-        return s.execCommand(args);
+        return structuredExecResultFromBanner(await s.execCommand(args));
       }
       throw new RoutingUnsupportedError("exec", this.cached?.kind ?? "unknown");
     });
