@@ -79,9 +79,12 @@ the first backfill slice:
 - Google permission, source-boundary, and file IDs remain stable provenance
   identities. Folder names, locations, and deep links are metadata rather than
   authority.
-- Inventory is paginated and breadth-first, with a serializable checkpoint and
-  explicit cumulative item, known-byte, Drive-request/cost, folder, per-file,
-  and per-invocation time limits.
+- Inventory is paginated and breadth-first, with a versioned serializable
+  checkpoint bound to the normalized Google permission, external tenant,
+  source drive/boundary, and destination authority identities. Legacy,
+  unversioned, or incompatible checkpoints fail closed before buffered items or
+  provider access. Explicit cumulative item, known-byte, Drive-request/cost,
+  folder, per-file, and per-invocation time limits still apply.
 - A fetched page is buffered in the checkpoint before its items are consumed,
   so a crash or bounded pause resumes without refetching or skipping the
   remainder of that page.

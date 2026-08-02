@@ -8,6 +8,7 @@ import {
   googleDriveKnowledgeSourceIdentity,
   inventoryGoogleDriveSource,
   planGoogleDriveTransfer,
+  type GoogleDriveInventoryCheckpoint,
   type GoogleDriveInventoryLimits,
   type GoogleDriveInventoryProviderItem,
 } from "../src/google-drive";
@@ -284,7 +285,7 @@ describe("bounded Google Drive inventory", () => {
   test("buffers the unprocessed page so a byte-limit resume makes no duplicate request", async () => {
     let requests = 0;
     const first = await inventoryGoogleDriveSource({
-      googlePermissionId: "permission-123",
+      googlePermissionId: " permission-123 ",
       source,
       workspaceId,
       initiatingSubjectId: subjectId,
@@ -304,6 +305,13 @@ describe("bounded Google Drive inventory", () => {
     expect(first.status).toBe("paused");
     expect(first.stopReason).toBe("known_byte_limit");
     expect(first.entries.map((entry) => entry.externalObjectId)).toEqual(["one"]);
+    expect(first.checkpoint).toMatchObject({
+      version: 2,
+      googlePermissionId: "permission-123",
+      externalTenantId: "permission-123",
+      sourceId: "folder-root",
+      sourceDriveId: "shared-drive",
+    });
     expect(requests).toBe(1);
 
     const resumed = await inventoryGoogleDriveSource({
@@ -323,6 +331,147 @@ describe("bounded Google Drive inventory", () => {
     expect(resumed.run.itemCount).toBe(1);
     expect(resumed.run.apiRequestCount).toBe(0);
     expect(requests).toBe(1);
+  });
+
+  test("rejects a buffered cross-tenant resume before output or provider access", async () => {
+    const first = await inventoryGoogleDriveSource({
+      googlePermissionId: "tenant-A",
+      source,
+      workspaceId,
+      initiatingSubjectId: subjectId,
+      limits: { ...limits, maxKnownBytes: 1 },
+      listChildren: async () => ({
+        items: [
+          item({ id: "tenant-a-one", name: "One.txt", mimeType: "text/plain", size: "1" }),
+          item({ id: "tenant-a-two", name: "Two.txt", mimeType: "text/plain", size: "1" }),
+        ],
+        nextPageToken: null,
+        incompleteSearch: false,
+      }),
+    });
+    expect(first.entries.map((entry) => entry.externalObjectId)).toEqual(["tenant-a-one"]);
+    expect(first.checkpoint?.pendingFolders[0]?.bufferedItems.map((entry) => entry.id)).toEqual([
+      "tenant-a-two",
+    ]);
+
+    let providerCalls = 0;
+    await expect(
+      inventoryGoogleDriveSource({
+        googlePermissionId: "tenant-B",
+        source,
+        workspaceId,
+        initiatingSubjectId: subjectId,
+        limits: { ...limits, maxKnownBytes: 2 },
+        checkpoint: first.checkpoint,
+        listChildren: async () => {
+          providerCalls += 1;
+          throw new Error("identity mismatch must fail before provider access");
+        },
+      }),
+    ).rejects.toThrow("does not match the selected source");
+    expect(providerCalls).toBe(0);
+  });
+
+  test("rejects permission, tenant, and source identity drift before buffered access", async () => {
+    const first = await inventoryGoogleDriveSource({
+      googlePermissionId: "permission-123",
+      source,
+      workspaceId,
+      initiatingSubjectId: subjectId,
+      limits: { ...limits, maxKnownBytes: 5 },
+      listChildren: async () => ({
+        items: [item({ id: "buffered", name: "Buffered.txt", mimeType: "text/plain", size: "10" })],
+        nextPageToken: null,
+        incompleteSearch: false,
+      }),
+    });
+    expect(first.checkpoint?.pendingFolders[0]?.bufferedItems).toHaveLength(1);
+
+    let providerCalls = 0;
+    const listChildren = async () => {
+      providerCalls += 1;
+      throw new Error("identity mismatch must fail before provider access");
+    };
+    const changedPermission = structuredClone(first.checkpoint!);
+    changedPermission.googlePermissionId = "permission-other";
+    await expect(
+      inventoryGoogleDriveSource({
+        googlePermissionId: "permission-123",
+        source,
+        workspaceId,
+        initiatingSubjectId: subjectId,
+        limits,
+        checkpoint: changedPermission,
+        listChildren,
+      }),
+    ).rejects.toThrow("does not match the selected source");
+
+    const changedTenant = structuredClone(first.checkpoint!);
+    changedTenant.externalTenantId = "tenant-other";
+    await expect(
+      inventoryGoogleDriveSource({
+        googlePermissionId: "permission-123",
+        source,
+        workspaceId,
+        initiatingSubjectId: subjectId,
+        limits,
+        checkpoint: changedTenant,
+        listChildren,
+      }),
+    ).rejects.toThrow("does not match the selected source");
+
+    await expect(
+      inventoryGoogleDriveSource({
+        googlePermissionId: "permission-123",
+        source: { ...source, id: "other-folder" },
+        workspaceId,
+        initiatingSubjectId: subjectId,
+        limits,
+        checkpoint: first.checkpoint,
+        listChildren,
+      }),
+    ).rejects.toThrow("does not match the selected source");
+    expect(providerCalls).toBe(0);
+  });
+
+  test("fails closed for legacy and unversioned checkpoint bytes", async () => {
+    const first = await inventoryGoogleDriveSource({
+      googlePermissionId: "permission-123",
+      source,
+      workspaceId,
+      initiatingSubjectId: subjectId,
+      limits: { ...limits, maxKnownBytes: 5 },
+      listChildren: async () => ({
+        items: [item({ id: "buffered", name: "Buffered.txt", mimeType: "text/plain", size: "10" })],
+        nextPageToken: null,
+        incompleteSearch: false,
+      }),
+    });
+    const legacy = structuredClone(first.checkpoint!) as unknown as Record<string, unknown>;
+    legacy.version = 1;
+    delete legacy.googlePermissionId;
+    delete legacy.externalTenantId;
+    const unversioned = structuredClone(first.checkpoint!) as unknown as Record<string, unknown>;
+    delete unversioned.version;
+
+    let providerCalls = 0;
+    for (const checkpoint of [legacy, unversioned]) {
+      await expect(
+        inventoryGoogleDriveSource({
+          googlePermissionId: "permission-123",
+          source,
+          workspaceId,
+          initiatingSubjectId: subjectId,
+          limits,
+          checkpoint: checkpoint as unknown as GoogleDriveInventoryCheckpoint,
+          listChildren: async () => {
+            providerCalls += 1;
+            throw new Error("unsupported checkpoint must fail before provider access");
+          },
+        }),
+      ).rejects.toThrow("unsupported Google Drive inventory checkpoint");
+    }
+    expect(providerCalls).toBe(0);
   });
 
   test("does not advance an incomplete or failed provider page", async () => {

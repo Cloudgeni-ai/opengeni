@@ -195,7 +195,9 @@ type GoogleDriveInventoryFrame = {
 };
 
 export type GoogleDriveInventoryCheckpoint = {
-  version: 1;
+  version: 2;
+  googlePermissionId: string;
+  externalTenantId: string;
   sourceId: string;
   sourceDriveId: string | null;
   scope: ScopedKnowledgeScope;
@@ -258,11 +260,7 @@ export function googleDriveKnowledgeSourceIdentity(input: {
   initiatingSubjectId: string;
 }): GoogleDriveKnowledgeSourceIdentity {
   const sourceId = driveId(input.source.id, "source.id");
-  const externalTenantId = boundedText(
-    input.googlePermissionId,
-    "googlePermissionId",
-    GOOGLE_DRIVE_MAX_ID_CHARS,
-  );
+  const externalTenantId = normalizedGooglePermissionId(input.googlePermissionId);
   const sourceDriveId = nullableDriveId(input.source.driveId, "source.driveId");
   return {
     providerKey: GOOGLE_DRIVE_PROVIDER_KEY,
@@ -337,17 +335,25 @@ export async function inventoryGoogleDriveSource(input: {
   now?: (() => number) | undefined;
 }): Promise<GoogleDriveInventoryResult> {
   const limits = validatedLimits(input.limits);
+  const googlePermissionId = normalizedGooglePermissionId(input.googlePermissionId);
   const source = googleDriveKnowledgeSourceIdentity({
-    googlePermissionId: input.googlePermissionId,
+    googlePermissionId,
     source: input.source,
     workspaceId: input.workspaceId,
     initiatingSubjectId: input.initiatingSubjectId,
   });
+  const checkpointIdentity: GoogleDriveInventoryCheckpointIdentity = {
+    googlePermissionId,
+    externalTenantId: source.externalTenantId,
+    sourceId: source.externalSourceId,
+    sourceDriveId: nullableDriveId(input.source.driveId, "source.driveId"),
+    scope: source.scope,
+  };
   const now = input.now ?? Date.now;
   const startedAt = now();
   const checkpoint = input.checkpoint
-    ? validatedCheckpoint(input.checkpoint, input.source, source.scope, limits)
-    : initialCheckpoint(input.source, source.scope);
+    ? validatedCheckpoint(input.checkpoint, checkpointIdentity, limits)
+    : initialCheckpoint(checkpointIdentity);
   const initialTotals = cloneTotals(checkpoint.totals);
   const entries: GoogleDriveInventoryEntry[] = [];
   const issues: GoogleDriveInventoryIssue[] = [];
@@ -514,49 +520,54 @@ export async function inventoryGoogleDriveSource(input: {
   };
 }
 
+type GoogleDriveInventoryCheckpointIdentity = Pick<
+  GoogleDriveInventoryCheckpoint,
+  "googlePermissionId" | "externalTenantId" | "sourceId" | "sourceDriveId" | "scope"
+>;
+
 function initialCheckpoint(
-  source: Pick<GoogleDriveSelectedSource, "id" | "driveId">,
-  scope: ScopedKnowledgeScope,
+  identity: GoogleDriveInventoryCheckpointIdentity,
 ): GoogleDriveInventoryCheckpoint {
-  const sourceId = driveId(source.id, "source.id");
-  const sourceDriveId = nullableDriveId(source.driveId, "source.driveId");
   return {
-    version: 1,
-    sourceId,
-    sourceDriveId,
-    scope: cloneScope(scope),
+    version: 2,
+    googlePermissionId: identity.googlePermissionId,
+    externalTenantId: identity.externalTenantId,
+    sourceId: identity.sourceId,
+    sourceDriveId: identity.sourceDriveId,
+    scope: cloneScope(identity.scope),
     pendingFolders: [
       {
-        folderId: sourceId,
-        driveId: sourceDriveId,
+        folderId: identity.sourceId,
+        driveId: identity.sourceDriveId,
         pageToken: null,
         loaded: false,
         bufferedItems: [],
         nextPageToken: null,
       },
     ],
-    seenFolderIds: [sourceId],
+    seenFolderIds: [identity.sourceId],
     totals: emptyTotals(),
   };
 }
 
 function validatedCheckpoint(
   value: GoogleDriveInventoryCheckpoint,
-  source: Pick<GoogleDriveSelectedSource, "id" | "driveId">,
-  scope: ScopedKnowledgeScope,
+  identity: GoogleDriveInventoryCheckpointIdentity,
   limits: GoogleDriveInventoryLimits,
 ): GoogleDriveInventoryCheckpoint {
-  if (value.version !== 1) throw new Error("unsupported Google Drive inventory checkpoint");
-  const checkpoint = cloneCheckpoint(value);
-  const sourceId = driveId(source.id, "source.id");
-  const sourceDriveId = nullableDriveId(source.driveId, "source.driveId");
+  if (!value || typeof value !== "object" || value.version !== 2) {
+    throw new Error("unsupported Google Drive inventory checkpoint");
+  }
   if (
-    checkpoint.sourceId !== sourceId ||
-    checkpoint.sourceDriveId !== sourceDriveId ||
-    !sameScope(checkpoint.scope, scope)
+    value.googlePermissionId !== identity.googlePermissionId ||
+    value.externalTenantId !== identity.externalTenantId ||
+    value.sourceId !== identity.sourceId ||
+    value.sourceDriveId !== identity.sourceDriveId ||
+    !sameScope(value.scope, identity.scope)
   ) {
     throw new Error("Google Drive inventory checkpoint does not match the selected source");
   }
+  const checkpoint = cloneCheckpoint(value);
   if (checkpoint.pendingFolders.length === 0) {
     throw new Error("Google Drive inventory checkpoint is already complete");
   }
@@ -567,7 +578,7 @@ function validatedCheckpoint(
   ) {
     throw new Error("Google Drive inventory checkpoint exceeds the folder limit");
   }
-  if (!checkpoint.seenFolderIds.includes(sourceId)) {
+  if (!checkpoint.seenFolderIds.includes(identity.sourceId)) {
     throw new Error("Google Drive inventory checkpoint lost its source boundary");
   }
   if (new Set(checkpoint.seenFolderIds).size !== checkpoint.seenFolderIds.length) {
@@ -741,6 +752,10 @@ function driveId(value: string, label: string): string {
   throw new Error(`${label} is invalid`);
 }
 
+function normalizedGooglePermissionId(value: string): string {
+  return boundedText(value, "googlePermissionId", GOOGLE_DRIVE_MAX_ID_CHARS);
+}
+
 function nullableDriveId(value: string | null, label: string): string | null {
   return value === null ? null : driveId(value, label);
 }
@@ -837,7 +852,9 @@ function cloneScope(scope: ScopedKnowledgeScope): ScopedKnowledgeScope {
 
 function cloneCheckpoint(value: GoogleDriveInventoryCheckpoint): GoogleDriveInventoryCheckpoint {
   return {
-    version: 1,
+    version: 2,
+    googlePermissionId: value.googlePermissionId,
+    externalTenantId: value.externalTenantId,
     sourceId: value.sourceId,
     sourceDriveId: value.sourceDriveId,
     scope: cloneScope(value.scope),
@@ -850,8 +867,13 @@ function cloneCheckpoint(value: GoogleDriveInventoryCheckpoint): GoogleDriveInve
   };
 }
 
-function sameScope(left: ScopedKnowledgeScope, right: ScopedKnowledgeScope): boolean {
+function sameScope(
+  left: ScopedKnowledgeScope | null | undefined,
+  right: ScopedKnowledgeScope,
+): boolean {
   return (
+    !!left &&
+    typeof left === "object" &&
     left.kind === right.kind &&
     left.workspaceId === right.workspaceId &&
     left.subjectId === right.subjectId
