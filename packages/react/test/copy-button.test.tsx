@@ -36,6 +36,57 @@ describe("CopyButton", () => {
     expect(button?.getAttribute("aria-label")).toBe("Copied");
     await r.unmount();
   });
+
+  test("resets Copied after the flash even when clipboard write is async", async () => {
+    let releaseWrite!: () => void;
+    const writeGate = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText: async () => {
+          await writeGate;
+        },
+      },
+    });
+
+    const r = await renderComponent(
+      <TooltipProvider delayDuration={400}>
+        <CopyButton text="async copy" label="Copy message" />
+      </TooltipProvider>,
+    );
+    const button = r.container.querySelector("button[data-og-copy]") as HTMLButtonElement | null;
+    expect(button).not.toBeNull();
+
+    // Pointer click (detail > 0) exercises the post-await blur path that used
+    // to throw when currentTarget was already cleared.
+    await act(async () => {
+      button?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true, detail: 1 }),
+      );
+    });
+    await flush();
+    expect(button?.getAttribute("data-state")).toBe("idle");
+
+    await act(async () => {
+      releaseWrite();
+      await writeGate;
+      // Let the click handler's continuation (setState + timer) flush.
+      await Promise.resolve();
+    });
+    await flush();
+    expect(button?.getAttribute("data-state")).toBe("copied");
+    expect(button?.getAttribute("aria-label")).toBe("Copied");
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1700));
+    });
+    await flush();
+    expect(button?.getAttribute("data-state")).toBe("idle");
+    expect(button?.getAttribute("aria-label")).toBe("Copy message");
+    await r.unmount();
+  });
 });
 
 describe("Markdown copy chrome", () => {
