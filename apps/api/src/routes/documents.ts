@@ -30,7 +30,7 @@ import {
   ensureDefaultBase,
   getDocument,
   getDocumentBase,
-  listDocumentBases,
+  listDocumentBasesEnsuringDefault,
   listDocuments,
   moveDocumentToBase,
   queueDocumentForReindex,
@@ -62,9 +62,14 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get("/v1/workspaces/:workspaceId/document-bases", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "documents:search");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "documents:search");
     return c.json(
-      (await listDocumentBases(db, workspaceId)).map((base) => DocumentBase.parse(base)),
+      (
+        await listDocumentBasesEnsuringDefault(db, {
+          accountId: grant.accountId,
+          workspaceId,
+        })
+      ).map((base) => DocumentBase.parse(base)),
     );
   });
 
