@@ -320,7 +320,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     await page.route(basesPattern, delayedBases);
     await page.goto(surfaceUrl(webBaseUrl, workspaceId, "documents", fixtures));
     await basesRequest;
-    await page.getByText("Loading bases", { exact: true }).waitFor();
+    await page.getByText("Loading collections", { exact: true }).waitFor();
     releaseBases();
     await page.getByText("No documents yet", { exact: true }).waitFor();
     await page.unroute(basesPattern, delayedBases);
