@@ -1183,6 +1183,57 @@ export const VOICE_INPUT_ACCEPTED_MIME_TYPES = [
 export const CodexCompactionMode = z.enum(["remote_v2", "portable"]);
 export type CodexCompactionMode = z.infer<typeof CodexCompactionMode>;
 
+export const SlackReactionEmojiName = z
+  .string()
+  .trim()
+  .min(1)
+  .max(64)
+  .regex(/^[a-z0-9_+-]+$/, "use the exact Slack emoji name without surrounding colons");
+export type SlackReactionEmojiName = z.infer<typeof SlackReactionEmojiName>;
+
+export const WorkspaceSlackReactionChannelPolicy = z.discriminatedUnion("mode", [
+  z.object({ mode: z.literal("bot_member") }).strict(),
+  z
+    .object({
+      mode: z.literal("allowlist"),
+      channelIds: z.array(z.string().trim().min(1).max(64)).max(100),
+    })
+    .strict(),
+]);
+export type WorkspaceSlackReactionChannelPolicy = z.infer<
+  typeof WorkspaceSlackReactionChannelPolicy
+>;
+
+export const WorkspaceSlackReactionSummonSettings = z
+  .object({
+    enabled: z.boolean(),
+    emoji: SlackReactionEmojiName,
+    channelPolicy: WorkspaceSlackReactionChannelPolicy,
+  })
+  .strict();
+export type WorkspaceSlackReactionSummonSettings = z.infer<
+  typeof WorkspaceSlackReactionSummonSettings
+>;
+
+export const SlackReactionChannel = z.object({
+  id: z.string().min(1).max(64),
+  name: z.string().min(1).max(256).nullable(),
+  isPrivate: z.boolean(),
+});
+export type SlackReactionChannel = z.infer<typeof SlackReactionChannel>;
+
+export const SlackReactionChannelListResponse = z.object({
+  channels: z.array(SlackReactionChannel).max(200),
+  nextCursor: z.string().max(1_024).nullable(),
+});
+export type SlackReactionChannelListResponse = z.infer<typeof SlackReactionChannelListResponse>;
+
+export const DEFAULT_WORKSPACE_SLACK_REACTION_SUMMON_SETTINGS = {
+  enabled: false,
+  emoji: "genie",
+  channelPolicy: { mode: "bot_member" },
+} as const satisfies WorkspaceSlackReactionSummonSettings;
+
 // Validates the KNOWN keys of workspaces.settings; passthrough keeps unknown
 // (future) keys rather than stripping them. memoryEnabled defaults off;
 // voiceInput defaults to enabled when the deployment has a provider.
@@ -1202,6 +1253,9 @@ export const WorkspaceSettingsSchema = z
     // Default compaction strategy for NEW Codex sessions created in this
     // workspace. Absent ⇒ remote_v2. Non-Codex sessions always freeze portable.
     codexCompactionDefault: CodexCompactionMode.optional(),
+    // Optional Slack reaction invocation. Absent/invalid fails closed to the
+    // disabled default via resolveWorkspaceSlackReactionSummonSettings.
+    slackReactionSummon: WorkspaceSlackReactionSummonSettings.optional(),
   })
   .passthrough();
 export type WorkspaceSettings = z.infer<typeof WorkspaceSettingsSchema>;
@@ -1235,6 +1289,39 @@ export function resolveWorkspaceVoiceInputEnabled(settings: unknown): boolean | 
   return null;
 }
 
+export function resolveWorkspaceSlackReactionSummonSettings(
+  settings: unknown,
+): WorkspaceSlackReactionSummonSettings {
+  const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
+  const configured = parsed.success ? parsed.data.slackReactionSummon : undefined;
+  if (!configured) {
+    return {
+      enabled: DEFAULT_WORKSPACE_SLACK_REACTION_SUMMON_SETTINGS.enabled,
+      emoji: DEFAULT_WORKSPACE_SLACK_REACTION_SUMMON_SETTINGS.emoji,
+      channelPolicy: { ...DEFAULT_WORKSPACE_SLACK_REACTION_SUMMON_SETTINGS.channelPolicy },
+    };
+  }
+  return configured.channelPolicy.mode === "allowlist"
+    ? {
+        ...configured,
+        channelPolicy: {
+          mode: "allowlist",
+          channelIds: [...new Set(configured.channelPolicy.channelIds)],
+        },
+      }
+    : { ...configured, channelPolicy: { mode: "bot_member" } };
+}
+
+export function workspaceSlackReactionChannelAllowed(
+  settings: WorkspaceSlackReactionSummonSettings,
+  channelId: string,
+): boolean {
+  return (
+    settings.channelPolicy.mode === "bot_member" ||
+    settings.channelPolicy.channelIds.includes(channelId)
+  );
+}
+
 // PATCH body for workspace settings: a partial top-level patch that merges into
 // the stored bag. Nested voiceInput/transcription updates are full replacements;
 // passthrough carries forward-compatible unknown keys.
@@ -1246,6 +1333,7 @@ export const UpdateWorkspaceSettingsRequest = z
     transcription: WorkspaceTranscriptionPolicy.optional(),
     maxNestedAgentDepth: NestedAgentDepthValue.nullable().optional(),
     codexCompactionDefault: CodexCompactionMode.optional(),
+    slackReactionSummon: WorkspaceSlackReactionSummonSettings.optional(),
   })
   .passthrough();
 export type UpdateWorkspaceSettingsRequest = z.infer<typeof UpdateWorkspaceSettingsRequest>;

@@ -30,6 +30,7 @@ import { CapabilityLogo } from "@/components/capabilities/capability-logo";
 import { CapabilityTile } from "@/components/capabilities/capability-tile";
 import { PacksSection } from "@/components/capabilities/packs-section";
 import { PersonalSlackAccountCard } from "@/components/capabilities/personal-slack-account-card";
+import { SlackReactionSummonCard } from "@/components/capabilities/slack-reaction-summon-card";
 import { LoadErrorState, PageHeader } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
@@ -112,6 +113,16 @@ export function canInstallOpenGeniSlackBot(
   workspaceId: string,
 ): boolean {
   return canWriteWorkspaceConnections(accessContext, workspaceId);
+}
+
+export function canManageSlackReactionSummon(
+  accessContext: AccessContext | null,
+  workspaceId: string,
+): boolean {
+  const grant = accessContext?.workspaceGrants.find(
+    (candidate) => candidate.workspaceId === workspaceId,
+  );
+  return grant?.permissions.includes("workspace:admin") === true;
 }
 
 export function SlackBotInstallControls({
@@ -242,6 +253,7 @@ export function CapabilitiesRoute({
     ? openGeniSlackBotUiMetadata(slackBotConnection)
     : null;
   const canInstallSlackBot = canInstallOpenGeniSlackBot(context.accessContext, workspaceId);
+  const canManageSlackReaction = canManageSlackReactionSummon(context.accessContext, workspaceId);
 
   const showPacks = filter === "all" || filter === "pack";
   const showCatalog = filter !== "pack";
@@ -1060,6 +1072,14 @@ export function CapabilitiesRoute({
                       </p>
                     </div>
                   </div>
+
+                  <SlackReactionSummonCard
+                    workspaceId={workspaceId}
+                    connection={slackBotConnection}
+                    canManage={canManageSlackReaction}
+                    installBusy={slackBotBusy}
+                    onReinstall={() => void installSlackBot(false)}
+                  />
 
                   <details className="group mt-3 border-t border-border/70 pt-3">
                     <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 text-2xs text-fg-subtle transition-colors hover:text-fg-muted">

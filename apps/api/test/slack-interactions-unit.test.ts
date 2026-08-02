@@ -1,5 +1,6 @@
 import { createHmac } from "node:crypto";
 import { describe, expect, test } from "bun:test";
+import type { WorkspaceSlackReactionSummonSettings } from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { MemoryEventBus, testSettings } from "@opengeni/testing";
 import { Hono } from "hono";
@@ -8,6 +9,7 @@ import { requireAccessKey } from "../src/http/auth";
 import {
   registerSlackInteractionRoutes,
   slackEventInboxEntry,
+  slackReactionInboxEntry,
   SLACK_DELIVERY_EVENT_TYPES,
   SLACK_INTERACTION_MAX_BODY_BYTES,
   SLACK_TASK_INSTRUCTIONS,
@@ -152,12 +154,17 @@ describe("Slack interaction signature boundary", () => {
 
 describe("Slack event classification and safe projection", () => {
   const bot = { botId: "B_OPEN_GENI", botUserId: "U_OPEN_GENI" };
-  const envelope = (event: Record<string, unknown>) => ({
+  const envelope = (event: Record<string, unknown>, eventId = "Ev1") => ({
     type: "event_callback",
     team_id: "T1",
-    event_id: "Ev1",
+    event_id: eventId,
     event,
   });
+  const reactionSettings = {
+    enabled: true,
+    emoji: "genie",
+    channelPolicy: { mode: "bot_member" },
+  } satisfies WorkspaceSlackReactionSummonSettings;
 
   test("classifies mentions, top-level bot DMs, and thread continuations", () => {
     expect(
@@ -248,6 +255,70 @@ describe("Slack event classification and safe projection", () => {
       { type: "message", user: "U1", channel: "C1", ts: "5" },
     ];
     for (const event of ignored) expect(slackEventInboxEntry(envelope(event), bot)).toBeNull();
+  });
+
+  test("filters reaction summons before content fetch and keeps remove/re-add identity stable", () => {
+    const reaction = {
+      type: "reaction_added",
+      user: "U1",
+      reaction: "genie",
+      item: { type: "message", channel: "C1", ts: "4.2" },
+    };
+    expect(
+      slackReactionInboxEntry(envelope(reaction), bot, {
+        ...reactionSettings,
+        enabled: false,
+      }),
+    ).toBeNull();
+    expect(
+      slackReactionInboxEntry(envelope({ ...reaction, reaction: "wave" }), bot, reactionSettings),
+    ).toBeNull();
+    expect(
+      slackReactionInboxEntry(envelope(reaction), bot, {
+        ...reactionSettings,
+        channelPolicy: { mode: "allowlist", channelIds: ["C2"] },
+      }),
+    ).toBeNull();
+    expect(
+      slackReactionInboxEntry(
+        envelope({ ...reaction, user: bot.botUserId }),
+        bot,
+        reactionSettings,
+      ),
+    ).toBeNull();
+    expect(
+      slackReactionInboxEntry(
+        envelope({ ...reaction, item: { type: "file", file: "F1" } }),
+        bot,
+        reactionSettings,
+      ),
+    ).toBeNull();
+
+    const first = slackReactionInboxEntry(
+      envelope(reaction, "Ev-reaction-1"),
+      bot,
+      reactionSettings,
+    );
+    const readded = slackReactionInboxEntry(
+      envelope(reaction, "Ev-reaction-2"),
+      bot,
+      reactionSettings,
+    );
+    expect(first).toMatchObject({
+      providerEventId: "Ev-reaction-1",
+      slackMessageTs: "4.2",
+      slackThreadTs: null,
+      triggerKind: "reaction",
+      text: "genie",
+    });
+    expect(readded?.providerMessageId).toBe(first?.providerMessageId);
+    expect(
+      slackReactionInboxEntry(
+        envelope({ ...reaction, user: "U2" }, "Ev-reaction-3"),
+        bot,
+        reactionSettings,
+      )?.providerMessageId,
+    ).not.toBe(first?.providerMessageId);
   });
 
   test("allows only bounded user-safe delivery events and freezes no-persistence instructions", () => {

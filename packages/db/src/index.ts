@@ -5388,6 +5388,7 @@ export type SlackBotUserLink = {
 export type SlackInteractionTriggerKind =
   | "app_mention"
   | "dm"
+  | "reaction"
   | "slash_command"
   | "message_shortcut"
   | "thread_reply";

@@ -32,6 +32,7 @@
     "db:generate": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; cd packages/db && bun run generate",
     "catalog:refresh": "bun scripts/refresh-integrations-catalog.ts",
     "catalog:import": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; bun scripts/import-integrations-catalog.ts",
+    "slack:manifest": "bun scripts/generate-slack-bot-manifest.ts",
     "typecheck": "bun scripts/typecheck.ts",
     "lint": "oxlint --deny-warnings .",
     "format": "oxfmt",

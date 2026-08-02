@@ -826,7 +826,9 @@ export const slackInteractionInbox = pgTable(
     slackMessageTs: text("slack_message_ts").notNull(),
     slackThreadTs: text("slack_thread_ts"),
     triggerKind: text("trigger_kind")
-      .$type<"app_mention" | "dm" | "slash_command" | "message_shortcut" | "thread_reply">()
+      .$type<
+        "app_mention" | "dm" | "reaction" | "slash_command" | "message_shortcut" | "thread_reply"
+      >()
       .notNull(),
     text: text("text").notNull(),
     status: text("status")

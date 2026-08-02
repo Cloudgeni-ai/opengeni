@@ -46,6 +46,7 @@ const SLACK_TIMEOUT_MS = 10_000;
 const MAX_CHANNEL_PAGE = 200;
 const MAX_HISTORY_PAGE = 100;
 const MAX_THREAD_PAGE = 100;
+const MAX_REACTION_CONTEXT_MESSAGES = 15;
 const MAX_USER_PAGE = 200;
 const MAX_FILE_PAGE = 200;
 const MAX_FILE_CURSOR_LENGTH = 1_024;
@@ -391,6 +392,41 @@ export class OpenGeniSlackBotClient {
         threadTimestamp: input.threadTimestamp,
         messages: slackArray(payload.messages).map(projectMessage),
         nextCursor: responseCursor(payload),
+      };
+    });
+  }
+
+  async reactionMessageContext(input: { channelId: string; messageTimestamp: string }) {
+    return await this.withAudit("thread_replies.read", async (headers) => {
+      const info = await this.requireMemberChannel(headers, input.channelId);
+      if (info.isShared || info.isExternallyShared || info.isOrgShared) {
+        throw new SlackBotProviderError("slack_connect_unsupported");
+      }
+      const payload = await this.call(headers, "conversations.replies", {
+        channel: input.channelId,
+        // Slack accepts either the parent timestamp or a message timestamp from
+        // inside the thread and returns the containing thread.
+        ts: input.messageTimestamp,
+        limit: String(MAX_REACTION_CONTEXT_MESSAGES),
+      });
+      const messages = slackArray(payload.messages)
+        .map(projectMessage)
+        .filter((message) => message.timestamp.length > 0);
+      const reactedMessage = messages.find(
+        (message) => message.timestamp === input.messageTimestamp,
+      );
+      const first = messages[0];
+      const threadTimestamp = first?.threadTimestamp || first?.timestamp || null;
+      if (!reactedMessage || !threadTimestamp) {
+        throw new SlackBotProviderError("message_not_found");
+      }
+      const nextCursor = responseCursor(payload);
+      return {
+        channel: info,
+        threadTimestamp,
+        reactedMessage,
+        messages,
+        truncated: nextCursor !== null,
       };
     });
   }
@@ -1263,6 +1299,9 @@ function projectChannel(value: unknown) {
     isMember: channel.is_member === true,
     isDirectMessage: channel.is_im === true,
     isArchived: channel.is_archived === true,
+    isShared: channel.is_shared === true,
+    isExternallyShared: channel.is_ext_shared === true,
+    isOrgShared: channel.is_org_shared === true,
     topic: boundedSlackString(slackRecord(channel.topic)?.value, 1_024),
     purpose: boundedSlackString(slackRecord(channel.purpose)?.value, 1_024),
     numMembers:

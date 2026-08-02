@@ -28,6 +28,8 @@ import {
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const migrationPath = new URL("../drizzle/0150_slack_task_interactions.sql", import.meta.url)
   .pathname;
+const reactionMigrationPath = new URL("../drizzle/0156_slack_reaction_trigger.sql", import.meta.url)
+  .pathname;
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -109,6 +111,7 @@ function inboxInput(input: {
   connectionId: string;
   eventId: string;
   messageId: string;
+  triggerKind?: "dm" | "reaction";
 }) {
   return {
     accountId: input.accountId,
@@ -121,8 +124,8 @@ function inboxInput(input: {
     slackChannelId: "D_DB_TEST",
     slackMessageTs: "1710000000.000001",
     slackThreadTs: null,
-    triggerKind: "dm" as const,
-    text: "Start a private task",
+    triggerKind: input.triggerKind ?? ("dm" as const),
+    text: input.triggerKind === "reaction" ? "genie" : "Start a private task",
   };
 }
 
@@ -139,6 +142,17 @@ describe("Slack interaction migration and durable database boundary", () => {
     expect(sql.match(/\n\s+SECURITY DEFINER\n\s+SET search_path = pg_catalog/g)).toHaveLength(3);
     expect(sql.match(/SET search_path = pg_catalog/g)).toHaveLength(3);
     expect(sql).toContain("credentialRole' = 'opengeni_slack_bot'");
+  });
+
+  test("expands the inbox trigger constraint for reactions as a rolling migration", async () => {
+    const sql = await readFile(reactionMigrationPath, "utf8");
+    expect(sql.startsWith("-- deployment-mode: rolling\n")).toBe(true);
+    expect(sql).toContain('DROP CONSTRAINT "slack_interaction_inbox_trigger_check"');
+    expect(sql).toContain("'reaction'");
+    expect(sql).toContain(") NOT VALID;");
+    expect(sql).toContain('VALIDATE CONSTRAINT "slack_interaction_inbox_trigger_check"');
+    expect(sql).not.toContain("CREATE TABLE");
+    expect(sql).not.toContain("ALTER TYPE");
   });
 
   test("enforces FORCE RLS and grants only the declared runtime DML", async () => {
@@ -210,7 +224,7 @@ describe("Slack interaction migration and durable database boundary", () => {
     expect(await resolveSlackInstallationRoute(db, "T_RESOLVER")).toBeNull();
   });
 
-  test("deduplicates event and message identities, reclaims expired leases, and scopes settlement", async () => {
+  test("deduplicates reaction event and remove-readd identities, reclaims expired leases, and scopes settlement", async () => {
     if (!available) return;
     const target = await workspace("inbox");
     const connection = await botConnection(target, "T_INBOX", {
@@ -219,16 +233,34 @@ describe("Slack interaction migration and durable database boundary", () => {
     });
     const first = await enqueueSlackInteractionInbox(
       db,
-      inboxInput({ ...target, connectionId: connection.id, eventId: "E1", messageId: "M1" }),
+      inboxInput({
+        ...target,
+        connectionId: connection.id,
+        eventId: "E1",
+        messageId: "M1",
+        triggerKind: "reaction",
+      }),
     );
     expect(first.inserted).toBe(true);
     const eventRetry = await enqueueSlackInteractionInbox(
       db,
-      inboxInput({ ...target, connectionId: connection.id, eventId: "E1", messageId: "M2" }),
+      inboxInput({
+        ...target,
+        connectionId: connection.id,
+        eventId: "E1",
+        messageId: "M2",
+        triggerKind: "reaction",
+      }),
     );
     const reconnectRetry = await enqueueSlackInteractionInbox(
       db,
-      inboxInput({ ...target, connectionId: connection.id, eventId: "E2", messageId: "M1" }),
+      inboxInput({
+        ...target,
+        connectionId: connection.id,
+        eventId: "E2",
+        messageId: "M1",
+        triggerKind: "reaction",
+      }),
     );
     expect(eventRetry).toMatchObject({ inserted: false, entry: { id: first.entry.id } });
     expect(reconnectRetry).toMatchObject({ inserted: false, entry: { id: first.entry.id } });

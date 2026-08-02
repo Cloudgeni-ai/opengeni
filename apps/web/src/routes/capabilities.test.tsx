@@ -6,6 +6,7 @@ import { createRoot } from "react-dom/client";
 import type { AccessContext } from "@/types";
 import {
   canInstallOpenGeniSlackBot,
+  canManageSlackReactionSummon,
   canWriteWorkspaceConnections,
   SlackBotInstallControls,
 } from "./capabilities";
@@ -81,6 +82,12 @@ describe("OpenGeni Slack bot install controls", () => {
       true,
     );
     expect(canWriteWorkspaceConnections(accessContext(["connections:write"]), "workspace-a")).toBe(
+      true,
+    );
+    expect(canManageSlackReactionSummon(accessContext(["connections:write"]), "workspace-a")).toBe(
+      false,
+    );
+    expect(canManageSlackReactionSummon(accessContext(["workspace:admin"]), "workspace-a")).toBe(
       true,
     );
   });
