@@ -100,6 +100,40 @@ describe("modelAttachmentContentForFiles", () => {
     ]);
   });
 
+  test("uses a verified image's model URL without changing document delivery", async () => {
+    const imageBytes = new TextEncoder().encode("image");
+    const pdfBytes = new TextEncoder().encode("pdf");
+    const image = {
+      ...file("00000000-0000-4000-8000-000000000013", "image/png", 5, "diagram.png"),
+      sha256: sha256(imageBytes),
+    };
+    const pdf = {
+      ...file("00000000-0000-4000-8000-000000000014", "application/pdf", 3, "notes.pdf"),
+      sha256: sha256(pdfBytes),
+    };
+    const content = await modelAttachmentContentForFiles(
+      [image, pdf],
+      async (entry) => (entry.id === image.id ? imageBytes : pdfBytes),
+      async (entry) => `https://storage.example/${entry.objectKey}?signed=1`,
+    );
+
+    expect(content[0]).toMatchObject({
+      kind: "image",
+      imageUrl: `https://storage.example/${image.objectKey}?signed=1`,
+      dataUrl: "data:image/png;base64,aW1hZ2U=",
+    });
+    expect(content[1]).not.toHaveProperty("imageUrl");
+    expect(withCurrentUserAttachmentContent([user("inspect")], content)[0]?.content).toEqual([
+      { type: "input_text", text: "inspect" },
+      { type: "input_image", image: `https://storage.example/${image.objectKey}?signed=1` },
+      {
+        type: "input_file",
+        file: "data:application/pdf;base64,cGRm",
+        filename: "notes.pdf",
+      },
+    ]);
+  });
+
   test("fails closed for active or unsupported MIME types without reading their bytes", async () => {
     const unsupported = [
       file("00000000-0000-4000-8000-000000000020", "image/svg+xml", 1, "active.svg"),

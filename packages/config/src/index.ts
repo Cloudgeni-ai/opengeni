@@ -1442,7 +1442,7 @@ export const OPENGENI_GATEWAY_MODELS = {
     upstreamModelId: "moonshotai/kimi-k3-fast",
     label: "Kimi K3 Fast",
     provider: "wafer",
-    implicitCaching: false,
+    implicitCaching: true,
   },
 } as const;
 
@@ -1521,8 +1521,10 @@ export const defaultModelPricing: Record<string, ModelPricingScheduleV1> = {
     ],
   },
   // Vercel AI Gateway endpoint prices, provider-pinned in the runtime.
-  // Snapshot: 2026-08-02. Baseten advertises implicit cache reads; Wafer does
-  // not, so Kimi intentionally has no discounted cached-input rate.
+  // Snapshot: 2026-08-02. Both pinned routes returned discounted implicit
+  // cache reads in live Gateway responses. Wafer/Kimi reported $0.45/M even
+  // though the provider-discovery flag currently says otherwise; bill from
+  // the response-backed rate, not that inconsistent boolean.
   [OPENGENI_GATEWAY_MODELS.deepseek.productId]: {
     default: {
       inputMicrosPerMillionTokens: 130_000,
@@ -1534,6 +1536,7 @@ export const defaultModelPricing: Record<string, ModelPricingScheduleV1> = {
   [OPENGENI_GATEWAY_MODELS.kimi.productId]: {
     default: {
       inputMicrosPerMillionTokens: 4_500_000,
+      cachedInputMicrosPerMillionTokens: 450_000,
       outputMicrosPerMillionTokens: 22_500_000,
       marginBps: 2_500,
     },
@@ -2321,12 +2324,10 @@ function gatewayRegistryProvider(
     kind: input.kind,
     id: workspace ? WORKSPACE_GATEWAY_PROVIDER_ID : OPENGENI_GATEWAY_PROVIDER_ID,
     label: workspace ? "Your Gateway" : "OpenGeni",
-    // Gateway-backed open models use Chat Completions. Vercel's Responses
-    // compatibility can complete a first Wafer/Kimi call but rejects the
-    // follow-up that replays reasoning plus function-call results; Baseten's
-    // DeepSeek deployment currently rejects the Responses request outright.
-    // Chat is the stable cross-provider tool-call wire format for both routes.
-    api: "chat",
+    // Responses preserves vision, reasoning items, and provider-native usage.
+    // Model-specific compatibility stays at the reviewed request fence rather
+    // than downgrading the whole provider wire.
+    api: "responses",
     baseUrl: VERCEL_AI_GATEWAY_BASE_URL,
     ...(input.apiKey ? { apiKey: input.apiKey } : {}),
     models,

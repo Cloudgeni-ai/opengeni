@@ -73,7 +73,7 @@ describe("curated AI Gateway catalogue", () => {
     const providers = configuredProviders(settings);
     const gateway = providers.find((provider) => provider.id === OPENGENI_GATEWAY_PROVIDER_ID)!;
     expect(gateway.kind).toBe("vercel-gateway-managed");
-    expect(gateway.api).toBe("chat");
+    expect(gateway.api).toBe("responses");
 
     const models = configuredModels(settings);
     const deepseek = models.find(
@@ -89,11 +89,11 @@ describe("curated AI Gateway catalogue", () => {
       runnable: true,
       mode: "implicit",
     });
-    expect(kimi.requestPolicy).toEqual({ gateway: { only: ["wafer"], caching: "none" } });
+    expect(kimi.requestPolicy).toEqual({ gateway: { only: ["wafer"], caching: "auto" } });
     expect(kimi.capabilities.promptCaching).toEqual({
-      upstream: "unsupported",
-      runnable: false,
-      mode: "none",
+      upstream: "supported",
+      runnable: true,
+      mode: "implicit",
     });
     expect(kimi.capabilities.latencyModes.map((mode) => mode.id)).toEqual(["standard"]);
 
@@ -105,6 +105,7 @@ describe("curated AI Gateway catalogue", () => {
     });
     expect(configuredModelPricing(settings)[kimi.id]).toEqual({
       inputMicrosPerMillionTokens: 4_500_000,
+      cachedInputMicrosPerMillionTokens: 450_000,
       outputMicrosPerMillionTokens: 22_500_000,
       marginBps: 2_500,
     });
@@ -145,6 +146,21 @@ describe("curated AI Gateway catalogue", () => {
         inputTokensDetails: { cached_tokens: 1_000_000 },
       }),
     ).toBe(360_000);
+  });
+
+  test("managed debit applies Wafer's response-backed cache-read price", () => {
+    const settings = {
+      ...getSettings(),
+      modelProvidersJson: "[]",
+      vercelAiGatewayApiKey: "vck_test",
+    };
+    expect(
+      calculateModelUsageCostMicros(settings, OPENGENI_GATEWAY_MODELS.kimi.productId, {
+        inputTokens: 1_000_000,
+        outputTokens: 0,
+        inputTokensDetails: { cached_tokens: 1_000_000 },
+      }),
+    ).toBe(562_500);
   });
 });
 

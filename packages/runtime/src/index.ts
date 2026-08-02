@@ -6,6 +6,7 @@ import type {
 } from "@opengeni/config";
 import {
   AGENT_INSTRUCTIONS_CORE_PLACEHOLDER,
+  OPENGENI_GATEWAY_MODELS,
   collectSandboxEnvironment,
   firstPartyMcpBaseUrl,
   gatewayRequestPolicyForUpstreamModel,
@@ -696,6 +697,90 @@ export class WorkspaceGatewayUnavailableError extends Error {
 }
 
 /**
+ * Kimi Fast/Wafer currently returns parallel function calls, but Gateway
+ * reclassifies a Responses continuation containing the canonical
+ * `call A, call B, result A, result B` batch as the base Kimi model. That model
+ * has no Wafer endpoint, so the exact-provider fence correctly rejects it.
+ * Interleave only complete, contiguous batches into
+ * `call A, result A, call B, result B`: same calls, ids, arguments, outputs,
+ * and order; no item is dropped or invented. Partial/ambiguous batches remain
+ * untouched and fail closed upstream.
+ */
+export function interleaveParallelFunctionCallResults(body: Record<string, unknown>): boolean {
+  const input = body.input;
+  if (!Array.isArray(input)) return false;
+  let changed = false;
+  let index = 0;
+  while (index < input.length) {
+    const item = input[index];
+    if (
+      !item ||
+      typeof item !== "object" ||
+      (item as Record<string, unknown>).type !== "function_call"
+    ) {
+      index += 1;
+      continue;
+    }
+    let callEnd = index;
+    while (
+      callEnd < input.length &&
+      input[callEnd] &&
+      typeof input[callEnd] === "object" &&
+      (input[callEnd] as Record<string, unknown>).type === "function_call"
+    ) {
+      callEnd += 1;
+    }
+    const calls = input.slice(index, callEnd) as Array<Record<string, unknown>>;
+    if (calls.length < 2) {
+      index = callEnd;
+      continue;
+    }
+    let resultEnd = callEnd;
+    while (
+      resultEnd < input.length &&
+      input[resultEnd] &&
+      typeof input[resultEnd] === "object" &&
+      (input[resultEnd] as Record<string, unknown>).type === "function_call_output"
+    ) {
+      resultEnd += 1;
+    }
+    const results = input.slice(callEnd, resultEnd) as Array<Record<string, unknown>>;
+    if (results.length !== calls.length) {
+      index = resultEnd;
+      continue;
+    }
+    const byCallId = new Map<string, Record<string, unknown>>();
+    let valid = true;
+    for (const result of results) {
+      const callId = result.call_id;
+      if (typeof callId !== "string" || byCallId.has(callId)) {
+        valid = false;
+        break;
+      }
+      byCallId.set(callId, result);
+    }
+    const interleaved: Array<Record<string, unknown>> = [];
+    for (const call of calls) {
+      const callId = call.call_id;
+      const result = typeof callId === "string" ? byCallId.get(callId) : undefined;
+      if (!result) {
+        valid = false;
+        break;
+      }
+      interleaved.push(call, result);
+    }
+    if (!valid) {
+      index = resultEnd;
+      continue;
+    }
+    input.splice(index, calls.length + results.length, ...interleaved);
+    changed = true;
+    index += interleaved.length;
+  }
+  return changed;
+}
+
+/**
  * Inject the reviewed route after SDK serialization, replacing any caller
  * gateway options. There is exactly one allowed endpoint provider and no model
  * fallback list. Unknown models/body shapes fail before network I/O.
@@ -741,6 +826,9 @@ export function vercelGatewayRoutingFetch(
       ...(policy.gateway.caching === "auto" ? { caching: "auto" } : {}),
     };
     body.providerOptions = providerOptions;
+    if (model === OPENGENI_GATEWAY_MODELS.kimi.upstreamModelId) {
+      interleaveParallelFunctionCallResults(body);
+    }
     const response = await inner(input, { ...init, body: JSON.stringify(body) });
     if (response.ok) {
       return response;

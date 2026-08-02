@@ -141,6 +141,7 @@ import {
   calculateModelUsageCostMicros,
   configuredModelPricing,
   configuredStaticUsageLimits,
+  OPENGENI_GATEWAY_MODELS,
   responseSatisfiesLatencyMode,
   sandboxArchiveCaptureTimeoutMs,
   sandboxWarmRateMicrosPerSecond,
@@ -1843,6 +1844,8 @@ export function shouldStartOnTurnRecording(params: {
  *   • a "chat" (OpenAIChatCompletionsModel wire) provider → "disabled": it cannot
  *     receive a screenshot through a proven visual transport, so computer use fails
  *     closed instead of serializing the image as text.
+ *   • Vercel Gateway providers → "disabled": their curated models support ordinary
+ *     function tools and vision input, not OpenAI's hosted computer tool.
  *   • everything else — built-in Azure/OpenAI responses, registry "responses"
  *     providers, AND the LEGACY global-client fallback (resolveTurnModel returned
  *     null) — → "hosted": real Responses hosted-tool support.
@@ -1860,10 +1863,26 @@ export function computerToolModeForTurn(
   if (resolvedModel.provider.kind === "codex-subscription") {
     return "function-image";
   }
+  if (
+    resolvedModel.provider.kind === "vercel-gateway-managed" ||
+    resolvedModel.provider.kind === "vercel-gateway-workspace"
+  ) {
+    return "disabled";
+  }
   if (resolvedModel.provider.api === "chat") {
     return "disabled";
   }
   return "hosted";
+}
+
+/** Gateway models do not advertise OpenAI's hosted apply_patch/view_image tool types. */
+export function structuredToolTransportForTurn(
+  resolvedModel: { provider: { kind: RegistryProviderKind } } | null,
+): boolean {
+  if (!resolvedModel) return true;
+  return !["codex-subscription", "vercel-gateway-managed", "vercel-gateway-workspace"].includes(
+    resolvedModel.provider.kind,
+  );
 }
 
 /**
@@ -1891,6 +1910,33 @@ export function modelAcceptsTypedAttachmentContentForTurn(
   resolvedModel: { provider: { api: ModelProviderApi } } | null,
 ): boolean {
   return resolvedModel === null || resolvedModel.provider.api === "responses";
+}
+
+/**
+ * Kimi Fast on Wafer accepts vision over HTTPS object URLs. Vercel currently
+ * reclassifies data-URL image requests as base Kimi before applying the exact
+ * Wafer fence. Other providers retain the verified inline projection.
+ */
+export function modelNeedsRemoteImageUrlForTurn(
+  resolvedModel: {
+    provider: { kind: RegistryProviderKind };
+    configured: { upstreamModelId: string };
+  } | null,
+): boolean {
+  if (!resolvedModel) return false;
+  return (
+    ["vercel-gateway-managed", "vercel-gateway-workspace"].includes(resolvedModel.provider.kind) &&
+    resolvedModel.configured.upstreamModelId === OPENGENI_GATEWAY_MODELS.kimi.upstreamModelId
+  );
+}
+
+export function externallyReachableModelImageUrl(value: string): string | null {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "https:" && !parsed.username && !parsed.password ? value : null;
+  } catch {
+    return null;
+  }
 }
 
 export type TurnSandboxProvisioner<T> = {
@@ -5612,7 +5658,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               // (built-in OpenAI/Azure = real hosted support; registry "chat"
               // providers = the SDK's own ChatCompletions detection) keeps the SDK
               // default.
-              structuredToolTransport: resolvedModel.provider.kind !== "codex-subscription",
+              structuredToolTransport: structuredToolTransportForTurn(resolvedModel),
               // EXPLICIT computer-use tool transport, derived from the resolved provider's
               // authoritative wire identity (codex → function-image, chat → disabled,
               // responses → hosted) so the runtime never string-sniffs the model instance's
@@ -6242,6 +6288,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             ...(modelAcceptsTypedAttachmentContentForTurn(resolvedModel) && objectStorage
               ? {
                   readFileBytesForModel: (file) => objectStorage.getFileBytes(file),
+                  ...(modelNeedsRemoteImageUrlForTurn(resolvedModel)
+                    ? {
+                        imageUrlForModel: async (file) => {
+                          const signed = await objectStorage.createGetUrl({
+                            key: file.objectKey,
+                            expiresInSeconds: 60 * 60,
+                          });
+                          return externallyReachableModelImageUrl(signed.url);
+                        },
+                      }
+                    : {}),
                 }
               : {}),
           },

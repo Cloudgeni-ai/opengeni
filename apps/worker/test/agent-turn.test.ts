@@ -2,7 +2,7 @@ import { describe, expect, mock, spyOn, test } from "bun:test";
 import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
 import { RunRawModelStreamEvent, Usage } from "@openai/agents-core";
 import { ModelItem } from "@openai/agents-core/types";
-import type { Settings } from "@opengeni/config";
+import { OPENGENI_GATEWAY_MODELS, type Settings } from "@opengeni/config";
 import { TurnExecutionPolicyV1 } from "@opengeni/contracts";
 import { createObservability } from "@opengeni/observability";
 import * as opengeniDb from "@opengeni/db";
@@ -48,6 +48,7 @@ import {
   emitModelCallUsage,
   ensureTurnModalRegistryImage,
   escapedMcpTimeoutRecoveryFailure,
+  externallyReachableModelImageUrl,
   filterUnmaterializedSandboxFileDownloads,
   headerSecretRedactions,
   historyRowsToAppend,
@@ -57,6 +58,7 @@ import {
   isWorkerShutdownCancellation,
   legacyTurnExecutionPolicyInput,
   modelAcceptsTypedAttachmentContentForTurn,
+  modelNeedsRemoteImageUrlForTurn,
   recordCompletedModelCallBeforeOwnershipFences,
   modelUsageSourceKey,
   modelResponseUsageContextSignal,
@@ -75,6 +77,7 @@ import {
   shouldStartOnTurnRecording,
   shouldRunTurnEndWorkspacePersistence,
   stableHumanInputRequestId,
+  structuredToolTransportForTurn,
   turnExecutionPolicyBillingIdentity,
   turnOperationCancellationFailure,
   unavailableMcpTurnInstructions,
@@ -3272,8 +3275,33 @@ describe("computerToolModeForTurn (explicit computer-use transport derivation)",
     expect(computerToolModeForTurn(resolved("api-key", "responses"))).toBe("hosted");
   });
 
+  test("Gateway Responses models do not inherit OpenAI hosted computer tools", () => {
+    expect(computerToolModeForTurn(resolved("vercel-gateway-managed", "responses"))).toBe(
+      "disabled",
+    );
+    expect(computerToolModeForTurn(resolved("vercel-gateway-workspace", "responses"))).toBe(
+      "disabled",
+    );
+  });
+
   test("the LEGACY global-client fallback (resolveTurnModel → null) → hosted EXPLICITLY", () => {
     expect(computerToolModeForTurn(null)).toBe("hosted");
+  });
+});
+
+describe("structuredToolTransportForTurn", () => {
+  const resolved = (kind: RegistryProviderKind) =>
+    ({ provider: { kind } }) as Parameters<typeof structuredToolTransportForTurn>[0];
+
+  test("keeps hosted tool types off Codex and both Gateway credential paths", () => {
+    expect(structuredToolTransportForTurn(resolved("codex-subscription"))).toBe(false);
+    expect(structuredToolTransportForTurn(resolved("vercel-gateway-managed"))).toBe(false);
+    expect(structuredToolTransportForTurn(resolved("vercel-gateway-workspace"))).toBe(false);
+  });
+
+  test("preserves hosted tool types for real Responses providers and the legacy path", () => {
+    expect(structuredToolTransportForTurn(resolved("api-key"))).toBe(true);
+    expect(structuredToolTransportForTurn(null)).toBe(true);
   });
 });
 
@@ -3309,6 +3337,34 @@ describe("modelAcceptsTypedAttachmentContentForTurn", () => {
   });
 });
 
+describe("Gateway model image delivery", () => {
+  const resolved = (kind: RegistryProviderKind, upstreamModelId: string) =>
+    ({ provider: { kind }, configured: { upstreamModelId } }) as Parameters<
+      typeof modelNeedsRemoteImageUrlForTurn
+    >[0];
+
+  test("uses remote images only for Kimi Fast through either Gateway credential path", () => {
+    const kimi = OPENGENI_GATEWAY_MODELS.kimi.upstreamModelId;
+    expect(modelNeedsRemoteImageUrlForTurn(resolved("vercel-gateway-managed", kimi))).toBe(true);
+    expect(modelNeedsRemoteImageUrlForTurn(resolved("vercel-gateway-workspace", kimi))).toBe(true);
+    expect(modelNeedsRemoteImageUrlForTurn(resolved("api-key", kimi))).toBe(false);
+    expect(
+      modelNeedsRemoteImageUrlForTurn(
+        resolved("vercel-gateway-managed", OPENGENI_GATEWAY_MODELS.deepseek.upstreamModelId),
+      ),
+    ).toBe(false);
+  });
+
+  test("accepts only credential-free HTTPS URLs for external model fetches", () => {
+    expect(externallyReachableModelImageUrl("https://storage.example/file?signature=x")).toBe(
+      "https://storage.example/file?signature=x",
+    );
+    expect(externallyReachableModelImageUrl("http://127.0.0.1:9000/file")).toBeNull();
+    expect(externallyReachableModelImageUrl("https://user:pass@storage.example/file")).toBeNull();
+    expect(externallyReachableModelImageUrl("not a URL")).toBeNull();
+  });
+});
+
 describe("acceptsPromptCacheKeyForTurn", () => {
   const resolved = (kind: RegistryProviderKind, api: ModelProviderApi, builtin = false) =>
     ({ provider: { kind, api, builtin } }) as Parameters<typeof acceptsPromptCacheKeyForTurn>[0];
@@ -3328,5 +3384,9 @@ describe("acceptsPromptCacheKeyForTurn", () => {
   });
 });
 
-type RegistryProviderKind = "api-key" | "codex-subscription";
+type RegistryProviderKind =
+  | "api-key"
+  | "codex-subscription"
+  | "vercel-gateway-managed"
+  | "vercel-gateway-workspace";
 type ModelProviderApi = "responses" | "chat";
