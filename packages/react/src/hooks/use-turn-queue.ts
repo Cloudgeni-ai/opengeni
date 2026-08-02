@@ -1,6 +1,7 @@
 import type {
   ComposerDraft,
   EffectiveSessionControl,
+  McpPersonalConnectionSummary,
   SessionEvent,
   SessionQueueMutationResponse,
   SessionQueueSnapshot,
@@ -53,6 +54,8 @@ export type UseTurnQueueResult = {
   pendingInputs: SessionPendingInputPreview[];
   /** Exact pending members projected to join an already-waiting prompt. */
   pendingInputAttachment: SessionQueueSnapshot["pendingInputAttachment"];
+  /** Secret-safe personal MCP summaries frozen on the exact active turn. */
+  activePersonalConnections: McpPersonalConnectionSummary[];
   effectiveControl: EffectiveSessionControl | null;
   /** The latest interrupted attempt has not yet durably proved physical quiescence. */
   stoppingPreviousAttempt: boolean;
@@ -332,6 +335,7 @@ export function useTurnQueue(
     queue: visibleSnapshot?.items ?? [],
     pendingInputs: visibleSnapshot?.pendingInputs ?? [],
     pendingInputAttachment: visibleSnapshot?.pendingInputAttachment ?? null,
+    activePersonalConnections: visibleSnapshot?.activePersonalConnections ?? [],
     effectiveControl: visibleSnapshot?.effectiveControl ?? null,
     stoppingPreviousAttempt: visibleSnapshot?.stoppingPreviousAttempt ?? false,
     loading: identityMatches ? loading : enabled,

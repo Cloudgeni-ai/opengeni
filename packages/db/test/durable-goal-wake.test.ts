@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import type { McpPersonalConnectionDelegation } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
   armCodexCapacityWait,
@@ -41,7 +42,14 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-async function runningGoalFixture(options: { withAncestor?: boolean } = {}) {
+async function runningGoalFixture(
+  options: {
+    withAncestor?: boolean;
+    personalConnectionDelegations?:
+      | McpPersonalConnectionDelegation[]
+      | ((subjectId: string) => McpPersonalConnectionDelegation[]);
+  } = {},
+) {
   const suffix = crypto.randomUUID();
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "goal-wake-test",
@@ -53,6 +61,10 @@ async function runningGoalFixture(options: { withAncestor?: boolean } = {}) {
     subjectId: `subject-${suffix}`,
   });
   const grant = access.workspaceGrants[0]!;
+  const personalConnectionDelegations =
+    typeof options.personalConnectionDelegations === "function"
+      ? options.personalConnectionDelegations(grant.subjectId)
+      : (options.personalConnectionDelegations ?? []);
   const ancestor = options.withAncestor
     ? await createSession(client.db, {
         accountId: grant.accountId,
@@ -75,6 +87,7 @@ async function runningGoalFixture(options: { withAncestor?: boolean } = {}) {
     metadata: {},
     model: "scripted-model",
     sandboxBackend: "none",
+    personalConnectionDelegations,
   });
   const initialized = await initializeSessionStartAtomically(client.db, {
     accountId: grant.accountId,
@@ -191,6 +204,76 @@ async function counts(ctx: GoalFixture) {
 }
 
 describe("durable active-goal wake", () => {
+  test("goal continuation freezes the exact finished causal turn authority and lineage", async () => {
+    const connectionId = crypto.randomUUID();
+    const ctx = await runningGoalFixture({
+      personalConnectionDelegations: (subjectId) => [
+        {
+          serverId: "linear",
+          connectionId,
+          ownerSubjectId: subjectId,
+          providerDomain: "linear.app",
+          kind: "oauth2",
+        },
+      ],
+    });
+    const delegations = ctx.turn.personalConnectionDelegations;
+    await settleIdle(ctx);
+
+    expect((await materialize(ctx)).action).toBe("continue");
+    const [materialized] = await shared.admin<
+      Array<{
+        personal_connection_delegations: McpPersonalConnectionDelegation[];
+        lineage: Record<string, unknown>;
+      }>
+    >`
+      select personal_connection_delegations, lineage
+      from session_system_updates
+      where workspace_id = ${ctx.grant.workspaceId!}
+        and session_id = ${ctx.session.id}
+        and kind = 'goal_continuation'
+    `;
+    expect(materialized?.personal_connection_delegations).toEqual(delegations);
+    expect(materialized?.lineage).toMatchObject({ causalTurnId: ctx.turn.id });
+
+    const replacementDelegations: McpPersonalConnectionDelegation[] = [
+      {
+        ...delegations[0]!,
+        connectionId: crypto.randomUUID(),
+      },
+    ];
+    await withWorkspaceSubjectRls(client.db, ctx.grant.workspaceId!, ctx.grant.subjectId, (db) =>
+      db.transaction((tx) =>
+        submitHumanPromptInTransaction(tx as typeof db, {
+          accountId: ctx.grant.accountId,
+          workspaceId: ctx.grant.workspaceId!,
+          sessionId: ctx.session.id,
+          subjectId: ctx.grant.subjectId,
+          actor: { type: "human", subjectId: ctx.grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          delivery: "send",
+          text: "new unrelated human work",
+          resources: [],
+          model: "scripted-model",
+          reasoningEffort: "low",
+          reasoningEffortFallback: "low",
+          source: "user",
+          personalConnectionDelegations: replacementDelegations,
+        }),
+      ),
+    );
+    const [afterUnrelatedTurn] = await shared.admin<
+      Array<{ personal_connection_delegations: McpPersonalConnectionDelegation[] }>
+    >`
+      select personal_connection_delegations
+      from session_system_updates
+      where workspace_id = ${ctx.grant.workspaceId!}
+        and session_id = ${ctx.session.id}
+        and kind = 'goal_continuation'
+    `;
+    expect(afterUnrelatedTurn?.personal_connection_delegations).toEqual(delegations);
+  });
+
   test("terminal settlement atomically arms an admitted-idle goal and its workflow outbox", async () => {
     const ctx = await runningGoalFixture();
     await settleIdle(ctx);

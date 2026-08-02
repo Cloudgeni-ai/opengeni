@@ -23,6 +23,7 @@ import {
   type CreateSessionResponse,
   type GoalSpec,
   type FirstPartyMcpToolName,
+  type McpPersonalConnectionDelegation,
   type Permission,
   type ReasoningEffort,
   type ResourceRef,
@@ -98,6 +99,10 @@ import { requireSessionAuthorization } from "../session-authorization";
 import { swapActiveSandbox, type FleetContext } from "../sandbox/fleet";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 import { requireVariableSetEncryption, validateVariableSetAttachment } from "./environments";
+import {
+  freezePersonalConnectionDelegations,
+  personalConnectionDelegationSourceForGrant,
+} from "./personal-connection-delegations";
 import { hasReservedOpenGeniSlackBotSessionMetadata } from "./slack-bot";
 import {
   assertToolRefsSubset,
@@ -168,7 +173,7 @@ type ValidatedSessionMcpServers = {
   metadata: SessionMcpServerMetadata[];
 };
 
-type FrozenCreationInitiator = {
+export type FrozenCreationInitiator = {
   initiator?: TurnInitiator;
   context?: TurnInitiatorContext;
   actor?: Extract<SessionCommandActor, { type: "agent_attempt" }>;
@@ -216,7 +221,7 @@ function serviceInitiatorForGrant(grant: AccessGrant): {
   };
 }
 
-function creationInitiatorForGrant(grant: AccessGrant): FrozenCreationInitiator {
+export function creationInitiatorForGrant(grant: AccessGrant): FrozenCreationInitiator {
   const serviceInitiator = serviceInitiatorForGrant(grant);
   const callerSessionId = grant.metadata?.["sessionId"];
   const callerTurnId = grant.metadata?.["turnId"];
@@ -549,6 +554,7 @@ export async function createAndStartSession(input: {
   // MCP servers. Metadata is the only shape emitted in events/responses.
   mcpServers?: CreateSessionMcpServerInput[];
   sessionMcpServers?: SessionMcpServerMetadata[];
+  personalConnectionDelegations?: McpPersonalConnectionDelegation[];
   // The manager session spawning this worker (a worker-signed sessionId claim
   // on the creating grant); null for direct API creates and scheduled runs.
   // When set, the worker's terminal-for-now transitions wake this parent.
@@ -624,6 +630,7 @@ export async function createAndStartSession(input: {
       sandboxGroupId: input.sandboxGroupId ?? null,
       ...(input.sandboxOs ? { sandboxOs: input.sandboxOs } : {}),
       mcpServers: input.mcpServers ?? [],
+      personalConnectionDelegations: input.personalConnectionDelegations ?? [],
       maxNestedAgentDepthOverride: input.maxNestedAgentDepthOverride ?? null,
       allowNestedAgentDepthIncrease: input.allowNestedAgentDepthIncrease ?? false,
       subjectId: input.subjectId ?? null,
@@ -668,6 +675,7 @@ export async function createAndStartSession(input: {
       sandboxGroupId: input.sandboxGroupId ?? null,
       ...(input.sandboxOs ? { sandboxOs: input.sandboxOs } : {}),
       mcpServers: input.mcpServers ?? [],
+      personalConnectionDelegations: input.personalConnectionDelegations ?? [],
       maxNestedAgentDepthOverride: input.maxNestedAgentDepthOverride ?? null,
       allowNestedAgentDepthIncrease: input.allowNestedAgentDepthIncrease ?? false,
       subjectId: input.subjectId ?? null,
@@ -966,6 +974,7 @@ export async function postUserMessageTurn(input: {
   latencyMode?: "standard" | "priority" | "fast" | null;
   clientEventId?: string;
   mcpCredentialUpdates?: UpdateSessionMcpServerCredentialsInput[];
+  personalConnectionDelegations?: McpPersonalConnectionDelegation[];
   delivery?: "send" | "steer";
   origin?: "human" | "operator";
   actor?: string;
@@ -1021,6 +1030,7 @@ export async function postUserMessageTurn(input: {
           reasoningEffortFallback: input.reasoningEffortFallback ?? settings.openaiReasoningEffort,
           turnExecutionPolicy: input.turnExecutionPolicy,
           source: input.origin === "operator" ? "api" : "user",
+          personalConnectionDelegations: input.personalConnectionDelegations ?? [],
           mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
         }),
       ),
@@ -1218,6 +1228,13 @@ export async function createSessionForRequest(
   // tool's permission/target authorization predicate, so attachment alone
   // exposes nothing.
   const tools = withFirstPartyTools(selectedTools, runtimeSettings);
+  const personalConnectionDelegations = await freezePersonalConnectionDelegations({
+    db,
+    workspaceId,
+    settings: runtimeSettings,
+    tools,
+    source: personalConnectionDelegationSourceForGrant(grant),
+  });
   await validateGitHubRepositorySelection(db, workspaceId, resources);
   if (resources.some((resource) => resource.kind === "file") && !objectStorage) {
     throw new HTTPException(503, { message: "object storage is not configured" });
@@ -1634,6 +1651,7 @@ export async function createSessionForRequest(
       firstPartyMcpTools,
       mcpServers: sessionMcpServers.dbServers,
       sessionMcpServers: sessionMcpServers.metadata,
+      personalConnectionDelegations,
       parentSessionId,
       createIdempotencyKey: payload.idempotencyKey ?? null,
       maxNestedAgentDepthOverride: payload.maxNestedAgentDepth ?? null,
@@ -1772,6 +1790,14 @@ export async function acceptSessionUserMessage(
     session: existingSession,
     updates: input.mcpCredentialUpdates ?? [],
   });
+  const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(db, workspaceId, settings);
+  const personalConnectionDelegations = await freezePersonalConnectionDelegations({
+    db,
+    workspaceId,
+    settings: runtimeSettings,
+    tools: existingSession.tools,
+    source: personalConnectionDelegationSourceForGrant(grant),
+  });
   const delegatedServiceInitiator = serviceInitiatorForGrant(grant);
   const { accepted, turn } = await postUserMessageTurn({
     db,
@@ -1790,6 +1816,7 @@ export async function acceptSessionUserMessage(
     reasoningEffortFallback: sessionReasoningEffort,
     turnExecutionPolicy,
     mcpCredentialUpdates,
+    personalConnectionDelegations,
     delivery: input.delivery ?? "send",
     origin: delegatedServiceInitiator ? "operator" : (input.origin ?? "human"),
     actor: grant.subjectId,

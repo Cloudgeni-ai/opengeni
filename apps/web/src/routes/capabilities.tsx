@@ -38,6 +38,7 @@ import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
 import {
+  apiKeyConnectionRef,
   capabilityConnectPlan,
   capabilityCounts,
   capabilityErrorToast,
@@ -50,9 +51,10 @@ import {
   filterCapabilityCatalogItems,
   isMissingCredentialsError,
   normalizeProviderDomain,
+  oauthConnectionRef,
+  oauthConnectionOwnership,
   oauthResumeAction,
   registryResultsForQuery,
-  subjectOAuthConnectionRef,
   resolveSheetItem,
   type CapabilityFilter,
   type CapabilityFormState,
@@ -85,6 +87,7 @@ import type {
   CapabilityCatalogItem,
   CapabilityPack,
   ConnectionMetadata,
+  ConnectionOwnership,
 } from "@/types";
 
 const PAGE_SIZE = 48;
@@ -514,6 +517,7 @@ export function CapabilitiesRoute({
           // deleted, so OAuth mints a fresh connection and the return handler
           // re-enables against it.
           ...(action.connectionId ? { connectionId: action.connectionId } : {}),
+          ownership: action.ownership,
           returnPath,
         });
         if (!response.authorizationUrl) {
@@ -542,14 +546,15 @@ export function CapabilitiesRoute({
           const connection = await client.createConnection(workspaceId, {
             providerDomain,
             kind: "api_key",
+            ownership: action.ownership,
             credential: { headers: action.headers },
           });
           await client.enableCapability(workspaceId, item.id, {
-            connectionRef: {
-              connectionId: connection.id,
-              providerDomain: connection.providerDomain,
-              kind: "api_key",
-            },
+            connectionRef: apiKeyConnectionRef(
+              action.ownership,
+              connection.id,
+              connection.providerDomain,
+            ),
           });
         }
         await refresh();
@@ -566,6 +571,7 @@ export function CapabilitiesRoute({
         const response = await startMcpOAuthWithTimeout(client, workspaceId, {
           ...(plan.mcpUrl ? { mcpUrl: plan.mcpUrl } : {}),
           ...(plan.providerDomain ? { providerDomain: plan.providerDomain } : {}),
+          ownership: action.ownership,
           returnPath,
         });
         if (!response.authorizationUrl) {
@@ -578,9 +584,14 @@ export function CapabilitiesRoute({
       }
 
       if (action.type === "api_key" && plan.mode === "api_key") {
-        // Reuse an existing workspace connection rather than creating a duplicate
-        // on a retry; only mint a new one when none exists.
-        const reuseId = connectionToReuseForApiKey(item, connections ?? [], plan.providerDomain);
+        // Reuse only a connection with the selected ownership rather than creating
+        // a duplicate on retry; workspace and personal rows never cross-reuse.
+        const reuseId = connectionToReuseForApiKey(
+          item,
+          connections ?? [],
+          plan.providerDomain,
+          action.ownership,
+        );
         const connection = reuseId
           ? await client.updateConnection(workspaceId, reuseId, {
               credential: { headers: action.headers },
@@ -589,17 +600,18 @@ export function CapabilitiesRoute({
           : await client.createConnection(workspaceId, {
               providerDomain: plan.providerDomain,
               kind: "api_key",
+              ownership: action.ownership,
               credential: { headers: action.headers },
             });
         // Build the enable ref from the connection row the API returns, never the
         // catalog domain — the API may canonicalize providerDomain, and the row
         // is the authoritative match the enable path validates against.
         await client.enableCapability(workspaceId, persisted.id, {
-          connectionRef: {
-            connectionId: connection.id,
-            providerDomain: connection.providerDomain,
-            kind: "api_key",
-          },
+          connectionRef: apiKeyConnectionRef(
+            action.ownership,
+            connection.id,
+            connection.providerDomain,
+          ),
         });
         await refresh();
         onRuntimeChanged();
@@ -646,7 +658,12 @@ export function CapabilitiesRoute({
     window.history.replaceState(null, "", window.location.pathname);
 
     if (outcome === "success") {
-      void resumeOAuthConnect(itemId, params.get("connectionId"), params.get("providerDomain"));
+      void resumeOAuthConnect(
+        itemId,
+        params.get("connectionId"),
+        params.get("providerDomain"),
+        oauthConnectionOwnership(params.get("ownership")),
+      );
     } else {
       const reason = params.get("reason");
       const item = itemId ? (items.find((candidate) => candidate.id === itemId) ?? null) : null;
@@ -694,6 +711,7 @@ export function CapabilitiesRoute({
     itemId: string | null,
     connectionId: string | null,
     providerDomain: string | null,
+    ownership: ConnectionOwnership | null,
   ) {
     setBusyId(itemId ?? "oauth-return");
     // Hoisted above the try so the catch can reopen the sheet from the freshly
@@ -749,8 +767,11 @@ export function CapabilitiesRoute({
         toast.success(`Connected ${item!.name}. Open it to finish enabling.`);
         return;
       }
+      const returnedConnection = conns?.find((candidate) => candidate.id === connectionId) ?? null;
+      const resolvedOwnership =
+        ownership ?? (returnedConnection?.subjectId === null ? "workspace" : "personal");
       await client.enableCapability(workspaceId, item!.id, {
-        connectionRef: subjectOAuthConnectionRef(refDomain),
+        connectionRef: oauthConnectionRef(resolvedOwnership, connectionId!, refDomain),
       });
       await refresh();
       onRuntimeChanged();

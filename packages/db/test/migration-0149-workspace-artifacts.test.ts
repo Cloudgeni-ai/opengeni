@@ -8,7 +8,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
-import { bootstrapWorkspace, createDb, createSession } from "../src/index";
+import { bootstrapWorkspace, createDb } from "../src/index";
 
 const migration = "0149_workspace_artifacts.sql";
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
@@ -91,19 +91,21 @@ describe("workspace artifacts migration", () => {
       const historicalPermissions = DEFAULT_FIRST_PARTY_MCP_PERMISSIONS.filter(
         (permission) => permission !== "connections:read" && !permission.startsWith("artifacts:"),
       );
-      const create = async (suffix: string, permissions?: string[], tools = historicalTools) =>
-        await createSession(db!.db, {
-          accountId: grant.accountId,
-          workspaceId: grant.workspaceId,
-          initialMessage: suffix,
-          resources: [],
-          tools: [],
-          metadata: {},
-          model: "gpt-5.6-sol",
-          sandboxBackend: "none",
-          ...(permissions === undefined ? {} : { firstPartyMcpPermissions: permissions as never }),
-          firstPartyMcpTools: [...tools],
-        });
+      const create = async (suffix: string, permissions?: string[], tools = historicalTools) => {
+        const id = crypto.randomUUID();
+        await admin`
+          insert into sessions (
+            id, account_id, workspace_id, initial_message, model,
+            sandbox_backend, sandbox_group_id,
+            first_party_mcp_permissions, first_party_mcp_tools, tool_policy
+          ) values (
+            ${id}, ${grant.accountId}, ${grant.workspaceId}, ${suffix}, 'gpt-5.6-sol',
+            'none', ${id},
+            ${permissions === undefined ? null : admin.json(permissions)}, ${admin.json(tools)},
+            ${admin.json({ mode: "explicit", inheritedFromSessionId: null })}
+          )`;
+        return { id };
+      };
       const inherited = await create("null-permissions");
       const empty = await create("empty", [], []);
       const narrow = await create("narrow", ["workspace:read"], ["session_get"]);

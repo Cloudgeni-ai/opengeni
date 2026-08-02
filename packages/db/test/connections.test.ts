@@ -904,7 +904,10 @@ describe("buildConnectionTokenResolver", () => {
         subjectScope: "subject",
       },
     });
-    expect(noSubject).toMatchObject({ status: "auth_needed", reason: "missing_connection" });
+    expect(noSubject).toMatchObject({
+      status: "auth_needed",
+      reason: "personal_authority_unavailable",
+    });
     expect(counts.load).toBe(0);
 
     const wrongOwner = await resolver({

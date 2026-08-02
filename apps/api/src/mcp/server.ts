@@ -130,6 +130,7 @@ import {
   requireVariableSetEncryption,
 } from "@opengeni/core";
 import {
+  captureScheduledTaskRestoreState,
   createValidatedScheduledTask,
   manualScheduledTaskTriggerUsageKey,
   manualScheduledTaskTriggerWorkflowId,
@@ -829,6 +830,7 @@ export function buildOpenGeniMcpServer(
       },
       async ({ id, ...raw }) => {
         const existing = await requireScheduledTask(deps.db, grant.workspaceId, id);
+        const previous = await captureScheduledTaskRestoreState(deps.db, existing);
         const payload = UpdateScheduledTaskRequest.parse(raw);
         requireVariableSetsUseForMcpAttachment(grant, payload.variableSetId);
         const update = await validatedScheduledTaskUpdate({
@@ -844,7 +846,7 @@ export function buildOpenGeniMcpServer(
         await syncUpdatedScheduledTask({
           db: deps.db,
           workflowClient: deps.workflowClient,
-          previous: existing,
+          previous,
           task,
         });
         return json(task);
@@ -859,13 +861,14 @@ export function buildOpenGeniMcpServer(
       },
       async ({ id }) => {
         const existing = await requireScheduledTask(deps.db, grant.workspaceId, id);
+        const previous = await captureScheduledTaskRestoreState(deps.db, existing);
         const task = await updateScheduledTask(deps.db, grant.workspaceId, id, {
           status: "paused",
         });
         await syncUpdatedScheduledTask({
           db: deps.db,
           workflowClient: deps.workflowClient,
-          previous: existing,
+          previous,
           task,
         });
         return json(task);
@@ -880,13 +883,14 @@ export function buildOpenGeniMcpServer(
       },
       async ({ id }) => {
         const existing = await requireScheduledTask(deps.db, grant.workspaceId, id);
+        const previous = await captureScheduledTaskRestoreState(deps.db, existing);
         const task = await updateScheduledTask(deps.db, grant.workspaceId, id, {
           status: "active",
         });
         await syncUpdatedScheduledTask({
           db: deps.db,
           workflowClient: deps.workflowClient,
-          previous: existing,
+          previous,
           task,
         });
         return json(task);

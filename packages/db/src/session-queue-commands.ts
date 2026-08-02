@@ -1,10 +1,12 @@
 import {
+  McpPersonalConnectionDelegations,
   metadataWithTurnExecutionPolicyV1,
   mergeResourceRefs,
   ResourceRef,
   resourceMountPath,
   stableJson,
   turnExecutionPolicyAuditMetadata,
+  type McpPersonalConnectionDelegation,
   type LatencyMode,
   type ReasoningEffort,
   type TurnExecutionPolicyV1,
@@ -106,6 +108,36 @@ export type AgentInternalUpdateCommandResult = {
   workspaceControlEventId: string | null;
   replay: boolean;
 };
+
+async function personalConnectionDelegationsForAgentActor(
+  db: Database,
+  workspaceId: string,
+  actor: Extract<SessionCommandActor, { type: "agent_attempt" }>,
+): Promise<McpPersonalConnectionDelegation[]> {
+  const [row] = await db
+    .select({ delegations: schema.sessionTurns.personalConnectionDelegations })
+    .from(schema.sessionTurns)
+    .where(
+      and(
+        eq(schema.sessionTurns.workspaceId, workspaceId),
+        eq(schema.sessionTurns.sessionId, actor.sessionId),
+        eq(schema.sessionTurns.id, actor.turnId),
+      ),
+    )
+    .limit(1);
+  if (!row) {
+    throw new SessionControlInvariantError(
+      `Agent authority turn not found: ${actor.sessionId}/${actor.turnId}`,
+    );
+  }
+  const parsed = McpPersonalConnectionDelegations.safeParse(row.delegations);
+  if (!parsed.success) {
+    throw new SessionControlInvariantError(
+      `Agent authority turn has malformed personal MCP delegation state: ${actor.sessionId}/${actor.turnId}`,
+    );
+  }
+  return parsed.data.map((delegation) => ({ ...delegation }));
+}
 
 async function lockSession(
   db: Database,
@@ -1154,6 +1186,7 @@ export async function submitHumanPromptInTransaction(
     /** Trusted API/core admission snapshot. Omitted only by legacy low-level callers. */
     turnExecutionPolicy?: TurnExecutionPolicyV1;
     source: "user" | "api";
+    personalConnectionDelegations?: McpPersonalConnectionDelegation[];
     mcpCredentialUpdates?: Array<{
       id: string;
       headersEncrypted: Record<string, string>;
@@ -1452,6 +1485,9 @@ export async function submitHumanPromptInTransaction(
         : {},
       lineage: { actor: input.actor.type },
       ...initiatorColumns(frozenInitiator),
+      personalConnectionDelegations: editedSourceTurn
+        ? editedSourceTurn.personalConnectionDelegations
+        : (input.personalConnectionDelegations ?? []),
     })
     .returning();
   if (!turn) throw new SessionControlInvariantError("Prompt turn was not inserted");
@@ -1720,6 +1756,11 @@ export async function sendAgentMessageInTransaction(
     targetSessionId: input.targetSessionId,
     action: "message",
   });
+  const personalConnectionDelegations = await personalConnectionDelegationsForAgentActor(
+    db,
+    input.workspaceId,
+    input.actor,
+  );
   const session = await lockSession(db, input.workspaceId, input.targetSessionId);
   if (session.status === "cancelled") {
     throw new QueueCommandConflictError(
@@ -1754,6 +1795,7 @@ export async function sendAgentMessageInTransaction(
         callerAttemptId: input.actor.attemptId,
         callerExecutionGeneration: input.actor.executionGeneration,
       },
+      personalConnectionDelegations,
       state: "pending",
     })
     .returning({ id: schema.sessionSystemUpdates.id });
@@ -1893,6 +1935,11 @@ export async function steerAgentSessionInTransaction(
     targetSessionId: input.targetSessionId,
     action: "steer",
   });
+  const personalConnectionDelegations = await personalConnectionDelegationsForAgentActor(
+    db,
+    input.workspaceId,
+    input.actor,
+  );
   const resumed = await autoResumeSessionBranchInTransaction(db, {
     workspaceId: input.workspaceId,
     sessionId: input.targetSessionId,
@@ -1952,6 +1999,7 @@ export async function steerAgentSessionInTransaction(
         callerAttemptId: input.actor.attemptId,
         callerExecutionGeneration: input.actor.executionGeneration,
       },
+      personalConnectionDelegations,
       state: "pending",
     })
     .returning({ id: schema.sessionSystemUpdates.id });

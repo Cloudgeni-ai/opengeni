@@ -166,12 +166,17 @@ describe("release schema contract", () => {
         (migrations.has("0149_workspace_artifacts.sql") ? 1 : 0) +
         (migrations.has("0150_slack_task_interactions.sql") ? 1 : 0) +
         (migrations.has("0151_slack_delivery_backoff.sql") ? 1 : 0) +
-        (migrations.has("0152_hierarchical_memory_foundation.sql") ? 1 : 0),
+        (migrations.has("0152_hierarchical_memory_foundation.sql") ? 1 : 0) +
+        (migrations.has("0153_mcp_personal_connection_delegations.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "8a8cfe345f4d749ce10b102fa4326a4d6293fa8e71807daed59f6c856f5949d2",
+      "fec58e3fe5d2ca722e1841aee0079b382b06126bc13ab0cce65441325cb7aaa9",
     );
-    expect(contract.latestMigration).toBe("0152_hierarchical_memory_foundation.sql");
+    expect(contract.latestMigration).toBe("0153_mcp_personal_connection_delegations.sql");
+    expect(migrations.get("0153_mcp_personal_connection_delegations.sql")).toMatchObject({
+      sha256: "e27385280b8342ddd2bad9fea000d823e0e96c46b1c340403afaca81613610cf",
+      deploymentMode: "rolling",
+    });
     expect(migrations.get("0152_hierarchical_memory_foundation.sql")).toMatchObject({
       sha256: "bf3c4ee84a4d9bce7503607d3f34c7046890e5daddeaf0f8390cbd06fb468cdc",
       deploymentMode: "maintenance",

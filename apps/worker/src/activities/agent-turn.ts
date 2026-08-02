@@ -27,6 +27,7 @@ import {
   CODEX_CREDENTIAL_LEASE_TTL_MS,
   getCodexRotationSettings,
   getWorkspaceModelPolicy,
+  getWorkspaceGrant,
   listCodexAccountStatuses,
   fetchCodexUsageForAccount,
   getSessionCodexState,
@@ -201,6 +202,8 @@ import { mergeResourceRefs } from "./common";
 import {
   assertSessionAllowsProductModel,
   defaultSessionMcpServerIds,
+  directPersonalConnectionSubjectId,
+  withFrozenPersonalConnectionDelegations,
   resolveSessionToolPolicy,
 } from "@opengeni/core";
 import { maybeCompactContext, settleFailedContextCompactionLandmark } from "./context-compaction";
@@ -327,7 +330,6 @@ import {
   type SessionTurn,
   type ToolAuthNeededPayload,
   type TurnExecutionPolicyV1,
-  type TurnInitiator,
 } from "@opengeni/contracts";
 import { createHash, randomUUID } from "node:crypto";
 
@@ -337,11 +339,11 @@ import { createHash, randomUUID } from "node:crypto";
 // budget against the same window.
 export const PROVIDER_BACKPRESSURE_DELAY_MS = 60_000;
 
-/** Personal connection authority follows the immutable human turn initiator, never the worker. */
+/** Broad personal lookup is allowed only for a direct human/API command. */
 export function credentialSubjectIdForTurnInitiator(
-  initiator: Pick<TurnInitiator, "kind" | "subjectId">,
+  turn: Pick<SessionTurn, "source" | "initiator" | "initiatorContext">,
 ): string | undefined {
-  return initiator.kind === "subject" ? initiator.subjectId : undefined;
+  return directPersonalConnectionSubjectId(turn);
 }
 
 /**
@@ -353,7 +355,7 @@ export function credentialSubjectIdForTurnInitiator(
 export function isDirectHumanTurnInitiation(
   turn: Pick<SessionTurn, "source" | "initiator" | "initiatorContext">,
 ): boolean {
-  if (turn.source !== "user" || turn.initiator.kind !== "subject") {
+  if ((turn.source !== "user" && turn.source !== "api") || turn.initiator.kind !== "subject") {
     return false;
   }
   return !["via", "viaTruncated", "provenanceError", "backfill"].some((key) =>
@@ -5368,8 +5370,23 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         attemptId: input.attemptId,
         turn,
       });
+      const personalConnectionDelegations = turn.personalConnectionDelegations;
+      const delegatedMembershipChecks = new Map<string, Promise<boolean>>();
+      const delegatedOwnerHasMembership = async (subjectId: string): Promise<boolean> => {
+        const existing = delegatedMembershipChecks.get(subjectId);
+        if (existing) return await existing;
+        const check = getWorkspaceGrant(db, subjectId, input.workspaceId).then(Boolean);
+        delegatedMembershipChecks.set(subjectId, check);
+        return await check;
+      };
+      const resolveFrozenCredential = withFrozenPersonalConnectionDelegations({
+        resolveCredential: rawResolveCredential,
+        settings: runSettings,
+        personalConnectionDelegations,
+        ownerHasWorkspaceMembership: delegatedOwnerHasMembership,
+      });
       const resolveCredential: typeof rawResolveCredential = async (request) => {
-        const result = await rawResolveCredential(request);
+        const result = await resolveFrozenCredential(request);
         if (result.status === "ok") {
           registerSecretRedactions(
             headerSecretRedactions("MCP", result.headers, Object.keys(result.headers)),
@@ -5377,7 +5394,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         }
         return result;
       };
-      const credentialSubjectId = credentialSubjectIdForTurnInitiator(turn.initiator);
+      const credentialSubjectId = credentialSubjectIdForTurnInitiator(turn);
       preparedTools = await waitForTurnOperation(
         withCodex(() =>
           runtime.prepareTools(runSettings, turnTools, {
