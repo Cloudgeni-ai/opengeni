@@ -1,5 +1,11 @@
 # @opengeni/documents
 
+## 0.2.67
+
+### Patch Changes
+
+- 6500589: Automatically restore and list each workspace's Default document collection so uploads no longer require creating a base first, while preserving existing base-specific APIs and optional collection organization.
+
 ## 0.2.66
 
 ### Patch Changes

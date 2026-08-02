@@ -1,5 +1,14 @@
 # @opengeni/api-router
 
+## 0.16.2
+
+### Patch Changes
+
+- 6500589: Automatically restore and list each workspace's Default document collection so uploads no longer require creating a base first, while preserving existing base-specific APIs and optional collection organization.
+- Updated dependencies [6500589]
+  - @opengeni/documents@0.2.67
+  - @opengeni/core@0.17.2
+
 ## 0.16.1
 
 ### Patch Changes
