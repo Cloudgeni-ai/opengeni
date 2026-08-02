@@ -36,7 +36,8 @@ Ordinary create/correct projections require an `active` or `approved`
 `kind=decision` memory inside its validity window. Supersession projections
 require the old row to be `superseded` and to name the exact replacement. A
 correction requires the replacement row to name the exact retired memory. These
-rules preserve history rather than silently presenting stale text as current.
+rules preserve history rather than silently presenting stale text as current. A
+correction or supersession that points to the same memory row fails closed.
 
 Governed-learning notifications remain later scope. They must enter through
 their own durable immutable receipts; they cannot be synthesized from a
@@ -53,14 +54,17 @@ projection contains only:
 - created/corrected/superseded change identity and one related memory id;
 - occurrence timestamp, importance, and effective `auto|review` mode;
 - canonical secret-redacted summary with an explicit truncation fact;
-- normalized namespace and a sorted, de-duplicated bounded label subset;
+- normalized namespace and a sorted, de-duplicated bounded label subset, only
+  when the shared secret redactor leaves every selector unchanged;
 - an optional secret-redacted bounded owner label;
 - immutable workspace/memory identifiers for a later UI link.
 
 Memory bodies, metadata, source references/excerpts, embeddings, hidden prompts,
 connection ids, channel ids, credentials, and raw actor subject ids are not in
-the projection type. The final stable JSON projection is independently bounded
-to 4 KiB.
+the projection type. Recognized credential material in namespace or labels is a
+deterministic denial rather than a selector rewrite, and malformed summary,
+namespace, or labels input also denies instead of throwing. The final stable
+JSON projection is independently bounded to 4 KiB.
 
 ## Loop prevention and idempotency
 

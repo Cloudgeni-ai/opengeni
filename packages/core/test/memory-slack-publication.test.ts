@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { redactSensitiveText } from "@opengeni/contracts";
 import {
   DEFAULT_MEMORY_SLACK_PUBLICATION_POLICY,
   MEMORY_SLACK_PROJECTION_MAX_UTF8_BYTES,
@@ -175,6 +176,30 @@ describe("Memory Slack publication security contract", () => {
     );
   });
 
+  test("fails closed when namespace or labels contain recognized credential material", () => {
+    const credential = `github_pat_${"a".repeat(32)}`;
+    const caseSensitiveCredential = ["AI", "za", "b".repeat(35)].join("");
+    expect(redactSensitiveText(credential)).toBe("[redacted]");
+    expect(redactSensitiveText(caseSensitiveCredential)).toBe("[redacted]");
+
+    expect(
+      evaluateMemorySlackPublication(candidate({ memory: { namespace: credential } })),
+    ).toEqual({ eligible: false, reason: "invalid_input" });
+    expect(
+      evaluateMemorySlackPublication(candidate({ memory: { namespace: caseSensitiveCredential } })),
+    ).toEqual({ eligible: false, reason: "invalid_input" });
+    expect(
+      evaluateMemorySlackPublication(
+        candidate({ memory: { labels: ["architecture", credential] } }),
+      ),
+    ).toEqual({ eligible: false, reason: "invalid_input" });
+    expect(
+      evaluateMemorySlackPublication(
+        candidate({ memory: { labels: ["architecture", caseSensitiveCredential] } }),
+      ),
+    ).toEqual({ eligible: false, reason: "invalid_input" });
+  });
+
   test("fails closed across account and workspace boundaries", () => {
     expect(
       evaluateMemorySlackPublication(
@@ -294,6 +319,23 @@ describe("Memory Slack publication security contract", () => {
     if (!superseded.eligible) return;
     expect(superseded.projection.changeKind).toBe("superseded");
     expect(superseded.idempotencyKey).not.toBe(corrected.idempotencyKey);
+
+    expect(
+      evaluateMemorySlackPublication(
+        candidate({
+          memory: { supersedesId: memoryId },
+          change: { kind: "corrected", relatedMemoryId: memoryId },
+        }),
+      ),
+    ).toEqual({ eligible: false, reason: "invalid_change_lineage" });
+    expect(
+      evaluateMemorySlackPublication(
+        candidate({
+          memory: { status: "superseded", supersededById: memoryId },
+          change: { kind: "superseded", relatedMemoryId: memoryId },
+        }),
+      ),
+    ).toEqual({ eligible: false, reason: "invalid_change_lineage" });
   });
 
   test("produces stable idempotency for canonical equivalent inputs and changes it for new truth", () => {
@@ -328,6 +370,21 @@ describe("Memory Slack publication security contract", () => {
     ).toEqual({ eligible: false, reason: "missing_summary" });
     expect(
       evaluateMemorySlackPublication(candidate({ memory: { namespace: "../private" } })),
+    ).toEqual({ eligible: false, reason: "invalid_input" });
+    expect(
+      evaluateMemorySlackPublication(
+        candidate({ distribution: { shareSummary: 42 as unknown as string } }),
+      ),
+    ).toEqual({ eligible: false, reason: "invalid_input" });
+    expect(
+      evaluateMemorySlackPublication(
+        candidate({ memory: { namespace: null as unknown as string } }),
+      ),
+    ).toEqual({ eligible: false, reason: "invalid_input" });
+    expect(
+      evaluateMemorySlackPublication(
+        candidate({ memory: { labels: { unsafe: true } as unknown as readonly string[] } }),
+      ),
     ).toEqual({ eligible: false, reason: "invalid_input" });
   });
 });

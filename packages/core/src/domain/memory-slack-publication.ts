@@ -273,6 +273,13 @@ function validIdentity(input: MemorySlackPublicationInput): boolean {
     uuids.every((value) => UUID_PATTERN.test(value)) &&
     Number.isSafeInteger(input.memory.version) &&
     input.memory.version > 0 &&
+    typeof input.memory.namespace === "string" &&
+    Array.isArray(input.memory.labels) &&
+    input.memory.labels.every((label) => typeof label === "string") &&
+    (input.change.ownerLabel === undefined ||
+      input.change.ownerLabel === null ||
+      typeof input.change.ownerLabel === "string") &&
+    typeof input.distribution.shareSummary === "string" &&
     IMPORTANCES.has(input.distribution.importance) &&
     REQUESTED_MODES.has(input.distribution.slackMode) &&
     CHANGE_KINDS.has(input.change.kind) &&
@@ -316,12 +323,14 @@ function validChangeLineage(input: MemorySlackPublicationInput): boolean {
     case "corrected":
       return (
         input.change.relatedMemoryId !== null &&
+        input.change.relatedMemoryId !== input.memory.id &&
         input.memory.supersedesId === input.change.relatedMemoryId &&
         input.memory.supersededById === null
       );
     case "superseded":
       return (
         input.change.relatedMemoryId !== null &&
+        input.change.relatedMemoryId !== input.memory.id &&
         input.memory.supersededById === input.change.relatedMemoryId
       );
   }
@@ -350,8 +359,11 @@ function effectiveDeliveryMode(
 }
 
 function normalizeNamespace(value: string): string | null {
-  const namespace = value.trim().toLowerCase();
+  const trimmed = value.trim();
+  if (redactSensitiveText(trimmed) !== trimmed) return null;
+  const namespace = trimmed.toLowerCase();
   if (!namespace || utf8Bytes(namespace) > MEMORY_SLACK_NAMESPACE_MAX_UTF8_BYTES) return null;
+  if (redactSensitiveText(namespace) !== namespace) return null;
   const segments = namespace.split("/");
   if (segments.some((segment) => !SELECTOR_SEGMENT_PATTERN.test(segment))) return null;
   return segments.join("/");
@@ -364,8 +376,11 @@ function normalizeLabels(
   const labels = new Set<string>();
   for (const value of values) {
     if (typeof value !== "string") return null;
-    const label = value.trim().toLowerCase();
+    const trimmed = value.trim();
+    if (redactSensitiveText(trimmed) !== trimmed) return null;
+    const label = trimmed.toLowerCase();
     if (
+      redactSensitiveText(label) !== label ||
       !SELECTOR_SEGMENT_PATTERN.test(label) ||
       utf8Bytes(label) > MEMORY_SLACK_LABEL_MAX_UTF8_BYTES
     ) {
