@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { errorCodeToJSON } from "@opengeni/agent-proto";
-import type { SessionEventType } from "@opengeni/contracts";
+import { SandboxBackend, type SessionEventType } from "@opengeni/contracts";
 import type { EventLogger } from "@opengeni/events";
 import type { Attributes, AttributeValue, Observability } from "@opengeni/observability";
 import {
@@ -19,7 +19,6 @@ export type CreditBalanceGauge = { accountId: string; balanceMicros: number };
 const turnTrackers = new WeakMap<Observability, TurnLifecycleMetrics>();
 const creditBalanceGaugeAccounts = new WeakMap<Observability, Set<string>>();
 const modelCacheCounterTotals = new WeakMap<Observability, Map<string, number>>();
-const retainedProcessTerminalBacklogTotals = new WeakMap<Observability, number>();
 
 // A worker process reaching one trillion tokens in one provider/cache counter is
 // already far outside an ordinary scrape lifetime. Refuse further increments
@@ -345,6 +344,41 @@ export function recordSandboxLeaseGauges(
   }
 }
 
+export const SANDBOX_INVENTORY_PROJECTION_DOMAINS = [
+  "leases",
+  "checkpoint_artifacts",
+  "rotation_backlog",
+  "retained_processes",
+  "expired_drains",
+] as const;
+
+export type SandboxInventoryProjectionDomain =
+  (typeof SANDBOX_INVENTORY_PROJECTION_DOMAINS)[number];
+
+export function recordSandboxInventoryProjectionSuccess(
+  observability: Observability,
+  domain: SandboxInventoryProjectionDomain,
+  timestampSeconds = Date.now() / 1_000,
+): void {
+  observability.setGauge({
+    name: "opengeni_sandbox_inventory_refresh_timestamp_seconds",
+    help: "Unix timestamp of the last complete successful sandbox inventory projection by domain.",
+    labels: { domain },
+    value: timestampSeconds,
+  });
+}
+
+export function recordSandboxInventoryProjectionFailure(
+  observability: Observability,
+  domain: SandboxInventoryProjectionDomain,
+): void {
+  observability.incrementCounter({
+    name: "opengeni_sandbox_inventory_refresh_failures_total",
+    help: "Failed sandbox inventory projection refreshes by domain.",
+    labels: { domain },
+  });
+}
+
 export function recordCreditBalanceGauges(
   observability: Observability,
   balances: CreditBalanceGauge[],
@@ -510,9 +544,7 @@ export function recordRetainedProcessInventoryGauges(
     current.terminal += Math.max(0, count.terminalOwnerCount);
   }
 
-  let terminalTotal = 0;
   for (const [ownerState, count] of normalized) {
-    terminalTotal += count.terminal;
     observability.setGauge({
       name: "opengeni_retained_processes_active",
       help: "Current active retained provider processes by durable owner state.",
@@ -526,31 +558,11 @@ export function recordRetainedProcessInventoryGauges(
       value: count.terminal,
     });
   }
-  const previous = retainedProcessTerminalBacklogTotals.get(observability);
-  if (previous !== undefined && terminalTotal > previous) {
-    observability.incrementCounter({
-      name: "opengeni_retained_process_terminal_owner_backlog_growth_total",
-      help: "Positive growth in terminal-owner retained-process backlog between app samples.",
-      amount: terminalTotal - previous,
-    });
-  }
-  retainedProcessTerminalBacklogTotals.set(observability, terminalTotal);
 }
 
-const EXPIRED_DRAINING_BACKENDS = [
-  "none",
-  "local",
-  "docker",
-  "modal",
-  "e2b",
-  "daytona",
-  "blaxel",
-  "runloop",
-  "selfhosted",
-  "unknown",
-] as const;
+export const EXPIRED_DRAINING_BACKENDS = [...SandboxBackend.options, "unknown"] as const;
 const EXPIRED_DRAINING_BACKEND_SET = new Set<string>(EXPIRED_DRAINING_BACKENDS);
-const EXPIRED_DRAINING_AGE_BUCKETS = ["lt_5m", "5m_1h", "1h_1d", "gte_1d"] as const;
+export const EXPIRED_DRAINING_AGE_BUCKETS = ["lt_5m", "5m_1h", "1h_1d", "gte_1d"] as const;
 
 export function recordExpiredDrainingSandboxLeaseGauges(
   observability: Observability,

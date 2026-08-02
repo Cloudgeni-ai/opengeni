@@ -403,6 +403,8 @@ export {
   type RoutableBackendSession,
   type ResolvedActiveBackend,
   type RoutingMutationSettlementResult,
+  type RoutingSandboxOperationObservation,
+  type RoutingSandboxOperationObserver,
   type RoutingRetainedProcess,
   type RoutingRetainedProcessAdoption,
   type RoutingRetainedProcessTerminalProof,

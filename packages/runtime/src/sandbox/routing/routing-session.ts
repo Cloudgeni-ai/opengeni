@@ -95,7 +95,7 @@ export interface ResolvedActiveBackend {
   session: RoutableBackendSession;
   /** The sandbox id this backend serves (`null` == the session's group sandbox). */
   sandboxId: string | null;
-  /** A label for diagnostics ("modal" | "selfhosted" | the sandbox name). */
+  /** A bounded provider-backend label (for example "modal" or "selfhosted"). */
   kind: string;
   /** Exact durable home-lease epoch for a persistable provider. Absent for
    * connected-machine and other non-persistable route targets. */
@@ -175,6 +175,10 @@ export interface RoutingSandboxSessionDeps {
   maxFenceRetries?: number;
   /** Optional structured-log sink for swap/fence transitions (diagnostics). */
   onTransition?: (event: RoutingTransitionEvent) => void;
+  /** Observe one physical provider-session method invocation. The callback is
+   * diagnostic only: callback failures are isolated and can never change the
+   * provider result or durable mutation-settlement ordering. */
+  onOperation?: RoutingSandboxOperationObserver;
   /** Admit a filesystem-writing operation after resolving its exact route but
    * before invoking the provider. A rejection fails closed and is deliberately
    * outside provider fence-retry/error handling, so it can never replay the op
@@ -230,6 +234,17 @@ export interface RoutingSandboxSessionDeps {
     backend: ResolvedActiveBackend;
   }) => Promise<DefaultBackendLossResult | null>;
 }
+
+export type RoutingSandboxOperationObservation = {
+  backend: string;
+  op: string;
+  outcome: "ok" | "failed";
+  durationMs: number;
+};
+
+export type RoutingSandboxOperationObserver = (
+  observation: RoutingSandboxOperationObservation,
+) => void;
 
 export type DefaultBackendLossResult = {
   leaseEpoch: number;
@@ -795,7 +810,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     if (!write) throw new RoutingUnsupportedError(op, record.backend.kind);
     let result: string;
     try {
-      result = await withSandboxProviderOperation(record.backend.session, () =>
+      result = await this.invokeProviderOperation(op, record.backend, () =>
         write.call(record.backend.session, args),
       );
     } catch (error) {
@@ -859,7 +874,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     await this.ensureParentPromotion(record);
     const write = record.backend.session.writeStdin;
     if (!write) throw new RoutingUnsupportedError("writeStdin", record.backend.kind);
-    const result = await withSandboxProviderOperation(record.backend.session, () =>
+    const result = await this.invokeProviderOperation("writeStdin", record.backend, () =>
       write.call(record.backend.session, args),
     );
     const proof = retainedProcessTerminalProof(result, providerSessionId);
@@ -895,7 +910,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         : undefined;
       let result: T;
       try {
-        result = await withSandboxProviderOperation(backend.session, () => fn(backend.session));
+        result = await this.invokeProviderOperation(op, backend, () => fn(backend.session));
       } catch (error) {
         if (mutatesWorkspace && this.deps.afterMutation) {
           try {
@@ -1046,6 +1061,31 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     throw lastError ?? new Error(`routing op "${op}" exhausted fence retries`);
   }
 
+  private async invokeProviderOperation<T>(
+    op: string,
+    backend: ResolvedActiveBackend,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const startedAt = performance.now();
+    let outcome: RoutingSandboxOperationObservation["outcome"] = "failed";
+    try {
+      const result = await withSandboxProviderOperation(backend.session, fn);
+      outcome = "ok";
+      return result;
+    } finally {
+      try {
+        this.deps.onOperation?.({
+          backend: backend.kind,
+          op,
+          outcome,
+          durationMs: Math.max(0, performance.now() - startedAt),
+        });
+      } catch {
+        // Telemetry is never part of provider or durable-settlement authority.
+      }
+    }
+  }
+
   /**
    * The failure-visibility boundary for the `exec_command` SDK capability tool — the
    * dominant fault surface, and the one whose thrown `SelfhostedControlError` reaches
@@ -1169,14 +1209,14 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     await this.ensureParentPromotion(record);
     const execCommand = record.backend.session.execCommand;
     if (execCommand) {
-      return await withSandboxProviderOperation(record.backend.session, () =>
+      return await this.invokeProviderOperation("execCommand", record.backend, () =>
         execCommand.call(record.backend.session, args),
       );
     }
     const exec = record.backend.session.exec;
     if (exec) {
       return formatExecResult(
-        await withSandboxProviderOperation(record.backend.session, () =>
+        await this.invokeProviderOperation("execCommand", record.backend, () =>
           exec.call(record.backend.session, args),
         ),
       );

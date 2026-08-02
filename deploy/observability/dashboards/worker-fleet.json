@@ -412,8 +412,8 @@
     },
     {
       "type": "timeseries",
-      "title": "Sandbox leases by liveness",
-      "description": "",
+      "title": "Sandbox lease inventory by liveness",
+      "description": "Fresh database projection. Cold is durable history, not active capacity; warming/warm/draining are live lifecycle states.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -444,7 +444,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (liveness) (opengeni_sandbox_leases)",
+          "expr": "opengeni:sandbox_leases:fresh_max",
           "legendFormat": "{{liveness}}",
           "datasource": {
             "type": "prometheus",

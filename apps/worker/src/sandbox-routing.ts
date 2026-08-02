@@ -52,6 +52,7 @@ import {
   type RoutableSandbox,
   type ResolvedActiveBackend,
   type RoutingMutationSettlementResult,
+  type RoutingSandboxOperationObserver,
   type RoutingRetainedProcess,
   type RoutingRetainedProcessTerminalProof,
   type SelfhostedOpObserver,
@@ -78,6 +79,8 @@ export type RoutingWiringServices = {
   /** The per-op observer wired into every selfhosted session this turn builds
    *  (out-of-band telemetry — op metrics + machine.* events). Absent ⇒ no-op. */
   onOp?: SelfhostedOpObserver;
+  /** Every physical routed provider call, across cloud and selfhosted homes. */
+  onSandboxOperation?: RoutingSandboxOperationObserver;
   /** The op-stream durable-resume journal (the Temporal adaptation from
    *  op-journal.ts): attach generation + settled-frontier persistence. Absent ⇒
    *  the runtime defaults (generation "1", no persistence) — tests / non-turn
@@ -784,6 +787,7 @@ export function wrapTurnBoxWithRouting(
       return pointer ?? { activeSandboxId: null, activeEpoch: 0 };
     },
     resolveActiveBackend: resolver,
+    ...(services.onSandboxOperation ? { onOperation: services.onSandboxOperation } : {}),
     ...(beforeMutation ? { beforeMutation } : {}),
     ...(afterMutation ? { afterMutation } : {}),
     ...(beforeProcessMutation ? { beforeProcessMutation } : {}),
@@ -927,6 +931,7 @@ export function wrapLazyTurnBoxWithRouting(
       }
       return routedResolver(pointer);
     },
+    ...(services.onSandboxOperation ? { onOperation: services.onSandboxOperation } : {}),
     ...(beforeMutation ? { beforeMutation } : {}),
     ...(afterMutation ? { afterMutation } : {}),
     ...(beforeProcessMutation ? { beforeProcessMutation } : {}),

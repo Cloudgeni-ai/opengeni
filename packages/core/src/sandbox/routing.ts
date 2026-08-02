@@ -1,4 +1,4 @@
-// apps/api/src/sandbox/routing.ts — wire the agent-loop-free routing proxy to the
+// apps/api/src/sandbox/channel-a.ts — wire the agent-loop-free routing proxy to the
 // real DB pointer + the live NATS control plane for the API-DIRECT Channel-A path
 // (M7). Symmetric with apps/worker/src/sandbox-routing.ts (the turn path).
 //
@@ -42,6 +42,7 @@ import {
   type RoutableSandbox,
   type RoutingRetainedProcess,
   type RoutingRetainedProcessTerminalProof,
+  type RoutingSandboxOperationObserver,
   type SelfhostedRelayConfig,
 } from "@opengeni/runtime/sandbox";
 
@@ -56,6 +57,7 @@ export type ChannelARoutingServices = {
   db: Database;
   settings: Settings;
   bus?: EventBus;
+  onSandboxOperation?: RoutingSandboxOperationObserver;
 };
 
 /** Map the deployment relay URL to the leaf's `SelfhostedRelayConfig` shape. The
@@ -432,6 +434,7 @@ export function wrapChannelABoxWithRouting(
       return pointer ?? { activeSandboxId: null, activeEpoch: 0 };
     },
     resolveActiveBackend: resolver,
+    ...(services.onSandboxOperation ? { onOperation: services.onSandboxOperation } : {}),
     ...(beforeMutation ? { beforeMutation } : {}),
     ...(afterMutation ? { afterMutation } : {}),
     ...(beforeProcessMutation ? { beforeProcessMutation } : {}),

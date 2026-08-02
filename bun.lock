@@ -337,6 +337,7 @@
       "name": "@opengeni/observability",
       "version": "0.3.0",
       "dependencies": {
+        "@opengeni/contracts": "workspace:*",
         "prom-client": "^15.1.3",
       },
       "devDependencies": {
