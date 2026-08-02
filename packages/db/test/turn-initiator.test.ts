@@ -575,6 +575,7 @@ describe("immutable session turn initiators", () => {
         prompt: "Continue goal",
         policy: { model: "must-not-win-over-steer" },
       },
+      personalConnectionDelegations: sourceDelegations,
     });
     await addSessionSystemUpdate(client.db, {
       accountId: grant.accountId,
@@ -590,6 +591,7 @@ describe("immutable session turn initiators", () => {
         childSessionId: source.id,
         status: "idle",
       },
+      personalConnectionDelegations: sourceDelegations,
     });
     const steeredClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
       sessionId: steeredTarget.id,
@@ -744,6 +746,142 @@ describe("immutable session turn initiators", () => {
     expect(mixedClaim.turn.source).toBe("goal");
     expect(mixedClaim.turn.model).toBe("goal-routed-model");
     expect(mixedClaim.turn.reasoningEffort).toBe("high");
+  });
+
+  test("Agent Steer and ordinary machine inputs split when their frozen personal authority differs", async () => {
+    const grant = await fixture();
+    const steerDelegations = [
+      {
+        serverId: "linear",
+        connectionId: crypto.randomUUID(),
+        ownerSubjectId: grant.subjectId,
+        providerDomain: "linear.app",
+        kind: "oauth2" as const,
+      },
+    ];
+    const noticeDelegations = [
+      {
+        serverId: "github",
+        connectionId: crypto.randomUUID(),
+        ownerSubjectId: "user:other-authority",
+        providerDomain: "github.com",
+        kind: "oauth2" as const,
+      },
+    ];
+    const source = await createSession(client.db, {
+      ...sessionInput(grant),
+      personalConnectionDelegations: steerDelegations,
+    });
+    const sourceStart = await initializeSessionStartAtomically(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: source.id,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    if (!sourceStart.turn) throw new Error("missing Steer source turn");
+
+    const target = await createSession(client.db, sessionInput(grant));
+    const steer = await addSessionSystemUpdate(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: target.id,
+      kind: "agent_steer_instruction",
+      classification: "action_required",
+      sourceId: source.id,
+      dedupeKey: crypto.randomUUID(),
+      summary: "Use the Steer authority",
+      payload: {
+        type: "agent_steer_instruction",
+        instruction: "Use the Steer authority",
+        operationId: crypto.randomUUID(),
+      },
+      lineage: {
+        callerSessionId: source.id,
+        callerTurnId: sourceStart.turn.id,
+        callerAttemptId: crypto.randomUUID(),
+        callerExecutionGeneration: sourceStart.turn.executionGeneration,
+      },
+      personalConnectionDelegations: steerDelegations,
+    });
+    if (!steer.added) throw new Error(`failed to add Steer: ${steer.reason}`);
+    const notice = await addSessionSystemUpdate(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: target.id,
+      kind: "agent_message",
+      classification: "info",
+      sourceId: "other-authority-notice",
+      dedupeKey: crypto.randomUUID(),
+      summary: "Use the notice authority later",
+      payload: {
+        type: "agent_message",
+        text: "Use the notice authority later",
+        operationId: crypto.randomUUID(),
+      },
+      lineage: {},
+      personalConnectionDelegations: noticeDelegations,
+    });
+    if (!notice.added) throw new Error(`failed to add notice: ${notice.reason}`);
+
+    const steerAttemptId = crypto.randomUUID();
+    const steerClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: target.id,
+      workflowId: `session-${target.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: steerAttemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (steerClaim.action !== "claimed") throw new Error("Steer batch was not claimed");
+    expect(steerClaim.turn.personalConnectionDelegations).toEqual(steerDelegations);
+    expect(
+      (
+        await listSessionSystemUpdatesForTurn(
+          client.db,
+          grant.workspaceId!,
+          target.id,
+          steerClaim.turn.id,
+        )
+      ).map((update) => update.id),
+    ).toEqual([steer.update.id]);
+    expect(
+      (await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, target.id)).map(
+        (update) => update.id,
+      ),
+    ).toEqual([notice.update.id]);
+
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: target.id,
+      turnId: steerClaim.turn.id,
+      triggerEventId: steerClaim.turn.triggerEventId,
+      attemptId: steerAttemptId,
+      turnStatus: "completed",
+      sessionStatus: "queued",
+      activeTurnId: null,
+      events: [],
+    });
+
+    const noticeClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: target.id,
+      workflowId: `session-${target.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (noticeClaim.action !== "claimed") throw new Error("notice batch was not claimed");
+    expect(noticeClaim.turn.personalConnectionDelegations).toEqual(noticeDelegations);
+    expect(
+      (
+        await listSessionSystemUpdatesForTurn(
+          client.db,
+          grant.workspaceId!,
+          target.id,
+          noticeClaim.turn.id,
+        )
+      ).map((update) => update.id),
+    ).toEqual([notice.update.id]);
   });
 
   test("ordinary machine inputs batch only across the same frozen personal authority", async () => {

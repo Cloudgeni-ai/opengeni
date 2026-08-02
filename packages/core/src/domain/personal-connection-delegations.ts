@@ -11,6 +11,8 @@ import {
   getWorkspaceGrant,
   listConnectionsMetadata,
   type Database,
+  type ResolveConnectionCredentialInput,
+  type ResolveConnectionCredentialResult,
 } from "@opengeni/db";
 
 export type PersonalConnectionDelegationSource =
@@ -153,6 +155,66 @@ export function personalConnectionDelegationForServer(
         (!ref.kind || !delegation.kind || delegation.kind === ref.kind),
     ) ?? null
   );
+}
+
+type ConnectionCredentialResolver = (
+  request: ResolveConnectionCredentialInput,
+) => Promise<ResolveConnectionCredentialResult>;
+
+function personalAuthorityUnavailable(
+  request: ResolveConnectionCredentialInput,
+): ResolveConnectionCredentialResult {
+  const ref = request.connectionRef;
+  return {
+    status: "auth_needed",
+    reason: "personal_authority_unavailable",
+    providerDomain: ref.providerDomain,
+    ...(ref.provider ? { provider: ref.provider } : {}),
+    ...(ref.scopes ? { scopes: ref.scopes } : {}),
+    ...(ref.resource ? { resource: ref.resource } : {}),
+    ...(ref.selectedResources ? { selectedResources: ref.selectedResources } : {}),
+  };
+}
+
+/**
+ * Resolves subject-owned MCP credentials only through the exact authority
+ * frozen on the causal turn. A direct human subject, worker Toolspace caller,
+ * retry, or recovery can identify the caller, but none may widen or replace
+ * the persisted connection UUID.
+ */
+export function withFrozenPersonalConnectionDelegations(input: {
+  resolveCredential: ConnectionCredentialResolver;
+  settings: Pick<Settings, "mcpServers">;
+  personalConnectionDelegations: McpPersonalConnectionDelegation[];
+  ownerHasWorkspaceMembership: (subjectId: string) => Promise<boolean>;
+}): ConnectionCredentialResolver {
+  return async (request) => {
+    let effectiveRequest = request;
+    if (request.connectionRef.subjectScope === "subject") {
+      const config = input.settings.mcpServers.find((server) => server.id === request.serverId);
+      const delegation = config
+        ? personalConnectionDelegationForServer(input.personalConnectionDelegations, config)
+        : null;
+      if (!delegation || !(await input.ownerHasWorkspaceMembership(delegation.ownerSubjectId))) {
+        return personalAuthorityUnavailable(request);
+      }
+      effectiveRequest = {
+        ...request,
+        subjectId: delegation.ownerSubjectId,
+        connectionRef: {
+          ...request.connectionRef,
+          providerDomain: delegation.providerDomain,
+          connectionId: delegation.connectionId,
+          ...(delegation.kind ? { kind: delegation.kind } : {}),
+        },
+      };
+    }
+    const result = await input.resolveCredential(effectiveRequest);
+    if (result.status === "ok" || request.connectionRef.subjectScope !== "subject") {
+      return result;
+    }
+    return personalAuthorityUnavailable(request);
+  };
 }
 
 export async function freezePersonalConnectionDelegations(input: {

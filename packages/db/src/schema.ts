@@ -1334,8 +1334,9 @@ export const sessions = pgTable(
     // when the creating grant carried a worker-signed sessionId claim (a session
     // spawning a worker); null for direct API creates and scheduled-task runs.
     // When set, this worker's terminal-for-now transitions wake the parent so a
-    // manager can orchestrate workers without busy-polling. Self-referencing FK,
-    // ON DELETE SET NULL so deleting a manager never cascades into its workers.
+    // manager can orchestrate workers without busy-polling. The migration-owned
+    // self-reference uses ON DELETE RESTRICT so immutable hierarchy and
+    // authority lineage cannot be silently orphaned by a parent hard delete.
     parentSessionId: uuid("parent_session_id"),
     // Exact parent turn whose worker-signed attempt created this child. This is
     // private immutable authority lineage: child completion copies personal MCP

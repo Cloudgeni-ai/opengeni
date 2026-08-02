@@ -332,6 +332,17 @@ describe("0153 personal MCP authority (real PostgreSQL)", () => {
           ${sql.json({ mode: "explicit", inheritedFromSessionId: parentSessionId })},
           ${parentSessionId}, ${parentTurnId}
         )`;
+      await expectSqlFailure(
+        sql`delete from sessions where id = ${parentSessionId}`,
+        "sessions_workspace_parent_fk",
+      );
+      const [preservedLineage] = await sql<
+        Array<{ parentSessionId: string | null; parentTurnId: string | null }>
+      >`
+        select parent_session_id as "parentSessionId", parent_turn_id as "parentTurnId"
+        from sessions where id = ${validChildId}`;
+      expect(preservedLineage).toEqual({ parentSessionId, parentTurnId });
+
       const oldWriterChildId = crypto.randomUUID();
       await sql`
         insert into sessions (

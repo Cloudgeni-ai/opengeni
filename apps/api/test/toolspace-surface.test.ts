@@ -368,6 +368,128 @@ describe("connectionBrokerFetch response lifecycle", () => {
     );
     expect(canceled).toEqual(["initial-401", "initial-401-again", "retry-401", "initial-403"]);
   });
+
+  test("pins direct and delegated Toolspace calls to frozen personal authority", async () => {
+    if (!available) return;
+    const accountId = crypto.randomUUID();
+    const workspaceId = crypto.randomUUID();
+    const ownerSubjectId = "host:user:personal-owner";
+    await admin`
+      insert into managed_accounts (id, name) values (${accountId}, 'toolspace personal account')`;
+    await admin`
+      insert into workspaces (id, account_id, name)
+      values (${workspaceId}, ${accountId}, 'toolspace personal workspace')`;
+    await admin`
+      insert into workspace_inference_controls (workspace_id, account_id)
+      values (${workspaceId}, ${accountId})`;
+    await admin`
+      insert into workspace_memberships (workspace_id, account_id, subject_id, role)
+      values (${workspaceId}, ${accountId}, ${ownerSubjectId}, 'owner')`;
+
+    const frozenConnectionId = crypto.randomUUID();
+    const replacementConnectionId = crypto.randomUUID();
+    const credentialRequests: McpCredentialsRequest[] = [];
+    let fetchCalls = 0;
+    const deps = {
+      db,
+      settings: testSettings(),
+      bus: new MemoryEventBus(),
+      connectionCredentials: {
+        mcpCredentials: async (request: McpCredentialsRequest) => {
+          credentialRequests.push(request);
+          if (request.connectionRef.connectionId === frozenConnectionId) {
+            return {
+              status: "auth_needed" as const,
+              accountId: request.accountId,
+              workspaceId: request.workspaceId,
+              sessionId: request.sessionId,
+              reason: "missing_connection" as const,
+              providerDomain: "linear.app",
+              connectionId: frozenConnectionId,
+            };
+          }
+          return {
+            status: "ok" as const,
+            accountId: request.accountId,
+            workspaceId: request.workspaceId,
+            sessionId: request.sessionId,
+            headers: { "x-test-credential": "replacement" },
+            providerDomain: "linear.app",
+            connectionId: replacementConnectionId,
+          };
+        },
+      },
+    } as unknown as ApiRouteDeps;
+    const config = {
+      id: "linear",
+      url: "https://linear.app/mcp",
+      cacheToolsList: false,
+      connectionRef: {
+        providerDomain: "linear.app",
+        subjectScope: "subject",
+      },
+    } as McpServerConfig;
+    const personalConnectionDelegations = [
+      {
+        serverId: "linear",
+        connectionId: frozenConnectionId,
+        ownerSubjectId,
+        providerDomain: "linear.app",
+        kind: "oauth2" as const,
+      },
+    ];
+    const grant = {
+      accountId,
+      workspaceId,
+      subjectId: "sandbox:toolspace",
+      permissions: ["toolspace:call"],
+    } as AccessGrant;
+    const turn = {
+      id: crypto.randomUUID(),
+      activeAttemptId: crypto.randomUUID(),
+      executionGeneration: 1,
+      initiator: { kind: "subject", subjectId: ownerSubjectId },
+      initiatorContext: {},
+    } as SessionTurn;
+    const baseFetch = async () => {
+      fetchCalls += 1;
+      return new Response("replacement credential must not be used");
+    };
+
+    for (const initiator of [
+      turn.initiator,
+      { kind: "service" as const, subjectId: "goal-continuation" },
+    ]) {
+      const broker = connectionBrokerFetch(baseFetch, {
+        deps,
+        grant,
+        config,
+        sessionId: crypto.randomUUID(),
+        rootSessionId: crypto.randomUUID(),
+        turn: { ...turn, initiator } as SessionTurn,
+        personalConnectionDelegations,
+      });
+      const response = await broker("https://linear.app/mcp", { method: "GET" });
+      expect(response.status).toBe(401);
+    }
+
+    expect(fetchCalls).toBe(0);
+    expect(credentialRequests).toHaveLength(2);
+    for (const request of credentialRequests) {
+      expect(request.callerSubjectId).toBe(ownerSubjectId);
+      expect(request.connectionRef).toMatchObject({
+        providerDomain: "linear.app",
+        connectionId: frozenConnectionId,
+        kind: "oauth2",
+        subjectScope: "subject",
+      });
+    }
+    expect(
+      credentialRequests.some(
+        (request) => request.connectionRef.connectionId === replacementConnectionId,
+      ),
+    ).toBe(false);
+  });
 });
 
 describe("prepareToolspaceMcpSurface", () => {

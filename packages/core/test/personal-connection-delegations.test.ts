@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import type { ConnectionMetadata, McpPersonalConnectionDelegation } from "@opengeni/contracts";
+import type { ResolveConnectionCredentialInput } from "@opengeni/db";
 import {
   personalConnectionDelegationSourceForGrant,
   personalConnectionDelegationsFromParent,
   personalConnectionDelegationsFromVisibleConnections,
+  withFrozenPersonalConnectionDelegations,
 } from "../src/domain/personal-connection-delegations";
 
 const personalServer = {
@@ -150,5 +152,108 @@ describe("personal MCP connection delegation", () => {
         parentDelegations: parent,
       }),
     ).toEqual([parent[0]]);
+  });
+
+  test("pins every caller surface to the same exact owner, UUID, provider, and kind", async () => {
+    const frozenConnectionId = "11111111-1111-4111-8111-111111111111";
+    const received: ResolveConnectionCredentialInput[] = [];
+    const resolver = withFrozenPersonalConnectionDelegations({
+      settings: { mcpServers: [personalServer] },
+      personalConnectionDelegations: [
+        {
+          serverId: "linear",
+          connectionId: frozenConnectionId,
+          ownerSubjectId: "user:owner",
+          providerDomain: "linear.app",
+          kind: "oauth2",
+        },
+      ],
+      ownerHasWorkspaceMembership: async (subjectId) => subjectId === "user:owner",
+      resolveCredential: async (input) => {
+        received.push(input);
+        return {
+          status: "ok",
+          headers: { "x-test-credential": "frozen" },
+          connectionId: input.connectionRef.connectionId!,
+        };
+      },
+    });
+    const request = {
+      workspaceId: "workspace-1",
+      serverId: "linear",
+      destinationUrl: "https://mcp.linear.app/mcp",
+      connectionRef: personalServer.connectionRef,
+    };
+
+    await resolver({ ...request, subjectId: "user:owner", toolName: "model_issue_create" });
+    await resolver({
+      ...request,
+      subjectId: "worker:first-party-mcp",
+      toolName: "toolspace_issue_create",
+    });
+
+    expect(received).toHaveLength(2);
+    for (const input of received) {
+      expect(input.subjectId).toBe("user:owner");
+      expect(input.connectionRef).toMatchObject({
+        providerDomain: "linear.app",
+        connectionId: frozenConnectionId,
+        kind: "oauth2",
+        subjectScope: "subject",
+      });
+    }
+  });
+
+  test("never falls forward when the exact frozen connection is unavailable", async () => {
+    const frozenConnectionId = "11111111-1111-4111-8111-111111111111";
+    const replacementConnectionId = "22222222-2222-4222-8222-222222222222";
+    const received: ResolveConnectionCredentialInput[] = [];
+    const resolver = withFrozenPersonalConnectionDelegations({
+      settings: { mcpServers: [personalServer] },
+      personalConnectionDelegations: [
+        {
+          serverId: "linear",
+          connectionId: frozenConnectionId,
+          ownerSubjectId: "user:owner",
+          providerDomain: "linear.app",
+          kind: "oauth2",
+        },
+      ],
+      ownerHasWorkspaceMembership: async () => true,
+      resolveCredential: async (input) => {
+        received.push(input);
+        if (input.connectionRef.connectionId === frozenConnectionId) {
+          return {
+            status: "auth_needed",
+            reason: "missing_connection",
+            providerDomain: "linear.app",
+            connectionId: frozenConnectionId,
+          };
+        }
+        return {
+          status: "ok",
+          headers: { "x-test-credential": "replacement" },
+          connectionId: replacementConnectionId,
+        };
+      },
+    });
+
+    const result = await resolver({
+      workspaceId: "workspace-1",
+      subjectId: "user:owner",
+      serverId: "linear",
+      destinationUrl: "https://mcp.linear.app/mcp",
+      connectionRef: personalServer.connectionRef,
+    });
+
+    expect(result).toEqual({
+      status: "auth_needed",
+      reason: "personal_authority_unavailable",
+      providerDomain: "linear.app",
+    });
+    expect(received.map((input) => input.connectionRef.connectionId)).toEqual([frozenConnectionId]);
+    expect(
+      received.some((input) => input.connectionRef.connectionId === replacementConnectionId),
+    ).toBe(false);
   });
 });

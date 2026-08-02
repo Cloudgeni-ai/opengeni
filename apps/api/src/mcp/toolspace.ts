@@ -11,9 +11,8 @@ import {
   type ToolRef,
 } from "@opengeni/contracts";
 import {
-  directPersonalConnectionSubjectId,
   hasPermission,
-  personalConnectionDelegationForServer,
+  withFrozenPersonalConnectionDelegations,
   settingsWithEnabledCapabilityMcpServers,
   type ApiRouteDeps,
 } from "@opengeni/core";
@@ -919,7 +918,7 @@ export function connectionBrokerFetch(
     return baseFetch;
   }
   const hostCredentialPort = input.deps.connectionCredentials?.mcpCredentials;
-  const resolveCredential = hostCredentialPort
+  const rawResolveCredential = hostCredentialPort
     ? buildHostConnectionTokenResolver(hostCredentialPort, {
         accountId: input.grant.accountId,
         workspaceId: input.grant.workspaceId,
@@ -933,67 +932,41 @@ export function connectionBrokerFetch(
         surface: "toolspace",
       })
     : buildConnectionTokenResolver(input.deps.db, input.deps.settings);
-  const directSubjectId = directPersonalConnectionSubjectId(input.turn);
   const personalDelegations = input.personalConnectionDelegations ?? [];
   const delegatedMembershipChecks = new Map<string, Promise<boolean>>();
+  const delegatedOwnerHasMembership = async (subjectId: string): Promise<boolean> => {
+    const existing = delegatedMembershipChecks.get(subjectId);
+    if (existing) return await existing;
+    const check = getWorkspaceGrant(input.deps.db, subjectId, input.grant.workspaceId).then(
+      Boolean,
+    );
+    delegatedMembershipChecks.set(subjectId, check);
+    return await check;
+  };
+  const resolveCredential = withFrozenPersonalConnectionDelegations({
+    resolveCredential: rawResolveCredential,
+    settings: { mcpServers: [input.config] },
+    personalConnectionDelegations: personalDelegations,
+    ownerHasWorkspaceMembership: delegatedOwnerHasMembership,
+  });
   return async (requestInput, init) => {
     const request = await mcpRequestInfo(requestInput, init);
     const destinationUrl = mcpRequestDestinationUrl(requestInput);
-    let effectiveConnectionRef = connectionRef;
-    let resolverSubjectId =
-      connectionRef.subjectScope === "subject"
-        ? directSubjectId
-        : hostCredentialPort
-          ? input.grant.subjectId
-          : undefined;
-    if (connectionRef.subjectScope === "subject" && !resolverSubjectId) {
-      const delegation = personalConnectionDelegationForServer(personalDelegations, input.config);
-      if (delegation) {
-        let membership = delegatedMembershipChecks.get(delegation.ownerSubjectId);
-        if (!membership) {
-          membership = getWorkspaceGrant(
-            input.deps.db,
-            delegation.ownerSubjectId,
-            input.grant.workspaceId,
-          ).then(Boolean);
-          delegatedMembershipChecks.set(delegation.ownerSubjectId, membership);
-        }
-        if (await membership) {
-          resolverSubjectId = delegation.ownerSubjectId;
-          effectiveConnectionRef = {
-            ...connectionRef,
-            connectionId: delegation.connectionId,
-          };
-        }
-      }
-    }
-    if (connectionRef.subjectScope === "subject" && !resolverSubjectId) {
-      return await authNeededFetchResponse(input, request, {
-        status: "auth_needed",
-        reason: "personal_authority_unavailable",
-        providerDomain: connectionRef.providerDomain,
-        ...(connectionRef.provider ? { provider: connectionRef.provider } : {}),
-        ...(connectionRef.scopes ? { scopes: connectionRef.scopes } : {}),
-        ...(connectionRef.resource ? { resource: connectionRef.resource } : {}),
-        ...(connectionRef.selectedResources
-          ? { selectedResources: connectionRef.selectedResources }
-          : {}),
-      });
-    }
+    const resolverSubjectId =
+      connectionRef.subjectScope !== "subject" && hostCredentialPort
+        ? input.grant.subjectId
+        : undefined;
     const resolve = async (forceRefresh: boolean) => {
       const result = await resolveCredential({
         workspaceId: input.grant.workspaceId,
         serverId: input.config.id,
-        connectionRef: effectiveConnectionRef,
+        connectionRef,
         destinationUrl,
         forceRefresh,
         ...(request.toolName ? { toolName: request.toolName } : {}),
         ...(resolverSubjectId ? { subjectId: resolverSubjectId } : {}),
       });
-      if (result.status === "ok" || connectionRef.subjectScope !== "subject") return result;
-      const safeResult = { ...result };
-      delete safeResult.connectionId;
-      return safeResult;
+      return result;
     };
     const first = await resolve(false);
     if (first.status === "auth_needed") {

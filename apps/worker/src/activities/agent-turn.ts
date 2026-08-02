@@ -203,7 +203,7 @@ import {
   assertSessionAllowsProductModel,
   defaultSessionMcpServerIds,
   directPersonalConnectionSubjectId,
-  personalConnectionDelegationForServer,
+  withFrozenPersonalConnectionDelegations,
   resolveSessionToolPolicy,
 } from "@opengeni/core";
 import { maybeCompactContext, settleFailedContextCompactionLandmark } from "./context-compaction";
@@ -5379,35 +5379,20 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         delegatedMembershipChecks.set(subjectId, check);
         return await check;
       };
+      const resolveFrozenCredential = withFrozenPersonalConnectionDelegations({
+        resolveCredential: rawResolveCredential,
+        settings: runSettings,
+        personalConnectionDelegations,
+        ownerHasWorkspaceMembership: delegatedOwnerHasMembership,
+      });
       const resolveCredential: typeof rawResolveCredential = async (request) => {
-        let effectiveRequest = request;
-        if (request.connectionRef.subjectScope === "subject" && !request.subjectId) {
-          const config = runSettings.mcpServers.find((server) => server.id === request.serverId);
-          const delegation = config
-            ? personalConnectionDelegationForServer(personalConnectionDelegations, config)
-            : null;
-          if (delegation && (await delegatedOwnerHasMembership(delegation.ownerSubjectId))) {
-            effectiveRequest = {
-              ...request,
-              subjectId: delegation.ownerSubjectId,
-              connectionRef: {
-                ...request.connectionRef,
-                connectionId: delegation.connectionId,
-              },
-            };
-          }
-        }
-        const result = await rawResolveCredential(effectiveRequest);
+        const result = await resolveFrozenCredential(request);
         if (result.status === "ok") {
           registerSecretRedactions(
             headerSecretRedactions("MCP", result.headers, Object.keys(result.headers)),
           );
-          return result;
         }
-        if (request.connectionRef.subjectScope !== "subject") return result;
-        const safeResult = { ...result };
-        delete safeResult.connectionId;
-        return safeResult;
+        return result;
       };
       const credentialSubjectId = credentialSubjectIdForTurnInitiator(turn);
       preparedTools = await waitForTurnOperation(

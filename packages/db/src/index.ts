@@ -35801,9 +35801,7 @@ export async function claimSessionWorkForAttempt(
             );
           const deliverable = selectBoundedSystemUpdateBatch(
             validUpdates,
-            agentSteer
-              ? () => true
-              : (first, candidate) => delegationKey(first) === delegationKey(candidate),
+            (first, candidate) => delegationKey(first) === delegationKey(candidate),
           );
           if (deliverable.length === 0) {
             const cancellationEvent =
