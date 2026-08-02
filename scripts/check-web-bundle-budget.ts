@@ -6,6 +6,7 @@ type ManifestEntry = {
   imports?: string[];
   css?: string[];
   isEntry?: boolean;
+  isDynamicEntry?: boolean;
 };
 
 const kib = 1024;
@@ -31,6 +32,13 @@ const repoRoot = path.resolve(import.meta.dir, "..");
 const distDir = path.join(repoRoot, "apps/web/dist");
 const manifestPath = path.join(distDir, ".vite/manifest.json");
 const manifest = (await Bun.file(manifestPath).json()) as Record<string, ManifestEntry>;
+
+const fleetDecisionRowKey = "../../packages/react/src/timeline/fleet-decision-row.tsx";
+if (manifest[fleetDecisionRowKey]?.isDynamicEntry) {
+  throw new Error(
+    "fleet decision rows must stay in the session render graph; a React.lazy boundary can resolve to an invalid component during unrelated session metadata rerenders",
+  );
+}
 
 function staticGraph(startKeys: Iterable<string>): Set<string> {
   const visited = new Set<string>();
