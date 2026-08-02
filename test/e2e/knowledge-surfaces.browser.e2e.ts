@@ -320,7 +320,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     await page.route(basesPattern, delayedBases);
     await page.goto(surfaceUrl(webBaseUrl, workspaceId, "documents", fixtures));
     await basesRequest;
-    await page.getByText("Loading bases", { exact: true }).waitFor();
+    await page.getByText("Loading collections", { exact: true }).waitFor();
     releaseBases();
     await page.getByText("No documents yet", { exact: true }).waitFor();
     await page.unroute(basesPattern, delayedBases);
@@ -661,7 +661,10 @@ async function openSurface(
   } else if (surface === "documents") {
     await page.getByText(longBaseName, { exact: true }).waitFor();
     await page.getByText("No documents yet", { exact: true }).waitFor();
-    const bases = page.getByRole("complementary", { name: "Bases", exact: true });
+    const bases = page.getByRole("complementary", {
+      name: "Collections (optional)",
+      exact: true,
+    });
     const search = page.getByRole("complementary", { name: "Search", exact: true });
     await bases.waitFor();
     await search.waitFor();
@@ -833,7 +836,7 @@ async function expectOwnedTouchTargets(page: Page, surface: Surface): Promise<vo
         ]
       : surface === "documents"
         ? [
-            page.getByRole("button", { name: "Create base", exact: true }),
+            page.locator("summary").getByText("New collectionoptional", { exact: true }),
             page.getByRole("button", { name: longBaseName, exact: true }),
           ]
         : [page.getByRole("button", { name: "Add memory", exact: true })];
