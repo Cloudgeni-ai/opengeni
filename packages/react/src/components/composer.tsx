@@ -53,7 +53,13 @@ import { ModelPicker as ModelPickerView } from "./model-picker";
 
 export { OPEN_WORKSTREAM_CONTROL_EVENT };
 
-function ComposerTip({ tip, children }: { tip: string; children: ReactElement }) {
+function ComposerTip({
+  tip,
+  children,
+}: {
+  tip: string;
+  children: ReactElement<{ title?: string }>;
+}) {
   if (!tip) return children;
   return cloneElement(children, { title: tip });
 }

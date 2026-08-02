@@ -1499,6 +1499,88 @@ describe("buildTimeline", () => {
     expect(items[0]).toMatchObject({ kind: "goal", action: "set", text: "Keep staging green" });
   });
 
+  test("agent goal tool stays in the activity cluster; landmark is suppressed", () => {
+    reset();
+    const groups = groupTimeline(
+      buildTimeline([
+        event("agent.toolCall.created", {
+          id: "call-mem",
+          name: "opengeni__memory_search",
+          arguments: { query: "tokens" },
+        }),
+        event("agent.toolCall.output", { id: "call-mem", output: "ok" }),
+        event("agent.toolCall.created", {
+          id: "call-goal",
+          name: "opengeni__goal_set",
+          arguments: { text: "Explain the MCP token flow" },
+        }),
+        event("agent.toolCall.output", { id: "call-goal", output: "ok" }),
+        event("goal.set", {
+          goalId: "goal-1",
+          text: "Explain the MCP token flow",
+          actor: "agent",
+          version: 1,
+        }),
+        event("agent.toolCall.created", {
+          id: "call-box",
+          name: "opengeni__sandboxes_list",
+          arguments: {},
+        }),
+        event("agent.toolCall.output", { id: "call-box", output: "[]" }),
+      ]),
+    );
+    expect(groups.filter((group) => group.kind === "item")).toHaveLength(0);
+    const activities = collectActivityGroups(groups);
+    expect(activities).toHaveLength(1);
+    expect(activities[0]!.items.map((item) => item.kind)).toEqual([
+      "tool-call",
+      "tool-call",
+      "tool-call",
+    ]);
+    expect(
+      activities[0]!.items
+        .filter((item): item is ToolCallItem => item.kind === "tool-call")
+        .map((item) => item.name),
+    ).toEqual(["opengeni__memory_search", "opengeni__goal_set", "opengeni__sandboxes_list"]);
+  });
+
+  test("non-agent goal.set still renders a landmark (API / create-session)", () => {
+    reset();
+    const items = buildTimeline([
+      event("goal.set", {
+        goalId: "goal-1",
+        text: "Keep staging green",
+        actor: "api",
+        version: 1,
+      }),
+    ]);
+    expect(items[0]).toMatchObject({ kind: "goal", action: "set", text: "Keep staging green" });
+  });
+
+  test("system goal.paused still renders a landmark", () => {
+    reset();
+    const items = buildTimeline([
+      event("goal.paused", {
+        goalId: "goal-1",
+        actor: "system",
+        reason: "no_progress",
+      }),
+    ]);
+    expect(items[0]).toMatchObject({ kind: "goal", action: "paused" });
+  });
+
+  test("goal.continuation still renders a landmark", () => {
+    reset();
+    const items = buildTimeline([
+      event("goal.continuation", { text: "still working toward the goal" }),
+    ]);
+    expect(items[0]).toMatchObject({
+      kind: "goal",
+      action: "continuation",
+      text: "still working toward the goal",
+    });
+  });
+
   test("goal.cleared is tolerated as a goal landmark", () => {
     reset();
     const items = buildTimeline([event("goal.cleared", { goalId: "goal-1" })]);

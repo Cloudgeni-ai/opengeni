@@ -45,17 +45,17 @@ const WORKER_SPAWN_TOOL = "session_create";
 const WORKER_MESSAGE_TOOL = "session_send_message";
 
 /**
- * Tools whose durable side-effect events already own the timeline (GoalRow /
- * MemoryRow). Emitting a generic tool-call too is double chrome — skip the call.
+ * Tools whose durable side-effect events already own the timeline (MemoryRow).
+ * Emitting a generic tool-call too is double chrome — skip the call.
+ *
+ * Goal tools are intentionally NOT landmark-only: an agent `goal_set` /
+ * `goal_update` / `goal_complete` / `goal_pause` stays an in-cluster tool row,
+ * and the matching `goal.*` session event is suppressed below when `actor` is
+ * `"agent"`. That keeps mid-turn goal tools from splitting the step rail with
+ * a breakaway GoalRow pill. Non-agent goal events (API, create-session,
+ * system auto-pause, continuations) still render as landmarks.
  */
-const LANDMARK_ONLY_TOOL_LEAVES = new Set([
-  "goal_set",
-  "goal_update",
-  "goal_complete",
-  "goal_pause",
-  "memory_save",
-  "memory_correct",
-]);
+const LANDMARK_ONLY_TOOL_LEAVES = new Set(["memory_save", "memory_correct"]);
 
 export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
   const items: TimelineItem[] = [];
@@ -659,6 +659,11 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
       case "goal.resumed":
       case "goal.cleared":
       case "goal.continuation": {
+        // Agent tool mutations already appear as tool-call rows in the activity
+        // cluster. Re-emitting them as GoalRow landmarks splits "N steps" mid-turn.
+        if (shouldSuppressAgentGoalLandmark(event.type, payload)) {
+          break;
+        }
         items.push({
           kind: "goal",
           id: event.id,
@@ -1441,6 +1446,22 @@ function goalText(payload: Record<string, unknown>): string | null {
     return payload.prompt;
   }
   return null;
+}
+
+/**
+ * Agent-owned goal mutations already have an in-cluster tool row. Suppress the
+ * breakaway landmark for those only. `goal.completed` has no actor field today
+ * and is only emitted by the agent tool, so it is always suppressed. API /
+ * system / create-session / continuation landmarks stay visible.
+ */
+function shouldSuppressAgentGoalLandmark(type: string, payload: Record<string, unknown>): boolean {
+  if (type === "goal.completed") {
+    return true;
+  }
+  if (type === "goal.set" || type === "goal.updated" || type === "goal.paused") {
+    return payload.actor === "agent";
+  }
+  return false;
 }
 
 /**

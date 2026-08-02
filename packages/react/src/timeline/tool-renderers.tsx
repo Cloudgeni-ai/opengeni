@@ -1266,6 +1266,9 @@ function GenericRenderer({ item }: ToolRendererProps) {
   const args = redactSecrets(parseToolArgs(item.arguments));
   const display = toolDisplayName(item.name);
   const icon = <GenericToolIcon name={item.name} />;
+  // Goal tools: surface the objective text on the collapsed row so the in-cluster
+  // tool replaces the old breakaway GoalRow pill without losing the gist.
+  const goalPreview = goalToolPreview(item.name, args);
 
   if (running) {
     return (
@@ -1274,7 +1277,7 @@ function GenericRenderer({ item }: ToolRendererProps) {
         iconTone="running"
         title={display}
         running
-        preview={<RunningPreview>Running…</RunningPreview>}
+        preview={goalPreview ?? <RunningPreview>Running…</RunningPreview>}
       >
         <PayloadBlock label="Arguments" value={args} />
       </ActivityDisclosure>
@@ -1306,12 +1309,39 @@ function GenericRenderer({ item }: ToolRendererProps) {
       iconTone="muted"
       title={display}
       cancelled={item.status === "cancelled"}
-      preview={item.status === "cancelled" ? undefined : "Done"}
+      preview={item.status === "cancelled" ? undefined : (goalPreview ?? "Done")}
     >
       <PayloadBlock label="Arguments" value={args} />
       <PayloadBlock label="Result" value={outText} />
     </ActivityDisclosure>
   );
+}
+
+function goalToolPreview(name: string, args: unknown): string | null {
+  const leaf = mcpToolLeaf(name);
+  if (
+    leaf !== "goal_set" &&
+    leaf !== "goal_update" &&
+    leaf !== "goal_complete" &&
+    leaf !== "goal_pause"
+  ) {
+    return null;
+  }
+  const record = args && typeof args === "object" ? (args as Record<string, unknown>) : null;
+  if (!record) {
+    return null;
+  }
+  const text =
+    typeof record.text === "string"
+      ? record.text
+      : typeof record.evidence === "string"
+        ? record.evidence
+        : typeof record.rationale === "string"
+          ? record.rationale
+          : typeof record.progressNote === "string"
+            ? record.progressNote
+            : null;
+  return text ? truncatePreview(text, 90) : null;
 }
 
 function truncatePreview(text: string, max: number): string {

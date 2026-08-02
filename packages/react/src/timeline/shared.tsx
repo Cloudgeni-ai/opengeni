@@ -215,6 +215,7 @@ export function ActivityDisclosure({
         role="button"
         tabIndex={0}
         aria-expanded={open}
+        data-state={open ? "open" : "closed"}
         onClick={() => setOpen((prev) => !prev)}
         onKeyDown={(event) => {
           if (event.key === "Enter" || event.key === " ") {
