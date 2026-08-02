@@ -1,4 +1,5 @@
 ---
+"@opengeni/api-router": patch
 ---
 
-Slack interaction safety-boundary regression coverage requires no package release.
+Publish regression coverage for Slack interaction durability, permanent preflight rejection, and read-only context-tool policy.
