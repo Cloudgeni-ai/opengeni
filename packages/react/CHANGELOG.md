@@ -1,5 +1,11 @@
 # @opengeni/react
 
+## 0.35.1
+
+### Patch Changes
+
+- b286dad: Keep fleet-decision timeline rows mounted when unrelated session metadata, including personal pin state, changes.
+
 ## 0.35.0
 
 ### Minor Changes
