@@ -15806,7 +15806,12 @@ function boundedConnectorActionText(value: string, label: string, max: number): 
   return trimmed;
 }
 
-function connectorActionName(toolName: string, args: unknown): string {
+/**
+ * Resolve the request's policy selector. This caller-controlled value is used
+ * only transiently to match the attempt-frozen policy snapshot; it must never
+ * be copied into a request row or audit event.
+ */
+function connectorActionPolicySelector(toolName: string, args: unknown): string {
   if (args && typeof args === "object" && !Array.isArray(args)) {
     const action = (args as Record<string, unknown>).action;
     if (typeof action === "string" && action.trim().length > 0) {
@@ -15814,6 +15819,12 @@ function connectorActionName(toolName: string, args: unknown): string {
     }
   }
   return toolName;
+}
+
+function connectorActionEvidenceName(
+  resolved: Exclude<ResolvedConnectorActionPolicy, { managed: false }>,
+): string {
+  return resolved.entry?.actionName ?? "*";
 }
 
 function connectorActionFingerprint(input: {
@@ -15942,8 +15953,8 @@ function normalizedConnectorActionInvocation(
   connectionId: string | null;
   serverId: string;
   toolName: string;
-  actionName: string;
-  actionFingerprint: string | null;
+  policyActionSelector: string;
+  arguments: unknown;
 } {
   const approvalId = boundedConnectorActionText(
     invocation.approvalId,
@@ -15960,7 +15971,7 @@ function normalizedConnectorActionInvocation(
     "connector tool name",
     CONNECTOR_ACTION_NAME_MAX,
   );
-  const actionName = connectorActionName(toolName, invocation.arguments);
+  const policyActionSelector = connectorActionPolicySelector(toolName, invocation.arguments);
   const connectionId = invocation.connectionId?.trim()
     ? boundedConnectorActionText(
         invocation.connectionId,
@@ -15973,17 +15984,38 @@ function normalizedConnectorActionInvocation(
     connectionId,
     serverId,
     toolName,
+    policyActionSelector,
+    arguments: invocation.arguments,
+  };
+}
+
+function durableConnectorActionInvocation(
+  identity: ConnectorActionAttemptIdentity,
+  invocation: ReturnType<typeof normalizedConnectorActionInvocation> & { connectionId: string },
+  resolved: Exclude<ResolvedConnectorActionPolicy, { managed: false }>,
+): {
+  approvalId: string;
+  connectionId: string;
+  serverId: string;
+  toolName: string;
+  actionName: string;
+  actionFingerprint: string;
+} {
+  const actionName = connectorActionEvidenceName(resolved);
+  return {
+    approvalId: invocation.approvalId,
+    connectionId: invocation.connectionId,
+    serverId: invocation.serverId,
+    toolName: invocation.toolName,
     actionName,
-    actionFingerprint: connectionId
-      ? connectorActionFingerprint({
-          workspaceId: identity.workspaceId,
-          connectionId,
-          serverId,
-          toolName,
-          actionName,
-          arguments: invocation.arguments,
-        })
-      : null,
+    actionFingerprint: connectorActionFingerprint({
+      workspaceId: identity.workspaceId,
+      connectionId: invocation.connectionId,
+      serverId: invocation.serverId,
+      toolName: invocation.toolName,
+      actionName,
+      arguments: invocation.arguments,
+    }),
   };
 }
 
@@ -16028,7 +16060,7 @@ function connectorActionRequestMatches(
   row: typeof schema.connectorActionRequests.$inferSelect,
   input: {
     identity: ConnectorActionAttemptIdentity;
-    invocation: ReturnType<typeof normalizedConnectorActionInvocation>;
+    invocation: ReturnType<typeof durableConnectorActionInvocation>;
     resolved: Exclude<ResolvedConnectorActionPolicy, { managed: false }>;
   },
 ): boolean {
@@ -16060,6 +16092,7 @@ function connectorActionRequestMatchesLogicalCall(
   identity: ConnectorActionAttemptIdentity,
   invocation: ReturnType<typeof normalizedConnectorActionInvocation>,
 ): boolean {
+  if (!invocation.connectionId) return false;
   return (
     row.accountId === identity.accountId &&
     row.workspaceId === identity.workspaceId &&
@@ -16071,8 +16104,15 @@ function connectorActionRequestMatchesLogicalCall(
     row.connectionId === invocation.connectionId &&
     row.serverId === invocation.serverId &&
     row.toolName === invocation.toolName &&
-    row.actionName === invocation.actionName &&
-    row.actionFingerprint === invocation.actionFingerprint
+    row.actionFingerprint ===
+      connectorActionFingerprint({
+        workspaceId: identity.workspaceId,
+        connectionId: invocation.connectionId,
+        serverId: invocation.serverId,
+        toolName: invocation.toolName,
+        actionName: row.actionName,
+        arguments: invocation.arguments,
+      })
   );
 }
 
@@ -16080,7 +16120,7 @@ async function insertConnectorActionRequest(
   db: Database,
   input: {
     identity: ConnectorActionAttemptIdentity;
-    invocation: ReturnType<typeof normalizedConnectorActionInvocation>;
+    invocation: ReturnType<typeof durableConnectorActionInvocation>;
     resolved: Exclude<ResolvedConnectorActionPolicy, { managed: false }>;
     status: "pending" | "blocked" | "executing";
   },
@@ -16254,7 +16294,7 @@ export async function prepareConnectorActionApproval(
   invocation: ConnectorActionInvocation,
 ): Promise<PrepareConnectorActionApprovalResult> {
   const normalized = normalizedConnectorActionInvocation(identity, invocation);
-  if (!normalized.connectionId || !normalized.actionFingerprint) {
+  if (!normalized.connectionId) {
     return { managed: false, decision: "unmanaged" };
   }
   return await withRlsContext(
@@ -16267,20 +16307,25 @@ export async function prepareConnectorActionApproval(
           connectionId: normalized.connectionId!,
           serverId: normalized.serverId,
           toolName: normalized.toolName,
-          actionName: normalized.actionName,
+          actionName: normalized.policyActionSelector,
         });
         if (!resolved.managed) return { managed: false, decision: "unmanaged" } as const;
+        const durable = durableConnectorActionInvocation(
+          identity,
+          { ...normalized, connectionId: normalized.connectionId! },
+          resolved,
+        );
         const decision = resolved.entry?.policy ?? "block";
         if (decision === "allow") {
           return {
             managed: true,
             decision,
-            actionFingerprint: normalized.actionFingerprint!,
+            actionFingerprint: durable.actionFingerprint,
           } as const;
         }
         const { row, inserted } = await insertConnectorActionRequest(tx as unknown as Database, {
           identity,
-          invocation: normalized,
+          invocation: durable,
           resolved,
           status: decision === "ask" ? "pending" : "blocked",
         });
@@ -16311,7 +16356,7 @@ export async function beginConnectorActionExecution(
   invocation: ConnectorActionInvocation,
 ): Promise<BeginConnectorActionExecutionResult> {
   const normalized = normalizedConnectorActionInvocation(identity, invocation);
-  if (!normalized.connectionId || !normalized.actionFingerprint) {
+  if (!normalized.connectionId) {
     return { allowed: true, managed: false };
   }
   return await withRlsContext(
@@ -16343,13 +16388,18 @@ export async function beginConnectorActionExecution(
             connectionId: normalized.connectionId!,
             serverId: normalized.serverId,
             toolName: normalized.toolName,
-            actionName: normalized.actionName,
+            actionName: normalized.policyActionSelector,
           });
           if (!resolved.managed) return { allowed: true, managed: false } as const;
+          const durable = durableConnectorActionInvocation(
+            identity,
+            { ...normalized, connectionId: normalized.connectionId! },
+            resolved,
+          );
           const decision = resolved.entry?.policy ?? "block";
           const created = await insertConnectorActionRequest(tx as unknown as Database, {
             identity,
-            invocation: normalized,
+            invocation: durable,
             resolved,
             status: decision === "ask" ? "pending" : decision === "block" ? "blocked" : "executing",
           });

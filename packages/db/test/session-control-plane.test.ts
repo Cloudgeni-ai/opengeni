@@ -4723,6 +4723,18 @@ describe("clean session control plane", () => {
       });
       expect(result.changed).toBe(true);
     }
+    const wildcardToolName = "perform_wildcard_action";
+    const wildcardPolicy = await upsertConnectorActionPolicy(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      subjectId: grant.subjectId,
+      connectionId,
+      serverId,
+      toolName: wildcardToolName,
+      actionName: "*",
+      policy: "block",
+    });
+    expect(wildcardPolicy.changed).toBe(true);
     await send(grant, session.id, "exercise connector action policies");
 
     const firstAttemptId = crypto.randomUUID();
@@ -4883,6 +4895,27 @@ describe("clean session control plane", () => {
       },
     );
 
+    const actionLeakMarker = ["Bearer", "review", "marker", crypto.randomUUID()].join("-");
+    const requestBodyLeakMarker = `request-body-marker-${crypto.randomUUID()}`;
+    const toolResultLeakMarker = `tool-result-marker-${crypto.randomUUID()}`;
+    const responseLeakMarker = `response-marker-${crypto.randomUUID()}`;
+    const wildcardBlockCall = {
+      approvalId: "connector-wildcard-block",
+      connectionId,
+      serverId,
+      toolName: wildcardToolName,
+      arguments: {
+        action: actionLeakMarker,
+        headers: { ["auth" + "orization"]: actionLeakMarker },
+        requestBody: { payload: requestBodyLeakMarker },
+        toolResult: toolResultLeakMarker,
+        response: { sensitive: responseLeakMarker },
+      },
+    };
+    expect(
+      await prepareConnectorActionApproval(client.db, secondIdentity, wildcardBlockCall),
+    ).toMatchObject({ managed: true, decision: "block" });
+
     const rejectCall = call("connector-reject", "reject");
     expect(
       await prepareConnectorActionApproval(client.db, secondIdentity, rejectCall),
@@ -4967,6 +5000,12 @@ describe("clean session control plane", () => {
       executionAttemptId: secondAttemptId,
     });
     expect(requestsByApproval.get(blockCall.approvalId)?.status).toBe("blocked");
+    const wildcardRequest = requestsByApproval.get(wildcardBlockCall.approvalId);
+    expect(wildcardRequest).toMatchObject({
+      status: "blocked",
+      toolName: wildcardToolName,
+      actionName: "*",
+    });
     expect(requestsByApproval.get(rejectCall.approvalId)).toMatchObject({
       status: "rejected",
       decision: "reject",
@@ -4982,6 +5021,18 @@ describe("clean session control plane", () => {
     expect(connectorAuditActions).toContain("connector.action.execution_started");
     expect(connectorAuditActions).toContain("connector.action.execution_completed");
     expect(JSON.stringify(evidence)).not.toContain(sensitiveFixture);
+    const wildcardAudits = evidence.audits.filter(
+      (row) => row.metadata.requestId === wildcardRequest?.id,
+    );
+    const wildcardEvidence = JSON.stringify({ request: wildcardRequest, audits: wildcardAudits });
+    for (const marker of [
+      actionLeakMarker,
+      requestBodyLeakMarker,
+      toolResultLeakMarker,
+      responseLeakMarker,
+    ]) {
+      expect(wildcardEvidence).not.toContain(marker);
+    }
   });
 
   test("a committed session control command replays before its stale control fence is checked", async () => {

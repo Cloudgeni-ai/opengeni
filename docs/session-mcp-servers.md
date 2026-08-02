@@ -137,13 +137,16 @@ and Allow never removes a session-level approval requirement.
 
 Managed calls use `connector_action_requests` as an idempotency and evidence
 ledger. It freezes the initiating actor, original attempt, connection/server/
-tool/action identity, policy id/version/source, and a canonical SHA-256 action
-fingerprint. Approval records the authenticated approver separately. The
-execution attempt is recorded when an approved request resumes. A repeated call
-after execution began is marked outcome-uncertain and denied rather than sent to
-the provider again. Audit rows contain only these bounded identifiers,
-decisions, timestamps, fingerprints, and coarse outcomes—never raw arguments,
-headers, credentials, request bodies, or tool results.
+tool identity, the matched attempt-frozen policy action selector (`*` for a
+wildcard or ambiguous match), policy id/version/source, and a canonical SHA-256
+action fingerprint. A caller-controlled `arguments.action` is used only
+transiently for policy matching and is never copied into request or audit rows.
+Approval records the authenticated approver separately. The execution attempt
+is recorded when an approved request resumes. A repeated call after execution
+began is marked outcome-uncertain and denied rather than sent to the provider
+again. Audit rows contain only these bounded identifiers, decisions, timestamps,
+fingerprints, and coarse outcomes—never raw arguments, headers, credentials,
+request bodies, tool results, or response payloads.
 
 Child inheritance is a create-time snapshot, not a live credential link. A
 static encrypted header map is copied as ciphertext and starts at credential
