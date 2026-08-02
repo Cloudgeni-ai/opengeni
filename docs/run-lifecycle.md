@@ -39,7 +39,13 @@ The ordinary web session composes this durable mode through
 WebRTC negotiation, the pinned V3 bridge, periodic outbound-ledger sync, and a
 version-fenced heartbeat. The already-mounted composer, Send/Steer,
 model/reasoning/tool configuration, and queue mutations remain available while
-voice is active. The owner operation and browser proof are
+voice is active. Its only persistent surface is a split voice action beside
+Send: the primary click starts or ends the call, while the disclosure holds the
+supported realtime-model choice, connection status, recovery actions, and dev
+diagnostics. Realtime-model choice is intentionally independent from the
+ordinary session model; the current controller truthfully exposes only its one
+supported Codex Live model until provider adapters add real alternatives.
+The owner operation and browser proof are
 scoped to session storage and never rendered or logged. Reload replays that
 same operation and rotates only the dead browser connection. Without matching
 proof, the surface truthfully remains lost-owner until an end/expiry event;

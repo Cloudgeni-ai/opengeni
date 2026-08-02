@@ -166,7 +166,7 @@ describe("ordinary session Codex realtime control", () => {
     }
   });
 
-  test("renders accessible status and start/stop controls without exposing owner proof", async () => {
+  test("renders the compact accessible voice action and switches from start to end", async () => {
     const calls: string[] = [];
     await act(async () => {
       root.render(
@@ -191,14 +191,16 @@ describe("ordinary session Codex realtime control", () => {
         />,
       );
     });
-    const region = container.querySelector('[aria-label="Codex realtime"]');
+    const region = container.querySelector('[aria-label="Realtime voice"]');
     const start = container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Start Codex realtime"]',
+      'button[aria-label="Start voice with Codex Live"]',
     );
     expect(region).not.toBeNull();
-    expect(container.querySelector('[role="status"]')?.textContent).toContain("Ready");
-    expect(container.textContent).toContain("Realtime debug");
-    expect(container.textContent).toContain("client delegation");
+    expect(container.querySelector('[role="status"]')?.textContent).toContain("Start voice");
+    expect(
+      container.querySelector('button[aria-label="Choose voice model and options"]'),
+    ).not.toBeNull();
+    expect(container.textContent).not.toContain("Realtime diagnostics");
     expect(start?.disabled).toBe(false);
     await act(async () => start?.click());
     expect(calls).toEqual(["start"]);
@@ -233,10 +235,9 @@ describe("ordinary session Codex realtime control", () => {
       );
     });
     const stop = container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Stop Codex realtime"]',
+      'button[aria-label="End voice conversation"]',
     );
-    expect(container.querySelector('[role="status"]')?.textContent).toContain("Live");
-    expect(container.textContent).toContain("provider started");
+    expect(container.querySelector('[role="status"]')?.textContent).toContain("Listening");
     expect(stop?.disabled).toBe(false);
     await act(async () => stop?.click());
     expect(calls).toEqual(["start", "stop"]);
@@ -284,13 +285,40 @@ describe("ordinary session Codex realtime control", () => {
     expect(container.querySelector('[role="status"]')?.textContent).toContain(
       "Audio output blocked",
     );
-    const resume = [...container.querySelectorAll("button")].find(
-      (button) => button.textContent === "Resume audio",
+    const resume = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Resume voice audio"]',
     );
-    expect(resume?.textContent).toContain("Resume audio");
+    expect(resume?.disabled).toBe(false);
     await act(async () => resume?.click());
     expect(calls).toEqual(["audio"]);
-    expect(container.querySelector('button[aria-label="Start Codex realtime"]')).toBeNull();
-    expect(container.querySelector('button[aria-label="Stop Codex realtime"]')).not.toBeNull();
+    expect(container.querySelector('button[aria-label="Start voice with Codex Live"]')).toBeNull();
+    expect(container.querySelector('button[aria-label="Resume voice audio"]')).not.toBeNull();
+  });
+
+  test("keeps an unavailable provider quiet and explains why start is disabled", async () => {
+    await act(async () => {
+      root.render(
+        <CodexRealtimeControl
+          snapshot={idle}
+          canStart={false}
+          admissionBlocker="Connect Codex to use this voice model."
+          codexConnected={false}
+          audioRef={createRef<HTMLAudioElement>()}
+          onStart={async () => undefined}
+          onStop={async () => undefined}
+          onRetry={async () => undefined}
+          onRetryAudibleOutput={async () => undefined}
+        />,
+      );
+    });
+
+    const start = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Start voice with Codex Live"]',
+    );
+    expect(start?.dataset.phase).toBe("unavailable");
+    expect(start?.disabled).toBe(true);
+    expect(container.querySelector('[role="status"]')?.textContent).toContain(
+      "Connect Codex for voice",
+    );
   });
 });

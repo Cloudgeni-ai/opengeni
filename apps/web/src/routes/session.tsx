@@ -1030,22 +1030,6 @@ function SessionChatPane(props: {
           <SessionPersonalConnectionDisclosure connections={delegatedPersonalConnections} />
         </div>
       ) : null}
-
-      {!terminal ? (
-        <Suspense fallback={null}>
-          <LazyCodexRealtimeControl
-            client={context.client}
-            workspaceId={props.session.workspaceId}
-            sessionId={props.session.id}
-            sessionStatus={props.session.status}
-            effectiveControl={props.queue.effectiveControl ?? props.session.effectiveControl}
-            events={props.events}
-            eventsReady={!props.initialLoading}
-            codexConnected={codexConnected}
-          />
-        </Suspense>
-      ) : null}
-
       {/* Compact session chrome above the composer — incoming, queue, goal,
           and agents as one dock. Hides entirely when there are no signals. */}
       <div className="mx-auto mb-2 w-full max-w-3xl shrink-0 px-4 sm:px-6">
@@ -1081,6 +1065,25 @@ function SessionChatPane(props: {
             commandContext={commandContext}
             onClearView={props.onClearView}
             fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
+            actions={
+              !terminal ? (
+                <Suspense fallback={null}>
+                  <LazyCodexRealtimeControl
+                    client={context.client}
+                    workspaceId={props.session.workspaceId}
+                    sessionId={props.session.id}
+                    sessionStatus={props.session.status}
+                    effectiveControl={
+                      props.queue.effectiveControl ?? props.session.effectiveControl
+                    }
+                    events={props.events}
+                    eventsReady={!props.initialLoading}
+                    codexConnected={codexConnected}
+                    underlyingModel={findPickerRow(modelCatalog.rows, model)?.label ?? model}
+                  />
+                </Suspense>
+              ) : null
+            }
             placeholder={
               props.session.status === "cancelled"
                 ? "This session was cancelled."

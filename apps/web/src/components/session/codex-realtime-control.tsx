@@ -7,10 +7,50 @@ import {
   type SessionEvent,
   type SessionStatus,
 } from "@opengeni/sdk";
+import {
+  AudioLinesIcon,
+  ChevronDownIcon,
+  CircleAlertIcon,
+  LoaderCircleIcon,
+  RotateCcwIcon,
+  SquareIcon,
+  Volume2Icon,
+} from "lucide-react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { type RefObject, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-const controlButtonClass =
-  "inline-flex h-8 shrink-0 cursor-pointer items-center justify-center rounded-md px-3 text-sm font-medium whitespace-nowrap transition-all outline-none focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-2 focus-visible:ring-offset-bg disabled:pointer-events-none disabled:opacity-50";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { cn } from "@/lib/utils";
+
+type RealtimeModelOption = {
+  id: string;
+  label: string;
+  provider: string;
+  description: string;
+  recommended?: boolean | undefined;
+};
+
+const CODEX_LIVE_MODEL: RealtimeModelOption = {
+  id: "gpt-live-1-boulder-alpha",
+  label: "Codex Live",
+  provider: "Connected Codex",
+  description: "Deep session integration",
+  recommended: true,
+};
+
+const SUPPORTED_REALTIME_MODELS = [CODEX_LIVE_MODEL] as const;
 
 type AdmissionInput = {
   sessionStatus: SessionStatus;
@@ -21,13 +61,16 @@ type AdmissionInput = {
 };
 
 export function codexRealtimeAdmissionAllowed(input: AdmissionInput): boolean {
-  return (
-    input.sessionStatus !== "cancelled" &&
-    input.controlState === "active" &&
-    input.settlement === null &&
-    input.codexConnected &&
-    !input.lifecycleActive
-  );
+  return codexRealtimeAdmissionBlocker(input) === null;
+}
+
+export function codexRealtimeAdmissionBlocker(input: AdmissionInput): string | null {
+  if (input.sessionStatus === "cancelled") return "This session was cancelled.";
+  if (input.controlState !== "active") return "Resume this session before starting voice.";
+  if (input.settlement !== null) return "Wait for the current session transition to finish.";
+  if (!input.codexConnected) return "Connect Codex to use this voice model.";
+  if (input.lifecycleActive) return "Voice is already active for this session.";
+  return null;
 }
 
 export function useSessionCodexRealtime(options: {
@@ -131,21 +174,24 @@ export function useSessionCodexRealtime(options: {
   const retryAudibleOutput = useCallback(async () => {
     await controllerRef.current?.retryAudibleOutput();
   }, []);
+  const admissionInput = {
+    sessionStatus: options.sessionStatus,
+    controlState: options.effectiveControl.state,
+    settlement: options.effectiveControl.settlement,
+    codexConnected: options.codexConnected,
+    lifecycleActive,
+  } satisfies AdmissionInput;
+  const admissionBlocker = codexRealtimeAdmissionBlocker(admissionInput);
   const canStart =
     controllerRef.current !== null &&
     ["idle", "error"].includes(snapshot.status) &&
-    codexRealtimeAdmissionAllowed({
-      sessionStatus: options.sessionStatus,
-      controlState: options.effectiveControl.state,
-      settlement: options.effectiveControl.settlement,
-      codexConnected: options.codexConnected,
-      lifecycleActive,
-    });
+    admissionBlocker === null;
 
   return {
     snapshot,
     lifecycleActive,
     canStart,
+    admissionBlocker,
     codexConnected: options.codexConnected,
     audioRef,
     start,
@@ -175,6 +221,7 @@ export function SessionCodexRealtimeControl(props: {
   events: SessionEvent[];
   eventsReady: boolean;
   codexConnected: boolean;
+  underlyingModel: string;
 }) {
   const realtime = useSessionCodexRealtime(props);
 
@@ -182,8 +229,10 @@ export function SessionCodexRealtimeControl(props: {
     <CodexRealtimeControl
       snapshot={realtime.snapshot}
       canStart={realtime.canStart}
+      admissionBlocker={realtime.admissionBlocker}
       codexConnected={realtime.codexConnected}
       audioRef={realtime.audioRef}
+      underlyingModel={props.underlyingModel}
       onStart={realtime.start}
       onStop={realtime.stop}
       onRetry={realtime.retry}
@@ -195,99 +244,201 @@ export function SessionCodexRealtimeControl(props: {
 export function CodexRealtimeControl(props: {
   snapshot: CodexRealtimeControllerSnapshot;
   canStart: boolean;
+  admissionBlocker?: string | null | undefined;
   codexConnected: boolean;
   showDiagnostics?: boolean;
   audioRef: RefObject<HTMLAudioElement | null>;
+  underlyingModel?: string | undefined;
   onStart: () => Promise<void>;
   onStop: () => Promise<void>;
   onRetry: () => Promise<void>;
   onRetryAudibleOutput: () => Promise<void>;
 }) {
-  const status = statusContent(props.snapshot, props.codexConnected);
+  const reduceMotion = useReducedMotion();
+  const selectedModel = CODEX_LIVE_MODEL;
+  const status = statusContent(
+    props.snapshot,
+    props.codexConnected,
+    props.canStart,
+    props.admissionBlocker ?? null,
+    selectedModel.label,
+  );
   const modeOwned = props.snapshot.mode?.state === "active";
-  const showStop = modeOwned && props.snapshot.status !== "lost_owner";
-  const showRetry =
+  const retryConnection =
     modeOwned &&
     props.snapshot.status !== "stopping" &&
     props.snapshot.status !== "active" &&
     props.snapshot.diagnostic?.recoverable === true;
-  const recoveryAction =
-    props.snapshot.audibleOutput === "blocked"
-      ? { label: "Resume audio", run: props.onRetryAudibleOutput }
-      : showRetry
-        ? { label: "Retry", run: props.onRetry }
-        : null;
-  const starting = props.snapshot.status === "starting";
+  const audioBlocked = props.snapshot.audibleOutput === "blocked";
+  const mainDisabled =
+    props.snapshot.status === "stopping" ||
+    props.snapshot.status === "lost_owner" ||
+    (!modeOwned && !props.canStart) ||
+    (props.snapshot.status === "starting" && !modeOwned);
+  const mainLabel = audioBlocked
+    ? "Resume voice audio"
+    : retryConnection
+      ? "Retry voice connection"
+      : modeOwned
+        ? "End voice conversation"
+        : `Start voice with ${selectedModel.label}`;
+  const runMainAction = audioBlocked
+    ? props.onRetryAudibleOutput
+    : retryConnection
+      ? props.onRetry
+      : modeOwned
+        ? props.onStop
+        : props.onStart;
+  const diagnosticsVisible = props.showDiagnostics ?? import.meta.env.DEV;
 
   return (
-    <section
-      aria-label="Codex realtime"
-      className="mx-auto flex w-full max-w-3xl shrink-0 flex-col gap-2 px-4 pb-2 sm:px-6"
-    >
+    <div aria-label="Realtime voice" className="inline-flex shrink-0 items-center">
       <audio ref={props.audioRef} autoPlay className="hidden" aria-hidden="true" />
-      <div className="flex w-full min-w-0 items-center gap-2 rounded-lg border border-border bg-surface-2/60 px-3 py-2">
-        <span
-          className={`size-2 shrink-0 rounded-full ${
-            props.snapshot.status === "active"
-              ? "bg-status-running"
-              : status.busy
-                ? "animate-pulse bg-brand"
-                : "bg-fg-muted"
-          }`}
-          aria-hidden="true"
+      <RealtimeComposerGlow phase={status.phase} reduceMotion={reduceMotion === true} />
+      <motion.button
+        type="button"
+        data-testid="realtime-primary-action"
+        data-phase={status.phase}
+        aria-label={mainLabel}
+        aria-pressed={modeOwned}
+        title={mainLabel}
+        disabled={mainDisabled}
+        whileTap={reduceMotion ? undefined : { scale: 0.92 }}
+        transition={{ type: "spring", stiffness: 520, damping: 30 }}
+        onClick={() => void runMainAction().catch(() => undefined)}
+        className={cn(
+          "relative inline-flex size-8 items-center justify-center rounded-l-og-md border outline-none",
+          "transition-[background-color,border-color,color,box-shadow] duration-200 ease-og-out",
+          "focus-visible:z-10 focus-visible:ring-2 focus-visible:ring-og-accent/45",
+          "disabled:cursor-not-allowed disabled:opacity-45 pointer-coarse:size-11",
+          voiceButtonTone(status.phase),
+        )}
+      >
+        <RealtimeActionGlyph
+          phase={status.phase}
+          audioBlocked={audioBlocked}
+          reduceMotion={reduceMotion === true}
         />
-        <div className="min-w-0 flex-1">
-          <p role="status" aria-live="polite" className="truncate text-sm font-medium text-fg">
-            {status.label}
-          </p>
-          <p className="truncate text-xs text-fg-muted">{status.detail}</p>
-        </div>
-        {showStop ? (
-          <>
-            {recoveryAction ? (
-              <button
-                type="button"
-                className={`${controlButtonClass} bg-primary text-primary-foreground hover:bg-primary/90`}
-                onClick={() => void recoveryAction.run().catch(() => undefined)}
-              >
-                {recoveryAction.label}
-              </button>
-            ) : null}
-            <button
-              type="button"
-              className={`${controlButtonClass} bg-secondary text-secondary-foreground hover:bg-secondary/80`}
-              aria-label="Stop Codex realtime"
-              disabled={props.snapshot.status === "stopping"}
-              onClick={() => void props.onStop().catch(() => undefined)}
-            >
-              {props.snapshot.status === "stopping" ? "Stopping" : "Stop"}
-            </button>
-          </>
-        ) : props.snapshot.status !== "lost_owner" ? (
+      </motion.button>
+
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
           <button
             type="button"
-            className={`${controlButtonClass} bg-primary text-primary-foreground hover:bg-primary/90`}
-            aria-label="Start Codex realtime"
-            disabled={!props.canStart || starting}
-            onClick={() => void props.onStart().catch(() => undefined)}
+            aria-label="Choose voice model and options"
+            title={`Voice model: ${selectedModel.label}`}
+            className={cn(
+              "inline-flex h-8 w-5 items-center justify-center rounded-r-og-md border border-l-0 outline-none",
+              "transition-[background-color,border-color,color] duration-200 ease-og-out",
+              "focus-visible:z-10 focus-visible:ring-2 focus-visible:ring-og-accent/45",
+              "pointer-coarse:h-11 pointer-coarse:w-7",
+              voiceButtonTone(status.phase),
+            )}
           >
-            {starting ? "Starting" : "Start"}
+            <ChevronDownIcon className="size-3" aria-hidden />
           </button>
-        ) : null}
-      </div>
-      {(props.showDiagnostics ?? import.meta.env.DEV) ? (
-        <CodexRealtimeDiagnostics snapshot={props.snapshot} />
-      ) : null}
+        </DropdownMenuTrigger>
+        <DropdownMenuContent
+          side="top"
+          align="end"
+          sideOffset={10}
+          collisionPadding={16}
+          className="w-[min(22rem,calc(100vw-2rem))] rounded-og-lg border-og-border bg-og-surface-1 p-1.5 text-og-fg shadow-og-lg"
+        >
+          <DropdownMenuLabel className="px-2.5 pb-1 pt-2 text-og-xs font-semibold uppercase tracking-[0.12em] text-og-fg-subtle">
+            Voice model
+          </DropdownMenuLabel>
+          <DropdownMenuRadioGroup value={selectedModel.id}>
+            {SUPPORTED_REALTIME_MODELS.map((model) => (
+              <DropdownMenuRadioItem
+                key={model.id}
+                value={model.id}
+                className="items-start rounded-og-md py-2.5 pl-8 pr-2.5"
+              >
+                <span className="min-w-0 flex-1">
+                  <span className="flex items-center gap-2">
+                    <span className="truncate text-og-sm font-medium text-og-fg">
+                      {model.label}
+                    </span>
+                    {model.recommended ? (
+                      <span className="rounded-full border border-og-accent/25 bg-og-accent-soft px-1.5 py-0.5 text-[10px] font-medium leading-none text-og-accent">
+                        Recommended
+                      </span>
+                    ) : null}
+                  </span>
+                  <span className="mt-0.5 block truncate text-og-xs text-og-fg-subtle">
+                    {model.provider} · {model.description}
+                  </span>
+                </span>
+              </DropdownMenuRadioItem>
+            ))}
+          </DropdownMenuRadioGroup>
+
+          <DropdownMenuSeparator className="mx-1 bg-og-border" />
+          <div className="px-2.5 py-2" role="status" aria-live="polite">
+            <div className="flex items-center gap-2 text-og-sm font-medium text-og-fg">
+              <RealtimeStatusDot phase={status.phase} reduceMotion={reduceMotion === true} />
+              {status.label}
+            </div>
+            <p className="mt-1 text-og-xs leading-5 text-og-fg-subtle">{status.detail}</p>
+          </div>
+
+          <div className="mx-2 mb-1 rounded-og-md border border-og-border/70 bg-og-surface-2/60 px-2.5 py-2">
+            <p className="truncate text-og-xs font-medium text-og-fg">
+              Session agent: {friendlyModelName(props.underlyingModel)}
+            </p>
+            <p className="mt-0.5 text-[11px] leading-4 text-og-fg-subtle">
+              Voice handles conversation; your session agent handles durable work.
+            </p>
+          </div>
+
+          {audioBlocked ? (
+            <DropdownMenuItem
+              className="rounded-og-md"
+              onSelect={() => void props.onRetryAudibleOutput().catch(() => undefined)}
+            >
+              <Volume2Icon />
+              Resume audio
+            </DropdownMenuItem>
+          ) : null}
+          {retryConnection ? (
+            <DropdownMenuItem
+              className="rounded-og-md"
+              onSelect={() => void props.onRetry().catch(() => undefined)}
+            >
+              <RotateCcwIcon />
+              Retry connection
+            </DropdownMenuItem>
+          ) : null}
+          {modeOwned && props.snapshot.status !== "lost_owner" ? (
+            <DropdownMenuItem
+              variant="destructive"
+              className="rounded-og-md"
+              disabled={props.snapshot.status === "stopping"}
+              onSelect={() => void props.onStop().catch(() => undefined)}
+            >
+              <SquareIcon />
+              End voice conversation
+            </DropdownMenuItem>
+          ) : null}
+
+          {diagnosticsVisible ? <RealtimeDiagnosticsMenu snapshot={props.snapshot} /> : null}
+        </DropdownMenuContent>
+      </DropdownMenu>
+
+      <span className="sr-only" role="status" aria-live="polite">
+        {status.label}. {status.detail}
+      </span>
       {props.snapshot.error ? (
         <span className="sr-only" role="alert">
           {props.snapshot.error}
         </span>
       ) : null}
-    </section>
+    </div>
   );
 }
 
-function CodexRealtimeDiagnostics({ snapshot }: { snapshot: CodexRealtimeControllerSnapshot }) {
+function RealtimeDiagnosticsMenu({ snapshot }: { snapshot: CodexRealtimeControllerSnapshot }) {
   const bridge = snapshot.bridge;
   const rows = [
     ["controller", snapshot.status],
@@ -311,67 +462,249 @@ function CodexRealtimeDiagnostics({ snapshot }: { snapshot: CodexRealtimeControl
   ] as const;
 
   return (
-    <details className="w-full rounded-md border border-border/70 bg-surface-2/40 px-3 py-2 text-xs text-fg-muted">
-      <summary className="cursor-pointer select-none font-medium text-fg">Realtime debug</summary>
-      <dl className="mt-2 grid grid-cols-[minmax(0,1fr)_minmax(0,2fr)] gap-x-3 gap-y-1 font-mono">
-        {rows.map(([label, value]) => (
-          <div className="contents" key={label}>
-            <dt>{label}</dt>
-            <dd className="min-w-0 truncate text-fg">{value}</dd>
-          </div>
-        ))}
-      </dl>
-      <p className="mt-2 font-sans">
-        OpenGeni actions use provider client delegation; direct tool schemas are not exposed by
-        realtime V3.
-      </p>
-    </details>
+    <>
+      <DropdownMenuSeparator className="mx-1 bg-og-border" />
+      <DropdownMenuSub>
+        <DropdownMenuSubTrigger className="rounded-og-md text-og-fg-muted">
+          Realtime diagnostics
+        </DropdownMenuSubTrigger>
+        <DropdownMenuSubContent className="max-h-80 w-72 overflow-y-auto rounded-og-lg border-og-border bg-og-surface-1 p-1.5 text-og-fg shadow-og-lg">
+          {rows.map(([label, value]) => (
+            <DropdownMenuItem
+              key={label}
+              disabled
+              className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-3 rounded-og-md font-mono text-[11px] opacity-100"
+            >
+              <span className="truncate text-og-fg-subtle">{label}</span>
+              <span className="truncate text-right text-og-fg">{value}</span>
+            </DropdownMenuItem>
+          ))}
+        </DropdownMenuSubContent>
+      </DropdownMenuSub>
+    </>
   );
 }
+
+type RealtimeVisualPhase =
+  | "idle"
+  | "connecting"
+  | "listening"
+  | "speaking"
+  | "reconnecting"
+  | "blocked"
+  | "unavailable"
+  | "error"
+  | "elsewhere"
+  | "stopping";
 
 function statusContent(
   snapshot: CodexRealtimeControllerSnapshot,
   codexConnected: boolean,
-): { label: string; detail: string; busy: boolean } {
+  canStart: boolean,
+  admissionBlocker: string | null,
+  modelLabel: string,
+): { phase: RealtimeVisualPhase; label: string; detail: string } {
   if (snapshot.audibleOutput === "blocked") {
     return {
+      phase: "blocked",
       label: "Audio output blocked",
-      detail: "Use Resume audio to hear the existing realtime connection",
-      busy: false,
+      detail: "Resume audio to hear the existing voice connection.",
     };
   }
   switch (snapshot.status) {
     case "starting":
-      return { label: "Starting realtime…", detail: "Connecting microphone and audio", busy: true };
+      return {
+        phase: "connecting",
+        label: "Connecting…",
+        detail: "Preparing your microphone and live voice.",
+      };
     case "active":
-      return { label: "Live", detail: "Codex realtime is active on this session", busy: false };
+      return snapshot.bridge?.speaking
+        ? {
+            phase: "speaking",
+            label: "Speaking",
+            detail: "Interrupt naturally whenever you want.",
+          }
+        : {
+            phase: "listening",
+            label: "Listening",
+            detail: "Voice and typed messages share this session.",
+          };
     case "stopping":
-      return { label: "Stopping realtime…", detail: "Returning to normal mode", busy: true };
+      return {
+        phase: "stopping",
+        label: "Ending voice…",
+        detail: "Saving the remaining conversation context.",
+      };
     case "recovering":
       return {
-        label: "Recovering realtime…",
-        detail: snapshot.error ?? "Reconnecting the same browser-owned mode",
-        busy: true,
+        phase: "reconnecting",
+        label: "Reconnecting…",
+        detail: snapshot.error ?? "Keeping this voice conversation connected.",
       };
     case "lost_owner":
       return {
-        label: "Realtime active in another browser",
-        detail: "Wait for that owner to stop or its lease to expire",
-        busy: false,
+        phase: "elsewhere",
+        label: "Voice active elsewhere",
+        detail: "Return to the browser that started it, or wait for that connection to expire.",
       };
     case "error":
       return {
-        label: "Realtime unavailable",
-        detail: snapshot.error ?? "Start failed",
-        busy: false,
+        phase: "error",
+        label: "Voice unavailable",
+        detail: snapshot.error ?? "The connection could not be started.",
       };
     case "idle":
-      return codexConnected
-        ? { label: "Ready for realtime", detail: "Talk with Codex on this session", busy: false }
-        : {
-            label: "Codex connection required",
-            detail: "Connect Codex to use realtime",
-            busy: false,
-          };
+      if (!codexConnected) {
+        return {
+          phase: "unavailable",
+          label: "Connect Codex for voice",
+          detail: "Connect a Codex account before using this voice model.",
+        };
+      }
+      if (!canStart && admissionBlocker) {
+        return { phase: "unavailable", label: "Voice unavailable", detail: admissionBlocker };
+      }
+      return {
+        phase: "idle",
+        label: "Start voice",
+        detail: `Talk live with ${modelLabel}.`,
+      };
   }
+}
+
+function RealtimeComposerGlow(props: { phase: RealtimeVisualPhase; reduceMotion: boolean }) {
+  const visible = [
+    "connecting",
+    "listening",
+    "speaking",
+    "reconnecting",
+    "blocked",
+    "error",
+    "stopping",
+  ].includes(props.phase);
+  return (
+    <AnimatePresence initial={false}>
+      {visible ? (
+        <motion.span
+          aria-hidden
+          key={props.phase}
+          initial={{ opacity: 0 }}
+          animate={
+            props.reduceMotion
+              ? { opacity: 0.48 }
+              : props.phase === "speaking"
+                ? { opacity: [0.42, 0.82, 0.52] }
+                : props.phase === "listening"
+                  ? { opacity: [0.34, 0.62, 0.42] }
+                  : { opacity: [0.28, 0.58, 0.28] }
+          }
+          exit={{ opacity: 0 }}
+          transition={
+            props.reduceMotion
+              ? { duration: 0.12 }
+              : {
+                  duration: props.phase === "speaking" ? 1.15 : 2.1,
+                  ease: "easeInOut",
+                  repeat: Number.POSITIVE_INFINITY,
+                }
+          }
+          className={cn(
+            "pointer-events-none absolute -inset-px z-[1] rounded-og-lg ring-1 ring-inset shadow-og-glow",
+            props.phase === "speaking"
+              ? "ring-og-status-running/50"
+              : props.phase === "blocked" || props.phase === "error"
+                ? "ring-og-status-waiting/45"
+                : "ring-og-accent/45",
+          )}
+        />
+      ) : null}
+    </AnimatePresence>
+  );
+}
+
+function RealtimeActionGlyph(props: {
+  phase: RealtimeVisualPhase;
+  audioBlocked: boolean;
+  reduceMotion: boolean;
+}) {
+  if (["connecting", "reconnecting", "stopping"].includes(props.phase)) {
+    return <LoaderCircleIcon className="size-3.5 animate-og-spin" aria-hidden />;
+  }
+  if (props.phase === "blocked") {
+    return props.audioBlocked ? (
+      <Volume2Icon className="size-3.5" aria-hidden />
+    ) : (
+      <CircleAlertIcon className="size-3.5" aria-hidden />
+    );
+  }
+  if (props.phase === "error" || props.phase === "elsewhere" || props.phase === "unavailable") {
+    return <CircleAlertIcon className="size-3.5" aria-hidden />;
+  }
+  if (props.phase === "listening" || props.phase === "speaking") {
+    return (
+      <span className="relative inline-flex size-4 items-center justify-center">
+        {!props.reduceMotion ? (
+          <motion.span
+            aria-hidden
+            className="absolute inset-0 rounded-full border border-current"
+            animate={{ opacity: [0.65, 0], scale: [0.65, 1.45] }}
+            transition={{
+              duration: props.phase === "speaking" ? 0.9 : 1.5,
+              ease: "easeOut",
+              repeat: Number.POSITIVE_INFINITY,
+            }}
+          />
+        ) : null}
+        <SquareIcon className="relative size-2.5 fill-current" aria-hidden />
+      </span>
+    );
+  }
+  return <AudioLinesIcon className="size-4" aria-hidden />;
+}
+
+function RealtimeStatusDot(props: { phase: RealtimeVisualPhase; reduceMotion: boolean }) {
+  const live = props.phase === "listening" || props.phase === "speaking";
+  return (
+    <span className="relative inline-flex size-2 shrink-0" aria-hidden>
+      {live && !props.reduceMotion ? (
+        <motion.span
+          className="absolute inset-0 rounded-full bg-og-status-running"
+          animate={{ opacity: [0.45, 0], scale: [1, 2.2] }}
+          transition={{ duration: 1.4, ease: "easeOut", repeat: Number.POSITIVE_INFINITY }}
+        />
+      ) : null}
+      <span
+        className={cn(
+          "relative size-2 rounded-full",
+          live
+            ? "bg-og-status-running"
+            : props.phase === "blocked" || props.phase === "error"
+              ? "bg-og-status-waiting"
+              : props.phase === "elsewhere" || props.phase === "unavailable"
+                ? "bg-og-fg-subtle"
+                : "bg-og-accent",
+        )}
+      />
+    </span>
+  );
+}
+
+function voiceButtonTone(phase: RealtimeVisualPhase): string {
+  if (phase === "listening" || phase === "speaking") {
+    return "border-og-accent/45 bg-og-accent text-og-accent-fg shadow-og-sm hover:bg-og-accent-strong";
+  }
+  if (phase === "blocked" || phase === "error") {
+    return "border-og-status-waiting/35 bg-og-status-waiting/10 text-og-status-waiting hover:bg-og-status-waiting/15";
+  }
+  if (phase === "connecting" || phase === "reconnecting" || phase === "stopping") {
+    return "border-og-accent/35 bg-og-accent-soft text-og-accent";
+  }
+  return "border-og-border bg-og-surface-2 text-og-fg-muted hover:border-og-accent/35 hover:bg-og-accent-soft hover:text-og-accent";
+}
+
+function friendlyModelName(model: string | undefined): string {
+  if (!model) return "Current session model";
+  const providerSeparator = model.lastIndexOf("/");
+  return providerSeparator >= 0 ? model.slice(providerSeparator + 1) : model;
 }

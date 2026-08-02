@@ -334,6 +334,17 @@ promotion schema is canonical in
 `packages/db/drizzle/0135_session_realtime_connection_promotion.sql` and
 `packages/db/src/session-realtime-ledger.ts`.
 
+The web UI mounts realtime as a compact split action inside the existing
+composer action row, immediately before Pause/Send; it does not reserve a
+second panel above the composer. The primary action follows the current
+lifecycle (start, end, retry, or resume audio). Its disclosure contains the
+supported realtime-model picker, plain-language status, recovery actions, and
+development-only diagnostics. Realtime-model choice remains separate from the
+durable session's underlying model; only models backed by a real provider
+adapter may appear.
+`ChatComposer.actionsStart` is the provider-neutral host seam; the current
+Codex-specific controller remains behind the web leaf.
+
 Complete role-bearing provider `turn.done` rows are the only authoritative voice
 transcript. Each provider delegation includes bounded finalized dialogue since
 the previous delegation and records a transcript fence. On end, after the
