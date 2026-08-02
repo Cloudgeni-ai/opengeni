@@ -1777,10 +1777,14 @@ describe("useComposer durable draft and control binding", () => {
     expect(reads).toBe(2);
     expect(hook.result.current.draftLoading).toBe(false);
     expect(releaseSecond).not.toBeNull();
-    // Soft reload must not flip draftLoading; settle the deferred read under act.
-    await flushing(() => {
+    // Soft reload must not flip draftLoading. Keep the deferred read's state
+    // commits inside act — on slower CI hosts a bare resolve can land after
+    // the synchronous act callback returns and trip the warning-free gate.
+    await flushing(async () => {
       releaseSecond!();
+      await new Promise((resolve) => setTimeout(resolve, 0));
     });
+    await flush();
     expect(hook.result.current.draftLoading).toBe(false);
     expect(hook.result.current.value).toBe("read-2");
     await hook.unmount();
