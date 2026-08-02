@@ -1,5 +1,18 @@
 # @opengeni/runtime
 
+## 0.16.1
+
+### Patch Changes
+
+- f4fa05c: Preserve structured exec results when routing to execCommand-only sandbox backends so file, Git, and PTY operations retain provider output and process authority.
+- dd71248: Make workspace-owned MCP OAuth connections the default, add explicit personal
+  connection ownership, and preserve exact delegated personal authority across
+  turns, child sessions, goals, schedules, retries, and recovery with safe
+  tool-level degradation when a personal connection is unavailable.
+- Updated dependencies [dd71248]
+  - @opengeni/contracts@0.29.0
+  - @opengeni/config@0.9.2
+
 ## 0.16.0
 
 ### Minor Changes

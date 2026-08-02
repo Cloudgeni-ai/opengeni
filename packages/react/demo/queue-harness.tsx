@@ -190,6 +190,7 @@ function QueueHarness() {
       queue: turns,
       pendingInputs: [],
       pendingInputAttachment: null,
+      activePersonalConnections: [],
       effectiveControl: null,
       stoppingPreviousAttempt: false,
       loading,

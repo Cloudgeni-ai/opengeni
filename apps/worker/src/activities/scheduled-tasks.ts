@@ -17,6 +17,7 @@ import {
   enqueueSessionWorkflowWakeIfRunnable,
   getBillingBalance,
   getScheduledTask,
+  getScheduledTaskPersonalConnectionDelegations,
   getRig,
   getVariableSet,
   isCodexBilledTurn,
@@ -63,6 +64,11 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
       if (!task) {
         return { action: "deleted" };
       }
+      const taskPersonalConnectionDelegations = await getScheduledTaskPersonalConnectionDelegations(
+        db,
+        task.workspaceId,
+        task.id,
+      );
       // A scheduled bot selection was authorized when the task was written,
       // but connection status and tenant/role binding are mutable. Revalidate
       // before any session/model cost and never fall back to a personal Slack
@@ -237,6 +243,7 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
               variableSetId: task.variableSetId ?? null,
               rigId: frozenRigId,
               rigVersionId: frozenRigVersionId,
+              personalConnectionDelegations: taskPersonalConnectionDelegations,
               maxNestedAgentDepthOverride: task.agentConfig.maxNestedAgentDepth ?? null,
               // The durable agent config was privilege-checked when the task
               // was created/updated. Preserve that explicit policy if a broader
@@ -328,6 +335,7 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
                 run.id,
               ),
               lineage: { scheduledTaskId: task.id, scheduledTaskRunId: run.id },
+              personalConnectionDelegations: taskPersonalConnectionDelegations,
             },
             async (tx, wakeEventId) => {
               if (!wakeEventId) throw new Error("Scheduled delivery has no wake event");
@@ -444,6 +452,7 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
                 run.id,
               ),
               lineage: { scheduledTaskId: task.id, scheduledTaskRunId: run.id },
+              personalConnectionDelegations: taskPersonalConnectionDelegations,
             },
             async (tx, wakeEventId) => {
               if (!wakeEventId) throw new Error("Scheduled delivery has no wake event");

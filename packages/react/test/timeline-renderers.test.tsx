@@ -210,6 +210,19 @@ function fleetDecisionEventPayload(): Record<string, unknown> {
 }
 
 describe("FleetDecisionRow", () => {
+  test("stays mounted through an unrelated parent rerender", async () => {
+    resetTimelineEvents();
+    const event = timelineEvent("codex.fleet.decision", fleetDecisionEventPayload());
+    const r = await renderComponent(<MessageTimeline events={[event]} className="before-unpin" />);
+
+    expect(r.container.textContent ?? "").toContain("Fleet policy shadow");
+    await r.rerender(<MessageTimeline events={[event]} className="after-unpin" />);
+    expect(r.container.textContent ?? "").toContain("Fleet policy shadow");
+    expect(r.container.querySelector(".after-unpin")).toBeTruthy();
+
+    await r.unmount();
+  });
+
   test("renders an accessible bounded production-vs-shadow explanation without secret metadata", async () => {
     resetTimelineEvents();
     const r = await renderComponent(
@@ -350,6 +363,38 @@ describe("TimelineRow — connection recovery", () => {
 });
 
 describe("MessageTimeline — settled turn folding", () => {
+  test("auto-opens a settled turn that contains a connection recovery warning", async () => {
+    resetTimelineEvents();
+    const turnId = "turn-auth-warning";
+    const events = [
+      timelineEvent(
+        "tool.auth_needed",
+        {
+          serverId: "mcp-linear",
+          providerDomain: "linear.app",
+          reason: "missing_connection",
+        },
+        turnId,
+      ),
+      timelineEvent("agent.reasoning.delta", { text: "Continuing without Linear." }, turnId),
+      timelineEvent(
+        "agent.message.completed",
+        { text: "The unrelated work completed; Linear was unavailable." },
+        turnId,
+      ),
+      timelineEvent("turn.completed", {}, turnId),
+    ];
+    const r = await renderComponent(<MessageTimeline events={events} />);
+    await flush();
+
+    const disclosure = r.container.querySelector("button[aria-expanded]") as HTMLElement | null;
+    expect(disclosure?.getAttribute("aria-expanded")).toBe("true");
+    expect(r.container.textContent).toContain("Connect Linear");
+    expect(r.container.textContent).toContain("It isn't connected yet.");
+
+    await r.unmount();
+  });
+
   test("settled turn renders one top-level chip, final answer, and folded narration", async () => {
     resetTimelineEvents();
     const events = [

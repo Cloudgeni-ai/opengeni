@@ -174,6 +174,42 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     });
   });
 
+  test("exec preserves structured output and PTY authority on an execCommand-only backend", async () => {
+    const promotions: Array<number | null> = [];
+    const backend: RoutableBackendSession = {
+      async execCommand(args) {
+        return (args as { tty?: boolean }).tty
+          ? "Chunk ID: pty\nWall time: 0.25 seconds\nProcess running with session ID 81\nOutput:\nroot@box:/workspace# "
+          : "Chunk ID: read\nWall time: 0.01 seconds\nProcess exited with code 7\nOutput:\nstructured output";
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+      beforeMutation: async () => "admission",
+      afterMutation: async ({ retainedProcess }) => {
+        promotions.push(retainedProcess?.providerSessionId ?? null);
+      },
+    });
+
+    await expect(proxy.exec({ cmd: "read" })).resolves.toEqual({
+      output: "structured output",
+      stdout: "structured output",
+      stderr: "",
+      wallTimeSeconds: 0,
+      exitCode: 7,
+    });
+    await expect(proxy.exec({ cmd: "/bin/bash", tty: true })).resolves.toEqual({
+      output: "root@box:/workspace# ",
+      stdout: "root@box:/workspace# ",
+      stderr: "",
+      wallTimeSeconds: 0,
+      sessionId: 81,
+    });
+    expect(promotions).toEqual([null, 81]);
+    expect(proxy.retainedProcessIdentity(81)).toMatchObject({ providerSessionId: 81 });
+  });
+
   test("a fenced read retry produces one observation per physical attempt", async () => {
     const pointer = mutablePointer({ activeSandboxId: "old", activeEpoch: 1 });
     const observations: Array<{ backend: string; outcome: string }> = [];

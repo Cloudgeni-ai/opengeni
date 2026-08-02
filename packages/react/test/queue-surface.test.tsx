@@ -88,6 +88,7 @@ function queue(overrides: Partial<UseTurnQueueResult> = {}): UseTurnQueueResult 
     mutationError: null,
     clearMutationError: () => {},
     ...overrides,
+    activePersonalConnections: overrides.activePersonalConnections ?? [],
   };
 }
 

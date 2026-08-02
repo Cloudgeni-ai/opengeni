@@ -320,6 +320,7 @@ try {
         "    () => ({",
         "      snapshot: null,",
         '      queue: [{ id: "turn-proof", workspaceId: "workspace-proof", sessionId: "session-proof", triggerEventId: "event-proof", temporalWorkflowId: "workflow-proof", status: "queued", source: "user", position: 1, prompt: "Review the queued host request", resources: [], tools: [], model: "host-model", reasoningEffort: "medium", latencyMode: "standard", sandboxBackend: "none", sandboxOs: null, metadata: {}, version: 1, executionGeneration: 0, activeAttemptId: null, lineage: {}, initiator: { kind: "service", subjectId: "host:proof" }, initiatorContext: {}, startedAt: null, finishedAt: null, createdAt: "2026-07-23T00:00:00.000Z", updatedAt: "2026-07-23T00:00:00.000Z" }],',
+        "      activePersonalConnections: [],",
         "      pendingInputs: [],",
         "      pendingInputAttachment: null,",
         "      effectiveControl: null,",

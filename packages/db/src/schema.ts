@@ -1,5 +1,6 @@
 import type {
   FirstPartyMcpToolName,
+  McpPersonalConnectionDelegation,
   McpServerConnectionRef,
   SessionMcpApprovalPolicy,
 } from "@opengeni/contracts";
@@ -1316,6 +1317,14 @@ export const sessions = pgTable(
     // Exact model-visible first-party tool selection. All catalogued tools are
     // selected by default; [] intentionally selects no broad-server tools.
     firstPartyMcpTools: jsonb("first_party_mcp_tools").$type<FirstPartyMcpToolName[]>().notNull(),
+    // Initial-command staging only. initializeSessionStartAtomically copies
+    // this immutable snapshot onto the first turn so create repair survives a
+    // crash between the session insert and first-turn transaction. Runtime
+    // credential authority must never read this session field.
+    initialPersonalConnectionDelegations: jsonb("initial_personal_connection_delegations")
+      .$type<McpPersonalConnectionDelegation[]>()
+      .notNull()
+      .default([]),
     // Durable tool-policy origin. Migration 0136 removes the old null/legacy
     // representation so every session has one explicit policy mode.
     toolPolicy: jsonb("tool_policy").$type<SessionToolPolicy>().notNull(),
@@ -1325,9 +1334,15 @@ export const sessions = pgTable(
     // when the creating grant carried a worker-signed sessionId claim (a session
     // spawning a worker); null for direct API creates and scheduled-task runs.
     // When set, this worker's terminal-for-now transitions wake the parent so a
-    // manager can orchestrate workers without busy-polling. Self-referencing FK,
-    // ON DELETE SET NULL so deleting a manager never cascades into its workers.
+    // manager can orchestrate workers without busy-polling. The migration-owned
+    // self-reference uses ON DELETE RESTRICT so immutable hierarchy and
+    // authority lineage cannot be silently orphaned by a parent hard delete.
     parentSessionId: uuid("parent_session_id"),
+    // Exact parent turn whose worker-signed attempt created this child. This is
+    // private immutable authority lineage: child completion copies personal MCP
+    // authority from that turn, never from whichever parent turn ran most
+    // recently. Null for top-level and legacy child sessions.
+    parentTurnId: uuid("parent_turn_id"),
     // Workspace-scoped CREATE idempotency key. NULL means the create carried no
     // key (each such create is independent). When set, the partial unique index
     // below collapses concurrent/retried creates with the same key in the same
@@ -2008,6 +2023,13 @@ export const sessionTurns = pgTable(
       .$type<Record<string, unknown>>()
       .notNull()
       .default({ backfill: true }),
+    // Immutable exact personal MCP authority for this logical turn. Recovery,
+    // approval, retries, and Toolspace reuse this row; no runtime may infer
+    // broader authority from the session creator or mutable session state.
+    personalConnectionDelegations: jsonb("personal_connection_delegations")
+      .$type<McpPersonalConnectionDelegation[]>()
+      .notNull()
+      .default([]),
     cancelledBy: text("cancelled_by"),
     cancelReason: text("cancel_reason"),
     // Atomic per-turn toolspace call budget counter (migration 0043). Incremented
@@ -2447,6 +2469,12 @@ export const sessionSystemUpdates = pgTable(
     summary: text("summary").notNull(),
     payload: jsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
     lineage: jsonb("lineage").$type<Record<string, unknown>>().notNull().default({}),
+    // Private immutable authority frozen when this machine input is accepted.
+    // Public projections intentionally omit connection ids and owner subjects.
+    personalConnectionDelegations: jsonb("personal_connection_delegations")
+      .$type<McpPersonalConnectionDelegation[]>()
+      .notNull()
+      .default([]),
     // pending is visible queue truth; delivered means its exact model-memory
     // batch was durably claimed. Terminal cancellation/supersession is explicit.
     state: text("state").notNull().default("pending"),
@@ -2526,6 +2554,12 @@ export const sessionSystemUpdateOutbox = pgTable(
     summary: text("summary").notNull(),
     payload: jsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
     lineage: jsonb("lineage").$type<Record<string, unknown>>().notNull().default({}),
+    // Exact private authority copied from the causal parent turn in the source
+    // terminal transaction. Delivery retries cannot replace this snapshot.
+    personalConnectionDelegations: jsonb("personal_connection_delegations")
+      .$type<McpPersonalConnectionDelegation[]>()
+      .notNull()
+      .default([]),
     status: text("status").notNull().default("pending"),
     attempts: integer("attempts").notNull().default(0),
     updateId: uuid("update_id"),
@@ -4325,6 +4359,16 @@ export const scheduledTasks = pgTable(
     runMode: text("run_mode").notNull().default("new_session_per_run"),
     overlapPolicy: text("overlap_policy").notNull().default("allow_concurrent"),
     agentConfig: jsonb("agent_config").$type<unknown>().notNull(),
+    createdByKind: text("created_by_kind").notNull().default("service"),
+    createdBySubjectId: text("created_by_subject_id").notNull().default("unattributed-legacy"),
+    createdByContext: jsonb("created_by_context")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({ backfill: true }),
+    personalConnectionDelegations: jsonb("personal_connection_delegations")
+      .$type<McpPersonalConnectionDelegation[]>()
+      .notNull()
+      .default([]),
     reusableSessionId: uuid("reusable_session_id").references(() => sessions.id, {
       onDelete: "set null",
     }),
@@ -5343,3 +5387,4 @@ export const rigChanges = pgTable(
 export * from "./workspace-instruction-policies-schema";
 export * from "./preference-registry-schema";
 export * from "./memory-governance-schema";
+export * from "./scoped-knowledge-schema";

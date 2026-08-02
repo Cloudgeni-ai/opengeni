@@ -161,12 +161,27 @@ function citedAssistantMessage() {
 }
 
 describe("turn credential subject authority", () => {
-  test("passes only a frozen human initiator to personal connection resolution", () => {
+  test("passes only a direct human/API turn to broad personal connection resolution", () => {
     expect(
-      credentialSubjectIdForTurnInitiator({ kind: "subject", subjectId: "subject-alice" }),
+      credentialSubjectIdForTurnInitiator({
+        source: "user",
+        initiator: { kind: "subject", subjectId: "subject-alice" },
+        initiatorContext: {},
+      }),
     ).toBe("subject-alice");
     expect(
-      credentialSubjectIdForTurnInitiator({ kind: "service", subjectId: "scheduler" }),
+      credentialSubjectIdForTurnInitiator({
+        source: "goal",
+        initiator: { kind: "service", subjectId: "goal-continuation" },
+        initiatorContext: {},
+      }),
+    ).toBeUndefined();
+    expect(
+      credentialSubjectIdForTurnInitiator({
+        source: "system",
+        initiator: { kind: "subject", subjectId: "subject-alice" },
+        initiatorContext: { via: [{ sessionId: crypto.randomUUID() }] },
+      }),
     ).toBeUndefined();
   });
 });

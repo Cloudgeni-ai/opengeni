@@ -29,6 +29,7 @@ import {
 import {
   CLEARED_RUN_STATE_BLOB,
   sessionSystemUpdateBatchHistoryItem,
+  type ToolAuthNeededPayload,
   verifyDelegatedAccessToken,
 } from "@opengeni/contracts";
 import {
@@ -3535,36 +3536,54 @@ describe("runtime event normalization", () => {
     }
   });
 
-  test("rejects subject-owned MCP use without a human initiator before resolver or transport", async () => {
+  test("degrades a subject-owned MCP without human authority instead of failing the turn", async () => {
     let resolverCalls = 0;
-    await expect(
-      prepareAgentTools(
-        testSettings({
-          mcpServers: [
-            {
-              id: "personal-slack",
-              name: "Personal Slack",
-              url: "https://mcp.slack.com/mcp",
-              connectionRef: {
-                providerDomain: "slack.com",
-                kind: "oauth2",
-                subjectScope: "subject",
-              },
-              cacheToolsList: false,
+    const authNeeded: ToolAuthNeededPayload[] = [];
+    const prepared = await prepareAgentTools(
+      testSettings({
+        mcpServers: [
+          {
+            id: "personal-slack",
+            name: "Personal Slack",
+            url: "https://mcp.slack.com/mcp",
+            connectionRef: {
+              providerDomain: "slack.com",
+              kind: "oauth2",
+              subjectScope: "subject",
             },
-          ],
-        }),
-        [{ kind: "mcp", id: "personal-slack" }],
-        {
-          workspaceId: "22222222-2222-4222-8222-222222222222",
-          resolveCredential: async () => {
-            resolverCalls += 1;
-            throw new Error("resolver must not run for a service turn");
+            cacheToolsList: false,
           },
+        ],
+      }),
+      [{ kind: "mcp", id: "personal-slack", optional: true }],
+      {
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        resolveCredential: async (request) => {
+          resolverCalls += 1;
+          expect(request.subjectId).toBeUndefined();
+          return {
+            status: "auth_needed",
+            reason: "missing_connection",
+            providerDomain: "slack.com",
+          };
         },
-      ),
-    ).rejects.toThrow("requires a human turn initiator");
-    expect(resolverCalls).toBe(0);
+        onAuthNeeded: (payload) => authNeeded.push(payload),
+      },
+    );
+    try {
+      expect(prepared.mcpServers).toHaveLength(0);
+      expect(resolverCalls).toBeGreaterThan(0);
+      expect(authNeeded).toEqual([
+        expect.objectContaining({
+          serverId: "personal-slack",
+          providerDomain: "slack.com",
+          reason: "missing_connection",
+          toolName: null,
+        }),
+      ]);
+    } finally {
+      await prepared.close();
+    }
   });
 
   test("sends configured credential headers to third-party MCP servers", async () => {

@@ -105,7 +105,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const payload = CreateConnectionRequest.parse(await c.req.json());
     assertNotReservedSlackBotMetadata(payload.metadata);
     const key = requireEnvironmentEncryption(settings);
-    const subjectId = writableSubjectId(payload.subjectId, grant.subjectId);
+    const subjectId = createConnectionSubjectId(payload, grant.subjectId);
     const providerDomain = canonicalProviderDomain(payload.providerDomain);
     assertNotDirectPersonalSlackOAuth(providerDomain, payload.kind);
     assertNotDirectGoogleDriveOAuth(providerDomain, payload.kind, payload.metadata);
@@ -834,6 +834,22 @@ function writableSubjectId(
     throw new HTTPException(403, { message: "cannot write a connection for another subject" });
   }
   return requested;
+}
+
+function createConnectionSubjectId(
+  payload: Pick<CreateConnectionRequest, "ownership" | "subjectId">,
+  grantSubjectId: string,
+): string | null {
+  if (payload.ownership === undefined) {
+    return writableSubjectId(payload.subjectId, grantSubjectId);
+  }
+  const subjectId = payload.ownership === "personal" ? grantSubjectId : null;
+  if (payload.subjectId !== undefined && payload.subjectId !== subjectId) {
+    throw new HTTPException(422, {
+      message: "ownership and subjectId describe different connection owners",
+    });
+  }
+  return subjectId;
 }
 
 function encryptCredentialBundle(key: Uint8Array, credential: Record<string, unknown>): string {

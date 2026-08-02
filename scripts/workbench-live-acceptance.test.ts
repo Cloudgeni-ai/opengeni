@@ -6,7 +6,9 @@ import {
   assertFixtureCapture,
   assertDedicatedCanaryEmail,
   assertAcceptancePrincipalScopes,
+  assertChangedFileLabelsContainRepositoryRoots,
   assertChangesDefaultVisible,
+  assertRepositoryChangesVisible,
   controlCancellationDurationMs,
   fixturePrompt,
   openWorkspaceIfCollapsed,
@@ -67,6 +69,45 @@ describe("workbench live acceptance preflight", () => {
     await assertChangesDefaultVisible(page);
 
     expect(calls).toEqual(["tab.wait", "selected-changes.wait", "layout.wait"]);
+  });
+
+  test("accepts repository evidence from the compact changed-file picker", async () => {
+    const calls: string[] = [];
+    const page = {
+      locator(selector: string) {
+        if (selector === "[data-workbench-changes-layout]") {
+          return {
+            getAttribute: async () => "compact",
+          };
+        }
+        expect(selector).toBe("[data-compact-file-picker]");
+        return {
+          waitFor: async (options: { state?: string; timeout?: number }) => {
+            expect(options).toEqual({ state: "visible", timeout: 20_000 });
+            calls.push("picker.wait");
+          },
+          locator(optionSelector: string) {
+            expect(optionSelector).toBe("option");
+            return {
+              allTextContents: async () => ["M · server.ts — api/", "M · app.tsx — web/src/"],
+            };
+          },
+        };
+      },
+      getByText() {
+        throw new Error("compact mode must not require hidden repository group labels");
+      },
+    } as never;
+
+    await assertRepositoryChangesVisible(page, ["api", "web"]);
+
+    expect(calls).toEqual(["picker.wait"]);
+  });
+
+  test("fails closed when compact changes omit an expected repository", () => {
+    expect(() =>
+      assertChangedFileLabelsContainRepositoryRoots(["M · server.ts — api/"], ["api", "web"]),
+    ).toThrow("compact workbench changes omitted repository web");
   });
 
   test("rejects the protected manually used production account", () => {

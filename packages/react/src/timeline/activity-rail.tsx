@@ -5,20 +5,19 @@ import {
   BrainIcon,
   SquareTerminalIcon,
 } from "lucide-react";
-import { lazy, Suspense, useLayoutEffect, useRef } from "react";
+import { useLayoutEffect, useRef } from "react";
 import { jsx as rowJsx, jsxs as rowJsxs } from "react/jsx-runtime";
 import { Markdown } from "../components/markdown";
 import { cn } from "../lib/cn";
 import { truncate } from "../lib/format";
 import { defaultToolRegistry } from "./tool-renderers";
 import { useEntranceAnimation, useEntranceAnimationLive } from "./entrance";
+import FleetDecisionRow from "./fleet-decision-row";
 import type { ToolRegistry } from "./registry";
 import { useSeenActivityIds } from "./seen-activity-ids";
 import { BodyNote, PayloadBlock, ActivityDisclosure } from "./shared";
 import { toolDisplayName } from "./tool-display-name";
 import type { ActivityItem, MemoryItem, ReasoningItem, SandboxItem, WorkerItem } from "./types";
-
-const LazyFleetDecisionRow = lazy(() => import("./fleet-decision-row"));
 
 /* ----------------------------------------------------------------------------
    Activity rail
@@ -153,15 +152,7 @@ function renderActivity(
       return <MemoryRow item={item} onMemoryClick={onMemoryClick} />;
     case "fleet-decision":
       return (
-        <Suspense fallback={null}>
-          <LazyFleetDecisionRow
-            item={item}
-            d={ActivityDisclosure}
-            b={BodyNote}
-            j={rowJsx}
-            s={rowJsxs}
-          />
-        </Suspense>
+        <FleetDecisionRow item={item} d={ActivityDisclosure} b={BodyNote} j={rowJsx} s={rowJsxs} />
       );
     default:
       return assertNever(item);

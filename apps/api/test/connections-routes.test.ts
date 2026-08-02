@@ -306,6 +306,56 @@ describe("personal Slack OAuth origin binding", () => {
 });
 
 describe("connections routes", () => {
+  test("manual connection ownership defaults to workspace and personal binds only the caller", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const headers = {
+      authorization: await bearer(workspace, "subject-a", [
+        "connections:read",
+        "connections:write",
+      ]),
+      "content-type": "application/json",
+    };
+    const create = (body: Record<string, unknown>) =>
+      app().request(`/v1/workspaces/${workspace.workspaceId}/connections`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          providerDomain: "api.example.com",
+          kind: "api_key",
+          credential: { headers: { authorization: "Bearer fixture" } },
+          ...body,
+        }),
+      });
+
+    const defaultWorkspace = await create({});
+    expect(defaultWorkspace.status).toBe(201);
+    expect(
+      ((await defaultWorkspace.json()) as { connection: { subjectId: string | null } }).connection
+        .subjectId,
+    ).toBeNull();
+
+    const explicitPersonal = await create({
+      providerDomain: "personal-api.example.com",
+      ownership: "personal",
+    });
+    expect(explicitPersonal.status).toBe(201);
+    expect(
+      ((await explicitPersonal.json()) as { connection: { subjectId: string | null } }).connection
+        .subjectId,
+    ).toBe("subject-a");
+
+    const contradictory = await create({
+      providerDomain: "contradictory.example.com",
+      ownership: "workspace",
+      subjectId: "subject-a",
+    });
+    expect(contradictory.status).toBe(422);
+    expect(await contradictory.text()).toContain(
+      "ownership and subjectId describe different connection owners",
+    );
+  });
+
   test("manual api_key create/list/get/revoke is permission-gated and never returns secret material", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -692,7 +742,7 @@ describe("connections routes", () => {
     expect(convert.status).toBe(422);
   });
 
-  test("oauth start/callback completes CIMD flow, creates a verified oauth2 connection, and keeps PKCE verifier out of URLs", async () => {
+  test("oauth start/callback defaults to a verified workspace oauth2 connection and keeps PKCE verifier out of URLs", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const as = startFakeAuthorizationServer({
@@ -745,6 +795,7 @@ describe("connections routes", () => {
       expect(state?.workspaceId).toBe(workspace.workspaceId);
       expect(state?.accountId).toBe(workspace.accountId);
       expect(state?.subjectId).toBe("subject-a");
+      expect(state?.ownership).toBe("workspace");
       expect(state?.providerDomain).toBe("mcp.example.com");
       expect(state?.mcpUrl).toBe(mcp.url);
       expect(state?.resource).toBe("urn:test:mcp");
@@ -765,6 +816,7 @@ describe("connections routes", () => {
       // connectionId) so the SPA can build the enable connectionRef straight from
       // the redirect, without depending on a listConnections round-trip.
       expect(location).toContain("providerDomain=mcp.example.com");
+      expect(location).toContain("ownership=workspace");
 
       expect(as.tokenRequests).toHaveLength(1);
       expect(as.tokenRequests[0]!.get("resource")).toBe("urn:test:mcp");
@@ -780,8 +832,7 @@ describe("connections routes", () => {
         workspaceId: workspace.workspaceId,
         providerDomain: "mcp.example.com",
         kind: "oauth2",
-        subjectId: "subject-a",
-        allowSubjectOwned: true,
+        allowSubjectOwned: false,
       });
       expect(loaded?.credential).toMatchObject({
         access_token: "mcp-access-token",
@@ -791,17 +842,7 @@ describe("connections routes", () => {
         token_endpoint: `${as.url}/token`,
         client_id: "https://api.opengeni.test/v1/integrations/oauth/client-metadata.json",
       });
-      expect(loaded?.subjectId).toBe("subject-a");
-      expect(
-        await loadConnectionCredentialForBroker(client.db, settings, {
-          workspaceId: workspace.workspaceId,
-          connectionId: loaded!.id,
-          providerDomain: "mcp.example.com",
-          kind: "oauth2",
-          subjectId: "subject-b",
-          allowSubjectOwned: true,
-        }),
-      ).toBeNull();
+      expect(loaded?.subjectId).toBeNull();
       const listedForBob = await app().request(
         `/v1/workspaces/${workspace.workspaceId}/connections`,
         { headers: { authorization: await bearer(workspace, "subject-b", ["connections:read"]) } },
@@ -810,7 +851,7 @@ describe("connections routes", () => {
         ((await listedForBob.json()) as { connections: Array<{ id: string }> }).connections.map(
           (connection) => connection.id,
         ),
-      ).not.toContain(loaded!.id);
+      ).toContain(loaded!.id);
       expect(loaded?.metadata.authorizationServerIssuer).toBe(new URL(as.url).toString());
       expect(loaded?.metadata.resource).toBe("urn:test:mcp");
       expect(loaded?.metadata.mcpUrl).toBe(mcp.url);
@@ -847,6 +888,7 @@ describe("connections routes", () => {
           body: JSON.stringify({
             providerDomain: "linear.app",
             mcpUrl: mcp.url,
+            ownership: "personal",
             returnPath: "/integrations?connect_item=linear",
           }),
         },
@@ -854,6 +896,9 @@ describe("connections routes", () => {
       const responseText = await response.clone().text();
       expect(response.status, responseText).toBe(200);
       const body = (await response.json()) as { state: string; authorizationUrl: string };
+      expect(
+        (readSignedState(body.state, STATE_SECRET) as Record<string, unknown> | null)?.ownership,
+      ).toBe("personal");
       expect(new URL(body.authorizationUrl).searchParams.get("resource")).toBe("urn:test:mcp");
 
       const callback = await publicApp(client.db).request(
@@ -861,6 +906,7 @@ describe("connections routes", () => {
       );
       expect(callback.status).toBe(302);
       expect(callback.headers.get("location")).toContain("integration_oauth=success");
+      expect(callback.headers.get("location")).toContain("ownership=personal");
       expect(callback.headers.get("location")).not.toContain("verification=failed");
       expect(as.tokenRequests).toHaveLength(1);
       expect(as.tokenRequests[0]!.get("resource")).toBe("urn:test:mcp");
@@ -1095,6 +1141,22 @@ describe("connections routes", () => {
       );
       expect(bobReconnect.status).toBe(404);
 
+      const ownershipTransfer = await app().request(
+        `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
+        {
+          method: "POST",
+          headers: aliceHeaders,
+          body: JSON.stringify({
+            providerDomain: "subject-oauth.example.com",
+            mcpUrl: mcp.url,
+            connectionId: seeded.id,
+            ownership: "workspace",
+            returnPath: "/integrations",
+          }),
+        },
+      );
+      expect(ownershipTransfer.status).toBe(409);
+
       const response = await app().request(
         `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
         {
@@ -1110,6 +1172,9 @@ describe("connections routes", () => {
       );
       expect(response.status).toBe(200);
       const body = (await response.json()) as { state: string };
+      expect(
+        (readSignedState(body.state, STATE_SECRET) as Record<string, unknown> | null)?.ownership,
+      ).toBe("personal");
       const callback = await publicApp(client.db).request(
         `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(body.state)}`,
       );

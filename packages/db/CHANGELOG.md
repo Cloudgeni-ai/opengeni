@@ -1,5 +1,21 @@
 # @opengeni/db
 
+## 0.20.0
+
+### Minor Changes
+
+- dd71248: Make workspace-owned MCP OAuth connections the default, add explicit personal
+  connection ownership, and preserve exact delegated personal authority across
+  turns, child sessions, goals, schedules, retries, and recovery with safe
+  tool-level degradation when a personal connection is unavailable.
+
+### Patch Changes
+
+- 03ed7eb: Preserve the linked Slack user's latest effective browser-selected turn model for inbound tasks and surface bounded session admission failures in Slack.
+- Updated dependencies [dd71248]
+  - @opengeni/contracts@0.29.0
+  - @opengeni/config@0.9.2
+
 ## 0.19.0
 
 ### Minor Changes

@@ -2548,6 +2548,46 @@ export const McpServerConnectionRef = z
   });
 export type McpServerConnectionRef = z.infer<typeof McpServerConnectionRef>;
 
+/** Internal frozen authority for one personal MCP connection. */
+export const McpPersonalConnectionDelegation = z
+  .object({
+    serverId: z.string().min(1).max(256),
+    connectionId: z.string().uuid(),
+    ownerSubjectId: z.string().min(1).max(512),
+    providerDomain: z.string().min(1).max(2048),
+    kind: z.enum(["oauth2", "api_key", "app_install", "delegated"]).optional(),
+  })
+  .strict();
+export type McpPersonalConnectionDelegation = z.infer<typeof McpPersonalConnectionDelegation>;
+
+/**
+ * Exact personal MCP authority frozen on one causal turn or scheduled task.
+ * One server can have at most one grant; bounded validation keeps corrupt JSON
+ * from becoming executable credential authority at a DB read boundary.
+ */
+export const McpPersonalConnectionDelegations = z
+  .array(McpPersonalConnectionDelegation)
+  .max(128)
+  .superRefine((delegations, context) => {
+    const seen = new Set<string>();
+    for (const [index, delegation] of delegations.entries()) {
+      if (seen.has(delegation.serverId)) {
+        context.addIssue({
+          code: "custom",
+          message: "personal MCP delegations must be unique by serverId",
+          path: [index, "serverId"],
+        });
+      }
+      seen.add(delegation.serverId);
+    }
+  });
+
+export const McpPersonalConnectionSummary = McpPersonalConnectionDelegation.pick({
+  serverId: true,
+  providerDomain: true,
+});
+export type McpPersonalConnectionSummary = z.infer<typeof McpPersonalConnectionSummary>;
+
 export type McpCredentialsRequest = {
   accountId: string;
   workspaceId: string;
@@ -2575,6 +2615,7 @@ export type McpCredentialsRequest = {
 
 export type McpCredentialAuthNeededReason =
   | CredentialAuthNeededReason
+  | "personal_authority_unavailable"
   | "unsupported_auth"
   | "resource_scope_unavailable";
 
@@ -4021,6 +4062,8 @@ export const SessionTurn = z.object({
   lineage: z.record(z.string(), z.unknown()),
   initiator: TurnInitiator,
   initiatorContext: TurnInitiatorContext,
+  /** Secret-safe projection of the exact personal authority frozen on this turn. */
+  personalConnections: z.array(McpPersonalConnectionSummary).default([]),
   cancelledBy: z.string().nullable(),
   cancelReason: z.string().nullable(),
   startedAt: z.string().nullable(),
@@ -4508,6 +4551,8 @@ export type SessionPendingInputPreview = z.infer<typeof SessionPendingInputPrevi
 export const SessionQueueSnapshot = z.object({
   version: z.number().int().nonnegative(),
   effectiveControl: EffectiveSessionControl,
+  /** Secret-safe personal MCP summaries frozen on the exact active turn. */
+  activePersonalConnections: z.array(McpPersonalConnectionSummary).default([]),
   /**
    * True while the latest attempt is interrupted but has not durably proved
    * quiescence: no more inference, user-visible output, or workspace-persistence
@@ -4875,6 +4920,9 @@ export const ScheduledTask = z.object({
   runMode: ScheduledTaskRunMode,
   overlapPolicy: ScheduledTaskOverlapPolicy,
   agentConfig: ScheduledTaskAgentConfig,
+  createdBy: TurnInitiator.default({ kind: "service", subjectId: "unattributed-legacy" }),
+  createdByContext: TurnInitiatorContext.default({}),
+  personalConnections: z.array(McpPersonalConnectionSummary).default([]),
   reusableSessionId: z.string().uuid().nullable(),
   variableSetId: z.string().uuid().nullable().default(null),
   /** @deprecated use variableSetId */
@@ -5397,9 +5445,14 @@ function compareDescending(left: number | string, right: number | string): numbe
 export const ConnectionCredentialBundle = z.record(z.string(), z.unknown());
 export type ConnectionCredentialBundle = z.infer<typeof ConnectionCredentialBundle>;
 
+export const ConnectionOwnership = z.enum(["workspace", "personal"]);
+export type ConnectionOwnership = z.infer<typeof ConnectionOwnership>;
+
 export const CreateConnectionRequest = z.object({
   providerDomain: z.string().min(1),
   kind: ConnectionKind,
+  ownership: ConnectionOwnership.optional(),
+  /** @deprecated use ownership */
   subjectId: z.string().min(1).nullable().optional(),
   credential: ConnectionCredentialBundle,
   grantedScopes: z.array(z.string().min(1)).default([]),
@@ -5449,6 +5502,7 @@ export const OAuthStartRequest = z
     requestedScopes: z.array(z.string().min(1)).default([]),
     returnPath: z.string().min(1).optional(),
     connectionId: z.string().uuid().optional(),
+    ownership: ConnectionOwnership.optional(),
     oauthClient: z
       .object({
         clientId: z.string().min(1),
@@ -6243,6 +6297,7 @@ export const ToolAuthNeededPayload = z.object({
     "expired",
     "insufficient_scope",
     "refresh_failed",
+    "personal_authority_unavailable",
     "unsupported_auth",
     "resource_scope_unavailable",
   ]),
@@ -9539,3 +9594,4 @@ export * from "./secret-redaction";
 export * from "./workspace-instruction-policies";
 export * from "./workspace-state";
 export * from "./preference-registry";
+export * from "./scoped-knowledge";

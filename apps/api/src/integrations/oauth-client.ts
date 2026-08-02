@@ -6,6 +6,7 @@ import {
   OPENGENI_PERSONAL_SLACK_MCP_URL,
   OAuthStartResponse,
   selectCanonicalPersonalSlackConnection,
+  type ConnectionOwnership,
   type OAuthStartRequest,
 } from "@opengeni/contracts";
 import { hasPermission, requireEnvironmentEncryption } from "@opengeni/core";
@@ -100,6 +101,7 @@ type OAuthStatePayload = {
   accountId: string;
   workspaceId: string;
   subjectId: string;
+  ownership: ConnectionOwnership;
   providerDomain: string;
   mcpUrl: string;
   resource: string;
@@ -154,6 +156,15 @@ export async function startMcpOAuth(
     : canonicalProviderDomain(context.payload.providerDomain ?? new URL(mcpUrl).hostname);
   const personalSlack = officialSlackResource || providerDomain === "slack.com";
   assertPersonalSlackOAuthStart(settings, context.payload, mcpUrl, personalSlack);
+  if (personalSlack && context.payload.ownership === "workspace") {
+    throw new HTTPException(422, {
+      message:
+        "Slack's hosted MCP connection is personal; use the OpenGeni Slack bot installation for workspace access",
+    });
+  }
+  const requestedOwnership: ConnectionOwnership = personalSlack
+    ? "personal"
+    : (context.payload.ownership ?? "workspace");
   const returnPath = safeReturnPath(context.payload.returnPath ?? "/integrations");
   const baseUrl = integrationBaseUrl(settings.publicBaseUrl, context.requestUrl);
   const redirectUri = `${baseUrl}/v1/integrations/oauth/callback`;
@@ -165,10 +176,15 @@ export async function startMcpOAuth(
     mcpUrl,
     personalSlack,
     connectionId: context.payload.connectionId,
+    requestedOwnership: context.payload.ownership,
+    newConnectionOwnership: requestedOwnership,
   });
   if (context.payload.connectionId && !existing) {
     throw new HTTPException(404, { message: "connection not found" });
   }
+  const ownership = existing
+    ? ownershipForConnection(existing.subjectId, context.subjectId)
+    : requestedOwnership;
 
   const discovery = await discoverMcpOAuth(mcpUrl, settings);
   if (personalSlack && !isLocalTestEnvironment(settings.environment)) {
@@ -195,6 +211,7 @@ export async function startMcpOAuth(
     accountId: context.accountId,
     workspaceId: context.workspaceId,
     subjectId: context.subjectId,
+    ownership,
     providerDomain,
     mcpUrl,
     resource,
@@ -274,6 +291,7 @@ export async function completeMcpOAuthCallback(
     };
   }
 
+  const ownerSubjectId = state.ownership === "personal" ? state.subjectId : null;
   try {
     const baseUrl = integrationBaseUrl(settings.publicBaseUrl, input.requestUrl);
     const redirectUri = `${baseUrl}/v1/integrations/oauth/callback`;
@@ -313,7 +331,7 @@ export async function completeMcpOAuthCallback(
             connectionId: state.connectionId,
             visibleToSubjectId: state.subjectId,
             expectedVersion: state.connectionVersion,
-            subjectId: state.subjectId,
+            subjectId: ownerSubjectId,
             providerDomain: state.providerDomain,
             kind: "oauth2",
             status: "active",
@@ -326,7 +344,7 @@ export async function completeMcpOAuthCallback(
         : createConnection(db, {
             accountId: state.accountId,
             workspaceId: state.workspaceId,
-            subjectId: state.subjectId,
+            subjectId: ownerSubjectId,
             providerDomain: state.providerDomain,
             kind: "oauth2",
             credentialEncrypted,
@@ -349,6 +367,7 @@ export async function completeMcpOAuthCallback(
       redirectTo: callbackReturnPath(state.returnPath, "success", {
         connectionId: connection.id,
         providerDomain: connection.providerDomain,
+        ownership: state.ownership,
         ...(verification.metadata.status === "failed" ? { verification: "failed" } : {}),
       }),
     };
@@ -853,6 +872,8 @@ async function existingOAuthConnectionForStart(
     mcpUrl: string;
     personalSlack: boolean;
     connectionId?: string | undefined;
+    requestedOwnership?: ConnectionOwnership | undefined;
+    newConnectionOwnership: ConnectionOwnership;
   },
 ) {
   if (input.connectionId) {
@@ -862,17 +883,25 @@ async function existingOAuthConnectionForStart(
       input.connectionId,
       input.subjectId,
     );
-    return connection?.subjectId === input.subjectId &&
-      connection.kind === "oauth2" &&
-      connection.providerDomain === input.providerDomain &&
+    if (!connection || connection.kind !== "oauth2") {
+      return null;
+    }
+    const ownership = ownershipForConnection(connection.subjectId, input.subjectId);
+    if (input.requestedOwnership && input.requestedOwnership !== ownership) {
+      throw new HTTPException(409, {
+        message: "connection ownership cannot be changed during OAuth reconnect",
+      });
+    }
+    return connection.providerDomain === input.providerDomain &&
       (!input.personalSlack || connection.metadata.mcpUrl === input.mcpUrl)
       ? connection
       : null;
   }
   const visible = await listConnectionsMetadata(db, input.workspaceId, input.subjectId);
+  const ownerSubjectId = input.newConnectionOwnership === "personal" ? input.subjectId : null;
   const matching = visible.filter(
     (connection) =>
-      connection.subjectId === input.subjectId &&
+      connection.subjectId === ownerSubjectId &&
       connection.kind === "oauth2" &&
       connection.providerDomain === input.providerDomain &&
       (!input.personalSlack || connection.metadata.mcpUrl === input.mcpUrl),
@@ -881,6 +910,15 @@ async function existingOAuthConnectionForStart(
     return selectCanonicalPersonalSlackConnection(matching);
   }
   return matching.find((connection) => connection.status === "active") ?? null;
+}
+
+function ownershipForConnection(
+  subjectId: string | null,
+  authenticatingSubjectId: string,
+): ConnectionOwnership {
+  if (subjectId === null) return "workspace";
+  if (subjectId === authenticatingSubjectId) return "personal";
+  throw new HTTPException(404, { message: "connection not found" });
 }
 
 function buildAuthorizationUrl(input: {
@@ -926,6 +964,9 @@ function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
     accountId: requiredString(payload.accountId, "state.accountId"),
     workspaceId: requiredString(payload.workspaceId, "state.workspaceId"),
     subjectId: requiredString(payload.subjectId, "state.subjectId"),
+    // OAuth states minted before ownership was explicit were always personal.
+    // Preserve that meaning for in-flight reconnects during a rolling deploy.
+    ownership: connectionOwnership(payload.ownership) ?? "personal",
     providerDomain: requiredString(payload.providerDomain, "state.providerDomain"),
     mcpUrl: stringValue(payload.mcpUrl) ?? resource,
     resource,
@@ -970,6 +1011,10 @@ function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
     ...(connectionId ? { connectionId } : {}),
     ...(connectionVersion !== undefined ? { connectionVersion } : {}),
   };
+}
+
+function connectionOwnership(value: unknown): ConnectionOwnership | undefined {
+  return value === "workspace" || value === "personal" ? value : undefined;
 }
 
 async function clientForState(

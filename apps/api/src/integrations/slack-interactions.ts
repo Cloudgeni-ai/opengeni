@@ -18,6 +18,7 @@ import {
   deleteSlackBotUserLink,
   enqueueSlackInteractionInbox,
   getOrCreateSlackInteraction,
+  getLatestSessionModelForSubject,
   getSlackBotUserLink,
   getSlackInteractionByRoute,
   getWorkspaceGrant,
@@ -344,6 +345,14 @@ export async function drainSlackInteractionsOnce(deps: ApiRouteDeps): Promise<bo
       });
     } catch (error) {
       const code = safeErrorCode(error);
+      console.error("[slack-interactions] inbox processing failed", {
+        workspaceId: entry.workspaceId,
+        connectionId: entry.connectionId,
+        providerEventId: entry.providerEventId,
+        triggerKind: entry.triggerKind,
+        attemptCount: entry.attemptCount,
+        errorCode: code,
+      });
       if (
         entry.attemptCount >= 5 ||
         permanentSlackInteractionError(error) ||
@@ -492,14 +501,35 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
     await continueSlackSession(deps, grant, interaction, entry);
     return;
   }
-  const session = await createSessionForRequest(deps, grant, entry.workspaceId, {
-    requestedSessionId: interaction.sessionReservationId,
-    initialMessage: entry.text,
-    turnInstructions: SLACK_TASK_INSTRUCTIONS,
-    firstPartyMcpTools: [...SLACK_TASK_FIRST_PARTY_MCP_TOOLS],
-    idempotencyKey: `slack:${entry.connectionId}:${entry.providerEventId}`,
-    clientEventId: `slack:${entry.providerEventId}`,
-  });
+  const preferredModel = await getLatestSessionModelForSubject(
+    deps.db,
+    entry.workspaceId,
+    grant.subjectId,
+  );
+  let session: Awaited<ReturnType<typeof createSessionForRequest>>;
+  try {
+    session = await createSessionForRequest(deps, grant, entry.workspaceId, {
+      requestedSessionId: interaction.sessionReservationId,
+      initialMessage: entry.text,
+      turnInstructions: SLACK_TASK_INSTRUCTIONS,
+      firstPartyMcpTools: [...SLACK_TASK_FIRST_PARTY_MCP_TOOLS],
+      ...(preferredModel ? { model: preferredModel } : {}),
+      idempotencyKey: `slack:${entry.connectionId}:${entry.providerEventId}`,
+      clientEventId: `slack:${entry.providerEventId}`,
+    });
+  } catch (error) {
+    if (error instanceof HTTPException) {
+      await client.postMessage({
+        operationId: deterministicUuid(`slack-admission-failed:${interaction.id}`),
+        channelId: entry.slackChannelId,
+        ...(entry.triggerKind === "slash_command"
+          ? {}
+          : { threadTimestamp: entry.slackThreadTs ?? entry.slackMessageTs }),
+        text: slackAdmissionFailureText(error),
+      });
+    }
+    throw error;
+  }
   const bound = await bindSlackInteractionSession(deps.db, {
     ...interaction,
     owningSubjectId: grant.subjectId,
@@ -982,6 +1012,7 @@ function safePayloadText(payload: unknown, field: string) {
 
 function safeErrorCode(error: unknown) {
   if (error instanceof SlackBotProviderError) return error.code.slice(0, 128);
+  if (error instanceof HTTPException) return `http_${error.status}`;
   const raw = error instanceof Error ? error.name : "slack_interaction_error";
   return (
     raw
@@ -989,6 +1020,16 @@ function safeErrorCode(error: unknown) {
       .replace(/[^a-z0-9_-]/g, "_")
       .slice(0, 128) || "error"
   );
+}
+
+function slackAdmissionFailureText(error: HTTPException) {
+  if (error.status === 402) {
+    return "OpenGeni could not start this task because the selected model has no available billing source. Open OpenGeni, select a connected subscription model, and try again.";
+  }
+  if (error.status === 429) {
+    return "OpenGeni could not start this task because this workspace has reached a usage limit. Try again later or review the workspace limits in OpenGeni.";
+  }
+  return "OpenGeni could not start this task because the workspace rejected the session settings. Open OpenGeni, select an available model, and try again.";
 }
 
 class SlackInteractionPermanentError extends Error {}

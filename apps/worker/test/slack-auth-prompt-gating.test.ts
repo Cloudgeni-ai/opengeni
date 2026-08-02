@@ -74,6 +74,20 @@ describe("Slack auth prompt gating", () => {
     ).toBe(false);
   });
 
+  test("allows setup-time prompts for direct authenticated API commands", () => {
+    expect(
+      shouldPublishToolAuthNeededForTurn(
+        setupAuthNeeded,
+        { type: "user.message", payload: { text: "Post this update in Slack." } },
+        {
+          source: "api",
+          initiator: directHumanTurn.initiator,
+          initiatorContext: {},
+        },
+      ),
+    ).toBe(true);
+  });
+
   test("suppresses agent-created user turns that inherit a human ancestor", () => {
     expect(
       shouldPublishToolAuthNeededForTurn(
@@ -129,14 +143,6 @@ describe("Slack auth prompt gating", () => {
         source: "api" as const,
         initiator: { kind: "service" as const, subjectId: "embedding-service" },
         initiatorContext: { occurrenceId: "occurrence-1" },
-      },
-    },
-    {
-      name: "direct API subject",
-      turn: {
-        source: "api" as const,
-        initiator: directHumanTurn.initiator,
-        initiatorContext: {},
       },
     },
     {

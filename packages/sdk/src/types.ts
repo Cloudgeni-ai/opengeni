@@ -376,6 +376,19 @@ export type McpServerConnectionRef = {
   subjectScope?: "workspace" | "subject" | undefined;
 };
 
+export type McpPersonalConnectionDelegation = {
+  serverId: string;
+  connectionId: string;
+  ownerSubjectId: string;
+  providerDomain: string;
+  kind?: ConnectionKind | undefined;
+};
+
+export type McpPersonalConnectionSummary = Pick<
+  McpPersonalConnectionDelegation,
+  "serverId" | "providerDomain"
+>;
+
 export type ConnectionMetadata = {
   id: string;
   accountId: string;
@@ -402,6 +415,8 @@ export type ConnectionMetadata = {
 export type CreateConnectionRequest = {
   providerDomain: string;
   kind: ConnectionKind;
+  ownership?: ConnectionOwnership | undefined;
+  /** @deprecated use ownership */
   subjectId?: string | null | undefined;
   credential: Record<string, unknown>;
   grantedScopes?: string[] | undefined;
@@ -503,6 +518,8 @@ export type ListConnectionsResponse = {
   connections: ConnectionMetadata[];
 };
 
+export type ConnectionOwnership = "workspace" | "personal";
+
 export type OAuthStartRequest = {
   providerDomain?: string | undefined;
   mcpUrl?: string | undefined;
@@ -510,6 +527,7 @@ export type OAuthStartRequest = {
   requestedScopes?: string[] | undefined;
   returnPath?: string | undefined;
   connectionId?: string | undefined;
+  ownership?: ConnectionOwnership | undefined;
   oauthClient?:
     | {
         clientId: string;
@@ -571,8 +589,10 @@ export type TurnInitiator = {
 /** A trusted embedding host's causal machine/service principal. */
 export type ServiceTurnInitiator = TurnInitiator & { kind: "service" };
 
+export type TurnInitiatorContext = Record<string, unknown>;
+
 /** Bounded host provenance; OpenGeni-owned lineage keys are reserved. */
-export type ServiceTurnInitiatorContext = Record<string, unknown>;
+export type ServiceTurnInitiatorContext = TurnInitiatorContext;
 
 export type IntegrationClientMetadata = {
   client_id: string;
@@ -746,6 +766,7 @@ export type SessionTurn = {
   lineage: Record<string, unknown>;
   initiator: TurnInitiator;
   initiatorContext: Record<string, unknown>;
+  personalConnections?: McpPersonalConnectionSummary[] | undefined;
   cancelledBy?: string | null;
   cancelReason?: string | null;
   startedAt: string | null;
@@ -1089,6 +1110,7 @@ export type ToolAuthNeededPayload = {
     | "expired"
     | "insufficient_scope"
     | "refresh_failed"
+    | "personal_authority_unavailable"
     | "unsupported_auth"
     | "resource_scope_unavailable";
   scopes?: string[] | undefined;
@@ -1651,6 +1673,9 @@ export type ScheduledTask = {
   runMode: ScheduledTaskRunMode;
   overlapPolicy: ScheduledTaskOverlapPolicy;
   agentConfig: ScheduledTaskAgentConfig;
+  createdBy?: TurnInitiator | undefined;
+  createdByContext?: TurnInitiatorContext | undefined;
+  personalConnections?: McpPersonalConnectionSummary[] | undefined;
   reusableSessionId: string | null;
   variableSetId: string | null;
   /** @deprecated use variableSetId */
@@ -2594,6 +2619,8 @@ export type NewSessionDraft = {
 export type SessionQueueSnapshot = {
   version: number;
   effectiveControl: EffectiveSessionControl;
+  /** Secret-safe personal MCP summaries frozen on the exact active turn. */
+  activePersonalConnections: McpPersonalConnectionSummary[];
   /** The latest interrupted attempt has not yet durably proved physical quiescence. */
   stoppingPreviousAttempt: boolean;
   items: SessionTurn[];
