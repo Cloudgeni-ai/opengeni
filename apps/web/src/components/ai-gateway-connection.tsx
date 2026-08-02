@@ -1,5 +1,5 @@
 import type { ConnectionMetadata } from "@opengeni/sdk";
-import { KeyRoundIcon, Loader2Icon, Trash2Icon } from "lucide-react";
+import { ChevronDownIcon, KeyRoundIcon, Loader2Icon, Trash2Icon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
@@ -26,6 +26,7 @@ export function AiGatewayConnectionCard(props: { workspaceId: string; canManage:
   const [error, setError] = useState<string | null>(null);
   const [apiKey, setApiKey] = useState("");
   const [busy, setBusy] = useState(false);
+  const [open, setOpen] = useState(false);
 
   const connection = useMemo(() => {
     const gatewayConnections = connections.filter(isGatewayConnection);
@@ -60,7 +61,7 @@ export function AiGatewayConnectionCard(props: { workspaceId: string; canManage:
     try {
       const metadata = {
         credentialRole: GATEWAY_ROLE,
-        credentialLabel: "Your Gateway",
+        credentialLabel: "Vercel AI Gateway",
       };
       const saved =
         connection && connection.status !== "revoked"
@@ -79,9 +80,10 @@ export function AiGatewayConnectionCard(props: { workspaceId: string; canManage:
             });
       setConnections((current) => [saved, ...current.filter((item) => item.id !== saved.id)]);
       setApiKey("");
-      toast.success("Gateway connected");
+      setOpen(false);
+      toast.success("Vercel AI Gateway connected");
     } catch (caught) {
-      toast.error("Couldn't save Gateway key", {
+      toast.error("Couldn't save Vercel AI Gateway key", {
         description: caught instanceof Error ? caught.message : String(caught),
       });
     } finally {
@@ -95,9 +97,10 @@ export function AiGatewayConnectionCard(props: { workspaceId: string; canManage:
     try {
       const revoked = await client.deleteConnection(props.workspaceId, connection.id);
       setConnections((current) => current.map((item) => (item.id === revoked.id ? revoked : item)));
-      toast.success("Gateway disconnected");
+      setOpen(false);
+      toast.success("Vercel AI Gateway disconnected");
     } catch (caught) {
-      toast.error("Couldn't disconnect Gateway", {
+      toast.error("Couldn't disconnect Vercel AI Gateway", {
         description: caught instanceof Error ? caught.message : String(caught),
       });
     } finally {
@@ -105,38 +108,46 @@ export function AiGatewayConnectionCard(props: { workspaceId: string; canManage:
     }
   }
 
-  return (
-    <section
-      aria-labelledby="workspace-gateway-heading"
-      className="rounded-lg border border-border"
-    >
-      <div className="flex items-center gap-2 border-b border-border/70 px-3 py-2.5">
-        <KeyRoundIcon className="size-3.5 shrink-0 text-brand" />
-        <div className="min-w-0 flex-1">
-          <h2 id="workspace-gateway-heading" className="text-sm font-medium">
-            Your Gateway
-          </h2>
-          <p className="text-2xs text-fg-subtle">Use the workspace's own AI Gateway billing.</p>
-        </div>
-        <span className="text-2xs text-fg-subtle">
-          {!loaded ? "…" : connected ? "Connected" : "Not connected"}
-        </span>
-      </div>
+  // This is an admin-only opt-in. Non-admins only need to see it when the
+  // workspace already connected one; the model picker exposes the usable rail.
+  if (!props.canManage && !connected) return null;
 
-      <div className="grid gap-3 px-3 py-3">
+  return (
+    <details
+      className="group rounded-lg border border-border"
+      open={open}
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
+      <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5 text-left transition-colors hover:bg-surface-2/60 [&::-webkit-details-marker]:hidden">
+        <KeyRoundIcon className="size-3.5 shrink-0 text-brand" />
+        <span className="min-w-0 flex-1 truncate text-sm font-medium">
+          Bring your own Vercel AI Gateway
+        </span>
+        <span className="text-2xs text-fg-subtle">
+          {!loaded ? "…" : connected ? "Connected" : error ? "Unavailable" : "Off"}
+        </span>
+        <ChevronDownIcon className="size-4 shrink-0 text-fg-subtle transition-transform group-open:rotate-180" />
+      </summary>
+
+      <div className="grid gap-3 border-t border-border/70 px-3 py-3">
+        <p className="text-2xs text-fg-subtle">
+          Use models through this workspace's Vercel account. Vercel bills usage directly instead of
+          using OpenGeni credits.
+        </p>
         {error ? <p className="text-xs text-destructive">{error}</p> : null}
         {props.canManage ? (
           <>
-            <div className="flex gap-2">
+            <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
               <Input
                 type="password"
                 autoComplete="off"
                 value={apiKey}
                 onChange={(event) => setApiKey(event.target.value)}
-                placeholder={connected ? "Replace AI Gateway key" : "AI Gateway key"}
-                aria-label="AI Gateway key"
+                className="h-9"
+                placeholder={connected ? "Replace Vercel AI Gateway key" : "Vercel AI Gateway key"}
+                aria-label="Vercel AI Gateway key"
               />
-              <Button type="button" size="sm" disabled={busy || !apiKey.trim()} onClick={save}>
+              <Button type="button" disabled={busy || !apiKey.trim()} onClick={save}>
                 {busy ? (
                   <Loader2Icon className="size-3.5 animate-spin" />
                 ) : connected ? (
@@ -145,29 +156,32 @@ export function AiGatewayConnectionCard(props: { workspaceId: string; canManage:
                   "Connect"
                 )}
               </Button>
+            </div>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-2xs text-fg-subtle">
+                Stored encrypted. Connecting does not run a model or spend credits.
+              </p>
               {connected ? (
                 <Button
                   type="button"
-                  size="icon-sm"
+                  size="xs"
                   variant="ghost"
                   disabled={busy}
-                  aria-label="Disconnect Gateway"
+                  className="text-destructive hover:text-destructive"
                   onClick={disconnect}
                 >
                   <Trash2Icon className="size-3.5" />
+                  Disconnect
                 </Button>
               ) : null}
             </div>
-            <p className="text-2xs text-fg-subtle">
-              Stored encrypted. Saving never runs a model or spends Gateway credits.
-            </p>
           </>
         ) : (
           <p className="text-xs text-fg-subtle">
-            Workspace admins can connect or replace this key.
+            Workspace admins manage this Vercel AI Gateway connection.
           </p>
         )}
       </div>
-    </section>
+    </details>
   );
 }
