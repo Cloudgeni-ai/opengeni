@@ -1,5 +1,12 @@
 # @opengeni/observability
 
+## 0.4.0
+
+### Minor Changes
+
+- 38ba6bc: Add bounded routed-sandbox provider operation observations and the fail-safe
+  Prometheus observer used by API-direct and worker turn execution.
+
 ## 0.3.0
 
 ### Minor Changes
