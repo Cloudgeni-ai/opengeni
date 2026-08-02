@@ -6,6 +6,11 @@ import {
   isCreditExhaustion,
   tryParseJson,
 } from "../lib/format";
+import {
+  mcpToolLeaf,
+  toolDisplayName,
+  toolMatchesLeaf,
+} from "./tool-display-name";
 import type {
   AgentMessageItem,
   ActivityItem,
@@ -22,12 +27,8 @@ import type {
   ToolCallItem,
   WorkerItem,
 } from "./types";
-/** Readable label for a tool call, without leaking an MCP server prefix. */
-export function toolDisplayName(name: string): string {
-  const boundary = name.indexOf("__");
-  const toolPart = boundary >= 0 ? name.slice(boundary + 2) : name;
-  return toolPart.replace(/[_-]+/g, " ").trim();
-}
+
+export { toolDisplayName, mcpToolLeaf, toolMatchesLeaf } from "./tool-display-name";
 
 /* ----------------------------------------------------------------------------
    Timeline projection
@@ -43,9 +44,22 @@ export function toolDisplayName(name: string): string {
    memoized, unit-tested, and re-run incrementally as new events stream in.
    -------------------------------------------------------------------------- */
 
-/** Tool names on the first-party OpenGeni MCP server that operate on sessions. */
+/** Tool leaves on the first-party OpenGeni MCP server that operate on sessions. */
 const WORKER_SPAWN_TOOL = "session_create";
 const WORKER_MESSAGE_TOOL = "session_send_message";
+
+/**
+ * Tools whose durable side-effect events already own the timeline (GoalRow /
+ * MemoryRow). Emitting a generic tool-call too is double chrome — skip the call.
+ */
+const LANDMARK_ONLY_TOOL_LEAVES = new Set([
+  "goal_set",
+  "goal_update",
+  "goal_complete",
+  "goal_pause",
+  "memory_save",
+  "memory_correct",
+]);
 
 export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
   const items: TimelineItem[] = [];
@@ -240,18 +254,25 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         const callId = typeof payload.id === "string" ? payload.id : null;
         const args = payload.arguments ?? null;
         closeStreamingTail();
-        if (name === WORKER_SPAWN_TOOL || name === WORKER_MESSAGE_TOOL) {
+        if (
+          toolMatchesLeaf(name, WORKER_SPAWN_TOOL) ||
+          toolMatchesLeaf(name, WORKER_MESSAGE_TOOL)
+        ) {
           items.push({
             kind: "worker",
             id: event.id,
             turnId,
             callId,
-            action: name === WORKER_SPAWN_TOOL ? "spawn" : "message",
+            action: toolMatchesLeaf(name, WORKER_SPAWN_TOOL) ? "spawn" : "message",
             prompt: workerPrompt(args),
             workerSessionId: extractSessionRef(args),
             status: "running",
             occurredAt: event.occurredAt,
           });
+          break;
+        }
+        if (LANDMARK_ONLY_TOOL_LEAVES.has(mcpToolLeaf(name))) {
+          // Goal/memory landmarks arrive as goal.* / memory.* events.
           break;
         }
         // Live Responses `web_search_call` events and the later SDK
@@ -1566,14 +1587,3 @@ export function extractSessionRef(value: unknown, depth = 0): string | null {
 function looksLikeId(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
 }
-
-/**
- * Readable label for a tool call ("session_create" -> "session create").
- *
- * MCP tools are namespaced `<serverId>__<toolName>` (see prefixedMcpToolName),
- * and for catalog-imported servers that serverId is an opaque slug+hash
- * ("mcp-integrations-sh-supabase-com-34ed9dcf1390-0i6tcf8"). De-slugging the
- * whole thing leaked that id into the timeline; strip the server prefix and show
- * just the tool ("list organizations"). Names without the `__` boundary (plain
- * built-ins like "session_create") are unaffected.
- */

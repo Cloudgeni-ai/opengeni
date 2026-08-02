@@ -368,7 +368,7 @@ function WorkspaceMenu(props: {
             params={{ workspaceId: props.activeWorkspaceId }}
           >
             <SettingsIcon className="size-4" />
-            Workspace settings
+            Settings
           </Link>
         </DropdownMenuItem>
       </DropdownMenuContent>

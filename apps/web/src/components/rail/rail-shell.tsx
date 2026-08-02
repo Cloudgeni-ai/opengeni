@@ -351,7 +351,7 @@ export function RailShell({ children }: { children: ReactNode }) {
             >
               <SheetTitle className="sr-only">Session navigation</SheetTitle>
               <SheetDescription className="sr-only">
-                Browse workspace sessions or open workspace settings.
+                Browse workspace sessions or open Workspace.
               </SheetDescription>
               <nav aria-label="Primary" className="h-full">
                 <RailBody />

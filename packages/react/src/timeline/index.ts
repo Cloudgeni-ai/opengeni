@@ -22,7 +22,9 @@ export {
   extractSessionRef,
   groupTimeline,
   sessionStatusFromEvents,
+  mcpToolLeaf,
   toolDisplayName,
+  toolMatchesLeaf,
 } from "./projection";
 
 // item types

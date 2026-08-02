@@ -21,21 +21,21 @@ import {
 } from "../src/timeline";
 
 describe("toolDisplayName", () => {
-  test("strips the MCP server-id prefix and shows only the tool", () => {
+  test("strips the MCP server-id prefix and title-cases the leaf", () => {
     // Catalog-imported MCP server: <opaque slug+hash>__<tool>.
     expect(
       toolDisplayName("mcp-integrations-sh-supabase-com-34ed9dcf1390-0i6tcf8__list_organizations"),
-    ).toBe("list organizations");
-    expect(toolDisplayName("opengeni__set_session_title")).toBe("set session title");
+    ).toBe("List organizations");
+    expect(toolDisplayName("opengeni__set_session_title")).toBe("Set session title");
   });
 
-  test("plain built-in tool names (no __ boundary) are just de-slugged", () => {
-    expect(toolDisplayName("session_create")).toBe("session create");
-    expect(toolDisplayName("bash")).toBe("bash");
+  test("plain built-in tool names (no __ boundary) are de-slugged and title-cased", () => {
+    expect(toolDisplayName("session_create")).toBe("Session create");
+    expect(toolDisplayName("bash")).toBe("Bash");
   });
 
   test("splits on the FIRST __ so a tool name containing __ survives whole", () => {
-    expect(toolDisplayName("mcp-supabase-abc123__do__thing")).toBe("do thing");
+    expect(toolDisplayName("mcp-supabase-abc123__do__thing")).toBe("Do thing");
   });
 });
 
@@ -2310,17 +2310,44 @@ describe("buildTimeline — memory writes", () => {
     expect(items).toEqual([]);
   });
 
-  test("clusters memory writes as activity steps alongside tool calls", () => {
+  test("memory_save tool calls are suppressed; the memory.* landmark owns the row", () => {
     reset();
     const groups = groupTimeline(
       buildTimeline([
-        event("agent.toolCall.created", { id: "call-1", name: "memory_save", arguments: {} }),
+        event("agent.toolCall.created", {
+          id: "call-1",
+          name: "opengeni__memory_save",
+          arguments: {},
+        }),
         event("agent.toolCall.output", { id: "call-1", output: "ok" }),
         event("memory.saved", { memoryId: "mem-1", kind: "preference", preview: "A preference." }),
       ]),
     );
     const activities = collectActivityGroups(groups);
     expect(activities).toHaveLength(1);
-    expect(activities[0]!.items.map((item) => item.kind)).toEqual(["tool-call", "memory"]);
+    expect(activities[0]!.items.map((item) => item.kind)).toEqual(["memory"]);
+  });
+
+  test("prefixed opengeni__session_create projects as a worker item", () => {
+    reset();
+    const worker = {
+      id: "0b3ba745-1111-4222-8333-9c76ad9e0000",
+      workspaceId: "ws-1",
+      status: "queued",
+    };
+    const items = buildTimeline([
+      event("agent.toolCall.created", {
+        id: "call-1",
+        name: "opengeni__session_create",
+        arguments: JSON.stringify({ initialMessage: "Run the drift check on prod" }),
+      }),
+      event("agent.toolCall.output", {
+        id: "call-1",
+        output: { content: [{ type: "text", text: JSON.stringify(worker) }] },
+      }),
+    ]);
+    expect(items).toHaveLength(1);
+    expect((items[0] as WorkerItem).kind).toBe("worker");
+    expect((items[0] as WorkerItem).workerSessionId).toBe(worker.id);
   });
 });

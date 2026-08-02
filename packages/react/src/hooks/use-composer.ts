@@ -420,7 +420,13 @@ export function useComposer(
         localSignatureAtStart === null
           ? localAtStart !== 0
           : localSignatureAtStart !== lastSavedSignature.current;
-      setDraftLoading(true);
+      // Only blank the picker on first hydrate / hard reload. Reconcile and
+      // event-triggered soft reloads (loadOlder SSE reconnect) must not flicker
+      // draftLoading — stale-while-revalidate keeps the settled UI mounted.
+      const showLoading = replaceLocal || draftRef.current === null;
+      if (showLoading) {
+        setDraftLoading(true);
+      }
       try {
         const fetched = await client.getComposerDraft(workspaceId, sessionId);
         if (

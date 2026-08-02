@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
 import { MessageTimeline, type TimelineItem } from "../src";
+import { setScrollEndSupportForTests } from "../src/components/tip-follow";
 import { actRun, registerDom, renderComponent, flush } from "./render-hook";
 
 registerDom();
@@ -657,7 +658,8 @@ describe("MessageTimeline pagination affordances", () => {
 
   test("mid-turn fold + tip growth does not unpin when maxScroll stays flat", async () => {
     // tools→message→tools: cluster collapse and narration growth cancel in
-    // maxScroll while scrollTop still drops — old conservation false-unpinned.
+    // maxScroll while scrollTop still drops — layout tip-follow recovers;
+    // scrollend must not treat that as a reader leave.
     const frames: FrameRequestCallback[] = [];
     globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
       frames.push(cb);
@@ -685,18 +687,127 @@ describe("MessageTimeline pagination affordances", () => {
     expect(r.container.textContent).not.toContain("Jump to latest");
 
     // Same scrollHeight + same maxScroll, but scrollTop drops (fold above +
-    // growth below). Must stay pinned and recover tip — not Jump to latest.
+    // growth below). Production folds co-occur with a commit — layout
+    // tip-follow recovers before scrollend settles at the tip.
     await actRun(() => {
       scroller.scrollTop = 1400;
       scroller.dispatchEvent(new Event("scroll"));
     });
+    layout.setContentHeight(2000);
+    await r.rerender(
+      <MessageTimeline events={[...initial, agentDelta(21, "x")]} status="running" />,
+    );
     await drainFrames(frames);
+    await flush();
+    await actRun(() => {
+      scroller.dispatchEvent(new Event("scrollend"));
+    });
     await flush();
     expect(r.container.textContent).not.toContain("Jump to latest");
     expect(distanceFromBottom(scroller)).toBeLessThan(48);
 
     layout.restore();
     await r.unmount();
+  });
+
+  test("unarmed scroll settle away from tip unpins (Vimium / PageUp)", async () => {
+    const frames: FrameRequestCallback[] = [];
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      frames.push(cb);
+      return frames.length;
+    };
+    globalThis.cancelAnimationFrame = () => undefined;
+
+    const prefix = manyEvents(19);
+    const initial = [...prefix, agentDelta(20, "hello ")];
+    const r = await renderComponent(<MessageTimeline events={initial} status="running" />);
+    const scroller = r.container.querySelector(".overflow-y-auto");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+    const layout = mockScrollerLayout(scroller, {
+      clientHeight: 400,
+      contentHeight: 2000,
+      tipHeight: 80,
+      paddingBottom: 24,
+    });
+    layout.syncTipAtBottom();
+    await actRun(() => {
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    await drainFrames(frames);
+    expect(r.container.textContent).not.toContain("Jump to latest");
+
+    // Extension-style jump: no wheel, no pointer arm — scrollend decides leave.
+    await actRun(() => {
+      scroller.scrollTop = 200;
+      layout.placeTipAt(120);
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    // Stream token while leave is pending must not yank back to the tip.
+    layout.setContentHeight(2400);
+    await r.rerender(
+      <MessageTimeline events={[...initial, agentDelta(21, "world")]} status="running" />,
+    );
+    await drainFrames(frames);
+    await flush();
+    expect(scroller.scrollTop).toBe(200);
+
+    await actRun(() => {
+      scroller.dispatchEvent(new Event("scrollend"));
+    });
+    await flush();
+    expect(r.container.textContent).toContain("Jump to latest");
+    expect(scroller.scrollTop).toBe(200);
+    expect(distanceFromBottom(scroller)).toBeGreaterThan(48);
+
+    layout.restore();
+    await r.unmount();
+  });
+
+  test("unarmed scroll-away falls back to one rAF leave when scrollend is missing", async () => {
+    const frames: FrameRequestCallback[] = [];
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      frames.push(cb);
+      return frames.length;
+    };
+    globalThis.cancelAnimationFrame = () => undefined;
+    setScrollEndSupportForTests(false);
+    try {
+      const prefix = manyEvents(19);
+      const initial = [...prefix, agentDelta(20, "hello ")];
+      const r = await renderComponent(<MessageTimeline events={initial} status="running" />);
+      const scroller = r.container.querySelector(".overflow-y-auto");
+      if (!(scroller instanceof HTMLElement)) {
+        throw new Error("expected timeline scroller");
+      }
+      const layout = mockScrollerLayout(scroller, {
+        clientHeight: 400,
+        contentHeight: 2000,
+        tipHeight: 80,
+        paddingBottom: 24,
+      });
+      layout.syncTipAtBottom();
+      await actRun(() => {
+        scroller.dispatchEvent(new Event("scroll"));
+      });
+      // Drain reveal/tip-follow frames so they cannot cancel the leave rAF.
+      await drainFrames(frames);
+
+      await actRun(() => {
+        scroller.scrollTop = 200;
+        layout.placeTipAt(120);
+        scroller.dispatchEvent(new Event("scroll"));
+      });
+      await drainFrames(frames);
+      await flush();
+      expect(r.container.textContent).toContain("Jump to latest");
+
+      layout.restore();
+      await r.unmount();
+    } finally {
+      setScrollEndSupportForTests(null);
+    }
   });
 
   test("layout height shrink while pinned does not unpin (settle-fold / scenario spawn)", async () => {

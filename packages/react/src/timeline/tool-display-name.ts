@@ -1,16 +1,35 @@
 /**
- * Readable label for a tool call ("session_create" -> "session create").
+ * MCP / first-party tool naming helpers.
  *
- * MCP tools are namespaced `<serverId>__<toolName>` (see prefixedMcpToolName),
- * and for catalog-imported servers that serverId is an opaque slug+hash.
- * De-slugging the whole thing leaked that id into the timeline; strip the
- * server prefix and show just the tool. Names without the `__` boundary (plain
- * built-ins like "session_create") are unaffected.
+ * Wire names are often `<serverId>__<toolName>` (see prefixedMcpToolName).
+ * Matching and titles must use the leaf tool name so `opengeni__session_create`
+ * and bare `session_create` resolve the same UI — without inventing previews
+ * from argument JSON.
+ */
+
+/** Leaf tool name after the first `__` server boundary (or the whole name). */
+export function mcpToolLeaf(name: string): string {
+  const boundary = name.indexOf("__");
+  return boundary >= 0 ? name.slice(boundary + 2) : name;
+}
+
+/**
+ * True when `wireName` is exactly `leaf` or ends with `__${leaf}` (MCP prefix).
+ * Does not treat arbitrary suffixes as matches — the leaf must be the full
+ * right-hand side after `__`.
+ */
+export function toolMatchesLeaf(wireName: string, leaf: string): boolean {
+  return wireName === leaf || wireName.endsWith(`__${leaf}`);
+}
+
+/**
+ * Readable label for a tool call ("session_create" / "opengeni__session_create"
+ * → "Session create"). Title-cases the first character of the leaf phrase.
  */
 export function toolDisplayName(name: string): string {
-  // The prefix is a single LEFT boundary (`registryId__toolName`), so split on
-  // the FIRST `__` — the tool name itself may contain `__` and must survive whole.
-  const boundary = name.indexOf("__");
-  const toolPart = boundary >= 0 ? name.slice(boundary + 2) : name;
-  return toolPart.replace(/[_-]+/g, " ").trim();
+  const phrase = mcpToolLeaf(name).replace(/[_-]+/g, " ").trim();
+  if (!phrase) {
+    return name;
+  }
+  return phrase.charAt(0).toUpperCase() + phrase.slice(1);
 }

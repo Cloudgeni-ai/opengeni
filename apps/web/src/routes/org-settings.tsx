@@ -178,7 +178,7 @@ export function OrgSettingsRoute({
             <Button asChild type="button" variant="ghost" size="sm">
               <Link to="/workspaces/$workspaceId/settings" params={{ workspaceId }}>
                 <SettingsIcon className="size-3.5" />
-                Workspace settings
+                Workspace
               </Link>
             </Button>
           </div>
@@ -515,7 +515,7 @@ function MembersSection(props: {
         </span>
       </div>
       <p className="text-xs text-fg-subtle">
-        Access is granted per workspace. Manage members in Workspace settings → People with access.
+        Access is granted per workspace. Manage members in Workspace → People with access.
         {props.canManage ? "" : " Only organization admins can change organization-level roles."}
       </p>
     </section>

@@ -1,12 +1,12 @@
 import { Loader2Icon, MicIcon } from "lucide-react";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import { useAppContext } from "@/context";
 import { resolveWorkspaceVoiceInputEnabled } from "@opengeni/sdk";
 import { cn } from "@/lib/utils";
 
-/** @deprecated Name retained while callers migrate to VoiceInputSettingsSection. */
-export function TranscriptionSettingsSection({
+/** Dense preference row used by workspace settings (no outer card). */
+export function VoiceInputPreferenceRow({
   workspaceId,
   canManage,
 }: {
@@ -18,9 +18,10 @@ export function TranscriptionSettingsSection({
   const capability = context.clientConfig.voiceInput;
   const [saving, setSaving] = useState(false);
   const enabled = resolveWorkspaceVoiceInputEnabled(workspace?.settings) ?? true;
+  const available = capability?.available === true;
 
   async function toggle() {
-    if (!canManage || saving || !capability?.available) return;
+    if (!canManage || saving || !available) return;
     setSaving(true);
     try {
       await context.updateWorkspaceSettings(workspaceId, { voiceInput: { enabled: !enabled } });
@@ -31,45 +32,76 @@ export function TranscriptionSettingsSection({
   }
 
   return (
-    <section className="grid gap-3 rounded-lg border border-border bg-surface p-4">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h2 className="flex items-center gap-1.5 text-sm font-medium">
-            <MicIcon className="size-3.5 text-brand" />
-            Voice input
-          </h2>
-          <p className="mt-1 text-xs text-fg-muted">
-            {capability?.available
-              ? "Record a short message and add its transcription to the composer draft."
-              : "Not configured by this deployment operator."}
-          </p>
-        </div>
-        {capability?.available ? (
-          <button
-            type="button"
-            role="switch"
-            aria-checked={enabled}
-            aria-label="Voice input"
-            disabled={!canManage || saving}
-            onClick={() => void toggle()}
-            className={cn(
-              "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors disabled:cursor-not-allowed disabled:opacity-50",
-              enabled ? "border-brand bg-brand" : "border-border bg-surface-2",
-            )}
-          >
-            {saving ? <Loader2Icon className="mx-auto size-3 animate-spin text-white" /> : null}
-            <span
-              className={cn(
-                "inline-block size-3.5 rounded-full bg-white shadow-sm transition-transform",
-                enabled ? "translate-x-4" : "translate-x-0.5",
-              )}
-            />
-          </button>
-        ) : null}
+    <PreferenceToggleRow
+      icon={<MicIcon className="size-3.5 text-brand" />}
+      label="Voice input"
+      description={
+        available
+          ? "Record a short message and add its transcription to the composer draft."
+          : "Not configured by this deployment operator."
+      }
+      checked={enabled}
+      disabled={!canManage || saving || !available}
+      saving={saving}
+      onToggle={() => void toggle()}
+    />
+  );
+}
+
+/** Shared dense toggle row for workspace preference lists. */
+export function PreferenceToggleRow(props: {
+  icon?: ReactNode;
+  label: string;
+  description: string;
+  checked: boolean;
+  disabled?: boolean;
+  saving?: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <div className="flex min-h-10 items-center gap-3 px-1 py-1.5">
+      {props.icon ? <span className="shrink-0">{props.icon}</span> : null}
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-sm font-medium">{props.label}</div>
+        <p className="truncate text-2xs text-fg-subtle" title={props.description}>
+          {props.description}
+        </p>
       </div>
-      {capability?.available && !canManage ? (
-        <p className="text-xs text-fg-subtle">Only workspace admins can change this.</p>
-      ) : null}
+      {props.saving ? <Loader2Icon className="size-3.5 shrink-0 animate-spin text-fg-subtle" /> : null}
+      <button
+        type="button"
+        role="switch"
+        aria-checked={props.checked}
+        aria-label={props.label}
+        disabled={props.disabled}
+        onClick={props.onToggle}
+        className={cn(
+          "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors disabled:cursor-not-allowed disabled:opacity-50",
+          props.checked ? "border-brand bg-brand" : "border-border bg-surface-2",
+        )}
+      >
+        <span
+          className={cn(
+            "inline-block size-3.5 rounded-full bg-white shadow-sm transition-transform",
+            props.checked ? "translate-x-4" : "translate-x-0.5",
+          )}
+        />
+      </button>
+    </div>
+  );
+}
+
+/** @deprecated Name retained while callers migrate to VoiceInputPreferenceRow. */
+export function TranscriptionSettingsSection({
+  workspaceId,
+  canManage,
+}: {
+  workspaceId: string;
+  canManage: boolean;
+}) {
+  return (
+    <section className="rounded-lg border border-border bg-surface px-3 py-1">
+      <VoiceInputPreferenceRow workspaceId={workspaceId} canManage={canManage} />
     </section>
   );
 }

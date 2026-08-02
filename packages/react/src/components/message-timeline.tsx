@@ -41,6 +41,7 @@ import {
   tipFollowCancel,
   tipFollowCompensateShrink,
   tipFollowStep,
+  supportsScrollEndEvent,
   TIP_FOLLOW_READER_UP_EPS_PX,
   TIP_FOLLOW_SHRINK_EPS_PX,
   type TipFollowState,
@@ -163,8 +164,11 @@ export type MessageTimelineProps = {
  *   tip-glued feed-forward — that is the one-line yank).
  * - One continuous follow while hot (faster τ when behind); sleeps when cold.
  * - While pinned, tip-debt from growth/collapse must NEVER unpin — only
- *   wheel/keys/pointer-armed scroll-up. Height shrink compensates scrollTop
- *   by Δh (collapse owns motion); tip-ease pauses briefly so the two don't fight.
+ *   wheel/keys/pointer-armed scroll-up, or a settled scrollend away from the
+ *   tip while the tip-follow camera is idle (Vimium / unfocused PageUp).
+ *   Height shrink compensates scrollTop by Δh (collapse owns motion); tip-ease
+ *   pauses briefly so the two don't fight. Programmatic camera writes are
+ *   tagged so their scroll echoes never count as leave.
  * - overflow-anchor off while pinned so the browser cannot instant-correct.
  * - Scrolled up → history prepends restore via the retained group anchor
  *   (offsetTop delta); loadOlder can truncate the tip, so scrollHeight delta
@@ -327,11 +331,24 @@ export function MessageTimeline({
   const lastScrollHeightRef = useRef(0);
   const lastClientHeightRef = useRef(0);
   /**
-   * Armed by pointerdown on the scroller. Geometric scroll-up only unpins
-   * while armed — mid-turn fold+growth also drops scrollTop with a flat
-   * maxScroll and must NOT count as leave. Wheel/keys unpin directly.
+   * Armed by pointerdown on the scroller. Immediate geometric scroll-up unpins
+   * while armed (scrollbar / touch drag). Wheel/keys unpin directly. Extension
+   * jumps (Vimium) settle via scrollend while the camera is idle.
    */
   const readerIntentArmRef = useRef(false);
+  /**
+   * Count of camera/snap scrollTop writes whose scroll echoes are not yet
+   * consumed. A boolean was wrong when the browser coalesced two writes into
+   * one scroll event (or fired two) — use a count, and clear to 0 on echo.
+   */
+  const programmaticScrollRef = useRef(0);
+  /**
+   * Unarmed scroll-away observed; waiting for scrollend (or rAF fallback).
+   * Blocks layout tip-follow so a stream token cannot yank before leave settles.
+   */
+  const pendingReaderLeaveRef = useRef(false);
+  /** Fallback leave check when `scrollend` is missing (one rAF, not a timer). */
+  const leaveFallbackRafRef = useRef<number | null>(null);
   // Resting fold state per durable group id (see fold-memory.ts). Outlives the
   // deliberate chip remounts (activity→turn wrap, nested key flips) so a fold
   // that already settled closed — or that the reader closed — never reopens.
@@ -371,6 +388,27 @@ export function MessageTimeline({
     lastClientHeightRef.current = node.clientHeight;
   }, []);
 
+  const writeScrollTop = useCallback((node: HTMLElement, top: number) => {
+    const next = Math.max(0, top);
+    if (node.scrollTop === next) {
+      return;
+    }
+    programmaticScrollRef.current += 1;
+    node.scrollTop = next;
+  }, []);
+
+  const cancelLeaveFallback = useCallback(() => {
+    if (leaveFallbackRafRef.current !== null) {
+      cancelFrame(leaveFallbackRafRef.current);
+      leaveFallbackRafRef.current = null;
+    }
+  }, []);
+
+  const clearPendingReaderLeave = useCallback(() => {
+    pendingReaderLeaveRef.current = false;
+    cancelLeaveFallback();
+  }, [cancelLeaveFallback]);
+
   const stopFollow = useCallback(() => {
     followRef.current = tipFollowCancel(followRef.current);
     if (followFrameRef.current !== null) {
@@ -379,7 +417,7 @@ export function MessageTimeline({
     }
   }, []);
 
-  /** Reader left the tip — wheel, keyboard, or pointer-armed scroll-up. */
+  /** Reader left the tip — wheel, keyboard, pointer-armed scroll-up, or scrollend. */
   const releasePinFromReader = useCallback(
     (node?: HTMLElement | null) => {
       if (!autoFollow || !pinnedRef.current || hasNewerRef.current) {
@@ -390,6 +428,7 @@ export function MessageTimeline({
         return;
       }
       readerIntentArmRef.current = false;
+      clearPendingReaderLeave();
       stopFollow();
       applyPinned(false);
       if (wantPinRef.current) {
@@ -400,8 +439,50 @@ export function MessageTimeline({
         setOlderPrefetchArmed(true);
       }
     },
-    [autoFollow, applyPinned, stopFollow],
+    [autoFollow, applyPinned, clearPendingReaderLeave, stopFollow],
   );
+
+  /**
+   * Settled away from the tip while the camera is idle — Vimium / unfocused
+   * PageUp. Folds are recovered by layout tip-follow before this fires at tip.
+   */
+  const releasePinAfterScrollSettled = useCallback(
+    (node: HTMLElement) => {
+      if (!autoFollow || !pinnedRef.current || hasNewerRef.current) {
+        return;
+      }
+      if (programmaticScrollRef.current > 0) {
+        return;
+      }
+      if (followRef.current.running || followFrameRef.current !== null) {
+        return;
+      }
+      if (isNearBottom(node) || maxScrollOf(node) <= 1) {
+        clearPendingReaderLeave();
+        return;
+      }
+      releasePinFromReader(node);
+      if (olderLoadGateRef.current === "cooling" && node.scrollTop > OLDER_PREFETCH_MARGIN_PX) {
+        olderLoadGateRef.current = "armed";
+      }
+    },
+    [autoFollow, clearPendingReaderLeave, releasePinFromReader],
+  );
+
+  const scheduleLeaveFallback = useCallback(() => {
+    // Prefer scrollend when the engine supports it.
+    if (supportsScrollEndEvent()) {
+      return;
+    }
+    cancelLeaveFallback();
+    leaveFallbackRafRef.current = requestFrame(() => {
+      leaveFallbackRafRef.current = null;
+      const current = scrollRef.current;
+      if (current) {
+        releasePinAfterScrollSettled(current);
+      }
+    });
+  }, [cancelLeaveFallback, releasePinAfterScrollSettled]);
 
   const onWheel = (event: {
     deltaY: number;
@@ -457,14 +538,15 @@ export function MessageTimeline({
   const snapToBottom = useCallback(
     (node: HTMLElement) => {
       stopFollow();
-      node.scrollTop = Math.max(0, node.scrollHeight - node.clientHeight);
+      cancelLeaveFallback();
+      writeScrollTop(node, Math.max(0, node.scrollHeight - node.clientHeight));
       syncScrollBaseline(node);
       followRef.current = {
         ...followRef.current,
         lastHeight: node.scrollHeight,
       };
     },
-    [stopFollow, syncScrollBaseline],
+    [cancelLeaveFallback, stopFollow, syncScrollBaseline, writeScrollTop],
   );
 
   const driveFollowRef = useRef<(node: HTMLElement, now?: number) => void>(() => undefined);
@@ -474,6 +556,12 @@ export function MessageTimeline({
         stopFollow();
         return;
       }
+      // Reader/extension leave in flight — do not yank back before scrollend.
+      if (pendingReaderLeaveRef.current) {
+        stopFollow();
+        return;
+      }
+      cancelLeaveFallback();
       // Prefer the rAF timestamp so ease integrates against vsync (and tests
       // can advance a synthetic clock via requestAnimationFrame callbacks).
       const now =
@@ -495,9 +583,7 @@ export function MessageTimeline({
           node.scrollHeight,
           node.clientHeight,
         );
-        if (node.scrollTop !== nextTop) {
-          node.scrollTop = nextTop;
-        }
+        writeScrollTop(node, nextTop);
         syncScrollBaseline(node);
         followRef.current = {
           ...followRef.current,
@@ -533,11 +619,10 @@ export function MessageTimeline({
         revealed: revealedRef.current,
       });
       followRef.current = result.state;
-      if (node.scrollTop !== result.scrollTop) {
-        node.scrollTop = result.scrollTop;
-      }
+      writeScrollTop(node, result.scrollTop);
       syncScrollBaseline(node);
       if (result.state.running) {
+        cancelLeaveFallback();
         if (followFrameRef.current === null) {
           followFrameRef.current = requestFrame((frameNow) => {
             followFrameRef.current = null;
@@ -552,11 +637,12 @@ export function MessageTimeline({
         followFrameRef.current = null;
       }
     },
-    [stopFollow, syncScrollBaseline],
+    [cancelLeaveFallback, stopFollow, syncScrollBaseline, writeScrollTop],
   );
   driveFollowRef.current = driveFollow;
 
   useEffect(() => stopFollow, [stopFollow]);
+  useEffect(() => () => cancelLeaveFallback(), [cancelLeaveFallback]);
 
   // The single post-commit scroll authority. Runs after EVERY commit (no dep
   // list): any commit may change content height, and the decision is cheap.
@@ -580,7 +666,7 @@ export function MessageTimeline({
       // prepend correction (it would shift the reader away from the top).
       pendingJumpToStartRef.current = false;
       stopFollow();
-      node.scrollTop = 0;
+      writeScrollTop(node, 0);
     } else if (wantPinRef.current && !hasNewer) {
       // Jump-to-latest was pressed on a history window and the tip window is
       // in THIS commit — consume pre-paint so the first tip frame is already
@@ -592,8 +678,15 @@ export function MessageTimeline({
       }
     } else if (autoFollow && pinnedRef.current && !hasNewer) {
       // Load/remount (still hidden): hard-park. Live tip after reveal: ease.
+      // Pending unarmed leave: tip *growth* must not yank (Vimium during stream).
+      // Flat/shrink commits (fold) still recover — height did not grow under us.
       if (!revealedRef.current) {
         snapToBottom(node);
+      } else if (pendingReaderLeaveRef.current) {
+        if (node.scrollHeight <= lastScrollHeightRef.current) {
+          clearPendingReaderLeave();
+          driveFollow(node);
+        }
       } else {
         driveFollow(node);
       }
@@ -628,7 +721,7 @@ export function MessageTimeline({
       if (delta !== null) {
         const expected = previousScrollTop + delta;
         if (Math.abs(node.scrollTop - expected) > 2) {
-          node.scrollTop = expected;
+          writeScrollTop(node, expected);
         }
       }
     }
@@ -885,9 +978,9 @@ export function MessageTimeline({
     }
   }, [hasNewer, autoFollow, applyPinned, snapToBottom, stopFollow]);
 
-  // Unpin: wheel / keys always; pointer-armed geometric scroll-up only.
-  // Mid-turn fold + narration drops scrollTop while maxScroll stays flat —
-  // treating that as reader-up was the Jump-to-latest bug on soft-follow.
+  // Pinned: layout/camera recover tip debt; wheel/keys/pointer-arm unpin
+  // immediately; extension jumps settle via scrollend (or one-rAF fallback).
+  // Do not tip-follow-yank an in-flight unarmed scroll-away — that ate Vimium.
   const onScroll = () => {
     const node = scrollRef.current;
     if (!node) {
@@ -904,17 +997,34 @@ export function MessageTimeline({
     const heightShrunk =
       followRef.current.lastHeight > 0 &&
       nextHeight < followRef.current.lastHeight - TIP_FOLLOW_SHRINK_EPS_PX;
+    // Consume all pending camera-write echoes (browsers may coalesce writes).
+    const programmatic = programmaticScrollRef.current > 0;
+    if (programmatic) {
+      programmaticScrollRef.current = 0;
+    }
 
     if (autoFollow && pinnedRef.current && !hasNewer) {
       // Fold / composer shrink: compensate before baseline sync so driveFollow
       // still sees the pre-shrink scrollTop (avoid double-subtract after clamp).
       if (heightShrunk || maxFell) {
         readerIntentArmRef.current = false;
+        clearPendingReaderLeave();
         driveFollow(node);
+        return;
+      }
+      if (programmatic) {
+        syncScrollBaseline(node);
+        followRef.current = {
+          ...followRef.current,
+          lastHeight: nextHeight,
+        };
         return;
       }
       syncScrollBaseline(node);
       const nearBottomPinned = isNearBottom(node);
+      if (nearBottomPinned) {
+        clearPendingReaderLeave();
+      }
       // Pointer-dragged scroll-up away from tip. Layout churn never arms this.
       if (readerArmed && readerUp > TIP_FOLLOW_READER_UP_EPS_PX && !nearBottomPinned) {
         readerIntentArmRef.current = false;
@@ -924,9 +1034,15 @@ export function MessageTimeline({
         }
         return;
       }
-      // Growth debt / fold noise / camera echo: stay pinned and recover tip.
-      if (!nearBottomPinned || readerUp > TIP_FOLLOW_READER_UP_EPS_PX) {
-        driveFollow(node);
+      // Tip grew under a still viewport (no reader-up): ease back to the tip.
+      // Reader/extension scroll-up in progress: do not yank — scrollend decides.
+      if (!nearBottomPinned && readerUp <= TIP_FOLLOW_READER_UP_EPS_PX) {
+        if (!pendingReaderLeaveRef.current) {
+          driveFollow(node);
+        }
+      } else if (!nearBottomPinned && readerUp > TIP_FOLLOW_READER_UP_EPS_PX) {
+        pendingReaderLeaveRef.current = true;
+        scheduleLeaveFallback();
       } else {
         followRef.current = {
           ...followRef.current,
@@ -969,6 +1085,20 @@ export function MessageTimeline({
     }
   };
 
+  const onScrollEnd = () => {
+    const node = scrollRef.current;
+    if (!node) {
+      return;
+    }
+    cancelLeaveFallback();
+    if (programmaticScrollRef.current > 0) {
+      programmaticScrollRef.current = 0;
+      syncScrollBaseline(node);
+      return;
+    }
+    releasePinAfterScrollSettled(node);
+  };
+
   return (
     <LightboxProvider>
       <FoldMemoryProvider value={foldMemoryRef.current}>
@@ -982,6 +1112,7 @@ export function MessageTimeline({
                   ref={scrollRef}
                   tabIndex={-1}
                   onScroll={onScroll}
+                  onScrollEnd={onScrollEnd}
                   onWheel={onWheel}
                   onPointerDown={onPointerDown}
                   onKeyDown={onKeyDown}

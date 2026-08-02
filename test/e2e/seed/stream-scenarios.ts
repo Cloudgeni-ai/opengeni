@@ -3,7 +3,8 @@
  * Each exercises a different timeline motion/content/pacing combination so
  * watching the open session surfaces fold choreography, tool marathons,
  * markdown crystallize, fast vs slow models, laggy stalls, failures, memory,
- * sandbox, and workers — not one thin metronome pulse.
+ * sandbox, workers (spawn/message + inbound childCompletion cards) — not one
+ * thin metronome pulse.
  */
 import type { AppendEventInput } from "@opengeni/db";
 import {
@@ -32,6 +33,11 @@ export type StreamCtx = {
   turnIndex: number;
   turnId: string;
   id: (label: string) => string;
+  /**
+   * Per-turn scratch so later phases can reuse ids minted earlier
+   * (e.g. child session ids from spawn tools → worker-completion cards).
+   */
+  scratch: Record<string, string>;
 };
 
 /** Named pacing presets — resolved against OPENGENI_SEED_STREAM_TOKEN_MS. */
@@ -91,6 +97,23 @@ export type StreamPhase =
     }
   | { kind: "goal-set"; text: string }
   | { kind: "goal-update"; text: string }
+  /**
+   * Inbound feedback from a child session — a `user.message` with
+   * `childCompletion` that projects to a worker-completion card (not a user bubble).
+   */
+  | {
+      kind: "worker-completion";
+      childSessionId: (ctx: StreamCtx) => string;
+      text: string;
+      childStatus: string;
+      goal?: {
+        status: string;
+        text?: string;
+        evidence?: string;
+        pausedReason?: string;
+        rationale?: string;
+      };
+    }
   | { kind: "raw"; events: (ctx: StreamCtx) => AppendEventInput[] };
 
 export function resolveStreamPacing(
@@ -563,10 +586,103 @@ const SCENARIO_HUGE_FAST_WALL: StreamScenario = {
   ],
 };
 
+const SCENARIO_WORKER_FLEET: StreamScenario = {
+  id: "worker-spawn",
+  title: "Workers: spawn, message, inbound completions",
+  userText: () =>
+    "Scenario: spawn workers, message one, then show completed / paused / failed feedback cards.",
+  phases: [
+    {
+      kind: "reason",
+      text: "Delegate login verification and a staging baseline to workers; keep coordinating here.",
+    },
+    {
+      kind: "tools",
+      settleMs: 280,
+      gapMs: 180,
+      tools: (ctx) => {
+        const login = crypto.randomUUID();
+        const migrate = crypto.randomUUID();
+        const load = crypto.randomUUID();
+        ctx.scratch.loginWorker = login;
+        ctx.scratch.migrateWorker = migrate;
+        ctx.scratch.loadWorker = load;
+        return [
+          sessionCreate(ctx.id("w0"), login, "verify login flow end-to-end"),
+          sessionCreate(ctx.id("w1"), migrate, "migrate billing service to new Postgres"),
+          sessionCreate(ctx.id("w2"), load, "capture a p95 latency baseline against staging"),
+          sessionSendMessage(
+            ctx.id("w3"),
+            login,
+            "please finish assertions and report — include screenshot evidence",
+          ),
+          execOk(ctx.id("w4"), "echo waiting-on-workers"),
+        ];
+      },
+    },
+    {
+      kind: "message",
+      text:
+        "Three workers are up. The **Messaging worker** row is `session_send_message` — same bot card as spawn, different title, prompt under it, deep-link into the child.\n\nWaiting on inbound completions…\n",
+      stream: true,
+      pacing: "yank",
+    },
+    { kind: "sleep", ms: 700 },
+    {
+      kind: "worker-completion",
+      childSessionId: (ctx) => ctx.scratch.loginWorker!,
+      text:
+        "Login flow verified end-to-end across Chromium, Firefox, and WebKit. All 128 assertions passed; the dashboard screenshot is attached. No flakes on three reruns.",
+      childStatus: "idle",
+      goal: {
+        status: "completed",
+        text: "verify login flow end-to-end",
+        evidence:
+          "128/128 assertions green on 3 consecutive runs; screenshot dashboard-2026-07-07.png captured.",
+      },
+    },
+    { kind: "sleep", ms: 480 },
+    {
+      kind: "worker-completion",
+      childSessionId: (ctx) => ctx.scratch.migrateWorker!,
+      text:
+        "I paused the migration worker — it needs the GHCR pull credentials before it can pull the base image, and I did not want to burn continuations retrying a blocked step.",
+      childStatus: "idle",
+      goal: {
+        status: "paused",
+        text: "migrate the billing service to the new Postgres cluster",
+        pausedReason:
+          "missing GHCR pull credentials — cannot pull ghcr.io/acme/billing base image",
+      },
+    },
+    { kind: "sleep", ms: 480 },
+    {
+      kind: "worker-completion",
+      childSessionId: (ctx) => ctx.scratch.loadWorker!,
+      text:
+        "The load-test worker failed: the staging target returned 503 for the whole window, so I could not gather a clean baseline.",
+      childStatus: "failed",
+      goal: {
+        status: "active",
+        text: "capture a p95 latency baseline against staging",
+      },
+    },
+    {
+      kind: "message",
+      text:
+        "Inbound cards landed: one **Worker completed**, one **Worker paused**, one **Worker failed**. Expand any for the full report; **View session** deep-links into the child.\n",
+      stream: true,
+      pacing: "fast",
+    },
+  ],
+};
+
 export const STREAM_SCENARIOS: StreamScenario[] = [
   // Listed twice so the long wall runs ~2× as often as sibling scenarios.
   SCENARIO_HUGE_FAST_WALL,
   SCENARIO_HUGE_FAST_WALL,
+  // Early in the cycle so the live harness shows fleet orchestration soon.
+  SCENARIO_WORKER_FLEET,
   {
     id: "markdown-kitchen-sink",
     title: "Markdown kitchen sink (mixed pacing + crystallize)",
@@ -842,32 +958,6 @@ export const STREAM_SCENARIOS: StreamScenario[] = [
         text: "Sandbox ops mixed with a truncated fat log. Expand the huge exec row to stress disclosure height animation.\n",
         stream: true,
         pacing: "burst",
-      },
-    ],
-  },
-  {
-    id: "worker-spawn",
-    title: "Spawn worker + send message",
-    userText: () => "Scenario: spawn a child session worker and send it a follow-up.",
-    phases: [
-      { kind: "reason", text: "Delegate the e2e assertion pass to a worker." },
-      {
-        kind: "tools",
-        settleMs: 320,
-        tools: (ctx) => {
-          const child = crypto.randomUUID();
-          return [
-            sessionCreate(ctx.id("w0"), child, "verify login flow end-to-end"),
-            sessionSendMessage(ctx.id("w1"), child, "please finish assertions and report"),
-            execOk(ctx.id("w2"), "echo waiting-on-worker"),
-          ];
-        },
-      },
-      {
-        kind: "message",
-        text: "Worker spawned. The worker row should deep-link; parent narration continues here.\n",
-        stream: true,
-        pacing: "yank",
       },
     ],
   },
