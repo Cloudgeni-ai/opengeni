@@ -2,6 +2,7 @@ import { createHmac, randomBytes } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import {
+  DEFAULT_FIRST_PARTY_MCP_TOOLS,
   OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
   OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
   OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
@@ -28,7 +29,6 @@ import {
   createSlackUserLinkToken,
   drainSlackInteractionsOnce,
   registerSlackInteractionRoutes,
-  SLACK_TASK_FIRST_PARTY_MCP_TOOLS,
   verifySlackUserLinkToken,
 } from "../src/integrations/slack-interactions";
 
@@ -37,6 +37,15 @@ const signingMaterial = ["slack", "interaction", crypto.randomUUID()].join("-");
 const encryptionKey = randomBytes(32).toString("base64");
 const authorizationHeaderName = ["author", "ization"].join("");
 const bearerScheme = ["Bear", "er"].join("");
+const SLACK_READ_ONLY_CONTEXT_TOOLS = [
+  "slack_bot_list_channels",
+  "slack_bot_channel_history",
+  "slack_bot_thread_replies",
+  "slack_bot_list_users",
+  "slack_bot_list_files",
+  "slack_bot_file_info",
+  "slack_bot_file_content",
+] as const;
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -435,7 +444,10 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       from sessions
       where workspace_id = ${value.owner.workspaceId}
         and id = ${routes[0]!.session_id}`;
-    expect(sessionPolicy!.first_party_mcp_tools).toEqual([...SLACK_TASK_FIRST_PARTY_MCP_TOOLS]);
+    expect(sessionPolicy!.first_party_mcp_tools).toEqual([
+      ...DEFAULT_FIRST_PARTY_MCP_TOOLS,
+      ...SLACK_READ_ONLY_CONTEXT_TOOLS,
+    ]);
     expect(sessionPolicy!.first_party_mcp_tools).not.toContain("slack_bot_post_message");
     expect(sessionPolicy!.first_party_mcp_tools).not.toContain("slack_bot_delete_message");
 
@@ -619,12 +631,13 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       status: 429,
       retryAfterSeconds: 30,
     });
+    const transientTriggerId = `transient-command-${crypto.randomUUID()}`;
     const transientCommand = new URLSearchParams({
       command: "/opengeni",
       team_id: value.teamId,
       user_id: value.ownerSlackUserId,
       channel_id: transientChannel,
-      trigger_id: `transient-command-${crypto.randomUUID()}`,
+      trigger_id: transientTriggerId,
       text: "Preserve this task through a transient Slack preflight",
     }).toString();
     const transientResponse = await value.app.request(
@@ -636,9 +649,48 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     );
     expect(transientResponse.status).toBe(200);
     expect(await transientResponse.text()).toContain("accepted this task");
+    expect(await interactions(value.owner.workspaceId)).toHaveLength(2);
+    const [pendingTransient] = await shared!.admin<
+      { status: string; attempt_count: number; retry_at: Date | null }[]
+    >`
+      select status, attempt_count, retry_at
+      from slack_interaction_inbox
+      where workspace_id = ${value.owner.workspaceId}
+        and provider_event_id = ${`command:${transientTriggerId}`}`;
+    expect(pendingTransient).toMatchObject({ status: "pending", attempt_count: 0, retry_at: null });
     value.slack.channelAccessFailures.delete(transientChannel);
     await drainAll(value.deps);
     expect(await interactions(value.owner.workspaceId)).toHaveLength(3);
+
+    for (const [channelId, failure] of [
+      ["C_INVALID_AUTH", { error: "invalid_auth" }],
+      ["C_HTTP_403", { status: 403 }],
+    ] as const) {
+      value.slack.channelAccessFailures.set(channelId, failure);
+      const triggerId = `permanent-${crypto.randomUUID()}`;
+      const permanentCommand = new URLSearchParams({
+        command: "/opengeni",
+        team_id: value.teamId,
+        user_id: value.ownerSlackUserId,
+        channel_id: channelId,
+        trigger_id: triggerId,
+        text: "Reject permanent preflight failure",
+      }).toString();
+      const permanentResponse = await value.app.request(
+        signedRequest(
+          "/v1/integrations/slack/commands",
+          permanentCommand,
+          "application/x-www-form-urlencoded",
+        ),
+      );
+      expect(permanentResponse.status).not.toBe(200);
+      const inbox = await shared!.admin<{ count: number }[]>`
+        select count(*)::int as count
+        from slack_interaction_inbox
+        where workspace_id = ${value.owner.workspaceId}
+          and provider_event_id = ${`command:${triggerId}`}`;
+      expect(inbox[0]!.count).toBe(0);
+    }
   });
 
   test("unmapped identities receive a link affordance, denied channels fail closed, and bot loops create nothing", async () => {
