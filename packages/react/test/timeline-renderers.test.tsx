@@ -1,9 +1,16 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
 import { act } from "react";
 import { registerDom, renderComponent, flush } from "./render-hook";
 import { defaultToolRegistry, ActivityRail } from "../src/timeline";
-import type { AuthNeededItem, MemoryItem, ToolCallItem, SandboxItem } from "../src/timeline";
+import type {
+  AuthNeededItem,
+  MemoryItem,
+  ToolCallItem,
+  SandboxItem,
+  ToolRegistry,
+  TimelineItem,
+} from "../src/timeline";
 import { MessageTimeline } from "../src";
 import { TimelineRow } from "../src/components/message-timeline";
 
@@ -209,20 +216,73 @@ function fleetDecisionEventPayload(): Record<string, unknown> {
   };
 }
 
-describe("FleetDecisionRow", () => {
-  test("stays mounted through an unrelated parent rerender", async () => {
-    resetTimelineEvents();
-    const event = timelineEvent("codex.fleet.decision", fleetDecisionEventPayload());
-    const r = await renderComponent(<MessageTimeline events={[event]} className="before-unpin" />);
+describe("timeline renderer isolation", () => {
+  test("keeps neighboring groups visible and recovers when an undefined renderer is replaced", async () => {
+    const items: TimelineItem[] = [
+      {
+        kind: "user-message",
+        id: "before-broken-renderer",
+        text: "Message before the broken renderer",
+        resources: [],
+        tools: [],
+        occurredAt: new Date(0).toISOString(),
+      },
+      toolItem({
+        id: "broken-renderer",
+        callId: "broken-renderer",
+        name: "consumer_tool_with_missing_renderer",
+        occurredAt: new Date(1).toISOString(),
+      }),
+      {
+        kind: "user-message",
+        id: "after-broken-renderer",
+        text: "Message after the broken renderer",
+        resources: [],
+        tools: [],
+        occurredAt: new Date(2).toISOString(),
+      },
+    ];
+    const brokenRegistry: ToolRegistry = {
+      fallback: defaultToolRegistry.fallback,
+      // Reproduce React error #130: an integration returned an undefined
+      // component type for one historical tool row.
+      resolve: () => undefined as never,
+    };
+    const error = spyOn(console, "error").mockImplementation(() => {});
 
-    expect(r.container.textContent ?? "").toContain("Fleet policy shadow");
-    await r.rerender(<MessageTimeline events={[event]} className="after-unpin" />);
-    expect(r.container.textContent ?? "").toContain("Fleet policy shadow");
-    expect(r.container.querySelector(".after-unpin")).toBeTruthy();
+    try {
+      const r = await renderComponent(
+        <MessageTimeline items={items} toolRegistry={brokenRegistry} />,
+      );
+      await flush();
 
-    await r.unmount();
+      const text = r.container.textContent ?? "";
+      expect(text).toContain("Message before the broken renderer");
+      expect(text).toContain("Timeline item unavailable");
+      expect(text).toContain("Message after the broken renderer");
+      expect(
+        r.container.querySelectorAll('[data-testid="timeline-group-render-error"]'),
+      ).toHaveLength(1);
+
+      await r.rerender(<MessageTimeline items={items} toolRegistry={defaultToolRegistry} />);
+      await flush();
+
+      const recoveredText = r.container.textContent ?? "";
+      expect(recoveredText).toContain("Message before the broken renderer");
+      expect(recoveredText).toContain("Consumer tool with missing renderer");
+      expect(recoveredText).toContain("Message after the broken renderer");
+      expect(
+        r.container.querySelectorAll('[data-testid="timeline-group-render-error"]'),
+      ).toHaveLength(0);
+
+      await r.unmount();
+    } finally {
+      error.mockRestore();
+    }
   });
+});
 
+describe("FleetDecisionRow", () => {
   test("renders an accessible bounded production-vs-shadow explanation without secret metadata", async () => {
     resetTimelineEvents();
     const r = await renderComponent(
