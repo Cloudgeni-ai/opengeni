@@ -1,5 +1,16 @@
 # @opengeni/api-router
 
+## 0.15.5
+
+### Patch Changes
+
+- 3035b59: Publish regression coverage for Slack interaction durability, permanent preflight rejection, and read-only context-tool policy.
+- Updated dependencies [1a2d41f]
+  - @opengeni/db@0.19.0
+  - @opengeni/core@0.16.2
+  - @opengeni/documents@0.2.64
+  - @opengeni/events@0.3.55
+
 ## 0.15.4
 
 ### Patch Changes
