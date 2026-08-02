@@ -70,6 +70,9 @@ import {
   getEnrollment,
   abandonRecordingForTurnAttempt,
   markSessionAttemptQuiesced,
+  beginConnectorActionExecution,
+  completeConnectorActionExecution,
+  prepareConnectorActionApproval,
   type AppendEventInput,
   type ActiveSandboxPointer,
   type SandboxRecord,
@@ -123,6 +126,7 @@ import {
   type ModelCallUsageInput,
   type ModelCallUsageNormalization,
   type BuildAgentOptions,
+  type ConnectorActionPolicyHooks,
   type RunAgentStreamOptions,
   type TurnToolCancellationFence,
   type BackendUnresolvableCode,
@@ -5470,6 +5474,32 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         turnExecutionPolicy.providerId,
         turnExecutionPolicy.latencyMode,
       );
+      const connectorActionIdentity = {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId,
+        attemptId: input.attemptId,
+        executionGeneration,
+        initiator: {
+          kind: turn.initiator.kind,
+          subjectId: turn.initiator.subjectId,
+        },
+      } as const;
+      const connectorActionPolicy: ConnectorActionPolicyHooks = {
+        prepare: async (call) =>
+          await prepareConnectorActionApproval(db, connectorActionIdentity, call),
+        begin: async (call) =>
+          await beginConnectorActionExecution(db, connectorActionIdentity, call),
+        complete: async ({ requestId, outcome }) =>
+          await completeConnectorActionExecution(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            requestId,
+            attemptId: input.attemptId,
+            outcome,
+          }),
+      };
       const agent = runtime.buildAgent(modelRunSettings, turnResources, {
         reasoningEffort: turn.reasoningEffort,
         latencyMode: turnExecutionPolicy.latencyMode,
@@ -5516,6 +5546,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         ...(activeSandboxBackend ? { activeSandboxBackend } : {}),
         fileResourceDownloads,
         mcpServers: preparedTools.mcpServers,
+        connectorActionPolicy,
         // LIVE by-reference connector namespaces (fills during this turn's
         // codex_apps tools/list): the codex tool_search description reads it per
         // model call so the model sees the account's real connected sources.

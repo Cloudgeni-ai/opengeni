@@ -341,6 +341,7 @@ describe("durable structured human input", () => {
         accountId: frozen.grant.accountId,
         workspaceId: frozen.grant.workspaceId!,
         sessionId: frozen.session.id,
+        subjectId: frozen.grant.subjectId,
         payload: { approvalId: "ordinary-call", decision: "approve" },
       }),
     ).toMatchObject({ action: "conflict" });
@@ -407,6 +408,7 @@ describe("durable structured human input", () => {
         accountId: ordinaryFirst.grant.accountId,
         workspaceId: ordinaryFirst.grant.workspaceId!,
         sessionId: ordinaryFirst.session.id,
+        subjectId: ordinaryFirst.grant.subjectId,
         payload: { approvalId: "ordinary-call", decision: "approve" },
       }),
     ).toMatchObject({ action: "accepted" });

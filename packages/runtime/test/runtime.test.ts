@@ -89,6 +89,7 @@ import {
   withSandboxLifecycleHooks,
   type ResolveConnectionCredentialInput,
   type ResolveConnectionCredentialResult,
+  type ConnectorActionPolicyHooks,
 } from "../src/index";
 
 import { Manifest } from "@openai/agents/sandbox";
@@ -1256,6 +1257,179 @@ describe("runtime event normalization", () => {
         await prepared.close();
         outer.close();
         inner.close();
+      }
+    });
+
+    async function connectorPolicyFixture(input: {
+      connectorDecision: "allow" | "ask" | "block";
+      legacyApproval?: boolean;
+      begin?: ConnectorActionPolicyHooks["begin"];
+      complete?: ConnectorActionPolicyHooks["complete"];
+      sandboxBackend?: "none" | "modal";
+    }) {
+      const mcp = startTestMcpServer();
+      const baseConfig = {
+        id: "docs",
+        name: "Document Search",
+        url: mcp.url,
+        cacheToolsList: false,
+        ...(input.legacyApproval ? { requireApproval: true as const } : {}),
+      };
+      const prepared = await prepareAgentTools(testSettings({ mcpServers: [baseConfig] }), [
+        { kind: "mcp", id: "docs" },
+      ]);
+      const calls: string[] = [];
+      const hooks: ConnectorActionPolicyHooks = {
+        prepare: async (call) => {
+          calls.push(`prepare:${call.approvalId}:${String((call.arguments as any).query)}`);
+          return { managed: true, decision: input.connectorDecision };
+        },
+        begin:
+          input.begin ??
+          (async (call) => {
+            calls.push(`begin:${call.approvalId}:${String((call.arguments as any).query)}`);
+            return input.connectorDecision === "block"
+              ? {
+                  allowed: false,
+                  managed: true,
+                  requestId: "request-1",
+                  reason: "blocked",
+                }
+              : {
+                  allowed: true,
+                  managed: true,
+                  requestId: "request-1",
+                };
+          }),
+        complete:
+          input.complete ??
+          (async ({ requestId, outcome }) => {
+            calls.push(`complete:${requestId}:${outcome}`);
+          }),
+      };
+      const settings = testSettings({
+        sandboxBackend: input.sandboxBackend ?? "none",
+        mcpServers: [
+          {
+            ...baseConfig,
+            connectionRef: {
+              connectionId: "connection-1",
+              providerDomain: "example.test",
+            },
+          },
+        ],
+      });
+      const agent = buildOpenGeniAgent(settings, [], {
+        mcpServers: prepared.mcpServers,
+        connectorActionPolicy: hooks,
+      });
+      return { agent, calls, mcp, prepared };
+    }
+
+    test("connector Allow executes once and preserves an existing Ask requirement", async () => {
+      const fixture = await connectorPolicyFixture({
+        connectorDecision: "allow",
+        legacyApproval: true,
+      });
+      try {
+        const [tool] = (await fixture.agent.getMcpTools(new RunContext())).filter(
+          (candidate) =>
+            candidate.type === "function" && candidate.name === "docs__search_documents",
+        );
+        if (!tool || tool.type !== "function") throw new Error("connector tool missing");
+        expect(await tool.needsApproval(new RunContext(), { query: "needle" }, "call-allow")).toBe(
+          true,
+        );
+        const output = await tool.invoke(new RunContext(), JSON.stringify({ query: "needle" }), {
+          toolCall: { callId: "call-allow" },
+        } as any);
+        expect(output).toBeDefined();
+        expect(fixture.mcp.calls).toEqual([
+          { tool: "search_documents", args: { query: "needle" } },
+        ]);
+        expect(fixture.calls).toEqual([
+          "prepare:call-allow:needle",
+          "begin:call-allow:needle",
+          "complete:request-1:completed",
+        ]);
+      } finally {
+        await fixture.prepared.close();
+        fixture.mcp.close();
+      }
+    });
+
+    test("connector Ask pauses and Block/reject paths never invoke the provider", async () => {
+      for (const connectorDecision of ["ask", "block"] as const) {
+        const fixture = await connectorPolicyFixture({
+          connectorDecision,
+          begin: async () => ({
+            allowed: false,
+            managed: true,
+            requestId: `request-${connectorDecision}`,
+            reason: connectorDecision === "ask" ? "approval_required" : "blocked",
+          }),
+        });
+        try {
+          const [tool] = (await fixture.agent.getMcpTools(new RunContext())).filter(
+            (candidate) =>
+              candidate.type === "function" && candidate.name === "docs__search_documents",
+          );
+          if (!tool || tool.type !== "function") throw new Error("connector tool missing");
+          expect(
+            await tool.needsApproval(
+              new RunContext(),
+              { query: "top-secret-query" },
+              `call-${connectorDecision}`,
+            ),
+          ).toBe(connectorDecision === "ask");
+          await expect(
+            tool.invoke(new RunContext(), JSON.stringify({ query: "top-secret-query" }), {
+              toolCall: { callId: `call-${connectorDecision}` },
+            } as any),
+          ).rejects.toThrow("Connector action was not executed");
+          expect(fixture.mcp.calls).toHaveLength(0);
+        } finally {
+          await fixture.prepared.close();
+          fixture.mcp.close();
+        }
+      }
+    });
+
+    test("connector execution retry is denied and the clone path retains enforcement", async () => {
+      let begins = 0;
+      const fixture = await connectorPolicyFixture({
+        connectorDecision: "allow",
+        sandboxBackend: "modal",
+        begin: async () => {
+          begins += 1;
+          return begins === 1
+            ? { allowed: true, managed: true, requestId: "request-retry" }
+            : {
+                allowed: false,
+                managed: true,
+                requestId: "request-retry",
+                reason: "already_executed",
+              };
+        },
+      });
+      try {
+        const clone = (
+          fixture.agent as unknown as { clone: (config: unknown) => ApprovalAgent }
+        ).clone({});
+        const [tool] = (await clone.getMcpTools(new RunContext())).filter(
+          (candidate) =>
+            candidate.type === "function" && candidate.name === "docs__search_documents",
+        );
+        if (!tool || tool.type !== "function") throw new Error("connector tool missing");
+        const details = { toolCall: { callId: "call-retry" } } as any;
+        await tool.invoke(new RunContext(), JSON.stringify({ query: "once" }), details);
+        await expect(
+          tool.invoke(new RunContext(), JSON.stringify({ query: "once" }), details),
+        ).rejects.toThrow("already_executed");
+        expect(fixture.mcp.calls).toHaveLength(1);
+      } finally {
+        await fixture.prepared.close();
+        fixture.mcp.close();
       }
     });
   });

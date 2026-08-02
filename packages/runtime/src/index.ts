@@ -1372,6 +1372,35 @@ export function effectiveSkillSelectionsForAgent(
   return agentSkillSelections.get(agent) ?? emptySkillSelections;
 }
 
+export type ConnectorActionToolCall = {
+  approvalId: string;
+  connectionId?: string | null;
+  serverId: string;
+  toolName: string;
+  arguments: unknown;
+};
+
+export type ConnectorActionPolicyPreparation =
+  | { managed: false; decision: "unmanaged" }
+  | { managed: true; decision: "allow" | "ask" | "block" };
+
+export type ConnectorActionExecutionAdmission =
+  | { allowed: true; managed: false }
+  | { allowed: true; managed: true; requestId: string }
+  | {
+      allowed: false;
+      managed: true;
+      requestId: string;
+      reason: "approval_required" | "blocked" | "rejected" | "already_executed" | "uncertain_retry";
+    };
+
+/** Secret-free persistence boundary supplied by the worker for one attempt. */
+export type ConnectorActionPolicyHooks = {
+  prepare: (call: ConnectorActionToolCall) => Promise<ConnectorActionPolicyPreparation>;
+  begin: (call: ConnectorActionToolCall) => Promise<ConnectorActionExecutionAdmission>;
+  complete: (input: { requestId: string; outcome: "completed" | "uncertain" }) => Promise<void>;
+};
+
 export type BuildAgentOptions = {
   model?: Model;
   /** Settled response for the one internal human-input interruption resumed by this run. */
@@ -1451,6 +1480,8 @@ export type BuildAgentOptions = {
   activeSandboxBackend?: Settings["sandboxBackend"];
   fileResourceDownloads?: SandboxFileDownload[];
   mcpServers?: MCPServer[];
+  /** Attempt-bound connector Allow/Ask/Block enforcement and safe audit hooks. */
+  connectorActionPolicy?: ConnectorActionPolicyHooks;
   // Workspace Memory V1 working-set block, resolved by the worker per turn.
   // Composed after the workspace persona/CORE/toolspace substrate and before
   // per-session instructions. Omitted/blank ⇒ byte-identical instructions.
@@ -1990,7 +2021,7 @@ export function buildOpenGeniAgent(
       agentsNeedingGenesisTitleDirective.add(agent);
     }
     maybeInstallCodexToolSearch(agent, settings, options);
-    applyMcpApprovalPolicy(agent, settings);
+    applyMcpApprovalPolicy(agent, settings, options.connectorActionPolicy);
     return agent;
   }
 
@@ -2085,7 +2116,7 @@ export function buildOpenGeniAgent(
     agentRigCredentialHooks.set(agent, sandboxLifecycleHooksForIds(options.rigCredentialHookIds));
   }
   maybeInstallCodexToolSearch(agent, settings, options);
-  applyMcpApprovalPolicy(agent, settings);
+  applyMcpApprovalPolicy(agent, settings, options.connectorActionPolicy);
   return agent;
 }
 
@@ -2136,7 +2167,9 @@ function mcpToolRequiresApproval(
 /** A per-server approval policy keyed by the server's `<id>__` tool prefix. */
 type McpApprovalPolicy = {
   prefix: string;
+  serverId: string;
   requireApproval: boolean | ReadonlySet<string>;
+  connectionId: string | null;
 };
 
 /** The subset of the agent surface the approval wrap needs — including `clone`. */
@@ -2165,10 +2198,11 @@ type ApprovalCapableAgent = {
 function installMcpApprovalPolicy(
   agent: ApprovalCapableAgent,
   policies: McpApprovalPolicy[],
+  connectorActionPolicy?: ConnectorActionPolicyHooks,
 ): void {
   const listMcpTools = agent.getMcpTools.bind(agent);
-  agent.getMcpTools = async (runContext: unknown) => {
-    const tools = await listMcpTools(runContext);
+  agent.getMcpTools = async (resolutionContext: unknown) => {
+    const tools = await listMcpTools(resolutionContext);
     return tools.map((tool) => {
       if (tool.type !== "function") {
         return tool;
@@ -2178,16 +2212,84 @@ function installMcpApprovalPolicy(
         return tool;
       }
       const unprefixed = tool.name.slice(policy.prefix.length);
-      return mcpToolRequiresApproval(policy.requireApproval, unprefixed)
-        ? { ...tool, needsApproval: async () => true }
-        : tool;
+      const originalNeedsApproval = tool.needsApproval.bind(tool);
+      const originalInvoke = tool.invoke.bind(tool);
+      const connectorManaged = Boolean(connectorActionPolicy && policy.connectionId);
+      if (!connectorManaged && !mcpToolRequiresApproval(policy.requireApproval, unprefixed)) {
+        return tool;
+      }
+      const connectorCall = (approvalId: string, args: unknown): ConnectorActionToolCall => ({
+        approvalId,
+        connectionId: policy.connectionId,
+        serverId: policy.serverId,
+        toolName: unprefixed,
+        arguments: args,
+      });
+      return {
+        ...tool,
+        needsApproval: async (
+          runContext: Parameters<typeof originalNeedsApproval>[0],
+          parsedInput: Parameters<typeof originalNeedsApproval>[1],
+          callId: Parameters<typeof originalNeedsApproval>[2],
+        ) => {
+          if (connectorManaged && !callId) {
+            throw new Error("Connector action is missing its durable approval identity");
+          }
+          const preparation = connectorManaged
+            ? await connectorActionPolicy!.prepare(connectorCall(callId!, parsedInput))
+            : ({ managed: false, decision: "unmanaged" } as const);
+          if (preparation.managed && preparation.decision === "block") {
+            return false;
+          }
+          const legacyApproval =
+            mcpToolRequiresApproval(policy.requireApproval, unprefixed) ||
+            (await originalNeedsApproval(runContext, parsedInput, callId));
+          return (preparation.managed && preparation.decision === "ask") || legacyApproval;
+        },
+        invoke: async (runContext, input, details) => {
+          if (!connectorManaged) {
+            return await originalInvoke(runContext, input, details);
+          }
+          const callId = details?.toolCall?.callId;
+          if (!callId) {
+            throw new Error("Connector action was not executed: missing durable call identity");
+          }
+          let parsedInput: unknown;
+          try {
+            parsedInput = JSON.parse(input) as unknown;
+          } catch {
+            throw new Error("Connector action was not executed: malformed tool input");
+          }
+          const admission = await connectorActionPolicy!.begin(connectorCall(callId, parsedInput));
+          if (!admission.allowed) {
+            throw new Error(`Connector action was not executed: ${admission.reason}`);
+          }
+          if (!admission.managed) {
+            return await originalInvoke(runContext, input, details);
+          }
+          try {
+            const output = await originalInvoke(runContext, input, details);
+            await connectorActionPolicy!.complete({
+              requestId: admission.requestId,
+              outcome: "completed",
+            });
+            return output;
+          } catch {
+            await connectorActionPolicy!.complete({
+              requestId: admission.requestId,
+              outcome: "uncertain",
+            });
+            throw new Error("Connector action failed after execution began");
+          }
+        },
+      };
     });
   };
   const originalClone = agent.clone?.bind(agent);
   if (originalClone) {
     agent.clone = (config: unknown) => {
       const cloned = originalClone(config);
-      installMcpApprovalPolicy(cloned, policies);
+      installMcpApprovalPolicy(cloned, policies, connectorActionPolicy);
       return cloned;
     };
   }
@@ -2218,23 +2320,34 @@ function installMcpApprovalPolicy(
  *  - CLONE SURVIVAL. The wrap is re-installed onto every clone; see
  *    {@link installMcpApprovalPolicy}.
  */
-function applyMcpApprovalPolicy(agent: Agent<any, any>, settings: Settings): void {
+function applyMcpApprovalPolicy(
+  agent: Agent<any, any>,
+  settings: Settings,
+  connectorActionPolicy?: ConnectorActionPolicyHooks,
+): void {
   const policies: McpApprovalPolicy[] = settings.mcpServers
     .filter(
       (server) =>
+        Boolean(connectorActionPolicy && server.connectionRef?.connectionId) ||
         server.requireApproval === true ||
         (Array.isArray(server.requireApproval) && server.requireApproval.length > 0),
     )
     .map((server) => ({
       prefix: prefixedMcpToolName(server.id, ""),
+      serverId: server.id,
       requireApproval:
         server.requireApproval === true ? true : new Set(server.requireApproval as string[]),
+      connectionId: server.connectionRef?.connectionId ?? null,
     }))
     .sort((a, b) => b.prefix.length - a.prefix.length);
   if (policies.length === 0) {
     return;
   }
-  installMcpApprovalPolicy(agent as unknown as ApprovalCapableAgent, policies);
+  installMcpApprovalPolicy(
+    agent as unknown as ApprovalCapableAgent,
+    policies,
+    connectorActionPolicy,
+  );
 }
 
 /**

@@ -119,6 +119,32 @@ The connection ref is likewise immutable for the session server. To switch an
 endpoint to a different host connection, create a new session attachment rather
 than treating credential rotation as a connection-rebinding operation.
 
+## Connector action policy enforcement
+
+Connection-backed MCP tools can additionally be governed by workspace
+`connector_action_policies`. Each versioned row scopes one connection, server,
+tool, and action (with `*` wildcards for server/tool/action) to `allow`, `ask`,
+or `block`. Attempt claim copies a bounded, ordered policy snapshot into
+`session_turn_attempts.connector_action_policies`; later policy edits affect a
+new attempt only, except that an already-created Ask request keeps its original
+decision across the approval-resume attempt.
+
+Resolution is most-specific-first. Two matching policies with equal specificity
+fail closed as Block. No matching row preserves the historical unmanaged
+behavior. The connector decision composes monotonically with `requireApproval`:
+Block stops before MCP invocation, Ask requires the ordinary durable approval,
+and Allow never removes a session-level approval requirement.
+
+Managed calls use `connector_action_requests` as an idempotency and evidence
+ledger. It freezes the initiating actor, original attempt, connection/server/
+tool/action identity, policy id/version/source, and a canonical SHA-256 action
+fingerprint. Approval records the authenticated approver separately. The
+execution attempt is recorded when an approved request resumes. A repeated call
+after execution began is marked outcome-uncertain and denied rather than sent to
+the provider again. Audit rows contain only these bounded identifiers,
+decisions, timestamps, fingerprints, and coarse outcomes—never raw arguments,
+headers, credentials, request bodies, or tool results.
+
 Child inheritance is a create-time snapshot, not a live credential link. A
 static encrypted header map is copied as ciphertext and starts at credential
 version 1 on the child; future parent and child rotations are independent. A
@@ -150,6 +176,13 @@ runtime settings. Normal model MCP and Toolspace/Code Mode use that same
 attempt-fenced configuration and request-time resolver, including forced refresh
 after a 401. Normal session reads return only safe metadata and the non-secret
 connection pointer.
+
+For model MCP execution, the worker also supplies attempt-bound connector policy
+hooks to the runtime. The runtime wraps converted MCP function tools and every
+sandbox clone, evaluates approval before interruption, rechecks durable
+admission immediately before invocation, and commits completion or uncertainty
+afterward. This wrapper does not change tool selection, connector visibility,
+Toolspace exclusion rules, or Slack interaction progress delivery.
 
 ## Never-return-values invariant
 
