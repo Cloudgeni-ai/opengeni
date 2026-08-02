@@ -1,6 +1,6 @@
 import type { ConnectionMetadata } from "@opengeni/sdk";
-import { ChevronDownIcon, KeyRoundIcon, Loader2Icon, Trash2Icon } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { ChevronDownIcon, Loader2Icon, Trash2Icon } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState, type SVGProps } from "react";
 import { toast } from "sonner";
 
 import { useAppContext } from "@/context";
@@ -9,6 +9,21 @@ import { Input } from "@/components/ui/input";
 
 const GATEWAY_DOMAIN = "ai-gateway.vercel.sh";
 const GATEWAY_ROLE = "vercel_ai_gateway";
+
+/** Vercel mark (simple-icons path) — currentColor so it matches surrounding chrome. */
+function VercelMark({ className, ...props }: SVGProps<SVGSVGElement>) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className={className}
+      fill="currentColor"
+      aria-hidden="true"
+      {...props}
+    >
+      <path d="M24 22.525H0l12-21.05 12 21.05z" />
+    </svg>
+  );
+}
 
 function isGatewayConnection(connection: ConnectionMetadata): boolean {
   return (
@@ -119,7 +134,7 @@ export function AiGatewayConnectionCard(props: { workspaceId: string; canManage:
       onToggle={(event) => setOpen(event.currentTarget.open)}
     >
       <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5 text-left transition-colors hover:bg-surface-2/60 [&::-webkit-details-marker]:hidden">
-        <KeyRoundIcon className="size-3.5 shrink-0 text-brand" />
+        <VercelMark className="size-3.5 shrink-0 text-fg" />
         <span className="min-w-0 flex-1 truncate text-sm font-medium">
           Bring your own Vercel AI Gateway
         </span>
