@@ -20,6 +20,11 @@ import {
   selectModelPricing,
   serviceTierForLatencyMode,
   withCodexCatalogProvider,
+  withWorkspaceGatewayCatalogProvider,
+  withWorkspaceGatewayCredential,
+  OPENGENI_GATEWAY_MODELS,
+  OPENGENI_GATEWAY_PROVIDER_ID,
+  WORKSPACE_GATEWAY_PROVIDER_ID,
 } from "../src";
 
 // A reusable Fireworks/GLM-5.2 registry JSON mirroring the doc's host example.
@@ -57,6 +62,91 @@ const codexRegistry = JSON.stringify([
     models: [{ id: "codex/gpt-5.6-sol", label: "gpt-5.6-sol", reasoningEffort: true }],
   },
 ]);
+
+describe("curated AI Gateway catalogue", () => {
+  test("adds the two managed models with exact routes, capabilities, and prices", () => {
+    const settings = {
+      ...getSettings(),
+      modelProvidersJson: "[]",
+      vercelAiGatewayApiKey: "vck_test",
+    };
+    const providers = configuredProviders(settings);
+    const gateway = providers.find((provider) => provider.id === OPENGENI_GATEWAY_PROVIDER_ID)!;
+    expect(gateway.kind).toBe("vercel-gateway-managed");
+    expect(gateway.api).toBe("responses");
+
+    const models = configuredModels(settings);
+    const deepseek = models.find(
+      (model) => model.id === OPENGENI_GATEWAY_MODELS.deepseek.productId,
+    )!;
+    const kimi = models.find((model) => model.id === OPENGENI_GATEWAY_MODELS.kimi.productId)!;
+    expect(deepseek.upstreamModelId).toBe(OPENGENI_GATEWAY_MODELS.deepseek.upstreamModelId);
+    expect(deepseek.requestPolicy).toEqual({
+      gateway: { only: ["baseten"], caching: "auto" },
+    });
+    expect(deepseek.capabilities.promptCaching).toEqual({
+      upstream: "supported",
+      runnable: true,
+      mode: "implicit",
+    });
+    expect(kimi.requestPolicy).toEqual({ gateway: { only: ["wafer"], caching: "none" } });
+    expect(kimi.capabilities.promptCaching).toEqual({
+      upstream: "unsupported",
+      runnable: false,
+      mode: "none",
+    });
+    expect(kimi.capabilities.latencyModes.map((mode) => mode.id)).toEqual(["standard"]);
+
+    expect(configuredModelPricing(settings)[deepseek.id]).toEqual({
+      inputMicrosPerMillionTokens: 130_000,
+      cachedInputMicrosPerMillionTokens: 28_000,
+      outputMicrosPerMillionTokens: 260_000,
+      marginBps: 2_500,
+    });
+    expect(configuredModelPricing(settings)[kimi.id]).toEqual({
+      inputMicrosPerMillionTokens: 4_500_000,
+      outputMicrosPerMillionTokens: 22_500_000,
+      marginBps: 2_500,
+    });
+  });
+
+  test("workspace overlay is externally billed and receives a key only at runtime", () => {
+    const base = { ...getSettings(), modelProvidersJson: "[]", vercelAiGatewayApiKey: undefined };
+    const catalog = withWorkspaceGatewayCatalogProvider(base);
+    const provider = configuredProviders(catalog).find(
+      (candidate) => candidate.id === WORKSPACE_GATEWAY_PROVIDER_ID,
+    )!;
+    expect(provider.kind).toBe("vercel-gateway-workspace");
+    expect(provider.apiKey).toBeUndefined();
+    expect(provider.credentialSource).toEqual({
+      kind: "workspace_connection",
+      mechanism: "api_key",
+    });
+    expect(provider.billing).toEqual({ upstreamPayer: "workspace", metering: "external" });
+
+    const runtime = withWorkspaceGatewayCredential(catalog, "vck_workspace");
+    expect(
+      configuredProviders(runtime).find(
+        (candidate) => candidate.id === WORKSPACE_GATEWAY_PROVIDER_ID,
+      )?.apiKey,
+    ).toBe("vck_workspace");
+  });
+
+  test("managed debit applies Baseten cache-read price and the existing 25% margin", () => {
+    const settings = {
+      ...getSettings(),
+      modelProvidersJson: "[]",
+      vercelAiGatewayApiKey: "vck_test",
+    };
+    expect(
+      calculateModelUsageCostMicros(settings, OPENGENI_GATEWAY_MODELS.deepseek.productId, {
+        inputTokens: 1_000_000,
+        outputTokens: 1_000_000,
+        inputTokensDetails: { cached_tokens: 1_000_000 },
+      }),
+    ).toBe(360_000);
+  });
+});
 
 const grok45Capabilities = {
   reasoning: {

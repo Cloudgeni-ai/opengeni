@@ -8,6 +8,7 @@ import {
   AGENT_INSTRUCTIONS_CORE_PLACEHOLDER,
   collectSandboxEnvironment,
   firstPartyMcpBaseUrl,
+  gatewayRequestPolicyForUpstreamModel,
   resolveFirstPartyDelegationSecret,
   resolveModelProvider,
   sandboxLifecycleHookIds,
@@ -630,9 +631,14 @@ export function buildOpenAIClientFromSettings(
 const providerClientCache = new Map<string, OpenAI>();
 
 export function buildProviderClient(provider: ResolvedModelProvider, settings: Settings): OpenAI {
-  const cached = providerClientCache.get(provider.id);
+  const workspaceGateway = provider.kind === "vercel-gateway-workspace";
+  const gatewayProvider = workspaceGateway || provider.kind === "vercel-gateway-managed";
+  const cached = workspaceGateway ? undefined : providerClientCache.get(provider.id);
   if (cached) {
     return cached;
+  }
+  if (workspaceGateway && !provider.apiKey) {
+    throw new WorkspaceGatewayUnavailableError();
   }
   const client = provider.builtin
     ? buildOpenAIClientFromSettings(settings, provider.id)
@@ -662,13 +668,93 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
         new OpenAI({
           ...(provider.apiKey ? { apiKey: provider.apiKey } : {}),
           ...(provider.baseUrl ? { baseURL: provider.baseUrl } : {}),
-          maxRetries: settings.openaiMaxRetries,
+          // Gateway routing is deliberately fail-closed. Avoid SDK replay after
+          // a request may have reached the one pinned endpoint.
+          maxRetries: gatewayProvider ? 0 : settings.openaiMaxRetries,
           ...(provider.defaultQuery ? { defaultQuery: provider.defaultQuery } : {}),
           ...(provider.defaultHeaders ? { defaultHeaders: provider.defaultHeaders } : {}),
-          fetch: instrumentedModelFetch(provider.id, globalThis.fetch),
+          fetch: gatewayProvider
+            ? vercelGatewayRoutingFetch(
+                provider.kind as "vercel-gateway-managed" | "vercel-gateway-workspace",
+                instrumentedModelFetch(provider.id, globalThis.fetch),
+              )
+            : instrumentedModelFetch(provider.id, globalThis.fetch),
         });
-  providerClientCache.set(provider.id, client);
+  if (!workspaceGateway) {
+    providerClientCache.set(provider.id, client);
+  }
   return client;
+}
+
+export class WorkspaceGatewayUnavailableError extends Error {
+  constructor() {
+    super(
+      "Your Gateway model is unavailable: connect or reconnect the workspace AI Gateway key in Settings, then retry.",
+    );
+    this.name = "WorkspaceGatewayUnavailableError";
+  }
+}
+
+/**
+ * Inject the reviewed route after SDK serialization, replacing any caller
+ * gateway options. There is exactly one allowed endpoint provider and no model
+ * fallback list. Unknown models/body shapes fail before network I/O.
+ */
+export function vercelGatewayRoutingFetch(
+  kind: Extract<
+    ResolvedModelProvider["kind"],
+    "vercel-gateway-managed" | "vercel-gateway-workspace"
+  >,
+  inner: typeof fetch,
+): typeof fetch {
+  return (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    if (!isModelCallFetch(input)) {
+      return await inner(input, init);
+    }
+    if (typeof init?.body !== "string") {
+      throw new Error("Model request could not be prepared");
+    }
+    let body: Record<string, unknown>;
+    try {
+      const parsed = JSON.parse(init.body) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("invalid body");
+      }
+      body = parsed as Record<string, unknown>;
+    } catch {
+      throw new Error("Model request could not be prepared");
+    }
+    const model = typeof body.model === "string" ? body.model : "";
+    const policy = gatewayRequestPolicyForUpstreamModel(model);
+    if (!policy) {
+      throw new Error("Model request is not in the approved catalogue");
+    }
+    const providerOptions =
+      body.providerOptions &&
+      typeof body.providerOptions === "object" &&
+      !Array.isArray(body.providerOptions)
+        ? { ...(body.providerOptions as Record<string, unknown>) }
+        : {};
+    providerOptions.gateway = {
+      only: [...policy.gateway.only],
+      order: [...policy.gateway.only],
+      ...(policy.gateway.caching === "auto" ? { caching: "auto" } : {}),
+    };
+    body.providerOptions = providerOptions;
+    const response = await inner(input, { ...init, body: JSON.stringify(body) });
+    if (response.ok) {
+      return response;
+    }
+    const message =
+      kind === "vercel-gateway-workspace" && (response.status === 401 || response.status === 403)
+        ? "Your Gateway connection needs attention. Reconnect it in workspace Settings."
+        : "The selected model is temporarily unavailable.";
+    return new Response(JSON.stringify({ error: { type: "model_unavailable", message } }), {
+      status: response.status,
+      statusText: response.statusText,
+      headers: { "content-type": "application/json" },
+    });
+  }) as typeof fetch;
 }
 
 /**

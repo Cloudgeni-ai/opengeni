@@ -4,6 +4,7 @@ import {
   configuredAllowedModels,
   policyProviderIdForModel,
   resolveTurnExecutionPolicyV1,
+  WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
   type Settings,
 } from "@opengeni/config";
 import {
@@ -837,6 +838,9 @@ export function canonicalConfiguredModel(
   // actual connection (an unconnected workspace fails the turn with a clear
   // "no Codex subscription connected" error rather than a misleading 422 here).
   if (settings.codexSubscriptionEnabled && canonicalModel.startsWith(CODEX_MODEL_ID_PREFIX)) {
+    return canonicalModel;
+  }
+  if (canonicalModel.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX)) {
     return canonicalModel;
   }
   throw new HTTPException(422, { message: `model is not available: ${model}` });

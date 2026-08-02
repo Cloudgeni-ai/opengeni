@@ -157,6 +157,7 @@ import {
   settingsWithCodexCredential,
   settingsWithEnabledCapabilityMcpServers,
   settingsWithSessionMcpServersForRun,
+  settingsWithWorkspaceGatewayCredential,
 } from "./capabilities";
 import {
   CODEX_USAGE_EXHAUSTED_PCT,
@@ -3078,11 +3079,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         mcpSettings,
         input.workspaceId,
       );
-      const capabilitySettings = await settingsWithCodexCredential(
+      const codexSettings = await settingsWithCodexCredential(
         db,
         input.workspaceId,
         mcpSettings,
         codexSubscriptionActive,
+      );
+      const capabilitySettings = await settingsWithWorkspaceGatewayCredential(
+        db,
+        input.workspaceId,
+        codexSettings,
       );
       runtime.configure(capabilitySettings);
       const session = await requireSession(db, input.workspaceId, input.sessionId);

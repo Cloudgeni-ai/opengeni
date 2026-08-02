@@ -115,6 +115,39 @@ derives both from the provider kind:
 not enable workspace BYOK; that requires a separately reviewed encrypted
 credential broker.
 
+## Curated AI Gateway models
+
+`OPENGENI_VERCEL_AI_GATEWAY_API_KEY` enables two reviewed OpenGeni-credit
+models. They are siblings of the built-in GPT-5.6 family in the OpenGeni picker
+rail; the client never receives the Gateway hostname, upstream model slug, or
+endpoint provider.
+
+| Product | Exact route | Supplier input / cache read / output | OpenGeni retail (+25%) |
+| --- | --- | --- | --- |
+| DeepSeek V4 Flash 0731 | `deepseek/deepseek-v4-flash-0731` → Baseten only | $0.13 / $0.028 / $0.26 per 1M | $0.1625 / $0.035 / $0.325 per 1M |
+| Kimi K3 Fast | `moonshotai/kimi-k3-fast` → Wafer only | $4.50 / — / $22.50 per 1M | $5.625 / — / $28.125 per 1M |
+
+Prices are a reviewed 2026-08-02 snapshot from the public Gateway endpoint
+metadata. They are intentionally static: adding a model or changing a route
+requires updating its definition, price, and tests together. Wafer publishes a
+Kimi cache-read price in aggregate metadata but currently reports
+`supports_implicit_caching: false`; OpenGeni therefore makes no Kimi cache-hit
+promise and bills all Wafer input at the normal input rate. Baseten reports
+implicit caching and cached tokens are charged at its cache-read rate.
+
+Every Gateway request replaces caller routing options with an exact one-item
+`only` and `order` list, sends no model fallback list, and disables OpenAI SDK
+retries. DeepSeek also requests Gateway automatic caching; Kimi does not.
+Unknown Gateway model slugs fail before network I/O. Keep Gateway account-level
+rewrite rules disabled for the managed key because those rules operate outside
+the request body.
+
+A workspace admin can instead connect **Your Gateway** in workspace Settings.
+The key is stored in the encrypted workspace connection table, resolved only in
+the worker, and uses the same curated models and exact routes. These turns have
+`upstreamPayer: workspace` and `metering: external`, so OpenGeni never debits
+credits. The picker hides this rail until the connection is active.
+
 ### Secret-safe definition versions
 
 `definitionVersion` is a deterministic SHA-256 digest of executable model and
@@ -381,8 +414,10 @@ compares Standard short- and long-context rates for the allow-listed GPT-5.6
 product ids. Treat mismatches as a prompt to re-check OpenAI (or the provider)
 and update `defaultModelPricing` — not as automatic truth to import.
 
-Not covered by the canary (OpenGeni-owned): Fast/priority multipliers,
-Fireworks GLM defaults, and the `marginBps` markup. Offline unit coverage uses
+Not covered by the llm-prices canary: Fast/priority multipliers, Fireworks GLM
+defaults, the provider-pinned Gateway snapshots, and the `marginBps` markup.
+Gateway catalogue tests pin the exact Baseten/Wafer rates and caching claims;
+offline llm-prices coverage uses
 `scripts/fixtures/llm-prices-current-v1.sample.json`.
 
 ## Evidence-bounded Grok 4.5 support
