@@ -19,6 +19,10 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
+    },
+    "./google-drive": {
+      "types": "./src/google-drive.ts",
+      "default": "./src/google-drive.ts"
     }
   },
   "publishConfig": {
