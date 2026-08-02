@@ -5234,7 +5234,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             resumeBoxForTurn(
               {
                 db,
-                settings,
+                settings: runSettings,
                 cancellationSignal: sandboxResumeSignal,
                 sandboxMetrics: runtimeMetricsHooksForObservability(observability),
                 onSandboxLost: publishSandboxLost,
@@ -5640,7 +5640,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             const provisioned = await resumeBoxForTurn(
               {
                 db,
-                settings,
+                settings: runSettings,
                 cancellationSignal: sandboxResumeSignal,
                 sandboxMetrics: runtimeMetricsHooksForObservability(observability),
                 onSandboxLost: publishSandboxLost,
