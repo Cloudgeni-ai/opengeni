@@ -330,7 +330,6 @@ import {
   type SessionTurn,
   type ToolAuthNeededPayload,
   type TurnExecutionPolicyV1,
-  type TurnInitiator,
 } from "@opengeni/contracts";
 import { createHash, randomUUID } from "node:crypto";
 
