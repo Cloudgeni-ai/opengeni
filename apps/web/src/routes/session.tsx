@@ -81,7 +81,6 @@ export function SessionRoute({
 
   // Session record + live event log via @opengeni/react. Fresh opens load a
   // bounded tail, then stream live events with resume-by-sequence.
-  const { session: fetchedSession, loading, error: loadError } = useSession(sessionId);
   const {
     events,
     sessionStatus,
@@ -98,6 +97,7 @@ export function SessionRoute({
     jumpToLatest,
     error: streamError,
   } = useSessionEvents(sessionId);
+  const { session: fetchedSession, loading, error: loadError } = useSession(sessionId, { events });
   // Queue + goal share the timeline's event stream — one SSE connection total.
   const queue = useTurnQueue(sessionId, { events });
   const goal = useGoal(sessionId, { events });
@@ -298,7 +298,7 @@ export function SessionRoute({
   });
   const agentNodes = lineage.lineage?.children ?? [];
 
-  if (loading || !session) {
+  if (!session) {
     if (loadError) {
       return isApiErrorStatus(loadError, 404) ? (
         <ProblemPanel
@@ -326,7 +326,24 @@ export function SessionRoute({
         />
       );
     }
-    return <LoadingPanel label="Opening session" />;
+    return (
+      <div className="flex min-h-0 w-full min-w-0 flex-1 overflow-hidden">
+        <SessionDock
+          workspaceId={workspaceId}
+          sessionId={sessionId}
+          session={null}
+          events={events}
+          connectionState={connectionState}
+          primary={<LoadingPanel label={loading ? "Opening session" : "Preparing session"} />}
+          dockCollapsed={!context.inspectorOpen}
+          onDockCollapsedChange={(collapsed) => context.setInspectorOpen(!collapsed)}
+          onOpenNavigation={() => {
+            context.setInspectorOpen(false);
+            rail.setDrawerOpen(true);
+          }}
+        />
+      </div>
+    );
   }
 
   const chatPane = (
@@ -422,7 +439,7 @@ export function SessionRoute({
 function SessionDock(props: {
   workspaceId: string;
   sessionId: string;
-  session: Session;
+  session: Session | null;
   events: SessionEvent[];
   connectionState: ReturnType<typeof useSessionEvents>["connectionState"];
   primary: React.ReactNode;
@@ -433,19 +450,23 @@ function SessionDock(props: {
   // The workbench (Changes | Files | Terminal | Desktop + machine chip) lives in
   // the package now; the app injects Debug around it. Agents remain in the one
   // compact composer-adjacent surface.
-  const debugTab: WorkspaceTab = {
-    id: "debug",
-    label: "Debug",
-    content: (
-      <Suspense fallback={<LoadingPanel label="Opening debug inspector" />}>
-        <LazySessionInspector
-          session={props.session}
-          events={props.events}
-          connectionState={props.connectionState}
-        />
-      </Suspense>
-    ),
-  };
+  const trailingTabs: WorkspaceTab[] = props.session
+    ? [
+        {
+          id: "debug",
+          label: "Debug",
+          content: (
+            <Suspense fallback={<LoadingPanel label="Opening debug inspector" />}>
+              <LazySessionInspector
+                session={props.session}
+                events={props.events}
+                connectionState={props.connectionState}
+              />
+            </Suspense>
+          ),
+        },
+      ]
+    : [];
 
   return (
     <SessionWorkspace
@@ -453,7 +474,7 @@ function SessionDock(props: {
       sessionId={props.sessionId}
       events={props.events}
       primary={props.primary}
-      trailingTabs={[debugTab]}
+      trailingTabs={trailingTabs}
       collapsed={props.dockCollapsed}
       onCollapsedChange={props.onDockCollapsedChange}
       mobileLeadingControl={
