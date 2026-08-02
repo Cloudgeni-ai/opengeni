@@ -1777,8 +1777,10 @@ describe("useComposer durable draft and control binding", () => {
     expect(reads).toBe(2);
     expect(hook.result.current.draftLoading).toBe(false);
     expect(releaseSecond).not.toBeNull();
-    releaseSecond!();
-    await flush();
+    // Soft reload must not flip draftLoading; settle the deferred read under act.
+    await flushing(() => {
+      releaseSecond!();
+    });
     expect(hook.result.current.draftLoading).toBe(false);
     expect(hook.result.current.value).toBe("read-2");
     await hook.unmount();

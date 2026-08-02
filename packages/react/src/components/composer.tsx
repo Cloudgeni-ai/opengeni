@@ -50,6 +50,7 @@ import type { PickerModelRow } from "../model-policy";
 import { OPEN_WORKSTREAM_CONTROL_EVENT } from "../workstream-control-event";
 import { CommandPalette as CommandPaletteView } from "./command-palette";
 import { ModelPicker as ModelPickerView } from "./model-picker";
+import { TooltipProvider } from "./tooltip";
 
 export { OPEN_WORKSTREAM_CONTROL_EVENT };
 
@@ -689,18 +690,23 @@ export const Root = forwardRef<HTMLDivElement, ComposerRootProps>(function Compo
   { controller, children, className, style, ...props },
   forwardedRef,
 ) {
+  // Provider stays on Root so optional Radix tip surfaces (voice input) work.
+  // Ordinary composer actions use native `title` via ComposerTip to avoid
+  // pulling Popper into every tip hotspot.
   return (
     <ComposerContext.Provider value={controller}>
-      <div
-        {...props}
-        ref={mergeRefs(controller.rootRef, forwardedRef)}
-        data-og-composer-id={controller.id}
-        className={cn("og-root", className)}
-        style={{ paddingBottom: "env(safe-area-inset-bottom)", ...style }}
-      >
-        {children}
-        <ComposerAnnouncements />
-      </div>
+      <TooltipProvider delayDuration={300}>
+        <div
+          {...props}
+          ref={mergeRefs(controller.rootRef, forwardedRef)}
+          data-og-composer-id={controller.id}
+          className={cn("og-root", className)}
+          style={{ paddingBottom: "env(safe-area-inset-bottom)", ...style }}
+        >
+          {children}
+          <ComposerAnnouncements />
+        </div>
+      </TooltipProvider>
     </ComposerContext.Provider>
   );
 });
