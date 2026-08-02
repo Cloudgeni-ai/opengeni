@@ -1,9 +1,9 @@
 import {
   projectSessionRealtimeLifecycle,
   type CodexRealtimeController,
+  type CodexRealtimeControllerClient,
   type CodexRealtimeControllerSnapshot,
   type EffectiveSessionControl,
-  type OpenGeniClient,
   type SessionEvent,
   type SessionStatus,
 } from "@opengeni/sdk";
@@ -52,7 +52,7 @@ export function realtimeSessionSurfacePolicy(
 }
 
 export function useSessionCodexRealtime(options: {
-  client: OpenGeniClient;
+  client: CodexRealtimeControllerClient;
   workspaceId: string;
   sessionId: string;
   sessionStatus: SessionStatus;
@@ -189,7 +189,7 @@ function hasStoredOwnerProof(workspaceId: string, sessionId: string): boolean {
 }
 
 export function SessionCodexRealtimeControl(props: {
-  client: OpenGeniClient;
+  client: CodexRealtimeControllerClient;
   workspaceId: string;
   sessionId: string;
   sessionStatus: SessionStatus;

@@ -296,7 +296,6 @@ async function submitPrompt(value: Fixture, text: string, sessionId = value.sess
       delivery: "send",
       text,
       resources: [],
-      tools: [],
       reasoningEffortFallback: "low",
       source: "user",
     }),

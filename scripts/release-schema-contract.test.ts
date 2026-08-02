@@ -171,12 +171,37 @@ describe("release schema contract", () => {
         (migrations.has("0154_scoped_knowledge_foundation.sql") ? 1 : 0) +
         (migrations.has("0155_connector_action_policies.sql") ? 1 : 0) +
         (migrations.has("0156_slack_reaction_trigger.sql") ? 1 : 0) +
-        (migrations.has("0157_session_policy_role_snapshots.sql") ? 1 : 0),
+        (migrations.has("0157_session_policy_role_snapshots.sql") ? 1 : 0) +
+        (migrations.has("0158_session_realtime_mode.sql") ? 1 : 0) +
+        (migrations.has("0159_session_realtime_ledger.sql") ? 1 : 0) +
+        (migrations.has("0160_session_realtime_delegation_terminal.sql") ? 1 : 0) +
+        (migrations.has("0161_session_realtime_context_projection.sql") ? 1 : 0) +
+        (migrations.has("0162_session_realtime_connection_promotion.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "8a70d243382d5a8e3f13fefbc23b3588207c7667e2c447fcdf07d6b8ac85fdc8",
+      "9a7b297d869af91923b763a68d3342885d270b6236a5f7ba867c1b0acc3ac6ef",
     );
-    expect(contract.latestMigration).toBe("0157_session_policy_role_snapshots.sql");
+    expect(contract.latestMigration).toBe("0162_session_realtime_connection_promotion.sql");
+    expect(migrations.get("0162_session_realtime_connection_promotion.sql")).toMatchObject({
+      sha256: "118312d240b3cb0f67241466447d8c726ffcd0d050429c3e5a4fdf89bd9fafe2",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0161_session_realtime_context_projection.sql")).toMatchObject({
+      sha256: "1faab33f74932523e1565719ab69979db1835856b893e1871a4aa000545c8bf0",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0160_session_realtime_delegation_terminal.sql")).toMatchObject({
+      sha256: "678147cf0298d01bf20acae291a33a275d3e8a66b82b289d7d876f3f9e8e0ecd",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0159_session_realtime_ledger.sql")).toMatchObject({
+      sha256: "471a4be63a30ab7315115a49e43deb5bf993e494df81be9c25274c2cce89b7e1",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0158_session_realtime_mode.sql")).toMatchObject({
+      sha256: "a005e2b0d0e41dc7350643facce2b080b2ede379d88c7d3725c0757e2ca65f15",
+      deploymentMode: "rolling",
+    });
     expect(migrations.get("0157_session_policy_role_snapshots.sql")).toMatchObject({
       sha256: "84ad34345fe587ac8d952a4ddb7c55b1fec6a381b9ba5a73af6bcf253860f737",
       deploymentMode: "rolling",
@@ -250,7 +275,9 @@ describe("release schema contract", () => {
     expect(
       contract.migrations
         .map((migration) => migration.path)
-        .filter((path) => /^(?:010[3-9]|011[0-9]|012[0-9]|013[0-9]|014[0-9]|015[0-7])_/.test(path)),
+        .filter((path) =>
+          /^(?:010[3-9]|011[0-9]|012[0-9]|013[0-9]|014[0-9]|015[0-9]|016[0-2])_/.test(path),
+        ),
     ).toEqual([
       "0103_host_export_root_session.sql",
       "0104_host_export_root_session_backfill.sql",
@@ -297,6 +324,11 @@ describe("release schema contract", () => {
       "0155_connector_action_policies.sql",
       "0156_slack_reaction_trigger.sql",
       "0157_session_policy_role_snapshots.sql",
+      "0158_session_realtime_mode.sql",
+      "0159_session_realtime_ledger.sql",
+      "0160_session_realtime_delegation_terminal.sql",
+      "0161_session_realtime_context_projection.sql",
+      "0162_session_realtime_connection_promotion.sql",
     ]);
     expect(migrations.get("0143_session_codex_compaction_mode.sql")).toMatchObject({
       sha256: "574cfe6fc5ab24135e84d3932fd936e134ebe28bce8ac3cb5db97a549683906f",

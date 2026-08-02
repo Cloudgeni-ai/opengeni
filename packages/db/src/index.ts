@@ -38160,23 +38160,23 @@ export async function claimSessionWorkForAttempt(
         // on the provider-delegated ordinary turn.
         const delivered =
           realtimeFence.active || providerDelegatedTurn
-          ? {
-              count: 0,
-              lastSequence: session.lastSequence,
-              triggerEventId: null,
-              historyItemId: null,
-              historyItem: null,
-              updates: [] as Array<typeof schema.sessionSystemUpdates.$inferSelect>,
-              events: [] as Array<typeof schema.sessionEvents.$inferInsert>,
-              event: null,
-            }
-          : await deliverPendingUpdates(
-              session.accountId,
-              row.id,
-              row.executionGeneration,
-              session.lastSequence + 1,
-              now,
-            );
+            ? {
+                count: 0,
+                lastSequence: session.lastSequence,
+                triggerEventId: null,
+                historyItemId: null,
+                historyItem: null,
+                updates: [] as Array<typeof schema.sessionSystemUpdates.$inferSelect>,
+                events: [] as Array<typeof schema.sessionEvents.$inferInsert>,
+                event: null,
+              }
+            : await deliverPendingUpdates(
+                session.accountId,
+                row.id,
+                row.executionGeneration,
+                session.lastSequence + 1,
+                now,
+              );
         await persistDeliveredUpdateBatch(delivered, session.accountId, row.id);
         if (delivered.events.length > 0) {
           await tx.insert(schema.sessionEvents).values(delivered.events);
