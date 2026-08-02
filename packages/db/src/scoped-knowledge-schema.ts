@@ -13,7 +13,7 @@ import {
 } from "drizzle-orm/pg-core";
 
 // Cross-row/composite foreign keys, immutable-history triggers, lifecycle
-// functions, and FORCE-RLS policies live in migration 0153. This schema leaf is
+// functions, and FORCE-RLS policies live in migration 0154. This schema leaf is
 // deliberately cycle-free so the repository module can use typed table names
 // without making the main schema declaration harder to navigate.
 
