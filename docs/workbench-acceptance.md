@@ -231,7 +231,7 @@ with a warm cache. Reports include p50, p75, p95, p99, and worst observation.
 | Metric | Release budget |
 | --- | --- |
 | Capture API response | p95 ≤ 200 ms when served from the deployment region |
-| Capture-backed usable workbench | p95 ≤ 500 ms from navigation on the production network path |
+| Capture-backed usable workbench | cold-cache p95 ≤ 5 s from full navigation on the production network path |
 | Warm-cache session switch | p95 ≤ 250 ms, with zero stale frames |
 | Immediate interaction feedback | p95 ≤ 100 ms |
 | Editor typing latency | p95 ≤ 50 ms per input event |

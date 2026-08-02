@@ -177,7 +177,10 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await pageA.keyboard.press("Enter");
     await initialPinMutation;
     await pageA.getByRole("button", { name: "Unpin session" }).waitFor();
-    expect((await reactCommitCount(pageA)) - initialCommits).toBeLessThanOrEqual(64);
+    // Session navigation now starts the real capture-backed workbench while the
+    // session record is still loading. Keep a bounded render budget that includes
+    // that intentional parallel surface instead of measuring the rail alone.
+    expect((await reactCommitCount(pageA)) - initialCommits).toBeLessThanOrEqual(72);
     const pinnedA = pageA.getByRole("group", { name: "Pinned" });
     await pinnedA.getByRole("button", { name: /^Open Master pin target/ }).waitFor();
     await pageA.waitForFunction(() =>
@@ -1026,6 +1029,10 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await desktopPage.getByRole("button", { name: "Resume this workstream" }).waitFor();
       await desktopPage.getByRole("button", { name: "Resume this workstream" }).click();
       await desktopPage.getByRole("button", { name: "Pause this workstream" }).waitFor();
+      // The session record and lineage tree are independent reads. Navigation
+      // must not require one to block the other, so await the lineage-owned chip
+      // before asserting the settled control stack.
+      await agentsChip.waitFor();
 
       const boxes = await Promise.all([chrome.boundingBox(), composer.boundingBox()]);
       for (const box of boxes) expect(box).not.toBeNull();

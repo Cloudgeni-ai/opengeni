@@ -376,6 +376,46 @@ describe("useWorkspaceCapture", () => {
     await hook.unmount();
   });
 
+  test("an initial capture announcement does not replace the identical mount read", async () => {
+    const manifest = fakeManifest({ revision: 3 });
+    let resolveRequest!: (response: GetWorkspaceCaptureResponse) => void;
+    const request = new Promise<GetWorkspaceCaptureResponse>((resolve) => {
+      resolveRequest = resolve;
+    });
+    let calls = 0;
+    const client = fakeClient({
+      getWorkspaceCapture: async () => {
+        calls += 1;
+        return await request;
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useWorkspaceCapture(SESSION_ID, {
+          ...ctx,
+          client,
+          events: [
+            fakeEvent(1, "workspace.revision.captured", {
+              revision: manifest.revision,
+              turnId: manifest.turnId,
+              capturedAt: manifest.capturedAt,
+              leaseEpoch: manifest.leaseEpoch,
+              stats: manifest.stats,
+            }),
+          ],
+        }),
+      undefined,
+    );
+
+    await flush();
+    expect(calls).toBe(1);
+    resolveRequest(captureAvailable(manifest));
+    await flush();
+    expect(calls).toBe(1);
+    expect(hook.result.current.revision).toBe(3);
+    await hook.unmount();
+  });
+
   test("a newer workspace.revision.degraded announce refreshes to the degraded state", async () => {
     let response: GetWorkspaceCaptureResponse = captureAvailable(fakeManifest({ revision: 3 }));
     let calls = 0;
