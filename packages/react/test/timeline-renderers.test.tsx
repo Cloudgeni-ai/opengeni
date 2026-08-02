@@ -210,6 +210,19 @@ function fleetDecisionEventPayload(): Record<string, unknown> {
 }
 
 describe("FleetDecisionRow", () => {
+  test("stays mounted through an unrelated parent rerender", async () => {
+    resetTimelineEvents();
+    const event = timelineEvent("codex.fleet.decision", fleetDecisionEventPayload());
+    const r = await renderComponent(<MessageTimeline events={[event]} className="before-unpin" />);
+
+    expect(r.container.textContent ?? "").toContain("Fleet policy shadow");
+    await r.rerender(<MessageTimeline events={[event]} className="after-unpin" />);
+    expect(r.container.textContent ?? "").toContain("Fleet policy shadow");
+    expect(r.container.querySelector(".after-unpin")).toBeTruthy();
+
+    await r.unmount();
+  });
+
   test("renders an accessible bounded production-vs-shadow explanation without secret metadata", async () => {
     resetTimelineEvents();
     const r = await renderComponent(
