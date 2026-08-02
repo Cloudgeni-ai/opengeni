@@ -313,6 +313,41 @@ describe("catalog-backed ModelPicker", () => {
     }
   });
 
+  test("one usable rail collapses the provider root", async () => {
+    const rows = projectPickerRows([
+      catalogModel({ id: "gpt-5.6-sol", label: "Sol", source: "opengeni" }),
+      catalogModel({ id: "deepseek-v4-flash-0731", label: "DeepSeek", source: "opengeni" }),
+    ]);
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <ModelPickerMenu
+            rows={rows}
+            model="gpt-5.6-sol"
+            effort="low"
+            latencyMode="standard"
+            onModelChange={() => {}}
+            onEffortChange={() => {}}
+            onLatencyModeChange={() => {}}
+          />,
+        ),
+      );
+      await act(async () => {
+        container.querySelector<HTMLButtonElement>('[data-testid="model-picker-back"]')?.click();
+      });
+      expect(container.querySelector('[data-testid="model-picker-models"]')).toBeTruthy();
+      expect(container.querySelector('[data-testid="model-picker-providers"]')).toBeNull();
+      expect(container.querySelector('[data-testid="model-picker-back"]')).toBeNull();
+      expect(container.textContent).toContain("DeepSeek");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("slides providers → models → thinking; Thinking commits the model", async () => {
     const rows = projectPickerRows([
       catalogModel({ id: "gpt-5.6-sol", label: "Sol" }),

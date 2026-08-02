@@ -25,7 +25,7 @@ const BILLING_CLASS_ORDER: PickerBillingClass[] = [
 const BILLING_CLASS_LABELS: Record<PickerBillingClass, string> = {
   opengeni_credits: "OpenGeni",
   codex_subscription: "Codex",
-  byok: "Bring your own key",
+  byok: "Your Gateway",
 };
 
 const AVAILABILITY_REASON_LABELS: Record<string, string> = {
@@ -39,6 +39,12 @@ const AVAILABILITY_REASON_LABELS: Record<string, string> = {
 };
 
 export function billingClassForModel(model: ClientModel): PickerBillingClass {
+  if (model.source === "codex") {
+    return "codex_subscription";
+  }
+  if (model.source === "workspace_gateway") {
+    return "byok";
+  }
   if (model.credentialSource?.kind === "connected_subscription") {
     return "codex_subscription";
   }
@@ -123,7 +129,7 @@ export function payerSummaryForModel(model: ClientModel): string {
     return "Codex subscription · external billing";
   }
   if (billing.upstreamPayer === "workspace") {
-    return "Workspace credentials · external billing";
+    return "Billed to your AI Gateway";
   }
   return "Deployment route · external billing";
 }
@@ -137,7 +143,7 @@ export function advancedSourceSummary(model: ClientModel): string | null {
     return "Connected Codex subscription";
   }
   if (source.kind === "workspace_connection") {
-    return "Workspace API key connection";
+    return "Workspace AI Gateway";
   }
   if (source.kind === "deployment") {
     return source.mechanism === "azure_ad_bearer"
@@ -148,22 +154,27 @@ export function advancedSourceSummary(model: ClientModel): string | null {
 }
 
 export function projectPickerRows(models: WorkspaceModelCatalogModel[]): PickerModelRow[] {
-  return models.map((catalog) => {
-    const billingClass = billingClassForModel(catalog);
-    return {
-      id: catalog.id,
-      label: catalog.label,
-      billingClass,
-      billingClassLabel: billingClassLabel(billingClass),
-      selectable: catalog.availability.selectable,
-      unavailableReason: catalog.availability.selectable
-        ? null
-        : availabilityReasonLabel(catalog.availability.reason),
-      provider: catalog.provider,
-      providerLabel: catalog.providerLabel,
-      catalog,
-    };
-  });
+  return models
+    .filter((catalog) => {
+      const billingClass = billingClassForModel(catalog);
+      return billingClass === "opengeni_credits" || catalog.credentialReadiness.status === "ready";
+    })
+    .map((catalog) => {
+      const billingClass = billingClassForModel(catalog);
+      return {
+        id: catalog.id,
+        label: catalog.label,
+        billingClass,
+        billingClassLabel: billingClassLabel(billingClass),
+        selectable: catalog.availability.selectable,
+        unavailableReason: catalog.availability.selectable
+          ? null
+          : availabilityReasonLabel(catalog.availability.reason),
+        provider: catalog.provider,
+        providerLabel: catalog.providerLabel,
+        catalog,
+      };
+    });
 }
 
 export function sortPickerRows(rows: PickerModelRow[]): PickerModelRow[] {

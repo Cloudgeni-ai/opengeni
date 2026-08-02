@@ -24,6 +24,7 @@ import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import { CodexSubscriptionsCard } from "@/components/codex-connection";
+import { AiGatewayConnectionCard } from "@/components/ai-gateway-connection";
 import { LoadErrorState } from "@/components/common";
 import {
   WORKSPACE_BROWSE_ITEMS,
@@ -380,6 +381,8 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
           workspaceId={workspaceId}
           canManage={canDeleteWorkspace}
         />
+
+        <AiGatewayConnectionCard workspaceId={workspaceId} canManage={canDeleteWorkspace} />
 
         <details
           className="rounded-lg border border-border"
