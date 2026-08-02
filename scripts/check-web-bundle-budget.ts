@@ -6,6 +6,7 @@ type ManifestEntry = {
   imports?: string[];
   css?: string[];
   isEntry?: boolean;
+  isDynamicEntry?: boolean;
 };
 
 const kib = 1024;
