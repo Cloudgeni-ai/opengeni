@@ -47,6 +47,8 @@ export type CodexRealtimeV3BridgeSnapshot = {
   speaking: boolean;
   activeDelegationId: string | null;
   lastError: string | null;
+  ignoredEventCount: number;
+  lastIgnoredEventType: string | null;
   pendingInbound: number;
   pendingInboundBytes: number;
   clientAckThroughSequence: number | null;
@@ -95,6 +97,8 @@ export function createCodexRealtimeV3Bridge(
   let speaking = false;
   let activeDelegationId: string | null = null;
   let lastError: string | null = null;
+  let ignoredEventCount = 0;
+  let lastIgnoredEventType: string | null = null;
   let fatal: CodexRealtimeV3BridgeFatal | null = null;
   let providerStarted:
     | { providerSessionId: string; providerEventId?: string | null | undefined }
@@ -119,6 +123,8 @@ export function createCodexRealtimeV3Bridge(
     speaking,
     activeDelegationId,
     lastError,
+    ignoredEventCount,
+    lastIgnoredEventType,
     pendingInbound: pendingInboundCount,
     pendingInboundBytes,
     clientAckThroughSequence,
@@ -218,6 +224,12 @@ export function createCodexRealtimeV3Bridge(
         if (sentSequences.has(entry.sequence)) continue;
         sendOutbound(options.events, entry);
         sentSequences.add(entry.sequence);
+        if (
+          (entry.kind === "delegation_result" || entry.kind === "error") &&
+          entry.delegationItemId === activeDelegationId
+        ) {
+          activeDelegationId = null;
+        }
       }
       publish();
     }
@@ -258,6 +270,12 @@ export function createCodexRealtimeV3Bridge(
     if (closed || fatal) return Promise.resolve();
     const parsed = parseCodexRealtimeV3Event(payload);
     if (!parsed.ok) {
+      if (parsed.reason === "unsupported_type") {
+        ignoredEventCount += 1;
+        lastIgnoredEventType = parsed.eventType;
+        publish();
+        return Promise.resolve();
+      }
       lastError = `Rejected Codex realtime V3 event: ${parsed.reason}`;
       publish();
       return Promise.resolve();

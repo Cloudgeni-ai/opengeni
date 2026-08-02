@@ -263,6 +263,7 @@ describe("Codex realtime V3 bridge", () => {
     );
 
     await bridge.ingest("{");
+    await bridge.ingest(JSON.stringify({ type: "rate_limits.updated" }));
     await bridge.ingest(
       transcript(1, "🙂".repeat(Math.floor(sdkWire.CODEX_REALTIME_V3_MAX_TEXT_BYTES / 4) + 1)),
     );
@@ -270,6 +271,10 @@ describe("Codex realtime V3 bridge", () => {
 
     expect(accepted).toEqual(["event-2", "event-3"]);
     expect(bridge.snapshot().lastError).toContain("oversized_field");
+    expect(bridge.snapshot()).toMatchObject({
+      ignoredEventCount: 1,
+      lastIgnoredEventType: "rate_limits.updated",
+    });
     bridge.close();
   });
 

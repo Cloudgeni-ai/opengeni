@@ -7,6 +7,7 @@ import {
 } from "@opengeni/codex";
 import {
   CodexRealtimeBrokerError,
+  OPENGENI_REALTIME_BASE_INSTRUCTIONS,
   brokerSessionCodexRealtime,
   type CodexRealtimeBrokerDependencies,
 } from "../src/codex-realtime";
@@ -92,6 +93,7 @@ describe("session Codex realtime broker", () => {
       ...request,
       sessionId: "session-one",
       initialItems: [],
+      instructions: `${OPENGENI_REALTIME_BASE_INSTRUCTIONS}\n\nAdditional realtime guidance:\nCurrent session context`,
     });
     expect(result).toEqual(response);
     expect(JSON.stringify(result)).not.toContain("credential-pin");
@@ -147,9 +149,39 @@ describe("session Codex realtime broker", () => {
     );
     expect(historyReads).toBe(1);
     expect(calls).toEqual([
-      { ...request, sessionId: "session-one", initialItems: history },
-      { ...request, sessionId: "session-one", initialItems: history },
+      {
+        ...request,
+        sessionId: "session-one",
+        initialItems: history,
+        instructions: `${OPENGENI_REALTIME_BASE_INSTRUCTIONS}\n\nAdditional realtime guidance:\nCurrent session context`,
+      },
+      {
+        ...request,
+        sessionId: "session-one",
+        initialItems: history,
+        instructions: `${OPENGENI_REALTIME_BASE_INSTRUCTIONS}\n\nAdditional realtime guidance:\nCurrent session context`,
+      },
     ]);
+  });
+
+  test("always identifies OpenGeni and explains the client delegation tool path", async () => {
+    let captured: CodexRealtimeCallInput | null = null;
+    await brokerSessionCodexRealtime(
+      dependencies({
+        createCall: async (_auth, input) => {
+          captured = input;
+          return response;
+        },
+      }),
+      {
+        sessionId: "session-one",
+        request: { sdp: request.sdp, version: request.version },
+      },
+    );
+
+    expect(captured?.instructions).toBe(OPENGENI_REALTIME_BASE_INSTRUCTIONS);
+    expect(captured?.instructions).toContain("client delegation");
+    expect(captured?.instructions).toContain("configured tools and permission policy");
   });
 
   test("forces one refresh after a provider 401, then retries exactly once", async () => {

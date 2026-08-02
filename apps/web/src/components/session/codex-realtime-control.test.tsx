@@ -238,6 +238,7 @@ describe("ordinary session Codex realtime control", () => {
           snapshot={idle}
           canStart={true}
           codexConnected={true}
+          showDiagnostics={true}
           audioRef={createRef<HTMLAudioElement>()}
           onStart={async () => {
             calls.push("start");
@@ -260,6 +261,8 @@ describe("ordinary session Codex realtime control", () => {
     );
     expect(region).not.toBeNull();
     expect(container.querySelector('[role="status"]')?.textContent).toContain("Ready");
+    expect(container.textContent).toContain("Realtime debug");
+    expect(container.textContent).toContain("client delegation");
     expect(start?.disabled).toBe(false);
     await act(async () => start?.click());
     expect(calls).toEqual(["start"]);
@@ -276,6 +279,7 @@ describe("ordinary session Codex realtime control", () => {
           }}
           canStart={false}
           codexConnected={true}
+          showDiagnostics={true}
           audioRef={createRef<HTMLAudioElement>()}
           onStart={async () => {
             calls.push("start");
@@ -296,6 +300,7 @@ describe("ordinary session Codex realtime control", () => {
       'button[aria-label="Stop Codex realtime"]',
     );
     expect(container.querySelector('[role="status"]')?.textContent).toContain("Live");
+    expect(container.textContent).toContain("provider started");
     expect(stop?.disabled).toBe(false);
     await act(async () => stop?.click());
     expect(calls).toEqual(["start", "stop"]);

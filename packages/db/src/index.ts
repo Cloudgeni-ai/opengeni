@@ -39018,6 +39018,16 @@ export async function peekSessionWork(
     if (!session) return { kind: "idle" };
     const realtime = await peekActiveSessionRealtime(scopedDb, workspaceId, sessionId);
     if (realtime) {
+      const realtimeDelegationTurnId =
+        session.activeTurnId === null
+          ? await findClaimableSessionRealtimeDelegationTurnInTransaction(scopedDb, {
+              accountId: session.accountId,
+              workspaceId,
+              sessionId,
+              realtimeId: realtime.id,
+            })
+          : null;
+      if (realtimeDelegationTurnId !== null) return { kind: "runnable" };
       return {
         kind: "realtime-active",
         realtimeId: realtime.id,

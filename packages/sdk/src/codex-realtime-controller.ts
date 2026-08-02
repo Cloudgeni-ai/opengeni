@@ -885,12 +885,12 @@ export function createCodexRealtimeController(
   };
 
   const heartbeat = async (): Promise<void> => {
-    const result = await exclusive(async () => {
+    await exclusive(async () => {
       const current = state.mode;
       if (!owner || !current || current.state !== "active") {
         throw new Error("Codex realtime owner is not active");
       }
-      return await options.client.heartbeatSessionRealtime(
+      const result = await options.client.heartbeatSessionRealtime(
         options.workspaceId,
         options.sessionId,
         current.id,
@@ -900,12 +900,15 @@ export function createCodexRealtimeController(
           expectedVersion: current.version,
         },
       );
+      // Publish the renewed version before releasing the mutation FIFO. A
+      // queued ledger sync must never observe the pre-heartbeat version after
+      // the server has already committed its successor.
+      if (result.mode.state === "ended") {
+        transitionEnded("Realtime lease ended");
+        return;
+      }
+      publish({ mode: result.mode, realtimeId: result.mode.id, error: null });
     });
-    if (result.mode.state === "ended") {
-      transitionEnded("Realtime lease ended");
-      return;
-    }
-    publish({ mode: result.mode, realtimeId: result.mode.id, error: null });
   };
 
   const flush = async (): Promise<void> => {

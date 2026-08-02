@@ -339,6 +339,7 @@ describe("Codex realtime browser controller", () => {
     let current = mode();
     let firstSync = true;
     let pendingOutbound: SyncSessionRealtimeLedgerResponse["outbound"] = [];
+    let heartbeatGate: Promise<void> | null = null;
     const controller = createCodexRealtimeController({
       workspaceId: WORKSPACE_ID,
       sessionId: SESSION_ID,
@@ -395,6 +396,7 @@ describe("Codex realtime browser controller", () => {
             version: current.version + 1,
             leaseExpiresAt: "2026-07-29T07:00:40.000Z",
           });
+          await heartbeatGate;
           return { mode: current, replay: false };
         },
         syncSessionRealtimeLedger: async (_workspaceId, _sessionId, _realtimeId, request) => {
@@ -541,6 +543,7 @@ describe("Codex realtime browser controller", () => {
         text: "Use the ordinary same-session tool path",
       }),
     ]);
+    expect(controller.snapshot().bridge?.activeDelegationId).toBe("delegation-item-1");
     pendingOutbound = [
       {
         id: "12121212-1212-4212-8212-121212121212",
@@ -571,6 +574,7 @@ describe("Codex realtime browser controller", () => {
       channel: "speakable",
       content: [{ type: "input_text", text: "ordinary tool path completed" }],
     });
+    expect(controller.snapshot().bridge?.activeDelegationId).toBeNull();
     expect(syncRequests.at(-1)).toMatchObject({
       clientAckThroughSequence: 10,
     });
@@ -591,8 +595,15 @@ describe("Codex realtime browser controller", () => {
       }),
     ]);
 
-    await controller.heartbeat();
-    await controller.flush();
+    let releaseHeartbeat!: () => void;
+    heartbeatGate = new Promise<void>((resolve) => {
+      releaseHeartbeat = resolve;
+    });
+    const renewing = controller.heartbeat();
+    await eventually(() => current.version === 2, "heartbeat did not reach the server");
+    const flushingAfterRenewal = controller.flush();
+    releaseHeartbeat();
+    await Promise.all([renewing, flushingAfterRenewal]);
     expect(syncRequests.at(-1)?.expectedVersion).toBe(2);
     await controller.stop();
     expect(controller.snapshot().status).toBe("idle");

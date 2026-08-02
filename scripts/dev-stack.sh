@@ -271,11 +271,11 @@ trap cleanup EXIT INT TERM
 (cd apps/api && bun run dev) &
 pids+=("$!")
 
-(cd apps/worker && OPENGENI_WORKER_ROLE=control bun run dev) &
+(cd apps/worker && OPENGENI_WORKER_ROLE=control bun run dev:watch) &
 pids+=("$!")
 
 (cd apps/worker && OPENGENI_WORKER_ROLE=turn \
-  OPENGENI_WORKER_HTTP_PORT="${OPENGENI_TURN_WORKER_HTTP_PORT}" bun run dev) &
+  OPENGENI_WORKER_HTTP_PORT="${OPENGENI_TURN_WORKER_HTTP_PORT}" bun run dev:watch) &
 pids+=("$!")
 
 (cd apps/web && bunx vite dev --port "${OPENGENI_WEB_PORT}" --host 0.0.0.0) &

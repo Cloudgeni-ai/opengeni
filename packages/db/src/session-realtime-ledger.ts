@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { ReasoningEffort, type SessionRealtimeMode } from "@opengeni/contracts";
-import { and, asc, eq, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 
 import { sanitizeEventPayload } from "./event-payload-sanitizer";
 import type { Database } from "./index";
@@ -1161,6 +1161,24 @@ async function admitRealtimeDelegationInTransaction(
       ),
     );
   const reasoning = ReasoningEffort.safeParse(session.metadata.reasoningEffort);
+  const [latestStarted] = await db
+    .select({
+      model: schema.sessionTurns.model,
+      reasoningEffort: schema.sessionTurns.reasoningEffort,
+      latencyMode: schema.sessionTurns.latencyMode,
+      sandboxBackend: schema.sessionTurns.sandboxBackend,
+      sandboxOs: schema.sessionTurns.sandboxOs,
+    })
+    .from(schema.sessionTurns)
+    .where(
+      and(
+        eq(schema.sessionTurns.workspaceId, input.workspaceId),
+        eq(schema.sessionTurns.sessionId, input.sessionId),
+        sql`${schema.sessionTurns.startedAt} is not null`,
+      ),
+    )
+    .orderBy(desc(schema.sessionTurns.startedAt), desc(schema.sessionTurns.createdAt))
+    .limit(1);
   const initiator: FrozenTurnInitiator = {
     initiator: { kind: "subject", subjectId: input.ownerSubjectId },
     context: {
@@ -1170,6 +1188,7 @@ async function admitRealtimeDelegationInTransaction(
       delegationItemId: incoming.delegationItemId!,
     },
   };
+  const latestReasoning = ReasoningEffort.safeParse(latestStarted?.reasoningEffort);
   const turnId = crypto.randomUUID();
   const triggerEventId = crypto.randomUUID();
   const workflowId = session.temporalWorkflowId ?? `session-${session.id}`;
@@ -1189,9 +1208,19 @@ async function admitRealtimeDelegationInTransaction(
       resources: [],
       tools: [],
       toolsProvided: false,
-      model: session.model,
-      reasoningEffort: reasoning.success ? reasoning.data : "medium",
-      sandboxBackend: session.sandboxBackend,
+      // The session default can differ from the provider/model explicitly used
+      // by the active conversation (for example a connected Codex subscription).
+      // Delegation is continuation work, so inherit the last started turn just
+      // like internal continuations and compaction do.
+      model: latestStarted?.model ?? session.model,
+      reasoningEffort: latestReasoning.success
+        ? latestReasoning.data
+        : reasoning.success
+          ? reasoning.data
+          : "medium",
+      latencyMode: latestStarted?.latencyMode ?? "standard",
+      sandboxBackend: latestStarted?.sandboxBackend ?? session.sandboxBackend,
+      sandboxOs: latestStarted?.sandboxOs ?? session.sandboxOs,
       metadata: {
         delivery: "send",
         realtimeDelegation: {

@@ -18,6 +18,7 @@ import {
   failSessionRealtimeConnectionInTransaction,
   getActiveSessionHistoryItems,
   listOutstandingSessionSystemUpdates,
+  peekSessionWork,
   recoverSessionDispatch,
   SessionControlInvariantError,
   SessionRealtimeConflictError,
@@ -206,6 +207,9 @@ async function admitAndClaimDelegation(
   );
   const turnId = admitted.accepted[0]?.entry.turnId;
   if (!turnId) throw new Error("Realtime delegation turn was not linked");
+  expect(await peekSessionWork(client.db, value.owner.workspaceId, value.owner.sessionId)).toEqual({
+    kind: "runnable",
+  });
   const attemptId = crypto.randomUUID();
   const claimed = await claimSessionWorkForAttempt(client.db, value.owner.workspaceId, {
     sessionId: value.owner.sessionId,
@@ -973,6 +977,28 @@ describe("session realtime ledger", () => {
 
   test("atomically admits one idempotent ordinary turn on the same session without changing hierarchy", async () => {
     const value = await fixture();
+    await transaction(value.owner.workspaceId, async (tx) => {
+      await tx.insert(schema.sessionTurns).values({
+        accountId: value.grant.accountId,
+        workspaceId: value.owner.workspaceId,
+        sessionId: value.session.id,
+        triggerEventId: crypto.randomUUID(),
+        temporalWorkflowId: `session-${value.session.id}`,
+        status: "completed",
+        source: "user",
+        position: 1,
+        prompt: "prior configured conversation turn",
+        resources: [],
+        tools: [],
+        model: "codex/configured-conversation-model",
+        reasoningEffort: "high",
+        latencyMode: "fast",
+        sandboxBackend: "docker",
+        sandboxOs: "linux",
+        startedAt: new Date(),
+        finishedAt: new Date(),
+      });
+    });
     const first = await claimInitial(value);
     await complete(value, first.claimed.connection);
     await proveProviderStarted(value, first.claimed.connection);
@@ -1071,6 +1097,11 @@ describe("session realtime ledger", () => {
       source: "api",
       status: "queued",
       prompt: input.entries[0]!.text,
+      model: "codex/configured-conversation-model",
+      reasoningEffort: "high",
+      latencyMode: "fast",
+      sandboxBackend: "docker",
+      sandboxOs: "linux",
       initiatorKind: "subject",
       initiatorSubjectId: value.owner.ownerSubjectId,
     });
@@ -1409,6 +1440,9 @@ describe("session realtime ledger", () => {
         .set({ metadata: { realtimeDelegation: { realtimeId: value.started.mode.id } } })
         .where(eq(schema.sessionTurns.id, turnId)),
     );
+    expect(
+      await peekSessionWork(client.db, value.owner.workspaceId, value.owner.sessionId),
+    ).toMatchObject({ kind: "realtime-active" });
     const claim = await claimSessionWorkForAttempt(client.db, value.owner.workspaceId, {
       sessionId: value.owner.sessionId,
       workflowId: `session-${value.owner.sessionId}`,

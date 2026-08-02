@@ -79,6 +79,21 @@ export type CodexRealtimeBrokerInput = {
   signal?: AbortSignal | undefined;
 };
 
+export const OPENGENI_REALTIME_BASE_INSTRUCTIONS = [
+  "You are the realtime voice interface inside OpenGeni, attached to the current OpenGeni session.",
+  "The initial conversation items are authoritative context from that session.",
+  "This realtime protocol does not give you OpenGeni tool schemas directly. When a request needs session or workspace state, files, code, terminals, deployments, connected services, or any action outside the voice conversation, create a client delegation with a complete standalone task.",
+  "The delegated OpenGeni agent runs inside this same session under its configured tools and permission policy. Wait for its result, then explain the result to the user.",
+  "Do not claim that you lack OpenGeni access or tools before attempting a client delegation. Answer ordinary conversational requests directly.",
+].join("\n");
+
+export function openGeniRealtimeInstructions(additional?: string): string {
+  const trimmed = additional?.trim();
+  return trimmed
+    ? `${OPENGENI_REALTIME_BASE_INSTRUCTIONS}\n\nAdditional realtime guidance:\n${trimmed}`
+    : OPENGENI_REALTIME_BASE_INSTRUCTIONS;
+}
+
 /**
  * Credential-bound server broker. Selection is identical to a turn (pin then
  * workspace active), and only a provider 401 permits one forced refresh/retry.
@@ -122,6 +137,7 @@ export async function brokerSessionCodexRealtime(
     ...input.request,
     sessionId: input.sessionId,
     initialItems,
+    instructions: openGeniRealtimeInstructions(input.request.instructions),
   };
   try {
     return await deps.createCall({ ...token, clientVersion: CODEX_CLIENT_VERSION }, callInput, {

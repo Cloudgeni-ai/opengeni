@@ -236,6 +236,7 @@ export function CodexRealtimeControl(props: {
   snapshot: CodexRealtimeControllerSnapshot;
   canStart: boolean;
   codexConnected: boolean;
+  showDiagnostics?: boolean;
   audioRef: RefObject<HTMLAudioElement | null>;
   onStart: () => Promise<void>;
   onStop: () => Promise<void>;
@@ -261,10 +262,10 @@ export function CodexRealtimeControl(props: {
   return (
     <section
       aria-label="Codex realtime"
-      className="mx-auto flex w-full max-w-3xl shrink-0 items-center gap-3 px-4 pb-2 sm:px-6"
+      className="mx-auto flex w-full max-w-3xl shrink-0 flex-col gap-2 px-4 pb-2 sm:px-6"
     >
       <audio ref={props.audioRef} autoPlay className="hidden" aria-hidden="true" />
-      <div className="flex min-w-0 flex-1 items-center gap-2 rounded-lg border border-border bg-surface-2/60 px-3 py-2">
+      <div className="flex w-full min-w-0 items-center gap-2 rounded-lg border border-border bg-surface-2/60 px-3 py-2">
         <span
           className={`size-2 shrink-0 rounded-full ${
             props.snapshot.status === "active"
@@ -314,12 +315,57 @@ export function CodexRealtimeControl(props: {
           </button>
         ) : null}
       </div>
+      {(props.showDiagnostics ?? import.meta.env.DEV) ? (
+        <CodexRealtimeDiagnostics snapshot={props.snapshot} />
+      ) : null}
       {props.snapshot.error ? (
         <span className="sr-only" role="alert">
           {props.snapshot.error}
         </span>
       ) : null}
     </section>
+  );
+}
+
+function CodexRealtimeDiagnostics({ snapshot }: { snapshot: CodexRealtimeControllerSnapshot }) {
+  const bridge = snapshot.bridge;
+  const rows = [
+    ["controller", snapshot.status],
+    ["microphone", snapshot.microphone],
+    ["audio", snapshot.audibleOutput],
+    ["generation", String(snapshot.connectionGeneration)],
+    ["reconnect attempt", String(snapshot.reconnectAttempt)],
+    ["mode", snapshot.mode?.state ?? "none"],
+    ["mode version", snapshot.mode ? String(snapshot.mode.version) : "—"],
+    ["connection epoch", snapshot.mode ? String(snapshot.mode.connectionEpoch) : "—"],
+    ["provider started", bridge ? String(bridge.providerStarted) : "false"],
+    ["provider speaking", bridge ? String(bridge.speaking) : "false"],
+    ["delegation", bridge?.activeDelegationId ? "active" : "none"],
+    ["pending durable events", bridge ? String(bridge.pendingInbound) : "0"],
+    ["pending bytes", bridge ? String(bridge.pendingInboundBytes) : "0"],
+    ["client ack", bridge?.clientAckThroughSequence?.toString() ?? "—"],
+    ["ignored provider events", bridge ? String(bridge.ignoredEventCount) : "0"],
+    ["last ignored event", bridge?.lastIgnoredEventType ?? "none"],
+    ["bridge error", bridge?.lastError ?? "none"],
+    ["diagnostic", snapshot.diagnostic?.kind ?? "none"],
+  ] as const;
+
+  return (
+    <details className="w-full rounded-md border border-border/70 bg-surface-2/40 px-3 py-2 text-xs text-fg-muted">
+      <summary className="cursor-pointer select-none font-medium text-fg">Realtime debug</summary>
+      <dl className="mt-2 grid grid-cols-[minmax(0,1fr)_minmax(0,2fr)] gap-x-3 gap-y-1 font-mono">
+        {rows.map(([label, value]) => (
+          <div className="contents" key={label}>
+            <dt>{label}</dt>
+            <dd className="min-w-0 truncate text-fg">{value}</dd>
+          </div>
+        ))}
+      </dl>
+      <p className="mt-2 font-sans">
+        OpenGeni actions use provider client delegation; direct tool schemas are not exposed by
+        realtime V3.
+      </p>
+    </details>
   );
 }
 
