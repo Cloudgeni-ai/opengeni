@@ -622,8 +622,7 @@ const SCENARIO_WORKER_FLEET: StreamScenario = {
     },
     {
       kind: "message",
-      text:
-        "Three workers are up. The **Messaging worker** row is `session_send_message` — same bot card as spawn, different title, prompt under it, deep-link into the child.\n\nWaiting on inbound completions…\n",
+      text: "Three workers are up. The **Messaging worker** row is `session_send_message` — same bot card as spawn, different title, prompt under it, deep-link into the child.\n\nWaiting on inbound completions…\n",
       stream: true,
       pacing: "yank",
     },
@@ -631,8 +630,7 @@ const SCENARIO_WORKER_FLEET: StreamScenario = {
     {
       kind: "worker-completion",
       childSessionId: (ctx) => ctx.scratch.loginWorker!,
-      text:
-        "Login flow verified end-to-end across Chromium, Firefox, and WebKit. All 128 assertions passed; the dashboard screenshot is attached. No flakes on three reruns.",
+      text: "Login flow verified end-to-end across Chromium, Firefox, and WebKit. All 128 assertions passed; the dashboard screenshot is attached. No flakes on three reruns.",
       childStatus: "idle",
       goal: {
         status: "completed",
@@ -645,22 +643,19 @@ const SCENARIO_WORKER_FLEET: StreamScenario = {
     {
       kind: "worker-completion",
       childSessionId: (ctx) => ctx.scratch.migrateWorker!,
-      text:
-        "I paused the migration worker — it needs the GHCR pull credentials before it can pull the base image, and I did not want to burn continuations retrying a blocked step.",
+      text: "I paused the migration worker — it needs the GHCR pull credentials before it can pull the base image, and I did not want to burn continuations retrying a blocked step.",
       childStatus: "idle",
       goal: {
         status: "paused",
         text: "migrate the billing service to the new Postgres cluster",
-        pausedReason:
-          "missing GHCR pull credentials — cannot pull ghcr.io/acme/billing base image",
+        pausedReason: "missing GHCR pull credentials — cannot pull ghcr.io/acme/billing base image",
       },
     },
     { kind: "sleep", ms: 480 },
     {
       kind: "worker-completion",
       childSessionId: (ctx) => ctx.scratch.loadWorker!,
-      text:
-        "The load-test worker failed: the staging target returned 503 for the whole window, so I could not gather a clean baseline.",
+      text: "The load-test worker failed: the staging target returned 503 for the whole window, so I could not gather a clean baseline.",
       childStatus: "failed",
       goal: {
         status: "active",
@@ -669,8 +664,7 @@ const SCENARIO_WORKER_FLEET: StreamScenario = {
     },
     {
       kind: "message",
-      text:
-        "Inbound cards landed: one **Worker completed**, one **Worker paused**, one **Worker failed**. Expand any for the full report; **View session** deep-links into the child.\n",
+      text: "Inbound cards landed: one **Worker completed**, one **Worker paused**, one **Worker failed**. Expand any for the full report; **View session** deep-links into the child.\n",
       stream: true,
       pacing: "fast",
     },

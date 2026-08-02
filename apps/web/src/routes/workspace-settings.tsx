@@ -4,6 +4,7 @@
 // console lives at Organization settings.
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
+  BoxIcon,
   BrainCircuitIcon,
   CheckIcon,
   ChevronDownIcon,
@@ -27,14 +28,10 @@ import { LoadErrorState } from "@/components/common";
 import {
   WORKSPACE_BROWSE_ITEMS,
   type WorkspaceConfigItem,
-} from "@/components/rail/workspace-nav";
-import {
-  PreferenceToggleRow,
-  VoiceInputPreferenceRow,
-} from "@/components/transcription-settings";
+} from "@/components/rail/workspace-nav-data";
+import { PreferenceToggleRow, VoiceInputPreferenceRow } from "@/components/transcription-settings";
 import { PermissionGroupPicker } from "@/components/permission-picker";
 import { Button } from "@/components/ui/button";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import {
   Dialog,
@@ -67,6 +64,10 @@ function BrowseWorkspaceStrip(props: { workspaceId: string; canReadInsights: boo
   const items = WORKSPACE_BROWSE_ITEMS.filter(
     (item: WorkspaceConfigItem) => !item.requiresAdmin || props.canReadInsights,
   );
+  // Leaf catalog only (workspace-nav-data). Do not import workspace-nav.tsx or
+  // workspace-nav-icons — that Lucide map shares into the shell and blows the
+  // initial bundle. Keep a single BoxIcon use so Rolldown's Lucide grouping
+  // stays aligned with the previous Variable-sets card.
   return (
     <nav aria-label="Browse workspace" className="flex flex-wrap items-center gap-x-1 gap-y-1.5">
       <span className="mr-1 text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
@@ -80,7 +81,7 @@ function BrowseWorkspaceStrip(props: { workspaceId: string; canReadInsights: boo
           title={item.description}
           className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg"
         >
-          <item.icon className="size-3.5 shrink-0 text-brand" />
+          {item.icon === "box" ? <BoxIcon className="size-3.5 shrink-0 text-brand" /> : null}
           {item.label}
         </Link>
       ))}
@@ -380,162 +381,160 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
           canManage={canDeleteWorkspace}
         />
 
-        <Collapsible
+        <details
+          className="rounded-lg border border-border"
           open={apiKeysOpen || createdToken != null}
-          onOpenChange={(open) => {
-            if (createdToken != null && !open) return;
-            setApiKeysOpen(open);
+          onToggle={(event) => {
+            const next = event.currentTarget.open;
+            if (createdToken != null && !next) {
+              event.currentTarget.open = true;
+              return;
+            }
+            setApiKeysOpen(next);
           }}
         >
-          <section className="rounded-lg border border-border">
-            <CollapsibleTrigger asChild>
-              <button
-                type="button"
-                className="flex w-full items-center gap-2 px-3 py-2.5 text-left transition-colors hover:bg-surface-2/60"
-              >
-                <KeyRoundIcon className="size-3.5 shrink-0 text-brand" />
-                <span className="min-w-0 flex-1 text-sm font-medium">API keys</span>
-                <span className="text-2xs text-fg-subtle">
-                  {!apiKeysLoaded
-                    ? "…"
-                    : activeApiKeyCount === 0
-                      ? "None"
-                      : `${activeApiKeyCount} active`}
-                </span>
-                <ChevronDownIcon
-                  className={cn(
-                    "size-4 shrink-0 text-fg-subtle transition-transform",
-                    apiKeysOpen || createdToken != null ? "rotate-180" : "",
-                  )}
+          <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5 text-left transition-colors hover:bg-surface-2/60 [&::-webkit-details-marker]:hidden">
+            <KeyRoundIcon className="size-3.5 shrink-0 text-brand" />
+            <span className="min-w-0 flex-1 text-sm font-medium">API keys</span>
+            <span className="text-2xs text-fg-subtle">
+              {!apiKeysLoaded
+                ? "…"
+                : activeApiKeyCount === 0
+                  ? "None"
+                  : `${activeApiKeyCount} active`}
+            </span>
+            <ChevronDownIcon
+              className={cn(
+                "size-4 shrink-0 text-fg-subtle transition-transform",
+                apiKeysOpen || createdToken != null ? "rotate-180" : "",
+              )}
+            />
+          </summary>
+          <div className="grid gap-3 border-t border-border px-3 py-3">
+            <p className="text-2xs text-fg-subtle">
+              Workspace-scoped keys for calling OpenGeni from another product.
+            </p>
+            {createdToken ? (
+              <Notice tone="success" title="Copy this token now — it won't be shown again.">
+                <div className="mt-2 flex min-w-0 items-center gap-2">
+                  <code className="min-w-0 flex-1 truncate rounded bg-bg px-2 py-1.5 text-xs text-fg">
+                    {createdToken}
+                  </code>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    aria-label="Copy token"
+                    onClick={() => void copyToken(createdToken)}
+                  >
+                    <CopyIcon className="size-3.5" />
+                  </Button>
+                </div>
+              </Notice>
+            ) : null}
+            {canManageApiKeys ? (
+              <>
+                <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+                  <Input
+                    value={apiKeyName}
+                    onChange={(event) => setApiKeyName(event.target.value)}
+                    className="h-9"
+                  />
+                  <Button type="button" disabled={busy} onClick={() => void createKey()}>
+                    {busy ? (
+                      <Loader2Icon className="size-3.5 animate-spin" />
+                    ) : (
+                      <PlusIcon className="size-3.5" />
+                    )}
+                    Create
+                  </Button>
+                </div>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-xs text-fg-subtle">
+                    A key can only carry permissions your own grant can delegate.
+                  </p>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    disabled={delegablePermissions.size === 0}
+                    onClick={() => setSelectedPermissions(new Set(delegablePermissions))}
+                  >
+                    Select all delegable
+                  </Button>
+                </div>
+                <PermissionGroupPicker
+                  groups={apiKeyPermissionGroups}
+                  selected={selectedPermissions}
+                  delegable={delegablePermissions}
+                  onToggle={togglePermission}
                 />
-              </button>
-            </CollapsibleTrigger>
-            <CollapsibleContent className="grid gap-3 border-t border-border px-3 py-3">
-              <p className="text-2xs text-fg-subtle">
-                Workspace-scoped keys for calling OpenGeni from another product.
+              </>
+            ) : (
+              <p className="text-xs text-fg-subtle">
+                You don't have permission to manage API keys here.
               </p>
-              {createdToken ? (
-                <Notice tone="success" title="Copy this token now — it won't be shown again.">
-                  <div className="mt-2 flex min-w-0 items-center gap-2">
-                    <code className="min-w-0 flex-1 truncate rounded bg-bg px-2 py-1.5 text-xs text-fg">
-                      {createdToken}
-                    </code>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon-sm"
-                      aria-label="Copy token"
-                      onClick={() => void copyToken(createdToken)}
-                    >
-                      <CopyIcon className="size-3.5" />
-                    </Button>
-                  </div>
-                </Notice>
-              ) : null}
-              {canManageApiKeys ? (
+            )}
+            <div className="divide-y divide-border/70 rounded-md border border-border/70">
+              {apiKeysError ? (
+                <div className="p-2">
+                  <LoadErrorState
+                    title="Couldn't load API keys"
+                    error={apiKeysError}
+                    onRetry={() => void refreshApiKeys()}
+                  />
+                </div>
+              ) : !apiKeysLoaded ? (
                 <>
-                  <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
-                    <Input
-                      value={apiKeyName}
-                      onChange={(event) => setApiKeyName(event.target.value)}
-                      className="h-9"
-                    />
-                    <Button type="button" disabled={busy} onClick={() => void createKey()}>
-                      {busy ? (
-                        <Loader2Icon className="size-3.5 animate-spin" />
-                      ) : (
-                        <PlusIcon className="size-3.5" />
-                      )}
-                      Create
-                    </Button>
-                  </div>
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <p className="text-xs text-fg-subtle">
-                      A key can only carry permissions your own grant can delegate.
-                    </p>
+                  {[0, 1].map((key) => (
+                    <div key={key} className="flex items-center justify-between gap-3 px-3 py-2">
+                      <div className="min-w-0 space-y-1.5">
+                        <Skeleton className="h-4 w-32" />
+                        <Skeleton className="h-3 w-24" />
+                      </div>
+                      <Skeleton className="h-8 w-20 rounded-md" />
+                    </div>
+                  ))}
+                </>
+              ) : apiKeys.length === 0 ? (
+                <div className="p-2">
+                  <EmptyState
+                    title="No API keys yet"
+                    description={
+                      canManageApiKeys
+                        ? "Create one above to call OpenGeni from another product."
+                        : "Keys created here call OpenGeni from another product."
+                    }
+                  />
+                </div>
+              ) : (
+                apiKeys.map((apiKey) => (
+                  <div
+                    key={apiKey.id}
+                    className="flex min-w-0 items-center justify-between gap-3 px-3 py-2"
+                  >
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-medium">{apiKey.name}</div>
+                      <div className="truncate text-2xs text-fg-subtle">
+                        {apiKey.prefix}… · {apiKey.revokedAt ? "revoked" : "active"}
+                      </div>
+                    </div>
                     <Button
                       type="button"
                       variant="ghost"
                       size="sm"
-                      disabled={delegablePermissions.size === 0}
-                      onClick={() => setSelectedPermissions(new Set(delegablePermissions))}
+                      disabled={busy || Boolean(apiKey.revokedAt)}
+                      onClick={() => setRevokingKey(apiKey)}
                     >
-                      Select all delegable
+                      <Trash2Icon className="size-3.5" />
+                      Revoke
                     </Button>
                   </div>
-                  <PermissionGroupPicker
-                    groups={apiKeyPermissionGroups}
-                    selected={selectedPermissions}
-                    delegable={delegablePermissions}
-                    onToggle={togglePermission}
-                  />
-                </>
-              ) : (
-                <p className="text-xs text-fg-subtle">
-                  You don't have permission to manage API keys here.
-                </p>
+                ))
               )}
-              <div className="divide-y divide-border/70 rounded-md border border-border/70">
-                {apiKeysError ? (
-                  <div className="p-2">
-                    <LoadErrorState
-                      title="Couldn't load API keys"
-                      error={apiKeysError}
-                      onRetry={() => void refreshApiKeys()}
-                    />
-                  </div>
-                ) : !apiKeysLoaded ? (
-                  <>
-                    {[0, 1].map((key) => (
-                      <div key={key} className="flex items-center justify-between gap-3 px-3 py-2">
-                        <div className="min-w-0 space-y-1.5">
-                          <Skeleton className="h-4 w-32" />
-                          <Skeleton className="h-3 w-24" />
-                        </div>
-                        <Skeleton className="h-8 w-20 rounded-md" />
-                      </div>
-                    ))}
-                  </>
-                ) : apiKeys.length === 0 ? (
-                  <div className="p-2">
-                    <EmptyState
-                      title="No API keys yet"
-                      description={
-                        canManageApiKeys
-                          ? "Create one above to call OpenGeni from another product."
-                          : "Keys created here call OpenGeni from another product."
-                      }
-                    />
-                  </div>
-                ) : (
-                  apiKeys.map((apiKey) => (
-                    <div
-                      key={apiKey.id}
-                      className="flex min-w-0 items-center justify-between gap-3 px-3 py-2"
-                    >
-                      <div className="min-w-0">
-                        <div className="truncate text-sm font-medium">{apiKey.name}</div>
-                        <div className="truncate text-2xs text-fg-subtle">
-                          {apiKey.prefix}… · {apiKey.revokedAt ? "revoked" : "active"}
-                        </div>
-                      </div>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        disabled={busy || Boolean(apiKey.revokedAt)}
-                        onClick={() => setRevokingKey(apiKey)}
-                      >
-                        <Trash2Icon className="size-3.5" />
-                        Revoke
-                      </Button>
-                    </div>
-                  ))
-                )}
-              </div>
-            </CollapsibleContent>
-          </section>
-        </Collapsible>
+            </div>
+          </div>
+        </details>
 
         <ConfirmDialog
           open={revokingKey !== null}

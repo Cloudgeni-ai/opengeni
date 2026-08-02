@@ -1174,10 +1174,12 @@ function parseSearchHits(outText: string): SearchHit[] | null {
   }
   const list = Array.isArray(parsed)
     ? parsed
-    : parsed && typeof parsed === "object" && Array.isArray((parsed as { results?: unknown }).results)
-      ? ((parsed as { results: unknown[] }).results)
+    : parsed &&
+        typeof parsed === "object" &&
+        Array.isArray((parsed as { results?: unknown }).results)
+      ? (parsed as { results: unknown[] }).results
       : parsed && typeof parsed === "object" && Array.isArray((parsed as { hits?: unknown }).hits)
-        ? ((parsed as { hits: unknown[] }).hits)
+        ? (parsed as { hits: unknown[] }).hits
         : null;
   if (!list) {
     return null;
@@ -1323,39 +1325,42 @@ function truncatePreview(text: string, max: number): string {
 /** Explicit first-party leaf/prefix → canonical product icons (match nav/pages). */
 function GenericToolIcon({ name }: { name: string }) {
   const leaf = mcpToolLeaf(name);
-  const Icon =
-    leaf.startsWith("goal_")
-      ? TargetIcon
-      : leaf.startsWith("memory_") || leaf === "preference_registry_summary" || leaf === "preference_registry_get"
-        ? BrainCircuitIcon
+  const Icon = leaf.startsWith("goal_")
+    ? TargetIcon
+    : leaf.startsWith("memory_") ||
+        leaf === "preference_registry_summary" ||
+        leaf === "preference_registry_get"
+      ? BrainCircuitIcon
       : leaf.startsWith("session_") ||
           leaf === "sessions_list" ||
           leaf === "set_session_title" ||
           leaf === "set_other_session_title"
         ? MessagesSquareIcon
-      : leaf.startsWith("sandbox") || leaf === "sandboxes_list" || leaf === "run_on"
-        ? ServerIcon
-      : leaf.startsWith("rig_")
-        ? ServerCogIcon
-      : leaf.startsWith("scheduled_")
-        ? CalendarClockIcon
-      : leaf.startsWith("artifacts_")
-        ? PanelsTopLeftIcon
-      : leaf.startsWith("social_")
-        ? Share2Icon
-      : leaf.startsWith("slack_")
-        ? MessageSquareIcon
-      : leaf.startsWith("github_")
-        ? FolderGitIcon
-      : leaf.startsWith("variable_")
-        ? BoxIcon
-      : leaf.startsWith("environment_")
-        ? KeyRoundIcon
-      : leaf.includes("document") || leaf.includes("knowledge") || leaf === "list_document_bases"
-        ? FileSearchIcon
-      : leaf === "tool_search" || leaf === "load_skill"
-        ? PlugIcon
-      : WrenchIcon;
+        : leaf.startsWith("sandbox") || leaf === "sandboxes_list" || leaf === "run_on"
+          ? ServerIcon
+          : leaf.startsWith("rig_")
+            ? ServerCogIcon
+            : leaf.startsWith("scheduled_")
+              ? CalendarClockIcon
+              : leaf.startsWith("artifacts_")
+                ? PanelsTopLeftIcon
+                : leaf.startsWith("social_")
+                  ? Share2Icon
+                  : leaf.startsWith("slack_")
+                    ? MessageSquareIcon
+                    : leaf.startsWith("github_")
+                      ? FolderGitIcon
+                      : leaf.startsWith("variable_")
+                        ? BoxIcon
+                        : leaf.startsWith("environment_")
+                          ? KeyRoundIcon
+                          : leaf.includes("document") ||
+                              leaf.includes("knowledge") ||
+                              leaf === "list_document_bases"
+                            ? FileSearchIcon
+                            : leaf === "tool_search" || leaf === "load_skill"
+                              ? PlugIcon
+                              : WrenchIcon;
   return <Icon className={ICON_SIZE} />;
 }
 

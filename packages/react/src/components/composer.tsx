@@ -46,9 +46,12 @@ import {
 import { cn } from "../lib/cn";
 import { composerSubmissionErrorMessage, formatBytes, formatRelativeTime } from "../lib/format";
 import type { PickerModelRow } from "../model-policy";
+import { OPEN_WORKSTREAM_CONTROL_EVENT } from "../workstream-control-event";
 import { CommandPalette as CommandPaletteView } from "./command-palette";
 import { ModelPicker as ModelPickerView } from "./model-picker";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./tooltip";
+
+export { OPEN_WORKSTREAM_CONTROL_EVENT };
 
 /** Radix tip for icon/chrome controls — never native `title` (browser ugly). */
 function ComposerTip({ tip, children }: { tip: string; children: ReactElement }) {
@@ -62,8 +65,6 @@ function ComposerTip({ tip, children }: { tip: string; children: ReactElement })
     </Tooltip>
   );
 }
-
-export const OPEN_WORKSTREAM_CONTROL_EVENT = "opengeni:open-workstream-control";
 
 export type ComposerDelivery = Pick<
   ComposerState,
@@ -1107,9 +1108,7 @@ export const SendButton = forwardRef<HTMLButtonElement, ComposerSendButtonProps>
     const controller = useComposerController();
     const tip =
       title ??
-      (controller.paused
-        ? controller.messages.sendAndResumeTitle
-        : controller.messages.sendTitle);
+      (controller.paused ? controller.messages.sendAndResumeTitle : controller.messages.sendTitle);
     return (
       <ComposerTip tip={tip}>
         <button
@@ -1118,6 +1117,7 @@ export const SendButton = forwardRef<HTMLButtonElement, ComposerSendButtonProps>
           type="button"
           onClick={() => void controller.submit("queue")}
           disabled={!controller.canSubmit}
+          data-og-tip={tip}
           aria-label={
             ariaLabel ??
             (controller.paused
@@ -1342,7 +1342,10 @@ function WorkstreamPausedStrip({
           {broaderOptions.length > 0 ? (
             <div className="mt-2 flex flex-wrap gap-1.5">
               {broaderOptions.map((option) => (
-                <ComposerTip key={`${option.scope}-${option.targetId ?? "selected"}`} tip={option.impactCopy}>
+                <ComposerTip
+                  key={`${option.scope}-${option.targetId ?? "selected"}`}
+                  tip={option.impactCopy}
+                >
                   <button
                     type="button"
                     disabled={busy}

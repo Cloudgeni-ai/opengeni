@@ -3,24 +3,19 @@
 // Automation / Admin). Mobile Workspace tab keeps the same groups as an inline
 // list. Active route marks the Settings control and the matching menu item.
 import { Link, useRouterState } from "@tanstack/react-router";
-import {
-  BoxIcon,
-  BrainCircuitIcon,
-  CalendarClockIcon,
-  ChevronUpIcon,
-  FileSearchIcon,
-  GaugeIcon,
-  LaptopIcon,
-  MapIcon,
-  PanelsTopLeftIcon,
-  PlugIcon,
-  ServerCogIcon,
-  SettingsIcon,
-  type LucideIcon,
-} from "lucide-react";
+import { ChevronUpIcon, SettingsIcon } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
 import { useRail } from "@/components/rail/rail-context";
+import {
+  filterWorkspaceConfigGroups,
+  isConfigItemActive,
+  isWorkspaceConfigPath,
+  WORKSPACE_CONFIG_GROUPS,
+  type WorkspaceConfigGroup,
+  type WorkspaceConfigTarget,
+} from "@/components/rail/workspace-nav-data";
+import { WORKSPACE_CONFIG_ICONS } from "@/components/rail/workspace-nav-icons";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -35,172 +30,17 @@ import { useAppContext } from "@/context";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import { cn } from "@/lib/utils";
 
-export type WorkspaceConfigTarget =
-  | "/workspaces/$workspaceId/insights"
-  | "/workspaces/$workspaceId/variable-sets"
-  | "/workspaces/$workspaceId/rigs"
-  | "/workspaces/$workspaceId/machines"
-  | "/workspaces/$workspaceId/capabilities"
-  | "/workspaces/$workspaceId/schedules"
-  | "/workspaces/$workspaceId/documents"
-  | "/workspaces/$workspaceId/memory"
-  | "/workspaces/$workspaceId/state"
-  | "/workspaces/$workspaceId/artifacts"
-  | "/workspaces/$workspaceId/settings";
-
-export type WorkspaceConfigItem = {
-  to: WorkspaceConfigTarget;
-  icon: LucideIcon;
-  label: string;
-  description: string;
-  /** When true, only include for subjects with workspace:admin. */
-  requiresAdmin?: boolean;
-};
-
-export type WorkspaceConfigGroup = {
-  id: string;
-  label: string;
-  items: WorkspaceConfigItem[];
-};
-
-export const WORKSPACE_CONFIG_GROUPS: WorkspaceConfigGroup[] = [
-  {
-    id: "overview",
-    label: "Overview",
-    items: [
-      {
-        to: "/workspaces/$workspaceId/insights",
-        icon: GaugeIcon,
-        label: "Insights",
-        description: "Spend, blockers, automation, and outcomes",
-        requiresAdmin: true,
-      },
-    ],
-  },
-  {
-    id: "runtime",
-    label: "Runtime",
-    items: [
-      {
-        to: "/workspaces/$workspaceId/variable-sets",
-        icon: BoxIcon,
-        label: "Variable sets",
-        description: "Secret variableSets for sandboxes",
-      },
-      {
-        to: "/workspaces/$workspaceId/rigs",
-        icon: ServerCogIcon,
-        label: "Rigs",
-        description: "Versioned sandbox machine definitions",
-      },
-      {
-        to: "/workspaces/$workspaceId/machines",
-        icon: LaptopIcon,
-        label: "Machines",
-        description: "Your own connected computers",
-      },
-    ],
-  },
-  {
-    id: "knowledge",
-    label: "Knowledge",
-    items: [
-      {
-        to: "/workspaces/$workspaceId/documents",
-        icon: FileSearchIcon,
-        label: "Documents",
-        description: "Indexed knowledge for agents",
-      },
-      {
-        to: "/workspaces/$workspaceId/memory",
-        icon: BrainCircuitIcon,
-        label: "Memory",
-        description: "Durable facts agents carry across sessions",
-      },
-      {
-        to: "/workspaces/$workspaceId/state",
-        icon: MapIcon,
-        label: "Workspace State",
-        description: "Read-only policy and knowledge inventory",
-      },
-    ],
-  },
-  {
-    id: "automation",
-    label: "Automation",
-    items: [
-      {
-        to: "/workspaces/$workspaceId/capabilities",
-        icon: PlugIcon,
-        label: "Capabilities",
-        description: "Packs, MCP servers, and tools",
-      },
-      {
-        to: "/workspaces/$workspaceId/schedules",
-        icon: CalendarClockIcon,
-        label: "Schedules",
-        description: "Run agents on a schedule",
-      },
-      {
-        to: "/workspaces/$workspaceId/artifacts",
-        icon: PanelsTopLeftIcon,
-        label: "Artifacts",
-        description: "Live pages and tools built with Geni",
-      },
-    ],
-  },
-  {
-    id: "admin",
-    label: "Admin",
-    items: [
-      {
-        to: "/workspaces/$workspaceId/settings",
-        icon: SettingsIcon,
-        label: "General, members & keys",
-        description: "Name, API keys, members, and Codex subscriptions",
-      },
-    ],
-  },
-];
-
-/** Destinations shown in the Browse workspace strip (excludes the settings page itself). */
-export const WORKSPACE_BROWSE_ITEMS: WorkspaceConfigItem[] = WORKSPACE_CONFIG_GROUPS.flatMap(
-  (group) => group.items,
-).filter((item) => item.to !== "/workspaces/$workspaceId/settings");
-
-export function filterWorkspaceConfigGroups(
-  groups: WorkspaceConfigGroup[],
-  canReadInsights: boolean,
-): WorkspaceConfigGroup[] {
-  return groups
-    .map((group) => ({
-      ...group,
-      items: group.items.filter((item) => !item.requiresAdmin || canReadInsights),
-    }))
-    .filter((group) => group.items.length > 0);
-}
-
-function configPathSuffix(to: WorkspaceConfigTarget): string {
-  const parts = to.split("/");
-  return parts[parts.length - 1] ?? "";
-}
-
-export function isWorkspaceConfigPath(pathname: string, workspaceId: string): boolean {
-  const prefix = `/workspaces/${workspaceId}/`;
-  if (!pathname.startsWith(prefix)) return false;
-  const rest = pathname.slice(prefix.length).split("/")[0] ?? "";
-  return WORKSPACE_CONFIG_GROUPS.some((group) =>
-    group.items.some((item) => configPathSuffix(item.to) === rest),
-  );
-}
-
-function isConfigItemActive(
-  pathname: string,
-  workspaceId: string,
-  to: WorkspaceConfigTarget,
-): boolean {
-  return pathname === `/workspaces/${workspaceId}/${configPathSuffix(to)}`;
-}
+export type {
+  WorkspaceConfigGroup,
+  WorkspaceConfigItem,
+  WorkspaceConfigTarget,
+} from "@/components/rail/workspace-nav-data";
+export {
+  filterWorkspaceConfigGroups,
+  isWorkspaceConfigPath,
+  WORKSPACE_BROWSE_ITEMS,
+  WORKSPACE_CONFIG_GROUPS,
+} from "@/components/rail/workspace-nav-data";
 
 export function WorkspaceNav() {
   const rail = useRail();
@@ -223,18 +63,21 @@ export function WorkspaceNav() {
             <p className="px-2 pb-0.5 pt-1 text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
               {group.label}
             </p>
-            {group.items.map((item) => (
-              <RailNavItem
-                key={item.to}
-                to={item.to}
-                workspaceId={rail.workspaceId}
-                icon={<item.icon className="size-4" />}
-                label={item.label}
-                description={item.description}
-                collapsed={false}
-                active={isConfigItemActive(pathname, rail.workspaceId, item.to)}
-              />
-            ))}
+            {group.items.map((item) => {
+              const Icon = WORKSPACE_CONFIG_ICONS[item.icon];
+              return (
+                <RailNavItem
+                  key={item.to}
+                  to={item.to}
+                  workspaceId={rail.workspaceId}
+                  icon={<Icon className="size-4" />}
+                  label={item.label}
+                  description={item.description}
+                  collapsed={false}
+                  active={isConfigItemActive(pathname, rail.workspaceId, item.to)}
+                />
+              );
+            })}
           </div>
         ))}
       </nav>
@@ -320,6 +163,7 @@ function WorkspaceSettingsMenu(props: {
             </DropdownMenuLabel>
             {group.items.map((item) => {
               const active = isConfigItemActive(props.pathname, props.workspaceId, item.to);
+              const Icon = WORKSPACE_CONFIG_ICONS[item.icon];
               return (
                 <DropdownMenuItem key={item.to} asChild>
                   <Link
@@ -332,7 +176,7 @@ function WorkspaceSettingsMenu(props: {
                     )}
                     onClick={() => setOpen(false)}
                   >
-                    <item.icon className="size-4" />
+                    <Icon className="size-4" />
                     <span className="min-w-0 flex-1 truncate">{item.label}</span>
                   </Link>
                 </DropdownMenuItem>

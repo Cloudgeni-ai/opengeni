@@ -357,7 +357,11 @@ function CompactAccountUsage({
   }
   if (status === "error" && !fiveHour && !weekly) {
     return (
-      <button type="button" className="text-2xs text-fg-subtle underline hover:text-fg" onClick={onRetry}>
+      <button
+        type="button"
+        className="text-2xs text-fg-subtle underline hover:text-fg"
+        onClick={onRetry}
+      >
         retry usage
       </button>
     );
@@ -614,9 +618,7 @@ function soonestResetExpiryMs(credits: CodexResetCredit[], now: number): number 
   return soonest;
 }
 
-function resetBadgeTone(
-  remainingMs: number | null,
-): "urgent" | "soon" | "ok" {
+function resetBadgeTone(remainingMs: number | null): "urgent" | "soon" | "ok" {
   if (remainingMs == null) return "ok";
   if (remainingMs < RESET_URGENT_MS) return "urgent";
   if (remainingMs < RESET_SOON_MS) return "soon";
@@ -1127,10 +1129,7 @@ export function CodexSubscriptionsCard({
             const resetTone = resetBadgeTone(resetRemainingMs);
             const expanded = expandedId === account.id;
             const coolingSecs = account.exhaustedUntil
-              ? Math.max(
-                  0,
-                  Math.round((new Date(account.exhaustedUntil).getTime() - now) / 1000),
-                )
+              ? Math.max(0, Math.round((new Date(account.exhaustedUntil).getTime() - now) / 1000))
               : 0;
             return (
               <article

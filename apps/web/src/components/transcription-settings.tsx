@@ -67,7 +67,9 @@ export function PreferenceToggleRow(props: {
           {props.description}
         </p>
       </div>
-      {props.saving ? <Loader2Icon className="size-3.5 shrink-0 animate-spin text-fg-subtle" /> : null}
+      {props.saving ? (
+        <Loader2Icon className="size-3.5 shrink-0 animate-spin text-fg-subtle" />
+      ) : null}
       <button
         type="button"
         role="switch"

@@ -418,7 +418,9 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     await page.goto(`http://127.0.0.1:${publicPort}/workspaces/${workspaceId}/settings`, {
       waitUntil: "domcontentloaded",
     });
-    await page.getByRole("heading", { name: "Codex subscriptions" }).waitFor({ timeout: 20_000 });
+    const subscriptionsHeading = page.locator("#codex-subscriptions-heading");
+    await subscriptionsHeading.waitFor({ timeout: 20_000 });
+    await subscriptionsHeading.scrollIntoViewIfNeeded();
     const accountCard = (name: string) =>
       page.getByRole("article", { name: `${name} Codex subscription` });
     const expandAccount = async (name: string) => {
@@ -512,7 +514,9 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     await mobile.goto(`http://127.0.0.1:${publicPort}/workspaces/${workspaceId}/settings`, {
       waitUntil: "domcontentloaded",
     });
-    await mobile.getByRole("heading", { name: "Codex subscriptions" }).waitFor({ timeout: 20_000 });
+    const mobileSubscriptionsHeading = mobile.locator("#codex-subscriptions-heading");
+    await mobileSubscriptionsHeading.waitFor({ timeout: 20_000 });
+    await mobileSubscriptionsHeading.scrollIntoViewIfNeeded();
     const mobileDetailed = mobile.getByRole("article", {
       name: "Detailed account Codex subscription",
     });
@@ -625,9 +629,9 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     await recoveryPage.goto(`http://127.0.0.1:${publicPort}/workspaces/${workspaceId}/settings`, {
       waitUntil: "domcontentloaded",
     });
-    await recoveryPage
-      .getByRole("heading", { name: "Codex subscriptions" })
-      .waitFor({ timeout: 20_000 });
+    const recoverySubscriptionsHeading = recoveryPage.locator("#codex-subscriptions-heading");
+    await recoverySubscriptionsHeading.waitFor({ timeout: 20_000 });
+    await recoverySubscriptionsHeading.scrollIntoViewIfNeeded();
     // Usage/count caches are still fresh, but detailed rows are never cached as
     // authority. A remount must therefore issue one live overview and restore the
     // durable same-attempt resume affordance rather than rendering no inventory.

@@ -8,7 +8,7 @@ describe("read-only Workspace State surface", () => {
   test("registers a first-class workspace route and rail destination", async () => {
     const [app, navigation] = await Promise.all([
       source("App.tsx"),
-      source("components/rail/workspace-nav.tsx"),
+      source("components/rail/workspace-nav-data.ts"),
     ]);
     expect(app).toContain('path: "state"');
     expect(app).toContain('import("@/routes/workspace-state")');
