@@ -1,5 +1,11 @@
 # @opengeni/runtime
 
+## 0.16.1
+
+### Patch Changes
+
+- f4fa05c: Preserve structured exec results when routing to execCommand-only sandbox backends so file, Git, and PTY operations retain provider output and process authority.
+
 ## 0.16.0
 
 ### Minor Changes
