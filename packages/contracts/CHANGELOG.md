@@ -1,5 +1,11 @@
 # @opengeni/contracts
 
+## 0.30.0
+
+### Minor Changes
+
+- 2321119: Add the provider-neutral scoped knowledge provenance, lifecycle, ACL, and normalized claim foundation for organization, workspace, and initiating-user personal evidence.
+
 ## 0.29.0
 
 ### Minor Changes
