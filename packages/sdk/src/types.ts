@@ -2676,6 +2676,8 @@ export type SessionControlResponse = {
   effectiveControl: EffectiveSessionControl;
   interruptionCount: number;
   wakeCount: number;
+  cancelledSessionCount: number;
+  cancelledTurnCount: number;
 };
 
 export type WorkspaceInferenceControlResponse = {

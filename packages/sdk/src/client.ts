@@ -1113,7 +1113,7 @@ export class OpenGeniClient {
     workspaceId: string,
     sessionId: string,
     request: {
-      action: "pause" | "resume";
+      action: "pause" | "resume" | "cancel";
       reason?: string;
       clientEventId: string;
       expectedControlEtag?: string;
@@ -1133,6 +1133,24 @@ export class OpenGeniClient {
   ): Promise<SessionControlResponse> {
     return await this.controlSession(workspaceId, sessionId, {
       action: "resume",
+      clientEventId: options.clientEventId ?? crypto.randomUUID(),
+      ...(options.reason ? { reason: options.reason } : {}),
+      ...(options.expectedControlEtag ? { expectedControlEtag: options.expectedControlEtag } : {}),
+    });
+  }
+
+  /**
+   * Terminally cancel a session subtree. Unlike pause, cancellation drains
+   * queued work and permanently fences new prompts for the session and every
+   * descendant.
+   */
+  async cancelSession(
+    workspaceId: string,
+    sessionId: string,
+    options: { reason?: string; clientEventId?: string; expectedControlEtag?: string } = {},
+  ): Promise<SessionControlResponse> {
+    return await this.controlSession(workspaceId, sessionId, {
+      action: "cancel",
       clientEventId: options.clientEventId ?? crypto.randomUUID(),
       ...(options.reason ? { reason: options.reason } : {}),
       ...(options.expectedControlEtag ? { expectedControlEtag: options.expectedControlEtag } : {}),

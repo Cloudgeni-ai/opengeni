@@ -153,7 +153,7 @@ async function send(
 async function controlSession(
   grant: { accountId: string; workspaceId: string; subjectId: string },
   sessionId: string,
-  action: "pause" | "resume",
+  action: "pause" | "resume" | "cancel",
 ) {
   return await withWorkspaceRls(client.db, grant.workspaceId, (db) =>
     db.transaction((tx) =>
@@ -3681,7 +3681,7 @@ describe("clean session control plane", () => {
     }
   });
 
-  test("Pause and Resume are the only session lifecycle controls", async () => {
+  test("Pause and Resume preserve lifecycle while Cancel is terminal", async () => {
     const { grant, session } = await fixture();
     const paused = await controlSession(grant, session.id, "pause");
     expect(paused.control.state).toBe("paused");
@@ -4724,6 +4724,118 @@ describe("clean session control plane", () => {
     });
     expect(replay.receipt.id).toBe(first.receipt.id);
     expect(await listWorkspaceControlEvents(client.db, grant.workspaceId!, 0, 10)).toHaveLength(1);
+  });
+
+  test("terminal cancellation drains a subtree and settles its active attempt as cancelled", async () => {
+    const { grant, session } = await fixture();
+    const child = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "child initial",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+      parentSessionId: session.id,
+    });
+    const rootPrompt = await send(grant, session.id, "root work");
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    expect(claimed?.id).toBe(rootPrompt.turn.id);
+    const childPrompt = await send(grant, child.id, "child queued work");
+
+    const cancelled = await controlSession(grant, session.id, "cancel");
+    expect(cancelled).toMatchObject({
+      replay: false,
+      control: { state: "paused" },
+      interruptionCount: 1,
+      cancelledSessionCount: 2,
+      cancelledTurnCount: 2,
+    });
+    expect(cancelled.affectedSessionEvents.map((entry) => entry.sessionId).sort()).toEqual(
+      [session.id, child.id].sort(),
+    );
+    expect((await getSession(client.db, grant.workspaceId!, session.id))?.status).toBe("cancelled");
+    expect((await getSession(client.db, grant.workspaceId!, child.id))?.status).toBe("cancelled");
+    expect((await getSessionTurn(client.db, grant.workspaceId!, childPrompt.turn.id))?.status).toBe(
+      "cancelled",
+    );
+    expect((await getSessionQueueSnapshot(client.db, grant.workspaceId!, child.id))?.items).toEqual(
+      [],
+    );
+
+    await expect(controlSession(grant, child.id, "resume")).rejects.toThrow(
+      "Cancelled session subtree cannot accept work",
+    );
+    await expect(send(grant, child.id, "must stay fenced")).rejects.toThrow(
+      "Cancelled session subtree cannot accept work",
+    );
+
+    const settled = await settleSessionAttemptInterruptions(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      attemptId,
+    );
+    expect(settled).toMatchObject({ action: "paused", outcome: "cancelled" });
+    expect((await getSessionTurn(client.db, grant.workspaceId!, rootPrompt.turn.id))?.status).toBe(
+      "cancelled",
+    );
+    expect((await getSession(client.db, grant.workspaceId!, session.id))?.status).toBe("cancelled");
+  });
+
+  test("terminal cancellation serializes a concurrent Send behind the terminal fence", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "queued before cancellation");
+    let cancellationApplied!: () => void;
+    const applied = new Promise<void>((resolve) => {
+      cancellationApplied = resolve;
+    });
+    let releaseCancellation!: () => void;
+    const release = new Promise<void>((resolve) => {
+      releaseCancellation = resolve;
+    });
+    const cancelling = withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db.transaction(async (tx) => {
+        const result = await mutateSessionControlInTransaction(tx as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          actor: { type: "human", subjectId: grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          action: "cancel",
+        });
+        cancellationApplied();
+        await release;
+        return result;
+      }),
+    );
+    await applied;
+
+    let sendSettled = false;
+    const racingSend = send(grant, session.id, "concurrent send")
+      .then(() => {
+        sendSettled = true;
+        throw new Error("concurrent Send unexpectedly succeeded");
+      })
+      .catch((error: unknown) => {
+        sendSettled = true;
+        throw error;
+      });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(sendSettled).toBe(false);
+    releaseCancellation();
+    await cancelling;
+    await expect(racingSend).rejects.toThrow("Cancelled session subtree cannot accept work");
+    expect(
+      (await getSessionQueueSnapshot(client.db, grant.workspaceId!, session.id))?.items,
+    ).toEqual([]);
   });
 
   test("a committed workspace control command replays before its stale revision is checked", async () => {
