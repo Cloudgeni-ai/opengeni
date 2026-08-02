@@ -545,6 +545,9 @@ export async function createAndStartSession(input: {
   // workspace agentInstructions at turn time; never emitted as a timeline event.
   // Null/omitted ⇒ the session carries none.
   instructions?: string | null;
+  // Immutable normalized prompt-policy role. This never derives from a
+  // workspace membership role; null retains the bounded metadata.role fallback.
+  policyRole?: string | null;
   // Validated against the creating grant before this is called.
   firstPartyMcpPermissions?: Permission[] | null;
   // Model-visible first-party tool names. Authorization remains controlled by
@@ -625,6 +628,7 @@ export async function createAndStartSession(input: {
       firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
       firstPartyMcpTools: input.firstPartyMcpTools,
       instructions: input.instructions ?? null,
+      policyRole: input.policyRole ?? null,
       parentSessionId: input.parentSessionId ?? null,
       createIdempotencyKey: input.createIdempotencyKey,
       sandboxGroupId: input.sandboxGroupId ?? null,
@@ -671,6 +675,7 @@ export async function createAndStartSession(input: {
       firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
       firstPartyMcpTools: input.firstPartyMcpTools,
       instructions: input.instructions ?? null,
+      policyRole: input.policyRole ?? null,
       parentSessionId: input.parentSessionId ?? null,
       sandboxGroupId: input.sandboxGroupId ?? null,
       ...(input.sandboxOs ? { sandboxOs: input.sandboxOs } : {}),
@@ -1647,6 +1652,7 @@ export async function createSessionForRequest(
       // contracts schema). Persisted on the row; composed system-level at turn
       // time. Not surfaced as an event.
       instructions: payload.instructions ?? null,
+      policyRole: payload.policyRole ?? null,
       firstPartyMcpPermissions,
       firstPartyMcpTools,
       mcpServers: sessionMcpServers.dbServers,

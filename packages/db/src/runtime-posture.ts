@@ -120,6 +120,7 @@ export const FORCE_RLS_TABLES = [
   "workspace_instruction_policy_activation_events",
   "workspace_instruction_policy_heads",
   "workspace_instruction_policy_revisions",
+  "workspace_instruction_policy_snapshots",
   "workspace_model_policies",
   "workspace_packs",
   "workspace_session_activity_revisions",
@@ -253,6 +254,7 @@ export const RUNTIME_READ_ONLY_TABLES = [
   "nested_agent_depth_configuration",
   "preference_registry_events",
   "preference_registry_snapshots",
+  "workspace_instruction_policy_snapshots",
 ] as const;
 
 /** Append-only evidence/revision tables are insertable and queryable, never mutable. */

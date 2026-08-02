@@ -10,11 +10,12 @@ deliberately separate from:
 - workspace instruction-policy charters and their separate authority;
 - model, tool, connector, or prompt-composition policy.
 
-This backend slice provides storage, service operations, HTTP and first-party
-MCP retrieval, SDK types, and isolation guarantees. It does **not** invoke
-preference snapshots during a turn or compose descriptors or full content into
-a model prompt. That runtime-composition boundary belongs to a later delivery
-lane. It also adds no UI, connector, or source/fact schema.
+The registry provides storage, service operations, HTTP and first-party MCP
+retrieval, SDK types, and isolation guarantees. Migration
+`0156_session_policy_role_snapshots.sql` now invokes its exact-attempt snapshot
+at runtime and composes only bounded descriptors with workspace policy. Full
+content remains on-demand. This adds no UI, connector, source/fact schema, or
+parallel preference authority.
 
 ## Scope and identity
 
@@ -40,10 +41,13 @@ creating a revision or event.
 
 Model-facing reads are stricter than ordinary human list/get reads. Summary and
 full-content operations require an exact signed session, turn, attempt, and
-execution generation. The service verifies that active attempt and derives the
-personal subject from the turn's immutable accepted human initiator. A worker,
-service principal, delegated-token subject, or mutable grant subject can never
-substitute its identity. Service-initiated attempts fail closed.
+execution generation. Direct human turns derive the personal subject from the
+immutable accepted initiator. Trusted goal continuations and compactions retain
+a service initiator but freeze the causal turn's human in the separate immutable
+`session_turns.initiating_human_subject_id` field. A worker, service principal,
+delegated-token subject, membership role, session creator, or mutable grant
+subject can never substitute its identity. Service-only work with no causal
+human fails closed to no preference snapshot.
 Authority resolution and snapshot/list/detail/full-content access share one
 transaction. Ordered workspace, session, turn, and attempt locks revalidate the
 exact account, workspace, session pointer, turn pointer, attempt state,
@@ -140,8 +144,27 @@ The retrieval handle binds the exact preference, immutable revision, and
 content hash. Full-content retrieval succeeds only when the exact handle exists
 in the exact attempt snapshot and the revision still matches all three values.
 A later correction, deactivation, expiry, or scope change cannot rewrite that
-snapshot or redirect its handle. A later attempt creates a new snapshot from
-the then-current active registry.
+snapshot or redirect its handle. Runtime reconstructs active state from the
+immutable lifecycle ledger at the logical turn's acceptance timestamp, so a
+turn queued before a later activation/deactivation retains its accepted
+descriptor set. Recovery attempts replay that same boundary. A new human turn,
+continuation, or compaction gets a new boundary and the then-current state.
+
+## Runtime composition
+
+The worker creates or replays the preference snapshot immediately after the
+exact attempt claim, before credit admission, provider allocation, compaction,
+or model work. The runtime renders descriptors only, ordered organization then
+workspace then immutable initiating user, and interleaves them with charter and
+policy in the precedence documented in
+[`workspace-instruction-policies.md`](workspace-instruction-policies.md).
+Descriptor count and canonical JSON remain bounded to 64 entries and 16 KiB;
+the combined governance prompt has its own 131,072-byte fail-closed limit.
+
+The same descriptor snapshot and retrieval handles are used by normal turns,
+goal continuations, and compaction. The exact handle remains authorized only
+for its session/turn/attempt/generation and initiating human. Automatic prompt
+composition never retrieves or embeds the full preference body.
 
 ## API, MCP, and SDK boundaries
 
@@ -177,6 +200,9 @@ Canonical implementation:
 - `packages/db/src/preference-registry-schema.ts`;
 - `packages/db/src/preference-registry.ts`;
 - `packages/db/drizzle/0137_preference_registry.sql`;
+- `packages/db/drizzle/0156_session_policy_role_snapshots.sql`;
 - `apps/api/src/routes/preference-registry.ts`;
 - `apps/api/src/mcp/server.ts`;
-- `packages/sdk/src/preference-registry.ts`.
+- `packages/sdk/src/preference-registry.ts`;
+- `packages/runtime/src/workspace-governance.ts`;
+- `apps/worker/src/activities/agent-turn.ts`.

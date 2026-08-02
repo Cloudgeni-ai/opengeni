@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
-import { WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS } from "@opengeni/contracts";
+import {
+  ResolvedWorkspaceInstructionPolicySnapshot,
+  WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
+  WorkspaceInstructionPolicySnapshot,
+} from "@opengeni/contracts";
 import type {
   WorkspaceInstructionPolicyActivationEvent,
   WorkspaceInstructionPolicyActivationResponse,
@@ -13,11 +17,13 @@ import type {
   WorkspaceInstructionPolicyProvenanceSource,
   WorkspaceInstructionPolicyRevision,
   WorkspaceInstructionPolicyScope,
+  WorkspaceInstructionPolicySnapshotEntry,
   WorkspaceInstructionPolicyTarget,
 } from "@opengeni/contracts";
-import { and, asc, desc, eq, isNull, lt, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lt, sql, type SQL } from "drizzle-orm";
 import type { Database } from "./index";
 import { withRlsContext, withWorkspaceRls } from "./index";
+import { nestedPostgresSqlState } from "./persistence-errors";
 import * as schema from "./schema";
 
 type DraftInput = WorkspaceInstructionPolicyTarget & {
@@ -62,6 +68,19 @@ export class WorkspaceInstructionPolicyLegacyUnavailableError extends Error {
     super("This workspace has no legacy agent instructions to import");
   }
 }
+
+export class WorkspaceInstructionPolicySnapshotAuthorityError extends Error {
+  readonly name = "WorkspaceInstructionPolicySnapshotAuthorityError";
+}
+
+export type WorkspaceInstructionPolicyAttemptClaims = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  attemptId: string;
+  executionGeneration: number;
+};
 
 function contentHash(content: string): string {
   return createHash("sha256").update(content, "utf8").digest("hex");
@@ -621,4 +640,114 @@ export async function rollbackWorkspaceInstructionPolicyRevision(
   },
 ): Promise<WorkspaceInstructionPolicyActivationResponse> {
   return await changeActiveRevision(db, { ...input, type: "rollback" });
+}
+
+/**
+ * Freeze (or replay) the exact active charter/global/role policy set for one
+ * accepted attempt, then resolve only those immutable revisions. The snapshot
+ * stores bounded descriptors/hashes; full policy text remains in the revision
+ * table and cannot be widened by a later head activation.
+ */
+export async function getOrCreateWorkspaceInstructionPolicySnapshot(
+  db: Database,
+  claims: WorkspaceInstructionPolicyAttemptClaims,
+) {
+  try {
+    return await withWorkspaceRls(db, claims.workspaceId, async (scopedDb) => {
+      const rows = (await scopedDb.execute(sql`
+        SELECT
+          snapshot.id,
+          snapshot.workspace_id AS "workspaceId",
+          snapshot.session_id AS "sessionId",
+          snapshot.turn_id AS "turnId",
+          snapshot.attempt_id AS "attemptId",
+          snapshot.execution_generation AS "executionGeneration",
+          snapshot.policy_role AS "policyRole",
+          snapshot.role_source AS "roleSource",
+          snapshot.entries,
+          snapshot.entry_hash AS "entryHash",
+          snapshot.created_at AS "createdAt"
+        FROM workspace_instruction_policy_get_or_create_snapshot(
+          ${claims.accountId}::uuid,
+          ${claims.workspaceId}::uuid,
+          ${claims.sessionId}::uuid,
+          ${claims.turnId}::uuid,
+          ${claims.attemptId}::uuid,
+          ${claims.executionGeneration}
+        ) snapshot
+      `)) as unknown as Array<{
+        id: string;
+        workspaceId: string;
+        sessionId: string;
+        turnId: string;
+        attemptId: string;
+        executionGeneration: number;
+        policyRole: string | null;
+        roleSource: string;
+        entries: unknown;
+        entryHash: string;
+        createdAt: Date | string;
+      }>;
+      const row = rows[0];
+      if (!row) {
+        throw new WorkspaceInstructionPolicySnapshotAuthorityError(
+          "Instruction-policy snapshot authority conflicts with the accepted attempt",
+        );
+      }
+      const snapshot = WorkspaceInstructionPolicySnapshot.parse({
+        ...row,
+        createdAt: iso(row.createdAt),
+      });
+      if (snapshot.entries.length === 0) {
+        return ResolvedWorkspaceInstructionPolicySnapshot.parse(snapshot);
+      }
+
+      const revisionIds = snapshot.entries.map((entry) => entry.revisionId);
+      const revisions = await scopedDb
+        .select()
+        .from(schema.workspaceInstructionPolicyRevisions)
+        .where(
+          and(
+            eq(schema.workspaceInstructionPolicyRevisions.accountId, claims.accountId),
+            eq(schema.workspaceInstructionPolicyRevisions.workspaceId, claims.workspaceId),
+            inArray(schema.workspaceInstructionPolicyRevisions.id, revisionIds),
+          ),
+        );
+      const revisionsById = new Map(revisions.map((revision) => [revision.id, revision]));
+      const resolvedEntries = snapshot.entries.map((entry) => {
+        const revision = revisionsById.get(entry.revisionId);
+        if (!revision || !snapshotEntryMatchesRevision(entry, revision)) {
+          throw new WorkspaceInstructionPolicyInvalidOperationError(
+            "Instruction-policy snapshot references an inexact immutable revision",
+          );
+        }
+        return { ...entry, content: revision.content };
+      });
+      return ResolvedWorkspaceInstructionPolicySnapshot.parse({
+        ...snapshot,
+        entries: resolvedEntries,
+      });
+    });
+  } catch (error) {
+    if (["40001", "42501"].includes(nestedPostgresSqlState(error) ?? "")) {
+      throw new WorkspaceInstructionPolicySnapshotAuthorityError(
+        "Instruction-policy snapshot requires the exact current attempt and generation",
+      );
+    }
+    throw error;
+  }
+}
+
+function snapshotEntryMatchesRevision(
+  entry: WorkspaceInstructionPolicySnapshotEntry,
+  revision: RevisionRow,
+): boolean {
+  return (
+    revision.id === entry.revisionId &&
+    revision.revision === entry.revision &&
+    revision.contentHash === entry.contentHash &&
+    revision.kind === entry.kind &&
+    revision.scope === entry.scope &&
+    revision.roleKey === entry.roleKey
+  );
 }

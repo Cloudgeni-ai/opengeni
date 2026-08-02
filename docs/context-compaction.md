@@ -118,6 +118,14 @@ The compaction model receives:
 3. the same system instructions as the running agent;
 4. no tools and no provider-side context-management policy.
 
+Explicit compaction is a new accepted logical turn and therefore composes the
+same deterministic workspace instruction-policy and preference-descriptor
+governance as an ordinary agent turn. Its service initiator may inherit the
+causal human's immutable preference authority from the latest started turn;
+pure service compaction has no personal preference authority. The exact
+snapshot is attempt-fenced, recovery reuses it, and Documents/RAG evidence are
+never promoted into governance.
+
 Responses providers use the Agents SDK's structured Responses conversion, so
 tool calls/results remain real protocol items on the wire. Chat providers use a
 plain-text adapter because Chat Completions has a different item protocol.
