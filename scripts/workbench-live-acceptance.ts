@@ -1824,10 +1824,10 @@ async function selectChangesTab(page: Page): Promise<void> {
   });
 }
 
-async function selectTreeFile(page: Page, directory: string, file: string): Promise<void> {
+export async function selectTreeFile(page: Page, directory: string, file: string): Promise<void> {
   const directoryItem = page.getByRole("treeitem").filter({ hasText: directory }).first();
   const directoryButton = directoryItem.getByRole("button").first();
-  if ((await directoryButton.getAttribute("aria-expanded")) !== "true") {
+  if ((await directoryItem.getAttribute("aria-expanded")) !== "true") {
     await directoryButton.click();
   }
   await page.getByRole("treeitem").filter({ hasText: file }).first().getByRole("button").click();
