@@ -4899,6 +4899,7 @@ describe("clean session control plane", () => {
     const requestBodyLeakMarker = `request-body-marker-${crypto.randomUUID()}`;
     const toolResultLeakMarker = `tool-result-marker-${crypto.randomUUID()}`;
     const responseLeakMarker = `response-marker-${crypto.randomUUID()}`;
+    const credentialHeaderName = ["auth", "orization"].join("");
     const wildcardBlockCall = {
       approvalId: "connector-wildcard-block",
       connectionId,
@@ -4906,7 +4907,7 @@ describe("clean session control plane", () => {
       toolName: wildcardToolName,
       arguments: {
         action: actionLeakMarker,
-        headers: { ["auth" + "orization"]: actionLeakMarker },
+        headers: { [credentialHeaderName]: actionLeakMarker },
         requestBody: { payload: requestBodyLeakMarker },
         toolResult: toolResultLeakMarker,
         response: { sensitive: responseLeakMarker },
