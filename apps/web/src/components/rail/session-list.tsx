@@ -94,16 +94,14 @@ import { cn } from "@/lib/utils";
 import type { Session } from "@/types";
 
 /** True when the browser should own navigation (new tab / window / modified click). */
-function isModifiedNavigationClick(event: Pick<MouseEvent, "metaKey" | "ctrlKey" | "shiftKey" | "altKey" | "button">): boolean {
+function isModifiedNavigationClick(
+  event: Pick<MouseEvent, "metaKey" | "ctrlKey" | "shiftKey" | "altKey" | "button">,
+): boolean {
   return event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0;
 }
 
 /** Composer / sessions-index entry — real link so Cmd/Ctrl-click opens a new tab. */
-function NewSessionLink(props: {
-  className?: string;
-  "aria-label"?: string;
-  children: ReactNode;
-}) {
+function NewSessionLink(props: { className?: string; "aria-label"?: string; children: ReactNode }) {
   const rail = useRail();
   const context = useAppContext();
   return (

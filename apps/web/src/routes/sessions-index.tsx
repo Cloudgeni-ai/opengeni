@@ -680,8 +680,7 @@ function ComputeTargetControl(props: {
   // fleet has machines. Discovery lives on the Machines page, not the composer.
   const showComputeTarget = !fleetEmpty;
 
-  const sandboxBackendOverride =
-    draft.compute.kind === "sandbox" ? draft.compute.backend : "";
+  const sandboxBackendOverride = draft.compute.kind === "sandbox" ? draft.compute.backend : "";
 
   // Defensive: if the segmented control is hidden (clean flow) while a stale draft
   // still points at a machine (e.g. the last machine just left the fleet), fall
@@ -738,9 +737,7 @@ function ComputeTargetControl(props: {
         </section>
       );
     }
-    return (
-      <ManagedSandboxFields draft={draft} onChange={onChange} disabled={props.disabled} />
-    );
+    return <ManagedSandboxFields draft={draft} onChange={onChange} disabled={props.disabled} />;
   }
 
   return (
@@ -776,11 +773,7 @@ function ComputeTargetControl(props: {
       {fleetLoadFailed ? <FleetErrorNotice onRetry={() => void fleet.refresh()} /> : null}
 
       {draft.compute.kind === "sandbox" ? (
-        <ManagedSandboxFields
-          draft={draft}
-          onChange={onChange}
-          disabled={props.disabled}
-        />
+        <ManagedSandboxFields draft={draft} onChange={onChange} disabled={props.disabled} />
       ) : (
         <ConnectedMachineFields
           draft={draft}
