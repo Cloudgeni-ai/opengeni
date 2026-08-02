@@ -313,6 +313,14 @@ function evaluateValidity(
 }
 
 function validChangeLineage(input: MemorySlackPublicationInput): boolean {
+  if (
+    input.memory.supersedesId === input.memory.id ||
+    input.memory.supersededById === input.memory.id ||
+    input.change.relatedMemoryId === input.memory.id
+  ) {
+    return false;
+  }
+
   switch (input.change.kind) {
     case "created":
       return (

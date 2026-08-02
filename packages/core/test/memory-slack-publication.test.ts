@@ -320,22 +320,31 @@ describe("Memory Slack publication security contract", () => {
     expect(superseded.projection.changeKind).toBe("superseded");
     expect(superseded.idempotencyKey).not.toBe(corrected.idempotencyKey);
 
-    expect(
-      evaluateMemorySlackPublication(
-        candidate({
-          memory: { supersedesId: memoryId },
-          change: { kind: "corrected", relatedMemoryId: memoryId },
-        }),
-      ),
-    ).toEqual({ eligible: false, reason: "invalid_change_lineage" });
-    expect(
-      evaluateMemorySlackPublication(
-        candidate({
-          memory: { status: "superseded", supersededById: memoryId },
-          change: { kind: "superseded", relatedMemoryId: memoryId },
-        }),
-      ),
-    ).toEqual({ eligible: false, reason: "invalid_change_lineage" });
+    const selfReferentialLineages = [
+      candidate({
+        memory: {
+          status: "superseded",
+          supersedesId: memoryId,
+          supersededById: replacementMemoryId,
+        },
+        change: { kind: "superseded", relatedMemoryId: replacementMemoryId },
+      }),
+      candidate({
+        memory: { supersedesId: memoryId },
+        change: { kind: "corrected", relatedMemoryId: memoryId },
+      }),
+      candidate({
+        memory: { status: "superseded", supersededById: memoryId },
+        change: { kind: "superseded", relatedMemoryId: memoryId },
+      }),
+    ];
+    for (const input of selfReferentialLineages) {
+      expect(() => evaluateMemorySlackPublication(input)).not.toThrow();
+      expect(evaluateMemorySlackPublication(input)).toEqual({
+        eligible: false,
+        reason: "invalid_change_lineage",
+      });
+    }
   });
 
   test("produces stable idempotency for canonical equivalent inputs and changes it for new truth", () => {
