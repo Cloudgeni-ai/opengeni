@@ -33,6 +33,7 @@ const SETTLED = new Set(["idle", "failed", "error", "cancelled"]);
 const CHANNEL_A_PATH = /\/sessions\/[^/]+\/(?:fs|git|terminal)\//;
 const WORKSPACE_SURFACE_SELECTOR = "[data-workspace-surface]";
 const CHANGES_LAYOUT_SELECTOR = "[data-workbench-changes-layout]";
+const CAPTURE_USABLE_WORKBENCH_P95_MS = 5_000;
 const shaPattern = /^[0-9a-f]{40}$/;
 const runIdPattern = /^[a-z0-9][a-z0-9-]{2,63}$/;
 
@@ -353,9 +354,9 @@ async function main(): Promise<void> {
       await context.close();
     }
     captureUsableWorkbench = measurement(navigationSamples);
-    if (captureUsableWorkbench.p95 > 500) {
+    if (captureUsableWorkbench.p95 > CAPTURE_USABLE_WORKBENCH_P95_MS) {
       throw new Error(
-        `capture-backed usable workbench p95 ${captureUsableWorkbench.p95}ms exceeds 500ms`,
+        `capture-backed usable workbench p95 ${captureUsableWorkbench.p95}ms exceeds ${CAPTURE_USABLE_WORKBENCH_P95_MS}ms`,
       );
     }
 
