@@ -4838,6 +4838,61 @@ describe("clean session control plane", () => {
     ).toEqual([]);
   });
 
+  test("terminal cancellation serializes child creation behind the terminal fence", async () => {
+    const { grant, session } = await fixture();
+    let cancellationApplied!: () => void;
+    const applied = new Promise<void>((resolve) => {
+      cancellationApplied = resolve;
+    });
+    let releaseCancellation!: () => void;
+    const release = new Promise<void>((resolve) => {
+      releaseCancellation = resolve;
+    });
+    const cancelling = withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db.transaction(async (tx) => {
+        const result = await mutateSessionControlInTransaction(tx as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          actor: { type: "human", subjectId: grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          action: "cancel",
+        });
+        cancellationApplied();
+        await release;
+        return result;
+      }),
+    );
+    await applied;
+
+    let childCreateSettled = false;
+    const racingChildCreate = createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "must stay fenced",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+      parentSessionId: session.id,
+    })
+      .then(() => {
+        childCreateSettled = true;
+        throw new Error("concurrent child creation unexpectedly succeeded");
+      })
+      .catch((error: unknown) => {
+        childCreateSettled = true;
+        throw error;
+      });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(childCreateSettled).toBe(false);
+    releaseCancellation();
+    await cancelling;
+    await expect(racingChildCreate).rejects.toThrow(
+      "Cancelled session subtree cannot create children",
+    );
+  });
+
   test("a committed workspace control command replays before its stale revision is checked", async () => {
     const { grant } = await fixture();
     const operationKey = crypto.randomUUID();
