@@ -17,7 +17,11 @@ import {
   saveSlackBotUserLink,
   type DbClient,
 } from "@opengeni/db";
-import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
+import {
+  createSessionForRequest,
+  type ApiRouteDeps,
+  type SessionWorkflowClient,
+} from "@opengeni/core";
 import {
   acquireSharedTestDatabase,
   MemoryEventBus,
@@ -197,6 +201,7 @@ async function fixture(
     deniedChannels?: string[];
     linkOther?: boolean;
     failAfterAcceptTexts?: string[];
+    managedBilling?: boolean;
   } = {},
 ) {
   const suffix = crypto.randomUUID();
@@ -232,6 +237,7 @@ async function fixture(
   const otherSlackUserId = `U_OTHER_${suffix}`;
   const settings = testSettings({
     productAccessMode: "managed",
+    ...(options.managedBilling ? { usageLimitsMode: "managed", billingMode: "stripe" } : {}),
     environmentsEncryptionKey: encryptionKey,
     slackSigningSecret: signingMaterial,
     publicBaseUrl: "https://app.example.test",
@@ -506,6 +512,69 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         (select count(*)::int from documents where workspace_id = ${value.owner.workspaceId}) as documents,
         (select count(*)::int from knowledge_memories where workspace_id = ${value.owner.workspaceId}) as memories`;
     expect(persistence).toEqual({ documents: 0, memories: 0 });
+  });
+
+  test("new Slack tasks preserve the linked subject's latest session model", async () => {
+    if (!available) return;
+    const value = await fixture();
+    await createSessionForRequest(value.deps, value.owner, value.owner.workspaceId, {
+      initialMessage: "Previously selected model",
+      model: "gpt-5.6-terra",
+      sandboxBackend: "none",
+    });
+
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_PREFERRED_MODEL_${crypto.randomUUID()}`,
+          event: {
+            type: "message",
+            channel_type: "im",
+            user: value.ownerSlackUserId,
+            channel: "D_PRIVATE",
+            ts: "1710000002.000001",
+            text: "Use my current OpenGeni model",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+
+    const [route] = await interactions(value.owner.workspaceId);
+    const [session] = await shared!.admin<{ model: string }[]>`
+      select model from sessions
+      where workspace_id = ${value.owner.workspaceId}
+        and id = ${route!.session_id}`;
+    expect(session!.model).toBe("gpt-5.6-terra");
+  });
+
+  test("permanent session admission failures are visible in Slack and retain a useful code", async () => {
+    if (!available) return;
+    const value = await fixture({ managedBilling: true });
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_NO_CREDIT_${crypto.randomUUID()}`,
+          event: {
+            type: "app_mention",
+            user: value.ownerSlackUserId,
+            channel: "C_TEAM",
+            ts: "1710000002.000001",
+            text: `<@${value.botUserId}> start a task`,
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+
+    expect(value.slack.posts.at(-1)?.text).toContain("no available billing source");
+    const [inbox] = await shared!.admin<{ status: string; last_error_code: string }[]>`
+      select status, last_error_code
+      from slack_interaction_inbox
+      where workspace_id = ${value.owner.workspaceId}`;
+    expect(inbox).toEqual({ status: "failed", last_error_code: "http_402" });
   });
 
   test("channel mentions adopt existing threads and any linked workspace participant can continue", async () => {

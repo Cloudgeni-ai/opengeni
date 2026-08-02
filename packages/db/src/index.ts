@@ -17692,6 +17692,33 @@ export async function listSessions(
   });
 }
 
+/**
+ * Return the model most recently chosen by one human subject in a workspace.
+ * Host-initiated surfaces such as Slack use this to preserve the user's model
+ * and billing principal instead of silently falling back to the deployment
+ * default. The workspace filter remains authoritative under FORCE RLS.
+ */
+export async function getLatestSessionModelForSubject(
+  db: Database,
+  workspaceId: string,
+  subjectId: string,
+): Promise<string | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({ model: schema.sessions.model })
+      .from(schema.sessions)
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, workspaceId),
+          eq(schema.sessions.createdBySubjectId, subjectId),
+        ),
+      )
+      .orderBy(desc(schema.sessions.createdAt), desc(schema.sessions.id))
+      .limit(1);
+    return row?.model ?? null;
+  });
+}
+
 export type SessionDiscoveryOrderBy = "createdAt" | "updatedAt";
 export type SessionDiscoveryCursor = {
   orderBy: SessionDiscoveryOrderBy;
