@@ -97,6 +97,7 @@ import {
   // (below, right after the leaf re-export). This lets a selfhosted active backend
   // apply file edits over its NATS fs ops using the SDK's exact diff semantics.
   applyDiff,
+  RunContext,
   type AgentInputItem,
   type CallModelInputFilter,
   type MCPServer,
@@ -105,6 +106,7 @@ import {
   type ModelRequest,
   type ModelProvider,
   type RunStreamEvent,
+  type SerializedTool,
   type Tool,
 } from "@openai/agents";
 import { localDirLazySkillSource } from "@openai/agents/sandbox/local";
@@ -1030,9 +1032,141 @@ export async function summarizeForCompaction(
 }
 
 /**
+ * Serialize the agent's model-visible tools for a remote_v2 compact request.
+ *
+ * Mirrors SDK `serializeTool` field semantics so the Responses converter emits
+ * the same tools→instructions wire prefix as ordinary turns. Function-tool
+ * namespaces live on non-enumerable Symbols (`functionToolNamespace` /
+ * `functionToolNamespaceDescription`); reading `tool.namespace` as a string
+ * silently drops them and regroups namespaced tools as bare functions.
+ * Computer tools that are not yet initialized are emitted as name-only schemas
+ * so serialize never throws before the run loop has resolved the instance.
+ */
+export async function serializedToolsForRemoteCompaction(agent: {
+  getAllTools: (runContext: RunContext) => Promise<Tool[]>;
+}): Promise<SerializedTool[]> {
+  const tools = await agent.getAllTools(new RunContext());
+  const serialized: SerializedTool[] = [];
+  for (const tool of tools) {
+    const entry = serializeToolForRemoteCompaction(tool);
+    if (entry) serialized.push(entry);
+  }
+  return serialized;
+}
+
+/** Read SDK Symbol-backed function-tool namespace metadata (by Symbol.description). */
+function functionToolNamespaceFields(tool: object): {
+  namespace?: string;
+  namespaceDescription?: string;
+} {
+  let namespace: string | undefined;
+  let namespaceDescription: string | undefined;
+  for (const symbol of Object.getOwnPropertySymbols(tool)) {
+    const value = (tool as Record<symbol, unknown>)[symbol];
+    if (typeof value !== "string" || value.length === 0) continue;
+    if (symbol.description === "functionToolNamespace") {
+      namespace = value;
+    } else if (symbol.description === "functionToolNamespaceDescription") {
+      namespaceDescription = value;
+    }
+  }
+  const record = tool as Record<string, unknown>;
+  if (!namespace && typeof record.namespace === "string" && record.namespace.length > 0) {
+    namespace = record.namespace;
+  }
+  if (
+    !namespaceDescription &&
+    typeof record.namespaceDescription === "string" &&
+    record.namespaceDescription.length > 0
+  ) {
+    namespaceDescription = record.namespaceDescription;
+  }
+  return {
+    ...(namespace ? { namespace } : {}),
+    ...(namespaceDescription ? { namespaceDescription } : {}),
+  };
+}
+
+function serializeToolForRemoteCompaction(tool: Tool): SerializedTool | null {
+  if (!tool || typeof tool !== "object" || typeof tool.type !== "string") {
+    return null;
+  }
+  const record = tool as Tool & Record<string, unknown>;
+  const name = typeof record.name === "string" ? record.name : "";
+  if (tool.type === "function") {
+    const { namespace, namespaceDescription } = functionToolNamespaceFields(record);
+    return {
+      type: "function",
+      name,
+      description: typeof record.description === "string" ? record.description : "",
+      parameters: record.parameters,
+      // Pass through like SDK serializeTool — do not coerce undefined → false
+      // (Responses wire would gain an explicit `"strict": false` and bust cache).
+      strict: record.strict,
+      ...(typeof record.deferLoading === "boolean" ? { deferLoading: record.deferLoading } : {}),
+      ...(namespace
+        ? {
+            namespace,
+            ...(namespaceDescription ? { namespaceDescription } : {}),
+          }
+        : {}),
+    } as SerializedTool;
+  }
+  if (tool.type === "hosted_tool") {
+    return {
+      type: "hosted_tool",
+      name,
+      providerData: record.providerData,
+    } as SerializedTool;
+  }
+  if (tool.type === "apply_patch") {
+    return { type: "apply_patch", name } as SerializedTool;
+  }
+  if (tool.type === "shell") {
+    return {
+      type: "shell",
+      name,
+      environment: record.environment,
+    } as SerializedTool;
+  }
+  if (tool.type === "computer") {
+    // Avoid SDK serializeTool's "computer not initialized" throw before the run.
+    const computer =
+      record.computer && typeof record.computer === "object"
+        ? (record.computer as { environment?: unknown; dimensions?: unknown })
+        : null;
+    if (
+      computer &&
+      typeof computer.environment === "string" &&
+      Array.isArray(computer.dimensions) &&
+      computer.dimensions.length === 2 &&
+      computer.dimensions.every((value) => typeof value === "number")
+    ) {
+      return {
+        type: "computer",
+        name,
+        environment: computer.environment,
+        dimensions: computer.dimensions,
+      } as SerializedTool;
+    }
+    return { type: "computer", name } as SerializedTool;
+  }
+  return null;
+}
+
+/**
  * Codex remote compaction v2: send active history + `compaction_trigger`, collect
  * exactly one `{ type: "compaction", encrypted_content }` output item.
  * Must run inside Codex ALS with `remote_compaction_v2` beta + turn metadata.
+ *
+ * Prompt-cache critical: `systemInstructions` and `tools` must match the
+ * ordinary agent turn prefix (Codex CLI sends `base_instructions` +
+ * `model_visible_specs` on the compact call). An empty instructions string
+ * busts the shared tools→instructions prefix and is rejected here.
+ *
+ * Tools are schema context only. This is a single `_fetchResponse` (no tool
+ * loop), and extract still requires exactly one compaction item, so a
+ * tool-call-shaped reply fails closed.
  */
 export async function requestRemoteCompactionV2(
   settings: Settings,
@@ -1040,13 +1174,31 @@ export async function requestRemoteCompactionV2(
   options: {
     client: OpenAI;
     model: string;
+    /**
+     * Exact agent system instructions for this session/turn. Required and
+     * non-blank — must match the prior ordinary model call for cache prefix.
+     */
+    systemInstructions: string;
     promptCacheKey?: string;
+    /** Model-visible tool schemas for the compact request (CLI parity). */
+    tools?: readonly SerializedTool[];
     onUsage?: (usage: ModelResponseUsage) => void | Promise<void>;
   },
 ): Promise<Record<string, unknown>> {
+  // Match Agents SDK `normalizeInstructions`: reject blank after trim, but send
+  // the original bytes. Trimming here would diverge from ordinary turns that
+  // keep leading/trailing whitespace and bust the tools→instructions prefix.
+  if (options.systemInstructions.trim() === "") {
+    throw new EmptyCompactionSummaryError({
+      stage: "remote_v2_instructions",
+      reason: "empty_system_instructions",
+    });
+  }
+  const systemInstructions = options.systemInstructions;
   const promptInput = buildRemoteCompactionV2PromptInput(input);
+  const tools = options.tools ? [...options.tools] : [];
   const request: ModelRequest = {
-    systemInstructions: "",
+    systemInstructions,
     input: promptInput as AgentInputItem[],
     modelSettings: {
       // Azure rejects store:false; Codex transport enforces store:false itself.
@@ -1055,7 +1207,7 @@ export async function requestRemoteCompactionV2(
         ? { providerData: { prompt_cache_key: options.promptCacheKey } }
         : {}),
     },
-    tools: [],
+    tools,
     toolsExplicitlyProvided: true,
     outputType: "text",
     handoffs: [],
