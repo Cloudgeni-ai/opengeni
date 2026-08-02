@@ -18,6 +18,25 @@ export default defineConfig({
     // initial graph and every chunk by gzip size; 800 kB remains a hard raw cap.
     chunkSizeWarningLimit: 800,
     manifest: true,
+    rolldownOptions: {
+      output: {
+        codeSplitting: {
+          groups: [
+            {
+              // The session workbench is the primary interactive route. Keep
+              // its static graph route-aware, but coalesce tiny shared groups
+              // so a cold navigation does not fan out into dozens of requests.
+              name: "session",
+              test: /src[\\/]routes[\\/]session\.tsx$/,
+              includeDependenciesRecursively: true,
+              entriesAware: true,
+              entriesAwareMergeThreshold: 128 * 1024,
+              priority: 2,
+            },
+          ],
+        },
+      },
+    },
   },
   server: {
     port: 3000,
