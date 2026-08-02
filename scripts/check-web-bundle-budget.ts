@@ -15,8 +15,10 @@ const budgets = {
   initialRaw: 773 * kib,
   initialGzip: 210 * kib,
   initialFileGzip: 70 * kib,
+  initialFiles: 12,
   directSessionRaw: 1900 * kib,
   directSessionGzip: 552 * kib,
+  directSessionFiles: 20,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,
   cssGzip: 30 * kib,
@@ -132,8 +134,10 @@ function enforce(label: string, actual: number, limit: number): void {
 enforce("initial raw graph", initialTotal.raw, budgets.initialRaw);
 enforce("initial gzip graph", initialTotal.gzip, budgets.initialGzip);
 enforce("largest initial gzip asset", largestInitial.gzip, budgets.initialFileGzip);
+enforce("initial graph file count", initialMetrics.length, budgets.initialFiles);
 enforce("direct session raw graph", directSessionTotal.raw, budgets.directSessionRaw);
 enforce("direct session gzip graph", directSessionTotal.gzip, budgets.directSessionGzip);
+enforce("direct session graph file count", directSessionMetrics.length, budgets.directSessionFiles);
 enforce("largest lazy raw chunk", largestLazyRaw.raw, budgets.lazyChunkRaw);
 enforce("largest lazy gzip chunk", largestLazyGzip.gzip, budgets.lazyChunkGzip);
 enforce("largest CSS gzip asset", largestCss.gzip, budgets.cssGzip);
