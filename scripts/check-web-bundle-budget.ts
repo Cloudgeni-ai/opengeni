@@ -15,7 +15,7 @@ const budgets = {
   initialRaw: 773 * kib,
   initialGzip: 210 * kib,
   initialFileGzip: 70 * kib,
-  initialFiles: 12,
+  initialFiles: 11,
   directSessionRaw: 1900 * kib,
   directSessionGzip: 552 * kib,
   directSessionFiles: 18,
