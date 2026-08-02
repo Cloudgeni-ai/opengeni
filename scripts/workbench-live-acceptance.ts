@@ -1835,8 +1835,7 @@ async function selectTreeFile(page: Page, directory: string, file: string): Prom
 
 async function assertColdReview(page: Page, marker: string): Promise<void> {
   await assertChangesDefaultVisible(page);
-  await page.getByText("api", { exact: true }).first().waitFor();
-  await page.getByText("web", { exact: true }).first().waitFor();
+  await assertRepositoryChangesVisible(page, ["api", "web"]);
 
   await page.getByRole("tab", { name: "Files", exact: true }).click();
   await selectTreeFile(page, "api", "server.ts");
@@ -1845,6 +1844,41 @@ async function assertColdReview(page: Page, marker: string): Promise<void> {
   await selectTreeFile(page, "api", "base.txt");
   await page.getByText("On machine", { exact: true }).waitFor();
   await page.getByRole("button", { name: "Open live file" }).waitFor();
+}
+
+export async function assertRepositoryChangesVisible(
+  page: Page,
+  repositoryRoots: readonly string[],
+): Promise<void> {
+  const layout = page.locator(CHANGES_LAYOUT_SELECTOR);
+  const mode = await layout.getAttribute("data-workbench-changes-layout");
+  if (mode === "rail") {
+    for (const root of repositoryRoots) {
+      await page.getByText(root, { exact: true }).first().waitFor();
+    }
+    return;
+  }
+  if (mode === "compact") {
+    const picker = page.locator("[data-compact-file-picker]");
+    await picker.waitFor({ state: "visible", timeout: 20_000 });
+    assertChangedFileLabelsContainRepositoryRoots(
+      await picker.locator("option").allTextContents(),
+      repositoryRoots,
+    );
+    return;
+  }
+  throw new Error(`unsupported workbench changes layout: ${mode ?? "missing"}`);
+}
+
+export function assertChangedFileLabelsContainRepositoryRoots(
+  labels: readonly string[],
+  repositoryRoots: readonly string[],
+): void {
+  for (const root of repositoryRoots) {
+    if (!labels.some((label) => label.includes(`${root}/`))) {
+      throw new Error(`compact workbench changes omitted repository ${root}`);
+    }
+  }
 }
 
 async function assertAccessibility(page: Page): Promise<void> {
