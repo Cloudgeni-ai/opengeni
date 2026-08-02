@@ -52,6 +52,16 @@ type ScopedRow = {
   scopeKey: string;
 };
 
+type ConvergentKnowledgeOperationKind =
+  | "provider"
+  | "source"
+  | "source_object"
+  | "document_version"
+  | "entity"
+  | "entity_alias"
+  | "fact"
+  | "claim_relation";
+
 export class ScopedKnowledgeConflictError extends Error {
   readonly name = "ScopedKnowledgeConflictError";
   readonly code = "SCOPED_KNOWLEDGE_CONFLICT";
@@ -195,6 +205,70 @@ function actorColumns(actor: ScopedKnowledgeActor) {
     actorSubjectId: actor.subjectId,
     initiatingHumanSubjectId: actor.initiatingHumanSubjectId,
   };
+}
+
+async function lockConvergentKnowledgeOperation(
+  db: Database,
+  input: {
+    accountId: string;
+    operationKind: ConvergentKnowledgeOperationKind;
+    operationNamespace: string;
+    operationId: string;
+    inputHash: string;
+  },
+): Promise<string | null> {
+  const lockIdentity = [
+    "scoped-knowledge",
+    input.accountId,
+    input.operationKind,
+    input.operationNamespace,
+    input.operationId,
+  ].join(":");
+  await db.execute(sql`select pg_advisory_xact_lock(hashtextextended(${lockIdentity}, 0::bigint))`);
+  const [receipt] = await db
+    .select()
+    .from(schema.knowledgeOperationReceipts)
+    .where(
+      and(
+        eq(schema.knowledgeOperationReceipts.accountId, input.accountId),
+        eq(schema.knowledgeOperationReceipts.operationKind, input.operationKind),
+        eq(schema.knowledgeOperationReceipts.operationNamespace, input.operationNamespace),
+        eq(schema.knowledgeOperationReceipts.operationId, input.operationId),
+      ),
+    )
+    .limit(1);
+  if (!receipt) return null;
+  if (receipt.inputHash !== input.inputHash) {
+    throw new ScopedKnowledgeConflictError(
+      "Knowledge operation id was replayed with different immutable input",
+    );
+  }
+  return receipt.resultId;
+}
+
+async function recordConvergentKnowledgeOperation(
+  db: Database,
+  input: {
+    accountId: string;
+    scope: ScopedKnowledgeScope;
+    operationKind: ConvergentKnowledgeOperationKind;
+    operationNamespace: string;
+    operationId: string;
+    inputHash: string;
+    resultId: string;
+    actor: ScopedKnowledgeActor;
+  },
+): Promise<void> {
+  await db.insert(schema.knowledgeOperationReceipts).values({
+    accountId: input.accountId,
+    ...scopeColumns(input.scope),
+    operationKind: input.operationKind,
+    operationNamespace: input.operationNamespace,
+    operationId: input.operationId,
+    inputHash: input.inputHash,
+    resultId: input.resultId,
+    ...actorColumns(input.actor),
+  });
 }
 
 function scopeFromRow(row: ScopedRow): ScopedKnowledgeScope {
@@ -473,6 +547,26 @@ export async function upsertKnowledgeProvider(
   });
   return await withKnowledgeWriteRls(db, input, async (scopedDb) => {
     try {
+      const receiptResultId = await lockConvergentKnowledgeOperation(scopedDb, {
+        accountId: input.accountId,
+        operationKind: "provider",
+        operationNamespace: "account",
+        operationId: input.operationId,
+        inputHash,
+      });
+      if (receiptResultId) {
+        const [replayed] = await scopedDb
+          .select()
+          .from(schema.knowledgeProviders)
+          .where(eq(schema.knowledgeProviders.id, receiptResultId))
+          .limit(1);
+        if (!replayed) {
+          throw new ScopedKnowledgeInvalidOperationError(
+            "Knowledge provider operation receipt has no visible result",
+          );
+        }
+        return providerFromRow(replayed);
+      }
       const [created] = await scopedDb
         .insert(schema.knowledgeProviders)
         .values({
@@ -486,7 +580,19 @@ export async function upsertKnowledgeProvider(
         })
         .onConflictDoNothing()
         .returning();
-      if (created) return providerFromRow(created);
+      if (created) {
+        await recordConvergentKnowledgeOperation(scopedDb, {
+          accountId: input.accountId,
+          scope: input.scope,
+          operationKind: "provider",
+          operationNamespace: "account",
+          operationId: input.operationId,
+          inputHash,
+          resultId: created.id,
+          actor: input.actor,
+        });
+        return providerFromRow(created);
+      }
       const [operation, natural] = await Promise.all([
         scopedDb
           .select()
@@ -517,6 +623,16 @@ export async function upsertKnowledgeProvider(
             "Provider operation id was replayed with different immutable input",
           );
         }
+        await recordConvergentKnowledgeOperation(scopedDb, {
+          accountId: input.accountId,
+          scope: input.scope,
+          operationKind: "provider",
+          operationNamespace: "account",
+          operationId: input.operationId,
+          inputHash,
+          resultId: operationRow.id,
+          actor: input.actor,
+        });
         return providerFromRow(operationRow);
       }
       const naturalRow = natural[0];
@@ -528,6 +644,16 @@ export async function upsertKnowledgeProvider(
           "Ordinary provider upsert cannot resurrect a tombstone",
         );
       }
+      await recordConvergentKnowledgeOperation(scopedDb, {
+        accountId: input.accountId,
+        scope: input.scope,
+        operationKind: "provider",
+        operationNamespace: "account",
+        operationId: input.operationId,
+        inputHash,
+        resultId: naturalRow.id,
+        actor: input.actor,
+      });
       return providerFromRow(naturalRow);
     } catch (error) {
       if (error instanceof Error && error.name.startsWith("ScopedKnowledge")) throw error;
@@ -559,6 +685,26 @@ export async function upsertKnowledgeSource(
   });
   return await withKnowledgeWriteRls(db, input, async (scopedDb) => {
     try {
+      const receiptResultId = await lockConvergentKnowledgeOperation(scopedDb, {
+        accountId: input.accountId,
+        operationKind: "source",
+        operationNamespace: "account",
+        operationId: input.operationId,
+        inputHash,
+      });
+      if (receiptResultId) {
+        const [replayed] = await scopedDb
+          .select()
+          .from(schema.knowledgeSources)
+          .where(eq(schema.knowledgeSources.id, receiptResultId))
+          .limit(1);
+        if (!replayed) {
+          throw new ScopedKnowledgeInvalidOperationError(
+            "Knowledge source operation receipt has no visible result",
+          );
+        }
+        return sourceFromRow(replayed);
+      }
       const [created] = await scopedDb
         .insert(schema.knowledgeSources)
         .values({
@@ -574,7 +720,19 @@ export async function upsertKnowledgeSource(
         })
         .onConflictDoNothing()
         .returning();
-      if (created) return sourceFromRow(created);
+      if (created) {
+        await recordConvergentKnowledgeOperation(scopedDb, {
+          accountId: input.accountId,
+          scope: input.scope,
+          operationKind: "source",
+          operationNamespace: "account",
+          operationId: input.operationId,
+          inputHash,
+          resultId: created.id,
+          actor: input.actor,
+        });
+        return sourceFromRow(created);
+      }
       const [operation, natural] = await Promise.all([
         scopedDb
           .select()
@@ -604,6 +762,16 @@ export async function upsertKnowledgeSource(
             "Source operation id was replayed with different immutable input",
           );
         }
+        await recordConvergentKnowledgeOperation(scopedDb, {
+          accountId: input.accountId,
+          scope: input.scope,
+          operationKind: "source",
+          operationNamespace: "account",
+          operationId: input.operationId,
+          inputHash,
+          resultId: operationRow.id,
+          actor: input.actor,
+        });
         return sourceFromRow(operationRow);
       }
       const naturalRow = natural[0];
@@ -622,6 +790,16 @@ export async function upsertKnowledgeSource(
           "Ordinary source upsert cannot resurrect a tombstone",
         );
       }
+      await recordConvergentKnowledgeOperation(scopedDb, {
+        accountId: input.accountId,
+        scope: input.scope,
+        operationKind: "source",
+        operationNamespace: "account",
+        operationId: input.operationId,
+        inputHash,
+        resultId: naturalRow.id,
+        actor: input.actor,
+      });
       return sourceFromRow(naturalRow);
     } catch (error) {
       if (error instanceof Error && error.name.startsWith("ScopedKnowledge")) throw error;
@@ -652,6 +830,7 @@ export async function appendKnowledgeSourceAclVersion(
     expectedAclGeneration: input.expectedAclGeneration,
     aclVersion,
     agentAccess: input.agentAccess,
+    reasonCode,
     actor: input.actor,
   });
   const aclHash = scopedKnowledgeInputHash({
@@ -877,6 +1056,7 @@ export async function completeKnowledgeSyncRun(
     watermark: input.watermark ?? null,
     metadata,
     errorCode: input.state === "failed" ? errorCode : null,
+    reasonCode,
   });
   return await withKnowledgeAuthorityRls(db, input, async (scopedDb) => {
     try {
@@ -946,6 +1126,26 @@ export async function upsertKnowledgeSourceObject(
           documentId: input.documentId ?? null,
           actor: input.actor,
         });
+        const receiptResultId = await lockConvergentKnowledgeOperation(scopedDb, {
+          accountId: input.accountId,
+          operationKind: "source_object",
+          operationNamespace: input.sourceId,
+          operationId: input.operationId,
+          inputHash,
+        });
+        if (receiptResultId) {
+          const [replayed] = await scopedDb
+            .select()
+            .from(schema.knowledgeSourceObjects)
+            .where(eq(schema.knowledgeSourceObjects.id, receiptResultId))
+            .limit(1);
+          if (!replayed) {
+            throw new ScopedKnowledgeInvalidOperationError(
+              "Knowledge source-object operation receipt has no visible result",
+            );
+          }
+          return objectFromRow(replayed);
+        }
         const [created] = await scopedDb
           .insert(schema.knowledgeSourceObjects)
           .values({
@@ -963,7 +1163,19 @@ export async function upsertKnowledgeSourceObject(
           })
           .onConflictDoNothing()
           .returning();
-        if (created) return objectFromRow(created);
+        if (created) {
+          await recordConvergentKnowledgeOperation(scopedDb, {
+            accountId: input.accountId,
+            scope: sourceScope,
+            operationKind: "source_object",
+            operationNamespace: input.sourceId,
+            operationId: input.operationId,
+            inputHash,
+            resultId: created.id,
+            actor: input.actor,
+          });
+          return objectFromRow(created);
+        }
         const [operation, natural] = await Promise.all([
           scopedDb
             .select()
@@ -993,6 +1205,16 @@ export async function upsertKnowledgeSourceObject(
               "Source-object operation id was replayed with different input",
             );
           }
+          await recordConvergentKnowledgeOperation(scopedDb, {
+            accountId: input.accountId,
+            scope: sourceScope,
+            operationKind: "source_object",
+            operationNamespace: input.sourceId,
+            operationId: input.operationId,
+            inputHash,
+            resultId: operationRow.id,
+            actor: input.actor,
+          });
           return objectFromRow(operationRow);
         }
         const naturalRow = natural[0];
@@ -1006,6 +1228,16 @@ export async function upsertKnowledgeSourceObject(
             "Ordinary source-object upsert cannot resurrect a tombstone",
           );
         }
+        await recordConvergentKnowledgeOperation(scopedDb, {
+          accountId: input.accountId,
+          scope: sourceScope,
+          operationKind: "source_object",
+          operationNamespace: input.sourceId,
+          operationId: input.operationId,
+          inputHash,
+          resultId: naturalRow.id,
+          actor: input.actor,
+        });
         return objectFromRow(naturalRow);
       } catch (error) {
         if (error instanceof Error && error.name.startsWith("ScopedKnowledge")) throw error;
@@ -1077,8 +1309,29 @@ export async function appendKnowledgeDocumentVersion(
           documentId: input.documentId ?? null,
           fileId: input.fileId ?? null,
           locationMetadata: input.locationMetadata ?? {},
+          reasonCode,
           actor: input.actor,
         });
+        const receiptResultId = await lockConvergentKnowledgeOperation(scopedDb, {
+          accountId: input.accountId,
+          operationKind: "document_version",
+          operationNamespace: input.objectId,
+          operationId: input.operationId,
+          inputHash,
+        });
+        if (receiptResultId) {
+          const [replayed] = await scopedDb
+            .select()
+            .from(schema.knowledgeDocumentVersions)
+            .where(eq(schema.knowledgeDocumentVersions.id, receiptResultId))
+            .limit(1);
+          if (!replayed) {
+            throw new ScopedKnowledgeInvalidOperationError(
+              "Knowledge document-version operation receipt has no visible result",
+            );
+          }
+          return versionFromRow(replayed);
+        }
         const existingRows = await scopedDb
           .select()
           .from(schema.knowledgeDocumentVersions)
@@ -1103,6 +1356,16 @@ export async function appendKnowledgeDocumentVersion(
               "Document-version key was replayed with different immutable input",
             );
           }
+          await recordConvergentKnowledgeOperation(scopedDb, {
+            accountId: input.accountId,
+            scope: objectScope,
+            operationKind: "document_version",
+            operationNamespace: input.objectId,
+            operationId: input.operationId,
+            inputHash,
+            resultId: existing.id,
+            actor: input.actor,
+          });
           return versionFromRow(existing);
         }
         const [source, acl] = await Promise.all([
@@ -1182,7 +1445,19 @@ export async function appendKnowledgeDocumentVersion(
               ),
             )
             .limit(1);
-          if (converged?.inputHash === inputHash) return versionFromRow(converged);
+          if (converged?.inputHash === inputHash) {
+            await recordConvergentKnowledgeOperation(scopedDb, {
+              accountId: input.accountId,
+              scope: objectScope,
+              operationKind: "document_version",
+              operationNamespace: input.objectId,
+              operationId: input.operationId,
+              inputHash,
+              resultId: converged.id,
+              actor: input.actor,
+            });
+            return versionFromRow(converged);
+          }
           throw new ScopedKnowledgeGenerationConflictError(
             "Another document version already advanced this object generation",
           );
@@ -1202,6 +1477,16 @@ export async function appendKnowledgeDocumentVersion(
             ${input.actor.initiatingHumanSubjectId}
           )
         `);
+        await recordConvergentKnowledgeOperation(scopedDb, {
+          accountId: input.accountId,
+          scope: objectScope,
+          operationKind: "document_version",
+          operationNamespace: input.objectId,
+          operationId: input.operationId,
+          inputHash,
+          resultId: created.id,
+          actor: input.actor,
+        });
         return versionFromRow(created);
       } catch (error) {
         if (error instanceof Error && error.name.startsWith("ScopedKnowledge")) throw error;
@@ -1232,6 +1517,7 @@ export async function recordKnowledgeLifecycleEvent(
     targetId: input.targetId,
     eventType: input.eventType,
     expectedGeneration: input.expectedGeneration,
+    reasonCode,
     actor: input.actor,
   });
   const placeholderScope: ScopedKnowledgeScope = {
@@ -1323,6 +1609,34 @@ export async function upsertKnowledgeEntity(
   });
   return await withKnowledgeWriteRls(db, input, async (scopedDb) => {
     try {
+      const receiptResultId = await lockConvergentKnowledgeOperation(scopedDb, {
+        accountId: input.accountId,
+        operationKind: "entity",
+        operationNamespace: "account",
+        operationId: input.operationId,
+        inputHash,
+      });
+      if (receiptResultId) {
+        const [replayed] = await scopedDb
+          .select()
+          .from(schema.knowledgeEntities)
+          .where(eq(schema.knowledgeEntities.id, receiptResultId))
+          .limit(1);
+        if (!replayed) {
+          throw new ScopedKnowledgeInvalidOperationError(
+            "Knowledge entity operation receipt has no visible result",
+          );
+        }
+        return {
+          id: replayed.id,
+          accountId: replayed.accountId,
+          scope: scopeFromRow(replayed),
+          entityType: replayed.entityType,
+          normalizedKey: replayed.normalizedKey,
+          displayName: replayed.displayName,
+          createdAt: iso(replayed.createdAt),
+        };
+      }
       const [created] = await scopedDb
         .insert(schema.knowledgeEntities)
         .values({
@@ -1338,6 +1652,16 @@ export async function upsertKnowledgeEntity(
         .onConflictDoNothing()
         .returning();
       if (created) {
+        await recordConvergentKnowledgeOperation(scopedDb, {
+          accountId: input.accountId,
+          scope: input.scope,
+          operationKind: "entity",
+          operationNamespace: "account",
+          operationId: input.operationId,
+          inputHash,
+          resultId: created.id,
+          actor: input.actor,
+        });
         return {
           id: created.id,
           accountId: created.accountId,
@@ -1384,6 +1708,16 @@ export async function upsertKnowledgeEntity(
           "Entity identity is already bound to different immutable metadata",
         );
       }
+      await recordConvergentKnowledgeOperation(scopedDb, {
+        accountId: input.accountId,
+        scope: input.scope,
+        operationKind: "entity",
+        operationNamespace: "account",
+        operationId: input.operationId,
+        inputHash,
+        resultId: row.id,
+        actor: input.actor,
+      });
       return {
         id: row.id,
         accountId: row.accountId,
@@ -1433,6 +1767,31 @@ export async function attachKnowledgeEntityAlias(
           normalizedAlias,
           actor: input.actor,
         });
+        const receiptResultId = await lockConvergentKnowledgeOperation(scopedDb, {
+          accountId: input.accountId,
+          operationKind: "entity_alias",
+          operationNamespace: "account",
+          operationId: input.operationId,
+          inputHash,
+        });
+        if (receiptResultId) {
+          const [replayed] = await scopedDb
+            .select()
+            .from(schema.knowledgeEntityAliases)
+            .where(eq(schema.knowledgeEntityAliases.id, receiptResultId))
+            .limit(1);
+          if (!replayed) {
+            throw new ScopedKnowledgeInvalidOperationError(
+              "Knowledge entity-alias operation receipt has no visible result",
+            );
+          }
+          return {
+            id: replayed.id,
+            entityId: replayed.entityId,
+            alias: replayed.alias,
+            normalizedAlias: replayed.normalizedAlias,
+          };
+        }
         const [created] = await scopedDb
           .insert(schema.knowledgeEntityAliases)
           .values({
@@ -1452,6 +1811,16 @@ export async function attachKnowledgeEntityAlias(
           .onConflictDoNothing()
           .returning();
         if (created) {
+          await recordConvergentKnowledgeOperation(scopedDb, {
+            accountId: input.accountId,
+            scope: scopeFromRow(entity),
+            operationKind: "entity_alias",
+            operationNamespace: "account",
+            operationId: input.operationId,
+            inputHash,
+            resultId: created.id,
+            actor: input.actor,
+          });
           return {
             id: created.id,
             entityId: created.entityId,
@@ -1485,6 +1854,16 @@ export async function attachKnowledgeEntityAlias(
               "Entity-alias operation id was replayed with different immutable input",
             );
           }
+          await recordConvergentKnowledgeOperation(scopedDb, {
+            accountId: input.accountId,
+            scope: scopeFromRow(entity),
+            operationKind: "entity_alias",
+            operationNamespace: "account",
+            operationId: input.operationId,
+            inputHash,
+            resultId: operationRow.id,
+            actor: input.actor,
+          });
           return {
             id: operationRow.id,
             entityId: operationRow.entityId,
@@ -1510,6 +1889,16 @@ export async function attachKnowledgeEntityAlias(
             "Entity alias is already bound to a different entity",
           );
         }
+        await recordConvergentKnowledgeOperation(scopedDb, {
+          accountId: input.accountId,
+          scope: scopeFromRow(entity),
+          operationKind: "entity_alias",
+          operationNamespace: "account",
+          operationId: input.operationId,
+          inputHash,
+          resultId: row.id,
+          actor: input.actor,
+        });
         return {
           id: row.id,
           entityId: row.entityId,
@@ -1578,6 +1967,26 @@ export async function upsertKnowledgeFact(
           object: input.object,
           actor: input.actor,
         });
+        const receiptResultId = await lockConvergentKnowledgeOperation(scopedDb, {
+          accountId: input.accountId,
+          operationKind: "fact",
+          operationNamespace: "account",
+          operationId: input.operationId,
+          inputHash,
+        });
+        if (receiptResultId) {
+          const [replayed] = await scopedDb
+            .select()
+            .from(schema.knowledgeFacts)
+            .where(eq(schema.knowledgeFacts.id, receiptResultId))
+            .limit(1);
+          if (!replayed) {
+            throw new ScopedKnowledgeInvalidOperationError(
+              "Knowledge fact operation receipt has no visible result",
+            );
+          }
+          return factFromRow(replayed);
+        }
         const [created] = await scopedDb
           .insert(schema.knowledgeFacts)
           .values({
@@ -1598,7 +2007,19 @@ export async function upsertKnowledgeFact(
           })
           .onConflictDoNothing()
           .returning();
-        if (created) return factFromRow(created);
+        if (created) {
+          await recordConvergentKnowledgeOperation(scopedDb, {
+            accountId: input.accountId,
+            scope: scopeFromRow(subject),
+            operationKind: "fact",
+            operationNamespace: "account",
+            operationId: input.operationId,
+            inputHash,
+            resultId: created.id,
+            actor: input.actor,
+          });
+          return factFromRow(created);
+        }
         const [operationRows, naturalRows] = await Promise.all([
           scopedDb
             .select()
@@ -1631,6 +2052,16 @@ export async function upsertKnowledgeFact(
         }
         const row = operationRow ?? naturalRows[0];
         if (!row) throw new ScopedKnowledgeConflictError("Knowledge fact identity conflicted");
+        await recordConvergentKnowledgeOperation(scopedDb, {
+          accountId: input.accountId,
+          scope: scopeFromRow(subject),
+          operationKind: "fact",
+          operationNamespace: "account",
+          operationId: input.operationId,
+          inputHash,
+          resultId: row.id,
+          actor: input.actor,
+        });
         return factFromRow(row);
       } catch (error) {
         if (error instanceof Error && error.name.startsWith("ScopedKnowledge")) throw error;
@@ -1789,6 +2220,31 @@ export async function linkKnowledgeClaims(
           toClaimId,
           actor: input.actor,
         });
+        const receiptResultId = await lockConvergentKnowledgeOperation(scopedDb, {
+          accountId: input.accountId,
+          operationKind: "claim_relation",
+          operationNamespace: "account",
+          operationId: input.operationId,
+          inputHash,
+        });
+        if (receiptResultId) {
+          const [replayed] = await scopedDb
+            .select()
+            .from(schema.knowledgeClaimRelations)
+            .where(eq(schema.knowledgeClaimRelations.id, receiptResultId))
+            .limit(1);
+          if (!replayed) {
+            throw new ScopedKnowledgeInvalidOperationError(
+              "Knowledge claim-relation operation receipt has no visible result",
+            );
+          }
+          return {
+            id: replayed.id,
+            relationType: replayed.relationType as KnowledgeClaimRelationType,
+            fromClaimId: replayed.fromClaimId,
+            toClaimId: replayed.toClaimId,
+          };
+        }
         const [created] = await scopedDb
           .insert(schema.knowledgeClaimRelations)
           .values({
@@ -1807,6 +2263,16 @@ export async function linkKnowledgeClaims(
           .onConflictDoNothing()
           .returning();
         if (created) {
+          await recordConvergentKnowledgeOperation(scopedDb, {
+            accountId: input.accountId,
+            scope: scopeFromRow(claim),
+            operationKind: "claim_relation",
+            operationNamespace: "account",
+            operationId: input.operationId,
+            inputHash,
+            resultId: created.id,
+            actor: input.actor,
+          });
           return {
             id: created.id,
             relationType: created.relationType as KnowledgeClaimRelationType,
@@ -1839,6 +2305,16 @@ export async function linkKnowledgeClaims(
               "Claim-relation operation id was replayed with different immutable input",
             );
           }
+          await recordConvergentKnowledgeOperation(scopedDb, {
+            accountId: input.accountId,
+            scope: scopeFromRow(claim),
+            operationKind: "claim_relation",
+            operationNamespace: "account",
+            operationId: input.operationId,
+            inputHash,
+            resultId: operationRow.id,
+            actor: input.actor,
+          });
           return {
             id: operationRow.id,
             relationType: operationRow.relationType as KnowledgeClaimRelationType,
@@ -1860,6 +2336,16 @@ export async function linkKnowledgeClaims(
           )
           .limit(1);
         if (!row) throw new ScopedKnowledgeConflictError("Claim relation identity conflicted");
+        await recordConvergentKnowledgeOperation(scopedDb, {
+          accountId: input.accountId,
+          scope: scopeFromRow(claim),
+          operationKind: "claim_relation",
+          operationNamespace: "account",
+          operationId: input.operationId,
+          inputHash,
+          resultId: row.id,
+          actor: input.actor,
+        });
         return {
           id: row.id,
           relationType: row.relationType as KnowledgeClaimRelationType,

@@ -62,7 +62,10 @@ The source side records:
 Mutable heads are not directly updateable by `opengeni_app`. Target-schema
 security-definer functions lock the exact row, recheck live GUC authority,
 apply expected-generation compare-and-swap, and append the lifecycle evidence in
-the same transaction. Runtime privileges remain `SELECT, INSERT` for ordinary
+the same transaction. Head triggers also require the active writer to be the
+exact security-definer function owner, so a caller cannot forge the local
+mutation GUCs even if table privileges are accidentally broadened. Runtime
+privileges remain `SELECT, INSERT` for ordinary
 foundation tables and `SELECT` only for lifecycle events; no new table grants
 runtime `UPDATE` or `DELETE`.
 
@@ -126,6 +129,16 @@ entity/fact/claim/evidence/review/proposal methods; and exact/list eligibility
 reads. Every write carries an operation identity and deterministic input hash.
 Every read carries account, workspace, exact initiating subject, and human vs
 agent surface.
+
+Natural-identity convergence is also durable. When distinct operation IDs race
+to create the same provider, source, object, document version, entity, alias,
+fact, or claim relation, `knowledge_operation_receipts` records every accepted
+identity and its exact result. Replaying any accepted identity with different
+input fails even when that identity did not win the underlying row insert.
+
+Migration 0154 is maintenance-only because it expands the exact runtime-role
+table and grant contract; old application sessions must be stopped for the
+cutover.
 
 This slice intentionally adds no HTTP route, public SDK method, MCP tool, UI,
 connector, scheduled sweep, prompt injection, or automatic policy/preference

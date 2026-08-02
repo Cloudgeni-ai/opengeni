@@ -171,12 +171,12 @@ describe("release schema contract", () => {
         (migrations.has("0154_scoped_knowledge_foundation.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "01db239d0d89a15a2b80ca1b76e30a03ee7be5e7024435ca1cc763f9dbcbfe27",
+      "b5a302785a2fa0f07d7cd48360875083364194f7604f9319d6562044ce4d66e0",
     );
     expect(contract.latestMigration).toBe("0154_scoped_knowledge_foundation.sql");
     expect(migrations.get("0154_scoped_knowledge_foundation.sql")).toMatchObject({
-      sha256: "a1773d964c96d8fc115e1e1711cb3f2b17a6f4f338ed3eda0c8a1dc1816dc0f9",
-      deploymentMode: "rolling",
+      sha256: "9e52f88b51b81d405de8f7c3c70a083a1a091d49b98042f96127565f352e9874",
+      deploymentMode: "maintenance",
     });
     expect(migrations.get("0153_mcp_personal_connection_delegations.sql")).toMatchObject({
       sha256: "e27385280b8342ddd2bad9fea000d823e0e96c46b1c340403afaca81613610cf",

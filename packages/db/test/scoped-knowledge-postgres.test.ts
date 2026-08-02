@@ -475,6 +475,16 @@ describe("scoped knowledge (real PostgreSQL + FORCE RLS)", () => {
       from knowledge_facts
       where id = ${factA.id}`;
     expect(storedFact).toBeDefined();
+    const convergedOperationId =
+      storedFact!.operationId === "fact-create-a" ? "fact-create-b" : "fact-create-a";
+    expect(
+      (
+        await upsertKnowledgeFact(db, {
+          ...factBase,
+          operationId: convergedOperationId,
+        })
+      ).id,
+    ).toBe(factA.id);
     await expect(
       upsertKnowledgeFact(db, {
         ...factBase,
@@ -482,14 +492,27 @@ describe("scoped knowledge (real PostgreSQL + FORCE RLS)", () => {
         object: { kind: "text", value: "starter" },
       }),
     ).rejects.toBeInstanceOf(ScopedKnowledgeConflictError);
+    await expect(
+      upsertKnowledgeFact(db, {
+        ...factBase,
+        operationId: convergedOperationId,
+        object: { kind: "text", value: "growth" },
+      }),
+    ).rejects.toBeInstanceOf(ScopedKnowledgeConflictError);
 
-    const [counts] = await admin<Array<{ entities: number; facts: number }>>`
+    const [counts] = await admin<
+      Array<{ entities: number; facts: number; factOperationReceipts: number }>
+    >`
       select
         (select count(*)::int from knowledge_entities where account_id = ${workspace.accountId})
           as entities,
         (select count(*)::int from knowledge_facts where account_id = ${workspace.accountId})
-          as facts`;
-    expect(counts).toEqual({ entities: 1, facts: 1 });
+          as facts,
+        (
+          select count(*)::int from knowledge_operation_receipts
+          where account_id = ${workspace.accountId} and operation_kind = 'fact'
+        ) as "factOperationReceipts"`;
+    expect(counts).toEqual({ entities: 1, facts: 1, factOperationReceipts: 2 });
   });
 
   test("checks alias operation replay before natural-key convergence", async () => {
@@ -699,6 +722,16 @@ describe("scoped knowledge (real PostgreSQL + FORCE RLS)", () => {
         reasonCode: "complete",
       }),
     ).rejects.toBeInstanceOf(ScopedKnowledgeConflictError);
+    await expect(
+      completeKnowledgeSyncRun(db, {
+        ...workspace,
+        initiatingSubjectId: actor.subjectId,
+        runId: run.id,
+        state: "succeeded",
+        outputCursor: "cursor-1",
+        reasonCode: "different-reason",
+      }),
+    ).rejects.toBeInstanceOf(ScopedKnowledgeConflictError);
 
     const object = await upsertKnowledgeSourceObject(db, {
       ...workspace,
@@ -767,6 +800,18 @@ describe("scoped knowledge (real PostgreSQL + FORCE RLS)", () => {
       reasonCode: "revoked",
     });
     expect(revokedReplay.replayed).toBe(true);
+    await expect(
+      recordKnowledgeLifecycleEvent(db, {
+        ...workspace,
+        operationId: "generation-revoke-object",
+        actor,
+        targetKind: "object",
+        targetId: object.id,
+        eventType: "revoked",
+        expectedGeneration: 1,
+        reasonCode: "different-reason",
+      }),
+    ).rejects.toBeInstanceOf(ScopedKnowledgeConflictError);
     await expect(
       upsertKnowledgeSourceObject(db, {
         ...workspace,
@@ -1200,6 +1245,48 @@ describe("scoped knowledge (real PostgreSQL + FORCE RLS)", () => {
       }
       expect((directMutationError as { code?: string } | undefined)?.code).toBe("42501");
 
+      await admin`grant update on knowledge_sources to opengeni_app`;
+      try {
+        let forgedGuardError: unknown;
+        try {
+          await app.begin(async (tx) => {
+            await tx`select set_config('opengeni.account_id', ${workspace.accountId}, true)`;
+            await tx`select set_config('opengeni.workspace_id', ${workspace.workspaceId}, true)`;
+            await tx`select set_config('opengeni.subject_id', ${actor.subjectId}, true)`;
+            await tx`select set_config('opengeni.knowledge_mutation_kind', 'sync', true)`;
+            await tx`select set_config('opengeni.knowledge_mutation_target', ${source.id}, true)`;
+            await tx`
+              update knowledge_sources
+              set sync_generation = sync_generation + 1, sync_cursor = 'forged'
+              where id = ${source.id}`;
+          });
+        } catch (error) {
+          forgedGuardError = error;
+        }
+        expect((forgedGuardError as { code?: string } | undefined)?.code).toBe("55000");
+      } finally {
+        await admin`revoke update on knowledge_sources from opengeni_app`;
+      }
+
+      const mismatchedWorkspace = await freshWorkspace("security-mismatched-workspace");
+      let workspaceAccountError: unknown;
+      try {
+        await admin`
+          insert into knowledge_providers (
+            account_id, scope_kind, scope_workspace_id, scope_subject_id, scope_key,
+            provider_key, external_tenant_id, operation_id, input_hash,
+            actor_kind, actor_subject_id, initiating_human_subject_id
+          ) values (
+            ${workspace.accountId}, 'workspace', ${mismatchedWorkspace.workspaceId}, null,
+            ${`workspace:${mismatchedWorkspace.workspaceId}:-`}, 'mismatched-provider',
+            'mismatched-tenant', 'mismatched-provider-operation', ${hash("mismatched-provider")},
+            'human', ${actor.subjectId}, ${actor.subjectId}
+          )`;
+      } catch (error) {
+        workspaceAccountError = error;
+      }
+      expect((workspaceAccountError as { code?: string } | undefined)?.code).toBe("23503");
+
       const lifecycleInput = {
         ...workspace,
         operationId: "security-revoke-provider",
@@ -1216,6 +1303,7 @@ describe("scoped knowledge (real PostgreSQL + FORCE RLS)", () => {
         targetId: lifecycleInput.targetId,
         eventType: lifecycleInput.eventType,
         expectedGeneration: lifecycleInput.expectedGeneration,
+        reasonCode: lifecycleInput.reasonCode,
         actor,
       });
       const [siblingWorkspace] = await admin<{ id: string }[]>`

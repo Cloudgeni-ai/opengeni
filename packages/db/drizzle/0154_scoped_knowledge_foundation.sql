@@ -1,4 +1,4 @@
--- deployment-mode: rolling
+-- deployment-mode: maintenance
 -- Additive provider-neutral scoped-knowledge foundation. This migration creates
 -- no connector, route, SDK/MCP/UI surface, prompt composition, policy head, or
 -- active preference/memory write path.
@@ -20,6 +20,7 @@ LANGUAGE sql IMMUTABLE AS $$
     OR (
       row_scope = 'personal'
       AND nullif(btrim(row_subject_id), '') IS NOT NULL
+      AND octet_length(convert_to(row_subject_id, 'UTF8')) <= 1024
     );
 $$;
 
@@ -102,6 +103,51 @@ LANGUAGE sql STABLE AS $$
       )
     );
 $$;
+
+CREATE TABLE "knowledge_operation_receipts" (
+  "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  "account_id" uuid NOT NULL REFERENCES "managed_accounts"("id") ON DELETE RESTRICT,
+  "scope_kind" text NOT NULL,
+  "scope_workspace_id" uuid REFERENCES "workspaces"("id") ON DELETE RESTRICT,
+  "scope_subject_id" text,
+  "scope_key" text NOT NULL,
+  "operation_kind" text NOT NULL,
+  "operation_namespace" text NOT NULL,
+  "operation_id" text NOT NULL,
+  "input_hash" text NOT NULL,
+  "result_id" uuid NOT NULL,
+  "actor_kind" text NOT NULL,
+  "actor_subject_id" text NOT NULL,
+  "initiating_human_subject_id" text,
+  "created_at" timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT "knowledge_operation_receipts_scope_chk" CHECK (
+    opengeni_private.scoped_knowledge_scope_valid(
+      "scope_kind", "scope_workspace_id", "scope_subject_id"
+    )
+    AND "scope_key" = opengeni_private.scoped_knowledge_scope_key(
+      "scope_kind", "scope_workspace_id", "scope_subject_id"
+    )
+  ),
+  CONSTRAINT "knowledge_operation_receipts_identity_chk" CHECK (
+    "operation_kind" IN (
+      'provider', 'source', 'source_object', 'document_version',
+      'entity', 'entity_alias', 'fact', 'claim_relation'
+    )
+    AND length(btrim("operation_namespace")) BETWEEN 1 AND 256
+    AND length(btrim("operation_id")) BETWEEN 1 AND 256
+    AND "input_hash" ~ '^[0-9a-f]{64}$'
+  ),
+  CONSTRAINT "knowledge_operation_receipts_actor_chk" CHECK (
+    opengeni_private.scoped_knowledge_actor_valid(
+      "actor_kind", "actor_subject_id", "initiating_human_subject_id"
+    )
+  ),
+  CONSTRAINT "knowledge_operation_receipts_operation_uq"
+    UNIQUE ("account_id", "operation_kind", "operation_namespace", "operation_id")
+);
+
+CREATE INDEX "knowledge_operation_receipts_result_idx"
+  ON "knowledge_operation_receipts" ("operation_kind", "result_id");
 
 CREATE TABLE "knowledge_providers" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1062,6 +1108,7 @@ DO $scope_workspace_fks$
 DECLARE table_name text;
 BEGIN
   FOREACH table_name IN ARRAY ARRAY[
+    'knowledge_operation_receipts',
     'knowledge_providers',
     'knowledge_sources',
     'knowledge_source_acl_versions',
@@ -1436,6 +1483,7 @@ DO $immutable_triggers$
 DECLARE table_name text;
 BEGIN
   FOREACH table_name IN ARRAY ARRAY[
+    'knowledge_operation_receipts',
     'knowledge_source_acl_versions',
     'knowledge_document_versions',
     'knowledge_lifecycle_events',
@@ -1459,11 +1507,20 @@ $immutable_triggers$;
 
 CREATE OR REPLACE FUNCTION scoped_knowledge_guard_provider_mutation()
 RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE mutation_writer boolean;
 BEGIN
   IF TG_OP = 'DELETE' THEN
     RAISE EXCEPTION 'knowledge provider tombstones are not deleted' USING ERRCODE = '55000';
   END IF;
-  IF current_setting('opengeni.knowledge_mutation_kind', true) <> 'lifecycle'
+  SELECT current_user = pg_get_userbyid(procedure_row.proowner)
+  INTO mutation_writer
+  FROM pg_proc procedure_row
+  WHERE procedure_row.oid = to_regprocedure(format(
+    '%I.scoped_knowledge_apply_lifecycle(uuid,text,uuid,text,bigint,text,text,text,text,text,text)',
+    TG_TABLE_SCHEMA
+  ));
+  IF NOT coalesce(mutation_writer, false)
+    OR current_setting('opengeni.knowledge_mutation_kind', true) <> 'lifecycle'
     OR current_setting('opengeni.knowledge_mutation_target', true) <> OLD.id::text
     OR (to_jsonb(NEW) - ARRAY['lifecycle_state', 'lifecycle_generation', 'updated_at'])
       IS DISTINCT FROM
@@ -1483,11 +1540,32 @@ $$;
 CREATE OR REPLACE FUNCTION scoped_knowledge_guard_source_mutation()
 RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE mutation_kind text := current_setting('opengeni.knowledge_mutation_kind', true);
+DECLARE mutation_writer boolean;
 BEGIN
   IF TG_OP = 'DELETE' THEN
     RAISE EXCEPTION 'knowledge source tombstones are not deleted' USING ERRCODE = '55000';
   END IF;
-  IF current_setting('opengeni.knowledge_mutation_target', true) <> OLD.id::text THEN
+  SELECT current_user = pg_get_userbyid(procedure_row.proowner)
+  INTO mutation_writer
+  FROM pg_proc procedure_row
+  WHERE procedure_row.oid = CASE mutation_kind
+    WHEN 'lifecycle' THEN to_regprocedure(format(
+      '%I.scoped_knowledge_apply_lifecycle(uuid,text,uuid,text,bigint,text,text,text,text,text,text)',
+      TG_TABLE_SCHEMA
+    ))
+    WHEN 'acl' THEN to_regprocedure(format(
+      '%I.scoped_knowledge_advance_source_acl(uuid,uuid,bigint,bigint,uuid,text,text,text,text,text,text)',
+      TG_TABLE_SCHEMA
+    ))
+    WHEN 'sync' THEN to_regprocedure(format(
+      '%I.scoped_knowledge_complete_sync(uuid,uuid,text,text,timestamptz,jsonb,text,text,text)',
+      TG_TABLE_SCHEMA
+    ))
+    ELSE NULL
+  END;
+  IF NOT coalesce(mutation_writer, false)
+    OR current_setting('opengeni.knowledge_mutation_target', true) <> OLD.id::text
+  THEN
     RAISE EXCEPTION 'knowledge source mutation target is not fenced' USING ERRCODE = '55000';
   END IF;
   IF mutation_kind = 'lifecycle' THEN
@@ -1529,11 +1607,28 @@ $$;
 CREATE OR REPLACE FUNCTION scoped_knowledge_guard_object_mutation()
 RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE mutation_kind text := current_setting('opengeni.knowledge_mutation_kind', true);
+DECLARE mutation_writer boolean;
 BEGIN
   IF TG_OP = 'DELETE' THEN
     RAISE EXCEPTION 'knowledge source object tombstones are not deleted' USING ERRCODE = '55000';
   END IF;
-  IF current_setting('opengeni.knowledge_mutation_target', true) <> OLD.id::text THEN
+  SELECT current_user = pg_get_userbyid(procedure_row.proowner)
+  INTO mutation_writer
+  FROM pg_proc procedure_row
+  WHERE procedure_row.oid = CASE mutation_kind
+    WHEN 'lifecycle' THEN to_regprocedure(format(
+      '%I.scoped_knowledge_apply_lifecycle(uuid,text,uuid,text,bigint,text,text,text,text,text,text)',
+      TG_TABLE_SCHEMA
+    ))
+    WHEN 'version' THEN to_regprocedure(format(
+      '%I.scoped_knowledge_advance_object_version(uuid,uuid,bigint,bigint,uuid,text,text,text,text,text,text)',
+      TG_TABLE_SCHEMA
+    ))
+    ELSE NULL
+  END;
+  IF NOT coalesce(mutation_writer, false)
+    OR current_setting('opengeni.knowledge_mutation_target', true) <> OLD.id::text
+  THEN
     RAISE EXCEPTION 'knowledge source object mutation target is not fenced' USING ERRCODE = '55000';
   END IF;
   IF mutation_kind = 'lifecycle' THEN
@@ -1568,11 +1663,20 @@ $$;
 
 CREATE OR REPLACE FUNCTION scoped_knowledge_guard_sync_mutation()
 RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE mutation_writer boolean;
 BEGIN
   IF TG_OP = 'DELETE' THEN
     RAISE EXCEPTION 'knowledge sync runs are not deleted' USING ERRCODE = '55000';
   END IF;
-  IF current_setting('opengeni.knowledge_mutation_kind', true) <> 'sync_complete'
+  SELECT current_user = pg_get_userbyid(procedure_row.proowner)
+  INTO mutation_writer
+  FROM pg_proc procedure_row
+  WHERE procedure_row.oid = to_regprocedure(format(
+    '%I.scoped_knowledge_complete_sync(uuid,uuid,text,text,timestamptz,jsonb,text,text,text)',
+    TG_TABLE_SCHEMA
+  ));
+  IF NOT coalesce(mutation_writer, false)
+    OR current_setting('opengeni.knowledge_mutation_kind', true) <> 'sync_complete'
     OR current_setting('opengeni.knowledge_mutation_target', true) <> OLD.id::text
     OR (to_jsonb(NEW) - ARRAY[
       'state', 'output_cursor', 'watermark', 'metadata', 'error_code',
@@ -1732,6 +1836,8 @@ BEGIN
           updated_at = clock_timestamp()
         WHERE target_object.id = p_target_id;
       END IF;
+      PERFORM set_config('opengeni.knowledge_mutation_kind', '', true);
+      PERFORM set_config('opengeni.knowledge_mutation_target', '', true);
 
       INSERT INTO knowledge_lifecycle_events (
         account_id, scope_kind, scope_workspace_id, scope_subject_id, scope_key,
@@ -1821,6 +1927,8 @@ BEGIN
       PERFORM set_config('opengeni.knowledge_mutation_target', p_source_id::text, true);
       UPDATE knowledge_sources SET current_acl_generation = acl_row.generation,
         updated_at = clock_timestamp() WHERE id = p_source_id;
+      PERFORM set_config('opengeni.knowledge_mutation_kind', '', true);
+      PERFORM set_config('opengeni.knowledge_mutation_target', '', true);
       INSERT INTO knowledge_lifecycle_events (
         account_id, scope_kind, scope_workspace_id, scope_subject_id, scope_key,
         target_kind, source_id, event_type, old_state, new_state,
@@ -1915,6 +2023,8 @@ BEGIN
         error_code = CASE WHEN p_state = 'failed' THEN p_error_code ELSE NULL END,
         completion_hash = p_completion_hash, completed_at = clock_timestamp()
       WHERE id = run_row.id RETURNING * INTO run_row;
+      PERFORM set_config('opengeni.knowledge_mutation_kind', '', true);
+      PERFORM set_config('opengeni.knowledge_mutation_target', '', true);
       INSERT INTO knowledge_lifecycle_events (
         account_id, scope_kind, scope_workspace_id, scope_subject_id, scope_key,
         target_kind, source_id, event_type, old_state, new_state,
@@ -2017,6 +2127,8 @@ BEGIN
       UPDATE knowledge_source_objects SET current_version_id = version_row.id,
         version_generation = version_row.version_generation, updated_at = clock_timestamp()
       WHERE id = p_object_id;
+      PERFORM set_config('opengeni.knowledge_mutation_kind', '', true);
+      PERFORM set_config('opengeni.knowledge_mutation_target', '', true);
       INSERT INTO knowledge_lifecycle_events (
         account_id, scope_kind, scope_workspace_id, scope_subject_id, scope_key,
         target_kind, object_id, event_type, old_state, new_state,
@@ -2067,6 +2179,7 @@ DO $rls$
 DECLARE table_name text;
 BEGIN
   FOREACH table_name IN ARRAY ARRAY[
+    'knowledge_operation_receipts',
     'knowledge_providers',
     'knowledge_sources',
     'knowledge_source_acl_versions',
@@ -2126,6 +2239,7 @@ DECLARE data_schema text := current_schema();
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
     FOREACH table_name IN ARRAY ARRAY[
+      'knowledge_operation_receipts',
       'knowledge_providers',
       'knowledge_sources',
       'knowledge_source_acl_versions',

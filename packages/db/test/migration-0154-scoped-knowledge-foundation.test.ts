@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
 
 const tables = [
+  "knowledge_operation_receipts",
   "knowledge_providers",
   "knowledge_sources",
   "knowledge_source_acl_versions",
@@ -24,9 +25,9 @@ const tables = [
 ] as const;
 
 describe("scoped-knowledge foundation migration", () => {
-  test("is additive, rolling, FORCE-RLS protected, and uses the current free ordinal", async () => {
+  test("is maintenance-gated, FORCE-RLS protected, and uses the current free ordinal", async () => {
     const sql = await readFile(join(migrationsDir, "0154_scoped_knowledge_foundation.sql"), "utf8");
-    expect(sql.split(/\r?\n/, 1)[0]).toBe("-- deployment-mode: rolling");
+    expect(sql.split(/\r?\n/, 1)[0]).toBe("-- deployment-mode: maintenance");
     for (const table of tables) {
       expect(sql).toContain(`CREATE TABLE "${table}"`);
       expect(sql).toContain(`'${table}'`);
@@ -46,6 +47,9 @@ describe("scoped-knowledge foundation migration", () => {
     expect(sql).toContain("scoped_knowledge_advance_source_acl");
     expect(sql).toContain("scoped_knowledge_complete_sync");
     expect(sql).toContain("scoped_knowledge_advance_object_version");
+    expect(sql).toContain("knowledge_operation_receipts_operation_uq");
+    expect(sql).toContain("current_user = pg_get_userbyid(procedure_row.proowner)");
+    expect(sql).toContain("set_config('opengeni.knowledge_mutation_kind', '', true)");
   });
 
   test("keeps provenance immutable and lifecycle restoration explicit", async () => {

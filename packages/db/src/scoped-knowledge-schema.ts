@@ -35,6 +35,33 @@ function actorColumns() {
   };
 }
 
+export const knowledgeOperationReceipts = pgTable(
+  "knowledge_operation_receipts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    ...tenantScopeColumns(),
+    operationKind: text("operation_kind").notNull(),
+    operationNamespace: text("operation_namespace").notNull(),
+    operationId: text("operation_id").notNull(),
+    inputHash: text("input_hash").notNull(),
+    resultId: uuid("result_id").notNull(),
+    ...actorColumns(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    operation: uniqueIndex("knowledge_operation_receipts_operation_uq").on(
+      table.accountId,
+      table.operationKind,
+      table.operationNamespace,
+      table.operationId,
+    ),
+    result: index("knowledge_operation_receipts_result_idx").on(
+      table.operationKind,
+      table.resultId,
+    ),
+  }),
+);
+
 export const knowledgeProviders = pgTable(
   "knowledge_providers",
   {
