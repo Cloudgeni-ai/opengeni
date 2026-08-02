@@ -4,7 +4,6 @@
 // console lives at Organization settings.
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
-  BoxIcon,
   BrainCircuitIcon,
   CheckIcon,
   ChevronDownIcon,
@@ -30,6 +29,7 @@ import {
   WORKSPACE_BROWSE_ITEMS,
   type WorkspaceConfigItem,
 } from "@/components/rail/workspace-nav-data";
+import { WORKSPACE_CONFIG_ICONS } from "@/components/rail/workspace-nav-icons";
 import { PreferenceToggleRow, VoiceInputPreferenceRow } from "@/components/transcription-settings";
 import { PermissionGroupPicker } from "@/components/permission-picker";
 import { Button } from "@/components/ui/button";
@@ -65,27 +65,29 @@ function BrowseWorkspaceStrip(props: { workspaceId: string; canReadInsights: boo
   const items = WORKSPACE_BROWSE_ITEMS.filter(
     (item: WorkspaceConfigItem) => !item.requiresAdmin || props.canReadInsights,
   );
-  // Leaf catalog only (workspace-nav-data). Do not import workspace-nav.tsx or
-  // workspace-nav-icons — that Lucide map shares into the shell and blows the
-  // initial bundle. Keep a single BoxIcon use so Rolldown's Lucide grouping
-  // stays aligned with the previous Variable-sets card.
+  // Icons come from workspace-nav-icons (already loaded by the rail shell).
+  // Import the map here — not workspace-nav.tsx — so settings stays free of
+  // the details/menu shell while every browse destination gets its icon.
   return (
     <nav aria-label="Browse workspace" className="flex flex-wrap items-center gap-x-1 gap-y-1.5">
       <span className="mr-1 text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
         Browse
       </span>
-      {items.map((item) => (
-        <Link
-          key={item.to}
-          to={item.to}
-          params={{ workspaceId: props.workspaceId }}
-          title={item.description}
-          className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg"
-        >
-          {item.icon === "box" ? <BoxIcon className="size-3.5 shrink-0 text-brand" /> : null}
-          {item.label}
-        </Link>
-      ))}
+      {items.map((item) => {
+        const Icon = WORKSPACE_CONFIG_ICONS[item.icon];
+        return (
+          <Link
+            key={item.to}
+            to={item.to}
+            params={{ workspaceId: props.workspaceId }}
+            title={item.description}
+            className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg"
+          >
+            <Icon className="size-3.5 shrink-0 text-brand" />
+            {item.label}
+          </Link>
+        );
+      })}
     </nav>
   );
 }
@@ -398,7 +400,7 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
         >
           <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5 text-left transition-colors hover:bg-surface-2/60 [&::-webkit-details-marker]:hidden">
             <KeyRoundIcon className="size-3.5 shrink-0 text-brand" />
-            <span className="min-w-0 flex-1 text-sm font-medium">API keys</span>
+            <span className="min-w-0 flex-1 text-sm font-medium">OpenGeni API Keys</span>
             <span className="text-2xs text-fg-subtle">
               {!apiKeysLoaded
                 ? "…"
