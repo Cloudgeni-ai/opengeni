@@ -1,5 +1,30 @@
 # @opengeni/worker-bundle
 
+## 0.14.0
+
+### Minor Changes
+
+- dd71248: Make workspace-owned MCP OAuth connections the default, add explicit personal
+  connection ownership, and preserve exact delegated personal authority across
+  turns, child sessions, goals, schedules, retries, and recovery with safe
+  tool-level degradation when a personal connection is unavailable.
+
+### Patch Changes
+
+- Updated dependencies [f4fa05c]
+- Updated dependencies [dd71248]
+- Updated dependencies [03ed7eb]
+  - @opengeni/runtime@0.16.1
+  - @opengeni/contracts@0.29.0
+  - @opengeni/core@0.17.0
+  - @opengeni/db@0.20.0
+  - @opengeni/config@0.9.2
+  - @opengeni/documents@0.2.65
+  - @opengeni/events@0.3.56
+  - @opengeni/github@0.4.14
+  - @opengeni/observability@0.4.1
+  - @opengeni/storage@0.2.51
+
 ## 0.13.11
 
 ### Patch Changes
