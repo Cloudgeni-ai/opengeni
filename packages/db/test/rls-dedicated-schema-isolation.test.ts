@@ -134,6 +134,7 @@ beforeAll(async () => {
 
   // (A) embedded migrate into the dedicated schema via the SDK entry point.
   await migrate(ADMIN_URL, SCHEMA);
+  await migrate(ADMIN_URL, SCHEMA);
 
   // Provision the non-owner app role via the REAL provisionRoles SDK entry, in
   // FORCE strategy, against the dedicated schema. This GRANTs opengeni_app DML on
@@ -242,6 +243,47 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
         delete: false,
       });
     }
+    expect(posture.tables.find((table) => table.name === "knowledge_memories")).toMatchObject({
+      select: true,
+      insert: true,
+      update: true,
+      delete: true,
+    });
+    for (const tableName of [
+      "knowledge_lifecycle_events",
+      "knowledge_memory_lifecycle_events",
+      "knowledge_memory_relationships",
+    ]) {
+      expect(posture.tables.find((table) => table.name === tableName)).toMatchObject({
+        select: true,
+        insert: false,
+        update: false,
+        delete: false,
+      });
+    }
+    for (const tableName of [
+      "knowledge_change_proposals",
+      "knowledge_claim_evidence",
+      "knowledge_claim_relations",
+      "knowledge_claim_reviews",
+      "knowledge_claims",
+      "knowledge_document_versions",
+      "knowledge_entities",
+      "knowledge_entity_aliases",
+      "knowledge_facts",
+      "knowledge_providers",
+      "knowledge_source_acl_versions",
+      "knowledge_source_objects",
+      "knowledge_sources",
+      "knowledge_sync_runs",
+    ]) {
+      expect(posture.tables.find((table) => table.name === tableName)).toMatchObject({
+        select: true,
+        insert: true,
+        update: false,
+        delete: false,
+      });
+    }
     for (const tableName of PROTECTED_NO_DIRECT_DML_TABLES) {
       expect(posture.tables.find((table) => table.name === tableName)).toMatchObject({
         rlsEnabled: true,
@@ -294,6 +336,46 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
       lifecycle_execute: true,
       snapshot_execute: true,
     });
+
+    const knowledgeFunctions = await admin<
+      Array<{
+        name: string;
+        security_definer: boolean;
+        app_execute: boolean;
+        public_execute: boolean;
+        settings: string[] | null;
+      }>
+    >`
+      SELECT
+        procedure.proname AS name,
+        procedure.prosecdef AS security_definer,
+        has_function_privilege('opengeni_app', procedure.oid, 'EXECUTE') AS app_execute,
+        exists (
+          select 1
+          from aclexplode(coalesce(procedure.proacl, acldefault('f', procedure.proowner))) acl
+          where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
+        ) AS public_execute,
+        procedure.proconfig AS settings
+      FROM pg_proc procedure
+      JOIN pg_namespace namespace ON namespace.oid = procedure.pronamespace
+      WHERE namespace.nspname = ${SCHEMA}
+        AND procedure.proname IN (
+          'scoped_knowledge_apply_lifecycle',
+          'scoped_knowledge_advance_source_acl',
+          'scoped_knowledge_complete_sync',
+          'scoped_knowledge_advance_object_version',
+          'scoped_knowledge_guard_acl_insert',
+          'scoped_knowledge_guard_sync_insert',
+          'scoped_knowledge_guard_version_insert'
+        )
+      ORDER BY procedure.proname`;
+    expect(knowledgeFunctions).toHaveLength(7);
+    for (const routine of knowledgeFunctions) {
+      expect(routine.security_definer).toBe(true);
+      expect(routine.public_execute).toBe(false);
+      expect(routine.settings).toContain(`search_path=${SCHEMA}, pg_catalog`);
+      expect(routine.app_execute).toBe(!routine.name.includes("_guard_"));
+    }
   });
 
   test("the restricted runtime role can perform Better Auth table DML", async () => {
