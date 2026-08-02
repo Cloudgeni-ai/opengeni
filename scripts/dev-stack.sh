@@ -31,7 +31,17 @@ fi
 
 # The local UI exposes Codex connection management, so its model-catalog and
 # runtime gates must agree by default. An explicit false still disables it.
-export OPENGENI_CODEX_SUBSCRIPTION_ENABLED="${OPENGENI_CODEX_SUBSCRIPTION_ENABLED:-true}"
+if [ -z "${OPENGENI_CODEX_SUBSCRIPTION_ENABLED:-}" ]; then
+  OPENGENI_CODEX_SUBSCRIPTION_ENABLED=true
+  export OPENGENI_CODEX_SUBSCRIPTION_ENABLED
+  {
+    printf '\n%s\n' '# Added by scripts/dev-stack.sh for local Codex/realtime development.'
+    printf 'OPENGENI_CODEX_SUBSCRIPTION_ENABLED=true\n'
+  } >>.env
+  echo "Enabled and persisted Codex subscription support in .env."
+else
+  export OPENGENI_CODEX_SUBSCRIPTION_ENABLED
+fi
 
 slugify() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//; s/-+/-/g'
@@ -236,6 +246,7 @@ fi
   printf 'OPENGENI_TEMPORAL_HOST=%s\n' "${OPENGENI_TEMPORAL_HOST}"
   printf 'OPENGENI_OBJECT_STORAGE_ENDPOINT=%s\n' "${OPENGENI_OBJECT_STORAGE_ENDPOINT}"
   printf 'OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT=%s\n' "${OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT}"
+  printf 'OPENGENI_CODEX_SUBSCRIPTION_ENABLED=%s\n' "${OPENGENI_CODEX_SUBSCRIPTION_ENABLED}"
   printf 'VITE_API_BASE_URL=%s\n' "${VITE_API_BASE_URL}"
 } >.env.runtime
 
@@ -278,7 +289,7 @@ pids+=("$!")
   OPENGENI_WORKER_HTTP_PORT="${OPENGENI_TURN_WORKER_HTTP_PORT}" bun run dev:watch) &
 pids+=("$!")
 
-(cd apps/web && bunx vite dev --port "${OPENGENI_WEB_PORT}" --host 0.0.0.0) &
+(cd apps/web && bun x vite dev --port "${OPENGENI_WEB_PORT}" --host 0.0.0.0) &
 pids+=("$!")
 
 wait

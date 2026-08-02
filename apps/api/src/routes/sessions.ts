@@ -757,7 +757,6 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         workspaceId,
         sessionId,
         deps.codexFetch,
-        claim.startupEntries,
       );
       try {
         const answer = await broker({ request: providerRequest, signal: c.req.raw.signal });

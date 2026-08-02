@@ -31,10 +31,11 @@ import {
   SessionControlInvariantError,
   updateSessionCommandReceiptResult,
 } from "./session-control";
+import { sessionRealtimeIsActiveInTransaction } from "./session-realtime-state";
 import {
-  fenceSessionWorkClaimForRealtimeInTransaction,
-  sessionRealtimeIsActiveInTransaction,
-} from "./session-realtime";
+  mirrorSessionRealtimeContextInTransaction,
+  renderRealtimeHumanInputContext,
+} from "./session-realtime-mirror";
 import * as schema from "./schema";
 import {
   frozenInitiatorForCommandActor,
@@ -50,8 +51,7 @@ export type QueueCommandConflictCode =
   | "PROMPT_CHANGED"
   | "DRAFT_CHANGED"
   | "DRAFT_NOT_EMPTY"
-  | "EDIT_SOURCE_CHANGED"
-  | "REALTIME_ACTIVE";
+  | "EDIT_SOURCE_CHANGED";
 
 export class QueueCommandConflictError extends Error {
   readonly name = "QueueCommandConflictError";
@@ -158,21 +158,6 @@ async function lockSession(
   const session = locks.sessions[0];
   if (!session) throw new Error(`Session not found: ${sessionId}`);
   return session;
-}
-
-async function requireNormalSessionMode(
-  db: Database,
-  session: typeof schema.sessions.$inferSelect,
-): Promise<typeof schema.sessions.$inferSelect> {
-  const realtimeFence = await fenceSessionWorkClaimForRealtimeInTransaction(db, session);
-  if (realtimeFence.active) {
-    throw new QueueCommandConflictError(
-      "REALTIME_ACTIVE",
-      "Session is currently in realtime mode",
-      { queueVersion: session.queueVersion },
-    );
-  }
-  return realtimeFence.session;
 }
 
 type SteerSupersessionResult = {
@@ -487,8 +472,7 @@ export async function saveComposerDraftInTransaction(
     workspaceId: input.workspaceId,
     controlLock: "already_locked",
   });
-  const session = await lockSession(db, input.workspaceId, input.sessionId);
-  await requireNormalSessionMode(db, session);
+  await lockSession(db, input.workspaceId, input.sessionId);
   const current = await getComposerDraftInTransaction(db, {
     ...input,
     lock: true,
@@ -574,7 +558,6 @@ export async function moveQueuedTurnInTransaction(
       replay: true,
     };
   }
-  session = await requireNormalSessionMode(db, session);
   if (session.queueVersion !== input.expectedQueueVersion) {
     throw new QueueCommandConflictError("QUEUE_VERSION_CHANGED", "Queue order changed", {
       queueVersion: session.queueVersion,
@@ -705,7 +688,6 @@ export async function deleteSessionQueueItemInTransaction(
       replay: true,
     };
   }
-  session = await requireNormalSessionMode(db, session);
   const turn = (
     await lockSessionEventWriteRows(db, {
       workspaceId: input.workspaceId,
@@ -840,7 +822,6 @@ export async function editQueuedTurnInTransaction(
       replay: true,
     };
   }
-  session = await requireNormalSessionMode(db, session);
   const draftRevision = existingDraft?.revision ?? 0;
   if (draftRevision !== input.expectedDraftRevision) {
     throw new QueueCommandConflictError("DRAFT_CHANGED", "Composer draft changed", {
@@ -1019,7 +1000,7 @@ export async function steerQueuedTurnInTransaction(
       replay: true,
     };
   }
-  await requireNormalSessionMode(db, await lockSession(db, input.workspaceId, input.sessionId));
+  await lockSession(db, input.workspaceId, input.sessionId);
   if (input.actor.type === "agent_attempt") {
     await assertAgentCommandAuthorityInTransaction(db, {
       workspaceId: input.workspaceId,
@@ -1210,6 +1191,14 @@ export async function submitHumanPromptInTransaction(
     reasoningEffortFallback: ReasoningEffort;
     /** Trusted API/core admission snapshot. Omitted only by legacy low-level callers. */
     turnExecutionPolicy?: TurnExecutionPolicyV1;
+    /** Trusted core-only metadata attached to the admitted turn. */
+    turnMetadata?: Record<string, unknown>;
+    /** Trusted display projection; the durable turn still receives `text`. */
+    messagePresentation?: {
+      kind: "realtime_voice" | "realtime_voice_handoff";
+      text: string;
+      context: string;
+    };
     source: "user" | "api";
     personalConnectionDelegations?: McpPersonalConnectionDelegation[];
     mcpCredentialUpdates?: Array<{
@@ -1240,6 +1229,8 @@ export async function submitHumanPromptInTransaction(
     reasoningEffort: input.reasoningEffort ?? null,
     latencyMode: input.latencyMode ?? null,
     source: input.source,
+    turnMetadata: input.turnMetadata ?? {},
+    messagePresentation: input.messagePresentation ?? null,
     mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
     ...(input.actor.type === "service"
       ? {
@@ -1286,8 +1277,6 @@ export async function submitHumanPromptInTransaction(
       replay: true,
     };
   }
-
-  await requireNormalSessionMode(db, await lockSession(db, input.workspaceId, input.sessionId));
 
   const before = await evaluateSessionControl(db, input.workspaceId, input.sessionId, {
     workspaceControl,
@@ -1471,7 +1460,15 @@ export async function submitHumanPromptInTransaction(
       type: "user.message",
       clientEventId: input.operationKey,
       payload: sanitizeEventPayload({
-        text: input.text,
+        text: input.messagePresentation?.text ?? input.text,
+        ...(input.messagePresentation
+          ? {
+              presentation: {
+                kind: input.messagePresentation.kind,
+                context: input.messagePresentation.context,
+              },
+            }
+          : {}),
         ...(input.resources.length ? { resources: input.resources } : {}),
         ...(input.model ? { model: input.model } : {}),
         ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
@@ -1508,8 +1505,8 @@ export async function submitHumanPromptInTransaction(
       latencyMode: input.turnExecutionPolicy?.latencyMode ?? input.latencyMode ?? "standard",
       sandboxBackend: session.sandboxBackend,
       metadata: input.turnExecutionPolicy
-        ? metadataWithTurnExecutionPolicyV1({}, input.turnExecutionPolicy)
-        : {},
+        ? metadataWithTurnExecutionPolicyV1(input.turnMetadata ?? {}, input.turnExecutionPolicy)
+        : (input.turnMetadata ?? {}),
       lineage: { actor: input.actor.type },
       ...initiatorColumns(frozenInitiator),
       initiatingHumanSubjectId: editedSourceTurn
@@ -1655,6 +1652,28 @@ export async function submitHumanPromptInTransaction(
     });
   }
   const eventRows = await db.insert(schema.sessionEvents).values(eventValues).returning();
+  if (input.actor.type === "human") {
+    await mirrorSessionRealtimeContextInTransaction(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      sourceKind: "human_input",
+      sourceId: acceptedEventId,
+      turnId,
+      channel: null,
+      text: renderRealtimeHumanInputContext({
+        delivery: input.delivery,
+        text: input.text,
+      }),
+      payload: {
+        delivery: input.delivery,
+        acceptedEventId,
+        instruction:
+          "Authoritative user context already routed to execution; do not delegate it again.",
+      },
+      now,
+    });
+  }
   const queueVersion = session.queueVersion + 1;
   await db
     .update(schema.sessions)
@@ -1971,10 +1990,7 @@ export async function steerAgentSessionInTransaction(
       replay: true,
     };
   }
-  await requireNormalSessionMode(
-    db,
-    await lockSession(db, input.workspaceId, input.targetSessionId),
-  );
+  await lockSession(db, input.workspaceId, input.targetSessionId);
   await assertAgentCommandAuthorityInTransaction(db, {
     workspaceId: input.workspaceId,
     actor: input.actor,

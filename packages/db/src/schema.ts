@@ -1541,9 +1541,8 @@ export const sessionRealtimeModes = pgTable(
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
     endedAt: timestamp("ended_at", { withTimezone: true }),
     endReason: text("end_reason"),
-    // The rolling migration owns this forward reference. Ended modes are
-    // consumed only when an eligible ordinary queued turn atomically binds all
-    // pending realtime history to one immutable projection row.
+    // The rolling migration owns this forward reference. End commits at most
+    // one canonical transcript-tail Steer and binds its audit projection here.
     contextProjectionId: uuid("context_projection_id"),
     contextProjectedAt: timestamp("context_projected_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -2438,10 +2437,8 @@ export const sessionTurns = pgTable(
   }),
 );
 
-// One bounded model-only projection of completed realtime ledger history,
-// bound to the exact ordinary text turn that consumed its source modes. This
-// is not conversation history: runtime reads it by turn id and filters its
-// system message from persistence, so later turns cannot replay it.
+// One bounded audit/idempotency projection of an ended mode's transcript-tail
+// wrapper, bound to the exact ordinary Steer turn that durably carries it.
 export const sessionRealtimeContextProjections = pgTable(
   "session_realtime_context_projections",
   {

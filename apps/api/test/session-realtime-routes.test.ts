@@ -142,6 +142,7 @@ async function fixture() {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId!,
     subjectId,
+    principalKind: "human_session",
     permissions: ["sessions:read", "sessions:control"],
     exp: Math.floor(Date.now() / 1_000) + 3_600,
   });
@@ -615,6 +616,7 @@ describe("session realtime lifecycle HTTP routes (real PostgreSQL)", () => {
             operationId: crypto.randomUUID(),
             kind: "user_transcript",
             text: "finalized API voice input",
+            payload: { turnId: "api-user-turn-1" },
           },
         ],
       }),

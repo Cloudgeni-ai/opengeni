@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { ReasoningEffort, type SessionRealtimeMode } from "@opengeni/contracts";
+import { LatencyMode, ReasoningEffort, type SessionRealtimeMode } from "@opengeni/contracts";
 import { and, asc, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 
 import { sanitizeEventPayload } from "./event-payload-sanitizer";
@@ -11,15 +11,16 @@ import {
   SessionRealtimeConflictError,
   type AssertSessionRealtimeOwnerInput,
 } from "./session-realtime";
-import { lockSessionEventWriteRows } from "./session-control";
-import { registerSessionWorkflowWakeInTransaction } from "./session-control";
-import { initiatorColumns, type FrozenTurnInitiator } from "./turn-initiator";
+import { lockSessionEventWriteRows, lockWorkspaceInferenceControl } from "./session-control";
+import { submitHumanPromptInTransaction } from "./session-queue-commands";
+import { mirrorSessionRealtimeContextInTransaction } from "./session-realtime-mirror";
 
 export const SESSION_REALTIME_LEDGER_MAX_BATCH = 64;
 export const SESSION_REALTIME_LEDGER_MAX_TEXT_BYTES = 131_072;
 export const SESSION_REALTIME_LEDGER_MAX_PAYLOAD_BYTES = 131_072;
 export const SESSION_REALTIME_LEDGER_MAX_OUTBOUND = 100;
 export const SESSION_REALTIME_STARTUP_MAX_ENTRIES = 100;
+const SESSION_REALTIME_SOURCE_EVENT_IDS_MAX = 64;
 
 export type SessionRealtimeConnectionState =
   | "negotiating"
@@ -194,23 +195,11 @@ export type AppendSessionRealtimeOutboundResult = {
   replay: boolean;
 };
 
-export type ProjectSessionRealtimeDelegationTerminalInput = {
-  accountId: string;
-  workspaceId: string;
-  sessionId: string;
-  turnId: string;
-  turnStatus: "completed" | "failed" | "cancelled" | "superseded";
-  terminalEvent: {
-    type: "turn.completed" | "turn.failed" | "turn.cancelled" | "turn.superseded";
-    payload: Record<string, unknown>;
-  };
-  now?: Date;
-};
-
-export type ProjectSessionRealtimeDelegationTerminalResult = {
-  entry: SessionRealtimeLedgerEntry;
-  replay: boolean;
-} | null;
+export {
+  projectSessionRealtimeDelegationTerminalInTransaction,
+  type ProjectSessionRealtimeDelegationTerminalInput,
+  type ProjectSessionRealtimeDelegationTerminalResult,
+} from "./session-realtime-terminal";
 
 export type ProjectSessionRealtimeDelegationProgressInput = {
   accountId: string;
@@ -342,65 +331,6 @@ export function isSessionRealtimeDelegationTurnMetadata(
   return realtimeDelegationMetadata(metadata) !== null;
 }
 
-/**
- * Under the canonical session lock, admit only the first queued ordinary turn
- * whose immutable metadata still matches its accepted provider call row. This
- * is the sole exception to the ordinary-work realtime claim fence.
- */
-export async function findClaimableSessionRealtimeDelegationTurnInTransaction(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sessionId: string;
-    realtimeId: string;
-  },
-): Promise<string | null> {
-  const [turn] = await db
-    .select({
-      id: schema.sessionTurns.id,
-      metadata: schema.sessionTurns.metadata,
-    })
-    .from(schema.sessionTurns)
-    .where(
-      and(
-        eq(schema.sessionTurns.accountId, input.accountId),
-        eq(schema.sessionTurns.workspaceId, input.workspaceId),
-        eq(schema.sessionTurns.sessionId, input.sessionId),
-        eq(schema.sessionTurns.status, "queued"),
-        eq(schema.sessionTurns.source, "api"),
-      ),
-    )
-    .orderBy(
-      asc(schema.sessionTurns.position),
-      asc(schema.sessionTurns.createdAt),
-      asc(schema.sessionTurns.id),
-    )
-    .limit(1);
-  if (!turn) return null;
-  const delegation = realtimeDelegationMetadata(turn.metadata);
-  if (!delegation || delegation.realtimeId !== input.realtimeId) return null;
-  const [call] = await db
-    .select({ id: schema.sessionRealtimeEntries.id })
-    .from(schema.sessionRealtimeEntries)
-    .where(
-      and(
-        eq(schema.sessionRealtimeEntries.id, delegation.ledgerEntryId),
-        eq(schema.sessionRealtimeEntries.accountId, input.accountId),
-        eq(schema.sessionRealtimeEntries.workspaceId, input.workspaceId),
-        eq(schema.sessionRealtimeEntries.sessionId, input.sessionId),
-        eq(schema.sessionRealtimeEntries.realtimeId, input.realtimeId),
-        eq(schema.sessionRealtimeEntries.connectionEpoch, delegation.connectionEpoch),
-        eq(schema.sessionRealtimeEntries.direction, "provider_in"),
-        eq(schema.sessionRealtimeEntries.kind, "delegation_call"),
-        eq(schema.sessionRealtimeEntries.delegationItemId, delegation.delegationItemId),
-        eq(schema.sessionRealtimeEntries.turnId, turn.id),
-      ),
-    )
-    .limit(1);
-  return call ? turn.id : null;
-}
-
 function deterministicUuid(seed: string): string {
   const bytes = createHash("sha256").update(seed, "utf8").digest().subarray(0, 16);
   bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x50;
@@ -409,8 +339,23 @@ function deterministicUuid(seed: string): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
-function deterministicTerminalOperationId(turnId: string): string {
-  return deterministicUuid(`opengeni:session-realtime-delegation-terminal:${turnId}`);
+function sourceEventProvenance(ids: readonly string[]): {
+  identity: string;
+  ids: string[];
+  count: number;
+  truncated: boolean;
+} {
+  const identity = createHash("sha256").update(ids.join(":"), "utf8").digest("hex");
+  if (ids.length <= SESSION_REALTIME_SOURCE_EVENT_IDS_MAX) {
+    return { identity, ids: [...ids], count: ids.length, truncated: false };
+  }
+  const half = SESSION_REALTIME_SOURCE_EVENT_IDS_MAX / 2;
+  return {
+    identity,
+    ids: [...ids.slice(0, half), ...ids.slice(-half)],
+    count: ids.length,
+    truncated: true,
+  };
 }
 
 function utf8Chunks(value: string, maximumBytes: number): string[] {
@@ -428,55 +373,6 @@ function utf8Chunks(value: string, maximumBytes: number): string[] {
     start = end;
   }
   return chunks;
-}
-
-function terminalProjection(input: ProjectSessionRealtimeDelegationTerminalInput): {
-  kind: "delegation_result" | "error";
-  text: string;
-  payload: Record<string, unknown>;
-} {
-  const expectedType = `turn.${input.turnStatus}`;
-  if (input.terminalEvent.type !== expectedType) {
-    throw new Error(
-      `Realtime delegation terminal event ${input.terminalEvent.type} does not match ${input.turnStatus}`,
-    );
-  }
-  const terminal = boundedPayload(input.terminalEvent.payload);
-  if (input.turnStatus === "completed") {
-    const output =
-      typeof terminal.output === "string" ? terminal.output : "Delegated turn completed.";
-    assertBoundedString(output, SESSION_REALTIME_LEDGER_MAX_TEXT_BYTES, "Delegation result");
-    return {
-      kind: "delegation_result",
-      text: output,
-      payload: boundedPayload({
-        status: input.turnStatus,
-        turnId: input.turnId,
-        terminalEventType: input.terminalEvent.type,
-        terminal,
-      }),
-    };
-  }
-  const code =
-    typeof terminal.code === "string" && terminal.code.length > 0
-      ? terminal.code
-      : `delegation_turn_${input.turnStatus}`;
-  const message =
-    typeof terminal.error === "string" && terminal.error.length > 0
-      ? terminal.error
-      : `Delegated turn ${input.turnStatus}.`;
-  assertBoundedString(message, SESSION_REALTIME_LEDGER_MAX_TEXT_BYTES, "Delegation error");
-  return {
-    kind: "error",
-    text: message,
-    payload: boundedPayload({
-      code,
-      status: input.turnStatus,
-      turnId: input.turnId,
-      terminalEventType: input.terminalEvent.type,
-      terminal,
-    }),
-  };
 }
 
 function expectedRole(input: SessionRealtimeInboundEntryInput): "user" | "assistant" | null {
@@ -1174,40 +1070,26 @@ async function admitRealtimeDelegationInTransaction(
   accountId: string,
   incoming: SessionRealtimeInboundEntryInput,
   entryId: string,
-  now: Date,
-): Promise<{ turnId: string; eventIds: string[]; workflowId: string }> {
-  // This function is a session-event writer, so independently retain the
-  // canonical control/workspace/session prefix even though owner proof already
-  // acquired it in the enclosing transaction.
-  const locks = await lockSessionEventWriteRows(db, {
-    workspaceId: input.workspaceId,
-    controlLock: "share",
-    sessionIds: [input.sessionId],
-  });
-  const session = locks.sessions[0];
+): Promise<{ turnId: string; eventIds: string[]; wakeRevision: number }> {
+  const [session] = await db
+    .select()
+    .from(schema.sessions)
+    .where(
+      and(
+        eq(schema.sessions.workspaceId, input.workspaceId),
+        eq(schema.sessions.id, input.sessionId),
+      ),
+    )
+    .limit(1);
   if (!session || session.accountId !== accountId || session.status === "cancelled") {
     throw new SessionRealtimeConflictError("REALTIME_NOT_FOUND", "Session not found");
   }
-
-  const [{ queued } = { queued: 0 }] = await db
-    .select({
-      queued: sql<number>`count(*) filter (where ${schema.sessionTurns.status} = 'queued')`,
-    })
-    .from(schema.sessionTurns)
-    .where(
-      and(
-        eq(schema.sessionTurns.workspaceId, input.workspaceId),
-        eq(schema.sessionTurns.sessionId, input.sessionId),
-      ),
-    );
   const reasoning = ReasoningEffort.safeParse(session.metadata.reasoningEffort);
   const [latestStarted] = await db
     .select({
       model: schema.sessionTurns.model,
       reasoningEffort: schema.sessionTurns.reasoningEffort,
       latencyMode: schema.sessionTurns.latencyMode,
-      sandboxBackend: schema.sessionTurns.sandboxBackend,
-      sandboxOs: schema.sessionTurns.sandboxOs,
     })
     .from(schema.sessionTurns)
     .where(
@@ -1219,143 +1101,58 @@ async function admitRealtimeDelegationInTransaction(
     )
     .orderBy(desc(schema.sessionTurns.startedAt), desc(schema.sessionTurns.createdAt))
     .limit(1);
-  const initiator: FrozenTurnInitiator = {
-    initiator: { kind: "subject", subjectId: input.ownerSubjectId },
-    context: {
-      source: "realtime_provider_delegation",
-      realtimeId: input.realtimeId,
-      connectionEpoch: input.connectionEpoch,
-      delegationItemId: incoming.delegationItemId!,
-    },
-  };
   const latestReasoning = ReasoningEffort.safeParse(latestStarted?.reasoningEffort);
-  const turnId = crypto.randomUUID();
-  const triggerEventId = crypto.randomUUID();
-  const workflowId = session.temporalWorkflowId ?? `session-${session.id}`;
-  const [turn] = await db
-    .insert(schema.sessionTurns)
-    .values({
-      id: turnId,
-      accountId,
-      workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
-      triggerEventId,
-      temporalWorkflowId: workflowId,
-      status: "queued",
-      source: "api",
-      position: Number(queued) + 1,
-      prompt: incoming.text!,
-      resources: [],
-      tools: [],
-      toolsProvided: false,
-      // The session default can differ from the provider/model explicitly used
-      // by the active conversation (for example a connected Codex subscription).
-      // Delegation is continuation work, so inherit the last started turn just
-      // like internal continuations and compaction do.
-      model: latestStarted?.model ?? session.model,
-      reasoningEffort: latestReasoning.success
-        ? latestReasoning.data
-        : reasoning.success
-          ? reasoning.data
-          : "medium",
-      latencyMode: latestStarted?.latencyMode ?? "standard",
-      sandboxBackend: latestStarted?.sandboxBackend ?? session.sandboxBackend,
-      sandboxOs: latestStarted?.sandboxOs ?? session.sandboxOs,
-      metadata: {
-        delivery: "send",
-        realtimeDelegation: {
-          realtimeId: input.realtimeId,
-          connectionEpoch: input.connectionEpoch,
-          delegationItemId: incoming.delegationItemId,
-          ledgerEntryId: entryId,
-        },
-      },
-      lineage: {
-        actor: "realtime_provider",
-        realtimeId: input.realtimeId,
-        connectionEpoch: input.connectionEpoch,
-        delegationItemId: incoming.delegationItemId,
-      },
-      ...initiatorColumns(initiator),
-      createdAt: now,
-      updatedAt: now,
-    })
-    .returning({ id: schema.sessionTurns.id });
-  if (!turn) throw new Error("Failed to create realtime delegation turn");
-
-  const eventValues: Array<typeof schema.sessionEvents.$inferInsert> = [
-    {
-      id: triggerEventId,
-      accountId,
-      workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
-      sequence: session.lastSequence + 1,
-      type: "user.message",
-      clientEventId: incoming.operationId,
-      payload: sanitizeEventPayload({
-        text: incoming.text,
-        delivery: "send",
-        initiator: initiator.initiator,
-        realtimeDelegation: {
-          realtimeId: input.realtimeId,
-          connectionEpoch: input.connectionEpoch,
-          delegationItemId: incoming.delegationItemId,
-        },
-      }),
-      occurredAt: now,
-    },
-    {
-      accountId,
-      workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
-      sequence: session.lastSequence + 2,
-      type: "turn.queued",
-      turnId,
-      payload: {
-        turnId,
-        triggerEventId,
-        source: "api",
-        initiator: initiator.initiator,
-        realtimeDelegation: {
-          realtimeId: input.realtimeId,
-          connectionEpoch: input.connectionEpoch,
-          delegationItemId: incoming.delegationItemId,
-        },
-      },
-      occurredAt: now,
-    },
-  ];
-  const events = await db.insert(schema.sessionEvents).values(eventValues).returning({
-    id: schema.sessionEvents.id,
-  });
-  await db
-    .update(schema.sessions)
-    .set({
-      status: "queued",
-      queueVersion: session.queueVersion + 1,
-      queueHeadPosition: 0,
-      queueTailPosition: Number(queued) + 1,
-      lastSequence: session.lastSequence + eventValues.length,
-      updatedAt: now,
-    })
-    .where(
-      and(eq(schema.sessions.workspaceId, input.workspaceId), eq(schema.sessions.id, session.id)),
-    );
-  await db.insert(schema.auditEvents).values({
+  const latestLatency = LatencyMode.safeParse(latestStarted?.latencyMode);
+  const provenance = {
+    source: "realtime_provider_delegation",
+    realtimeId: input.realtimeId,
+    connectionEpoch: input.connectionEpoch,
+    delegationItemId: incoming.delegationItemId!,
+    ledgerEntryId: entryId,
+  };
+  const inputTranscript = incoming.payload?.inputTranscript;
+  if (typeof inputTranscript !== "string" || inputTranscript.trim().length === 0) {
+    throw new Error("Realtime delegation input transcript is required");
+  }
+  const admitted = await submitHumanPromptInTransaction(db, {
     accountId,
     workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
     subjectId: input.ownerSubjectId,
-    action: "session.realtime.delegation.accept",
-    targetType: "session_turn",
-    targetId: turnId,
-    metadata: {
-      realtimeId: input.realtimeId,
-      connectionEpoch: input.connectionEpoch,
-      delegationItemId: incoming.delegationItemId,
-      ledgerEntryId: entryId,
+    subjectLabel: "Realtime",
+    actor: {
+      type: "service",
+      subjectId: input.ownerSubjectId,
+      subjectLabel: "Realtime",
+      context: provenance,
     },
+    operationKey: incoming.operationId,
+    delivery: "steer",
+    text: incoming.text!,
+    messagePresentation: {
+      kind: "realtime_voice",
+      text: inputTranscript,
+      context: incoming.text!,
+    },
+    resources: [],
+    model: latestStarted?.model ?? session.model,
+    reasoningEffort: latestReasoning.success
+      ? latestReasoning.data
+      : reasoning.success
+        ? reasoning.data
+        : "medium",
+    latencyMode: latestLatency.success ? latestLatency.data : "standard",
+    reasoningEffortFallback: reasoning.success ? reasoning.data : "medium",
+    turnMetadata: {
+      realtimeDelegation: { ...provenance, inputTranscript },
+    },
+    source: "api",
   });
-  return { turnId, eventIds: events.map(({ id }) => id), workflowId };
+  return {
+    turnId: admitted.turnId,
+    eventIds: admitted.eventIds,
+    wakeRevision: admitted.wakeRevision,
+  };
 }
 
 async function materializeRealtimeUpdates(
@@ -1460,6 +1257,9 @@ export async function syncSessionRealtimeLedgerInTransaction(
   if ((input.entries?.length ?? 0) > SESSION_REALTIME_LEDGER_MAX_BATCH) {
     throw new Error("Realtime ledger batch exceeds the server limit");
   }
+  // Realtime sync may admit canonical Steer work. Preserve the global lock
+  // order before owner proof locks the session row.
+  await lockWorkspaceInferenceControl(db, input.workspaceId, "update");
   const mode = await assertSessionRealtimeOwnerInTransaction(db, input);
   if (mode.connectionEpoch !== input.connectionEpoch) {
     throw new SessionRealtimeConflictError(
@@ -1485,8 +1285,7 @@ export async function syncSessionRealtimeLedgerInTransaction(
   let nextSequence = await nextLedgerSequence(db, input.realtimeId);
   let providerStartupAcknowledged = connection.startupAcknowledgedAt !== null;
   const eventIds: string[] = [];
-  let delegationTurns = 0;
-  let delegationWorkflowId: string | null = null;
+  let workflowWakeRevision: number | null = null;
   const now = input.now ?? new Date();
   if (input.providerStarted) {
     assertBoundedString(
@@ -1547,6 +1346,13 @@ export async function syncSessionRealtimeLedgerInTransaction(
       !text
     ) {
       throw new Error("Finalized realtime transcript text is required");
+    }
+    if (incoming.kind === "user_transcript" || incoming.kind === "assistant_transcript") {
+      const turnId = payload.turnId;
+      if (typeof turnId !== "string" || turnId.length === 0) {
+        throw new Error("Finalized realtime transcript turn id is required");
+      }
+      assertBoundedString(turnId, 1_024, "Realtime transcript turn id");
     }
     const [existing] = await db
       .select()
@@ -1620,7 +1426,6 @@ export async function syncSessionRealtimeLedgerInTransaction(
           modeRow.accountId,
           incoming,
           entry.id,
-          now,
         );
         const [linked] = await db
           .update(schema.sessionRealtimeEntries)
@@ -1630,8 +1435,7 @@ export async function syncSessionRealtimeLedgerInTransaction(
         if (!linked) throw new Error("Failed to link realtime delegation turn");
         entry = linked;
         eventIds.push(...admission.eventIds);
-        delegationTurns += 1;
-        delegationWorkflowId = admission.workflowId;
+        workflowWakeRevision = Math.max(workflowWakeRevision ?? 0, admission.wakeRevision);
         await hooks.afterDelegationAdmission?.({ entryId: entry.id, turnId: admission.turnId });
       }
     }
@@ -1700,21 +1504,6 @@ export async function syncSessionRealtimeLedgerInTransaction(
         ),
       );
   }
-  if (input.providerStarted && connection.startupFenceSequence > 0) {
-    await db
-      .update(schema.sessionRealtimeEntries)
-      .set({ clientAckedAt: now, providerAckedAt: now, updatedAt: now })
-      .where(
-        and(
-          eq(schema.sessionRealtimeEntries.workspaceId, input.workspaceId),
-          eq(schema.sessionRealtimeEntries.sessionId, input.sessionId),
-          eq(schema.sessionRealtimeEntries.realtimeId, input.realtimeId),
-          eq(schema.sessionRealtimeEntries.direction, "provider_out"),
-          isNull(schema.sessionRealtimeEntries.providerAckedAt),
-          sql`${schema.sessionRealtimeEntries.sequence} <= ${connection.startupFenceSequence}`,
-        ),
-      );
-  }
   const outbound = await db
     .select()
     .from(schema.sessionRealtimeEntries)
@@ -1732,16 +1521,6 @@ export async function syncSessionRealtimeLedgerInTransaction(
       asc(schema.sessionRealtimeEntries.sequence),
     )
     .limit(SESSION_REALTIME_LEDGER_MAX_OUTBOUND);
-  const workflowWakeRevision =
-    delegationTurns > 0
-      ? await registerSessionWorkflowWakeInTransaction(db, {
-          accountId: modeRow.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          temporalWorkflowId: delegationWorkflowId ?? `session-${input.sessionId}`,
-          reason: "realtime_delegation",
-        })
-      : null;
   return {
     accepted,
     outbound: outbound.map(mapEntry),
@@ -1878,7 +1657,34 @@ export async function projectSessionRealtimeDelegationProgressInTransaction(
     )
     .for("update")
     .limit(1);
-  if (!call) return { entries: [] };
+  const text = progressEvents.map((event) => event.text).join("");
+  const source = sourceEventProvenance(progressEvents.map((event) => event.id));
+  const sourceEventIds = source.ids;
+  const sourceEventSequences = progressEvents.map((event) => event.sequence);
+  const now = input.now ?? new Date();
+  if (!call) {
+    const mirrored = await mirrorSessionRealtimeContextInTransaction(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      sourceKind: "assistant_progress",
+      sourceId: source.identity,
+      turnId: input.turnId,
+      channel: "commentary",
+      text,
+      payload: {
+        route: "session_context",
+        status: "running",
+        sourceEventIds,
+        sourceEventCount: source.count,
+        sourceEventIdsTruncated: source.truncated,
+        firstSourceEventSequence: sourceEventSequences[0],
+        lastSourceEventSequence: sourceEventSequences.at(-1),
+      },
+      now,
+    });
+    return { entries: mirrored ? [mapEntry(mirrored.entry)] : [] };
+  }
   if (!call.delegationItemId) {
     throw new Error(`Delegation turn ${input.turnId} has no provider item identity`);
   }
@@ -1887,6 +1693,7 @@ export async function projectSessionRealtimeDelegationProgressInTransaction(
     .select({
       connectionEpoch: schema.sessionRealtimeModes.connectionEpoch,
       state: schema.sessionRealtimeModes.state,
+      leaseExpiresAt: schema.sessionRealtimeModes.leaseExpiresAt,
     })
     .from(schema.sessionRealtimeModes)
     .where(
@@ -1901,14 +1708,33 @@ export async function projectSessionRealtimeDelegationProgressInTransaction(
   if (!mode) {
     throw new Error(`Delegation turn ${input.turnId} lost its realtime mode ownership`);
   }
-  if (mode.state !== "active") return { entries: [] };
+  if (mode.state !== "active" || mode.leaseExpiresAt <= now) {
+    const mirrored = await mirrorSessionRealtimeContextInTransaction(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      sourceKind: "assistant_progress",
+      sourceId: source.identity,
+      turnId: input.turnId,
+      channel: "commentary",
+      text,
+      payload: {
+        route: "session_context",
+        status: "running",
+        priorRealtimeId: call.realtimeId,
+        sourceEventIds,
+        sourceEventCount: source.count,
+        sourceEventIdsTruncated: source.truncated,
+        firstSourceEventSequence: sourceEventSequences[0],
+        lastSourceEventSequence: sourceEventSequences.at(-1),
+      },
+      now,
+    });
+    return { entries: mirrored ? [mapEntry(mirrored.entry)] : [] };
+  }
 
-  const text = progressEvents.map((event) => event.text).join("");
   const chunks = utf8Chunks(text, SESSION_REALTIME_LEDGER_MAX_TEXT_BYTES);
-  const sourceEventIds = progressEvents.map((event) => event.id);
-  const sourceEventSequences = progressEvents.map((event) => event.sequence);
-  const operationSeed = sourceEventIds.join(":");
-  const now = input.now ?? new Date();
+  const operationSeed = source.identity;
   let nextSequence = await nextLedgerSequence(db, call.realtimeId);
   const inserted = await db
     .insert(schema.sessionRealtimeEntries)
@@ -1929,11 +1755,15 @@ export async function projectSessionRealtimeDelegationProgressInTransaction(
         turnId: input.turnId,
         text: chunk,
         payload: boundedPayload({
+          route: "delegation_context",
+          channel: "commentary",
           status: "running",
           turnId: input.turnId,
           callOperationId: call.operationId,
           callLedgerEntryId: call.id,
           sourceEventIds,
+          sourceEventCount: source.count,
+          sourceEventIdsTruncated: source.truncated,
           firstSourceEventSequence: sourceEventSequences[0],
           lastSourceEventSequence: sourceEventSequences.at(-1),
           chunkIndex,
@@ -1955,107 +1785,3 @@ export async function projectSessionRealtimeDelegationProgressInTransaction(
  * active. A later valid rotation may therefore replay the same durable row,
  * while the immutable realtime id prevents projection into another mode.
  */
-export async function projectSessionRealtimeDelegationTerminalInTransaction(
-  db: Database,
-  input: ProjectSessionRealtimeDelegationTerminalInput,
-): Promise<ProjectSessionRealtimeDelegationTerminalResult> {
-  const calls = await db
-    .select()
-    .from(schema.sessionRealtimeEntries)
-    .where(
-      and(
-        eq(schema.sessionRealtimeEntries.accountId, input.accountId),
-        eq(schema.sessionRealtimeEntries.workspaceId, input.workspaceId),
-        eq(schema.sessionRealtimeEntries.sessionId, input.sessionId),
-        eq(schema.sessionRealtimeEntries.turnId, input.turnId),
-        eq(schema.sessionRealtimeEntries.direction, "provider_in"),
-        eq(schema.sessionRealtimeEntries.kind, "delegation_call"),
-      ),
-    )
-    .for("update")
-    .limit(2);
-  if (calls.length === 0) return null;
-  if (calls.length !== 1) {
-    throw new Error(`Delegation turn ${input.turnId} has multiple accepted realtime calls`);
-  }
-  const call = calls[0]!;
-  if (!call.delegationItemId) {
-    throw new Error(`Delegation turn ${input.turnId} has no provider item identity`);
-  }
-  const [mode] = await db
-    .select({
-      id: schema.sessionRealtimeModes.id,
-      connectionEpoch: schema.sessionRealtimeModes.connectionEpoch,
-    })
-    .from(schema.sessionRealtimeModes)
-    .where(
-      and(
-        eq(schema.sessionRealtimeModes.id, call.realtimeId),
-        eq(schema.sessionRealtimeModes.accountId, input.accountId),
-        eq(schema.sessionRealtimeModes.workspaceId, input.workspaceId),
-        eq(schema.sessionRealtimeModes.sessionId, input.sessionId),
-      ),
-    )
-    .limit(1);
-  if (!mode) {
-    throw new Error(`Delegation turn ${input.turnId} lost its realtime mode ownership`);
-  }
-
-  const projected = terminalProjection(input);
-  const operationId = deterministicTerminalOperationId(input.turnId);
-  const [existing] = await db
-    .select()
-    .from(schema.sessionRealtimeEntries)
-    .where(
-      and(
-        eq(schema.sessionRealtimeEntries.workspaceId, input.workspaceId),
-        eq(schema.sessionRealtimeEntries.sessionId, input.sessionId),
-        eq(schema.sessionRealtimeEntries.turnId, input.turnId),
-        eq(schema.sessionRealtimeEntries.direction, "provider_out"),
-        inArray(schema.sessionRealtimeEntries.kind, ["delegation_result", "error"]),
-      ),
-    )
-    .limit(1);
-  if (existing) {
-    if (
-      existing.accountId !== input.accountId ||
-      existing.realtimeId !== call.realtimeId ||
-      existing.operationId !== operationId ||
-      existing.kind !== projected.kind ||
-      existing.delegationItemId !== call.delegationItemId
-    ) {
-      throw new Error(`Delegation turn ${input.turnId} has conflicting terminal projection`);
-    }
-    return { entry: mapEntry(existing), replay: true };
-  }
-
-  const now = input.now ?? new Date();
-  const nextSequence = await nextLedgerSequence(db, call.realtimeId);
-  const payload = boundedPayload({
-    ...projected.payload,
-    callOperationId: call.operationId,
-    callLedgerEntryId: call.id,
-  });
-  const [entry] = await db
-    .insert(schema.sessionRealtimeEntries)
-    .values({
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
-      realtimeId: call.realtimeId,
-      operationId,
-      connectionEpoch: mode.connectionEpoch,
-      sequence: Number(nextSequence),
-      direction: "provider_out",
-      kind: projected.kind,
-      delegationItemId: call.delegationItemId,
-      turnId: input.turnId,
-      text: projected.text,
-      payload,
-      createdAt: now,
-      updatedAt: now,
-    })
-    .returning();
-  if (!entry) throw new Error("Failed to project realtime delegation terminal result");
-  return { entry: mapEntry(entry), replay: false };
-}

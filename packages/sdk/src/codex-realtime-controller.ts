@@ -1085,9 +1085,11 @@ export function createCodexRealtimeController(
       const retiredTask = connectionTask;
       connectionTask = null;
       void retiredTask?.catch(() => undefined);
-      closeBrowserResources();
-      let current = state.mode;
       try {
+        await active?.bridge.sealAndFlush();
+        closeBrowserResources();
+        let current = state.mode;
+        if (!current) throw new Error("Codex realtime mode disappeared while stopping");
         let response: SessionRealtimeMutationResponse;
         try {
           response = await exclusive(
@@ -1128,6 +1130,7 @@ export function createCodexRealtimeController(
       } catch (error) {
         stopping = false;
         owner = currentOwner;
+        startActiveIntervals();
         publish({
           status: "recovering",
           diagnostic: diagnostic("terminal_stop", safeError(error), true),

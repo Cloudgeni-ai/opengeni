@@ -6,10 +6,11 @@ import type {
   SessionRealtimeMode,
   SessionRealtimeModel,
 } from "@opengeni/contracts";
-import { and, asc, eq, gt, inArray, sql } from "drizzle-orm";
+import { and, asc, eq, inArray } from "drizzle-orm";
 
 import { sanitizeEventPayload } from "./event-payload-sanitizer";
 import type { Database } from "./index";
+import { flushSessionRealtimeTranscriptTailInTransaction } from "./session-realtime-context";
 import {
   evaluateSessionControl,
   lockSessionEventWriteRows,
@@ -17,16 +18,14 @@ import {
 } from "./session-control";
 import * as schema from "./schema";
 
+export { sessionRealtimeIsActiveInTransaction } from "./session-realtime-state";
+
 export const SESSION_REALTIME_LEASE_MS = 30_000;
 const SESSION_REALTIME_MIN_LEASE_MS = 5_000;
 const SESSION_REALTIME_MAX_LEASE_MS = 120_000;
 
 export type SessionRealtimeConflictCode =
   | "SESSION_CANCELLED"
-  | "SESSION_NOT_IDLE"
-  | "QUEUED_PROMPT"
-  | "PENDING_HUMAN_INPUT"
-  | "PENDING_APPROVAL"
   | "CONTROL_NOT_ACTIVE"
   | "REALTIME_ACTIVE"
   | "REALTIME_NOT_FOUND"
@@ -96,12 +95,6 @@ export type SessionRealtimeMutationResult = {
 
 export type RenewSessionRealtimeResult = SessionRealtimeMutationResult & {
   expired: boolean;
-};
-
-export type ActiveSessionRealtime = {
-  id: string;
-  leaseExpiresAt: Date;
-  version: number;
 };
 
 function hashOwnerKey(ownerKey: string): string {
@@ -296,12 +289,28 @@ async function endWithEvent(
     },
     now,
   );
+  await flushSessionRealtimeTranscriptTailInTransaction(db, {
+    accountId: session.accountId,
+    workspaceId: session.workspaceId,
+    sessionId: session.id,
+    realtimeId: ended.id,
+    ownerSubjectId: ended.ownerSubjectId,
+    now,
+  });
   const workflowWakeRevision = await registerNormalModeWake(db, session, `realtime_${reason}`);
+  const [refreshedSession] = await db
+    .select()
+    .from(schema.sessions)
+    .where(
+      and(eq(schema.sessions.workspaceId, session.workspaceId), eq(schema.sessions.id, session.id)),
+    )
+    .limit(1);
+  if (!refreshedSession) throw new Error("Realtime session disappeared while ending mode");
   return {
     mode: mapRealtimeMode(ended),
     eventId: event.id,
     workflowWakeRevision,
-    session: { ...session, lastSequence: event.sequence, updatedAt: now },
+    session: refreshedSession,
   };
 }
 
@@ -328,83 +337,11 @@ async function lockRealtimeSession(
   return { session, control };
 }
 
-async function assertRealtimeAdmission(db: Database, session: SessionRow): Promise<void> {
+function assertRealtimeAdmission(session: SessionRow): void {
   if (session.status === "cancelled") {
     throw new SessionRealtimeConflictError(
       "SESSION_CANCELLED",
       "Cancelled session cannot enter realtime mode",
-    );
-  }
-  if (session.activeTurnId !== null) {
-    throw new SessionRealtimeConflictError(
-      "SESSION_NOT_IDLE",
-      "Session has active or requires-action work",
-    );
-  }
-  const [liveAttempt] = await db
-    .select({ id: schema.sessionTurnAttempts.id })
-    .from(schema.sessionTurnAttempts)
-    .where(
-      and(
-        eq(schema.sessionTurnAttempts.workspaceId, session.workspaceId),
-        eq(schema.sessionTurnAttempts.sessionId, session.id),
-        inArray(schema.sessionTurnAttempts.state, ["claimed", "running"]),
-      ),
-    )
-    .limit(1);
-  if (liveAttempt) {
-    throw new SessionRealtimeConflictError(
-      "SESSION_NOT_IDLE",
-      "Session still has an admitted ordinary work owner",
-    );
-  }
-  const [queuedPrompt] = await db
-    .select({ id: schema.sessionTurns.id })
-    .from(schema.sessionTurns)
-    .where(
-      and(
-        eq(schema.sessionTurns.workspaceId, session.workspaceId),
-        eq(schema.sessionTurns.sessionId, session.id),
-        eq(schema.sessionTurns.status, "queued"),
-        inArray(schema.sessionTurns.source, ["user", "api"]),
-      ),
-    )
-    .limit(1);
-  if (queuedPrompt) {
-    throw new SessionRealtimeConflictError("QUEUED_PROMPT", "Session has a queued human prompt");
-  }
-  const [humanInput] = await db
-    .select({ id: schema.sessionHumanInputRequests.id })
-    .from(schema.sessionHumanInputRequests)
-    .where(
-      and(
-        eq(schema.sessionHumanInputRequests.workspaceId, session.workspaceId),
-        eq(schema.sessionHumanInputRequests.sessionId, session.id),
-        eq(schema.sessionHumanInputRequests.status, "pending"),
-      ),
-    )
-    .limit(1);
-  if (humanInput) {
-    throw new SessionRealtimeConflictError(
-      "PENDING_HUMAN_INPUT",
-      "Session has unresolved human input",
-    );
-  }
-  const [approval] = await db
-    .select({ id: schema.agentRunStates.id })
-    .from(schema.agentRunStates)
-    .where(
-      and(
-        eq(schema.agentRunStates.workspaceId, session.workspaceId),
-        eq(schema.agentRunStates.sessionId, session.id),
-        sql`jsonb_array_length(${schema.agentRunStates.pendingApprovals}) > 0`,
-      ),
-    )
-    .limit(1);
-  if (approval) {
-    throw new SessionRealtimeConflictError(
-      "PENDING_APPROVAL",
-      "Session has unresolved tool approval",
     );
   }
 }
@@ -468,7 +405,7 @@ export async function beginSessionRealtimeInTransaction(
       "Session control must be active before realtime starts",
     );
   }
-  await assertRealtimeAdmission(db, session);
+  assertRealtimeAdmission(session);
 
   const [row] = await db
     .insert(schema.sessionRealtimeModes)
@@ -661,67 +598,14 @@ export async function endSessionRealtimeInTransaction(
   };
 }
 
-/** Called after the canonical session row is locked by a normal command. */
-export async function sessionRealtimeIsActiveInTransaction(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-  now = new Date(),
-): Promise<boolean> {
-  const [row] = await db
-    .select({ id: schema.sessionRealtimeModes.id })
-    .from(schema.sessionRealtimeModes)
-    .where(
-      and(
-        eq(schema.sessionRealtimeModes.workspaceId, workspaceId),
-        eq(schema.sessionRealtimeModes.sessionId, sessionId),
-        eq(schema.sessionRealtimeModes.state, "active"),
-        gt(schema.sessionRealtimeModes.leaseExpiresAt, now),
-      ),
-    )
-    .limit(1);
-  return Boolean(row);
-}
-
-/** Final ordinary-work claim fence, called under the canonical session lock. */
-export async function fenceSessionWorkClaimForRealtimeInTransaction(
+/** Lazily settle an expired voice lease under the canonical session lock. */
+export async function settleExpiredSessionRealtimeInTransaction(
   db: Database,
   session: SessionRow,
   now = new Date(),
-): Promise<{ active: ActiveSessionRealtime | null; session: SessionRow }> {
+): Promise<SessionRow> {
   const row = await loadActiveRowForUpdate(db, session.workspaceId, session.id);
-  if (!row) return { active: null, session };
-  if (row.leaseExpiresAt > now) {
-    return {
-      active: { id: row.id, leaseExpiresAt: row.leaseExpiresAt, version: row.version },
-      session,
-    };
-  }
+  if (!row || row.leaseExpiresAt > now) return session;
   const expired = await endWithEvent(db, session, row, "lease_expired", now);
-  return { active: null, session: expired.session };
-}
-
-export async function peekActiveSessionRealtime(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-  now = new Date(),
-): Promise<ActiveSessionRealtime | null> {
-  const [row] = await db
-    .select({
-      id: schema.sessionRealtimeModes.id,
-      leaseExpiresAt: schema.sessionRealtimeModes.leaseExpiresAt,
-      version: schema.sessionRealtimeModes.version,
-    })
-    .from(schema.sessionRealtimeModes)
-    .where(
-      and(
-        eq(schema.sessionRealtimeModes.workspaceId, workspaceId),
-        eq(schema.sessionRealtimeModes.sessionId, sessionId),
-        eq(schema.sessionRealtimeModes.state, "active"),
-        gt(schema.sessionRealtimeModes.leaseExpiresAt, now),
-      ),
-    )
-    .limit(1);
-  return row ?? null;
+  return expired.session;
 }

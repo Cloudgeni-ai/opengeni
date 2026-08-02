@@ -492,9 +492,9 @@ describe("Codex realtime browser controller", () => {
     expect(syncRequests).toHaveLength(beforeAudioDelta);
     await controller.ingestProviderEvent(
       JSON.stringify({
-        type: "input_transcript.added",
+        type: "turn.done",
         event_id: "transcript-final",
-        item: { id: "input-item", text: "finalized user text" },
+        turn: { id: "input-turn", role: "user", transcript: "finalized user text" },
       }),
     );
     expect(syncRequests.at(-1)?.entries).toEqual([
@@ -506,9 +506,13 @@ describe("Codex realtime browser controller", () => {
     ]);
     await controller.ingestProviderEvent(
       JSON.stringify({
-        type: "output_transcript.added",
+        type: "turn.done",
         event_id: "assistant-transcript-final",
-        item: { id: "output-item", text: "finalized assistant text" },
+        turn: {
+          id: "output-turn",
+          role: "assistant",
+          transcript: "finalized assistant text",
+        },
       }),
     );
     expect(syncRequests.at(-1)?.entries).toEqual([
@@ -540,7 +544,11 @@ describe("Codex realtime browser controller", () => {
         kind: "delegation_call",
         providerEventId: "delegation-created-final",
         delegationItemId: "delegation-item-1",
-        text: "Use the ordinary same-session tool path",
+        text: expect.stringContaining("<input>Use the ordinary same-session tool path</input>"),
+        payload: expect.objectContaining({
+          inputTranscript: "Use the ordinary same-session tool path",
+          transcriptFenceTurnIds: ["input-turn", "output-turn"],
+        }),
       }),
     ]);
     expect(controller.snapshot().bridge?.activeDelegationId).toBe("delegation-item-1");
@@ -1370,9 +1378,13 @@ describe("Codex realtime browser controller", () => {
 
   test("persists an event emitted synchronously by setRemoteDescription exactly once", async () => {
     const payload = JSON.stringify({
-      type: "input_transcript.added",
+      type: "turn.done",
       event_id: "early-transcript-1",
-      item: { id: "early-item-1", text: "captured before transport return" },
+      turn: {
+        id: "early-turn-1",
+        role: "user",
+        transcript: "captured before transport return",
+      },
     });
     let browser!: ReturnType<typeof browserFixture>;
     browser = browserFixture({
@@ -1581,9 +1593,13 @@ describe("Codex realtime browser controller", () => {
     const encoder = new TextEncoder();
     const emptyPayloads = Array.from({ length: 128 }, (_, index) =>
       JSON.stringify({
-        type: "input_transcript.added",
+        type: "turn.done",
         event_id: `handoff-${index}`,
-        item: { id: `item-${index}`, text: "" },
+        turn: {
+          id: `turn-${index}`,
+          role: "user",
+          transcript: "",
+        },
       }),
     );
     const emptyBytes = emptyPayloads.reduce(
@@ -1595,11 +1611,12 @@ describe("Codex realtime browser controller", () => {
     const remainder = textBudget % emptyPayloads.length;
     const payloads = emptyPayloads.map((_payload, index) =>
       JSON.stringify({
-        type: "input_transcript.added",
+        type: "turn.done",
         event_id: `handoff-${index}`,
-        item: {
-          id: `item-${index}`,
-          text: "x".repeat(textBytes + (index < remainder ? 1 : 0)),
+        turn: {
+          id: `turn-${index}`,
+          role: "user",
+          transcript: "x".repeat(textBytes + (index < remainder ? 1 : 0)),
         },
       }),
     );
@@ -1720,9 +1737,13 @@ describe("Codex realtime browser controller", () => {
       dispatchProviderMessage(
         browser.events,
         JSON.stringify({
-          type: "input_transcript.added",
+          type: "turn.done",
           event_id: `active-${index}`,
-          item: { id: `item-${index}`, text: `active-${index}` },
+          turn: {
+            id: `turn-${index}`,
+            role: "user",
+            transcript: `active-${index}`,
+          },
         }),
       );
     }

@@ -224,19 +224,17 @@ import {
   type WorkspaceControlRow,
 } from "./session-control";
 import {
-  fenceSessionWorkClaimForRealtimeInTransaction,
-  peekActiveSessionRealtime,
   sessionRealtimeIsActiveInTransaction,
+  settleExpiredSessionRealtimeInTransaction,
 } from "./session-realtime";
 import {
-  findClaimableSessionRealtimeDelegationTurnInTransaction,
   isSessionRealtimeDelegationTurnMetadata,
   projectSessionRealtimeDelegationProgressInTransaction,
   projectSessionRealtimeDelegationTerminalInTransaction,
 } from "./session-realtime-ledger";
 import {
-  projectSessionRealtimeContextForTurnInTransaction,
-  type SessionRealtimeContextProjection,
+  listSessionRealtimeContinuityEntriesInTransaction,
+  type SessionRealtimeContinuityEntry,
 } from "./session-realtime-context";
 import * as schema from "./schema";
 import {
@@ -21415,47 +21413,26 @@ export async function getActiveSessionHistoryItems(
   });
 }
 
-/**
- * Read only the completed realtime-history projection bound to this exact turn.
- * It is model-only ephemeral context, not active session history; a later turn
- * id therefore cannot replay an earlier mode's projection.
- */
-export async function getSessionRealtimeContextProjectionForTurn(
+/** Bounded finalized voice turns used only to resume a later realtime call. */
+export async function getSessionRealtimeContinuityEntries(
   db: Database,
   workspaceId: string,
   sessionId: string,
-  turnId: string,
-): Promise<SessionRealtimeContextProjection | null> {
+  maximumEntries = 20,
+): Promise<SessionRealtimeContinuityEntry[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .select()
-      .from(schema.sessionRealtimeContextProjections)
-      .where(
-        and(
-          eq(schema.sessionRealtimeContextProjections.workspaceId, workspaceId),
-          eq(schema.sessionRealtimeContextProjections.sessionId, sessionId),
-          eq(schema.sessionRealtimeContextProjections.turnId, turnId),
-        ),
-      )
-      .limit(2);
-    if (rows.length > 1) {
-      throw new Error(`Turn ${turnId} has multiple realtime context projections`);
-    }
-    const row = rows[0];
-    return row
-      ? {
-          id: row.id,
-          workspaceId: row.workspaceId,
-          sessionId: row.sessionId,
-          turnId: row.turnId,
-          context: row.context,
-          sourceModeCount: row.sourceModeCount,
-          sourceEntryCount: row.sourceEntryCount,
-          includedEntryCount: row.includedEntryCount,
-          omittedEntryCount: row.omittedEntryCount,
-          createdAt: row.createdAt.toISOString(),
-        }
-      : null;
+    const [session] = await scopedDb
+      .select({ accountId: schema.sessions.accountId })
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .limit(1);
+    if (!session) return [];
+    return await listSessionRealtimeContinuityEntriesInTransaction(scopedDb, {
+      accountId: session.accountId,
+      workspaceId,
+      sessionId,
+      maximumEntries,
+    });
   });
 }
 
@@ -36759,15 +36736,8 @@ export type ClaimSessionWorkForAttemptResult =
   | { action: "claimed"; turn: SessionTurnForExecution }
   | {
       action: "unclaimed";
-      reason: "gate-closed" | "no-work" | "stale-approval" | "control-pending" | "realtime-active";
+      reason: "gate-closed" | "no-work" | "stale-approval" | "control-pending";
     };
-
-export type ClaimSessionWorkForAttemptHooks = {
-  /** Test-only failure injection after source modes and projection are bound. */
-  afterRealtimeContextProjection?:
-    | ((projection: SessionRealtimeContextProjection) => void | Promise<void>)
-    | undefined;
-};
 
 /**
  * Claim and register one inference attempt after a turn worker has accepted the
@@ -36779,7 +36749,6 @@ export async function claimSessionWorkForAttempt(
   db: Database,
   workspaceId: string,
   input: ClaimSessionWorkForAttemptInput,
-  hooks: ClaimSessionWorkForAttemptHooks = {},
 ): Promise<ClaimSessionWorkForAttemptResult> {
   const { sessionId, workflowId } = input;
   return await withWorkspaceRls(
@@ -37074,27 +37043,12 @@ export async function claimSessionWorkForAttempt(
         );
         let session = prefix.sessions[0];
         if (!session) return { action: "unclaimed", reason: "no-work" };
-        const realtimeFence = await fenceSessionWorkClaimForRealtimeInTransaction(
+        // Work and realtime may coexist, but claim remains the lazy lifecycle
+        // cleanup point for an expired voice lease.
+        session = await settleExpiredSessionRealtimeInTransaction(
           tx as unknown as Database,
           session,
         );
-        session = realtimeFence.session;
-        const realtimeDelegationTurnId = realtimeFence.active
-          ? session.activeTurnId === null
-            ? await findClaimableSessionRealtimeDelegationTurnInTransaction(
-                tx as unknown as Database,
-                {
-                  accountId: session.accountId,
-                  workspaceId,
-                  sessionId,
-                  realtimeId: realtimeFence.active.id,
-                },
-              )
-            : null
-          : null;
-        if (realtimeFence.active && realtimeDelegationTurnId === null) {
-          return { action: "unclaimed", reason: "realtime-active" };
-        }
         if (effectiveControl.state !== "active") {
           return { action: "unclaimed", reason: "gate-closed" };
         }
@@ -37563,9 +37517,6 @@ export async function claimSessionWorkForAttempt(
             }
           : undefined;
         const id = queuedTurn?.id;
-        if (realtimeFence.active && id !== realtimeDelegationTurnId) {
-          return { action: "unclaimed", reason: "realtime-active" };
-        }
         if (!id) {
           // Manual compaction is a first-class maintenance execution, never
           // prompt queue work. A waiting human/API prompt stays ahead because
@@ -38138,46 +38089,28 @@ export async function claimSessionWorkForAttempt(
           }),
           producerCodexCredentialId: null,
         });
-        // A provider-delegated turn remains part of realtime work even if it
-        // reaches the queue after the mode ended. It must not consume voice
-        // continuity intended for the next ordinary human/API text turn.
         const providerDelegatedTurn = isSessionRealtimeDelegationTurnMetadata(row.metadata);
-        const realtimeContextProjection =
-          !realtimeFence.active && !providerDelegatedTurn
-            ? await projectSessionRealtimeContextForTurnInTransaction(tx as unknown as Database, {
-                accountId: session.accountId,
-                workspaceId,
-                sessionId,
-                turnId: row.id,
-                now,
-              })
-            : null;
-        if (realtimeContextProjection) {
-          await hooks.afterRealtimeContextProjection?.(realtimeContextProjection);
-        }
         // Cross-session updates are already projected through
-        // delegation.context.append while realtime is active. Keep them
-        // pending for normal mode instead of consuming them as hidden context
-        // on the provider-delegated ordinary turn.
-        const delivered =
-          realtimeFence.active || providerDelegatedTurn
-            ? {
-                count: 0,
-                lastSequence: session.lastSequence,
-                triggerEventId: null,
-                historyItemId: null,
-                historyItem: null,
-                updates: [] as Array<typeof schema.sessionSystemUpdates.$inferSelect>,
-                events: [] as Array<typeof schema.sessionEvents.$inferInsert>,
-                event: null,
-              }
-            : await deliverPendingUpdates(
-                session.accountId,
-                row.id,
-                row.executionGeneration,
-                session.lastSequence + 1,
-                now,
-              );
+        // delegation.context.append. Keep them pending instead of consuming
+        // them as hidden context on the provider-delegated ordinary turn.
+        const delivered = providerDelegatedTurn
+          ? {
+              count: 0,
+              lastSequence: session.lastSequence,
+              triggerEventId: null,
+              historyItemId: null,
+              historyItem: null,
+              updates: [] as Array<typeof schema.sessionSystemUpdates.$inferSelect>,
+              events: [] as Array<typeof schema.sessionEvents.$inferInsert>,
+              event: null,
+            }
+          : await deliverPendingUpdates(
+              session.accountId,
+              row.id,
+              row.executionGeneration,
+              session.lastSequence + 1,
+              now,
+            );
         await persistDeliveredUpdateBatch(delivered, session.accountId, row.id);
         if (delivered.events.length > 0) {
           await tx.insert(schema.sessionEvents).values(delivered.events);
@@ -38933,12 +38866,6 @@ export async function settleSessionAttemptInterruptions(
 
 export type SessionWorkPeek =
   | { kind: "runnable" }
-  | {
-      kind: "realtime-active";
-      realtimeId: string;
-      leaseExpiresAt: string;
-      version: number;
-    }
   | { kind: "approval-pending"; triggerEventId: string }
   | { kind: "approval-wait"; humanInputRequestId?: string; expiresAt?: string }
   | {
@@ -39017,25 +38944,6 @@ export async function peekSessionWork(
       .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
       .limit(1);
     if (!session) return { kind: "idle" };
-    const realtime = await peekActiveSessionRealtime(scopedDb, workspaceId, sessionId);
-    if (realtime) {
-      const realtimeDelegationTurnId =
-        session.activeTurnId === null
-          ? await findClaimableSessionRealtimeDelegationTurnInTransaction(scopedDb, {
-              accountId: session.accountId,
-              workspaceId,
-              sessionId,
-              realtimeId: realtime.id,
-            })
-          : null;
-      if (realtimeDelegationTurnId !== null) return { kind: "runnable" };
-      return {
-        kind: "realtime-active",
-        realtimeId: realtime.id,
-        leaseExpiresAt: realtime.leaseExpiresAt.toISOString(),
-        version: realtime.version,
-      };
-    }
     const [interruption] = await scopedDb
       .select({ attemptId: schema.sessionAttemptInterruptions.attemptId })
       .from(schema.sessionAttemptInterruptions)

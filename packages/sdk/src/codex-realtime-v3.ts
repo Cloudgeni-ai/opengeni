@@ -33,6 +33,8 @@ export type {
 export const CODEX_REALTIME_V3_SYNC_MAX_ENTRIES = 64;
 export const CODEX_REALTIME_V3_PENDING_MAX_ENTRIES = 256;
 export const CODEX_REALTIME_V3_PENDING_MAX_BYTES = 16 * 1024 * 1024;
+const REALTIME_DELEGATION_TRANSCRIPT_MAX_BYTES = 65_536;
+const REALTIME_DELEGATION_INPUT_MAX_BYTES = 65_536;
 
 export type CodexRealtimeV3BridgeFatal = {
   code: "pending_overflow";
@@ -80,6 +82,8 @@ export type CodexRealtimeV3Bridge = {
   snapshot(): CodexRealtimeV3BridgeSnapshot;
   ingest(payload: string): Promise<void>;
   flush(): Promise<void>;
+  /** Stop accepting provider events, then durably drain everything already parsed. */
+  sealAndFlush(): Promise<void>;
   listen(): void;
   close(): void;
 };
@@ -89,10 +93,17 @@ type PendingInbound = {
   bytes: number;
 };
 
+type FinalizedTranscript = {
+  role: "user" | "assistant";
+  text: string;
+  turnId: string;
+};
+
 export function createCodexRealtimeV3Bridge(
   options: CodexRealtimeV3BridgeOptions,
 ): CodexRealtimeV3Bridge {
   let closed = false;
+  let sealed = false;
   let listening = false;
   let speaking = false;
   let activeDelegationId: string | null = null;
@@ -113,6 +124,9 @@ export function createCodexRealtimeV3Bridge(
   let forceSync = false;
   const clientReceivedSequences = new Set<number>();
   const sentSequences = new Set<number>();
+  const finalizedTurnIds = new Set<string>();
+  let transcriptSinceDelegation: FinalizedTranscript[] = [];
+  let pendingDelegationUserTranscript: { delegationItemId: string; text: string } | null = null;
   const randomUUID = options.randomUUID ?? defaultRandomUUID;
 
   const snapshot = (): CodexRealtimeV3BridgeSnapshot => ({
@@ -148,7 +162,7 @@ export function createCodexRealtimeV3Bridge(
   };
 
   const enqueue = (entry: SessionRealtimeInboundEntry): boolean => {
-    if (closed || fatal) return false;
+    if (closed || sealed || fatal) return false;
     const bytes = utf8ByteLength(JSON.stringify(entry));
     if (
       pendingInboundCount + 1 > CODEX_REALTIME_V3_PENDING_MAX_ENTRIES ||
@@ -248,6 +262,16 @@ export function createCodexRealtimeV3Bridge(
         sendOutbound(options.events, entry);
         sentSequences.add(entry.sequence);
         if (
+          entry.kind === "session_update" &&
+          entry.payload.source === "human_input" &&
+          entry.payload.delivery === "steer"
+        ) {
+          // The session continues under the human's new direction. The typed
+          // session update above is all the provider needs; this only keeps the
+          // local diagnostic from claiming the prior delegation is still live.
+          activeDelegationId = null;
+        }
+        if (
           (entry.kind === "delegation_result" || entry.kind === "error") &&
           entry.delegationItemId === activeDelegationId
         ) {
@@ -291,7 +315,7 @@ export function createCodexRealtimeV3Bridge(
   };
 
   const ingest = (payload: string): Promise<void> => {
-    if (closed || fatal) return Promise.resolve();
+    if (closed || sealed || fatal) return Promise.resolve();
     const parsed = parseCodexRealtimeV3Event(payload);
     if (!parsed.ok) {
       if (parsed.reason === "unsupported_type") {
@@ -314,24 +338,65 @@ export function createCodexRealtimeV3Bridge(
         };
         durable = true;
       }
-    } else if (event.type === "input_transcript.added") {
-      durable = enqueue(inbound(randomUUID, "user_transcript", event));
-    } else if (event.type === "output_transcript.added") {
-      durable = enqueue(inbound(randomUUID, "assistant_transcript", event));
+    } else if (
+      event.type === "input_transcript.added" ||
+      event.type === "output_transcript.added"
+    ) {
+      // These events are provider UI deltas. `turn.done` is the single
+      // authoritative finalized transcript persisted below.
     } else if (event.type === "delegation.created") {
       activeDelegationId = event.delegationItemId;
+      const transcript = delegationTranscript(transcriptSinceDelegation, event.inputTranscript);
+      const coveredTurnIds = transcriptSinceDelegation.map((entry) => entry.turnId);
       durable = enqueue({
         operationId: randomUUID(),
         kind: "delegation_call",
         providerEventId: event.providerEventId,
         delegationItemId: event.delegationItemId,
-        text: event.inputTranscript,
-        payload: { offsetMs: event.offsetMs },
+        text: renderRealtimeDelegationInput(event.inputTranscript, transcript),
+        payload: {
+          offsetMs: event.offsetMs,
+          inputTranscript: event.inputTranscript,
+          transcriptFenceTurnIds: coveredTurnIds,
+        },
       });
+      if (durable) {
+        const alreadyFinalized = transcriptSinceDelegation.some(
+          (entry) =>
+            entry.role === "user" &&
+            normalizedTranscript(entry.text) === normalizedTranscript(event.inputTranscript),
+        );
+        pendingDelegationUserTranscript = alreadyFinalized
+          ? null
+          : { delegationItemId: event.delegationItemId, text: event.inputTranscript };
+        transcriptSinceDelegation = [];
+      }
     } else if (event.type === "output_audio.delta") {
       speaking = true;
     } else if (event.type === "turn.done") {
       speaking = false;
+      if (event.transcript.length > 0 && !finalizedTurnIds.has(event.turnId)) {
+        const coveredByDelegationItemId =
+          event.role === "user" &&
+          pendingDelegationUserTranscript !== null &&
+          normalizedTranscript(event.transcript) ===
+            normalizedTranscript(pendingDelegationUserTranscript.text)
+            ? pendingDelegationUserTranscript.delegationItemId
+            : null;
+        durable = enqueue(finalTranscript(randomUUID, event, coveredByDelegationItemId));
+        if (durable) {
+          finalizedTurnIds.add(event.turnId);
+          if (coveredByDelegationItemId) {
+            pendingDelegationUserTranscript = null;
+          } else {
+            transcriptSinceDelegation.push({
+              role: event.role,
+              text: event.transcript,
+              turnId: event.turnId,
+            });
+          }
+        }
+      }
     } else if (event.type === "error") {
       lastError = event.message;
       durable = enqueue({
@@ -350,7 +415,7 @@ export function createCodexRealtimeV3Bridge(
     void ingest(message.data).catch(() => undefined);
   };
   const listen = (): void => {
-    if (closed || listening) return;
+    if (closed || sealed || listening) return;
     listening = true;
     options.events.addEventListener("message", onMessage);
   };
@@ -360,6 +425,13 @@ export function createCodexRealtimeV3Bridge(
     snapshot,
     ingest,
     flush: () => requestFlush(true),
+    sealAndFlush: async () => {
+      if (closed) return;
+      sealed = true;
+      if (listening) options.events.removeEventListener("message", onMessage);
+      listening = false;
+      await requestFlush(true);
+    },
     listen,
     close: () => {
       if (closed) return;
@@ -370,33 +442,102 @@ export function createCodexRealtimeV3Bridge(
   };
 }
 
-function inbound(
+function finalTranscript(
   randomUUID: () => string,
-  kind: "user_transcript" | "assistant_transcript",
-  event: Extract<
-    CodexRealtimeV3Event,
-    { type: "input_transcript.added" | "output_transcript.added" }
-  >,
+  event: Extract<CodexRealtimeV3Event, { type: "turn.done" }>,
+  coveredByDelegationItemId: string | null,
 ): SessionRealtimeInboundEntry {
   return {
     operationId: randomUUID(),
-    kind,
+    kind: event.role === "user" ? "user_transcript" : "assistant_transcript",
     providerEventId: event.providerEventId,
-    text: event.text,
+    text: event.transcript,
+    payload: {
+      turnId: event.turnId,
+      ...(coveredByDelegationItemId ? { coveredByDelegationItemId } : {}),
+    },
   };
+}
+
+function delegationTranscript(
+  entries: readonly FinalizedTranscript[],
+  inputTranscript: string,
+): FinalizedTranscript[] {
+  const selected = [...entries];
+  const last = selected.at(-1);
+  if (
+    inputTranscript.length > 0 &&
+    !(
+      last?.role === "user" &&
+      normalizedTranscript(last.text) === normalizedTranscript(inputTranscript)
+    )
+  ) {
+    selected.push({ role: "user", text: inputTranscript, turnId: "provider-delegation-input" });
+  }
+  const bounded: FinalizedTranscript[] = [];
+  let bytes = 0;
+  for (let index = selected.length - 1; index >= 0; index -= 1) {
+    const entry = selected[index]!;
+    const line = `${entry.role}: ${entry.text}`;
+    const lineBytes = utf8ByteLength(line) + (bounded.length > 0 ? 1 : 0);
+    if (bytes + lineBytes > REALTIME_DELEGATION_TRANSCRIPT_MAX_BYTES) break;
+    bounded.unshift(entry);
+    bytes += lineBytes;
+  }
+  return bounded;
+}
+
+function renderRealtimeDelegationInput(
+  inputTranscript: string,
+  transcript: readonly FinalizedTranscript[],
+): string {
+  const input = takeUtf8Head(inputTranscript, REALTIME_DELEGATION_INPUT_MAX_BYTES);
+  const transcriptDelta = transcript.map((entry) => `${entry.role}: ${entry.text}`).join("\n");
+  return [
+    "<realtime_delegation>",
+    `  <input>${escapeXmlText(input)}</input>`,
+    ...(transcriptDelta
+      ? [`  <transcript_delta>${escapeXmlText(transcriptDelta)}</transcript_delta>`]
+      : []),
+    "</realtime_delegation>",
+  ].join("\n");
+}
+
+function normalizedTranscript(value: string): string {
+  return value.trim().replaceAll(/\s+/g, " ");
+}
+
+function takeUtf8Head(value: string, maximumBytes: number): string {
+  const bytes = new TextEncoder().encode(value);
+  if (bytes.length <= maximumBytes) return value;
+  let end = maximumBytes;
+  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end -= 1;
+  return new TextDecoder().decode(bytes.subarray(0, end));
+}
+
+function escapeXmlText(value: string): string {
+  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
 
 function sendOutbound(events: RTCDataChannel, entry: SessionRealtimeLedgerEntry): void {
   if (events.readyState !== "open") throw new Error("Codex realtime data channel is not open");
   const text = entry.text ?? JSON.stringify(entry.payload);
+  const payloadChannel =
+    entry.payload.channel === "speakable" || entry.payload.channel === "commentary"
+      ? entry.payload.channel
+      : entry.payload.channel === null
+        ? undefined
+        : entry.kind === "session_update"
+          ? "commentary"
+          : undefined;
   const messages =
     (entry.kind === "delegation_result" || entry.kind === "error") && entry.delegationItemId
       ? encodeCodexRealtimeV3DelegationContextAppend({
           delegationItemId: entry.delegationItemId,
           text,
-          channel: "speakable",
+          channel: payloadChannel ?? "speakable",
         })
-      : encodeCodexRealtimeV3SessionContextAppend({ text, channel: "commentary" });
+      : encodeCodexRealtimeV3SessionContextAppend({ text, channel: payloadChannel });
   for (const message of messages) events.send(JSON.stringify(message));
 }
 

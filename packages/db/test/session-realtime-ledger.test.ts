@@ -24,6 +24,8 @@ import {
   SessionControlInvariantError,
   SessionRealtimeConflictError,
   settleCodexCredentialLeaseLoss,
+  settleSessionAttemptInterruptions,
+  submitHumanPromptInTransaction,
   syncSessionRealtimeLedgerInTransaction,
   withWorkspaceRls,
   type Database,
@@ -104,6 +106,28 @@ function ownerProof(value: Fixture, expectedVersion = value.started.mode.version
   };
 }
 
+async function endMode(value: Fixture) {
+  return await transaction(value.owner.workspaceId, (tx) =>
+    endSessionRealtimeInTransaction(tx, {
+      ...ownerProof(value),
+      reason: "user_stop",
+    }),
+  );
+}
+
+async function beginReplacementMode(value: Fixture): Promise<Fixture> {
+  const owner = {
+    ...value.owner,
+    operationId: crypto.randomUUID(),
+    browserInstanceId: `browser-${crypto.randomUUID()}`,
+    ownerKey: `owner-key-${crypto.randomUUID()}-${crypto.randomUUID()}`,
+  };
+  const started = await transaction(owner.workspaceId, (tx) =>
+    beginSessionRealtimeInTransaction(tx, owner),
+  );
+  return { ...value, owner, started };
+}
+
 async function claimInitial(value: Fixture, promotionMode: "legacy" | "staged" = "staged") {
   const operationId = crypto.randomUUID();
   const input = {
@@ -169,6 +193,7 @@ function delegationSyncInput(
   connection: { id: string; connectionEpoch: number },
   operationId = crypto.randomUUID(),
 ) {
+  const inputTranscript = "Complete one ordinary delegated task on this same session";
   return {
     ...ownerProof(value),
     connectionId: connection.id,
@@ -179,8 +204,8 @@ function delegationSyncInput(
         kind: "delegation_call" as const,
         providerEventId: `delegation-created-${operationId}`,
         delegationItemId: `delegation-item-${operationId}`,
-        text: "Complete one ordinary delegated task on this same session",
-        payload: { offsetMs: 125 },
+        text: `<realtime_delegation>\n  <input>${inputTranscript}</input>\n</realtime_delegation>`,
+        payload: { offsetMs: 125, inputTranscript, transcriptFenceTurnIds: [] },
       },
     ],
   };
@@ -533,7 +558,7 @@ describe("session realtime ledger", () => {
     });
   });
 
-  test("accepts durable provider startup proof exactly once for the captured rotation fence", async () => {
+  test("accepts startup proof once without mistaking it for provider delivery", async () => {
     const value = await fixture();
     const first = await claimInitial(value);
     await complete(value, first.claimed.connection);
@@ -572,12 +597,14 @@ describe("session realtime ledger", () => {
       connectionEpoch: rotated.connection.connectionEpoch,
       providerStarted: proof,
     };
-    await transaction(value.owner.workspaceId, (tx) =>
+    const firstStarted = await transaction(value.owner.workspaceId, (tx) =>
       syncSessionRealtimeLedgerInTransaction(tx, syncInput),
     );
-    await transaction(value.owner.workspaceId, (tx) =>
+    const replayedStarted = await transaction(value.owner.workspaceId, (tx) =>
       syncSessionRealtimeLedgerInTransaction(tx, syncInput),
     );
+    expect(firstStarted.outbound.map((entry) => entry.id)).toContain(outbound.entry.id);
+    expect(replayedStarted.outbound.map((entry) => entry.id)).toContain(outbound.entry.id);
 
     const persisted = await transaction(value.owner.workspaceId, async (tx) => {
       const [connection] = await tx
@@ -597,12 +624,15 @@ describe("session realtime ledger", () => {
       startupEventId: proof.providerEventId,
     });
     expect(persisted.connection?.startupAcknowledgedAt).toBeInstanceOf(Date);
-    expect(persisted.entry?.providerAckedAt).toBeInstanceOf(Date);
+    expect(persisted.entry?.providerAckedAt).toBeNull();
 
     const acknowledgedClaimReplay = await transaction(value.owner.workspaceId, (tx) =>
       claimSessionRealtimeConnectionInTransaction(tx, rotationInput),
     );
-    expect(acknowledgedClaimReplay).toMatchObject({ replay: true, startupEntries: [] });
+    expect(acknowledgedClaimReplay.replay).toBe(true);
+    expect(acknowledgedClaimReplay.startupEntries.map((entry) => entry.id)).toEqual([
+      outbound.entry.id,
+    ]);
 
     await expectConflict(
       transaction(value.owner.workspaceId, (tx) =>
@@ -615,22 +645,40 @@ describe("session realtime ledger", () => {
     );
   });
 
-  test("keeps finalized transcripts in the realtime ledger until one-time text projection", async () => {
+  test("keeps finalized transcripts out of durable history until the end-of-call tail flush", async () => {
     const value = await fixture();
     const first = await claimInitial(value);
     await complete(value, first.claimed.connection);
+    await expect(
+      transaction(value.owner.workspaceId, (tx) =>
+        syncSessionRealtimeLedgerInTransaction(tx, {
+          ...ownerProof(value),
+          connectionId: first.claimed.connection.id,
+          connectionEpoch: 1,
+          entries: [
+            {
+              operationId: crypto.randomUUID(),
+              kind: "user_transcript",
+              text: "legacy transcript fragment",
+            },
+          ],
+        }),
+      ),
+    ).rejects.toThrow("Finalized realtime transcript turn id is required");
     const entries = [
       {
         operationId: crypto.randomUUID(),
         kind: "user_transcript" as const,
         providerEventId: "input-transcript-1",
         text: "finalized human voice",
+        payload: { turnId: "user-turn-1" },
       },
       {
         operationId: crypto.randomUUID(),
         kind: "assistant_transcript" as const,
         providerEventId: "output-transcript-1",
         text: "finalized assistant voice",
+        payload: { turnId: "assistant-turn-1" },
       },
     ];
     const input = {
@@ -678,7 +726,7 @@ describe("session realtime ledger", () => {
           role: "user" as const,
           providerEventId: "immutable-transcript-1",
           text: "immutable finalized transcript",
-          payload: { nested: { z: 1, a: 2 } },
+          payload: { turnId: "immutable-turn-1", nested: { z: 1, a: 2 } },
         },
       ],
     };
@@ -705,7 +753,12 @@ describe("session realtime ledger", () => {
       transaction(value.owner.workspaceId, (tx) =>
         syncSessionRealtimeLedgerInTransaction(tx, {
           ...exact,
-          entries: [{ ...exact.entries[0]!, payload: { nested: { a: 3, z: 1 } } }],
+          entries: [
+            {
+              ...exact.entries[0]!,
+              payload: { turnId: "immutable-turn-1", nested: { a: 3, z: 1 } },
+            },
+          ],
         }),
       ),
     ).rejects.toMatchObject({ code: "REALTIME_ENTRY_CHANGED" });
@@ -821,7 +874,7 @@ describe("session realtime ledger", () => {
         },
       }),
     );
-    expect(acknowledged.outbound.map((entry) => entry.id)).not.toContain(update!.id);
+    expect(acknowledged.outbound.map((entry) => entry.id)).toContain(update!.id);
     expect(
       await listOutstandingSessionSystemUpdates(
         client.db,
@@ -1072,6 +1125,10 @@ describe("session realtime ledger", () => {
             eq(schema.sessionRealtimeEntries.operationId, input.entries[0]!.operationId),
           ),
         );
+      const [userEvent] = await tx
+        .select()
+        .from(schema.sessionEvents)
+        .where(eq(schema.sessionEvents.id, turns[0]!.triggerEventId));
       const [session] = await tx
         .select({
           id: schema.sessions.id,
@@ -1090,7 +1147,7 @@ describe("session realtime ledger", () => {
         .select({ children: sql<number>`count(*)` })
         .from(schema.sessions)
         .where(eq(schema.sessions.parentSessionId, value.session.id));
-      return { turns, calls, session, count: Number(count), children: Number(children) };
+      return { turns, calls, userEvent, session, count: Number(count), children: Number(children) };
     });
     expect(persisted.turns).toHaveLength(1);
     expect(persisted.turns[0]).toMatchObject({
@@ -1101,16 +1158,471 @@ describe("session realtime ledger", () => {
       model: "codex/configured-conversation-model",
       reasoningEffort: "high",
       latencyMode: "fast",
-      sandboxBackend: "docker",
-      sandboxOs: "linux",
-      initiatorKind: "subject",
+      sandboxBackend: "none",
+      sandboxOs: null,
+      initiatorKind: "service",
       initiatorSubjectId: value.owner.ownerSubjectId,
+      lineage: { actor: "service" },
+      metadata: {
+        delivery: "steer",
+        realtimeDelegation: {
+          realtimeId: value.started.mode.id,
+          connectionEpoch: 1,
+          delegationItemId: input.entries[0]!.delegationItemId,
+          ledgerEntryId: persisted.calls[0]!.id,
+          source: "realtime_provider_delegation",
+          inputTranscript: input.entries[0]!.payload.inputTranscript,
+        },
+        replacedTurnId: null,
+        replacedAttemptId: null,
+        interruptionCount: 0,
+      },
     });
     expect(persisted.calls).toHaveLength(1);
+    expect(persisted.userEvent?.payload).toEqual({
+      text: input.entries[0]!.payload.inputTranscript,
+      presentation: {
+        kind: "realtime_voice",
+        context: input.entries[0]!.text,
+      },
+      model: "codex/configured-conversation-model",
+      reasoningEffort: "high",
+      latencyMode: "fast",
+      delivery: "steer",
+      initiator: expect.any(Object),
+    });
     expect(persisted.calls[0]!.turnId).toBe(persisted.turns[0]!.id);
     expect(persisted.count).toBe(before.count);
     expect(persisted.children).toBe(0);
     expect(persisted.session).toEqual(before.session);
+  });
+
+  test("delegation uses canonical Steer against an already-running ordinary turn", async () => {
+    const value = await fixture();
+    const connection = await claimInitial(value);
+    await complete(value, connection.claimed.connection);
+    await proveProviderStarted(value, connection.claimed.connection);
+    const foreground = await transaction(value.owner.workspaceId, (tx) =>
+      submitHumanPromptInTransaction(tx, {
+        accountId: value.owner.accountId,
+        workspaceId: value.owner.workspaceId,
+        sessionId: value.owner.sessionId,
+        subjectId: value.owner.ownerSubjectId,
+        actor: { type: "human", subjectId: value.owner.ownerSubjectId },
+        operationKey: crypto.randomUUID(),
+        delivery: "send",
+        text: "Work on the original direction",
+        resources: [],
+        reasoningEffortFallback: "low",
+        source: "user",
+      }),
+    );
+    const attemptId = crypto.randomUUID();
+    const foregroundClaim = await claimSessionWorkForAttempt(client.db, value.owner.workspaceId, {
+      sessionId: value.owner.sessionId,
+      workflowId: `session-${value.owner.sessionId}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(foregroundClaim).toMatchObject({
+      action: "claimed",
+      turn: { id: foreground.turnId },
+    });
+
+    const admitted = await transaction(value.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(
+        tx,
+        delegationSyncInput(value, connection.claimed.connection),
+      ),
+    );
+    const replacementId = admitted.accepted[0]?.entry.turnId;
+    if (!replacementId) throw new Error("Realtime Steer replacement was not linked");
+    const facts = await transaction(value.owner.workspaceId, async (tx) => {
+      const [replacement] = await tx
+        .select()
+        .from(schema.sessionTurns)
+        .where(eq(schema.sessionTurns.id, replacementId));
+      const [interruption] = await tx
+        .select()
+        .from(schema.sessionAttemptInterruptions)
+        .where(eq(schema.sessionAttemptInterruptions.attemptId, attemptId));
+      const [session] = await tx
+        .select({ activeTurnId: schema.sessions.activeTurnId })
+        .from(schema.sessions)
+        .where(eq(schema.sessions.id, value.owner.sessionId));
+      return { replacement, interruption, session };
+    });
+    expect(facts.replacement).toMatchObject({
+      id: replacementId,
+      status: "queued",
+      metadata: {
+        delivery: "steer",
+        replacedTurnId: foreground.turnId,
+        replacedAttemptId: attemptId,
+        interruptionCount: 1,
+      },
+    });
+    expect(facts.interruption).toMatchObject({ attemptId, kind: "steer", state: "pending" });
+    expect(facts.session?.activeTurnId).toBe(foreground.turnId);
+  });
+
+  test("human Steer continues an ownerless realtime delegation through session context", async () => {
+    const value = await fixture();
+    const connection = await claimInitial(value);
+    await complete(value, connection.claimed.connection);
+    await proveProviderStarted(value, connection.claimed.connection);
+    const admitted = await transaction(value.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(
+        tx,
+        delegationSyncInput(value, connection.claimed.connection),
+      ),
+    );
+    const delegatedTurnId = admitted.accepted[0]?.entry.turnId;
+    if (!delegatedTurnId) throw new Error("Realtime delegation was not linked");
+    await transaction(value.owner.workspaceId, async (tx) => {
+      await tx.execute(sql`set local opengeni.session_inference_claim = '1'`);
+      await tx
+        .update(schema.sessionTurns)
+        .set({ status: "requires_action", startedAt: new Date(), updatedAt: new Date() })
+        .where(eq(schema.sessionTurns.id, delegatedTurnId));
+      await tx
+        .update(schema.sessions)
+        .set({
+          activeTurnId: delegatedTurnId,
+          status: "requires_action",
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.sessions.id, value.owner.sessionId));
+    });
+
+    await transaction(value.owner.workspaceId, (tx) =>
+      submitHumanPromptInTransaction(tx, {
+        accountId: value.owner.accountId,
+        workspaceId: value.owner.workspaceId,
+        sessionId: value.owner.sessionId,
+        subjectId: value.owner.ownerSubjectId,
+        actor: { type: "human", subjectId: value.owner.ownerSubjectId },
+        operationKey: crypto.randomUUID(),
+        delivery: "steer",
+        text: "Replace the waiting delegation",
+        resources: [],
+        reasoningEffortFallback: "medium",
+        source: "user",
+      }),
+    );
+
+    const projection = await transaction(value.owner.workspaceId, async (tx) => {
+      const terminal = await tx
+        .select()
+        .from(schema.sessionRealtimeEntries)
+        .where(
+          and(
+            eq(schema.sessionRealtimeEntries.turnId, delegatedTurnId),
+            eq(schema.sessionRealtimeEntries.direction, "provider_out"),
+            eq(schema.sessionRealtimeEntries.kind, "error"),
+          ),
+        );
+      const [humanSteer] = await tx
+        .select()
+        .from(schema.sessionRealtimeEntries)
+        .where(
+          and(
+            eq(schema.sessionRealtimeEntries.direction, "provider_out"),
+            eq(schema.sessionRealtimeEntries.kind, "session_update"),
+          ),
+        );
+      const [turn] = await tx
+        .select({ status: schema.sessionTurns.status })
+        .from(schema.sessionTurns)
+        .where(eq(schema.sessionTurns.id, delegatedTurnId));
+      return { humanSteer, terminal, turn };
+    });
+    expect(projection.turn?.status).toBe("superseded");
+    expect(projection.terminal).toEqual([]);
+    expect(projection.humanSteer).toMatchObject({
+      kind: "session_update",
+      payload: {
+        delivery: "steer",
+        source: "human_input",
+      },
+    });
+  });
+
+  test("human Steer does not fabricate a terminal after running-turn interruption settlement", async () => {
+    const value = await fixture();
+    const connection = await claimInitial(value);
+    await complete(value, connection.claimed.connection);
+    await proveProviderStarted(value, connection.claimed.connection);
+    const admitted = await transaction(value.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(
+        tx,
+        delegationSyncInput(value, connection.claimed.connection),
+      ),
+    );
+    const delegatedTurnId = admitted.accepted[0]?.entry.turnId;
+    if (!delegatedTurnId) throw new Error("Realtime delegation was not linked");
+    const attemptId = crypto.randomUUID();
+    const claim = await claimSessionWorkForAttempt(client.db, value.owner.workspaceId, {
+      sessionId: value.owner.sessionId,
+      workflowId: `session-${value.owner.sessionId}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(claim).toMatchObject({ action: "claimed", turn: { id: delegatedTurnId } });
+
+    await transaction(value.owner.workspaceId, (tx) =>
+      submitHumanPromptInTransaction(tx, {
+        accountId: value.owner.accountId,
+        workspaceId: value.owner.workspaceId,
+        sessionId: value.owner.sessionId,
+        subjectId: value.owner.ownerSubjectId,
+        actor: { type: "human", subjectId: value.owner.ownerSubjectId },
+        operationKey: crypto.randomUUID(),
+        delivery: "steer",
+        text: "Replace the running delegation",
+        resources: [],
+        reasoningEffortFallback: "medium",
+        source: "user",
+      }),
+    );
+    await settleSessionAttemptInterruptions(
+      client.db,
+      value.owner.workspaceId,
+      value.owner.sessionId,
+      attemptId,
+    );
+
+    const terminal = await transaction(value.owner.workspaceId, (tx) =>
+      tx
+        .select()
+        .from(schema.sessionRealtimeEntries)
+        .where(
+          and(
+            eq(schema.sessionRealtimeEntries.turnId, delegatedTurnId),
+            eq(schema.sessionRealtimeEntries.direction, "provider_out"),
+            eq(schema.sessionRealtimeEntries.kind, "error"),
+          ),
+        ),
+    );
+    expect(terminal).toEqual([]);
+  });
+
+  test("mirrors accepted human Send or Steer once as silent typed realtime context", async () => {
+    const value = await fixture();
+    const connection = await claimInitial(value);
+    await complete(value, connection.claimed.connection);
+    await proveProviderStarted(value, connection.claimed.connection);
+
+    const human = await transaction(value.owner.workspaceId, (tx) =>
+      submitHumanPromptInTransaction(tx, {
+        accountId: value.owner.accountId,
+        workspaceId: value.owner.workspaceId,
+        sessionId: value.owner.sessionId,
+        subjectId: value.owner.ownerSubjectId,
+        actor: { type: "human", subjectId: value.owner.ownerSubjectId },
+        operationKey: crypto.randomUUID(),
+        delivery: "send",
+        text: "Use <human> steering & keep context",
+        resources: [],
+        reasoningEffortFallback: "medium",
+        source: "user",
+      }),
+    );
+    const [mirrored] = await transaction(value.owner.workspaceId, (tx) =>
+      tx
+        .select()
+        .from(schema.sessionRealtimeEntries)
+        .where(
+          and(
+            eq(schema.sessionRealtimeEntries.realtimeId, value.started.mode.id),
+            eq(schema.sessionRealtimeEntries.kind, "session_update"),
+          ),
+        ),
+    );
+    expect(mirrored).toMatchObject({
+      turnId: null,
+      text: expect.stringContaining("Use &lt;human&gt; steering &amp; keep context"),
+      payload: {
+        source: "human_input",
+        sourceId: human.acceptedEventId,
+        sourceTurnId: human.turnId,
+        channel: null,
+        delivery: "send",
+        acceptedEventId: human.acceptedEventId,
+      },
+    });
+
+    await transaction(value.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(
+        tx,
+        delegationSyncInput(value, connection.claimed.connection),
+      ),
+    );
+    const humanMirrors = await transaction(value.owner.workspaceId, (tx) =>
+      tx
+        .select({ payload: schema.sessionRealtimeEntries.payload })
+        .from(schema.sessionRealtimeEntries)
+        .where(
+          and(
+            eq(schema.sessionRealtimeEntries.realtimeId, value.started.mode.id),
+            eq(schema.sessionRealtimeEntries.kind, "session_update"),
+            sql`${schema.sessionRealtimeEntries.payload} ->> 'source' = 'human_input'`,
+          ),
+        ),
+    );
+    expect(humanMirrors).toHaveLength(1);
+  });
+
+  test("mirrors progress and completion for work already running when realtime starts", async () => {
+    const initial = await fixture();
+    await endMode(initial);
+    const foreground = await transaction(initial.owner.workspaceId, (tx) =>
+      submitHumanPromptInTransaction(tx, {
+        accountId: initial.owner.accountId,
+        workspaceId: initial.owner.workspaceId,
+        sessionId: initial.owner.sessionId,
+        subjectId: initial.owner.ownerSubjectId,
+        actor: { type: "human", subjectId: initial.owner.ownerSubjectId },
+        operationKey: crypto.randomUUID(),
+        delivery: "send",
+        text: "Finish the pre-existing task",
+        resources: [],
+        reasoningEffortFallback: "medium",
+        source: "user",
+      }),
+    );
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(client.db, initial.owner.workspaceId, {
+      sessionId: initial.owner.sessionId,
+      workflowId: `session-${initial.owner.sessionId}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed")
+      throw new Error(`Pre-existing turn not claimed: ${claimed.reason}`);
+    expect(claimed.turn.id).toBe(foreground.turnId);
+
+    const active = await beginReplacementMode(initial);
+    const connection = await claimInitial(active);
+    await complete(active, connection.claimed.connection);
+    await proveProviderStarted(active, connection.claimed.connection);
+    const appended = await appendSessionEventsForTurnAttempt(
+      client.db,
+      active.owner.workspaceId,
+      active.owner.sessionId,
+      claimed.turn.id,
+      claimed.turn.executionGeneration,
+      attemptId,
+      [{ type: "agent.message.delta", payload: { text: "Still working on it." } }],
+    );
+    expect(appended.accepted).toBe(true);
+    const settled = await applySessionTurnSettlement(client.db, active.owner.workspaceId, {
+      sessionId: active.owner.sessionId,
+      turnId: claimed.turn.id,
+      triggerEventId: claimed.turn.triggerEventId,
+      attemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [
+        { type: "turn.completed", payload: { output: "Pre-existing task finished." } },
+        { type: "session.status.changed", payload: { status: "idle" } },
+      ],
+    });
+    expect(settled.action).toBe("settled");
+
+    const rows = await transaction(active.owner.workspaceId, (tx) =>
+      tx
+        .select()
+        .from(schema.sessionRealtimeEntries)
+        .where(
+          and(
+            eq(schema.sessionRealtimeEntries.realtimeId, active.started.mode.id),
+            eq(schema.sessionRealtimeEntries.kind, "session_update"),
+          ),
+        )
+        .orderBy(asc(schema.sessionRealtimeEntries.sequence)),
+    );
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({
+      text: "Still working on it.",
+      payload: { source: "assistant_progress", channel: "commentary", route: "session_context" },
+    });
+    expect(rows[1]).toMatchObject({
+      text: "Pre-existing task finished.",
+      payload: {
+        source: "assistant_terminal",
+        channel: "speakable",
+        route: "session_context",
+        status: "completed",
+      },
+    });
+  });
+
+  test("reattaches an old delegated turn to the new realtime session-wide context", async () => {
+    const original = await fixture();
+    const originalConnection = await claimInitial(original);
+    await complete(original, originalConnection.claimed.connection);
+    await proveProviderStarted(original, originalConnection.claimed.connection);
+    const execution = await admitAndClaimDelegation(
+      original,
+      originalConnection.claimed.connection,
+    );
+    await endMode(original);
+
+    const active = await beginReplacementMode(original);
+    const activeConnection = await claimInitial(active);
+    await complete(active, activeConnection.claimed.connection);
+    await proveProviderStarted(active, activeConnection.claimed.connection);
+    await appendSessionEventsForTurnAttempt(
+      client.db,
+      active.owner.workspaceId,
+      active.owner.sessionId,
+      execution.turn.id,
+      execution.turn.executionGeneration,
+      execution.attemptId,
+      [{ type: "agent.message.delta", payload: { text: "Resumed delegation progress." } }],
+    );
+    const settled = await applySessionTurnSettlement(client.db, active.owner.workspaceId, {
+      sessionId: active.owner.sessionId,
+      turnId: execution.turn.id,
+      triggerEventId: execution.turn.triggerEventId,
+      attemptId: execution.attemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [
+        { type: "turn.completed", payload: { output: "Old delegation finished." } },
+        { type: "session.status.changed", payload: { status: "idle" } },
+      ],
+    });
+    expect(settled.action).toBe("settled");
+
+    const rows = await transaction(active.owner.workspaceId, (tx) =>
+      tx
+        .select()
+        .from(schema.sessionRealtimeEntries)
+        .where(
+          and(
+            eq(schema.sessionRealtimeEntries.realtimeId, active.started.mode.id),
+            eq(schema.sessionRealtimeEntries.kind, "session_update"),
+          ),
+        )
+        .orderBy(asc(schema.sessionRealtimeEntries.sequence)),
+    );
+    expect(rows.map((row) => [row.text, row.payload.channel])).toEqual([
+      ["Resumed delegation progress.", "commentary"],
+      ["Old delegation finished.", "speakable"],
+    ]);
+    expect(rows.every((row) => row.payload.priorRealtimeId === original.started.mode.id)).toBe(
+      true,
+    );
   });
 
   test("claims only the accepted delegation during realtime and projects one terminal result", async () => {
@@ -1401,8 +1913,8 @@ describe("session realtime ledger", () => {
       "REALTIME_CONNECTION_CHANGED",
     );
     const started = await proveProviderStarted(value, rotated.connection, active.mode.version);
-    expect(started.outbound.map((entry) => entry.id)).not.toContain(terminal.id);
-    const [acknowledged] = await transaction(value.owner.workspaceId, (tx) =>
+    expect(started.outbound.map((entry) => entry.id)).toContain(terminal.id);
+    const [unacknowledged] = await transaction(value.owner.workspaceId, (tx) =>
       tx
         .select({
           clientAckedAt: schema.sessionRealtimeEntries.clientAckedAt,
@@ -1411,8 +1923,8 @@ describe("session realtime ledger", () => {
         .from(schema.sessionRealtimeEntries)
         .where(eq(schema.sessionRealtimeEntries.id, terminal.id)),
     );
-    expect(acknowledged?.clientAckedAt).toBeInstanceOf(Date);
-    expect(acknowledged?.providerAckedAt).toBeInstanceOf(Date);
+    expect(unacknowledged?.clientAckedAt).toBeNull();
+    expect(unacknowledged?.providerAckedAt).toBeNull();
   });
 
   test("projects deterministic errors from both exceptional terminal failure paths", async () => {
@@ -1482,7 +1994,7 @@ describe("session realtime ledger", () => {
     }
   });
 
-  test("keeps a delegation with corrupted linkage queued behind the realtime fence", async () => {
+  test("does not deadlock ordinary work when delegation metadata is corrupted", async () => {
     const value = await fixture();
     const first = await claimInitial(value);
     await complete(value, first.claimed.connection);
@@ -1502,7 +2014,7 @@ describe("session realtime ledger", () => {
     );
     expect(
       await peekSessionWork(client.db, value.owner.workspaceId, value.owner.sessionId),
-    ).toMatchObject({ kind: "realtime-active" });
+    ).toMatchObject({ kind: "runnable" });
     const claim = await claimSessionWorkForAttempt(client.db, value.owner.workspaceId, {
       sessionId: value.owner.sessionId,
       workflowId: `session-${value.owner.sessionId}`,
@@ -1511,7 +2023,7 @@ describe("session realtime ledger", () => {
       dispatchId: crypto.randomUUID(),
       trigger: { kind: "next" },
     });
-    expect(claim).toEqual({ action: "unclaimed", reason: "realtime-active" });
+    expect(claim).toMatchObject({ action: "claimed", turn: { id: turnId } });
   });
 
   test("rolls back call and turn on an injected transient failure, then exact retry succeeds", async () => {

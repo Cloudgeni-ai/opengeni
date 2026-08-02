@@ -3,24 +3,18 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import { and, asc, eq } from "drizzle-orm";
 
 import {
-  addSessionSystemUpdate,
-  applySessionTurnSettlement,
-  beginSessionRealtimeInTransaction,
   activateSessionRealtimeConnectionInTransaction,
+  beginSessionRealtimeInTransaction,
   bootstrapWorkspace,
   claimSessionRealtimeConnectionInTransaction,
-  claimSessionWorkForAttempt,
   completeSessionRealtimeConnectionInTransaction,
   createDb,
   createSession,
   endSessionRealtimeInTransaction,
-  getSessionRealtimeContextProjectionForTurn,
-  listSessionSystemUpdatesForTurn,
-  recoverSessionDispatch,
-  renderSessionRealtimeContext,
-  SESSION_REALTIME_CONTEXT_HEADER,
+  getSessionRealtimeContinuityEntries,
+  renderSessionRealtimeTail,
   SESSION_REALTIME_CONTEXT_MAX_BYTES,
-  submitHumanPromptInTransaction,
+  SESSION_REALTIME_TAIL_SOURCE,
   syncSessionRealtimeLedgerInTransaction,
   withWorkspaceRls,
   type Database,
@@ -38,7 +32,7 @@ beforeAll(async () => {
   const acquired = await acquireSharedTestDatabase("session-realtime-context");
   if (!acquired) throw new Error("PostgreSQL test database unavailable");
   shared = acquired;
-  client = createDb(shared.appUrl, { max: 16 });
+  client = createDb(shared.appUrl, { max: 12 });
 }, 180_000);
 
 afterAll(async () => {
@@ -46,16 +40,20 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-type Fixture = Awaited<ReturnType<typeof fixture>>;
+async function transaction<T>(workspaceId: string, fn: (db: Database) => Promise<T>): Promise<T> {
+  return await withWorkspaceRls(client.db, workspaceId, (db) =>
+    db.transaction((tx) => fn(tx as unknown as Database)),
+  );
+}
 
-async function fixture(workspaceLabel = "primary") {
+async function fixture() {
   const suffix = crypto.randomUUID();
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "test",
-    accountExternalId: `realtime-context-account-${workspaceLabel}-${suffix}`,
+    accountExternalId: `realtime-context-account-${suffix}`,
     accountName: "Realtime context",
     workspaceExternalSource: "test",
-    workspaceExternalId: `realtime-context-workspace-${workspaceLabel}-${suffix}`,
+    workspaceExternalId: `realtime-context-workspace-${suffix}`,
     workspaceName: "Realtime context",
     subjectId: `subject-${suffix}`,
   });
@@ -77,74 +75,45 @@ async function fixture(workspaceLabel = "primary") {
   };
 }
 
-async function peerSession(value: Fixture, label: string) {
-  return await createSession(client.db, {
-    accountId: value.accountId,
-    workspaceId: value.workspaceId,
-    initialMessage: label,
-    resources: [],
-    metadata: {},
-    model: "scripted-model",
-    sandboxBackend: "none",
-  });
-}
+type Fixture = Awaited<ReturnType<typeof fixture>>;
 
-async function transaction<T>(workspaceId: string, fn: (db: Database) => Promise<T>): Promise<T> {
-  return await withWorkspaceRls(client.db, workspaceId, (db) =>
-    db.transaction((tx) => fn(tx as unknown as Database)),
-  );
-}
-
-function realtimeOwner(value: Fixture, sessionId = value.session.id) {
-  return {
-    accountId: value.accountId,
-    workspaceId: value.workspaceId,
-    sessionId,
-    operationId: crypto.randomUUID(),
-    ownerSubjectId: value.subjectId,
-    browserInstanceId: `browser-${crypto.randomUUID()}`,
-    ownerKey: `owner-key-${crypto.randomUUID()}-${crypto.randomUUID()}`,
-    model: "gpt-live-1-boulder-alpha" as const,
-  };
-}
-
-function ledgerEntry(
-  kind: SessionRealtimeInboundEntryInput["kind"],
-  text: string | null,
+function transcript(
+  role: "user" | "assistant",
+  text: string,
   payload: Record<string, unknown> = {},
 ): SessionRealtimeInboundEntryInput {
   return {
     operationId: crypto.randomUUID(),
-    kind,
-    ...(kind === "user_transcript" ? { role: "user" as const } : {}),
-    ...(kind === "assistant_transcript" ? { role: "assistant" as const } : {}),
+    kind: role === "user" ? "user_transcript" : "assistant_transcript",
+    role,
     text,
-    payload,
+    payload: { turnId: crypto.randomUUID(), ...payload },
   };
 }
 
-async function completedMode(
+async function runMode(
   value: Fixture,
-  options: {
-    sessionId?: string;
-    firstEntries?: SessionRealtimeInboundEntryInput[];
-    rotatedEntries?: SessionRealtimeInboundEntryInput[];
-    baseMs?: number;
-  } = {},
+  entries: SessionRealtimeInboundEntryInput[],
+  options: { providerStarted?: boolean; baseMs?: number } = {},
 ) {
-  const owner = realtimeOwner(value, options.sessionId);
   const baseMs = options.baseMs ?? Date.now();
+  const owner = {
+    accountId: value.accountId,
+    workspaceId: value.workspaceId,
+    sessionId: value.session.id,
+    operationId: crypto.randomUUID(),
+    ownerSubjectId: value.subjectId,
+    browserInstanceId: `browser-${crypto.randomUUID()}`,
+    ownerKey: `owner-${crypto.randomUUID()}-${crypto.randomUUID()}`,
+    model: "gpt-live-1-boulder-alpha" as const,
+  };
   const started = await transaction(value.workspaceId, (tx) =>
-    beginSessionRealtimeInTransaction(tx, {
-      ...owner,
-      now: new Date(baseMs),
-      leaseMs: 120_000,
-    }),
+    beginSessionRealtimeInTransaction(tx, { ...owner, now: new Date(baseMs), leaseMs: 120_000 }),
   );
-  const firstClaim = await transaction(value.workspaceId, (tx) =>
+  const claimed = await transaction(value.workspaceId, (tx) =>
     claimSessionRealtimeConnectionInTransaction(tx, {
       workspaceId: value.workspaceId,
-      sessionId: owner.sessionId,
+      sessionId: value.session.id,
       realtimeId: started.mode.id,
       ownerSubjectId: owner.ownerSubjectId,
       browserInstanceId: owner.browserInstanceId,
@@ -159,899 +128,257 @@ async function completedMode(
   await transaction(value.workspaceId, (tx) =>
     completeSessionRealtimeConnectionInTransaction(tx, {
       workspaceId: value.workspaceId,
-      sessionId: owner.sessionId,
+      sessionId: value.session.id,
       realtimeId: started.mode.id,
-      connectionId: firstClaim.connection.id,
-      operationId: firstClaim.connection.operationId,
+      connectionId: claimed.connection.id,
+      operationId: claimed.connection.operationId,
       connectionEpoch: 1,
-      sdpAnswer: "v=0\r\na=answer:first\r\n",
+      sdpAnswer: "v=0\r\na=answer\r\n",
       now: new Date(baseMs + 2),
     }),
   );
   await transaction(value.workspaceId, (tx) =>
     activateSessionRealtimeConnectionInTransaction(tx, {
       workspaceId: value.workspaceId,
-      sessionId: owner.sessionId,
+      sessionId: value.session.id,
       realtimeId: started.mode.id,
       ownerSubjectId: owner.ownerSubjectId,
       browserInstanceId: owner.browserInstanceId,
       ownerKey: owner.ownerKey,
       expectedVersion: started.mode.version,
       expectedConnectionEpoch: 1,
-      connectionId: firstClaim.connection.id,
-      operationId: firstClaim.connection.operationId,
+      connectionId: claimed.connection.id,
+      operationId: claimed.connection.operationId,
       connectionEpoch: 1,
-      now: new Date(baseMs + 2),
+      now: new Date(baseMs + 3),
     }),
   );
-  if ((options.firstEntries?.length ?? 0) > 0) {
+  if (entries.length > 0 || options.providerStarted) {
     await transaction(value.workspaceId, (tx) =>
       syncSessionRealtimeLedgerInTransaction(tx, {
         workspaceId: value.workspaceId,
-        sessionId: owner.sessionId,
+        sessionId: value.session.id,
         realtimeId: started.mode.id,
         ownerSubjectId: owner.ownerSubjectId,
         browserInstanceId: owner.browserInstanceId,
         ownerKey: owner.ownerKey,
         expectedVersion: started.mode.version,
-        connectionId: firstClaim.connection.id,
+        connectionId: claimed.connection.id,
         connectionEpoch: 1,
-        entries: options.firstEntries,
-        now: new Date(baseMs + 3),
-      }),
-    );
-  }
-
-  let finalVersion = started.mode.version;
-  let finalConnection = firstClaim.connection;
-  if (options.rotatedEntries) {
-    const rotated = await transaction(value.workspaceId, (tx) =>
-      claimSessionRealtimeConnectionInTransaction(tx, {
-        workspaceId: value.workspaceId,
-        sessionId: owner.sessionId,
-        realtimeId: started.mode.id,
-        ownerSubjectId: owner.ownerSubjectId,
-        browserInstanceId: owner.browserInstanceId,
-        ownerKey: owner.ownerKey,
-        expectedVersion: started.mode.version,
-        operationId: crypto.randomUUID(),
-        expectedConnectionEpoch: 1,
-        rotate: true,
+        entries,
+        ...(options.providerStarted
+          ? { providerStarted: { providerSessionId: `provider-${started.mode.id}` } }
+          : {}),
         now: new Date(baseMs + 4),
       }),
     );
-    finalConnection = rotated.connection;
-    await transaction(value.workspaceId, (tx) =>
-      completeSessionRealtimeConnectionInTransaction(tx, {
-        workspaceId: value.workspaceId,
-        sessionId: owner.sessionId,
-        realtimeId: started.mode.id,
-        connectionId: rotated.connection.id,
-        operationId: rotated.connection.operationId,
-        connectionEpoch: 2,
-        sdpAnswer: "v=0\r\na=answer:rotated\r\n",
-        now: new Date(baseMs + 5),
-      }),
-    );
-    const activated = await transaction(value.workspaceId, (tx) =>
-      activateSessionRealtimeConnectionInTransaction(tx, {
-        workspaceId: value.workspaceId,
-        sessionId: owner.sessionId,
-        realtimeId: started.mode.id,
-        ownerSubjectId: owner.ownerSubjectId,
-        browserInstanceId: owner.browserInstanceId,
-        ownerKey: owner.ownerKey,
-        expectedVersion: started.mode.version,
-        expectedConnectionEpoch: 1,
-        connectionId: rotated.connection.id,
-        operationId: rotated.connection.operationId,
-        connectionEpoch: rotated.connection.connectionEpoch,
-        now: new Date(baseMs + 5),
-      }),
-    );
-    finalVersion = activated.mode.version;
-    if (options.rotatedEntries.length > 0) {
-      await transaction(value.workspaceId, (tx) =>
-        syncSessionRealtimeLedgerInTransaction(tx, {
-          workspaceId: value.workspaceId,
-          sessionId: owner.sessionId,
-          realtimeId: started.mode.id,
-          ownerSubjectId: owner.ownerSubjectId,
-          browserInstanceId: owner.browserInstanceId,
-          ownerKey: owner.ownerKey,
-          expectedVersion: finalVersion,
-          connectionId: rotated.connection.id,
-          connectionEpoch: 2,
-          entries: options.rotatedEntries,
-          now: new Date(baseMs + 6),
-        }),
-      );
-    }
   }
   const ended = await transaction(value.workspaceId, (tx) =>
     endSessionRealtimeInTransaction(tx, {
       workspaceId: value.workspaceId,
-      sessionId: owner.sessionId,
+      sessionId: value.session.id,
       realtimeId: started.mode.id,
       ownerSubjectId: owner.ownerSubjectId,
       browserInstanceId: owner.browserInstanceId,
       ownerKey: owner.ownerKey,
-      expectedVersion: finalVersion,
+      expectedVersion: started.mode.version,
       reason: "user_stop",
       now: new Date(baseMs + 10),
     }),
   );
-  return { owner, started, ended, finalVersion, finalConnection };
+  return { owner, started, claimed, ended };
 }
 
-async function submitPrompt(value: Fixture, text: string, sessionId = value.session.id) {
-  return await transaction(value.workspaceId, (tx) =>
-    submitHumanPromptInTransaction(tx, {
-      accountId: value.accountId,
-      workspaceId: value.workspaceId,
-      sessionId,
-      subjectId: value.subjectId,
-      actor: { type: "human", subjectId: value.subjectId },
-      operationKey: crypto.randomUUID(),
-      delivery: "send",
-      text,
-      resources: [],
-      reasoningEffortFallback: "low",
-      source: "user",
-    }),
-  );
-}
-
-function claimInput(
-  sessionId: string,
-  overrides: Partial<{ attemptId: string; dispatchId: string }> = {},
-) {
-  return {
-    sessionId,
-    workflowId: `session-${sessionId}`,
-    workflowRunId: crypto.randomUUID(),
-    attemptId: overrides.attemptId ?? crypto.randomUUID(),
-    dispatchId: overrides.dispatchId ?? crypto.randomUUID(),
-    trigger: { kind: "next" as const },
-  };
-}
-
-function contextEvents(context: string | null): Array<Record<string, unknown>> {
-  return (context ?? "")
-    .split("\n")
-    .filter((line) => line.startsWith("event="))
-    .map((line) => JSON.parse(line.slice("event=".length)) as Record<string, unknown>);
-}
-
-function sourceEntry(
-  text: string,
-  overrides: Partial<SessionRealtimeContextSourceEntry> = {},
-): SessionRealtimeContextSourceEntry {
+function sourceEntry(role: "user" | "assistant", text: string): SessionRealtimeContextSourceEntry {
   return {
     id: crypto.randomUUID(),
     realtimeId: crypto.randomUUID(),
-    modeStartedAt: new Date("2026-07-29T00:00:00.000Z"),
-    modeEndedAt: new Date("2026-07-29T00:01:00.000Z"),
-    modeEndReason: "user_stop",
-    connectionEpoch: 1,
     sequence: 1,
-    direction: "provider_in",
-    kind: "user_transcript",
-    role: "user",
-    providerEventId: null,
-    delegationItemId: null,
-    sourceUpdateId: null,
-    turnId: null,
+    role,
     text,
-    payload: {},
-    clientAckedAt: null,
-    providerAckedAt: null,
-    createdAt: new Date("2026-07-29T00:00:30.000Z"),
-    ...overrides,
+    payload: { turnId: crypto.randomUUID() },
   };
 }
 
-describe("session realtime context projection", () => {
-  test("renders deterministic chronological whole-entry context under the UTF-8 byte bound", () => {
-    const older = sourceEntry("older", {
-      sequence: 1,
-      payload: { z: 1, a: { y: 2, b: 3 }, ä: 4, Z: 5 },
-    });
-    const oversized = sourceEntry("界😀".repeat(12_000), { sequence: 2 });
-    const newest = sourceEntry("newest 😀", { sequence: 3 });
+describe("session realtime transcript tail and continuity", () => {
+  test("renders escaped, bounded Codex-style tail context", () => {
+    const escaped = renderSessionRealtimeTail([
+      sourceEntry("user", "change <this> & that"),
+      sourceEntry("assistant", "understood"),
+    ]);
+    expect(escaped.context).toContain("&lt;this&gt; &amp; that");
+    expect(escaped.context).not.toContain("change <this>");
 
-    const rendered = renderSessionRealtimeContext(2, [older, oversized, newest]);
-    const replay = renderSessionRealtimeContext(2, [older, oversized, newest]);
-
-    expect(rendered).toEqual(replay);
-    expect(rendered.context?.startsWith(SESSION_REALTIME_CONTEXT_HEADER)).toBe(true);
+    const rendered = renderSessionRealtimeTail([
+      sourceEntry("user", "change <this> & that"),
+      sourceEntry("assistant", "understood"),
+      sourceEntry("user", "x".repeat(SESSION_REALTIME_CONTEXT_MAX_BYTES * 2)),
+    ]);
+    expect(rendered.context).toContain(`<source>${SESSION_REALTIME_TAIL_SOURCE}</source>`);
+    expect(rendered.context).toContain("[2 older transcript turns omitted]");
     expect(Buffer.byteLength(rendered.context!, "utf8")).toBeLessThanOrEqual(
       SESSION_REALTIME_CONTEXT_MAX_BYTES,
     );
-    expect(Buffer.from(rendered.context!, "utf8").toString("utf8")).toBe(rendered.context!);
-    expect(rendered.context).not.toContain("�");
-    expect(rendered).toMatchObject({ includedEntryCount: 2, omittedEntryCount: 1 });
-    expect(contextEvents(rendered.context).map((entry) => entry.text)).toEqual([
-      "older",
-      "newest 😀",
-    ]);
-    expect(Object.keys(contextEvents(rendered.context)[0]?.payload ?? {})).toEqual([
-      "Z",
-      "a",
-      "z",
-      "ä",
-    ]);
-    expect(contextEvents(rendered.context)[0]?.payload).toEqual({
-      Z: 5,
-      a: { b: 3, y: 2 },
-      z: 1,
-      ä: 4,
-    });
+    expect(rendered.includedEntryCount + rendered.omittedEntryCount).toBe(3);
   });
 
-  test("binds multiple ended modes and rotations once, survives same-turn recovery, and never replays later", async () => {
-    const value = await fixture("recovery");
-    const base = Date.now();
-    await completedMode(value, {
-      baseMs: base,
-      firstEntries: [ledgerEntry("user_transcript", "mode one user")],
-    });
-    await completedMode(value, {
-      baseMs: base + 1_000,
-      firstEntries: [ledgerEntry("assistant_transcript", "mode two before rotation")],
-      rotatedEntries: [ledgerEntry("user_transcript", "mode two after rotation")],
-    });
-    const prompt = await submitPrompt(value, "continue in text");
-    const firstClaimInput = claimInput(value.session.id);
-    const firstClaim = await claimSessionWorkForAttempt(
-      client.db,
-      value.workspaceId,
-      firstClaimInput,
-    );
-    expect(firstClaim.action).toBe("claimed");
-    if (firstClaim.action !== "claimed") throw new Error(firstClaim.reason);
-    expect(firstClaim.turn.id).toBe(prompt.turnId);
-
-    const projection = await getSessionRealtimeContextProjectionForTurn(
-      client.db,
-      value.workspaceId,
-      value.session.id,
-      firstClaim.turn.id,
-    );
-    expect(projection).toMatchObject({
-      turnId: firstClaim.turn.id,
-      sourceModeCount: 2,
-      sourceEntryCount: 3,
-      includedEntryCount: 3,
-      omittedEntryCount: 0,
-    });
-    expect(contextEvents(projection?.context ?? null).map((entry) => entry.text)).toEqual([
-      "mode one user",
-      "mode two before rotation",
-      "mode two after rotation",
-    ]);
-    expect(
-      contextEvents(projection?.context ?? null).map((entry) => entry.connectionEpoch),
-    ).toEqual([1, 1, 2]);
-
-    const exactClaimReplay = await claimSessionWorkForAttempt(
-      client.db,
-      value.workspaceId,
-      firstClaimInput,
-    );
-    expect(exactClaimReplay).toMatchObject({ action: "claimed", turn: { id: firstClaim.turn.id } });
-    const recovery = await recoverSessionDispatch(client.db, value.workspaceId, {
-      sessionId: value.session.id,
-      attemptId: firstClaimInput.attemptId,
-      timeoutType: "HEARTBEAT",
-      maxRedispatches: 3,
-    });
-    expect(recovery).toMatchObject({ action: "recovering", turnId: firstClaim.turn.id });
-    const recoveryClaimInput = claimInput(value.session.id);
-    const recoveryClaim = await claimSessionWorkForAttempt(
-      client.db,
-      value.workspaceId,
-      recoveryClaimInput,
-    );
-    expect(recoveryClaim).toMatchObject({
-      action: "claimed",
-      turn: { id: firstClaim.turn.id, executionGeneration: 2 },
-    });
-    const recoveredProjection = await getSessionRealtimeContextProjectionForTurn(
-      client.db,
-      value.workspaceId,
-      value.session.id,
-      firstClaim.turn.id,
-    );
-    expect(recoveredProjection?.id).toBe(projection?.id);
-
-    if (recoveryClaim.action !== "claimed") throw new Error(recoveryClaim.reason);
-    await applySessionTurnSettlement(client.db, value.workspaceId, {
-      sessionId: value.session.id,
-      turnId: recoveryClaim.turn.id,
-      triggerEventId: recoveryClaim.turn.triggerEventId,
-      attemptId: recoveryClaimInput.attemptId,
-      turnStatus: "completed",
-      sessionStatus: "idle",
-      activeTurnId: null,
-      events: [
-        { type: "turn.completed", payload: { output: "continued" } },
-        { type: "session.status.changed", payload: { status: "idle" } },
-      ],
-    });
-    const laterPrompt = await submitPrompt(value, "later ordinary turn");
-    const laterClaim = await claimSessionWorkForAttempt(
-      client.db,
-      value.workspaceId,
-      claimInput(value.session.id),
-    );
-    expect(laterClaim).toMatchObject({ action: "claimed", turn: { id: laterPrompt.turnId } });
-    expect(
-      await getSessionRealtimeContextProjectionForTurn(
-        client.db,
-        value.workspaceId,
-        value.session.id,
-        laterPrompt.turnId,
-      ),
-    ).toBeNull();
-    const projections = await transaction(value.workspaceId, (tx) =>
-      tx
-        .select({ id: schema.sessionRealtimeContextProjections.id })
-        .from(schema.sessionRealtimeContextProjections)
-        .where(eq(schema.sessionRealtimeContextProjections.sessionId, value.session.id)),
-    );
-    expect(projections).toHaveLength(1);
-  });
-
-  test("atomically binds continuity and normal updates to one concurrent first text claim", async () => {
-    const value = await fixture("concurrent-first-text");
-    await completedMode(value, {
-      firstEntries: [ledgerEntry("user_transcript", "concurrent voice transcript")],
-    });
-    const updateId = crypto.randomUUID();
-    const update = await addSessionSystemUpdate(client.db, {
-      accountId: value.accountId,
-      workspaceId: value.workspaceId,
-      sessionId: value.session.id,
-      kind: "agent_message",
-      classification: "info",
-      sourceId: `concurrent-source-${updateId}`,
-      dedupeKey: `concurrent-update-${updateId}`,
-      summary: "concurrent normal update",
-      payload: {
-        type: "agent_message",
-        text: "concurrent normal update",
-        operationId: updateId,
-      },
-    });
-    if (!update.added) throw new Error("Concurrent update was not inserted");
-    const prompt = await submitPrompt(value, "first concurrent text turn");
-    const leftInput = claimInput(value.session.id);
-    const rightInput = claimInput(value.session.id);
-    const [left, right] = await Promise.all([
-      claimSessionWorkForAttempt(client.db, value.workspaceId, leftInput),
-      claimSessionWorkForAttempt(client.db, value.workspaceId, rightInput),
-    ]);
-    const claims = [
-      { result: left, input: leftInput },
-      { result: right, input: rightInput },
-    ];
-    const winners = claims.filter(({ result }) => result.action === "claimed");
-    const losers = claims.filter(({ result }) => result.action === "unclaimed");
-    expect(winners).toHaveLength(1);
-    expect(losers).toHaveLength(1);
-    const winner = winners[0]!;
-    if (winner.result.action !== "claimed") throw new Error("Concurrent claim winner is missing");
-    expect(winner.result.turn.id).toBe(prompt.turnId);
-
-    const projection = await getSessionRealtimeContextProjectionForTurn(
-      client.db,
-      value.workspaceId,
-      value.session.id,
-      prompt.turnId,
-    );
-    expect(contextEvents(projection?.context ?? null).map((entry) => entry.kind)).toEqual([
-      "user_transcript",
-    ]);
-    expect(contextEvents(projection?.context ?? null).map((entry) => entry.text)).toEqual([
-      "concurrent voice transcript",
-    ]);
-    const delivered = await listSessionSystemUpdatesForTurn(
-      client.db,
-      value.workspaceId,
-      value.session.id,
-      prompt.turnId,
-    );
-    expect(delivered.map(({ id }) => id)).toEqual([update.update.id]);
-    const history = await transaction(value.workspaceId, (tx) =>
-      tx
-        .select({ item: schema.sessionHistoryItems.item })
-        .from(schema.sessionHistoryItems)
-        .where(eq(schema.sessionHistoryItems.sessionId, value.session.id)),
-    );
-    expect(
-      history.some(({ item }) => JSON.stringify(item).includes("concurrent voice transcript")),
-    ).toBe(false);
-
-    await expect(
-      claimSessionWorkForAttempt(client.db, value.workspaceId, winner.input),
-    ).resolves.toMatchObject({ action: "claimed", turn: { id: prompt.turnId } });
-    await expect(
-      claimSessionWorkForAttempt(client.db, value.workspaceId, losers[0]!.input),
-    ).resolves.toMatchObject({ action: "unclaimed", reason: "no-work" });
-    const projections = await transaction(value.workspaceId, (tx) =>
-      tx
-        .select({ id: schema.sessionRealtimeContextProjections.id })
-        .from(schema.sessionRealtimeContextProjections)
-        .where(eq(schema.sessionRealtimeContextProjections.sessionId, value.session.id)),
-    );
-    expect(projections).toHaveLength(1);
-  });
-
-  test("rolls claim projection and consumption back together, and explicitly consumes empty history", async () => {
-    const rollback = await fixture("rollback");
-    const completed = await completedMode(rollback, {
-      firstEntries: [ledgerEntry("user_transcript", "rollback me")],
-    });
-    const prompt = await submitPrompt(rollback, "claim after rollback");
-    const input = claimInput(rollback.session.id);
-    await expect(
-      claimSessionWorkForAttempt(client.db, rollback.workspaceId, input, {
-        afterRealtimeContextProjection: () => {
-          throw new Error("injected post-projection failure");
-        },
-      }),
-    ).rejects.toThrow("injected post-projection failure");
-    const rolledBack = await transaction(rollback.workspaceId, async (tx) => {
-      const [turn] = await tx
-        .select({ status: schema.sessionTurns.status })
+  test("ending an empty realtime mode creates no backend turn", async () => {
+    const value = await fixture();
+    const mode = await runMode(value, []);
+    const facts = await transaction(value.workspaceId, async (tx) => {
+      const [row] = await tx
+        .select({ projectionId: schema.sessionRealtimeModes.contextProjectionId })
+        .from(schema.sessionRealtimeModes)
+        .where(eq(schema.sessionRealtimeModes.id, mode.started.mode.id));
+      const turns = await tx
+        .select({ id: schema.sessionTurns.id })
         .from(schema.sessionTurns)
-        .where(eq(schema.sessionTurns.id, prompt.turnId));
-      const [mode] = await tx
-        .select({ projectionId: schema.sessionRealtimeModes.contextProjectionId })
-        .from(schema.sessionRealtimeModes)
-        .where(eq(schema.sessionRealtimeModes.id, completed.started.mode.id));
-      const projections = await tx
-        .select({ id: schema.sessionRealtimeContextProjections.id })
-        .from(schema.sessionRealtimeContextProjections)
-        .where(eq(schema.sessionRealtimeContextProjections.turnId, prompt.turnId));
-      const history = await tx
-        .select({ id: schema.sessionHistoryItems.id })
-        .from(schema.sessionHistoryItems)
-        .where(eq(schema.sessionHistoryItems.turnId, prompt.turnId));
-      const attempts = await tx
-        .select({ id: schema.sessionTurnAttempts.id })
-        .from(schema.sessionTurnAttempts)
-        .where(eq(schema.sessionTurnAttempts.turnId, prompt.turnId));
-      return { turn, mode, projections, history, attempts };
+        .where(eq(schema.sessionTurns.sessionId, value.session.id));
+      return { row, turns };
     });
-    expect(rolledBack).toEqual({
-      turn: { status: "queued" },
-      mode: { projectionId: null },
-      projections: [],
-      history: [],
-      attempts: [],
-    });
-    await expect(
-      claimSessionWorkForAttempt(client.db, rollback.workspaceId, input),
-    ).resolves.toMatchObject({ action: "claimed", turn: { id: prompt.turnId } });
-
-    const empty = await fixture("empty");
-    const emptyMode = await completedMode(empty);
-    const emptyPrompt = await submitPrompt(empty, "after silent realtime");
-    await claimSessionWorkForAttempt(client.db, empty.workspaceId, claimInput(empty.session.id));
-    const emptyProjection = await getSessionRealtimeContextProjectionForTurn(
-      client.db,
-      empty.workspaceId,
-      empty.session.id,
-      emptyPrompt.turnId,
-    );
-    expect(emptyProjection).toMatchObject({
-      context: null,
-      sourceModeCount: 1,
-      sourceEntryCount: 0,
-      includedEntryCount: 0,
-      omittedEntryCount: 0,
-    });
-    const [emptyMarker] = await transaction(empty.workspaceId, (tx) =>
-      tx
-        .select({ projectionId: schema.sessionRealtimeModes.contextProjectionId })
-        .from(schema.sessionRealtimeModes)
-        .where(eq(schema.sessionRealtimeModes.id, emptyMode.started.mode.id)),
-    );
-    expect(emptyMarker?.projectionId).toBe(emptyProjection?.id);
-
-    const noHistory = await fixture("none");
-    const noHistoryPrompt = await submitPrompt(noHistory, "ordinary without voice");
-    await claimSessionWorkForAttempt(
-      client.db,
-      noHistory.workspaceId,
-      claimInput(noHistory.session.id),
-    );
-    expect(
-      await getSessionRealtimeContextProjectionForTurn(
-        client.db,
-        noHistory.workspaceId,
-        noHistory.session.id,
-        noHistoryPrompt.turnId,
-      ),
-    ).toBeNull();
+    expect(facts.row?.projectionId).toBeNull();
+    expect(facts.turns).toHaveLength(0);
   });
 
-  test("keeps active delegation claims fenced from continuity and coexists with pending updates", async () => {
-    const value = await fixture("delegation");
-    const prior = await completedMode(value, {
-      firstEntries: [ledgerEntry("user_transcript", "prior completed mode")],
-    });
-    const owner = realtimeOwner(value);
-    const started = await transaction(value.workspaceId, (tx) =>
-      beginSessionRealtimeInTransaction(tx, owner),
-    );
-    const connection = await transaction(value.workspaceId, (tx) =>
-      claimSessionRealtimeConnectionInTransaction(tx, {
-        workspaceId: value.workspaceId,
-        sessionId: value.session.id,
-        realtimeId: started.mode.id,
-        ownerSubjectId: owner.ownerSubjectId,
-        browserInstanceId: owner.browserInstanceId,
-        ownerKey: owner.ownerKey,
-        expectedVersion: started.mode.version,
-        operationId: crypto.randomUUID(),
-        expectedConnectionEpoch: 1,
-        rotate: false,
-      }),
-    );
-    await transaction(value.workspaceId, (tx) =>
-      completeSessionRealtimeConnectionInTransaction(tx, {
-        workspaceId: value.workspaceId,
-        sessionId: value.session.id,
-        realtimeId: started.mode.id,
-        connectionId: connection.connection.id,
-        operationId: connection.connection.operationId,
-        connectionEpoch: 1,
-        sdpAnswer: "v=0\r\na=answer:delegation\r\n",
-      }),
-    );
-    await transaction(value.workspaceId, (tx) =>
-      activateSessionRealtimeConnectionInTransaction(tx, {
-        workspaceId: value.workspaceId,
-        sessionId: value.session.id,
-        realtimeId: started.mode.id,
-        ownerSubjectId: owner.ownerSubjectId,
-        browserInstanceId: owner.browserInstanceId,
-        ownerKey: owner.ownerKey,
-        expectedVersion: started.mode.version,
-        expectedConnectionEpoch: 1,
-        connectionId: connection.connection.id,
-        operationId: connection.connection.operationId,
-        connectionEpoch: 1,
-      }),
-    );
-    await transaction(value.workspaceId, (tx) =>
-      syncSessionRealtimeLedgerInTransaction(tx, {
-        workspaceId: value.workspaceId,
-        sessionId: value.session.id,
-        realtimeId: started.mode.id,
-        ownerSubjectId: owner.ownerSubjectId,
-        browserInstanceId: owner.browserInstanceId,
-        ownerKey: owner.ownerKey,
-        expectedVersion: started.mode.version,
-        connectionId: connection.connection.id,
-        connectionEpoch: 1,
-        providerStarted: {
-          providerSessionId: "provider-session-context",
-          providerEventId: "provider-started-context",
-        },
-      }),
-    );
-    const updateId = crypto.randomUUID();
-    const update = await addSessionSystemUpdate(client.db, {
-      accountId: value.accountId,
-      workspaceId: value.workspaceId,
-      sessionId: value.session.id,
-      classification: "info",
-      sourceId: updateId,
-      dedupeKey: `context-update-${updateId}`,
-      summary: "cross-session update during realtime",
-      kind: "child_terminal_result",
-      payload: {
-        type: "child_terminal_result",
-        childSessionId: crypto.randomUUID(),
-        status: "idle",
-      },
-    });
-    if (!update.added) throw new Error("Cross-session update was not inserted");
-    const delegationOperation = crypto.randomUUID();
-    const delegated = await transaction(value.workspaceId, (tx) =>
-      syncSessionRealtimeLedgerInTransaction(tx, {
-        workspaceId: value.workspaceId,
-        sessionId: value.session.id,
-        realtimeId: started.mode.id,
-        ownerSubjectId: owner.ownerSubjectId,
-        browserInstanceId: owner.browserInstanceId,
-        ownerKey: owner.ownerKey,
-        expectedVersion: started.mode.version,
-        connectionId: connection.connection.id,
-        connectionEpoch: 1,
-        entries: [
-          {
-            operationId: delegationOperation,
-            kind: "delegation_call",
-            providerEventId: `delegation-created-${delegationOperation}`,
-            delegationItemId: `delegation-item-${delegationOperation}`,
-            text: "perform delegated work",
-            payload: { offsetMs: 100 },
-          },
-        ],
-      }),
-    );
-    const delegatedTurnId = delegated.accepted[0]?.entry.turnId;
-    if (!delegatedTurnId) throw new Error("Delegation was not admitted");
-    const delegatedClaimInput = claimInput(value.session.id);
-    const delegatedClaim = await claimSessionWorkForAttempt(
-      client.db,
-      value.workspaceId,
-      delegatedClaimInput,
-    );
-    expect(delegatedClaim).toMatchObject({ action: "claimed", turn: { id: delegatedTurnId } });
-    expect(
-      await getSessionRealtimeContextProjectionForTurn(
-        client.db,
-        value.workspaceId,
-        value.session.id,
-        delegatedTurnId,
-      ),
-    ).toBeNull();
-    const [priorMarker] = await transaction(value.workspaceId, (tx) =>
-      tx
-        .select({ projectionId: schema.sessionRealtimeModes.contextProjectionId })
-        .from(schema.sessionRealtimeModes)
-        .where(eq(schema.sessionRealtimeModes.id, prior.started.mode.id)),
-    );
-    expect(priorMarker?.projectionId).toBeNull();
-
-    if (delegatedClaim.action !== "claimed") throw new Error(delegatedClaim.reason);
-    await applySessionTurnSettlement(client.db, value.workspaceId, {
-      sessionId: value.session.id,
-      turnId: delegatedTurnId,
-      triggerEventId: delegatedClaim.turn.triggerEventId,
-      attemptId: delegatedClaimInput.attemptId,
-      turnStatus: "completed",
-      sessionStatus: "idle",
-      activeTurnId: null,
-      events: [
-        { type: "turn.completed", payload: { output: "delegated result" } },
-        { type: "session.status.changed", payload: { status: "idle" } },
-      ],
-    });
-    const delayedDelegationOperation = crypto.randomUUID();
-    const delayedDelegation = await transaction(value.workspaceId, (tx) =>
-      syncSessionRealtimeLedgerInTransaction(tx, {
-        workspaceId: value.workspaceId,
-        sessionId: value.session.id,
-        realtimeId: started.mode.id,
-        ownerSubjectId: owner.ownerSubjectId,
-        browserInstanceId: owner.browserInstanceId,
-        ownerKey: owner.ownerKey,
-        expectedVersion: started.mode.version,
-        connectionId: connection.connection.id,
-        connectionEpoch: 1,
-        entries: [
-          {
-            operationId: delayedDelegationOperation,
-            kind: "delegation_call",
-            providerEventId: `delegation-created-${delayedDelegationOperation}`,
-            delegationItemId: `delegation-item-${delayedDelegationOperation}`,
-            text: "perform delayed delegated work",
-            payload: { offsetMs: 200 },
-          },
-        ],
-      }),
-    );
-    const delayedDelegatedTurnId = delayedDelegation.accepted[0]?.entry.turnId;
-    if (!delayedDelegatedTurnId) throw new Error("Delayed delegation was not admitted");
-    await transaction(value.workspaceId, (tx) =>
+  test("ending with transcript tail immediately creates one canonical Steer turn", async () => {
+    const value = await fixture();
+    const mode = await runMode(value, [
+      transcript("user", "Please remember the final constraint"),
+      transcript("assistant", "I will."),
+    ]);
+    const replay = await transaction(value.workspaceId, (tx) =>
       endSessionRealtimeInTransaction(tx, {
         workspaceId: value.workspaceId,
         sessionId: value.session.id,
-        realtimeId: started.mode.id,
-        ownerSubjectId: owner.ownerSubjectId,
-        browserInstanceId: owner.browserInstanceId,
-        ownerKey: owner.ownerKey,
-        expectedVersion: started.mode.version,
+        realtimeId: mode.started.mode.id,
+        ownerSubjectId: mode.owner.ownerSubjectId,
+        browserInstanceId: mode.owner.browserInstanceId,
+        ownerKey: mode.owner.ownerKey,
+        expectedVersion: mode.started.mode.version,
         reason: "user_stop",
       }),
     );
-    const delayedClaimInput = claimInput(value.session.id);
-    const delayedClaim = await claimSessionWorkForAttempt(
+    expect(replay.replay).toBe(true);
+    const facts = await transaction(value.workspaceId, async (tx) => {
+      const [row] = await tx
+        .select({ projectionId: schema.sessionRealtimeModes.contextProjectionId })
+        .from(schema.sessionRealtimeModes)
+        .where(eq(schema.sessionRealtimeModes.id, mode.started.mode.id));
+      const projections = await tx
+        .select()
+        .from(schema.sessionRealtimeContextProjections)
+        .where(eq(schema.sessionRealtimeContextProjections.sessionId, value.session.id));
+      const turns = await tx
+        .select()
+        .from(schema.sessionTurns)
+        .where(eq(schema.sessionTurns.sessionId, value.session.id))
+        .orderBy(asc(schema.sessionTurns.createdAt));
+      const [userEvent] = turns[0]
+        ? await tx
+            .select({ payload: schema.sessionEvents.payload })
+            .from(schema.sessionEvents)
+            .where(eq(schema.sessionEvents.id, turns[0].triggerEventId))
+        : [];
+      return { row, projections, turns, userEvent };
+    });
+    expect(facts.row?.projectionId).toBe(facts.projections[0]?.id);
+    expect(facts.projections).toHaveLength(1);
+    expect(facts.projections[0]?.context).toContain("Please remember the final constraint");
+    expect(facts.turns).toHaveLength(1);
+    expect(facts.turns[0]).toMatchObject({
+      id: facts.projections[0]?.turnId,
+      status: "queued",
+      metadata: {
+        delivery: "steer",
+        realtimeTailFlush: { source: SESSION_REALTIME_TAIL_SOURCE },
+      },
+    });
+    expect(facts.userEvent?.payload).toMatchObject({
+      text: "Voice session ended. Remaining conversation context was sent to the agent.",
+      presentation: {
+        kind: "realtime_voice_handoff",
+        context: facts.projections[0]?.context,
+      },
+    });
+  });
+
+  test("flushes only finalized transcript after the latest delegation fence", async () => {
+    const value = await fixture();
+    const delegationItemId = `delegation-${crypto.randomUUID()}`;
+    const mode = await runMode(
+      value,
+      [
+        transcript("user", "before delegation"),
+        {
+          operationId: crypto.randomUUID(),
+          kind: "delegation_call",
+          providerEventId: `provider-${crypto.randomUUID()}`,
+          delegationItemId,
+          text: "<realtime_delegation><input>do it</input></realtime_delegation>",
+          payload: { inputTranscript: "do it", transcriptFenceTurnIds: [] },
+        },
+        transcript("user", "do it", { coveredByDelegationItemId: delegationItemId }),
+        transcript("assistant", "I have started it."),
+        transcript("user", "Use the safer option."),
+      ],
+      { providerStarted: true },
+    );
+    const [projection] = await transaction(value.workspaceId, (tx) =>
+      tx
+        .select()
+        .from(schema.sessionRealtimeContextProjections)
+        .where(eq(schema.sessionRealtimeContextProjections.sessionId, value.session.id)),
+    );
+    expect(projection?.context).not.toContain("before delegation");
+    expect(projection?.context).not.toContain(">do it<");
+    expect(projection?.context).toContain("I have started it.");
+    expect(projection?.context).toContain("Use the safer option.");
+    expect(projection?.sourceEntryCount).toBe(2);
+    expect(mode.ended.mode.state).toBe("ended");
+  });
+
+  test("returns bounded finalized continuity across ended and current modes without dedup", async () => {
+    const value = await fixture();
+    await runMode(value, [
+      transcript("user", "first voice"),
+      transcript("assistant", "first reply"),
+    ]);
+    await runMode(
+      value,
+      [transcript("user", "second voice"), transcript("assistant", "second reply")],
+      { baseMs: Date.now() + 1_000 },
+    );
+    const continuity = await getSessionRealtimeContinuityEntries(
       client.db,
       value.workspaceId,
-      delayedClaimInput,
+      value.session.id,
+      3,
     );
-    expect(delayedClaim).toMatchObject({
-      action: "claimed",
-      turn: { id: delayedDelegatedTurnId },
-    });
-    expect(
-      await getSessionRealtimeContextProjectionForTurn(
-        client.db,
-        value.workspaceId,
-        value.session.id,
-        delayedDelegatedTurnId,
-      ),
-    ).toBeNull();
-    const unconsumedMarkers = await transaction(value.workspaceId, (tx) =>
+    expect(continuity.map((entry) => [entry.role, entry.text])).toEqual([
+      ["assistant", "first reply"],
+      ["user", "second voice"],
+      ["assistant", "second reply"],
+    ]);
+    expect(new Set(continuity.map((entry) => entry.turnId)).size).toBe(3);
+  });
+
+  test("keeps tail state isolated by workspace and session", async () => {
+    const first = await fixture();
+    const second = await fixture();
+    await runMode(first, [transcript("user", "first only")]);
+    await runMode(second, [transcript("user", "second only")]);
+    const [firstProjection] = await transaction(first.workspaceId, (tx) =>
       tx
-        .select({
-          id: schema.sessionRealtimeModes.id,
-          projectionId: schema.sessionRealtimeModes.contextProjectionId,
-        })
-        .from(schema.sessionRealtimeModes)
+        .select()
+        .from(schema.sessionRealtimeContextProjections)
         .where(
           and(
-            eq(schema.sessionRealtimeModes.workspaceId, value.workspaceId),
-            eq(schema.sessionRealtimeModes.sessionId, value.session.id),
+            eq(schema.sessionRealtimeContextProjections.workspaceId, first.workspaceId),
+            eq(schema.sessionRealtimeContextProjections.sessionId, first.session.id),
           ),
         ),
     );
-    expect(unconsumedMarkers).toHaveLength(2);
-    expect(unconsumedMarkers.every((mode) => mode.projectionId === null)).toBe(true);
-    if (delayedClaim.action !== "claimed") throw new Error(delayedClaim.reason);
-    await applySessionTurnSettlement(client.db, value.workspaceId, {
-      sessionId: value.session.id,
-      turnId: delayedDelegatedTurnId,
-      triggerEventId: delayedClaim.turn.triggerEventId,
-      attemptId: delayedClaimInput.attemptId,
-      turnStatus: "completed",
-      sessionStatus: "idle",
-      activeTurnId: null,
-      events: [
-        { type: "turn.completed", payload: { output: "delayed delegated result" } },
-        { type: "session.status.changed", payload: { status: "idle" } },
-      ],
-    });
-    const ordinary = await submitPrompt(value, "ordinary text after delegation");
-    const ordinaryClaim = await claimSessionWorkForAttempt(
-      client.db,
-      value.workspaceId,
-      claimInput(value.session.id),
-    );
-    expect(ordinaryClaim).toMatchObject({ action: "claimed", turn: { id: ordinary.turnId } });
-    const projection = await getSessionRealtimeContextProjectionForTurn(
-      client.db,
-      value.workspaceId,
-      value.session.id,
-      ordinary.turnId,
-    );
-    expect(projection?.sourceModeCount).toBe(2);
-    expect(contextEvents(projection?.context ?? null).map((entry) => entry.kind)).toEqual([
-      "user_transcript",
-      "delegation_call",
-      "delegation_result",
-      "delegation_call",
-      "delegation_result",
-    ]);
-    const deliveredUpdates = await listSessionSystemUpdatesForTurn(
-      client.db,
-      value.workspaceId,
-      value.session.id,
-      ordinary.turnId,
-    );
-    expect(deliveredUpdates.map((delivered) => delivered.id)).toEqual([update.update.id]);
-  });
-
-  test("isolates source consumption across two sessions and two workspaces", async () => {
-    const primary = await fixture("isolation-primary");
-    const peer = await peerSession(primary, "peer session");
-    const foreign = await fixture("isolation-foreign");
-    const base = Date.now();
-    const primaryMode = await completedMode(primary, {
-      sessionId: primary.session.id,
-      baseMs: base,
-      firstEntries: [ledgerEntry("user_transcript", "primary-only")],
-    });
-    const peerMode = await completedMode(primary, {
-      sessionId: peer.id,
-      baseMs: base + 1_000,
-      firstEntries: [ledgerEntry("user_transcript", "peer-only")],
-    });
-    const foreignMode = await completedMode(foreign, {
-      baseMs: base + 2_000,
-      firstEntries: [ledgerEntry("user_transcript", "foreign-only")],
-    });
-    const primaryPrompt = await submitPrompt(primary, "primary text");
-    const peerPrompt = await submitPrompt(primary, "peer text", peer.id);
-    const foreignPrompt = await submitPrompt(foreign, "foreign text");
-
-    await claimSessionWorkForAttempt(
-      client.db,
-      primary.workspaceId,
-      claimInput(primary.session.id),
-    );
-    const primaryProjection = await getSessionRealtimeContextProjectionForTurn(
-      client.db,
-      primary.workspaceId,
-      primary.session.id,
-      primaryPrompt.turnId,
-    );
-    expect(contextEvents(primaryProjection?.context ?? null).map((entry) => entry.text)).toEqual([
-      "primary-only",
-    ]);
-    expect(
-      await getSessionRealtimeContextProjectionForTurn(
-        client.db,
-        primary.workspaceId,
-        peer.id,
-        primaryPrompt.turnId,
-      ),
-    ).toBeNull();
-    expect(
-      await getSessionRealtimeContextProjectionForTurn(
-        client.db,
-        foreign.workspaceId,
-        primary.session.id,
-        primaryPrompt.turnId,
-      ),
-    ).toBeNull();
-
-    const markersAfterPrimary = await transaction(primary.workspaceId, (tx) =>
-      tx
-        .select({
-          id: schema.sessionRealtimeModes.id,
-          projectionId: schema.sessionRealtimeModes.contextProjectionId,
-        })
-        .from(schema.sessionRealtimeModes)
-        .where(
-          and(
-            eq(schema.sessionRealtimeModes.workspaceId, primary.workspaceId),
-            eq(schema.sessionRealtimeModes.state, "ended"),
-          ),
-        )
-        .orderBy(asc(schema.sessionRealtimeModes.endedAt)),
-    );
-    expect(
-      markersAfterPrimary.find((mode) => mode.id === primaryMode.started.mode.id)?.projectionId,
-    ).toBe(primaryProjection?.id);
-    expect(
-      markersAfterPrimary.find((mode) => mode.id === peerMode.started.mode.id)?.projectionId,
-    ).toBeNull();
-    const [foreignMarkerBefore] = await transaction(foreign.workspaceId, (tx) =>
-      tx
-        .select({ projectionId: schema.sessionRealtimeModes.contextProjectionId })
-        .from(schema.sessionRealtimeModes)
-        .where(eq(schema.sessionRealtimeModes.id, foreignMode.started.mode.id)),
-    );
-    expect(foreignMarkerBefore?.projectionId).toBeNull();
-
-    await claimSessionWorkForAttempt(client.db, primary.workspaceId, claimInput(peer.id));
-    await claimSessionWorkForAttempt(
-      client.db,
-      foreign.workspaceId,
-      claimInput(foreign.session.id),
-    );
-    expect(
-      contextEvents(
-        (
-          await getSessionRealtimeContextProjectionForTurn(
-            client.db,
-            primary.workspaceId,
-            peer.id,
-            peerPrompt.turnId,
-          )
-        )?.context ?? null,
-      ).map((entry) => entry.text),
-    ).toEqual(["peer-only"]);
-    expect(
-      contextEvents(
-        (
-          await getSessionRealtimeContextProjectionForTurn(
-            client.db,
-            foreign.workspaceId,
-            foreign.session.id,
-            foreignPrompt.turnId,
-          )
-        )?.context ?? null,
-      ).map((entry) => entry.text),
-    ).toEqual(["foreign-only"]);
+    expect(firstProjection?.context).toContain("first only");
+    expect(firstProjection?.context).not.toContain("second only");
   });
 });

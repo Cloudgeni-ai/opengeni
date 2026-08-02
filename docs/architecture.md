@@ -334,31 +334,40 @@ promotion schema is canonical in
 `packages/db/drizzle/0135_session_realtime_connection_promotion.sql` and
 `packages/db/src/session-realtime-ledger.ts`.
 
-When one or more realtime modes have ended, their durable ledger becomes normal
-model continuity only in the first eligible ordinary queued human/API text
-claim. Under the same session-lock transaction, the claim selects every ended
-unprojected mode by `(ended_at,id)`, orders whole ledger rows by mode then
-`(sequence,id)`, inserts one exact-turn `session_realtime_context_projections`
-row, and marks all source modes with that projection. Rendering is deterministic
-and limited to 65,536 UTF-8 bytes: newest whole entries win when necessary,
-selected entries remain chronological, and durable counts expose omissions.
-An ended mode with no finalized rows is still consumed by a projection whose
-`context` is `NULL`; no ended modes create no projection. The worker reads this
-model-only system context strictly by `(workspace,session,turn)`, including on
-same-turn recovery; it is never appended to `session_history_items`, and later
-turns cannot replay it. Active or delayed provider-delegated turns consume
-neither continuity nor pending cross-session updates. Canonical:
-`packages/db/src/session-realtime-context.ts`, `packages/db/src/index.ts`,
-`packages/db/drizzle/0134_session_realtime_context_projection.sql`, and
-`apps/worker/src/activities/run-input.ts`.
+Complete role-bearing provider `turn.done` rows are the only authoritative voice
+transcript. Each provider delegation includes bounded finalized dialogue since
+the previous delegation and records a transcript fence. On end, after the
+browser seals and durably drains parsed V3 events, the lifecycle transaction
+selects only the finalized tail after the latest fence, excludes a late user
+turn already covered by the delegation, and submits one bounded Codex-style XML
+wrapper through canonical ordinary `Steer`. The linked
+`session_realtime_context_projections` row is idempotency/audit provenance for
+that durable turn, not hidden worker context. Empty tails create neither row nor
+turn. Later realtime calls receive bounded ordinary durable history plus bounded
+prior finalized voice turns as inert role-labeled startup continuity with an
+explicit silence instruction. Canonical:
+`packages/sdk/src/codex-realtime-v3.ts`,
+`packages/db/src/session-realtime-context.ts`,
+`packages/db/drizzle/0156_session_realtime_context_projection.sql`, and
+`apps/api/src/session-realtime-context.ts`.
 
 Native provider delegation remains in that same session. Exact owner, connection
 epoch, and provider-start proof gate one transaction that accepts the provider
-call ledger row and creates one ordinary queued `session_turns` row plus its
-canonical events and durable workflow wake. The call's one-to-one `turn_id` is
-the terminal result/error projection seam. The active-mode claim fence admits
-only that exact call-linked turn. Terminal settlement atomically creates one
-linked outbound `delegation_result` or deterministic `error`. The browser
+call ledger row and invokes the canonical prompt `Steer` transaction with a
+service initiator and immutable realtime provenance. This is exactly ordinary
+Steer: it supersedes current direction when needed, moves the replacement to the
+queue head, emits canonical events/audit, and creates the durable workflow wake.
+The call's one-to-one `turn_id` is the terminal result/error projection seam;
+ordinary work claims remain available throughout realtime. Progress and terminal
+output for that still-active call use commentary/speakable
+`delegation.context.append`. Pre-existing work, direct human work, and work from
+a prior realtime call use session-wide `session.context.append` instead, so a
+newly joined voice session receives progress and completion without inventing a
+delegation id. Accepted human Send/Steer is mirrored once as silent typed
+session context after canonical execution admission and cannot loop back into
+another delegation. A Steer then continues through later agent updates; internal
+turn supersession produces no synthetic stopped/error message. Completion,
+failure, and cancellation create the corresponding durable outbound row. The browser
 durably ACKs delivery from OpenGeni, but pinned V3 has no provider receipt for a
 context append, so provider send remains at-least-once and the same durable row
 may replay after an ambiguous send, browser restart, or connection rotation.

@@ -1,6 +1,6 @@
 -- deployment-mode: rolling
 -- Rebased after the current main migration ledger.
--- Exactly-once, turn-scoped projection of completed realtime history into normal inference.
+-- Exactly-once audit/idempotency projection for the canonical transcript-tail Steer turn.
 
 SET lock_timeout = '5s';
 SET statement_timeout = '10min';

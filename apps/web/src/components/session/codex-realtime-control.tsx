@@ -22,33 +22,12 @@ type AdmissionInput = {
 
 export function codexRealtimeAdmissionAllowed(input: AdmissionInput): boolean {
   return (
-    input.sessionStatus === "idle" &&
+    input.sessionStatus !== "cancelled" &&
     input.controlState === "active" &&
     input.settlement === null &&
     input.codexConnected &&
     !input.lifecycleActive
   );
-}
-
-export function realtimeSessionSurfacePolicy(
-  snapshot: CodexRealtimeControllerSnapshot,
-  lifecycleActive: boolean,
-): {
-  ordinaryControlsLocked: boolean;
-  queueReadOnly: boolean;
-  composerDisabled: boolean;
-  configDisabled: boolean;
-} {
-  const ordinaryControlsLocked =
-    lifecycleActive ||
-    snapshot.mode?.state === "active" ||
-    ["starting", "active", "stopping", "recovering", "lost_owner"].includes(snapshot.status);
-  return {
-    ordinaryControlsLocked,
-    queueReadOnly: ordinaryControlsLocked,
-    composerDisabled: ordinaryControlsLocked,
-    configDisabled: ordinaryControlsLocked,
-  };
 }
 
 export function useSessionCodexRealtime(options: {
@@ -173,7 +152,6 @@ export function useSessionCodexRealtime(options: {
     stop,
     retry,
     retryAudibleOutput,
-    policy: realtimeSessionSurfacePolicy(snapshot, lifecycleActive),
   };
 }
 
@@ -197,26 +175,8 @@ export function SessionCodexRealtimeControl(props: {
   events: SessionEvent[];
   eventsReady: boolean;
   codexConnected: boolean;
-  onControlsLockedChange: (locked: boolean) => void;
 }) {
   const realtime = useSessionCodexRealtime(props);
-  const onControlsLockedChange = props.onControlsLockedChange;
-  const startRealtime = realtime.start;
-  const ordinaryControlsLocked = realtime.policy.ordinaryControlsLocked;
-
-  useEffect(() => {
-    onControlsLockedChange(ordinaryControlsLocked);
-  }, [onControlsLockedChange, ordinaryControlsLocked]);
-
-  const start = useCallback(async () => {
-    onControlsLockedChange(true);
-    try {
-      await startRealtime();
-    } catch (error) {
-      onControlsLockedChange(ordinaryControlsLocked);
-      throw error;
-    }
-  }, [onControlsLockedChange, ordinaryControlsLocked, startRealtime]);
 
   return (
     <CodexRealtimeControl
@@ -224,7 +184,7 @@ export function SessionCodexRealtimeControl(props: {
       canStart={realtime.canStart}
       codexConnected={realtime.codexConnected}
       audioRef={realtime.audioRef}
-      onStart={start}
+      onStart={realtime.start}
       onStop={realtime.stop}
       onRetry={realtime.retry}
       onRetryAudibleOutput={realtime.retryAudibleOutput}

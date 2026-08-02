@@ -58,9 +58,9 @@ function outbound(overrides: Partial<SessionRealtimeLedgerEntry> = {}): SessionR
 
 function transcript(index: number, text = `event-${index}`): string {
   return JSON.stringify({
-    type: "input_transcript.added",
+    type: "turn.done",
     event_id: `provider-${index}`,
-    item: { id: `item-${index}`, text },
+    turn: { id: `turn-${index}`, role: "user", transcript: text },
   });
 }
 
@@ -158,6 +158,182 @@ describe("Codex realtime V3 wire parity", () => {
 });
 
 describe("Codex realtime V3 bridge", () => {
+  test("persists one finalized transcript per turn and ignores live transcript deltas", async () => {
+    const requests: SyncSessionRealtimeLedgerRequest[] = [];
+    const bridge = createCodexRealtimeV3Bridge(
+      bridgeOptions({
+        sync: async (request) => {
+          requests.push(request);
+          return { accepted: [], outbound: [] };
+        },
+      }),
+    );
+
+    await bridge.ingest(
+      JSON.stringify({
+        type: "input_transcript.added",
+        event_id: "delta-1",
+        item: { id: "item-1", text: "hel" },
+      }),
+    );
+    await bridge.ingest(transcript(1, "hello"));
+    await bridge.ingest(transcript(1, "hello"));
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.entries).toEqual([
+      expect.objectContaining({
+        kind: "user_transcript",
+        providerEventId: "provider-1",
+        text: "hello",
+        payload: { turnId: "turn-1" },
+      }),
+    ]);
+    bridge.close();
+  });
+
+  test("delegates with the bounded finalized dialogue delta and an exact transcript fence", async () => {
+    const requests: SyncSessionRealtimeLedgerRequest[] = [];
+    const bridge = createCodexRealtimeV3Bridge(
+      bridgeOptions({
+        sync: async (request) => {
+          requests.push(request);
+          return { accepted: [], outbound: [] };
+        },
+      }),
+    );
+    await bridge.ingest(transcript(1, "Please inspect <this> & report"));
+    await bridge.ingest(
+      JSON.stringify({
+        type: "turn.done",
+        event_id: "provider-2",
+        turn: { id: "turn-2", role: "assistant", transcript: "I can inspect it." },
+      }),
+    );
+    await bridge.ingest(
+      JSON.stringify({
+        type: "delegation.created",
+        event_id: "delegation-event-1",
+        item: {
+          id: "delegation-1",
+          type: "delegation",
+          target: "client",
+          content: [{ type: "input_text", text: "Do it <safely>" }],
+        },
+      }),
+    );
+
+    const call = requests.flatMap((request) => request.entries ?? []).at(-1)!;
+    expect(call).toMatchObject({
+      kind: "delegation_call",
+      delegationItemId: "delegation-1",
+      payload: {
+        inputTranscript: "Do it <safely>",
+        transcriptFenceTurnIds: ["turn-1", "turn-2"],
+      },
+    });
+    expect(call.text).toContain("<input>Do it &lt;safely&gt;</input>");
+    expect(call.text).toContain("user: Please inspect &lt;this&gt; &amp; report");
+    expect(call.text).toContain("assistant: I can inspect it.");
+    bridge.close();
+  });
+
+  test("marks a user turn finalized after delegation.created as covered by that delegation", async () => {
+    const requests: SyncSessionRealtimeLedgerRequest[] = [];
+    const bridge = createCodexRealtimeV3Bridge(
+      bridgeOptions({
+        sync: async (request) => {
+          requests.push(request);
+          return { accepted: [], outbound: [] };
+        },
+      }),
+    );
+    await bridge.ingest(
+      JSON.stringify({
+        type: "delegation.created",
+        event_id: "delegation-event-1",
+        item: {
+          id: "delegation-1",
+          type: "delegation",
+          target: "client",
+          content: [{ type: "input_text", text: "Run the checks" }],
+        },
+      }),
+    );
+    await bridge.ingest(transcript(1, "Run   the checks"));
+
+    expect(requests.flatMap((request) => request.entries ?? []).at(-1)).toMatchObject({
+      kind: "user_transcript",
+      payload: { turnId: "turn-1", coveredByDelegationItemId: "delegation-1" },
+    });
+    bridge.close();
+  });
+
+  test("routes session context with explicit silent and speakable channels", async () => {
+    const sent: string[] = [];
+    const rows = [
+      outbound({
+        id: "44444444-4444-4444-8444-444444444451",
+        operationId: "55555555-5555-4555-8555-555555555561",
+        sequence: 11,
+        kind: "session_update",
+        delegationItemId: null,
+        text: "typed human context",
+        payload: { channel: null },
+      }),
+      outbound({
+        id: "44444444-4444-4444-8444-444444444452",
+        operationId: "55555555-5555-4555-8555-555555555562",
+        sequence: 12,
+        kind: "session_update",
+        delegationItemId: null,
+        text: "pre-existing work finished",
+        payload: { channel: "speakable" },
+      }),
+    ];
+    const bridge = createCodexRealtimeV3Bridge(
+      bridgeOptions({
+        events: dataChannel((value) => sent.push(value)),
+        sync: async () => ({ accepted: [], outbound: rows }),
+      }),
+    );
+    await bridge.flush();
+
+    expect(sent.map((value) => JSON.parse(value))).toEqual([
+      {
+        type: "session.context.append",
+        content: [{ type: "input_text", text: "typed human context" }],
+      },
+      {
+        type: "session.context.append",
+        channel: "speakable",
+        content: [{ type: "input_text", text: "pre-existing work finished" }],
+      },
+    ]);
+    bridge.close();
+  });
+
+  test("sealAndFlush drains parsed events and rejects later provider input", async () => {
+    const requests: SyncSessionRealtimeLedgerRequest[] = [];
+    const bridge = createCodexRealtimeV3Bridge(
+      bridgeOptions({
+        sync: async (request) => {
+          requests.push(request);
+          return { accepted: [], outbound: [] };
+        },
+      }),
+    );
+    const first = bridge.ingest(transcript(1, "persist before stop"));
+    await bridge.sealAndFlush();
+    await first;
+    await bridge.ingest(transcript(2, "must be ignored after stop fence"));
+
+    expect(requests.flatMap((request) => request.entries ?? []).map((entry) => entry.text)).toEqual(
+      ["persist before stop"],
+    );
+    expect(bridge.snapshot().pendingInbound).toBe(0);
+    bridge.close();
+  });
+
   test("durably reports startup, client-ACKs receipt, and never fabricates a provider ACK", async () => {
     const sent: string[] = [];
     const requests: SyncSessionRealtimeLedgerRequest[] = [];
@@ -259,6 +435,55 @@ describe("Codex realtime V3 bridge", () => {
       delegation_item_id: "delegation-1",
       channel: "speakable",
       content: [{ type: "input_text", text: "Finished." }],
+    });
+    expect(bridge.snapshot().activeDelegationId).toBeNull();
+    bridge.close();
+  });
+
+  test("human Steer continues through session context without a fabricated delegation result", async () => {
+    const sent: string[] = [];
+    let pending: SessionRealtimeLedgerEntry[] = [];
+    const bridge = createCodexRealtimeV3Bridge(
+      bridgeOptions({
+        events: dataChannel((value) => sent.push(value)),
+        sync: async () => ({ accepted: [], outbound: pending }),
+      }),
+    );
+    await bridge.ingest(
+      JSON.stringify({
+        type: "delegation.created",
+        event_id: "delegation-event-1",
+        item: {
+          id: "delegation-1",
+          type: "delegation",
+          target: "client",
+          content: [{ type: "input_text", text: "Inspect it" }],
+        },
+      }),
+    );
+    expect(bridge.snapshot().activeDelegationId).toBe("delegation-1");
+
+    pending = [
+      outbound({
+        id: "44444444-4444-4444-8444-444444444444",
+        operationId: "55555555-5555-4555-8555-555555555555",
+        sequence: 11,
+        kind: "session_update",
+        delegationItemId: null,
+        text: "<session_user_message><delivery>steer</delivery><text>Focus on tests</text></session_user_message>",
+        payload: { source: "human_input", delivery: "steer", channel: null },
+      }),
+    ];
+    await bridge.flush();
+
+    expect(JSON.parse(sent.at(-1)!)).toEqual({
+      type: "session.context.append",
+      content: [
+        {
+          type: "input_text",
+          text: "<session_user_message><delivery>steer</delivery><text>Focus on tests</text></session_user_message>",
+        },
+      ],
     });
     expect(bridge.snapshot().activeDelegationId).toBeNull();
     bridge.close();

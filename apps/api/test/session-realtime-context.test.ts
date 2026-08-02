@@ -79,6 +79,21 @@ describe("ordinary-session realtime context projection", () => {
     ).toEqual([{ role: "user", text: "visible text" }]);
   });
 
+  test("adds prior voice continuity as inert role-labeled context", () => {
+    const projected = projectSessionRealtimeInitialItems(
+      [{ position: 0, item: { type: "message", role: "user", content: "Durable request." } }],
+      [
+        { role: "user", text: "What happened?" },
+        { role: "assistant", text: "I delegated the check." },
+      ],
+    );
+    expect(projected[0]).toEqual({ role: "user", text: "Durable request." });
+    expect(projected[1]).toMatchObject({ role: "user" });
+    expect(projected[1]?.text).toContain("Remain completely silent when this session starts.");
+    expect(projected[1]?.text).toContain("USER: What happened?");
+    expect(projected[1]?.text).toContain("ASSISTANT: I delegated the check.");
+  });
+
   test("keeps the newest complete tail under exact upstream limits", () => {
     const rows = Array.from(
       { length: CODEX_REALTIME_INITIAL_ITEMS_MAX_COUNT + 10 },

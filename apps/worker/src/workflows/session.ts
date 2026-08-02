@@ -502,29 +502,6 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       }
       continue;
     }
-    if (peek.kind === "realtime-active") {
-      // Realtime is a temporary owner of this ordinary session. Durable work
-      // stays pending in Postgres while this workflow waits for the lifecycle
-      // wake, with the lease deadline as the backstop if the browser vanishes.
-      // In particular, do not run goal continuation while realtime owns the
-      // session. The claim activity remains the authoritative final fence if a
-      // begin races a stale non-realtime peek.
-      const seenWakeups = wakeups;
-      const seenApprovalWakeups = approvalWakeups;
-      const seenInterruptionWakeups = interruptionWakeups;
-      const parsedDeadline = Date.parse(peek.leaseExpiresAt);
-      const timeoutMs = Number.isFinite(parsedDeadline)
-        ? Math.max(0, parsedDeadline - Date.now())
-        : 0;
-      await condition(
-        () =>
-          interruptionWakeups !== seenInterruptionWakeups ||
-          wakeups !== seenWakeups ||
-          approvalWakeups !== seenApprovalWakeups,
-        timeoutMs,
-      );
-      continue;
-    }
     if (peek.kind === "idle") {
       let continuation: activities.MaybeContinueGoalResult = { action: "none" };
       try {

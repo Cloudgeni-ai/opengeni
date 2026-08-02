@@ -20,6 +20,7 @@ import {
   SessionRealtimeConflictError,
   submitHumanPromptInTransaction,
   withWorkspaceRls,
+  withWorkspaceSubjectRls,
   type Database,
 } from "../src/index";
 import * as schema from "../src/schema";
@@ -316,7 +317,7 @@ describe("session realtime lifecycle (real PostgreSQL)", () => {
     );
   });
 
-  test("rejects queued human work and paused control at admission", async () => {
+  test("allows queued human work but still requires active session control", async () => {
     const queued = await fixture();
     await withWorkspaceRls(client.db, queued.grant.workspaceId, (db) =>
       db.transaction((tx) =>
@@ -335,7 +336,9 @@ describe("session realtime lifecycle (real PostgreSQL)", () => {
         }),
       ),
     );
-    await expectConflict(begin(queued, owner(queued)), "QUEUED_PROMPT");
+    await expect(begin(queued, owner(queued))).resolves.toMatchObject({
+      mode: { state: "active" },
+    });
 
     const paused = await fixture();
     await withWorkspaceRls(client.db, paused.grant.workspaceId, (db) =>
@@ -353,13 +356,13 @@ describe("session realtime lifecycle (real PostgreSQL)", () => {
     await expectConflict(begin(paused, owner(paused)), "CONTROL_NOT_ACTIVE");
   });
 
-  test("blocks composer and human Send while preserving ordinary inbound updates without a wake", async () => {
+  test("keeps composer, human Send, updates, and worker claims available during realtime", async () => {
     const value = await fixture();
     const proof = owner(value);
     await begin(value, proof);
 
     await expect(
-      withWorkspaceRls(client.db, value.grant.workspaceId, (db) =>
+      withWorkspaceSubjectRls(client.db, value.grant.workspaceId, value.grant.subjectId, (db) =>
         db.transaction((tx) =>
           saveComposerDraftInTransaction(tx as unknown as Database, {
             accountId: value.grant.accountId,
@@ -374,27 +377,26 @@ describe("session realtime lifecycle (real PostgreSQL)", () => {
           }),
         ),
       ),
-    ).rejects.toMatchObject({ code: "REALTIME_ACTIVE" });
+    ).resolves.toMatchObject({ text: "blocked draft", revision: 1 });
 
-    await expect(
-      withWorkspaceRls(client.db, value.grant.workspaceId, (db) =>
-        db.transaction((tx) =>
-          submitHumanPromptInTransaction(tx as unknown as Database, {
-            accountId: value.grant.accountId,
-            workspaceId: value.grant.workspaceId,
-            sessionId: value.session.id,
-            subjectId: value.grant.subjectId,
-            actor: { type: "human", subjectId: value.grant.subjectId },
-            operationKey: crypto.randomUUID(),
-            delivery: "send",
-            text: "blocked send",
-            resources: [],
-            reasoningEffortFallback: "low",
-            source: "user",
-          }),
-        ),
+    const submitted = await withWorkspaceRls(client.db, value.grant.workspaceId, (db) =>
+      db.transaction((tx) =>
+        submitHumanPromptInTransaction(tx as unknown as Database, {
+          accountId: value.grant.accountId,
+          workspaceId: value.grant.workspaceId,
+          sessionId: value.session.id,
+          subjectId: value.grant.subjectId,
+          actor: { type: "human", subjectId: value.grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          delivery: "send",
+          text: "allowed send",
+          resources: [],
+          reasoningEffortFallback: "low",
+          source: "user",
+        }),
       ),
-    ).rejects.toMatchObject({ code: "REALTIME_ACTIVE" });
+    );
+    expect(submitted.turnId).toBeString();
 
     const update = await addPendingUpdate(value);
     expect(update).toMatchObject({ added: true, shouldWake: false, workflowWakeRevision: null });
@@ -407,13 +409,59 @@ describe("session realtime lifecycle (real PostgreSQL)", () => {
     ).toHaveLength(1);
     expect(
       await peekSessionWork(client.db, value.grant.workspaceId, value.session.id),
-    ).toMatchObject({
-      kind: "realtime-active",
+    ).toMatchObject({ kind: "runnable" });
+    await expect(claim(value)).resolves.toMatchObject({
+      action: "claimed",
+      turn: { id: submitted.turnId },
     });
-    await expect(claim(value)).resolves.toEqual({ action: "unclaimed", reason: "realtime-active" });
   });
 
-  test("claim first wins the session lock and makes concurrent realtime admission reject", async () => {
+  test("human Steer uses its ordinary replacement semantics during realtime", async () => {
+    const value = await fixture();
+    const proof = owner(value);
+    await begin(value, proof);
+    const first = await withWorkspaceRls(client.db, value.grant.workspaceId, (db) =>
+      db.transaction((tx) =>
+        submitHumanPromptInTransaction(tx as unknown as Database, {
+          accountId: value.grant.accountId,
+          workspaceId: value.grant.workspaceId,
+          sessionId: value.session.id,
+          subjectId: value.grant.subjectId,
+          actor: { type: "human", subjectId: value.grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          delivery: "send",
+          text: "first direction",
+          resources: [],
+          reasoningEffortFallback: "low",
+          source: "user",
+        }),
+      ),
+    );
+    const replacement = await withWorkspaceRls(client.db, value.grant.workspaceId, (db) =>
+      db.transaction((tx) =>
+        submitHumanPromptInTransaction(tx as unknown as Database, {
+          accountId: value.grant.accountId,
+          workspaceId: value.grant.workspaceId,
+          sessionId: value.session.id,
+          subjectId: value.grant.subjectId,
+          actor: { type: "human", subjectId: value.grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          delivery: "steer",
+          text: "replacement direction",
+          resources: [],
+          reasoningEffortFallback: "low",
+          source: "user",
+        }),
+      ),
+    );
+    expect(replacement.queueVersion).toBeGreaterThan(first.queueVersion);
+    await expect(claim(value)).resolves.toMatchObject({
+      action: "claimed",
+      turn: { id: replacement.turnId, prompt: "replacement direction" },
+    });
+  });
+
+  test("claim and realtime admission serialize but both succeed", async () => {
     const value = await fixture();
     await requestSessionCompaction(client.db, value.grant.workspaceId, value.session.id);
     const proof = owner(value);
@@ -426,11 +474,11 @@ describe("session realtime lifecycle (real PostgreSQL)", () => {
       release();
 
       await expect(ordinaryClaim).resolves.toMatchObject({ action: "claimed" });
-      await expectConflict(realtimeBegin, "SESSION_NOT_IDLE");
+      await expect(realtimeBegin).resolves.toMatchObject({ mode: { state: "active" } });
     });
   });
 
-  test("realtime first wins the session lock, preserves pending maintenance, and resumes it on end", async () => {
+  test("realtime admission does not defer already-pending maintenance", async () => {
     const value = await fixture();
     await requestSessionCompaction(client.db, value.grant.workspaceId, value.session.id);
     const proof = owner(value);
@@ -443,17 +491,13 @@ describe("session realtime lifecycle (real PostgreSQL)", () => {
       release();
 
       const started = await realtimeBegin;
-      await expect(ordinaryClaim).resolves.toEqual({
-        action: "unclaimed",
-        reason: "realtime-active",
-      });
+      await expect(ordinaryClaim).resolves.toMatchObject({ action: "claimed" });
       expect(
         await isSessionCompactionRequested(client.db, value.grant.workspaceId, value.session.id),
       ).toBe(true);
 
       const ended = await end(value, proof, started.mode.id, started.mode.version);
       expect(ended.workflowWakeRevision).toBeGreaterThan(0);
-      await expect(claim(value)).resolves.toMatchObject({ action: "claimed" });
     });
   });
 

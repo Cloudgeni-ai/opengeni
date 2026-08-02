@@ -12,10 +12,8 @@ import type {
 import {
   CodexRealtimeControl,
   codexRealtimeAdmissionAllowed,
-  realtimeSessionSurfacePolicy,
   useSessionCodexRealtime,
 } from "./codex-realtime-control";
-import { sessionCodexRealtimeSynchronousLock } from "./codex-realtime-policy";
 
 GlobalRegistrator.register({ url: "https://app.example.test" });
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
@@ -79,18 +77,20 @@ describe("ordinary session Codex realtime control", () => {
     container.remove();
   });
 
-  test("admits only an exactly idle, controllable, settled, Codex-connected session", () => {
-    expect(
-      codexRealtimeAdmissionAllowed({
-        sessionStatus: "idle",
-        controlState: "active",
-        settlement: null,
-        codexConnected: true,
-        lifecycleActive: false,
-      }),
-    ).toBe(true);
+  test("admits non-cancelled work states when control and Codex are ready", () => {
+    for (const sessionStatus of ["idle", "queued", "running", "requires_action"] as const) {
+      expect(
+        codexRealtimeAdmissionAllowed({
+          sessionStatus,
+          controlState: "active",
+          settlement: null,
+          codexConnected: true,
+          lifecycleActive: false,
+        }),
+      ).toBe(true);
+    }
     for (const blocked of [
-      { sessionStatus: "running" as const },
+      { sessionStatus: "cancelled" as const },
       { controlState: "paused" as const },
       { settlement: { state: "stopping" as const } },
       { codexConnected: false },
@@ -107,65 +107,6 @@ describe("ordinary session Codex realtime control", () => {
         }),
       ).toBe(false);
     }
-  });
-
-  test("keeps the ordinary draft mounted while queue, composer, steer, and config are fenced", () => {
-    for (const status of ["starting", "active", "stopping", "recovering", "lost_owner"] as const) {
-      expect(realtimeSessionSurfacePolicy({ ...idle, status }, false)).toEqual({
-        ordinaryControlsLocked: true,
-        queueReadOnly: true,
-        composerDisabled: true,
-        configDisabled: true,
-      });
-    }
-    expect(realtimeSessionSurfacePolicy(idle, true).ordinaryControlsLocked).toBe(true);
-    expect(realtimeSessionSurfacePolicy(idle, false).ordinaryControlsLocked).toBe(false);
-  });
-
-  test("locks synchronously from durable lifecycle or this browser's owner proof", () => {
-    const workspaceId = "11111111-1111-4111-8111-111111111111";
-    const sessionId = "22222222-2222-4222-8222-222222222222";
-    const started = {
-      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-      workspaceId,
-      sessionId,
-      sequence: 10,
-      type: "session.realtime.started",
-      payload: {
-        realtimeId: "33333333-3333-4333-8333-333333333333",
-        operationId: "44444444-4444-4444-8444-444444444444",
-        version: 1,
-        connectionEpoch: 1,
-        leaseExpiresAt: "2026-07-29T07:00:30.000Z",
-      },
-      occurredAt: "2026-07-29T07:00:00.000Z",
-    } satisfies SessionEvent;
-
-    expect(sessionCodexRealtimeSynchronousLock([], workspaceId, sessionId)).toBe(false);
-    sessionStorage.setItem(`opengeni:codex-realtime-owner:${workspaceId}:${sessionId}`, "proof");
-    expect(sessionCodexRealtimeSynchronousLock([], workspaceId, sessionId)).toBe(true);
-    sessionStorage.clear();
-    expect(sessionCodexRealtimeSynchronousLock([started], workspaceId, sessionId)).toBe(true);
-    expect(
-      sessionCodexRealtimeSynchronousLock(
-        [
-          {
-            ...started,
-            id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-            sequence: 11,
-            type: "session.realtime.ended",
-            payload: {
-              ...started.payload,
-              version: 2,
-              reason: "user_stop",
-            },
-          },
-          started,
-        ],
-        workspaceId,
-        sessionId,
-      ),
-    ).toBe(false);
   });
 
   test("catches up a durable active lifecycle that predates the lazy controller load", async () => {
@@ -203,11 +144,7 @@ describe("ordinary session Codex realtime control", () => {
         codexConnected: true,
       });
       return (
-        <output
-          data-status={realtime.snapshot.status}
-          data-locked={String(realtime.policy.ordinaryControlsLocked)}
-          data-can-start={String(realtime.canStart)}
-        />
+        <output data-status={realtime.snapshot.status} data-can-start={String(realtime.canStart)} />
       );
     }
 
@@ -222,7 +159,6 @@ describe("ordinary session Codex realtime control", () => {
       }
       const output = container.querySelector("output");
       expect(output?.getAttribute("data-status")).toBe("lost_owner");
-      expect(output?.getAttribute("data-locked")).toBe("true");
       expect(output?.getAttribute("data-can-start")).toBe("false");
       expect(consoleError).not.toHaveBeenCalled();
     } finally {

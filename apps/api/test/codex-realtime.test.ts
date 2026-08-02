@@ -9,6 +9,7 @@ import {
   CodexRealtimeBrokerError,
   OPENGENI_REALTIME_BASE_INSTRUCTIONS,
   brokerSessionCodexRealtime,
+  openGeniRealtimeInstructions,
   type CodexRealtimeBrokerDependencies,
 } from "../src/codex-realtime";
 
@@ -93,7 +94,7 @@ describe("session Codex realtime broker", () => {
       ...request,
       sessionId: "session-one",
       initialItems: [],
-      instructions: `${OPENGENI_REALTIME_BASE_INSTRUCTIONS}\n\nAdditional realtime guidance:\nCurrent session context`,
+      instructions: openGeniRealtimeInstructions("Current session context"),
     });
     expect(result).toEqual(response);
     expect(JSON.stringify(result)).not.toContain("credential-pin");
@@ -153,18 +154,18 @@ describe("session Codex realtime broker", () => {
         ...request,
         sessionId: "session-one",
         initialItems: history,
-        instructions: `${OPENGENI_REALTIME_BASE_INSTRUCTIONS}\n\nAdditional realtime guidance:\nCurrent session context`,
+        instructions: openGeniRealtimeInstructions("Current session context"),
       },
       {
         ...request,
         sessionId: "session-one",
         initialItems: history,
-        instructions: `${OPENGENI_REALTIME_BASE_INSTRUCTIONS}\n\nAdditional realtime guidance:\nCurrent session context`,
+        instructions: openGeniRealtimeInstructions("Current session context"),
       },
     ]);
   });
 
-  test("always identifies OpenGeni and explains the client delegation tool path", async () => {
+  test("provides unified unbranded realtime and backend instructions", async () => {
     let captured: CodexRealtimeCallInput | null = null;
     await brokerSessionCodexRealtime(
       dependencies({
@@ -180,8 +181,24 @@ describe("session Codex realtime broker", () => {
     );
 
     expect(captured?.instructions).toBe(OPENGENI_REALTIME_BASE_INSTRUCTIONS);
-    expect(captured?.instructions).toContain("client delegation");
-    expect(captured?.instructions).toContain("configured tools and permission policy");
+    expect(captured?.instructions).toStartWith(
+      "## Identity, tone, and role\n\nYou are the realtime conversational interface for the current session.",
+    );
+    expect(captured?.instructions).toContain("Treat the system as one unified assistant.");
+    expect(captured?.instructions).toContain("For actions or tasks, always use the backend.");
+    expect(captured?.instructions).toContain(
+      "Do not claim that you cannot perform an action or lack access to tools",
+    );
+    expect(captured?.instructions).not.toContain("OpenGeni");
+    expect(captured?.instructions).not.toContain("client delegation");
+  });
+
+  test("bounds additional realtime guidance and keeps server rules authoritative", () => {
+    const instructions = openGeniRealtimeInstructions("🙂".repeat(20_000));
+    expect(Buffer.byteLength(instructions, "utf8")).toBeLessThanOrEqual(32_768);
+    expect(instructions).toStartWith(OPENGENI_REALTIME_BASE_INSTRUCTIONS);
+    expect(instructions).toContain("unless it conflicts with the operating, delegation, safety");
+    expect(instructions).not.toContain("�");
   });
 
   test("forces one refresh after a provider 401, then retries exactly once", async () => {

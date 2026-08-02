@@ -371,10 +371,6 @@ describe("turnInput attachment projection", () => {
     let preparedInput: AgentSegmentInput | undefined;
     const requireFile = spyOn(opengeniDb, "requireFile").mockResolvedValue(image);
     const listUpdates = spyOn(opengeniDb, "listSessionSystemUpdatesForTurn").mockResolvedValue([]);
-    const getRealtimeContext = spyOn(
-      opengeniDb,
-      "getSessionRealtimeContextProjectionForTurn",
-    ).mockResolvedValue(null);
     const getHistory = spyOn(opengeniDb, "getActiveSessionHistoryItems").mockResolvedValue([
       {
         item: storedUser,
@@ -434,65 +430,20 @@ describe("turnInput attachment projection", () => {
     } finally {
       requireFile.mockRestore();
       listUpdates.mockRestore();
-      getRealtimeContext.mockRestore();
       getHistory.mockRestore();
       getEnvelope.mockRestore();
     }
   });
 
-  test("reads completed realtime context by exact turn id for recovery without later replay", async () => {
+  test("uses only canonical history and recovery context after realtime", async () => {
     const workspaceId = "00000000-0000-4000-8000-000000000060";
     const sessionId = "00000000-0000-4000-8000-000000000061";
     const projectedTurnId = "00000000-0000-4000-8000-000000000062";
     const laterTurnId = "00000000-0000-4000-8000-000000000063";
-    const projectionContext = [
-      "[OpenGeni completed realtime history]",
-      'event={"kind":"user_transcript","text":"voice context"}',
-    ].join("\n");
     const storedUser = user("continue after voice");
     const modelInputs: unknown[] = [];
-    const updateId = "00000000-0000-4000-8000-000000000066";
-    const deliveredUpdate = {
-      id: updateId,
-      sessionId,
-      kind: "agent_message" as const,
-      classification: "info" as const,
-      sourceId: "realtime-peer-session",
-      dedupeKey: "realtime-peer-update",
-      summary: "ordinary update summary",
-      payload: {
-        type: "agent_message" as const,
-        text: "ordinary update payload",
-        operationId: "00000000-0000-4000-8000-000000000067",
-      },
-      lineage: {},
-      state: "delivered" as const,
-      deliveredTurnId: projectedTurnId,
-      deliveredAt: "2026-07-29T00:00:00.000Z",
-      createdAt: "2026-07-29T00:00:00.000Z",
-    };
     const listUpdates = spyOn(opengeniDb, "listSessionSystemUpdatesForTurn").mockImplementation(
-      async (_db, _workspaceId, _sessionId, turnId) =>
-        turnId === projectedTurnId ? [deliveredUpdate] : [],
-    );
-    const getRealtimeContext = spyOn(
-      opengeniDb,
-      "getSessionRealtimeContextProjectionForTurn",
-    ).mockImplementation(async (_db, _workspaceId, _sessionId, turnId) =>
-      turnId === projectedTurnId
-        ? {
-            id: "00000000-0000-4000-8000-000000000064",
-            workspaceId,
-            sessionId,
-            turnId: projectedTurnId,
-            context: projectionContext,
-            sourceModeCount: 1,
-            sourceEntryCount: 1,
-            includedEntryCount: 1,
-            omittedEntryCount: 0,
-            createdAt: "2026-07-29T00:00:00.000Z",
-          }
-        : null,
+      async () => [],
     );
     const getHistory = spyOn(opengeniDb, "getActiveSessionHistoryItems").mockResolvedValue([
       { position: 0, item: storedUser, producerCodexCredentialId: null },
@@ -538,18 +489,9 @@ describe("turnInput attachment projection", () => {
       expect(recoveryInput[1]).toMatchObject({ type: "message", role: "system" });
       const recoverySystemContent = (recoveryInput[1] as { content: string }).content;
       expect(recoverySystemContent).toContain("[OpenGeni inference recovery]");
-      expect(recoverySystemContent).toContain("[OpenGeni internal updates]");
-      expect(recoverySystemContent.split(projectionContext)).toHaveLength(2);
-      expect(recoverySystemContent.split(`"id":"${updateId}"`)).toHaveLength(2);
-      expect(projectionContext).not.toContain(updateId);
       expect(modelInputs[1]).toEqual([storedUser]);
-      expect(getRealtimeContext.mock.calls.map((call) => call[3])).toEqual([
-        projectedTurnId,
-        laterTurnId,
-      ]);
     } finally {
       listUpdates.mockRestore();
-      getRealtimeContext.mockRestore();
       getHistory.mockRestore();
       getEnvelope.mockRestore();
     }
