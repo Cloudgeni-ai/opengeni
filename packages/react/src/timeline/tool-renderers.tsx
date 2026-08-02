@@ -1078,8 +1078,8 @@ function DocsSearchRenderer({ item }: ToolRendererProps) {
     >
       {hits && hits.length > 0 ? (
         <ul className="grid gap-2">
-          {hits.slice(0, 8).map((hit, index) => (
-            <li key={`${hit.title}-${index}`} className="min-w-0">
+          {hits.slice(0, 8).map((hit) => (
+            <li key={`${hit.title}\u0000${hit.snippet}`} className="min-w-0">
               <div className="truncate text-og-sm font-medium text-og-fg">{hit.title}</div>
               {hit.snippet ? (
                 <div className="mt-0.5 line-clamp-2 text-og-xs text-og-fg-muted">{hit.snippet}</div>

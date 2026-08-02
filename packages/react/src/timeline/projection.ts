@@ -6,11 +6,7 @@ import {
   isCreditExhaustion,
   tryParseJson,
 } from "../lib/format";
-import {
-  mcpToolLeaf,
-  toolDisplayName,
-  toolMatchesLeaf,
-} from "./tool-display-name";
+import { mcpToolLeaf, toolMatchesLeaf } from "./tool-display-name";
 import type {
   AgentMessageItem,
   ActivityItem,

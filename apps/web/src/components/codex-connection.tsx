@@ -1024,14 +1024,14 @@ export function CodexSubscriptionsCard({
 
   // Burying reconnect behind a click is worse than one auto-open; healthy rows stay closed.
   useEffect(() => {
-    if (autoExpandedReloginRef.current || expandedId != null) return;
-    const needsRelogin = accounts.find(
+    if (autoExpandedReloginRef.current || expandedId != null || !data) return;
+    const needsRelogin = data.accounts.find(
       (account) => account.status !== "active" && account.lastError != null,
     );
     if (!needsRelogin) return;
     autoExpandedReloginRef.current = true;
     setExpandedId(needsRelogin.id);
-  }, [accounts, expandedId]);
+  }, [data, expandedId]);
 
   return (
     <section aria-labelledby="codex-subscriptions-heading" className="grid gap-2">
