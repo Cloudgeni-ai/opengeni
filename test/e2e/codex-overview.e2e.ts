@@ -706,7 +706,20 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     await completedPage.goto(`http://127.0.0.1:${publicPort}/workspaces/${workspaceId}/settings`, {
       waitUntil: "domcontentloaded",
     });
-    await completedPage
+    const completedSubscriptionsHeading = completedPage.locator("#codex-subscriptions-heading");
+    await completedSubscriptionsHeading.waitFor({ timeout: 20_000 });
+    await completedSubscriptionsHeading.scrollIntoViewIfNeeded();
+    // Dense rows keep reset outcomes inside collapsed details.
+    const completedDetailed = completedPage.getByRole("article", {
+      name: "Detailed account Codex subscription",
+    });
+    const completedShow = completedDetailed.getByRole("button", {
+      name: "Show details for Detailed account",
+    });
+    if (await completedShow.isVisible()) {
+      await completedShow.click();
+    }
+    await completedDetailed
       .getByText("The earlier redemption succeeded; usage was refreshed.")
       .waitFor({ timeout: 20_000 });
     expect(

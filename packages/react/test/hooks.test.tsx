@@ -1777,9 +1777,8 @@ describe("useComposer durable draft and control binding", () => {
     expect(reads).toBe(2);
     expect(hook.result.current.draftLoading).toBe(false);
     expect(releaseSecond).not.toBeNull();
-    await flushing(() => {
-      releaseSecond!();
-    });
+    releaseSecond!();
+    await flush();
     expect(hook.result.current.draftLoading).toBe(false);
     expect(hook.result.current.value).toBe("read-2");
     await hook.unmount();

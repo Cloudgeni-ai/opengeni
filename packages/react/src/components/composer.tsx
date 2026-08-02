@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import {
+  cloneElement,
   createContext,
   forwardRef,
   useCallback,
@@ -49,21 +50,12 @@ import type { PickerModelRow } from "../model-policy";
 import { OPEN_WORKSTREAM_CONTROL_EVENT } from "../workstream-control-event";
 import { CommandPalette as CommandPaletteView } from "./command-palette";
 import { ModelPicker as ModelPickerView } from "./model-picker";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./tooltip";
 
 export { OPEN_WORKSTREAM_CONTROL_EVENT };
 
-/** Radix tip for icon/chrome controls — never native `title` (browser ugly). */
 function ComposerTip({ tip, children }: { tip: string; children: ReactElement }) {
-  if (!tip) {
-    return children;
-  }
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>{children}</TooltipTrigger>
-      <TooltipContent side="top">{tip}</TooltipContent>
-    </Tooltip>
-  );
+  if (!tip) return children;
+  return cloneElement(children, { title: tip });
 }
 
 export type ComposerDelivery = Pick<
@@ -693,18 +685,16 @@ export const Root = forwardRef<HTMLDivElement, ComposerRootProps>(function Compo
 ) {
   return (
     <ComposerContext.Provider value={controller}>
-      <TooltipProvider delayDuration={300}>
-        <div
-          {...props}
-          ref={mergeRefs(controller.rootRef, forwardedRef)}
-          data-og-composer-id={controller.id}
-          className={cn("og-root", className)}
-          style={{ paddingBottom: "env(safe-area-inset-bottom)", ...style }}
-        >
-          {children}
-          <ComposerAnnouncements />
-        </div>
-      </TooltipProvider>
+      <div
+        {...props}
+        ref={mergeRefs(controller.rootRef, forwardedRef)}
+        data-og-composer-id={controller.id}
+        className={cn("og-root", className)}
+        style={{ paddingBottom: "env(safe-area-inset-bottom)", ...style }}
+      >
+        {children}
+        <ComposerAnnouncements />
+      </div>
     </ComposerContext.Provider>
   );
 });
