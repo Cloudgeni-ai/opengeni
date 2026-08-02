@@ -22,6 +22,7 @@ import type { ComponentType } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { Collapsible } from "radix-ui";
 import {
+  Component,
   memo,
   useCallback,
   useEffect,
@@ -1158,21 +1159,23 @@ export function MessageTimeline({
                             : 0;
                       return (
                         <div key={key} data-og-timeline-group-anchor="" data-og-group-key={key}>
-                          <TimelineGroupView
-                            group={group}
-                            renderMessageText={renderMessageText}
-                            onOpenSession={onOpenSession}
-                            onMemoryClick={onMemoryClick}
-                            onReconnect={onReconnect}
-                            resolveProviderLogo={resolveProviderLogo}
-                            toolRegistry={toolRegistry}
-                            turnSummary={turnSummary}
-                            foldLiveCluster={isAgentProgress(next)}
-                            trailingAgentText={trailingAgentTextAfterTurn(group, next)}
-                            contextCompactionCount={
-                              contextCompactionCount > 0 ? contextCompactionCount : undefined
-                            }
-                          />
+                          <TimelineGroupRenderBoundary>
+                            <TimelineGroupView
+                              group={group}
+                              renderMessageText={renderMessageText}
+                              onOpenSession={onOpenSession}
+                              onMemoryClick={onMemoryClick}
+                              onReconnect={onReconnect}
+                              resolveProviderLogo={resolveProviderLogo}
+                              toolRegistry={toolRegistry}
+                              turnSummary={turnSummary}
+                              foldLiveCluster={isAgentProgress(next)}
+                              trailingAgentText={trailingAgentTextAfterTurn(group, next)}
+                              contextCompactionCount={
+                                contextCompactionCount > 0 ? contextCompactionCount : undefined
+                              }
+                            />
+                          </TimelineGroupRenderBoundary>
                         </div>
                       );
                     })}
@@ -1420,6 +1423,51 @@ function cancelFrame(id: number): void {
   window.clearTimeout(id);
 }
 
+type TimelineGroupRenderBoundaryProps = {
+  children: ReactNode;
+};
+
+type TimelineGroupRenderBoundaryState = {
+  failed: boolean;
+};
+
+/**
+ * A malformed historical payload or consumer renderer must not take down the
+ * entire conversation. Keep the boundary outside the row component so React
+ * can replace an invalid element type (error #130) with a bounded fallback.
+ */
+class TimelineGroupRenderBoundary extends Component<
+  TimelineGroupRenderBoundaryProps,
+  TimelineGroupRenderBoundaryState
+> {
+  state: TimelineGroupRenderBoundaryState = { failed: false };
+
+  static getDerivedStateFromError(): TimelineGroupRenderBoundaryState {
+    return { failed: true };
+  }
+
+  render(): ReactNode {
+    if (this.state.failed) {
+      return (
+        <div
+          data-testid="timeline-group-render-error"
+          role="status"
+          className="flex items-start gap-2 rounded-lg border border-og-border bg-og-surface-muted px-3 py-2 text-sm text-og-fg-muted"
+        >
+          <TriangleAlertIcon aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
+          <div>
+            <p className="font-medium text-og-fg">Timeline item unavailable</p>
+            <p>
+              This item could not be displayed. The rest of the conversation is still available.
+            </p>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 // The full loaded window stays mounted, so settled history rows must be cheap
 // on every commit: projection reuses group objects for unchanged groups, so
 // memo skips them. Live projection creates a new group object, and
@@ -1581,21 +1629,25 @@ const TimelineGroupView = memo(function TimelineGroupView({
       // more "N steps" was the redundant double fold).
       const nestClusters = foldableActivityClusterCount(group.groups) >= 2;
       const turnCopyText = collectTurnCopyText(group.groups, trailingAgentText);
-      const body = group.groups.map((child) => (
-        <TimelineGroupView
-          key={timelineGroupKey(child)}
-          group={child}
-          renderMessageText={renderMessageText}
-          onOpenSession={onOpenSession}
-          onMemoryClick={onMemoryClick}
-          onReconnect={onReconnect}
-          resolveProviderLogo={resolveProviderLogo}
-          toolRegistry={toolRegistry}
-          turnSummary={turnSummary}
-          insideTurn
-          nestClusterChips={nestClusters}
-        />
-      ));
+      const body = group.groups.map((child) => {
+        const key = timelineGroupKey(child);
+        return (
+          <TimelineGroupRenderBoundary key={key}>
+            <TimelineGroupView
+              group={child}
+              renderMessageText={renderMessageText}
+              onOpenSession={onOpenSession}
+              onMemoryClick={onMemoryClick}
+              onReconnect={onReconnect}
+              resolveProviderLogo={resolveProviderLogo}
+              toolRegistry={toolRegistry}
+              turnSummary={turnSummary}
+              insideTurn
+              nestClusterChips={nestClusters}
+            />
+          </TimelineGroupRenderBoundary>
+        );
+      });
       return (
         <TurnSummary
           items={activityItems}
