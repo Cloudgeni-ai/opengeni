@@ -78,6 +78,7 @@ import {
   type SessionTurnRecordingSettlement,
 } from "@opengeni/db";
 import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@opengeni/events";
+import { sandboxOperationMetricObserver } from "@opengeni/observability";
 import {
   sandboxStateEntryFromRunState,
   maxTurnsExceededRunState,
@@ -2297,6 +2298,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     const machineOpObserver = makeMachineOpObserver(
       runtimeMetricsHooksForObservability(observability),
     );
+    const sandboxOperationObserver = sandboxOperationMetricObserver(observability);
     let isCodexTurn = false;
     let isExternallyBilledTurn = false;
     let executionGeneration = 0;
@@ -5162,6 +5164,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               settings,
               bus,
               onOp: machineOpObserver.observer,
+              onSandboxOperation: sandboxOperationObserver,
               opJournal,
             },
             {
@@ -5190,6 +5193,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 settings,
                 bus,
                 onOp: machineOpObserver.observer,
+                onSandboxOperation: sandboxOperationObserver,
                 onHomeSandboxRebound,
               },
               {
@@ -5297,6 +5301,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 db,
                 settings,
                 bus,
+                onSandboxOperation: sandboxOperationObserver,
                 onHomeSandboxLost: publishSandboxLost,
                 onHomeSandboxRebound,
               },
@@ -5786,6 +5791,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             settings,
             bus,
             onOp: machineOpObserver.observer,
+            onSandboxOperation: sandboxOperationObserver,
             onHomeSandboxLost: publishSandboxLost,
             onHomeSandboxRebound,
           },

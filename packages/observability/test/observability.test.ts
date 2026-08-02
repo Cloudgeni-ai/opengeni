@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { createObservability, logStartupDependencyRetry, parseHeaders } from "../src";
+import { SandboxBackend } from "@opengeni/contracts";
+import {
+  createObservability,
+  logStartupDependencyRetry,
+  parseHeaders,
+  sandboxOperationMetricObserver,
+} from "../src";
 
 const settings = {
   serviceName: "opengeni",
@@ -72,6 +78,64 @@ describe("observability", () => {
     expect(() =>
       obs.incrementCounter({ name: "opengeni_turns_total", labels: { status: "idle" } }),
     ).toThrow("already registered");
+  });
+
+  test("records routed sandbox operations with bounded labels", async () => {
+    const obs = createObservability(settings, { component: "worker", now: () => 1 });
+    const observe = sandboxOperationMetricObserver(obs);
+    observe({ backend: "modal", op: "execCommand", outcome: "ok", durationMs: 250 });
+    observe({
+      backend: "sb-user-controlled-provider-id",
+      op: "readFile:/private/path",
+      outcome: "failed",
+      durationMs: 10,
+    });
+
+    const metrics = await obs.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_sandbox_operations_total\{[^}]*backend="modal"[^}]*op="execCommand"[^}]*outcome="ok"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_sandbox_operations_total\{[^}]*backend="unknown"[^}]*op="unknown"[^}]*outcome="failed"[^}]*\} 1\b/,
+    );
+    expect(metrics).not.toContain("sb-user-controlled-provider-id");
+    expect(metrics).not.toContain("/private/path");
+    expect(metrics).toContain("opengeni_sandbox_operation_duration_seconds_bucket");
+  });
+
+  test("recognizes every public sandbox backend without collapsing it", async () => {
+    const obs = createObservability(settings, { component: "worker", now: () => 1 });
+    const observe = sandboxOperationMetricObserver(obs);
+    for (const backend of SandboxBackend.options) {
+      observe({ backend, op: "exec", outcome: "ok", durationMs: 1 });
+    }
+
+    const metrics = await obs.prometheusMetrics();
+    for (const backend of SandboxBackend.options) {
+      expect(metrics).toContain(`backend="${backend}"`);
+    }
+  });
+
+  test("counts observer failures without leaking them into sandbox execution", async () => {
+    const obs = createObservability(settings, { component: "worker", now: () => 1 });
+    obs.incrementCounter({
+      name: "opengeni_sandbox_operations_total",
+      labels: { incompatible_test_label: "seed" },
+    });
+
+    expect(() =>
+      sandboxOperationMetricObserver(obs)({
+        backend: "modal",
+        op: "exec",
+        outcome: "ok",
+        durationMs: 1,
+      }),
+    ).not.toThrow();
+
+    const metrics = await obs.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_observability_observer_errors_total\{[^}]*observer="sandbox_operation"[^}]*\} 1\b/,
+    );
   });
 
   test("exports OTLP JSON spans", async () => {

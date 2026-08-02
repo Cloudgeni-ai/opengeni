@@ -351,8 +351,8 @@ export async function createWorkerWorkflowSignaler(
 /**
  * Register the ONE global reaper Temporal Schedule (the sole liveness/GC/cost-stop
  * driver — P1.3 / OD-3) and durable system-update outbox repair cadence. With
- * sandbox ownership off the activity performs only bounded DB outbox repair;
- * it never reads/terminates sandbox leases.
+ * sandbox ownership off the activity performs bounded DB outbox repair and
+ * read-only observability projections; it never mutates or terminates sandbox leases.
  *
  * The Schedule fires sandboxReaperWorkflow on the worker's global task queue
  * every settings.sandboxLeaseReaperPeriodMs (the SAME cadence the boot invariant

@@ -40,6 +40,8 @@ networkPolicy:
   enabled: false
   egress:
     enabled: false
+    # Environment-specific rules appended after OpenGeni's canonical recording
+    # and alert rules. This list never replaces the built-in safety catalog.
     rules: []
   ingressController:
     namespaceSelector: {}
@@ -891,6 +893,9 @@ observability:
     # Optional Prometheus Operator starter alerts. The template is also guarded
     # on monitoring.coreos.com/v1 being installed.
     enabled: false
+    # Must cover at least three configured sandbox reaper periods; Helm rejects
+    # an incompatible pairing before generating a rule that would age out live data.
+    inventoryFreshnessSeconds: 300
     labels: {}
     annotations: {}
     rules: []

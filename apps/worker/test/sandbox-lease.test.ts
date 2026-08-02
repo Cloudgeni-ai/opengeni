@@ -141,10 +141,10 @@ const REAPER_SETTINGS = testSettings({
 });
 
 // A lean ActivityServices the reaper actually reads from (db/settings/observability).
-function reaperServices(settings: Settings = REAPER_SETTINGS): () => Promise<ActivityServices> {
-  const observability = createObservability(settings, {
-    component: "worker-test",
-  });
+function reaperServices(
+  settings: Settings = REAPER_SETTINGS,
+  observability = createObservability(settings, { component: "worker-test" }),
+): () => Promise<ActivityServices> {
   return async () => ({
     settings,
     db,
@@ -474,6 +474,39 @@ afterAll(async () => {
 }, 180_000);
 
 describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, spied provider stop)", () => {
+  test("ownership-off keeps read-only inventory fresh without provider mutation", async () => {
+    if (!available) return;
+    const settings = testSettings({
+      sandboxBackend: "local",
+      webSearchEnabled: false,
+      sandboxOwnershipEnabled: false,
+      sandboxLeaseReaperPeriodMs: 30_000,
+    });
+    const observability = createObservability(settings, { component: "worker-test" });
+    const spy = makeTerminateSpy();
+    const { reapSandboxLeases } = createSandboxLeaseActivities(
+      reaperServices(settings, observability),
+      { terminateBox: spy.fn },
+    );
+
+    const result = await reapSandboxLeases();
+    const metrics = await observability.prometheusMetrics();
+
+    expect(result).toMatchObject({ examined: 0, terminated: 0 });
+    expect(spy.calls).toHaveLength(0);
+    for (const domain of [
+      "leases",
+      "checkpoint_artifacts",
+      "rotation_backlog",
+      "retained_processes",
+      "expired_drains",
+    ]) {
+      expect(metrics).toContain(
+        `opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="${domain}",`,
+      );
+    }
+  });
+
   test("(1) one pass: reaps a stale viewer holder, resets warming-death, terminates a draining-past-grace box → lease cold", async () => {
     if (!available) return;
     const spy = makeTerminateSpy();

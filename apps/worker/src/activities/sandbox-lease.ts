@@ -115,7 +115,10 @@ import {
   recordSandboxCheckpointArtifactGauges,
   recordSandboxCheckpointArtifactOutcome,
   recordSandboxDeadlineRotationsRequested,
+  recordSandboxInventoryProjectionFailure,
+  recordSandboxInventoryProjectionSuccess,
   type RetainedProcessReconciliationOutcome,
+  type SandboxInventoryProjectionDomain,
   recordSandboxLeaseGauges,
   recordSandboxOrphansTerminated,
   recordSandboxRotationBacklogGauges,
@@ -286,9 +289,9 @@ export function createSandboxLeaseActivities(
   const probeDrainableProvider = options.probeDrainableProvider ?? probeDrainableProviderReadiness;
   /**
    * The one global reaper sweep. Idempotent; concurrency-safe with itself.
-   * Gated by the caller (the Schedule is only registered when
-   * sandboxOwnershipEnabled); a defensive no-op here too so a manual trigger
-   * with the flag off can never terminate a box.
+   * The global Schedule always runs. A defensive mutation gate here ensures
+   * that an ownership-off deployment still refreshes read-only metrics and
+   * repairs the system-update outbox but can never terminate a box.
    */
   async function reapSandboxLeases(): Promise<ReapSandboxLeasesResult> {
     const service = await services();
@@ -312,6 +315,11 @@ export function createSandboxLeaseActivities(
         deleted: expiredSessionListSnapshots,
       });
     }
+    // Inventory is useful even while provider ownership is disabled, and the
+    // same globally scheduled activity remains its single projection owner.
+    // Refresh before the mutation gate so dashboards show truthful zero/history
+    // state and absence alerts do not misclassify an intentional rollout flag.
+    await refreshQueueLeaseAndCreditGauges(db, observability);
     if (!settings.sandboxOwnershipEnabled) {
       if (parentUpdates.claimed > 0) {
         observability.info("system-update outbox reconciled", parentUpdates);
@@ -325,7 +333,6 @@ export function createSandboxLeaseActivities(
         modalOrphansTerminated: 0,
       };
     }
-    await refreshQueueLeaseAndCreditGauges(db, observability);
 
     const rotationsRequested = await requestDueSandboxRotationsGlobal(
       db,
@@ -1218,54 +1225,71 @@ async function refreshQueueLeaseAndCreditGauges(
       error: error instanceof Error ? error.message : String(error),
     });
   }
-  try {
+  await refreshSandboxInventoryGauge(observability, "leases", "sandbox-lease", async () => {
     recordSandboxLeaseGauges(observability, await countSandboxLeasesByLiveness(db));
-  } catch (error) {
-    observability.warn("sandbox reaper: sandbox-lease gauge refresh failed", {
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
-  try {
-    recordSandboxCheckpointArtifactGauges(
-      observability,
-      await countSandboxCheckpointArtifactsByState(db),
-    );
-  } catch (error) {
-    observability.warn("sandbox reaper: checkpoint-artifact gauge refresh failed", {
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
-  try {
-    recordSandboxRotationBacklogGauges(observability, await readSandboxRotationBacklog(db));
-  } catch (error) {
-    observability.warn("sandbox reaper: rotation-backlog gauge refresh failed", {
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
-  try {
-    recordRetainedProcessInventoryGauges(
-      observability,
-      await countActiveRetainedProcessesByOwnerState(db),
-    );
-  } catch (error) {
-    observability.warn("sandbox reaper: retained-process gauge refresh failed", {
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
-  try {
-    recordExpiredDrainingSandboxLeaseGauges(
-      observability,
-      await countExpiredDrainingSandboxLeases(db),
-    );
-  } catch (error) {
-    observability.warn("sandbox reaper: expired-draining gauge refresh failed", {
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
+  });
+  await refreshSandboxInventoryGauge(
+    observability,
+    "checkpoint_artifacts",
+    "checkpoint-artifact",
+    async () => {
+      recordSandboxCheckpointArtifactGauges(
+        observability,
+        await countSandboxCheckpointArtifactsByState(db),
+      );
+    },
+  );
+  await refreshSandboxInventoryGauge(
+    observability,
+    "rotation_backlog",
+    "rotation-backlog",
+    async () => {
+      recordSandboxRotationBacklogGauges(observability, await readSandboxRotationBacklog(db));
+    },
+  );
+  await refreshSandboxInventoryGauge(
+    observability,
+    "retained_processes",
+    "retained-process",
+    async () => {
+      recordRetainedProcessInventoryGauges(
+        observability,
+        await countActiveRetainedProcessesByOwnerState(db),
+      );
+    },
+  );
+  await refreshSandboxInventoryGauge(
+    observability,
+    "expired_drains",
+    "expired-draining",
+    async () => {
+      recordExpiredDrainingSandboxLeaseGauges(
+        observability,
+        await countExpiredDrainingSandboxLeases(db),
+      );
+    },
+  );
   try {
     recordCreditBalanceGauges(observability, await listCreditBalancesByAccount(db));
   } catch (error) {
     observability.warn("sandbox reaper: credit-balance gauge refresh failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+async function refreshSandboxInventoryGauge(
+  observability: ActivityServices["observability"],
+  domain: SandboxInventoryProjectionDomain,
+  diagnosticName: string,
+  refresh: () => Promise<void>,
+): Promise<void> {
+  try {
+    await refresh();
+    recordSandboxInventoryProjectionSuccess(observability, domain);
+  } catch (error) {
+    recordSandboxInventoryProjectionFailure(observability, domain);
+    observability.warn(`sandbox reaper: ${diagnosticName} gauge refresh failed`, {
       error: error instanceof Error ? error.message : String(error),
     });
   }
