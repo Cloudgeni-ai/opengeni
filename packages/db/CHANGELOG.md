@@ -1,5 +1,11 @@
 # @opengeni/db
 
+## 0.19.0
+
+### Minor Changes
+
+- 1a2d41f: Add the typed hierarchical memory governance schema, lifecycle operations, and FORCE-RLS foundation.
+
 ## 0.18.1
 
 ### Patch Changes
