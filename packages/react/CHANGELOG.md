@@ -1,5 +1,12 @@
 # @opengeni/react
 
+## 0.35.2
+
+### Patch Changes
+
+- 83ac3b6: Keep a malformed or unavailable timeline renderer from crashing the entire conversation by isolating each timeline group behind a visible fallback, then retry the row when its renderer inputs change.
+  - @opengeni/sdk@0.35.0
+
 ## 0.35.1
 
 ### Patch Changes
