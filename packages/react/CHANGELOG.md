@@ -1,5 +1,11 @@
 # @opengeni/react
 
+## 0.34.2
+
+### Patch Changes
+
+- 9840496: Avoid replacing an in-flight initial workspace-capture read when the matching capture announcement arrives first.
+
 ## 0.34.1
 
 ### Patch Changes
