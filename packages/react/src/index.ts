@@ -486,6 +486,7 @@ export { cn } from "./lib/cn";
 export {
   CREDIT_EXHAUSTION_MESSAGE,
   formatBytes,
+  formatClockTime,
   formatRelativeTime,
   humanizeFailureReason,
   isCreditExhaustion,

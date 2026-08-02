@@ -186,6 +186,9 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
             open.text = text || open.text;
           }
           open.streaming = false;
+          // Completion time is what the footer shows ("finished at"); keep the
+          // first-delta stamp only until this event arrives.
+          open.occurredAt = event.occurredAt;
           // The SDK can emit a hosted-tool item only after its provider-native
           // operation has completed, even though answer deltas were already
           // streamed. The completed message event is the durable ordering

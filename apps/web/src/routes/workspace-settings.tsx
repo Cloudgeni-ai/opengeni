@@ -41,6 +41,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/ui/notice";
+import { ContentPage } from "@/components/ui/content-layout";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
 import { orgLabel } from "@/lib/org";
@@ -239,7 +240,7 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
   }
 
   return (
-    <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col overflow-y-auto px-4 py-5 sm:px-6 lg:px-8">
+    <ContentPage width="standard">
       <section className="grid gap-5 text-left">
         <PageHeader
           icon={<SettingsIcon className="size-4" />}
@@ -482,7 +483,7 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
           onDelete={deleteWorkspace}
         />
       </section>
-    </div>
+    </ContentPage>
   );
 }
 

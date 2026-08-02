@@ -361,16 +361,18 @@ describe("buildTimeline", () => {
 
   test("accumulates streaming deltas into one agent message and finalizes on completed", () => {
     reset();
-    const items = buildTimeline([
-      event("user.message", { text: "Deploy staging" }),
-      event("agent.message.delta", { text: "On it — " }),
-      event("agent.message.delta", { text: "checking the cluster." }),
-      event("agent.message.completed", { text: "On it — checking the cluster." }),
-    ]);
+    const user = event("user.message", { text: "Deploy staging" });
+    const deltaA = event("agent.message.delta", { text: "On it — " });
+    const deltaB = event("agent.message.delta", { text: "checking the cluster." });
+    const done = event("agent.message.completed", { text: "On it — checking the cluster." });
+    const items = buildTimeline([user, deltaA, deltaB, done]);
     expect(items.map((item) => item.kind)).toEqual(["user-message", "agent-message"]);
     const message = items[1] as AgentMessageItem;
     expect(message.text).toBe("On it — checking the cluster.");
     expect(message.streaming).toBe(false);
+    // Footer "finished at" uses the completed event time, not the first delta.
+    expect(message.occurredAt).toBe(done.occurredAt);
+    expect(message.occurredAt).not.toBe(deltaA.occurredAt);
   });
 
   test("keeps accumulated text when completed text does not extend it", () => {

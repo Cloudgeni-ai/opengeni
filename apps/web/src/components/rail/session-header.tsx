@@ -13,7 +13,7 @@ import {
 } from "@opengeni/react";
 import type { SessionEventsConnectionState } from "@opengeni/react";
 import type { SessionSummary } from "@opengeni/sdk";
-import { LockIcon, PanelRightIcon, PauseIcon, PencilIcon, PinIcon, PlayIcon } from "lucide-react";
+import { LockIcon, PanelRightIcon, PauseIcon, PencilIcon, PinIcon } from "lucide-react";
 import { useCallback, useRef, useState, type ReactNode } from "react";
 
 import { BillingClassMark, type BillingClass } from "@/components/billing-class-mark";
@@ -177,11 +177,21 @@ export function SessionHeader({
         <SessionPinButton session={session} onPin={onPin} />
         <div className="hidden items-center gap-2 md:flex">
           <ConnectionPill state={connectionState} />
-          <SessionStatusBadge status={status} />
+          {/* Admission vs lifecycle are different axes, but showing both when
+              control is Active (Running + Active) is redundant noise. When
+              paused, admission is the headline — hide lifecycle so we don't
+              imply the session is still "Running"/"Idle" under a pause gate. */}
+          {session.effectiveControl.state === "active" ? (
+            <SessionStatusBadge status={status} />
+          ) : (
+            <WorkstreamControlIndicator session={session} />
+          )}
         </div>
-        <WorkstreamControlIndicator session={session} />
         <span className="sr-only md:hidden">
-          Connection {connectionState}. Session {status}.
+          Connection {connectionState}.{" "}
+          {session.effectiveControl.state === "active"
+            ? `Session ${status}.`
+            : "Workstream paused."}
         </span>
         {keyAuthRequired ? (
           <Button
@@ -210,17 +220,19 @@ export function SessionHeader({
   );
 }
 
+/** Pause-only header chip (Active is not shown — lifecycle status covers “go”). */
 function WorkstreamControlIndicator({ session }: { session: Session }) {
   const control = session.effectiveControl;
+  if (control.state !== "paused") {
+    return null;
+  }
   const blocker = control.primaryBlocker;
   const label =
-    control.state === "active"
-      ? "Active"
-      : blocker?.kind === "workspace"
-        ? "Workspace paused"
-        : control.directState === "paused" || blocker?.sessionId === session.id
-          ? "Paused here"
-          : `Paused by ${blocker?.displayName ?? "parent"}`;
+    blocker?.kind === "workspace"
+      ? "Workspace paused"
+      : control.directState === "paused" || blocker?.sessionId === session.id
+        ? "Paused here"
+        : `Paused by ${blocker?.displayName ?? "parent"}`;
   return (
     <button
       type="button"
@@ -229,17 +241,9 @@ function WorkstreamControlIndicator({ session }: { session: Session }) {
       onClick={() => {
         document.dispatchEvent(new Event(OPEN_WORKSTREAM_CONTROL_EVENT));
       }}
-      className={`inline-flex min-w-0 max-w-48 items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs font-medium ${
-        control.state === "paused"
-          ? "border-status-waiting/35 bg-status-waiting/10 text-fg hover:bg-status-waiting/15"
-          : "border-status-running/30 bg-status-running/10 text-fg hover:bg-status-running/15"
-      }`}
+      className="inline-flex min-w-0 max-w-48 items-center gap-1.5 rounded-full border border-status-waiting/35 bg-status-waiting/10 px-2 py-0.5 text-xs font-medium text-fg hover:bg-status-waiting/15"
     >
-      {control.state === "paused" ? (
-        <PauseIcon className="size-3 shrink-0 fill-current text-status-waiting" />
-      ) : (
-        <PlayIcon className="size-3 shrink-0 fill-current text-status-running" />
-      )}
+      <PauseIcon className="size-3 shrink-0 fill-current text-status-waiting" />
       <span className="hidden truncate sm:inline">{label}</span>
       {control.additionalBlockerCount > 0 ? (
         <span className="hidden shrink-0 sm:inline">+{control.additionalBlockerCount}</span>

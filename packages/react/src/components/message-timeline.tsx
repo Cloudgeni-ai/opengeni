@@ -32,7 +32,7 @@ import {
   type ReactNode,
 } from "react";
 import { cn } from "../lib/cn";
-import { formatRelativeTime, truncate } from "../lib/format";
+import { formatClockTime, formatRelativeTime, truncate } from "../lib/format";
 import { prefersReducedMotion } from "../lib/motion";
 import { Markdown } from "./markdown";
 import {
@@ -158,7 +158,8 @@ export type MessageTimelineProps = {
  * replaces was the "content is hidden, then pops in in batches" wobble.)
  *
  * Scroll invariant (tip-follow camera — see `./tip-follow.ts`):
- * - DOM truth mounts immediately; the camera eases down to the tip (not
+ * - Load/remount: hidden until tip is hard-snapped across a short settle; then
+ *   reveal. Live tip: DOM grows immediately; the camera eases down (not
  *   tip-glued feed-forward — that is the one-line yank).
  * - One continuous follow while hot (faster τ when behind); sleeps when cold.
  * - While pinned, tip-debt from growth/collapse must NEVER unpin — only
@@ -288,9 +289,10 @@ export function MessageTimeline({
   const olderLoadGateRef = useRef<"armed" | "cooling">("armed");
   const resizeFollowRafRef = useRef<number | null>(null);
   const firstGroupKey = allGroups[0] ? timelineGroupKey(allGroups[0]) : null;
-  // Content stays invisible until its first bottom-anchored frame, so a flash
-  // of the window's TOP while a large timeline lays out is structurally
-  // impossible — the reader only ever sees it already at the bottom.
+  // Content stays invisible until the tip is hard-parked across a short
+  // post-commit settle (two rAFs). That absorbs sync late layout while hidden
+  // so load/remount does not ease into the tip — live tip-follow is unchanged
+  // once revealed. A flash of the window's TOP is still structurally impossible.
   const [revealed, setRevealed] = useState(false);
   // Mirror `pinned` into a ref, written ONLY by applyPinned, so the
   // ResizeObserver rAF (a stable closure) reads the live value and a snap can
@@ -589,8 +591,12 @@ export function MessageTimeline({
         snapToBottom(node);
       }
     } else if (autoFollow && pinnedRef.current && !hasNewer) {
-      // Live tip: tip-follow camera eases down (snap only first paint / jumps).
-      driveFollow(node);
+      // Load/remount (still hidden): hard-park. Live tip after reveal: ease.
+      if (!revealedRef.current) {
+        snapToBottom(node);
+      } else {
+        driveFollow(node);
+      }
     } else if (prepended) {
       // Keep the reader on the same retained rows. Prefer the offsetTop delta
       // of the group that still holds the previous first item — that stays
@@ -661,10 +667,45 @@ export function MessageTimeline({
       }
       groupOffsetByKeyRef.current = nextOffsetByKey;
     }
-    if (!revealed && groups.length > 0) {
-      setRevealed(true);
-    }
   });
+
+  // First paint / session remount: keep the scroller hidden, snap to tip for
+  // two animation frames (late sync layout), then reveal. Does not change the
+  // tip-follow ease law used once `revealed` is true.
+  useLayoutEffect(() => {
+    if (revealed || allGroups.length === 0) {
+      return;
+    }
+    let cancelled = false;
+    let frame2 = 0;
+    const park = () => {
+      const node = scrollRef.current;
+      if (node && autoFollow && pinnedRef.current && !hasNewerRef.current) {
+        snapToBottom(node);
+      }
+    };
+    park();
+    const frame1 = requestFrame(() => {
+      if (cancelled) {
+        return;
+      }
+      park();
+      frame2 = requestFrame(() => {
+        if (cancelled) {
+          return;
+        }
+        park();
+        setRevealed(true);
+      });
+    });
+    return () => {
+      cancelled = true;
+      cancelFrame(frame1);
+      if (frame2 !== 0) {
+        cancelFrame(frame2);
+      }
+    };
+  }, [revealed, allGroups.length, autoFollow, snapToBottom]);
 
   // A cleared timeline (stream identity change) re-arms the reveal + prefetch
   // gate and returns to bottom-follow for the next session's first paint.
@@ -792,9 +833,15 @@ export function MessageTimeline({
         if (!current) {
           return;
         }
-        if (autoFollow && pinnedRef.current && !hasNewerRef.current) {
-          driveFollow(current);
+        if (!autoFollow || !pinnedRef.current || hasNewerRef.current) {
+          return;
         }
+        // Still unveiling the first tip frame: hard-park (no ease settle).
+        if (!revealedRef.current) {
+          snapToBottom(current);
+          return;
+        }
+        driveFollow(current);
       });
     });
     observer.observe(inner);
@@ -808,7 +855,7 @@ export function MessageTimeline({
         resizeFollowRafRef.current = null;
       }
     };
-  }, [autoFollow, driveFollow]);
+  }, [autoFollow, driveFollow, snapToBottom]);
 
   // Entering a non-tip history window: drop any live pin so the page bottom
   // cannot re-stick follow across loadNewer. Leaving it (the tip window
@@ -1787,6 +1834,22 @@ function compactionSkipSubtitle(reason: string | null): string {
   }
 }
 
+/** Hover-reveal clock beside the copy control (sent / finished). */
+function MessageFooterTime({ occurredAt }: { occurredAt: string }) {
+  return (
+    <time
+      dateTime={occurredAt}
+      className={cn(
+        "shrink-0 tabular-nums text-og-xs text-og-fg-subtle",
+        "opacity-0 transition-opacity duration-150",
+        "group-hover/copy:opacity-100 group-focus-within/copy:opacity-100 pointer-coarse:opacity-70",
+      )}
+    >
+      {formatClockTime(occurredAt)}
+    </time>
+  );
+}
+
 function UserMessageRow({
   item,
   renderMessageText,
@@ -1804,6 +1867,7 @@ function UserMessageRow({
           copyText={item.text}
           label="Copy message"
           className="w-fit max-w-full min-w-0"
+          trailing={<MessageFooterTime occurredAt={item.occurredAt} />}
         >
           <div className="w-fit max-w-full min-w-0 rounded-og-lg rounded-br-og-xs border border-og-border bg-og-surface-2 px-4 py-2.5 text-og-md leading-6 text-og-fg">
             {renderMessageText ? (
@@ -1835,13 +1899,15 @@ function AgentMessageRow({
   ) : (
     <Markdown streaming={item.streaming}>{item.text}</Markdown>
   );
-  // While streaming, copy is still useful (current text) but keep chrome calm.
+  // While streaming, copy is still useful (current text) but keep chrome calm —
+  // stamp only after the message finishes (occurredAt tracks completion).
   return (
     <CopyHoverFrame
       copyText={item.text}
       label="Copy message"
-      align="end"
+      align="start"
       className={cn(enter && "animate-og-enter", "min-w-0 text-og-md leading-7 text-og-fg")}
+      trailing={item.streaming ? null : <MessageFooterTime occurredAt={item.occurredAt} />}
     >
       {body}
     </CopyHoverFrame>

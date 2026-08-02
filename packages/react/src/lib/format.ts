@@ -1,5 +1,19 @@
 import { OpenGeniApiError } from "@opengeni/sdk";
 
+/** Local finished-at stamp for message footers: "Aug 2, 3:42 PM" / locale-equivalent. */
+export function formatClockTime(iso: string): string {
+  const then = new Date(iso);
+  if (Number.isNaN(then.getTime())) {
+    return "";
+  }
+  return then.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
 /** Compact relative time: "now", "42s", "7m", "3h", "2d", then a date. */
 export function formatRelativeTime(iso: string, now: Date = new Date()): string {
   const then = new Date(iso).getTime();

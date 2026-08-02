@@ -28,6 +28,7 @@ import {
   type ComponentPropsWithoutRef,
   type DragEvent,
   type KeyboardEvent,
+  type ReactElement,
   type ReactNode,
   type Ref,
   type RefObject,
@@ -47,6 +48,20 @@ import { composerSubmissionErrorMessage, formatBytes, formatRelativeTime } from 
 import type { PickerModelRow } from "../model-policy";
 import { CommandPalette as CommandPaletteView } from "./command-palette";
 import { ModelPicker as ModelPickerView } from "./model-picker";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./tooltip";
+
+/** Radix tip for icon/chrome controls — never native `title` (browser ugly). */
+function ComposerTip({ tip, children }: { tip: string; children: ReactElement }) {
+  if (!tip) {
+    return children;
+  }
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{children}</TooltipTrigger>
+      <TooltipContent side="top">{tip}</TooltipContent>
+    </Tooltip>
+  );
+}
 
 export const OPEN_WORKSTREAM_CONTROL_EVENT = "opengeni:open-workstream-control";
 
@@ -226,6 +241,31 @@ export type UseChatComposerControllerOptions = {
 };
 
 /**
+ * Autosize a composer textarea up to `maxPx` without the classic height→0
+ * measure collapse (that flash expands the timeline flex sibling and yanks
+ * tip-follow while a stream is pinned).
+ */
+export function applyComposerTextareaHeight(
+  textarea: HTMLTextAreaElement,
+  maxPx: number = 220,
+): void {
+  // Grow path: content already overflows — raise height, no measure collapse.
+  if (textarea.scrollHeight > textarea.clientHeight + 1) {
+    textarea.style.height = `${Math.min(textarea.scrollHeight, maxPx)}px`;
+    return;
+  }
+  // Shrink / steady: `auto` measures natural height without flashing empty.
+  const before = textarea.offsetHeight;
+  textarea.style.height = "auto";
+  const nextPx = Math.min(textarea.scrollHeight, maxPx);
+  if (Math.abs(nextPx - before) < 1) {
+    textarea.style.height = `${before}px`;
+    return;
+  }
+  textarea.style.height = `${nextPx}px`;
+}
+
+/**
  * Headless interaction layer for a chat composer. It is the single owner of
  * delivery guards, keyboard routing, command interception, drag/drop, focus,
  * confirmation, and feedback state used by both the preset and primitives.
@@ -347,13 +387,33 @@ export function useChatComposerController({
     [],
   );
 
+  // Autosize without collapsing the composer to 0 on every keystroke. The old
+  // height→0→content pattern briefly expanded the timeline scroller and yanked
+  // tip-follow while streams were live (pin/unpin flicker when typing fast).
+  const resizeInputRafRef = useRef<number | null>(null);
   const resizeInput = useCallback(() => {
-    const textarea = textareaRef.current;
-    if (!textarea) return;
-    textarea.style.height = "0px";
-    textarea.style.height = `${Math.min(textarea.scrollHeight, 220)}px`;
+    if (resizeInputRafRef.current !== null) {
+      return;
+    }
+    resizeInputRafRef.current = requestAnimationFrame(() => {
+      resizeInputRafRef.current = null;
+      const textarea = textareaRef.current;
+      if (!textarea) {
+        return;
+      }
+      applyComposerTextareaHeight(textarea, 220);
+    });
   }, []);
   useEffect(() => resizeInput(), [delivery.value, resizeInput]);
+  useEffect(
+    () => () => {
+      if (resizeInputRafRef.current !== null) {
+        cancelAnimationFrame(resizeInputRafRef.current);
+        resizeInputRafRef.current = null;
+      }
+    },
+    [],
+  );
 
   const handlers = useMemo(
     () => ({
@@ -632,16 +692,18 @@ export const Root = forwardRef<HTMLDivElement, ComposerRootProps>(function Compo
 ) {
   return (
     <ComposerContext.Provider value={controller}>
-      <div
-        {...props}
-        ref={mergeRefs(controller.rootRef, forwardedRef)}
-        data-og-composer-id={controller.id}
-        className={cn("og-root", className)}
-        style={{ paddingBottom: "env(safe-area-inset-bottom)", ...style }}
-      >
-        {children}
-        <ComposerAnnouncements />
-      </div>
+      <TooltipProvider delayDuration={300}>
+        <div
+          {...props}
+          ref={mergeRefs(controller.rootRef, forwardedRef)}
+          data-og-composer-id={controller.id}
+          className={cn("og-root", className)}
+          style={{ paddingBottom: "env(safe-area-inset-bottom)", ...style }}
+        >
+          {children}
+          <ComposerAnnouncements />
+        </div>
+      </TooltipProvider>
     </ComposerContext.Provider>
   );
 });
@@ -919,6 +981,7 @@ export const AttachButton = forwardRef<HTMLButtonElement, ComposerAttachButtonPr
   ) {
     const controller = useComposerController();
     if (!controller.attachments) return null;
+    const tip = title ?? controller.messages.attachFiles;
     return (
       <>
         <input
@@ -929,23 +992,24 @@ export const AttachButton = forwardRef<HTMLButtonElement, ComposerAttachButtonPr
           className="hidden"
           onChange={controller.handleFileChange}
         />
-        <button
-          {...props}
-          ref={ref}
-          type="button"
-          disabled={controller.disabled}
-          onClick={() => controller.fileInputRef.current?.click()}
-          aria-label={ariaLabel ?? controller.messages.attachFiles}
-          title={title ?? controller.messages.attachFiles}
-          className={cn(
-            "inline-flex size-8 items-center justify-center rounded-og-md",
-            "text-og-fg-muted transition-colors duration-150 hover:bg-og-surface-2 hover:text-og-fg",
-            "disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:size-11",
-            className,
-          )}
-        >
-          {children ?? <PaperclipIcon className="size-4" />}
-        </button>
+        <ComposerTip tip={tip}>
+          <button
+            {...props}
+            ref={ref}
+            type="button"
+            disabled={controller.disabled}
+            onClick={() => controller.fileInputRef.current?.click()}
+            aria-label={ariaLabel ?? tip}
+            className={cn(
+              "inline-flex size-8 items-center justify-center rounded-og-md",
+              "text-og-fg-muted transition-colors duration-150 hover:bg-og-surface-2 hover:text-og-fg",
+              "disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:size-11",
+              className,
+            )}
+          >
+            {children ?? <PaperclipIcon className="size-4" />}
+          </button>
+        </ComposerTip>
       </>
     );
   },
@@ -1000,30 +1064,32 @@ export const PauseButton = forwardRef<HTMLButtonElement, ComposerPauseButtonProp
     const controller = useComposerController();
     if (!controller.effectiveControl || controller.paused || !controller.hasControl) return null;
     const busy = controller.pausing || controller.resuming;
+    const tip = title ?? controller.messages.pauseTitle;
     return (
-      <button
-        {...props}
-        ref={mergeRefs(controller.pauseButtonRef, ref)}
-        type="button"
-        onClick={() => void controller.pause()}
-        disabled={busy}
-        aria-label={ariaLabel ?? controller.messages.pauseAriaLabel}
-        title={title ?? controller.messages.pauseTitle}
-        className={cn(
-          "inline-flex size-8 items-center justify-center rounded-og-md border border-og-border pointer-coarse:size-11",
-          "bg-og-surface-2 text-og-fg-muted transition-colors duration-150",
-          "hover:border-og-status-waiting/50 hover:text-og-status-waiting",
-          "disabled:opacity-50",
-          className,
-        )}
-      >
-        {children ??
-          (busy ? (
-            <LoaderCircleIcon className="size-3.5 animate-og-spin" />
-          ) : (
-            <PauseIcon className="size-3.5 fill-current" />
-          ))}
-      </button>
+      <ComposerTip tip={tip}>
+        <button
+          {...props}
+          ref={mergeRefs(controller.pauseButtonRef, ref)}
+          type="button"
+          onClick={() => void controller.pause()}
+          disabled={busy}
+          aria-label={ariaLabel ?? controller.messages.pauseAriaLabel}
+          className={cn(
+            "inline-flex size-8 items-center justify-center rounded-og-md border border-og-border pointer-coarse:size-11",
+            "bg-og-surface-2 text-og-fg-muted transition-colors duration-150",
+            "hover:border-og-status-waiting/50 hover:text-og-status-waiting",
+            "disabled:opacity-50",
+            className,
+          )}
+        >
+          {children ??
+            (busy ? (
+              <LoaderCircleIcon className="size-3.5 animate-og-spin" />
+            ) : (
+              <PauseIcon className="size-3.5 fill-current" />
+            ))}
+        </button>
+      </ComposerTip>
     );
   },
 );
@@ -1039,41 +1105,42 @@ export const SendButton = forwardRef<HTMLButtonElement, ComposerSendButtonProps>
     ref,
   ) {
     const controller = useComposerController();
+    const tip =
+      title ??
+      (controller.paused
+        ? controller.messages.sendAndResumeTitle
+        : controller.messages.sendTitle);
     return (
-      <button
-        {...props}
-        ref={ref}
-        type="button"
-        onClick={() => void controller.submit("queue")}
-        disabled={!controller.canSubmit}
-        aria-label={
-          ariaLabel ??
-          (controller.paused
-            ? controller.messages.sendAndResumeAriaLabel
-            : controller.messages.sendMessageAriaLabel)
-        }
-        title={
-          title ??
-          (controller.paused
-            ? controller.messages.sendAndResumeTitle
-            : controller.messages.sendTitle)
-        }
-        className={cn(
-          "inline-flex size-8 items-center justify-center rounded-og-md pointer-coarse:size-11",
-          "bg-og-accent text-og-accent-fg shadow-og-sm",
-          "transition-[background-color,transform,opacity] duration-150 ease-og-spring",
-          "hover:bg-og-accent-strong active:scale-95",
-          "disabled:cursor-not-allowed disabled:bg-og-surface-3 disabled:text-og-fg-subtle disabled:shadow-none",
-          className,
-        )}
-      >
-        {children ??
-          (controller.sending ? (
-            <LoaderCircleIcon className="size-4 animate-og-spin" />
-          ) : (
-            <ArrowUpIcon className="size-4" />
-          ))}
-      </button>
+      <ComposerTip tip={tip}>
+        <button
+          {...props}
+          ref={ref}
+          type="button"
+          onClick={() => void controller.submit("queue")}
+          disabled={!controller.canSubmit}
+          aria-label={
+            ariaLabel ??
+            (controller.paused
+              ? controller.messages.sendAndResumeAriaLabel
+              : controller.messages.sendMessageAriaLabel)
+          }
+          className={cn(
+            "inline-flex size-8 items-center justify-center rounded-og-md pointer-coarse:size-11",
+            "bg-og-accent text-og-accent-fg shadow-og-sm",
+            "transition-[background-color,transform,opacity] duration-150 ease-og-spring",
+            "hover:bg-og-accent-strong active:scale-95",
+            "disabled:cursor-not-allowed disabled:bg-og-surface-3 disabled:text-og-fg-subtle disabled:shadow-none",
+            className,
+          )}
+        >
+          {children ??
+            (controller.sending ? (
+              <LoaderCircleIcon className="size-4 animate-og-spin" />
+            ) : (
+              <ArrowUpIcon className="size-4" />
+            ))}
+        </button>
+      </ComposerTip>
     );
   },
 );
@@ -1275,27 +1342,27 @@ function WorkstreamPausedStrip({
           {broaderOptions.length > 0 ? (
             <div className="mt-2 flex flex-wrap gap-1.5">
               {broaderOptions.map((option) => (
-                <button
-                  key={`${option.scope}-${option.targetId ?? "selected"}`}
-                  type="button"
-                  disabled={busy}
-                  title={option.impactCopy}
-                  onClick={() => onResumeOption(option)}
-                  className="rounded-og-md border border-og-border bg-og-surface-1 px-2 py-1 text-og-xs text-og-fg-muted hover:bg-og-surface-2 hover:text-og-fg pointer-coarse:min-h-10"
-                >
-                  <span className="block font-medium">
-                    {option.scope === "workspace"
-                      ? messages.resumeWorkspace
-                      : messages.resumeFromSession}
-                  </span>
-                  <span className="block text-[10px] text-og-fg-subtle">
-                    {option.selectedStateAfter === "active"
-                      ? messages.sessionCanRun
-                      : messages.stillPausedBy(
-                          option.remainingPrimaryBlocker?.displayName ?? messages.narrowerPause,
-                        )}
-                  </span>
-                </button>
+                <ComposerTip key={`${option.scope}-${option.targetId ?? "selected"}`} tip={option.impactCopy}>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => onResumeOption(option)}
+                    className="rounded-og-md border border-og-border bg-og-surface-1 px-2 py-1 text-og-xs text-og-fg-muted hover:bg-og-surface-2 hover:text-og-fg pointer-coarse:min-h-10"
+                  >
+                    <span className="block font-medium">
+                      {option.scope === "workspace"
+                        ? messages.resumeWorkspace
+                        : messages.resumeFromSession}
+                    </span>
+                    <span className="block text-[10px] text-og-fg-subtle">
+                      {option.selectedStateAfter === "active"
+                        ? messages.sessionCanRun
+                        : messages.stillPausedBy(
+                            option.remainingPrimaryBlocker?.displayName ?? messages.narrowerPause,
+                          )}
+                    </span>
+                  </button>
+                </ComposerTip>
               ))}
             </div>
           ) : null}
@@ -1453,29 +1520,28 @@ function AttachmentChips({
             )}
             <div className="min-w-0 flex-1">
               <div className="truncate font-medium text-og-fg">{attachment.name}</div>
-              <div
-                className={cn(
-                  "truncate text-og-xs",
-                  failed ? "text-og-status-failed" : "text-og-fg-subtle",
-                )}
-                title={failed ? statusText : undefined}
-              >
-                {statusText}
-              </div>
+              {failed ? (
+                <ComposerTip tip={statusText}>
+                  <div className="truncate text-og-xs text-og-status-failed">{statusText}</div>
+                </ComposerTip>
+              ) : (
+                <div className="truncate text-og-xs text-og-fg-subtle">{statusText}</div>
+              )}
             </div>
             {attachment.status === "uploading" ? (
               <LoaderCircleIcon className="size-3.5 shrink-0 animate-og-spin" />
             ) : null}
             {failed && onRetry ? (
-              <button
-                type="button"
-                onClick={() => onRetry(attachment.id)}
-                className="shrink-0 rounded-og-xs p-1 text-og-fg-muted hover:bg-og-surface-1 hover:text-og-fg pointer-coarse:size-10"
-                aria-label={messages.retryAttachment(attachment.name)}
-                title={messages.retryUpload}
-              >
-                <RotateCwIcon className="size-3.5" />
-              </button>
+              <ComposerTip tip={messages.retryUpload}>
+                <button
+                  type="button"
+                  onClick={() => onRetry(attachment.id)}
+                  className="shrink-0 rounded-og-xs p-1 text-og-fg-muted hover:bg-og-surface-1 hover:text-og-fg pointer-coarse:size-10"
+                  aria-label={messages.retryAttachment(attachment.name)}
+                >
+                  <RotateCwIcon className="size-3.5" />
+                </button>
+              </ComposerTip>
             ) : null}
             <button
               type="button"

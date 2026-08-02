@@ -19,6 +19,7 @@ import { toast } from "sonner";
 
 import { LoadErrorState, PageHeader } from "@/components/common";
 import { Button } from "@/components/ui/button";
+import { ContentPage } from "@/components/ui/content-layout";
 import { useAppContext } from "@/context";
 import {
   entitlementEntries,
@@ -137,7 +138,7 @@ export function OrgSettingsRoute({
   }
 
   return (
-    <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col overflow-y-auto px-4 py-5 sm:px-6 lg:px-8">
+    <ContentPage width="standard">
       <section className="grid gap-5 text-left">
         <PageHeader
           icon={<BuildingIcon className="size-4" />}
@@ -289,7 +290,7 @@ export function OrgSettingsRoute({
           role={accountGrant?.role ?? null}
         />
       </section>
-    </div>
+    </ContentPage>
   );
 }
 
