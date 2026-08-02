@@ -231,6 +231,7 @@ import {
 import {
   findClaimableSessionRealtimeDelegationTurnInTransaction,
   isSessionRealtimeDelegationTurnMetadata,
+  projectSessionRealtimeDelegationProgressInTransaction,
   projectSessionRealtimeDelegationTerminalInTransaction,
 } from "./session-realtime-ledger";
 import {
@@ -43137,6 +43138,21 @@ export async function appendSessionEventsForTurnAttempt(
           };
         });
         const inserted = await tx.insert(schema.sessionEvents).values(values).returning();
+        if (fence.allowed) {
+          await projectSessionRealtimeDelegationProgressInTransaction(tx as unknown as Database, {
+            accountId: session.accountId,
+            workspaceId,
+            sessionId,
+            turnId,
+            events: inserted.map((event) => ({
+              id: event.id,
+              sequence: event.sequence,
+              type: event.type,
+              payload: event.payload,
+            })),
+            now,
+          });
+        }
         await tx
           .update(schema.sessions)
           .set({

@@ -41,7 +41,8 @@ export function projectSessionRealtimeInitialItems(
     const text = entry.text ?? JSON.stringify(entry.payload);
     if (!text) continue;
     const label =
-      entry.kind === "delegation_result" && entry.delegationItemId
+      (entry.kind === "delegation_progress" || entry.kind === "delegation_result") &&
+      entry.delegationItemId
         ? `OpenGeni delegation ${entry.delegationItemId}`
         : entry.kind === "session_update"
           ? "OpenGeni session update"

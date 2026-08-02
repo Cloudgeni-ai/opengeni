@@ -5,6 +5,7 @@ import { and, asc, eq, sql } from "drizzle-orm";
 import {
   addSessionSystemUpdate,
   activateSessionRealtimeConnectionInTransaction,
+  appendSessionEventsForTurnAttempt,
   appendSessionRealtimeOutboundInTransaction,
   applySessionTurnSettlement,
   beginSessionRealtimeInTransaction,
@@ -1218,6 +1219,65 @@ describe("session realtime ledger", () => {
       syncSessionRealtimeLedgerInTransaction(tx, acknowledgment),
     );
     expect(lostResponseRetry.outbound.map((entry) => entry.id)).not.toContain(terminalRows[0]!.id);
+  });
+
+  test("projects accepted delegated assistant deltas as ordered durable progress", async () => {
+    const value = await fixture();
+    const first = await claimInitial(value);
+    await complete(value, first.claimed.connection);
+    await proveProviderStarted(value, first.claimed.connection);
+    const execution = await admitAndClaimDelegation(value, first.claimed.connection);
+
+    const appended = await appendSessionEventsForTurnAttempt(
+      client.db,
+      value.owner.workspaceId,
+      value.owner.sessionId,
+      execution.turn.id,
+      execution.turn.executionGeneration,
+      execution.attemptId,
+      [
+        { type: "agent.message.delta", payload: { text: "Checking " } },
+        { type: "agent.message.delta", payload: { text: "the workspace." } },
+      ],
+    );
+    expect(appended.accepted).toBe(true);
+
+    const [progress] = await transaction(value.owner.workspaceId, (tx) =>
+      tx
+        .select()
+        .from(schema.sessionRealtimeEntries)
+        .where(
+          and(
+            eq(schema.sessionRealtimeEntries.turnId, execution.turn.id),
+            eq(schema.sessionRealtimeEntries.kind, "delegation_progress"),
+          ),
+        ),
+    );
+    expect(progress).toMatchObject({
+      realtimeId: value.started.mode.id,
+      delegationItemId: execution.admitted.accepted[0]!.entry.delegationItemId,
+      direction: "provider_out",
+      text: "Checking the workspace.",
+      payload: {
+        status: "running",
+        turnId: execution.turn.id,
+        sourceEventIds: appended.events.map((event) => event.id),
+      },
+    });
+
+    const pending = await transaction(value.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(tx, {
+        ...ownerProof(value),
+        connectionId: first.claimed.connection.id,
+        connectionEpoch: first.claimed.connection.connectionEpoch,
+      }),
+    );
+    expect(pending.outbound).toContainEqual(
+      expect.objectContaining({
+        id: progress!.id,
+        kind: "delegation_progress",
+      }),
+    );
   });
 
   test("rolls terminal settlement and projection back together before an exact retry", async () => {

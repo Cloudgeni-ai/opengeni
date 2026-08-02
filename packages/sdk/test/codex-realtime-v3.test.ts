@@ -197,6 +197,73 @@ describe("Codex realtime V3 bridge", () => {
     bridge.close();
   });
 
+  test("coalesces delegated progress as commentary and keeps the handoff active until result", async () => {
+    const sent: string[] = [];
+    let pending: SessionRealtimeLedgerEntry[] = [];
+    const bridge = createCodexRealtimeV3Bridge(
+      bridgeOptions({
+        events: dataChannel((value) => sent.push(value)),
+        sync: async () => ({ accepted: [], outbound: pending }),
+      }),
+    );
+    await bridge.ingest(
+      JSON.stringify({
+        type: "delegation.created",
+        event_id: "delegation-event-1",
+        item: {
+          id: "delegation-1",
+          type: "delegation",
+          target: "client",
+          content: [{ type: "input_text", text: "Inspect it" }],
+        },
+      }),
+    );
+    expect(bridge.snapshot().activeDelegationId).toBe("delegation-1");
+
+    pending = [
+      outbound({
+        id: "44444444-4444-4444-8444-444444444441",
+        operationId: "55555555-5555-4555-8555-555555555551",
+        sequence: 8,
+        kind: "delegation_progress",
+        text: "Checking ",
+      }),
+      outbound({
+        id: "44444444-4444-4444-8444-444444444442",
+        operationId: "55555555-5555-4555-8555-555555555552",
+        sequence: 9,
+        kind: "delegation_progress",
+        text: "the workspace.",
+      }),
+    ];
+    await bridge.flush();
+    expect(JSON.parse(sent.at(-1)!)).toEqual({
+      type: "delegation.context.append",
+      delegation_item_id: "delegation-1",
+      channel: "commentary",
+      content: [{ type: "input_text", text: "Checking the workspace." }],
+    });
+    expect(bridge.snapshot().activeDelegationId).toBe("delegation-1");
+
+    pending = [
+      outbound({
+        id: "44444444-4444-4444-8444-444444444443",
+        operationId: "55555555-5555-4555-8555-555555555553",
+        sequence: 10,
+        text: "Finished.",
+      }),
+    ];
+    await bridge.flush();
+    expect(JSON.parse(sent.at(-1)!)).toEqual({
+      type: "delegation.context.append",
+      delegation_item_id: "delegation-1",
+      channel: "speakable",
+      content: [{ type: "input_text", text: "Finished." }],
+    });
+    expect(bridge.snapshot().activeDelegationId).toBeNull();
+    bridge.close();
+  });
+
   test("coalesces 65 valid events into exact FIFO batches of 64 and 1", async () => {
     const batches: string[][] = [];
     const bridge = createCodexRealtimeV3Bridge(

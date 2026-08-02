@@ -61,10 +61,24 @@ try {
     sql`
       select calls.realtime_id, calls.connection_epoch, calls.sequence,
              turns.id as turn_id, turns.status as turn_status,
+             progress.entry_count as progress_entries,
+             progress.text_bytes as progress_text_bytes,
+             progress.last_created_at as last_progress_at,
+             progress.all_client_acked as progress_delivered_to_browser,
              terminals.kind as terminal_kind,
              terminals.client_acked_at is not null as delivered_to_browser
       from session_realtime_entries calls
       join session_turns turns on turns.id = calls.turn_id
+      left join lateral (
+        select count(*)::int as entry_count,
+               coalesce(sum(octet_length(coalesce(entries.text, ''))), 0)::int as text_bytes,
+               max(entries.created_at) as last_created_at,
+               coalesce(bool_and(entries.client_acked_at is not null), false) as all_client_acked
+        from session_realtime_entries entries
+        where entries.turn_id = calls.turn_id
+          and entries.direction = 'provider_out'
+          and entries.kind = 'delegation_progress'
+      ) progress on true
       left join session_realtime_entries terminals
         on terminals.turn_id = calls.turn_id
        and terminals.direction = 'provider_out'

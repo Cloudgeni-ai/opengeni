@@ -57,6 +57,7 @@ export type SessionRealtimeLedgerKind =
   | "user_transcript"
   | "assistant_transcript"
   | "delegation_call"
+  | "delegation_progress"
   | "delegation_result"
   | "interruption"
   | "session_update"
@@ -86,7 +87,10 @@ export type SessionRealtimeLedgerEntry = {
 
 export type SessionRealtimeInboundEntry = {
   operationId: string;
-  kind: Exclude<SessionRealtimeLedgerKind, "delegation_result" | "session_update">;
+  kind: Exclude<
+    SessionRealtimeLedgerKind,
+    "delegation_progress" | "delegation_result" | "session_update"
+  >;
   role?: "user" | "assistant" | null | undefined;
   providerEventId?: string | null | undefined;
   delegationItemId?: string | null | undefined;

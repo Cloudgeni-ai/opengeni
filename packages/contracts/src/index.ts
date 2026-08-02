@@ -4064,6 +4064,7 @@ export const SessionRealtimeLedgerKind = z.enum([
   "user_transcript",
   "assistant_transcript",
   "delegation_call",
+  "delegation_progress",
   "delegation_result",
   "interruption",
   "session_update",

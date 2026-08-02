@@ -1792,7 +1792,7 @@ export const sessionRealtimeEntries = pgTable(
     ),
     kindValid: check(
       "session_realtime_entries_kind_check",
-      sql`${table.kind} in ('user_transcript', 'assistant_transcript', 'delegation_call', 'delegation_result', 'interruption', 'session_update', 'error')`,
+      sql`${table.kind} in ('user_transcript', 'assistant_transcript', 'delegation_call', 'delegation_progress', 'delegation_result', 'interruption', 'session_update', 'error')`,
     ),
     roleValid: check(
       "session_realtime_entries_role_check",
@@ -1818,7 +1818,7 @@ export const sessionRealtimeEntries = pgTable(
       "session_realtime_entries_turn_check",
       sql`${table.turnId} is null
         or (${table.kind} = 'delegation_call' and ${table.direction} = 'provider_in')
-        or (${table.kind} in ('delegation_result', 'error') and ${table.direction} = 'provider_out')`,
+        or (${table.kind} in ('delegation_progress', 'delegation_result', 'error') and ${table.direction} = 'provider_out')`,
     ),
     transcriptValid: check(
       "session_realtime_entries_transcript_check",

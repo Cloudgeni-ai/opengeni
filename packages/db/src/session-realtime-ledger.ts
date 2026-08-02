@@ -110,6 +110,7 @@ export type SessionRealtimeLedgerKind =
   | "user_transcript"
   | "assistant_transcript"
   | "delegation_call"
+  | "delegation_progress"
   | "delegation_result"
   | "interruption"
   | "session_update"
@@ -139,7 +140,10 @@ export type SessionRealtimeLedgerEntry = {
 
 export type SessionRealtimeInboundEntryInput = {
   operationId: string;
-  kind: Exclude<SessionRealtimeLedgerKind, "delegation_result" | "session_update">;
+  kind: Exclude<
+    SessionRealtimeLedgerKind,
+    "delegation_progress" | "delegation_result" | "session_update"
+  >;
   role?: "user" | "assistant" | null | undefined;
   providerEventId?: string | null | undefined;
   delegationItemId?: string | null | undefined;
@@ -207,6 +211,24 @@ export type ProjectSessionRealtimeDelegationTerminalResult = {
   entry: SessionRealtimeLedgerEntry;
   replay: boolean;
 } | null;
+
+export type ProjectSessionRealtimeDelegationProgressInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  events: ReadonlyArray<{
+    id: string;
+    sequence: number;
+    type: string;
+    payload: unknown;
+  }>;
+  now?: Date;
+};
+
+export type ProjectSessionRealtimeDelegationProgressResult = {
+  entries: SessionRealtimeLedgerEntry[];
+};
 
 type ConnectionRow = typeof schema.sessionRealtimeConnections.$inferSelect;
 type EntryRow = typeof schema.sessionRealtimeEntries.$inferSelect;
@@ -379,15 +401,33 @@ export async function findClaimableSessionRealtimeDelegationTurnInTransaction(
   return call ? turn.id : null;
 }
 
-function deterministicTerminalOperationId(turnId: string): string {
-  const bytes = createHash("sha256")
-    .update(`opengeni:session-realtime-delegation-terminal:${turnId}`, "utf8")
-    .digest()
-    .subarray(0, 16);
+function deterministicUuid(seed: string): string {
+  const bytes = createHash("sha256").update(seed, "utf8").digest().subarray(0, 16);
   bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x50;
   bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
   const hex = bytes.toString("hex");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function deterministicTerminalOperationId(turnId: string): string {
+  return deterministicUuid(`opengeni:session-realtime-delegation-terminal:${turnId}`);
+}
+
+function utf8Chunks(value: string, maximumBytes: number): string[] {
+  const bytes = Buffer.from(value, "utf8");
+  if (bytes.length <= maximumBytes) return [value];
+  const chunks: string[] = [];
+  let start = 0;
+  while (start < bytes.length) {
+    let end = Math.min(start + maximumBytes, bytes.length);
+    if (end < bytes.length) {
+      while (end > start && (bytes[end]! & 0xc0) === 0x80) end -= 1;
+    }
+    if (end === start) throw new Error("Realtime progress chunk boundary is invalid");
+    chunks.push(bytes.subarray(start, end).toString("utf8"));
+    start = end;
+  }
+  return chunks;
 }
 
 function terminalProjection(input: ProjectSessionRealtimeDelegationTerminalInput): {
@@ -1797,6 +1837,114 @@ export async function appendSessionRealtimeOutboundInTransaction(
     .returning();
   if (!entry) throw new Error("Failed to append realtime outbound entry");
   return { entry: mapEntry(entry), replay: false };
+}
+
+/**
+ * Under the caller's canonical session/turn fence, mirror accepted assistant
+ * text deltas into the active delegation's durable provider-out stream. One
+ * append batch becomes one or more bounded progress rows, preserving the
+ * ordinary event order without making the browser's live SSE authoritative.
+ */
+export async function projectSessionRealtimeDelegationProgressInTransaction(
+  db: Database,
+  input: ProjectSessionRealtimeDelegationProgressInput,
+): Promise<ProjectSessionRealtimeDelegationProgressResult> {
+  const progressEvents = input.events.flatMap((event) => {
+    if (
+      event.type !== "agent.message.delta" ||
+      !event.payload ||
+      typeof event.payload !== "object" ||
+      Array.isArray(event.payload)
+    ) {
+      return [];
+    }
+    const text = (event.payload as Record<string, unknown>).text;
+    return typeof text === "string" && text.length > 0 ? [{ ...event, text }] : [];
+  });
+  if (progressEvents.length === 0) return { entries: [] };
+
+  const [call] = await db
+    .select()
+    .from(schema.sessionRealtimeEntries)
+    .where(
+      and(
+        eq(schema.sessionRealtimeEntries.accountId, input.accountId),
+        eq(schema.sessionRealtimeEntries.workspaceId, input.workspaceId),
+        eq(schema.sessionRealtimeEntries.sessionId, input.sessionId),
+        eq(schema.sessionRealtimeEntries.turnId, input.turnId),
+        eq(schema.sessionRealtimeEntries.direction, "provider_in"),
+        eq(schema.sessionRealtimeEntries.kind, "delegation_call"),
+      ),
+    )
+    .for("update")
+    .limit(1);
+  if (!call) return { entries: [] };
+  if (!call.delegationItemId) {
+    throw new Error(`Delegation turn ${input.turnId} has no provider item identity`);
+  }
+
+  const [mode] = await db
+    .select({
+      connectionEpoch: schema.sessionRealtimeModes.connectionEpoch,
+      state: schema.sessionRealtimeModes.state,
+    })
+    .from(schema.sessionRealtimeModes)
+    .where(
+      and(
+        eq(schema.sessionRealtimeModes.id, call.realtimeId),
+        eq(schema.sessionRealtimeModes.accountId, input.accountId),
+        eq(schema.sessionRealtimeModes.workspaceId, input.workspaceId),
+        eq(schema.sessionRealtimeModes.sessionId, input.sessionId),
+      ),
+    )
+    .limit(1);
+  if (!mode) {
+    throw new Error(`Delegation turn ${input.turnId} lost its realtime mode ownership`);
+  }
+  if (mode.state !== "active") return { entries: [] };
+
+  const text = progressEvents.map((event) => event.text).join("");
+  const chunks = utf8Chunks(text, SESSION_REALTIME_LEDGER_MAX_TEXT_BYTES);
+  const sourceEventIds = progressEvents.map((event) => event.id);
+  const sourceEventSequences = progressEvents.map((event) => event.sequence);
+  const operationSeed = sourceEventIds.join(":");
+  const now = input.now ?? new Date();
+  let nextSequence = await nextLedgerSequence(db, call.realtimeId);
+  const inserted = await db
+    .insert(schema.sessionRealtimeEntries)
+    .values(
+      chunks.map((chunk, chunkIndex) => ({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        realtimeId: call.realtimeId,
+        operationId: deterministicUuid(
+          `opengeni:session-realtime-delegation-progress:${input.turnId}:${operationSeed}:${chunkIndex}`,
+        ),
+        connectionEpoch: mode.connectionEpoch,
+        sequence: nextSequence++,
+        direction: "provider_out" as const,
+        kind: "delegation_progress" as const,
+        delegationItemId: call.delegationItemId,
+        turnId: input.turnId,
+        text: chunk,
+        payload: boundedPayload({
+          status: "running",
+          turnId: input.turnId,
+          callOperationId: call.operationId,
+          callLedgerEntryId: call.id,
+          sourceEventIds,
+          firstSourceEventSequence: sourceEventSequences[0],
+          lastSourceEventSequence: sourceEventSequences.at(-1),
+          chunkIndex,
+          chunkCount: chunks.length,
+        }),
+        createdAt: now,
+        updatedAt: now,
+      })),
+    )
+    .returning();
+  return { entries: inserted.map(mapEntry) };
 }
 
 /**

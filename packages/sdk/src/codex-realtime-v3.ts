@@ -221,7 +221,30 @@ export function createCodexRealtimeV3Bridge(
           clientReceivedSequences.add(entry.sequence);
           clientAckThroughSequence = Math.max(clientAckThroughSequence ?? 0, entry.sequence);
         }
-        if (sentSequences.has(entry.sequence)) continue;
+      }
+      for (let index = 0; index < result.outbound.length;) {
+        const entry = result.outbound[index]!;
+        if (sentSequences.has(entry.sequence)) {
+          index += 1;
+          continue;
+        }
+        if (entry.kind === "delegation_progress" && entry.delegationItemId) {
+          const progress: SessionRealtimeLedgerEntry[] = [];
+          while (index < result.outbound.length) {
+            const candidate = result.outbound[index]!;
+            if (
+              candidate.kind !== "delegation_progress" ||
+              candidate.delegationItemId !== entry.delegationItemId
+            ) {
+              break;
+            }
+            if (!sentSequences.has(candidate.sequence)) progress.push(candidate);
+            index += 1;
+          }
+          sendDelegationProgress(options.events, entry.delegationItemId, progress);
+          for (const candidate of progress) sentSequences.add(candidate.sequence);
+          continue;
+        }
         sendOutbound(options.events, entry);
         sentSequences.add(entry.sequence);
         if (
@@ -230,6 +253,7 @@ export function createCodexRealtimeV3Bridge(
         ) {
           activeDelegationId = null;
         }
+        index += 1;
       }
       publish();
     }
@@ -374,6 +398,24 @@ function sendOutbound(events: RTCDataChannel, entry: SessionRealtimeLedgerEntry)
         })
       : encodeCodexRealtimeV3SessionContextAppend({ text, channel: "commentary" });
   for (const message of messages) events.send(JSON.stringify(message));
+}
+
+function sendDelegationProgress(
+  events: RTCDataChannel,
+  delegationItemId: string,
+  entries: SessionRealtimeLedgerEntry[],
+): void {
+  if (entries.length === 0) return;
+  if (events.readyState !== "open") throw new Error("Codex realtime data channel is not open");
+  const text = entries.map((entry) => entry.text ?? "").join("");
+  if (text.length === 0) return;
+  for (const message of encodeCodexRealtimeV3DelegationContextAppend({
+    delegationItemId,
+    text,
+    channel: "commentary",
+  })) {
+    events.send(JSON.stringify(message));
+  }
 }
 
 function utf8ByteLength(value: string): number {
