@@ -17843,6 +17843,56 @@ export async function listSessions(
   });
 }
 
+/**
+ * Return the model most recently chosen by one human subject in their own
+ * workspace sessions. A later subject-initiated turn supersedes the session's
+ * creation-time default; sessions with no such turn fall back to sessions.model.
+ * Turn timestamp ties use queue position then UUID, and session ties use the
+ * immutable session timestamp/UUID. Other subjects' turns never influence the
+ * result. The workspace filter remains authoritative under FORCE RLS.
+ */
+export async function getLatestSessionModelForSubject(
+  db: Database,
+  workspaceId: string,
+  subjectId: string,
+): Promise<string | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.execute<{ model: string }>(sql`
+      select coalesce(latest_subject_turn.model, subject_session.model) as model
+      from ${schema.sessions} subject_session
+      left join lateral (
+        select
+          subject_turn.id,
+          subject_turn.model,
+          subject_turn.position,
+          subject_turn.created_at
+        from ${schema.sessionTurns} subject_turn
+        where subject_turn.workspace_id = ${workspaceId}
+          and subject_turn.session_id = subject_session.id
+          and subject_turn.initiator_kind = 'subject'
+          and subject_turn.initiator_subject_id = ${subjectId}
+        order by
+          subject_turn.created_at desc,
+          subject_turn.position desc,
+          subject_turn.id desc
+        limit 1
+      ) latest_subject_turn on true
+      where subject_session.workspace_id = ${workspaceId}
+        and subject_session.created_by_kind = 'subject'
+        and subject_session.created_by_subject_id = ${subjectId}
+      order by
+        coalesce(latest_subject_turn.created_at, subject_session.created_at) desc,
+        (latest_subject_turn.id is not null) desc,
+        subject_session.created_at desc,
+        subject_session.id desc,
+        latest_subject_turn.position desc nulls last,
+        latest_subject_turn.id desc nulls last
+      limit 1
+    `);
+    return rows[0]?.model ?? null;
+  });
+}
+
 export type SessionDiscoveryOrderBy = "createdAt" | "updatedAt";
 export type SessionDiscoveryCursor = {
   orderBy: SessionDiscoveryOrderBy;

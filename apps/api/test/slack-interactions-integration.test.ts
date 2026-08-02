@@ -13,11 +13,18 @@ import {
   createConnection,
   createDb,
   encryptVariableSetValue,
+  getLatestSessionModelForSubject,
+  getWorkspaceGrant,
   grantWorkspaceAccess,
   saveSlackBotUserLink,
   type DbClient,
 } from "@opengeni/db";
-import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
+import {
+  acceptSessionUserMessage,
+  createSessionForRequest,
+  type ApiRouteDeps,
+  type SessionWorkflowClient,
+} from "@opengeni/core";
 import {
   acquireSharedTestDatabase,
   MemoryEventBus,
@@ -197,6 +204,8 @@ async function fixture(
     deniedChannels?: string[];
     linkOther?: boolean;
     failAfterAcceptTexts?: string[];
+    managedBilling?: boolean;
+    codexSubscriptionEnabled?: boolean;
   } = {},
 ) {
   const suffix = crypto.randomUUID();
@@ -232,6 +241,8 @@ async function fixture(
   const otherSlackUserId = `U_OTHER_${suffix}`;
   const settings = testSettings({
     productAccessMode: "managed",
+    ...(options.managedBilling ? { usageLimitsMode: "managed", billingMode: "stripe" } : {}),
+    ...(options.codexSubscriptionEnabled ? { codexSubscriptionEnabled: true } : {}),
     environmentsEncryptionKey: encryptionKey,
     slackSigningSecret: signingMaterial,
     publicBaseUrl: "https://app.example.test",
@@ -506,6 +517,334 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         (select count(*)::int from documents where workspace_id = ${value.owner.workspaceId}) as documents,
         (select count(*)::int from knowledge_memories where workspace_id = ${value.owner.workspaceId}) as memories`;
     expect(persistence).toEqual({ documents: 0, memories: 0 });
+  });
+
+  test("new Slack tasks preserve a later browser-selected turn model", async () => {
+    if (!available) return;
+    const value = await fixture({ codexSubscriptionEnabled: true });
+    const browserSession = await createSessionForRequest(
+      value.deps,
+      value.owner,
+      value.owner.workspaceId,
+      {
+        initialMessage: "Initially selected Terra",
+        model: "gpt-5.6-terra",
+        sandboxBackend: "none",
+      },
+    );
+    await acceptSessionUserMessage(
+      value.deps,
+      value.owner,
+      value.owner.workspaceId,
+      browserSession.id,
+      {
+        text: "Switch this session to my connected Codex model",
+        model: "codex/gpt-5.6-sol",
+        clientEventId: `browser-model-switch-${crypto.randomUUID()}`,
+      },
+    );
+
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_PREFERRED_MODEL_${crypto.randomUUID()}`,
+          event: {
+            type: "message",
+            channel_type: "im",
+            user: value.ownerSlackUserId,
+            channel: "D_PRIVATE",
+            ts: "1710000002.000001",
+            text: "Use my current OpenGeni model",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+
+    const [route] = await interactions(value.owner.workspaceId);
+    const [session] = await shared!.admin<{ model: string }[]>`
+      select model from sessions
+      where workspace_id = ${value.owner.workspaceId}
+        and id = ${route!.session_id}`;
+    expect(session!.model).toBe("codex/gpt-5.6-sol");
+  });
+
+  test("subject model lookup orders turns across sessions, resolves ties, and falls back without turns", async () => {
+    if (!available) return;
+    const value = await fixture({ codexSubscriptionEnabled: true });
+    const olderSession = await createSessionForRequest(
+      value.deps,
+      value.owner,
+      value.owner.workspaceId,
+      {
+        initialMessage: "Older Terra session",
+        model: "gpt-5.6-terra",
+        sandboxBackend: "none",
+      },
+    );
+    await acceptSessionUserMessage(
+      value.deps,
+      value.owner,
+      value.owner.workspaceId,
+      olderSession.id,
+      {
+        text: "Choose Codex later in the older session",
+        model: "codex/gpt-5.6-sol",
+        clientEventId: `older-session-model-switch-${crypto.randomUUID()}`,
+      },
+    );
+    const newerSession = await createSessionForRequest(
+      value.deps,
+      value.owner,
+      value.owner.workspaceId,
+      {
+        initialMessage: "Newer Luna session",
+        model: "gpt-5.6-luna",
+        sandboxBackend: "none",
+      },
+    );
+
+    await shared!.admin`
+      update sessions
+      set created_at = '2026-08-02T10:00:00Z'::timestamptz
+      where workspace_id = ${value.owner.workspaceId}
+        and id = ${olderSession.id}`;
+    await shared!.admin`
+      update session_turns
+      set created_at = case
+        when model = 'codex/gpt-5.6-sol' then '2026-08-02T13:00:00Z'::timestamptz
+        else '2026-08-02T10:00:00Z'::timestamptz
+      end
+      where workspace_id = ${value.owner.workspaceId}
+        and session_id = ${olderSession.id}`;
+    await shared!.admin`
+      update sessions
+      set created_at = '2026-08-02T12:00:00Z'::timestamptz
+      where workspace_id = ${value.owner.workspaceId}
+        and id = ${newerSession.id}`;
+    await shared!.admin`
+      update session_turns
+      set created_at = '2026-08-02T12:00:00Z'::timestamptz
+      where workspace_id = ${value.owner.workspaceId}
+        and session_id = ${newerSession.id}`;
+
+    expect(
+      await getLatestSessionModelForSubject(
+        client.db,
+        value.owner.workspaceId,
+        value.owner.subjectId,
+      ),
+    ).toBe("codex/gpt-5.6-sol");
+
+    await shared!.admin`
+      update session_turns
+      set created_at = '2026-08-02T14:00:00Z'::timestamptz
+      where workspace_id = ${value.owner.workspaceId}
+        and session_id = ${olderSession.id}`;
+    expect(
+      await getLatestSessionModelForSubject(
+        client.db,
+        value.owner.workspaceId,
+        value.owner.subjectId,
+      ),
+    ).toBe("codex/gpt-5.6-sol");
+
+    const fallbackSession = await createSessionForRequest(
+      value.deps,
+      value.owner,
+      value.owner.workspaceId,
+      {
+        initialMessage: "Fallback-only session",
+        model: "gpt-5.6-luna",
+        sandboxBackend: "none",
+      },
+    );
+    await shared!.admin`
+      delete from session_turns
+      where workspace_id = ${value.owner.workspaceId}
+        and session_id = ${fallbackSession.id}`;
+    await shared!.admin`
+      update sessions
+      set created_at = '2026-08-02T15:00:00Z'::timestamptz
+      where workspace_id = ${value.owner.workspaceId}
+        and id = ${fallbackSession.id}`;
+    expect(
+      await getLatestSessionModelForSubject(
+        client.db,
+        value.owner.workspaceId,
+        value.owner.subjectId,
+      ),
+    ).toBe("gpt-5.6-luna");
+  });
+
+  test("subject model lookup ignores other users and workspaces", async () => {
+    if (!available) return;
+    const value = await fixture({ codexSubscriptionEnabled: true });
+    const ownerSession = await createSessionForRequest(
+      value.deps,
+      value.owner,
+      value.owner.workspaceId,
+      {
+        initialMessage: "Owner Terra session",
+        model: "gpt-5.6-terra",
+        sandboxBackend: "none",
+      },
+    );
+    const otherGrant = await getWorkspaceGrant(
+      client.db,
+      value.otherSubjectId,
+      value.owner.workspaceId,
+    );
+    if (!otherGrant) throw new Error("other subject grant was not created");
+    await acceptSessionUserMessage(
+      value.deps,
+      otherGrant,
+      value.owner.workspaceId,
+      ownerSession.id,
+      {
+        text: "Another user chooses Luna",
+        model: "gpt-5.6-luna",
+        clientEventId: `other-subject-model-switch-${crypto.randomUUID()}`,
+      },
+    );
+    const otherSubjectSession = await createSessionForRequest(
+      value.deps,
+      otherGrant,
+      value.owner.workspaceId,
+      {
+        initialMessage: "Other subject Codex session",
+        model: "codex/gpt-5.6-sol",
+        sandboxBackend: "none",
+      },
+    );
+
+    const crossWorkspace = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "slack-interactions-cross-workspace-test",
+      accountExternalId: `account-${crypto.randomUUID()}`,
+      accountName: "Slack interactions cross-workspace",
+      workspaceExternalSource: "slack-interactions-cross-workspace-test",
+      workspaceExternalId: `workspace-${crypto.randomUUID()}`,
+      workspaceName: "Slack interactions cross-workspace",
+      subjectId: value.owner.subjectId,
+    });
+    const crossWorkspaceGrant = crossWorkspace.workspaceGrants[0]!;
+    const crossWorkspaceSession = await createSessionForRequest(
+      value.deps,
+      crossWorkspaceGrant,
+      crossWorkspaceGrant.workspaceId,
+      {
+        initialMessage: "Same subject in another workspace",
+        model: "codex/gpt-5.6-sol",
+        sandboxBackend: "none",
+      },
+    );
+
+    await shared!.admin`
+      update sessions
+      set created_at = '2026-08-02T10:00:00Z'::timestamptz
+      where workspace_id = ${value.owner.workspaceId}
+        and id = ${ownerSession.id}`;
+    await shared!.admin`
+      update session_turns
+      set created_at = case
+        when initiator_subject_id = ${value.otherSubjectId}
+          then '2026-08-02T20:00:00Z'::timestamptz
+        else '2026-08-02T10:00:00Z'::timestamptz
+      end
+      where workspace_id = ${value.owner.workspaceId}
+        and session_id = ${ownerSession.id}`;
+    await shared!.admin`
+      update sessions
+      set created_at = '2026-08-02T21:00:00Z'::timestamptz
+      where workspace_id = ${value.owner.workspaceId}
+        and id = ${otherSubjectSession.id}`;
+    await shared!.admin`
+      update session_turns
+      set created_at = '2026-08-02T21:00:00Z'::timestamptz
+      where workspace_id = ${value.owner.workspaceId}
+        and session_id = ${otherSubjectSession.id}`;
+    await shared!.admin`
+      update sessions
+      set created_at = '2026-08-02T22:00:00Z'::timestamptz
+      where workspace_id = ${crossWorkspaceGrant.workspaceId}
+        and id = ${crossWorkspaceSession.id}`;
+    await shared!.admin`
+      update session_turns
+      set created_at = '2026-08-02T22:00:00Z'::timestamptz
+      where workspace_id = ${crossWorkspaceGrant.workspaceId}
+        and session_id = ${crossWorkspaceSession.id}`;
+
+    expect(
+      await getLatestSessionModelForSubject(
+        client.db,
+        value.owner.workspaceId,
+        value.owner.subjectId,
+      ),
+    ).toBe("gpt-5.6-terra");
+  });
+
+  test("new Slack tasks preserve the linked subject's latest session default", async () => {
+    if (!available) return;
+    const value = await fixture();
+    await createSessionForRequest(value.deps, value.owner, value.owner.workspaceId, {
+      initialMessage: "Previously selected model",
+      model: "gpt-5.6-terra",
+      sandboxBackend: "none",
+    });
+
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_PREFERRED_MODEL_${crypto.randomUUID()}`,
+          event: {
+            type: "message",
+            channel_type: "im",
+            user: value.ownerSlackUserId,
+            channel: "D_PRIVATE",
+            ts: "1710000002.000001",
+            text: "Use my current OpenGeni model",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+
+    const [route] = await interactions(value.owner.workspaceId);
+    const [session] = await shared!.admin<{ model: string }[]>`
+      select model from sessions
+      where workspace_id = ${value.owner.workspaceId}
+        and id = ${route!.session_id}`;
+    expect(session!.model).toBe("gpt-5.6-terra");
+  });
+
+  test("permanent session admission failures are visible in Slack and retain a useful code", async () => {
+    if (!available) return;
+    const value = await fixture({ managedBilling: true });
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_NO_CREDIT_${crypto.randomUUID()}`,
+          event: {
+            type: "app_mention",
+            user: value.ownerSlackUserId,
+            channel: "C_TEAM",
+            ts: "1710000002.000001",
+            text: `<@${value.botUserId}> start a task`,
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+
+    expect(value.slack.posts.at(-1)?.text).toContain("no available billing source");
+    const [inbox] = await shared!.admin<{ status: string; last_error_code: string }[]>`
+      select status, last_error_code
+      from slack_interaction_inbox
+      where workspace_id = ${value.owner.workspaceId}`;
+    expect(inbox).toEqual({ status: "failed", last_error_code: "http_402" });
   });
 
   test("channel mentions adopt existing threads and any linked workspace participant can continue", async () => {
