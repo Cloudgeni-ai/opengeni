@@ -7,7 +7,7 @@ const CHUNKS_BY_RECORDING = "by-recording";
 export type VoiceRecordingCaptureState = "capturing" | "stopped" | "discarded";
 export type VoiceRecordingUploadState = "pending" | "syncing" | "retrying" | "complete";
 export type VoiceRecordingTranscriptionState = "pending" | "transcribing" | "retrying" | "complete";
-export type VoiceRecordingFinalizationState = "pending" | "ready" | "handed-off";
+export type VoiceRecordingFinalizationState = "pending" | "transcript-ready" | "handed-off";
 export type VoiceRecordingChunkUploadState = "pending" | "syncing" | "complete";
 
 export type VoiceRecordingManifest = {
@@ -22,6 +22,11 @@ export type VoiceRecordingManifest = {
   uploadState: VoiceRecordingUploadState;
   transcriptionState: VoiceRecordingTranscriptionState;
   finalizationState: VoiceRecordingFinalizationState;
+  /** Tab/process lease. A different owner may take over only after this heartbeat is stale. */
+  ownerId: string | null;
+  ownerHeartbeatAt: string | null;
+  /** Authoritative provider result, persisted before any composer draft mutation. */
+  transcriptText: string | null;
   nextChunkNumber: number;
   chunkCount: number;
   totalBytes: number;
@@ -44,6 +49,7 @@ export type VoiceRecordingChunk = {
 
 export type PersistVoiceRecordingChunkInput = {
   recordingId: string;
+  ownerId?: string | undefined;
   chunkNumber: number;
   capturedAt: string;
   startMilliseconds: number;
@@ -61,7 +67,16 @@ export type PersistVoiceRecordingChunkResult = {
 export interface VoiceRecordingStore {
   createManifest(manifest: VoiceRecordingManifest): Promise<void>;
   getManifest(recordingId: string): Promise<VoiceRecordingManifest | null>;
-  listRecoverableManifests(workspaceId: string): Promise<VoiceRecordingManifest[]>;
+  listRecoverableManifests(
+    workspaceId: string,
+    ownership?: { ownerId: string; staleBefore: string },
+  ): Promise<VoiceRecordingManifest[]>;
+  claimManifest(
+    recordingId: string,
+    ownerId: string,
+    claimedAt: string,
+    staleBefore: string,
+  ): Promise<VoiceRecordingManifest>;
   listChunks(recordingId: string): Promise<VoiceRecordingChunk[]>;
   persistChunk(input: PersistVoiceRecordingChunkInput): Promise<PersistVoiceRecordingChunkResult>;
   updateManifest(
@@ -69,12 +84,19 @@ export interface VoiceRecordingStore {
     update: Partial<
       Pick<
         VoiceRecordingManifest,
-        "captureState" | "uploadState" | "transcriptionState" | "finalizationState"
+        | "captureState"
+        | "uploadState"
+        | "transcriptionState"
+        | "finalizationState"
+        | "ownerId"
+        | "ownerHeartbeatAt"
+        | "transcriptText"
       >
     >,
     updatedAt: string,
+    ownerId?: string | undefined,
   ): Promise<VoiceRecordingManifest>;
-  discard(recordingId: string): Promise<void>;
+  discard(recordingId: string, ownerId?: string | undefined): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -106,11 +128,19 @@ export class VoiceRecordingChunkSequenceError extends Error {
   }
 }
 
+export class VoiceRecordingOwnedError extends Error {
+  constructor(recordingId: string) {
+    super(`Voice recording ${recordingId} is active in another browser tab.`);
+    this.name = "VoiceRecordingOwnedError";
+  }
+}
+
 export function createVoiceRecordingManifest(input: {
   recordingId: string;
   workspaceId: string;
   mimeType: string;
   createdAt: string;
+  ownerId?: string | null | undefined;
 }): VoiceRecordingManifest {
   return {
     version: 1,
@@ -124,6 +154,9 @@ export function createVoiceRecordingManifest(input: {
     uploadState: "pending",
     transcriptionState: "pending",
     finalizationState: "pending",
+    ownerId: input.ownerId ?? null,
+    ownerHeartbeatAt: input.ownerId ? input.createdAt : null,
+    transcriptText: null,
     nextChunkNumber: 0,
     chunkCount: 0,
     totalBytes: 0,
@@ -185,6 +218,7 @@ export function planVoiceRecordingChunkCommit(input: {
   const updatedManifest: VoiceRecordingManifest = {
     ...manifest,
     updatedAt: chunk.capturedAt,
+    ownerHeartbeatAt: manifest.ownerId ? chunk.capturedAt : manifest.ownerHeartbeatAt,
     nextChunkNumber: manifest.nextChunkNumber + 1,
     chunkCount: manifest.chunkCount + 1,
     totalBytes: manifest.totalBytes + chunk.byteLength,
@@ -219,10 +253,13 @@ export class IndexedDbVoiceRecordingStore implements VoiceRecordingStore {
       transaction.objectStore(MANIFEST_STORE).get(recordingId),
     );
     await transactionComplete(transaction);
-    return manifest ?? null;
+    return manifest ? normalizeManifest(manifest) : null;
   }
 
-  async listRecoverableManifests(workspaceId: string): Promise<VoiceRecordingManifest[]> {
+  async listRecoverableManifests(
+    workspaceId: string,
+    ownership?: { ownerId: string; staleBefore: string },
+  ): Promise<VoiceRecordingManifest[]> {
     const database = await this.database;
     const transaction = database.transaction(MANIFEST_STORE, "readonly");
     const manifests = await requestResult<VoiceRecordingManifest[]>(
@@ -230,13 +267,51 @@ export class IndexedDbVoiceRecordingStore implements VoiceRecordingStore {
     );
     await transactionComplete(transaction);
     return manifests
+      .map(normalizeManifest)
       .filter(
         (manifest) =>
           manifest.workspaceId === workspaceId &&
           manifest.captureState !== "discarded" &&
-          manifest.finalizationState !== "handed-off",
+          manifest.finalizationState !== "handed-off" &&
+          manifestAvailableToOwner(manifest, ownership),
       )
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  }
+
+  async claimManifest(
+    recordingId: string,
+    ownerId: string,
+    claimedAt: string,
+    staleBefore: string,
+  ): Promise<VoiceRecordingManifest> {
+    const database = await this.database;
+    const transaction = database.transaction(MANIFEST_STORE, "readwrite");
+    const manifests = transaction.objectStore(MANIFEST_STORE);
+    const stored = await requestResult<VoiceRecordingManifest | undefined>(
+      manifests.get(recordingId),
+    );
+    if (!stored) {
+      transaction.abort();
+      throw new VoiceRecordingNotFoundError(recordingId);
+    }
+    const manifest = normalizeManifest(stored);
+    if (
+      manifest.finalizationState === "handed-off" ||
+      !manifestAvailableToOwner(manifest, { ownerId, staleBefore })
+    ) {
+      transaction.abort();
+      throw new VoiceRecordingOwnedError(recordingId);
+    }
+    const updated: VoiceRecordingManifest = {
+      ...manifest,
+      captureState: manifest.captureState === "capturing" ? "stopped" : manifest.captureState,
+      ownerId,
+      ownerHeartbeatAt: claimedAt,
+      updatedAt: claimedAt,
+    };
+    manifests.put(updated);
+    await transactionComplete(transaction);
+    return updated;
   }
 
   async listChunks(recordingId: string): Promise<VoiceRecordingChunk[]> {
@@ -267,8 +342,10 @@ export class IndexedDbVoiceRecordingStore implements VoiceRecordingStore {
       transaction.abort();
       throw new VoiceRecordingNotFoundError(input.recordingId);
     }
+    const normalizedManifest = normalizeManifest(manifest);
+    assertManifestOwnership(normalizedManifest, input.ownerId);
     const result = planVoiceRecordingChunkCommit({
-      manifest,
+      manifest: normalizedManifest,
       chunk,
       existingChunk: existingChunk ?? null,
     });
@@ -285,10 +362,17 @@ export class IndexedDbVoiceRecordingStore implements VoiceRecordingStore {
     update: Partial<
       Pick<
         VoiceRecordingManifest,
-        "captureState" | "uploadState" | "transcriptionState" | "finalizationState"
+        | "captureState"
+        | "uploadState"
+        | "transcriptionState"
+        | "finalizationState"
+        | "ownerId"
+        | "ownerHeartbeatAt"
+        | "transcriptText"
       >
     >,
     updatedAt: string,
+    ownerId?: string | undefined,
   ): Promise<VoiceRecordingManifest> {
     const database = await this.database;
     const transaction = database.transaction(MANIFEST_STORE, "readwrite");
@@ -300,26 +384,65 @@ export class IndexedDbVoiceRecordingStore implements VoiceRecordingStore {
       transaction.abort();
       throw new VoiceRecordingNotFoundError(recordingId);
     }
-    const updated = { ...manifest, ...update, updatedAt };
+    const normalizedManifest = normalizeManifest(manifest);
+    assertManifestOwnership(normalizedManifest, ownerId);
+    const updated = { ...normalizedManifest, ...update, updatedAt };
     manifests.put(updated);
     await transactionComplete(transaction);
     return updated;
   }
 
-  async discard(recordingId: string): Promise<void> {
+  async discard(recordingId: string, ownerId?: string | undefined): Promise<void> {
     const database = await this.database;
     const transaction = database.transaction([MANIFEST_STORE, CHUNK_STORE], "readwrite");
+    const manifests = transaction.objectStore(MANIFEST_STORE);
+    const stored = await requestResult<VoiceRecordingManifest | undefined>(
+      manifests.get(recordingId),
+    );
+    if (!stored) {
+      transaction.abort();
+      throw new VoiceRecordingNotFoundError(recordingId);
+    }
+    assertManifestOwnership(normalizeManifest(stored), ownerId);
     const chunks = transaction.objectStore(CHUNK_STORE);
     const chunkKeys = await requestResult<IDBValidKey[]>(
       chunks.index(CHUNKS_BY_RECORDING).getAllKeys(recordingId),
     );
     for (const key of chunkKeys) chunks.delete(key);
-    transaction.objectStore(MANIFEST_STORE).delete(recordingId);
+    manifests.delete(recordingId);
     await transactionComplete(transaction);
   }
 
   async close(): Promise<void> {
     (await this.database).close();
+  }
+}
+
+function normalizeManifest(manifest: VoiceRecordingManifest): VoiceRecordingManifest {
+  return {
+    ...manifest,
+    ownerId: manifest.ownerId ?? null,
+    ownerHeartbeatAt: manifest.ownerHeartbeatAt ?? null,
+    transcriptText: manifest.transcriptText ?? null,
+  };
+}
+
+function manifestAvailableToOwner(
+  manifest: VoiceRecordingManifest,
+  ownership?: { ownerId: string; staleBefore: string },
+): boolean {
+  if (!manifest.ownerId) return true;
+  if (!ownership) return false;
+  if (manifest.ownerId === ownership.ownerId) return true;
+  return !manifest.ownerHeartbeatAt || manifest.ownerHeartbeatAt <= ownership.staleBefore;
+}
+
+function assertManifestOwnership(
+  manifest: VoiceRecordingManifest,
+  ownerId: string | undefined,
+): void {
+  if (manifest.ownerId !== (ownerId ?? null)) {
+    throw new VoiceRecordingOwnedError(manifest.recordingId);
   }
 }
 

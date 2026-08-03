@@ -5,4 +5,4 @@
 "@opengeni/sdk": patch
 ---
 
-Persist timesliced composer voice recordings in browser storage, recover and retry the same audio after interruption or reload, and raise the configurable recording ceiling for long-form transcription.
+Persist timesliced composer voice recordings in browser storage with stale-fenced per-tab ownership, oldest-first recovery, byte-ceiling enforcement, and durable transcript-before-draft handoff. Interrupted audio retries reuse the same recording, while uncertain saved transcripts require explicit insertion instead of automatic retranscription or duplicate append.

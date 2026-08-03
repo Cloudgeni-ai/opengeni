@@ -167,4 +167,82 @@ describe("durable voice recording browser storage", () => {
       afterDiscardCount: 0,
     });
   }, 30_000);
+
+  test("blocks a second live owner and permits only explicit stale takeover", async () => {
+    const databaseName = `opengeni-voice-owner-test-${crypto.randomUUID()}`;
+    const result = await page.evaluate(
+      async ({ source, databaseName: requestedDatabaseName }) => {
+        const moduleUrl = URL.createObjectURL(new Blob([source], { type: "text/javascript" }));
+        const storage = (await import(
+          moduleUrl
+        )) as typeof import("../../packages/react/src/voice-recording-store");
+        URL.revokeObjectURL(moduleUrl);
+        const ownerStore = new storage.IndexedDbVoiceRecordingStore({
+          databaseName: requestedDatabaseName,
+        });
+        const otherStore = new storage.IndexedDbVoiceRecordingStore({
+          databaseName: requestedDatabaseName,
+        });
+        const manifest = storage.createVoiceRecordingManifest({
+          recordingId: "live-recording",
+          workspaceId: "workspace-1",
+          mimeType: "audio/webm",
+          createdAt: "2026-08-03T21:00:00.000Z",
+          ownerId: "tab-a",
+        });
+        await ownerStore.createManifest(manifest);
+        const hiddenFromOtherOwner = await otherStore.listRecoverableManifests("workspace-1", {
+          ownerId: "tab-b",
+          staleBefore: "2026-08-03T20:59:30.000Z",
+        });
+        let liveClaimError: string | null = null;
+        try {
+          await otherStore.claimManifest(
+            manifest.recordingId,
+            "tab-b",
+            "2026-08-03T21:00:05.000Z",
+            "2026-08-03T20:59:30.000Z",
+          );
+        } catch (error) {
+          liveClaimError = error instanceof Error ? error.name : "unknown";
+        }
+        let liveDiscardError: string | null = null;
+        try {
+          await otherStore.discard(manifest.recordingId, "tab-b");
+        } catch (error) {
+          liveDiscardError = error instanceof Error ? error.name : "unknown";
+        }
+        const staleClaim = await otherStore.claimManifest(
+          manifest.recordingId,
+          "tab-b",
+          "2026-08-03T21:01:00.000Z",
+          "2026-08-03T21:00:30.000Z",
+        );
+        await otherStore.discard(manifest.recordingId, "tab-b");
+        await Promise.all([ownerStore.close(), otherStore.close()]);
+        await new Promise<void>((resolve, reject) => {
+          const deletion = indexedDB.deleteDatabase(requestedDatabaseName);
+          deletion.onsuccess = () => resolve();
+          deletion.onerror = () => reject(deletion.error);
+          deletion.onblocked = () => reject(new Error("Test database deletion was blocked."));
+        });
+        return {
+          hiddenCount: hiddenFromOtherOwner.length,
+          liveClaimError,
+          liveDiscardError,
+          staleClaimOwner: staleClaim.ownerId,
+          staleClaimCaptureState: staleClaim.captureState,
+        };
+      },
+      { source: moduleSource, databaseName },
+    );
+
+    expect(result).toEqual({
+      hiddenCount: 0,
+      liveClaimError: "VoiceRecordingOwnedError",
+      liveDiscardError: "VoiceRecordingOwnedError",
+      staleClaimOwner: "tab-b",
+      staleClaimCaptureState: "stopped",
+    });
+  }, 30_000);
 });

@@ -238,8 +238,13 @@ records five-second `MediaRecorder` chunks into an IndexedDB manifest before
 reporting them locally saved. Stop waits for persistence, assembles the ordered
 chunks, and automatically finalizes through the existing one-shot SDK multipart
 request to `POST /v1/workspaces/:workspaceId/transcriptions`. Failed or aborted
-finalization retains the same recording for Retry and mount/reload recovery;
-successful draft append discards it. The API selects one server-side provider
+finalization retains the same recording for Retry and mount/reload recovery. A
+session-scoped tab owner heartbeat prevents another live tab from retrying or
+discarding active work; stale ownership may be reclaimed, and retained recordings
+are surfaced oldest-first. Provider text is persisted locally before draft mutation;
+an uncertain handoff becomes an explicit saved-transcript insertion action rather
+than an automatic retranscription or append. Local data is discarded only after
+handoff is durably represented. The API selects one server-side provider
 before sending bytes and never retries the same clip across vendors. Default order
 prefers Codex `/backend-api/transcribe` when subscription routing is enabled and
 the workspace has an active attached Codex credential, then OpenAI
@@ -247,8 +252,9 @@ the workspace has an active attached Codex credential, then OpenAI
 secrets are ignored. ClientConfig projects only availability and hard ceilings —
 never provider names or credentials. Workspace settings store a simple
 `voiceInput.enabled` toggle (legacy `transcription.enabled` maps for one release).
-The default duration ceiling is 30 minutes and deployments may configure up to
-2 hours. Audio is not logged or persisted server-side; the transcript appends to
+The default duration ceiling is 60 seconds and deployments may configure up to
+10 minutes while finalization remains a one-shot request capped at 25 MiB. Audio is
+not logged or persisted server-side; the transcript appends to
 the editable draft and is sent only through ordinary Send.
 
 > Canonical: [`transcription.md`](transcription.md),
@@ -660,7 +666,7 @@ The barrel (`index.ts`, 2600+ lines) drives the SDK run: instruction composition
 
 ### 7.10 `sdk` + `react` — published clients
 
-`sdk` must carry **zero runtime deps** (hand-mirrors contract types; pinned by `contract-parity.test.ts`). Streaming is exactly-once/in-order/gap-free anchored on `sequence` (backfill **throws** rather than skip). `SessionEvent.type`/`Permission`/`UsageEventType` are **open unions** — do not narrow. Native voice input uses `OpenGeniClient.transcribeAudio` for one multipart finalization attempt; callers may retry the same durably retained browser recording, but the SDK and API do not retry a possibly-started request or switch providers. Legacy host-adapter transcription types remain exported for one compatibility release. `react`'s optional DOM-only peers (noVNC, xterm, Pierre diffs, CodeMirror) **must be lazily imported** so SSR/non-desktop bundles stay clean. Its voice-input hook owns timesliced MediaRecorder capture, persists ordered chunks and integrity metadata in IndexedDB before reporting them saved, stops at the configurable server ceiling, recovers interrupted recordings across mount/reload, retries finalization without reopening the microphone, fences late transcription responses by generation, and appends non-empty text to the editable composer draft without auto-submitting. Connected-machine UI (dashboard, enrollment, status pills, metrics) is carved into the **`@opengeni/react/machines`** subpath (`src/machines.ts`) so the root import is the clean sandbox-only default and machine surfaces are opt-in (the root still re-exports them deprecated for back-compat, #144). The two are version-linked via changesets; the desktop pixel plane is consent-gated (409 until acknowledged).
+`sdk` must carry **zero runtime deps** (hand-mirrors contract types; pinned by `contract-parity.test.ts`). Streaming is exactly-once/in-order/gap-free anchored on `sequence` (backfill **throws** rather than skip). `SessionEvent.type`/`Permission`/`UsageEventType` are **open unions** — do not narrow. Native voice input uses `OpenGeniClient.transcribeAudio` for one multipart finalization attempt; callers may retry the same durably retained browser recording, but the SDK and API do not retry a possibly-started request or switch providers. Legacy host-adapter transcription types remain exported for one compatibility release. `react`'s optional DOM-only peers (noVNC, xterm, Pierre diffs, CodeMirror) **must be lazily imported** so SSR/non-desktop bundles stay clean. Its voice-input hook owns timesliced MediaRecorder capture, persists ordered chunks and integrity metadata in IndexedDB before reporting them saved, enforces the 60-second default / 600-second maximum and 25 MiB one-shot ceiling, uses stale-fenced per-tab ownership, exposes every retained recording oldest-first, retries finalization without reopening the microphone, creates the cancellation fence before storage enumeration, and persists provider text before any draft mutation. A reload never auto-retranscribes or auto-appends an uncertain saved result; explicit insertion completes its durable handoff. Connected-machine UI (dashboard, enrollment, status pills, metrics) is carved into the **`@opengeni/react/machines`** subpath (`src/machines.ts`) so the root import is the clean sandbox-only default and machine surfaces are opt-in (the root still re-exports them deprecated for back-compat, #144). The two are version-linked via changesets; the desktop pixel plane is consent-gated (409 until acknowledged).
 
 ### 7.11 `agent/` (Rust) + `agent-proto` + the relay
 

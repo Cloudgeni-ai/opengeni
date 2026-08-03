@@ -4,6 +4,7 @@ import { act, useState } from "react";
 import { ChatComposer } from "../src/components/chat-composer";
 import { appendFinalTranscript } from "../src/hooks/use-transcription";
 import {
+  VOICE_RECORDING_CLIENT_MAX_DURATION_SECONDS,
   VOICE_RECORDING_TIMESLICE_MILLISECONDS,
   useVoiceInput,
 } from "../src/hooks/use-voice-input";
@@ -11,6 +12,7 @@ import {
   createVoiceRecordingManifest,
   planVoiceRecordingChunkCommit,
   prepareVoiceRecordingChunk,
+  VoiceRecordingOwnedError,
   type PersistVoiceRecordingChunkInput,
   type PersistVoiceRecordingChunkResult,
   type VoiceRecordingChunk,
@@ -35,7 +37,7 @@ afterEach(async () => {
 
 const capability = {
   available: true,
-  maxDurationSeconds: 1_800,
+  maxDurationSeconds: 60,
   maxSizeBytes: 25 * 1024 * 1024,
   acceptedMimeTypes: ["audio/webm", "audio/webm;codecs=opus", "audio/mp4", "audio/ogg;codecs=opus"],
 };
@@ -117,8 +119,17 @@ class MemoryVoiceRecordingStore implements VoiceRecordingStore {
   readonly chunks = new Map<string, VoiceRecordingChunk>();
   failNextPersist: Error | null = null;
   failNextDiscard: Error | null = null;
+  failNextCreate: Error | null = null;
+  failHandedOffUpdate: Error | null = null;
+  listChunksStarted: (() => void) | null = null;
+  listChunksGate: Promise<void> | null = null;
 
   async createManifest(manifest: VoiceRecordingManifest): Promise<void> {
+    if (this.failNextCreate) {
+      const error = this.failNextCreate;
+      this.failNextCreate = null;
+      throw error;
+    }
     if (this.manifests.has(manifest.recordingId)) throw new Error("duplicate manifest");
     this.manifests.set(manifest.recordingId, manifest);
   }
@@ -127,16 +138,58 @@ class MemoryVoiceRecordingStore implements VoiceRecordingStore {
     return this.manifests.get(recordingId) ?? null;
   }
 
-  async listRecoverableManifests(workspaceId: string): Promise<VoiceRecordingManifest[]> {
-    return [...this.manifests.values()].filter(
-      (manifest) =>
-        manifest.workspaceId === workspaceId &&
-        manifest.captureState !== "discarded" &&
-        manifest.finalizationState !== "handed-off",
-    );
+  async listRecoverableManifests(
+    workspaceId: string,
+    ownership?: { ownerId: string; staleBefore: string },
+  ): Promise<VoiceRecordingManifest[]> {
+    return [...this.manifests.values()]
+      .filter(
+        (manifest) =>
+          manifest.workspaceId === workspaceId &&
+          manifest.captureState !== "discarded" &&
+          manifest.finalizationState !== "handed-off" &&
+          (!manifest.ownerId ||
+            manifest.ownerId === ownership?.ownerId ||
+            Boolean(
+              ownership &&
+              (!manifest.ownerHeartbeatAt || manifest.ownerHeartbeatAt <= ownership.staleBefore),
+            )),
+      )
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  }
+
+  async claimManifest(
+    recordingId: string,
+    ownerId: string,
+    claimedAt: string,
+    staleBefore: string,
+  ): Promise<VoiceRecordingManifest> {
+    const manifest = this.manifests.get(recordingId);
+    if (!manifest) throw new Error("missing manifest");
+    if (
+      manifest.finalizationState === "handed-off" ||
+      (manifest.ownerId &&
+        manifest.ownerId !== ownerId &&
+        manifest.ownerHeartbeatAt &&
+        manifest.ownerHeartbeatAt > staleBefore)
+    ) {
+      throw new VoiceRecordingOwnedError(recordingId);
+    }
+    const updated = {
+      ...manifest,
+      captureState:
+        manifest.captureState === "capturing" ? ("stopped" as const) : manifest.captureState,
+      ownerId,
+      ownerHeartbeatAt: claimedAt,
+      updatedAt: claimedAt,
+    };
+    this.manifests.set(recordingId, updated);
+    return updated;
   }
 
   async listChunks(recordingId: string): Promise<VoiceRecordingChunk[]> {
+    this.listChunksStarted?.();
+    await this.listChunksGate;
     return [...this.chunks.values()]
       .filter((chunk) => chunk.recordingId === recordingId)
       .sort((left, right) => left.chunkNumber - right.chunkNumber);
@@ -152,6 +205,7 @@ class MemoryVoiceRecordingStore implements VoiceRecordingStore {
     }
     const manifest = this.manifests.get(input.recordingId);
     if (!manifest) throw new Error("missing manifest");
+    assertMemoryOwner(manifest, input.ownerId);
     const chunk = await prepareVoiceRecordingChunk(input);
     const key = `${input.recordingId}:${input.chunkNumber}`;
     const result = planVoiceRecordingChunkCommit({
@@ -171,24 +225,40 @@ class MemoryVoiceRecordingStore implements VoiceRecordingStore {
     update: Partial<
       Pick<
         VoiceRecordingManifest,
-        "captureState" | "uploadState" | "transcriptionState" | "finalizationState"
+        | "captureState"
+        | "uploadState"
+        | "transcriptionState"
+        | "finalizationState"
+        | "ownerId"
+        | "ownerHeartbeatAt"
+        | "transcriptText"
       >
     >,
     updatedAt: string,
+    ownerId?: string | undefined,
   ): Promise<VoiceRecordingManifest> {
     const manifest = this.manifests.get(recordingId);
     if (!manifest) throw new Error("missing manifest");
+    assertMemoryOwner(manifest, ownerId);
+    if (update.finalizationState === "handed-off" && this.failHandedOffUpdate) {
+      const error = this.failHandedOffUpdate;
+      this.failHandedOffUpdate = null;
+      throw error;
+    }
     const updated = { ...manifest, ...update, updatedAt };
     this.manifests.set(recordingId, updated);
     return updated;
   }
 
-  async discard(recordingId: string): Promise<void> {
+  async discard(recordingId: string, ownerId?: string | undefined): Promise<void> {
     if (this.failNextDiscard) {
       const error = this.failNextDiscard;
       this.failNextDiscard = null;
       throw error;
     }
+    const manifest = this.manifests.get(recordingId);
+    if (!manifest) throw new Error("missing manifest");
+    assertMemoryOwner(manifest, ownerId);
     this.manifests.delete(recordingId);
     for (const [key, chunk] of this.chunks) {
       if (chunk.recordingId === recordingId) this.chunks.delete(key);
@@ -198,8 +268,42 @@ class MemoryVoiceRecordingStore implements VoiceRecordingStore {
   async close(): Promise<void> {}
 }
 
+function assertMemoryOwner(manifest: VoiceRecordingManifest, ownerId: string | undefined): void {
+  if (manifest.ownerId !== (ownerId ?? null)) {
+    throw new VoiceRecordingOwnedError(manifest.recordingId);
+  }
+}
+
 async function settle(count = 12): Promise<void> {
   for (let index = 0; index < count; index += 1) await Promise.resolve();
+}
+
+async function seedStoppedRecording(
+  store: MemoryVoiceRecordingStore,
+  recordingId: string,
+  createdAt: string,
+): Promise<void> {
+  const manifest = createVoiceRecordingManifest({
+    recordingId,
+    workspaceId: "ws-1",
+    mimeType: "audio/webm",
+    createdAt,
+  });
+  await store.createManifest(manifest);
+  await store.persistChunk({
+    recordingId,
+    chunkNumber: 0,
+    capturedAt: new Date(new Date(createdAt).getTime() + 1_000).toISOString(),
+    startMilliseconds: 0,
+    durationMilliseconds: 1_000,
+    mimeType: manifest.mimeType,
+    audio: new Blob([recordingId], { type: manifest.mimeType }),
+  });
+  await store.updateManifest(
+    recordingId,
+    { captureState: "stopped" },
+    new Date(new Date(createdAt).getTime() + 1_000).toISOString(),
+  );
 }
 
 function composerState(
@@ -288,6 +392,65 @@ describe("useVoiceInput", () => {
     await hook.unmount();
   });
 
+  test("stops every acquired microphone track when recorder or manifest setup fails", async () => {
+    const recorderFailure = installMediaMocks();
+    Object.defineProperty(globalThis, "MediaRecorder", {
+      configurable: true,
+      value: class {
+        static isTypeSupported() {
+          return true;
+        }
+        constructor() {
+          throw new DOMException("Recorder unavailable", "NotSupportedError");
+        }
+      },
+    });
+    const recorderHook = await renderHook(
+      () =>
+        useVoiceInput({
+          client: { transcribeAudio: async () => ({ text: "unused", languages: [] }) },
+          workspaceId: "ws-1",
+          capability,
+          enabled: true,
+          value: "",
+          setValue: () => undefined,
+          focusInput: () => undefined,
+          createRecordingStore: () => new MemoryVoiceRecordingStore(),
+        }),
+      undefined,
+    );
+    await act(async () => {
+      await recorderHook.result.current.start();
+    });
+    expect(recorderFailure.track.stop).toHaveBeenCalledTimes(1);
+    expect(recorderHook.result.current.status).toBe("error");
+    await recorderHook.unmount();
+
+    const manifestFailure = installMediaMocks();
+    const store = new MemoryVoiceRecordingStore();
+    store.failNextCreate = new Error("manifest unavailable");
+    const manifestHook = await renderHook(
+      () =>
+        useVoiceInput({
+          client: { transcribeAudio: async () => ({ text: "unused", languages: [] }) },
+          workspaceId: "ws-1",
+          capability,
+          enabled: true,
+          value: "",
+          setValue: () => undefined,
+          focusInput: () => undefined,
+          createRecordingStore: () => store,
+        }),
+      undefined,
+    );
+    await act(async () => {
+      await manifestHook.result.current.start();
+    });
+    expect(manifestFailure.track.stop).toHaveBeenCalledTimes(1);
+    expect(manifestHook.result.current.status).toBe("error");
+    await manifestHook.unmount();
+  });
+
   test("permission denial stays controlled and late responses after cancel are fenced", async () => {
     installMediaMocks({ deny: true });
     const deniedStore = new MemoryVoiceRecordingStore();
@@ -360,6 +523,57 @@ describe("useVoiceInput", () => {
     });
     expect(draft).toBe("keep");
     await recording.unmount();
+  });
+
+  test("cancel during delayed chunk enumeration never starts a stale upload", async () => {
+    installMediaMocks();
+    const store = new MemoryVoiceRecordingStore();
+    let releaseChunks: (() => void) | null = null;
+    store.listChunksGate = new Promise<void>((resolve) => {
+      releaseChunks = resolve;
+    });
+    let listStarted: (() => void) | null = null;
+    const started = new Promise<void>((resolve) => {
+      listStarted = resolve;
+    });
+    store.listChunksStarted = () => listStarted?.();
+    let calls = 0;
+    const hook = await renderHook(
+      () =>
+        useVoiceInput({
+          client: {
+            transcribeAudio: async () => {
+              calls += 1;
+              return { text: "stale", languages: [] };
+            },
+          },
+          workspaceId: "ws-1",
+          capability,
+          enabled: true,
+          value: "",
+          setValue: () => undefined,
+          focusInput: () => undefined,
+          createRecordingStore: () => store,
+          createRecordingId: () => "recording-delayed-list",
+        }),
+      undefined,
+    );
+
+    await act(async () => {
+      await hook.result.current.start();
+      hook.result.current.stop();
+      await started;
+    });
+    await act(async () => {
+      hook.result.current.cancel();
+      releaseChunks?.();
+      await settle(30);
+    });
+
+    expect(calls).toBe(0);
+    expect(hook.result.current.status).toBe("recovered");
+    expect(store.manifests.get("recording-delayed-list")?.uploadState).toBe("retrying");
+    await hook.unmount();
   });
 
   test("composer mic stop auto-transcribes and never auto-sends", async () => {
@@ -462,28 +676,27 @@ describe("useVoiceInput", () => {
     expect(mounted.container.querySelector("[aria-label='Start voice input']")).toBeTruthy();
   });
 
-  test("uses short timeslices and preserves a simulated 31-minute recording duration", async () => {
+  test("uses short timeslices and stops before uploading audio above the one-shot byte ceiling", async () => {
     installMediaMocks();
     const store = new MemoryVoiceRecordingStore();
-    let submitted: TranscribeAudioInput | undefined;
+    let transcriptionCalls = 0;
     const hook = await renderHook(
       () =>
         useVoiceInput({
           client: {
-            transcribeAudio: async (_workspaceId, input) => {
-              submitted = input;
-              return { text: "long recording", languages: [] };
+            transcribeAudio: async () => {
+              transcriptionCalls += 1;
+              return { text: "oversized", languages: [] };
             },
           },
           workspaceId: "ws-1",
-          capability: { ...capability, maxDurationSeconds: 3_600 },
+          capability: { ...capability, maxDurationSeconds: 3_600, maxSizeBytes: 2 },
           enabled: true,
           value: "",
           setValue: () => undefined,
           focusInput: () => undefined,
           createRecordingStore: () => store,
-          createRecordingId: () => "recording-long",
-          now: () => new Date("2026-08-03T21:00:00.000Z"),
+          createRecordingId: () => "recording-size-limit",
         }),
       undefined,
     );
@@ -493,22 +706,17 @@ describe("useVoiceInput", () => {
     });
     const recorder = FakeMediaRecorder.instances[0];
     expect(recorder?.startTimeslice).toBe(VOICE_RECORDING_TIMESLICE_MILLISECONDS);
-    await act(async () => {
-      recorder?.emit(new Blob([new Uint8Array([4, 5])], { type: recorder.mimeType }), 31 * 60_000);
-      await settle();
-    });
-    expect(hook.result.current.locallySaved).toBe(true);
-    expect(hook.result.current.durationSeconds).toBe(31 * 60);
+    expect(VOICE_RECORDING_CLIENT_MAX_DURATION_SECONDS).toBe(600);
     await act(async () => {
       hook.result.current.stop();
       await settle(24);
     });
 
-    if (!submitted) throw new Error("missing long recording submission");
-    expect(submitted.durationSeconds).toBe(31 * 60 + 1);
-    expect(submitted.audio).toBeInstanceOf(Blob);
-    expect((submitted.audio as Blob).size).toBe(5);
-    expect(hook.result.current.status).toBe("idle");
+    expect(transcriptionCalls).toBe(0);
+    expect(hook.result.current.status).toBe("error");
+    expect(hook.result.current.error).toBe("too_large");
+    expect(hook.result.current.hasRecoverableRecording).toBe(true);
+    expect(store.manifests.get("recording-size-limit")?.totalBytes).toBe(3);
     await hook.unmount();
   });
 
@@ -763,6 +971,214 @@ describe("useVoiceInput", () => {
     });
     expect(calls).toEqual(["ws-1"]);
     await hook.unmount();
+  });
+
+  test("keeps a live capturing manifest private to its owning tab until ownership is released", async () => {
+    installMediaMocks();
+    const store = new MemoryVoiceRecordingStore();
+    const first = await renderHook(
+      () =>
+        useVoiceInput({
+          client: { transcribeAudio: async () => ({ text: "first", languages: [] }) },
+          workspaceId: "ws-1",
+          capability,
+          enabled: true,
+          value: "",
+          setValue: () => undefined,
+          focusInput: () => undefined,
+          createRecordingStore: () => store,
+          createRecordingId: () => "recording-live-tab",
+          createOwnerId: () => "tab-a",
+        }),
+      undefined,
+    );
+    await act(async () => {
+      await first.result.current.start();
+    });
+
+    const second = await renderHook(
+      () =>
+        useVoiceInput({
+          client: { transcribeAudio: async () => ({ text: "second", languages: [] }) },
+          workspaceId: "ws-1",
+          capability,
+          enabled: true,
+          value: "",
+          setValue: () => undefined,
+          focusInput: () => undefined,
+          createRecordingStore: () => store,
+          createOwnerId: () => "tab-b",
+        }),
+      undefined,
+    );
+    await act(async () => {
+      await settle(20);
+    });
+    expect(second.result.current.status).toBe("idle");
+    expect(second.result.current.hasRecoverableRecording).toBe(false);
+    await act(async () => {
+      await second.result.current.discard();
+    });
+    expect(store.manifests.has("recording-live-tab")).toBe(true);
+    await second.unmount();
+
+    await first.unmount();
+    await act(async () => {
+      await settle(30);
+    });
+    expect(store.manifests.get("recording-live-tab")?.ownerId).toBeNull();
+    expect(store.manifests.get("recording-live-tab")?.captureState).toBe("stopped");
+
+    const recovered = await renderHook(
+      () =>
+        useVoiceInput({
+          client: { transcribeAudio: async () => ({ text: "recovered", languages: [] }) },
+          workspaceId: "ws-1",
+          capability,
+          enabled: true,
+          value: "",
+          setValue: () => undefined,
+          focusInput: () => undefined,
+          createRecordingStore: () => store,
+          createOwnerId: () => "tab-c",
+        }),
+      undefined,
+    );
+    await act(async () => {
+      await settle(20);
+    });
+    expect(recovered.result.current.status).toBe("recovered");
+    expect(recovered.result.current.recordingId).toBe("recording-live-tab");
+    await recovered.unmount();
+  });
+
+  test("advances through every retained recording after the current one is discarded", async () => {
+    installMediaMocks();
+    const store = new MemoryVoiceRecordingStore();
+    await seedStoppedRecording(store, "recording-oldest", "2026-08-03T20:00:00.000Z");
+    await seedStoppedRecording(store, "recording-newer", "2026-08-03T20:01:00.000Z");
+    const hook = await renderHook(
+      () =>
+        useVoiceInput({
+          client: { transcribeAudio: async () => ({ text: "unused", languages: [] }) },
+          workspaceId: "ws-1",
+          capability,
+          enabled: true,
+          value: "",
+          setValue: () => undefined,
+          focusInput: () => undefined,
+          createRecordingStore: () => store,
+          createOwnerId: () => "queue-tab",
+        }),
+      undefined,
+    );
+    await act(async () => {
+      await settle(20);
+    });
+    expect(hook.result.current.recordingId).toBe("recording-oldest");
+
+    await act(async () => {
+      await hook.result.current.discard();
+      await settle(20);
+    });
+    expect(hook.result.current.status).toBe("recovered");
+    expect(hook.result.current.recordingId).toBe("recording-newer");
+    expect(store.manifests.has("recording-oldest")).toBe(false);
+    expect(store.manifests.has("recording-newer")).toBe(true);
+    await hook.unmount();
+  });
+
+  test("persists transcript before handoff and never auto-retranscribes or re-appends after uncertainty", async () => {
+    installMediaMocks();
+    const store = new MemoryVoiceRecordingStore();
+    store.failHandedOffUpdate = new Error("handoff state unavailable");
+    store.failNextDiscard = new Error("discard must not run before durable handoff");
+    let calls = 0;
+    let firstDraft = "";
+    const first = await renderHook(
+      () =>
+        useVoiceInput({
+          client: {
+            transcribeAudio: async () => {
+              calls += 1;
+              return { text: "saved transcript", languages: [] };
+            },
+          },
+          workspaceId: "ws-1",
+          capability,
+          enabled: true,
+          value: firstDraft,
+          setValue: (value) => {
+            firstDraft = value;
+          },
+          focusInput: () => undefined,
+          createRecordingStore: () => store,
+          createRecordingId: () => "recording-handoff-uncertain",
+          createOwnerId: () => "handoff-tab-a",
+        }),
+      undefined,
+    );
+    await act(async () => {
+      await first.result.current.start();
+      first.result.current.stop();
+      await settle(30);
+    });
+    expect(firstDraft).toBe("saved transcript");
+    expect(calls).toBe(1);
+    expect(first.result.current.status).toBe("transcript-ready");
+    expect(first.result.current.error).toBe("handoff_uncertain");
+    expect(store.manifests.get("recording-handoff-uncertain")).toMatchObject({
+      finalizationState: "transcript-ready",
+      transcriptText: "saved transcript",
+    });
+    expect(store.failNextDiscard).not.toBeNull();
+    await first.unmount();
+    await act(async () => {
+      await settle(20);
+    });
+
+    let recoveredDraft = "existing draft";
+    const recovered = await renderHook(
+      () =>
+        useVoiceInput({
+          client: {
+            transcribeAudio: async () => {
+              calls += 1;
+              return { text: "duplicate", languages: [] };
+            },
+          },
+          workspaceId: "ws-1",
+          capability,
+          enabled: true,
+          value: recoveredDraft,
+          setValue: (value) => {
+            recoveredDraft = value;
+          },
+          focusInput: () => undefined,
+          createRecordingStore: () => store,
+          createOwnerId: () => "handoff-tab-b",
+        }),
+      undefined,
+    );
+    await act(async () => {
+      await settle(20);
+    });
+    expect(recovered.result.current.status).toBe("transcript-ready");
+    expect(recovered.result.current.savedTranscript).toBe("saved transcript");
+    expect(recoveredDraft).toBe("existing draft");
+    expect(calls).toBe(1);
+
+    await act(async () => {
+      await recovered.result.current.insertSavedTranscript();
+      await settle(20);
+    });
+    expect(recoveredDraft).toBe("existing draft saved transcript");
+    expect(calls).toBe(1);
+    expect(recovered.result.current.status).toBe("idle");
+    expect(store.manifests.get("recording-handoff-uncertain")?.finalizationState).toBe(
+      "handed-off",
+    );
+    await recovered.unmount();
   });
 
   test("does not expose retry after transcript handoff when local discard fails", async () => {

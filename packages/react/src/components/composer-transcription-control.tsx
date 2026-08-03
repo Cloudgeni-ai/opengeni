@@ -5,6 +5,7 @@ import type {
   WorkspaceTranscriptionPolicy,
 } from "@opengeni/sdk";
 import {
+  ClipboardPasteIcon,
   LoaderCircleIcon,
   MicIcon,
   RefreshCwIcon,
@@ -39,6 +40,8 @@ export type ComposerTranscriptionMessages = {
   saving: string;
   transcribing: string;
   recovered: string;
+  recoveredTranscript: string;
+  insertRecoveredTranscript: string;
   discardRecovered: string;
   unavailableDisabled: string;
   unavailable: string;
@@ -49,6 +52,7 @@ export type ComposerTranscriptionMessages = {
   errorInvalidAudio: string;
   errorStorageUnavailable: string;
   errorRetryable: string;
+  errorHandoffUncertain: string;
   errorUnknown: string;
 };
 
@@ -62,6 +66,8 @@ const defaultMessages: ComposerTranscriptionMessages = {
   saving: "Saving audio locally…",
   transcribing: "Transcribing…",
   recovered: "Recording recovered and saved locally.",
+  recoveredTranscript: "Transcript saved locally. Check your draft before inserting.",
+  insertRecoveredTranscript: "Insert saved transcript",
   discardRecovered: "Discard saved recording",
   unavailableDisabled: "Voice input is unavailable while the composer is disabled.",
   unavailable: "Voice input is unavailable for this workspace.",
@@ -72,6 +78,7 @@ const defaultMessages: ComposerTranscriptionMessages = {
   errorInvalidAudio: "The recording could not be read. Try again.",
   errorStorageUnavailable: "Voice input stopped because audio could not be saved safely.",
   errorRetryable: "Recording is saved locally. Retry transcription when ready.",
+  errorHandoffUncertain: "Transcript is saved. Check your draft before inserting it again.",
   errorUnknown: "Voice input could not start. Try again.",
 };
 
@@ -130,7 +137,9 @@ export function ComposerTranscriptionControl({
     status === "saving" ||
     status === "transcribing";
   const recoverable =
-    transcription.hasRecoverableRecording && (status === "recovered" || status === "error");
+    transcription.hasRecoverableRecording &&
+    (status === "recovered" || status === "transcript-ready" || status === "error");
+  const savedTranscript = status === "transcript-ready" && transcription.savedTranscript !== null;
   const unavailableMessage = composer.disabled
     ? messages.unavailableDisabled
     : !capability?.available || !workspaceEnabled
@@ -153,9 +162,11 @@ export function ComposerTranscriptionControl({
             ? messages.transcribing
             : status === "recovered"
               ? messages.recovered
-              : status === "error"
-                ? (errorMessage ?? messages.errorUnknown)
-                : unavailableMessage;
+              : status === "transcript-ready"
+                ? messages.recoveredTranscript
+                : status === "error"
+                  ? (errorMessage ?? messages.errorUnknown)
+                  : unavailableMessage;
 
   function start(event: MouseEvent<HTMLButtonElement>) {
     if (unavailableMessage) {
@@ -184,20 +195,32 @@ export function ComposerTranscriptionControl({
             )}
           >
             <span className="max-w-44 truncate text-og-xs text-og-fg-muted max-sm:max-w-28">
-              {status === "error" ? (errorMessage ?? messages.errorRetryable) : messages.recovered}
+              {savedTranscript
+                ? (errorMessage ?? messages.recoveredTranscript)
+                : status === "error"
+                  ? (errorMessage ?? messages.errorRetryable)
+                  : messages.recovered}
             </span>
-            <Tip tip={messages.retry}>
+            <Tip tip={savedTranscript ? messages.insertRecoveredTranscript : messages.retry}>
               <button
                 type="button"
-                onClick={() => transcription.retry()}
-                aria-label={messages.retry}
+                onClick={() =>
+                  savedTranscript
+                    ? void transcription.insertSavedTranscript()
+                    : transcription.retry()
+                }
+                aria-label={savedTranscript ? messages.insertRecoveredTranscript : messages.retry}
                 className={cn(
                   "inline-flex size-7 shrink-0 items-center justify-center rounded-og-sm",
                   "bg-og-fg text-og-bg transition-colors duration-150 motion-reduce:transition-none",
                   "hover:bg-og-fg-muted pointer-coarse:size-11",
                 )}
               >
-                <RefreshCwIcon className="size-3.5" />
+                {savedTranscript ? (
+                  <ClipboardPasteIcon className="size-3.5" />
+                ) : (
+                  <RefreshCwIcon className="size-3.5" />
+                )}
               </button>
             </Tip>
             <Tip tip={messages.discardRecovered}>
@@ -447,6 +470,8 @@ function transcriptionErrorMessage(code: string, messages: ComposerTranscription
     case "provider":
     case "timeout":
       return messages.errorRetryable;
+    case "handoff_uncertain":
+      return messages.errorHandoffUncertain;
     case "unknown":
       return messages.errorUnknown;
     default:

@@ -16,7 +16,7 @@ else delete document.documentElement.dataset.ogTheme;
 
 const capability: ClientVoiceInputConfig = {
   available: true,
-  maxDurationSeconds: 1800,
+  maxDurationSeconds: 60,
   maxSizeBytes: 25 * 1024 * 1024,
   acceptedMimeTypes: ["audio/webm", "audio/webm;codecs=opus", "audio/mp4", "audio/ogg;codecs=opus"],
 };

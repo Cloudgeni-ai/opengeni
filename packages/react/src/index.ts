@@ -49,7 +49,13 @@ export {
   FILE_ONLY_MESSAGE_TEXT,
 } from "./hooks/use-composer";
 export type { ComposerSendExtras, ComposerState, UseComposerOptions } from "./hooks/use-composer";
-export { VOICE_RECORDING_TIMESLICE_MILLISECONDS, useVoiceInput } from "./hooks/use-voice-input";
+export {
+  VOICE_RECORDING_CLIENT_MAX_DURATION_SECONDS,
+  VOICE_RECORDING_OWNER_HEARTBEAT_MILLISECONDS,
+  VOICE_RECORDING_OWNER_STALE_MILLISECONDS,
+  VOICE_RECORDING_TIMESLICE_MILLISECONDS,
+  useVoiceInput,
+} from "./hooks/use-voice-input";
 export type {
   UseVoiceInputOptions,
   UseVoiceInputResult,
@@ -60,6 +66,7 @@ export {
   VoiceRecordingChunkConflictError,
   VoiceRecordingChunkSequenceError,
   VoiceRecordingNotFoundError,
+  VoiceRecordingOwnedError,
   VoiceRecordingStorageUnavailableError,
   createVoiceRecordingManifest,
   planVoiceRecordingChunkCommit,

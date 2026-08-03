@@ -363,12 +363,12 @@ const SettingsSchema = z.object({
   // Provider credentials stay server-side; ClientConfig only projects availability
   // and hard ceilings. Selection happens once before audio is sent — never retry
   // the same clip across vendors after an upstream request may have started.
-  voiceInputMaxDurationSeconds: z.coerce.number().int().positive().max(7_200).default(1_800),
+  voiceInputMaxDurationSeconds: z.coerce.number().int().positive().max(600).default(60),
   voiceInputMaxSizeBytes: z.coerce
     .number()
     .int()
     .positive()
-    .max(100 * 1024 * 1024)
+    .max(25 * 1024 * 1024)
     .default(25 * 1024 * 1024),
   // Preferred provider order (comma-separated ids). First configured+ready wins.
   // Codex subscription STT is preferred by default when subscription routing is

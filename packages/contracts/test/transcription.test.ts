@@ -224,7 +224,19 @@ describe("native voice input contracts", () => {
       acceptedMimeTypes: ["audio/webm", "audio/mp4"],
     });
     expect(capability.available).toBe(true);
-    expect(capability.maxDurationSeconds).toBe(1_800);
+    expect(capability.maxDurationSeconds).toBe(60);
+    expect(
+      ClientVoiceInputConfig.safeParse({
+        ...capability,
+        maxDurationSeconds: 601,
+      }).success,
+    ).toBe(false);
+    expect(
+      ClientVoiceInputConfig.safeParse({
+        ...capability,
+        maxSizeBytes: 25 * 1024 * 1024 + 1,
+      }).success,
+    ).toBe(false);
     expect(
       ClientVoiceInputConfig.safeParse({
         available: true,
