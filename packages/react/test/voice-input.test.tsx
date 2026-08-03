@@ -562,6 +562,63 @@ describe("useVoiceInput", () => {
     await recording.unmount();
   });
 
+  test("workspace replacement fences a pending permission response before manifest creation", async () => {
+    const { track } = installMediaMocks();
+    const mediaStream = {
+      getTracks: () => [track],
+    } as unknown as MediaStream;
+    let resolvePermission: ((stream: MediaStream) => void) | null = null;
+    const getUserMedia = mock(
+      () =>
+        new Promise<MediaStream>((resolve) => {
+          resolvePermission = resolve;
+        }),
+    );
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: { getUserMedia },
+    });
+    const store = new MemoryVoiceRecordingStore();
+    const hook = await renderHook(
+      (props: { workspaceId: string }) =>
+        useVoiceInput({
+          client: { transcribeAudio: async () => ({ text: "unused", languages: [] }) },
+          workspaceId: props.workspaceId,
+          capability,
+          enabled: true,
+          value: "",
+          setValue: () => undefined,
+          focusInput: () => undefined,
+          createRecordingStore: () => store,
+          createRecordingId: () => "recording-stale-permission",
+          createOwnerId: () => "workspace-permission-owner",
+        }),
+      { workspaceId: "ws-1" },
+    );
+
+    let startPromise!: Promise<boolean>;
+    await act(async () => {
+      startPromise = hook.result.current.start();
+      await settle(4);
+    });
+    expect(hook.result.current.status).toBe("requesting-permission");
+    await hook.rerender({ workspaceId: "ws-2" });
+
+    let started = true;
+    await act(async () => {
+      resolvePermission?.(mediaStream);
+      started = await startPromise;
+      await settle(8);
+    });
+    expect(started).toBe(false);
+    expect(track.stop).toHaveBeenCalledTimes(1);
+    expect(store.manifests.size).toBe(0);
+    expect(FakeMediaRecorder.instances).toHaveLength(0);
+    expect(hook.result.current.status).toBe("idle");
+    expect(hook.result.current.recordingId).toBeNull();
+    await hook.unmount();
+  });
+
   test("cancel during delayed chunk enumeration never starts a stale upload", async () => {
     installMediaMocks();
     const store = new MemoryVoiceRecordingStore();

@@ -102,6 +102,7 @@ export function useVoiceInput({
   nowRef.current = now;
   const readNow = useCallback(() => nowRef.current(), []);
   const generationRef = useRef(0);
+  const workspaceIdRef = useRef(workspaceId);
   const ownerIdRef = useRef<string | null>(null);
   const ownerLeaseRef = useRef<VoiceRecordingOwnerLease | null>(null);
   const ownerIdPromiseRef = useRef<Promise<string> | null>(null);
@@ -127,6 +128,7 @@ export function useVoiceInput({
   const statusRef = useRef(status);
   valueRef.current = value;
   statusRef.current = status;
+  workspaceIdRef.current = workspaceId;
 
   const ensureOwnerId = useCallback(async (): Promise<string> => {
     if (ownerIdRef.current) return ownerIdRef.current;
@@ -262,18 +264,20 @@ export function useVoiceInput({
 
   const loadNextRecoverable = useCallback(
     async (generation: number): Promise<void> => {
+      const active = () =>
+        generation === generationRef.current && workspaceIdRef.current === workspaceId;
       const [store, ownerId] = await Promise.all([ensureStore(), ensureOwnerId()]);
-      if (generation !== generationRef.current) return;
+      if (!active()) return;
       const staleBefore = new Date(
         readNow().getTime() - VOICE_RECORDING_OWNER_STALE_MILLISECONDS,
       ).toISOString();
       await store.cleanupHandedOffManifests({ ownerId, staleBefore }).catch(() => undefined);
-      if (generation !== generationRef.current) return;
+      if (!active()) return;
       const manifests = await store.listRecoverableManifests(workspaceId, {
         ownerId,
         staleBefore,
       });
-      if (generation !== generationRef.current) return;
+      if (!active()) return;
       for (const candidate of manifests) {
         try {
           const claimedAt = readNow().toISOString();
@@ -283,7 +287,7 @@ export function useVoiceInput({
             claimedAt,
             staleBefore,
           );
-          if (generation !== generationRef.current) {
+          if (!active()) {
             await store
               .updateManifest(
                 claimed.recordingId,
@@ -308,7 +312,7 @@ export function useVoiceInput({
           throw reason;
         }
       }
-      if (generation === generationRef.current && !manifestRef.current) {
+      if (active() && !manifestRef.current) {
         setStatus("idle");
         setError(null);
       }
@@ -326,6 +330,7 @@ export function useVoiceInput({
       controllerRef.current = controller;
       const active = () =>
         generation === generationRef.current &&
+        workspaceIdRef.current === workspaceId &&
         !controller.signal.aborted &&
         manifestRef.current?.recordingId === manifest.recordingId &&
         manifestRef.current.workspaceId === workspaceId;
@@ -484,6 +489,7 @@ export function useVoiceInput({
     ) {
       return false;
     }
+    const prerequisiteGeneration = generationRef.current;
     let store: VoiceRecordingStore;
     let ownerId: string;
     try {
@@ -498,6 +504,9 @@ export function useVoiceInput({
       return false;
     }
     if (
+      prerequisiteGeneration !== generationRef.current ||
+      workspaceIdRef.current !== workspaceId ||
+      ownerIdRef.current !== ownerId ||
       manifestRef.current !== null ||
       statusRef.current === "requesting-permission" ||
       statusRef.current === "recording" ||
@@ -507,6 +516,10 @@ export function useVoiceInput({
       return false;
     }
     const generation = ++generationRef.current;
+    const startAttemptIsCurrent = () =>
+      generation === generationRef.current &&
+      workspaceIdRef.current === workspaceId &&
+      ownerIdRef.current === ownerId;
     setStatus("requesting-permission");
     setError(null);
     let acquiredStream: MediaStream | null = null;
@@ -515,7 +528,7 @@ export function useVoiceInput({
     try {
       const mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
       acquiredStream = mediaStream;
-      if (generation !== generationRef.current) {
+      if (!startAttemptIsCurrent()) {
         mediaStream.getTracks().forEach((track) => track.stop());
         return false;
       }
@@ -533,7 +546,7 @@ export function useVoiceInput({
       });
       createdManifest = manifest;
       await store.createManifest(manifest);
-      if (generation !== generationRef.current) {
+      if (!startAttemptIsCurrent()) {
         await store.discard(manifest.recordingId, ownerId);
         clearCaptureRuntime();
         return false;
@@ -573,7 +586,7 @@ export function useVoiceInput({
               mimeType: manifest.mimeType,
               audio: event.data,
             });
-            if (generation !== generationRef.current) return;
+            if (!startAttemptIsCurrent()) return;
             rememberManifest(result.manifest);
             if (result.manifest.totalBytes > capability.maxSizeBytes) {
               captureLimitErrorRef.current = "too_large";
@@ -595,18 +608,19 @@ export function useVoiceInput({
             const resolveSettled = resolveCaptureSettledRef.current;
             resolveCaptureSettledRef.current = null;
             resolveSettled?.();
-            const captureIsCurrent = () =>
+            const stoppedCaptureIsCurrent = () =>
               generation === generationRef.current &&
+              workspaceIdRef.current === workspaceId &&
               ownerIdRef.current === ownerId &&
               manifestRef.current?.recordingId === manifest.recordingId &&
               manifestRef.current.workspaceId === workspaceId &&
               manifestRef.current.ownerId === ownerId;
-            if (!captureIsCurrent()) return;
+            if (!stoppedCaptureIsCurrent()) return;
             const current = manifestRef.current;
             if (!current) return;
             const stopped = await updateManifestBestEffort(current, { captureState: "stopped" });
             if (
-              !captureIsCurrent() ||
+              !stoppedCaptureIsCurrent() ||
               stopped.recordingId !== manifest.recordingId ||
               stopped.workspaceId !== workspaceId ||
               stopped.ownerId !== ownerId
@@ -837,9 +851,8 @@ export function useVoiceInput({
 
   useEffect(() => {
     const current = manifestRef.current;
-    let generation = generationRef.current;
+    const generation = ++generationRef.current;
     if (current && current.workspaceId !== workspaceId) {
-      generation = ++generationRef.current;
       controllerRef.current?.abort();
       controllerRef.current = null;
       const recorder = recorderRef.current;
