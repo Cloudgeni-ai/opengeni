@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   ActivateWorkspaceInstructionPolicyRequest,
   CreateWorkspaceInstructionPolicyDraftRequest,
@@ -9,6 +10,7 @@ import {
   WorkspaceInstructionPolicyDiffResponse,
   WorkspaceInstructionPolicyListQuery,
   WorkspaceInstructionPolicyListResponse,
+  WorkspaceInstructionPolicyOperationReuseResponse,
   WorkspaceInstructionPolicyRevision,
 } from "@opengeni/contracts";
 import { requireAccessGrant, type ApiRouteDeps } from "@opengeni/core";
@@ -24,6 +26,7 @@ import {
   WorkspaceInstructionPolicyInvalidOperationError,
   WorkspaceInstructionPolicyLegacyUnavailableError,
   WorkspaceInstructionPolicyNotFoundError,
+  WorkspaceInstructionPolicyOperationReuseError,
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -46,6 +49,15 @@ function policyErrorResponse(context: Context, error: unknown): Response {
         code: error.code,
         message: error.message,
         currentHead: error.currentHead,
+      }),
+      409,
+    );
+  }
+  if (error instanceof WorkspaceInstructionPolicyOperationReuseError) {
+    return context.json(
+      WorkspaceInstructionPolicyOperationReuseResponse.parse({
+        code: error.code,
+        message: error.message,
       }),
       409,
     );
@@ -117,6 +129,7 @@ export function registerWorkspaceInstructionPolicyRoutes(app: Hono, deps: ApiRou
       return context.json(
         WorkspaceInstructionPolicyRevision.parse(
           await createWorkspaceInstructionPolicyDraft(deps.db, {
+            operationId: request.operationId ?? randomUUID(),
             accountId: grant.accountId,
             workspaceId,
             createdBySubjectId: grant.subjectId,
@@ -145,6 +158,7 @@ export function registerWorkspaceInstructionPolicyRoutes(app: Hono, deps: ApiRou
       return context.json(
         WorkspaceInstructionPolicyRevision.parse(
           await importLegacyWorkspaceInstructionPolicyDraft(deps.db, {
+            operationId: request.operationId ?? randomUUID(),
             accountId: grant.accountId,
             workspaceId,
             createdBySubjectId: grant.subjectId,
@@ -188,10 +202,14 @@ export function registerWorkspaceInstructionPolicyRoutes(app: Hono, deps: ApiRou
       return context.json(
         WorkspaceInstructionPolicyActivationResponse.parse(
           await rollbackWorkspaceInstructionPolicyRevision(deps.db, {
+            operationId: request.operationId ?? randomUUID(),
             accountId: grant.accountId,
             workspaceId,
             targetRevisionId: request.targetRevisionId,
             expectedCurrentRevisionId: request.expectedCurrentRevisionId,
+            ...(request.expectedActivationVersion === undefined
+              ? {}
+              : { expectedActivationVersion: request.expectedActivationVersion }),
             actorSubjectId: grant.subjectId,
             reason: request.reason,
           }),
@@ -227,10 +245,14 @@ export function registerWorkspaceInstructionPolicyRoutes(app: Hono, deps: ApiRou
       return context.json(
         WorkspaceInstructionPolicyActivationResponse.parse(
           await activateWorkspaceInstructionPolicyRevision(deps.db, {
+            operationId: request.operationId ?? randomUUID(),
             accountId: grant.accountId,
             workspaceId,
             revisionId,
             expectedCurrentRevisionId: request.expectedCurrentRevisionId,
+            ...(request.expectedActivationVersion === undefined
+              ? {}
+              : { expectedActivationVersion: request.expectedActivationVersion }),
             actorSubjectId: grant.subjectId,
             reason: request.reason,
           }),
