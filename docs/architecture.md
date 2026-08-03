@@ -331,7 +331,7 @@ elements, and timers, including pending rotation. Fixed-code diagnostics expose
 microphone, autoplay, negotiation, rotation, reconnect, lost-owner, and terminal
 stop classes without credentials, SDP, audio, or transcript bodies. The
 promotion schema is canonical in
-`packages/db/drizzle/0160_session_realtime_connection_promotion.sql` and
+`packages/db/drizzle/0162_session_realtime_connection_promotion.sql` and
 `packages/db/src/session-realtime-ledger.ts`.
 
 The web UI mounts realtime as a compact split action inside the existing
@@ -363,7 +363,7 @@ prior finalized voice turns as inert role-labeled startup continuity with an
 explicit silence instruction. Canonical:
 `packages/sdk/src/codex-realtime-v3.ts`,
 `packages/db/src/session-realtime-context.ts`,
-`packages/db/drizzle/0159_session_realtime_context_projection.sql`, and
+`packages/db/drizzle/0161_session_realtime_context_projection.sql`, and
 `apps/api/src/session-realtime-context.ts`.
 
 Native provider delegation remains in that same session. Exact owner, connection
