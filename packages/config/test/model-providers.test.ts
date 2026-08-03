@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   assertTurnExecutionPolicyMatchesConfigV1,
+  calculateGatewayReportedCostMicros,
   calculateModelUsageCostMicros,
   canonicalizeConfiguredModelId,
   configuredAllowedModels,
@@ -82,14 +83,19 @@ describe("curated AI Gateway catalogue", () => {
     const kimi = models.find((model) => model.id === OPENGENI_GATEWAY_MODELS.kimi.productId)!;
     expect(deepseek.upstreamModelId).toBe(OPENGENI_GATEWAY_MODELS.deepseek.upstreamModelId);
     expect(deepseek.requestPolicy).toEqual({
-      gateway: { only: ["deepinfra"], caching: "auto" },
+      gateway: { only: ["baseten", "novita", "deepinfra"], caching: "auto" },
     });
     expect(deepseek.capabilities.promptCaching).toEqual({
       upstream: "supported",
       runnable: true,
       mode: "implicit",
     });
-    expect(kimi.requestPolicy).toEqual({ gateway: { only: ["wafer"], caching: "auto" } });
+    expect(kimi.upstreamModelId).toBe("moonshotai/kimi-k3");
+    expect(kimi.label).toBe("Kimi K3");
+    expect(kimi.aliases).toEqual([]);
+    expect(kimi.requestPolicy).toEqual({
+      gateway: { only: ["baseten", "fireworks"], caching: "auto" },
+    });
     expect(kimi.capabilities.promptCaching).toEqual({
       upstream: "supported",
       runnable: true,
@@ -98,15 +104,15 @@ describe("curated AI Gateway catalogue", () => {
     expect(kimi.capabilities.latencyModes.map((mode) => mode.id)).toEqual(["standard"]);
 
     expect(configuredModelPricing(settings)[deepseek.id]).toEqual({
-      inputMicrosPerMillionTokens: 90_000,
-      cachedInputMicrosPerMillionTokens: 18_000,
-      outputMicrosPerMillionTokens: 180_000,
+      inputMicrosPerMillionTokens: 140_000,
+      cachedInputMicrosPerMillionTokens: 28_000,
+      outputMicrosPerMillionTokens: 280_000,
       marginBps: 2_500,
     });
     expect(configuredModelPricing(settings)[kimi.id]).toEqual({
-      inputMicrosPerMillionTokens: 4_500_000,
-      cachedInputMicrosPerMillionTokens: 450_000,
-      outputMicrosPerMillionTokens: 22_500_000,
+      inputMicrosPerMillionTokens: 3_000_000,
+      cachedInputMicrosPerMillionTokens: 300_000,
+      outputMicrosPerMillionTokens: 15_000_000,
       marginBps: 2_500,
     });
   });
@@ -133,7 +139,7 @@ describe("curated AI Gateway catalogue", () => {
     ).toBe("vck_workspace");
   });
 
-  test("managed debit applies DeepInfra cache-read price and the existing 25% margin", () => {
+  test("managed debit fallback uses the highest approved DeepSeek route", () => {
     const settings = {
       ...getSettings(),
       modelProvidersJson: "[]",
@@ -145,10 +151,10 @@ describe("curated AI Gateway catalogue", () => {
         outputTokens: 1_000_000,
         inputTokensDetails: { cached_tokens: 1_000_000 },
       }),
-    ).toBe(247_500);
+    ).toBe(385_000);
   });
 
-  test("managed debit applies Wafer's response-backed cache-read price", () => {
+  test("managed debit fallback applies normal Kimi cache-read pricing", () => {
     const settings = {
       ...getSettings(),
       modelProvidersJson: "[]",
@@ -160,7 +166,37 @@ describe("curated AI Gateway catalogue", () => {
         outputTokens: 0,
         inputTokensDetails: { cached_tokens: 1_000_000 },
       }),
-    ).toBe(562_500);
+    ).toBe(375_000);
+  });
+
+  test("managed debit converts exact Gateway cost before applying margin", () => {
+    const settings = {
+      ...getSettings(),
+      modelProvidersJson: "[]",
+      vercelAiGatewayApiKey: "vck_test",
+    };
+    expect(
+      calculateGatewayReportedCostMicros(
+        settings,
+        OPENGENI_GATEWAY_MODELS.deepseek.productId,
+        "0.00000325",
+        { inputTokens: 9 },
+      ),
+    ).toBe(5);
+    expect(
+      calculateGatewayReportedCostMicros(
+        settings,
+        OPENGENI_GATEWAY_MODELS.deepseek.productId,
+        "1.23456789",
+      ),
+    ).toBe(1_543_210);
+    expect(() =>
+      calculateGatewayReportedCostMicros(
+        settings,
+        OPENGENI_GATEWAY_MODELS.deepseek.productId,
+        "NaN",
+      ),
+    ).toThrow("Invalid AI Gateway inference cost");
   });
 });
 
@@ -1102,7 +1138,7 @@ describe("turn execution policy V1", () => {
       modelId: "codex/gpt-5.6-sol",
       requestedModelId: null,
       modelSource: "session",
-      reasoningEffort: "xhigh",
+      reasoningEffort: "max",
       reasoningSource: "session",
     });
     expect(policy).toMatchObject({
@@ -1112,6 +1148,7 @@ describe("turn execution policy V1", () => {
       credentialSource: { kind: "connected_subscription", provider: "codex" },
       billing: { upstreamPayer: "connected_subscription", metering: "external" },
     });
+    expect(policy.reasoningEffort).toBe("max");
   });
 });
 describe("Grok 4.5 explicit xAI registry contract", () => {

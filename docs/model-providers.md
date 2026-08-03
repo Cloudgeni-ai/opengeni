@@ -122,39 +122,35 @@ models. They are siblings of the built-in GPT-5.6 family in the OpenGeni picker
 rail; the client never receives the Gateway hostname, upstream model slug, or
 endpoint provider.
 
-| Product | Exact route | Supplier input / cache read / output | OpenGeni retail (+25%) |
+| Product | Approved provider order | Supplier input / cache read / output | Conservative retail fallback (+25%) |
 | --- | --- | --- | --- |
-| DeepSeek V4 Flash 0731 | `deepseek/deepseek-v4-flash-0731` → DeepInfra only | $0.09 / $0.018 / $0.18 per 1M | $0.1125 / $0.0225 / $0.225 per 1M |
-| Kimi K3 Fast | `moonshotai/kimi-k3-fast` → Wafer only | $4.50 / $0.45 / $22.50 per 1M | $5.625 / $0.5625 / $28.125 per 1M |
+| DeepSeek V4 Flash 0731 | Baseten → Novita → DeepInfra | Baseten $0.13 / $0.028 / $0.26; Novita $0.14 / $0.028 / $0.28; DeepInfra $0.09 / $0.018 / $0.18 per 1M | $0.175 / $0.035 / $0.35 per 1M (highest approved route) |
+| Kimi K3 | Baseten → Fireworks | $3 / $0.30 / $15 per 1M on both routes | $3.75 / $0.375 / $18.75 per 1M |
 
-Prices are a reviewed 2026-08-02 snapshot from the public Gateway endpoint
-metadata. DeepInfra replaced Baseten for DeepSeek after both supported API
-surfaces and both DeepSeek slugs returned a provider-pinned 503 from Baseten;
-DeepInfra passed Responses text, two parallel tool calls, continuation, and
-implicit cache reporting. Prices are intentionally static: adding a model or changing a route
-requires reviewing its Responses tool-call transport and updating its
-definition, price, and tests together. Wafer's discovery boolean currently
-conflicts with its live response: a provider-pinned continuation returned
-`cached_tokens` and charged $0.45/M cached input. OpenGeni therefore preserves
-and bills that reported cache-read slice. Kimi may emit parallel function calls;
-before the next Responses request, OpenGeni interleaves each complete call/result
-batch without changing any item. Without that wire-order normalization, Gateway
-returns a 400 whose error metadata unexpectedly names base Kimi. The internal
-cause is not observable; the Wafer-only fence prevents any fallback.
+Prices are a reviewed 2026-08-03 snapshot from public Gateway endpoint metadata.
+Managed turns normally debit the exact Gateway-reported inference cost for the
+provider that actually served the response, plus 25%. The static token rates
+above are only a conservative fallback if that response metadata is absent.
+Adding or changing a model requires reviewing the provider order, Responses
+tool/vision transport, cache reporting, pricing, definition, and tests together.
+Kimi's Gateway Responses adapter rejects grouped parallel call/result history.
+At the post-serialization fence, OpenGeni pairs only complete call/result batches
+by `call_id`. This preserves all fields and parallel execution; it does not
+change the model or provider route. Grouped, name-annotated, and Chat Completions
+continuations were probed on 2026-08-03; only the paired Responses shape kept
+full tool continuity plus Gateway route/cost metadata.
 
-Every Gateway request replaces caller routing options with an exact one-item
-`only` and `order` list, sends no model fallback list, and disables OpenAI SDK
-retries. Unknown Gateway model slugs fail before network I/O. Keep Gateway account-level
-rewrite rules disabled for the managed key because those rules operate outside
-the request body.
+Every Gateway request replaces caller routing options with the reviewed provider
+list in both `only` and `order`, sends no model fallback list, and disables OpenAI
+SDK retries. Gateway may advance only through that ordered allowlist. Unknown
+Gateway model slugs fail before network I/O. Keep Gateway account-level rewrite
+rules disabled for the managed key because those rules operate outside the
+request body.
 
-Both models request Gateway automatic caching. Kimi Fast remains catalogued as
+Both models request Gateway automatic caching. Kimi remains catalogued as
 image-capable. OpenGeni verifies finalized attachment bytes and checksums, then
-sends images inline as data URLs; it never gives Gateway or Wafer an object-store
-URL. A 2026-08-02 provider-pinned data-URL probe returned a Gateway 400 whose
-metadata named base Kimi, while an HTTPS-image probe succeeded on Wafer. That is
-recorded as an unresolved Gateway compatibility defect, not worked around by
-granting the provider storage access.
+sends images inline as data URLs through the standard Responses input surface;
+it never gives an endpoint provider an object-store URL.
 
 A workspace admin can instead connect **Vercel AI Gateway** in workspace Settings.
 The key is stored in the encrypted workspace connection table, resolved only in

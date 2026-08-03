@@ -78,7 +78,7 @@ export function effortOptionsForModel(model: ClientModel): ReasoningEffort[] {
   if (!efforts || efforts.length === 0) {
     return ["low"];
   }
-  const order: ReasoningEffort[] = ["none", "minimal", "low", "medium", "high", "xhigh"];
+  const order: ReasoningEffort[] = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
   return order.filter((effort) => efforts.includes(effort));
 }
 

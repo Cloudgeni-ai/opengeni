@@ -1258,7 +1258,7 @@ describe("composer reasoning-effort picker (full host enum)", () => {
       allowedModels: ["gpt-5.6-sol"],
       models: [],
       defaultReasoningEffort: "none",
-      allowedReasoningEfforts: ["none", "minimal", "low", "medium", "high", "xhigh"],
+      allowedReasoningEfforts: ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
       mcpServers: [],
       fileUploads: { enabled: false, maxSizeBytes: 0 },
       productAccessMode: "local",
@@ -1293,6 +1293,7 @@ describe("composer reasoning-effort picker (full host enum)", () => {
       "medium",
       "high",
       "xhigh",
+      "max",
     ]);
   });
 
@@ -1314,6 +1315,7 @@ describe("composer reasoning-effort picker (full host enum)", () => {
       "Medium",
       "High",
       "Extra high",
+      "Max",
     ]);
   });
 });
