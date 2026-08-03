@@ -1,5 +1,6 @@
-// Documents: indexed document bases for agent search, with upload, reindex,
-// and semantic search — all through the SDK client.
+// Documents: immediate upload into an internal Default collection, with
+// optional collections for organization, reindex, and semantic search — all
+// through the SDK client.
 import {
   BotOffIcon,
   CheckIcon,
@@ -45,6 +46,20 @@ const sourceKindOptions: KnowledgeSourceKind[] = [
   "web",
   "other",
 ];
+
+export function isDefaultDocumentCollection(base: Pick<DocumentBase, "name">): boolean {
+  return base.name.trim().toLowerCase() === "default";
+}
+
+export function resolveDocumentCollectionSelection(
+  currentId: string | null,
+  bases: DocumentBase[],
+): string | null {
+  if (currentId && bases.some((base) => base.id === currentId)) {
+    return currentId;
+  }
+  return bases.find(isDefaultDocumentCollection)?.id ?? bases[0]?.id ?? null;
+}
 
 export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
@@ -92,8 +107,7 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
   const selectedBase = bases.find((base) => base.id === selectedBaseId) ?? null;
   const failedDocuments = documents.filter((document) => document.status === "failed");
   // Honest list states: an initial fetch renders as loading and a failed load
-  // as an error with retry — never as "Create a document base to start." or
-  // "Upload files to index this base."
+  // as an error with retry — never as a mandatory collection-creation gate.
   const basesView = listViewState({
     loading: basesLoading,
     error: basesError,
@@ -111,10 +125,10 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
       const next = await client.listDocumentBases(workspaceId);
       setBases(next);
       setBasesError(null);
-      setSelectedBaseId((current) => current ?? next[0]?.id ?? null);
+      setSelectedBaseId((current) => resolveDocumentCollectionSelection(current, next));
     } catch (error) {
       setBasesError(error instanceof Error ? error : new Error(String(error)));
-      toast.error("Failed to load document bases", { description: String(error) });
+      toast.error("Failed to load document collections", { description: String(error) });
     } finally {
       setBasesLoading(false);
     }
@@ -180,11 +194,11 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
       setBases((current) => [...current, base]);
       setSelectedBaseId(base.id);
       setName("");
-      toast.success("Document base created", {
+      toast.success("Collection created", {
         description: `“${base.name}” is ready for uploads.`,
       });
     } catch (error) {
-      toast.error("Failed to create document base", {
+      toast.error("Failed to create collection", {
         description: error instanceof Error ? error.message : String(error),
       });
     } finally {
@@ -226,8 +240,8 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
     }
   }
 
-  // A drop can create the Default base or auto-file into any base — re-pull
-  // the base list and land the user where the document actually went.
+  // A drop can create Default or auto-file into any collection — re-pull the
+  // collection list and land the user where the document actually went.
   async function finishDrop(document: IndexedDocument) {
     try {
       const nextBases = await client.listDocumentBases(workspaceId);
@@ -396,35 +410,42 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
         <PageHeader
           icon={<FileSearchIcon className="size-4" />}
           title="Documents"
-          description="Indexed document bases the agent can search."
+          description="Upload immediately for agent search. Collections are optional organization."
           actions={
-            <div className="grid w-full min-w-0 gap-2 sm:grid-cols-[minmax(10rem,1fr)_auto] lg:w-auto">
-              <Input
-                ref={nameInputRef}
-                aria-label="New document base name"
-                value={name}
-                onChange={(event) => setName(event.target.value)}
-                placeholder="New base name"
-                className="h-8 min-w-0 text-xs pointer-coarse:min-h-10"
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") void handleCreateBase();
-                }}
-              />
-              <Button
-                type="button"
-                size="sm"
-                onClick={() => void handleCreateBase()}
-                disabled={creatingBase || !name.trim()}
-                className="h-8 shrink-0 pointer-coarse:min-h-10"
-              >
-                {creatingBase ? (
-                  <Loader2Icon className="size-3.5 animate-spin" />
-                ) : (
-                  <PlusIcon className="size-3.5" />
-                )}
-                Create base
-              </Button>
-            </div>
+            <details className="w-full min-w-0 lg:w-auto">
+              <summary className="flex h-8 cursor-pointer list-none items-center justify-center gap-1.5 rounded-md border border-border bg-surface px-3 text-xs font-medium text-fg-muted hover:bg-surface-2 pointer-coarse:min-h-10">
+                <PlusIcon className="size-3.5" />
+                New collection
+                <span className="font-normal text-fg-subtle">optional</span>
+              </summary>
+              <div className="mt-2 grid min-w-0 gap-2 rounded-lg border border-border bg-surface p-2 sm:min-w-80 sm:grid-cols-[minmax(10rem,1fr)_auto]">
+                <Input
+                  ref={nameInputRef}
+                  aria-label="New document collection name"
+                  value={name}
+                  onChange={(event) => setName(event.target.value)}
+                  placeholder="Collection name"
+                  className="h-8 min-w-0 text-xs pointer-coarse:min-h-10"
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") void handleCreateBase();
+                  }}
+                />
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={() => void handleCreateBase()}
+                  disabled={creatingBase || !name.trim()}
+                  className="h-8 shrink-0 pointer-coarse:min-h-10"
+                >
+                  {creatingBase ? (
+                    <Loader2Icon className="size-3.5 animate-spin" />
+                  ) : (
+                    <PlusIcon className="size-3.5" />
+                  )}
+                  Create
+                </Button>
+              </div>
+            </details>
           }
         />
 
@@ -440,7 +461,7 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
             <SparklesIcon className="size-4 text-brand" />
             Drop anything
             <span className="text-2xs font-normal text-fg-subtle">
-              Drops start in Default; enabled curation may name, summarize, and file them.
+              Drops start in Default; enabled curation may name, summarize, and organize them.
             </span>
           </div>
           <div className="mt-2 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
@@ -525,7 +546,7 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
                 id="document-bases-heading"
                 className="text-xs font-medium uppercase text-fg-subtle"
               >
-                Bases
+                Collections <span className="normal-case font-normal">(optional)</span>
               </h2>
               <div className="text-2xs text-fg-subtle">{bases.length}</div>
             </div>
@@ -533,17 +554,17 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
               {basesView === "loading" ? (
                 <div className="flex items-center gap-2 rounded-lg border border-border p-3 text-xs text-fg-muted">
                   <Loader2Icon className="size-3.5 animate-spin" />
-                  Loading bases
+                  Loading collections
                 </div>
               ) : basesView === "error" ? (
                 <LoadErrorState
-                  title="Couldn't load document bases"
+                  title="Couldn't load document collections"
                   error={basesError}
                   onRetry={() => void refreshBases()}
                 />
               ) : basesView === "empty" ? (
                 <div className="rounded-lg border border-dashed border-border p-3 text-xs leading-5 text-fg-muted">
-                  No bases yet. Name one above to start indexing documents.
+                  Default is being prepared. Refresh if this message persists.
                 </div>
               ) : (
                 bases.map((base) => (
@@ -558,8 +579,15 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
                         : "border-border bg-bg/25 text-fg-muted hover:bg-surface-2",
                     )}
                   >
-                    <span className="min-w-0 break-words" title={base.name}>
-                      {base.name}
+                    <span className="flex min-w-0 items-center gap-1.5">
+                      <span className="min-w-0 break-words" title={base.name}>
+                        {base.name}
+                      </span>
+                      {isDefaultDocumentCollection(base) ? (
+                        <span className="shrink-0 rounded border border-border px-1 text-[10px] font-normal text-fg-subtle">
+                          automatic
+                        </span>
+                      ) : null}
                     </span>
                     {selectedBaseId === base.id ? (
                       <CheckIcon className="size-3.5 shrink-0" />
@@ -880,20 +908,20 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
             ) : basesView === "empty" ? (
               <EmptyState
                 icon={<FileSearchIcon className="size-4" />}
-                title="Create your first base"
-                description="A document base is an indexed corpus the agent can search. Name one and upload files to it."
+                title="Preparing Default collection"
+                description="OpenGeni creates Default automatically so uploads never require collection setup."
                 action={
-                  <Button type="button" size="sm" onClick={() => nameInputRef.current?.focus()}>
-                    <PlusIcon className="size-3.5" />
-                    Create base
+                  <Button type="button" size="sm" onClick={() => void refreshBases()}>
+                    <RefreshCwIcon className="size-3.5" />
+                    Refresh
                   </Button>
                 }
               />
             ) : (
               <EmptyState
                 icon={<FileSearchIcon className="size-4" />}
-                title="No base selected"
-                description="Pick a base on the left to upload and search its documents."
+                title="No collection selected"
+                description="Pick a collection on the left. Default is selected automatically when needed."
               />
             )}
           </div>

@@ -789,10 +789,10 @@ export async function getDocumentBase(
 }
 
 /**
- * Find-or-create the workspace's Default base — where knowledge drops land
- * before configured curation files them elsewhere. Matched by name
- * (case-insensitive) so a user-created "Default" is adopted rather than
- * duplicated.
+ * Find-or-create the workspace's internal Default collection — where ordinary
+ * uploads can start and knowledge drops land before configured curation files
+ * them elsewhere. Matched by name (case-insensitive) so a user-created
+ * "Default" is adopted rather than duplicated.
  */
 export async function ensureDefaultBase(
   db: Database,
@@ -812,7 +812,7 @@ export async function ensureDefaultBase(
         if (existing) return mapDocumentBase(existing);
 
         // The partial unique index is the serialization point for concurrent
-        // first drops. A losing insert re-reads the winner instead of
+        // first uploads. A losing insert re-reads the winner instead of
         // surfacing a duplicate-base error.
         const [inserted] = await tx
           .insert(schema.documentBases)
@@ -835,6 +835,21 @@ export async function ensureDefaultBase(
         throw new Error("Failed to create Default document base");
       }),
   );
+}
+
+/**
+ * List a workspace's optional document collections after restoring the
+ * internal Default collection when it is missing. Keeping the ensure and list
+ * in the service layer gives every caller the same migration-free recovery
+ * behavior after an old writer, manual repair, or future collection-management
+ * path renames or removes Default.
+ */
+export async function listDocumentBasesEnsuringDefault(
+  db: Database,
+  input: { accountId: string; workspaceId: string },
+): Promise<DocumentBase[]> {
+  await ensureDefaultBase(db, input);
+  return await listDocumentBases(db, input.workspaceId);
 }
 
 export async function addDocumentToBase(

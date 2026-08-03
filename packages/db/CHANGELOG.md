@@ -1,5 +1,17 @@
 # @opengeni/db
 
+## 0.21.0
+
+### Minor Changes
+
+- 2321119: Add the provider-neutral scoped knowledge provenance, lifecycle, ACL, and normalized claim foundation for organization, workspace, and initiating-user personal evidence.
+
+### Patch Changes
+
+- Updated dependencies [2321119]
+  - @opengeni/contracts@0.30.0
+  - @opengeni/config@0.9.3
+
 ## 0.20.0
 
 ### Minor Changes
