@@ -47,6 +47,7 @@ const MAX_CHANNEL_PAGE = 200;
 const MAX_HISTORY_PAGE = 100;
 const MAX_THREAD_PAGE = 100;
 const MAX_REACTION_CONTEXT_MESSAGES = 15;
+const MAX_REACTION_CONTEXT_PAGES = 8;
 const MAX_USER_PAGE = 200;
 const MAX_FILE_PAGE = 200;
 const MAX_FILE_CURSOR_LENGTH = 1_024;
@@ -402,31 +403,59 @@ export class OpenGeniSlackBotClient {
       if (info.isShared || info.isExternallyShared || info.isOrgShared) {
         throw new SlackBotProviderError("slack_connect_unsupported");
       }
-      const payload = await this.call(headers, "conversations.replies", {
-        channel: input.channelId,
-        // Slack accepts either the parent timestamp or a message timestamp from
-        // inside the thread and returns the containing thread.
-        ts: input.messageTimestamp,
-        limit: String(MAX_REACTION_CONTEXT_MESSAGES),
-      });
-      const messages = slackArray(payload.messages)
-        .map(projectMessage)
-        .filter((message) => message.timestamp.length > 0);
-      const reactedMessage = messages.find(
-        (message) => message.timestamp === input.messageTimestamp,
-      );
-      const first = messages[0];
-      const threadTimestamp = first?.threadTimestamp || first?.timestamp || null;
+      const messages: ReturnType<typeof projectMessage>[] = [];
+      const seenMessageTimestamps = new Set<string>();
+      const seenCursors = new Set<string>();
+      let cursor: string | null = null;
+      let nextCursor: string | null = null;
+      let threadTimestamp: string | null = null;
+      let reactedMessage: ReturnType<typeof projectMessage> | null = null;
+
+      for (let page = 0; page < MAX_REACTION_CONTEXT_PAGES; page += 1) {
+        const payload = await this.call(headers, "conversations.replies", {
+          channel: input.channelId,
+          // Slack accepts either the parent timestamp or a message timestamp from
+          // inside the thread and returns the containing thread.
+          ts: input.messageTimestamp,
+          limit: String(MAX_REACTION_CONTEXT_MESSAGES),
+          ...(cursor ? { cursor } : {}),
+        });
+        const pageMessages = slackArray(payload.messages)
+          .map(projectMessage)
+          .filter((message) => message.timestamp.length > 0);
+        const first = pageMessages[0];
+        threadTimestamp ??= first?.threadTimestamp || first?.timestamp || null;
+        for (const message of pageMessages) {
+          if (seenMessageTimestamps.has(message.timestamp)) continue;
+          seenMessageTimestamps.add(message.timestamp);
+          messages.push(message);
+        }
+        reactedMessage =
+          reactedMessage ??
+          pageMessages.find((message) => message.timestamp === input.messageTimestamp) ??
+          null;
+        nextCursor = responseCursor(payload);
+        if (reactedMessage || !nextCursor) break;
+        if (seenCursors.has(nextCursor)) {
+          throw new SlackBotProviderError("invalid_response");
+        }
+        seenCursors.add(nextCursor);
+        cursor = nextCursor;
+      }
+
       if (!reactedMessage || !threadTimestamp) {
         throw new SlackBotProviderError("message_not_found");
       }
-      const nextCursor = responseCursor(payload);
+      const boundedMessages = selectSlackReactionContextMessages(
+        messages,
+        reactedMessage.timestamp,
+      );
       return {
         channel: info,
         threadTimestamp,
         reactedMessage,
-        messages,
-        truncated: nextCursor !== null,
+        messages: boundedMessages,
+        truncated: nextCursor !== null || messages.length > boundedMessages.length,
       };
     });
   }
@@ -1323,6 +1352,34 @@ function projectMessage(value: unknown) {
       .map(projectFile)
       .filter((file): file is NonNullable<typeof file> => file !== null),
   };
+}
+
+function selectSlackReactionContextMessages(
+  messages: ReturnType<typeof projectMessage>[],
+  reactedTimestamp: string,
+) {
+  if (messages.length <= MAX_REACTION_CONTEXT_MESSAGES) return messages;
+  const reactedIndex = messages.findIndex((message) => message.timestamp === reactedTimestamp);
+  if (reactedIndex < 0) return [];
+
+  const selected = new Set<number>([0, reactedIndex]);
+  for (
+    let distance = 1;
+    selected.size < MAX_REACTION_CONTEXT_MESSAGES && distance < messages.length;
+    distance += 1
+  ) {
+    const before = reactedIndex - distance;
+    const after = reactedIndex + distance;
+    if (before > 0) selected.add(before);
+    if (selected.size < MAX_REACTION_CONTEXT_MESSAGES && after < messages.length) {
+      selected.add(after);
+    }
+  }
+  for (let index = 0; selected.size < MAX_REACTION_CONTEXT_MESSAGES; index += 1) {
+    if (index >= messages.length) break;
+    selected.add(index);
+  }
+  return [...selected].sort((left, right) => left - right).map((index) => messages[index]!);
 }
 
 function projectFile(value: unknown) {

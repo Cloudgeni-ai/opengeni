@@ -74,6 +74,7 @@ export const SLACK_DELIVERY_EVENT_TYPES = [
 const MAX_SLACK_TEXT_CHARS = 3_500;
 const MAX_SLACK_INPUT_CHARS = 8_000;
 const MAX_SLACK_REACTION_CONTEXT_MESSAGES = 15;
+const MAX_SLACK_REACTION_FILE_SUMMARY_CHARS = 1_500;
 const MAX_PROGRESS_MESSAGES = 3;
 const SLACK_USER_LINK_TTL_MS = 15 * 60_000;
 const INBOX_LEASE_MS = 30_000;
@@ -604,11 +605,8 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
     await continueSlackSession(deps, grant, existing, entry);
     return;
   }
-  if (
-    !hasPermission(grant.permissions, "sessions:create") ||
-    !hasPermission(grant.permissions, "sessions:control")
-  ) {
-    throw new SlackInteractionPermanentError("reaction_session_permissions_denied");
+  if (!hasPermission(grant.permissions, "sessions:create")) {
+    throw new SlackInteractionPermanentError("sessions_create_denied");
   }
   const { interaction } = await getOrCreateSlackInteraction(deps.db, {
     accountId: entry.accountId,
@@ -706,11 +704,11 @@ async function processSlackReactionInboxEntry(
   if (!grant || grant.accountId !== entry.accountId) {
     throw new SlackInteractionPermanentError("identity_access_revoked");
   }
-  if (!hasPermission(grant.permissions, "sessions:create")) {
-    throw new SlackInteractionPermanentError("sessions_create_denied");
-  }
-  if (!hasPermission(grant.permissions, "sessions:control")) {
-    throw new SlackInteractionPermanentError("sessions_control_denied");
+  if (
+    !hasPermission(grant.permissions, "sessions:create") ||
+    !hasPermission(grant.permissions, "sessions:control")
+  ) {
+    throw new SlackInteractionPermanentError("reaction_session_permissions_denied");
   }
 
   const client = await createOpenGeniSlackBotInteractionClient(deps, {
@@ -802,37 +800,61 @@ type SlackReactionMessageContext = Awaited<
   ReturnType<OpenGeniSlackBotClient["reactionMessageContext"]>
 >;
 
-function slackReactionTaskText(context: SlackReactionMessageContext) {
-  const messageLines = context.messages
+export function slackReactionTaskText(context: SlackReactionMessageContext) {
+  const reactedLine = slackReactionMessageLine(context.reactedMessage, true);
+  const surroundingLines = context.messages
     .slice(0, MAX_SLACK_REACTION_CONTEXT_MESSAGES)
-    .map((message) => {
-      const actor = message.userId ?? (message.botId ? `bot:${message.botId}` : "unknown");
-      const text = message.text?.trim() || "(no text)";
-      const fileSummary = message.files.length
-        ? ` Files: ${message.files
-            .map((file) => file.title ?? file.name ?? file.id)
-            .filter(Boolean)
-            .join(", ")}.`
-        : "";
-      const reacted =
-        message.timestamp === context.reactedMessage.timestamp ? " [reacted message]" : "";
-      return `- ${message.timestamp ?? "unknown"} ${actor}${reacted}: ${text}${fileSummary}`;
-    });
-  const suffix = context.truncated
-    ? "\nThe containing thread was truncated at the bounded Slack context limit."
-    : "";
-  const prompt = [
+    .filter((message) => message.timestamp !== context.reactedMessage.timestamp)
+    .map((message) => slackReactionMessageLine(message, false));
+  const truncationNotice =
+    "The containing thread was truncated at the bounded Slack context limit.";
+  let prompt = [
     "A linked, authorized Slack user explicitly summoned OpenGeni by reacting to one message.",
     "Use only the exact reacted message and bounded containing-thread context below.",
     "If the intended action is ambiguous, ask a concise clarifying question in the originating thread before taking action.",
     "Do not infer permission to ingest or persist this Slack content into Knowledge, Memory, preferences, policy, instructions, or the Workspace Charter.",
     "",
-    ...messageLines,
-    suffix,
+    "Exact reacted message:",
+    reactedLine,
+    "",
+    "Bounded surrounding thread context:",
   ].join("\n");
-  return prompt.length <= MAX_SLACK_INPUT_CHARS
-    ? prompt
-    : `${prompt.slice(0, MAX_SLACK_INPUT_CHARS - 72)}\n[Slack reaction context truncated to the safe input bound.]`;
+  let truncated = context.truncated;
+  for (const line of surroundingLines) {
+    const candidate = `${prompt}\n${line}`;
+    if (candidate.length + 1 + truncationNotice.length > MAX_SLACK_INPUT_CHARS) {
+      truncated = true;
+      break;
+    }
+    prompt = candidate;
+  }
+  return truncated ? `${prompt}\n${truncationNotice}` : prompt;
+}
+
+function slackReactionMessageLine(
+  message: SlackReactionMessageContext["reactedMessage"],
+  reacted: boolean,
+) {
+  const actor = message.userId || (message.botId ? `bot:${message.botId}` : "unknown");
+  const text = message.text.trim() || "(no text)";
+  const fileLabels: string[] = [];
+  let fileChars = 0;
+  let filesTruncated = false;
+  for (const file of message.files) {
+    const label = file.title || file.name || file.id;
+    if (!label) continue;
+    const addedChars = label.length + (fileLabels.length > 0 ? 2 : 0);
+    if (fileChars + addedChars > MAX_SLACK_REACTION_FILE_SUMMARY_CHARS) {
+      filesTruncated = true;
+      break;
+    }
+    fileLabels.push(label);
+    fileChars += addedChars;
+  }
+  const fileSummary = fileLabels.length
+    ? ` Files: ${fileLabels.join(", ")}${filesTruncated ? ", …" : ""}.`
+    : "";
+  return `- ${message.timestamp || "unknown"} ${actor}${reacted ? " [reacted message]" : ""}: ${text}${fileSummary}`;
 }
 
 async function continueSlackReactionSession(
@@ -1313,6 +1335,7 @@ function safePayloadText(payload: unknown, field: string) {
 
 function safeErrorCode(error: unknown) {
   if (error instanceof SlackBotProviderError) return error.code.slice(0, 128);
+  if (error instanceof SlackInteractionPermanentError) return error.code.slice(0, 128);
   if (error instanceof HTTPException) return `http_${error.status}`;
   const raw = error instanceof Error ? error.name : "slack_interaction_error";
   return (
@@ -1333,7 +1356,12 @@ function slackAdmissionFailureText(error: HTTPException) {
   return "OpenGeni could not start this task because the workspace rejected the session settings. Open OpenGeni, select an available model, and try again.";
 }
 
-class SlackInteractionPermanentError extends Error {}
+class SlackInteractionPermanentError extends Error {
+  constructor(readonly code: string) {
+    super(code);
+    this.name = "SlackInteractionPermanentError";
+  }
+}
 
 function permanentSlackInteractionError(error: unknown) {
   return error instanceof SlackInteractionPermanentError || error instanceof HTTPException;

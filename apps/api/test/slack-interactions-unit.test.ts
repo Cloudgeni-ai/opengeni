@@ -10,6 +10,7 @@ import {
   registerSlackInteractionRoutes,
   slackEventInboxEntry,
   slackReactionInboxEntry,
+  slackReactionTaskText,
   SLACK_DELIVERY_EVENT_TYPES,
   SLACK_INTERACTION_MAX_BODY_BYTES,
   SLACK_TASK_INSTRUCTIONS,
@@ -327,5 +328,51 @@ describe("Slack event classification and safe projection", () => {
     expect(SLACK_TASK_INSTRUCTIONS).toContain("task-local only");
     expect(SLACK_TASK_INSTRUCTIONS).toContain("Do not write Slack context to Documents");
     expect(SLACK_TASK_INSTRUCTIONS).toContain("Never expose private reasoning");
+  });
+
+  test("pins the exact reacted message before budgeting long surrounding context", () => {
+    const exactText = `Pinned production decision: ${"x".repeat(3_500)}`;
+    const reactedMessage = {
+      timestamp: "1706100000.000017",
+      threadTimestamp: "1706100000.000001",
+      userId: "U_REACTED",
+      botId: "",
+      text: exactText,
+      files: [
+        {
+          id: "F_PINNED",
+          name: "deployment-plan.md",
+          title: "Pinned deployment plan",
+          mimetype: "text/markdown",
+          filetype: "markdown",
+          mode: "hosted",
+          size: 1_024,
+          originatingHuddleId: "",
+          huddleTranscriptFileId: "",
+        },
+      ],
+    };
+    const prompt = slackReactionTaskText({
+      reactedMessage,
+      messages: [
+        ...Array.from({ length: 14 }, (_, index) => ({
+          ...reactedMessage,
+          timestamp: `1706100000.${String(index + 1).padStart(6, "0")}`,
+          text: `Long surrounding context ${index}: ${"c".repeat(550)}`,
+          files: [],
+        })),
+        reactedMessage,
+      ],
+      truncated: true,
+    } as never);
+
+    expect(prompt.length).toBeLessThanOrEqual(8_000);
+    expect(prompt).toContain(exactText);
+    expect(prompt).toContain("[reacted message]");
+    expect(prompt).toContain("Pinned deployment plan");
+    expect(prompt.indexOf("[reacted message]")).toBeLessThan(
+      prompt.indexOf("Bounded surrounding thread context:"),
+    );
+    expect(prompt).toContain("bounded Slack context limit");
   });
 });

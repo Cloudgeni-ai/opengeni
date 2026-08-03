@@ -5,7 +5,10 @@
 // spine (OAuth redirect or an API-key form) in a right-hand detail sheet, never
 // by hand-editing enable headers. Packs keep their first-class register/enable/
 // disable/unregister surface, restyled flat.
-import { OPENGENI_SLACK_BOT_REQUIRED_SCOPES } from "@opengeni/contracts/slack-bot-scopes";
+import {
+  OPENGENI_SLACK_BOT_REQUESTED_SCOPES,
+  OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
+} from "@opengeni/contracts/slack-bot-scopes";
 import { usePacks, useVariableSets } from "@opengeni/react";
 import {
   Building2Icon,
@@ -123,6 +126,14 @@ export function canManageSlackReactionSummon(
     (candidate) => candidate.workspaceId === workspaceId,
   );
   return grant?.permissions.includes("workspace:admin") === true;
+}
+
+export function WorkspaceSlackBotRequestedScopes() {
+  return (
+    <p className="mt-2 max-w-3xl break-words font-mono text-2xs leading-relaxed text-fg-subtle">
+      {OPENGENI_SLACK_BOT_REQUESTED_SCOPES.join(", ")}
+    </p>
+  );
 }
 
 export function SlackBotInstallControls({
@@ -1137,9 +1148,7 @@ export function CapabilitiesRoute({
                       <ChevronDownIcon className="size-3 shrink-0 transition-transform group-open:rotate-180" />
                       <span>Workspace bot permissions requested</span>
                     </summary>
-                    <p className="mt-2 max-w-3xl break-words font-mono text-2xs leading-relaxed text-fg-subtle">
-                      {OPENGENI_SLACK_BOT_REQUIRED_SCOPES.join(", ")}
-                    </p>
+                    <WorkspaceSlackBotRequestedScopes />
                   </details>
                 </>
               )}
