@@ -172,6 +172,92 @@ export const workspaceInstructionPolicyActivationEvents = pgTable(
   }),
 );
 
+export const workspaceInstructionPolicyOnboardingProposals = pgTable(
+  "workspace_instruction_policy_onboarding_proposals",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    operationId: uuid("operation_id").notNull(),
+    requestFingerprint: text("request_fingerprint").notNull(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    kind: text("kind").notNull(),
+    scope: text("scope").notNull(),
+    roleKey: text("role_key"),
+    sourceId: text("source_id").notNull(),
+    sourceVersion: text("source_version").notNull(),
+    confidenceBps: integer("confidence_bps").notNull(),
+    baselineRevisionId: uuid("baseline_revision_id"),
+    baselineRevision: bigint("baseline_revision", { mode: "number" }),
+    baselineContentHash: text("baseline_content_hash"),
+    baselineActivationVersion: bigint("baseline_activation_version", { mode: "number" }).notNull(),
+    baselineActivatedAt: timestamp("baseline_activated_at", { withTimezone: true }),
+    draftRevisionId: uuid("draft_revision_id").notNull(),
+    draftRevision: bigint("draft_revision", { mode: "number" }).notNull(),
+    draftContentHash: text("draft_content_hash").notNull(),
+    status: text("status").notNull().default("proposed"),
+    createdBySubjectId: text("created_by_subject_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceOperation: uniqueIndex(
+      "workspace_instruction_policy_onboarding_proposals_workspace_operation_uq",
+    ).on(table.workspaceId, table.operationId),
+    sourceVersionTarget: uniqueIndex(
+      "workspace_instruction_policy_onboarding_proposals_source_version_target_uq",
+    ).on(
+      table.workspaceId,
+      table.kind,
+      table.scope,
+      sql`coalesce(${table.roleKey}, '')`,
+      table.sourceId,
+      table.sourceVersion,
+    ),
+    workspaceTimeline: index(
+      "workspace_instruction_policy_onboarding_proposals_workspace_time_idx",
+    ).on(table.workspaceId, table.createdAt, table.id),
+    operationReceipt: check(
+      "workspace_instruction_policy_onboarding_proposals_operation_receipt_chk",
+      sql`${table.requestFingerprint} ~ '^[0-9a-f]{64}$'`,
+    ),
+    target: check(
+      "workspace_instruction_policy_onboarding_proposals_target_chk",
+      sql`(
+        (${table.kind} = 'charter' and ${table.scope} = 'global' and ${table.roleKey} is null)
+        or (${table.kind} = 'policy' and ${table.scope} = 'global' and ${table.roleKey} is null)
+        or (${table.kind} = 'policy' and ${table.scope} = 'role' and ${table.roleKey} is not null)
+      )`,
+    ),
+    source: check(
+      "workspace_instruction_policy_onboarding_proposals_source_chk",
+      sql`length(btrim(${table.sourceId})) between 1 and 512
+        and length(btrim(${table.sourceVersion})) between 1 and 256
+        and ${table.confidenceBps} between 0 and 10000`,
+    ),
+    baseline: check(
+      "workspace_instruction_policy_onboarding_proposals_baseline_chk",
+      sql`(
+        ${table.baselineRevisionId} is null
+        and ${table.baselineRevision} is null
+        and ${table.baselineContentHash} is null
+        and ${table.baselineActivationVersion} = 0
+        and ${table.baselineActivatedAt} is null
+      ) or (
+        ${table.baselineRevisionId} is not null
+        and ${table.baselineRevision} > 0
+        and ${table.baselineContentHash} ~ '^[0-9a-f]{64}$'
+        and ${table.baselineActivationVersion} > 0
+        and ${table.baselineActivatedAt} is not null
+      )`,
+    ),
+    draft: check(
+      "workspace_instruction_policy_onboarding_proposals_draft_chk",
+      sql`${table.draftRevision} > 0
+        and ${table.draftContentHash} ~ '^[0-9a-f]{64}$'
+        and ${table.status} = 'proposed'`,
+    ),
+  }),
+);
+
 export const workspaceInstructionPolicySnapshots = pgTable(
   "workspace_instruction_policy_snapshots",
   {

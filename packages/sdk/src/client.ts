@@ -220,6 +220,7 @@ import type {
 import type {
   ActivateWorkspaceInstructionPolicyRequest,
   CreateWorkspaceInstructionPolicyDraftRequest,
+  CreateWorkspaceInstructionPolicyOnboardingProposalRequest,
   ImportLegacyWorkspaceInstructionPolicyDraftRequest,
   RollbackWorkspaceInstructionPolicyRequest,
   WorkspaceInstructionPolicyActivationResponse,
@@ -227,6 +228,9 @@ import type {
   WorkspaceInstructionPolicyDiffResponse,
   WorkspaceInstructionPolicyListOptions,
   WorkspaceInstructionPolicyListResponse,
+  WorkspaceInstructionPolicyOnboardingProposal,
+  WorkspaceInstructionPolicyOnboardingProposalListOptions,
+  WorkspaceInstructionPolicyOnboardingProposalListResponse,
   WorkspaceInstructionPolicyRevision,
 } from "./workspace-instruction-policies";
 import type { WorkspaceStateGetOptions, WorkspaceStateResponse } from "./workspace-state";
@@ -1946,6 +1950,32 @@ export class OpenGeniClient {
     return await this.requestJson<WorkspaceInstructionPolicyRevision>(
       "POST",
       `/v1/workspaces/${workspaceId}/instruction-policies/drafts`,
+      request,
+    );
+  }
+
+  /** List the newest immutable onboarding proposals and their inactive policy drafts. */
+  async listWorkspaceInstructionPolicyOnboardingProposals(
+    workspaceId: string,
+    options: WorkspaceInstructionPolicyOnboardingProposalListOptions = {},
+  ): Promise<WorkspaceInstructionPolicyOnboardingProposalListResponse> {
+    const params = new URLSearchParams();
+    if (options.limit !== undefined) params.set("limit", String(options.limit));
+    const query = params.toString();
+    return await this.requestJson<WorkspaceInstructionPolicyOnboardingProposalListResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/instruction-policies/onboarding-proposals${query ? `?${query}` : ""}`,
+    );
+  }
+
+  /** Create one draft-only proposal against an exact active-policy baseline. */
+  async createWorkspaceInstructionPolicyOnboardingProposal(
+    workspaceId: string,
+    request: CreateWorkspaceInstructionPolicyOnboardingProposalRequest,
+  ): Promise<WorkspaceInstructionPolicyOnboardingProposal> {
+    return await this.requestJson<WorkspaceInstructionPolicyOnboardingProposal>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/instruction-policies/onboarding-proposals`,
       request,
     );
   }
