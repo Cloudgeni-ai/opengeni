@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import {
+  PreferenceRegistrySnapshot,
   ResolvedWorkspaceInstructionPolicySnapshot,
   WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
   WorkspaceInstructionPolicySnapshot,
@@ -22,7 +23,7 @@ import type {
 } from "@opengeni/contracts";
 import { and, asc, desc, eq, inArray, isNull, lt, sql, type SQL } from "drizzle-orm";
 import type { Database } from "./index";
-import { withRlsContext, withWorkspaceRls } from "./index";
+import { withRlsContext, withWorkspaceRls, withWorkspaceSubjectRls } from "./index";
 import { nestedPostgresSqlState } from "./persistence-errors";
 import * as schema from "./schema";
 
@@ -82,12 +83,160 @@ export type WorkspaceInstructionPolicyAttemptClaims = {
   executionGeneration: number;
 };
 
+export type WorkspaceStateAcceptedAttemptGovernance = {
+  attemptId: string;
+  executionGeneration: number;
+  acceptedAt: string;
+  policySnapshot: WorkspaceInstructionPolicySnapshot | null;
+  preferenceSnapshot: {
+    id: string;
+    descriptorHash: string;
+    descriptors: Array<{
+      id: string;
+      revisionId: string;
+      contentHash: string;
+      activeVersion: number;
+      scope: "organization" | "workspace" | "user";
+    }>;
+    truncated: boolean;
+    createdAt: string;
+  } | null;
+};
+
 function contentHash(content: string): string {
   return createHash("sha256").update(content, "utf8").digest("hex");
 }
 
 function iso(value: Date | string): string {
   return (value instanceof Date ? value : new Date(value)).toISOString();
+}
+
+/**
+ * Inspect one immutable accepted attempt only when the authenticated caller is
+ * exactly its frozen initiating human. The null result deliberately conflates
+ * absence, cross-account/workspace lookup, and another subject's attempt.
+ */
+export async function getWorkspaceStateAcceptedAttemptGovernance(
+  db: Database,
+  input: { accountId: string; workspaceId: string; subjectId: string; attemptId: string },
+): Promise<WorkspaceStateAcceptedAttemptGovernance | null> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scopedDb) => {
+    const initiatingSubject = sql<string>`coalesce(
+        ${schema.sessionTurns.initiatingHumanSubjectId},
+        case when ${schema.sessionTurns.initiatorKind} = 'subject'
+          then ${schema.sessionTurns.initiatorSubjectId}
+        end
+      )`;
+    const [attempt] = await scopedDb
+      .select({
+        attemptId: schema.sessionTurnAttempts.id,
+        executionGeneration: schema.sessionTurnAttempts.executionGeneration,
+        acceptedAt: schema.sessionTurns.createdAt,
+      })
+      .from(schema.sessionTurnAttempts)
+      .innerJoin(
+        schema.sessionTurns,
+        and(
+          eq(schema.sessionTurns.accountId, schema.sessionTurnAttempts.accountId),
+          eq(schema.sessionTurns.workspaceId, schema.sessionTurnAttempts.workspaceId),
+          eq(schema.sessionTurns.sessionId, schema.sessionTurnAttempts.sessionId),
+          eq(schema.sessionTurns.id, schema.sessionTurnAttempts.turnId),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.sessionTurnAttempts.accountId, input.accountId),
+          eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
+          eq(schema.sessionTurnAttempts.id, input.attemptId),
+          eq(initiatingSubject, input.subjectId),
+        ),
+      )
+      .limit(1);
+    if (!attempt) return null;
+
+    const [policyRows, preferenceRows] = await Promise.all([
+      scopedDb
+        .select()
+        .from(schema.workspaceInstructionPolicySnapshots)
+        .where(
+          and(
+            eq(schema.workspaceInstructionPolicySnapshots.accountId, input.accountId),
+            eq(schema.workspaceInstructionPolicySnapshots.workspaceId, input.workspaceId),
+            eq(schema.workspaceInstructionPolicySnapshots.attemptId, input.attemptId),
+            eq(
+              schema.workspaceInstructionPolicySnapshots.executionGeneration,
+              attempt.executionGeneration,
+            ),
+          ),
+        )
+        .limit(1),
+      scopedDb
+        .select()
+        .from(schema.preferenceRegistrySnapshots)
+        .where(
+          and(
+            eq(schema.preferenceRegistrySnapshots.accountId, input.accountId),
+            eq(schema.preferenceRegistrySnapshots.workspaceId, input.workspaceId),
+            eq(schema.preferenceRegistrySnapshots.attemptId, input.attemptId),
+            eq(schema.preferenceRegistrySnapshots.executionGeneration, attempt.executionGeneration),
+            eq(schema.preferenceRegistrySnapshots.initiatingHumanSubjectId, input.subjectId),
+          ),
+        )
+        .limit(1),
+    ]);
+    const policyRow = policyRows[0] ?? null;
+    const preferenceRow = preferenceRows[0] ?? null;
+    return {
+      attemptId: attempt.attemptId,
+      executionGeneration: attempt.executionGeneration,
+      acceptedAt: iso(attempt.acceptedAt),
+      policySnapshot: policyRow
+        ? WorkspaceInstructionPolicySnapshot.parse({
+            id: policyRow.id,
+            workspaceId: policyRow.workspaceId,
+            sessionId: policyRow.sessionId,
+            turnId: policyRow.turnId,
+            attemptId: policyRow.attemptId,
+            executionGeneration: policyRow.executionGeneration,
+            policyRole: policyRow.policyRole,
+            roleSource: policyRow.roleSource,
+            entries: policyRow.entries,
+            entryHash: policyRow.entryHash,
+            createdAt: iso(policyRow.createdAt),
+          })
+        : null,
+      preferenceSnapshot: preferenceRow
+        ? (() => {
+            const snapshot = PreferenceRegistrySnapshot.parse({
+              id: preferenceRow.id,
+              workspaceId: preferenceRow.workspaceId,
+              sessionId: preferenceRow.sessionId,
+              turnId: preferenceRow.turnId,
+              attemptId: preferenceRow.attemptId,
+              executionGeneration: preferenceRow.executionGeneration,
+              initiatingHumanSubjectId: preferenceRow.initiatingHumanSubjectId,
+              descriptorHash: preferenceRow.descriptorHash,
+              descriptors: preferenceRow.descriptors,
+              truncated: preferenceRow.truncated,
+              createdAt: iso(preferenceRow.createdAt),
+            });
+            return {
+              id: snapshot.id,
+              descriptorHash: snapshot.descriptorHash,
+              descriptors: snapshot.descriptors.map((descriptor) => ({
+                id: descriptor.id,
+                revisionId: descriptor.revisionId,
+                contentHash: descriptor.contentHash,
+                activeVersion: descriptor.activeVersion,
+                scope: descriptor.scope,
+              })),
+              truncated: snapshot.truncated,
+              createdAt: snapshot.createdAt,
+            };
+          })()
+        : null,
+    };
+  });
 }
 
 type RevisionRow = typeof schema.workspaceInstructionPolicyRevisions.$inferSelect;
