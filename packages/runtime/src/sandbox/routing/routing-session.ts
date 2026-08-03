@@ -924,7 +924,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   private async dispatch<T>(
     op: string,
     mutatesWorkspace: boolean,
-    fn: (session: RoutableBackendSession) => Promise<T>,
+    fn: (session: RoutableBackendSession, backend: ResolvedActiveBackend) => Promise<T>,
   ): Promise<T> {
     let attempt = 0;
     let lastError: unknown;
@@ -938,7 +938,9 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         : undefined;
       let result: T;
       try {
-        result = await this.invokeProviderOperation(op, backend, () => fn(backend.session));
+        result = await this.invokeProviderOperation(op, backend, () =>
+          fn(backend.session, backend),
+        );
       } catch (error) {
         if (mutatesWorkspace && this.deps.afterMutation) {
           try {
@@ -1305,7 +1307,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   }
 
   async materializeEntry(args: unknown): Promise<void> {
-    return this.dispatch("materializeEntry", true, async (s) => {
+    return this.dispatch("materializeEntry", true, async (s, backend) => {
       if (!s.materializeEntry) {
         throw new RoutingUnsupportedError("materializeEntry", this.cached?.kind ?? "unknown");
       }
@@ -1322,7 +1324,11 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         args && typeof args === "object" && typeof (args as { path?: unknown }).path === "string"
           ? (args as { path: string }).path
           : null;
-      if (path) {
+      // A connected machine intentionally treats manifest materialization as a
+      // no-op: its filesystem is user-owned and is not a platform staging
+      // target. Do not reinterpret that documented contract as a failed write.
+      // Provider-managed sandboxes still need the in-provider visibility proof.
+      if (path && backend.kind !== "selfhosted") {
         await assertProviderCanSeeMaterializedPath(s, path);
       }
     });
