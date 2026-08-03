@@ -1,5 +1,12 @@
 # @opengeni/config
 
+## 0.10.5
+
+### Patch Changes
+
+- Updated dependencies [b83af7a]
+  - @opengeni/contracts@0.34.0
+
 ## 0.10.4
 
 ### Patch Changes

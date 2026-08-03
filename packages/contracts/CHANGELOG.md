@@ -1,5 +1,13 @@
 # @opengeni/contracts
 
+## 0.34.0
+
+### Minor Changes
+
+- b83af7a: Add replay-safe workspace instruction policy administration across the API,
+  contracts, database, and SDK, including immutable operation receipts that reject
+  changed requests reusing the same operation identifier.
+
 ## 0.33.0
 
 ### Minor Changes
