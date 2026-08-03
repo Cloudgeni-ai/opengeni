@@ -15,7 +15,7 @@ import {
   getSessionEvent,
   getSessionRootId,
   getSessionGoal,
-  getLatestRunState,
+  getLatestRunStateResumeMetadata,
   getHumanInputResumeForEvent,
   getSessionHumanInputRequest,
   installOrReadTurnExecutionPolicyForAttempt,
@@ -3225,7 +3225,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         trigger,
       );
       triggerType = trigger.type;
-      const latestTurnState = await getLatestRunState(db, input.workspaceId, input.sessionId);
+      const latestTurnState = await getLatestRunStateResumeMetadata(
+        db,
+        input.workspaceId,
+        input.sessionId,
+      );
       const continuationCodexCredentialId =
         latestTurnState?.turnId === turnId ? latestTurnState.frozenCodexCredentialId : null;
       redispatchesAtDispatch = Number(

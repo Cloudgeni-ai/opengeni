@@ -95,6 +95,17 @@ import { startGitCredentialRenewalLoop } from "../src/activities/git-credential-
 
 const OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE = "openai-responses";
 
+describe("approval RunState materialization boundary", () => {
+  test("ordinary agent turns read resume metadata without decoding the approval blob", async () => {
+    const source = await Bun.file(
+      new URL("../src/activities/agent-turn.ts", import.meta.url),
+    ).text();
+
+    expect(source).toContain("getLatestRunStateResumeMetadata(");
+    expect(source).not.toMatch(/\bgetLatestRunState\s*\(/);
+  });
+});
+
 describe("disconnected MCP turn instructions", () => {
   test("warns the model without exposing an unbounded unavailable registry", () => {
     expect(
