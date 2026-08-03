@@ -1,5 +1,24 @@
 # @opengeni/api-router
 
+## 0.16.6
+
+### Patch Changes
+
+- Updated dependencies [e62495f]
+- Updated dependencies [b4982fa]
+- Updated dependencies [b4982fa]
+- Updated dependencies [70e6d56]
+  - @opengeni/contracts@0.31.2
+  - @opengeni/core@0.18.2
+  - @opengeni/config@0.10.2
+  - @opengeni/runtime@0.17.2
+  - @opengeni/db@0.22.3
+  - @opengeni/documents@0.2.71
+  - @opengeni/events@0.3.61
+  - @opengeni/github@0.4.18
+  - @opengeni/observability@0.4.5
+  - @opengeni/storage@0.2.55
+
 ## 0.16.5
 
 ### Patch Changes
