@@ -521,6 +521,71 @@
     },
     {
       "type": "timeseries",
+      "title": "Turn slot saturation: weighted fleet vs worst pod",
+      "description": "Capacity-weighted fleet saturation is total used slots divided by total safe capacity; worst pod preserves localized admission pressure. Never sum or average per-pod ratios.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": ["last", "max"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(opengeni_turn_slots_used{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"})\n/\nclamp_min(sum(opengeni_turn_slots_capacity{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}), 1)",
+          "legendFormat": "weighted fleet",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "max(opengeni_turn_slot_saturation_ratio{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"})",
+          "legendFormat": "worst pod",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "id": 16,
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 27
+      }
+    },
+    {
+      "type": "timeseries",
       "title": "Sandbox lease inventory by liveness",
       "description": "Fresh database projection. Cold is durable history, not active capacity; warming/warm/draining are live lifecycle states.",
       "datasource": {

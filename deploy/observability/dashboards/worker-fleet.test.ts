@@ -69,6 +69,39 @@ describe("worker fleet dashboard scope", () => {
     }
   });
 
+  test("shows capacity-weighted fleet saturation and the worst saturated pod", async () => {
+    const dashboard = JSON.parse(
+      await readFile(new URL("./worker-fleet.json", import.meta.url), "utf8"),
+    );
+    const panels = dashboard.panels as Array<{
+      title?: string;
+      targets?: Array<{ refId?: string; expr?: string; legendFormat?: string }>;
+    }>;
+    const panel = panels.find(
+      (candidate) => candidate.title === "Turn slot saturation: weighted fleet vs worst pod",
+    );
+
+    expect(panel?.targets).toEqual([
+      expect.objectContaining({
+        refId: "A",
+        expr: 'sum(opengeni_turn_slots_used{namespace="$namespace",environment="$environment",release="$release"})\n/\nclamp_min(sum(opengeni_turn_slots_capacity{namespace="$namespace",environment="$environment",release="$release"}), 1)',
+        legendFormat: "weighted fleet",
+      }),
+      expect.objectContaining({
+        refId: "B",
+        expr: 'max(opengeni_turn_slot_saturation_ratio{namespace="$namespace",environment="$environment",release="$release"})',
+        legendFormat: "worst pod",
+      }),
+    ]);
+
+    const expressions = collectExpressions(dashboard);
+    expect(
+      expressions.some((expression) =>
+        /sum\s*\(opengeni_turn_slot_saturation_ratio/.test(expression),
+      ),
+    ).toBe(false);
+  });
+
   test("gates backlog panels with freshness from the same scrape instance", async () => {
     const dashboard = JSON.parse(
       await readFile(new URL("./worker-fleet.json", import.meta.url), "utf8"),
