@@ -3,7 +3,6 @@ import type { Settings } from "@opengeni/config";
 import {
   GOOGLE_DRIVE_CREDENTIAL_LABEL,
   GOOGLE_DRIVE_CREDENTIAL_ROLE,
-  GOOGLE_DRIVE_METADATA_READONLY_SCOPE,
   GOOGLE_DRIVE_PROVIDER_DOMAIN,
   GOOGLE_DRIVE_READONLY_SCOPE,
   GoogleDriveBrowseItem,
@@ -11,6 +10,8 @@ import {
   GoogleDriveConnectionMetadata,
   GoogleDriveOAuthStartResponse,
   SaveGoogleDriveSourceRequest,
+  googleDriveOAuthScopeDecision,
+  googleDriveScopesAllowCapability,
   type GoogleDriveOAuthStartRequest,
 } from "@opengeni/contracts/google-drive";
 import { hasPermission, requireEnvironmentEncryption } from "@opengeni/core";
@@ -170,7 +171,11 @@ export async function completeGoogleDriveOAuthCallback(
       },
       fetchImpl,
     );
-    if (!token.scopes.includes(GOOGLE_DRIVE_READONLY_SCOPE)) {
+    const scopeDecision = googleDriveOAuthScopeDecision(token.scopes);
+    if (
+      scopeDecision.accessMode !== "readonly" ||
+      !scopeDecision.capabilities.includes("recursive_source_sync")
+    ) {
       throw new GoogleDriveCallbackError("scope_not_granted");
     }
     const identity = await verifyGoogleDriveIdentity(token.accessToken, fetchImpl);
@@ -230,7 +235,7 @@ export async function completeGoogleDriveOAuthCallback(
       googleEmail: identity.emailAddress,
       googleDisplayName: identity.displayName,
       verifiedAt: new Date().toISOString(),
-      accessMode: "readonly",
+      accessMode: scopeDecision.accessMode,
       ...(previousMetadata?.selectedSources
         ? { selectedSources: previousMetadata.selectedSources }
         : previousMetadata?.selectedSource
@@ -302,7 +307,7 @@ export async function browseGoogleDrive(
   if (!connection) {
     throw new HTTPException(404, { message: "Google Drive connection not found" });
   }
-  requireGoogleDriveConnection(connection, input.subjectId);
+  requireGoogleDriveSourceConnection(connection, input.subjectId);
   const parentId = validDriveId(input.parentId, "parentId");
   const currentItem = await resolveGoogleDriveBoundaryItem(deps, {
     workspaceId: input.workspaceId,
@@ -377,7 +382,7 @@ export async function saveGoogleDriveSource(
   if (!existing) {
     throw new HTTPException(404, { message: "Google Drive connection not found" });
   }
-  requireGoogleDriveConnection(existing, input.subjectId);
+  requireGoogleDriveSourceConnection(existing, input.subjectId);
   const verifiedSources = [];
   for (const source of payload.sources) {
     const sourceId = validDriveId(source.id, "source.id");
@@ -405,7 +410,7 @@ export async function saveGoogleDriveSource(
       input.connectionId,
       input.subjectId,
     )) ?? existing;
-  const latestMetadata = requireGoogleDriveConnection(latest, input.subjectId);
+  const latestMetadata = requireGoogleDriveSourceConnection(latest, input.subjectId);
   const updated = await updateConnection(deps.db, {
     workspaceId: input.workspaceId,
     connectionId: latest.id,
@@ -546,15 +551,20 @@ function requireGoogleDriveConnection(
   ) {
     throw new HTTPException(422, { message: "connection is not this user's Google Drive" });
   }
-  if (
-    !connection.grantedScopes.includes(GOOGLE_DRIVE_READONLY_SCOPE) &&
-    !connection.grantedScopes.includes(GOOGLE_DRIVE_METADATA_READONLY_SCOPE)
-  ) {
+  return parsed.data;
+}
+
+function requireGoogleDriveSourceConnection(
+  connection: Parameters<typeof requireGoogleDriveConnection>[0],
+  subjectId: string,
+) {
+  const metadata = requireGoogleDriveConnection(connection, subjectId);
+  if (!googleDriveScopesAllowCapability(connection.grantedScopes, "recursive_source_sync")) {
     throw new HTTPException(401, {
-      message: "Google Drive needs to be reconnected with metadata access",
+      message: "Google Drive needs to be reconnected with selected-source read access",
     });
   }
-  return parsed.data;
+  return metadata;
 }
 
 function readGoogleDriveOAuthState(

@@ -20,6 +20,35 @@ Google currently classifies `drive.readonly` as a restricted scope.
 Keep the OAuth app in Testing with explicit test users for local development.
 Production use requires Google's applicable verification and security review.
 
+## Launch OAuth scope decision
+
+The current connector configures a continuously readable folder, My Drive, or
+Shared Drive boundary. That product mode requires
+`https://www.googleapis.com/auth/drive.readonly`:
+
+- `drive.file` grants per-file access to files created by the app or explicitly
+  opened/shared with it. It does not prove that OpenGeni can continuously
+  discover every present or future descendant of a selected folder or Shared
+  Drive, so it never satisfies the recursive-source-sync capability.
+- `drive.metadata.readonly` can describe Drive items but cannot read document
+  content. Legacy metadata-only connections must reconnect before source
+  browsing/configuration because every saved boundary promises later recursive
+  content synchronization.
+- `drive.readonly` satisfies metadata discovery, content reads, and recursive
+  source synchronization. A previously granted full `drive` scope is
+  semantically sufficient but OpenGeni does not request that broader scope.
+- A future narrow Google Picker mode may use `drive.file` only when its source
+  contract is explicitly limited to the individually selected files. It must
+  not be represented as a recursively synchronized folder.
+
+OAuth start continues to use Google's incremental-authorization flag. Future
+Drive publishing under OPE-138 may request `drive.file` as a separate write
+capability without replacing the read-only source grant. The callback and every
+active source-browser admission evaluate the exact returned/stored scope set
+through one deterministic capability decision. Unknown, partial, write-only,
+or malformed grants fail before Google identity lookup, credential persistence,
+or source-provider reads.
+
 ## Local setup
 
 1. In Google Cloud, enable the Google Drive API.
