@@ -1,8 +1,11 @@
 import { createRoot } from "react-dom/client";
 import type { GitDiffHunk, GitDiffLine, GitFileDiff } from "@opengeni/sdk";
-import { WorkbenchChanges } from "../src/components/workbench-changes";
-import { FileBrowser } from "../src/components/file-browser";
-import type { FileTreeNode, UseSandboxFilesResult } from "../src/hooks/use-sandbox-files";
+import {
+  FileBrowser,
+  WorkbenchChanges,
+  type FileTreeNode,
+  type UseSandboxFilesResult,
+} from "@opengeni/react";
 import "./styles.css";
 
 /* ----------------------------------------------------------------------------

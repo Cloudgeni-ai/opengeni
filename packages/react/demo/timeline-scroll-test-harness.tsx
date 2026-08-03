@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 
-import { MessageTimeline, type TimelineItem } from "../src/index";
+import { MessageTimeline, type TimelineItem } from "@opengeni/react";
 import "./styles.css";
 
 type VisibleRow = { id: string | null; top: number | null };

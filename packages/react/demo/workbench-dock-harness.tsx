@@ -1,5 +1,5 @@
 import { createRoot } from "react-dom/client";
-import { OpenGeniProvider, SandboxWorkspace, useSessionEvents } from "../src/index";
+import { OpenGeniProvider, SandboxWorkspace, useSessionEvents } from "@opengeni/react";
 import { DOCK_SESSION_ID, DOCK_STATES, DockStateMockClient } from "./workbench-dock-states";
 import "./styles.css";
 

@@ -13,7 +13,8 @@ The default root import (`@opengeni/react`) is the clean sandbox-agnostic
 surface — the chat/timeline hooks and components plus the sandbox workspace
 suite. Advanced chat-composer composition lives under
 `@opengeni/react/composer`; Connected-Machine UI lives under
-`@opengeni/react/machines`. (The root barrel still re-exports the machines
+`@opengeni/react/machines`; realtime voice controls live under the lazily
+loadable `@opengeni/react/realtime` subpath. (The root barrel still re-exports the machines
 island for back-compat, deprecated per #144.)
 
 Design-system-first: every visual decision routes through CSS-variable tokens
@@ -117,6 +118,89 @@ export function App() {
   );
 }
 ```
+
+## Realtime composer controls (`@opengeni/react/realtime`)
+
+The realtime subpath is the exact OpenGeni composer experience: model catalog
+and selection, split-button motion, start/stop/retry states, microphone and
+audio mute controls, diagnostics, recovery, and the same copy, ARIA, classes,
+and styling used by the web console. It is deliberately separate from the root
+entry so SSR and non-realtime consumers do not eagerly load browser media or
+transport code.
+
+For an existing session, place one public component in the composer's action
+slot. It resolves `client` and `workspaceId` from `OpenGeniProvider` and reuses
+the host's existing session/event projection rather than opening a duplicate
+stream:
+
+```tsx
+import { ChatComposer } from "@opengeni/react";
+import { SessionRealtimeControl } from "@opengeni/react/realtime";
+
+<ChatComposer
+  composer={composer}
+  effectiveControl={effectiveControl}
+  actionsStart={
+    <SessionRealtimeControl
+      sessionId={sessionId}
+      sessionStatus={sessionStatus}
+      effectiveControl={effectiveControl}
+      events={events}
+      eventsReady={!initialLoading}
+      codexConnected={codexConnected}
+    />
+  }
+/>;
+```
+
+For a new-session composer, create the session with `startMode: "realtime"`,
+navigate to it, and pass the selected model to the same existing-session
+control's `realtimeAutostartModel` prop:
+
+```tsx
+import { NewSessionRealtimeControl } from "@opengeni/react/realtime";
+
+<NewSessionRealtimeControl
+  codexConnected={codexConnected}
+  onStart={async (model) => {
+    const session = await client.createSession(workspaceId, {
+      requestedSessionId: crypto.randomUUID(),
+      startMode: "realtime",
+      idempotencyKey: crypto.randomUUID(),
+    });
+    navigateToSession(session.id, { realtimeAutostartModel: model });
+    return true;
+  }}
+/>;
+```
+
+Proxy-backed hosts can pass explicit `client` and `workspaceId` overrides. The
+exported `EmbeddedRealtimeSessionClientLike` requires only catalog, begin,
+Codex/Gateway negotiation, activation, heartbeat, ledger sync, and end. For
+custom layouts, use `useSessionRealtime`, `useRealtimeModelSelection`,
+`RealtimeVoiceControl`, and `RealtimeModelPickerMenu`; the batteries-included
+wrappers remain the recommended path.
+
+The reference consumer is `demo/realtime.html`. Run `bun run demo` from
+`packages/react`, then open `http://localhost:3100/realtime.html?mode=mock` for
+deterministic selection/start/mute/stop/reconnect/error testing. Use
+`?mode=live&workspaceId=…&sessionId=…` against the web server's same-origin
+`/demo-api` proxy for a real local OpenGeni environment. Configure
+`OPENGENI_DEMO_API_URL` and, only on the server, optional demo API/access
+credentials; the browser receives neither credential. Prefer the deployment's
+normal browser authentication. If the proxy needs a server credential, create a
+dedicated tenant-scoped, least-privilege key for the reference demo and never
+reuse a deployment-wide runtime secret. Helm deployments can mount a Secret
+containing only `api-key` and/or `access-key` with
+`web.demoApiCredentialsSecret`; those values are mounted read-only rather than
+exposed as container environment variables. Local non-Kubernetes servers may
+instead use `OPENGENI_DEMO_API_KEY` and/or `OPENGENI_DEMO_ACCESS_KEY`.
+
+Microphone capture works on `localhost` or a secure HTTPS origin. A remote HTTP
+deployment cannot request microphone access. The live page exercises catalog
+loading, realtime-first creation, Codex Live, Gateway models, mute, recovery,
+delegation/context timeline updates, structured questions, and stop/restart
+through published package APIs only.
 
 ## Composer customization (`@opengeni/react/composer`)
 
@@ -418,4 +502,6 @@ what the surfaces you mount need:
 `bun run demo` (from this package) serves a harness that drives the real hooks
 and components against a scripted mock client — a manager ops-channel narrative
 with streaming, tool calls, and a worker spawn, plus fleet and scheduled-task
-views and a dark/light toggle. `bun run demo:build` is part of the repo gate.
+views and a dark/light toggle. `realtime.html` is the public-package reference
+consumer described above, with deterministic mock and same-origin live modes.
+`bun run demo:build` is part of the repo gate.

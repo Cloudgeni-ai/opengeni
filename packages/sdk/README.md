@@ -37,6 +37,56 @@ for await (const event of client.streamEvents(workspaceId, session.id)) {
 }
 ```
 
+## Realtime browser controller (`@opengeni/sdk/realtime`)
+
+The public realtime subpath owns the provider-neutral browser controller and
+the existing Codex Live, WebRTC/V3, and AI Gateway transports. It selects the
+transport from the catalog model without changing the backend API, durable
+ledger, delegation, context, or recovery semantics:
+
+```ts
+import { OpenGeniClient } from "@opengeni/sdk";
+import type { SessionRealtimeClientLike } from "@opengeni/sdk/realtime";
+
+const client = new OpenGeniClient({ baseUrl: "/opengeni-api" });
+const realtimeClient: SessionRealtimeClientLike = client;
+const catalog = await realtimeClient.getWorkspaceRealtimeModelCatalog(workspaceId);
+const model = catalog.models.find((candidate) => candidate.available)?.id;
+if (!model) throw new Error("No realtime model is available");
+
+// Lazy import keeps the base SDK entry safe for server and non-realtime hosts.
+const { createSessionRealtimeController } = await import("@opengeni/sdk/realtime");
+const controller = createSessionRealtimeController({
+  client: realtimeClient,
+  workspaceId,
+  sessionId,
+  model,
+  remoteAudio,
+});
+
+const unsubscribe = controller.subscribe((snapshot) => {
+  console.log(snapshot.status, snapshot.microphone, snapshot.diagnostic);
+});
+await controller.start();
+
+// Later:
+await controller.stop();
+unsubscribe();
+controller.close();
+```
+
+`SessionRealtimeClientLike` is the exact proxy-friendly backend surface:
+catalog, begin, Codex/Gateway negotiation, activation, heartbeat, ledger sync,
+and end. Existing `OpenGeniClient` methods remain the implementation. Current
+Codex-named controller and transport exports remain available as compatibility
+aliases, but new integrations should use the provider-neutral names.
+
+Do not put API credentials in browser bundles. Browser hosts should either use
+the deployment's normal browser authentication or expose these same methods
+through a tenant-scoped, same-origin proxy. The SDK does not move persistence,
+prompt construction, context processing, delegation, or provider credentials
+out of `apps/api`, `apps/worker`, or `packages/db`.
+
 ## Workspace artifacts
 
 Workspace artifacts are generic, immutable HTML publications. The SDK does not

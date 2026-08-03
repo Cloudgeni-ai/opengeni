@@ -1,6 +1,6 @@
 import type { SessionEvent } from "@opengeni/sdk";
 import { createRoot } from "react-dom/client";
-import { MessageTimeline } from "../src/index";
+import { MessageTimeline } from "@opengeni/react";
 import { createFleetPolicyCanonicalProof } from "./fleet-policy-canonical-proof";
 import "./styles.css";
 

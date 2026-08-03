@@ -56,7 +56,7 @@ proof, the surface truthfully remains lost-owner until an end/expiry event;
 there is no status API or newly invented logical mode. Canonical:
 `packages/sdk/src/codex-realtime-controller.ts`,
 `packages/sdk/src/gateway-realtime-transport.ts`,
-`apps/web/src/components/session/codex-realtime-control.tsx`, and
+`packages/react/src/realtime/realtime-control.tsx`, and
 `apps/web/src/routes/session.tsx`.
 
 Finite provider calls are hidden behind connection generations, not new

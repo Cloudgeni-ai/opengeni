@@ -13,6 +13,8 @@ import {
 import {
   GOOGLE_DRIVE_PROVIDER_DOMAIN,
   GoogleDriveConnectionMetadata,
+  GoogleDriveDisconnectRequest,
+  GoogleDriveLifecycleActionRequest,
   GoogleDriveOAuthStartRequest,
   GoogleDriveOAuthStartResponse,
 } from "@opengeni/contracts/google-drive";
@@ -47,8 +49,10 @@ import { HTTPException } from "hono/http-exception";
 import {
   browseGoogleDrive,
   completeGoogleDriveOAuthCallback,
+  disconnectGoogleDrive,
   saveGoogleDriveSource,
   startGoogleDriveOAuth,
+  transitionGoogleDriveLifecycle,
 } from "../integrations/google-drive";
 import {
   completeMcpOAuthCallback,
@@ -288,6 +292,29 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.redirect(result.redirectTo, 302);
   });
 
+  app.patch(
+    "/v1/workspaces/:workspaceId/connections/google-drive/:connectionId/lifecycle",
+    async (c) => {
+      assertIntegrationsEnabled();
+      const workspaceId = c.req.param("workspaceId");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
+      const parsed = GoogleDriveLifecycleActionRequest.safeParse(await c.req.json());
+      if (!parsed.success) {
+        throw new HTTPException(400, { message: "invalid Google Drive lifecycle request" });
+      }
+      return c.json(
+        ConnectionResponse.parse({
+          connection: await transitionGoogleDriveLifecycle(deps, {
+            workspaceId,
+            subjectId: grant.subjectId,
+            connectionId: c.req.param("connectionId"),
+            payload: parsed.data,
+          }),
+        }),
+      );
+    },
+  );
+
   app.get(
     "/v1/workspaces/:workspaceId/connections/google-drive/:connectionId/browse",
     async (c) => {
@@ -421,18 +448,43 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!existing) {
       throw new HTTPException(404, { message: "connection not found" });
     }
-    const connection = isOpenGeniSlackBotConnection(existing)
-      ? await revokeConnectionWithSlackBotSuccessAudit(db, {
-          accountId: grant.accountId,
+    const isGoogleDrive =
+      existing.subjectId === grant.subjectId &&
+      existing.providerDomain === GOOGLE_DRIVE_PROVIDER_DOMAIN &&
+      existing.kind === "oauth2" &&
+      GoogleDriveConnectionMetadata.safeParse(existing.metadata).success;
+    const googleDriveDisconnect = isGoogleDrive
+      ? GoogleDriveDisconnectRequest.safeParse(await c.req.json().catch(() => null))
+      : null;
+    if (googleDriveDisconnect && !googleDriveDisconnect.success) {
+      throw new HTTPException(400, {
+        message:
+          googleDriveDisconnect.error.issues[0]?.message ??
+          "invalid Google Drive disconnect request",
+      });
+    }
+    if (existing.status === "revoked" && !isGoogleDrive) {
+      return c.json(ConnectionResponse.parse({ connection: existing }));
+    }
+    const connection = isGoogleDrive
+      ? await disconnectGoogleDrive(deps, {
           workspaceId,
           subjectId: grant.subjectId,
-          connectionId,
-          expectedVersion: existing.version,
-          credentialRole: OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
-          credentialLabel: OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
-          slackTeamId: openGeniSlackBotMetadata(existing.metadata)!.slackTeamId,
+          connection: existing,
+          payload: googleDriveDisconnect!.data,
         })
-      : await revokeConnection(db, workspaceId, connectionId, grant.subjectId);
+      : isOpenGeniSlackBotConnection(existing)
+        ? await revokeConnectionWithSlackBotSuccessAudit(db, {
+            accountId: grant.accountId,
+            workspaceId,
+            subjectId: grant.subjectId,
+            connectionId,
+            expectedVersion: existing.version,
+            credentialRole: OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
+            credentialLabel: OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
+            slackTeamId: openGeniSlackBotMetadata(existing.metadata)!.slackTeamId,
+          })
+        : await revokeConnection(db, workspaceId, connectionId, grant.subjectId, existing.version);
     if (!connection) {
       throw new HTTPException(409, { message: "connection changed during disconnect; try again" });
     }

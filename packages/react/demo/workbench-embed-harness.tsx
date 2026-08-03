@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { OpenGeniClient, type SessionEvent } from "@opengeni/sdk";
-import { OpenGeniProvider, SandboxWorkspace, useSessionEvents } from "../src/index";
+import { OpenGeniProvider, SandboxWorkspace, useSessionEvents } from "@opengeni/react";
 import "./styles.css";
 
 /* ----------------------------------------------------------------------------

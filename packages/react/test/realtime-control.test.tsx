@@ -2,20 +2,16 @@ import { afterAll, afterEach, beforeEach, describe, expect, spyOn, test } from "
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, createRef, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import type {
-  CodexRealtimeControllerSnapshot,
-  EffectiveSessionControl,
-  OpenGeniClient,
-  SessionEvent,
-} from "@opengeni/sdk";
+import type { EffectiveSessionControl, OpenGeniClient, SessionEvent } from "@opengeni/sdk";
+import type { SessionRealtimeControllerSnapshot } from "@opengeni/sdk/realtime";
 
 import {
-  CodexRealtimeControl,
+  RealtimeVoiceControl,
   RealtimeModelPickerMenu,
   codexRealtimeAdmissionAllowed,
   type RealtimeModelOption,
-  useSessionCodexRealtime,
-} from "./codex-realtime-control";
+  useSessionRealtime,
+} from "../src/realtime/realtime-control";
 
 GlobalRegistrator.register({ url: "https://app.example.test" });
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
@@ -25,7 +21,7 @@ afterAll(() => {
   GlobalRegistrator.unregister();
 });
 
-const idle: CodexRealtimeControllerSnapshot = {
+const idle: SessionRealtimeControllerSnapshot = {
   status: "idle",
   realtimeId: null,
   mode: null,
@@ -40,7 +36,7 @@ const idle: CodexRealtimeControllerSnapshot = {
   error: null,
 };
 
-const activeMode: NonNullable<CodexRealtimeControllerSnapshot["mode"]> = {
+const activeMode: NonNullable<SessionRealtimeControllerSnapshot["mode"]> = {
   id: "33333333-3333-4333-8333-333333333333",
   sessionId: "22222222-2222-4222-8222-222222222222",
   operationId: "44444444-4444-4444-8444-444444444444",
@@ -142,7 +138,7 @@ describe("ordinary session Codex realtime control", () => {
     const events = [started];
 
     function Harness() {
-      const realtime = useSessionCodexRealtime({
+      const realtime = useSessionRealtime({
         client,
         workspaceId: started.workspaceId,
         sessionId: started.sessionId,
@@ -179,7 +175,7 @@ describe("ordinary session Codex realtime control", () => {
     const calls: string[] = [];
     await act(async () => {
       root.render(
-        <CodexRealtimeControl
+        <RealtimeVoiceControl
           snapshot={idle}
           canStart={true}
           modelAvailable={true}
@@ -221,7 +217,7 @@ describe("ordinary session Codex realtime control", () => {
 
     await act(async () => {
       root.render(
-        <CodexRealtimeControl
+        <RealtimeVoiceControl
           snapshot={{
             ...idle,
             status: "active",
@@ -347,7 +343,7 @@ describe("ordinary session Codex realtime control", () => {
   test("configures the voice model picker below the new-session composer", async () => {
     await act(async () => {
       root.render(
-        <CodexRealtimeControl
+        <RealtimeVoiceControl
           snapshot={idle}
           canStart={true}
           modelAvailable={true}
@@ -372,7 +368,7 @@ describe("ordinary session Codex realtime control", () => {
     const calls: string[] = [];
     await act(async () => {
       root.render(
-        <CodexRealtimeControl
+        <RealtimeVoiceControl
           snapshot={{
             ...idle,
             status: "active",
@@ -425,7 +421,7 @@ describe("ordinary session Codex realtime control", () => {
   test("keeps an unavailable provider quiet and explains why start is disabled", async () => {
     await act(async () => {
       root.render(
-        <CodexRealtimeControl
+        <RealtimeVoiceControl
           snapshot={idle}
           canStart={false}
           admissionBlocker="Connect Codex to use this voice model."

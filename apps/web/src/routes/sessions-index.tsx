@@ -23,6 +23,7 @@ import {
   type ComposerState,
 } from "@opengeni/react";
 import { useMachines, type MachineView } from "@opengeni/react/machines";
+import { NewSessionRealtimeControl } from "@opengeni/react/realtime";
 import { OpenGeniApiError, type SessionRealtimeModel } from "@opengeni/sdk";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
@@ -39,7 +40,6 @@ import { BillingClassMark } from "@/components/billing-class-mark";
 import { ConsoleComposer, useDraftAttachments } from "@/components/Composer";
 import { ComposerMobilePlus } from "@/components/composer-mobile-plus";
 import { ModelPicker, SessionToolPicker, type SessionToolSelection } from "@/components/pickers";
-import { NewSessionRealtimeControl } from "@/components/session/codex-realtime-control";
 import { RepositoryContextPicker } from "@/components/repository-picker";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";

@@ -12,7 +12,7 @@ import type {
   MachinesResponse,
   MachineView,
   MetricSample,
-} from "../src/index";
+} from "@opengeni/react";
 
 const GiB = 1024 * 1024 * 1024;
 

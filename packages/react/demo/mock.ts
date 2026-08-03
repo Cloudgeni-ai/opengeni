@@ -15,6 +15,7 @@ import type {
   CapabilityPack,
   ClientConfig,
   ComposerDraft,
+  CreateSessionRequest,
   CreateWorkspaceEnvironmentRequest,
   CreateVariableSetRequest,
   CreateRigRequest,
@@ -77,9 +78,10 @@ import type {
   VariableSet,
   VariableSetVariableMetadata,
   WorkspaceRegisteredPack,
+  WorkspaceRealtimeModelCatalogResponse,
 } from "@opengeni/sdk";
-import type { SessionClientLike } from "../src/index";
-import type { MachinesResponse } from "../src/machines";
+import type { SessionClientLike } from "@opengeni/react";
+import type { MachinesResponse } from "@opengeni/react/machines";
 
 const WORKSPACE_ID = "11111111-2222-4333-8444-555555555555";
 export const MANAGER_SESSION_ID = "3f6e1a2b-4c5d-4e6f-8a9b-0c1d2e3f4a5b";
@@ -195,6 +197,56 @@ export class MockOpenGeniClient implements SessionClientLike {
           checkedAt: null,
         },
       })),
+    };
+  }
+
+  async getWorkspaceRealtimeModelCatalog(
+    _workspaceId: string,
+  ): Promise<WorkspaceRealtimeModelCatalogResponse> {
+    return {
+      models: [
+        {
+          id: "opengeni-gateway/openai/gpt-realtime-2.1",
+          label: "GPT Realtime 2.1",
+          provider: "OpenGeni",
+          description: "Best overall voice intelligence",
+          available: true,
+          unavailableReason: null,
+          recommended: true,
+        },
+        {
+          id: "gpt-live-1-boulder-alpha",
+          label: "Codex Live",
+          provider: "Connected Codex",
+          description: "Deep session integration",
+          available: true,
+          unavailableReason: null,
+          recommended: false,
+        },
+        {
+          id: "workspace-gateway/openai/gpt-realtime-mini",
+          label: "GPT Realtime Mini",
+          provider: "Your Gateway",
+          description: "Faster, lighter live voice",
+          available: true,
+          unavailableReason: null,
+          recommended: false,
+        },
+      ],
+    };
+  }
+
+  async createSession(
+    _workspaceId: string,
+    request: CreateSessionRequest,
+  ): Promise<Session & { initialTurnId: string | null }> {
+    const sessionId = request.requestedSessionId ?? demoUuid();
+    const bus = this.bus(sessionId);
+    bus.setStatus("idle");
+    return {
+      ...this.fabricateSession(sessionId, "idle", "Realtime-first demo session"),
+      createIdempotencyKey: request.idempotencyKey ?? null,
+      initialTurnId: null,
     };
   }
 

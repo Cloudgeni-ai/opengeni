@@ -44,6 +44,10 @@
       "import": "./src/model-policy.ts",
       "default": "./src/model-policy.ts"
     },
+    "./realtime": {
+      "types": "./src/realtime.ts",
+      "default": "./src/realtime.ts"
+    },
     "./styles.css": {
       "types": "./styles/index.d.ts",
       "default": "./styles/index.css"
@@ -62,6 +66,7 @@
     "build": "bun ../../scripts/build-typescript-package.ts",
     "demo": "vite dev demo --port 3100",
     "demo:build": "vite build demo",
+    "demo:build:deployed": "OPENGENI_REACT_DEMO_BASE=/react-demo/ OPENGENI_REACT_DEMO_OUT_DIR=../../../apps/web/dist/react-demo vite build demo",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {
