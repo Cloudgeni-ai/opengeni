@@ -1,5 +1,20 @@
 # @opengeni/db
 
+## 0.26.0
+
+### Minor Changes
+
+- b121e7c: Add durable Google Drive pause, resume, disconnect, reconnect, revoked-token,
+  removed-app, and permission re-consent lifecycle handling with version-fenced
+  state transitions, generation-bound disconnect idempotency, stale-replay
+  protection, and secret-safe provider error classification.
+
+### Patch Changes
+
+- Updated dependencies [b121e7c]
+  - @opengeni/contracts@0.35.0
+  - @opengeni/config@0.10.6
+
 ## 0.25.0
 
 ### Minor Changes
