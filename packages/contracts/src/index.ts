@@ -5165,43 +5165,83 @@ export const CapabilityPack = z.preprocess(
     }
     return record;
   },
-  z.object({
-    id: z.string().min(1),
-    name: z.string().min(1),
-    description: z.string().min(1),
-    role: z.string().min(1),
-    category: z.string().min(1),
-    version: z.string().min(1),
-    // Container image ref (digest-pinned recommended) the pack's sessions run
-    // in. At most one enabled pack per workspace may declare one; with none,
-    // sessions use the deployment-wide image settings.
-    sandboxImage: z.string().trim().min(1).max(512).optional(),
-    // Skills delivered into the sandbox skill index when the pack is enabled.
-    skills: z
-      .array(CapabilityPackSkill)
-      .max(32)
-      .superRefine((skills, ctx) => {
-        const seen = new Set<string>();
-        skills.forEach((skill, index) => {
-          const key = skill.name.toLowerCase();
-          if (seen.has(key)) {
-            ctx.addIssue({
-              code: "custom",
-              message: `duplicate pack skill name: ${skill.name}`,
-              path: [index, "name"],
-            });
-          }
-          seen.add(key);
+  z
+    .object({
+      id: z.string().min(1),
+      name: z.string().min(1),
+      description: z.string().min(1),
+      role: z.string().min(1),
+      category: z.string().min(1),
+      version: z.string().min(1),
+      // Container image ref (digest-pinned recommended) the pack's sessions run
+      // in. At most one enabled pack per workspace may declare one; with none,
+      // sessions use the deployment-wide image settings.
+      sandboxImage: z.string().trim().min(1).max(512).optional(),
+      // Optional provider-native immutable identities for the exact logical
+      // sandboxImage above. These avoid re-importing a private registry image on
+      // every provider while preserving sandboxImage as the cross-provider image
+      // provenance and lease-conflict identity.
+      sandboxProviderImages: z
+        .object({
+          modal: z
+            .object({
+              imageId: z
+                .string()
+                .trim()
+                .regex(/^im-[A-Za-z0-9]{22}$/),
+            })
+            .strict()
+            .optional(),
+        })
+        .strict()
+        .optional(),
+      // Skills delivered into the sandbox skill index when the pack is enabled.
+      skills: z
+        .array(CapabilityPackSkill)
+        .max(32)
+        .superRefine((skills, ctx) => {
+          const seen = new Set<string>();
+          skills.forEach((skill, index) => {
+            const key = skill.name.toLowerCase();
+            if (seen.has(key)) {
+              ctx.addIssue({
+                code: "custom",
+                message: `duplicate pack skill name: ${skill.name}`,
+                path: [index, "name"],
+              });
+            }
+            seen.add(key);
+          });
+        })
+        .default([]),
+      tools: z.array(ToolRef).default([]),
+      connectors: z.array(CapabilityPackConnector).default([]),
+      knowledge: z.array(CapabilityPackKnowledge).default([]),
+      scheduledTaskTemplates: z.array(CapabilityPackScheduledTaskTemplate).default([]),
+      variableSet: CapabilityPackVariableSet.optional(),
+      metadata: z.record(z.string(), z.unknown()).default({}),
+    })
+    .superRefine((pack, ctx) => {
+      if (!pack.sandboxProviderImages?.modal) {
+        return;
+      }
+      if (!pack.sandboxImage) {
+        ctx.addIssue({
+          code: "custom",
+          message: "sandboxProviderImages.modal requires sandboxImage",
+          path: ["sandboxProviderImages", "modal"],
         });
-      })
-      .default([]),
-    tools: z.array(ToolRef).default([]),
-    connectors: z.array(CapabilityPackConnector).default([]),
-    knowledge: z.array(CapabilityPackKnowledge).default([]),
-    scheduledTaskTemplates: z.array(CapabilityPackScheduledTaskTemplate).default([]),
-    variableSet: CapabilityPackVariableSet.optional(),
-    metadata: z.record(z.string(), z.unknown()).default({}),
-  }),
+        return;
+      }
+      if (!/@sha256:[0-9a-f]{64}$/i.test(pack.sandboxImage)) {
+        ctx.addIssue({
+          code: "custom",
+          message:
+            "sandboxProviderImages.modal requires sandboxImage to be pinned by an OCI sha256 digest",
+          path: ["sandboxImage"],
+        });
+      }
+    }),
 );
 export type CapabilityPack = z.infer<typeof CapabilityPack>;
 

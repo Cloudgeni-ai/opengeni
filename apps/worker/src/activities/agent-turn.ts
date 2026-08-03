@@ -1773,9 +1773,11 @@ export async function reconcileActiveSandboxPointer(
 /**
  * Warm the Modal private-registry image for the image ref this turn actually
  * resolved, not only the deployment-global OPENGENI_MODAL_IMAGE_REF warmed at
- * worker boot. Packs can override `modalImageRef` per workspace/turn, so a
- * private pack image must be resolved before sandbox creation or Modal falls
- * back to the unauthenticated `fromTag` path.
+ * worker boot. A provider-native modalImageId bypasses registry import and is
+ * resolved by ModalImageSelector.fromId during create. Otherwise packs can
+ * override `modalImageRef` per workspace/turn, so a private pack image must be
+ * resolved before sandbox creation or Modal falls back to the unauthenticated
+ * `fromTag` path.
  */
 export async function ensureTurnModalRegistryImage(
   runSettings: Settings,
@@ -1783,6 +1785,9 @@ export async function ensureTurnModalRegistryImage(
   ensureRegistryImage: (settings: Settings) => Promise<void> = ensureModalRegistryImage,
 ): Promise<void> {
   if (sandboxCreationBackend !== "modal") {
+    return;
+  }
+  if (runSettings.modalImageId) {
     return;
   }
   if (!runSettings.modalImageRegistrySecret || !runSettings.modalImageRef) {
@@ -4034,7 +4039,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // deployment default; a rig with no image (or a rig-less turn) is a
         // pass-through, leaving the pack/deployment chain exactly as today.
         ...settingsWithRigImage(
-          settingsWithPackSandboxImage(capabilitySettings, packRuntime.sandboxImage),
+          settingsWithPackSandboxImage(
+            capabilitySettings,
+            packRuntime.sandboxImage,
+            packRuntime.sandboxProviderImages,
+          ),
           rigVersion?.image ?? null,
         ),
         openaiModel: turn.model,

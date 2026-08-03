@@ -1318,6 +1318,23 @@ describe("backend-gated sandbox required-credential validation", () => {
     ).not.toThrow();
   });
 
+  test("parses and validates an immutable Modal image ID", () => {
+    const imageId = "im-1234567890123456789012";
+    expect(
+      withEnv(
+        {
+          OPENGENI_MODAL_IMAGE_REF:
+            "ghcr.io/example/sandbox@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          OPENGENI_MODAL_IMAGE_ID: imageId,
+        },
+        () => getSettings(),
+      ).modalImageId,
+    ).toBe(imageId);
+    expect(() =>
+      withEnv({ OPENGENI_MODAL_IMAGE_ID: "im-not-a-valid-id" }, () => getSettings()),
+    ).toThrow();
+  });
+
   test("daytona requires its api key only when active", () => {
     expect(() => withEnv({ OPENGENI_SANDBOX_BACKEND: "daytona" }, () => getSettings())).toThrow(
       "OPENGENI_DAYTONA_API_KEY is required when OPENGENI_SANDBOX_BACKEND=daytona",

@@ -480,6 +480,15 @@ const SettingsSchema = z.object({
   dockerWorkspaceBaseDir: z.string().min(1).optional(),
   modalAppName: z.string().default("opengeni-sandbox"),
   modalImageRef: z.string().optional(),
+  // Provider-native immutable Modal image ID for the exact logical
+  // `modalImageRef`. When set, the runtime uses ModalImageSelector.fromId and
+  // never asks Modal to parse or import the registry ref. The logical ref is
+  // still persisted on the sandbox lease for provenance and conflict fencing;
+  // the Modal session envelope persists the actual image ID.
+  modalImageId: z
+    .string()
+    .regex(/^im-[A-Za-z0-9]{22}$/)
+    .optional(),
   // Name of a Modal Secret (containing REGISTRY_USERNAME + REGISTRY_PASSWORD) used
   // to authenticate the pull of `modalImageRef` from a PRIVATE registry. When UNSET
   // (the default), the sandbox image is pulled UNAUTHENTICATED — i.e. it must be a
@@ -1691,6 +1700,7 @@ export function getSettings(): Settings {
     dockerWorkspaceBaseDir: optional("OPENGENI_DOCKER_WORKSPACE_BASE_DIR"),
     modalAppName: optional("OPENGENI_MODAL_APP_NAME"),
     modalImageRef: optional("OPENGENI_MODAL_IMAGE_REF"),
+    modalImageId: optional("OPENGENI_MODAL_IMAGE_ID"),
     modalImageRegistrySecret: optional("OPENGENI_MODAL_IMAGE_REGISTRY_SECRET"),
     modalTimeoutSeconds: optional("OPENGENI_MODAL_TIMEOUT_SECONDS"),
     modalTokenId: optional("OPENGENI_MODAL_TOKEN_ID"),
