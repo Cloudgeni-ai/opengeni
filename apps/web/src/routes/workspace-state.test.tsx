@@ -69,4 +69,46 @@ describe("Workspace State loader", () => {
     expect(current().error).toBeNull();
     await act(async () => root.unmount());
   });
+
+  test("fences a late response after switching inspected attempts", async () => {
+    const workspaceId = "00000000-0000-4000-8000-000000000003";
+    const attemptA = "00000000-0000-4000-8000-000000000011";
+    const attemptB = "00000000-0000-4000-8000-000000000012";
+    const pendingA = deferred<WorkspaceStateResponse>();
+    const pendingB = deferred<WorkspaceStateResponse>();
+    const client: Parameters<typeof useWorkspaceStateInventory>[0] = {
+      getWorkspaceState: async (_workspaceId, options) =>
+        await (options?.attemptId === attemptA ? pendingA.promise : pendingB.promise),
+    };
+    let observed: ReturnType<typeof useWorkspaceStateInventory> | null = null;
+    const current = () => observed as unknown as ReturnType<typeof useWorkspaceStateInventory>;
+
+    function Harness({ attemptId }: { attemptId: string }) {
+      observed = useWorkspaceStateInventory(client, workspaceId, attemptId);
+      return <output>{observed.state?.generatedAt ?? "loading"}</output>;
+    }
+
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    await act(async () => root.render(<Harness attemptId={attemptA} />));
+    await act(async () => root.render(<Harness attemptId={attemptB} />));
+
+    await act(async () =>
+      pendingB.resolve({
+        ...response(workspaceId),
+        generatedAt: "2026-08-03T11:00:02.000Z",
+      }),
+    );
+    expect(container.textContent).toBe("2026-08-03T11:00:02.000Z");
+
+    await act(async () =>
+      pendingA.resolve({
+        ...response(workspaceId),
+        generatedAt: "2026-08-03T11:00:01.000Z",
+      }),
+    );
+    expect(container.textContent).toBe("2026-08-03T11:00:02.000Z");
+    expect(current().state?.generatedAt).toBe("2026-08-03T11:00:02.000Z");
+    await act(async () => root.unmount());
+  });
 });

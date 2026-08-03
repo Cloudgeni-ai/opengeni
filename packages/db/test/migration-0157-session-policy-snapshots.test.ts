@@ -15,8 +15,10 @@ import {
   deactivatePreferenceRegistry,
   getOrCreatePreferenceRegistrySnapshot,
   getOrCreateWorkspaceInstructionPolicySnapshot,
+  getCurrentPreferenceRegistryGovernanceMetadata,
   getPreferenceRegistryFullContent,
   getSession,
+  getWorkspaceStateAcceptedAttemptGovernance,
   initializeSessionStartAtomically,
   migrate,
   provisionRoles,
@@ -459,6 +461,140 @@ describe("migration 0157 session policy role and exact-attempt snapshots", () =>
     expect(invalidSnapshot.policyRole).toBeNull();
     expect(invalidSnapshot.roleSource).toBe("invalid_metadata_fallback");
     expect(invalidSnapshot.entries).toEqual([]);
+  });
+
+  test("inspects only the exact initiating subject's immutable attempt metadata", async () => {
+    if (!shared || !client) return;
+    const workspace = await freshWorkspace("workspace-state-governance");
+    const siblingWorkspace = await freshWorkspace(
+      "workspace-state-governance-sibling",
+      workspace.accountId,
+    );
+    const otherAccountWorkspace = await freshWorkspace("workspace-state-governance-other-account");
+    const subjectId = "workspace-state-governance-owner";
+    const policy = await activatePolicy(workspace, {
+      kind: "policy",
+      scope: "global",
+      roleKey: null,
+      content: "WORKSPACE_STATE_POLICY_BODY_MUST_NOT_PROJECT",
+    });
+    const proposal = await createPreferenceRegistryProposal(client.db, {
+      ...workspace,
+      actorSubjectId: subjectId,
+      principalKind: "human_session",
+      scope: "user",
+      stableKey: "workspace-state-style",
+      title: "Private workspace state title",
+      description: "Private workspace state description",
+      content: "PRIVATE_PREFERENCE_VALUE_MUST_NOT_PROJECT",
+      precedenceRank: 10,
+      conflictStrategy: "override",
+      conflictsWith: [],
+      provenanceSource: "human",
+      provenanceSourceId: null,
+      expiresAt: null,
+    });
+    const [revision] = await shared.admin<{ id: string }[]>`
+      select id
+      from preference_registry_revisions
+      where preference_id = ${proposal.id}
+      order by revision desc
+      limit 1
+    `;
+    await activatePreferenceRegistryRevision(client.db, {
+      ...workspace,
+      actorSubjectId: subjectId,
+      principalKind: "human_session",
+      preferenceId: proposal.id,
+      revisionId: revision!.id,
+      expectedCurrentRevisionId: null,
+      expectedScopeVersion: proposal.scopeVersion,
+      authorizeScope: (scope) => expect(scope).toBe("user"),
+      reason: "Activate workspace state inspection preference",
+    });
+
+    const session = await createPolicySession(workspace, {
+      label: "workspace state accepted attempt",
+    });
+    const attempt = await seedAttempt(workspace, session.id, subjectId);
+    const [policySnapshot, preferenceSnapshot] = await Promise.all([
+      getOrCreateWorkspaceInstructionPolicySnapshot(client.db, attempt),
+      getOrCreatePreferenceRegistrySnapshot(client.db, attempt),
+    ]);
+
+    const inspected = await getWorkspaceStateAcceptedAttemptGovernance(client.db, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      subjectId,
+      attemptId: attempt.attemptId,
+    });
+    expect(inspected).toMatchObject({
+      attemptId: attempt.attemptId,
+      executionGeneration: 1,
+      policySnapshot: {
+        id: policySnapshot.id,
+        entries: [expect.objectContaining({ revisionId: policy.id })],
+      },
+      preferenceSnapshot: {
+        id: preferenceSnapshot.id,
+        descriptorHash: preferenceSnapshot.descriptorHash,
+        descriptors: [expect.objectContaining({ id: proposal.id, revisionId: revision!.id })],
+      },
+    });
+    const serialized = JSON.stringify(inspected);
+    expect(serialized).not.toContain("WORKSPACE_STATE_POLICY_BODY_MUST_NOT_PROJECT");
+    expect(serialized).not.toContain("PRIVATE_PREFERENCE_VALUE_MUST_NOT_PROJECT");
+    expect(serialized).not.toContain("Private workspace state title");
+    expect(serialized).not.toContain("Private workspace state description");
+    expect(serialized).not.toContain("retrievalHandle");
+
+    const currentPreferences = await getCurrentPreferenceRegistryGovernanceMetadata(client.db, {
+      workspaceId: workspace.workspaceId,
+      subjectId,
+    });
+    expect(currentPreferences).toEqual({
+      descriptors: [
+        expect.objectContaining({ id: proposal.id, revisionId: revision!.id, scope: "user" }),
+      ],
+      truncated: false,
+    });
+    expect(
+      await getWorkspaceStateAcceptedAttemptGovernance(client.db, {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        subjectId: "workspace-state-governance-other-subject",
+        attemptId: attempt.attemptId,
+      }),
+    ).toBeNull();
+    expect(
+      await getWorkspaceStateAcceptedAttemptGovernance(client.db, {
+        accountId: siblingWorkspace.accountId,
+        workspaceId: siblingWorkspace.workspaceId,
+        subjectId,
+        attemptId: attempt.attemptId,
+      }),
+    ).toBeNull();
+    expect(
+      await getWorkspaceStateAcceptedAttemptGovernance(client.db, {
+        accountId: otherAccountWorkspace.accountId,
+        workspaceId: otherAccountWorkspace.workspaceId,
+        subjectId,
+        attemptId: attempt.attemptId,
+      }),
+    ).toBeNull();
+
+    const missingSession = await createPolicySession(workspace, {
+      label: "workspace state missing snapshots",
+    });
+    const missingAttempt = await seedAttempt(workspace, missingSession.id, subjectId);
+    expect(
+      await getWorkspaceStateAcceptedAttemptGovernance(client.db, {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        subjectId,
+        attemptId: missingAttempt.attemptId,
+      }),
+    ).toMatchObject({ policySnapshot: null, preferenceSnapshot: null });
   });
 
   test("claim atomically installs both governance snapshots for the accepted human turn", async () => {

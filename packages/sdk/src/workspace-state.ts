@@ -49,15 +49,93 @@ export type WorkspaceStateGapCode =
   | "pending_memory_review"
   | "partial_inventory";
 
+export type WorkspaceStateGovernanceDriftStatus =
+  | "identical"
+  | "changed"
+  | "superseded"
+  | "missing"
+  | "unavailable"
+  | "truncated";
+
+export type WorkspaceStateGetOptions = { attemptId?: string };
+
+export type WorkspaceStateAttemptGovernance =
+  | { status: "not_requested" }
+  | {
+      status: "unavailable";
+      reason: "attempt_not_found_or_not_authorized";
+      driftStatus: "unavailable";
+    }
+  | {
+      status: "available";
+      attemptId: string;
+      executionGeneration: number;
+      acceptedAt: string;
+      policySnapshot:
+        | { status: "missing" }
+        | {
+            status: "available";
+            id: string;
+            createdAt: string;
+            entryHash: string;
+            policyRole: string | null;
+            roleSource:
+              | "session_binding"
+              | "metadata_fallback"
+              | "none"
+              | "invalid_metadata_fallback";
+            entries: Array<{
+              kind: WorkspaceInstructionPolicyKind;
+              scope: WorkspaceInstructionPolicyScope;
+              roleKey: string | null;
+              revisionId: string;
+              revision: number;
+              contentHash: string;
+              activationVersion: number;
+              activatedAt: string;
+              provenance: {
+                source: WorkspaceInstructionPolicyProvenanceSource;
+                sourceIdHash: string | null;
+              };
+            }>;
+          };
+      preferenceSnapshot:
+        | { status: "missing" }
+        | {
+            status: "available";
+            id: string;
+            createdAt: string;
+            descriptorHash: string;
+            descriptorCount: number;
+            truncated: boolean;
+          };
+      drift: {
+        overall: WorkspaceStateGovernanceDriftStatus;
+        policy: {
+          status: WorkspaceStateGovernanceDriftStatus;
+          snapshotHash: string | null;
+          currentHash: string | null;
+          snapshotTargetCount: number;
+          currentTargetCount: number;
+        };
+        preferences: {
+          status: WorkspaceStateGovernanceDriftStatus;
+          snapshotHash: string | null;
+          currentHash: string | null;
+          snapshotDescriptorCount: number;
+          currentDescriptorCount: number;
+          snapshotTruncated: boolean;
+          currentTruncated: boolean;
+        };
+      };
+    };
+
 export type WorkspaceStateResponse = {
   workspaceId: string;
   generatedAt: string;
   truth: {
     current: { source: "read_time_projection"; capturedAt: string };
-    policySnapshot: {
-      status: "not_captured";
-      reason: "workspace_instruction_policy_snapshot_not_implemented";
-    };
+    attemptGovernance: WorkspaceStateAttemptGovernance;
   };
   policy: {
     authority: "workspace_instruction_policy_heads";

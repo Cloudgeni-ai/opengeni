@@ -93,7 +93,7 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-async function request(permissions: Permission[]): Promise<Response> {
+async function request(permissions: Permission[], attemptId?: string): Promise<Response> {
   const bearer = await signDelegatedAccessToken(DELEGATION_SIGNING_FIXTURE, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
@@ -104,7 +104,8 @@ async function request(permissions: Permission[]): Promise<Response> {
   });
   const headers = new Headers();
   headers.set("authorization", ["Bearer", bearer].join(" "));
-  return await app.request(`http://x/v1/workspaces/${grant.workspaceId}/workspace-state`, {
+  const query = attemptId ? `?attemptId=${encodeURIComponent(attemptId)}` : "";
+  return await app.request(`http://x/v1/workspaces/${grant.workspaceId}/workspace-state${query}`, {
     headers,
   });
 }
@@ -163,6 +164,20 @@ describe("workspace state API authorization", () => {
         { code: "no_memory_records", relatedCount: 0 },
       ],
     });
+  });
+
+  test("does not disclose whether an unavailable attempt exists", async () => {
+    const response = await request(["workspace:read"], crypto.randomUUID());
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    const body = WorkspaceStateResponse.parse(await response.json());
+    expect(body.truth.attemptGovernance).toEqual({
+      status: "unavailable",
+      reason: "attempt_not_found_or_not_authorized",
+      driftStatus: "unavailable",
+    });
+    expect(JSON.stringify(body.truth.attemptGovernance)).not.toContain("sessionId");
+    expect(JSON.stringify(body.truth.attemptGovernance)).not.toContain("turnId");
   });
 
   test("bounds base rows while aggregating all and only subject-visible documents", async () => {

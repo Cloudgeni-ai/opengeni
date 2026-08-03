@@ -19,6 +19,9 @@ export const WORKSPACE_STATE_MEMORY_SAMPLE_LIMIT = 100;
 
 const Count = z.number().int().nonnegative();
 
+export const WorkspaceStateQuery = z.object({ attemptId: z.string().uuid().optional() }).strict();
+export type WorkspaceStateQuery = z.infer<typeof WorkspaceStateQuery>;
+
 export const WorkspaceStateDocumentStatusCounts = z
   .object({
     queued: Count,

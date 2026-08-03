@@ -217,7 +217,7 @@ import type {
   WorkspaceInstructionPolicyListResponse,
   WorkspaceInstructionPolicyRevision,
 } from "./workspace-instruction-policies";
-import type { WorkspaceStateResponse } from "./workspace-state";
+import type { WorkspaceStateGetOptions, WorkspaceStateResponse } from "./workspace-state";
 import type {
   ActivatePreferenceRegistryRevisionRequest,
   ChangePreferenceRegistryScopeRequest,
@@ -1735,10 +1735,16 @@ export class OpenGeniClient {
   }
 
   /** Read-time, secret-safe inventory of policy heads and visible workspace knowledge. */
-  async getWorkspaceState(workspaceId: string): Promise<WorkspaceStateResponse> {
+  async getWorkspaceState(
+    workspaceId: string,
+    options: WorkspaceStateGetOptions = {},
+  ): Promise<WorkspaceStateResponse> {
+    const params = new URLSearchParams();
+    if (options.attemptId) params.set("attemptId", options.attemptId);
+    const query = params.size > 0 ? `?${params.toString()}` : "";
     return await this.requestJson<WorkspaceStateResponse>(
       "GET",
-      `/v1/workspaces/${workspaceId}/workspace-state`,
+      `/v1/workspaces/${workspaceId}/workspace-state${query}`,
     );
   }
 

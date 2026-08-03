@@ -94,7 +94,10 @@ export type {
 } from "./workspace-instruction-policies";
 export type {
   WorkspaceStateDocumentStatusCounts,
+  WorkspaceStateAttemptGovernance,
   WorkspaceStateGapCode,
+  WorkspaceStateGetOptions,
+  WorkspaceStateGovernanceDriftStatus,
   WorkspaceStateMemoryKindCounts,
   WorkspaceStateMemoryStatusCounts,
   WorkspaceStateResponse,
