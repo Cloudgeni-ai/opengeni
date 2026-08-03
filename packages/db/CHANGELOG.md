@@ -1,5 +1,11 @@
 # @opengeni/db
 
+## 0.22.0
+
+### Minor Changes
+
+- e07eb52: Enforce frozen Allow, Ask, and Block connector action policies before provider execution while persisting metadata-only approval, decision, and outcome evidence.
+
 ## 0.21.0
 
 ### Minor Changes
