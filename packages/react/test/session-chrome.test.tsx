@@ -239,6 +239,70 @@ describe("SessionChrome", () => {
     expect(panel?.textContent).not.toContain("realtime_delegation");
   });
 
+  test("presents an accepted Steer as changing direction instead of queued", async () => {
+    const steeringTurn = fakeTurn({
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      prompt: "Focus on the authentication failure first",
+      position: 0,
+      metadata: { delivery: "steer" },
+    });
+    const laterTurn = fakeTurn({
+      id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      prompt: "Then update the documentation",
+      position: 1,
+    });
+    mounted = await renderComponent(
+      <SessionChrome queue={queue({ queue: [steeringTurn, laterTurn] })} composer={composer()} />,
+    );
+
+    const steeringChip = mounted.container.querySelector<HTMLButtonElement>(
+      '[data-og-session-chrome-signal="steering"]',
+    );
+    const queueChip = mounted.container.querySelector<HTMLButtonElement>(
+      '[data-og-session-chrome-signal="queue"]',
+    );
+    expect(steeringChip?.textContent).toContain("Changing direction");
+    expect(steeringChip?.textContent).toContain("Focus on the authentication failure first");
+    expect(queueChip?.textContent).toContain("1 queued prompt");
+
+    await act(async () => steeringChip?.click());
+    const steeringPanel = mounted.container.querySelector(
+      '[data-og-session-chrome-panel="steering"]',
+    );
+    expect(steeringPanel?.textContent).toContain("Direction accepted");
+    expect(steeringPanel?.textContent).not.toContain("stopped");
+
+    await act(async () => queueChip?.click());
+    const queuePanel = mounted.container.querySelector('[data-og-session-chrome-panel="queue"]');
+    expect(queuePanel?.textContent).toContain("Then update the documentation");
+    expect(queuePanel?.textContent).not.toContain("Focus on the authentication failure first");
+  });
+
+  test("shows a composer Steer optimistically before the server responds", async () => {
+    mounted = await renderComponent(
+      <SessionChrome
+        queue={queue({ queue: [] })}
+        composer={composer({
+          sending: true,
+          steering: {
+            phase: "submitting",
+            text: "Use the smaller patch",
+            clientEventId: "client-steer-1",
+            triggerEventId: null,
+            turnId: null,
+          },
+        })}
+      />,
+    );
+
+    const steeringChip = mounted.container.querySelector<HTMLButtonElement>(
+      '[data-og-session-chrome-signal="steering"]',
+    );
+    expect(steeringChip?.textContent).toContain("Changing direction");
+    expect(steeringChip?.textContent).toContain("Use the smaller patch");
+    expect(mounted.container.querySelector('[data-og-session-chrome-signal="queue"]')).toBeNull();
+  });
+
   test("expands queue and reveals hover actions wired to queue APIs", async () => {
     const calls: string[] = [];
     const q = queue({

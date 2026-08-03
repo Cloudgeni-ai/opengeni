@@ -1343,8 +1343,10 @@ describe("session realtime ledger", () => {
     expect(projection.terminal).toEqual([]);
     expect(projection.humanSteer).toMatchObject({
       kind: "session_update",
+      text: expect.stringContaining("<status>accepted_for_steering</status>"),
       payload: {
         delivery: "steer",
+        routing: "accepted_for_steering",
         source: "human_input",
       },
     });
@@ -1443,15 +1445,19 @@ describe("session realtime ledger", () => {
           ),
         ),
     );
+    const mirroredText = String(mirrored?.text);
+    expect(mirroredText).toContain("<status>accepted_for_execution</status>");
+    expect(mirroredText).toContain("Use &lt;human&gt; steering &amp; keep context");
+    expect(mirroredText).toContain("do not delegate this message again");
     expect(mirrored).toMatchObject({
       turnId: null,
-      text: expect.stringContaining("Use &lt;human&gt; steering &amp; keep context"),
       payload: {
         source: "human_input",
         sourceId: human.acceptedEventId,
         sourceTurnId: human.turnId,
         channel: null,
         delivery: "send",
+        routing: "accepted_for_execution",
         acceptedEventId: human.acceptedEventId,
       },
     });
@@ -1475,6 +1481,64 @@ describe("session realtime ledger", () => {
         ),
     );
     expect(humanMirrors).toHaveLength(1);
+  });
+
+  test("marks a human Send behind existing work as queued without a later acceptance echo", async () => {
+    const value = await fixture();
+    const connection = await claimInitial(value);
+    await complete(value, connection.claimed.connection);
+    await proveProviderStarted(value, connection.claimed.connection);
+
+    await transaction(value.owner.workspaceId, (tx) =>
+      submitHumanPromptInTransaction(tx, {
+        accountId: value.owner.accountId,
+        workspaceId: value.owner.workspaceId,
+        sessionId: value.owner.sessionId,
+        subjectId: value.owner.ownerSubjectId,
+        actor: { type: "human", subjectId: value.owner.ownerSubjectId },
+        operationKey: crypto.randomUUID(),
+        delivery: "send",
+        text: "First waiting message",
+        resources: [],
+        reasoningEffortFallback: "medium",
+        source: "user",
+      }),
+    );
+    const second = await transaction(value.owner.workspaceId, (tx) =>
+      submitHumanPromptInTransaction(tx, {
+        accountId: value.owner.accountId,
+        workspaceId: value.owner.workspaceId,
+        sessionId: value.owner.sessionId,
+        subjectId: value.owner.ownerSubjectId,
+        actor: { type: "human", subjectId: value.owner.ownerSubjectId },
+        operationKey: crypto.randomUUID(),
+        delivery: "send",
+        text: "Second waiting message",
+        resources: [],
+        reasoningEffortFallback: "medium",
+        source: "user",
+      }),
+    );
+    const [mirrored] = await transaction(value.owner.workspaceId, (tx) =>
+      tx
+        .select()
+        .from(schema.sessionRealtimeEntries)
+        .where(
+          and(
+            eq(schema.sessionRealtimeEntries.kind, "session_update"),
+            sql`${schema.sessionRealtimeEntries.payload} ->> 'sourceId' = ${second.acceptedEventId}`,
+          ),
+        ),
+    );
+
+    expect(mirrored).toMatchObject({
+      text: expect.stringContaining("<status>queued_for_execution</status>"),
+      payload: {
+        source: "human_input",
+        routing: "queued_for_execution",
+        delivery: "send",
+      },
+    });
   });
 
   test("mirrors progress and completion for work already running when realtime starts", async () => {

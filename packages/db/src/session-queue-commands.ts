@@ -1653,6 +1653,12 @@ export async function submitHumanPromptInTransaction(
   }
   const eventRows = await db.insert(schema.sessionEvents).values(eventValues).returning();
   if (input.actor.type === "human") {
+    const realtimeRouting =
+      input.delivery === "steer"
+        ? "accepted_for_steering"
+        : session.activeTurnId || existingQueued.length > 0
+          ? "queued_for_execution"
+          : "accepted_for_execution";
     await mirrorSessionRealtimeContextInTransaction(db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
@@ -1663,13 +1669,14 @@ export async function submitHumanPromptInTransaction(
       channel: null,
       text: renderRealtimeHumanInputContext({
         delivery: input.delivery,
+        routing: realtimeRouting,
         text: input.text,
       }),
       payload: {
         delivery: input.delivery,
+        routing: realtimeRouting,
         acceptedEventId,
-        instruction:
-          "Authoritative user context already routed to execution; do not delegate it again.",
+        instruction: "OpenGeni accepted and routed this user input; do not delegate it again.",
       },
       now,
     });

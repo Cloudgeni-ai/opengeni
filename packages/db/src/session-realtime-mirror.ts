@@ -142,13 +142,15 @@ export async function mirrorSessionRealtimeContextInTransaction(
 
 export function renderRealtimeHumanInputContext(input: {
   delivery: "send" | "steer";
+  routing: "accepted_for_execution" | "queued_for_execution" | "accepted_for_steering";
   text: string;
 }): string {
   return [
     "<session_user_message>",
-    "  <status>already_accepted_by_execution_agent</status>",
+    `  <status>${input.routing}</status>`,
     `  <delivery>${input.delivery}</delivery>`,
     `  <text>${escapeXmlText(input.text)}</text>`,
+    "  <instruction>Already routed by OpenGeni; do not delegate this message again.</instruction>",
     "</session_user_message>",
   ].join("\n");
 }
