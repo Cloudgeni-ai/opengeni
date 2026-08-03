@@ -538,13 +538,15 @@ export function useComposer(
             replaceLocal ||
             (!localWasDirtyAtStart && localAtStart === localEditRevision.current)
           ) {
-            // Model/effort ride in sendExtras (outside localEditRevision). If
+            // Model/effort/latency ride in sendExtras (outside
+            // localEditRevision). If
             // the picker changed during this fetch, skip onDraftApplied so a
-            // stale server model/effort cannot undo the operator's pick.
+            // stale server policy cannot undo the operator's pick.
             const extrasNow = resolveSendExtras(sendExtrasRef.current);
             const pickerChangedDuringFetch =
               extrasNow.model !== extrasAtStart.model ||
-              extrasNow.reasoningEffort !== extrasAtStart.reasoningEffort;
+              extrasNow.reasoningEffort !== extrasAtStart.reasoningEffort ||
+              extrasNow.latencyMode !== extrasAtStart.latencyMode;
             valueRef.current = fetched.text;
             restoredResourcesRef.current = fetched.resources;
             lastSavedSignature.current = draftSignature(draftPayload(fetched));
