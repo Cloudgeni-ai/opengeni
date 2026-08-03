@@ -2283,7 +2283,7 @@ function normalizeCapabilities(capabilities: ModelCapabilitiesV1): ModelCapabili
 
 function legacyModelCapabilities(
   settings: Settings,
-  input: { reasoningEffort: boolean; hostedWebSearch: boolean },
+  input: { reasoningEffort: boolean; hostedWebSearch: boolean; vision?: boolean },
 ): ModelCapabilitiesV1 {
   const reasoningEfforts = input.reasoningEffort ? configuredAllowedReasoningEfforts(settings) : [];
   return normalizeCapabilities({
@@ -2304,7 +2304,7 @@ function legacyModelCapabilities(
       xSearch: { upstream: "unknown", runnable: false },
       codeExecution: { upstream: "unknown", runnable: false },
     },
-    inputModalities: ["text"],
+    inputModalities: input.vision ? ["text", "image"] : ["text"],
     outputModalities: ["text"],
     transports: {
       sse: { upstream: "unknown", runnable: true },
@@ -2755,6 +2755,7 @@ export function withCodexCatalogProvider(settings: Settings): Settings {
         ...legacyModelCapabilities(settings, {
           reasoningEffort: true,
           hostedWebSearch: true,
+          vision: slug.startsWith("gpt-5.6-"),
         }),
         ...(builtinPromptCachingForModel(`${CODEX_MODEL_ID_PREFIX}${slug}`)
           ? {
@@ -2941,6 +2942,7 @@ export function configuredModels(settings: Settings): ConfiguredModel[] {
         ...legacyModelCapabilities(settings, {
           reasoningEffort: true,
           hostedWebSearch: settings.webSearchEnabled,
+          vision: id.startsWith("gpt-5.6-"),
         }),
         ...(builtinPromptCachingForModel(id)
           ? { promptCaching: builtinPromptCachingForModel(id)! }

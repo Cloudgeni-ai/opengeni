@@ -90,6 +90,7 @@ describe("curated AI Gateway catalogue", () => {
       runnable: true,
       mode: "implicit",
     });
+    expect(deepseek.capabilities.inputModalities).toEqual(["text"]);
     expect(kimi.upstreamModelId).toBe("moonshotai/kimi-k3");
     expect(kimi.label).toBe("Kimi K3");
     expect(kimi.aliases).toEqual([]);
@@ -101,6 +102,7 @@ describe("curated AI Gateway catalogue", () => {
       runnable: true,
       mode: "implicit",
     });
+    expect(kimi.capabilities.inputModalities).toEqual(["text", "image"]);
     expect(kimi.capabilities.latencyModes.map((mode) => mode.id)).toEqual(["standard"]);
 
     expect(configuredModelPricing(settings)[deepseek.id]).toEqual({
@@ -623,6 +625,12 @@ describe("configuredModels", () => {
     const models = configuredModels(settings);
     expect(models.find((model) => model.id === "gpt-5.6-luna")?.label).toBe("GPT-5.6 Luna");
     expect(models.find((model) => model.id === "codex/gpt-5.6-luna")?.label).toBe("GPT-5.6 Luna");
+    expect(
+      models.find((model) => model.id === "gpt-5.6-luna")?.capabilities.inputModalities,
+    ).toEqual(["text", "image"]);
+    expect(
+      models.find((model) => model.id === "codex/gpt-5.6-luna")?.capabilities.inputModalities,
+    ).toEqual(["text", "image"]);
   });
 
   test("with no registry returns exactly the built-in allow-list, default model first", () => {

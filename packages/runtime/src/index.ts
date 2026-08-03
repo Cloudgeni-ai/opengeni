@@ -1773,6 +1773,12 @@ export type BuildAgentOptions = {
   hostedWebSearch?: boolean;
   encryptedReasoning?: boolean;
   structuredToolTransport?: boolean;
+  // Whether this turn's resolved model accepts image input. This is derived
+  // from ConfiguredModel.capabilities.inputModalities at the worker boundary.
+  // False removes image-only sandbox tools and projects images out of each
+  // provider request without mutating OpenGeni's durable history. Omitted keeps
+  // the legacy built-in path image-capable.
+  supportsImageInput?: boolean;
   // EXPLICIT computer-use tool transport, decided where provider identity is
   // authoritative (the worker's model resolution — agent-turn.ts). Threaded into
   // buildAgentCapabilities → computerUse({toolMode}) so tool selection never rests
@@ -2211,6 +2217,9 @@ const agentToolspaceTokenSessionId = new WeakMap<object, string>();
 // freshly-built agent. It must not remain in Agent.instructions: those
 // instructions are presented again on every internal model/tool loop.
 const agentsNeedingGenesisTitleDirective = new WeakSet<object>();
+// Per-turn model modality used by the literal pre-provider input filter. The
+// durable session history remains canonical; only the request clone is shaped.
+const agentSupportsImageInput = new WeakMap<object, boolean>();
 // The EFFECTIVE backend the turn resolved for this agent (undefined -> the home
 // backend). Read by runStream's owned branch to keep platform box-setup hooks off
 // connected machines (a user's real computer).
@@ -2394,6 +2403,7 @@ export function buildOpenGeniAgent(
     if (options.genesisTitleHint) {
       agentsNeedingGenesisTitleDirective.add(agent);
     }
+    agentSupportsImageInput.set(agent, options.supportsImageInput ?? true);
     maybeInstallCodexToolSearch(agent, settings, options);
     applyMcpApprovalPolicy(
       agent,
@@ -2423,6 +2433,9 @@ export function buildOpenGeniAgent(
       ...(options.structuredToolTransport !== undefined
         ? { structuredToolTransport: options.structuredToolTransport }
         : {}),
+      ...(options.supportsImageInput !== undefined
+        ? { supportsImageInput: options.supportsImageInput }
+        : {}),
       ...(options.computerToolMode !== undefined
         ? { computerToolMode: options.computerToolMode }
         : {}),
@@ -2449,6 +2462,7 @@ export function buildOpenGeniAgent(
   if (options.genesisTitleHint) {
     agentsNeedingGenesisTitleDirective.add(agent);
   }
+  agentSupportsImageInput.set(agent, options.supportsImageInput ?? true);
   agentFileDownloads.set(
     agent,
     normalizeSandboxFileDownloads(options.fileResourceDownloads ?? []).filter(
@@ -2859,6 +2873,13 @@ export function withStructuredViewImageFunctionResults(tools: Tool<unknown>[]): 
   });
 }
 
+/** Remove filesystem tools whose successful output necessarily contains pixels. */
+function withoutImageInputTools(tools: Tool<unknown>[]): Tool<unknown>[] {
+  return tools.filter(
+    (capabilityTool) => capabilityTool.type !== "function" || capabilityTool.name !== "view_image",
+  );
+}
+
 export function buildAgentCapabilities(
   settings: Settings,
   packSkills: PackSkill[],
@@ -2867,6 +2888,7 @@ export function buildAgentCapabilities(
     sessionSkills?: PackSkill[];
     workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];
     structuredToolTransport?: boolean;
+    supportsImageInput?: boolean;
     // EXPLICIT computer-use transport (see BuildAgentOptions.computerToolMode).
     // Omitted/unproven transport fails closed with no computer tools.
     computerToolMode?: ComputerToolMode;
@@ -2888,9 +2910,18 @@ export function buildAgentCapabilities(
   // `apply_patch` + text `view_image` variants the backend accepts — the SDK
   // handles their function_call round-trip natively, so no reimplementation.
   // Scoped to filesystem: shell() is always a function-tool transport.
+  const configureFilesystemTools = (tools: Tool<unknown>[]): Tool<unknown>[] => {
+    const transportTools =
+      options.structuredToolTransport === false
+        ? withStructuredViewImageFunctionResults(tools)
+        : tools;
+    return options.supportsImageInput === false
+      ? withoutImageInputTools(transportTools)
+      : transportTools;
+  };
   const filesystemCapability = filesystem({
-    ...(options.structuredToolTransport === false
-      ? { configureTools: withStructuredViewImageFunctionResults }
+    ...(options.structuredToolTransport === false || options.supportsImageInput === false
+      ? { configureTools: configureFilesystemTools }
       : {}),
   });
   if (options.structuredToolTransport === false) {
@@ -2934,6 +2965,7 @@ export function buildAgentCapabilities(
   // run time (the SandboxAgent merge); xdotool drives :0 regardless of whether any
   // viewer is attached, so no pixel-tunnel dependency.
   if (
+    options.supportsImageInput !== false &&
     settings.computerUseEnabled &&
     settings.sandboxDesktopEnabled &&
     desktopCapableBackend(settings.sandboxBackend)
@@ -4594,13 +4626,129 @@ function composeCallModelInputFilters(filters: CallModelInputFilter[]): CallMode
   };
 }
 
+const IMAGE_CONTENT_TYPES = new Set(["image", "input_image", "image_url", "computer_screenshot"]);
+const IMAGE_OMITTED_TEXT =
+  "[Image content omitted because the selected model does not support image input.]";
+
+function modelInputItemType(value: unknown): string | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const type = (value as Record<string, unknown>).type;
+  return typeof type === "string" ? type : null;
+}
+
+function modelInputCallId(value: unknown): string | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const direct = record.callId ?? record.call_id;
+  if (typeof direct === "string" && direct.length > 0) return direct;
+  if (!record.providerData || typeof record.providerData !== "object") return null;
+  const provider = record.providerData as Record<string, unknown>;
+  const nested = provider.callId ?? provider.call_id;
+  return typeof nested === "string" && nested.length > 0 ? nested : null;
+}
+
+function imageOnlyToolCall(value: unknown): boolean {
+  const type = modelInputItemType(value);
+  if (type === "computer_call") return true;
+  if (type !== "function_call" || !value || typeof value !== "object") return false;
+  const name = (value as Record<string, unknown>).name;
+  return typeof name === "string" && (name === "view_image" || name.startsWith("computer_"));
+}
+
+function stripImageContentParts(value: unknown): { value: unknown; removed: boolean } {
+  if (Array.isArray(value)) {
+    let removed = false;
+    const kept: unknown[] = [];
+    for (const part of value) {
+      if (IMAGE_CONTENT_TYPES.has(modelInputItemType(part) ?? "")) {
+        removed = true;
+        continue;
+      }
+      kept.push(part);
+    }
+    return { value: removed ? kept : value, removed };
+  }
+  if (IMAGE_CONTENT_TYPES.has(modelInputItemType(value) ?? "")) {
+    return { value: undefined, removed: true };
+  }
+  return { value, removed: false };
+}
+
+function omittedImageTextPart(): Record<string, string> {
+  return { type: "input_text", text: IMAGE_OMITTED_TEXT };
+}
+
+function stripImagesFromModelInputItem<T extends Record<string, unknown>>(item: T): T | null {
+  if (IMAGE_CONTENT_TYPES.has(modelInputItemType(item) ?? "")) return null;
+  let clone: Record<string, unknown> | null = null;
+  for (const field of ["content", "output"] as const) {
+    if (!(field in item)) continue;
+    const projected = stripImageContentParts(item[field]);
+    if (!projected.removed) continue;
+    clone ??= { ...item };
+    clone[field] =
+      projected.value === undefined ||
+      (Array.isArray(projected.value) && projected.value.length === 0)
+        ? [omittedImageTextPart()]
+        : projected.value;
+  }
+  return (clone ?? item) as T;
+}
+
+/**
+ * Build the per-request view for a model's input modalities. Image-capable
+ * models receive the exact original array. Text-only models lose image payloads
+ * and image-only tool pairs from this clone only; durable history is untouched,
+ * so switching back to the same image-capable model restores its original cache
+ * prefix and pixel context.
+ */
+export function projectModelInputForImageSupport<T extends Record<string, unknown>>(
+  items: readonly T[],
+  supportsImageInput: boolean,
+): T[] {
+  if (supportsImageInput) return items as T[];
+
+  const imageOnlyCallIds = new Set<string>();
+  const imageOnlyCallIndexes = new Set<number>();
+  items.forEach((item, index) => {
+    if (!imageOnlyToolCall(item)) return;
+    imageOnlyCallIndexes.add(index);
+    for (let previous = index - 1; previous >= 0; previous -= 1) {
+      if (modelInputItemType(items[previous]) !== "reasoning") break;
+      imageOnlyCallIndexes.add(previous);
+    }
+    const callId = modelInputCallId(item);
+    if (callId) imageOnlyCallIds.add(callId);
+  });
+
+  const projected: T[] = [];
+  items.forEach((item, index) => {
+    const callId = modelInputCallId(item);
+    if (imageOnlyCallIndexes.has(index) || (callId && imageOnlyCallIds.has(callId))) return;
+    const stripped = stripImagesFromModelInputItem(item);
+    if (stripped) projected.push(stripped);
+  });
+  return sanitizeHistoryItemsForModel(projected) as T[];
+}
+
+function modelModalityProjectionFilterForAgent(agent: object): CallModelInputFilter | undefined {
+  if (agentSupportsImageInput.get(agent) !== false) return undefined;
+  return async ({ modelData }) => ({
+    ...modelData,
+    input: projectModelInputForImageSupport(
+      modelData.input as unknown as Array<Record<string, unknown>>,
+      false,
+    ) as typeof modelData.input,
+  });
+}
+
 /**
  * The model-input filter applied before every model call. The computer_call
  * action/actions normalizer is ALWAYS on (the Azure endpoint 400s without it);
  * the provider-item-id strip is layered on top when the configured policy
  * selects it; the context-robustness guard then raises the proactive durable
- * compaction signal on the client-compaction path. It never trims history from
- * an individual request.
+ * compaction signal on the client-compaction path. Model-specific modality
+ * projection is composed at runAgentStream's literal final seam.
  */
 export function callModelInputFilterForSettings(
   settings: Settings,
@@ -4775,6 +4923,7 @@ export async function runAgentStream(
               }
             : {}),
         }),
+        modelModalityProjectionFilterForAgent(agent),
       ].filter((f): f is CallModelInputFilter => Boolean(f)),
     );
     const ownedRunOptions: Parameters<typeof run>[2] = {
@@ -4861,10 +5010,10 @@ export async function runAgentStream(
     : undefined;
   const sandboxSessionState = prepared.sandboxSessionState;
   // Apply the built-in per-call filters (computer-call normalization, optional
-  // provider-id stripping, image/budget guard), then any per-turn filter
-  // (genesis title directive). A callModelInputFilter only shapes the per-call
-  // model input; the SDK persists filtered clones into its session view, while
-  // OpenGeni's durable conversation truth is still reconciled explicitly below.
+  // provider-id stripping, output bounds), then any per-turn filter and finally
+  // the model's modality projection. The SDK invokes filters on a deep request
+  // clone; OpenGeni does not pass an SDK session here and reconciles durable
+  // conversation truth from the untouched run-state history.
   const callModelInputFilter = composeCallModelInputFilters(
     [
       callModelInputFilterForSettings(settings),
@@ -4882,6 +5031,7 @@ export async function runAgentStream(
           ? { contextCompactionRequested: overrides.contextCompactionRequested }
           : {}),
       }),
+      modelModalityProjectionFilterForAgent(agent),
     ].filter((f): f is CallModelInputFilter => Boolean(f)),
   );
   const runOptions: Parameters<typeof run>[2] = {

@@ -1870,10 +1870,14 @@ export function shouldStartOnTurnRecording(params: {
 export function computerToolModeForTurn(
   resolvedModel: {
     provider: { kind: RegistryProviderKind; api: ModelProviderApi };
+    configured: { capabilities: { inputModalities: string[] } };
   } | null,
 ): ComputerToolMode {
   if (!resolvedModel) {
     return "hosted"; // legacy built-in Responses client — real hosted support
+  }
+  if (!modelSupportsImageInputForTurn(resolvedModel)) {
+    return "disabled";
   }
   if (resolvedModel.provider.kind === "codex-subscription") {
     return "function-image";
@@ -1914,17 +1918,34 @@ export function hostedWebSearchForTurn(
   return resolvedModel?.configured.hostedWebSearch ?? deploymentWebSearchEnabled;
 }
 
+/** Exact model-catalog modality gate; null preserves the legacy built-in path. */
+export function modelSupportsImageInputForTurn(
+  resolvedModel: {
+    configured: { capabilities: { inputModalities: string[] } };
+  } | null,
+): boolean {
+  return (
+    resolvedModel === null ||
+    resolvedModel.configured.capabilities.inputModalities.includes("image")
+  );
+}
+
 /**
- * Decide whether this turn's provider accepts typed file/image content in a
- * user message. The legacy built-in client and registry Responses clients use
- * the Agents SDK Responses converter, which supports `input_image` and
- * `input_file`. Chat-completions providers retain the sandbox-path projection
- * until that transport declares and proves an equivalent capability.
+ * Decide whether this turn accepts typed attachment content in a user message.
+ * The wire must support typed content and the exact configured model must
+ * advertise image input. Text-only and chat-completions models retain only the
+ * sandbox-path projection.
  */
 export function modelAcceptsTypedAttachmentContentForTurn(
-  resolvedModel: { provider: { api: ModelProviderApi } } | null,
+  resolvedModel: {
+    provider: { api: ModelProviderApi };
+    configured: { capabilities: { inputModalities: string[] } };
+  } | null,
 ): boolean {
-  return resolvedModel === null || resolvedModel.provider.api === "responses";
+  return (
+    (resolvedModel === null || resolvedModel.provider.api === "responses") &&
+    modelSupportsImageInputForTurn(resolvedModel)
+  );
 }
 
 export type TurnSandboxProvisioner<T> = {
@@ -5591,6 +5612,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             }
           : {};
       const hostedWebSearch = hostedWebSearchForTurn(resolvedModel, runSettings.webSearchEnabled);
+      const supportsImageInput = modelSupportsImageInputForTurn(resolvedModel);
       const serviceTier = serviceTierForLatencyMode(
         turnExecutionPolicy.providerId,
         turnExecutionPolicy.latencyMode,
@@ -5688,6 +5710,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // session's MCP allow-list; the effective context window drives the
         // compaction threshold.
         hostedWebSearch,
+        supportsImageInput,
         ...(resolvedModel
           ? {
               encryptedReasoning:

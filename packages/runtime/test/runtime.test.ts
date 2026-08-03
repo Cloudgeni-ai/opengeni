@@ -37,6 +37,7 @@ import {
   pinProvidedSessionManifestEnvironment,
   azureCliLoginCommand,
   azureOpenAIDefaultQuery,
+  buildAgentCapabilities,
   buildOpenGeniAgent,
   HUMAN_INPUT_TOOL_NAME,
   buildManifest,
@@ -73,6 +74,7 @@ import {
   stripProviderItemIdsFilter,
   callModelInputFilterForSettings,
   contextRobustnessFilterForSettings,
+  projectModelInputForImageSupport,
   prefixedMcpToolName,
   prepareAgentTools,
   runAzureCliLoginHook,
@@ -1073,6 +1075,23 @@ describe("runtime event normalization", () => {
     expect(await (wrappedError as any).invoke(undefined, "{}", undefined)).toBe(
       "image path `/tmp/missing.png` was not found",
     );
+  });
+
+  test("text-only models do not receive the filesystem view_image tool", () => {
+    const toolNames = (supportsImageInput: boolean) => {
+      const [filesystemCapability] = buildAgentCapabilities(testSettings(), [], {
+        structuredToolTransport: false,
+        supportsImageInput,
+      });
+      const bound = (filesystemCapability as any).bind({
+        createEditor: () => ({}),
+        viewImage: async () => ({ type: "image", image: { data: "aGk=" } }),
+      });
+      return bound.tools().map((tool: { name?: string }) => tool.name);
+    };
+
+    expect(toolNames(false)).toEqual(["apply_patch"]);
+    expect(toolNames(true)).toEqual(["view_image", "apply_patch"]);
   });
 
   describe("failed MCP tool calls carry an isError flag", () => {
@@ -5811,6 +5830,74 @@ describe("provider item id stripping", () => {
     ];
 
     expect(elideSupersededViewImagePairs(prefix)).toBe(prefix);
+  });
+
+  test("text-only request projection removes images and image-tool pairs without mutating history", () => {
+    const input = [
+      {
+        type: "message",
+        role: "user",
+        content: [
+          { type: "input_text", text: "What is shown?" },
+          { type: "input_image", image: "data:image/png;base64,USER" },
+        ],
+      },
+      { type: "reasoning", content: [{ type: "input_text", text: "inspect" }] },
+      {
+        type: "function_call",
+        callId: "view-1",
+        name: "view_image",
+        arguments: '{"path":"/tmp/a.png"}',
+      },
+      {
+        type: "function_call_result",
+        callId: "view-1",
+        output: [{ type: "input_image", image: "data:image/png;base64,TOOL" }],
+      },
+      {
+        type: "function_call",
+        callId: "metadata-1",
+        name: "read_metadata",
+        arguments: "{}",
+      },
+      {
+        type: "function_call_result",
+        callId: "metadata-1",
+        output: [
+          { type: "input_text", text: "width=10" },
+          { type: "input_image", image: "data:image/png;base64,PREVIEW" },
+        ],
+      },
+      { type: "computer_call", callId: "computer-1", actions: [{ type: "screenshot" }] },
+      {
+        type: "computer_call_result",
+        callId: "computer-1",
+        output: { type: "computer_screenshot", image_url: "data:image/png;base64,SCREEN" },
+      },
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_image", image: "data:image/png;base64,ONLY" }],
+      },
+    ] as Array<Record<string, unknown>>;
+    const durableJson = JSON.stringify(input);
+
+    const projected = projectModelInputForImageSupport(input, false);
+
+    expect(JSON.stringify(projected)).not.toContain("data:image");
+    expect(projected.some((item) => item.name === "view_image")).toBe(false);
+    expect(projected.some((item) => item.type === "computer_call")).toBe(false);
+    expect(projected.some((item) => item.callId === "view-1")).toBe(false);
+    expect(projected.some((item) => item.type === "reasoning")).toBe(false);
+    expect(projected.find((item) => item.callId === "metadata-1" && "output" in item)).toEqual({
+      type: "function_call_result",
+      callId: "metadata-1",
+      output: [{ type: "input_text", text: "width=10" }],
+    });
+    expect(JSON.stringify(projected)).toContain("Image content omitted");
+    expect(JSON.stringify(input)).toBe(durableJson);
+    expect(projectModelInputForImageSupport(input, true)).toBe(input);
+    expect(JSON.stringify(projectModelInputForImageSupport(input, true))).toBe(durableJson);
   });
 
   test("callModelInputFilterForSettings preserves screenshot history prefixes across successive calls", async () => {
