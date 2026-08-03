@@ -2443,12 +2443,15 @@ describe("worker activities integration", () => {
         },
         embedder: {
           model: "test-embedder",
-          dimensions: 3,
+          dimensions: DEFAULT_DOCUMENT_EMBEDDING_DIMENSIONS,
           embedMany: async (chunks) => {
             embedderCalls += 1;
-            return chunks.map(() => [0, 0, 0]);
+            return chunks.map((chunk) =>
+              deterministicEmbedding(chunk, DEFAULT_DOCUMENT_EMBEDDING_DIMENSIONS),
+            );
           },
-          embedQuery: async () => [0, 0, 0],
+          embedQuery: async (query) =>
+            deterministicEmbedding(query, DEFAULT_DOCUMENT_EMBEDDING_DIMENSIONS),
         },
       } satisfies DocumentServices,
     });
