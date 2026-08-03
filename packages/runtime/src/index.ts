@@ -6,8 +6,10 @@ import type {
 } from "@opengeni/config";
 import {
   AGENT_INSTRUCTIONS_CORE_PLACEHOLDER,
+  OPENGENI_GATEWAY_MODELS,
   collectSandboxEnvironment,
   firstPartyMcpBaseUrl,
+  gatewayRequestPolicyForUpstreamModel,
   resolveFirstPartyDelegationSecret,
   resolveModelProvider,
   sandboxLifecycleHookIds,
@@ -97,6 +99,7 @@ import {
   // (below, right after the leaf re-export). This lets a selfhosted active backend
   // apply file edits over its NATS fs ops using the SDK's exact diff semantics.
   applyDiff,
+  RunContext,
   type AgentInputItem,
   type CallModelInputFilter,
   type MCPServer,
@@ -105,6 +108,7 @@ import {
   type ModelRequest,
   type ModelProvider,
   type RunStreamEvent,
+  type SerializedTool,
   type Tool,
 } from "@openai/agents";
 import { localDirLazySkillSource } from "@openai/agents/sandbox/local";
@@ -628,9 +632,14 @@ export function buildOpenAIClientFromSettings(
 const providerClientCache = new Map<string, OpenAI>();
 
 export function buildProviderClient(provider: ResolvedModelProvider, settings: Settings): OpenAI {
-  const cached = providerClientCache.get(provider.id);
+  const workspaceGateway = provider.kind === "vercel-gateway-workspace";
+  const gatewayProvider = workspaceGateway || provider.kind === "vercel-gateway-managed";
+  const cached = workspaceGateway ? undefined : providerClientCache.get(provider.id);
   if (cached) {
     return cached;
+  }
+  if (workspaceGateway && !provider.apiKey) {
+    throw new WorkspaceGatewayUnavailableError();
   }
   const client = provider.builtin
     ? buildOpenAIClientFromSettings(settings, provider.id)
@@ -660,13 +669,182 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
         new OpenAI({
           ...(provider.apiKey ? { apiKey: provider.apiKey } : {}),
           ...(provider.baseUrl ? { baseURL: provider.baseUrl } : {}),
-          maxRetries: settings.openaiMaxRetries,
+          // Gateway routing is deliberately fail-closed. Avoid SDK replay after
+          // a request may have reached the one pinned endpoint.
+          maxRetries: gatewayProvider ? 0 : settings.openaiMaxRetries,
           ...(provider.defaultQuery ? { defaultQuery: provider.defaultQuery } : {}),
           ...(provider.defaultHeaders ? { defaultHeaders: provider.defaultHeaders } : {}),
-          fetch: instrumentedModelFetch(provider.id, globalThis.fetch),
+          fetch: gatewayProvider
+            ? vercelGatewayRoutingFetch(
+                provider.kind as "vercel-gateway-managed" | "vercel-gateway-workspace",
+                instrumentedModelFetch(provider.id, globalThis.fetch),
+              )
+            : instrumentedModelFetch(provider.id, globalThis.fetch),
         });
-  providerClientCache.set(provider.id, client);
+  if (!workspaceGateway) {
+    providerClientCache.set(provider.id, client);
+  }
   return client;
+}
+
+export class WorkspaceGatewayUnavailableError extends Error {
+  constructor() {
+    super(
+      "Your Gateway model is unavailable: connect or reconnect the workspace AI Gateway key in Settings, then retry.",
+    );
+    this.name = "WorkspaceGatewayUnavailableError";
+  }
+}
+
+/**
+ * Kimi Fast/Wafer currently returns parallel function calls, but Gateway
+ * rejects a Responses continuation containing the canonical
+ * `call A, call B, result A, result B` batch with error metadata that names the
+ * base Kimi model. Whether that is internal normalization or incorrect error
+ * metadata is not observable. The exact-provider fence correctly prevents any
+ * fallback.
+ * Interleave only complete, contiguous batches into
+ * `call A, result A, call B, result B`: same calls, ids, arguments, outputs,
+ * and order; no item is dropped or invented. Partial/ambiguous batches remain
+ * untouched and fail closed upstream.
+ */
+export function interleaveParallelFunctionCallResults(body: Record<string, unknown>): boolean {
+  const input = body.input;
+  if (!Array.isArray(input)) return false;
+  let changed = false;
+  let index = 0;
+  while (index < input.length) {
+    const item = input[index];
+    if (
+      !item ||
+      typeof item !== "object" ||
+      (item as Record<string, unknown>).type !== "function_call"
+    ) {
+      index += 1;
+      continue;
+    }
+    let callEnd = index;
+    while (
+      callEnd < input.length &&
+      input[callEnd] &&
+      typeof input[callEnd] === "object" &&
+      (input[callEnd] as Record<string, unknown>).type === "function_call"
+    ) {
+      callEnd += 1;
+    }
+    const calls = input.slice(index, callEnd) as Array<Record<string, unknown>>;
+    if (calls.length < 2) {
+      index = callEnd;
+      continue;
+    }
+    let resultEnd = callEnd;
+    while (
+      resultEnd < input.length &&
+      input[resultEnd] &&
+      typeof input[resultEnd] === "object" &&
+      (input[resultEnd] as Record<string, unknown>).type === "function_call_output"
+    ) {
+      resultEnd += 1;
+    }
+    const results = input.slice(callEnd, resultEnd) as Array<Record<string, unknown>>;
+    if (results.length !== calls.length) {
+      index = resultEnd;
+      continue;
+    }
+    const byCallId = new Map<string, Record<string, unknown>>();
+    let valid = true;
+    for (const result of results) {
+      const callId = result.call_id;
+      if (typeof callId !== "string" || byCallId.has(callId)) {
+        valid = false;
+        break;
+      }
+      byCallId.set(callId, result);
+    }
+    const interleaved: Array<Record<string, unknown>> = [];
+    for (const call of calls) {
+      const callId = call.call_id;
+      const result = typeof callId === "string" ? byCallId.get(callId) : undefined;
+      if (!result) {
+        valid = false;
+        break;
+      }
+      interleaved.push(call, result);
+    }
+    if (!valid) {
+      index = resultEnd;
+      continue;
+    }
+    input.splice(index, calls.length + results.length, ...interleaved);
+    changed = true;
+    index += interleaved.length;
+  }
+  return changed;
+}
+
+/**
+ * Inject the reviewed route after SDK serialization, replacing any caller
+ * gateway options. There is exactly one allowed endpoint provider and no model
+ * fallback list. Unknown models/body shapes fail before network I/O.
+ */
+export function vercelGatewayRoutingFetch(
+  kind: Extract<
+    ResolvedModelProvider["kind"],
+    "vercel-gateway-managed" | "vercel-gateway-workspace"
+  >,
+  inner: typeof fetch,
+): typeof fetch {
+  return (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    if (!isModelCallFetch(input)) {
+      return await inner(input, init);
+    }
+    if (typeof init?.body !== "string") {
+      throw new Error("Model request could not be prepared");
+    }
+    let body: Record<string, unknown>;
+    try {
+      const parsed = JSON.parse(init.body) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("invalid body");
+      }
+      body = parsed as Record<string, unknown>;
+    } catch {
+      throw new Error("Model request could not be prepared");
+    }
+    const model = typeof body.model === "string" ? body.model : "";
+    const policy = gatewayRequestPolicyForUpstreamModel(model);
+    if (!policy) {
+      throw new Error("Model request is not in the approved catalogue");
+    }
+    const providerOptions =
+      body.providerOptions &&
+      typeof body.providerOptions === "object" &&
+      !Array.isArray(body.providerOptions)
+        ? { ...(body.providerOptions as Record<string, unknown>) }
+        : {};
+    providerOptions.gateway = {
+      only: [...policy.gateway.only],
+      order: [...policy.gateway.only],
+      ...(policy.gateway.caching === "auto" ? { caching: "auto" } : {}),
+    };
+    body.providerOptions = providerOptions;
+    if (model === OPENGENI_GATEWAY_MODELS.kimi.upstreamModelId) {
+      interleaveParallelFunctionCallResults(body);
+    }
+    const response = await inner(input, { ...init, body: JSON.stringify(body) });
+    if (response.ok) {
+      return response;
+    }
+    const message =
+      kind === "vercel-gateway-workspace" && (response.status === 401 || response.status === 403)
+        ? "Your Gateway connection needs attention. Reconnect it in workspace Settings."
+        : "The selected model is temporarily unavailable.";
+    return new Response(JSON.stringify({ error: { type: "model_unavailable", message } }), {
+      status: response.status,
+      statusText: response.statusText,
+      headers: { "content-type": "application/json" },
+    });
+  }) as typeof fetch;
 }
 
 /**
@@ -1030,9 +1208,141 @@ export async function summarizeForCompaction(
 }
 
 /**
+ * Serialize the agent's model-visible tools for a remote_v2 compact request.
+ *
+ * Mirrors SDK `serializeTool` field semantics so the Responses converter emits
+ * the same tools→instructions wire prefix as ordinary turns. Function-tool
+ * namespaces live on non-enumerable Symbols (`functionToolNamespace` /
+ * `functionToolNamespaceDescription`); reading `tool.namespace` as a string
+ * silently drops them and regroups namespaced tools as bare functions.
+ * Computer tools that are not yet initialized are emitted as name-only schemas
+ * so serialize never throws before the run loop has resolved the instance.
+ */
+export async function serializedToolsForRemoteCompaction(agent: {
+  getAllTools: (runContext: RunContext) => Promise<Tool[]>;
+}): Promise<SerializedTool[]> {
+  const tools = await agent.getAllTools(new RunContext());
+  const serialized: SerializedTool[] = [];
+  for (const tool of tools) {
+    const entry = serializeToolForRemoteCompaction(tool);
+    if (entry) serialized.push(entry);
+  }
+  return serialized;
+}
+
+/** Read SDK Symbol-backed function-tool namespace metadata (by Symbol.description). */
+function functionToolNamespaceFields(tool: object): {
+  namespace?: string;
+  namespaceDescription?: string;
+} {
+  let namespace: string | undefined;
+  let namespaceDescription: string | undefined;
+  for (const symbol of Object.getOwnPropertySymbols(tool)) {
+    const value = (tool as Record<symbol, unknown>)[symbol];
+    if (typeof value !== "string" || value.length === 0) continue;
+    if (symbol.description === "functionToolNamespace") {
+      namespace = value;
+    } else if (symbol.description === "functionToolNamespaceDescription") {
+      namespaceDescription = value;
+    }
+  }
+  const record = tool as Record<string, unknown>;
+  if (!namespace && typeof record.namespace === "string" && record.namespace.length > 0) {
+    namespace = record.namespace;
+  }
+  if (
+    !namespaceDescription &&
+    typeof record.namespaceDescription === "string" &&
+    record.namespaceDescription.length > 0
+  ) {
+    namespaceDescription = record.namespaceDescription;
+  }
+  return {
+    ...(namespace ? { namespace } : {}),
+    ...(namespaceDescription ? { namespaceDescription } : {}),
+  };
+}
+
+function serializeToolForRemoteCompaction(tool: Tool): SerializedTool | null {
+  if (!tool || typeof tool !== "object" || typeof tool.type !== "string") {
+    return null;
+  }
+  const record = tool as Tool & Record<string, unknown>;
+  const name = typeof record.name === "string" ? record.name : "";
+  if (tool.type === "function") {
+    const { namespace, namespaceDescription } = functionToolNamespaceFields(record);
+    return {
+      type: "function",
+      name,
+      description: typeof record.description === "string" ? record.description : "",
+      parameters: record.parameters,
+      // Pass through like SDK serializeTool — do not coerce undefined → false
+      // (Responses wire would gain an explicit `"strict": false` and bust cache).
+      strict: record.strict,
+      ...(typeof record.deferLoading === "boolean" ? { deferLoading: record.deferLoading } : {}),
+      ...(namespace
+        ? {
+            namespace,
+            ...(namespaceDescription ? { namespaceDescription } : {}),
+          }
+        : {}),
+    } as SerializedTool;
+  }
+  if (tool.type === "hosted_tool") {
+    return {
+      type: "hosted_tool",
+      name,
+      providerData: record.providerData,
+    } as SerializedTool;
+  }
+  if (tool.type === "apply_patch") {
+    return { type: "apply_patch", name } as SerializedTool;
+  }
+  if (tool.type === "shell") {
+    return {
+      type: "shell",
+      name,
+      environment: record.environment,
+    } as SerializedTool;
+  }
+  if (tool.type === "computer") {
+    // Avoid SDK serializeTool's "computer not initialized" throw before the run.
+    const computer =
+      record.computer && typeof record.computer === "object"
+        ? (record.computer as { environment?: unknown; dimensions?: unknown })
+        : null;
+    if (
+      computer &&
+      typeof computer.environment === "string" &&
+      Array.isArray(computer.dimensions) &&
+      computer.dimensions.length === 2 &&
+      computer.dimensions.every((value) => typeof value === "number")
+    ) {
+      return {
+        type: "computer",
+        name,
+        environment: computer.environment,
+        dimensions: computer.dimensions,
+      } as SerializedTool;
+    }
+    return { type: "computer", name } as SerializedTool;
+  }
+  return null;
+}
+
+/**
  * Codex remote compaction v2: send active history + `compaction_trigger`, collect
  * exactly one `{ type: "compaction", encrypted_content }` output item.
  * Must run inside Codex ALS with `remote_compaction_v2` beta + turn metadata.
+ *
+ * Prompt-cache critical: `systemInstructions` and `tools` must match the
+ * ordinary agent turn prefix (Codex CLI sends `base_instructions` +
+ * `model_visible_specs` on the compact call). An empty instructions string
+ * busts the shared tools→instructions prefix and is rejected here.
+ *
+ * Tools are schema context only. This is a single `_fetchResponse` (no tool
+ * loop), and extract still requires exactly one compaction item, so a
+ * tool-call-shaped reply fails closed.
  */
 export async function requestRemoteCompactionV2(
   settings: Settings,
@@ -1040,13 +1350,31 @@ export async function requestRemoteCompactionV2(
   options: {
     client: OpenAI;
     model: string;
+    /**
+     * Exact agent system instructions for this session/turn. Required and
+     * non-blank — must match the prior ordinary model call for cache prefix.
+     */
+    systemInstructions: string;
     promptCacheKey?: string;
+    /** Model-visible tool schemas for the compact request (CLI parity). */
+    tools?: readonly SerializedTool[];
     onUsage?: (usage: ModelResponseUsage) => void | Promise<void>;
   },
 ): Promise<Record<string, unknown>> {
+  // Match Agents SDK `normalizeInstructions`: reject blank after trim, but send
+  // the original bytes. Trimming here would diverge from ordinary turns that
+  // keep leading/trailing whitespace and bust the tools→instructions prefix.
+  if (options.systemInstructions.trim() === "") {
+    throw new EmptyCompactionSummaryError({
+      stage: "remote_v2_instructions",
+      reason: "empty_system_instructions",
+    });
+  }
+  const systemInstructions = options.systemInstructions;
   const promptInput = buildRemoteCompactionV2PromptInput(input);
+  const tools = options.tools ? [...options.tools] : [];
   const request: ModelRequest = {
-    systemInstructions: "",
+    systemInstructions,
     input: promptInput as AgentInputItem[],
     modelSettings: {
       // Azure rejects store:false; Codex transport enforces store:false itself.
@@ -1055,7 +1383,7 @@ export async function requestRemoteCompactionV2(
         ? { providerData: { prompt_cache_key: options.promptCacheKey } }
         : {}),
     },
-    tools: [],
+    tools,
     toolsExplicitlyProvided: true,
     outputType: "text",
     handoffs: [],

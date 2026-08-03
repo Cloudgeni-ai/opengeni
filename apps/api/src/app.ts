@@ -387,7 +387,7 @@ export function createAppComposition(deps: AppDependencies): {
         // Provider-grouped model list for the picker. configuredModels() carries the
         // union of the built-in allow-list and every registry provider's models, in
         // selection order (default model first); project each to the client-safe
-        // ClientModel shape (ConfiguredModel.providerId → ClientModel.provider).
+        // provider-blind ClientModel shape (execution topology remains server-side).
         models: configuredModels(catalogSettings).map(projectClientModel),
         defaultReasoningEffort: deps.settings.openaiReasoningEffort,
         allowedReasoningEfforts: configuredAllowedReasoningEfforts(deps.settings),

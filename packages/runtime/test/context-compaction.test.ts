@@ -44,7 +44,12 @@ import {
   renderCompactionPromptInputForChat,
   type CompactionItem,
 } from "../src/context-compaction";
-import { extractResponseOutputText, summarizeForCompaction } from "../src/index";
+import {
+  extractResponseOutputText,
+  requestRemoteCompactionV2,
+  serializedToolsForRemoteCompaction,
+  summarizeForCompaction,
+} from "../src/index";
 import { sanitizeHistoryItemsForModel } from "../src/history-sanitizer";
 import { testSettings } from "@opengeni/testing";
 
@@ -1162,5 +1167,150 @@ describe("Codex remote compaction v2 helpers", () => {
     expect(history.some((item) => item.role === "assistant")).toBe(false);
     expect(history.some((item) => item.role === "user" && item.content === "keep")).toBe(true);
     expect(history.some((item) => item.role === "developer")).toBe(true);
+  });
+
+  test("remote_v2 retain keeps input_image parts (portable strips them)", () => {
+    const withImage = userParts([
+      { type: "input_text", text: "look" },
+      { type: "input_image", image_url: "data:image/png;base64,abc" },
+    ]);
+    const remote = buildRemoteV2ReplacementHistory([withImage], {
+      type: "compaction",
+      encrypted_content: "blob",
+    });
+    expect(remote[0]).toMatchObject({
+      role: "user",
+      content: [
+        { type: "input_text", text: "look" },
+        { type: "input_image", image_url: "data:image/png;base64,abc" },
+      ],
+    });
+    const portable = buildCompactionReplacementHistory([withImage], "summary");
+    expect((portable[0] as { content?: unknown }).content).toEqual([
+      { type: "input_text", text: "look" },
+    ]);
+  });
+
+  test("remote_v2 retain keeps images when truncating oversized text", () => {
+    const long = "x".repeat(300_000);
+    const history = buildRemoteV2ReplacementHistory(
+      [
+        userParts([
+          { type: "input_text", text: long },
+          { type: "input_image", image_url: "data:image/png;base64,abc" },
+        ]),
+      ],
+      { type: "compaction", encrypted_content: "blob" },
+    );
+    const content = (history[0] as { content?: unknown[] }).content;
+    expect(Array.isArray(content)).toBe(true);
+    expect(content?.some((part) => (part as { type?: string }).type === "input_image")).toBe(true);
+    const textPart = content?.find((part) => (part as { type?: string }).type === "input_text") as
+      | { text?: string }
+      | undefined;
+    expect(typeof textPart?.text).toBe("string");
+    expect((textPart?.text ?? "").length).toBeLessThan(long.length);
+  });
+
+  test("serializedToolsForRemoteCompaction keeps function schemas and uninitialized computer", async () => {
+    const tools = await serializedToolsForRemoteCompaction({
+      getAllTools: async () =>
+        [
+          {
+            type: "function",
+            name: "shell",
+            description: "run",
+            parameters: { type: "object", properties: {} },
+            strict: false,
+            deferLoading: false,
+          },
+          {
+            type: "computer",
+            name: "computer",
+            computer: {},
+          },
+        ] as never,
+    });
+    expect(tools).toEqual([
+      {
+        type: "function",
+        name: "shell",
+        description: "run",
+        parameters: { type: "object", properties: {} },
+        strict: false,
+        deferLoading: false,
+      },
+      { type: "computer", name: "computer" },
+    ]);
+  });
+
+  test("serializedToolsForRemoteCompaction preserves Symbol-backed namespaces", async () => {
+    const namespaced = {
+      type: "function",
+      name: "search",
+      description: "find",
+      parameters: { type: "object", properties: {} },
+      strict: true,
+    };
+    Object.defineProperty(namespaced, Symbol("functionToolNamespace"), {
+      value: "docs",
+      enumerable: false,
+    });
+    Object.defineProperty(namespaced, Symbol("functionToolNamespaceDescription"), {
+      value: "Docs tools",
+      enumerable: false,
+    });
+    const tools = await serializedToolsForRemoteCompaction({
+      getAllTools: async () => [namespaced] as never,
+    });
+    expect(tools).toEqual([
+      {
+        type: "function",
+        name: "search",
+        description: "find",
+        parameters: { type: "object", properties: {} },
+        strict: true,
+        namespace: "docs",
+        namespaceDescription: "Docs tools",
+      },
+    ]);
+  });
+
+  test("requestRemoteCompactionV2 rejects empty system instructions (cache prefix)", async () => {
+    const client = {
+      responses: { create: async () => ({}) },
+    } as unknown as OpenAI;
+    await expect(
+      requestRemoteCompactionV2(testSettings(), [user("hi")], {
+        client,
+        model: "gpt-5.6-sol",
+        systemInstructions: "   ",
+      }),
+    ).rejects.toBeInstanceOf(EmptyCompactionSummaryError);
+  });
+
+  test("requestRemoteCompactionV2 keeps untrimmed instructions bytes", async () => {
+    const padded = "\nkeep me\n";
+    let seenInstructions: unknown;
+    const client = {
+      responses: {
+        create: async (body: { instructions?: unknown }) => {
+          seenInstructions = body.instructions;
+          return {
+            id: "resp_test",
+            status: "completed",
+            output: [{ type: "compaction", encrypted_content: "blob" }],
+          };
+        },
+      },
+    } as unknown as OpenAI;
+    await requestRemoteCompactionV2(testSettings(), [user("hi")], {
+      client,
+      model: "gpt-5.6-sol",
+      systemInstructions: padded,
+    });
+    // Ordinary turns keep leading/trailing whitespace via normalizeInstructions;
+    // compact must not `.trim()` the payload or the cache prefix diverges.
+    expect(seenInstructions).toBe(padded);
   });
 });

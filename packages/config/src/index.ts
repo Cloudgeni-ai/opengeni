@@ -355,6 +355,10 @@ const SettingsSchema = z.object({
   openaiBaseUrl: z.string().optional(),
   openaiModel: z.string().default("gpt-5.6-sol"),
   openaiAllowedModels: z.string().default("gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna"),
+  // OpenGeni-managed Vercel AI Gateway. When configured, the two reviewed
+  // Gateway models below are added to the managed-credit catalog. Workspace
+  // Gateway keys use the encrypted connection broker and never this secret.
+  vercelAiGatewayApiKey: z.string().optional(),
   // Native composer voice input (browser MediaRecorder → API transcription).
   // Provider credentials stay server-side; ClientConfig only projects availability
   // and hard ceilings. Selection happens once before audio is sent — never retry
@@ -1178,6 +1182,9 @@ export const ModelCapabilitiesV1Schema = z
       responsesWebSocket: CapabilityStateV1Schema,
       realtimeAudio: CapabilityStateV1Schema,
     }),
+    promptCaching: CapabilityStateV1Schema.extend({
+      mode: z.enum(["implicit", "automatic", "none"]),
+    }).optional(),
     latencyModes: z
       .array(
         z.object({
@@ -1282,7 +1289,12 @@ export type ModelProviderApi = z.infer<typeof ModelProviderApi>;
  * "codex-subscription" providers authenticate per-request with a ChatGPT/Codex
  * subscription token resolved at call time (no static key) — see @opengeni/codex.
  */
-export const RegistryProviderKind = z.enum(["api-key", "codex-subscription"]);
+export const RegistryProviderKind = z.enum([
+  "api-key",
+  "codex-subscription",
+  "vercel-gateway-managed",
+  "vercel-gateway-workspace",
+]);
 export type RegistryProviderKind = z.infer<typeof RegistryProviderKind>;
 
 /** A single model exposed by a registry provider. */
@@ -1335,7 +1347,7 @@ const RegistryModelSchema = z
 
 /** A non-built-in provider declared by the host via OPENGENI_MODEL_PROVIDERS_JSON. */
 const RegistryProviderSchema = z.object({
-  kind: RegistryProviderKind.default("api-key"), // "codex-subscription" => per-request token, no static key
+  kind: RegistryProviderKind.default("api-key"),
   id: z.string().min(1).regex(registryId), // stable provider id, e.g. "fireworks"
   label: z.string().min(1).optional(),
   api: ModelProviderApi.default("chat"),
@@ -1401,6 +1413,12 @@ export interface ConfiguredModel {
   credentialSource: CredentialSourceV1;
   billing: BillingAttributionV1;
   capabilities: ModelCapabilitiesV1;
+  requestPolicy?: {
+    gateway: {
+      only: [string];
+      caching: "auto" | "none";
+    };
+  };
   pricing?: ModelPricingScheduleV1 | undefined;
   definitionVersion: string;
   contextWindowTokens?: number | undefined;
@@ -1410,6 +1428,32 @@ export interface ConfiguredModel {
   reasoningEffort: boolean;
   hostedWebSearch: boolean;
 }
+
+export const VERCEL_AI_GATEWAY_BASE_URL = "https://ai-gateway.vercel.sh/v1" as const;
+export const OPENGENI_GATEWAY_PROVIDER_ID = "opengeni-gateway" as const;
+export const WORKSPACE_GATEWAY_PROVIDER_ID = "workspace-gateway" as const;
+export const WORKSPACE_GATEWAY_MODEL_ID_PREFIX = "workspace-gateway/" as const;
+export const VERCEL_AI_GATEWAY_CONNECTION_DOMAIN = "ai-gateway.vercel.sh" as const;
+export const VERCEL_AI_GATEWAY_CONNECTION_ROLE = "vercel_ai_gateway" as const;
+
+export const OPENGENI_GATEWAY_MODELS = {
+  deepseek: {
+    productId: "deepseek-v4-flash-0731",
+    workspaceProductId: `${WORKSPACE_GATEWAY_MODEL_ID_PREFIX}deepseek-v4-flash-0731`,
+    upstreamModelId: "deepseek/deepseek-v4-flash-0731",
+    label: "DeepSeek V4 Flash 0731",
+    provider: "deepinfra",
+    implicitCaching: true,
+  },
+  kimi: {
+    productId: "kimi-k3-fast",
+    workspaceProductId: `${WORKSPACE_GATEWAY_MODEL_ID_PREFIX}kimi-k3-fast`,
+    upstreamModelId: "moonshotai/kimi-k3-fast",
+    label: "Kimi K3 Fast",
+    provider: "wafer",
+    implicitCaching: true,
+  },
+} as const;
 
 /**
  * Built-in OpenGeni credit pricing schedules.
@@ -1484,6 +1528,27 @@ export const defaultModelPricing: Record<string, ModelPricingScheduleV1> = {
         },
       },
     ],
+  },
+  // Vercel AI Gateway endpoint prices, provider-pinned in the runtime.
+  // Snapshot: 2026-08-02. Both pinned routes returned discounted implicit
+  // cache reads in live Gateway responses. Wafer/Kimi reported $0.45/M even
+  // though the provider-discovery flag currently says otherwise; bill from
+  // the response-backed rate, not that inconsistent boolean.
+  [OPENGENI_GATEWAY_MODELS.deepseek.productId]: {
+    default: {
+      inputMicrosPerMillionTokens: 90_000,
+      cachedInputMicrosPerMillionTokens: 18_000,
+      outputMicrosPerMillionTokens: 180_000,
+      marginBps: 2_500,
+    },
+  },
+  [OPENGENI_GATEWAY_MODELS.kimi.productId]: {
+    default: {
+      inputMicrosPerMillionTokens: 4_500_000,
+      cachedInputMicrosPerMillionTokens: 450_000,
+      outputMicrosPerMillionTokens: 22_500_000,
+      marginBps: 2_500,
+    },
   },
   // Fireworks AI / GLM 5.2 — the first shipped non-OpenAI registry model. A
   // built-in default pricing entry makes managed billing work out of the box
@@ -1656,6 +1721,7 @@ export function getSettings(): Settings {
     openaiBaseUrl: optional("OPENGENI_OPENAI_BASE_URL") ?? optional("OPENAI_BASE_URL"),
     openaiModel: optional("OPENGENI_OPENAI_MODEL"),
     openaiAllowedModels: optional("OPENGENI_OPENAI_ALLOWED_MODELS"),
+    vercelAiGatewayApiKey: optional("OPENGENI_VERCEL_AI_GATEWAY_API_KEY"),
     voiceInputMaxDurationSeconds: optional("OPENGENI_VOICE_INPUT_MAX_DURATION_SECONDS"),
     voiceInputMaxSizeBytes: optional("OPENGENI_VOICE_INPUT_MAX_SIZE_BYTES"),
     voiceInputProviderOrder: optional("OPENGENI_VOICE_INPUT_PROVIDER_ORDER"),
@@ -2202,6 +2268,128 @@ function legacyModelCapabilities(
   });
 }
 
+export function gatewayRequestPolicyForUpstreamModel(
+  upstreamModelId: string,
+): ConfiguredModel["requestPolicy"] {
+  const model = Object.values(OPENGENI_GATEWAY_MODELS).find(
+    (candidate) => candidate.upstreamModelId === upstreamModelId,
+  );
+  if (!model) {
+    return undefined;
+  }
+  return {
+    gateway: {
+      only: [model.provider],
+      caching: model.implicitCaching ? "auto" : "none",
+    },
+  };
+}
+
+function gatewayModelCapabilities(
+  settings: Settings,
+  input: { implicitCaching: boolean; vision: boolean },
+): ModelCapabilitiesV1 {
+  const legacy = legacyModelCapabilities(settings, {
+    reasoningEffort: true,
+    hostedWebSearch: false,
+  });
+  return normalizeCapabilities({
+    ...legacy,
+    functionCalling: { upstream: "supported", runnable: true },
+    inputModalities: input.vision ? ["text", "image"] : ["text"],
+    transports: {
+      ...legacy.transports,
+      sse: { upstream: "supported", runnable: true },
+    },
+    promptCaching: input.implicitCaching
+      ? { upstream: "supported", runnable: true, mode: "implicit" }
+      : { upstream: "unsupported", runnable: false, mode: "none" },
+    // "Fast" is part of Kimi's product name, not OpenGeni's separately billed
+    // latency mode. Both Gateway products expose only standard here.
+    latencyModes: [{ id: "standard", upstream: "supported", runnable: true }],
+  });
+}
+
+function gatewayRegistryProvider(
+  settings: Settings,
+  input:
+    | { kind: "vercel-gateway-managed"; apiKey: string }
+    | { kind: "vercel-gateway-workspace"; apiKey?: string },
+): RegistryProvider {
+  const workspace = input.kind === "vercel-gateway-workspace";
+  const models = [OPENGENI_GATEWAY_MODELS.deepseek, OPENGENI_GATEWAY_MODELS.kimi].map((model) => ({
+    id: workspace ? model.workspaceProductId : model.productId,
+    upstreamModelId: model.upstreamModelId,
+    label: model.label,
+    capabilities: gatewayModelCapabilities(settings, {
+      implicitCaching: model.implicitCaching,
+      vision: model === OPENGENI_GATEWAY_MODELS.kimi,
+    }),
+    contextWindowTokens: 1_000_000,
+    effectiveContextWindowTokens: 900_000,
+    autoCompactTokenLimit: 850_000,
+    toolOutputTruncationTokens: settings.modelToolOutputTruncationTokens,
+  }));
+  return {
+    kind: input.kind,
+    id: workspace ? WORKSPACE_GATEWAY_PROVIDER_ID : OPENGENI_GATEWAY_PROVIDER_ID,
+    label: workspace ? "Your Gateway" : "OpenGeni",
+    // Responses preserves vision, reasoning items, and provider-native usage.
+    // Model-specific compatibility stays at the reviewed request fence rather
+    // than downgrading the whole provider wire.
+    api: "responses",
+    baseUrl: VERCEL_AI_GATEWAY_BASE_URL,
+    ...(input.apiKey ? { apiKey: input.apiKey } : {}),
+    models,
+  };
+}
+
+function configuredRegistryProviders(settings: Settings): RegistryProvider[] {
+  const providers = parseModelProvidersJson(settings.modelProvidersJson);
+  if (!settings.vercelAiGatewayApiKey) {
+    return providers;
+  }
+  if (providers.some((provider) => provider.id === OPENGENI_GATEWAY_PROVIDER_ID)) {
+    throw new Error(
+      `${OPENGENI_GATEWAY_PROVIDER_ID} is reserved for OPENGENI_VERCEL_AI_GATEWAY_API_KEY`,
+    );
+  }
+  return [
+    ...providers,
+    gatewayRegistryProvider(settings, {
+      kind: "vercel-gateway-managed",
+      apiKey: settings.vercelAiGatewayApiKey,
+    }),
+  ];
+}
+
+/** Static catalog overlay; it contains no concrete workspace credential. */
+export function withWorkspaceGatewayCatalogProvider(settings: Settings): Settings {
+  const providers = parseModelProvidersJson(settings.modelProvidersJson);
+  if (providers.some((provider) => provider.id === WORKSPACE_GATEWAY_PROVIDER_ID)) {
+    return settings;
+  }
+  return {
+    ...settings,
+    modelProvidersJson: JSON.stringify([
+      ...providers,
+      gatewayRegistryProvider(settings, { kind: "vercel-gateway-workspace" }),
+    ]),
+  };
+}
+
+/** Runtime overlay after the worker resolves the workspace's encrypted key. */
+export function withWorkspaceGatewayCredential(settings: Settings, apiKey: string): Settings {
+  if (!apiKey.trim()) {
+    throw new Error("workspace AI Gateway credential is empty");
+  }
+  const catalogSettings = withWorkspaceGatewayCatalogProvider(settings);
+  const providers = parseModelProvidersJson(catalogSettings.modelProvidersJson).map((provider) =>
+    provider.id === WORKSPACE_GATEWAY_PROVIDER_ID ? { ...provider, apiKey } : provider,
+  );
+  return { ...catalogSettings, modelProvidersJson: JSON.stringify(providers) };
+}
+
 /** OpenAI GPT-5.6 Fast mode is 2× Standard list rates (service_tier fast/priority). */
 const GPT56_FAST_BILLING_MULTIPLIER_BPS = 20_000;
 
@@ -2254,6 +2442,17 @@ function builtinLatencyModesForModel(modelId: string): Array<{
     ];
   }
   return [{ id: "standard", upstream: "unknown", runnable: true }];
+}
+
+function builtinPromptCachingForModel(
+  modelId: string,
+): NonNullable<ModelCapabilitiesV1["promptCaching"]> | undefined {
+  const slug = modelId.startsWith(CODEX_MODEL_ID_PREFIX)
+    ? modelId.slice(CODEX_MODEL_ID_PREFIX.length)
+    : modelId;
+  return slug.startsWith("gpt-5.6-")
+    ? { upstream: "supported", runnable: true, mode: "implicit" }
+    : undefined;
 }
 
 /**
@@ -2312,15 +2511,23 @@ function assertLatencyModeRunnable(
 }
 
 function registryCredentialSource(provider: RegistryProvider): CredentialSourceV1 {
-  return provider.kind === "codex-subscription"
-    ? { kind: "connected_subscription", provider: "codex" }
-    : { kind: "deployment", mechanism: "api_key" };
+  if (provider.kind === "codex-subscription") {
+    return { kind: "connected_subscription", provider: "codex" };
+  }
+  if (provider.kind === "vercel-gateway-workspace") {
+    return { kind: "workspace_connection", mechanism: "api_key" };
+  }
+  return { kind: "deployment", mechanism: "api_key" };
 }
 
 function registryBilling(provider: RegistryProvider): BillingAttributionV1 {
-  return provider.kind === "codex-subscription"
-    ? { upstreamPayer: "connected_subscription", metering: "external" }
-    : { upstreamPayer: "deployment", metering: "opengeni_credits" };
+  if (provider.kind === "codex-subscription") {
+    return { upstreamPayer: "connected_subscription", metering: "external" };
+  }
+  if (provider.kind === "vercel-gateway-workspace") {
+    return { upstreamPayer: "workspace", metering: "external" };
+  }
+  return { upstreamPayer: "deployment", metering: "opengeni_credits" };
 }
 
 function builtinCredentialSource(settings: Settings): CredentialSourceV1 {
@@ -2403,6 +2610,7 @@ function definitionVersionFor(
     billing: model.billing,
     executionLimits: model.executionLimits,
     capabilities: model.capabilities,
+    ...(model.requestPolicy ? { requestPolicy: model.requestPolicy } : {}),
     pricing: model.pricing ?? null,
   });
   return `sha256:${createHash("sha256")
@@ -2455,7 +2663,7 @@ export function configuredProviders(settings: Settings): ResolvedModelProvider[]
       : undefined;
     builtin.apiKey = settings.openaiApiKey;
   }
-  const registry = parseModelProvidersJson(settings.modelProvidersJson).map(
+  const registry = configuredRegistryProviders(settings).map(
     (provider): ResolvedModelProvider => ({
       id: provider.id,
       label: provider.label ?? provider.id,
@@ -2498,6 +2706,11 @@ export function withCodexCatalogProvider(settings: Settings): Settings {
           reasoningEffort: true,
           hostedWebSearch: true,
         }),
+        ...(builtinPromptCachingForModel(`${CODEX_MODEL_ID_PREFIX}${slug}`)
+          ? {
+              promptCaching: builtinPromptCachingForModel(`${CODEX_MODEL_ID_PREFIX}${slug}`)!,
+            }
+          : {}),
         latencyModes: builtinLatencyModesForModel(`${CODEX_MODEL_ID_PREFIX}${slug}`),
       };
       return {
@@ -2542,6 +2755,9 @@ export function policyProviderIdForModel(settings: Settings, modelId: string): s
   if (canonicalModelId.startsWith(CODEX_MODEL_ID_PREFIX)) {
     return CODEX_PROVIDER_ID;
   }
+  if (canonicalModelId.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX)) {
+    return WORKSPACE_GATEWAY_PROVIDER_ID;
+  }
   const configured = configuredModels(settings).find((model) => model.id === canonicalModelId);
   return configured?.providerId ?? builtinProviderId(settings);
 }
@@ -2571,9 +2787,14 @@ function finalizeConfiguredModel(
   provider: ResolvedModelProvider,
   input: Omit<ConfiguredModel, "schemaVersion" | "definitionVersion" | "executionLimits">,
 ): ConfiguredModel {
+  const requestPolicy =
+    provider.kind === "vercel-gateway-managed" || provider.kind === "vercel-gateway-workspace"
+      ? gatewayRequestPolicyForUpstreamModel(input.upstreamModelId)
+      : undefined;
   const modelWithoutVersion: Omit<ConfiguredModel, "definitionVersion"> = {
     schemaVersion: 1,
     ...input,
+    ...(requestPolicy ? { requestPolicy } : {}),
     executionLimits: resolvedExecutionLimits(settings, input),
   };
   return {
@@ -2645,7 +2866,7 @@ export function configuredModels(settings: Settings): ConfiguredModel[] {
   // a codex/ id has NO codex provider injected (no active subscription) it then
   // resolves to nothing and getModel fails loud with
   // CodexSubscriptionUnavailableError instead of mis-routing to Azure.
-  const parsedRegistry = parseModelProvidersJson(settings.modelProvidersJson);
+  const parsedRegistry = configuredRegistryProviders(settings);
   const registryOwnedIds = new Set(
     parsedRegistry.flatMap((provider) => provider.models.map((model) => model.id)),
   );
@@ -2671,6 +2892,9 @@ export function configuredModels(settings: Settings): ConfiguredModel[] {
           reasoningEffort: true,
           hostedWebSearch: settings.webSearchEnabled,
         }),
+        ...(builtinPromptCachingForModel(id)
+          ? { promptCaching: builtinPromptCachingForModel(id)! }
+          : {}),
         latencyModes: builtinLatencyModesForModel(id),
       };
       return finalizeConfiguredModel(settings, builtinProvider, {
@@ -2804,9 +3028,13 @@ export type ResolveTurnExecutionPolicyV1Input = {
 };
 
 function settingsForTurnExecutionPolicy(settings: Settings, modelId: string): Settings {
-  return settings.codexSubscriptionEnabled && modelId.startsWith(CODEX_MODEL_ID_PREFIX)
-    ? withCodexCatalogProvider(settings)
-    : settings;
+  if (settings.codexSubscriptionEnabled && modelId.startsWith(CODEX_MODEL_ID_PREFIX)) {
+    return withCodexCatalogProvider(settings);
+  }
+  if (modelId.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX)) {
+    return withWorkspaceGatewayCatalogProvider(settings);
+  }
+  return settings;
 }
 
 /**
@@ -2924,7 +3152,7 @@ export function configuredModelPricingSchedules(
     ]),
   );
   const registry: Record<string, ModelPricingScheduleV1> = {};
-  for (const provider of parseModelProvidersJson(settings.modelProvidersJson)) {
+  for (const provider of configuredRegistryProviders(settings)) {
     for (const model of provider.models) {
       if (model.pricing) {
         registry[model.id] = normalizeModelPricingSchedule(model.pricing);
@@ -4298,6 +4526,14 @@ function validateSettings(settings: Settings): void {
   const builtinId = builtinProviderId(settings);
   const providerIds = new Set<string>();
   for (const provider of registryProviders) {
+    if (
+      provider.kind === "vercel-gateway-managed" ||
+      provider.kind === "vercel-gateway-workspace"
+    ) {
+      throw new Error(
+        `OPENGENI_MODEL_PROVIDERS_JSON provider kind ${provider.kind} is reserved for the reviewed AI Gateway broker`,
+      );
+    }
     if (provider.id === builtinId) {
       throw new Error(
         `OPENGENI_MODEL_PROVIDERS_JSON provider id ${provider.id} collides with the built-in provider id`,
@@ -4309,7 +4545,7 @@ function validateSettings(settings: Settings): void {
       );
     }
     providerIds.add(provider.id);
-    if (!resolveProviderApiKey(provider)) {
+    if (provider.kind !== "codex-subscription" && !resolveProviderApiKey(provider)) {
       throw new Error(
         `OPENGENI_MODEL_PROVIDERS_JSON provider ${provider.id} requires a resolvable API key (set apiKey or apiKeyEnv)`,
       );

@@ -13,6 +13,7 @@ import {
 } from "react";
 
 import { useAppContext } from "@/context";
+import { requestCreateComposerFocus } from "@/lib/create-composer-focus";
 
 const RAIL_COLLAPSED_KEY = "opengeni.rail.collapsed";
 const RAIL_WIDTH_KEY = "opengeni.rail.width";
@@ -178,7 +179,10 @@ export function RailProvider({
   const startNewSession = useCallback(() => {
     appContext.resetSessionView();
     setDrawerOpen(false);
-    void navigate({ to: "/workspaces/$workspaceId/sessions", params: { workspaceId } });
+    void navigate({ to: "/workspaces/$workspaceId/sessions", params: { workspaceId } }).then(() => {
+      // Same-route: create composer stays mounted, so autoFocus will not re-run.
+      requestCreateComposerFocus();
+    });
   }, [appContext, navigate, workspaceId]);
 
   const value = useMemo<RailContextValue>(

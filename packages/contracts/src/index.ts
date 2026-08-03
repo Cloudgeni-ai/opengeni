@@ -9124,6 +9124,9 @@ export const ModelCapabilitiesV1 = /* @__PURE__ */ defineModelContractSchema(() 
       responsesWebSocket: ModelCapabilityStateV1,
       realtimeAudio: ModelCapabilityStateV1,
     }),
+    promptCaching: ModelCapabilityStateV1.extend({
+      mode: z.enum(["implicit", "automatic", "none"]),
+    }).optional(),
     latencyModes: z.array(
       z.object({
         id: z.enum(["standard", "priority", "fast"]),
@@ -9339,6 +9342,7 @@ export const ClientModel = /* @__PURE__ */ defineModelContractSchema(() =>
     provider: z.string(), // provider id
     providerLabel: z.string(),
     api: z.enum(["responses", "chat"]),
+    source: z.enum(["opengeni", "codex", "workspace_gateway"]).optional(),
     contextWindowTokens: z.number().int().positive().optional(),
     // Additive normalized definition metadata. Optional so older server payloads
     // remain parseable; current servers project the complete V1 set.

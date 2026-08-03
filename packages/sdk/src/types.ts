@@ -1898,6 +1898,11 @@ export type ModelCapabilitiesV1 = {
     responsesWebSocket: ModelCapabilityStateV1;
     realtimeAudio: ModelCapabilityStateV1;
   };
+  promptCaching?:
+    | (ModelCapabilityStateV1 & {
+        mode: "implicit" | "automatic" | "none";
+      })
+    | undefined;
   latencyModes: Array<{
     id: "standard" | "priority" | "fast";
     upstream: ModelCapabilitySupportV1;
@@ -1946,6 +1951,7 @@ export type ClientModel = {
   provider: string;
   providerLabel: string;
   api: "responses" | "chat";
+  source?: "opengeni" | "codex" | "workspace_gateway" | undefined;
   contextWindowTokens?: number | undefined;
   schemaVersion?: 1 | undefined;
   aliases?: string[] | undefined;

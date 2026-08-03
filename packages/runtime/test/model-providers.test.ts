@@ -28,9 +28,88 @@ import {
   buildProviderClient,
   CodexSubscriptionUnavailableError,
   HUMAN_INPUT_TOOL_NAME,
+  interleaveParallelFunctionCallResults,
   MultiProviderModelProvider,
   resolveTurnModel,
+  vercelGatewayRoutingFetch,
 } from "../src/index";
+
+describe("Vercel AI Gateway request fence", () => {
+  test("interleaves only complete parallel function-call batches without changing items", () => {
+    const callA = { type: "function_call", call_id: "a", name: "a", arguments: "{}" };
+    const callB = { type: "function_call", call_id: "b", name: "b", arguments: "{}" };
+    const resultB = { type: "function_call_output", call_id: "b", output: "B" };
+    const resultA = { type: "function_call_output", call_id: "a", output: "A" };
+    const body = { input: [{ role: "user", content: "go" }, callA, callB, resultB, resultA] };
+    expect(interleaveParallelFunctionCallResults(body)).toBe(true);
+    expect(body.input).toEqual([{ role: "user", content: "go" }, callA, resultA, callB, resultB]);
+
+    const partial = { input: [callA, callB, resultA] };
+    expect(interleaveParallelFunctionCallResults(partial)).toBe(false);
+    expect(partial.input).toEqual([callA, callB, resultA]);
+  });
+
+  test("replaces caller routing for both Gateway billing paths", async () => {
+    for (const kind of ["vercel-gateway-managed", "vercel-gateway-workspace"] as const) {
+      let captured: Record<string, unknown> | null = null;
+      const inner = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+        captured = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response("{}", {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }) as typeof fetch;
+      const routed = vercelGatewayRoutingFetch(kind, inner);
+      await routed("https://ai-gateway.vercel.sh/v1/responses", {
+        method: "POST",
+        body: JSON.stringify({
+          model: "deepseek/deepseek-v4-flash-0731",
+          providerOptions: {
+            gateway: { only: ["somewhere-else"], models: ["fallback/model"] },
+            deepseek: { includeReasoning: true },
+          },
+        }),
+      });
+      expect(captured?.providerOptions).toEqual({
+        gateway: { only: ["deepinfra"], order: ["deepinfra"], caching: "auto" },
+        deepseek: { includeReasoning: true },
+      });
+    }
+  });
+
+  test("pins Kimi to Wafer with its live-proven implicit cache policy", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const routed = vercelGatewayRoutingFetch("vercel-gateway-managed", (async (
+      _input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      captured = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch);
+    await routed("https://ai-gateway.vercel.sh/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "moonshotai/kimi-k3-fast" }),
+    });
+    expect(captured?.providerOptions).toEqual({
+      gateway: { only: ["wafer"], order: ["wafer"], caching: "auto" },
+    });
+  });
+
+  test("unknown models fail before network I/O", async () => {
+    let calls = 0;
+    const routed = vercelGatewayRoutingFetch("vercel-gateway-managed", (async () => {
+      calls += 1;
+      return new Response("{}");
+    }) as typeof fetch);
+    await expect(
+      routed("https://ai-gateway.vercel.sh/v1/responses", {
+        method: "POST",
+        body: JSON.stringify({ model: "unreviewed/model" }),
+      }),
+    ).rejects.toThrow("approved catalogue");
+    expect(calls).toBe(0);
+  });
+});
 
 // The synthetic codex-subscription provider the worker overlay
 // (settingsWithCodexCredential → withCodexProvider) injects into runSettings for

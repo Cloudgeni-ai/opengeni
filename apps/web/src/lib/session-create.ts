@@ -38,7 +38,8 @@ import { buildTools } from "./session-tools";
 // ── Compute target — the promoted top-level "Where should this run?" choice ──
 
 /** A platform-owned ephemeral sandbox. `backend === ""` is the deployment
- *  default; a specific managed backend is an Advanced override. */
+ *  default. The composer no longer exposes a managed-backend override; keep the
+ *  field so drafts/API mapping stay stable if we re-enable it later. */
 export type ManagedSandboxTarget = {
   kind: "sandbox";
   backend: SandboxBackend | "";
@@ -346,7 +347,9 @@ export function sessionDraftFromNewSessionDraftOptions(
         }
       : {
           kind: "sandbox",
-          backend: options.sandboxBackend ?? "",
+          // Ignore persisted managed-backend overrides — the create UI no longer
+          // offers that control; always use the deployment default.
+          backend: "",
         },
     variableSetId: options.variableSetId ?? "",
     rigId: options.rigId ?? "",
@@ -449,9 +452,9 @@ function formatLifetime(ms: number): string {
   return Number.isInteger(hours) ? `${hours}h` : `${Math.round(hours)}h`;
 }
 
-/** The managed backend options for the Advanced override, descriptor-driven and
- *  led by the deployment default. Excludes `selfhosted` (the Connected Machine
- *  kind). */
+/** Managed backend choices (deployment default first). Excludes `selfhosted`
+ *  (Connected Machine kind). Kept for tests / a possible future override UI —
+ *  the create composer no longer surfaces this control. */
 export function managedBackendOptions(): ManagedBackendOption[] {
   const managed = (
     Object.entries(CAPABILITY_DESCRIPTORS) as Array<[SandboxBackend, CapabilityDescriptor]>

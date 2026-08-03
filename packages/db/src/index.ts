@@ -146,7 +146,12 @@ import {
   SubmitHumanInputResponseRequest,
   TurnExecutionPolicyV1,
 } from "@opengeni/contracts";
-import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
+import {
+  environmentsEncryptionKeyBytes,
+  VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
+  VERCEL_AI_GATEWAY_CONNECTION_ROLE,
+  type Settings,
+} from "@opengeni/config";
 import { boundModelToolOutputItem, isCodexBilledModel } from "@opengeni/codex";
 // Re-exported so consumers get the whole codex-billed detection surface (the pure
 // prefix test + the credential-aware predicates below) from a single import.
@@ -7235,6 +7240,56 @@ export async function loadConnectionCredentialForBroker(
       };
     },
   );
+}
+
+export async function workspaceVercelAiGatewayConnectionActive(
+  db: Database,
+  workspaceId: string,
+): Promise<boolean> {
+  const connections = await listConnectionsMetadata(db, workspaceId, null);
+  return connections.some(
+    (connection) =>
+      connection.subjectId === null &&
+      connection.providerDomain === VERCEL_AI_GATEWAY_CONNECTION_DOMAIN &&
+      connection.kind === "api_key" &&
+      connection.status === "active" &&
+      connection.metadata.credentialRole === VERCEL_AI_GATEWAY_CONNECTION_ROLE,
+  );
+}
+
+/** Resolve only the reviewed workspace-shared AI Gateway credential shape. */
+export async function loadWorkspaceVercelAiGatewayApiKey(
+  db: Database,
+  settings: Settings,
+  workspaceId: string,
+): Promise<string | null> {
+  const metadata = (await listConnectionsMetadata(db, workspaceId, null)).find(
+    (connection) =>
+      connection.subjectId === null &&
+      connection.providerDomain === VERCEL_AI_GATEWAY_CONNECTION_DOMAIN &&
+      connection.kind === "api_key" &&
+      connection.status === "active" &&
+      connection.metadata.credentialRole === VERCEL_AI_GATEWAY_CONNECTION_ROLE,
+  );
+  if (!metadata) {
+    return null;
+  }
+  const connection = await loadConnectionCredentialForBroker(db, settings, {
+    workspaceId,
+    connectionId: metadata.id,
+    providerDomain: VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
+    kind: "api_key",
+    allowSubjectOwned: false,
+  });
+  if (
+    !connection ||
+    connection.status !== "active" ||
+    connection.metadata.credentialRole !== VERCEL_AI_GATEWAY_CONNECTION_ROLE
+  ) {
+    return null;
+  }
+  const apiKey = connection.credential.apiKey;
+  return typeof apiKey === "string" && apiKey.trim().length > 0 ? apiKey : null;
 }
 
 export async function recordConnectionTokenRefresh(

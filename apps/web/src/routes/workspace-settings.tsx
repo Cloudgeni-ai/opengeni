@@ -24,6 +24,7 @@ import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import { CodexSubscriptionsCard } from "@/components/codex-connection";
+import { AiGatewayConnectionCard } from "@/components/ai-gateway-connection";
 import { LoadErrorState } from "@/components/common";
 import {
   WORKSPACE_BROWSE_ITEMS,
@@ -64,10 +65,8 @@ function BrowseWorkspaceStrip(props: { workspaceId: string; canReadInsights: boo
   const items = WORKSPACE_BROWSE_ITEMS.filter(
     (item: WorkspaceConfigItem) => !item.requiresAdmin || props.canReadInsights,
   );
-  // Leaf catalog only (workspace-nav-data). Do not import workspace-nav.tsx or
-  // workspace-nav-icons — that Lucide map shares into the shell and blows the
-  // initial bundle. Keep a single BoxIcon use so Rolldown's Lucide grouping
-  // stays aligned with the previous Variable-sets card.
+  // Leaf catalog only. Importing the rail icon map into this lazy route creates
+  // an eager shared-chunk edge between the app shell and workspace settings.
   return (
     <nav aria-label="Browse workspace" className="flex flex-wrap items-center gap-x-1 gap-y-1.5">
       <span className="mr-1 text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
@@ -381,6 +380,8 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
           canManage={canDeleteWorkspace}
         />
 
+        <AiGatewayConnectionCard workspaceId={workspaceId} canManage={canDeleteWorkspace} />
+
         <details
           className="rounded-lg border border-border"
           open={apiKeysOpen || createdToken != null}
@@ -395,7 +396,7 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
         >
           <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5 text-left transition-colors hover:bg-surface-2/60 [&::-webkit-details-marker]:hidden">
             <KeyRoundIcon className="size-3.5 shrink-0 text-brand" />
-            <span className="min-w-0 flex-1 text-sm font-medium">API keys</span>
+            <span className="min-w-0 flex-1 text-sm font-medium">OpenGeni API Keys</span>
             <span className="text-2xs text-fg-subtle">
               {!apiKeysLoaded
                 ? "…"
