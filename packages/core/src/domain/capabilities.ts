@@ -898,6 +898,19 @@ function packCatalogItem(
   pack: ReturnType<typeof listCapabilityPacks>[number],
   source: "built_in" | "manual",
 ): CapabilityCatalogItem {
+  const customMetadata = { ...pack.metadata };
+  for (const key of [
+    "packId",
+    "version",
+    "connectors",
+    "knowledge",
+    "scheduledTaskTemplates",
+    "sandboxImage",
+    "sandboxProviderImages",
+    "skills",
+  ]) {
+    delete customMetadata[key];
+  }
   return CapabilityCatalogItem.parse({
     id: `pack:${pack.id}`,
     kind: "pack",
@@ -912,6 +925,7 @@ function packCatalogItem(
       notes: "Enables role-scoped tools, connectors, knowledge, and scheduled-task templates.",
     },
     metadata: {
+      ...customMetadata,
       packId: pack.id,
       version: pack.version,
       connectors: pack.connectors,
@@ -921,7 +935,6 @@ function packCatalogItem(
       ...(pack.sandboxImage ? { sandboxImage: pack.sandboxImage } : {}),
       ...(pack.sandboxProviderImages ? { sandboxProviderImages: pack.sandboxProviderImages } : {}),
       ...(pack.skills.length > 0 ? { skills: pack.skills.map((skill) => skill.name) } : {}),
-      ...pack.metadata,
     },
   });
 }

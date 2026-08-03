@@ -3533,7 +3533,7 @@ describe("API component integration", () => {
     });
     const workspaceId = await defaultWorkspaceId(app);
     const suffix = crypto.randomUUID().slice(0, 8);
-    const imagePackManifest = (id: string, image: string) => ({
+    const imagePackManifest = (id: string, image: string, modalImageId?: string) => ({
       id,
       name: `Pack ${id}`,
       description: "Pack with a pack-scoped sandbox image.",
@@ -3541,6 +3541,7 @@ describe("API component integration", () => {
       category: "infrastructure",
       version: "0.1.0",
       sandboxImage: image,
+      ...(modalImageId ? { sandboxProviderImages: { modal: { imageId: modalImageId } } } : {}),
       skills: [
         {
           name: "infra-ops",
@@ -3555,16 +3556,24 @@ describe("API component integration", () => {
           ],
         },
       ],
+      metadata: {
+        sandboxImage: "example.invalid/spoofed:latest",
+        sandboxProviderImages: { modal: { imageId: "im-abcdefghijklmnopqrstuv" } },
+        skills: ["spoofed-skill"],
+      },
     });
     const packA = `img-a-${suffix}`;
     const packB = `img-b-${suffix}`;
-    for (const [packId, image] of [
-      [packA, "example.com/sandbox-a@sha256:aaaa"],
-      [packB, "example.com/sandbox-b@sha256:bbbb"],
+    const packAImage =
+      "example.com/sandbox-a@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const packAModalImageId = "im-1234567890123456789012";
+    for (const [packId, image, modalImageId] of [
+      [packA, packAImage, packAModalImageId],
+      [packB, "example.com/sandbox-b@sha256:bbbb", undefined],
     ] as const) {
       const registered = await app.request(workspacePath(workspaceId, "/packs"), {
         method: "POST",
-        body: JSON.stringify(imagePackManifest(packId, image)),
+        body: JSON.stringify(imagePackManifest(packId, image, modalImageId)),
         headers: { "content-type": "application/json" },
       });
       expect(registered.status).toBe(201);
@@ -3584,8 +3593,12 @@ describe("API component integration", () => {
       items: Array<{ id: string; metadata: Record<string, unknown> }>;
     };
     const packAItem = catalog.items.find((item) => item.id === `pack:${packA}`);
-    expect(packAItem?.metadata.sandboxImage).toBe("example.com/sandbox-a@sha256:aaaa");
+    expect(packAItem?.metadata.sandboxImage).toBe(packAImage);
+    expect(packAItem?.metadata.sandboxProviderImages).toEqual({
+      modal: { imageId: packAModalImageId },
+    });
     expect(packAItem?.metadata.skills).toEqual(["infra-ops"]);
+    expect(JSON.stringify(packAItem?.metadata)).not.toContain("spoofed");
     expect(JSON.stringify(packAItem?.metadata)).not.toContain("Runbook.");
 
     // A second image-declaring pack cannot be enabled, on either enable path.
