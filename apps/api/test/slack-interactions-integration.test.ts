@@ -493,6 +493,52 @@ async function drainAll(deps: ApiRouteDeps, limit = 50) {
   return count;
 }
 
+async function waitForBlockedAppQueries(blockerPid: number, expected: number) {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const [row] = await shared!.admin<{ count: number }[]>`
+      with recursive blocked(pid) as (
+        select pid
+        from pg_stat_activity
+        where datname = current_database()
+          and ${blockerPid} = any(pg_blocking_pids(pid))
+        union
+        select activity.pid
+        from pg_stat_activity activity
+        join blocked blocker on blocker.pid = any(pg_blocking_pids(activity.pid))
+        where activity.datname = current_database()
+      )
+      select count(*)::int as count
+      from pg_stat_activity activity
+      join blocked on blocked.pid = activity.pid
+      where activity.usename = 'opengeni_app'
+        and activity.state = 'active'
+        and activity.wait_event_type = 'Lock'`;
+    if ((row?.count ?? 0) >= expected) return;
+    await Bun.sleep(10);
+  }
+  const activity = await shared!.admin<
+    {
+      pid: number;
+      usename: string;
+      state: string;
+      wait_event_type: string | null;
+      wait_event: string | null;
+      blocking_pids: number[];
+      query: string;
+    }[]
+  >`
+    select pid, usename, state, wait_event_type, wait_event,
+      pg_blocking_pids(pid) as blocking_pids,
+      left(regexp_replace(query, E'[\\n\\r\\t ]+', ' ', 'g'), 240) as query
+    from pg_stat_activity
+    where datname = current_database()
+    order by pid`;
+  throw new Error(
+    `timed out waiting for ${expected} blocked Slack interaction replicas: ${JSON.stringify(activity)}`,
+  );
+}
+
 async function interactions(workspaceId: string) {
   return await shared!.admin<
     {
@@ -734,6 +780,230 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(persistence).toEqual({ documents: 0, memories: 0 });
   });
 
+  test("distinct same-owner reactions concurrently create one route with one durable message per Slack event", async () => {
+    if (!available) return;
+    const channelId = "C_REACTION_DISTINCT_CONCURRENT";
+    const rootTimestamp = "1706050000.000001";
+    const firstTimestamp = "1706050000.000002";
+    const secondTimestamp = "1706050000.000003";
+    const firstEventId = `E_REACTION_DISTINCT_FIRST_${crypto.randomUUID()}`;
+    const secondEventId = `E_REACTION_DISTINCT_SECOND_${crypto.randomUUID()}`;
+    const value = await fixture({
+      grantedScopes: [...OPENGENI_SLACK_BOT_REQUESTED_SCOPES],
+      slackReactionSummon: {
+        enabled: true,
+        emoji: "genie",
+        channelPolicy: { mode: "allowlist", channelIds: [channelId] },
+      },
+    });
+    value.slack.reactionContexts.set(`${channelId}:${firstTimestamp}`, {
+      messages: [
+        {
+          ts: rootTimestamp,
+          user: "U_THREAD_ROOT",
+          text: "Investigate both independent deployment signals in this thread.",
+        },
+        {
+          ts: firstTimestamp,
+          thread_ts: rootTimestamp,
+          user: value.ownerSlackUserId,
+          text: "First distinct Slack reaction task.",
+        },
+      ],
+    });
+    value.slack.reactionContexts.set(`${channelId}:${secondTimestamp}`, {
+      messages: [
+        {
+          ts: rootTimestamp,
+          user: "U_THREAD_ROOT",
+          text: "Investigate both independent deployment signals in this thread.",
+        },
+        {
+          ts: secondTimestamp,
+          thread_ts: rootTimestamp,
+          user: value.ownerSlackUserId,
+          text: "Second distinct Slack reaction task.",
+        },
+      ],
+    });
+    const firstEvent = reactionEvent({
+      teamId: value.teamId,
+      eventId: firstEventId,
+      userId: value.ownerSlackUserId,
+      channelId,
+      timestamp: firstTimestamp,
+    });
+    const secondEvent = reactionEvent({
+      teamId: value.teamId,
+      eventId: secondEventId,
+      userId: value.ownerSlackUserId,
+      channelId,
+      timestamp: secondTimestamp,
+    });
+    for (const event of [firstEvent, secondEvent, firstEvent]) {
+      expect((await postEvent(value.app, event)).status).toBe(200);
+    }
+    const [queued] = await shared!.admin<{ count: number }[]>`
+      select count(*)::int as count
+      from slack_interaction_inbox
+      where workspace_id = ${value.owner.workspaceId}`;
+    expect(queued!.count).toBe(2);
+
+    const { interaction } = await getOrCreateSlackInteraction(client.db, {
+      accountId: value.owner.accountId,
+      workspaceId: value.owner.workspaceId,
+      connectionId: value.connectionId,
+      slackTeamId: value.teamId,
+      slackChannelId: channelId,
+      slackThreadTs: rootTimestamp,
+      routeKey: `${channelId}:${rootTimestamp}`,
+      triggeringProviderEventId: firstEventId,
+      owningSubjectId: value.owner.subjectId,
+      visibility: "workspace",
+    });
+    const replicaA = createDb(shared!.appUrl, { max: 1 });
+    const replicaB = createDb(shared!.appUrl, { max: 1 });
+    const replicaADeps = {
+      ...value.deps,
+      db: replicaA.db,
+      bus: new MemoryEventBus(),
+    } as ApiRouteDeps;
+    const replicaBDeps = {
+      ...value.deps,
+      db: replicaB.db,
+      bus: new MemoryEventBus(),
+    } as ApiRouteDeps;
+    let drains: Array<Promise<boolean>> = [];
+    try {
+      await shared!.admin.begin(async (lockTx) => {
+        await lockTx`
+          select id from slack_interactions
+          where id = ${interaction.id}
+          for update`;
+        const [blocker] = await lockTx<{ pid: number }[]>`
+          select pg_backend_pid()::int as pid`;
+        if (!blocker) throw new Error("expected Slack route lock backend");
+        drains = [
+          drainSlackInteractionsOnce(replicaADeps),
+          drainSlackInteractionsOnce(replicaBDeps),
+        ];
+        await waitForBlockedAppQueries(blocker.pid, 2);
+
+        const [duringBind] = await shared!.admin<
+          { sessions: number; routes: number; inboxes: number; messages: number }[]
+        >`
+          select
+            (select count(*)::int from sessions
+              where workspace_id = ${value.owner.workspaceId}) as sessions,
+            (select count(*)::int from slack_interactions
+              where workspace_id = ${value.owner.workspaceId}) as routes,
+            (select count(*)::int from slack_interaction_inbox
+              where workspace_id = ${value.owner.workspaceId}
+                and status = 'processing') as inboxes,
+            (select count(*)::int from session_events
+              where workspace_id = ${value.owner.workspaceId}
+                and session_id = ${interaction.sessionReservationId}
+                and type = 'user.message') as messages`;
+        expect(duringBind).toEqual({ sessions: 1, routes: 1, inboxes: 2, messages: 2 });
+      });
+      expect(await Promise.all(drains)).toEqual([true, true]);
+
+      const messageRows = await shared!.admin<{ client_event_id: string; text: string }[]>`
+        select client_event_id, payload ->> 'text' as text
+        from session_events
+        where workspace_id = ${value.owner.workspaceId}
+          and session_id = ${interaction.sessionReservationId}
+          and type = 'user.message'
+        order by client_event_id`;
+      expect(messageRows).toEqual([
+        {
+          client_event_id: `slack:${firstEventId}`,
+          text: expect.stringContaining("First distinct Slack reaction task."),
+        },
+        {
+          client_event_id: `slack:${secondEventId}`,
+          text: expect.stringContaining("Second distinct Slack reaction task."),
+        },
+      ]);
+      const [route] = await interactions(value.owner.workspaceId);
+      expect(route).toMatchObject({
+        id: interaction.id,
+        session_id: interaction.sessionReservationId,
+        route_key: `${channelId}:${rootTimestamp}`,
+      });
+      let inboxRows = await shared!.admin<
+        { id: string; provider_event_id: string; status: string; attempt_count: number }[]
+      >`
+        select id, provider_event_id, status, attempt_count
+        from slack_interaction_inbox
+        where workspace_id = ${value.owner.workspaceId}
+        order by provider_event_id`;
+      for (const pendingInbox of inboxRows.filter((row) => row.status === "pending")) {
+        await shared!.admin`
+          update slack_interaction_inbox
+          set retry_at = now() - interval '1 second'
+          where id = ${pendingInbox.id}`;
+        expect(await drainSlackInteractionsOnce(replicaADeps)).toBe(true);
+      }
+      inboxRows = await shared!.admin<
+        { id: string; provider_event_id: string; status: string; attempt_count: number }[]
+      >`
+        select id, provider_event_id, status, attempt_count
+        from slack_interaction_inbox
+        where workspace_id = ${value.owner.workspaceId}
+        order by provider_event_id`;
+      expect(inboxRows.map(({ attempt_count: _attemptCount, ...row }) => row)).toEqual([
+        {
+          id: expect.any(String),
+          provider_event_id: firstEventId,
+          status: "processed",
+        },
+        {
+          id: expect.any(String),
+          provider_event_id: secondEventId,
+          status: "processed",
+        },
+      ]);
+      expect(inboxRows.every((row) => row.attempt_count >= 1 && row.attempt_count <= 2)).toBe(true);
+      expect(value.slack.posts).toHaveLength(1);
+
+      for (const retryInbox of inboxRows) {
+        await shared!.admin`
+          update slack_interaction_inbox
+          set status = 'pending', claim_holder_id = null, claim_expires_at = null,
+            retry_at = now(), last_error_code = 'forced_retry', processed_at = null,
+            updated_at = now()
+          where id = ${retryInbox.id}`;
+        expect(await drainSlackInteractionsOnce(replicaADeps)).toBe(true);
+        const [afterRetry] = await shared!.admin<{ messages: number; attempts: number }[]>`
+          select
+            (select count(*)::int from session_events
+              where workspace_id = ${value.owner.workspaceId}
+                and session_id = ${interaction.sessionReservationId}
+                and type = 'user.message') as messages,
+            (select attempt_count::int from slack_interaction_inbox
+              where id = ${retryInbox.id}) as attempts`;
+        expect(afterRetry).toEqual({
+          messages: 2,
+          attempts: retryInbox.attempt_count + 1,
+        });
+      }
+      expect((await postEvent(value.app, firstEvent)).status).toBe(200);
+      const [afterIngressReplay] = await shared!.admin<{ inboxes: number; messages: number }[]>`
+        select
+          (select count(*)::int from slack_interaction_inbox
+            where workspace_id = ${value.owner.workspaceId}) as inboxes,
+          (select count(*)::int from session_events
+            where workspace_id = ${value.owner.workspaceId}
+              and session_id = ${interaction.sessionReservationId}
+              and type = 'user.message') as messages`;
+      expect(afterIngressReplay).toEqual({ inboxes: 2, messages: 2 });
+    } finally {
+      await Promise.allSettled(drains);
+      await Promise.all([replicaA.close(), replicaB.close()]);
+    }
+  }, 60_000);
+
   test("reaction retrieval paginates to the exact message and pins it under the prompt budget", async () => {
     if (!available) return;
     const channelId = "C_REACTION_PAGED";
@@ -862,13 +1132,14 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       visibility: "workspace",
     });
 
+    const racingEventId = `E_REACTION_RACING_USER_${crypto.randomUUID()}`;
     expect(
       (
         await postEvent(
           value.app,
           reactionEvent({
             teamId: value.teamId,
-            eventId: `E_REACTION_RACING_USER_${crypto.randomUUID()}`,
+            eventId: racingEventId,
             userId: value.otherSlackUserId,
             channelId,
             timestamp: reactedTimestamp,
@@ -899,13 +1170,14 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       where workspace_id = ${value.owner.workspaceId}`;
     expect(beforeOwner!.count).toBe(0);
 
+    const owningEventId = `E_REACTION_OWNING_USER_${crypto.randomUUID()}`;
     expect(
       (
         await postEvent(
           value.app,
           reactionEvent({
             teamId: value.teamId,
-            eventId: `E_REACTION_OWNING_USER_${crypto.randomUUID()}`,
+            eventId: owningEventId,
             userId: value.ownerSlackUserId,
             channelId,
             timestamp: reactedTimestamp,
@@ -946,6 +1218,17 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       from slack_interaction_inbox
       where id = ${waiting!.id}`;
     expect(racingInbox).toEqual({ status: "processed", last_error_code: null });
+    const clientEventIds = await shared!.admin<{ client_event_id: string }[]>`
+      select client_event_id
+      from session_events
+      where workspace_id = ${value.owner.workspaceId}
+        and session_id = ${created!.id}
+        and type = 'user.message'
+      order by client_event_id`;
+    expect(clientEventIds).toEqual([
+      { client_event_id: `slack:${owningEventId}` },
+      { client_event_id: `slack:${racingEventId}` },
+    ]);
   });
 
   test("reaction pagination resumes its durable cursor across a fresh claim after Slack throttling", async () => {

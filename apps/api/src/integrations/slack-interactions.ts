@@ -806,6 +806,12 @@ async function processSlackReactionInboxEntry(
       idempotencyKey: `slack-interaction:${interaction.id}`,
       clientEventId: `slack:${entry.providerEventId}`,
     });
+    // The route-wide create key converges every replica on one reserved
+    // session, but its first writer's initial message is the only event created
+    // by that operation. Replay this exact Slack event through the normal
+    // per-message idempotency boundary: the create winner is recognized as the
+    // initial event, while every distinct loser appends one durable task.
+    await acceptSlackReactionTask(deps, grant, session.id, preparedEntry);
   } catch (error) {
     if (error instanceof HTTPException) {
       await client.postMessage({
@@ -905,10 +911,28 @@ async function continueSlackReactionSession(
     throw new SlackInteractionPermanentError("session_owner_mismatch");
   }
   await reopenSlackInteractionDelivery(deps.db, interaction);
-  await acceptSessionUserMessage(deps, grant, entry.workspaceId, interaction.sessionId, {
+  await acceptSlackReactionTask(deps, grant, interaction.sessionId, entry);
+}
+
+async function acceptSlackReactionTask(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  sessionId: string,
+  entry: SlackInteractionInboxEntry,
+) {
+  const clientEventId = `slack:${entry.providerEventId}`;
+  const initialMessages = await listSessionEventPage(deps.db, entry.workspaceId, sessionId, {
+    after: 0,
+    limit: 1,
+    includeTypes: ["user.message"],
+    payloadMode: "none",
+    maxBytes: 16 * 1024,
+  });
+  if (initialMessages.events[0]?.clientEventId === clientEventId) return;
+  await acceptSessionUserMessage(deps, grant, entry.workspaceId, sessionId, {
     text: entry.text,
     turnInstructions: SLACK_TASK_INSTRUCTIONS,
-    clientEventId: `slack:${entry.providerEventId}`,
+    clientEventId,
   });
 }
 
