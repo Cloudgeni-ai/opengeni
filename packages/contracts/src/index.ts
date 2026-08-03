@@ -8103,10 +8103,10 @@ export const CreateSessionRequest = withVariableSetIdAlias({
   variableSetId: z.string().uuid().optional(),
   environmentId: z.string().uuid().optional(),
   // The rig to bind this session to (M3). Its ACTIVE version is resolved and
-  // FROZEN onto the session at create. Omitted ⇒ the workspace's default rig
-  // (workspaces.default_rig_id) when set, else a rig-less session (today's
-  // behavior). An id that does not name a rig in the workspace is a 422.
-  rigId: z.string().uuid().optional(),
+  // FROZEN onto the session at create. Omitted ⇒ inherit the workspace default;
+  // null ⇒ explicitly create a rig-less session; UUID ⇒ bind that exact rig.
+  // An id that does not name a rig in the workspace is a 422.
+  rigId: z.string().uuid().nullable().optional(),
   goal: GoalSpec.optional(),
   clientEventId: SessionOperationKey.optional(),
   // Workspace-scoped CREATE idempotency key: collapses concurrent/retried

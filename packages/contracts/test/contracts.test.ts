@@ -477,6 +477,14 @@ describe("contracts", () => {
     expect(payload.metadata).toEqual({});
   });
 
+  test("accepts an explicit rig-less session", () => {
+    const payload = CreateSessionRequest.parse({
+      initialMessage: "inspect repo",
+      rigId: null,
+    });
+    expect(payload.rigId).toBeNull();
+  });
+
   test("accepts validated inline session skills", () => {
     const parsed = CreateSessionRequest.parse({
       initialMessage: "prepare release",
