@@ -744,14 +744,19 @@ jobs:
           terraform -chdir=deploy/terraform/gcp init -backend=false
           terraform -chdir=deploy/terraform/gcp validate
 
-  images:
-    name: Workload image builds
+  service-images:
+    name: Build service workload images
     needs: automation-admission
     if: ${{ always() && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write # push immutable exact-main-SHA dogfood images; PR and automation runs remain build-only
+    outputs:
+      api_digest: ${{ steps.api_image.outputs.digest }}
+      worker_digest: ${{ steps.worker_image.outputs.digest }}
+      web_digest: ${{ steps.web_image.outputs.digest }}
+      relay_digest: ${{ steps.relay_image.outputs.digest }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -812,16 +817,6 @@ jobs:
             OPENGENI_SERVER_VERSION=sha-${{ github.sha }}
             OPENGENI_DEPLOYMENT_REVISION=${{ github.sha }}
 
-      - name: Build headless sandbox image
-        id: sandbox_image
-        uses: docker/build-push-action@v7.3.0
-        with:
-          context: .
-          file: docker/sandbox.Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name == 'push' }}
-          tags: ${{ github.event_name == 'push' && format('ghcr.io/cloudgeni-ai/opengeni-sandbox:dogfood-sha-{0}', github.sha) || 'opengeni-sandbox:ci' }}
-
       - name: Build relay image
         id: relay_image
         uses: docker/build-push-action@v7.3.0
@@ -832,14 +827,75 @@ jobs:
           push: ${{ github.event_name == 'push' }}
           tags: ${{ github.event_name == 'push' && format('ghcr.io/cloudgeni-ai/opengeni-relay:dogfood-sha-{0}', github.sha) || 'opengeni-relay:ci' }}
 
+  sandbox-image:
+    name: Build headless sandbox workload image
+    needs: automation-admission
+    if: ${{ always() && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # push the immutable exact-main-SHA dogfood image; PR and automation runs remain build-only
+    outputs:
+      sandbox_digest: ${{ steps.sandbox_image.outputs.digest }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.sha }}
+          persist-credentials: false
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build headless sandbox image
+        id: sandbox_image
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: .
+          file: docker/sandbox.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ github.event_name == 'push' && format('ghcr.io/cloudgeni-ai/opengeni-sandbox:dogfood-sha-{0}', github.sha) || 'opengeni-sandbox:ci' }}
+
+  images:
+    name: Workload image builds
+    needs: [automation-admission, service-images, sandbox-image]
+    if: ${{ always() && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Require every workload image build
+        env:
+          SERVICE_IMAGES_RESULT: ${{ needs.service-images.result }}
+          SANDBOX_IMAGE_RESULT: ${{ needs.sandbox-image.result }}
+        run: |
+          set -euo pipefail
+          test "$SERVICE_IMAGES_RESULT" = "success"
+          test "$SANDBOX_IMAGE_RESULT" = "success"
+
+      - name: Check out exact aggregate source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.sha }}
+          persist-credentials: false
       - name: Write exact-main-SHA dogfood receipt
         if: ${{ github.event_name == 'push' }}
         env:
-          API_DIGEST: ${{ steps.api_image.outputs.digest }}
-          WORKER_DIGEST: ${{ steps.worker_image.outputs.digest }}
-          WEB_DIGEST: ${{ steps.web_image.outputs.digest }}
-          SANDBOX_DIGEST: ${{ steps.sandbox_image.outputs.digest }}
-          RELAY_DIGEST: ${{ steps.relay_image.outputs.digest }}
+          API_DIGEST: ${{ needs.service-images.outputs.api_digest }}
+          WORKER_DIGEST: ${{ needs.service-images.outputs.worker_digest }}
+          WEB_DIGEST: ${{ needs.service-images.outputs.web_digest }}
+          SANDBOX_DIGEST: ${{ needs.sandbox-image.outputs.sandbox_digest }}
+          RELAY_DIGEST: ${{ needs.service-images.outputs.relay_digest }}
         run: |
           set -euo pipefail
           for digest in \
