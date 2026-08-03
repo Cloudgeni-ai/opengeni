@@ -72,8 +72,8 @@ const LazySessionInspector = lazy(() =>
 );
 
 const LazyCodexRealtimeControl = lazy(() =>
-  import("@/components/session/codex-realtime-control").then(({ SessionCodexRealtimeControl }) => ({
-    default: SessionCodexRealtimeControl,
+  import("@opengeni/react/realtime").then(({ SessionRealtimeControl }) => ({
+    default: SessionRealtimeControl,
   })),
 );
 

@@ -52,7 +52,13 @@ spec:
           envFrom:
             - configMapRef:
                 name: {{ include "opengeni.fullname" . }}-config
+          {{- if or .Values.web.demoApiBaseUrl .Values.api.enabled }}
+          env:
+            - name: OPENGENI_DEMO_API_URL
+              value: {{ default (printf "http://%s-api:%d" (include "opengeni.fullname" .) (.Values.api.service.port | int)) .Values.web.demoApiBaseUrl | quote }}
+          {{- else }}
           env: []
+          {{- end }}
           {{- if .Values.web.probes.startup.enabled }}
           startupProbe:
             {{- include "opengeni.httpProbe" (dict "probe" .Values.web.probes.startup) | nindent 12 }}

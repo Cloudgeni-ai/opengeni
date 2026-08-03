@@ -1,7 +1,7 @@
 import type { SessionTurn } from "@opengeni/sdk";
 import { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { QueueSurface, type ComposerState, type UseTurnQueueResult } from "../src/index";
+import { QueueSurface, type ComposerState, type UseTurnQueueResult } from "@opengeni/react";
 import {
   QUEUE_BOUNDARY_CLUSTERS,
   queueBoundaryPrompt,

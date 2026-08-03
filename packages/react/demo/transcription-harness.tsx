@@ -1,7 +1,7 @@
 import type { ClientVoiceInputConfig } from "@opengeni/sdk";
 import { useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { ChatComposer, type ComposerState } from "../src/index";
+import { ChatComposer, type ComposerState } from "@opengeni/react";
 import "../../../apps/web/src/styles.css";
 
 type FixtureMode = "normal" | "denied" | "hanging";

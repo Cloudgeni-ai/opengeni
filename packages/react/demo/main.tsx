@@ -15,7 +15,7 @@ import {
   useSession,
   useSessionEvents,
   useWorkspaceSessions,
-} from "../src/index";
+} from "@opengeni/react";
 import { MANAGER_SESSION_ID, MockOpenGeniClient } from "./mock";
 import "./styles.css";
 

@@ -4,8 +4,10 @@ import viteReact from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
 export default defineConfig({
+  base: process.env.OPENGENI_REACT_DEMO_BASE ?? "/",
   plugins: [viteReact(), tailwindcss()],
   build: {
+    outDir: process.env.OPENGENI_REACT_DEMO_OUT_DIR ?? "../demo-dist",
     // The harness deliberately exposes the full lazy language/theme catalog.
     // Keep the warning boundary aligned with the production app's enforced
     // 800 kB raw lazy-chunk budget; the largest generated chunk remains below
@@ -27,6 +29,7 @@ export default defineConfig({
         workbenchEmbed: resolve(__dirname, "workbench-embed.html"),
         terminal: resolve(__dirname, "terminal.html"),
         transcription: resolve(__dirname, "transcription.html"),
+        realtime: resolve(__dirname, "realtime.html"),
       },
     },
   },

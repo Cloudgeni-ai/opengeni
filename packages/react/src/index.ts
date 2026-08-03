@@ -447,6 +447,8 @@ export { SandboxTerminal } from "./components/sandbox-terminal";
 export type { SandboxTerminalProps, XtermTheme } from "./components/sandbox-terminal";
 export { FileBrowser } from "./components/file-browser";
 export type { FileBrowserProps } from "./components/file-browser";
+export { WorkbenchChanges } from "./components/workbench-changes";
+export type { WorkbenchChangesProps } from "./components/workbench-changes";
 export { DiffView } from "./components/diff-view";
 export type { DiffViewProps, DiffTheme } from "./components/diff-view";
 export { PierreDiff } from "./components/pierre-diff";

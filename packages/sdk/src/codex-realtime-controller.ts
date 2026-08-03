@@ -147,6 +147,41 @@ export type CodexRealtimeControllerClient = {
 
 export type CodexRealtimeOwnerStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 
+/** Canonical browser-owner storage namespace for a public realtime model. */
+export function sessionRealtimeOwnerStorageNamespace(model: SessionRealtimeModel): string {
+  return model === "gpt-live-1-boulder-alpha" ? "codex-realtime-owner" : "gateway-realtime-owner";
+}
+
+/** Canonical browser-owner storage key shared by the SDK controller and React facade. */
+export function sessionRealtimeOwnerStorageKey(
+  workspaceId: string,
+  sessionId: string,
+  model: SessionRealtimeModel,
+): string {
+  return ownerStorageKey(workspaceId, sessionId, sessionRealtimeOwnerStorageNamespace(model));
+}
+
+/**
+ * Truthfully project whether this browser has resumable owner proof before the
+ * lazily loaded controller is constructed. Invalid or cross-session records are
+ * removed by the same parser used by controller recovery.
+ */
+export function hasStoredSessionRealtimeOwnerProof(input: {
+  workspaceId: string;
+  sessionId: string;
+  model: SessionRealtimeModel;
+  storage?: CodexRealtimeOwnerStorage | undefined;
+}): boolean {
+  const storage = input.storage ?? defaultStorage();
+  return (
+    readOwnerRecord(
+      storage,
+      sessionRealtimeOwnerStorageKey(input.workspaceId, input.sessionId, input.model),
+      input,
+    ) !== null
+  );
+}
+
 export type CreateCodexRealtimeControllerOptions = {
   client: CodexRealtimeControllerClient;
   workspaceId: string;

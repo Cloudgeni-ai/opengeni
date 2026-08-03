@@ -336,7 +336,7 @@ promotion schema is canonical in
 `packages/db/drizzle/0162_session_realtime_connection_promotion.sql` and
 `packages/db/src/session-realtime-ledger.ts`.
 
-The web UI mounts realtime as a compact split action inside the existing
+The public React package and web UI mount realtime as a compact split action inside the existing
 composer action row, immediately before Pause/Send; it does not reserve a
 second panel above the composer. The primary action follows the current
 lifecycle (start, end, retry, or resume audio). Its disclosure contains the
@@ -349,7 +349,16 @@ Connected Codex remains on its original WebRTC/V3 path. Gateway models use a
 single-use browser token and normalized WebSocket transport, then translate at
 the provider edge into the same durable V3 bridge; provider choice cannot alter
 session context, delegation/Steer, progress/results, ACK fencing, or tail handoff.
-`ChatComposer.actionsStart` is the provider-neutral host seam.
+`ChatComposer.actionsStart` is the provider-neutral host seam. Canonical client
+ownership is split deliberately: `packages/sdk/src/realtime.ts` exposes the
+framework-neutral controller, transport selection, lifecycle/ledger/catalog
+types, and narrow backend client interface;
+`packages/react/src/realtime/realtime-control.tsx` owns the exact hooks and UI;
+and `apps/web` is only a consumer with routing, draft, and session-creation
+callbacks. Base SDK/React entries do not eagerly import realtime, so browser
+media and transport code remain lazy and SSR-safe. `apps/api`, `apps/worker`,
+and `packages/db` continue to own persistence, prompts, context processing,
+delegation, credentials, and provider-side mechanics.
 
 Complete role-bearing provider `turn.done` rows are the only authoritative voice
 transcript. Each provider delegation includes bounded finalized dialogue since
@@ -861,6 +870,7 @@ A typed `DeploymentContract` (`@opengeni/deployment`) turns an abstract profile 
 | Documents / RAG / knowledge memories                                        | `packages/documents/src/index.ts`, `apps/api/src/routes/documents.ts`, `apps/api/src/mcp/documents.ts`                                                                                                                                                      | —                                                                                  |
 | GitHub App                                                                  | `packages/github/src/index.ts`, `apps/api/src/routes/github.ts`                                                                                                                                                                                             | —                                                                                  |
 | The published SDK/React surface                                             | `packages/sdk/src/index.ts`, `packages/react/src/index.ts`                                                                                                                                                                                                  | `.changeset/config.json`                                                           |
+| Public realtime controller / React composer experience                     | `packages/sdk/src/realtime.ts`, `packages/react/src/realtime.ts`, `packages/react/src/realtime/`; `apps/web` is consumer-only                                                                                                                               | `packages/sdk/README.md`, `packages/react/README.md`                               |
 | Composer voice input / transcription providers / microphone lifecycle      | `packages/contracts/src/index.ts`, `packages/config/src/index.ts`, `apps/api/src/transcription/`, `packages/sdk/src/client.ts`, `packages/react/src/hooks/use-voice-input.ts`                                                                              | [`transcription.md`](transcription.md)                                             |
 | Structured human input                                                     | `packages/contracts/src/index.ts`, `packages/db/src/index.ts`, `packages/runtime/src/index.ts`, `apps/worker/src/activities/agent-turn.ts`, `apps/api/src/routes/sessions.ts`                                                                               | [`human-input.md`](human-input.md)                                                 |
 | The Rust agent / wire proto                                                 | `agent/proto/opengeni_agent.proto`, `agent/scripts/codegen.sh`                                                                                                                                                                                              | `agent/README.md`                                                                  |

@@ -325,6 +325,10 @@ worker:
 
 web:
   enabled: true
+  # Server-side target for the public React reference demo's same-origin
+  # /demo-api proxy. Empty uses this release's in-cluster API service when the
+  # API is enabled; set an explicit http(s) URL only for split deployments.
+  demoApiBaseUrl: ""
   replicaCount: 2
   strategy:
     type: RollingUpdate

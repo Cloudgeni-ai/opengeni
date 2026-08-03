@@ -4,6 +4,7 @@ import type {
   EmbeddedFileAttachmentClientLike,
   EmbeddedGoalClientLike,
   EmbeddedHumanInputSessionClientLike,
+  EmbeddedRealtimeSessionClientLike,
   EmbeddedSessionClientLike,
   EmbeddedSessionLineageClientLike,
   EmbeddedSessionMcpApprovalPolicyClientLike,
@@ -52,6 +53,11 @@ export type EmbeddedSessionMcpApprovalPolicyClientOverride = {
 
 export type EmbeddedSessionReadClientOverride = {
   client?: EmbeddedSessionReadClientLike | undefined;
+  workspaceId?: string | undefined;
+};
+
+export type EmbeddedRealtimeSessionClientOverride = {
+  client?: EmbeddedRealtimeSessionClientLike | undefined;
   workspaceId?: string | undefined;
 };
 
@@ -238,6 +244,16 @@ export function useEmbeddedSessionMcpApprovalPolicy(
     eventClientMethods(override, ["getSession", "updateSessionMcpApprovalPolicy"]),
     "useSessionMcpApprovalPolicy",
   );
+}
+
+/** Resolve the exact browser/API surface required by `@opengeni/react/realtime`. */
+export function useEmbeddedRealtimeSession(
+  override: EmbeddedRealtimeSessionClientOverride = {},
+): EmbeddedClientContextValue<EmbeddedRealtimeSessionClientLike> {
+  // Preserve the existing lazy capability behavior: proxy/test clients may
+  // implement only the methods reached by their selected model and lifecycle.
+  // The exported structural type remains the complete embedding contract.
+  return useEmbeddedClientRefinement(override, [], "realtime hooks");
 }
 
 /**

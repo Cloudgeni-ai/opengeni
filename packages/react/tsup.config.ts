@@ -30,6 +30,7 @@ export default defineConfig({
     "src/session-ui.ts",
     "src/machines.ts",
     "src/model-policy.ts",
+    "src/realtime.ts",
   ],
   format: ["esm"],
   target: "es2022",

@@ -27,6 +27,18 @@ spec:
           port: {{ .Values.web.containerPort }}
   {{- if .Values.networkPolicy.egress.enabled }}
   egress:
-    {{- toYaml .Values.networkPolicy.egress.rules | nindent 4 }}
+    {{- if .Values.api.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "opengeni.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: api
+      ports:
+        - protocol: TCP
+          port: {{ .Values.api.containerPort }}
+    {{- end }}
+    {{- with .Values.networkPolicy.egress.rules }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
   {{- end }}
 {{- end }}
