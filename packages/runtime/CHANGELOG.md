@@ -1,5 +1,11 @@
 # @opengeni/runtime
 
+## 0.16.3
+
+### Patch Changes
+
+- e07eb52: Enforce frozen Allow, Ask, and Block connector action policies before provider execution while persisting metadata-only approval, decision, and outcome evidence.
+
 ## 0.16.2
 
 ### Patch Changes

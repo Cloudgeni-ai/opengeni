@@ -1,5 +1,19 @@
 # @opengeni/api-router
 
+## 0.16.3
+
+### Patch Changes
+
+- e07eb52: Enforce frozen Allow, Ask, and Block connector action policies before provider execution while persisting metadata-only approval, decision, and outcome evidence.
+- Updated dependencies [e07eb52]
+- Updated dependencies [c4a0031]
+- Updated dependencies [4fcb6af]
+  - @opengeni/db@0.22.0
+  - @opengeni/runtime@0.16.3
+  - @opengeni/core@0.17.3
+  - @opengeni/documents@0.2.68
+  - @opengeni/events@0.3.58
+
 ## 0.16.2
 
 ### Patch Changes

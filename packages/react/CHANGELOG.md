@@ -1,5 +1,11 @@
 # @opengeni/react
 
+## 0.35.3
+
+### Patch Changes
+
+- a299919: Make horizontally scrollable Markdown code blocks and tables reachable from the keyboard.
+
 ## 0.35.2
 
 ### Patch Changes
