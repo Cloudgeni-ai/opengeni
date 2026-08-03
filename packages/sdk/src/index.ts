@@ -119,10 +119,14 @@ export type {
   WorkspaceArtifactMutationResponse,
   WorkspaceArtifactVersion,
 } from "./workspace-artifacts";
-export { normalizeWorkspaceInstructionPolicyRoleKey } from "./workspace-instruction-policies";
+export {
+  normalizeWorkspaceInstructionPolicyRoleKey,
+  WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
+} from "./workspace-instruction-policies";
 export type {
   ActivateWorkspaceInstructionPolicyRequest,
   CreateWorkspaceInstructionPolicyDraftRequest,
+  CreateWorkspaceInstructionPolicyOnboardingProposalRequest,
   ImportLegacyWorkspaceInstructionPolicyDraftRequest,
   RollbackWorkspaceInstructionPolicyRequest,
   WorkspaceInstructionPolicyActivationEvent,
@@ -136,6 +140,13 @@ export type {
   WorkspaceInstructionPolicyKind,
   WorkspaceInstructionPolicyListOptions,
   WorkspaceInstructionPolicyListResponse,
+  WorkspaceInstructionPolicyOnboardingProposal,
+  WorkspaceInstructionPolicyOnboardingProposalConflictResponse,
+  WorkspaceInstructionPolicyOnboardingProposalContentErrorResponse,
+  WorkspaceInstructionPolicyOnboardingProposalListOptions,
+  WorkspaceInstructionPolicyOnboardingProposalListResponse,
+  WorkspaceInstructionPolicyOnboardingProposalSource,
+  WorkspaceInstructionPolicyOnboardingProposalStaleResponse,
   WorkspaceInstructionPolicyOperationReuseResponse,
   WorkspaceInstructionPolicyProvenanceSource,
   WorkspaceInstructionPolicyRevision,

@@ -1,10 +1,12 @@
 # Workspace State
 
-Workspace State is a read-only, read-time inventory of existing workspace
-authorities. It helps operators understand instruction-policy metadata,
-knowledge coverage, freshness, and deterministic structural gaps without
-creating another editor, storage authority, background synthesizer, or runtime
-prompt source.
+Workspace State is a read-time inventory of existing workspace authorities. It
+helps operators understand instruction-policy metadata, knowledge coverage,
+freshness, and deterministic structural gaps. The inventory remains read-only;
+the console additionally provides one bounded workspace-admin action that
+creates an inactive onboarding proposal through the existing instruction-policy
+authority. It does not create another storage authority, background synthesizer,
+or runtime prompt source.
 
 The current slice is additive and dependency-safe. It does not implement the
 full structured Workspace State administration planned for later phases.
@@ -18,6 +20,9 @@ Workspace State projects existing sources; it owns none of them:
   `workspace_instruction_policy_heads`, and
   `workspace_instruction_policy_activation_events` as documented in
   [`workspace-instruction-policies.md`](workspace-instruction-policies.md);
+- onboarding evidence remains in
+  `workspace_instruction_policy_onboarding_proposals`, and every proposal links
+  to one inactive revision in that same instruction-policy authority;
 - indexed knowledge remains in Documents (`document_bases`, `documents`, and
   `document_chunks`);
 - durable facts, decisions, procedures, and other retrieval observations remain
@@ -43,6 +48,13 @@ explicitly activates them.
 returns `Cache-Control: private, no-store`. The optional
 `?attemptId=<uuid>` query requests immutable governance metadata for one
 accepted attempt.
+
+The separate proposal surface lives at
+`/v1/workspaces/:workspaceId/instruction-policies/onboarding-proposals`.
+`GET` requires `workspace:read`; `POST` requires `workspace:admin`, an exact
+active-head baseline, bounded source/version/confidence evidence, and an
+idempotent operation ID. The POST creates only immutable proposal evidence plus
+one inactive instruction-policy revision. It never activates policy.
 
 Attempt inspection additionally requires the authenticated subject to equal
 the turn's immutable initiating-human subject (including a causal human carried
@@ -178,20 +190,25 @@ permission-unavailable, error/retry, partial-coverage, freshness, and accepted-
 attempt governance states. The inspector accepts an attempt UUID and displays
 only drift status, counts, hashes, role metadata, and timestamps. Loader
 generation fences include both workspace and attempt IDs, so a late response
-cannot populate a newer selection. The surface contains no edit, synthesis,
-lock, activation, or policy mutation control. Deep links lead to the existing
-Documents, Memory, Capabilities/Skills, Sessions/Agents, Rigs, Variable Sets,
-and Workspace Settings surfaces.
+cannot populate a newer selection. A second generation-fenced loader lists
+recent onboarding proposal evidence. Workspace admins may submit one explicit
+draft-only proposal with the exact displayed active-head baseline; readers see
+the immutable source/version/confidence, linked draft, baseline, and timestamp.
+There is no activation, rollback, Memory promotion, Documents promotion, or
+general policy editor. Deep links lead to the existing Documents, Memory,
+Capabilities/Skills, Sessions/Agents, Rigs, Variable Sets, and Workspace
+Settings surfaces.
 
 ## Explicit non-goals
 
 This slice does not implement:
 
-- policy or preference administration mutations;
+- policy activation, rollback, preference administration, or general policy
+  editing;
 - preference storage;
 - source/fact schema work;
 - Slack, transcript, email, repository, or other connectors;
-- policy draft creation, activation, rollback, or administration UI;
+- proposal review/approval states or automatic proposal generation;
 - background sweeps, auto-synthesis, direct prompt injection, or a new charter
   authority.
 
