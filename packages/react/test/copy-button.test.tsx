@@ -36,6 +36,57 @@ describe("CopyButton", () => {
     expect(button?.getAttribute("aria-label")).toBe("Copied");
     await r.unmount();
   });
+
+  test("resets Copied after the flash even when clipboard write is async", async () => {
+    let releaseWrite!: () => void;
+    const writeGate = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText: async () => {
+          await writeGate;
+        },
+      },
+    });
+
+    const r = await renderComponent(
+      <TooltipProvider delayDuration={400}>
+        <CopyButton text="async copy" label="Copy message" />
+      </TooltipProvider>,
+    );
+    const button = r.container.querySelector("button[data-og-copy]") as HTMLButtonElement | null;
+    expect(button).not.toBeNull();
+
+    // Pointer click (detail > 0) exercises the post-await blur path that used
+    // to throw when currentTarget was already cleared.
+    await act(async () => {
+      button?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true, detail: 1 }),
+      );
+    });
+    await flush();
+    expect(button?.getAttribute("data-state")).toBe("idle");
+
+    await act(async () => {
+      releaseWrite();
+      await writeGate;
+      // Let the click handler's continuation (setState + timer) flush.
+      await Promise.resolve();
+    });
+    await flush();
+    expect(button?.getAttribute("data-state")).toBe("copied");
+    expect(button?.getAttribute("aria-label")).toBe("Copied");
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1700));
+    });
+    await flush();
+    expect(button?.getAttribute("data-state")).toBe("idle");
+    expect(button?.getAttribute("aria-label")).toBe("Copy message");
+    await r.unmount();
+  });
 });
 
 describe("Markdown copy chrome", () => {
@@ -53,7 +104,9 @@ describe("Markdown copy chrome", () => {
     const source = "```ts\nconst x = 1;\n```";
     const r = await renderComponent(<Markdown>{source}</Markdown>);
     const button = r.container.querySelector('button[data-og-copy][aria-label="Copy code"]');
+    const codeBlock = r.container.querySelector("pre");
     expect(button).not.toBeNull();
+    expect(codeBlock?.getAttribute("tabindex")).toBe("0");
     // Ghost control: no bordered "Copy code" pill chrome.
     expect(button?.textContent?.trim() ?? "").toBe("");
     expect(button?.className ?? "").not.toContain("border-og-border");
@@ -79,7 +132,9 @@ describe("Markdown copy chrome", () => {
     const source = `| A | B |\n| --- | --- |\n| 1 | 2 |`;
     const r = await renderComponent(<Markdown>{source}</Markdown>);
     const button = r.container.querySelector('button[data-og-copy][aria-label="Copy table"]');
+    const scrollRegion = r.container.querySelector("table")?.parentElement;
     expect(button).not.toBeNull();
+    expect(scrollRegion?.getAttribute("tabindex")).toBe("0");
     expect(button?.textContent?.trim() ?? "").toBe("");
     await act(async () => {
       button?.dispatchEvent(new MouseEvent("click", { bubbles: true }));

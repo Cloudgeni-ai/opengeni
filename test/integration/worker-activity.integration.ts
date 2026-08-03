@@ -198,7 +198,11 @@ describe("worker activities integration", () => {
     const runtime = {
       prepareTools: async (settings: Parameters<OpenGeniRuntime["prepareTools"]>[0]) => {
         preparedSettings = settings;
-        return { mcpServers: [], close: async () => {} };
+        return {
+          mcpServers: [],
+          resolvedMcpConnectionIds: new Map<string, string>(),
+          close: async () => {},
+        };
       },
     };
     const runSettings = await settingsWithSessionMcpServersForRun(
@@ -1639,7 +1643,11 @@ describe("worker activities integration", () => {
       configure: () => {},
       resolveTurnModel: () => null,
       buildAgent: () => ({}) as never,
-      prepareTools: async () => ({ mcpServers: [], close: async () => {} }),
+      prepareTools: async () => ({
+        mcpServers: [],
+        resolvedMcpConnectionIds: new Map<string, string>(),
+        close: async () => {},
+      }),
       prepareInput: async (_agent, input) => {
         expect(input.kind).toBe("approval");
         return { input: "approved" };

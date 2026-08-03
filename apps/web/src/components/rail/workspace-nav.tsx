@@ -136,7 +136,7 @@ function WorkspaceSettingsMenu(props: {
       </summary>
       <div
         className={cn(
-          "absolute bottom-full z-50 mb-1.5 max-h-[min(24rem,70vh)] w-64 overflow-y-auto rounded-md border border-border bg-surface p-1 shadow-md",
+          "absolute bottom-full z-50 mb-1.5 max-h-[min(36rem,75vh)] w-64 overflow-y-auto rounded-md border border-border bg-surface p-1 shadow-md",
           props.collapsed ? "left-0" : "left-0",
         )}
       >

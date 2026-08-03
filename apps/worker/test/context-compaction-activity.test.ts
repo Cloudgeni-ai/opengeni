@@ -720,6 +720,7 @@ describe("standalone context compaction execution", () => {
       }),
       prepareTools: async () => ({
         mcpServers: [],
+        resolvedMcpConnectionIds: new Map<string, string>(),
         codexConnectorNamespaces: new Set<string>(),
         close: async () => undefined,
       }),

@@ -520,6 +520,7 @@ export async function registerSessionTurnAttemptClaim(
     temporalActivityId: string;
     verifiedControlRevision: number;
     mcpApprovalPolicies: Record<string, SessionMcpApprovalPolicy>;
+    connectorActionPolicies: schema.ConnectorActionPolicySnapshotEntry[];
   },
 ): Promise<typeof schema.sessionTurnAttempts.$inferSelect> {
   const [inserted] = await db
@@ -555,6 +556,8 @@ export async function registerSessionTurnAttemptClaim(
     existing.temporalWorkflowId !== input.temporalWorkflowId ||
     existing.temporalWorkflowRunId !== input.temporalWorkflowRunId ||
     existing.temporalActivityId !== input.temporalActivityId ||
+    JSON.stringify(existing.connectorActionPolicies) !==
+      JSON.stringify(input.connectorActionPolicies) ||
     existing.state === "closed"
   ) {
     throw new SessionControlInvariantError(

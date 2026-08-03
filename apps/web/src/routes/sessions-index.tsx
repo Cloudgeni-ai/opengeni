@@ -1,7 +1,7 @@
 // The sessions index: the centered "Start a session" composer. The form is
-// organised top-down — (A) message → (B) WHERE SHOULD THIS RUN? (the promoted
-// top-level compute target) → (C) the compute-dependent band it gates → (D) the
-// compute-independent optional band (goal, OpenGeni tool permissions).
+// organised top-down — (A) message + model/tools/repos pills → (B) WHERE SHOULD
+// THIS RUN? (when machines exist) → (C) rig/variable-set or machine fields.
+// Goals are set by the agent (or later surfaces), not at create.
 //
 // "Where should this run?" is a first-class segmented control with two kinds:
 // Managed Sandbox (ephemeral, platform-owned — clones repos, injects env) vs
@@ -28,44 +28,42 @@ import { Link, useNavigate } from "@tanstack/react-router";
 import {
   BoxIcon,
   CheckIcon,
-  ChevronDownIcon,
-  FlagIcon,
   FolderIcon,
-  GitBranchIcon,
   MonitorOffIcon,
   ServerCogIcon,
   ServerIcon,
-  ShieldIcon,
-  SlidersHorizontalIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
+import { BillingClassMark } from "@/components/billing-class-mark";
 import { ConsoleComposer, useDraftAttachments } from "@/components/Composer";
-import { PermissionGroupPicker } from "@/components/permission-picker";
 import { ModelPicker, SessionToolPicker, type SessionToolSelection } from "@/components/pickers";
 import { RepositoryContextPicker } from "@/components/repository-picker";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/ui/notice";
 import { Select } from "@/components/ui/select";
 import { StatusDot, type StatusTone } from "@/components/ui/status-dot";
 import { useAppContext, useLatestCallback } from "@/context";
+import { FOCUS_CREATE_COMPOSER_EVENT } from "@/lib/create-composer-focus";
+import { displayModel } from "@/lib/format";
 import { isMachineComputeSelectable } from "@/lib/machine-selectability";
-import { coerceReasoningEffortForModel, findPickerRow } from "@/lib/model-policy";
-import { sessionMcpPermissionGroups } from "@/lib/permissions";
+import {
+  coerceReasoningEffortForModel,
+  findPickerRow,
+  type PickerModelRow,
+} from "@/lib/model-policy";
+import { isCodexProductModel } from "@/lib/session-model";
 import { groupSessionsForRail, relativeTimeLabel } from "@/lib/sessions-group";
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 import {
   emptySessionDraft,
   isSessionDraftComputeReady,
-  managedBackendOptions,
   newSessionDraftOptionsFromSessionDraft,
   selfhostedCapabilityChips,
   sessionDraftFromNewSessionDraftOptions,
   submissionFromSessionDraft,
   type ConnectedMachineTarget,
-  type ManagedSandboxTarget,
   type SessionDraft,
 } from "@/lib/session-create";
 import {
@@ -81,9 +79,7 @@ import {
   runNewSessionRouteSubmission,
   type CreatedSessionRouteAuthority,
 } from "@/routes/sessions-index-submission";
-import type { SandboxBackend, Session } from "@/types";
-
-const BACKEND_OPTIONS = managedBackendOptions();
+import type { Session } from "@/types";
 
 export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
   const { accessKeyVersion } = useAppContext();
@@ -101,16 +97,25 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
   const attachments = useDraftAttachments(workspaceId);
   const { resetSessionView } = context;
   const [message, setMessage] = useState("");
-  const [optionsOpen, setOptionsOpen] = useState(false);
   const [draft, setDraft] = useState<SessionDraft>(() => emptySessionDraft());
   const [toolSelectionExplicit, setToolSelectionExplicit] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [createdSessionAuthority, setCreatedSessionAuthority] =
     useState<CreatedSessionRouteAuthority | null>(null);
+  const composerRegionRef = useRef<HTMLDivElement | null>(null);
+  // 0 = no explicit request (mount uses ConsoleComposer autoFocus). >0 = same-route
+  // new-session / shortcut asked us to put the caret back in the create composer.
+  const [createComposerFocusGen, setCreateComposerFocusGen] = useState(0);
 
   useEffect(() => {
     resetSessionView();
   }, [resetSessionView, workspaceId]);
+
+  useEffect(() => {
+    const onRequest = () => setCreateComposerFocusGen((current) => current + 1);
+    window.addEventListener(FOCUS_CREATE_COMPOSER_EVENT, onRequest);
+    return () => window.removeEventListener(FOCUS_CREATE_COMPOSER_EVENT, onRequest);
+  }, []);
 
   const computeReady = isSessionDraftComputeReady(draft);
   const persistedToolPolicy = useMemo(
@@ -203,6 +208,13 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
     resourceHydrationReady: context.githubCatalogReady && context.workspaceMcpCatalogReady,
   });
   const busy = context.busy || submitting;
+
+  useEffect(() => {
+    if (createComposerFocusGen === 0 || newSessionDraft.loading) return;
+    const textarea = composerRegionRef.current?.querySelector("textarea");
+    if (!textarea || textarea.disabled) return;
+    textarea.focus();
+  }, [createComposerFocusGen, newSessionDraft.loading]);
 
   // The session does not exist yet, so this surface cannot use `useComposer`
   // (that hook sends to a session). It still renders the package ChatComposer
@@ -349,7 +361,7 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
           </h1>
         </section>
 
-        <div className="mt-8">
+        <div ref={composerRegionRef} className="mt-8">
           <ConsoleComposer
             workspaceId={workspaceId}
             composer={createComposer}
@@ -362,6 +374,7 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
               <SessionControlStrip
                 workspaceId={workspaceId}
                 disabled={busy || newSessionDraft.loading}
+                showRepos={draft.compute.kind === "sandbox"}
                 selection={{
                   mcpServerIds: context.selectedCapabilityToolIds,
                   firstPartyToolIds: draft.firstPartyMcpTools,
@@ -384,14 +397,6 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
             onChange={setDraft}
             disabled={busy || newSessionDraft.loading}
           />
-
-          <OptionalSessionOptions
-            open={optionsOpen}
-            onOpenChange={setOptionsOpen}
-            draft={draft}
-            onChange={setDraft}
-            disabled={busy || newSessionDraft.loading}
-          />
         </div>
 
         <RecentSessions workspaceId={workspaceId} />
@@ -402,11 +407,12 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
 
 // ── Recent sessions — the quiet main-canvas browser the rail can't be (D4.2) ──
 // A calm section below the composer: the most recent sessions as compact rows
-// (status dot, title, repo/model meta, relative time), linking straight in. It
-// reuses the same useWorkspaceSessions hook the rail runs on and renders only
-// when sessions exist, so the hero stays the composer.
+// (status, title, provider mark + catalog model label, relative time). Reuses
+// the rail's session list + the workspace model catalog so labels/marks match
+// the model picker — never raw wire ids as the primary display.
 function RecentSessions({ workspaceId }: { workspaceId: string }) {
   const { sessions, pinned } = useWorkspaceSessions({ limit: 12, pollIntervalMs: 30_000 });
+  const modelCatalog = useWorkspaceModelCatalog(workspaceId);
   const recent = useMemo(() => {
     const ordinary = sessions.filter((session) => !session.pinned);
     const { running, grouped } = groupSessionsForRail(ordinary);
@@ -422,14 +428,19 @@ function RecentSessions({ workspaceId }: { workspaceId: string }) {
 
   return (
     <section className="mt-12">
-      <h2 className="mb-2 px-0.5 text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
+      <h2 className="mb-1.5 px-0.5 text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
         Recent sessions
       </h2>
       {/* flex-col, not grid: a grid auto track grows to a nowrap row's full
           min-content width, defeating truncate and overflowing the page. */}
-      <ul className="flex min-w-0 flex-col gap-1">
+      <ul className="flex min-w-0 flex-col divide-y divide-border/60">
         {recent.map((session) => (
-          <RecentSessionRow key={session.id} workspaceId={workspaceId} session={session} />
+          <RecentSessionRow
+            key={session.id}
+            workspaceId={workspaceId}
+            session={session}
+            catalogRows={modelCatalog.rows}
+          />
         ))}
       </ul>
     </section>
@@ -460,24 +471,54 @@ function sessionRepoLabel(session: Session): string | null {
   return parts.length >= 2 ? parts.slice(-2).join("/") : (parts.at(-1) ?? null);
 }
 
-function RecentSessionRow({ workspaceId, session }: { workspaceId: string; session: Session }) {
+function recentSessionModelPresentation(
+  modelId: string,
+  catalogRows: readonly PickerModelRow[],
+): { label: string; billingClass: PickerModelRow["billingClass"] } {
+  const row = findPickerRow([...catalogRows], modelId);
+  return {
+    label: row?.label ?? displayModel(modelId),
+    billingClass:
+      row?.billingClass ??
+      (isCodexProductModel(modelId) ? "codex_subscription" : "opengeni_credits"),
+  };
+}
+
+function RecentSessionRow({
+  workspaceId,
+  session,
+  catalogRows,
+}: {
+  workspaceId: string;
+  session: Session;
+  catalogRows: readonly PickerModelRow[];
+}) {
   const title = session.title?.trim() || session.initialMessage?.trim() || "Untitled session";
-  const meta = [session.model, sessionRepoLabel(session)].filter(Boolean).join(" · ");
+  const model = recentSessionModelPresentation(session.model, catalogRows);
+  const repo = sessionRepoLabel(session);
+  const metaBits = [model.label, repo].filter(Boolean);
   return (
     <li className="min-w-0">
       <Link
         to="/workspaces/$workspaceId/sessions/$sessionId"
         params={{ workspaceId, sessionId: session.id }}
-        className="group flex items-center gap-3 rounded-lg border border-border bg-surface/40 px-3 py-2.5 transition-colors hover:border-border-strong hover:bg-surface-2/60"
+        className="group flex items-center gap-3 rounded-md px-1 py-2.5 transition-colors hover:bg-surface-2/50"
       >
         <StatusDot
           tone={SESSION_STATUS_TONE[session.status]}
           pulse={session.status === "running"}
         />
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-sm text-fg">{title}</span>
-          {meta ? (
-            <span className="mt-0.5 block truncate text-2xs text-fg-subtle">{meta}</span>
+          <span className="block truncate text-sm text-fg group-hover:text-fg">{title}</span>
+          {metaBits.length > 0 ? (
+            <span className="mt-0.5 flex min-w-0 items-center gap-1.5 text-2xs text-fg-subtle">
+              <BillingClassMark
+                billingClass={model.billingClass}
+                className="size-3 text-fg-muted"
+                aria-label=""
+              />
+              <span className="truncate">{metaBits.join(" · ")}</span>
+            </span>
           ) : null}
         </span>
         <span className="shrink-0 text-2xs tabular-nums text-fg-subtle">
@@ -488,17 +529,19 @@ function RecentSessionRow({ workspaceId, session }: { workspaceId: string; sessi
   );
 }
 
-// The composer's inline strip: compute-INDEPENDENT controls only (model + tools).
-// Repository context now lives in the compute-dependent band below (it only makes
-// sense once a managed sandbox is the target), not as an always-visible pill.
+// Composer footer pills: model, tools, and (for managed sandbox) repos — same
+// compact control language. Repo stays out of the compute band so that band
+// only shows when rigs / variable sets exist.
 function SessionControlStrip({
   workspaceId,
   disabled,
+  showRepos,
   selection,
   onToolSelectionChange,
 }: {
   workspaceId: string;
   disabled: boolean;
+  showRepos: boolean;
   selection: SessionToolSelection;
   onToolSelectionChange: (selection: SessionToolSelection) => void;
 }) {
@@ -521,7 +564,7 @@ function SessionControlStrip({
     modelCatalog.rows,
   ]);
   return (
-    <div className="flex min-w-0 items-center gap-1.5">
+    <div className="flex min-w-0 flex-wrap items-center gap-1.5">
       <ModelPicker
         rows={modelCatalog.rows}
         model={context.model}
@@ -541,6 +584,9 @@ function SessionControlStrip({
         disabled={disabled}
         onChange={onToolSelectionChange}
       />
+      {showRepos ? (
+        <WorkspaceRepositoryPicker workspaceId={workspaceId} disabled={disabled} />
+      ) : null}
     </div>
   );
 }
@@ -625,15 +671,6 @@ function ComputeTargetControl(props: {
   // option isn't silently swallowed by a transient outage (states #4).
   const fleetLoadFailed =
     fleet.error != null && !(fleet.error instanceof OpenGeniApiError && fleet.error.status === 404);
-  // Preserve the last managed backend override across kind toggles (lossless) so
-  // toggling machine→sandbox returns to the prior choice, not a forced reset.
-  const lastBackend = useRef<SandboxBackend | "">(
-    draft.compute.kind === "sandbox" ? draft.compute.backend : "",
-  );
-  if (draft.compute.kind === "sandbox") {
-    lastBackend.current = draft.compute.backend;
-  }
-
   // The Connected Machine path is OPT-IN. With an EMPTY self-hosted fleet and no
   // explicit opt-in, the segmented control is not rendered at all — the composer
   // shows the clean sandbox-only flow (byte-identical submission to before this
@@ -643,22 +680,32 @@ function ComputeTargetControl(props: {
   // fleet has machines. Discovery lives on the Machines page, not the composer.
   const showComputeTarget = !fleetEmpty;
 
+  const sandboxBackendOverride = draft.compute.kind === "sandbox" ? draft.compute.backend : "";
+
   // Defensive: if the segmented control is hidden (clean flow) while a stale draft
   // still points at a machine (e.g. the last machine just left the fleet), fall
   // back to the managed sandbox so a hidden machine target can never be submitted.
+  // Also drop any leftover managed-backend override — that control is gone from
+  // the composer, so a stale draft must not keep forcing a sandbox type.
   useEffect(() => {
     if (!showComputeTarget && draft.compute.kind === "machine") {
-      onChange({ ...draft, compute: { kind: "sandbox", backend: lastBackend.current } });
+      onChange({ ...draft, compute: { kind: "sandbox", backend: "" } });
+      return;
+    }
+    if (draft.compute.kind === "sandbox" && sandboxBackendOverride) {
+      onChange({ ...draft, compute: { kind: "sandbox", backend: "" } });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showComputeTarget, draft.compute.kind]);
+  }, [showComputeTarget, draft.compute.kind, sandboxBackendOverride]);
 
   const selectKind = (kind: ComputeKind) => {
     if (kind === draft.compute.kind) {
       return;
     }
     if (kind === "sandbox") {
-      onChange({ ...draft, compute: { kind: "sandbox", backend: lastBackend.current } });
+      // Composer no longer exposes a managed-backend override — always the
+      // deployment default (empty wire field).
+      onChange({ ...draft, compute: { kind: "sandbox", backend: "" } });
       return;
     }
     // Auto-pick the first selectable machine so the common single-machine case is
@@ -680,22 +727,17 @@ function ComputeTargetControl(props: {
   // opt-in link to reveal the Connected Machine path. The sandbox compute is
   // narrowed defensively (the normalization effect keeps the draft in sync).
   if (!showComputeTarget) {
-    const sandboxCompute: ManagedSandboxTarget =
-      draft.compute.kind === "sandbox"
-        ? draft.compute
-        : { kind: "sandbox", backend: lastBackend.current };
-    return (
-      <section className="mt-5 grid gap-2">
-        <ManagedSandboxFields
-          workspaceId={props.workspaceId}
-          draft={draft}
-          compute={sandboxCompute}
-          onChange={onChange}
-          disabled={props.disabled}
-        />
-        {fleetLoadFailed ? <FleetErrorNotice onRetry={() => void fleet.refresh()} /> : null}
-      </section>
-    );
+    // No machines → no compute chooser. Rig/variable-set card only when needed;
+    // ManagedSandboxFields returns null when empty so we don't leave a blank gap.
+    if (fleetLoadFailed) {
+      return (
+        <section className="mt-5 grid gap-2">
+          <ManagedSandboxFields draft={draft} onChange={onChange} disabled={props.disabled} />
+          <FleetErrorNotice onRetry={() => void fleet.refresh()} />
+        </section>
+      );
+    }
+    return <ManagedSandboxFields draft={draft} onChange={onChange} disabled={props.disabled} />;
   }
 
   return (
@@ -731,16 +773,9 @@ function ComputeTargetControl(props: {
       {fleetLoadFailed ? <FleetErrorNotice onRetry={() => void fleet.refresh()} /> : null}
 
       {draft.compute.kind === "sandbox" ? (
-        <ManagedSandboxFields
-          workspaceId={props.workspaceId}
-          draft={draft}
-          compute={draft.compute}
-          onChange={onChange}
-          disabled={props.disabled}
-        />
+        <ManagedSandboxFields draft={draft} onChange={onChange} disabled={props.disabled} />
       ) : (
         <ConnectedMachineFields
-          workspaceId={props.workspaceId}
           draft={draft}
           compute={draft.compute}
           machines={machines}
@@ -804,44 +839,32 @@ function ComputeKindButton(props: {
   );
 }
 
-// ── Managed Sandbox kind: repo+branch (clone source), env, Advanced backend ───
+// ── Managed Sandbox extras: rig + variable set only (repos live in the composer pills) ─
 
 function ManagedSandboxFields(props: {
-  workspaceId: string;
   draft: SessionDraft;
-  compute: ManagedSandboxTarget;
   onChange: (draft: SessionDraft) => void;
   disabled: boolean;
 }) {
-  const { draft, compute, onChange } = props;
+  const { draft, onChange } = props;
   const variableSets = useVariableSets();
   const rigs = useRigs();
-  const selectedBackend =
-    BACKEND_OPTIONS.find((option) => option.value === compute.backend) ?? BACKEND_OPTIONS[0];
-  const backendSummary = [selectedBackend?.label, ...(selectedBackend?.chips ?? [])]
-    .filter(Boolean)
-    .join(" · ");
+  const showRigs = rigs.rigs.length > 0;
+  const showVariableSets = variableSets.variableSets.length > 0;
+  if (!showRigs && !showVariableSets) {
+    return null;
+  }
 
   return (
     // One flat card: hairline-separated rows, controls right-aligned, no
     // nested boxes and no restating helper text — the controls speak.
-    <div className="overflow-hidden rounded-lg border border-border bg-surface/40">
-      <div className="flex items-center justify-between gap-3 px-3 py-2">
-        <Label className="flex shrink-0 items-center gap-1.5 text-xs">
-          <GitBranchIcon className="size-3 shrink-0 text-fg-subtle" />
-          Repository
-        </Label>
-        <div className="flex min-w-0 justify-end">
-          <WorkspaceRepositoryPicker workspaceId={props.workspaceId} disabled={props.disabled} />
-        </div>
-      </div>
-
+    <div className="mt-5 overflow-hidden rounded-lg border border-border bg-surface/40">
       {/* Rig picker — offered only when the workspace has at least one rig.
           Picking a rig preselects its default variable sets in the control
           below (still user-overridable). Empty ⇒ the workspace default rig,
           resolved server-side. */}
-      {rigs.rigs.length > 0 ? (
-        <div className="flex items-center justify-between gap-3 border-t border-border/70 px-3 py-2">
+      {showRigs ? (
+        <div className="flex items-center justify-between gap-3 px-3 py-2">
           <Label className="flex shrink-0 items-center gap-1.5 text-xs">
             <ServerCogIcon className="size-3 shrink-0 text-fg-subtle" />
             Rig
@@ -876,8 +899,13 @@ function ManagedSandboxFields(props: {
 
       {/* Offer variableSets only when some exist — configuration UI for
           resources you don't have is clutter (same rule as machines). */}
-      {variableSets.variableSets.length > 0 ? (
-        <div className="flex items-center justify-between gap-3 border-t border-border/70 px-3 py-2">
+      {showVariableSets ? (
+        <div
+          className={cn(
+            "flex items-center justify-between gap-3 px-3 py-2",
+            showRigs && "border-t border-border/70",
+          )}
+        >
           <Label className="flex shrink-0 items-center gap-1.5 text-xs">
             <BoxIcon className="size-3 shrink-0 text-fg-subtle" />
             Variable set
@@ -897,48 +925,13 @@ function ManagedSandboxFields(props: {
           </Select>
         </div>
       ) : null}
-
-      {/* Low-level sandbox backend override — a quiet in-card disclosure row,
-          descriptor-driven from CAPABILITY_DESCRIPTORS. */}
-      <details className="group border-t border-border/70">
-        <summary className="flex cursor-pointer list-none items-center gap-1.5 px-3 py-2 text-2xs text-fg-subtle transition-colors hover:text-fg-muted">
-          <ChevronDownIcon className="size-3 shrink-0 transition-transform group-open:rotate-180" />
-          <span>Advanced</span>
-          <span className="text-fg-subtle/70">·</span>
-          <span className="truncate">backend: {backendSummary}</span>
-        </summary>
-        <div className="grid gap-1.5 px-3 pb-2.5">
-          <Select
-            value={compute.backend}
-            disabled={props.disabled}
-            onChange={(event) =>
-              onChange({
-                ...draft,
-                compute: { kind: "sandbox", backend: event.target.value as SandboxBackend | "" },
-              })
-            }
-          >
-            {BACKEND_OPTIONS.map((option) => (
-              <option key={option.value || "default"} value={option.value}>
-                {option.label}
-                {option.chips.length > 0 ? ` · ${option.chips.join(" · ")}` : ""}
-              </option>
-            ))}
-          </Select>
-          <p className="text-2xs text-fg-subtle">
-            Forces the underlying sandbox type. Leave on the deployment default unless you need a
-            specific backend.
-          </p>
-        </div>
-      </details>
     </div>
   );
 }
 
-// ── Connected Machine kind: machine picker, folder, grayed repos, env note ────
+// ── Connected Machine kind: machine picker, folder, env note ──────────────────
 
 function ConnectedMachineFields(props: {
-  workspaceId: string;
   draft: SessionDraft;
   compute: ConnectedMachineTarget;
   machines: MachineView[];
@@ -1045,35 +1038,15 @@ function ConnectedMachineFields(props: {
         </p>
       </div>
 
-      {/* Repositories — grayed: a connected machine uses its own checkout & git
-          auth (D3), so the workspace repo selection is never cloned onto it. */}
-      <div className="grid gap-2 border-t border-border pt-4">
-        <Label className="flex items-center justify-between gap-1.5 text-xs text-fg-subtle">
-          <span className="flex items-center gap-1.5">
-            <GitBranchIcon className="size-3 shrink-0" />
-            Repositories
-          </span>
-          <span className="rounded border border-border px-1.5 py-px text-2xs font-normal text-fg-subtle">
-            Not cloned here
-          </span>
-        </Label>
-        <div className="pointer-events-none select-none opacity-45">
-          <WorkspaceRepositoryPicker workspaceId={props.workspaceId} disabled />
-        </div>
-        <p className="text-2xs text-fg-subtle">
-          This machine uses its own checkout &amp; git auth, so your selected repositories
-          aren&apos;t cloned onto it.
-        </p>
-      </div>
-
-      {/* Variable set injection — hidden on a connected machine (D2). */}
+      {/* Variable set injection — hidden on a connected machine (D2). Repos live
+          in the composer pills for managed sandboxes only (not cloned here). */}
       <div className="grid gap-1 border-t border-border pt-4">
         <p className="flex items-center gap-1.5 text-xs text-fg-subtle">
           <BoxIcon className="size-3 shrink-0" />
-          No variable set is injected here.
+          Uses this machine&apos;s checkout, git auth, and environment
         </p>
         <p className="text-2xs text-fg-subtle">
-          The machine&apos;s own variable set &amp; git credentials apply.
+          Workspace repositories and variable sets aren&apos;t injected onto a connected machine.
         </p>
       </div>
     </div>
@@ -1143,112 +1116,5 @@ function FolderRadio(props: {
       ) : null}
       <span className="text-2xs text-fg-subtle">— {props.hint}</span>
     </button>
-  );
-}
-
-// ── Compute-independent optional band: goal + OpenGeni tool permissions ───────
-
-function OptionalSessionOptions(props: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  draft: SessionDraft;
-  onChange: (draft: SessionDraft) => void;
-  disabled: boolean;
-}) {
-  const { draft } = props;
-  const update = (patch: Partial<SessionDraft>) => props.onChange({ ...draft, ...patch });
-  const summary = [
-    draft.goalText.trim() ? "goal set" : null,
-    draft.customMcpPermissions ? `${draft.mcpPermissions.size} MCP scopes` : null,
-  ].filter(Boolean);
-
-  return (
-    <Collapsible open={props.open} onOpenChange={props.onOpenChange} className="mt-2">
-      <div className="overflow-hidden rounded-lg border border-border bg-surface/40">
-        <CollapsibleTrigger asChild>
-          <button
-            type="button"
-            className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-fg-muted transition-colors hover:bg-surface-2/40 hover:text-fg"
-          >
-            <SlidersHorizontalIcon className="size-3.5 shrink-0 text-fg-subtle" />
-            <span className="font-medium">Goal &amp; tool permissions</span>
-            <span className="min-w-0 flex-1 truncate text-2xs text-fg-subtle">
-              {summary.length > 0 ? summary.join(" · ") : "Optional"}
-            </span>
-            <ChevronDownIcon
-              className={cn("size-3.5 shrink-0 transition-transform", props.open && "rotate-180")}
-            />
-          </button>
-        </CollapsibleTrigger>
-        <CollapsibleContent>
-          <div className="grid gap-3 border-t border-border/70 px-3 pb-3 pt-2.5">
-            <div className="grid gap-2">
-              <Label className="flex items-center gap-1.5 text-xs">
-                <FlagIcon className="size-3 shrink-0 text-fg-subtle" />
-                Goal (optional)
-              </Label>
-              <textarea
-                value={draft.goalText}
-                disabled={props.disabled}
-                onChange={(event) => update({ goalText: event.target.value })}
-                placeholder="Keep the session working on its own between your messages…"
-                className="min-h-12 rounded-md border border-border bg-bg px-3 py-2 text-sm transition-colors placeholder:text-fg-subtle hover:border-border-strong focus-visible:border-ring focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
-              />
-              <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_10rem]">
-                <Input
-                  value={draft.goalSuccessCriteria}
-                  disabled={props.disabled || !draft.goalText.trim()}
-                  onChange={(event) => update({ goalSuccessCriteria: event.target.value })}
-                  placeholder="Success criteria (optional)"
-                  className="h-9 text-sm"
-                />
-                <Input
-                  value={draft.goalMaxAutoContinuations}
-                  disabled={props.disabled || !draft.goalText.trim()}
-                  onChange={(event) => update({ goalMaxAutoContinuations: event.target.value })}
-                  placeholder="Max continuations"
-                  inputMode="numeric"
-                  className="h-9 text-sm"
-                />
-              </div>
-            </div>
-
-            <div className="grid gap-2">
-              <label className="flex items-center gap-2 text-xs text-fg-muted">
-                <input
-                  type="checkbox"
-                  checked={draft.customMcpPermissions}
-                  disabled={props.disabled}
-                  onChange={(event) => update({ customMcpPermissions: event.target.checked })}
-                  className="size-3.5 accent-brand-strong"
-                />
-                <ShieldIcon className="size-3 shrink-0 text-fg-subtle" />
-                Restrict this session&apos;s OpenGeni tool permissions
-              </label>
-              {draft.customMcpPermissions ? (
-                <PermissionGroupPicker
-                  groups={sessionMcpPermissionGroups}
-                  selected={draft.mcpPermissions}
-                  disabled={props.disabled}
-                  onToggle={(permission) => {
-                    const next = new Set(draft.mcpPermissions);
-                    if (next.has(permission)) {
-                      next.delete(permission);
-                    } else {
-                      next.add(permission);
-                    }
-                    update({ mcpPermissions: next });
-                  }}
-                />
-              ) : (
-                <p className="text-2xs text-fg-subtle">
-                  By default this session can use OpenGeni tools on your behalf in this workspace.
-                </p>
-              )}
-            </div>
-          </div>
-        </CollapsibleContent>
-      </div>
-    </Collapsible>
   );
 }

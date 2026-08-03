@@ -392,6 +392,11 @@ describe("SDK / contracts parity (full coverage)", () => {
       role: "devops",
       category: "infrastructure",
       version: "1.0.0",
+      sandboxImage:
+        "ghcr.io/acme/devops@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      sandboxProviderImages: {
+        modal: { imageId: "im-1234567890123456789012" },
+      },
       skills: [{ name: "runbooks", files: [{ path: "SKILL.md", content: "# Runbooks" }] }],
     };
     expect(ContractRegisterCapabilityPackRequest.safeParse(manifest).success).toBe(true);

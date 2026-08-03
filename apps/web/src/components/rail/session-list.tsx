@@ -9,7 +9,7 @@ import {
   OpenGeniSessionListCursorError,
   type SessionListResponse,
 } from "@opengeni/sdk";
-import { useRouterState } from "@tanstack/react-router";
+import { Link, useRouterState } from "@tanstack/react-router";
 import {
   ChevronRightIcon,
   EllipsisIcon,
@@ -20,7 +20,16 @@ import {
   PlusIcon,
   SearchIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent,
+  type ReactNode,
+} from "react";
 
 import { useRail } from "@/components/rail/rail-context";
 import { Button } from "@/components/ui/button";
@@ -79,8 +88,41 @@ import {
   type SessionTreeNode,
 } from "@/lib/sessions-group";
 import { sessionDescendantCountAria, sessionDescendantCountText } from "@/lib/session-tree-count";
+import { requestCreateComposerFocus } from "@/lib/create-composer-focus";
+import { NEW_SESSION_SHORTCUT, shortcutLabel } from "@/lib/keyboard-shortcuts";
 import { cn } from "@/lib/utils";
 import type { Session } from "@/types";
+
+/** True when the browser should own navigation (new tab / window / modified click). */
+function isModifiedNavigationClick(
+  event: Pick<MouseEvent, "metaKey" | "ctrlKey" | "shiftKey" | "altKey" | "button">,
+): boolean {
+  return event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0;
+}
+
+/** Composer / sessions-index entry — real link so Cmd/Ctrl-click opens a new tab. */
+function NewSessionLink(props: { className?: string; "aria-label"?: string; children: ReactNode }) {
+  const rail = useRail();
+  const context = useAppContext();
+  return (
+    <Link
+      to="/workspaces/$workspaceId/sessions"
+      params={{ workspaceId: rail.workspaceId }}
+      aria-label={props["aria-label"]}
+      aria-keyshortcuts="Meta+Shift+O Control+Shift+O"
+      className={props.className}
+      onClick={(event) => {
+        if (isModifiedNavigationClick(event)) return;
+        context.resetSessionView();
+        rail.setDrawerOpen(false);
+        // Same-route Link may not remount the index; ask it to refocus the composer.
+        queueMicrotask(() => requestCreateComposerFocus());
+      }}
+    >
+      {props.children}
+    </Link>
+  );
+}
 
 type RenameFn = (workspaceId: string, sessionId: string, title: string) => Promise<Session | null>;
 type PinFocusTarget = SessionFocusTarget;
@@ -914,17 +956,19 @@ export function SessionList() {
         <Tooltip>
           <TooltipTrigger asChild>
             <Button
-              type="button"
+              asChild
               variant="ghost"
               size="icon-xs"
-              aria-label="New session"
-              onClick={rail.startNewSession}
               className="text-fg-muted hover:text-fg pointer-coarse:size-11"
             >
-              <PlusIcon className="size-3.5" />
+              <NewSessionLink aria-label="New session">
+                <PlusIcon className="size-3.5" />
+              </NewSessionLink>
             </Button>
           </TooltipTrigger>
-          <TooltipContent side="right">New session · c</TooltipContent>
+          <TooltipContent side="right">
+            New session · {shortcutLabel(NEW_SESSION_SHORTCUT)}
+          </TooltipContent>
         </Tooltip>
       </div>
 
@@ -999,7 +1043,7 @@ export function SessionList() {
             </button>
           </div>
         ) : flat.length === 0 ? (
-          <EmptySessions onStart={rail.startNewSession} />
+          <EmptySessions />
         ) : (
           <>
             {pinnedNodes.length > 0 ? (
@@ -1016,7 +1060,6 @@ export function SessionList() {
                   onRevealActivePath={revealActivePath}
                   childPages={childPages}
                   onLoadMoreChildren={loadChildPage}
-                  onSelect={rail.openSession}
                   onRename={context.updateSessionTitle}
                   onPin={onPin}
                 />
@@ -1040,7 +1083,6 @@ export function SessionList() {
                 onRevealActivePath={revealActivePath}
                 childPages={childPages}
                 onLoadMoreChildren={loadChildPage}
-                onSelect={rail.openSession}
                 onRename={context.updateSessionTitle}
                 onPin={onPin}
               />
@@ -1059,7 +1101,6 @@ export function SessionList() {
                 onRevealActivePath={revealActivePath}
                 childPages={childPages}
                 onLoadMoreChildren={loadChildPage}
-                onSelect={rail.openSession}
                 onRename={context.updateSessionTitle}
                 onPin={onPin}
               />
@@ -1104,7 +1145,6 @@ function SessionGroup(props: {
   onRevealActivePath: () => void;
   childPages: ReadonlyMap<string, ChildPageState>;
   onLoadMoreChildren: (sessionId: string, cursor?: string) => Promise<void>;
-  onSelect: (sessionId: string) => void;
   onRename: RenameFn;
   onPin: PinFn;
 }) {
@@ -1135,7 +1175,6 @@ function SessionGroup(props: {
             onRevealActivePath={props.onRevealActivePath}
             childPages={props.childPages}
             onLoadMoreChildren={props.onLoadMoreChildren}
-            onSelect={props.onSelect}
             onRename={props.onRename}
             onPin={props.onPin}
           />
@@ -1169,7 +1208,6 @@ function SessionTreeRow(props: {
   onRevealActivePath: () => void;
   childPages: ReadonlyMap<string, ChildPageState>;
   onLoadMoreChildren: (sessionId: string, cursor?: string) => Promise<void>;
-  onSelect: (sessionId: string) => void;
   onRename: RenameFn;
   onPin: PinFn;
 }) {
@@ -1213,7 +1251,6 @@ function SessionTreeRow(props: {
         active={node.session.id === props.activeSessionId}
         focused={index >= 0 && index === props.focusIndex}
         onFocus={() => props.onFocusSession(node.session.id)}
-        onSelect={props.onSelect}
         onRename={props.onRename}
         onPin={props.onPin}
       />
@@ -1242,7 +1279,6 @@ function SessionTreeRow(props: {
                   onRevealActivePath={props.onRevealActivePath}
                   childPages={props.childPages}
                   onLoadMoreChildren={props.onLoadMoreChildren}
-                  onSelect={props.onSelect}
                   onRename={props.onRename}
                   onPin={props.onPin}
                 />
@@ -1361,7 +1397,6 @@ function SessionRow(props: {
   active: boolean;
   focused: boolean;
   onFocus: () => void;
-  onSelect: (sessionId: string) => void;
   onRename: RenameFn;
   onPin: PinFn;
 }) {
@@ -1458,8 +1493,9 @@ function SessionRow(props: {
         <div title={`${title} — ${stateLabel}`} className={rowClassName}>
           <ActiveAccent active={props.active} />
           {lead}
-          <button
-            type="button"
+          <Link
+            to="/workspaces/$workspaceId/sessions/$sessionId"
+            params={{ workspaceId: rail.workspaceId, sessionId: props.session.id }}
             data-session-index={props.index}
             data-session-focus
             data-session-row={props.session.id}
@@ -1469,7 +1505,10 @@ function SessionRow(props: {
               props.session.pinned ? ". Pinned" : ""
             }${hasChildren ? `. ${childCountAria.replace("descendant", "spawned")}` : ""}`}
             onFocus={props.onFocus}
-            onClick={() => props.onSelect(props.session.id)}
+            onClick={(event) => {
+              if (isModifiedNavigationClick(event)) return;
+              rail.setDrawerOpen(false);
+            }}
             className="flex h-full min-w-0 flex-1 items-center gap-1.5 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-1 focus-visible:ring-offset-surface"
           >
             <RailStatusDot status={props.session.status} />
@@ -1507,7 +1546,7 @@ function SessionRow(props: {
                 {relativeTime}
               </span>
             ) : null}
-          </button>
+          </Link>
           <RowActionsMenu
             session={props.session}
             onRename={rename.startEditing}
@@ -1619,7 +1658,7 @@ function RowActionsMenu({
           className="pointer-coarse:min-h-11"
           onSelect={onRename}
           // The menu item lives inside the row; stop the synthetic click from
-          // bubbling to the row's onSelect (open-session).
+          // activating the session link.
           onClick={(event) => event.stopPropagation()}
         >
           <PencilIcon className="size-4" />
@@ -1666,13 +1705,15 @@ function RailStatusDot({ status }: { status: Session["status"] }) {
   );
 }
 
-function EmptySessions({ onStart }: { onStart: () => void }) {
+function EmptySessions() {
   return (
     <div className="mt-2 grid gap-2 rounded-lg border border-dashed border-border px-3 py-4 text-center">
       <p className="text-xs text-fg-subtle">No sessions yet</p>
-      <Button type="button" size="sm" onClick={onStart} className="mx-auto">
-        <PlusIcon className="size-3.5" />
-        Start your first session
+      <Button asChild size="sm" className="mx-auto">
+        <NewSessionLink>
+          <PlusIcon className="size-3.5" />
+          Start your first session
+        </NewSessionLink>
       </Button>
     </div>
   );
@@ -1727,18 +1768,15 @@ export function CollapsedSessionsButton() {
       </Tooltip>
       <Tooltip>
         <TooltipTrigger asChild>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            aria-label="New session"
-            onClick={rail.startNewSession}
-            className="text-fg-muted hover:text-fg"
-          >
-            <PlusIcon className="size-4" />
+          <Button asChild variant="ghost" size="icon-sm" className="text-fg-muted hover:text-fg">
+            <NewSessionLink aria-label="New session">
+              <PlusIcon className="size-4" />
+            </NewSessionLink>
           </Button>
         </TooltipTrigger>
-        <TooltipContent side="right">New session · c</TooltipContent>
+        <TooltipContent side="right">
+          New session · {shortcutLabel(NEW_SESSION_SHORTCUT)}
+        </TooltipContent>
       </Tooltip>
     </div>
   );

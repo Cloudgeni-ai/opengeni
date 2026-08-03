@@ -1,5 +1,40 @@
 # @opengeni/documents
 
+## 0.2.70
+
+### Patch Changes
+
+- Updated dependencies [9c4d73d]
+  - @opengeni/config@0.10.1
+  - @opengeni/contracts@0.31.1
+  - @opengeni/db@0.22.2
+  - @opengeni/storage@0.2.54
+
+## 0.2.69
+
+### Patch Changes
+
+- Updated dependencies [8b3e46f]
+  - @opengeni/config@0.10.0
+  - @opengeni/contracts@0.31.0
+  - @opengeni/db@0.22.1
+  - @opengeni/storage@0.2.53
+
+## 0.2.68
+
+### Patch Changes
+
+- 4fcb6af: Add a bounded, resumable Google Drive inventory and deterministic export planner with
+  tenant- and permission-bound versioned checkpoints.
+- Updated dependencies [e07eb52]
+  - @opengeni/db@0.22.0
+
+## 0.2.67
+
+### Patch Changes
+
+- 6500589: Automatically restore and list each workspace's Default document collection so uploads no longer require creating a base first, while preserving existing base-specific APIs and optional collection organization.
+
 ## 0.2.66
 
 ### Patch Changes

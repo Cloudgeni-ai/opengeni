@@ -262,7 +262,8 @@ describe("new-session draft option mapping", () => {
       firstPartyMcpPermissions: ["workspace:read", "sessions:read"],
     });
     expect(sessionDraftFromNewSessionDraftOptions(options)).toMatchObject({
-      compute: { kind: "sandbox", backend: "modal" },
+      // Composer no longer restores managed-backend overrides into the draft.
+      compute: { kind: "sandbox", backend: "" },
       variableSetId: draft.variableSetId,
       rigId: draft.rigId,
       goalText: "durable goal",

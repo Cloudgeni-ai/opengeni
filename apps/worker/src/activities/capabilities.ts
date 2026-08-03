@@ -2,12 +2,15 @@ import {
   environmentsEncryptionKeyBytes,
   type Settings,
   withCodexCatalogProvider,
+  withWorkspaceGatewayCatalogProvider,
+  withWorkspaceGatewayCredential,
 } from "@opengeni/config";
 import { settingsWithEnabledCapabilityMcpServers } from "@opengeni/core";
 import {
   listSessionMcpServerMetadata,
   listSessionMcpServersForRun,
   workspaceCodexSubscriptionActive,
+  loadWorkspaceVercelAiGatewayApiKey,
   type Database,
   type SessionMcpServerForRun,
 } from "@opengeni/db";
@@ -109,4 +112,14 @@ export async function settingsWithCodexCredential(
 /** Pure: append the synthetic codex-subscription provider, idempotently. */
 export function withCodexProvider(settings: Settings): Settings {
   return withCodexCatalogProvider(settings);
+}
+
+export async function settingsWithWorkspaceGatewayCredential(
+  db: Database,
+  workspaceId: string,
+  settings: Settings,
+): Promise<Settings> {
+  const catalogSettings = withWorkspaceGatewayCatalogProvider(settings);
+  const apiKey = await loadWorkspaceVercelAiGatewayApiKey(db, settings, workspaceId);
+  return apiKey ? withWorkspaceGatewayCredential(catalogSettings, apiKey) : catalogSettings;
 }

@@ -16,6 +16,7 @@ import {
   parseLiveAcceptanceArgs,
   parseProtectedEmails,
   sanitizeDiagnostic,
+  selectTreeFile,
   waitForSandboxLiveness,
 } from "./workbench-live-acceptance";
 
@@ -69,6 +70,36 @@ describe("workbench live acceptance preflight", () => {
     await assertChangesDefaultVisible(page);
 
     expect(calls).toEqual(["tab.wait", "selected-changes.wait", "layout.wait"]);
+  });
+
+  test("keeps an expanded file-tree directory open when selecting another file", async () => {
+    const clicks: string[] = [];
+    const directoryButton = { click: async () => clicks.push("directory") };
+    const fileButton = { click: async () => clicks.push("file") };
+    const directoryItem = {
+      getAttribute: async (name: string) => {
+        expect(name).toBe("aria-expanded");
+        return "true";
+      },
+      getByRole: () => ({ first: () => directoryButton }),
+    };
+    const fileItem = {
+      getByRole: () => fileButton,
+    };
+    const page = {
+      getByRole(role: string) {
+        expect(role).toBe("treeitem");
+        return {
+          filter({ hasText }: { hasText: string }) {
+            return { first: () => (hasText === "api" ? directoryItem : fileItem) };
+          },
+        };
+      },
+    } as never;
+
+    await selectTreeFile(page, "api", "base.txt");
+
+    expect(clicks).toEqual(["file"]);
   });
 
   test("accepts repository evidence from the compact changed-file picker", async () => {

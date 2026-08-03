@@ -1373,6 +1373,9 @@ export function requiredRuntimeEnvVars(
   } else {
     vars.push("OPENGENI_OPENAI_API_KEY");
   }
+  if (env.OPENGENI_VERCEL_AI_GATEWAY_API_KEY) {
+    vars.push("OPENGENI_VERCEL_AI_GATEWAY_API_KEY");
+  }
   if (runtimeDatabaseUrlRequired(contract)) {
     vars.push("OPENGENI_DATABASE_URL");
   }
@@ -2168,6 +2171,9 @@ function runtimeEnvValues(
           requiredEnv("OPENGENI_AZURE_OPENAI_API_KEY", env.OPENGENI_AZURE_OPENAI_API_KEY),
         ]
       : [requiredEnv("OPENGENI_OPENAI_API_KEY", env.OPENGENI_OPENAI_API_KEY)]),
+    ...(env.OPENGENI_VERCEL_AI_GATEWAY_API_KEY
+      ? [requiredEnv("OPENGENI_VERCEL_AI_GATEWAY_API_KEY", env.OPENGENI_VERCEL_AI_GATEWAY_API_KEY)]
+      : []),
   ];
 
   if (contract.objectStorage.api === "azure-blob") {

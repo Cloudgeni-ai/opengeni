@@ -337,6 +337,12 @@ export const modalProvider: ProviderRegistration = {
     if (!settings.modalAppName) {
       throw new SandboxConfigError("modal", "OPENGENI_MODAL_APP_NAME is required");
     }
+    if (settings.modalImageId && !settings.modalImageRef) {
+      throw new SandboxConfigError(
+        "modal",
+        "OPENGENI_MODAL_IMAGE_ID requires OPENGENI_MODAL_IMAGE_REF for logical image provenance",
+      );
+    }
   },
   build({ settings, environment, exposedPorts }) {
     const options: NonNullable<ConstructorParameters<typeof ModalSandboxClient>[0]> = {
@@ -383,7 +389,12 @@ export const modalProvider: ProviderRegistration = {
 type ModalModule = typeof import("modal");
 type ModalClientLike = InstanceType<ModalModule["ModalClient"]>;
 
-// --- Private-registry image resolution (OPENGENI_MODAL_IMAGE_REGISTRY_SECRET) ------
+// --- Modal provider-native / private-registry image resolution --------------------
+//
+// OPENGENI_MODAL_IMAGE_ID is the preferred immutable provider-native path. The
+// Agents extension resolves it with ModalImageSelector.fromId and serializes the
+// actual imageId into the session state, while modalImageRef remains the logical
+// digest persisted on the OpenGeni lease.
 //
 // The Agents-extension Modal backend resolves `modalImageRef` via
 // `Image.fromRegistry(tag)` with NO secret, so it can only pull PUBLIC images. To run
@@ -426,6 +437,12 @@ export async function ensureModalRegistryImage(
   settings: Settings,
   loadModal: ModalModuleLoader = defaultModalLoader,
 ): Promise<void> {
+  // A provider-native immutable image ID bypasses registry import entirely.
+  // ModalImageSelector.fromId resolves it during sandbox creation and the
+  // provider session state records that exact ID.
+  if (settings.modalImageId) {
+    return;
+  }
   if (!settings.modalImageRegistrySecret || !settings.modalImageRef) {
     return;
   }
@@ -469,6 +486,7 @@ function cachedModalRegistryImage(settings: Settings): unknown | undefined {
 
 /**
  * Choose the image selector for a Modal sandbox client from settings. Returns:
+ *  - `fromId(modalImageId)` when a provider-native immutable ID is configured;
  *  - `fromImage(resolved)` when a private-registry secret is configured AND the
  *    image has been resolved (ensureModalRegistryImage ran before create);
  *  - `fromTag(modalImageRef)` for the public path (no secret, or cold cache — the
@@ -477,6 +495,9 @@ function cachedModalRegistryImage(settings: Settings): unknown | undefined {
  * Exported for unit tests.
  */
 export function resolveModalImageSelector(settings: Settings): ModalImageSelector | undefined {
+  if (settings.modalImageId) {
+    return ModalImageSelector.fromId(settings.modalImageId);
+  }
   if (!settings.modalImageRef) {
     return undefined;
   }

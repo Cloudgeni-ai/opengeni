@@ -165,9 +165,10 @@ export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
     throw new Error("workflowBundle is valid only for the control worker role");
   }
   // Pre-resolve a PRIVATE-registry sandbox image before any turn creates a box.
-  // No-op unless OPENGENI_MODAL_IMAGE_REGISTRY_SECRET + OPENGENI_MODAL_IMAGE_REF are
-  // both set (so non-modal / public-image deployments are byte-unchanged and never
-  // load the modal SDK here). Memoized in the provider, so this runs once per process.
+  // A provider-native OPENGENI_MODAL_IMAGE_ID intentionally bypasses this
+  // registry path and is resolved by ModalImageSelector.fromId at create time.
+  // Otherwise this is a no-op unless the registry secret + logical ref are both
+  // set. Memoized in the provider, so it runs once per process.
   if (options.role === "turn") {
     await retryStartupDependency(
       "Modal private-registry image",
