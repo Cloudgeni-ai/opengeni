@@ -30,6 +30,9 @@ CREATE TABLE connector_action_policies (
     CHECK (octet_length(btrim(created_by_subject_id)) BETWEEN 1 AND 1024),
   CONSTRAINT connector_action_policies_updater_chk
     CHECK (octet_length(btrim(updated_by_subject_id)) BETWEEN 1 AND 1024),
+  CONSTRAINT connector_action_policies_workspace_account_fk
+    FOREIGN KEY (workspace_id, account_id)
+    REFERENCES workspaces(id, account_id) ON DELETE CASCADE,
   CONSTRAINT connector_action_policies_scope_uq
     UNIQUE (workspace_id, connection_id, server_id, tool_name, action_name)
 );

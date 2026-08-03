@@ -16226,6 +16226,7 @@ export async function upsertConnectorActionPolicy(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
+        await assertWorkspaceAccountPairInScope(tx, input.accountId, input.workspaceId);
         const [existing] = await tx
           .select()
           .from(schema.connectorActionPolicies)

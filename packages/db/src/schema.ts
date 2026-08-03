@@ -748,6 +748,11 @@ export const connectorActionPolicies = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
+    workspaceAccount: foreignKey({
+      name: "connector_action_policies_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
     scope: uniqueIndex("connector_action_policies_scope_uq").on(
       table.workspaceId,
       table.connectionId,
