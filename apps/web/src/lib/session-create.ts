@@ -125,6 +125,7 @@ export type BuildCreateSessionRequestInput = {
   submission: TurnSubmission;
   /** Session-scoped system guidance that is not rendered in the chat timeline. */
   instructions?: string;
+  startMode?: "realtime";
   omitWorkspaceResources?: boolean;
   selectedTools: ToolRef[];
   defaultModel: string;
@@ -181,7 +182,9 @@ export function buildCreateSessionRequest(
       ? undefined
       : [...input.selectedTools];
   return {
-    initialMessage: input.submission.text,
+    ...(input.startMode === "realtime"
+      ? { startMode: "realtime" as const }
+      : { initialMessage: input.submission.text }),
     instructions: input.instructions || undefined,
     resources,
     ...(tools === undefined ? {} : { tools }),

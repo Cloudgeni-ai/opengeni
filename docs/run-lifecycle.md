@@ -21,6 +21,128 @@ one non-retryable Temporal `runAgentTurn` activity. Inside the activity the
 OpenAI Agents SDK loop makes as many model calls and tool calls as the work
 needs.
 
+The same ordinary session can add and remove a realtime voice
+conversational transport without creating a second session, queue, or workflow.
+Only the authenticated browser owner/connection is exclusive. Human
+composer/queue/Send/Steer, ordinary turns, recovery, compaction, goals, and
+maintenance continue through their existing transactions and worker claims
+while voice is active. Realtime and ordinary mutations still serialize on the
+canonical PostgreSQL locks, but neither becomes an admission fence for the
+other. Ending or expiring the owner commits `session.realtime.ended`; an expired
+lease is also cleaned up lazily during a normal claim. The lifecycle is
+canonical in
+`packages/db/src/session-realtime.ts`, `packages/db/src/index.ts`, and
+`apps/worker/src/workflows/session.ts`.
+
+The ordinary web session composes this durable mode through one lifecycle
+controller and a selected provider transport. Connected Codex keeps its native
+WebRTC/V3 transport unchanged. AI Gateway models mint a single-use short-lived
+browser token, connect through Gateway's normalized realtime WebSocket, and
+translate only at the edge into the same pinned V3 bridge. Both therefore share
+the same owner, connection epochs, ledger, context projection, delegation/Steer,
+tail handoff, heartbeat, rotation, and recovery semantics. The already-mounted composer, Send/Steer,
+model/reasoning/tool configuration, and queue mutations remain available while
+voice is active. Its only persistent surface is a split voice action beside
+Send: the primary click starts or ends the call, while the disclosure holds the
+supported realtime-model choice, connection status, recovery actions, and dev
+diagnostics. Realtime-model choice is intentionally independent from the
+ordinary session model and remembers the user's last workspace choice. The
+catalog groups OpenGeni-managed Gateway, Connected Codex, and workspace-owned
+Gateway models; unconfigured credentials remain visible but disabled.
+The owner operation and browser proof are
+scoped to session storage and never rendered or logged. Reload replays that
+same operation and rotates only the dead browser connection. Without matching
+proof, the surface truthfully remains lost-owner until an end/expiry event;
+there is no status API or newly invented logical mode. Canonical:
+`packages/sdk/src/codex-realtime-controller.ts`,
+`packages/sdk/src/gateway-realtime-transport.ts`,
+`apps/web/src/components/session/codex-realtime-control.tsx`, and
+`apps/web/src/routes/session.tsx`.
+
+Finite provider calls are hidden behind connection generations, not new
+realtime modes. On OpenGeni's configured conservative proactive-rotation interval, or after a dead or
+disconnected peer, the controller reuses a healthy microphone stream and
+negotiates one replacement beside the active connection. PostgreSQL permits
+exactly one `active` connection and one `negotiating`/`ready` replacement for a
+mode. The browser activates the replacement only after its data channel opens;
+that transaction advances the connection epoch, retires the old row, and keeps
+the same realtime id, owner, lifecycle, and durable V3 ledger. During rolling
+deployment, clients that omit the new browser-activation marker retain the old
+immediate-activation behavior; hardened clients always require the two-phase
+proof. Startup replay and OpenGeni client-delivery ACKs remain bound to the promoted connection,
+and browser generation fences make late answers, duplicate callbacks, and old
+peer events inert. Failed preparation leaves the old healthy peer active;
+recovery uses bounded backoff and terminal conflicts permanently stop its retry
+loop. Stop, reload without owner proof, and concurrent timer/network failure
+all abort pending negotiation and release peers, timers, media, and playback.
+The browser installs a raw listener synchronously when `oai-events` is created,
+before any asynchronous negotiation. Its activation FIFO excludes audio deltas,
+rejects malformed or over-1-MiB events, and is hard-bounded to 256 entries and
+16 MiB; crossing either bound aborts that generation instead of dropping and
+continuing. Negotiation plus channel-open has one abortable 20-second deadline
+under the 30-second mode lease. Activation drains the early FIFO and swaps to
+the direct bridge listener synchronously, with no await gap or duplicate.
+
+Microphone and audible output are separate truthful states. Permission denial,
+missing device, acquisition failure, and an ended track have deterministic
+non-secret codes; a lost track is reacquired before recovery can claim input is
+healthy. Remote playback never disables or serializes microphone input, so
+native full-duplex GPT-Live barge-in remains provider-controlled. If browser
+autoplay rejects `audio.play()`, the existing connection remains live but the UI
+announces audible output as blocked and offers a user-gesture retry; retrying
+playback neither begins another mode nor negotiates another provider call.
+Diagnostics distinguish permission, device, autoplay, negotiation, rotation,
+reconnect, lost-owner, and terminal-stop transitions without SDP, credentials,
+audio, or transcript bodies.
+
+Only provider `turn.done` events persist transcript truth: one complete
+role-bearing user or assistant entry per provider turn. Live transcript deltas
+remain non-authoritative. Each `delegation.created` carries the bounded finalized
+dialogue since the previous delegation and records its transcript fence. When
+voice ends, the browser first seals and durably drains every already-parsed V3
+event. The same end transaction then selects only finalized transcript after the
+latest delegation fence, excludes a late user `turn.done` already represented by
+that delegation, renders a bounded Codex-style XML tail, and submits it through
+the canonical ordinary `Steer` path. The associated
+`session_realtime_context_projections` row is idempotency/audit provenance for
+that durable tail turn; workers perform no hidden next-turn injection. An empty
+tail creates no turn. A later voice call receives both bounded durable session
+history and bounded prior finalized voice turns as inert, role-labeled startup
+context with an explicit silence instruction. Canonical:
+`packages/sdk/src/codex-realtime-v3.ts`,
+`packages/db/src/session-realtime-context.ts`, and
+`apps/api/src/session-realtime-context.ts`.
+
+A provider `delegation.created` uses the same execution path as a human change
+of direction. After exact owner, active connection epoch, and provider-start
+proof, one transaction ledgers the call and invokes canonical prompt `Steer` on
+that same session with a service initiator and immutable realtime provenance.
+Idle work queues normally; active work is superseded/interrupted; queued work is
+reordered by the existing Steer semantics. The call row links one-to-one to the
+turn for terminal result/error projection. Invalid calls receive a deterministic
+outbound error; transient admission failure rolls call and Steer back together.
+No separate realtime worker-claim exception or voice-only turn semantics exist.
+Completion, failure, and cancellation atomically append one turn-linked
+`delegation_result` or deterministic `error` while that exact realtime
+delegation remains active. Steer is session continuation: realtime receives the
+accepted direction and later agent stream through session context, with no
+synthetic stopped/error message. Progress uses commentary
+`delegation.context.append`; completion uses speakable
+`delegation.context.append`. Work that predated voice, was sent by the
+human composer, or belongs to a prior voice call instead follows the active
+session-wide route: commentary progress and speakable terminal output use
+`session.context.append`. Accepted human Send/Steer is mirrored once through
+that same session-wide route without a channel, in a typed envelope saying it
+was already accepted by execution; voice therefore understands the change but
+does not delegate it again. The browser durably ACKs receipt of each row from
+OpenGeni. Pinned V3 exposes no provider receipt for either append event, so
+provider sends remain at-least-once: a live
+bridge suppresses repeat sends only within that generation after a full local
+send, while a browser crash or connection rotation replays the same durable row
+and may repeat an ambiguous provider append. Stale connection identities cannot
+advance even the client-delivery ACK. No child session, fork, handoff framework,
+or after-commit admission loop exists.
+
 Every accepted turn also carries one immutable `TurnInitiator`. Human/API
 Send and Steer capture the authenticated subject that accepted the command;
 schedules, goal continuation, compaction, and coalesced internal batches use

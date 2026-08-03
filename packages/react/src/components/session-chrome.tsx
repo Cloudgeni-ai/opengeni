@@ -32,6 +32,7 @@
  */
 import type { SessionGoal, SessionPendingInputPreview, SessionTurn } from "@opengeni/sdk";
 import {
+  AudioLinesIcon,
   ArrowDownIcon,
   ArrowUpIcon,
   BotIcon,
@@ -64,7 +65,7 @@ import { cn } from "../lib/cn";
 import { requestQueueDraftEdit } from "./queue-draft-policy";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./tooltip";
 
-export type SessionChromeSignalId = "incoming" | "queue" | "goal" | "agents";
+export type SessionChromeSignalId = "incoming" | "steering" | "queue" | "goal" | "agents";
 
 export type SessionChromeSignalTone = "neutral" | "accent" | "waiting" | "running";
 
@@ -105,6 +106,11 @@ type GoalPillState =
   | "invariant_broken"
   | "completed";
 
+type QueuedTurnPresentation = {
+  kind: "prompt" | "realtime_voice" | "realtime_voice_handoff";
+  text: string;
+};
+
 const GOAL_LABEL: Record<GoalPillState, string> = {
   pursuing: "Pursuing",
   scheduled: "Scheduled",
@@ -114,6 +120,28 @@ const GOAL_LABEL: Record<GoalPillState, string> = {
   invariant_broken: "Needs attention",
   completed: "Done",
 };
+
+function queuedTurnPresentation(turn: SessionTurn): QueuedTurnPresentation {
+  const realtimeDelegation = objectValue(turn.metadata.realtimeDelegation);
+  const inputTranscript = realtimeDelegation?.inputTranscript;
+  if (typeof inputTranscript === "string" && inputTranscript.trim()) {
+    return { kind: "realtime_voice", text: inputTranscript.trim() };
+  }
+  if (objectValue(turn.metadata.realtimeTailFlush)) {
+    return { kind: "realtime_voice_handoff", text: "Remaining voice context" };
+  }
+  return { kind: "prompt", text: turn.prompt };
+}
+
+function isSteeringTurn(turn: SessionTurn): boolean {
+  return turn.metadata.delivery === "steer";
+}
+
+function objectValue(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
 
 /** Select pill state from the goal's authoritative continuation projection. */
 export function sessionChromeGoalPillState(
@@ -215,6 +243,34 @@ export function SessionChrome({
   const record = goal?.goal ?? null;
   const incoming = queue.pendingInputs;
   const turns = queue.queue;
+  const composerSteering = composer?.steering ?? null;
+  const { steering, queuedTurns } = useMemo(() => {
+    const pendingQueueSteer =
+      turns.find((turn) => queue.pendingByTurn[turn.id] === "steer") ?? null;
+    const durableQueueSteer =
+      !pendingQueueSteer && turns[0] && isSteeringTurn(turns[0]) ? turns[0] : null;
+    const currentSteering =
+      composerSteering?.phase === "submitting"
+        ? composerSteering
+        : pendingQueueSteer
+          ? {
+              phase: "submitting" as const,
+              text: queuedTurnPresentation(pendingQueueSteer).text,
+              turnId: pendingQueueSteer.id,
+            }
+          : durableQueueSteer
+            ? {
+                phase: "accepted" as const,
+                text: queuedTurnPresentation(durableQueueSteer).text,
+                turnId: durableQueueSteer.id,
+              }
+            : composerSteering;
+    const currentTurnId = currentSteering?.turnId ?? null;
+    return {
+      steering: currentSteering,
+      queuedTurns: currentTurnId ? turns.filter((turn) => turn.id !== currentTurnId) : turns,
+    };
+  }, [composerSteering, queue.pendingByTurn, turns]);
   const canMutateQueue = !readOnly && composer !== undefined;
 
   const liveGoal =
@@ -250,14 +306,44 @@ export function SessionChrome({
         icon: <InboxIcon className="size-3" />,
       });
     }
-    if (turns.length > 0) {
-      const detail = turns[0]?.prompt;
+    if (steering) {
+      rows.push({
+        id: "steering",
+        label: "Changing direction…",
+        detail: steering.text,
+        tone: "accent",
+        icon:
+          steering.phase === "submitting" ? (
+            <Loader2Icon className="size-3 animate-og-spin" />
+          ) : (
+            <ZapIcon className="size-3" />
+          ),
+      });
+    }
+    if (queuedTurns.length > 0) {
+      const presentations = queuedTurns.map(queuedTurnPresentation);
+      const first = presentations[0];
+      const allVoiceRequests = presentations.every(({ kind }) => kind === "realtime_voice");
+      const onlyVoiceHandoff =
+        presentations.length === 1 && first?.kind === "realtime_voice_handoff";
+      const voiceOnly = allVoiceRequests || onlyVoiceHandoff;
+      const detail = first?.text;
       rows.push({
         id: "queue",
-        label: `${turns.length} queued prompt${turns.length === 1 ? "" : "s"}`,
+        label: allVoiceRequests
+          ? queuedTurns.length === 1
+            ? "Voice request queued"
+            : `${queuedTurns.length} voice requests queued`
+          : onlyVoiceHandoff
+            ? "Voice handoff queued"
+            : `${queuedTurns.length} queued prompt${queuedTurns.length === 1 ? "" : "s"}`,
         ...(detail ? { detail } : {}),
         tone: "neutral",
-        icon: <ListOrderedIcon className="size-3" />,
+        icon: voiceOnly ? (
+          <AudioLinesIcon className="size-3" />
+        ) : (
+          <ListOrderedIcon className="size-3" />
+        ),
       });
     }
     if (record && goalState) {
@@ -292,7 +378,7 @@ export function SessionChrome({
       });
     }
     return rows;
-  }, [agentsSignal, elapsed, goalState, incoming, record, turns]);
+  }, [agentsSignal, elapsed, goalState, incoming, queuedTurns, record, steering]);
 
   const [activeUncontrolled, setActiveUncontrolled] = useState<SessionChromeSignalId | null>(
     defaultActive,
@@ -320,10 +406,10 @@ export function SessionChrome({
 
   useEffect(() => {
     if (active !== "queue" || !replaceDraftFor) return;
-    if (!turns.some((turn) => turn.id === replaceDraftFor)) {
+    if (!queuedTurns.some((turn) => turn.id === replaceDraftFor)) {
       setReplaceDraftFor(null);
     }
-  }, [active, replaceDraftFor, turns]);
+  }, [active, queuedTurns, replaceDraftFor]);
 
   useEffect(() => {
     const rail = railRef.current;
@@ -363,7 +449,7 @@ export function SessionChrome({
     const node = panelBodyRef.current;
     if (!node) return;
     setPanelHeight(node.offsetHeight);
-  }, [open, active, incoming, turns, record, goalState, agentsPanel, agentsSignal]);
+  }, [open, active, incoming, queuedTurns, record, goalState, agentsPanel, agentsSignal, steering]);
 
   useEffect(() => {
     if (!open) return;
@@ -385,9 +471,11 @@ export function SessionChrome({
   const panelBody =
     active === "incoming" ? (
       <IncomingPanel inputs={incoming} onDismiss={onDismissIncoming} />
+    ) : active === "steering" && steering ? (
+      <SteeringPanel phase={steering.phase} text={steering.text} />
     ) : active === "queue" ? (
       <QueuePanel
-        turns={turns}
+        turns={queuedTurns}
         readOnly={!canMutateQueue}
         mutationFor={queue.mutationFor}
         replaceDraftFor={replaceDraftFor}
@@ -661,6 +749,33 @@ function IncomingPanel({
   );
 }
 
+function SteeringPanel({ phase, text }: { phase: "submitting" | "accepted"; text: string }) {
+  return (
+    <div
+      className="flex items-start gap-2 rounded-og-sm px-1.5 py-1"
+      role="status"
+      aria-live="polite"
+      data-og-session-chrome-panel="steering"
+    >
+      <span className="mt-0.5 inline-flex size-5 shrink-0 items-center justify-center rounded-full bg-og-accent-soft text-og-accent">
+        {phase === "submitting" ? (
+          <Loader2Icon className="size-3 animate-og-spin" aria-hidden="true" />
+        ) : (
+          <ZapIcon className="size-3" aria-hidden="true" />
+        )}
+      </span>
+      <div className="min-w-0">
+        <p className="truncate text-og-xs font-medium leading-4 text-og-fg">{text}</p>
+        <p className="mt-0.5 text-[10px] leading-4 text-og-fg-muted">
+          {phase === "submitting"
+            ? "Sending your latest direction…"
+            : "Direction accepted. The agent will continue from it."}
+        </p>
+      </div>
+    </div>
+  );
+}
+
 function QueuePanel({
   turns,
   readOnly,
@@ -691,6 +806,8 @@ function QueuePanel({
       data-og-session-chrome-panel="queue"
     >
       {turns.map((turn, index) => {
+        const presentation = queuedTurnPresentation(turn);
+        const voice = presentation.kind !== "prompt";
         const pending = mutationFor(turn.id);
         const beforeUp = index > 0 ? (turns[index - 1]?.id ?? null) : null;
         const beforeDown = index < turns.length - 1 ? (turns[index + 2]?.id ?? null) : null;
@@ -703,11 +820,18 @@ function QueuePanel({
             className="group flex flex-col gap-1 rounded-og-sm px-1.5 py-1 transition-colors hover:bg-[var(--og-session-chrome-row-hover)]"
           >
             <div className="flex items-start gap-1.5">
-              <span className="mt-px shrink-0 font-og-mono text-[10px] leading-4 text-og-fg-subtle">
-                {index + 1}
-              </span>
+              {voice ? (
+                <AudioLinesIcon
+                  aria-hidden="true"
+                  className="mt-0.5 size-3 shrink-0 text-og-accent"
+                />
+              ) : (
+                <span className="mt-px shrink-0 font-og-mono text-[10px] leading-4 text-og-fg-subtle">
+                  {index + 1}
+                </span>
+              )}
               <p className="min-w-0 flex-1 truncate text-og-xs leading-4 text-og-fg">
-                {turn.prompt}
+                {presentation.text}
               </p>
               {showActions ? (
                 <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 max-sm:opacity-100">

@@ -210,6 +210,7 @@ import {
   codexRequestStorage,
   isCodexTransportError,
   withCodexRequestOverrides,
+  selectCodexCredentialId,
   type CodexRequestContext,
   type CodexUsageHeaderSnapshot,
 } from "@opengeni/codex";
@@ -508,14 +509,7 @@ export function selectCodexCredentialForTurn(args: {
   activeCredentialId: string | null;
   connectedIds: Set<string>;
 }): string | null {
-  const { sessionPinnedCredentialId: pin, activeCredentialId: active, connectedIds } = args;
-  if (pin && connectedIds.has(pin)) {
-    return pin;
-  }
-  if (active && connectedIds.has(active)) {
-    return active;
-  }
-  return null;
+  return selectCodexCredentialId(args);
 }
 
 export function filterUnmaterializedSandboxFileDownloads(

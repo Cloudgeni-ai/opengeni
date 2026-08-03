@@ -14,6 +14,7 @@ import {
 } from "./workspace-control-stream";
 import type {
   AccessContext,
+  ActivateCodexRealtimeConnectionRequest,
   AddWorkspaceMemberRequest,
   ApiKey,
   BillingEntitlementsResponse,
@@ -23,6 +24,10 @@ import type {
   CodexOverviewResponse,
   CodexAllocatorUpdate,
   CodexConnectionStatus,
+  CodexRealtimeWebrtcRequest,
+  CodexRealtimeWebrtcResponse,
+  GatewayRealtimeConnectRequest,
+  GatewayRealtimeConnectResponse,
   CodexConnectPoll,
   CodexConnectStart,
   CodexUsage,
@@ -31,6 +36,7 @@ import type {
   BillingUsageResponse,
   InsightsRange,
   WorkspaceInsightsResponse,
+  BeginSessionRealtimeRequest,
   CapabilityCatalogItem,
   CapabilityCatalogResponse,
   CapabilityInstallation,
@@ -39,6 +45,7 @@ import type {
   MoveDocumentRequest,
   ClientConfig,
   WorkspaceModelCatalogResponse,
+  WorkspaceRealtimeModelCatalogResponse,
   ClientSessionEventInput,
   CompactSessionContextResult,
   CompleteFileUploadResponse,
@@ -70,6 +77,7 @@ import type {
   DeviceEnrollmentDenyResponse,
   DeviceEnrollmentLookupResponse,
   MintEnrollTokenResponse,
+  EndSessionRealtimeRequest,
   DiscoverMcpCapabilitiesResponse,
   Document,
   DocumentBase,
@@ -116,6 +124,10 @@ import type {
   SessionGoal,
   SessionHumanInputRequest,
   SessionLineageResponse,
+  SessionRealtimeMutationResponse,
+  SyncSessionRealtimeLedgerRequest,
+  SyncSessionRealtimeLedgerResponse,
+  RenewSessionRealtimeRequest,
   SessionMcpCredentialUpdateInput,
   UpdateSessionMcpApprovalPolicyRequest,
   UpdateSessionMcpApprovalPolicyResponse,
@@ -566,6 +578,111 @@ export class OpenGeniClient {
     );
   }
 
+  /** Negotiate one server-mediated connected-Codex GPT-Live V3 WebRTC call. */
+  async negotiateCodexRealtimeWebrtc(
+    workspaceId: string,
+    sessionId: string,
+    request: CodexRealtimeWebrtcRequest,
+    options: { signal?: AbortSignal | undefined } = {},
+  ): Promise<CodexRealtimeWebrtcResponse> {
+    return await this.requestJson<CodexRealtimeWebrtcResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/realtime/webrtc`,
+      request,
+      {},
+      { signal: options.signal },
+    );
+  }
+
+  /** Mint a short-lived browser token for one AI Gateway realtime connection. */
+  async negotiateGatewayRealtime(
+    workspaceId: string,
+    sessionId: string,
+    request: GatewayRealtimeConnectRequest,
+    options: { signal?: AbortSignal | undefined } = {},
+  ): Promise<GatewayRealtimeConnectResponse> {
+    return await this.requestJson<GatewayRealtimeConnectResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/realtime/gateway`,
+      request,
+      {},
+      { signal: options.signal },
+    );
+  }
+
+  /** Promote a negotiated connection only after its browser data channel is ready. */
+  async activateCodexRealtimeConnection(
+    workspaceId: string,
+    sessionId: string,
+    realtimeId: string,
+    connectionId: string,
+    request: ActivateCodexRealtimeConnectionRequest,
+    options: { signal?: AbortSignal | undefined } = {},
+  ): Promise<SessionRealtimeMutationResponse> {
+    return await this.requestJson<SessionRealtimeMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/realtime/${realtimeId}/connections/${connectionId}/activate`,
+      request,
+      {},
+      { signal: options.signal },
+    );
+  }
+
+  /** Atomically enter realtime mode for this ordinary session. */
+  async beginSessionRealtime(
+    workspaceId: string,
+    sessionId: string,
+    request: BeginSessionRealtimeRequest,
+  ): Promise<SessionRealtimeMutationResponse> {
+    return await this.requestJson<SessionRealtimeMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/realtime`,
+      request,
+    );
+  }
+
+  /** Renew the exact authenticated browser owner's realtime lease. */
+  async heartbeatSessionRealtime(
+    workspaceId: string,
+    sessionId: string,
+    realtimeId: string,
+    request: RenewSessionRealtimeRequest,
+  ): Promise<SessionRealtimeMutationResponse> {
+    return await this.requestJson<SessionRealtimeMutationResponse>(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/realtime/${realtimeId}/heartbeat`,
+      request,
+    );
+  }
+
+  /** Persist finalized V3 events, acknowledge delivery, and replay pending outbound context. */
+  async syncSessionRealtimeLedger(
+    workspaceId: string,
+    sessionId: string,
+    realtimeId: string,
+    request: SyncSessionRealtimeLedgerRequest,
+  ): Promise<SyncSessionRealtimeLedgerResponse> {
+    return await this.requestJson<SyncSessionRealtimeLedgerResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/realtime/${realtimeId}/sync`,
+      request,
+    );
+  }
+
+  /** End realtime mode and restore ordinary text workflow admission. */
+  async endSessionRealtime(
+    workspaceId: string,
+    sessionId: string,
+    realtimeId: string,
+    request: EndSessionRealtimeRequest,
+  ): Promise<SessionRealtimeMutationResponse> {
+    return await this.requestJson<SessionRealtimeMutationResponse>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/realtime/${realtimeId}`,
+      request,
+    );
+  }
+
   async listTurns(
     workspaceId: string,
     sessionId: string,
@@ -660,7 +777,10 @@ export class OpenGeniClient {
     return await this.requestJson<DeviceEnrollmentApproveResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/enrollments/device/approve`,
-      { userCode: request.userCode, allowScreenControl: request.allowScreenControl ?? false },
+      {
+        userCode: request.userCode,
+        allowScreenControl: request.allowScreenControl ?? false,
+      },
     );
   }
 
@@ -813,7 +933,10 @@ export class OpenGeniClient {
     );
     assertApiContractResponse(response);
     if (!response.ok) {
-      throw await apiErrorFromResponse(response, { method: "GET", correlationId });
+      throw await apiErrorFromResponse(response, {
+        method: "GET",
+        correlationId,
+      });
     }
     await assertJsonResponse(response, { method: "GET", correlationId });
     const body = await response.json();
@@ -873,7 +996,9 @@ export class OpenGeniClient {
   async getLatestEventResult(
     workspaceId: string,
     sessionId: string,
-    options: Omit<SessionEventCompactResultOptions, "resultMode"> = { latest: "terminal" },
+    options: Omit<SessionEventCompactResultOptions, "resultMode"> = {
+      latest: "terminal",
+    },
   ): Promise<SessionEventCompactResult | null> {
     return await this.listEventPage(workspaceId, sessionId, {
       ...options,
@@ -911,7 +1036,11 @@ export class OpenGeniClient {
   async pauseSession(
     workspaceId: string,
     sessionId: string,
-    options: { reason?: string; clientEventId?: string; expectedControlEtag?: string } = {},
+    options: {
+      reason?: string;
+      clientEventId?: string;
+      expectedControlEtag?: string;
+    } = {},
   ): Promise<SessionControlResponse> {
     return await this.controlSession(workspaceId, sessionId, {
       action: "pause",
@@ -946,7 +1075,9 @@ export class OpenGeniClient {
       status?: SessionHumanInputRequest["status"];
     } = {},
   ): Promise<SessionHumanInputRequest[]> {
-    const result = await this.requestJson<{ requests: SessionHumanInputRequest[] }>(
+    const result = await this.requestJson<{
+      requests: SessionHumanInputRequest[];
+    }>(
       "GET",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/human-input-requests`,
       undefined,
@@ -1023,7 +1154,10 @@ export class OpenGeniClient {
     });
     assertApiContractResponse(response);
     if (!response.ok) {
-      throw await apiErrorFromResponse(response, { method: "GET", correlationId });
+      throw await apiErrorFromResponse(response, {
+        method: "GET",
+        correlationId,
+      });
     }
     if (!response.body) {
       throw new OpenGeniApiError(response.status, "SSE response did not include a readable body");
@@ -1131,7 +1265,11 @@ export class OpenGeniClient {
   async resumeSession(
     workspaceId: string,
     sessionId: string,
-    options: { reason?: string; clientEventId?: string; expectedControlEtag?: string } = {},
+    options: {
+      reason?: string;
+      clientEventId?: string;
+      expectedControlEtag?: string;
+    } = {},
   ): Promise<SessionControlResponse> {
     return await this.controlSession(workspaceId, sessionId, {
       action: "resume",
@@ -1200,7 +1338,10 @@ export class OpenGeniClient {
     );
     assertApiContractResponse(response);
     if (!response.ok) {
-      throw await apiErrorFromResponse(response, { method: "GET", correlationId });
+      throw await apiErrorFromResponse(response, {
+        method: "GET",
+        correlationId,
+      });
     }
     await assertJsonResponse(response, { method: "GET", correlationId });
     const events = (await response.json()) as WorkspaceControlEvent[];
@@ -1250,13 +1391,19 @@ export class OpenGeniClient {
       }),
       {
         method: "GET",
-        headers: { ...this.headers(correlationId), Accept: "text/event-stream" },
+        headers: {
+          ...this.headers(correlationId),
+          Accept: "text/event-stream",
+        },
         ...(options.signal ? { signal: options.signal } : {}),
       },
     );
     assertApiContractResponse(response);
     if (!response.ok) {
-      throw await apiErrorFromResponse(response, { method: "GET", correlationId });
+      throw await apiErrorFromResponse(response, {
+        method: "GET",
+        correlationId,
+      });
     }
     if (!response.body) {
       throw new OpenGeniApiError(response.status, "SSE response did not include a readable body");
@@ -1718,6 +1865,16 @@ export class OpenGeniClient {
     );
   }
 
+  /** Authenticated realtime voice models and credential readiness. */
+  async getWorkspaceRealtimeModelCatalog(
+    workspaceId: string,
+  ): Promise<WorkspaceRealtimeModelCatalogResponse> {
+    return await this.requestJson<WorkspaceRealtimeModelCatalogResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/realtime-model-catalog`,
+    );
+  }
+
   /** The caller's access context: subject, account + workspace grants, defaults. */
   async getAccessContext(): Promise<AccessContext> {
     return await this.requestJson<AccessContext>("GET", "/v1/access/me");
@@ -2092,7 +2249,9 @@ export class OpenGeniClient {
       "GET",
       `/v1/workspaces/${workspaceId}/scheduled-tasks/${taskId}/runs`,
       undefined,
-      { ...(options.limit !== undefined ? { limit: String(options.limit) } : {}) },
+      {
+        ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
+      },
     );
   }
 
@@ -2456,7 +2615,10 @@ export class OpenGeniClient {
       throw error;
     }
     if (!response.ok) {
-      throw await apiErrorFromResponse(response, { method: "GET", correlationId });
+      throw await apiErrorFromResponse(response, {
+        method: "GET",
+        correlationId,
+      });
     }
     if (response.status !== 200 && response.status !== 206) {
       await cancelResponseBody(response, "unexpected retained artifact response status");
@@ -3221,10 +3383,10 @@ export class OpenGeniClient {
     workspaceId: string,
     accountId: string,
   ): Promise<{ disconnected: boolean; newActiveId: string | null }> {
-    return await this.requestJson<{ disconnected: boolean; newActiveId: string | null }>(
-      "DELETE",
-      `/v1/workspaces/${workspaceId}/codex/accounts/${accountId}`,
-    );
+    return await this.requestJson<{
+      disconnected: boolean;
+      newActiveId: string | null;
+    }>("DELETE", `/v1/workspaces/${workspaceId}/codex/accounts/${accountId}`);
   }
 
   /** Rename a Codex account (label only in P1). */

@@ -12,7 +12,7 @@ const inventorySource = source.slice(
 
 describe("document inventory bounds", () => {
   test("validates every row and label limit before opening the RLS query", () => {
-    const rlsAt = inventorySource.indexOf("return await withWorkspaceRls");
+    const rlsAt = inventorySource.indexOf("return await withDocumentRls");
     expect(source).toContain("DOCUMENT_INVENTORY_MAX_BASE_LIMIT = 100");
     expect(source).toContain("DOCUMENT_INVENTORY_MAX_TOPIC_LIMIT = 100");
     expect(source).toContain("DOCUMENT_INVENTORY_MAX_TOPIC_CHARS = 256");
@@ -27,7 +27,9 @@ describe("document inventory bounds", () => {
     expect(inventorySource).toContain("max(${schema.documents.updatedAt})");
     expect(inventorySource).toContain(".limit(baseLimit)");
     expect(inventorySource).toContain(".limit(topicLimit + 1)");
-    expect(inventorySource.match(/documentAccessConditions\(input\.access\)/g)).toHaveLength(2);
+    expect(
+      inventorySource.match(/documentAccessConditions\(workspaceId, input\.access\)/g),
+    ).toHaveLength(2);
     expect(inventorySource).toContain(".where(documentWhere)");
     expect(inventorySource).toMatch(/\.where\(\s*and\(\s*documentWhere,/);
     expect(inventorySource).not.toContain(".select()");

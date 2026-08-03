@@ -1700,6 +1700,130 @@ describe("useComposer queue-vs-steer", () => {
     expect(typeof input.clientEventId).toBe("string");
     await hook.unmount();
   });
+
+  test("projects Steer immediately, keeps it accepted, then settles when execution starts", async () => {
+    let resolveSteer!: (value: { accepted: SessionEvent; turn: SessionTurn }) => void;
+    const pendingSteer = new Promise<{ accepted: SessionEvent; turn: SessionTurn }>((resolve) => {
+      resolveSteer = resolve;
+    });
+    const turn = fakeTurn({ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" });
+    const accepted = makeEvent(10, "user.message", { delivery: "steer" });
+    const client = fakeClient({
+      steerMessage: async () => await pendingSteer,
+    });
+    type Props = { events: SessionEvent[] };
+    const hook = await renderHook(
+      (props: Props) =>
+        useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: props.events }),
+      { events: [] as SessionEvent[] },
+    );
+    await flush();
+
+    let result!: Promise<boolean>;
+    await reactAct(async () => {
+      result = hook.result.current.steer("Focus on the authentication failure first");
+      await Promise.resolve();
+    });
+    expect(hook.result.current.steering).toMatchObject({
+      phase: "submitting",
+      text: "Focus on the authentication failure first",
+      turnId: null,
+    });
+
+    await reactAct(async () => {
+      resolveSteer({ accepted, turn });
+      expect(await result).toBe(true);
+    });
+    expect(hook.result.current.steering).toMatchObject({
+      phase: "accepted",
+      triggerEventId: accepted.id,
+      turnId: turn.id,
+    });
+
+    await hook.rerender({
+      events: [
+        accepted,
+        {
+          ...makeEvent(11, "turn.started", { triggerEventId: accepted.id }),
+          turnId: turn.id,
+        },
+      ],
+    });
+    expect(hook.result.current.steering).toBeNull();
+    await hook.unmount();
+  });
+
+  test("reconciles a Steer that started before a standalone event stream went live", async () => {
+    const turn = fakeTurn({ id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" });
+    let accepted: SessionEvent | null = null;
+    let reconciliations = 0;
+    const client = fakeClient({
+      steerMessage: async (_workspaceId, _sessionId, input) => {
+        accepted = {
+          ...makeEvent(20, "user.message", { delivery: "steer" }),
+          clientEventId: typeof input === "string" ? undefined : input.clientEventId,
+        };
+        return { accepted, turn };
+      },
+      getSession: async () => ({ lastSequence: 21 }) as never,
+      listEvents: async () => {
+        reconciliations += 1;
+        return accepted
+          ? [
+              accepted,
+              {
+                ...makeEvent(21, "turn.started", { triggerEventId: accepted.id }),
+                turnId: turn.id,
+              },
+            ]
+          : [];
+      },
+      streamEvents: (_workspaceId, _sessionId, options) =>
+        (async function* () {
+          await options?.beforeLive?.();
+          yield* [] as SessionEvent[];
+        })(),
+    });
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          draftPersistence: "disabled",
+        }),
+      undefined,
+    );
+
+    await flushing(async () => {
+      expect(await hook.result.current.steer("Use the smaller patch")).toBe(true);
+    });
+    await flush();
+
+    expect(reconciliations).toBe(1);
+    expect(hook.result.current.steering).toBeNull();
+    await hook.unmount();
+  });
+
+  test("removes the optimistic Steer projection when admission fails", async () => {
+    const client = fakeClient({
+      steerMessage: async () => {
+        throw new Error("Steer was rejected");
+      },
+    });
+    const hook = await renderHook(
+      () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+    await reactAct(async () => hook.result.current.setValue("Keep this draft"));
+    await flushing(async () => {
+      expect(await hook.result.current.steer()).toBe(false);
+    });
+    expect(hook.result.current.steering).toBeNull();
+    expect(hook.result.current.value).toBe("Keep this draft");
+    expect(hook.result.current.error?.message).toBe("Steer was rejected");
+    await hook.unmount();
+  });
 });
 
 describe("useComposer durable draft and control binding", () => {

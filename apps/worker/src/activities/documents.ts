@@ -1,8 +1,9 @@
-import { indexDocumentNow } from "@opengeni/documents";
+import { getDocument, indexDocumentNow } from "@opengeni/documents";
 import { configuredStaticUsageLimits } from "@opengeni/config";
 import {
   getBillingBalance,
   recordUsageEvent,
+  rlsContextForWorkspace,
   sumUsageQuantity,
   withWorkspaceUsageLock,
 } from "@opengeni/db";
@@ -15,7 +16,22 @@ export function createDocumentActivities(services: () => Promise<ActivityService
       if (!objectStorage) {
         throw new Error("object storage is not configured");
       }
+      const context = await rlsContextForWorkspace(db, input.workspaceId);
+      if (context.accountId !== input.accountId) {
+        throw new Error("document account/workspace authority mismatch");
+      }
       return await withWorkspaceUsageLock(db, input.workspaceId, async (lockedDb) => {
+        const claimedDocument = await getDocument(lockedDb, input.workspaceId, input.documentId, {
+          viewerSubjectId: input.authoritySubjectId,
+        });
+        if (
+          !claimedDocument ||
+          claimedDocument.authorityKind !== input.authorityKind ||
+          claimedDocument.authorityWorkspaceId !== input.authorityWorkspaceId ||
+          claimedDocument.authoritySubjectId !== input.authoritySubjectId
+        ) {
+          throw new Error("document authority changed before indexing");
+        }
         const document = await indexDocumentNow(
           lockedDb,
           objectStorage,
@@ -48,7 +64,15 @@ export function createDocumentActivities(services: () => Promise<ActivityService
               }
             },
           },
+          { viewerSubjectId: input.authoritySubjectId },
         );
+        if (
+          document.authorityKind !== input.authorityKind ||
+          document.authorityWorkspaceId !== input.authorityWorkspaceId ||
+          document.authoritySubjectId !== input.authoritySubjectId
+        ) {
+          throw new Error("document authority changed before indexing");
+        }
         if (document.status === "ready") {
           await recordUsageEvent(lockedDb, {
             accountId: input.accountId,

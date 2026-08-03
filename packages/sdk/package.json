@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/sdk",
-  "version": "0.36.2",
+  "version": "0.37.0",
   "description": "Framework-agnostic TypeScript SDK for the OpenGeni API: typed client, session lifecycle, SSE event streaming with reconnect + replay-by-sequence, and proxy re-streaming helpers.",
   "license": "Apache-2.0",
   "repository": {
@@ -25,6 +25,14 @@
     "./core": {
       "types": "./src/core.ts",
       "default": "./src/core.ts"
+    },
+    "./codex-realtime-controller": {
+      "types": "./src/codex-realtime-controller.ts",
+      "default": "./src/codex-realtime-controller.ts"
+    },
+    "./gateway-realtime-transport": {
+      "types": "./src/gateway-realtime-transport.ts",
+      "default": "./src/gateway-realtime-transport.ts"
     }
   },
   "publishConfig": {
@@ -36,7 +44,9 @@
     "build": "bun ../../scripts/build-typescript-package.ts",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
+  "dependencies": {},
   "devDependencies": {
+    "@opengeni/codex": "workspace:*",
     "@opengeni/contracts": "workspace:*",
     "@opengeni/deployment": "workspace:*",
     "tsup": "^8.5.0",

@@ -2,7 +2,7 @@ import type { ClientModel, ReasoningEffort, WorkspaceModelCatalogModel } from "@
 
 export type PickerBillingClass = "opengeni_credits" | "codex_subscription" | "byok";
 
-export type PickerModelRow = {
+export type PickerModelRow<TCatalog extends ClientModel = WorkspaceModelCatalogModel> = {
   id: string;
   label: string;
   billingClass: PickerBillingClass;
@@ -11,7 +11,7 @@ export type PickerModelRow = {
   unavailableReason: string | null;
   provider: string;
   providerLabel: string;
-  catalog: WorkspaceModelCatalogModel;
+  catalog: TCatalog;
 };
 
 export type LatencyModeId = "standard" | "priority" | "fast";
@@ -117,6 +117,13 @@ export function labelLatencyMode(mode: LatencyModeId): string {
   return "Standard";
 }
 
+export function labelReasoningEffort(effort: ReasoningEffort): string {
+  if (effort === "xhigh") {
+    return "Extra high";
+  }
+  return effort.slice(0, 1).toUpperCase() + effort.slice(1);
+}
+
 export function payerSummaryForModel(model: ClientModel): string {
   const billing = model.billing;
   if (!billing) {
@@ -177,7 +184,27 @@ export function projectPickerRows(models: WorkspaceModelCatalogModel[]): PickerM
     });
 }
 
-export function sortPickerRows(rows: PickerModelRow[]): PickerModelRow[] {
+/** Project the lightweight client-config model list into the same picker contract. */
+export function projectClientModelRows(models: ClientModel[]): PickerModelRow<ClientModel>[] {
+  return models.map((catalog) => {
+    const billingClass = billingClassForModel(catalog);
+    return {
+      id: catalog.id,
+      label: catalog.label,
+      billingClass,
+      billingClassLabel: billingClassLabel(billingClass),
+      selectable: true,
+      unavailableReason: null,
+      provider: catalog.provider,
+      providerLabel: catalog.providerLabel,
+      catalog,
+    };
+  });
+}
+
+export function sortPickerRows<TCatalog extends ClientModel>(
+  rows: PickerModelRow<TCatalog>[],
+): PickerModelRow<TCatalog>[] {
   return [...rows].sort((left, right) => {
     const classDelta =
       BILLING_CLASS_ORDER.indexOf(left.billingClass) -
@@ -192,18 +219,35 @@ export function sortPickerRows(rows: PickerModelRow[]): PickerModelRow[] {
   });
 }
 
-export function findPickerRow(rows: PickerModelRow[], modelId: string): PickerModelRow | null {
+export function findPickerRow<TCatalog extends ClientModel>(
+  rows: PickerModelRow<TCatalog>[],
+  modelId: string,
+): PickerModelRow<TCatalog> | null {
   return rows.find((row) => row.id === modelId) ?? null;
 }
 
 export function groupPickerRowsByBillingClass(
   rows: PickerModelRow[],
-): Array<{ billingClass: PickerBillingClass; label: string; rows: PickerModelRow[] }> {
+): Array<{ billingClass: PickerBillingClass; label: string; rows: PickerModelRow[] }>;
+export function groupPickerRowsByBillingClass<TCatalog extends ClientModel>(
+  rows: PickerModelRow<TCatalog>[],
+): Array<{
+  billingClass: PickerBillingClass;
+  label: string;
+  rows: PickerModelRow<TCatalog>[];
+}>;
+export function groupPickerRowsByBillingClass<TCatalog extends ClientModel>(
+  rows: PickerModelRow<TCatalog>[],
+): Array<{
+  billingClass: PickerBillingClass;
+  label: string;
+  rows: PickerModelRow<TCatalog>[];
+}> {
   const sorted = sortPickerRows(rows);
   const groups: Array<{
     billingClass: PickerBillingClass;
     label: string;
-    rows: PickerModelRow[];
+    rows: PickerModelRow<TCatalog>[];
   }> = [];
   for (const row of sorted) {
     const existing = groups.find((group) => group.billingClass === row.billingClass);

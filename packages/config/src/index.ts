@@ -1430,11 +1430,58 @@ export interface ConfiguredModel {
 }
 
 export const VERCEL_AI_GATEWAY_BASE_URL = "https://ai-gateway.vercel.sh/v1" as const;
+export const VERCEL_AI_GATEWAY_AI_SDK_BASE_URL = "https://ai-gateway.vercel.sh/v4/ai" as const;
 export const OPENGENI_GATEWAY_PROVIDER_ID = "opengeni-gateway" as const;
 export const WORKSPACE_GATEWAY_PROVIDER_ID = "workspace-gateway" as const;
 export const WORKSPACE_GATEWAY_MODEL_ID_PREFIX = "workspace-gateway/" as const;
 export const VERCEL_AI_GATEWAY_CONNECTION_DOMAIN = "ai-gateway.vercel.sh" as const;
 export const VERCEL_AI_GATEWAY_CONNECTION_ROLE = "vercel_ai_gateway" as const;
+
+export const CODEX_REALTIME_MODEL_ID = "gpt-live-1-boulder-alpha" as const;
+export const OPENGENI_REALTIME_MODEL_ID_PREFIX = "opengeni-gateway/" as const;
+export const WORKSPACE_REALTIME_MODEL_ID_PREFIX = "workspace-gateway/" as const;
+
+/** Curated voice models exposed through AI Gateway's normalized realtime API. */
+export const AI_GATEWAY_REALTIME_MODELS = {
+  openaiRealtime21: {
+    upstreamModelId: "openai/gpt-realtime-2.1",
+    managedModelId: `${OPENGENI_REALTIME_MODEL_ID_PREFIX}openai/gpt-realtime-2.1`,
+    workspaceModelId: `${WORKSPACE_REALTIME_MODEL_ID_PREFIX}openai/gpt-realtime-2.1`,
+    label: "GPT Realtime 2.1",
+    description: "Best overall voice intelligence",
+  },
+  openaiRealtimeMini: {
+    upstreamModelId: "openai/gpt-realtime-mini",
+    managedModelId: `${OPENGENI_REALTIME_MODEL_ID_PREFIX}openai/gpt-realtime-mini`,
+    workspaceModelId: `${WORKSPACE_REALTIME_MODEL_ID_PREFIX}openai/gpt-realtime-mini`,
+    label: "GPT Realtime Mini",
+    description: "Faster, lighter live voice",
+  },
+  grokVoiceThinkFast20: {
+    upstreamModelId: "xai/grok-voice-think-fast-2.0",
+    managedModelId: `${OPENGENI_REALTIME_MODEL_ID_PREFIX}xai/grok-voice-think-fast-2.0`,
+    workspaceModelId: `${WORKSPACE_REALTIME_MODEL_ID_PREFIX}xai/grok-voice-think-fast-2.0`,
+    label: "Grok Voice Think Fast 2.0",
+    description: "Fast, natural xAI voice",
+  },
+} as const;
+
+export type AiGatewayRealtimeModel =
+  (typeof AI_GATEWAY_REALTIME_MODELS)[keyof typeof AI_GATEWAY_REALTIME_MODELS];
+
+export function resolveAiGatewayRealtimeModel(
+  modelId: string,
+): { source: "managed" | "workspace"; upstreamModelId: string } | null {
+  for (const model of Object.values(AI_GATEWAY_REALTIME_MODELS)) {
+    if (model.managedModelId === modelId) {
+      return { source: "managed", upstreamModelId: model.upstreamModelId };
+    }
+    if (model.workspaceModelId === modelId) {
+      return { source: "workspace", upstreamModelId: model.upstreamModelId };
+    }
+  }
+  return null;
+}
 
 export const OPENGENI_GATEWAY_MODELS = {
   deepseek: {

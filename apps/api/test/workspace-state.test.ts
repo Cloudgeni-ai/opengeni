@@ -193,6 +193,8 @@ describe("workspace state API authorization", () => {
       sourceKind: "email",
       visibility: "private",
       createdBy: grant.subjectId,
+      initiatingSubjectId: grant.subjectId,
+      access: { viewerSubjectId: grant.subjectId },
     });
     await addDocumentToBase(client.db, {
       accountId: grant.accountId,
@@ -203,6 +205,8 @@ describe("workspace state API authorization", () => {
       sourceKind: "chat",
       visibility: "private",
       createdBy: "user:another-subject",
+      initiatingSubjectId: "user:another-subject",
+      access: { viewerSubjectId: "user:another-subject" },
     });
 
     const response = await request(["workspace:read", "documents:search"]);
@@ -281,6 +285,8 @@ describe("workspace state API authorization", () => {
       title: "hidden private topics",
       visibility: "private",
       createdBy: "user:another-subject",
+      initiatingSubjectId: "user:another-subject",
+      access: { viewerSubjectId: "user:another-subject" },
     });
     const malformedTopics: unknown[] = [{ label: "object-label" }, true, 7, ["nested-label"], null];
     await shared.admin`
@@ -348,6 +354,8 @@ describe("workspace state API authorization", () => {
       title: "owner private normalized topics",
       visibility: "private",
       createdBy: grant.subjectId,
+      initiatingSubjectId: grant.subjectId,
+      access: { viewerSubjectId: grant.subjectId },
     });
     const otherAccess = await bootstrapWorkspace(client.db, {
       accountExternalSource: "test",
