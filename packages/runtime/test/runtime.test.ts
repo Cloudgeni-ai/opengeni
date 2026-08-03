@@ -66,6 +66,7 @@ import {
   normalizeModelCallUsage,
   modelResponseServiceTierFromSdkEvent,
   modelResponseUsageFromSdkEvent,
+  modelResponseUsageFromResponse,
   normalizeSdkEvent,
   normalizeToolOutputForEvent,
   prepareRunInput,
@@ -404,6 +405,61 @@ describe("runtime event normalization", () => {
       serviceTier: "priority",
     });
     expect(normalizeSdkEvent(event)).toEqual([]);
+  });
+
+  test("extracts bounded Gateway route billing from raw and normalized responses", () => {
+    const metadata = {
+      gateway: {
+        routing: { finalProvider: "novita" },
+        inferenceCost: "0.00000325",
+      },
+    };
+    const direct = modelResponseUsageFromResponse({
+      id: "resp-gateway-raw",
+      usage: {
+        input_tokens: 405,
+        output_tokens: 4,
+        input_tokens_details: { cached_tokens: 331 },
+      },
+      provider_metadata: {
+        gateway: {
+          routing: { finalProvider: "novita" },
+          cost: "0.00000325",
+        },
+      },
+    });
+    const normalized = modelResponseUsageFromResponse({
+      id: "resp-gateway-normalized",
+      usage: { inputTokens: 9, outputTokens: 8 },
+      providerData: { provider_metadata: metadata },
+    });
+
+    expect(direct?.gatewayBilling).toEqual({
+      finalProvider: "novita",
+      inferenceCostUsd: "0.00000325",
+    });
+    expect(normalized?.gatewayBilling).toEqual(direct?.gatewayBilling);
+    expect(direct?.usage).toMatchObject({
+      inputTokens: 405,
+      outputTokens: 4,
+      inputTokensDetails: { cached_tokens: 331 },
+    });
+  });
+
+  test("drops malformed Gateway billing metadata without dropping token usage", () => {
+    const usage = modelResponseUsageFromResponse({
+      id: "resp-gateway-invalid",
+      usage: { input_tokens: 9, output_tokens: 8 },
+      provider_metadata: {
+        gateway: {
+          routing: { finalProvider: "../../not-a-provider" },
+          inferenceCost: "NaN",
+        },
+      },
+    });
+
+    expect(usage?.gatewayBilling).toBeUndefined();
+    expect(usage?.usage).toMatchObject({ inputTokens: 9, outputTokens: 8 });
   });
 
   test("normalizes model-call usage telemetry fields and supported aliases", () => {

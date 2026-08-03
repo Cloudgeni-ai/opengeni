@@ -134,7 +134,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     codexProductSku: undefined,
     codexRotationNearExhaustionPct: 90,
     openaiReasoningEffort: "high",
-    openaiAllowedReasoningEfforts: "low,medium,high,xhigh",
+    openaiAllowedReasoningEfforts: "low,medium,high,xhigh,max",
     openaiResponsesTransport: "http",
     openaiProviderItemIds: "strip",
     openaiReasoningEncryptedContent: true,
