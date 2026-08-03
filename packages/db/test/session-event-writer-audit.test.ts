@@ -227,6 +227,10 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
+  "packages/db/src/session-control.ts#cancelSessionSubtreeInTransaction": {
+    inserts: 1,
+    contract: "owned_suffix",
+  },
   "packages/db/src/session-queue-commands.ts#moveQueuedTurnInTransaction": {
     inserts: 1,
     contract: "canonical",
@@ -278,6 +282,7 @@ const callerOwnedControlWriters = new Set([
 ]);
 
 const expectedOwnedSuffixCallers: Record<string, string[]> = {
+  cancelSessionSubtreeInTransaction: ["mutateSessionControlInTransaction"],
   supersedeCodexCapacityWaitInTransaction: ["reconcileCodexCapacityWait"],
   supersedeSessionCurrentDirectionInTransaction: [
     "steerAgentSessionInTransaction",
@@ -286,6 +291,7 @@ const expectedOwnedSuffixCallers: Record<string, string[]> = {
   ],
   closePendingSessionToolCallsInTransaction: [
     "armCodexCapacityWait",
+    "cancelSessionSubtreeInTransaction",
     "supersedeSessionCurrentDirectionInTransaction",
     "settleSessionAttemptInterruptions",
     "applySessionTurnSettlement",
