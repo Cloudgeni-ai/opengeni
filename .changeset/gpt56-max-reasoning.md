@@ -1,7 +1,6 @@
 ---
 "@opengeni/config": patch
 "@opengeni/contracts": patch
-"@opengeni/deployment": patch
 "@opengeni/react": patch
 "@opengeni/sdk": patch
 ---
