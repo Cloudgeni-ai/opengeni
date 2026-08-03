@@ -81,6 +81,13 @@ export const TIP_FOLLOW_VELOCITY_ARM_DEBT_PX = 72;
 export const TIP_FOLLOW_VELOCITY_DECAY_MS = _t(180);
 /** Reader-up pixels above clamp budget that count as leaving the tip. */
 export const TIP_FOLLOW_READER_UP_EPS_PX = 2;
+/**
+ * Browsers snap scrollTop writes to device pixels (whole px at dpr 1). A DOM
+ * position within this window of the camera's own fractional position is that
+ * quantization echo, not external motion — keep the fraction so sub-pixel
+ * settle steps accumulate. Anything larger (clamp, user, glue) re-bases.
+ */
+export const TIP_FOLLOW_QUANTIZE_WINDOW_PX = 1;
 
 /** Test-only override for scrollend feature detection (`null` = probe DOM). */
 let scrollEndSupportOverride: boolean | null = null;
@@ -122,11 +129,20 @@ export type TipFollowState = {
   hotUntil: number;
   lastTs: number;
   lastHeight: number;
+  /** Last observed scroller clientHeight — viewport shrink heats like tip growth. */
+  lastClientHeight: number;
   lastGrowthAt: number;
   /** EMA of recent height growth (px/s); nudges τ / ceiling under bursts. */
   growthVelocity: number;
   /** Camera velocity toward tip (px/s). Smoothed — never jumps with debt. */
   scrollVelocity: number;
+  /**
+   * Fractional camera position. The DOM quantizes scrollTop to device pixels,
+   * so settle steps under 1px would be discarded every frame if the camera
+   * re-based on the DOM — it then parks 20-50px short of the tip forever.
+   * `null` = no fraction in flight; adopt the DOM position.
+   */
+  cameraTop: number | null;
 };
 
 export type TipFollowStepInput = {
@@ -150,9 +166,11 @@ export function createTipFollowState(): TipFollowState {
     hotUntil: 0,
     lastTs: 0,
     lastHeight: 0,
+    lastClientHeight: 0,
     lastGrowthAt: 0,
     growthVelocity: 0,
     scrollVelocity: 0,
+    cameraTop: null,
   };
 }
 
@@ -162,6 +180,7 @@ export function tipFollowCancel(state: TipFollowState): TipFollowState {
     running: false,
     lastTs: 0,
     scrollVelocity: 0,
+    cameraTop: null,
   };
 }
 
@@ -190,6 +209,49 @@ export function tipFollowNoteGrowth(
   return {
     ...state,
     lastHeight: height,
+    lastGrowthAt: now,
+    growthVelocity,
+    hotUntil: now + TIP_FOLLOW_HOT_IDLE_MS,
+  };
+}
+
+/**
+ * Record scroller viewport height. A shrink (composer / SessionChrome /
+ * window) raises tip debt (`scrollHeight - clientHeight`) without growing
+ * content — the same debt content-growth would create. Heat the camera so
+ * catch-up does not fall into cold soft-settle (~42px/s) and leave the tip
+ * parked under the chrome.
+ */
+export function tipFollowNoteViewportShrink(
+  state: TipFollowState,
+  clientHeight: number,
+  now: number,
+): TipFollowState {
+  const previous = state.lastClientHeight;
+  if (previous <= 0) {
+    return { ...state, lastClientHeight: clientHeight };
+  }
+  const shrink = previous - clientHeight;
+  if (shrink <= 0) {
+    return { ...state, lastClientHeight: clientHeight };
+  }
+  if (shrink <= TIP_FOLLOW_SHRINK_EPS_PX) {
+    // Sub-eps shrink: HOLD the baseline (deadband with memory). An animated
+    // chrome/composer ease-out delivers many ≤eps frames; adopting each one
+    // leaked the whole tail into cold debt with no glue and no heat.
+    return state;
+  }
+  const dt = state.lastGrowthAt > 0 ? now - state.lastGrowthAt : 0;
+  let growthVelocity = state.growthVelocity;
+  if (dt > 0) {
+    const instant = (shrink / dt) * 1000;
+    growthVelocity = growthVelocity * 0.65 + instant * 0.35;
+  } else {
+    growthVelocity = Math.max(growthVelocity, shrink * (1000 / TIP_FOLLOW_HOT_IDLE_MS));
+  }
+  return {
+    ...state,
+    lastClientHeight: clientHeight,
     lastGrowthAt: now,
     growthVelocity,
     hotUntil: now + TIP_FOLLOW_HOT_IDLE_MS,
@@ -377,6 +439,29 @@ export function tipFollowCompensateShrink(
 }
 
 /**
+ * Viewport shrank (SessionChrome / composer / window). maxScroll rises by ≈Δc;
+ * keep the same tip distance: scrollTop += Δc. Without this, pinned follow only
+ * sees new tip debt and soft-settles under the chrome.
+ */
+export function tipFollowCompensateViewportShrink(
+  scrollTop: number,
+  previousClientHeight: number,
+  nextClientHeight: number,
+  scrollHeight: number,
+  epsPx: number = TIP_FOLLOW_SHRINK_EPS_PX,
+): number {
+  if (previousClientHeight <= 0) {
+    return scrollTop;
+  }
+  const shrink = previousClientHeight - nextClientHeight;
+  if (shrink <= epsPx) {
+    return scrollTop;
+  }
+  const maxScroll = Math.max(0, scrollHeight - nextClientHeight);
+  return Math.max(0, Math.min(maxScroll, scrollTop + shrink));
+}
+
+/**
  * One camera step. Shell schedules the next rAF while `result.state.running`.
  */
 export function tipFollowStep(
@@ -385,12 +470,39 @@ export function tipFollowStep(
 ): TipFollowStepResult {
   const { scrollTop, scrollHeight, clientHeight, now, pinned, reducedMotion, revealed } = input;
   const previousHeight = state.lastHeight;
+  const previousClient = state.lastClientHeight;
   const frameGrowth =
     previousHeight > 0 && scrollHeight > previousHeight ? scrollHeight - previousHeight : 0;
-  const grew = frameGrowth > 0;
+  const frameViewportShrink =
+    previousClient > 0 && clientHeight < previousClient - TIP_FOLLOW_SHRINK_EPS_PX
+      ? previousClient - clientHeight
+      : 0;
+  const grew = frameGrowth > 0 || frameViewportShrink > 0;
   let noted = tipFollowNoteGrowth(state, scrollHeight, now);
+  noted = tipFollowNoteViewportShrink(noted, clientHeight, now);
+  // Sub-device-pixel writes are floored by the engine: a DOM position within
+  // the quantization window of our own fractional camera is the echo of our
+  // last write, not external motion — keep the fraction so settle steps
+  // accumulate. Larger disagreement (clamp / reader / snap) re-bases.
+  let cameraTop = scrollTop;
+  if (
+    state.cameraTop !== null &&
+    Math.abs(state.cameraTop - scrollTop) <= TIP_FOLLOW_QUANTIZE_WINDOW_PX
+  ) {
+    cameraTop = state.cameraTop;
+  }
+  // Chrome/composer dock: tip-glue before ease so debt from ΔclientHeight is
+  // not left for cold soft-settle (content still under the new bar).
+  if (pinned && frameViewportShrink > 0) {
+    cameraTop = tipFollowCompensateViewportShrink(
+      cameraTop,
+      previousClient,
+      clientHeight,
+      scrollHeight,
+    );
+  }
   const target = targetScrollTop(scrollHeight, clientHeight);
-  const debt = target - scrollTop;
+  const debt = target - cameraTop;
   const hot = now < noted.hotUntil;
   const settling = !hot && Math.abs(debt) < TIP_FOLLOW_CATCHUP_DEBT_PX;
 
@@ -426,7 +538,7 @@ export function tipFollowStep(
 
   if (Math.abs(debt) <= 0.75) {
     return {
-      scrollTop: Math.abs(debt) > 0 ? target : scrollTop,
+      scrollTop: Math.abs(debt) > 0 ? target : cameraTop,
       state: {
         ...tipFollowCancel(noted),
         growthVelocity: hot ? noted.growthVelocity : 0,
@@ -445,13 +557,19 @@ export function tipFollowStep(
   let scrollVelocity =
     (noted.scrollVelocity ?? 0) + (desiredVel - (noted.scrollVelocity ?? 0)) * velAlpha;
 
-  const maxStep = tipFollowMaxStepPx(debt, noted.growthVelocity, dt, frameGrowth, hot);
+  const maxStep = tipFollowMaxStepPx(
+    debt,
+    noted.growthVelocity,
+    dt,
+    frameGrowth + frameViewportShrink,
+    hot,
+  );
   const maxVel = maxStep / dtSec;
   if (Math.abs(scrollVelocity) > maxVel) {
     scrollVelocity = Math.sign(scrollVelocity) * maxVel;
   }
 
-  let next = scrollTop + scrollVelocity * dtSec;
+  let next = cameraTop + scrollVelocity * dtSec;
   // Never overshoot the tip — stop and kill velocity on arrival.
   if (debt > 0 && next >= target - 0.35) {
     next = target;
@@ -462,13 +580,16 @@ export function tipFollowStep(
   }
   next = Math.max(0, next);
 
+  const running = Math.abs(target - next) > 0.35 || Math.abs(scrollVelocity) > 1;
   return {
     scrollTop: next,
     state: {
       ...noted,
       scrollVelocity,
-      running: Math.abs(target - next) > 0.35 || Math.abs(scrollVelocity) > 1,
+      running,
       lastTs: now,
+      // Carry the fraction the DOM will floor away; drop it once landed.
+      cameraTop: running ? next : null,
     },
   };
 }

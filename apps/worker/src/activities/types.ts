@@ -295,14 +295,26 @@ export type DispatchScheduledTaskRunResult =
       workflowWakeRevision: number | null;
     };
 
-export type IndexDocumentInput = {
+type DocumentIndexIdentity = {
   accountId: string;
   workspaceId: string;
   documentId: string;
+};
+
+type CurrentDocumentIndexAuthority = {
   authorityKind: DocumentAuthorityKind;
   authorityWorkspaceId: string | null;
   authoritySubjectId: string | null;
 };
+
+type HistoricalDocumentIndexAuthority = {
+  authorityKind?: never;
+  authorityWorkspaceId?: never;
+  authoritySubjectId?: never;
+};
+
+export type IndexDocumentInput = DocumentIndexIdentity &
+  (CurrentDocumentIndexAuthority | HistoricalDocumentIndexAuthority);
 
 type ClaimedRunAgentTurnResult = {
   // "recovering": this attempt ended after durably preserving the same current

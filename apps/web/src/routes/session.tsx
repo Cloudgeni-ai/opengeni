@@ -1,7 +1,8 @@
 // The session view — live timeline plus one compact prompt queue above the
 // composer. Enter queues and Cmd/Ctrl+Enter steers; failed sessions stay
 // honest (reason + retry history) and revivable from the same composer.
-import { HumanInputForm, MessageTimeline, SessionChrome } from "@opengeni/react/session-ui";
+import { useMachines } from "@opengeni/react/machines";
+import { HumanInputSurface, MessageTimeline, SessionChrome } from "@opengeni/react/session-ui";
 import {
   creditExhaustedFromEvents,
   projectPendingApprovals,
@@ -26,7 +27,7 @@ import { toast } from "sonner";
 
 import { isApiErrorStatus } from "@/api";
 import { ConsoleComposer } from "@/components/Composer";
-import { SessionPersonalConnectionDisclosure } from "@/components/capabilities/session-personal-connection-disclosure";
+import { ComposerMobilePlus } from "@/components/composer-mobile-plus";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { MarkdownText } from "@/components/markdown";
 import { ModelPicker, SessionToolPicker, type SessionToolSelection } from "@/components/pickers";
@@ -37,6 +38,7 @@ import {
   UserMessageBody,
 } from "@/components/session/banners";
 import { useRail } from "@/components/rail/rail-context";
+import { CLOUD_SANDBOX_LABEL } from "@/components/session/sandbox-switcher";
 import { SubagentTree } from "@/components/session/subagents";
 import { SessionWorkspace } from "@/components/session/sandbox-workspace";
 import { Button } from "@/components/ui/button";
@@ -277,11 +279,10 @@ export function SessionRoute({
   );
 
   // The workspace shell already needs the capability catalog for session tool
-  // policy. Reuse that authoritative read for timeline names and logos instead
-  // of downloading the same large catalog again from the session route.
-  const { providerLogos, capabilityNames } = useMemo(() => {
+  // policy. Reuse that authoritative read for timeline logos instead of
+  // downloading the same large catalog again from the session route.
+  const providerLogos = useMemo(() => {
     const logos = new Map<string, string>();
-    const names = new Map<string, string>();
     for (const capability of context.workspaceCapabilityCatalog) {
       const domain = capability.providerDomain ?? capability.connectionRef?.providerDomain ?? null;
       const url = context.client.catalogAssetUrl(capability.logoAssetPath);
@@ -289,20 +290,12 @@ export function SessionRoute({
         const key = normalizeProviderDomain(domain);
         if (!logos.has(key)) logos.set(key, url);
       }
-      const mcpServerId = capability.runtime.mcpServerId;
-      if (mcpServerId && capability.name && !names.has(mcpServerId)) {
-        names.set(mcpServerId, capability.name);
-      }
     }
-    return { providerLogos: logos, capabilityNames: names };
+    return logos;
   }, [context.client, context.workspaceCapabilityCatalog]);
   const resolveProviderLogo = useCallback(
     (domain: string) => providerLogos.get(normalizeProviderDomain(domain)) ?? null,
     [providerLogos],
-  );
-  const resolveCapabilityName = useCallback(
-    (mcpServerId: string) => capabilityNames.get(mcpServerId) ?? null,
-    [capabilityNames],
   );
   // One lineage read feeds the single composer-anchored agents surface. Events
   // refresh it instantly on spawn/worker-completion, and a 30s poll ensures the pill's
@@ -412,7 +405,6 @@ export function SessionRoute({
       onReject={(approvalId) => approve(approvalId, "reject")}
       onReconnect={onReconnect}
       resolveProviderLogo={resolveProviderLogo}
-      resolveCapabilityName={resolveCapabilityName}
     />
   );
 
@@ -547,24 +539,13 @@ function SessionChatPane(props: {
   onReject: (approvalId: string) => Promise<void>;
   onReconnect: (item: AuthNeededItem) => void | Promise<void>;
   resolveProviderLogo: (providerDomain: string) => string | null;
-  /** Real capability name for a user-message tool chip, resolved from the catalog. */
-  resolveCapabilityName: (mcpServerId: string) => string | null;
 }) {
   const context = useAppContext();
   const modelCatalog = useWorkspaceModelCatalog(props.session.workspaceId);
+  const fleet = useMachines({ sessionId: props.session.id, pollIntervalMs: 5000 });
+  const computeLabel =
+    fleet.machines.find((machine) => machine.active)?.name ?? CLOUD_SANDBOX_LABEL;
   const terminal = isTerminalSessionStatus(props.session.status);
-  const delegatedPersonalConnections = useMemo(() => {
-    const byServer = new Map<string, { serverId: string; providerDomain: string }>();
-    for (const connection of props.queue.activePersonalConnections) {
-      byServer.set(connection.serverId, connection);
-    }
-    for (const turn of props.queue.queue) {
-      for (const connection of turn.personalConnections ?? []) {
-        byServer.set(connection.serverId, connection);
-      }
-    }
-    return [...byServer.values()];
-  }, [props.queue.activePersonalConnections, props.queue.queue]);
   const agentsSignal = useMemo(() => {
     const agents = props.agentNodes;
     if (agents.length === 0) return undefined;
@@ -888,13 +869,7 @@ function SessionChatPane(props: {
   const renderMessageText = useCallback(
     (text: string, item: AgentMessageItem | UserMessageItem) => {
       if (item.kind === "user-message") {
-        return (
-          <UserMessageBody
-            workspaceId={props.session.workspaceId}
-            item={item}
-            resolveCapabilityName={props.resolveCapabilityName}
-          />
-        );
+        return <UserMessageBody workspaceId={props.session.workspaceId} item={item} />;
       }
       return (
         <div data-testid="assistant-markdown">
@@ -902,7 +877,7 @@ function SessionChatPane(props: {
         </div>
       );
     },
-    [props.session.workspaceId, props.resolveCapabilityName],
+    [props.session.workspaceId],
   );
 
   return (
@@ -933,6 +908,7 @@ function SessionChatPane(props: {
               className="h-full"
               items={props.timeline}
               status={props.session.status}
+              computeLabel={computeLabel}
               renderMessageText={renderMessageText}
               onOpenSession={props.onOpenSession}
               onMemoryClick={props.onMemoryClick}
@@ -1020,30 +996,21 @@ function SessionChatPane(props: {
 
       {/* Structured questions are tool output, not approvals: answer/skip
           resumes the exact frozen call. The authoritative hook reads pending
-          rows and uses this shared event feed only as a refresh trigger. */}
+          rows and uses this shared event feed only as a refresh trigger.
+          Parallel requests step one-at-a-time inside HumanInputSurface. */}
       {props.humanInput.requests.length > 0 && props.session.status === "requires_action" ? (
-        <div className="mx-auto w-full max-w-3xl shrink-0 px-4 sm:px-6">
-          <div className="grid max-h-[28rem] gap-3 overflow-y-auto pb-2">
-            {props.humanInput.requests.map((request) => (
-              <HumanInputForm
-                key={request.id}
-                request={request}
-                submitting={props.humanInput.respondingRequestId !== null}
-                error={props.humanInput.mutationError?.message}
-                onSubmit={(response) =>
-                  props.humanInput.respond(request.id, response).then(() => undefined)
-                }
-              />
-            ))}
-          </div>
+        <div className="mx-auto w-full max-w-3xl shrink-0 px-4 sm:px-6 pb-2">
+          <HumanInputSurface
+            requests={props.humanInput.requests}
+            respondingRequestId={props.humanInput.respondingRequestId}
+            error={props.humanInput.mutationError?.message}
+            onSubmit={(requestId, response) =>
+              props.humanInput.respond(requestId, response).then(() => undefined)
+            }
+          />
         </div>
       ) : null}
 
-      {delegatedPersonalConnections.length ? (
-        <div className="mx-auto mb-2 w-full max-w-3xl shrink-0 px-4 sm:px-6">
-          <SessionPersonalConnectionDisclosure connections={delegatedPersonalConnections} />
-        </div>
-      ) : null}
       {/* Compact session chrome above the composer — incoming, queue, goal,
           and agents as one dock. Hides entirely when there are no signals. */}
       <div className="mx-auto mb-2 w-full max-w-3xl shrink-0 px-4 sm:px-6">
@@ -1079,6 +1046,19 @@ function SessionChatPane(props: {
             commandContext={commandContext}
             onClearView={props.onClearView}
             fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
+            controlsLeading={
+              <ComposerMobilePlus
+                disabled={terminal || composer.sending}
+                fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
+                servers={selectableSessionMcpServers}
+                firstPartyTools={firstPartySessionToolOptions}
+                selection={durableToolSelection}
+                toolsDisabled={
+                  composer.sending || terminal || durableToolsSaving || !durableToolsHydrated
+                }
+                onToolSelectionChange={(next) => void saveDurableToolPolicy(next)}
+              />
+            }
             actions={
               !terminal ? (
                 <Suspense fallback={null}>
@@ -1112,7 +1092,7 @@ function SessionChatPane(props: {
                     : "Send a follow-up…"
             }
             controls={
-              <div className="flex min-w-0 items-center gap-1.5">
+              <div className="flex min-w-0 items-center gap-1.5 max-sm:min-w-0 max-sm:flex-nowrap">
                 <ModelPicker
                   rows={modelCatalog.rows}
                   model={model}
@@ -1142,6 +1122,7 @@ function SessionChatPane(props: {
                   servers={selectableSessionMcpServers}
                   firstPartyTools={firstPartySessionToolOptions}
                   selection={durableToolSelection}
+                  triggerClassName="max-sm:hidden"
                   disabled={
                     composer.sending || terminal || durableToolsSaving || !durableToolsHydrated
                   }

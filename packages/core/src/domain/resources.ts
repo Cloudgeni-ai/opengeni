@@ -8,6 +8,7 @@ import {
   normalizeRepositorySubpath,
   normalizeResourceMountPath,
   resourceIdentityKey,
+  resourceMountPath,
   resourceMountPathCollisionKey,
   ResourceRefConflictError,
   ResourceMountPathError,
@@ -115,7 +116,7 @@ export function normalizeResources(resources: ResourceRef[]): ResourceRef[] {
   for (const resource of resources) {
     let normalized: ResourceRef;
     if (resource.kind === "file") {
-      const mountPath = normalizeMountPath(resource.mountPath ?? `files/${resource.fileId}`);
+      const mountPath = normalizeMountPath(resourceMountPath(resource));
       normalized = {
         kind: "file",
         fileId: resource.fileId,

@@ -2,7 +2,7 @@ import { describe, expect, spyOn, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
 import { act } from "react";
 import { registerDom, renderComponent, flush } from "./render-hook";
-import { defaultToolRegistry, ActivityRail } from "../src/timeline";
+import { defaultToolRegistry, ActivityRail, TimelineComputeLabelProvider } from "../src/timeline";
 import type {
   AuthNeededItem,
   MemoryItem,
@@ -79,7 +79,7 @@ describe("provider MCP unavailable rendering", () => {
 });
 
 describe("durable machine-input timeline", () => {
-  test("renders a delivered coalesced batch with source and typed members", async () => {
+  test("renders a collapsed landmark pill; details hold typed members", async () => {
     resetTimelineEvents();
     const r = await renderComponent(
       <MessageTimeline
@@ -108,12 +108,52 @@ describe("durable machine-input timeline", () => {
       />,
     );
     await flush();
-    expect(r.container.textContent).toContain("2 updates joined this turn");
+    expect(r.container.textContent).toContain("2 updates · Agent update, Agent finished");
+    expect(r.container.textContent).not.toContain("updates joined this turn");
     expect(r.container.textContent).not.toContain("Input batch");
     expect(r.container.textContent).not.toContain('"sourceId"');
+    const details = r.container.querySelector(
+      "details[data-og-machine-input-batch]",
+    ) as HTMLDetailsElement | null;
+    expect(details).not.toBeNull();
+    expect(details?.open).toBe(false);
+    // Detail rows stay in the DOM for expand-on-demand audit.
     expect(r.container.textContent).toContain("verification-agent");
     expect(r.container.textContent).toContain("Cache verification completed.");
     expect(r.container.textContent).toContain("Agent finished");
+    await r.unmount();
+  });
+
+  test("identical agent-finished members collapse to one plural pill", async () => {
+    resetTimelineEvents();
+    const members = Array.from({ length: 15 }, (_, index) => ({
+      id: `update-${index}`,
+      kind: "child_terminal_result" as const,
+      classification: "success" as const,
+      sourceId: `aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa${index.toString(16)}`,
+      summary: `A worker session you spawned has finished its work and gone idle. Worker session id: aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa${index.toString(16)}`,
+    }));
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          timelineEvent("system.update.delivered", {
+            historyItemId: "history-agents",
+            count: members.length,
+            members,
+          }),
+        ]}
+      />,
+    );
+    await flush();
+    expect(r.container.textContent).toContain("15 agents finished");
+    expect(r.container.textContent).not.toContain("updates joined this turn");
+    expect(
+      (
+        r.container.querySelector(
+          "details[data-og-machine-input-batch]",
+        ) as HTMLDetailsElement | null
+      )?.open,
+    ).toBe(false);
     await r.unmount();
   });
 });
@@ -1762,6 +1802,74 @@ describe("turn fold — memory facet", () => {
       timelineEvent("turn.completed", {}),
     ]);
     expect(trigger?.textContent).toContain("1 memory updated");
+    await r.unmount();
+  });
+});
+
+describe("ask / run_on / exec collapsed previews", () => {
+  test("request_human_input shows Ask + first question, not Done", async () => {
+    const item = toolItem({
+      name: "request_human_input",
+      arguments: {
+        questions: [{ id: "q1", prompt: "Which region should we deploy to?", kind: "text" }],
+        allowSkip: false,
+      },
+      output: JSON.stringify({ requestId: "req-1", outcome: "answered" }),
+      status: "complete",
+    });
+    const r = await renderComponent(<ActivityRail items={[item]} />);
+    await flush();
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("Ask");
+    expect(text).toContain("Which region should we deploy to?");
+    expect(text).not.toContain("Done");
+    expect(text).not.toContain("Request human input");
+    await r.unmount();
+  });
+
+  test("run_on shows machine name from tool output + exec gist", async () => {
+    const item = toolItem({
+      name: "run_on",
+      arguments: {
+        target: "sandbox-abc",
+        op: { kind: "exec", cmd: "uname -a" },
+      },
+      output: JSON.stringify({
+        target: "sandbox-abc",
+        targetName: "studio-mac",
+        kind: "exec",
+        ok: true,
+        stdout: "Darwin\n",
+        exitCode: 0,
+      }),
+      status: "complete",
+    });
+    const r = await renderComponent(<ActivityRail items={[item]} />);
+    await flush();
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("Run on studio-mac");
+    expect(text).toContain("$ uname -a");
+    expect(text).not.toContain("Done");
+    await r.unmount();
+  });
+
+  test("exec_command prefixes preview with computeLabel", async () => {
+    const item = toolItem({
+      name: "exec_command",
+      arguments: { cmd: "pwd" },
+      output: "Chunk ID none\nProcess exited with code 0\nOutput:\n/workspace\n",
+      status: "complete",
+    });
+    const r = await renderComponent(
+      <TimelineComputeLabelProvider value="studio-mac">
+        <ActivityRail items={[item]} />
+      </TimelineComputeLabelProvider>,
+    );
+    await flush();
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("$ pwd");
+    expect(text).toContain("on studio-mac");
+    expect(text).toContain("/workspace");
     await r.unmount();
   });
 });

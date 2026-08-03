@@ -3,8 +3,11 @@ import { describe, expect, test } from "bun:test";
 import { applyAnalyticsConsent, syncAnalytics } from "./analytics";
 import {
   analyticsHasProviders,
+  analyticsPreferencesAvailable,
+  openAnalyticsPreferences,
   persistAnalyticsConsent,
   storedAnalyticsConsent,
+  takePendingAnalyticsPreferencesOpen,
 } from "./analytics-consent";
 
 describe("analytics consent", () => {
@@ -16,6 +19,19 @@ describe("analytics consent", () => {
         providers: { reo: { clientId: "reo_client-1" } },
       }),
     ).toBe(true);
+    expect(analyticsPreferencesAvailable({ consentRequired: true, providers: {} })).toBe(false);
+    expect(
+      analyticsPreferencesAvailable({
+        consentRequired: true,
+        providers: { reo: { clientId: "reo_client-1" } },
+      }),
+    ).toBe(true);
+    expect(
+      analyticsPreferencesAvailable({
+        consentRequired: false,
+        providers: { reo: { clientId: "reo_client-1" } },
+      }),
+    ).toBe(false);
   });
 
   test("persists and validates consent choices", () => {
@@ -45,6 +61,13 @@ describe("analytics consent", () => {
         },
       }),
     ).toBe("denied");
+  });
+
+  test("queues preference opens until the lazy manager consumes them", () => {
+    expect(takePendingAnalyticsPreferencesOpen()).toBe(false);
+    openAnalyticsPreferences();
+    expect(takePendingAnalyticsPreferencesOpen()).toBe(true);
+    expect(takePendingAnalyticsPreferencesOpen()).toBe(false);
   });
 });
 

@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 
 import {
-  analyticsHasProviders,
+  OPEN_ANALYTICS_PREFERENCES_EVENT,
+  analyticsPreferencesAvailable,
   persistAnalyticsConsent,
   storedAnalyticsConsent,
+  takePendingAnalyticsPreferencesOpen,
   type AnalyticsConsent,
 } from "@/lib/analytics-consent";
 import type { ClientConfig } from "@/types";
@@ -40,7 +42,17 @@ export function AnalyticsManager({
     };
   }, [config, hasSearchParameters, isPublicAuthRoute, pathname]);
 
-  const showPreferences = config.consentRequired && analyticsHasProviders(config);
+  useEffect(() => {
+    const open = () => {
+      takePendingAnalyticsPreferencesOpen();
+      setEditing(true);
+    };
+    if (takePendingAnalyticsPreferencesOpen()) setEditing(true);
+    window.addEventListener(OPEN_ANALYTICS_PREFERENCES_EVENT, open);
+    return () => window.removeEventListener(OPEN_ANALYTICS_PREFERENCES_EVENT, open);
+  }, []);
+
+  const showPreferences = analyticsPreferencesAvailable(config);
 
   const choose = (nextChoice: AnalyticsConsent) => {
     persistAnalyticsConsent(nextChoice);
@@ -51,19 +63,7 @@ export function AnalyticsManager({
     });
   };
 
-  if (!showPreferences || isPublicAuthRoute) return null;
-
-  if (!editing) {
-    return (
-      <button
-        type="button"
-        className={`${BUTTON_CLASS} fixed bottom-3 left-3 z-40 h-8 bg-secondary px-2 text-xs text-secondary-foreground hover:bg-secondary/80`}
-        onClick={() => setEditing(true)}
-      >
-        Analytics preferences
-      </button>
-    );
-  }
+  if (!showPreferences || isPublicAuthRoute || !editing) return null;
 
   return (
     <section

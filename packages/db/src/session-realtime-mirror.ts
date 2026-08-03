@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 
+import type { HumanInputQuestion, HumanInputResponse } from "@opengeni/contracts";
 import { and, desc, eq, gt, sql } from "drizzle-orm";
 
 import { sanitizeEventPayload } from "./event-payload-sanitizer";
@@ -16,7 +17,12 @@ export type MirrorSessionRealtimeContextInput = {
   accountId: string;
   workspaceId: string;
   sessionId: string;
-  sourceKind: "human_input" | "assistant_progress" | "assistant_terminal";
+  sourceKind:
+    | "human_input"
+    | "human_input_request"
+    | "human_input_response"
+    | "assistant_progress"
+    | "assistant_terminal";
   sourceId: string;
   text: string;
   channel: SessionRealtimeMirrorChannel;
@@ -153,6 +159,116 @@ export function renderRealtimeHumanInputContext(input: {
     "  <instruction>Already routed by OpenGeni; do not delegate this message again.</instruction>",
     "</session_user_message>",
   ].join("\n");
+}
+
+export type RealtimeHumanInputRequestContext = {
+  id: string;
+  questions: HumanInputQuestion[];
+  allowSkip: boolean;
+  expiresAt?: Date | string | null;
+};
+
+/**
+ * Render the exact durable question contract for the conversational surface.
+ * The structured form remains authoritative, while a conversational answer is
+ * ordinary new user input that the realtime model delegates once with enough
+ * question context for the next underlying turn.
+ */
+export function renderRealtimeHumanInputRequestContext(input: {
+  requests: RealtimeHumanInputRequestContext[];
+}): string {
+  const lines = ["<session_human_input_request>", "  <status>waiting_for_user</status>"];
+  for (const request of input.requests) {
+    lines.push(
+      "  <request>",
+      `    <id>${escapeXmlText(request.id)}</id>`,
+      `    <allow_skip>${String(request.allowSkip)}</allow_skip>`,
+      `    <expires_at>${escapeXmlText(renderExpiry(request.expiresAt))}</expires_at>`,
+    );
+    for (const question of request.questions) {
+      lines.push(
+        "    <question>",
+        `      <id>${escapeXmlText(question.id)}</id>`,
+        `      <kind>${escapeXmlText(question.kind)}</kind>`,
+        `      <required>${String(question.required)}</required>`,
+      );
+      if (question.label) lines.push(`      <label>${escapeXmlText(question.label)}</label>`);
+      lines.push(`      <prompt>${escapeXmlText(question.prompt)}</prompt>`);
+      if (question.helpText) {
+        lines.push(`      <help_text>${escapeXmlText(question.helpText)}</help_text>`);
+      }
+      if (question.options.length > 0) {
+        lines.push("      <options>");
+        for (const option of question.options) {
+          lines.push(
+            "        <option>",
+            `          <id>${escapeXmlText(option.id)}</id>`,
+            `          <label>${escapeXmlText(option.label)}</label>`,
+          );
+          if (option.description) {
+            lines.push(`          <description>${escapeXmlText(option.description)}</description>`);
+          }
+          lines.push("        </option>");
+        }
+        lines.push("      </options>");
+      }
+      lines.push(
+        `      <allow_other>${String(question.allowOther)}</allow_other>`,
+        "    </question>",
+      );
+    }
+    lines.push("  </request>");
+  }
+  lines.push(
+    "  <instruction>The current work is waiting for the user's input. Ask the questions naturally, one at a time when useful, without changing their meaning or answering for the user. The user may answer in the visible form or answer conversationally here. If the user answers here, delegate exactly once with a complete message containing the relevant question and the user's answer. If the user changes direction instead, delegate that new direction normally. Do not claim the work resumed until a later session update confirms it.</instruction>",
+    "</session_human_input_request>",
+  );
+  return lines.join("\n");
+}
+
+export function renderRealtimeHumanInputResponseContext(input: {
+  requestId: string;
+  questions: HumanInputQuestion[];
+  response: HumanInputResponse;
+}): string {
+  const lines = [
+    "<session_human_input_response>",
+    `  <request_id>${escapeXmlText(input.requestId)}</request_id>`,
+    `  <outcome>${escapeXmlText(input.response.outcome)}</outcome>`,
+  ];
+  if (input.response.outcome === "answered") {
+    const questions = new Map(input.questions.map((question) => [question.id, question]));
+    lines.push("  <answers>");
+    for (const answer of input.response.answers) {
+      const question = questions.get(answer.questionId);
+      const optionLabels = new Map(
+        question?.options.map((option) => [option.id, option.label]) ?? [],
+      );
+      lines.push(
+        "    <answer>",
+        `      <question_id>${escapeXmlText(answer.questionId)}</question_id>`,
+      );
+      if (question) lines.push(`      <question>${escapeXmlText(question.prompt)}</question>`);
+      for (const value of answer.values) {
+        lines.push(`      <value>${escapeXmlText(optionLabels.get(value) ?? value)}</value>`);
+      }
+      if (answer.other) lines.push(`      <other>${escapeXmlText(answer.other)}</other>`);
+      lines.push("    </answer>");
+    }
+    lines.push("  </answers>");
+  }
+  lines.push(
+    input.response.outcome === "answered" || input.response.outcome === "skipped"
+      ? "  <instruction>This structured response was accepted through the session UI and the same work can resume. Treat it as authoritative user context, do not delegate it again, and acknowledge briefly only if useful.</instruction>"
+      : "  <instruction>This pending question is no longer active. Do not ask it again unless the user raises it.</instruction>",
+    "</session_human_input_response>",
+  );
+  return lines.join("\n");
+}
+
+function renderExpiry(value: Date | string | null | undefined): string {
+  if (value === null || value === undefined) return "none";
+  return value instanceof Date ? value.toISOString() : value;
 }
 
 function escapeXmlText(value: string): string {
