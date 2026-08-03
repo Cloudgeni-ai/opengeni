@@ -1,0 +1,19 @@
+{{- if .Values.xmcp.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "opengeni.fullname" . }}-xmcp
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: xmcp
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.xmcp.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "opengeni.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: xmcp
+{{- end }}

@@ -1,0 +1,110 @@
+{{- if .Values.xmcp.enabled }}
+{{- $priorityClassName := include "opengeni.priorityClassName" (dict "root" . "explicit" "" "tier" "execution") }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "opengeni.fullname" . }}-xmcp
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: xmcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "opengeni.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: xmcp
+  template:
+    metadata:
+      labels:
+        {{- include "opengeni.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: xmcp
+    spec:
+      serviceAccountName: {{ include "opengeni.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      {{- if $priorityClassName }}
+      priorityClassName: {{ $priorityClassName | quote }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: xmcp
+          image: {{ include "opengeni.image" (dict "root" . "image" .Values.xmcp.image) | quote }}
+          imagePullPolicy: {{ .Values.xmcp.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - name: http
+              containerPort: {{ .Values.xmcp.service.port }}
+          env:
+            - name: MCP_HOST
+              value: 0.0.0.0
+            - name: MCP_PORT
+              value: {{ .Values.xmcp.service.port | quote }}
+            - name: X_API_BASE_URL
+              value: {{ .Values.xmcp.api.baseUrl | quote }}
+            - name: X_API_TIMEOUT
+              value: {{ .Values.xmcp.api.timeoutSeconds | quote }}
+            - name: X_API_DEBUG
+              value: {{ .Values.xmcp.api.debug | quote }}
+            - name: X_API_TOOL_ALLOWLIST
+              value: {{ join "," .Values.xmcp.toolAllowlist | quote }}
+            - name: X_OAUTH_PRINT_TOKENS
+              value: "0"
+            - name: X_OAUTH_PRINT_AUTH_HEADER
+              value: "0"
+            - name: X_OAUTH_CONSUMER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.xmcp.credentials.existingSecret }}
+                  key: {{ .Values.xmcp.credentials.consumerKeyKey }}
+            - name: X_OAUTH_CONSUMER_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.xmcp.credentials.existingSecret }}
+                  key: {{ .Values.xmcp.credentials.consumerSecretKey }}
+            - name: X_BEARER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.xmcp.credentials.existingSecret }}
+                  key: {{ .Values.xmcp.credentials.bearerTokenKey }}
+            - name: X_OAUTH_ACCESS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.xmcp.credentials.existingSecret }}
+                  key: {{ .Values.xmcp.credentials.accessTokenKey }}
+            - name: X_OAUTH_ACCESS_TOKEN_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.xmcp.credentials.existingSecret }}
+                  key: {{ .Values.xmcp.credentials.accessTokenSecretKey }}
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 6
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.xmcp.resources | nindent 12 }}
+{{- end }}

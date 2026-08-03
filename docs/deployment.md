@@ -1144,6 +1144,25 @@ Then select it per session with an explicit tool reference such as
 Enterprise token or other provider credential into this server; it is a
 registry-docs endpoint only.
 
+## X XMCP workload
+
+The chart also contains an optional `xmcp` workload for the official X XMCP
+source. It is disabled by default and is intended for private,
+cluster-internal use. When enabled, the chart creates a `ClusterIP` service at
+`http://<fullname>-xmcp:8000/mcp` and appends a configured `x` entry to
+`OPENGENI_MCP_SERVERS`, so the endpoint appears in the capability catalog and
+can be selected like any other configured MCP server.
+
+The `x` server id is reserved while XMCP is enabled; a manually configured
+entry with that id is rejected instead of being silently duplicated.
+
+The workload uses a read-only tool allowlist by default. Its credentials must
+come from a dedicated Secret and include the X OAuth1 consumer key/credential,
+bearer token, and user access-token pair. The image is built from a pinned
+upstream XMCP revision and its manifest digest is recorded in the immutable
+image receipt; Kubernetes must never start its interactive browser OAuth flow.
+Do not put X credential values in Helm values or `OPENGENI_MCP_SERVERS`.
+
 ## Connected Machines
 
 A Connected Machine is a user-owned computer (a laptop, workstation, or server,

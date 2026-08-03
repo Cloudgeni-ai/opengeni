@@ -876,6 +876,55 @@ terraformMcp:
     limits:
       memory: 256Mi
 
+# Optional self-hosted X API MCP server. This runs the official xdevplatform
+# XMCP source as a private, cluster-internal Streamable HTTP server. It is
+# disabled by default because the server requires operator-provisioned X
+# OAuth1 consumer credentials and a user access-token pair.
+xmcp:
+  enabled: false
+  image:
+    # Built from a pinned upstream XMCP revision by the workload-image pipeline.
+    repository: opengeni-xmcp
+    tag: "xmcp-63d34362d88ed9f94d54ccd5ecd5bb4d12e11759"
+    digest: ""
+    pullPolicy: IfNotPresent
+  service:
+    port: 8000
+  credentials:
+    existingSecret: opengeni-xmcp
+    consumerKeyKey: X_OAUTH_CONSUMER_KEY
+    consumerSecretKey: X_OAUTH_CONSUMER_SECRET
+    bearerTokenKey: X_BEARER_TOKEN
+    accessTokenKey: X_OAUTH_ACCESS_TOKEN
+    accessTokenSecretKey: X_OAUTH_ACCESS_TOKEN_SECRET
+  api:
+    baseUrl: https://api.x.com
+    timeoutSeconds: 30
+    debug: "0"
+  # Safe default: only read-only operations are exposed. Write operations can
+  # be enabled explicitly by an operator who accepts their side effects.
+  toolAllowlist:
+    - getUsersMe
+    - getUsersByUsername
+    - getUsersByUsernames
+    - getUsersById
+    - getUsersByIds
+    - getUsersPosts
+    - getUsersMentions
+    - getUsersFollowers
+    - getUsersFollowing
+    - getPostsById
+    - getPostsByIds
+    - searchPostsRecent
+    - searchUsers
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
 observability:
   structuredLogs: true
   metrics:

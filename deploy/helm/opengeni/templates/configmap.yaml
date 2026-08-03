@@ -5,8 +5,36 @@ metadata:
   labels:
     {{- include "opengeni.labels" . | nindent 4 }}
 data:
+  {{- $mcpServers := list -}}
+  {{- if hasKey .Values.config "OPENGENI_MCP_SERVERS" -}}
+  {{- $mcpServers = mustFromJson (index .Values.config "OPENGENI_MCP_SERVERS") -}}
+  {{- end -}}
+  {{- if .Values.xmcp.enabled -}}
+  {{- $hasXServer := false -}}
+  {{- range $server := $mcpServers -}}
+  {{- if eq ($server.id | default "") "x" -}}
+  {{- $hasXServer = true -}}
+  {{- end -}}
+  {{- end -}}
+  {{- if $hasXServer -}}
+  {{- fail "xmcp.enabled reserves MCP server id x; remove the x entry from config.OPENGENI_MCP_SERVERS" -}}
+  {{- end -}}
+  {{- $mcpServers = append $mcpServers (dict
+    "id" "x"
+    "name" "X"
+    "url" (printf "http://%s-xmcp:%d/mcp" (include "opengeni.fullname" .) (.Values.xmcp.service.port | int))
+    "allowedTools" .Values.xmcp.toolAllowlist
+    "timeoutMs" (mul (.Values.xmcp.api.timeoutSeconds | int) 1000)
+    "cacheToolsList" false
+  ) -}}
+  {{- end -}}
   {{- range $key, $value := .Values.config }}
+  {{- if ne $key "OPENGENI_MCP_SERVERS" }}
   {{ $key }}: {{ $value | quote }}
+  {{- end }}
+  {{- end }}
+  {{- if or (hasKey .Values.config "OPENGENI_MCP_SERVERS") .Values.xmcp.enabled }}
+  OPENGENI_MCP_SERVERS: {{ $mcpServers | toJson | quote }}
   {{- end }}
   {{- if not (hasKey .Values.config "OPENGENI_MCP_URL") }}
   OPENGENI_MCP_URL: {{ printf "http://%s-api:%d/v1/workspaces/{workspaceId}/mcp" (include "opengeni.fullname" .) (.Values.api.service.port | int) | quote }}

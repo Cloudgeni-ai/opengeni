@@ -757,6 +757,7 @@ jobs:
       worker_digest: ${{ steps.worker_image.outputs.digest }}
       web_digest: ${{ steps.web_image.outputs.digest }}
       relay_digest: ${{ steps.relay_image.outputs.digest }}
+      xmcp_digest: ${{ steps.xmcp_image.outputs.digest }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -827,6 +828,16 @@ jobs:
           push: ${{ github.event_name == 'push' }}
           tags: ${{ github.event_name == 'push' && format('ghcr.io/cloudgeni-ai/opengeni-relay:dogfood-sha-{0}', github.sha) || 'opengeni-relay:ci' }}
 
+      - name: Build X XMCP image
+        id: xmcp_image
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: .
+          file: docker/xmcp.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ github.event_name == 'push' && 'ghcr.io/cloudgeni-ai/opengeni-xmcp:xmcp-63d34362d88ed9f94d54ccd5ecd5bb4d12e11759' || 'opengeni-xmcp:ci' }}
+
   sandbox-image:
     name: Build headless sandbox workload image
     needs: automation-admission
@@ -896,6 +907,7 @@ jobs:
           WEB_DIGEST: ${{ needs.service-images.outputs.web_digest }}
           SANDBOX_DIGEST: ${{ needs.sandbox-image.outputs.sandbox_digest }}
           RELAY_DIGEST: ${{ needs.service-images.outputs.relay_digest }}
+          XMCP_DIGEST: ${{ needs.service-images.outputs.xmcp_digest }}
         run: |
           set -euo pipefail
           for digest in \
@@ -903,7 +915,8 @@ jobs:
             "$WORKER_DIGEST" \
             "$WEB_DIGEST" \
             "$SANDBOX_DIGEST" \
-            "$RELAY_DIGEST"; do
+            "$RELAY_DIGEST" \
+            "$XMCP_DIGEST"; do
             printf '%s\n' "$digest" \
               | grep -Eq '^sha256:[0-9a-f]{64}$'
           done
@@ -923,6 +936,7 @@ jobs:
             --arg webDigest "$WEB_DIGEST" \
             --arg sandboxDigest "$SANDBOX_DIGEST" \
             --arg relayDigest "$RELAY_DIGEST" \
+            --arg xmcpDigest "$XMCP_DIGEST" \
             '{
               schemaVersion: 1,
               source: {
@@ -942,7 +956,8 @@ jobs:
                 worker: { repository: "ghcr.io/cloudgeni-ai/opengeni-worker", digest: $workerDigest },
                 web: { repository: "ghcr.io/cloudgeni-ai/opengeni-web", digest: $webDigest },
                 sandbox: { repository: "ghcr.io/cloudgeni-ai/opengeni-sandbox", digest: $sandboxDigest },
-                relay: { repository: "ghcr.io/cloudgeni-ai/opengeni-relay", digest: $relayDigest }
+                relay: { repository: "ghcr.io/cloudgeni-ai/opengeni-relay", digest: $relayDigest },
+                xmcp: { repository: "ghcr.io/cloudgeni-ai/opengeni-xmcp", digest: $xmcpDigest }
               }
             }' > dogfood-images.json
           sha256sum dogfood-images.json > dogfood-images.sha256
