@@ -215,11 +215,7 @@ export function OnboardingProposalInventory({
 }) {
   const context = useAppContext();
   const { client } = context;
-  const canCreate = hasWorkspacePermission(
-    context.accessContext,
-    workspaceId,
-    "workspace:admin",
-  );
+  const canCreate = hasWorkspacePermission(context.accessContext, workspaceId, "workspace:admin");
   const proposals = useWorkspaceInstructionPolicyOnboardingProposals(client, workspaceId);
   const [kind, setKind] = useState<WorkspaceInstructionPolicyKind>("charter");
   const [scope, setScope] = useState<WorkspaceInstructionPolicyScope>("global");
@@ -239,9 +235,7 @@ export function OnboardingProposalInventory({
       : null;
   const baseline = state.policy.activeHeads.find(
     (head) =>
-      head.kind === kind &&
-      head.scope === effectiveScope &&
-      head.roleKey === normalizedRoleKey,
+      head.kind === kind && head.scope === effectiveScope && head.roleKey === normalizedRoleKey,
   );
 
   const createProposal = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
@@ -260,21 +254,18 @@ export function OnboardingProposalInventory({
     setSubmitError(null);
     setCreatedProposalId(null);
     try {
-      const created = await client.createWorkspaceInstructionPolicyOnboardingProposal(
-        workspaceId,
-        {
-          operationId: crypto.randomUUID(),
-          kind,
-          scope: effectiveScope,
-          roleKey: normalizedRoleKey,
-          content,
-          sourceId,
-          sourceVersion,
-          confidenceBps: Math.round(confidence * 100),
-          expectedCurrentRevisionId: baseline?.revisionId ?? null,
-          expectedActivationVersion: baseline?.activationVersion ?? 0,
-        },
-      );
+      const created = await client.createWorkspaceInstructionPolicyOnboardingProposal(workspaceId, {
+        operationId: crypto.randomUUID(),
+        kind,
+        scope: effectiveScope,
+        roleKey: normalizedRoleKey,
+        content,
+        sourceId,
+        sourceVersion,
+        confidenceBps: Math.round(confidence * 100),
+        expectedCurrentRevisionId: baseline?.revisionId ?? null,
+        expectedActivationVersion: baseline?.activationVersion ?? 0,
+      });
       setContent("");
       setCreatedProposalId(created.id);
       await Promise.all([proposals.reload(), onWorkspaceStateReload()]);
@@ -470,8 +461,7 @@ export function OnboardingProposalInventory({
               <div key={proposal.id} className="grid gap-2 p-3 text-xs text-fg-muted">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="font-medium text-fg">
-                    {onboardingProposalTargetLabel(proposal)} · draft r
-                    {proposal.draft.revision}
+                    {onboardingProposalTargetLabel(proposal)} · draft r{proposal.draft.revision}
                   </div>
                   <span className="rounded-full border border-status-waiting/50 px-2 py-1 text-status-waiting">
                     Inactive proposal

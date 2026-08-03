@@ -357,10 +357,7 @@ export type WorkspaceInstructionPolicyOperationReuseResponse = z.infer<
 
 export const WorkspaceInstructionPolicyOnboardingProposalSource = z.object({
   id: z.string().min(1).max(WORKSPACE_INSTRUCTION_POLICY_SOURCE_ID_MAX_CHARS),
-  version: z
-    .string()
-    .min(1)
-    .max(WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_SOURCE_VERSION_MAX_CHARS),
+  version: z.string().min(1).max(WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_SOURCE_VERSION_MAX_CHARS),
   confidenceBps: z.number().int().min(0).max(10_000),
 });
 export type WorkspaceInstructionPolicyOnboardingProposalSource = z.infer<

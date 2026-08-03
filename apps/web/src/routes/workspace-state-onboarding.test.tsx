@@ -114,7 +114,7 @@ const state = {
     activeHeadsTruncated: false,
     latestRevision: null,
     legacyRuntime: { source: "deployment_default", workspaceOverrideConfigured: false },
-    runtimeComposition: { status: "implemented" },
+    runtimeComposition: { status: "not_implemented" },
   },
   knowledge: {
     availability: "unavailable",
@@ -146,18 +146,30 @@ describe("Workspace State onboarding proposals", () => {
 
       expect(container.textContent).toContain("Proposals never activate themselves");
       expect(container.textContent).toContain("No onboarding proposals exist yet.");
-      expect(container.textContent).toContain("Revision r7");
-      expect(container.textContent).toContain("Activation v3");
 
       const selects = container.querySelectorAll<HTMLSelectElement>("select");
       await act(async () => {
         selects[0]!.value = "policy";
         selects[0]!.dispatchEvent(new Event("change", { bubbles: true }));
       });
+      expect(container.textContent).toContain("Revision r7");
+      expect(container.textContent).toContain("Activation v3");
       const textarea = container.querySelector<HTMLTextAreaElement>("textarea")!;
       await act(async () => {
-        textarea.value = "Require explicit confirmation before production mutations.";
-        textarea.dispatchEvent(new Event("input", { bubbles: true }));
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(
+          textarea,
+          "Require explicit confirmation before production mutations.",
+        );
+        const reactPropsKey = Object.keys(textarea).find((key) => key.startsWith("__reactProps$"));
+        expect(reactPropsKey).toBeDefined();
+        const onChange = (
+          textarea as unknown as Record<
+            string,
+            { onChange?: (event: { target: HTMLTextAreaElement }) => void }
+          >
+        )[reactPropsKey!]!.onChange;
+        expect(typeof onChange).toBe("function");
+        onChange!({ target: textarea });
       });
       const form = container.querySelector<HTMLFormElement>(
         'form[aria-label="Create onboarding proposal"]',

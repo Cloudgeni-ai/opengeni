@@ -97,6 +97,37 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
+  IF NEW."baseline_revision_id" IS NULL THEN
+    IF EXISTS (
+      SELECT 1
+      FROM "workspace_instruction_policy_heads" head
+      WHERE head."account_id" = NEW."account_id"
+        AND head."workspace_id" = NEW."workspace_id"
+        AND head."kind" = NEW."kind"
+        AND head."scope" = NEW."scope"
+        AND head."role_key" IS NOT DISTINCT FROM NEW."role_key"
+    ) THEN
+      RAISE EXCEPTION 'instruction-policy onboarding proposal must capture the exact active head baseline'
+        USING ERRCODE = '23514';
+    END IF;
+  ELSIF NOT EXISTS (
+    SELECT 1
+    FROM "workspace_instruction_policy_heads" head
+    WHERE head."account_id" = NEW."account_id"
+      AND head."workspace_id" = NEW."workspace_id"
+      AND head."kind" = NEW."kind"
+      AND head."scope" = NEW."scope"
+      AND head."role_key" IS NOT DISTINCT FROM NEW."role_key"
+      AND head."revision_id" = NEW."baseline_revision_id"
+      AND head."revision" = NEW."baseline_revision"
+      AND head."content_hash" = NEW."baseline_content_hash"
+      AND head."activation_version" = NEW."baseline_activation_version"
+      AND head."activated_at" = NEW."baseline_activated_at"
+  ) THEN
+    RAISE EXCEPTION 'instruction-policy onboarding proposal must capture the exact active head baseline'
+      USING ERRCODE = '23514';
+  END IF;
+
   IF NEW."baseline_revision_id" IS NOT NULL AND NOT EXISTS (
     SELECT 1
     FROM "workspace_instruction_policy_revisions" revision
@@ -132,6 +163,23 @@ BEGIN
       AND revision."created_by_subject_id" = NEW."created_by_subject_id"
   ) THEN
     RAISE EXCEPTION 'instruction-policy onboarding proposal must identify its exact inactive draft'
+      USING ERRCODE = '23514';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM "workspace_instruction_policy_heads" head
+    WHERE head."account_id" = NEW."account_id"
+      AND head."workspace_id" = NEW."workspace_id"
+      AND head."revision_id" = NEW."draft_revision_id"
+  ) OR EXISTS (
+    SELECT 1
+    FROM "workspace_instruction_policy_activation_events" event
+    WHERE event."account_id" = NEW."account_id"
+      AND event."workspace_id" = NEW."workspace_id"
+      AND event."new_revision_id" = NEW."draft_revision_id"
+  ) THEN
+    RAISE EXCEPTION 'instruction-policy onboarding proposal must identify a never-activated inactive draft'
       USING ERRCODE = '23514';
   END IF;
   RETURN NEW;

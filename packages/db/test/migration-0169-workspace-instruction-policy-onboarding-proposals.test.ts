@@ -12,15 +12,17 @@ describe("workspace instruction-policy onboarding proposal migration", () => {
       "utf8",
     );
     expect(sql.split(/\r?\n/, 1)[0]).toBe("-- deployment-mode: rolling");
-    expect(sql).toContain(
-      'CREATE TABLE "workspace_instruction_policy_onboarding_proposals"',
-    );
+    expect(sql).toContain('CREATE TABLE "workspace_instruction_policy_onboarding_proposals"');
     expect(sql).toContain(
       "workspace_instruction_policy_onboarding_proposals_source_version_target_uq",
     );
     expect(sql).toContain("workspace_instruction_policy_validate_onboarding_proposal");
+    expect(sql).toContain("must capture the exact active head baseline");
+    expect(sql).toContain('head."activation_version" = NEW."baseline_activation_version"');
     expect(sql).toContain("revision.\"provenance_source\" = 'onboarding'");
     expect(sql).toContain('revision."provenance_source_id" = NEW."id"::text');
+    expect(sql).toContain("must identify a never-activated inactive draft");
+    expect(sql).toContain('event."new_revision_id" = NEW."draft_revision_id"');
     expect(sql).toContain("workspace_instruction_policy_onboarding_proposals_immutable");
     expect(sql).toContain('ALTER TABLE "workspace_instruction_policy_onboarding_proposals"');
     expect(sql).toContain("FORCE ROW LEVEL SECURITY");
@@ -30,7 +32,7 @@ describe("workspace instruction-policy onboarding proposal migration", () => {
     expect(sql.match(/opengeni_private\.workspace_rls_visible/g)).toHaveLength(2);
     expect(sql).toContain('"baseline_activation_version" = 0');
     expect(sql).toContain('"confidence_bps" BETWEEN 0 AND 10000');
-    expect(sql).toContain('"status" = \'proposed\'');
+    expect(sql).toContain("\"status\" = 'proposed'");
     expect(sql).not.toMatch(/INSERT\s+INTO\s+"workspace_instruction_policy_heads"/i);
     expect(sql).not.toMatch(/UPDATE\s+"workspace_instruction_policy_heads"/i);
   });

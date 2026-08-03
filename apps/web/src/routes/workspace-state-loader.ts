@@ -127,10 +127,9 @@ export function useWorkspaceInstructionPolicyOnboardingProposals(
       loading: true,
     }));
     try {
-      const response = await client.listWorkspaceInstructionPolicyOnboardingProposals(
-        workspaceId,
-        { limit: 50 },
-      );
+      const response = await client.listWorkspaceInstructionPolicyOnboardingProposals(workspaceId, {
+        limit: 50,
+      });
       if (generation.current !== requestGeneration) return;
       setResult({ client, workspaceId, response, error: null, loading: false });
     } catch (loadError) {

@@ -4,12 +4,7 @@ import {
   signDelegatedAccessToken,
   type Permission,
 } from "@opengeni/contracts";
-import {
-  bootstrapWorkspace,
-  createDb,
-  withRlsContext,
-  type DbClient,
-} from "@opengeni/db";
+import { bootstrapWorkspace, createDb, withRlsContext, type DbClient } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
 import { provisionRoles } from "@opengeni/db/provision-roles";
 import * as dbSchema from "@opengeni/db/schema";
@@ -189,11 +184,15 @@ async function expectDatabaseFailure(operation: Promise<unknown>, pattern: RegEx
 
 describe("workspace instruction-policy onboarding proposals", () => {
   test("creates inactive replay-safe drafts and returns typed validation and conflict outcomes", async () => {
-    const unauthorized = await request(workspaceGrant, "/instruction-policies/onboarding-proposals", {
-      method: "POST",
-      permissions: ["workspace:read"],
-      body: proposalBody(),
-    });
+    const unauthorized = await request(
+      workspaceGrant,
+      "/instruction-policies/onboarding-proposals",
+      {
+        method: "POST",
+        permissions: ["workspace:read"],
+        body: proposalBody(),
+      },
+    );
     expect(unauthorized.status).toBe(403);
 
     const empty = await request(workspaceGrant, "/instruction-policies/onboarding-proposals", {
@@ -251,11 +250,10 @@ describe("workspace instruction-policy onboarding proposals", () => {
     });
     expect(created.draft.provenance.sourceId).toBe(created.id);
 
-    const exactRetry = await request(
-      workspaceGrant,
-      "/instruction-policies/onboarding-proposals",
-      { method: "POST", body: createBody },
-    );
+    const exactRetry = await request(workspaceGrant, "/instruction-policies/onboarding-proposals", {
+      method: "POST",
+      body: createBody,
+    });
     expect(exactRetry.status).toBe(201);
     expect(await exactRetry.json()).toEqual(created);
 
@@ -464,7 +462,9 @@ describe("workspace instruction-policy onboarding proposals", () => {
         await scopedDb
           .select({ id: dbSchema.workspaceInstructionPolicyOnboardingProposals.id })
           .from(dbSchema.workspaceInstructionPolicyOnboardingProposals)
-          .where(eq(dbSchema.workspaceInstructionPolicyOnboardingProposals.id, otherAccountProposal.id)),
+          .where(
+            eq(dbSchema.workspaceInstructionPolicyOnboardingProposals.id, otherAccountProposal.id),
+          ),
     );
     expect(siblingContextLeak).toEqual([]);
 
@@ -582,6 +582,77 @@ describe("workspace instruction-policy onboarding proposals", () => {
         )
       `,
       /must identify its exact inactive draft/i,
+    );
+
+    const baselineDraftResponse = await request(
+      siblingWorkspaceGrant,
+      "/instruction-policies/drafts",
+      {
+        method: "POST",
+        body: {
+          operationId: crypto.randomUUID(),
+          kind: "policy",
+          scope: "global",
+          roleKey: null,
+          content: "Establish the current policy baseline for proposal trigger validation.",
+          provenanceSource: "human",
+        },
+      },
+    );
+    expect(baselineDraftResponse.status).toBe(201);
+    const baselineDraft = (await baselineDraftResponse.json()) as Record<string, any>;
+    const baselineActivation = await request(
+      siblingWorkspaceGrant,
+      `/instruction-policies/${baselineDraft.id}/activate`,
+      {
+        method: "POST",
+        body: {
+          operationId: crypto.randomUUID(),
+          expectedCurrentRevisionId: null,
+          expectedActivationVersion: 0,
+          reason: "Exercise exact onboarding-proposal baseline validation",
+        },
+      },
+    );
+    expect(baselineActivation.status).toBe(200);
+
+    await expectDatabaseFailure(
+      shared.admin`
+        INSERT INTO workspace_instruction_policy_onboarding_proposals (
+          operation_id,
+          request_fingerprint,
+          account_id,
+          workspace_id,
+          kind,
+          scope,
+          role_key,
+          source_id,
+          source_version,
+          confidence_bps,
+          baseline_activation_version,
+          draft_revision_id,
+          draft_revision,
+          draft_content_hash,
+          created_by_subject_id
+        ) VALUES (
+          ${crypto.randomUUID()}::uuid,
+          ${"e".repeat(64)},
+          ${siblingWorkspaceGrant.accountId}::uuid,
+          ${siblingWorkspaceGrant.workspaceId}::uuid,
+          'policy',
+          'global',
+          NULL,
+          'stale-baseline-forge',
+          'v1',
+          10000,
+          0,
+          ${proposal.draft.id}::uuid,
+          ${proposal.draft.revision},
+          ${proposal.draft.contentHash},
+          ${siblingWorkspaceGrant.subjectId}
+        )
+      `,
+      /must capture the exact active head baseline/i,
     );
   }, 120_000);
 });

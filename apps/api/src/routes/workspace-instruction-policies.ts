@@ -229,11 +229,7 @@ export function registerWorkspaceInstructionPolicyRoutes(app: Hono, deps: ApiRou
     }
     return context.json(
       WorkspaceInstructionPolicyOnboardingProposalListResponse.parse(
-        await listWorkspaceInstructionPolicyOnboardingProposals(
-          deps.db,
-          workspaceId,
-          parsed.data,
-        ),
+        await listWorkspaceInstructionPolicyOnboardingProposals(deps.db, workspaceId, parsed.data),
       ),
     );
   });
