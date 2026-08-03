@@ -1,5 +1,11 @@
 # @opengeni/codex
 
+## 0.2.10
+
+### Patch Changes
+
+- 4f15920: Add an authorized, server-mediated connected-Codex GPT-Live V3 WebRTC SDP path with credential-safe negotiation and browser lifecycle helpers.
+
 ## 0.2.9
 
 ### Patch Changes
