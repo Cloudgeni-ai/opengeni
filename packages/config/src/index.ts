@@ -1415,7 +1415,7 @@ export interface ConfiguredModel {
   capabilities: ModelCapabilitiesV1;
   requestPolicy?: {
     gateway: {
-      only: [string];
+      only: [string, ...string[]];
       caching: "auto" | "none";
     };
   };
@@ -1442,15 +1442,15 @@ export const OPENGENI_GATEWAY_MODELS = {
     workspaceProductId: `${WORKSPACE_GATEWAY_MODEL_ID_PREFIX}deepseek-v4-flash-0731`,
     upstreamModelId: "deepseek/deepseek-v4-flash-0731",
     label: "DeepSeek V4 Flash 0731",
-    provider: "deepinfra",
+    providers: ["baseten", "novita", "deepinfra"],
     implicitCaching: true,
   },
   kimi: {
-    productId: "kimi-k3-fast",
-    workspaceProductId: `${WORKSPACE_GATEWAY_MODEL_ID_PREFIX}kimi-k3-fast`,
-    upstreamModelId: "moonshotai/kimi-k3-fast",
-    label: "Kimi K3 Fast",
-    provider: "wafer",
+    productId: "kimi-k3",
+    workspaceProductId: `${WORKSPACE_GATEWAY_MODEL_ID_PREFIX}kimi-k3`,
+    upstreamModelId: "moonshotai/kimi-k3",
+    label: "Kimi K3",
+    providers: ["baseten", "fireworks"],
     implicitCaching: true,
   },
 } as const;
@@ -1529,24 +1529,24 @@ export const defaultModelPricing: Record<string, ModelPricingScheduleV1> = {
       },
     ],
   },
-  // Vercel AI Gateway endpoint prices, provider-pinned in the runtime.
-  // Snapshot: 2026-08-02. Both pinned routes returned discounted implicit
-  // cache reads in live Gateway responses. Wafer/Kimi reported $0.45/M even
-  // though the provider-discovery flag currently says otherwise; bill from
-  // the response-backed rate, not that inconsistent boolean.
+  // Conservative Vercel AI Gateway fallback prices. Normal managed Gateway
+  // billing uses the exact response Gateway `cost` / `inferenceCost` and applies
+  // the same margin. These token rates are used only if that
+  // metadata is absent. DeepSeek therefore carries the highest approved route
+  // (Novita); both approved Kimi routes have the same list price.
   [OPENGENI_GATEWAY_MODELS.deepseek.productId]: {
     default: {
-      inputMicrosPerMillionTokens: 90_000,
-      cachedInputMicrosPerMillionTokens: 18_000,
-      outputMicrosPerMillionTokens: 180_000,
+      inputMicrosPerMillionTokens: 140_000,
+      cachedInputMicrosPerMillionTokens: 28_000,
+      outputMicrosPerMillionTokens: 280_000,
       marginBps: 2_500,
     },
   },
   [OPENGENI_GATEWAY_MODELS.kimi.productId]: {
     default: {
-      inputMicrosPerMillionTokens: 4_500_000,
-      cachedInputMicrosPerMillionTokens: 450_000,
-      outputMicrosPerMillionTokens: 22_500_000,
+      inputMicrosPerMillionTokens: 3_000_000,
+      cachedInputMicrosPerMillionTokens: 300_000,
+      outputMicrosPerMillionTokens: 15_000_000,
       marginBps: 2_500,
     },
   },
@@ -2279,7 +2279,7 @@ export function gatewayRequestPolicyForUpstreamModel(
   }
   return {
     gateway: {
-      only: [model.provider],
+      only: [...model.providers] as [string, ...string[]],
       caching: model.implicitCaching ? "auto" : "none",
     },
   };
@@ -2304,8 +2304,8 @@ function gatewayModelCapabilities(
     promptCaching: input.implicitCaching
       ? { upstream: "supported", runnable: true, mode: "implicit" }
       : { upstream: "unsupported", runnable: false, mode: "none" },
-    // "Fast" is part of Kimi's product name, not OpenGeni's separately billed
-    // latency mode. Both Gateway products expose only standard here.
+    // Both Gateway products expose one reviewed route policy and no separately
+    // billed latency mode.
     latencyModes: [{ id: "standard", upstream: "supported", runnable: true }],
   });
 }
@@ -2317,19 +2317,22 @@ function gatewayRegistryProvider(
     | { kind: "vercel-gateway-workspace"; apiKey?: string },
 ): RegistryProvider {
   const workspace = input.kind === "vercel-gateway-workspace";
-  const models = [OPENGENI_GATEWAY_MODELS.deepseek, OPENGENI_GATEWAY_MODELS.kimi].map((model) => ({
-    id: workspace ? model.workspaceProductId : model.productId,
-    upstreamModelId: model.upstreamModelId,
-    label: model.label,
-    capabilities: gatewayModelCapabilities(settings, {
-      implicitCaching: model.implicitCaching,
-      vision: model === OPENGENI_GATEWAY_MODELS.kimi,
-    }),
-    contextWindowTokens: 1_000_000,
-    effectiveContextWindowTokens: 900_000,
-    autoCompactTokenLimit: 850_000,
-    toolOutputTruncationTokens: settings.modelToolOutputTruncationTokens,
-  }));
+  const models = [OPENGENI_GATEWAY_MODELS.deepseek, OPENGENI_GATEWAY_MODELS.kimi].map((model) => {
+    const kimi = model === OPENGENI_GATEWAY_MODELS.kimi;
+    return {
+      id: workspace ? model.workspaceProductId : model.productId,
+      upstreamModelId: model.upstreamModelId,
+      label: model.label,
+      capabilities: gatewayModelCapabilities(settings, {
+        implicitCaching: model.implicitCaching,
+        vision: kimi,
+      }),
+      contextWindowTokens: 1_000_000,
+      effectiveContextWindowTokens: 900_000,
+      autoCompactTokenLimit: 850_000,
+      toolOutputTruncationTokens: settings.modelToolOutputTruncationTokens,
+    };
+  });
   return {
     kind: input.kind,
     id: workspace ? WORKSPACE_GATEWAY_PROVIDER_ID : OPENGENI_GATEWAY_PROVIDER_ID,
@@ -3314,6 +3317,39 @@ export function calculateModelUsageCostMicros(
     }
   }
   return total;
+}
+
+/**
+ * Convert AI Gateway's exact USD inference cost to OpenGeni credit micros and
+ * apply the configured model margin. Decimal arithmetic is integer-only so a
+ * sub-micro provider charge cannot be lost to floating-point rounding.
+ */
+export function calculateGatewayReportedCostMicros(
+  settings: Settings,
+  model: string,
+  inferenceCostUsd: string,
+  options?: { inputTokens?: number },
+): number {
+  const schedule = configuredModelPricingSchedules(settings)[model];
+  if (!schedule) {
+    throw new Error(`Missing model pricing for ${model}`);
+  }
+  const pricing = selectModelPricing(schedule, positiveInt(options?.inputTokens));
+  const match = /^(0|[1-9]\d*)(?:\.(\d{1,18}))?$/.exec(inferenceCostUsd);
+  if (!match) {
+    throw new Error("Invalid AI Gateway inference cost");
+  }
+  const fraction = match[2] ?? "";
+  const decimalDigits = BigInt(`${match[1]}${fraction}`);
+  const decimalScale = 10n ** BigInt(fraction.length);
+  const marginBps = BigInt(10_000 + (pricing.marginBps ?? 0));
+  const numerator = decimalDigits * 1_000_000n * marginBps;
+  const denominator = decimalScale * 10_000n;
+  const micros = (numerator + denominator - 1n) / denominator;
+  if (micros > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error("AI Gateway inference cost exceeds the supported billing range");
+  }
+  return Number(micros);
 }
 
 export function configuredAllowedReasoningEfforts(

@@ -357,6 +357,10 @@ export type NormalizedRuntimeEvent = {
 export type ModelResponseUsage = {
   responseId?: string;
   serviceTier?: string;
+  gatewayBilling?: {
+    finalProvider: string;
+    inferenceCostUsd: string;
+  };
   usage: {
     inputTokens?: number;
     outputTokens?: number;
@@ -697,21 +701,16 @@ export class WorkspaceGatewayUnavailableError extends Error {
 }
 
 /**
- * Kimi Fast/Wafer currently returns parallel function calls, but Gateway
- * rejects a Responses continuation containing the canonical
- * `call A, call B, result A, result B` batch with error metadata that names the
- * base Kimi model. Whether that is internal normalization or incorrect error
- * metadata is not observable. The exact-provider fence correctly prevents any
- * fallback.
- * Interleave only complete, contiguous batches into
- * `call A, result A, call B, result B`: same calls, ids, arguments, outputs,
- * and order; no item is dropped or invented. Partial/ambiguous batches remain
- * untouched and fail closed upstream.
+ * Gateway's Kimi Responses adapter rejects the standard grouped parallel-tool
+ * continuation (`call A, call B, result A, result B`) even though it accepts
+ * the exact same complete items when each result follows its call. Pair only
+ * complete contiguous batches by `call_id`; preserve every item and field,
+ * parallel execution, model, and provider route. Partial or ambiguous batches
+ * stay untouched and fail closed upstream.
  */
-export function interleaveParallelFunctionCallResults(body: Record<string, unknown>): boolean {
+function pairKimiParallelFunctionCallResults(body: Record<string, unknown>): void {
   const input = body.input;
-  if (!Array.isArray(input)) return false;
-  let changed = false;
+  if (!Array.isArray(input)) return;
   let index = 0;
   while (index < input.length) {
     const item = input[index];
@@ -751,41 +750,38 @@ export function interleaveParallelFunctionCallResults(body: Record<string, unkno
       index = resultEnd;
       continue;
     }
-    const byCallId = new Map<string, Record<string, unknown>>();
-    let valid = true;
+    const resultsByCallId = new Map<string, Record<string, unknown>>();
     for (const result of results) {
       const callId = result.call_id;
-      if (typeof callId !== "string" || byCallId.has(callId)) {
-        valid = false;
+      if (typeof callId !== "string" || resultsByCallId.has(callId)) {
+        resultsByCallId.clear();
         break;
       }
-      byCallId.set(callId, result);
+      resultsByCallId.set(callId, result);
     }
-    const interleaved: Array<Record<string, unknown>> = [];
+    const paired: Array<Record<string, unknown>> = [];
     for (const call of calls) {
       const callId = call.call_id;
-      const result = typeof callId === "string" ? byCallId.get(callId) : undefined;
+      const result = typeof callId === "string" ? resultsByCallId.get(callId) : undefined;
       if (!result) {
-        valid = false;
+        paired.length = 0;
         break;
       }
-      interleaved.push(call, result);
+      paired.push(call, result);
     }
-    if (!valid) {
+    if (paired.length === calls.length * 2) {
+      input.splice(index, paired.length, ...paired);
+      index += paired.length;
+    } else {
       index = resultEnd;
-      continue;
     }
-    input.splice(index, calls.length + results.length, ...interleaved);
-    changed = true;
-    index += interleaved.length;
   }
-  return changed;
 }
 
 /**
  * Inject the reviewed route after SDK serialization, replacing any caller
- * gateway options. There is exactly one allowed endpoint provider and no model
- * fallback list. Unknown models/body shapes fail before network I/O.
+ * gateway options. Only the ordered, reviewed endpoint providers are allowed;
+ * no model fallback list is sent. Unknown models/body shapes fail before I/O.
  */
 export function vercelGatewayRoutingFetch(
   kind: Extract<
@@ -829,7 +825,7 @@ export function vercelGatewayRoutingFetch(
     };
     body.providerOptions = providerOptions;
     if (model === OPENGENI_GATEWAY_MODELS.kimi.upstreamModelId) {
-      interleaveParallelFunctionCallResults(body);
+      pairKimiParallelFunctionCallResults(body);
     }
     const response = await inner(input, { ...init, body: JSON.stringify(body) });
     if (response.ok) {
@@ -5820,11 +5816,63 @@ export function modelResponseUsageFromResponse(response: unknown): ModelResponse
         ? (response as { responseId: string }).responseId
         : undefined;
   const serviceTier = modelResponseServiceTierFromResponse(response);
+  const gatewayBilling = gatewayBillingFromResponse(response);
   return {
     ...(responseId ? { responseId } : {}),
     ...(serviceTier ? { serviceTier } : {}),
+    ...(gatewayBilling ? { gatewayBilling } : {}),
     usage,
   };
+}
+
+/** Extract only the bounded, non-secret Gateway billing facts we consume. */
+function gatewayBillingFromResponse(
+  response: unknown,
+): ModelResponseUsage["gatewayBilling"] | null {
+  if (!response || typeof response !== "object" || Array.isArray(response)) {
+    return null;
+  }
+  const record = response as Record<string, unknown>;
+  const providerData =
+    record.providerData &&
+    typeof record.providerData === "object" &&
+    !Array.isArray(record.providerData)
+      ? (record.providerData as Record<string, unknown>)
+      : null;
+  const metadataCandidate =
+    record.provider_metadata ??
+    record.providerMetadata ??
+    providerData?.provider_metadata ??
+    providerData?.providerMetadata;
+  if (
+    !metadataCandidate ||
+    typeof metadataCandidate !== "object" ||
+    Array.isArray(metadataCandidate)
+  ) {
+    return null;
+  }
+  const gateway = (metadataCandidate as Record<string, unknown>).gateway;
+  if (!gateway || typeof gateway !== "object" || Array.isArray(gateway)) {
+    return null;
+  }
+  const gatewayRecord = gateway as Record<string, unknown>;
+  const routing = gatewayRecord.routing;
+  const routingRecord =
+    routing && typeof routing === "object" && !Array.isArray(routing)
+      ? (routing as Record<string, unknown>)
+      : null;
+  const finalProvider = routingRecord?.finalProvider ?? routingRecord?.final_provider;
+  const inferenceCostUsd =
+    gatewayRecord.inferenceCost ?? gatewayRecord.inference_cost ?? gatewayRecord.cost;
+  if (
+    typeof finalProvider !== "string" ||
+    !/^[a-z0-9][a-z0-9-]{0,63}$/.test(finalProvider) ||
+    typeof inferenceCostUsd !== "string" ||
+    !/^(0|[1-9]\d*)(?:\.\d{1,18})?$/.test(inferenceCostUsd)
+  ) {
+    return null;
+  }
+  return { finalProvider, inferenceCostUsd };
 }
 
 export type ModelResponseServiceTierEvent = {
