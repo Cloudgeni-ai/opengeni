@@ -5,7 +5,10 @@
 // spine (OAuth redirect or an API-key form) in a right-hand detail sheet, never
 // by hand-editing enable headers. Packs keep their first-class register/enable/
 // disable/unregister surface, restyled flat.
-import { OPENGENI_SLACK_BOT_REQUIRED_SCOPES } from "@opengeni/contracts/slack-bot-scopes";
+import {
+  OPENGENI_SLACK_BOT_REQUESTED_SCOPES,
+  OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
+} from "@opengeni/contracts/slack-bot-scopes";
 import { usePacks, useVariableSets } from "@opengeni/react";
 import {
   Building2Icon,
@@ -30,6 +33,7 @@ import { CapabilityLogo } from "@/components/capabilities/capability-logo";
 import { CapabilityTile } from "@/components/capabilities/capability-tile";
 import { PacksSection } from "@/components/capabilities/packs-section";
 import { PersonalSlackAccountCard } from "@/components/capabilities/personal-slack-account-card";
+import { SlackReactionSummonCard } from "@/components/capabilities/slack-reaction-summon-card";
 import { LoadErrorState, PageHeader } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
@@ -112,6 +116,24 @@ export function canInstallOpenGeniSlackBot(
   workspaceId: string,
 ): boolean {
   return canWriteWorkspaceConnections(accessContext, workspaceId);
+}
+
+export function canManageSlackReactionSummon(
+  accessContext: AccessContext | null,
+  workspaceId: string,
+): boolean {
+  const grant = accessContext?.workspaceGrants.find(
+    (candidate) => candidate.workspaceId === workspaceId,
+  );
+  return grant?.permissions.includes("workspace:admin") === true;
+}
+
+export function WorkspaceSlackBotRequestedScopes() {
+  return (
+    <p className="mt-2 max-w-3xl break-words font-mono text-2xs leading-relaxed text-fg-subtle">
+      {OPENGENI_SLACK_BOT_REQUESTED_SCOPES.join(", ")}
+    </p>
+  );
 }
 
 export function SlackBotInstallControls({
@@ -242,6 +264,7 @@ export function CapabilitiesRoute({
     ? openGeniSlackBotUiMetadata(slackBotConnection)
     : null;
   const canInstallSlackBot = canInstallOpenGeniSlackBot(context.accessContext, workspaceId);
+  const canManageSlackReaction = canManageSlackReactionSummon(context.accessContext, workspaceId);
 
   const showPacks = filter === "all" || filter === "pack";
   const showCatalog = filter !== "pack";
@@ -1061,6 +1084,14 @@ export function CapabilitiesRoute({
                     </div>
                   </div>
 
+                  <SlackReactionSummonCard
+                    workspaceId={workspaceId}
+                    connection={slackBotConnection}
+                    canManage={canManageSlackReaction}
+                    installBusy={slackBotBusy}
+                    onReinstall={() => void installSlackBot(false)}
+                  />
+
                   <details className="group mt-3 border-t border-border/70 pt-3">
                     <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 text-2xs text-fg-subtle transition-colors hover:text-fg-muted">
                       <ChevronDownIcon className="size-3 shrink-0 transition-transform group-open:rotate-180" />
@@ -1117,9 +1148,7 @@ export function CapabilitiesRoute({
                       <ChevronDownIcon className="size-3 shrink-0 transition-transform group-open:rotate-180" />
                       <span>Workspace bot permissions requested</span>
                     </summary>
-                    <p className="mt-2 max-w-3xl break-words font-mono text-2xs leading-relaxed text-fg-subtle">
-                      {OPENGENI_SLACK_BOT_REQUIRED_SCOPES.join(", ")}
-                    </p>
+                    <WorkspaceSlackBotRequestedScopes />
                   </details>
                 </>
               )}

@@ -5388,6 +5388,7 @@ export type SlackBotUserLink = {
 export type SlackInteractionTriggerKind =
   | "app_mention"
   | "dm"
+  | "reaction"
   | "slash_command"
   | "message_shortcut"
   | "thread_reply";
@@ -5412,6 +5413,7 @@ export type SlackInteractionInboxEntry = {
   attemptCount: number;
   retryAt: Date | null;
   lastErrorCode: string | null;
+  reactionContextCheckpoint: unknown | null;
   processedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
@@ -5557,6 +5559,7 @@ export async function enqueueSlackInteractionInbox(
     | "attemptCount"
     | "retryAt"
     | "lastErrorCode"
+    | "reactionContextCheckpoint"
     | "processedAt"
     | "createdAt"
     | "updatedAt"
@@ -5619,6 +5622,7 @@ export async function settleSlackInteractionInbox(
         claimHolderId: null,
         claimExpiresAt: null,
         retryAt: null,
+        reactionContextCheckpoint: null,
         processedAt: sql`now()`,
         lastErrorCode: input.errorCode ?? null,
         updatedAt: sql`now()`,
@@ -5626,6 +5630,42 @@ export async function settleSlackInteractionInbox(
       .where(
         and(
           eq(schema.slackInteractionInbox.id, input.entry.id),
+          eq(schema.slackInteractionInbox.claimHolderId, input.claimHolderId),
+          eq(schema.slackInteractionInbox.status, "processing"),
+        ),
+      )
+      .returning({ id: schema.slackInteractionInbox.id });
+    return rows.length === 1;
+  });
+}
+
+export async function saveSlackInteractionInboxReactionCheckpoint(
+  db: Database,
+  input: {
+    entry: Pick<
+      SlackInteractionInboxEntry,
+      "id" | "accountId" | "workspaceId" | "connectionId" | "providerEventId" | "providerMessageId"
+    >;
+    claimHolderId: string;
+    checkpoint: unknown;
+  },
+): Promise<boolean> {
+  return await withRlsContext(db, input.entry, async (scopedDb) => {
+    const rows = await scopedDb
+      .update(schema.slackInteractionInbox)
+      .set({
+        reactionContextCheckpoint: input.checkpoint,
+        updatedAt: sql`now()`,
+      })
+      .where(
+        and(
+          eq(schema.slackInteractionInbox.id, input.entry.id),
+          eq(schema.slackInteractionInbox.accountId, input.entry.accountId),
+          eq(schema.slackInteractionInbox.workspaceId, input.entry.workspaceId),
+          eq(schema.slackInteractionInbox.connectionId, input.entry.connectionId),
+          eq(schema.slackInteractionInbox.providerEventId, input.entry.providerEventId),
+          eq(schema.slackInteractionInbox.providerMessageId, input.entry.providerMessageId),
+          eq(schema.slackInteractionInbox.triggerKind, "reaction"),
           eq(schema.slackInteractionInbox.claimHolderId, input.claimHolderId),
           eq(schema.slackInteractionInbox.status, "processing"),
         ),
@@ -6178,6 +6218,8 @@ function mapSlackInteractionInbox(
     attemptCount: slackRowNumber(row, "attemptCount", "attempt_count"),
     retryAt: slackRowNullableDate(row, "retryAt", "retry_at"),
     lastErrorCode: slackRowNullableString(row, "lastErrorCode", "last_error_code"),
+    reactionContextCheckpoint:
+      slackRowValue(row, "reactionContextCheckpoint", "reaction_context_checkpoint") ?? null,
     processedAt: slackRowNullableDate(row, "processedAt", "processed_at"),
     createdAt: slackRowDate(row, "createdAt", "created_at"),
     updatedAt: slackRowDate(row, "updatedAt", "updated_at"),

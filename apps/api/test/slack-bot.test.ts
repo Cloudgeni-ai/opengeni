@@ -4,6 +4,7 @@ import type { Settings } from "@opengeni/config";
 import {
   OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
   OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
+  OPENGENI_SLACK_BOT_REQUESTED_SCOPES,
   OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
   OPENGENI_SLACK_BOT_SAFE_OPTIONAL_SCOPES,
   OPENGENI_SLACK_BOT_SESSION_METADATA_KEY,
@@ -176,7 +177,7 @@ function fakeSlack(
     const headers =
       method === "auth.test"
         ? {
-            "x-oauth-scopes": (options.scopes ?? OPENGENI_SLACK_BOT_REQUIRED_SCOPES).join(","),
+            "x-oauth-scopes": (options.scopes ?? OPENGENI_SLACK_BOT_REQUESTED_SCOPES).join(","),
           }
         : undefined;
     if (url.hostname === "files.slack.com") {
@@ -663,7 +664,7 @@ describe("OpenGeni Slack bot credential verification", () => {
       "mpim:read",
       "users:read",
     ]);
-    const exact = fakeSlack();
+    const exact = fakeSlack({ scopes: OPENGENI_SLACK_BOT_REQUIRED_SCOPES });
     const verified = await verifyOpenGeniSlackBotCredential(
       fixtureBotToken(),
       exact.fetch,
@@ -889,7 +890,7 @@ async function withFailingConnectionInsert<T>(
 }
 
 describe("OpenGeni Slack bot connection", () => {
-  test("requests the required-only bot manifest and completes the reduced-scope callback", async () => {
+  test("requests the reaction-capable bot manifest and completes the callback", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const slack = fakeSlack();
@@ -902,7 +903,7 @@ describe("OpenGeni Slack bot connection", () => {
     expect(authorizationUrl.origin).toBe("https://slack.com");
     expect(authorizationUrl.pathname).toBe("/oauth/v2/authorize");
     expect(authorizationUrl.searchParams.get("scope")).toBe(
-      OPENGENI_SLACK_BOT_REQUIRED_SCOPES.join(","),
+      OPENGENI_SLACK_BOT_REQUESTED_SCOPES.join(","),
     );
     expect(authorizationUrl.searchParams.has("user_scope")).toBe(false);
 
@@ -916,7 +917,7 @@ describe("OpenGeni Slack bot connection", () => {
     );
     expect(connection).toMatchObject({
       status: "active",
-      grantedScopes: [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES].sort(),
+      grantedScopes: [...OPENGENI_SLACK_BOT_REQUESTED_SCOPES].sort(),
       verifiedInstallVersion: 1,
     });
     expect(connection?.verifiedInstallAt).not.toBeNull();
@@ -945,7 +946,7 @@ describe("OpenGeni Slack bot connection", () => {
       kind: "app_install",
       status: "active",
       verifiedInstallVersion: 1,
-      grantedScopes: [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES].sort(),
+      grantedScopes: [...OPENGENI_SLACK_BOT_REQUESTED_SCOPES].sort(),
       metadata: {
         credentialRole: OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
         slackTeamId: "T_OPEN_GENI",
