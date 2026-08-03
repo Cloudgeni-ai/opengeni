@@ -984,11 +984,7 @@ async function transitionGoogleDriveProviderResponseFailure(
     input.connectionId,
     input.subjectId,
   );
-  if (
-    !latest ||
-    latest.version !== input.connectionVersion ||
-    latest.status !== "active"
-  ) {
+  if (!latest || latest.version !== input.connectionVersion || latest.status !== "active") {
     return;
   }
   await transitionGoogleDriveConnectionLifecycle(
