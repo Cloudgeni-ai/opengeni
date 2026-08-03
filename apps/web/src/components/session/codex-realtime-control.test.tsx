@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, createRef, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -20,6 +20,10 @@ import {
 GlobalRegistrator.register({ url: "https://app.example.test" });
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
   true;
+
+afterAll(() => {
+  GlobalRegistrator.unregister();
+});
 
 const idle: CodexRealtimeControllerSnapshot = {
   status: "idle",
