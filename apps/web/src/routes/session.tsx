@@ -1,7 +1,7 @@
 // The session view — live timeline plus one compact prompt queue above the
 // composer. Enter queues and Cmd/Ctrl+Enter steers; failed sessions stay
 // honest (reason + retry history) and revivable from the same composer.
-import { HumanInputForm, MessageTimeline, SessionChrome } from "@opengeni/react/session-ui";
+import { HumanInputSurface, MessageTimeline, SessionChrome } from "@opengeni/react/session-ui";
 import {
   creditExhaustedFromEvents,
   projectPendingApprovals,
@@ -1003,22 +1003,18 @@ function SessionChatPane(props: {
 
       {/* Structured questions are tool output, not approvals: answer/skip
           resumes the exact frozen call. The authoritative hook reads pending
-          rows and uses this shared event feed only as a refresh trigger. */}
+          rows and uses this shared event feed only as a refresh trigger.
+          Parallel requests step one-at-a-time inside HumanInputSurface. */}
       {props.humanInput.requests.length > 0 && props.session.status === "requires_action" ? (
-        <div className="mx-auto w-full max-w-3xl shrink-0 px-4 sm:px-6">
-          <div className="grid max-h-[28rem] gap-3 overflow-y-auto pb-2">
-            {props.humanInput.requests.map((request) => (
-              <HumanInputForm
-                key={request.id}
-                request={request}
-                submitting={props.humanInput.respondingRequestId !== null}
-                error={props.humanInput.mutationError?.message}
-                onSubmit={(response) =>
-                  props.humanInput.respond(request.id, response).then(() => undefined)
-                }
-              />
-            ))}
-          </div>
+        <div className="mx-auto w-full max-w-3xl shrink-0 px-4 sm:px-6 pb-2">
+          <HumanInputSurface
+            requests={props.humanInput.requests}
+            respondingRequestId={props.humanInput.respondingRequestId}
+            error={props.humanInput.mutationError?.message}
+            onSubmit={(requestId, response) =>
+              props.humanInput.respond(requestId, response).then(() => undefined)
+            }
+          />
         </div>
       ) : null}
 
