@@ -1,5 +1,12 @@
 # @opengeni/sdk
 
+## 0.37.0
+
+### Minor Changes
+
+- 13b961e: Add an atomic terminal session-subtree cancellation command that drains queued work, fences concurrent prompts and child creation, interrupts live attempts, durably reports cancelled children to surviving parents, and exposes the operation through the API/core/SDK control surface.
+- 3baaebd: Add configurable Slack emoji-reaction summons with a least-privilege manifest, bounded thread context, and workspace-admin settings.
+
 ## 0.36.2
 
 ### Patch Changes
