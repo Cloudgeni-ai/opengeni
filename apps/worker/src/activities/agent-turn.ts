@@ -142,6 +142,7 @@ import {
 import { connectionTokenResolverForTurn } from "./mcp-credentials";
 import {
   assertTurnExecutionPolicyMatchesConfigV1,
+  calculateGatewayReportedCostMicros,
   calculateModelUsageCostMicros,
   configuredModelPricing,
   configuredStaticUsageLimits,
@@ -151,6 +152,8 @@ import {
   serviceTierForLatencyMode,
   settingsWithResolvedModelContext,
   resolveTurnExecutionPolicyV1,
+  OPENGENI_GATEWAY_MODELS,
+  OPENGENI_GATEWAY_PROVIDER_ID,
   type ModelUsageInput,
   type ModelProviderApi,
   type RegistryProviderKind,
@@ -1186,6 +1189,8 @@ export async function processModelResponseUsageEvent(input: {
         externallyBilled: input.externallyBilled,
         usage: responseUsage.usage,
         normalizedUsage,
+        gatewayManaged: input.provider === OPENGENI_GATEWAY_PROVIDER_ID,
+        gatewayBilling: responseUsage.gatewayBilling,
         sourceKey,
         ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
         observability: input.observability,
@@ -1312,6 +1317,8 @@ export async function processCompactionModelUsageEvent(input: {
         externallyBilled: input.externallyBilled,
         usage: input.usage.usage,
         normalizedUsage,
+        gatewayManaged: input.provider === OPENGENI_GATEWAY_PROVIDER_ID,
+        gatewayBilling: input.usage.gatewayBilling,
         sourceKey,
         observability: input.observability,
       });
@@ -9211,6 +9218,7 @@ export type ModelUsageBillingRecord = {
   /** Same quantity written to usage_events.model.cost when present; else 0. */
   pricedCostMicros: number;
   normalizedUsage: ModelCallUsageNormalization;
+  upstreamProvider?: string;
 };
 
 // Exported for unit testing the external-billing bypass; not part of the activity surface.
@@ -9225,6 +9233,8 @@ export async function recordModelUsageAndDebitCredits(
     turnAttemptId: string;
     model: string;
     externallyBilled: boolean;
+    gatewayManaged?: boolean;
+    gatewayBilling?: ModelResponseUsage["gatewayBilling"];
     usage?: ModelUsageInput | ModelCallUsageInput | null;
     normalizedUsage?: ModelCallUsageNormalization;
     sourceKey: string;
@@ -9240,6 +9250,20 @@ export async function recordModelUsageAndDebitCredits(
   const inputTokens = sanitizedUsage.inputTokens ?? 0;
   const outputTokens = sanitizedUsage.outputTokens ?? 0;
   const totalTokens = sanitizedUsage.totalTokens ?? 0;
+  const gatewayBilling = input.gatewayManaged ? input.gatewayBilling : undefined;
+  if (gatewayBilling) {
+    const gatewayModel = Object.values(OPENGENI_GATEWAY_MODELS).find(
+      (candidate) => candidate.productId === input.model,
+    );
+    if (
+      !gatewayModel ||
+      !(gatewayModel.providers as readonly string[]).includes(gatewayBilling.finalProvider)
+    ) {
+      throw new Error(
+        `AI Gateway reported unapproved provider ${gatewayBilling.finalProvider} for ${input.model}`,
+      );
+    }
+  }
   // An externally billed turn is paid outside OpenGeni, so it
   // consumes ZERO OpenGeni credits and must never feed an OpenGeni cap. A
   // codex/<slug> model has no entry in configuredModelPricing, so the normal path
@@ -9285,19 +9309,24 @@ export async function recordModelUsageAndDebitCredits(
     });
   }
   const shouldDebit = settings.billingMode === "stripe" || settings.usageLimitsMode === "managed";
-  if (!shouldDebit || totalTokens === 0) {
+  if (!shouldDebit || (totalTokens === 0 && !gatewayBilling)) {
     return {
       billingPath: "opengeni_credits",
       pricedCostMicros: 0,
       normalizedUsage,
+      ...(gatewayBilling ? { upstreamProvider: gatewayBilling.finalProvider } : {}),
     };
   }
   if (!configuredModelPricing(settings)[input.model]) {
     throw new Error(`Missing model pricing for ${input.model}`);
   }
-  const costMicros = calculateModelUsageCostMicros(settings, input.model, sanitizedUsage, {
-    latencyMode: input.latencyMode ?? "standard",
-  });
+  const costMicros = gatewayBilling
+    ? calculateGatewayReportedCostMicros(settings, input.model, gatewayBilling.inferenceCostUsd, {
+        inputTokens,
+      })
+    : calculateModelUsageCostMicros(settings, input.model, sanitizedUsage, {
+        latencyMode: input.latencyMode ?? "standard",
+      });
   await recordUsageEvent(db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
@@ -9333,6 +9362,7 @@ export async function recordModelUsageAndDebitCredits(
         // per-call debit record carries cache efficiency alongside the token
         // counts. 0 when the provider did not report cached tokens.
         cachedTokens: normalizedUsage.telemetry.cachedTokens ?? 0,
+        ...(gatewayBilling ? { gatewayProvider: gatewayBilling.finalProvider } : {}),
       },
     });
     recordCreditMicros(input.observability, "usage", result.debitedMicros);
@@ -9341,6 +9371,7 @@ export async function recordModelUsageAndDebitCredits(
     billingPath: "opengeni_credits",
     pricedCostMicros: costMicros,
     normalizedUsage,
+    ...(gatewayBilling ? { upstreamProvider: gatewayBilling.finalProvider } : {}),
   };
 }
 
@@ -9368,7 +9399,7 @@ export async function recordAuthoritativeModelCallFact(input: {
       turnId: input.turnId,
       turnAttemptId: input.turnAttemptId,
       sourceKey: input.sourceKey,
-      provider: input.provider,
+      provider: input.billing.upstreamProvider ?? input.provider,
       providerApi: input.providerApi,
       model: input.model,
       billingPath: input.billing.billingPath,

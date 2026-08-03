@@ -66,11 +66,11 @@ const NON_LLM_PRICES_MODELS = [
   },
   {
     id: "deepseek-v4-flash-0731",
-    reason: "provider-pinned Baseten snapshot; covered by catalogue tests",
+    reason: "reviewed Gateway routes; exact-cost billing and conservative fallback are tested",
   },
   {
-    id: "kimi-k3-fast",
-    reason: "provider-pinned Wafer snapshot; covered by catalogue tests",
+    id: "kimi-k3",
+    reason: "reviewed Gateway routes; exact-cost billing and conservative fallback are tested",
   },
 ] as const;
 

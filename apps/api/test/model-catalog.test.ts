@@ -27,9 +27,16 @@ describe("workspace model catalog availability", () => {
     });
     expect(managed.deployment).toBeUndefined();
     expect(managed.credentialSource).toBeUndefined();
-    expect(JSON.stringify(managed)).not.toContain("deepinfra");
-    expect(JSON.stringify(managed)).not.toContain("baseten");
-    expect(JSON.stringify(managed)).not.toContain("ai-gateway.vercel.sh");
+    const publicManagedModel = JSON.stringify(managed);
+    for (const internalName of [
+      "baseten",
+      "novita",
+      "deepinfra",
+      "fireworks",
+      "ai-gateway.vercel.sh",
+    ]) {
+      expect(publicManagedModel).not.toContain(internalName);
+    }
 
     const workspaceModel = disconnected.models.find(
       (model) => model.id === "workspace-gateway/deepseek-v4-flash-0731",

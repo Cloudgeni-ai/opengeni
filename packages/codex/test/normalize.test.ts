@@ -43,6 +43,13 @@ describe("normalizeCodexRequestBody", () => {
         }
       ).effort,
     ).toBe("high");
+    expect(
+      (
+        normalizeCodexRequestBody({ reasoning: { effort: "max" } }, identity).reasoning as {
+          effort: string;
+        }
+      ).effort,
+    ).toBe("max");
   });
 
   test("strips every item id but PRESERVES call_id", () => {

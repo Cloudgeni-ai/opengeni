@@ -503,7 +503,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
   },
 };
 
-export const ReasoningEffort = z.enum(["none", "minimal", "low", "medium", "high", "xhigh"]);
+export const ReasoningEffort = z.enum(["none", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
 /** Provider service-tier / latency mode selected for a turn or session default. */
 export const LatencyMode = z.enum(["standard", "priority", "fast"]);
@@ -3604,7 +3604,8 @@ export function reasoningEffortForMetadata(
     value === "low" ||
     value === "medium" ||
     value === "high" ||
-    value === "xhigh"
+    value === "xhigh" ||
+    value === "max"
     ? value
     : fallback;
 }
