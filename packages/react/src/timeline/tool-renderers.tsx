@@ -196,10 +196,7 @@ function ExecRenderer({ item }: ToolRendererProps) {
 
   const peek = binary ? "binary output" : tailPeek(stripped) || "(no output)";
   const truncated = execTruncated(text);
-  const preview = withComputePreview(
-    computeLabel,
-    truncated ? `⋯ truncated · ${peek}` : peek,
-  );
+  const preview = withComputePreview(computeLabel, truncated ? `⋯ truncated · ${peek}` : peek);
   // Hand TermBlock the FULL stripped output; it owns the tail/show-more slicing.
   const body = binary ? "(binary output suppressed)" : stripped;
 
@@ -1307,7 +1304,13 @@ function AskRenderer({ item }: ToolRendererProps) {
         iconTone="running"
         title={title}
         running
-        preview={preview ? <RunningPreview>{preview}</RunningPreview> : <RunningPreview>Waiting…</RunningPreview>}
+        preview={
+          preview ? (
+            <RunningPreview>{preview}</RunningPreview>
+          ) : (
+            <RunningPreview>Waiting…</RunningPreview>
+          )
+        }
       >
         <PayloadBlock label="Arguments" value={args} />
       </ActivityDisclosure>

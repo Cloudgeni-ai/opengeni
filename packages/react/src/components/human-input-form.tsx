@@ -316,7 +316,9 @@ export function HumanInputForm({
                 ) : null}
               </h2>
               {progressLabel ? (
-                <span className="text-og-xs font-medium text-og-status-waiting">{progressLabel}</span>
+                <span className="text-og-xs font-medium text-og-status-waiting">
+                  {progressLabel}
+                </span>
               ) : null}
               {!singleQuestion ? (
                 <span className="text-og-xs font-medium text-og-fg-subtle">
@@ -330,15 +332,16 @@ export function HumanInputForm({
             {request.expiresAt ? (
               <p className="mt-1 text-og-xs text-og-fg-subtle">
                 {messages.deadlineLabel}{" "}
-                <time dateTime={request.expiresAt} title={new Date(request.expiresAt).toLocaleString()}>
+                <time
+                  dateTime={request.expiresAt}
+                  title={new Date(request.expiresAt).toLocaleString()}
+                >
                   {messages.formatDeadline(request.expiresAt)}
                 </time>
               </p>
             ) : null}
             {request.allowSkip && singleQuestion ? (
-              <p className="mt-1 text-og-xs text-og-fg-subtle">
-                Or skip and let the agent decide.
-              </p>
+              <p className="mt-1 text-og-xs text-og-fg-subtle">Or skip and let the agent decide.</p>
             ) : null}
           </div>
           <button
@@ -418,7 +421,10 @@ export function HumanInputForm({
       </div>
 
       {(error ?? submissionError) ? (
-        <p role="alert" className="relative z-10 shrink-0 px-4 pb-1 text-og-sm text-og-status-failed">
+        <p
+          role="alert"
+          className="relative z-10 shrink-0 px-4 pb-1 text-og-sm text-og-status-failed"
+        >
           {error ?? submissionError}
         </p>
       ) : null}
@@ -509,9 +515,7 @@ function QuestionControls({
               ) : null}
             </label>
           </div>
-          {question.label ? (
-            <p className="text-og-sm text-og-fg-muted">{question.prompt}</p>
-          ) : null}
+          {question.label ? <p className="text-og-sm text-og-fg-muted">{question.prompt}</p> : null}
           {question.helpText ? (
             <p id={helpId} className="text-og-xs text-og-fg-subtle">
               {question.helpText}

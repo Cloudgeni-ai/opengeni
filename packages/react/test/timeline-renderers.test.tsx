@@ -2,11 +2,7 @@ import { describe, expect, spyOn, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
 import { act } from "react";
 import { registerDom, renderComponent, flush } from "./render-hook";
-import {
-  defaultToolRegistry,
-  ActivityRail,
-  TimelineComputeLabelProvider,
-} from "../src/timeline";
+import { defaultToolRegistry, ActivityRail, TimelineComputeLabelProvider } from "../src/timeline";
 import type {
   AuthNeededItem,
   MemoryItem,
@@ -152,8 +148,11 @@ describe("durable machine-input timeline", () => {
     expect(r.container.textContent).toContain("15 agents finished");
     expect(r.container.textContent).not.toContain("updates joined this turn");
     expect(
-      (r.container.querySelector("details[data-og-machine-input-batch]") as HTMLDetailsElement | null)
-        ?.open,
+      (
+        r.container.querySelector(
+          "details[data-og-machine-input-batch]",
+        ) as HTMLDetailsElement | null
+      )?.open,
     ).toBe(false);
     await r.unmount();
   });
