@@ -295,6 +295,9 @@ describe("catalog-backed ModelPicker", () => {
       );
       expect(container.querySelector('[data-testid="model-picker-reasoning"]')).toBeTruthy();
       expect(container.textContent).toContain("Thinking");
+      expect(container.textContent).toContain(
+        "Unsupported attachments stay in the session but are hidden from this model.",
+      );
       expect(
         container.querySelector('[data-testid="billing-class-icon-opengeni_credits"]'),
       ).toBeTruthy();

@@ -37,6 +37,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 
 import { BillingClassMark } from "@/components/billing-class-mark";
 import { ConsoleComposer, useDraftAttachments } from "@/components/Composer";
+import { ComposerMobilePlus } from "@/components/composer-mobile-plus";
 import { ModelPicker, SessionToolPicker, type SessionToolSelection } from "@/components/pickers";
 import { NewSessionRealtimeControl } from "@/components/session/codex-realtime-control";
 import { RepositoryContextPicker } from "@/components/repository-picker";
@@ -372,6 +373,27 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
             disabled={newSessionDraft.loading}
             fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
             placeholder="Describe a task for the agent…"
+            controlsLeading={
+              <ComposerMobilePlus
+                disabled={busy || newSessionDraft.loading}
+                fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
+                servers={context.toolMcpServers}
+                firstPartyTools={firstPartySessionToolOptions}
+                selection={{
+                  mcpServerIds: context.selectedCapabilityToolIds,
+                  firstPartyToolIds: draft.firstPartyMcpTools,
+                }}
+                toolsDisabled={busy || newSessionDraft.loading}
+                onToolSelectionChange={(selection) => {
+                  setToolSelectionExplicit(true);
+                  context.setSelectedCapabilityToolIds(selection.mcpServerIds);
+                  setDraft((current) => ({
+                    ...current,
+                    firstPartyMcpTools: selection.firstPartyToolIds,
+                  }));
+                }}
+              />
+            }
             actions={
               <NewSessionRealtimeControl
                 client={context.client}
@@ -561,7 +583,7 @@ function RecentSessionRow({
 
 // Composer footer pills: model, tools, and (for managed sandbox) repos — same
 // compact control language. Repo stays out of the compute band so that band
-// only shows when rigs / variable sets exist.
+// only shows when rigs / variable sets exist. On mobile, tools move under “+”.
 function SessionControlStrip({
   workspaceId,
   modelCatalog,
@@ -595,7 +617,7 @@ function SessionControlStrip({
     modelCatalog.rows,
   ]);
   return (
-    <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+    <div className="flex min-w-0 flex-wrap items-center gap-1.5 max-sm:flex-nowrap">
       <ModelPicker
         rows={modelCatalog.rows}
         model={context.model}
@@ -612,6 +634,7 @@ function SessionControlStrip({
         servers={context.toolMcpServers}
         firstPartyTools={firstPartySessionToolOptions}
         selection={selection}
+        triggerClassName="max-sm:hidden"
         disabled={disabled}
         onChange={onToolSelectionChange}
       />

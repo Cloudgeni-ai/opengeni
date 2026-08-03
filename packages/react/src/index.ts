@@ -256,6 +256,8 @@ export type {
   HumanInputFormMessages,
   HumanInputFormProps,
 } from "./components/human-input-form";
+export { HumanInputSurface } from "./components/human-input-surface";
+export type { HumanInputSurfaceProps } from "./components/human-input-surface";
 
 // Timeline projection
 export {

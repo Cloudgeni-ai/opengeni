@@ -13,6 +13,7 @@ import {
   KeyboardIcon,
   KeyRoundIcon,
   LockIcon,
+  MessageCircleQuestionIcon,
   MessagesSquareIcon,
   MessageSquareIcon,
   MousePointer2Icon,
@@ -28,6 +29,7 @@ import {
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { stringifyPayload, tryParseJson } from "../lib/format";
+import { useTimelineComputeLabel } from "./compute-label";
 import {
   applyPatchOpsFromToolItem,
   controlCaret,
@@ -94,6 +96,14 @@ function RunningPreview({ children }: { children: ReactNode }) {
   );
 }
 
+/** Prefix a collapsed preview with the host-supplied active compute label. */
+function withComputePreview(label: string | null, preview: string): string {
+  if (!label) {
+    return preview;
+  }
+  return `on ${label} · ${preview}`;
+}
+
 /* ---- exec_command ---------------------------------------------------------- */
 
 function ExecRenderer({ item }: ToolRendererProps) {
@@ -103,6 +113,7 @@ function ExecRenderer({ item }: ToolRendererProps) {
   const running = item.status === "running";
   const out = item.output;
   const title = `$ ${cmd}`;
+  const computeLabel = useTimelineComputeLabel();
 
   // No output event ever arrived (item.output stays undefined from creation):
   // the turn failed before the output insert — most likely a NUL byte in the
@@ -116,7 +127,7 @@ function ExecRenderer({ item }: ToolRendererProps) {
         title={title}
         titleMono
         chip={{ tone: "bad", text: "failed" }}
-        preview="output lost — NUL byte could not be stored"
+        preview={withComputePreview(computeLabel, "output lost — NUL byte could not be stored")}
       >
         <BodyNote tone="error">
           output contained a NUL byte and could not be stored; the turn failed on this tool&apos;s
@@ -137,7 +148,7 @@ function ExecRenderer({ item }: ToolRendererProps) {
         title={title}
         titleMono
         chip={{ tone: "bad", text: "failed" }}
-        preview="tool call failed"
+        preview={withComputePreview(computeLabel, "tool call failed")}
       >
         <BodyNote tone="error">the tool call failed with no output.</BodyNote>
       </ActivityDisclosure>
@@ -146,6 +157,7 @@ function ExecRenderer({ item }: ToolRendererProps) {
 
   if (running) {
     const streamed = typeof out === "string" ? stripExecBanner(out) : "";
+    const runningPreview = streamed ? `${streamed.split("\n").length} lines` : "running…";
     return (
       <ActivityDisclosure
         icon={<TerminalIcon className={ICON_SIZE} />}
@@ -154,9 +166,7 @@ function ExecRenderer({ item }: ToolRendererProps) {
         titleMono
         running
         preview={
-          <RunningPreview>
-            {streamed ? `${streamed.split("\n").length} lines` : "running…"}
-          </RunningPreview>
+          <RunningPreview>{withComputePreview(computeLabel, runningPreview)}</RunningPreview>
         }
       >
         {/* The row title is already `$ ${cmd}`; the TermBlock header drops the
@@ -184,8 +194,9 @@ function ExecRenderer({ item }: ToolRendererProps) {
     iconTone = "failed";
   }
 
-  const preview = binary ? "binary output" : tailPeek(stripped) || "(no output)";
+  const peek = binary ? "binary output" : tailPeek(stripped) || "(no output)";
   const truncated = execTruncated(text);
+  const preview = withComputePreview(computeLabel, truncated ? `⋯ truncated · ${peek}` : peek);
   // Hand TermBlock the FULL stripped output; it owns the tail/show-more slicing.
   const body = binary ? "(binary output suppressed)" : stripped;
 
@@ -198,7 +209,7 @@ function ExecRenderer({ item }: ToolRendererProps) {
       {...(chip ? { chip } : {})}
       failed={item.status === "failed"}
       cancelled={item.status === "cancelled"}
-      preview={truncated ? `⋯ truncated · ${preview}` : preview}
+      preview={preview}
     >
       <TermBlock
         command={null}
@@ -1254,6 +1265,179 @@ function MemoryProposeRenderer({ item }: ToolRendererProps) {
   );
 }
 
+/* ---- request_human_input --------------------------------------------------- */
+
+function askToolPreview(args: unknown): string | null {
+  const record = args && typeof args === "object" ? (args as Record<string, unknown>) : null;
+  const questions = Array.isArray(record?.questions) ? record.questions : null;
+  if (!questions || questions.length === 0) {
+    return null;
+  }
+  const first = questions[0];
+  if (!first || typeof first !== "object") {
+    return null;
+  }
+  const q = first as Record<string, unknown>;
+  const text =
+    typeof q.label === "string" && q.label.trim()
+      ? q.label.trim()
+      : typeof q.prompt === "string" && q.prompt.trim()
+        ? q.prompt.trim()
+        : null;
+  if (!text) {
+    return null;
+  }
+  const preview = truncatePreview(text, 90);
+  return questions.length > 1 ? `${preview} · ${questions.length} questions` : preview;
+}
+
+function AskRenderer({ item }: ToolRendererProps) {
+  const args = redactSecrets(parseToolArgs(item.arguments));
+  const preview = askToolPreview(args);
+  const icon = <MessageCircleQuestionIcon className={ICON_SIZE} />;
+  const title = "Ask";
+
+  if (item.status === "running") {
+    return (
+      <ActivityDisclosure
+        icon={icon}
+        iconTone="running"
+        title={title}
+        running
+        preview={
+          preview ? (
+            <RunningPreview>{preview}</RunningPreview>
+          ) : (
+            <RunningPreview>Waiting…</RunningPreview>
+          )
+        }
+      >
+        <PayloadBlock label="Arguments" value={args} />
+      </ActivityDisclosure>
+    );
+  }
+
+  const { text: outText, isError } = unwrapMcpOutput(item.output);
+  if ((isError || item.status === "failed") && item.status !== "cancelled") {
+    return (
+      <ActivityDisclosure
+        icon={icon}
+        iconTone="failed"
+        title={title}
+        chip={{ tone: "bad", text: "error" }}
+        preview={truncatePreview(outText, 80) || preview || "Error"}
+      >
+        <PayloadBlock label="Arguments" value={args} />
+        <PayloadBlock label="Error" value={outText} failed />
+      </ActivityDisclosure>
+    );
+  }
+
+  return (
+    <ActivityDisclosure
+      icon={icon}
+      iconTone="muted"
+      title={title}
+      cancelled={item.status === "cancelled"}
+      preview={item.status === "cancelled" ? undefined : (preview ?? undefined)}
+    >
+      <PayloadBlock label="Arguments" value={args} />
+      {outText ? <PayloadBlock label="Result" value={outText} /> : null}
+    </ActivityDisclosure>
+  );
+}
+
+/* ---- run_on ---------------------------------------------------------------- */
+
+function runOnTargetName(output: unknown): string | null {
+  const { text } = unwrapMcpOutput(output);
+  const parsed = tryParseJson(text);
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    const name = (parsed as { targetName?: unknown }).targetName;
+    if (typeof name === "string" && name.trim()) {
+      return name.trim();
+    }
+  }
+  return null;
+}
+
+function runOnOpPreview(args: Record<string, unknown>): string | null {
+  const op = args.op;
+  if (!op || typeof op !== "object" || Array.isArray(op)) {
+    return null;
+  }
+  const record = op as Record<string, unknown>;
+  if (record.kind === "exec" && typeof record.cmd === "string" && record.cmd.trim()) {
+    return `$ ${record.cmd.trim()}`;
+  }
+  if (
+    (record.kind === "read" || record.kind === "write") &&
+    typeof record.path === "string" &&
+    record.path.trim()
+  ) {
+    return truncatePreview(record.path.trim(), 72);
+  }
+  return null;
+}
+
+function RunOnRenderer({ item }: ToolRendererProps) {
+  const parsedArgs = parseToolArgs(item.arguments);
+  const args = redactSecrets(parsedArgs);
+  const targetName = runOnTargetName(item.output);
+  const title = targetName ? `Run on ${targetName}` : "Run on";
+  const opPreview = runOnOpPreview(parsedArgs);
+  const icon = <ServerIcon className={ICON_SIZE} />;
+
+  if (item.status === "running") {
+    return (
+      <ActivityDisclosure
+        icon={icon}
+        iconTone="running"
+        title={title}
+        running
+        preview={
+          opPreview ? (
+            <RunningPreview>{opPreview}</RunningPreview>
+          ) : (
+            <RunningPreview>Running…</RunningPreview>
+          )
+        }
+      >
+        <PayloadBlock label="Arguments" value={args} />
+      </ActivityDisclosure>
+    );
+  }
+
+  const { text: outText, isError } = unwrapMcpOutput(item.output);
+  if ((isError || item.status === "failed") && item.status !== "cancelled") {
+    return (
+      <ActivityDisclosure
+        icon={icon}
+        iconTone="failed"
+        title={title}
+        chip={{ tone: "bad", text: "error" }}
+        preview={truncatePreview(outText, 80) || opPreview || "Error"}
+      >
+        <PayloadBlock label="Arguments" value={args} />
+        <PayloadBlock label="Error" value={outText} failed />
+      </ActivityDisclosure>
+    );
+  }
+
+  return (
+    <ActivityDisclosure
+      icon={icon}
+      iconTone="muted"
+      title={title}
+      cancelled={item.status === "cancelled"}
+      preview={item.status === "cancelled" ? undefined : (opPreview ?? undefined)}
+    >
+      <PayloadBlock label="Arguments" value={args} />
+      {outText ? <PayloadBlock label="Result" value={outText} /> : null}
+    </ActivityDisclosure>
+  );
+}
+
 /* ---- generic fallback (first-party MCP, external MCP, unknown) ------------- */
 
 /**
@@ -1355,42 +1539,45 @@ function truncatePreview(text: string, max: number): string {
 /** Explicit first-party leaf/prefix → canonical product icons (match nav/pages). */
 function GenericToolIcon({ name }: { name: string }) {
   const leaf = mcpToolLeaf(name);
-  const Icon = leaf.startsWith("goal_")
-    ? TargetIcon
-    : leaf.startsWith("memory_") ||
-        leaf === "preference_registry_summary" ||
-        leaf === "preference_registry_get"
-      ? BrainCircuitIcon
-      : leaf.startsWith("session_") ||
-          leaf === "sessions_list" ||
-          leaf === "set_session_title" ||
-          leaf === "set_other_session_title"
-        ? MessagesSquareIcon
-        : leaf.startsWith("sandbox") || leaf === "sandboxes_list" || leaf === "run_on"
-          ? ServerIcon
-          : leaf.startsWith("rig_")
-            ? ServerCogIcon
-            : leaf.startsWith("scheduled_")
-              ? CalendarClockIcon
-              : leaf.startsWith("artifacts_")
-                ? PanelsTopLeftIcon
-                : leaf.startsWith("social_")
-                  ? Share2Icon
-                  : leaf.startsWith("slack_")
-                    ? MessageSquareIcon
-                    : leaf.startsWith("github_")
-                      ? FolderGitIcon
-                      : leaf.startsWith("variable_")
-                        ? BoxIcon
-                        : leaf.startsWith("environment_")
-                          ? KeyRoundIcon
-                          : leaf.includes("document") ||
-                              leaf.includes("knowledge") ||
-                              leaf === "list_document_bases"
-                            ? FileSearchIcon
-                            : leaf === "tool_search" || leaf === "load_skill"
-                              ? PlugIcon
-                              : WrenchIcon;
+  const Icon =
+    leaf === "request_human_input"
+      ? MessageCircleQuestionIcon
+      : leaf.startsWith("goal_")
+        ? TargetIcon
+        : leaf.startsWith("memory_") ||
+            leaf === "preference_registry_summary" ||
+            leaf === "preference_registry_get"
+          ? BrainCircuitIcon
+          : leaf.startsWith("session_") ||
+              leaf === "sessions_list" ||
+              leaf === "set_session_title" ||
+              leaf === "set_other_session_title"
+            ? MessagesSquareIcon
+            : leaf.startsWith("sandbox") || leaf === "sandboxes_list" || leaf === "run_on"
+              ? ServerIcon
+              : leaf.startsWith("rig_")
+                ? ServerCogIcon
+                : leaf.startsWith("scheduled_")
+                  ? CalendarClockIcon
+                  : leaf.startsWith("artifacts_")
+                    ? PanelsTopLeftIcon
+                    : leaf.startsWith("social_")
+                      ? Share2Icon
+                      : leaf.startsWith("slack_")
+                        ? MessageSquareIcon
+                        : leaf.startsWith("github_")
+                          ? FolderGitIcon
+                          : leaf.startsWith("variable_")
+                            ? BoxIcon
+                            : leaf.startsWith("environment_")
+                              ? KeyRoundIcon
+                              : leaf.includes("document") ||
+                                  leaf.includes("knowledge") ||
+                                  leaf === "list_document_bases"
+                                ? FileSearchIcon
+                                : leaf === "tool_search" || leaf === "load_skill"
+                                  ? PlugIcon
+                                  : WrenchIcon;
   return <Icon className={ICON_SIZE} />;
 }
 
@@ -1404,6 +1591,8 @@ const BASE_ENTRIES: ToolRegistryEntry[] = [
   { match: "rawType", type: "hosted_tool_call", render: WebSearchRenderer },
   // First-party sandbox + MCP tools resolve by name (exact or MCP leaf).
   { match: "name", name: "exec_command", render: ExecRenderer },
+  { match: "name", name: "request_human_input", render: AskRenderer },
+  { match: "name", name: "run_on", render: RunOnRenderer },
   { match: "name", name: "write_stdin", render: WriteStdinRenderer },
   { match: "name", name: "apply_patch_call", render: ApplyPatchRenderer },
   { match: "name", name: "apply_patch", render: ApplyPatchRenderer },

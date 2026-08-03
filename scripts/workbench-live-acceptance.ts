@@ -35,6 +35,8 @@ const OBSERVABILITY_PROBE_PERMISSIONS = [
 const SETTLED = new Set(["idle", "failed", "error", "cancelled"]);
 const CHANNEL_A_PATH = /\/sessions\/[^/]+\/(?:fs|git|terminal)\//;
 const CAPTURE_FILE_PATH = /\/sessions\/[^/]+\/workspace\/capture\/file$/;
+const OPTIONAL_ANALYTICS_CHUNK_PATH = /^\/assets\/analytics-consent-[A-Za-z0-9_-]+\.js$/;
+const MANAGED_SESSION_PATH = /^\/v1\/auth\/get-session$/;
 const WORKSPACE_SURFACE_SELECTOR = "[data-workspace-surface]";
 const CHANGES_LAYOUT_SELECTOR = "[data-workbench-changes-layout]";
 const CAPTURE_API_P95_MS = maximumMillisecondBudget("performance.capture-api-response", "p95");
@@ -1810,7 +1812,7 @@ function observePage(page: Page): BrowserProblems {
   page.on("requestfailed", (request) => {
     const path = safePath(request.url());
     const errorText = request.failure()?.errorText ?? "unknown request failure";
-    if (isExpectedCaptureFileCancellation(path, errorText)) return;
+    if (isExpectedBrowserCancellation(path, errorText)) return;
     problems.failedRequests.push(`${sanitizeDiagnostic(errorText)} ${path}`);
   });
   page.on("response", (response) => {
@@ -1821,8 +1823,13 @@ function observePage(page: Page): BrowserProblems {
   return problems;
 }
 
-export function isExpectedCaptureFileCancellation(path: string, errorText: string): boolean {
-  return errorText === "net::ERR_ABORTED" && CAPTURE_FILE_PATH.test(path);
+export function isExpectedBrowserCancellation(path: string, errorText: string): boolean {
+  if (errorText !== "net::ERR_ABORTED") return false;
+  return (
+    CAPTURE_FILE_PATH.test(path) ||
+    OPTIONAL_ANALYTICS_CHUNK_PATH.test(path) ||
+    MANAGED_SESSION_PATH.test(path)
+  );
 }
 
 function assertNoProblems(problems: BrowserProblems, requireZeroChannelA: boolean): void {

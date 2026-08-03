@@ -117,7 +117,239 @@ describe("workspace state projection", () => {
     expect(serialized).not.toContain("SECRET");
     expect(serialized).not.toContain("secret-provenance-id");
     expect(serialized).not.toContain("secret-actor");
-    expect(projected.truth.policySnapshot.status).toBe("not_captured");
+    expect(projected.truth.attemptGovernance.status).toBe("not_requested");
+  });
+
+  test("projects immutable attempt metadata and classifies exact, superseded, and truncated drift", () => {
+    const policyHead: WorkspaceInstructionPolicyHead = {
+      workspaceId: WORKSPACE_ID,
+      kind: "policy",
+      scope: "global",
+      roleKey: null,
+      revisionId: id(5_001),
+      revision: 2,
+      contentHash: "b".repeat(64),
+      activationVersion: 2,
+      activatedAt: NOW,
+    };
+    const projected = projectWorkspaceState({
+      workspaceId: WORKSPACE_ID,
+      generatedAt: NOW,
+      workspaceAgentInstructions: null,
+      policies: policies([policyHead]),
+      knowledge: null,
+      attemptGovernance: {
+        status: "available",
+        attemptId: id(5_100),
+        executionGeneration: 3,
+        acceptedAt: "2026-07-29T12:00:00.000Z",
+        policySnapshot: {
+          id: id(5_101),
+          workspaceId: WORKSPACE_ID,
+          sessionId: id(5_102),
+          turnId: id(5_103),
+          attemptId: id(5_100),
+          executionGeneration: 3,
+          policyRole: null,
+          roleSource: "none",
+          entryHash: "c".repeat(64),
+          entries: [
+            {
+              kind: "policy",
+              scope: "global",
+              roleKey: null,
+              revisionId: id(5_000),
+              revision: 1,
+              contentHash: "a".repeat(64),
+              activationVersion: 1,
+              activatedAt: "2026-07-28T12:00:00.000Z",
+              provenance: { source: "human", sourceIdHash: null },
+            },
+          ],
+          createdAt: "2026-07-29T12:00:01.000Z",
+        },
+        preferenceSnapshot: {
+          id: id(5_104),
+          descriptorHash: "d".repeat(64),
+          descriptors: [
+            {
+              id: id(5_105),
+              revisionId: id(5_106),
+              contentHash: "e".repeat(64),
+              activeVersion: 1,
+              scope: "user",
+            },
+          ],
+          truncated: true,
+          createdAt: "2026-07-29T12:00:01.000Z",
+        },
+        currentPreferences: {
+          descriptors: [
+            {
+              id: id(5_105),
+              revisionId: id(5_106),
+              contentHash: "e".repeat(64),
+              activeVersion: 1,
+              scope: "user",
+            },
+          ],
+          truncated: false,
+        },
+      },
+    });
+
+    expect(projected.truth.attemptGovernance).toMatchObject({
+      status: "available",
+      attemptId: id(5_100),
+      policySnapshot: { status: "available", entryHash: "c".repeat(64) },
+      preferenceSnapshot: {
+        status: "available",
+        descriptorHash: "d".repeat(64),
+        descriptorCount: 1,
+        truncated: true,
+      },
+      drift: {
+        overall: "truncated",
+        policy: { status: "superseded", snapshotTargetCount: 1, currentTargetCount: 1 },
+        preferences: { status: "truncated", snapshotDescriptorCount: 1 },
+      },
+    });
+    expect(JSON.stringify(projected)).not.toContain("title");
+    expect(JSON.stringify(projected)).not.toContain("description");
+    expect(JSON.stringify(projected)).not.toContain("retrievalHandle");
+  });
+
+  test("classifies unavailable, missing, identical, and changed governance truth", () => {
+    const currentHead: WorkspaceInstructionPolicyHead = {
+      workspaceId: WORKSPACE_ID,
+      kind: "policy",
+      scope: "global",
+      roleKey: null,
+      revisionId: id(5_201),
+      revision: 1,
+      contentHash: "1".repeat(64),
+      activationVersion: 1,
+      activatedAt: NOW,
+    };
+    const policySnapshot = {
+      id: id(5_202),
+      workspaceId: WORKSPACE_ID,
+      sessionId: id(5_203),
+      turnId: id(5_204),
+      attemptId: id(5_205),
+      executionGeneration: 1,
+      policyRole: null,
+      roleSource: "none" as const,
+      entryHash: "2".repeat(64),
+      entries: [
+        {
+          kind: "policy" as const,
+          scope: "global" as const,
+          roleKey: null,
+          revisionId: currentHead.revisionId,
+          revision: currentHead.revision,
+          contentHash: currentHead.contentHash,
+          activationVersion: currentHead.activationVersion,
+          activatedAt: currentHead.activatedAt,
+          provenance: { source: "human" as const, sourceIdHash: null },
+        },
+      ],
+      createdAt: NOW,
+    };
+    const preference = {
+      id: id(5_206),
+      revisionId: id(5_207),
+      contentHash: "3".repeat(64),
+      activeVersion: 1,
+      scope: "user" as const,
+    };
+    const shared = {
+      workspaceId: WORKSPACE_ID,
+      generatedAt: NOW,
+      workspaceAgentInstructions: null,
+      knowledge: null,
+    };
+
+    expect(
+      projectWorkspaceState({
+        ...shared,
+        policies: policies([currentHead]),
+        attemptGovernance: { status: "unavailable" },
+      }).truth.attemptGovernance,
+    ).toEqual({
+      status: "unavailable",
+      reason: "attempt_not_found_or_not_authorized",
+      driftStatus: "unavailable",
+    });
+
+    const missing = projectWorkspaceState({
+      ...shared,
+      policies: policies([currentHead]),
+      attemptGovernance: {
+        status: "available",
+        attemptId: id(5_205),
+        executionGeneration: 1,
+        acceptedAt: NOW,
+        policySnapshot: null,
+        preferenceSnapshot: null,
+        currentPreferences: { descriptors: [preference], truncated: false },
+      },
+    }).truth.attemptGovernance;
+    expect(missing).toMatchObject({
+      status: "available",
+      policySnapshot: { status: "missing" },
+      preferenceSnapshot: { status: "missing" },
+      drift: {
+        overall: "missing",
+        policy: { status: "missing" },
+        preferences: { status: "missing" },
+      },
+    });
+
+    const identicalInput = {
+      status: "available" as const,
+      attemptId: id(5_205),
+      executionGeneration: 1,
+      acceptedAt: NOW,
+      policySnapshot,
+      preferenceSnapshot: {
+        id: id(5_208),
+        descriptorHash: "4".repeat(64),
+        descriptors: [preference],
+        truncated: false,
+        createdAt: NOW,
+      },
+      currentPreferences: { descriptors: [preference], truncated: false },
+    };
+    expect(
+      projectWorkspaceState({
+        ...shared,
+        policies: policies([currentHead]),
+        attemptGovernance: identicalInput,
+      }).truth.attemptGovernance,
+    ).toMatchObject({ drift: { overall: "identical", policy: { status: "identical" } } });
+    expect(
+      projectWorkspaceState({
+        ...shared,
+        policies: policies(),
+        attemptGovernance: identicalInput,
+      }).truth.attemptGovernance,
+    ).toMatchObject({ drift: { overall: "changed", policy: { status: "changed" } } });
+    expect(
+      projectWorkspaceState({
+        ...shared,
+        policies: policies([currentHead]),
+        attemptGovernance: {
+          ...identicalInput,
+          policySnapshot: { ...policySnapshot, entries: [] },
+        },
+      }).truth.attemptGovernance,
+    ).toMatchObject({
+      drift: {
+        overall: "changed",
+        policy: { status: "changed", snapshotTargetCount: 0, currentTargetCount: 1 },
+      },
+    });
   });
 
   test("bounds, sanitizes, sorts, and labels partial aggregate coverage deterministically", () => {

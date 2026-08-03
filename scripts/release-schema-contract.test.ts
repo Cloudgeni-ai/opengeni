@@ -180,14 +180,19 @@ describe("release schema contract", () => {
         (migrations.has("0163_session_realtime_delegation_progress.sql") ? 1 : 0) +
         (migrations.has("0164_session_realtime_models.sql") ? 1 : 0) +
         (migrations.has("0165_document_authority_foundation.sql") ? 1 : 0) +
-        (migrations.has("0166_connection_disconnect_idempotency.sql") ? 1 : 0),
+        (migrations.has("0166_connection_disconnect_idempotency.sql") ? 1 : 0) +
+        (migrations.has("0167_document_index_replay_authority.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "6ca75e500fba7aa982cbf4f0325399dfb65f7820169c52360b8b57ada5c614d6",
+      "898d570b9c1f2ef9815f186e7160fdda433f462f44bed5c92706e7f0b24f6e12",
     );
-    expect(contract.latestMigration).toBe("0166_connection_disconnect_idempotency.sql");
+    expect(contract.latestMigration).toBe("0167_document_index_replay_authority.sql");
     expect(migrations.get("0166_connection_disconnect_idempotency.sql")).toMatchObject({
       sha256: "47e93eac839e160995f732f18986753d45221b1aedf98852c19b0b271236dc1b",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0167_document_index_replay_authority.sql")).toMatchObject({
+      sha256: "a6709b8c4c4bdd8bef82770aad11d2fb7424e858a657137315b36bb71496bb96",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0165_document_authority_foundation.sql")).toMatchObject({

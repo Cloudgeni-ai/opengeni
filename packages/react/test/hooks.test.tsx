@@ -1965,6 +1965,48 @@ describe("useComposer durable draft and control binding", () => {
     await hook.unmount();
   });
 
+  test("draft hydration cannot overwrite a latency selection made while the read is in flight", async () => {
+    let resolveDraft!: (draft: ComposerDraft) => void;
+    const client = fakeClient({
+      getComposerDraft: async () =>
+        await new Promise<ComposerDraft>((resolve) => {
+          resolveDraft = resolve;
+        }),
+    });
+    const applied: ComposerDraft[] = [];
+    const hook = await renderHook<ReturnType<typeof useComposer>, "standard" | "fast">(
+      (latencyMode: "standard" | "fast") =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          sendExtras: { model: "model-x", reasoningEffort: "medium", latencyMode },
+          onDraftApplied: (draft) => applied.push(draft),
+        }),
+      "standard",
+    );
+
+    await flush();
+    await hook.rerender("fast");
+    await flushing(async () => {
+      resolveDraft({
+        revision: 1,
+        text: "restored text",
+        resources: [],
+        model: "model-x",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sourceTurnId: null,
+        sourceTurnVersion: null,
+        updatedAt: new Date().toISOString(),
+      });
+      await Promise.resolve();
+    });
+
+    expect(hook.result.current.value).toBe("restored text");
+    expect(applied).toEqual([]);
+    await hook.unmount();
+  });
+
   test("history already present at mount is treated as a projection, not live traffic", async () => {
     let reads = 0;
     const client = fakeClient({
@@ -2167,7 +2209,7 @@ describe("useComposer durable draft and control binding", () => {
     const fileId = "33333333-3333-4333-8333-333333333333";
     const canonicalFile = {
       kind: "file" as const,
-      mountPath: `files/${fileId}`,
+      mountPath: `.opengeni/files/${fileId}`,
       fileId,
     };
     let serverDraft: ComposerDraft = {
@@ -2187,7 +2229,7 @@ describe("useComposer durable draft and control binding", () => {
         resource.kind === "file"
           ? {
               kind: "file" as const,
-              mountPath: resource.mountPath ?? `files/${resource.fileId}`,
+              mountPath: resource.mountPath ?? `.opengeni/files/${resource.fileId}`,
               fileId: resource.fileId,
             }
           : resource,

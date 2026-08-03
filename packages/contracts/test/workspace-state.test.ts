@@ -6,10 +6,7 @@ const minimalResponse = {
   generatedAt: "2026-07-30T12:00:00.000Z",
   truth: {
     current: { source: "read_time_projection", capturedAt: "2026-07-30T12:00:00.000Z" },
-    policySnapshot: {
-      status: "not_captured",
-      reason: "workspace_instruction_policy_snapshot_not_implemented",
-    },
+    attemptGovernance: { status: "not_requested" },
   },
   policy: {
     authority: "workspace_instruction_policy_heads",

@@ -1,12 +1,13 @@
-import type {
-  ComposerDraft,
-  EffectiveControlResumeOption,
-  EffectiveSessionControl,
-  OpenGeniApiError,
-  ResourceRef,
-  SaveComposerDraftRequest,
-  SendMessageInput,
-  SessionEvent,
+import {
+  DEFAULT_FILE_RESOURCE_MOUNT_ROOT,
+  type ComposerDraft,
+  type EffectiveControlResumeOption,
+  type EffectiveSessionControl,
+  type OpenGeniApiError,
+  type ResourceRef,
+  type SaveComposerDraftRequest,
+  type SendMessageInput,
+  type SessionEvent,
 } from "@opengeni/sdk";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
@@ -537,13 +538,15 @@ export function useComposer(
             replaceLocal ||
             (!localWasDirtyAtStart && localAtStart === localEditRevision.current)
           ) {
-            // Model/effort ride in sendExtras (outside localEditRevision). If
+            // Model/effort/latency ride in sendExtras (outside
+            // localEditRevision). If
             // the picker changed during this fetch, skip onDraftApplied so a
-            // stale server model/effort cannot undo the operator's pick.
+            // stale server policy cannot undo the operator's pick.
             const extrasNow = resolveSendExtras(sendExtrasRef.current);
             const pickerChangedDuringFetch =
               extrasNow.model !== extrasAtStart.model ||
-              extrasNow.reasoningEffort !== extrasAtStart.reasoningEffort;
+              extrasNow.reasoningEffort !== extrasAtStart.reasoningEffort ||
+              extrasNow.latencyMode !== extrasAtStart.latencyMode;
             valueRef.current = fetched.text;
             restoredResourcesRef.current = fetched.resources;
             lastSavedSignature.current = draftSignature(draftPayload(fetched));
@@ -1442,7 +1445,7 @@ function mergeResources(base: ResourceRef[], additions: ResourceRef[]): Resource
     // different duplicate counts after server normalization.
     const key =
       resource.kind === "file"
-        ? `file:${resource.fileId}\u0000${resource.mountPath ?? `files/${resource.fileId}`}`
+        ? `file:${resource.fileId}\u0000${resource.mountPath ?? `${DEFAULT_FILE_RESOURCE_MOUNT_ROOT}/${resource.fileId}`}`
         : JSON.stringify(resource);
     if (seen.has(key)) return false;
     seen.add(key);

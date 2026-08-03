@@ -51,10 +51,14 @@ export type ChatComposerProps = {
   autoFocus?: boolean | undefined;
   /** Replaces the default keyboard hint under the field. */
   hint?: string | undefined;
+  /** App controls ahead of attach (e.g. mobile “+” overflow). */
+  controlsLeading?: ReactNode | undefined;
   /** App controls in the footer row, replacing the hint. */
   controlsStart?: ReactNode | undefined;
   /** App actions beside Pause/Send, ordered before the built-in actions. */
   actionsStart?: ReactNode | undefined;
+  /** Extra classes for the built-in attach control (e.g. `max-sm:hidden`). */
+  attachButtonClassName?: string | undefined;
   /** Provider-neutral speech capability. Provider configuration stays in workspace settings. */
   transcription?: ComposerTranscriptionControlProps | undefined;
   /** Content rendered above the textarea, inside the field chrome. */
@@ -90,8 +94,10 @@ export function ChatComposer({
   disabled,
   autoFocus,
   hint,
+  controlsLeading,
   controlsStart,
   actionsStart,
+  attachButtonClassName,
   transcription,
   header,
   onPaste,
@@ -121,7 +127,9 @@ export function ChatComposer({
     onPaste,
     messages,
   });
-  const hasControls = Boolean(attachments || models || controlsStart || transcription);
+  const hasControls = Boolean(
+    attachments || models || controlsLeading || controlsStart || transcription,
+  );
   const stackActions = hasControls && Boolean(actionsStart);
 
   return (
@@ -140,7 +148,8 @@ export function ChatComposer({
             <Footer className={stackActions ? "flex-wrap" : undefined}>
               {hasControls ? (
                 <Controls className={stackActions ? "w-full sm:w-auto" : undefined}>
-                  <AttachButton />
+                  {controlsLeading}
+                  <AttachButton className={attachButtonClassName} />
                   {transcription ? <ComposerTranscriptionControl {...transcription} /> : null}
                   {models ? (
                     <ModelPicker models={models} value={selectedModel} onChange={onSelectModel} />

@@ -461,10 +461,13 @@ export type RepositoryResourceRef = {
   githubRepositoryId?: number | undefined;
 };
 
+/** Value mirror of `@opengeni/contracts`; parity-tested without adding an SDK runtime dependency. */
+export const DEFAULT_FILE_RESOURCE_MOUNT_ROOT = ".opengeni/files" as const;
+
 export type FileResourceRef = {
   kind: "file";
   fileId: string;
-  /** Optional workspace-relative override; defaults to `files/<file-id>`. */
+  /** Optional workspace-relative override; defaults to `.opengeni/files/<file-id>`. */
   mountPath?: string | undefined;
 };
 
@@ -1027,8 +1030,6 @@ export type HumanInputQuestion = {
   allowOther: boolean;
   validation?:
     | {
-        minLength?: number | null | undefined;
-        maxLength?: number | null | undefined;
         minSelections?: number | null | undefined;
         maxSelections?: number | null | undefined;
       }
@@ -2131,6 +2132,7 @@ export type ModelCapabilitiesV1 = {
     codeExecution: ModelCapabilityStateV1;
   };
   inputModalities: Array<"text" | "image" | "audio">;
+  inputFileMediaTypes?: string[] | undefined;
   outputModalities: Array<"text" | "image" | "audio">;
   transports: {
     sse: ModelCapabilityStateV1;

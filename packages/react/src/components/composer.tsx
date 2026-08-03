@@ -932,7 +932,11 @@ export const Footer = forwardRef<HTMLDivElement, ComposerFooterProps>(function C
     <div
       {...props}
       ref={ref}
-      className={cn("flex items-end gap-1.5 px-2 pb-2 pt-0.5 sm:px-2.5 sm:pb-2.5", className)}
+      className={cn(
+        "flex items-end gap-1.5 px-2 pb-2 pt-0.5 sm:px-2.5 sm:pb-2.5",
+        "max-sm:items-center max-sm:gap-1",
+        className,
+      )}
     />
   );
 });
@@ -945,7 +949,11 @@ export const Controls = forwardRef<HTMLSpanElement, ComposerControlsProps>(
       <span
         {...props}
         ref={ref}
-        className={cn("flex min-w-0 flex-1 flex-wrap items-center gap-1.5", className)}
+        className={cn(
+          "flex min-w-0 flex-1 flex-wrap items-center gap-1.5",
+          "max-sm:flex-nowrap max-sm:gap-1",
+          className,
+        )}
       />
     );
   },
@@ -1008,6 +1016,7 @@ export const AttachButton = forwardRef<HTMLButtonElement, ComposerAttachButtonPr
           type="file"
           accept={accept}
           multiple={multiple}
+          data-og-composer-attach
           className="hidden"
           onChange={controller.handleFileChange}
         />
@@ -1022,7 +1031,7 @@ export const AttachButton = forwardRef<HTMLButtonElement, ComposerAttachButtonPr
             className={cn(
               "inline-flex size-8 items-center justify-center rounded-og-md",
               "text-og-fg-muted transition-colors duration-150 hover:bg-og-surface-2 hover:text-og-fg",
-              "disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:size-11",
+              "disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:size-9",
               className,
             )}
           >
@@ -1094,7 +1103,7 @@ export const PauseButton = forwardRef<HTMLButtonElement, ComposerPauseButtonProp
           disabled={busy}
           aria-label={ariaLabel ?? controller.messages.pauseAriaLabel}
           className={cn(
-            "inline-flex size-8 items-center justify-center rounded-og-md border border-og-border pointer-coarse:size-11",
+            "inline-flex size-8 items-center justify-center rounded-og-md border border-og-border pointer-coarse:size-9",
             "bg-og-surface-2 text-og-fg-muted transition-colors duration-150",
             "hover:border-og-status-waiting/50 hover:text-og-status-waiting",
             "disabled:opacity-50",
@@ -1143,7 +1152,7 @@ export const SendButton = forwardRef<HTMLButtonElement, ComposerSendButtonProps>
               : controller.messages.sendMessageAriaLabel)
           }
           className={cn(
-            "inline-flex size-8 items-center justify-center rounded-og-md pointer-coarse:size-11",
+            "inline-flex size-8 items-center justify-center rounded-og-md pointer-coarse:size-9",
             "bg-og-accent text-og-accent-fg shadow-og-sm",
             "transition-[background-color,transform,opacity] duration-150 ease-og-spring",
             "hover:bg-og-accent-strong active:scale-95",

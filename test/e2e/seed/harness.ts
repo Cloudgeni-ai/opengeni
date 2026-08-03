@@ -33,6 +33,14 @@
 //   OPENGENI_DATABASE_URL=postgres://opengeni_app:opengeni_app@127.0.0.1:6432/opengeni \
 //     bun --env-file=/dev/null test/e2e/seed/stream-session-events.ts
 // Optional: --workspace UUID --session UUID (defaults to the current UI test session).
+//
+// Structured human-input gallery (freeze requires_action + pending requests; no LLM):
+//   set -a && . ./.env.runtime && set +a
+//   OPENGENI_SEED_BASE_URL=http://127.0.0.1:$OPENGENI_API_PORT \
+//   OPENGENI_SEED_WEB_URL=http://127.0.0.1:$OPENGENI_WEB_PORT \
+//     bun --env-file=/dev/null test/e2e/seed/seed-human-input-gallery.ts
+//   bun --env-file=/dev/null test/e2e/seed/screenshot-human-input-gallery.ts
+// Output: tmp/human-input-ux-review/{manifest,shots}.json + PNGs
 import { OpenGeniClient, type Session } from "@opengeni/sdk";
 
 export const BASE_URL = process.env.OPENGENI_SEED_BASE_URL ?? "http://127.0.0.1:8000";

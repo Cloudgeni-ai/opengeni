@@ -4,6 +4,7 @@ import type {
   SessionHumanInputRequest,
   SubmitHumanInputResponseRequest,
 } from "@opengeni/sdk";
+import { ChevronDownIcon, ChevronUpIcon, MessageCircleQuestionIcon } from "lucide-react";
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { cn } from "../lib/cn";
 
@@ -23,28 +24,43 @@ export type HumanInputFormMessages = {
   deadlineLabel: string;
   formatDeadline: (value: string) => string;
   required: string;
-  minLength: (count: number) => string;
-  maxLength: (count: number) => string;
   otherRequired: string;
   minSelections: (count: number) => string;
   maxSelections: (count: number) => string;
+  optional: string;
+  /** Shown when the question list overflows the card and more content is below. */
+  moreBelow: string;
+  questionCount: (count: number) => string;
+  collapse: string;
+  expand: string;
+  selectionHint: (min: number | null | undefined, max: number | null | undefined) => string | null;
 };
 
 export const defaultHumanInputFormMessages: HumanInputFormMessages = {
-  title: "Your input is needed",
-  description: "The agent is paused until you answer these questions.",
+  title: "Input required",
+  /** Multi-question chrome has no default subtitle; hosts may still override. */
+  description: "",
   submit: "Continue",
   skip: "Skip",
   submitting: "Submitting…",
   other: "Other",
-  deadlineLabel: "Respond before",
+  deadlineLabel: "Expires",
   formatDeadline,
   required: "This question is required.",
-  minLength: (count) => `Enter at least ${count} characters.`,
-  maxLength: (count) => `Enter no more than ${count} characters.`,
   otherRequired: "Enter a value for Other.",
   minSelections: (count) => `Choose at least ${count} option${count === 1 ? "" : "s"}.`,
   maxSelections: (count) => `Choose no more than ${count} option${count === 1 ? "" : "s"}.`,
+  optional: "Optional",
+  moreBelow: "More below",
+  questionCount: (count) => `${count} questions`,
+  collapse: "Collapse",
+  expand: "Expand",
+  selectionHint: (min, max) => {
+    if (min != null && max != null) return `Choose ${min}–${max}.`;
+    if (min != null) return `Choose at least ${min}.`;
+    if (max != null) return `Choose up to ${max}.`;
+    return null;
+  },
 };
 
 export type HumanInputFormProps = {
@@ -54,17 +70,22 @@ export type HumanInputFormProps = {
   error?: string | null | undefined;
   title?: ReactNode;
   description?: ReactNode;
+  /** e.g. "1 of 2" when a host is stepping through parallel requests. */
+  progressLabel?: ReactNode;
   submitLabel?: string | undefined;
   skipLabel?: string | undefined;
   messages?: Partial<HumanInputFormMessages> | undefined;
   autoFocus?: boolean | undefined;
+  /** Start collapsed to a compact bar (drafts still retained). */
+  defaultCollapsed?: boolean | undefined;
   className?: string | undefined;
 };
 
 /**
- * Styled but host-neutral renderer for one structured request. Hosts can use
- * the headless `useHumanInputRequests` hook instead, or replace the title and
- * description while retaining accessible field semantics and validation.
+ * Styled but host-neutral renderer for one structured request. Matches the
+ * waiting-tone decision language of ApprovalSurface: question-first, compact
+ * options, sticky ask/submit chrome. Hosts can replace title/description or
+ * use `useHumanInputRequests` headlessly.
  */
 export function HumanInputForm({
   request,
@@ -73,24 +94,43 @@ export function HumanInputForm({
   error,
   title,
   description,
+  progressLabel,
   submitLabel,
   skipLabel,
   messages: messageOverrides,
   autoFocus = true,
+  defaultCollapsed = false,
   className,
 }: HumanInputFormProps) {
   const messages = { ...defaultHumanInputFormMessages, ...messageOverrides };
-  const resolvedTitle = title === undefined ? messages.title : title;
-  const resolvedDescription = description === undefined ? messages.description : description;
+  const singleQuestion = request.questions.length === 1 ? request.questions[0]! : null;
+  const resolvedTitle =
+    title === undefined
+      ? singleQuestion
+        ? (singleQuestion.label ?? singleQuestion.prompt)
+        : messages.title
+      : title;
+  const resolvedDescription =
+    description === undefined
+      ? singleQuestion
+        ? singleQuestion.label
+          ? singleQuestion.prompt
+          : (singleQuestion.helpText ?? null)
+        : messages.description || null
+      : description;
   const resolvedSubmitLabel = submitLabel ?? messages.submit;
   const resolvedSkipLabel = skipLabel ?? messages.skip;
   const formId = useId();
+  const titleId = useId();
+  const scrollRef = useRef<HTMLDivElement>(null);
   const [drafts, setDrafts] = useState<Record<string, HumanInputAnswerDraft>>(() =>
     initialDrafts(request.questions),
   );
   const [validationErrors, setValidationErrors] = useState<Record<string, string>>({});
   const [submissionError, setSubmissionError] = useState<string | null>(null);
   const [submittingInternally, setSubmittingInternally] = useState(false);
+  const [overflowBelow, setOverflowBelow] = useState(false);
+  const [collapsed, setCollapsed] = useState(defaultCollapsed);
   const submissionInFlight = useRef(false);
   const submissionGeneration = useRef(0);
   const busy = submitting || submittingInternally;
@@ -102,7 +142,36 @@ export function HumanInputForm({
     setValidationErrors({});
     setSubmissionError(null);
     setSubmittingInternally(false);
-  }, [request.id, request.questions]);
+    setCollapsed(defaultCollapsed);
+  }, [request.id, request.questions, defaultCollapsed]);
+
+  useEffect(() => {
+    if (collapsed) {
+      setOverflowBelow(false);
+      return;
+    }
+    const node = scrollRef.current;
+    if (!node) return;
+    const sync = () => {
+      const { scrollTop, scrollHeight, clientHeight } = node;
+      setOverflowBelow(
+        scrollHeight > clientHeight + 2 && scrollTop + clientHeight < scrollHeight - 4,
+      );
+    };
+    // Layout after paint: first sync can run before the max-height flex
+    // constraint resolves, which falsely reports no overflow.
+    const frame = requestAnimationFrame(sync);
+    node.addEventListener("scroll", sync, { passive: true });
+    const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(sync) : null;
+    observer?.observe(node);
+    const content = node.firstElementChild;
+    if (content) observer?.observe(content);
+    return () => {
+      cancelAnimationFrame(frame);
+      node.removeEventListener("scroll", sync);
+      observer?.disconnect();
+    };
+  }, [request.id, request.questions, collapsed]);
 
   const update = (
     questionId: string,
@@ -140,195 +209,233 @@ export function HumanInputForm({
     }
   };
 
+  const focusQuestion = (questionId: string): void => {
+    const root = scrollRef.current;
+    if (!root) return;
+    const block = Array.from(
+      root.querySelectorAll<HTMLElement>("[data-human-input-question]"),
+    ).find((node) => node.getAttribute("data-human-input-question") === questionId);
+    block?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    const focusable = block?.querySelector<HTMLElement>(
+      "input:not([type='hidden']):not([disabled]), textarea:not([disabled])",
+    );
+    focusable?.focus({ preventScroll: true });
+  };
+
   const submit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
     const result = answersFromDrafts(request.questions, drafts, messages);
     if (Object.keys(result.errors).length > 0) {
       setValidationErrors(result.errors);
+      const firstInvalid = request.questions.find((question) => question.id in result.errors);
+      if (firstInvalid) {
+        // After paint so aria-invalid / error text exist under the question.
+        requestAnimationFrame(() => focusQuestion(firstInvalid.id));
+      }
       return;
     }
     await submitResponse({ outcome: "answered", answers: result.answers });
   };
 
+  const metaBits = [
+    progressLabel,
+    !singleQuestion ? messages.questionCount(request.questions.length) : null,
+    request.expiresAt ? (
+      <>
+        {messages.deadlineLabel}{" "}
+        <time dateTime={request.expiresAt} title={new Date(request.expiresAt).toLocaleString()}>
+          {messages.formatDeadline(request.expiresAt)}
+        </time>
+      </>
+    ) : null,
+  ].filter(Boolean);
+
+  if (collapsed) {
+    return (
+      <div
+        data-human-input-request={request.id}
+        data-human-input-collapsed=""
+        aria-labelledby={titleId}
+        className={cn(
+          "og-root flex w-full items-center gap-3 rounded-og-lg border border-og-status-waiting/35 bg-og-status-waiting/5 px-3 py-2.5 shadow-og-sm",
+          className,
+        )}
+      >
+        <span className="inline-flex size-8 shrink-0 items-center justify-center rounded-og-md bg-og-status-waiting/12 text-og-status-waiting">
+          <MessageCircleQuestionIcon aria-hidden="true" className="size-4" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <h2 id={titleId} className="truncate text-og-sm font-semibold text-og-fg">
+            {resolvedTitle}
+          </h2>
+          {metaBits.length > 0 ? (
+            <p className="mt-0.5 truncate text-og-xs text-og-fg-subtle">{metaBits.join(" · ")}</p>
+          ) : null}
+        </div>
+        <button
+          type="button"
+          onClick={() => setCollapsed(false)}
+          className="inline-flex min-h-8 shrink-0 items-center gap-1 rounded-og-md border border-og-border px-2.5 py-1 text-og-xs font-medium text-og-fg-muted transition-colors hover:bg-og-surface-1 hover:text-og-fg"
+        >
+          {messages.expand}
+          <ChevronDownIcon aria-hidden="true" className="size-3.5" />
+        </button>
+      </div>
+    );
+  }
+
   return (
     <form
       data-human-input-request={request.id}
       onSubmit={(event) => void submit(event)}
+      aria-labelledby={titleId}
       className={cn(
-        "og-root flex w-full flex-col gap-5 rounded-og-lg border border-og-border bg-og-surface-1 p-5 shadow-og-sm",
+        // Multi-question: pin height at the cap so the flex body gets a real
+        // box and overflow-y engages. max-height alone + percentage/`h-full`
+        // children often sizes to content and clips with no scroll.
+        "og-root flex min-h-0 w-full flex-col overflow-hidden rounded-og-lg border border-og-status-waiting/35 bg-og-status-waiting/5 shadow-og-sm",
+        singleQuestion
+          ? "max-h-[min(28rem,50dvh)]"
+          : "h-[min(28rem,50dvh)] max-h-[min(28rem,50dvh)]",
         className,
       )}
     >
-      <header>
-        <h2 className="text-og-md font-semibold text-og-fg">{resolvedTitle}</h2>
-        {resolvedDescription ? (
-          <div className="mt-1 text-og-sm text-og-fg-muted">{resolvedDescription}</div>
-        ) : null}
-        {request.expiresAt ? (
-          <p className="mt-1 text-og-xs text-og-fg-subtle">
-            {messages.deadlineLabel}{" "}
-            <time dateTime={request.expiresAt}>{messages.formatDeadline(request.expiresAt)}</time>
-          </p>
-        ) : null}
-      </header>
-
-      <fieldset disabled={busy} className="contents">
-        {request.questions.map((question, index) => {
-          const draft = drafts[question.id] ?? emptyDraft();
-          const fieldId = `${formId}-${index}`;
-          const errorId = `${fieldId}-error`;
-          const helpId = `${fieldId}-help`;
-          const describedBy =
-            [question.helpText ? helpId : null, validationErrors[question.id] ? errorId : null]
-              .filter(Boolean)
-              .join(" ") || undefined;
-          return (
-            <div key={question.id} className="flex flex-col gap-2">
-              <label
-                htmlFor={question.kind === "text" ? fieldId : undefined}
-                className="text-og-base font-medium text-og-fg"
-              >
-                {question.label ?? question.prompt}
-                {question.required ? (
+      <header className="shrink-0 border-b border-og-status-waiting/20 px-4 py-3">
+        <div className="flex items-start gap-3">
+          <span className="mt-0.5 inline-flex size-8 shrink-0 items-center justify-center rounded-og-md bg-og-status-waiting/12 text-og-status-waiting">
+            <MessageCircleQuestionIcon aria-hidden="true" className="size-4" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+              <h2 id={titleId} className="text-og-md font-semibold text-og-fg">
+                {resolvedTitle}
+                {singleQuestion?.required && !request.allowSkip ? (
                   <span aria-hidden className="ml-1 text-og-status-failed">
                     *
                   </span>
                 ) : null}
-              </label>
-              {question.label ? (
-                <p className="text-og-sm text-og-fg-muted">{question.prompt}</p>
+              </h2>
+              {progressLabel ? (
+                <span className="text-og-xs font-medium text-og-status-waiting">
+                  {progressLabel}
+                </span>
               ) : null}
-              {question.helpText ? (
-                <p id={helpId} className="text-og-xs text-og-fg-subtle">
-                  {question.helpText}
-                </p>
-              ) : null}
-              {question.kind === "text" ? (
-                <textarea
-                  id={fieldId}
-                  value={draft.values[0] ?? ""}
-                  onChange={(event) =>
-                    update(question.id, (current) => ({
-                      ...current,
-                      values: event.target.value ? [event.target.value] : [],
-                    }))
-                  }
-                  aria-invalid={Boolean(validationErrors[question.id])}
-                  aria-describedby={describedBy}
-                  autoFocus={autoFocus && index === 0}
-                  rows={3}
-                  className="min-h-20 w-full resize-y rounded-og-md border border-og-border bg-og-surface-2 px-3 py-2 text-og-base text-og-fg outline-none placeholder:text-og-fg-subtle focus:border-og-accent"
-                />
-              ) : (
-                <div
-                  role={question.kind === "single_select" ? "radiogroup" : "group"}
-                  aria-describedby={describedBy}
-                  className="flex flex-col gap-2"
-                >
-                  {question.options.map((option, optionIndex) => {
-                    const checked = draft.values.includes(option.id);
-                    return (
-                      <label
-                        key={option.id}
-                        className="flex cursor-pointer items-start gap-2 rounded-og-md border border-og-border px-3 py-2 hover:bg-og-surface-2"
-                      >
-                        <input
-                          type={question.kind === "single_select" ? "radio" : "checkbox"}
-                          name={question.kind === "single_select" ? fieldId : undefined}
-                          autoFocus={autoFocus && index === 0 && optionIndex === 0}
-                          checked={checked}
-                          onChange={(event) =>
-                            update(question.id, (current) => ({
-                              ...current,
-                              values:
-                                question.kind === "single_select"
-                                  ? event.target.checked
-                                    ? [option.id]
-                                    : []
-                                  : event.target.checked
-                                    ? [...current.values, option.id]
-                                    : current.values.filter((value) => value !== option.id),
-                              ...(question.kind === "single_select" && event.target.checked
-                                ? { otherSelected: false }
-                                : {}),
-                            }))
-                          }
-                          className="mt-0.5 accent-og-accent"
-                        />
-                        <span className="min-w-0">
-                          <span className="block text-og-sm font-medium text-og-fg">
-                            {option.label}
-                          </span>
-                          {option.description ? (
-                            <span className="block text-og-xs text-og-fg-muted">
-                              {option.description}
-                            </span>
-                          ) : null}
-                        </span>
-                      </label>
-                    );
-                  })}
-                  {question.allowOther ? (
-                    <label className="flex items-start gap-2 rounded-og-md border border-og-border px-3 py-2">
-                      <input
-                        type={question.kind === "single_select" ? "radio" : "checkbox"}
-                        name={question.kind === "single_select" ? fieldId : undefined}
-                        checked={draft.otherSelected}
-                        autoFocus={autoFocus && index === 0 && question.options.length === 0}
-                        onChange={(event) =>
-                          update(question.id, (current) => ({
-                            ...current,
-                            otherSelected: event.target.checked,
-                            ...(question.kind === "single_select" && event.target.checked
-                              ? { values: [] }
-                              : {}),
-                          }))
-                        }
-                        className="mt-2 accent-og-accent"
-                      />
-                      <span className="min-w-0 flex-1">
-                        <span className="block text-og-sm font-medium text-og-fg">
-                          {messages.other}
-                        </span>
-                        <input
-                          type="text"
-                          value={draft.other}
-                          disabled={!draft.otherSelected || busy}
-                          onChange={(event) =>
-                            update(question.id, (current) => ({
-                              ...current,
-                              other: event.target.value,
-                            }))
-                          }
-                          className="mt-1 w-full rounded-og-sm border border-og-border bg-og-surface-2 px-2 py-1.5 text-og-sm text-og-fg outline-none focus:border-og-accent disabled:opacity-50"
-                        />
-                      </span>
-                    </label>
-                  ) : null}
-                </div>
-              )}
-              {validationErrors[question.id] ? (
-                <p id={errorId} role="alert" className="text-og-xs text-og-status-failed">
-                  {validationErrors[question.id]}
-                </p>
+              {!singleQuestion ? (
+                <span className="text-og-xs font-medium text-og-fg-subtle">
+                  {messages.questionCount(request.questions.length)}
+                </span>
               ) : null}
             </div>
-          );
-        })}
-      </fieldset>
+            {resolvedDescription ? (
+              <div className="mt-0.5 text-og-sm text-og-fg-muted">{resolvedDescription}</div>
+            ) : null}
+            {request.expiresAt ? (
+              <p className="mt-1 text-og-xs text-og-fg-subtle">
+                {messages.deadlineLabel}{" "}
+                <time
+                  dateTime={request.expiresAt}
+                  title={new Date(request.expiresAt).toLocaleString()}
+                >
+                  {messages.formatDeadline(request.expiresAt)}
+                </time>
+              </p>
+            ) : null}
+            {request.allowSkip && singleQuestion ? (
+              <p className="mt-1 text-og-xs text-og-fg-subtle">Or skip and let the agent decide.</p>
+            ) : null}
+          </div>
+          <button
+            type="button"
+            onClick={() => setCollapsed(true)}
+            aria-label={messages.collapse}
+            title={messages.collapse}
+            className="inline-flex size-8 shrink-0 items-center justify-center rounded-og-md text-og-fg-muted transition-colors hover:bg-og-surface-1 hover:text-og-fg"
+          >
+            <ChevronUpIcon aria-hidden="true" className="size-4" />
+          </button>
+        </div>
+      </header>
+
+      <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
+        <div
+          ref={scrollRef}
+          className="min-h-0 flex-1 overflow-y-auto overscroll-contain [scrollbar-gutter:stable]"
+        >
+          <fieldset disabled={busy} className="min-w-0 space-y-4 px-4 py-3">
+            {request.questions.map((question, index) => {
+              if (singleQuestion) {
+                // Title already carries the question; only render the control + help extras.
+                return (
+                  <div key={question.id} data-human-input-question={question.id}>
+                    <QuestionControls
+                      question={question}
+                      draft={drafts[question.id] ?? emptyDraft()}
+                      fieldId={`${formId}-${index}`}
+                      error={validationErrors[question.id]}
+                      messages={messages}
+                      autoFocus={autoFocus}
+                      firstOption
+                      showPromptChrome={false}
+                      allowSkip={request.allowSkip}
+                      busy={busy}
+                      onUpdate={(apply) => update(question.id, apply)}
+                    />
+                  </div>
+                );
+              }
+              return (
+                <div
+                  key={question.id}
+                  data-human-input-question={question.id}
+                  className="flex flex-col gap-1.5"
+                >
+                  <QuestionControls
+                    question={question}
+                    draft={drafts[question.id] ?? emptyDraft()}
+                    fieldId={`${formId}-${index}`}
+                    error={validationErrors[question.id]}
+                    messages={messages}
+                    autoFocus={autoFocus && index === 0}
+                    firstOption={index === 0}
+                    showPromptChrome
+                    allowSkip={request.allowSkip}
+                    busy={busy}
+                    onUpdate={(apply) => update(question.id, apply)}
+                  />
+                </div>
+              );
+            })}
+          </fieldset>
+        </div>
+        {overflowBelow ? (
+          <div
+            className="pointer-events-none absolute inset-x-0 bottom-0 z-[1] flex flex-col items-center"
+            aria-hidden="true"
+          >
+            <div className="h-10 w-full bg-gradient-to-t from-og-surface-1 via-og-surface-1/85 to-transparent" />
+            <span className="-mt-5 mb-1 rounded-og-full bg-og-surface-1 px-2.5 py-0.5 text-og-xs font-medium text-og-fg-muted shadow-og-sm ring-1 ring-og-border/60">
+              {messages.moreBelow}
+            </span>
+          </div>
+        ) : null}
+      </div>
 
       {(error ?? submissionError) ? (
-        <p role="alert" className="text-og-sm text-og-status-failed">
+        <p
+          role="alert"
+          className="relative z-10 shrink-0 px-4 pb-1 text-og-sm text-og-status-failed"
+        >
           {error ?? submissionError}
         </p>
       ) : null}
-      <footer className="flex items-center justify-end gap-2">
+
+      <footer className="relative z-10 flex shrink-0 items-center justify-end gap-2 border-t border-og-status-waiting/20 bg-og-surface-1/95 px-4 py-3 backdrop-blur-[2px]">
         {request.allowSkip ? (
           <button
             type="button"
             disabled={busy}
             onClick={() => void submitResponse({ outcome: "skipped" })}
-            className="rounded-og-md border border-og-border px-3 py-2 text-og-sm font-medium text-og-fg-muted hover:bg-og-surface-2 disabled:opacity-50"
+            className="inline-flex min-h-9 items-center rounded-og-md border border-og-border px-3 py-1.5 text-og-sm font-medium text-og-fg-muted transition-colors hover:bg-og-surface-1 hover:text-og-fg disabled:opacity-50"
           >
             {resolvedSkipLabel}
           </button>
@@ -336,12 +443,227 @@ export function HumanInputForm({
         <button
           type="submit"
           disabled={busy}
-          className="rounded-og-md bg-og-accent px-3 py-2 text-og-sm font-medium text-og-accent-fg hover:bg-og-accent-strong disabled:opacity-50"
+          className="inline-flex min-h-9 items-center rounded-og-md bg-og-accent px-3 py-1.5 text-og-sm font-medium text-og-accent-fg transition-colors hover:bg-og-accent-strong disabled:opacity-50"
         >
           {busy ? messages.submitting : resolvedSubmitLabel}
         </button>
       </footer>
     </form>
+  );
+}
+
+function QuestionControls({
+  question,
+  draft,
+  fieldId,
+  error,
+  messages,
+  autoFocus,
+  firstOption,
+  showPromptChrome,
+  allowSkip,
+  busy,
+  onUpdate,
+}: {
+  question: HumanInputQuestion;
+  draft: HumanInputAnswerDraft;
+  fieldId: string;
+  error: string | undefined;
+  messages: HumanInputFormMessages;
+  autoFocus: boolean;
+  firstOption: boolean;
+  showPromptChrome: boolean;
+  allowSkip: boolean;
+  busy: boolean;
+  onUpdate: (apply: (draft: HumanInputAnswerDraft) => HumanInputAnswerDraft) => void;
+}) {
+  const errorId = `${fieldId}-error`;
+  const helpId = `${fieldId}-help`;
+  const hint =
+    question.kind === "multi_select"
+      ? messages.selectionHint(
+          question.validation?.minSelections,
+          question.validation?.maxSelections,
+        )
+      : null;
+  const describedBy =
+    [
+      question.helpText && showPromptChrome ? helpId : null,
+      hint ? `${fieldId}-hint` : null,
+      error ? errorId : null,
+    ]
+      .filter(Boolean)
+      .join(" ") || undefined;
+  return (
+    <>
+      {showPromptChrome ? (
+        <>
+          <div className="flex flex-wrap items-baseline gap-x-2">
+            <label
+              htmlFor={question.kind === "text" ? fieldId : undefined}
+              className="text-og-sm font-medium text-og-fg"
+            >
+              {question.label ?? question.prompt}
+              {question.required && !allowSkip ? (
+                <span aria-hidden className="ml-1 text-og-status-failed">
+                  *
+                </span>
+              ) : !question.required ? (
+                <span className="ml-1.5 text-og-xs font-normal text-og-fg-subtle">
+                  {messages.optional}
+                </span>
+              ) : null}
+            </label>
+          </div>
+          {question.label ? <p className="text-og-sm text-og-fg-muted">{question.prompt}</p> : null}
+          {question.helpText ? (
+            <p id={helpId} className="text-og-xs text-og-fg-subtle">
+              {question.helpText}
+            </p>
+          ) : null}
+          {hint ? (
+            <p id={`${fieldId}-hint`} className="text-og-xs text-og-fg-subtle">
+              {hint}
+            </p>
+          ) : null}
+        </>
+      ) : (
+        <>
+          {!question.required && allowSkip === false ? (
+            <p className="text-og-xs text-og-fg-subtle">{messages.optional}</p>
+          ) : null}
+          {question.helpText && question.label ? (
+            <p id={helpId} className="mb-1.5 text-og-xs text-og-fg-subtle">
+              {question.helpText}
+            </p>
+          ) : null}
+          {hint ? (
+            <p id={`${fieldId}-hint`} className="mb-1.5 text-og-xs text-og-fg-subtle">
+              {hint}
+            </p>
+          ) : null}
+        </>
+      )}
+
+      {question.kind === "text" ? (
+        <textarea
+          id={fieldId}
+          value={draft.values[0] ?? ""}
+          onChange={(event) =>
+            onUpdate((current) => ({
+              ...current,
+              values: event.target.value ? [event.target.value] : [],
+            }))
+          }
+          aria-invalid={Boolean(error)}
+          aria-describedby={describedBy}
+          autoFocus={autoFocus}
+          rows={2}
+          className="min-h-14 w-full resize-y rounded-og-md border border-og-border bg-og-surface-1 px-3 py-2 text-og-sm text-og-fg outline-none placeholder:text-og-fg-subtle focus:border-og-accent"
+        />
+      ) : (
+        <div
+          role={question.kind === "single_select" ? "radiogroup" : "group"}
+          aria-describedby={describedBy}
+          className="flex flex-col gap-0.5"
+        >
+          {question.options.map((option, optionIndex) => {
+            const checked = draft.values.includes(option.id);
+            return (
+              <label
+                key={option.id}
+                className={cn(
+                  "flex cursor-pointer items-start gap-2.5 rounded-og-md px-2.5 py-2 transition-colors",
+                  checked
+                    ? "bg-og-status-waiting/12 text-og-fg"
+                    : "text-og-fg hover:bg-og-surface-1/80",
+                )}
+              >
+                <input
+                  type={question.kind === "single_select" ? "radio" : "checkbox"}
+                  name={question.kind === "single_select" ? fieldId : undefined}
+                  autoFocus={autoFocus && firstOption && optionIndex === 0}
+                  checked={checked}
+                  onChange={(event) =>
+                    onUpdate((current) => ({
+                      ...current,
+                      values:
+                        question.kind === "single_select"
+                          ? event.target.checked
+                            ? [option.id]
+                            : []
+                          : event.target.checked
+                            ? [...current.values, option.id]
+                            : current.values.filter((value) => value !== option.id),
+                      ...(question.kind === "single_select" && event.target.checked
+                        ? { otherSelected: false }
+                        : {}),
+                    }))
+                  }
+                  className="mt-0.5 accent-og-accent"
+                />
+                <span className="min-w-0">
+                  <span className="block text-og-sm font-medium">{option.label}</span>
+                  {option.description ? (
+                    <span className="mt-0.5 block text-og-xs text-og-fg-muted">
+                      {option.description}
+                    </span>
+                  ) : null}
+                </span>
+              </label>
+            );
+          })}
+          {question.allowOther ? (
+            <label
+              className={cn(
+                "flex items-start gap-2.5 rounded-og-md px-2.5 py-2 transition-colors",
+                draft.otherSelected
+                  ? "bg-og-status-waiting/12 text-og-fg"
+                  : "text-og-fg hover:bg-og-surface-1/80",
+              )}
+            >
+              <input
+                type={question.kind === "single_select" ? "radio" : "checkbox"}
+                name={question.kind === "single_select" ? fieldId : undefined}
+                checked={draft.otherSelected}
+                autoFocus={autoFocus && firstOption && question.options.length === 0}
+                onChange={(event) =>
+                  onUpdate((current) => ({
+                    ...current,
+                    otherSelected: event.target.checked,
+                    ...(question.kind === "single_select" && event.target.checked
+                      ? { values: [] }
+                      : {}),
+                  }))
+                }
+                className="mt-2 accent-og-accent"
+              />
+              <span className="min-w-0 flex-1">
+                <span className="block text-og-sm font-medium">{messages.other}</span>
+                <input
+                  type="text"
+                  value={draft.other}
+                  disabled={!draft.otherSelected || busy}
+                  placeholder="Type a value…"
+                  onChange={(event) =>
+                    onUpdate((current) => ({
+                      ...current,
+                      other: event.target.value,
+                    }))
+                  }
+                  className="mt-1.5 w-full rounded-og-sm border border-og-border bg-og-surface-1 px-2 py-1.5 text-og-sm text-og-fg outline-none focus:border-og-accent disabled:opacity-50"
+                />
+              </span>
+            </label>
+          ) : null}
+        </div>
+      )}
+      {error ? (
+        <p id={errorId} role="alert" className="text-og-xs text-og-status-failed">
+          {error}
+        </p>
+      ) : null}
+    </>
   );
 }
 
@@ -358,29 +680,19 @@ export function answersFromDrafts(
     const values = question.kind === "text" ? draft.values.filter(Boolean) : draft.values;
     const other = draft.otherSelected ? draft.other.trim() : "";
     const supplied = values.length + (other ? 1 : 0);
+
+    // Other-selected-but-empty must win over generic "required" — otherwise the
+    // user sees the wrong diagnosis next to a clearly selected control.
+    if (question.kind !== "text" && draft.otherSelected && !other) {
+      errors[question.id] = messages.otherRequired;
+      continue;
+    }
+
     if (question.required && supplied === 0) {
       errors[question.id] = messages.required;
       continue;
     }
-    if (question.kind === "text") {
-      const value = values[0] ?? "";
-      if (
-        value &&
-        question.validation?.minLength != null &&
-        value.length < question.validation.minLength
-      ) {
-        errors[question.id] = messages.minLength(question.validation.minLength);
-        continue;
-      }
-      if (question.validation?.maxLength != null && value.length > question.validation.maxLength) {
-        errors[question.id] = messages.maxLength(question.validation.maxLength);
-        continue;
-      }
-    } else {
-      if (draft.otherSelected && !other) {
-        errors[question.id] = messages.otherRequired;
-        continue;
-      }
+    if (question.kind !== "text") {
       const min = question.validation?.minSelections;
       const max = question.kind === "single_select" ? 1 : question.validation?.maxSelections;
       if (min != null && supplied < min) {
@@ -413,5 +725,13 @@ function emptyDraft(): HumanInputAnswerDraft {
 
 function formatDeadline(value: string): string {
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+  if (Number.isNaN(date.getTime())) return value;
+  const ms = date.getTime() - Date.now();
+  if (ms <= 0) return "deadline passed";
+  const minutes = Math.round(ms / 60_000);
+  if (minutes < 1) return "in under a minute";
+  if (minutes < 60) return `in ${minutes}m`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `in ${hours}h`;
+  return date.toLocaleString();
 }

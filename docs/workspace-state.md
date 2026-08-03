@@ -40,7 +40,20 @@ explicitly activates them.
 ## HTTP and authorization
 
 `GET /v1/workspaces/:workspaceId/workspace-state` requires `workspace:read` and
-returns `Cache-Control: private, no-store`.
+returns `Cache-Control: private, no-store`. The optional
+`?attemptId=<uuid>` query requests immutable governance metadata for one
+accepted attempt.
+
+Attempt inspection additionally requires the authenticated subject to equal
+the turn's immutable initiating-human subject (including a causal human carried
+by an authorized service continuation). The lookup explicitly fences account,
+workspace, the attempt's immutable session/turn identity and execution
+generation, and initiating subject. It does not require the turn's mutable
+current execution generation to remain equal after recovery, so a retained
+historical accepted attempt remains inspectable. Missing, foreign-account,
+foreign-workspace, and another subject's attempts all collapse to the same
+`attempt_not_found_or_not_authorized` result, with no session or turn identifier
+disclosed.
 
 Knowledge facts are independently gated by `documents:search`:
 
@@ -64,6 +77,9 @@ The response deliberately excludes:
   authors, versions, ACL tags, curation evidence, and file identifiers;
 - Memory text, source references, scopes, confidence, metadata, actors, session
   identifiers, and correction chains;
+- policy snapshot bodies and personal preference titles, descriptions, values,
+  retrieval handles, subject identifiers, session identifiers, and turn
+  identifiers;
 - variable values, credentials, integration configuration, prompt text, and
   model/tool schemas.
 
@@ -76,6 +92,8 @@ It returns only bounded metadata and aggregates:
 | Subject-visible document status/source totals | All matching rows via SQL aggregates | No document records are returned or sampled |
 | Topics returned | 24 | `topicsTruncated` |
 | Newest Memory records sampled | 100 | `memorySample.limitReached`; `coverage=partial` |
+| Accepted-attempt policy entries | 3 | Immutable snapshot-table constraint; count and hash are explicit |
+| Accepted-attempt preference descriptors | 64 / 16 KiB | Only descriptor count/hash is projected; `truncated` is explicit |
 
 Base names are normalized and clipped to 160 characters. Topic labels are
 normalized and clipped to 96 characters. Aggregate status and source-kind
@@ -100,21 +118,36 @@ does not read, duplicate, or create another preference store.
 `generatedAt`, `latestDocumentUpdatedAt`, per-base `latestUpdatedAt`, and the
 Memory sample's `latestUpdatedAt` make freshness explicit.
 
-## Current state versus snapshots
+## Current state versus accepted-attempt governance
 
-The response is labeled `truth.current.source=read_time_projection`. The
-instruction-policy snapshot is explicitly:
+The current inventory remains labeled
+`truth.current.source=read_time_projection`. Without `attemptId`,
+`truth.attemptGovernance.status=not_requested`.
 
-```text
-status = not_captured
-reason = workspace_instruction_policy_snapshot_not_implemented
-```
+For an authorized accepted attempt, Workspace State reads the existing
+immutable instruction-policy and preference-registry snapshot rows. It projects
+only stable IDs, revisions, content hashes, activation versions, timestamps,
+normalized policy role/source, coarse counts, and truncation facts. Policy and
+preference bodies never cross the boundary.
 
-Active heads are authoritative stored policy state, but runtime composition is
-not implemented. They must not be interpreted as evidence that
-an agent received those revisions. Existing runtime behavior still uses the
-legacy workspace override when configured, otherwise the deployment default;
-Workspace State reports only which fallback source exists, never its content.
+Drift is deterministic and independently labeled for policy and preferences:
+
+- `identical`: the frozen and current stable identities are exact;
+- `superseded`: the same policy targets or preference IDs remain, but active
+  revisions changed;
+- `changed`: the current target/descriptor identity set added or removed an
+  entry;
+- `missing`: the accepted attempt exists but one immutable snapshot row does
+  not;
+- `truncated`: either the frozen or current preference descriptor set reached
+  its count/byte bound, so exact equality is not claimed;
+- `unavailable`: the attempt lookup did not pass the uniform authorization
+  fence.
+
+Active heads remain authoritative current stored state, while the snapshot is
+the evidence of what the accepted attempt froze. The legacy workspace override
+or deployment-default metadata remains separately labeled and never exposes its
+content.
 
 ## Knowledge map and gap signals
 
@@ -141,16 +174,20 @@ changes. Gaps are not persisted and cannot activate policy.
 ## Console surface
 
 `/workspaces/:workspaceId/state` renders Workspace State with loading, empty,
-permission-unavailable, error/retry, partial-coverage, and freshness states. It
-contains no edit, synthesis, lock, activation, or policy mutation control. Deep
-links lead to the existing Documents, Memory, Capabilities/Skills,
-Sessions/Agents, Rigs, Variable Sets, and Workspace Settings surfaces.
+permission-unavailable, error/retry, partial-coverage, freshness, and accepted-
+attempt governance states. The inspector accepts an attempt UUID and displays
+only drift status, counts, hashes, role metadata, and timestamps. Loader
+generation fences include both workspace and attempt IDs, so a late response
+cannot populate a newer selection. The surface contains no edit, synthesis,
+lock, activation, or policy mutation control. Deep links lead to the existing
+Documents, Memory, Capabilities/Skills, Sessions/Agents, Rigs, Variable Sets,
+and Workspace Settings surfaces.
 
 ## Explicit non-goals
 
 This slice does not implement:
 
-- prompt/runtime composition or immutable attempt policy snapshots;
+- policy or preference administration mutations;
 - preference storage;
 - source/fact schema work;
 - Slack, transcript, email, repository, or other connectors;

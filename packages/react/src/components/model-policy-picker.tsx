@@ -452,6 +452,11 @@ export function ModelPolicyPickerMenu(
         <p className="px-2.5 pt-1 pb-1 text-xs font-medium tracking-wide text-og-fg-subtle uppercase">
           {messages.thinking}
         </p>
+        {focusModel.catalog.capabilities?.inputModalities.includes("image") === false ? (
+          <p className="px-2.5 pb-1.5 text-xs leading-relaxed text-og-fg-subtle">
+            Unsupported attachments stay in the session but are hidden from this model.
+          </p>
+        ) : null}
         <div className="flex flex-col gap-0.5">
           {effortOptionsForModel(focusModel.catalog).map((effort) => {
             const selected = activeModel && effort === props.effort;
@@ -540,7 +545,7 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
           disabled={props.disabled}
           aria-label={messages.label}
           className={cn(
-            "inline-flex h-8 max-w-64 items-center gap-1 rounded-full border border-transparent px-2.5 text-xs text-og-fg-muted outline-none transition-colors hover:border-og-border hover:bg-og-surface-2 hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50",
+            "inline-flex h-8 max-w-64 items-center gap-1 rounded-full border border-transparent px-2.5 text-xs text-og-fg-muted outline-none transition-colors hover:border-og-border hover:bg-og-surface-2 hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50 max-sm:h-7 max-sm:max-w-[9rem] max-sm:px-2",
             props.className,
           )}
         >
@@ -552,10 +557,10 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
             className="text-og-fg"
           />
           <span className="truncate font-medium text-og-fg">{selected?.label ?? props.model}</span>
-          <span>{labelReasoningEffort(props.effort)}</span>
+          <span className="max-sm:hidden">{labelReasoningEffort(props.effort)}</span>
           {props.latencyMode === "fast" ? (
             <ZapIcon
-              className="size-3.5 shrink-0 text-og-fg"
+              className="size-3.5 shrink-0 fill-current stroke-current text-og-fg"
               aria-label={messages.fast}
               data-testid="model-picker-fast-icon"
             />

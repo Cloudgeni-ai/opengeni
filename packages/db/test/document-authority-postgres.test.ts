@@ -242,4 +242,82 @@ describe("document authority (real PostgreSQL + pgvector + FORCE RLS)", () => {
     });
     expect(stolenRows).toHaveLength(0);
   });
+
+  test("resolves only the immutable tuple for historical indexing under exact workspace RLS", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace("historical-resolver");
+    const sibling = await freshWorkspace("historical-resolver-sibling", workspace.accountId);
+    const personal = await createDocument(workspace, {
+      label: "historical-personal",
+      kind: "personal",
+      subjectId: "user:alice",
+    });
+    const siblingPersonal = await createDocument(sibling, {
+      label: "historical-sibling-personal",
+      kind: "personal",
+      subjectId: "user:alice",
+    });
+
+    const [functionAcl] = await admin<Array<{ public_execute: boolean; app_execute: boolean }>>`
+      select
+        coalesce(bool_or(A.grantee = 0 and A.privilege_type = 'EXECUTE'), false) as public_execute,
+        coalesce(bool_or(
+          A.grantee = (select oid from pg_roles where rolname = 'opengeni_app')
+          and A.privilege_type = 'EXECUTE'
+        ), false) as app_execute
+      from pg_proc P
+      cross join lateral aclexplode(coalesce(P.proacl, acldefault('f', P.proowner))) A
+      where P.oid = 'opengeni_private.resolve_document_index_authority(uuid,uuid,uuid)'::regprocedure
+    `;
+    expect(functionAcl).toEqual({ public_execute: false, app_execute: true });
+
+    const resolved = await app.begin(async (tx) => {
+      await tx`select set_config('opengeni.account_id', ${workspace.accountId}, true)`;
+      await tx`select set_config('opengeni.workspace_id', ${workspace.workspaceId}, true)`;
+      const direct = await tx<{ id: string }[]>`
+        select id from documents where id = ${personal.documentId}`;
+      expect(direct).toHaveLength(0);
+      return await tx<
+        Array<{
+          authority_kind: string;
+          authority_workspace_id: string | null;
+          authority_subject_id: string | null;
+        }>
+      >`
+        select authority_kind, authority_workspace_id, authority_subject_id
+        from opengeni_private.resolve_document_index_authority(
+          ${workspace.accountId}, ${workspace.workspaceId}, ${personal.documentId}
+        )`;
+    });
+    expect([...resolved]).toEqual([
+      {
+        authority_kind: "personal",
+        authority_workspace_id: workspace.workspaceId,
+        authority_subject_id: "user:alice",
+      },
+    ]);
+
+    const crossWorkspace = await app.begin(async (tx) => {
+      await tx`select set_config('opengeni.account_id', ${workspace.accountId}, true)`;
+      await tx`select set_config('opengeni.workspace_id', ${workspace.workspaceId}, true)`;
+      return await tx`
+        select * from opengeni_private.resolve_document_index_authority(
+          ${workspace.accountId}, ${workspace.workspaceId}, ${siblingPersonal.documentId}
+        )`;
+    });
+    expect(crossWorkspace).toHaveLength(0);
+
+    await expect(
+      app.begin(async (tx) => {
+        await tx`select set_config('opengeni.account_id', ${workspace.accountId}, true)`;
+        await tx`select set_config('opengeni.workspace_id', ${workspace.workspaceId}, true)`;
+        await tx`
+          select * from opengeni_private.resolve_document_index_authority(
+            ${workspace.accountId}, ${sibling.workspaceId}, ${siblingPersonal.documentId}
+          )`;
+      }),
+    ).rejects.toThrow(
+      "document index authority lookup requires exact account/workspace RLS context",
+    );
+  });
 });

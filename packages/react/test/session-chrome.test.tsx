@@ -449,4 +449,32 @@ describe("SessionChrome", () => {
     expect(prompt?.closest('[data-slot="tooltip-trigger"]')).toBeNull();
     expect(queueChip?.getAttribute("data-slot")).not.toBe("tooltip-trigger");
   });
+
+  test("caps expanded panel height so long agents/queue lists scroll inside", async () => {
+    mounted = await renderComponent(
+      <SessionChrome
+        queue={queue({ queue: [] })}
+        agentsSignal={{ count: 29, detail: "5 paused", tone: "waiting" }}
+        agentsPanel={
+          <ul data-testid="agents-body">
+            {Array.from({ length: 29 }, (_, index) => (
+              <li key={index}>agent {index + 1}</li>
+            ))}
+          </ul>
+        }
+      />,
+    );
+    const agentsChip = mounted.container.querySelector<HTMLButtonElement>(
+      '[data-og-session-chrome-signal="agents"]',
+    );
+    await act(async () => {
+      agentsChip?.click();
+    });
+    const body = mounted.container.querySelector<HTMLElement>(
+      "[data-og-session-chrome-panel-shell] > div",
+    );
+    expect(body).not.toBeNull();
+    expect(body?.style.maxHeight).toBe("var(--og-session-chrome-panel-max-height)");
+    expect(body?.className).toContain("overflow-y-auto");
+  });
 });

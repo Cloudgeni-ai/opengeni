@@ -6,10 +6,33 @@ type AnalyticsConfig = ClientConfig["analytics"];
 
 const CONSENT_STORAGE_KEY = "opengeni.analyticsConsent";
 
+/** Dispatched when Account menu asks to reopen the consent sheet. */
+export const OPEN_ANALYTICS_PREFERENCES_EVENT = "opengeni:open-analytics-preferences";
+
 let inMemoryConsent: AnalyticsConsent | null = null;
+/** Survives a click before the lazy AnalyticsManager mounts and attaches its listener. */
+let pendingOpenPreferences = false;
 
 export function analyticsHasProviders(config: AnalyticsConfig | null | undefined): boolean {
   return Boolean(config && Object.values(config.providers).some(Boolean));
+}
+
+/** True when the console should offer analytics consent UI (first visit + Account reopen). */
+export function analyticsPreferencesAvailable(config: AnalyticsConfig | null | undefined): boolean {
+  return Boolean(config?.consentRequired && analyticsHasProviders(config));
+}
+
+export function openAnalyticsPreferences(): void {
+  pendingOpenPreferences = true;
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new Event(OPEN_ANALYTICS_PREFERENCES_EVENT));
+}
+
+/** Consume a pending Account-menu open (e.g. event fired before the manager mounted). */
+export function takePendingAnalyticsPreferencesOpen(): boolean {
+  if (!pendingOpenPreferences) return false;
+  pendingOpenPreferences = false;
+  return true;
 }
 
 export function storedAnalyticsConsent(

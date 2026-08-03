@@ -1,4 +1,8 @@
-import type { WorkspaceStateGapCode, WorkspaceStateResponse } from "@opengeni/sdk";
+import type {
+  WorkspaceStateGapCode,
+  WorkspaceStateGovernanceDriftStatus,
+  WorkspaceStateResponse,
+} from "@opengeni/sdk";
 import { Link } from "@tanstack/react-router";
 import {
   BookOpenIcon,
@@ -13,7 +17,7 @@ import {
   SettingsIcon,
   UsersIcon,
 } from "lucide-react";
-import type { ReactNode } from "react";
+import { type FormEvent, type ReactNode, useState } from "react";
 
 import { EmptyState, LoadErrorState, PageHeader } from "@/components/common";
 import { ContentPage } from "@/components/ui/content-layout";
@@ -42,6 +46,23 @@ function formatDate(value: string | null): string {
 
 function humanize(value: string): string {
   return value.replaceAll("_", " ").replace(/^./u, (character) => character.toUpperCase());
+}
+
+const GOVERNANCE_DRIFT_EXPLANATIONS: Record<WorkspaceStateGovernanceDriftStatus, string> = {
+  identical: "Frozen and current stable identities match exactly.",
+  superseded: "The same targets remain, but one or more active revisions changed.",
+  changed: "The current target or descriptor set added or removed an entry.",
+  missing: "The accepted attempt has no immutable snapshot row for this authority.",
+  truncated: "A snapshot or current preference bound prevents an exact equality claim.",
+  unavailable: "The comparison is unavailable under the accepted-attempt authorization fence.",
+};
+
+function comparisonHash(value: string | null): ReactNode {
+  return value ? <code className="break-all text-2xs">sha256:{value}</code> : "Unavailable";
+}
+
+function comparisonCount(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
 }
 
 function StateCard(props: { title: string; description?: string; children: ReactNode }) {
@@ -99,9 +120,9 @@ function PolicyInventory({ state }: { state: WorkspaceStateResponse }) {
       </div>
 
       <div className="mt-4 rounded-md border border-status-waiting/30 bg-status-waiting/10 p-3 text-xs leading-5 text-fg-muted">
-        <span className="font-medium text-fg">Current versus snapshot:</span> this is a read-time
-        view. Runtime composition and immutable policy snapshots are not implemented, so active
-        policy heads must not be interpreted as agent prompt truth.
+        <span className="font-medium text-fg">Current governance:</span> active heads are read-time
+        metadata, not prompt bodies. Inspect an accepted attempt below to compare them with the
+        immutable governance frozen for that attempt.
       </div>
 
       {policy.latestRevision ? (
@@ -143,6 +164,197 @@ function PolicyInventory({ state }: { state: WorkspaceStateResponse }) {
         <p className="mt-2 text-xs text-status-waiting">
           Only the first 32 active heads are shown.
         </p>
+      ) : null}
+    </StateCard>
+  );
+}
+
+export function AttemptGovernanceInventory({
+  state,
+  attemptInput,
+  onAttemptInput,
+  onInspect,
+  onClear,
+}: {
+  state: WorkspaceStateResponse;
+  attemptInput: string;
+  onAttemptInput: (value: string) => void;
+  onInspect: (event: FormEvent<HTMLFormElement>) => void;
+  onClear: () => void;
+}) {
+  const governance = state.truth.attemptGovernance;
+  return (
+    <StateCard
+      title="Accepted-attempt governance"
+      description="Inspect immutable policy and structured-preference metadata for an attempt you initiated. Hidden prompt text and preference values are never returned."
+    >
+      <form className="flex flex-col gap-2 sm:flex-row" onSubmit={onInspect}>
+        <input
+          aria-label="Attempt ID"
+          className="min-w-0 flex-1 rounded-md border border-border bg-surface px-3 py-2 text-sm text-fg outline-none focus:border-brand"
+          placeholder="Attempt UUID"
+          value={attemptInput}
+          onChange={(event) => onAttemptInput(event.target.value)}
+          pattern="[0-9a-fA-F-]{36}"
+          required
+        />
+        <button
+          type="submit"
+          className="rounded-md bg-brand px-3 py-2 text-sm font-medium text-white hover:bg-brand/90"
+        >
+          Inspect
+        </button>
+        <button
+          type="button"
+          className="rounded-md border border-border px-3 py-2 text-sm font-medium text-fg hover:bg-surface-2"
+          onClick={onClear}
+        >
+          Clear
+        </button>
+      </form>
+
+      {governance.status === "not_requested" ? (
+        <div className="mt-4">
+          <EmptyState>Enter an accepted attempt ID to inspect its frozen governance.</EmptyState>
+        </div>
+      ) : null}
+      {governance.status === "unavailable" ? (
+        <div className="mt-4">
+          <EmptyState>
+            That attempt is unavailable or was not initiated by your authenticated subject. No
+            attempt metadata was disclosed.
+          </EmptyState>
+        </div>
+      ) : null}
+      {governance.status === "available" ? (
+        <div className="mt-4 grid gap-4">
+          <div className="grid gap-3 sm:grid-cols-4">
+            <Metric label="Overall drift" value={humanize(governance.drift.overall)} />
+            <Metric label="Policy drift" value={humanize(governance.drift.policy.status)} />
+            <Metric
+              label="Preference drift"
+              value={humanize(governance.drift.preferences.status)}
+            />
+            <Metric label="Accepted" value={formatDate(governance.acceptedAt)} />
+          </div>
+          <div className="rounded-md border border-border p-3">
+            <h3 className="text-xs font-semibold uppercase tracking-wider text-fg-subtle">
+              Current versus snapshot
+            </h3>
+            <p className="mt-1 text-xs leading-5 text-fg-muted">
+              Deterministic drift compares stable IDs, revisions, content hashes, and activation
+              versions. Policy and preference bodies are never returned.
+            </p>
+            <div className="mt-3 grid gap-3 lg:grid-cols-2">
+              {[
+                {
+                  key: "policy",
+                  title: "Instruction policy",
+                  status: governance.drift.policy.status,
+                  snapshotCount: governance.drift.policy.snapshotTargetCount,
+                  currentCount: governance.drift.policy.currentTargetCount,
+                  snapshotHash: governance.drift.policy.snapshotHash,
+                  currentHash: governance.drift.policy.currentHash,
+                  snapshotNoun: "frozen target",
+                  currentNoun: "current target",
+                  snapshotCoverage: null,
+                  currentCoverage: null,
+                },
+                {
+                  key: "preferences",
+                  title: "Structured preferences",
+                  status: governance.drift.preferences.status,
+                  snapshotCount: governance.drift.preferences.snapshotDescriptorCount,
+                  currentCount: governance.drift.preferences.currentDescriptorCount,
+                  snapshotHash: governance.drift.preferences.snapshotHash,
+                  currentHash: governance.drift.preferences.currentHash,
+                  snapshotNoun: "frozen descriptor",
+                  currentNoun: "current descriptor",
+                  snapshotCoverage: governance.drift.preferences.snapshotTruncated
+                    ? "truncated"
+                    : "complete",
+                  currentCoverage: governance.drift.preferences.currentTruncated
+                    ? "truncated"
+                    : "complete",
+                },
+              ].map((comparison) => (
+                <section
+                  key={comparison.key}
+                  aria-label={`${comparison.title} governance comparison`}
+                  className="rounded-md border border-border/70 bg-surface-2/30 p-3 text-xs text-fg-muted"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <h4 className="font-medium text-fg">{comparison.title}</h4>
+                    <span className="rounded-full border border-border px-2 py-1 font-medium text-fg">
+                      {humanize(comparison.status)}
+                    </span>
+                  </div>
+                  <p className="mt-2 leading-5">
+                    {GOVERNANCE_DRIFT_EXPLANATIONS[comparison.status]}
+                  </p>
+                  <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                    <div className="rounded border border-border bg-surface p-2">
+                      <div className="font-medium text-fg">Accepted snapshot</div>
+                      <div className="mt-1">
+                        {comparisonCount(comparison.snapshotCount, comparison.snapshotNoun)}
+                      </div>
+                      {comparison.snapshotCoverage ? (
+                        <div className="mt-1">Coverage: {comparison.snapshotCoverage}</div>
+                      ) : null}
+                      <div className="mt-1">{comparisonHash(comparison.snapshotHash)}</div>
+                    </div>
+                    <div className="rounded border border-border bg-surface p-2">
+                      <div className="font-medium text-fg">Current authority</div>
+                      <div className="mt-1">
+                        {comparisonCount(comparison.currentCount, comparison.currentNoun)}
+                      </div>
+                      {comparison.currentCoverage ? (
+                        <div className="mt-1">Coverage: {comparison.currentCoverage}</div>
+                      ) : null}
+                      <div className="mt-1">{comparisonHash(comparison.currentHash)}</div>
+                    </div>
+                  </div>
+                </section>
+              ))}
+            </div>
+          </div>
+          <div className="grid gap-3 lg:grid-cols-2">
+            <div className="rounded-md border border-border p-3 text-xs text-fg-muted">
+              <div className="font-medium text-fg">Instruction policy snapshot</div>
+              {governance.policySnapshot.status === "missing" ? (
+                <p className="mt-2">No immutable policy snapshot row exists for this attempt.</p>
+              ) : (
+                <div className="mt-2 grid gap-1">
+                  <span>{governance.policySnapshot.entries.length} frozen target(s)</span>
+                  <span>Role: {governance.policySnapshot.policyRole ?? "none"}</span>
+                  <span>Captured {formatDate(governance.policySnapshot.createdAt)}</span>
+                  <code className="break-all text-2xs">
+                    sha256:{governance.policySnapshot.entryHash}
+                  </code>
+                </div>
+              )}
+            </div>
+            <div className="rounded-md border border-border p-3 text-xs text-fg-muted">
+              <div className="font-medium text-fg">Structured preference snapshot</div>
+              {governance.preferenceSnapshot.status === "missing" ? (
+                <p className="mt-2">
+                  No immutable preference snapshot row exists for this attempt.
+                </p>
+              ) : (
+                <div className="mt-2 grid gap-1">
+                  <span>{governance.preferenceSnapshot.descriptorCount} frozen descriptor(s)</span>
+                  <span>
+                    Coverage: {governance.preferenceSnapshot.truncated ? "truncated" : "complete"}
+                  </span>
+                  <span>Captured {formatDate(governance.preferenceSnapshot.createdAt)}</span>
+                  <code className="break-all text-2xs">
+                    sha256:{governance.preferenceSnapshot.descriptorHash}
+                  </code>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
       ) : null}
     </StateCard>
   );
@@ -338,7 +550,21 @@ function ExistingSources({ workspaceId }: { workspaceId: string }) {
 
 export function WorkspaceStateRoute({ workspaceId }: { workspaceId: string }) {
   const { client } = useAppContext();
-  const { state, error, loading, reload } = useWorkspaceStateInventory(client, workspaceId);
+  const [attemptInput, setAttemptInput] = useState("");
+  const [attemptId, setAttemptId] = useState<string | undefined>();
+  const { state, error, loading, reload } = useWorkspaceStateInventory(
+    client,
+    workspaceId,
+    attemptId,
+  );
+  const inspectAttempt = (event: FormEvent<HTMLFormElement>): void => {
+    event.preventDefault();
+    setAttemptId(attemptInput.trim());
+  };
+  const clearAttempt = (): void => {
+    setAttemptInput("");
+    setAttemptId(undefined);
+  };
 
   return (
     <ContentPage width="standard">
@@ -370,6 +596,13 @@ export function WorkspaceStateRoute({ workspaceId }: { workspaceId: string }) {
             sweep or policy mutation ran.
           </div>
           <PolicyInventory state={state} />
+          <AttemptGovernanceInventory
+            state={state}
+            attemptInput={attemptInput}
+            onAttemptInput={setAttemptInput}
+            onInspect={inspectAttempt}
+            onClear={clearAttempt}
+          />
           <KnowledgeInventory state={state} workspaceId={workspaceId} />
           <ExistingSources workspaceId={workspaceId} />
         </div>

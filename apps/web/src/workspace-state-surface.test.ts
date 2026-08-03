@@ -28,7 +28,9 @@ describe("read-only Workspace State surface", () => {
       "No document bases are visible.",
       "No knowledge counts were disclosed.",
       "Current versus snapshot",
-      "policy snapshots are not implemented",
+      "Accepted snapshot",
+      "Current authority",
+      "Deterministic drift compares stable IDs",
       "Base list truncated",
       "Memory sample reached",
       "Open Documents",
@@ -42,5 +44,6 @@ describe("read-only Workspace State surface", () => {
       /createWorkspaceInstruction|activateWorkspaceInstruction|updateKnowledgeMemory/,
     );
     expect(route).not.toMatch(/method:\s*["'](?:POST|PATCH|PUT|DELETE)/);
+    expect(route).not.toContain("policy snapshots are not implemented");
   });
 });

@@ -31,6 +31,8 @@ export function ConsoleComposer(props: {
   autoFocus?: boolean;
   disabled?: boolean;
   fileUploadsEnabled: boolean;
+  /** Rendered before attach (mobile “+” lives here). */
+  controlsLeading?: ReactNode;
   controls?: ReactNode;
   actions?: ReactNode;
   commandContext?: SlashCommandContext;
@@ -52,6 +54,9 @@ export function ConsoleComposer(props: {
       {...(props.fileUploadsEnabled ? { attachments: props.attachments } : {})}
       {...(props.commandContext ? { commandContext: props.commandContext } : {})}
       {...(props.onClearView ? { onClearView: props.onClearView } : {})}
+      {...(props.controlsLeading ? { controlsLeading: props.controlsLeading } : {})}
+      // Desktop keeps the paperclip; mobile reaches attach via the “+” menu.
+      attachButtonClassName="max-sm:hidden"
       controlsStart={props.controls}
       actionsStart={props.actions}
       {...(context.clientConfig.voiceInput?.available

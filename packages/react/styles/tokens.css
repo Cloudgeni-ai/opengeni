@@ -107,6 +107,8 @@
   --og-session-chrome-rail-pad: 0.2rem;
   --og-session-chrome-panel-pad-x: 0.5rem;
   --og-session-chrome-panel-pad-y: 0.4rem;
+  /* Expanded agents/queue/inbox/goal body — scroll inside, never grow unbound. */
+  --og-session-chrome-panel-max-height: min(18rem, 40dvh);
   --og-session-chrome-duration: 220ms;
   --og-session-chrome-crossfade-duration: 180ms;
   --og-session-chrome-ease: var(--og-ease-out);

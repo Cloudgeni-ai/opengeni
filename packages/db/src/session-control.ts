@@ -10,6 +10,10 @@ import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Database } from "./index";
 import * as schema from "./schema";
 import { closePendingSessionToolCallsInTransaction } from "./session-tool-call-settlement";
+import {
+  mirrorSessionRealtimeContextInTransaction,
+  renderRealtimeHumanInputResponseContext,
+} from "./session-realtime-mirror";
 
 export const SESSION_ANCESTRY_LIMIT = 10_000;
 
@@ -2088,7 +2092,12 @@ async function cancelSessionSubtreeInTransaction(
   }
   const immediatelyCancelledTurnIds = immediatelyCancelledTurns.map((turn) => turn.id);
   const now = new Date();
-  let cancelledHumanInputs: Array<{ id: string; sessionId: string; turnId: string }> = [];
+  let cancelledHumanInputs: Array<{
+    id: string;
+    sessionId: string;
+    turnId: string;
+    questions: (typeof schema.sessionHumanInputRequests.$inferSelect)["questions"];
+  }> = [];
   if (immediatelyCancelledTurnIds.length > 0) {
     await db
       .update(schema.sessionTurns)
@@ -2122,6 +2131,7 @@ async function cancelSessionSubtreeInTransaction(
         id: schema.sessionHumanInputRequests.id,
         sessionId: schema.sessionHumanInputRequests.sessionId,
         turnId: schema.sessionHumanInputRequests.turnId,
+        questions: schema.sessionHumanInputRequests.questions,
       });
     await db
       .update(schema.codexCapacityWaiters)
@@ -2247,8 +2257,45 @@ async function cancelSessionSubtreeInTransaction(
         ? await db.insert(schema.sessionEvents).values(eventValues).returning({
             id: schema.sessionEvents.id,
             sequence: schema.sessionEvents.sequence,
+            type: schema.sessionEvents.type,
+            turnId: schema.sessionEvents.turnId,
+            payload: schema.sessionEvents.payload,
           })
         : [];
+    const cancelledHumanInputsById = new Map(
+      cancelledHumanInputs
+        .filter((request) => request.sessionId === session.id)
+        .map((request) => [request.id, request]),
+    );
+    for (const event of inserted) {
+      if (event.type !== "user.humanInputResponse") continue;
+      const payload = event.payload as { requestId?: unknown };
+      const request =
+        typeof payload.requestId === "string"
+          ? cancelledHumanInputsById.get(payload.requestId)
+          : null;
+      if (!request) continue;
+      await mirrorSessionRealtimeContextInTransaction(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: session.id,
+        sourceKind: "human_input_response",
+        sourceId: event.id,
+        turnId: event.turnId,
+        channel: null,
+        text: renderRealtimeHumanInputResponseContext({
+          requestId: request.id,
+          questions: request.questions,
+          response: { outcome: "cancelled" },
+        }),
+        payload: {
+          requestId: request.id,
+          outcome: "cancelled",
+          sourceEventId: event.id,
+        },
+        now,
+      });
+    }
     const liveTurnId =
       session.activeTurnId && liveTurnIds.has(session.activeTurnId) ? session.activeTurnId : null;
     await db
