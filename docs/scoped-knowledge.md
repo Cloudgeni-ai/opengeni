@@ -39,11 +39,16 @@ prevent cross-organization workspace anchors even for malformed direct SQL.
 `documents.acl_tags` remain caller-supplied retrieval filters. They are not read
 or stored by this foundation and confer no authorization.
 
-Existing Documents are not reclassified by this migration. Legacy workspace
-documents remain workspace-scoped. Legacy private documents retain their
-existing workspace plus creator boundary until an explicit authorized
-migration/reclassification; ambiguous rows never widen to organization or
-cross-workspace personal access.
+Migration 0157 projects this same authority tuple onto `documents` and
+`document_chunks`. Legacy workspace documents deterministically remain
+workspace authority. Legacy private documents become personal authority bound
+to their original workspace and existing creator; migration 0126 already
+rejects an empty private creator, so ambiguous rows never widen. New document
+and chunk authority is immutable, chunks copy the exact parent tuple, and the
+runtime-role FORCE-RLS policy calls the same
+`scoped_knowledge_scope_visible` predicate before any document search ranking.
+The older `visibility` field remains only as a compatibility projection
+(`personal` → `private`, organization/workspace → `workspace`).
 
 ## Source and lifecycle ledgers
 

@@ -883,16 +883,23 @@ export async function addDocumentToBase(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
       const viewerSubjectId = cleanString(input.access?.viewerSubjectId ?? null);
-      if (viewerSubjectId) await setSubjectRlsContext(scopedDb, viewerSubjectId);
-      const base = await getDocumentBase(scopedDb, input.workspaceId, input.baseId);
-      if (!base) throw new Error(`Document base not found: ${input.baseId}`);
-      const file = await requireReadyFile(scopedDb, input.workspaceId, input.fileId);
       const authority = resolveDocumentAuthority({
         kind: input.authorityKind,
         legacyVisibility: input.visibility,
         workspaceId: input.workspaceId,
-        initiatingSubjectId: input.initiatingSubjectId ?? input.createdBy,
+        initiatingSubjectId: input.initiatingSubjectId,
       });
+      if (
+        authority.kind === "personal" &&
+        (viewerSubjectId !== authority.subjectId ||
+          cleanString(input.createdBy ?? null) !== authority.subjectId)
+      ) {
+        throw new Error("personal document writes require the exact initiating subject");
+      }
+      if (viewerSubjectId) await setSubjectRlsContext(scopedDb, viewerSubjectId);
+      const base = await getDocumentBase(scopedDb, input.workspaceId, input.baseId);
+      if (!base) throw new Error(`Document base not found: ${input.baseId}`);
+      const file = await requireReadyFile(scopedDb, input.workspaceId, input.fileId);
       const now = new Date();
       const [existing] = await scopedDb
         .select()

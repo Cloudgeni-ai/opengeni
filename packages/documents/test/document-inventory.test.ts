@@ -12,7 +12,7 @@ const inventorySource = source.slice(
 
 describe("document inventory bounds", () => {
   test("validates every row and label limit before opening the RLS query", () => {
-    const rlsAt = inventorySource.indexOf("return await withWorkspaceRls");
+    const rlsAt = inventorySource.indexOf("return await withDocumentRls");
     expect(source).toContain("DOCUMENT_INVENTORY_MAX_BASE_LIMIT = 100");
     expect(source).toContain("DOCUMENT_INVENTORY_MAX_TOPIC_LIMIT = 100");
     expect(source).toContain("DOCUMENT_INVENTORY_MAX_TOPIC_CHARS = 256");
