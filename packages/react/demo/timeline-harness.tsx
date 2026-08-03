@@ -11,7 +11,7 @@ import {
   TurnSummary,
   type ActivityItem,
   type TimelineGroup,
-} from "../src/index";
+} from "@opengeni/react";
 import {
   authNeededEvents,
   cancelledTurnEvents,

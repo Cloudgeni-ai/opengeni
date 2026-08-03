@@ -19,6 +19,11 @@
 @theme inline {
   --font-og-sans: var(--og-font-sans);
   --font-og-mono: var(--og-font-mono);
+  /* Compatibility aliases still used by published components and the exact
+     dropdown primitives shared with the web app. Keep the public stylesheet
+     self-contained instead of requiring consumers to copy the app theme. */
+  --font-sans: var(--og-font-sans);
+  --font-mono: var(--og-font-mono);
 
   /* Type ramp — a real 4-step scale (no half-pixel hand-tuning). Every
      timeline string maps to one of these via `text-og-{xs,sm,base,md}`;
@@ -31,6 +36,8 @@
   --text-og-base--line-height: 1.55;
   --text-og-md: 15px;
   --text-og-md--line-height: 1.6;
+  --text-2xs: 0.6875rem;
+  --text-2xs--line-height: 1rem;
 
   --color-og-bg: var(--og-color-bg);
   --color-og-surface-1: var(--og-color-surface-1);
@@ -56,11 +63,64 @@
   --color-og-status-cancelled: var(--og-color-status-cancelled);
   --color-og-danger: var(--og-color-danger);
 
+  --color-bg: var(--og-color-bg);
+  --color-surface: var(--og-color-surface-1);
+  --color-surface-2: var(--og-color-surface-2);
+  --color-surface-3: var(--og-color-surface-3);
+  --color-border: var(--og-color-border);
+  --color-border-strong: var(--og-color-border-strong);
+  --color-fg: var(--og-color-fg);
+  --color-fg-muted: var(--og-color-fg-muted);
+  --color-fg-subtle: var(--og-color-fg-subtle);
+  --color-brand: var(--og-color-accent);
+  --color-brand-strong: var(--og-color-accent-deep);
+  --color-brand-fg: var(--og-color-accent-fg);
+  --color-status-queued: var(--og-color-status-queued);
+  --color-status-running: var(--og-color-status-running);
+  --color-status-idle: var(--og-color-status-idle);
+  --color-status-waiting: var(--og-color-status-waiting);
+  --color-status-success: var(--og-color-status-idle);
+  --color-status-failed: var(--og-color-status-failed);
+  --color-status-cancelled: var(--og-color-status-cancelled);
+  --color-danger: var(--og-color-danger);
+
+  --color-background: var(--color-bg);
+  --color-foreground: var(--color-fg);
+  --color-card: var(--color-surface);
+  --color-card-foreground: var(--color-fg);
+  --color-popover: var(--color-surface-3);
+  --color-popover-foreground: var(--color-fg);
+  --color-primary: var(--color-brand-strong);
+  --color-primary-foreground: var(--color-brand-fg);
+  --color-secondary: var(--color-surface-2);
+  --color-secondary-foreground: var(--color-fg);
+  --color-muted: var(--color-surface-2);
+  --color-muted-foreground: var(--color-fg-muted);
+  --color-accent: var(--color-surface-2);
+  --color-accent-foreground: var(--color-fg);
+  --color-destructive: var(--og-color-danger);
+  --color-destructive-filled: color-mix(in oklch, var(--og-color-danger) 70%, black);
+  --color-destructive-foreground: var(--og-color-accent-fg);
+  --color-input: var(--color-surface-2);
+  --color-ring: var(--color-brand);
+  --color-sidebar: var(--color-surface);
+  --color-sidebar-foreground: var(--color-fg);
+  --color-sidebar-primary: var(--color-brand-strong);
+  --color-sidebar-primary-foreground: var(--color-brand-fg);
+  --color-sidebar-accent: var(--color-surface-2);
+  --color-sidebar-accent-foreground: var(--color-fg);
+  --color-sidebar-border: var(--color-border);
+  --color-sidebar-ring: var(--color-brand);
+
   --radius-og-xs: var(--og-radius-xs);
   --radius-og-sm: var(--og-radius-sm);
   --radius-og-md: var(--og-radius-md);
   --radius-og-lg: var(--og-radius-lg);
   --radius-og-xl: var(--og-radius-xl);
+  --radius-sm: var(--og-radius-sm);
+  --radius-md: var(--og-radius-md);
+  --radius-lg: var(--og-radius-lg);
+  --radius-xl: var(--og-radius-xl);
 
   --shadow-og-sm: var(--og-shadow-sm);
   --shadow-og-md: var(--og-shadow-md);

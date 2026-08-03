@@ -15,6 +15,7 @@ export default defineConfig({
   entry: [
     "src/index.ts",
     "src/core.ts",
+    "src/realtime.ts",
     "src/codex-realtime-controller.ts",
     "src/gateway-realtime-transport.ts",
   ],

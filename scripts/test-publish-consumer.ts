@@ -9,7 +9,9 @@
  * from the frozen Bun lock), typechecks with stable TypeScript 7, builds the root and session
  * subpaths through Vite, verifies the packed runtime skill-library subpath, and
  * server-renders populated embedded host surfaces without a DOM. A second
- * consumer installs only the session subpath's required peers.
+ * consumer installs only the session subpath's required peers. A third imports
+ * only the public SDK/React realtime subpaths, renders both batteries-included
+ * composer controls without a provider, and bundles them as an external host.
  */
 import { cp, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -153,11 +155,13 @@ try {
   const tarballRoot = join(tempRoot, "tarballs");
   const consumerRoot = join(tempRoot, "consumer");
   const minimalSessionRoot = join(tempRoot, "minimal-session-consumer");
+  const minimalRealtimeRoot = join(tempRoot, "minimal-realtime-consumer");
   await Promise.all([
     mkdir(stagingRoot, { recursive: true }),
     mkdir(tarballRoot, { recursive: true }),
     mkdir(consumerRoot, { recursive: true }),
     mkdir(minimalSessionRoot, { recursive: true }),
+    mkdir(minimalRealtimeRoot, { recursive: true }),
   ]);
 
   const versions = await workspaceVersions();
@@ -456,6 +460,125 @@ try {
     ),
   ]);
 
+  const minimalRealtimeManifest = {
+    name: "opengeni-minimal-realtime-proof",
+    version: "0.0.0",
+    private: true,
+    type: "module",
+    scripts: {
+      typecheck: "tsc -p tsconfig.json --noEmit",
+      build: "vite build --logLevel warn",
+      ssr: "bun realtime.tsx",
+    },
+    dependencies: {
+      "@opengeni/react": `file:${react.tarball}`,
+      "@opengeni/sdk": sdkFile,
+      react: reactSource.peerDependencies?.react,
+      "react-dom": reactSource.peerDependencies?.["react-dom"],
+    },
+    devDependencies: {
+      "@types/node": "^24.10.1",
+      "@types/react": reactSource.devDependencies?.["@types/react"],
+      "@types/react-dom": reactSource.devDependencies?.["@types/react-dom"],
+      typescript: rootManifest.devDependencies?.typescript,
+      vite: reactSource.devDependencies?.vite,
+    },
+    overrides: {
+      "@opengeni/sdk": sdkFile,
+    },
+  };
+  await Promise.all([
+    writeFile(
+      join(minimalRealtimeRoot, "package.json"),
+      `${JSON.stringify(minimalRealtimeManifest, null, 2)}\n`,
+    ),
+    writeFile(
+      join(minimalRealtimeRoot, "tsconfig.json"),
+      `${JSON.stringify(
+        {
+          compilerOptions: {
+            strict: true,
+            target: "ESNext",
+            lib: ["ESNext", "DOM", "DOM.Iterable"],
+            module: "ESNext",
+            moduleResolution: "Bundler",
+            jsx: "react-jsx",
+            skipLibCheck: false,
+            noEmit: true,
+            types: ["node"],
+          },
+          include: ["realtime.tsx", "vite.config.ts"],
+        },
+        null,
+        2,
+      )}\n`,
+    ),
+    writeFile(
+      join(minimalRealtimeRoot, "vite.config.ts"),
+      'import { defineConfig } from "vite";\nexport default defineConfig({ build: { emptyOutDir: true, lib: { entry: "realtime.tsx", formats: ["es"], fileName: "realtime" }, rollupOptions: { external: ["react", "react/jsx-runtime", "react-dom/server"] } } });\n',
+    ),
+    writeFile(
+      join(minimalRealtimeRoot, "realtime.tsx"),
+      [
+        'import { createSessionRealtimeController, sessionRealtimeTransportKind, type SessionRealtimeClientLike } from "@opengeni/sdk/realtime";',
+        'import { NewSessionRealtimeControl, SessionRealtimeControl, type EmbeddedRealtimeSessionClientLike } from "@opengeni/react/realtime";',
+        'import { renderToStaticMarkup } from "react-dom/server";',
+        "",
+        'const unsupported = async (..._input: unknown[]): Promise<never> => { throw new Error("not called during SSR proof"); };',
+        "const proxyClient = {",
+        "  getWorkspaceRealtimeModelCatalog: unsupported,",
+        "  beginSessionRealtime: unsupported,",
+        "  heartbeatSessionRealtime: unsupported,",
+        "  negotiateCodexRealtimeWebrtc: unsupported,",
+        "  negotiateGatewayRealtime: unsupported,",
+        "  activateCodexRealtimeConnection: unsupported,",
+        "  syncSessionRealtimeLedger: unsupported,",
+        "  endSessionRealtime: unsupported,",
+        "} satisfies EmbeddedRealtimeSessionClientLike & SessionRealtimeClientLike;",
+        "const effectiveControl = {",
+        '  state: "active" as const,',
+        "  controlVersion: 0,",
+        '  controlEtag: "active-0",',
+        '  directState: "active" as const,',
+        "  primaryBlocker: null,",
+        "  additionalBlockerCount: 0,",
+        "  blockers: [],",
+        "  resumeOptions: [],",
+        "  override: null,",
+        "  settlement: null,",
+        "};",
+        "",
+        'if (sessionRealtimeTransportKind("gpt-live-1-boulder-alpha") !== "codex") throw new Error("Codex transport selection drifted");',
+        'if (sessionRealtimeTransportKind("opengeni-gateway/openai/gpt-realtime-2.1") !== "gateway") throw new Error("Gateway transport selection drifted");',
+        "void createSessionRealtimeController;",
+        "const markup = renderToStaticMarkup(",
+        "  <>",
+        "    <SessionRealtimeControl",
+        "      client={proxyClient}",
+        '      workspaceId="workspace-proof"',
+        '      sessionId="session-proof"',
+        '      sessionStatus="idle"',
+        "      effectiveControl={effectiveControl}",
+        "      events={[]}",
+        "      eventsReady={false}",
+        "      codexConnected={true}",
+        "    />",
+        "    <NewSessionRealtimeControl",
+        "      client={proxyClient}",
+        '      workspaceId="workspace-proof"',
+        "      codexConnected={true}",
+        "      onStart={async () => true}",
+        "    />",
+        "  </>,",
+        ");",
+        'if ((markup.match(/aria-label="Start voice with Codex Live"/g) ?? []).length !== 2) throw new Error("SSR output lost public realtime composer controls");',
+        'if (!markup.includes("Choose voice model and options")) throw new Error("SSR output lost realtime model picker ARIA copy");',
+        "console.log(`REALTIME_SUBPATH_SSR_OK bytes=${new TextEncoder().encode(markup).byteLength}`);",
+        "",
+      ].join("\n"),
+    ),
+  ]);
+
   process.stdout.write("[publish-consumer] installing release-shaped tarballs\n");
   await run(["bun", "install"], consumerRoot);
   await rm(join(consumerRoot, "node_modules"), { recursive: true, force: true });
@@ -472,6 +595,13 @@ try {
   await run(["bun", "install", "--frozen-lockfile"], minimalSessionRoot);
   await run(["bun", "run", "typecheck"], minimalSessionRoot);
   await run(["bun", "run", "build"], minimalSessionRoot);
+  process.stdout.write("[publish-consumer] installing minimal realtime-only consumer\n");
+  await run(["bun", "install"], minimalRealtimeRoot);
+  await rm(join(minimalRealtimeRoot, "node_modules"), { recursive: true, force: true });
+  await run(["bun", "install", "--frozen-lockfile"], minimalRealtimeRoot);
+  await run(["bun", "run", "typecheck"], minimalRealtimeRoot);
+  await run(["bun", "run", "build"], minimalRealtimeRoot);
+  await run(["bun", "run", "ssr"], minimalRealtimeRoot);
 
   const sessionBundle = await readFile(
     join(consumerRoot, "session-dist", "session-consumer.js"),
@@ -502,7 +632,7 @@ try {
 
   passed = true;
   process.stdout.write(
-    `[publish-consumer] PASS ${sdk.manifest.name}@${sdk.manifest.version} + ${react.manifest.name}@${react.manifest.version} + ${runtime.manifest.name}@${runtime.manifest.version}; strict types, session-only bundle, browser CSS, SSR, and packed skill-library imports are clean.\n`,
+    `[publish-consumer] PASS ${sdk.manifest.name}@${sdk.manifest.version} + ${react.manifest.name}@${react.manifest.version} + ${runtime.manifest.name}@${runtime.manifest.version}; strict types, session-only and realtime-only bundles, browser CSS, SSR, and packed skill-library imports are clean.\n`,
   );
 } finally {
   if (passed && !keepArtifacts) {

@@ -1,7 +1,10 @@
 import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { SandboxTerminal } from "../src/components/sandbox-terminal";
-import type { TerminalChunk, UseSandboxTerminalResult } from "../src/hooks/use-sandbox-terminal";
+import {
+  SandboxTerminal,
+  type TerminalChunk,
+  type UseSandboxTerminalResult,
+} from "@opengeni/react";
 import "./styles.css";
 
 /* ----------------------------------------------------------------------------

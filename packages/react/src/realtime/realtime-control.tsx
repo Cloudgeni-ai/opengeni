@@ -1,15 +1,14 @@
+import { type EffectiveSessionControl, type SessionEvent, type SessionStatus } from "@opengeni/sdk";
 import {
+  hasStoredSessionRealtimeOwnerProof,
   projectSessionRealtimeLifecycle,
-  type CodexRealtimeController,
-  type CodexRealtimeControllerClient,
-  type CodexRealtimeControllerSnapshot,
-  type EffectiveSessionControl,
-  type SessionEvent,
+  type SessionRealtimeClientLike,
+  type SessionRealtimeController,
+  type SessionRealtimeControllerSnapshot,
+  type CreateSessionRealtimeControllerOptions,
   type SessionRealtimeModel,
-  type SessionStatus,
   type WorkspaceRealtimeModelCatalogItem,
-  type WorkspaceRealtimeModelCatalogResponse,
-} from "@opengeni/sdk";
+} from "@opengeni/sdk/realtime";
 import {
   AudioLinesIcon,
   CheckIcon,
@@ -26,8 +25,16 @@ import {
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { type RefObject, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { BillingClassMark, type BillingClass } from "@/components/billing-class-mark";
-import { PickerAnimatedPage, PickerBackHeader, PickerNavRow } from "@/components/pickers";
+import {
+  BillingClassMark,
+  PickerAnimatedPage,
+  PickerBackHeader,
+  PickerNavRow,
+} from "../components/model-policy-picker";
+import type { EmbeddedRealtimeSessionClientLike } from "../client";
+import { cn } from "../lib/cn";
+import type { PickerBillingClass as BillingClass } from "../model-policy";
+import { useEmbeddedRealtimeSession } from "../session-context";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -37,8 +44,7 @@ import {
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { cn } from "@/lib/utils";
+} from "./dropdown-menu";
 
 export type RealtimeModelOption = {
   id: SessionRealtimeModel;
@@ -76,11 +82,11 @@ const REALTIME_PROVIDER_META: Record<
 };
 const REALTIME_MODEL_STORAGE_PREFIX = "opengeni:realtime-model";
 
-type RealtimeControllerClient = CodexRealtimeControllerClient & {
-  getWorkspaceRealtimeModelCatalog?(
-    workspaceId: string,
-  ): Promise<WorkspaceRealtimeModelCatalogResponse>;
-};
+type RealtimeControllerClient = EmbeddedRealtimeSessionClientLike & SessionRealtimeClientLike;
+
+export type SessionRealtimeControllerFactory = (
+  options: CreateSessionRealtimeControllerOptions,
+) => SessionRealtimeController;
 
 type AdmissionInput = {
   sessionStatus: SessionStatus;
@@ -103,9 +109,9 @@ export function codexRealtimeAdmissionBlocker(input: AdmissionInput): string | n
   return null;
 }
 
-export function useSessionCodexRealtime(options: {
-  client: RealtimeControllerClient;
-  workspaceId: string;
+export function useSessionRealtime(options: {
+  client?: RealtimeControllerClient | undefined;
+  workspaceId?: string | undefined;
   sessionId: string;
   sessionStatus: SessionStatus;
   effectiveControl: EffectiveSessionControl;
@@ -115,13 +121,19 @@ export function useSessionCodexRealtime(options: {
   model?: SessionRealtimeModel | undefined;
   modelAvailable?: boolean | undefined;
   modelUnavailableReason?: string | null | undefined;
+  /** Deterministic browser-test/demo seam. Production hosts should use the SDK default. */
+  controllerFactory?: SessionRealtimeControllerFactory | undefined;
 }) {
+  const { client, workspaceId } = useEmbeddedRealtimeSession({
+    client: options.client,
+    workspaceId: options.workspaceId,
+  });
   const model = options.model ?? CODEX_LIVE_MODEL.id;
   const audioRef = useRef<HTMLAudioElement>(null);
-  const controllerRef = useRef<CodexRealtimeController | null>(null);
+  const controllerRef = useRef<SessionRealtimeController | null>(null);
   const controllerModelRef = useRef<SessionRealtimeModel | null>(null);
-  const [snapshot, setSnapshot] = useState<CodexRealtimeControllerSnapshot>(() => ({
-    status: hasStoredOwnerProof(options.workspaceId, options.sessionId, model)
+  const [snapshot, setSnapshot] = useState<SessionRealtimeControllerSnapshot>(() => ({
+    status: hasStoredSessionRealtimeOwnerProof({ workspaceId, sessionId: options.sessionId, model })
       ? "recovering"
       : "idle",
     realtimeId: null,
@@ -148,28 +160,18 @@ export function useSessionCodexRealtime(options: {
 
   useEffect(() => {
     let disposed = false;
-    let controller: CodexRealtimeController | null = null;
+    let controller: SessionRealtimeController | null = null;
     let unsubscribe: (() => void) | null = null;
-    void Promise.all([
-      import("@opengeni/sdk/codex-realtime-controller"),
-      model === CODEX_LIVE_MODEL.id
-        ? Promise.resolve(null)
-        : import("@opengeni/sdk/gateway-realtime-transport"),
-    ])
-      .then(([{ createCodexRealtimeController }, gateway]) => {
+    void import("@opengeni/sdk/realtime")
+      .then(({ createSessionRealtimeController }) => {
         if (disposed) return;
-        controller = createCodexRealtimeController({
-          client: options.client,
-          workspaceId: options.workspaceId,
+        const controllerFactory = options.controllerFactory ?? createSessionRealtimeController;
+        controller = controllerFactory({
+          client,
+          workspaceId,
           sessionId: options.sessionId,
           ...(audioRef.current ? { remoteAudio: audioRef.current } : {}),
-          ...(model === CODEX_LIVE_MODEL.id
-            ? {}
-            : {
-                model,
-                ownerStorageNamespace: "gateway-realtime-owner",
-                startTransport: gateway!.createGatewayRealtimeTransportStarter(),
-              }),
+          model,
         });
         controllerRef.current = controller;
         controllerModelRef.current = model;
@@ -212,7 +214,7 @@ export function useSessionCodexRealtime(options: {
         controllerModelRef.current = null;
       }
     };
-  }, [model, options.client, options.sessionId, options.workspaceId]);
+  }, [client, model, options.controllerFactory, options.sessionId, workspaceId]);
 
   useEffect(() => {
     if (!options.eventsReady) return;
@@ -274,26 +276,9 @@ export function useSessionCodexRealtime(options: {
   };
 }
 
-function hasStoredOwnerProof(
-  workspaceId: string,
-  sessionId: string,
-  model: SessionRealtimeModel,
-): boolean {
-  if (typeof sessionStorage === "undefined") return false;
-  try {
-    return (
-      sessionStorage.getItem(
-        `opengeni:${model === CODEX_LIVE_MODEL.id ? "codex" : "gateway"}-realtime-owner:${workspaceId}:${sessionId}`,
-      ) !== null
-    );
-  } catch {
-    return false;
-  }
-}
-
-export function SessionCodexRealtimeControl(props: {
-  client: RealtimeControllerClient;
-  workspaceId: string;
+export function SessionRealtimeControl(props: {
+  client?: RealtimeControllerClient | undefined;
+  workspaceId?: string | undefined;
   sessionId: string;
   sessionStatus: SessionStatus;
   effectiveControl: EffectiveSessionControl;
@@ -302,16 +287,18 @@ export function SessionCodexRealtimeControl(props: {
   codexConnected: boolean;
   realtimeAutostartModel?: SessionRealtimeModel | undefined;
   onRealtimeAutostartConsumed?: (() => void) | undefined;
+  /** Deterministic browser-test/demo seam. Production hosts should use the SDK default. */
+  controllerFactory?: SessionRealtimeControllerFactory | undefined;
 }) {
   const lifecycle = useMemo(() => projectSessionRealtimeLifecycle(props.events), [props.events]);
-  const selection = useWorkspaceRealtimeModelSelection({
+  const selection = useRealtimeModelSelection({
     client: props.client,
     workspaceId: props.workspaceId,
     codexConnected: props.codexConnected,
     activeModel: lifecycle?.state === "active" ? lifecycle.model : null,
   });
   const selectedModel = selection.selectedModel;
-  const realtime = useSessionCodexRealtime({
+  const realtime = useSessionRealtime({
     ...props,
     model: selectedModel.id,
     modelAvailable: selectedModel.available,
@@ -356,7 +343,7 @@ export function SessionCodexRealtimeControl(props: {
   ]);
 
   return (
-    <CodexRealtimeControl
+    <RealtimeVoiceControl
       snapshot={realtime.snapshot}
       canStart={realtime.canStart}
       admissionBlocker={realtime.admissionBlocker}
@@ -376,12 +363,16 @@ export function SessionCodexRealtimeControl(props: {
   );
 }
 
-export function useWorkspaceRealtimeModelSelection(options: {
-  client: RealtimeControllerClient;
-  workspaceId: string;
+export function useRealtimeModelSelection(options: {
+  client?: RealtimeControllerClient | undefined;
+  workspaceId?: string | undefined;
   codexConnected: boolean;
   activeModel?: SessionRealtimeModel | null | undefined;
 }) {
+  const { client, workspaceId } = useEmbeddedRealtimeSession({
+    client: options.client,
+    workspaceId: options.workspaceId,
+  });
   const activeModel = options.activeModel;
   const [catalog, setCatalog] = useState<RealtimeModelOption[]>(() => [
     {
@@ -391,15 +382,15 @@ export function useWorkspaceRealtimeModelSelection(options: {
     },
   ]);
   const [selectedModelId, setSelectedModelId] = useState<SessionRealtimeModel>(
-    () => readRealtimeModelPreference(options.workspaceId) ?? CODEX_LIVE_MODEL.id,
+    () => readRealtimeModelPreference(workspaceId) ?? CODEX_LIVE_MODEL.id,
   );
 
   useEffect(() => {
     let disposed = false;
-    const load = options.client.getWorkspaceRealtimeModelCatalog;
+    const load = client.getWorkspaceRealtimeModelCatalog;
     if (!load) return;
     void load
-      .call(options.client, options.workspaceId)
+      .call(client, workspaceId)
       .then((response) => {
         if (disposed) return;
         const models = response.models.map(toRealtimeModelOption);
@@ -413,7 +404,7 @@ export function useWorkspaceRealtimeModelSelection(options: {
     return () => {
       disposed = true;
     };
-  }, [options.client, options.workspaceId]);
+  }, [client, workspaceId]);
 
   useEffect(() => {
     if (activeModel) setSelectedModelId(activeModel);
@@ -431,15 +422,15 @@ export function useWorkspaceRealtimeModelSelection(options: {
       const model = catalog.find((candidate) => candidate.id === value);
       if (!model || !model.available || activeModel) return;
       setSelectedModelId(model.id);
-      writeRealtimeModelPreference(options.workspaceId, model.id);
+      writeRealtimeModelPreference(workspaceId, model.id);
     },
-    [activeModel, catalog, options.workspaceId],
+    [activeModel, catalog, workspaceId],
   );
 
   return { models: catalog, selectedModel, selectModel };
 }
 
-const IDLE_REALTIME_SNAPSHOT: CodexRealtimeControllerSnapshot = {
+const IDLE_REALTIME_SNAPSHOT: SessionRealtimeControllerSnapshot = {
   status: "idle",
   realtimeId: null,
   mode: null,
@@ -455,14 +446,14 @@ const IDLE_REALTIME_SNAPSHOT: CodexRealtimeControllerSnapshot = {
 };
 
 export function NewSessionRealtimeControl(props: {
-  client: RealtimeControllerClient;
-  workspaceId: string;
+  client?: RealtimeControllerClient | undefined;
+  workspaceId?: string | undefined;
   codexConnected: boolean;
   disabled?: boolean | undefined;
   disabledReason?: string | null | undefined;
   onStart: (model: SessionRealtimeModel) => Promise<boolean>;
 }) {
-  const selection = useWorkspaceRealtimeModelSelection({
+  const selection = useRealtimeModelSelection({
     client: props.client,
     workspaceId: props.workspaceId,
     codexConnected: props.codexConnected,
@@ -470,7 +461,7 @@ export function NewSessionRealtimeControl(props: {
   const audioRef = useRef<HTMLAudioElement>(null);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const snapshot = useMemo<CodexRealtimeControllerSnapshot>(
+  const snapshot = useMemo<SessionRealtimeControllerSnapshot>(
     () =>
       starting
         ? { ...IDLE_REALTIME_SNAPSHOT, status: "starting" }
@@ -497,7 +488,7 @@ export function NewSessionRealtimeControl(props: {
   }, [canStart, onStart, selectedModelId]);
 
   return (
-    <CodexRealtimeControl
+    <RealtimeVoiceControl
       snapshot={snapshot}
       canStart={canStart}
       admissionBlocker={selection.selectedModel.unavailableReason ?? props.disabledReason ?? null}
@@ -519,8 +510,8 @@ export function NewSessionRealtimeControl(props: {
   );
 }
 
-export function CodexRealtimeControl(props: {
-  snapshot: CodexRealtimeControllerSnapshot;
+export function RealtimeVoiceControl(props: {
+  snapshot: SessionRealtimeControllerSnapshot;
   canStart: boolean;
   admissionBlocker?: string | null | undefined;
   modelAvailable: boolean;
@@ -605,7 +596,7 @@ export function CodexRealtimeControl(props: {
             data-testid="realtime-mute-controls"
             initial={reduceMotion ? false : { opacity: 0, width: 0, marginRight: 0 }}
             animate={{ opacity: 1, width: "auto", marginRight: 4 }}
-            exit={reduceMotion ? undefined : { opacity: 0, width: 0, marginRight: 0 }}
+            {...(reduceMotion ? {} : { exit: { opacity: 0, width: 0, marginRight: 0 } })}
             transition={{ duration: reduceMotion ? 0 : 0.18, ease: [0.2, 0.8, 0.2, 1] }}
             className="inline-flex shrink-0 items-center gap-0.5 overflow-hidden"
           >
@@ -632,7 +623,7 @@ export function CodexRealtimeControl(props: {
         aria-pressed={modeOwned}
         title={mainLabel}
         disabled={mainDisabled}
-        whileTap={reduceMotion ? undefined : { scale: 0.92 }}
+        {...(reduceMotion ? {} : { whileTap: { scale: 0.92 } })}
         transition={{ type: "spring", stiffness: 520, damping: 30 }}
         onClick={() => void runMainAction().catch(() => undefined)}
         className={cn(
@@ -781,7 +772,7 @@ function RealtimeMuteButton(props: {
       aria-label={label}
       aria-pressed={props.muted}
       title={label}
-      whileTap={props.reduceMotion ? undefined : { scale: 0.92 }}
+      {...(props.reduceMotion ? {} : { whileTap: { scale: 0.92 } })}
       onClick={props.onToggle}
       className={cn(
         "inline-flex size-8 shrink-0 items-center justify-center rounded-og-md border outline-none",
@@ -875,7 +866,7 @@ export function RealtimeModelPickerMenu(props: {
   );
 }
 
-function RealtimeDiagnosticsMenu({ snapshot }: { snapshot: CodexRealtimeControllerSnapshot }) {
+function RealtimeDiagnosticsMenu({ snapshot }: { snapshot: SessionRealtimeControllerSnapshot }) {
   const bridge = snapshot.bridge;
   const rows = [
     ["controller", snapshot.status],
@@ -937,7 +928,7 @@ type RealtimeVisualPhase =
   | "stopping";
 
 function statusContent(
-  snapshot: CodexRealtimeControllerSnapshot,
+  snapshot: SessionRealtimeControllerSnapshot,
   modelAvailable: boolean,
   canStart: boolean,
   admissionBlocker: string | null,
@@ -1176,3 +1167,12 @@ function isRealtimeModel(value: string | null): value is SessionRealtimeModel {
     value === "workspace-gateway/xai/grok-voice-think-fast-2.0"
   );
 }
+
+/** @deprecated Use the provider-neutral realtime names. */
+export const useSessionCodexRealtime = useSessionRealtime;
+/** @deprecated Use the provider-neutral realtime names. */
+export const useWorkspaceRealtimeModelSelection = useRealtimeModelSelection;
+/** @deprecated Use the provider-neutral realtime names. */
+export const SessionCodexRealtimeControl = SessionRealtimeControl;
+/** @deprecated Use the provider-neutral realtime names. */
+export const CodexRealtimeControl = RealtimeVoiceControl;
