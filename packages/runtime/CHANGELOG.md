@@ -1,5 +1,24 @@
 # @opengeni/runtime
 
+## 0.18.0
+
+### Minor Changes
+
+- e03397d: Freeze workspace instruction policies and structured preference descriptors at
+  the accepted logical-turn boundary, add immutable per-session policy roles, and
+  compose the resulting exact-attempt governance into agent and compaction prompts.
+
+### Patch Changes
+
+- Updated dependencies [13b961e]
+- Updated dependencies [ecc4288]
+- Updated dependencies [e03397d]
+- Updated dependencies [4f15920]
+- Updated dependencies [3baaebd]
+  - @opengeni/contracts@0.32.0
+  - @opengeni/codex@0.2.10
+  - @opengeni/config@0.10.3
+
 ## 0.17.2
 
 ### Patch Changes
