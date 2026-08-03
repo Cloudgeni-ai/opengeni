@@ -3,6 +3,9 @@
 -- every accepted attempt. Documents and knowledge sources are not policy
 -- authorities and are intentionally absent from this snapshot.
 
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '10min';
+
 ALTER TABLE "sessions"
   ADD COLUMN IF NOT EXISTS "policy_role" text;
 
@@ -15,7 +18,10 @@ ALTER TABLE "sessions"
       AND "policy_role" ~ '^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$'
       AND "policy_role" !~ '--'
     )
-  );
+  ) NOT VALID;
+
+ALTER TABLE "sessions"
+  VALIDATE CONSTRAINT "sessions_policy_role_chk";
 
 CREATE OR REPLACE FUNCTION workspace_instruction_policy_reject_session_role_mutation()
 RETURNS trigger
@@ -42,7 +48,10 @@ ALTER TABLE "session_turns"
   ADD CONSTRAINT "session_turns_initiating_human_subject_id_chk" CHECK (
     "initiating_human_subject_id" IS NULL
     OR length(btrim("initiating_human_subject_id")) BETWEEN 1 AND 1024
-  );
+  ) NOT VALID;
+
+ALTER TABLE "session_turns"
+  VALIDATE CONSTRAINT "session_turns_initiating_human_subject_id_chk";
 
 CREATE OR REPLACE FUNCTION workspace_governance_reject_turn_human_mutation()
 RETURNS trigger
@@ -65,19 +74,26 @@ CREATE TRIGGER session_turns_initiating_human_immutable
 ALTER TABLE "preference_registry_snapshots"
   DROP CONSTRAINT "preference_registry_snapshots_account_id_fkey",
   ADD CONSTRAINT "preference_registry_snapshots_account_id_fkey"
-    FOREIGN KEY ("account_id") REFERENCES "managed_accounts"("id") ON DELETE CASCADE,
+    FOREIGN KEY ("account_id") REFERENCES "managed_accounts"("id") ON DELETE CASCADE NOT VALID,
   DROP CONSTRAINT "preference_registry_snapshots_workspace_id_fkey",
   ADD CONSTRAINT "preference_registry_snapshots_workspace_id_fkey"
-    FOREIGN KEY ("workspace_id") REFERENCES "workspaces"("id") ON DELETE CASCADE,
+    FOREIGN KEY ("workspace_id") REFERENCES "workspaces"("id") ON DELETE CASCADE NOT VALID,
   DROP CONSTRAINT "preference_registry_snapshots_session_id_fkey",
   ADD CONSTRAINT "preference_registry_snapshots_session_id_fkey"
-    FOREIGN KEY ("session_id") REFERENCES "sessions"("id") ON DELETE CASCADE,
+    FOREIGN KEY ("session_id") REFERENCES "sessions"("id") ON DELETE CASCADE NOT VALID,
   DROP CONSTRAINT "preference_registry_snapshots_turn_id_fkey",
   ADD CONSTRAINT "preference_registry_snapshots_turn_id_fkey"
-    FOREIGN KEY ("turn_id") REFERENCES "session_turns"("id") ON DELETE CASCADE,
+    FOREIGN KEY ("turn_id") REFERENCES "session_turns"("id") ON DELETE CASCADE NOT VALID,
   DROP CONSTRAINT "preference_registry_snapshots_attempt_id_fkey",
   ADD CONSTRAINT "preference_registry_snapshots_attempt_id_fkey"
-    FOREIGN KEY ("attempt_id") REFERENCES "session_turn_attempts"("id") ON DELETE CASCADE;
+    FOREIGN KEY ("attempt_id") REFERENCES "session_turn_attempts"("id") ON DELETE CASCADE NOT VALID;
+
+ALTER TABLE "preference_registry_snapshots"
+  VALIDATE CONSTRAINT "preference_registry_snapshots_account_id_fkey",
+  VALIDATE CONSTRAINT "preference_registry_snapshots_workspace_id_fkey",
+  VALIDATE CONSTRAINT "preference_registry_snapshots_session_id_fkey",
+  VALIDATE CONSTRAINT "preference_registry_snapshots_turn_id_fkey",
+  VALIDATE CONSTRAINT "preference_registry_snapshots_attempt_id_fkey";
 
 CREATE TABLE "workspace_instruction_policy_snapshots" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),

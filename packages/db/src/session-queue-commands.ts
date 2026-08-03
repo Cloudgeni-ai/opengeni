@@ -1485,9 +1485,19 @@ export async function submitHumanPromptInTransaction(
         : {},
       lineage: { actor: input.actor.type },
       ...initiatorColumns(frozenInitiator),
+      initiatingHumanSubjectId: editedSourceTurn
+        ? (editedSourceTurn.initiatingHumanSubjectId ??
+          (editedSourceTurn.initiatorKind === "subject"
+            ? editedSourceTurn.initiatorSubjectId
+            : null))
+        : frozenInitiator.initiator.kind === "subject"
+          ? frozenInitiator.initiator.subjectId
+          : null,
       personalConnectionDelegations: editedSourceTurn
         ? editedSourceTurn.personalConnectionDelegations
         : (input.personalConnectionDelegations ?? []),
+      createdAt: now,
+      updatedAt: now,
     })
     .returning();
   if (!turn) throw new SessionControlInvariantError("Prompt turn was not inserted");

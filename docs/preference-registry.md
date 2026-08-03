@@ -105,9 +105,12 @@ proposal head to have its exact version-1 creation event before commit.
 Supersession locks both heads and rejects a replacement whose active immutable
 revision is expired at transaction time, leaving the source and event history
 unchanged.
-Revisions, events, snapshots, heads, and their account/workspace/session/turn/
-attempt parents use restrictive deletion semantics; parent deletion cannot
-erase registry history.
+Preference heads, revisions, and lifecycle events keep restrictive deletion
+semantics, so deleting an account or workspace cannot erase registry history.
+Exact-attempt descriptor snapshots are immutable while their ownership chain
+exists, but cascade with deletion of their account, workspace, session, turn,
+or attempt because they are execution-state projections rather than the
+registry's lifecycle ledger.
 
 ## Imported material is proposal-only
 
@@ -190,9 +193,10 @@ All four tables carry account/workspace visibility keys, use ENABLE + FORCE RLS,
 and are accessed through account/workspace/subject context wrappers. Ordinary
 runtime DML is SELECT + INSERT for proposal heads and revisions and SELECT-only
 for events and snapshots. Snapshot INSERT and head UPDATE/DELETE are available
-only through their narrow security-definer functions. Database constraints, restrictive
-foreign keys, and immutable-history triggers defend revision/hash, target,
-active-head, snapshot, and audit integrity beneath the service layer.
+only through their narrow security-definer functions. Database constraints,
+restrictive lifecycle-ledger foreign keys, lifecycle-cascading snapshot foreign
+keys, and immutable-history triggers defend revision/hash, target, active-head,
+snapshot, and audit integrity beneath the service layer.
 
 Canonical implementation:
 

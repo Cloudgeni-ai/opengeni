@@ -36310,6 +36310,7 @@ export async function initializeSessionStartAtomically(
         let queueTailPosition = Number(session.queueTailPosition);
         if (!turn) {
           queueTailPosition += 1;
+          const acceptedAt = new Date();
           [turn] = await tx
             .insert(schema.sessionTurns)
             .values({
@@ -36347,6 +36348,8 @@ export async function initializeSessionStartAtomically(
                 session.initialPersonalConnectionDelegations,
                 `sessions:${session.workspaceId}:${session.id}:initial`,
               ),
+              createdAt: acceptedAt,
+              updatedAt: acceptedAt,
             })
             .returning();
           if (!turn) throw new Error("Failed to create initial session turn");
@@ -36480,6 +36483,7 @@ export async function enqueueSessionTurn(
         const position = atHead
           ? Number(lockedSession.queueHeadPosition) - 1
           : Number(lockedSession.queueTailPosition) + 1;
+        const acceptedAt = new Date();
         const [row] = await tx
           .insert(schema.sessionTurns)
           .values({
@@ -36510,6 +36514,8 @@ export async function enqueueSessionTurn(
             initiatingHumanSubjectId:
               input.initiator.kind === "subject" ? input.initiator.subjectId : null,
             personalConnectionDelegations: input.personalConnectionDelegations ?? [],
+            createdAt: acceptedAt,
+            updatedAt: acceptedAt,
           })
           .returning();
         if (!row) {
@@ -37512,6 +37518,8 @@ export async function claimSessionWorkForAttempt(
                     : null),
                 personalConnectionDelegations: [],
                 startedAt: now,
+                createdAt: now,
+                updatedAt: now,
               })
               .returning();
             if (!compactionTurn) throw new Error("Failed to create context compaction execution");
@@ -37864,6 +37872,8 @@ export async function claimSessionWorkForAttempt(
               initiatingHumanSubjectId,
               personalConnectionDelegations: internalPersonalConnectionDelegations,
               startedAt: now,
+              createdAt: now,
+              updatedAt: now,
             })
             .returning();
           if (!internalTurn) throw new Error("Failed to create internal update inference");

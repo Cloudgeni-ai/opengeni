@@ -123,7 +123,8 @@ that turn; a recovery attempt for the same logical turn resolves the same
 accepted state. A newly accepted human turn, goal continuation, system turn, or
 compaction receives the then-current state.
 
-Snapshots use `FORCE ROW LEVEL SECURITY`, restrictive parent foreign keys,
+Snapshots use `FORCE ROW LEVEL SECURITY`, ownership-parent foreign keys that
+cascade only with account/workspace/session/turn/attempt lifecycle deletion,
 immutable-history triggers, and SELECT-only application table privileges. One
 target-schema-local security-definer function validates the exact active
 session/turn/attempt/generation and is the only runtime insert path.

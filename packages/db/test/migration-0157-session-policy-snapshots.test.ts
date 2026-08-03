@@ -7,6 +7,7 @@ import postgres from "postgres";
 import {
   activatePreferenceRegistryRevision,
   activateWorkspaceInstructionPolicyRevision,
+  claimSessionWorkForAttempt,
   createDb,
   createPreferenceRegistryProposal,
   createSession,
@@ -16,6 +17,7 @@ import {
   getOrCreateWorkspaceInstructionPolicySnapshot,
   getPreferenceRegistryFullContent,
   getSession,
+  initializeSessionStartAtomically,
   migrate,
   provisionRoles,
   withWorkspaceRls,
@@ -58,11 +60,11 @@ beforeAll(async () => {
       },
     };
   } else {
-    shared = await acquireSharedTestDatabase("migration-0156-policy-snapshots");
+    shared = await acquireSharedTestDatabase("migration-0157-policy-snapshots");
   }
   if (!shared) {
     if (requireRealDatabase) {
-      throw new Error("real PostgreSQL is required for migration 0156 proof");
+      throw new Error("real PostgreSQL is required for migration 0157 proof");
     }
     console.warn("[migration-0157] PostgreSQL unavailable, skipping FORCE-RLS assertions");
     return;
@@ -213,8 +215,12 @@ describe("migration 0157 session policy role and exact-attempt snapshots", () =>
   test("declares the bounded rolling boundary without membership, document, or knowledge authority", async () => {
     const sql = await readFile(migrationPath, "utf8");
     expect(sql.split(/\r?\n/, 1)[0]).toBe("-- deployment-mode: rolling");
+    expect(sql).toContain("SET LOCAL lock_timeout = '5s'");
+    expect(sql).toContain("SET LOCAL statement_timeout = '10min'");
     expect(sql).toContain('ADD COLUMN IF NOT EXISTS "policy_role" text');
     expect(sql).toContain('ADD COLUMN IF NOT EXISTS "initiating_human_subject_id" text');
+    expect(sql).toContain('VALIDATE CONSTRAINT "sessions_policy_role_chk"');
+    expect(sql).toContain('VALIDATE CONSTRAINT "session_turns_initiating_human_subject_id_chk"');
     expect(sql).toContain('CREATE TABLE "workspace_instruction_policy_snapshots"');
     expect(sql).toContain("workspace_instruction_policy_get_or_create_snapshot");
     expect(sql).toContain("preference_registry_canonical_snapshot_at");
@@ -453,6 +459,104 @@ describe("migration 0157 session policy role and exact-attempt snapshots", () =>
     expect(invalidSnapshot.policyRole).toBeNull();
     expect(invalidSnapshot.roleSource).toBe("invalid_metadata_fallback");
     expect(invalidSnapshot.entries).toEqual([]);
+  });
+
+  test("claim atomically installs both governance snapshots for the accepted human turn", async () => {
+    if (!shared || !client) return;
+    const workspace = await freshWorkspace("policy-claim-snapshots");
+    const subjectId = "claim-snapshot-human";
+    const charter = await activatePolicy(workspace, {
+      kind: "charter",
+      scope: "global",
+      roleKey: null,
+      content: "CLAIM_CHARTER",
+    });
+    const proposal = await createPreferenceRegistryProposal(client.db, {
+      ...workspace,
+      actorSubjectId: subjectId,
+      principalKind: "human_session",
+      scope: "user",
+      stableKey: "claim-review-style",
+      title: "Claim review style",
+      description: "Keep accepted-turn claims evidence-first.",
+      content: "Lead with the exact accepted-turn evidence.",
+      precedenceRank: 20,
+      conflictStrategy: "override",
+      conflictsWith: [],
+      provenanceSource: "human",
+      provenanceSourceId: null,
+      expiresAt: null,
+    });
+    const [revision] = await shared.admin<{ id: string }[]>`
+      select id
+      from preference_registry_revisions
+      where preference_id = ${proposal.id}
+      order by revision desc
+      limit 1
+    `;
+    await activatePreferenceRegistryRevision(client.db, {
+      ...workspace,
+      actorSubjectId: subjectId,
+      principalKind: "human_session",
+      preferenceId: proposal.id,
+      revisionId: revision!.id,
+      expectedCurrentRevisionId: null,
+      expectedScopeVersion: proposal.scopeVersion,
+      authorizeScope: (scope) => expect(scope).toBe("user"),
+      reason: "Activate the claim snapshot preference",
+    });
+
+    const session = await createSession(client.db, {
+      ...workspace,
+      initialMessage: "claim the accepted turn",
+      resources: [],
+      tools: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId, label: "Claim snapshot human" },
+      model: "test-model",
+      sandboxBackend: "none",
+    });
+    const started = await initializeSessionStartAtomically(client.db, {
+      ...workspace,
+      sessionId: session.id,
+      reasoningEffortFallback: "medium",
+      createdEventPayload: {},
+    });
+    expect(started.turn).not.toBeNull();
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(client.db, workspace.workspaceId, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      attemptId,
+      trigger: { kind: "next" },
+    });
+    expect(claimed.action).toBe("claimed");
+
+    const snapshotRows = await shared.admin<
+      Array<{ policyEntries: unknown; preferenceDescriptors: unknown }>
+    >`
+      select
+        policy.entries as "policyEntries",
+        preference.descriptors as "preferenceDescriptors"
+      from workspace_instruction_policy_snapshots policy
+      join preference_registry_snapshots preference
+        on preference.account_id = policy.account_id
+        and preference.workspace_id = policy.workspace_id
+        and preference.session_id = policy.session_id
+        and preference.turn_id = policy.turn_id
+        and preference.attempt_id = policy.attempt_id
+        and preference.execution_generation = policy.execution_generation
+      where policy.attempt_id = ${attemptId}
+    `;
+    expect(snapshotRows).toHaveLength(1);
+    expect(snapshotRows[0]!.policyEntries).toEqual([
+      expect.objectContaining({ revisionId: charter.id, kind: "charter", scope: "global" }),
+    ]);
+    expect(snapshotRows[0]!.preferenceDescriptors).toEqual([
+      expect.objectContaining({ stableKey: "claim-review-style", scope: "user" }),
+    ]);
   });
 
   test("freezes accepted-time preferences for a service continuation's causal human", async () => {

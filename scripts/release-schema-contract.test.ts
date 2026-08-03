@@ -174,11 +174,11 @@ describe("release schema contract", () => {
         (migrations.has("0157_session_policy_role_snapshots.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "322176e39b715700642106cdf2c92dda060b522e8fad90e6e8df4dbe924adf31",
+      "8a70d243382d5a8e3f13fefbc23b3588207c7667e2c447fcdf07d6b8ac85fdc8",
     );
     expect(contract.latestMigration).toBe("0157_session_policy_role_snapshots.sql");
     expect(migrations.get("0157_session_policy_role_snapshots.sql")).toMatchObject({
-      sha256: "d7c112c47d256cd92ab8661e43c8706e693b336fa17f43eb7f48b510aa0acec5",
+      sha256: "84ad34345fe587ac8d952a4ddb7c55b1fec6a381b9ba5a73af6bcf253860f737",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0156_slack_reaction_trigger.sql")).toMatchObject({
