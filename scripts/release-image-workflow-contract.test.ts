@@ -133,7 +133,20 @@ describe("release image workflow contract", () => {
       ci.indexOf("\n  automation-report:\n"),
     );
     const parsed = Bun.YAML.parse(ci) as {
-      jobs: Record<string, { name?: string; needs?: string | string[]; if?: string }>;
+      jobs: Record<
+        string,
+        {
+          name?: string;
+          needs?: string | string[];
+          if?: string;
+          steps?: Array<{
+            name?: string;
+            env?: Record<string, string>;
+            run?: string;
+            with?: Record<string, unknown>;
+          }>;
+        }
+      >;
     };
 
     expect(parsed.jobs["service-images"]?.needs).toBe("automation-admission");
@@ -147,9 +160,37 @@ describe("release image workflow contract", () => {
     expect(parsed.jobs["service-images"]?.if).toBe(parsed.jobs["sandbox-image"]?.if);
     expect(parsed.jobs.images?.if).toBe(parsed.jobs["service-images"]?.if);
     expect(images.match(/packages: write/g)).toHaveLength(2);
+    for (const jobName of ["service-images", "sandbox-image"]) {
+      const login = parsed.jobs[jobName]?.steps?.find((step) => step.name === "Log in to GHCR");
+      expect(login?.with).toEqual({
+        registry: "ghcr.io",
+        username: "${{ github.actor }}",
+        password: "${{ secrets.GITHUB_TOKEN }}",
+      });
+    }
     expect(images).toContain("Require every workload image build");
     expect(images).toContain("SERVICE_IMAGES_RESULT: ${{ needs.service-images.result }}");
     expect(images).toContain("SANDBOX_IMAGE_RESULT: ${{ needs.sandbox-image.result }}");
+    const aggregate = parsed.jobs.images?.steps?.find(
+      (step) => step.name === "Require every workload image build",
+    );
+    expect(aggregate?.env).toEqual({
+      SERVICE_IMAGES_RESULT: "${{ needs.service-images.result }}",
+      SANDBOX_IMAGE_RESULT: "${{ needs.sandbox-image.result }}",
+    });
+    const aggregateResult = (serviceResult: string, sandboxResult: string) =>
+      Bun.spawnSync(["bash", "-c", aggregate?.run ?? "exit 1"], {
+        env: {
+          ...process.env,
+          SERVICE_IMAGES_RESULT: serviceResult,
+          SANDBOX_IMAGE_RESULT: sandboxResult,
+        },
+      }).exitCode;
+    expect(aggregateResult("success", "success")).toBe(0);
+    for (const result of ["failure", "skipped", "cancelled", ""]) {
+      expect(aggregateResult(result, "success")).not.toBe(0);
+      expect(aggregateResult("success", result)).not.toBe(0);
+    }
     expect(images.match(/push: \$\{\{ github\.event_name == 'push' \}\}/g)).toHaveLength(5);
     expect(images.match(/:dogfood-sha-\{0\}', github\.sha\)/g)).toHaveLength(5);
     expect(images).not.toMatch(/format\('ghcr\.io\/cloudgeni-ai\/opengeni-[^']+:sha-\{0\}'/);
