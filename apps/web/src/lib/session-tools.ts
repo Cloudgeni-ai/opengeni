@@ -64,6 +64,7 @@ export const reasoningEffortOrder: IntelligenceEffort[] = [
   "medium",
   "high",
   "xhigh",
+  "max",
 ];
 
 export function isIntelligenceEffort(value: unknown): value is IntelligenceEffort {

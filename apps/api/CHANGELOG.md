@@ -1,5 +1,64 @@
 # @opengeni/api-router
 
+## 0.16.5
+
+### Patch Changes
+
+- 9c4d73d: Add curated OpenGeni-credit and workspace-key Vercel AI Gateway model paths for
+  DeepSeek V4 Flash and Kimi K3, including exact provider routing, cache-aware
+  pricing and metering, Responses tool continuity, provider-blind catalog UX, and
+  stable remote-compaction cache prefixes.
+- Updated dependencies [9c4d73d]
+  - @opengeni/config@0.10.1
+  - @opengeni/contracts@0.31.1
+  - @opengeni/core@0.18.1
+  - @opengeni/db@0.22.2
+  - @opengeni/runtime@0.17.1
+  - @opengeni/documents@0.2.70
+  - @opengeni/github@0.4.17
+  - @opengeni/storage@0.2.54
+  - @opengeni/events@0.3.60
+  - @opengeni/observability@0.4.4
+
+## 0.16.4
+
+### Patch Changes
+
+- Updated dependencies [8b3e46f]
+  - @opengeni/config@0.10.0
+  - @opengeni/contracts@0.31.0
+  - @opengeni/core@0.18.0
+  - @opengeni/runtime@0.17.0
+  - @opengeni/db@0.22.1
+  - @opengeni/documents@0.2.69
+  - @opengeni/github@0.4.16
+  - @opengeni/storage@0.2.53
+  - @opengeni/events@0.3.59
+  - @opengeni/observability@0.4.3
+
+## 0.16.3
+
+### Patch Changes
+
+- e07eb52: Enforce frozen Allow, Ask, and Block connector action policies before provider execution while persisting metadata-only approval, decision, and outcome evidence.
+- Updated dependencies [e07eb52]
+- Updated dependencies [c4a0031]
+- Updated dependencies [4fcb6af]
+  - @opengeni/db@0.22.0
+  - @opengeni/runtime@0.16.3
+  - @opengeni/core@0.17.3
+  - @opengeni/documents@0.2.68
+  - @opengeni/events@0.3.58
+
+## 0.16.2
+
+### Patch Changes
+
+- 6500589: Automatically restore and list each workspace's Default document collection so uploads no longer require creating a base first, while preserving existing base-specific APIs and optional collection organization.
+- Updated dependencies [6500589]
+  - @opengeni/documents@0.2.67
+  - @opengeni/core@0.17.2
+
 ## 0.16.1
 
 ### Patch Changes

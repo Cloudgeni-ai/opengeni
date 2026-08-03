@@ -59,7 +59,20 @@ const AUDIT_MODELS: Array<{
   },
 ];
 
-const OPENGENI_ONLY = ["accounts/fireworks/models/glm-5p2"] as const;
+const NON_LLM_PRICES_MODELS = [
+  {
+    id: "accounts/fireworks/models/glm-5p2",
+    reason: "OpenGeni-only; not in llm-prices",
+  },
+  {
+    id: "deepseek-v4-flash-0731",
+    reason: "reviewed Gateway routes; exact-cost billing and conservative fallback are tested",
+  },
+  {
+    id: "kimi-k3",
+    reason: "reviewed Gateway routes; exact-cost billing and conservative fallback are tested",
+  },
+] as const;
 
 function usdToMicros(usd: number): number {
   return Math.round(usd * 1_000_000);
@@ -164,8 +177,8 @@ export function auditModelPricingAgainstLlmPrices(doc: LlmPricesDocument): {
     }
   }
 
-  for (const id of OPENGENI_ONLY) {
-    lines.push(`skip ${id} (OpenGeni-only; not in llm-prices)`);
+  for (const entry of NON_LLM_PRICES_MODELS) {
+    lines.push(`skip ${entry.id} (${entry.reason})`);
   }
 
   lines.push("note Fast/priority multipliers and marginBps are OpenGeni-owned — not audited here");

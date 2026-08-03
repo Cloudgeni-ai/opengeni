@@ -37,6 +37,7 @@ import {
   updateWorkspaceSettings,
   upsertWorkspaceModelPolicy,
   workspaceCodexSubscriptionActive,
+  workspaceVercelAiGatewayConnectionActive,
 } from "@opengeni/db";
 import { boundWorkspaceControlHttpPage } from "@opengeni/events";
 import type { Hono } from "hono";
@@ -162,9 +163,10 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/model-catalog", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    const [policy, codexSubscriptionActive] = await Promise.all([
+    const [policy, codexSubscriptionActive, workspaceGatewayConnectionActive] = await Promise.all([
       getWorkspaceModelPolicy(deps.db, workspaceId),
       workspaceCodexSubscriptionActive(deps.db, deps.settings, workspaceId),
+      workspaceVercelAiGatewayConnectionActive(deps.db, workspaceId),
     ]);
     c.header("cache-control", "private, no-store");
     return c.json(
@@ -173,6 +175,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
           settings: deps.settings,
           policy,
           codexSubscriptionActive,
+          workspaceGatewayConnectionActive,
         }),
       ),
     );

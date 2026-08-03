@@ -403,6 +403,17 @@ describe("sandbox preparation profiles", () => {
     expect(sandboxLifecycleHookIds(settings)).toEqual([]);
   });
 
+  test("offers GPT-5.6 max reasoning by default", () => {
+    const settings = withEnv({}, () => getSettings());
+    expect(configuredAllowedReasoningEfforts(settings)).toEqual([
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+    ]);
+  });
+
   test("returns client model and reasoning options with current defaults included", () => {
     const settings = {
       ...withEnv({}, () => getSettings()),
@@ -1316,6 +1327,23 @@ describe("backend-gated sandbox required-credential validation", () => {
     expect(() =>
       withEnv({ OPENGENI_SANDBOX_BACKEND: "docker" }, () => getSettings()),
     ).not.toThrow();
+  });
+
+  test("parses and validates an immutable Modal image ID", () => {
+    const imageId = "im-1234567890123456789012";
+    expect(
+      withEnv(
+        {
+          OPENGENI_MODAL_IMAGE_REF:
+            "ghcr.io/example/sandbox@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          OPENGENI_MODAL_IMAGE_ID: imageId,
+        },
+        () => getSettings(),
+      ).modalImageId,
+    ).toBe(imageId);
+    expect(() =>
+      withEnv({ OPENGENI_MODAL_IMAGE_ID: "im-not-a-valid-id" }, () => getSettings()),
+    ).toThrow();
   });
 
   test("daytona requires its api key only when active", () => {

@@ -146,7 +146,12 @@ import {
   SubmitHumanInputResponseRequest,
   TurnExecutionPolicyV1,
 } from "@opengeni/contracts";
-import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
+import {
+  environmentsEncryptionKeyBytes,
+  VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
+  VERCEL_AI_GATEWAY_CONNECTION_ROLE,
+  type Settings,
+} from "@opengeni/config";
 import { boundModelToolOutputItem, isCodexBilledModel } from "@opengeni/codex";
 // Re-exported so consumers get the whole codex-billed detection surface (the pure
 // prefix test + the credential-aware predicates below) from a single import.
@@ -7235,6 +7240,56 @@ export async function loadConnectionCredentialForBroker(
       };
     },
   );
+}
+
+export async function workspaceVercelAiGatewayConnectionActive(
+  db: Database,
+  workspaceId: string,
+): Promise<boolean> {
+  const connections = await listConnectionsMetadata(db, workspaceId, null);
+  return connections.some(
+    (connection) =>
+      connection.subjectId === null &&
+      connection.providerDomain === VERCEL_AI_GATEWAY_CONNECTION_DOMAIN &&
+      connection.kind === "api_key" &&
+      connection.status === "active" &&
+      connection.metadata.credentialRole === VERCEL_AI_GATEWAY_CONNECTION_ROLE,
+  );
+}
+
+/** Resolve only the reviewed workspace-shared AI Gateway credential shape. */
+export async function loadWorkspaceVercelAiGatewayApiKey(
+  db: Database,
+  settings: Settings,
+  workspaceId: string,
+): Promise<string | null> {
+  const metadata = (await listConnectionsMetadata(db, workspaceId, null)).find(
+    (connection) =>
+      connection.subjectId === null &&
+      connection.providerDomain === VERCEL_AI_GATEWAY_CONNECTION_DOMAIN &&
+      connection.kind === "api_key" &&
+      connection.status === "active" &&
+      connection.metadata.credentialRole === VERCEL_AI_GATEWAY_CONNECTION_ROLE,
+  );
+  if (!metadata) {
+    return null;
+  }
+  const connection = await loadConnectionCredentialForBroker(db, settings, {
+    workspaceId,
+    connectionId: metadata.id,
+    providerDomain: VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
+    kind: "api_key",
+    allowSubjectOwned: false,
+  });
+  if (
+    !connection ||
+    connection.status !== "active" ||
+    connection.metadata.credentialRole !== VERCEL_AI_GATEWAY_CONNECTION_ROLE
+  ) {
+    return null;
+  }
+  const apiKey = connection.credential.apiKey;
+  return typeof apiKey === "string" && apiKey.trim().length > 0 ? apiKey : null;
 }
 
 export async function recordConnectionTokenRefresh(
@@ -15744,6 +15799,816 @@ export async function listSessionMcpServersForRun(
       };
     });
   });
+}
+
+export type ConnectorActionPolicyDecision = schema.ConnectorActionPolicyDecision;
+export type ConnectorActionPolicySnapshotEntry = schema.ConnectorActionPolicySnapshotEntry;
+
+export type ConnectorActionAttemptIdentity = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  attemptId: string;
+  executionGeneration: number;
+  initiator: Pick<TurnInitiator, "kind" | "subjectId">;
+};
+
+export type ConnectorActionInvocation = {
+  approvalId: string;
+  connectionId?: string | null;
+  serverId: string;
+  toolName: string;
+  arguments: unknown;
+};
+
+export type PrepareConnectorActionApprovalResult =
+  | { managed: false; decision: "unmanaged" }
+  | {
+      managed: true;
+      decision: ConnectorActionPolicyDecision;
+      requestId?: string;
+      actionFingerprint: string;
+    };
+
+export type BeginConnectorActionExecutionResult =
+  | { allowed: true; managed: false }
+  | {
+      allowed: true;
+      managed: true;
+      requestId: string;
+      actionFingerprint: string;
+    }
+  | {
+      allowed: false;
+      managed: true;
+      reason: "approval_required" | "blocked" | "rejected" | "already_executed" | "uncertain_retry";
+      requestId: string;
+      actionFingerprint: string;
+    };
+
+const CONNECTOR_ACTION_POLICY_SNAPSHOT_MAX = 2048;
+const CONNECTOR_ACTION_APPROVAL_ID_MAX = 1024;
+const CONNECTOR_ACTION_CONNECTION_ID_MAX = 512;
+const CONNECTOR_ACTION_SERVER_ID_MAX = 256;
+const CONNECTOR_ACTION_NAME_MAX = 512;
+
+function boundedConnectorActionText(value: string, label: string, max: number): string {
+  const trimmed = value.trim();
+  if (trimmed.length === 0 || Buffer.byteLength(trimmed, "utf8") > max) {
+    throw new Error(`${label} must be between 1 and ${max} UTF-8 bytes`);
+  }
+  return trimmed;
+}
+
+/**
+ * Resolve the request's policy selector. This caller-controlled value is used
+ * only transiently to match the attempt-frozen policy snapshot; it must never
+ * be copied into a request row or audit event.
+ */
+function connectorActionPolicySelector(toolName: string, args: unknown): string {
+  if (args && typeof args === "object" && !Array.isArray(args)) {
+    const action = (args as Record<string, unknown>).action;
+    if (typeof action === "string" && action.trim().length > 0) {
+      return boundedConnectorActionText(action, "connector action name", CONNECTOR_ACTION_NAME_MAX);
+    }
+  }
+  return toolName;
+}
+
+function connectorActionEvidenceName(
+  resolved: Exclude<ResolvedConnectorActionPolicy, { managed: false }>,
+): string {
+  return resolved.entry?.actionName ?? "*";
+}
+
+function connectorActionFingerprint(input: {
+  workspaceId: string;
+  connectionId: string;
+  serverId: string;
+  toolName: string;
+  actionName: string;
+  arguments: unknown;
+}): string {
+  return createHash("sha256")
+    .update(
+      stableJson({
+        workspaceId: input.workspaceId,
+        connectionId: input.connectionId,
+        serverId: input.serverId,
+        toolName: input.toolName,
+        actionName: input.actionName,
+        arguments: input.arguments ?? null,
+      }),
+      "utf8",
+    )
+    .digest("hex");
+}
+
+type ResolvedConnectorActionPolicy =
+  | { managed: false }
+  | {
+      managed: true;
+      source: "explicit";
+      entry: ConnectorActionPolicySnapshotEntry;
+    }
+  | {
+      managed: true;
+      source: "ambiguous";
+      entry: null;
+      decision: "block";
+    };
+
+/** Resolve one immutable attempt snapshot with exact-over-wildcard precedence. */
+export function resolveConnectorActionPolicy(
+  snapshot: readonly ConnectorActionPolicySnapshotEntry[],
+  input: { connectionId: string; serverId: string; toolName: string; actionName: string },
+): ResolvedConnectorActionPolicy {
+  const candidates = snapshot
+    .filter(
+      (entry) =>
+        entry.connectionId === input.connectionId &&
+        (entry.serverId === input.serverId || entry.serverId === "*") &&
+        (entry.toolName === input.toolName || entry.toolName === "*") &&
+        (entry.actionName === input.actionName || entry.actionName === "*"),
+    )
+    .map((entry) => ({
+      entry,
+      specificity:
+        Number(entry.serverId !== "*") +
+        Number(entry.toolName !== "*") +
+        Number(entry.actionName !== "*"),
+    }))
+    .sort(
+      (left, right) =>
+        right.specificity - left.specificity || left.entry.id.localeCompare(right.entry.id),
+    );
+  const selected = candidates[0];
+  if (!selected) return { managed: false };
+  if (candidates[1]?.specificity === selected.specificity) {
+    return { managed: true, source: "ambiguous", entry: null, decision: "block" };
+  }
+  return { managed: true, source: "explicit", entry: selected.entry };
+}
+
+function connectorActionAuditMetadata(
+  row: typeof schema.connectorActionRequests.$inferSelect,
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    requestId: row.id,
+    sessionId: row.sessionId,
+    turnId: row.turnId,
+    attemptId: row.creationAttemptId,
+    creationExecutionGeneration: row.creationExecutionGeneration,
+    executionAttemptId: row.executionAttemptId,
+    executionAttemptGeneration: row.executionAttemptGeneration,
+    approvalId: row.approvalId,
+    initiatorKind: row.initiatorKind,
+    initiatorSubjectId: row.initiatorSubjectId,
+    connectionId: row.connectionId,
+    connectionVersion: row.connectionVersion,
+    serverId: row.serverId,
+    toolName: row.toolName,
+    actionName: row.actionName,
+    policyId: row.policyId,
+    policyVersion: row.policyVersion,
+    policySource: row.policySource,
+    policyDecision: row.policyDecision,
+    actionFingerprint: row.actionFingerprint,
+    ...extra,
+  };
+}
+
+async function insertConnectorActionAudit(
+  db: Database,
+  input: {
+    row: typeof schema.connectorActionRequests.$inferSelect;
+    action: string;
+    subjectId: string;
+    extra?: Record<string, unknown>;
+  },
+): Promise<void> {
+  await db.insert(schema.auditEvents).values({
+    accountId: input.row.accountId,
+    workspaceId: input.row.workspaceId,
+    subjectId: input.subjectId,
+    action: input.action,
+    targetType: "connector_action_request",
+    targetId: input.row.id,
+    metadata: connectorActionAuditMetadata(input.row, input.extra),
+  });
+}
+
+function normalizedConnectorActionInvocation(
+  identity: ConnectorActionAttemptIdentity,
+  invocation: ConnectorActionInvocation,
+): {
+  approvalId: string;
+  connectionId: string | null;
+  serverId: string;
+  toolName: string;
+  policyActionSelector: string;
+  arguments: unknown;
+} {
+  const approvalId = boundedConnectorActionText(
+    invocation.approvalId,
+    "connector approval id",
+    CONNECTOR_ACTION_APPROVAL_ID_MAX,
+  );
+  const serverId = boundedConnectorActionText(
+    invocation.serverId,
+    "connector server id",
+    CONNECTOR_ACTION_SERVER_ID_MAX,
+  );
+  const toolName = boundedConnectorActionText(
+    invocation.toolName,
+    "connector tool name",
+    CONNECTOR_ACTION_NAME_MAX,
+  );
+  const policyActionSelector = connectorActionPolicySelector(toolName, invocation.arguments);
+  const connectionId = invocation.connectionId?.trim()
+    ? boundedConnectorActionText(
+        invocation.connectionId,
+        "connector connection id",
+        CONNECTOR_ACTION_CONNECTION_ID_MAX,
+      )
+    : null;
+  return {
+    approvalId,
+    connectionId,
+    serverId,
+    toolName,
+    policyActionSelector,
+    arguments: invocation.arguments,
+  };
+}
+
+function durableConnectorActionInvocation(
+  identity: ConnectorActionAttemptIdentity,
+  invocation: ReturnType<typeof normalizedConnectorActionInvocation> & { connectionId: string },
+  resolved: Exclude<ResolvedConnectorActionPolicy, { managed: false }>,
+): {
+  approvalId: string;
+  connectionId: string;
+  serverId: string;
+  toolName: string;
+  actionName: string;
+  actionFingerprint: string;
+} {
+  const actionName = connectorActionEvidenceName(resolved);
+  return {
+    approvalId: invocation.approvalId,
+    connectionId: invocation.connectionId,
+    serverId: invocation.serverId,
+    toolName: invocation.toolName,
+    actionName,
+    actionFingerprint: connectorActionFingerprint({
+      workspaceId: identity.workspaceId,
+      connectionId: invocation.connectionId,
+      serverId: invocation.serverId,
+      toolName: invocation.toolName,
+      actionName,
+      arguments: invocation.arguments,
+    }),
+  };
+}
+
+async function connectorActionAttemptSnapshot(
+  db: Database,
+  identity: ConnectorActionAttemptIdentity,
+): Promise<ConnectorActionPolicySnapshotEntry[]> {
+  const [attempt] = await db
+    .select({
+      accountId: schema.sessionTurnAttempts.accountId,
+      sessionId: schema.sessionTurnAttempts.sessionId,
+      turnId: schema.sessionTurnAttempts.turnId,
+      executionGeneration: schema.sessionTurnAttempts.executionGeneration,
+      state: schema.sessionTurnAttempts.state,
+      connectorActionPolicies: schema.sessionTurnAttempts.connectorActionPolicies,
+    })
+    .from(schema.sessionTurnAttempts)
+    .where(
+      and(
+        eq(schema.sessionTurnAttempts.workspaceId, identity.workspaceId),
+        eq(schema.sessionTurnAttempts.id, identity.attemptId),
+      ),
+    )
+    .limit(1);
+  if (
+    !attempt ||
+    attempt.accountId !== identity.accountId ||
+    attempt.sessionId !== identity.sessionId ||
+    attempt.turnId !== identity.turnId ||
+    attempt.executionGeneration !== identity.executionGeneration ||
+    !["claimed", "running"].includes(attempt.state)
+  ) {
+    throw new Error(`connector action attempt ownership is unavailable: ${identity.attemptId}`);
+  }
+  if (attempt.connectorActionPolicies.length > CONNECTOR_ACTION_POLICY_SNAPSHOT_MAX) {
+    throw new Error("connector action policy snapshot exceeds the runtime bound");
+  }
+  return attempt.connectorActionPolicies;
+}
+
+function connectorActionRequestMatches(
+  row: typeof schema.connectorActionRequests.$inferSelect,
+  input: {
+    identity: ConnectorActionAttemptIdentity;
+    invocation: ReturnType<typeof durableConnectorActionInvocation>;
+    resolved: Exclude<ResolvedConnectorActionPolicy, { managed: false }>;
+  },
+): boolean {
+  const entry = input.resolved.entry;
+  return (
+    row.accountId === input.identity.accountId &&
+    row.workspaceId === input.identity.workspaceId &&
+    row.sessionId === input.identity.sessionId &&
+    row.turnId === input.identity.turnId &&
+    row.creationAttemptId === input.identity.attemptId &&
+    row.creationExecutionGeneration === input.identity.executionGeneration &&
+    row.approvalId === input.invocation.approvalId &&
+    row.initiatorKind === input.identity.initiator.kind &&
+    row.initiatorSubjectId === input.identity.initiator.subjectId &&
+    row.connectionId === input.invocation.connectionId &&
+    row.serverId === input.invocation.serverId &&
+    row.toolName === input.invocation.toolName &&
+    row.actionName === input.invocation.actionName &&
+    row.policyId === (entry?.id ?? null) &&
+    row.policyVersion === (entry?.version ?? null) &&
+    row.policySource === input.resolved.source &&
+    row.policyDecision === (entry?.policy ?? "block") &&
+    row.actionFingerprint === input.invocation.actionFingerprint
+  );
+}
+
+function connectorActionRequestMatchesLogicalCall(
+  row: typeof schema.connectorActionRequests.$inferSelect,
+  identity: ConnectorActionAttemptIdentity,
+  invocation: ReturnType<typeof normalizedConnectorActionInvocation>,
+): boolean {
+  if (!invocation.connectionId) return false;
+  return (
+    row.accountId === identity.accountId &&
+    row.workspaceId === identity.workspaceId &&
+    row.sessionId === identity.sessionId &&
+    row.turnId === identity.turnId &&
+    row.approvalId === invocation.approvalId &&
+    row.initiatorKind === identity.initiator.kind &&
+    row.initiatorSubjectId === identity.initiator.subjectId &&
+    row.connectionId === invocation.connectionId &&
+    row.serverId === invocation.serverId &&
+    row.toolName === invocation.toolName &&
+    row.actionFingerprint ===
+      connectorActionFingerprint({
+        workspaceId: identity.workspaceId,
+        connectionId: invocation.connectionId,
+        serverId: invocation.serverId,
+        toolName: invocation.toolName,
+        actionName: row.actionName,
+        arguments: invocation.arguments,
+      })
+  );
+}
+
+async function insertConnectorActionRequest(
+  db: Database,
+  input: {
+    identity: ConnectorActionAttemptIdentity;
+    invocation: ReturnType<typeof durableConnectorActionInvocation>;
+    resolved: Exclude<ResolvedConnectorActionPolicy, { managed: false }>;
+    status: "pending" | "blocked" | "executing";
+  },
+): Promise<{ row: typeof schema.connectorActionRequests.$inferSelect; inserted: boolean }> {
+  const entry = input.resolved.entry;
+  const [inserted] = await db
+    .insert(schema.connectorActionRequests)
+    .values({
+      accountId: input.identity.accountId,
+      workspaceId: input.identity.workspaceId,
+      sessionId: input.identity.sessionId,
+      turnId: input.identity.turnId,
+      creationAttemptId: input.identity.attemptId,
+      creationExecutionGeneration: input.identity.executionGeneration,
+      approvalId: input.invocation.approvalId,
+      initiatorKind: input.identity.initiator.kind,
+      initiatorSubjectId: input.identity.initiator.subjectId,
+      connectionId: input.invocation.connectionId!,
+      serverId: input.invocation.serverId,
+      toolName: input.invocation.toolName,
+      actionName: input.invocation.actionName,
+      policyId: entry?.id ?? null,
+      policyVersion: entry?.version ?? null,
+      policySource: input.resolved.source,
+      policyDecision: entry?.policy ?? "block",
+      actionFingerprint: input.invocation.actionFingerprint!,
+      status: input.status,
+      ...(input.status === "executing"
+        ? {
+            executionAttemptId: input.identity.attemptId,
+            executionAttemptGeneration: input.identity.executionGeneration,
+            executionStartedAt: new Date(),
+          }
+        : {}),
+    })
+    .onConflictDoNothing({
+      target: [
+        schema.connectorActionRequests.workspaceId,
+        schema.connectorActionRequests.sessionId,
+        schema.connectorActionRequests.turnId,
+        schema.connectorActionRequests.approvalId,
+      ],
+    })
+    .returning();
+  if (inserted) return { row: inserted, inserted: true };
+  const [existing] = await db
+    .select()
+    .from(schema.connectorActionRequests)
+    .where(
+      and(
+        eq(schema.connectorActionRequests.workspaceId, input.identity.workspaceId),
+        eq(schema.connectorActionRequests.sessionId, input.identity.sessionId),
+        eq(schema.connectorActionRequests.turnId, input.identity.turnId),
+        eq(schema.connectorActionRequests.approvalId, input.invocation.approvalId),
+      ),
+    )
+    .for("update")
+    .limit(1);
+  if (!existing || !connectorActionRequestMatches(existing, input)) {
+    throw new Error("connector action approval id conflicts with different immutable inputs");
+  }
+  return { row: existing, inserted: false };
+}
+
+export async function upsertConnectorActionPolicy(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+    connectionId: string;
+    serverId: string;
+    toolName: string;
+    actionName: string;
+    policy: ConnectorActionPolicyDecision;
+  },
+): Promise<{ policy: typeof schema.connectorActionPolicies.$inferSelect; changed: boolean }> {
+  const scope = {
+    connectionId: boundedConnectorActionText(
+      input.connectionId,
+      "connector connection id",
+      CONNECTOR_ACTION_CONNECTION_ID_MAX,
+    ),
+    serverId: boundedConnectorActionText(
+      input.serverId,
+      "connector server id",
+      CONNECTOR_ACTION_SERVER_ID_MAX,
+    ),
+    toolName: boundedConnectorActionText(
+      input.toolName,
+      "connector tool name",
+      CONNECTOR_ACTION_NAME_MAX,
+    ),
+    actionName: boundedConnectorActionText(
+      input.actionName,
+      "connector action name",
+      CONNECTOR_ACTION_NAME_MAX,
+    ),
+  };
+  const subjectId = boundedConnectorActionText(input.subjectId, "policy actor", 1024);
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        await assertWorkspaceAccountPairInScope(tx, input.accountId, input.workspaceId);
+        const [existing] = await tx
+          .select()
+          .from(schema.connectorActionPolicies)
+          .where(
+            and(
+              eq(schema.connectorActionPolicies.workspaceId, input.workspaceId),
+              eq(schema.connectorActionPolicies.connectionId, scope.connectionId),
+              eq(schema.connectorActionPolicies.serverId, scope.serverId),
+              eq(schema.connectorActionPolicies.toolName, scope.toolName),
+              eq(schema.connectorActionPolicies.actionName, scope.actionName),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (existing?.policy === input.policy) return { policy: existing, changed: false };
+        const now = new Date();
+        const [row] = existing
+          ? await tx
+              .update(schema.connectorActionPolicies)
+              .set({
+                policy: input.policy,
+                version: existing.version + 1,
+                updatedBySubjectId: subjectId,
+                updatedAt: now,
+              })
+              .where(eq(schema.connectorActionPolicies.id, existing.id))
+              .returning()
+          : await tx
+              .insert(schema.connectorActionPolicies)
+              .values({
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                ...scope,
+                policy: input.policy,
+                createdBySubjectId: subjectId,
+                updatedBySubjectId: subjectId,
+              })
+              .returning();
+        if (!row) throw new Error("Failed to persist connector action policy");
+        await tx.insert(schema.auditEvents).values({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId,
+          action: "connector.action.policy_changed",
+          targetType: "connector_action_policy",
+          targetId: row.id,
+          metadata: {
+            connectionId: row.connectionId,
+            serverId: row.serverId,
+            toolName: row.toolName,
+            actionName: row.actionName,
+            policy: row.policy,
+            version: row.version,
+            previousPolicy: existing?.policy ?? null,
+            previousVersion: existing?.version ?? null,
+          },
+        });
+        return { policy: row, changed: true };
+      }),
+  );
+}
+
+export async function prepareConnectorActionApproval(
+  db: Database,
+  identity: ConnectorActionAttemptIdentity,
+  invocation: ConnectorActionInvocation,
+): Promise<PrepareConnectorActionApprovalResult> {
+  const normalized = normalizedConnectorActionInvocation(identity, invocation);
+  if (!normalized.connectionId) {
+    return { managed: false, decision: "unmanaged" };
+  }
+  return await withRlsContext(
+    db,
+    { accountId: identity.accountId, workspaceId: identity.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const snapshot = await connectorActionAttemptSnapshot(tx as unknown as Database, identity);
+        const resolved = resolveConnectorActionPolicy(snapshot, {
+          connectionId: normalized.connectionId!,
+          serverId: normalized.serverId,
+          toolName: normalized.toolName,
+          actionName: normalized.policyActionSelector,
+        });
+        if (!resolved.managed) return { managed: false, decision: "unmanaged" } as const;
+        const durable = durableConnectorActionInvocation(
+          identity,
+          { ...normalized, connectionId: normalized.connectionId! },
+          resolved,
+        );
+        const decision = resolved.entry?.policy ?? "block";
+        if (decision === "allow") {
+          return {
+            managed: true,
+            decision,
+            actionFingerprint: durable.actionFingerprint,
+          } as const;
+        }
+        const { row, inserted } = await insertConnectorActionRequest(tx as unknown as Database, {
+          identity,
+          invocation: durable,
+          resolved,
+          status: decision === "ask" ? "pending" : "blocked",
+        });
+        if (inserted) {
+          await insertConnectorActionAudit(tx as unknown as Database, {
+            row,
+            action:
+              decision === "ask"
+                ? "connector.action.approval_requested"
+                : "connector.action.blocked",
+            subjectId: identity.initiator.subjectId,
+            extra: { outcome: decision },
+          });
+        }
+        return {
+          managed: true,
+          decision,
+          requestId: row.id,
+          actionFingerprint: row.actionFingerprint,
+        } as const;
+      }),
+  );
+}
+
+export async function beginConnectorActionExecution(
+  db: Database,
+  identity: ConnectorActionAttemptIdentity,
+  invocation: ConnectorActionInvocation,
+): Promise<BeginConnectorActionExecutionResult> {
+  const normalized = normalizedConnectorActionInvocation(identity, invocation);
+  if (!normalized.connectionId) {
+    return { allowed: true, managed: false };
+  }
+  return await withRlsContext(
+    db,
+    { accountId: identity.accountId, workspaceId: identity.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const snapshot = await connectorActionAttemptSnapshot(tx as unknown as Database, identity);
+        const [existing] = await tx
+          .select()
+          .from(schema.connectorActionRequests)
+          .where(
+            and(
+              eq(schema.connectorActionRequests.workspaceId, identity.workspaceId),
+              eq(schema.connectorActionRequests.sessionId, identity.sessionId),
+              eq(schema.connectorActionRequests.turnId, identity.turnId),
+              eq(schema.connectorActionRequests.approvalId, normalized.approvalId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (existing && !connectorActionRequestMatchesLogicalCall(existing, identity, normalized)) {
+          throw new Error("connector action approval id conflicts with different immutable inputs");
+        }
+        let row = existing;
+        let inserted = false;
+        if (!row) {
+          const resolved = resolveConnectorActionPolicy(snapshot, {
+            connectionId: normalized.connectionId!,
+            serverId: normalized.serverId,
+            toolName: normalized.toolName,
+            actionName: normalized.policyActionSelector,
+          });
+          if (!resolved.managed) return { allowed: true, managed: false } as const;
+          const durable = durableConnectorActionInvocation(
+            identity,
+            { ...normalized, connectionId: normalized.connectionId! },
+            resolved,
+          );
+          const decision = resolved.entry?.policy ?? "block";
+          const created = await insertConnectorActionRequest(tx as unknown as Database, {
+            identity,
+            invocation: durable,
+            resolved,
+            status: decision === "ask" ? "pending" : decision === "block" ? "blocked" : "executing",
+          });
+          row = created.row;
+          inserted = created.inserted;
+          if (inserted) {
+            await insertConnectorActionAudit(tx as unknown as Database, {
+              row,
+              action:
+                decision === "ask"
+                  ? "connector.action.approval_requested"
+                  : decision === "block"
+                    ? "connector.action.blocked"
+                    : "connector.action.execution_started",
+              subjectId: identity.initiator.subjectId,
+              extra: { outcome: decision === "allow" ? "started" : decision },
+            });
+          }
+        }
+        if (row.status === "approved") {
+          const [executing] = await tx
+            .update(schema.connectorActionRequests)
+            .set({
+              status: "executing",
+              executionAttemptId: identity.attemptId,
+              executionAttemptGeneration: identity.executionGeneration,
+              executionStartedAt: new Date(),
+              updatedAt: new Date(),
+            })
+            .where(eq(schema.connectorActionRequests.id, row.id))
+            .returning();
+          if (!executing) throw new Error("Approved connector action request disappeared");
+          row = executing;
+          await insertConnectorActionAudit(tx as unknown as Database, {
+            row,
+            action: "connector.action.execution_started",
+            subjectId: identity.initiator.subjectId,
+            extra: { outcome: "started" },
+          });
+          return {
+            allowed: true,
+            managed: true,
+            requestId: row.id,
+            actionFingerprint: row.actionFingerprint,
+          } as const;
+        }
+        if (row.status === "executing") {
+          if (inserted) {
+            return {
+              allowed: true,
+              managed: true,
+              requestId: row.id,
+              actionFingerprint: row.actionFingerprint,
+            } as const;
+          }
+          const [uncertain] = await tx
+            .update(schema.connectorActionRequests)
+            .set({
+              status: "uncertain",
+              outcome: "retry_after_execution_started",
+              executionFinishedAt: new Date(),
+              updatedAt: new Date(),
+            })
+            .where(eq(schema.connectorActionRequests.id, row.id))
+            .returning();
+          if (!uncertain) throw new Error("Executing connector action request disappeared");
+          await insertConnectorActionAudit(tx as unknown as Database, {
+            row: uncertain,
+            action: "connector.action.execution_uncertain",
+            subjectId: identity.initiator.subjectId,
+            extra: { outcome: "retry_denied" },
+          });
+          return {
+            allowed: false,
+            managed: true,
+            reason: "uncertain_retry",
+            requestId: uncertain.id,
+            actionFingerprint: uncertain.actionFingerprint,
+          } as const;
+        }
+        const reason =
+          row.status === "pending"
+            ? "approval_required"
+            : row.status === "rejected"
+              ? "rejected"
+              : row.status === "blocked"
+                ? "blocked"
+                : "already_executed";
+        return {
+          allowed: false,
+          managed: true,
+          reason,
+          requestId: row.id,
+          actionFingerprint: row.actionFingerprint,
+        } as const;
+      }),
+  );
+}
+
+export async function completeConnectorActionExecution(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    requestId: string;
+    attemptId: string;
+    outcome: "completed" | "uncertain";
+  },
+): Promise<void> {
+  await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const [existing] = await tx
+          .select()
+          .from(schema.connectorActionRequests)
+          .where(
+            and(
+              eq(schema.connectorActionRequests.workspaceId, input.workspaceId),
+              eq(schema.connectorActionRequests.id, input.requestId),
+              eq(schema.connectorActionRequests.executionAttemptId, input.attemptId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!existing) throw new Error("Connector action request not found for completion");
+        if (existing.status === input.outcome) return;
+        if (existing.status !== "executing") {
+          throw new Error(`Connector action request cannot complete from ${existing.status}`);
+        }
+        const [row] = await tx
+          .update(schema.connectorActionRequests)
+          .set({
+            status: input.outcome,
+            outcome: input.outcome,
+            executionFinishedAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(eq(schema.connectorActionRequests.id, existing.id))
+          .returning();
+        if (!row) throw new Error("Connector action request disappeared during completion");
+        await insertConnectorActionAudit(tx as unknown as Database, {
+          row,
+          action:
+            input.outcome === "completed"
+              ? "connector.action.execution_completed"
+              : "connector.action.execution_uncertain",
+          subjectId: row.initiatorSubjectId,
+          extra: { outcome: input.outcome },
+        });
+      }),
+  );
 }
 
 type DeploymentDepthPolicy = NestedAgentDepthDeploymentPolicy;
@@ -36092,6 +36957,29 @@ export async function claimSessionWorkForAttempt(
           const mcpApprovalPolicies: Record<string, SessionMcpApprovalPolicy> = Object.fromEntries(
             policyRows.map((row) => [row.serverId, row.requireApproval ?? false]),
           );
+          const connectorPolicyRows = await tx
+            .select({
+              id: schema.connectorActionPolicies.id,
+              connectionId: schema.connectorActionPolicies.connectionId,
+              serverId: schema.connectorActionPolicies.serverId,
+              toolName: schema.connectorActionPolicies.toolName,
+              actionName: schema.connectorActionPolicies.actionName,
+              policy: schema.connectorActionPolicies.policy,
+              version: schema.connectorActionPolicies.version,
+            })
+            .from(schema.connectorActionPolicies)
+            .where(eq(schema.connectorActionPolicies.workspaceId, workspaceId))
+            .orderBy(
+              asc(schema.connectorActionPolicies.connectionId),
+              asc(schema.connectorActionPolicies.serverId),
+              asc(schema.connectorActionPolicies.toolName),
+              asc(schema.connectorActionPolicies.actionName),
+              asc(schema.connectorActionPolicies.id),
+            )
+            .limit(2049);
+          if (connectorPolicyRows.length > 2048) {
+            throw new Error("Connector action policy snapshot exceeds the 2048-row bound");
+          }
           // New queued, compaction, and internal-update executions are born
           // while the locked session still has no active-turn pointer. Publish
           // that ownership edge before freezing governance so the database
@@ -36134,6 +37022,7 @@ export async function claimSessionWorkForAttempt(
             temporalActivityId: input.dispatchId,
             verifiedControlRevision: Number(workspaceControl.revision),
             mcpApprovalPolicies,
+            connectorActionPolicies: connectorPolicyRows,
           });
           // Freeze governance only after this exact attempt is durably claimed,
           // while the claim transaction still owns the session/turn/attempt
@@ -41500,6 +42389,7 @@ export async function acceptSessionApprovalDecision(
     accountId: string;
     workspaceId: string;
     sessionId: string;
+    subjectId: string;
     payload: Record<string, unknown>;
     clientEventId?: string | null;
   },
@@ -41638,6 +42528,41 @@ export async function acceptSessionApprovalDecision(
           })
           .returning();
         if (!event) throw new Error("Failed to append approval decision");
+        const approvalDecision = input.payload.decision;
+        if (approvalDecision === "approve" || approvalDecision === "reject") {
+          const [connectorRequest] = await tx
+            .update(schema.connectorActionRequests)
+            .set({
+              status: approvalDecision === "approve" ? "approved" : "rejected",
+              decision: approvalDecision,
+              decisionBySubjectId: boundedConnectorActionText(
+                input.subjectId,
+                "approval actor",
+                1024,
+              ),
+              decisionEventId: event.id,
+              decidedAt: event.occurredAt,
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(schema.connectorActionRequests.workspaceId, input.workspaceId),
+                eq(schema.connectorActionRequests.sessionId, input.sessionId),
+                eq(schema.connectorActionRequests.turnId, turn.id),
+                eq(schema.connectorActionRequests.approvalId, approvalId),
+                eq(schema.connectorActionRequests.status, "pending"),
+              ),
+            )
+            .returning();
+          if (connectorRequest) {
+            await insertConnectorActionAudit(tx as unknown as Database, {
+              row: connectorRequest,
+              action: "connector.action.approval_decided",
+              subjectId: input.subjectId,
+              extra: { decision: approvalDecision },
+            });
+          }
+        }
         await tx
           .update(schema.sessions)
           .set({

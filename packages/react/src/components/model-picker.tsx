@@ -24,11 +24,11 @@ export type ModelPickerProps = {
 const EMPTY_CLIENT_MODELS: ClientModel[] = [];
 
 function isCodexClientModel(model: ClientModel): boolean {
-  return model.id.startsWith("codex/") || model.provider === "codex-subscription";
+  return model.id.startsWith("codex/") || model.source === "codex";
 }
 
 function isCodexPickerRow(row: PickerModelRow): boolean {
-  return row.id.startsWith("codex/") || row.provider === "codex-subscription";
+  return row.id.startsWith("codex/") || row.catalog.source === "codex";
 }
 
 function applyCodexOnlyRows(rows: PickerModelRow[], codexOnly: boolean): PickerModelRow[] {

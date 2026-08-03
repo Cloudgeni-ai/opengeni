@@ -38,6 +38,7 @@ import { WorkspaceNav } from "@/components/rail/workspace-nav";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { matchesShortcut, NEW_SESSION_SHORTCUT } from "@/lib/keyboard-shortcuts";
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 import { useAppContext } from "@/context";
 import { isCodexProductModel } from "@/lib/session-model";
@@ -291,20 +292,10 @@ export function RailShell({ children }: { children: ReactNode }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pathname]);
 
-  // Global `c` shortcut → new session. Ignored while typing in a field or with
-  // a modifier held, so it never steals keystrokes from the composer.
+  // Global chords (⌘/Ctrl+⇧O → new session). Modifier chords work in inputs too.
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
-      if (event.key !== "c" || event.metaKey || event.ctrlKey || event.altKey) {
-        return;
-      }
-      const target = event.target as HTMLElement | null;
-      if (
-        target &&
-        (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))
-      ) {
-        return;
-      }
+      if (!matchesShortcut(event, NEW_SESSION_SHORTCUT.chord)) return;
       event.preventDefault();
       rail.startNewSession();
     }

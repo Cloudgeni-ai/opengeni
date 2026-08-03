@@ -1912,7 +1912,7 @@ const CLIENT_CONFIG: ClientConfig = {
     },
   ],
   defaultReasoningEffort: "medium",
-  allowedReasoningEfforts: ["none", "minimal", "low", "medium", "high", "xhigh"],
+  allowedReasoningEfforts: ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
   mcpServers: [{ id: "opengeni", name: "OpenGeni" }],
   fileUploads: { enabled: true, maxSizeBytes: 25 * 1024 * 1024 },
   productAccessMode: "managed",

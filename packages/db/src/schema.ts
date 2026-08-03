@@ -33,6 +33,18 @@ const vector = customType<{ data: number[]; driverData: string }>({
   },
 });
 
+export type ConnectorActionPolicyDecision = "allow" | "ask" | "block";
+
+export type ConnectorActionPolicySnapshotEntry = {
+  id: string;
+  connectionId: string;
+  serverId: string;
+  toolName: string;
+  actionName: string;
+  policy: ConnectorActionPolicyDecision;
+  version: number;
+};
+
 export const managedAccounts = pgTable(
   "managed_accounts",
   {
@@ -711,6 +723,53 @@ export const connections = pgTable(
       table.workspaceId,
       table.expiresAt,
     ),
+  }),
+);
+
+export const connectorActionPolicies = pgTable(
+  "connector_action_policies",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    connectionId: text("connection_id").notNull(),
+    serverId: text("server_id").notNull(),
+    toolName: text("tool_name").notNull(),
+    actionName: text("action_name").notNull(),
+    policy: text("policy").$type<ConnectorActionPolicyDecision>().notNull(),
+    version: integer("version").notNull().default(1),
+    createdBySubjectId: text("created_by_subject_id").notNull(),
+    updatedBySubjectId: text("updated_by_subject_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "connector_action_policies_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    scope: uniqueIndex("connector_action_policies_scope_uq").on(
+      table.workspaceId,
+      table.connectionId,
+      table.serverId,
+      table.toolName,
+      table.actionName,
+    ),
+    workspaceConnection: index("connector_action_policies_workspace_connection_idx").on(
+      table.workspaceId,
+      table.connectionId,
+      table.serverId,
+    ),
+    policyValid: check(
+      "connector_action_policies_policy_chk",
+      sql`${table.policy} in ('allow', 'ask', 'block')`,
+    ),
+    versionValid: check("connector_action_policies_version_chk", sql`${table.version} > 0`),
   }),
 );
 
@@ -2099,6 +2158,10 @@ export const sessionTurnAttempts = pgTable(
     mcpApprovalPolicies: jsonb("mcp_approval_policies")
       .$type<Record<string, SessionMcpApprovalPolicy>>()
       .notNull(),
+    connectorActionPolicies: jsonb("connector_action_policies")
+      .$type<ConnectorActionPolicySnapshotEntry[]>()
+      .notNull()
+      .default([]),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     closedAt: timestamp("closed_at", { withTimezone: true }),
@@ -2172,6 +2235,124 @@ export const sessionTurnAttempts = pgTable(
       "session_turn_attempts_closed_check",
       sql`(${table.state} = 'closed' and ${table.outcome} is not null and ${table.closedAt} is not null)
         or (${table.state} <> 'closed' and ${table.outcome} is null and ${table.closedAt} is null)`,
+    ),
+  }),
+);
+
+export const connectorActionRequests = pgTable(
+  "connector_action_requests",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id").notNull(),
+    turnId: uuid("turn_id").notNull(),
+    creationAttemptId: uuid("creation_attempt_id").notNull(),
+    creationExecutionGeneration: integer("creation_execution_generation").notNull(),
+    executionAttemptId: uuid("execution_attempt_id"),
+    executionAttemptGeneration: integer("execution_attempt_generation"),
+    approvalId: text("approval_id").notNull(),
+    initiatorKind: text("initiator_kind").$type<"subject" | "service">().notNull(),
+    initiatorSubjectId: text("initiator_subject_id").notNull(),
+    connectionId: text("connection_id").notNull(),
+    connectionVersion: integer("connection_version"),
+    serverId: text("server_id").notNull(),
+    toolName: text("tool_name").notNull(),
+    actionName: text("action_name").notNull(),
+    // Attempt-frozen provenance intentionally survives policy deletion.
+    policyId: uuid("policy_id"),
+    policyVersion: integer("policy_version"),
+    policySource: text("policy_source").$type<"explicit" | "ambiguous">().notNull(),
+    policyDecision: text("policy_decision").$type<ConnectorActionPolicyDecision>().notNull(),
+    actionFingerprint: text("action_fingerprint").notNull(),
+    status: text("status")
+      .$type<
+        | "pending"
+        | "approved"
+        | "rejected"
+        | "blocked"
+        | "executing"
+        | "completed"
+        | "failed"
+        | "uncertain"
+      >()
+      .notNull(),
+    decision: text("decision").$type<"approve" | "reject">(),
+    decisionBySubjectId: text("decision_by_subject_id"),
+    decisionEventId: uuid("decision_event_id"),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    executionStartedAt: timestamp("execution_started_at", { withTimezone: true }),
+    executionFinishedAt: timestamp("execution_finished_at", { withTimezone: true }),
+    outcome: text("outcome"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    creationAttempt: foreignKey({
+      name: "connector_action_requests_creation_attempt_fk",
+      columns: [
+        table.accountId,
+        table.workspaceId,
+        table.sessionId,
+        table.turnId,
+        table.creationAttemptId,
+      ],
+      foreignColumns: [
+        sessionTurnAttempts.accountId,
+        sessionTurnAttempts.workspaceId,
+        sessionTurnAttempts.sessionId,
+        sessionTurnAttempts.turnId,
+        sessionTurnAttempts.id,
+      ],
+    }).onDelete("cascade"),
+    executionAttempt: foreignKey({
+      name: "connector_action_requests_execution_attempt_fk",
+      columns: [
+        table.accountId,
+        table.workspaceId,
+        table.sessionId,
+        table.turnId,
+        table.executionAttemptId,
+      ],
+      foreignColumns: [
+        sessionTurnAttempts.accountId,
+        sessionTurnAttempts.workspaceId,
+        sessionTurnAttempts.sessionId,
+        sessionTurnAttempts.turnId,
+        sessionTurnAttempts.id,
+      ],
+    }).onDelete("cascade"),
+    identity: uniqueIndex("connector_action_requests_identity_uq").on(
+      table.workspaceId,
+      table.sessionId,
+      table.turnId,
+      table.approvalId,
+    ),
+    attemptStatus: index("connector_action_requests_attempt_status_idx").on(
+      table.workspaceId,
+      table.creationAttemptId,
+      table.status,
+    ),
+    sessionCreated: index("connector_action_requests_session_created_idx").on(
+      table.workspaceId,
+      table.sessionId,
+      table.createdAt.desc(),
+      table.id.desc(),
+    ),
+    policyDecisionValid: check(
+      "connector_action_requests_policy_decision_chk",
+      sql`${table.policyDecision} in ('allow', 'ask', 'block')`,
+    ),
+    statusValid: check(
+      "connector_action_requests_status_chk",
+      sql`${table.status} in (
+        'pending', 'approved', 'rejected', 'blocked', 'executing',
+        'completed', 'failed', 'uncertain'
+      )`,
     ),
   }),
 );

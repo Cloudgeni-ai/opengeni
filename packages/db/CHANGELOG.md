@@ -1,5 +1,31 @@
 # @opengeni/db
 
+## 0.22.2
+
+### Patch Changes
+
+- 9c4d73d: Add curated OpenGeni-credit and workspace-key Vercel AI Gateway model paths for
+  DeepSeek V4 Flash and Kimi K3, including exact provider routing, cache-aware
+  pricing and metering, Responses tool continuity, provider-blind catalog UX, and
+  stable remote-compaction cache prefixes.
+- Updated dependencies [9c4d73d]
+  - @opengeni/config@0.10.1
+  - @opengeni/contracts@0.31.1
+
+## 0.22.1
+
+### Patch Changes
+
+- Updated dependencies [8b3e46f]
+  - @opengeni/config@0.10.0
+  - @opengeni/contracts@0.31.0
+
+## 0.22.0
+
+### Minor Changes
+
+- e07eb52: Enforce frozen Allow, Ask, and Block connector action policies before provider execution while persisting metadata-only approval, decision, and outcome evidence.
+
 ## 0.21.0
 
 ### Minor Changes

@@ -182,7 +182,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     // that intentional parallel surface instead of measuring the rail alone.
     expect((await reactCommitCount(pageA)) - initialCommits).toBeLessThanOrEqual(72);
     const pinnedA = pageA.getByRole("group", { name: "Pinned" });
-    await pinnedA.getByRole("button", { name: /^Open Master pin target/ }).waitFor();
+    await pinnedA.getByRole("link", { name: /^Open Master pin target/ }).waitFor();
     await pageA.waitForFunction(() =>
       document.activeElement?.getAttribute("aria-label")?.startsWith("Actions for Master"),
     );
@@ -197,7 +197,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     const sameDeviceTab = await deviceA.newPage();
     await sameDeviceTab.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions`);
     const sameTabPinned = sameDeviceTab.getByRole("group", { name: "Pinned" });
-    const sameTabPinnedTarget = sameTabPinned.getByRole("button", {
+    const sameTabPinnedTarget = sameTabPinned.getByRole("link", {
       name: /^Open Master pin target/,
     });
     await sameTabPinnedTarget.waitFor();
@@ -240,10 +240,10 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await pageB.reload();
     await pageB.getByRole("button", { name: "Unpin session" }).waitFor();
     const pinnedB = pageB.getByRole("group", { name: "Pinned" });
-    await pinnedB.getByRole("button", { name: /^Open Master pin target/ }).waitFor();
+    await pinnedB.getByRole("link", { name: /^Open Master pin target/ }).waitFor();
     expect(
       await pinnedB
-        .getByRole("button", { name: /^Open / })
+        .getByRole("link", { name: /^Open / })
         .first()
         .getAttribute("aria-label"),
     ).toStartWith("Open Master pin target");
@@ -265,13 +265,13 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     const search = pageB.getByRole("searchbox", { name: "Search sessions" });
     await search.fill("Master pin target");
     await pageB.getByText("1 matching session.").waitFor();
-    await pinnedB.getByRole("button", { name: /^Open Master pin target/ }).waitFor();
-    expect(
-      await pageB.getByRole("button", { name: /^Open Newer unrelated activity/ }).count(),
-    ).toBe(0);
+    await pinnedB.getByRole("link", { name: /^Open Master pin target/ }).waitFor();
+    expect(await pageB.getByRole("link", { name: /^Open Newer unrelated activity/ }).count()).toBe(
+      0,
+    );
     await search.fill("");
     await pageB
-      .getByRole("button", { name: /^Open Newer unrelated activity/ })
+      .getByRole("link", { name: /^Open Newer unrelated activity/ })
       .waitFor({ timeout: 10_000 });
 
     // Pagination is also exercised through the normal authenticated browser API
@@ -296,16 +296,14 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
 
     // The rail uses real roving focus. Arrow navigation changes document focus,
     // Home returns to the pin, and Enter activates the currently focused row.
-    const targetRow = pinnedB.getByRole("button", {
+    const targetRow = pinnedB.getByRole("link", {
       name: /^Open Master pin target/,
     });
 
     // A boundary key is a navigation no-op. If it records the already-current
     // row as an intent, moving to that row's actions and then refreshing the
     // list incorrectly steals focus back to the row.
-    const boundaryRow = pageB
-      .locator("[data-sessionpin-session-list] button[data-session-row]")
-      .first();
+    const boundaryRow = pageB.locator("[data-sessionpin-session-list] a[data-session-row]").first();
     const boundarySessionId = await boundaryRow.getAttribute("data-session-row");
     if (!boundarySessionId) throw new Error("expected a visible boundary session row");
     await boundaryRow.focus();
@@ -346,7 +344,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await createSessionThroughApi(pageB, apiBaseUrl, workspaceId, "Refresh-only activity");
     await pageB.evaluate(() => window.dispatchEvent(new Event("focus")));
     await pageB
-      .getByRole("button", { name: /^Open Refresh-only activity/ })
+      .getByRole("link", { name: /^Open Refresh-only activity/ })
       .waitFor({ timeout: 10_000 });
     expect(await pageB.evaluate(() => document.activeElement?.getAttribute("aria-label"))).toBe(
       focusedBeforeRefresh,
@@ -526,8 +524,8 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       expect(secondPage.sessions).toHaveLength(50);
       expect(secondPage.nextCursor).toBeTruthy();
       const retainedId = secondPage.sessions[0]!.id;
-      const visibleRows = page.locator("[data-sessionpin-session-list] button[data-session-row]");
-      await page.locator(`button[data-session-row="${retainedId}"]`).waitFor();
+      const visibleRows = page.locator("[data-sessionpin-session-list] a[data-session-row]");
+      await page.locator(`a[data-session-row="${retainedId}"]`).waitFor();
       expect(await visibleRows.count()).toBe(100);
 
       // A generic 500 is not treated as cursor expiry: loaded rows stay put and
@@ -555,7 +553,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await retryOlder.waitFor({ timeout: 10_000 });
       expect(injectedFailure).toBe(true);
       expect(await visibleRows.count()).toBe(100);
-      await page.locator(`button[data-session-row="${retainedId}"]`).waitFor();
+      await page.locator(`a[data-session-row="${retainedId}"]`).waitFor();
 
       // Delete the exact server-owned snapshot named by the live continuation.
       // The API must type that response as 410; the client then creates one new
@@ -597,7 +595,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       );
       expect(rebasedSecond.sessions).toHaveLength(50);
       expect(await visibleRows.count()).toBe(100);
-      await page.locator(`button[data-session-row="${retainedId}"]`).waitFor();
+      await page.locator(`a[data-session-row="${retainedId}"]`).waitFor();
 
       // The rebased page-two response exposes the last cursor. All 106 matching
       // rows remain reachable exactly once, including the oldest sentinel.
@@ -614,7 +612,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       const finalPage = (await (await finalPageResponse).json()) as BrowserSessionPage;
       expect(finalPage.sessions).toHaveLength(6);
       expect(finalPage.nextCursor).toBeNull();
-      await page.locator(`button[data-session-row="${sentinel!.id}"]`).waitFor();
+      await page.locator(`a[data-session-row="${sentinel!.id}"]`).waitFor();
       const visibleIds = await visibleRows.evaluateAll((rows) =>
         rows.map((row) => row.getAttribute("data-session-row")),
       );
@@ -705,14 +703,12 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       const pinnedList = page.getByRole("list", { name: "Pinned sessions" });
       await pinnedList.waitFor();
       const topLevelPin = (sessionId: string) =>
-        pinnedList.locator(
-          `:scope > [role="listitem"] > div > button[data-session-row="${sessionId}"]`,
-        );
+        pinnedList.locator(`:scope > [role="listitem"] > div > a[data-session-row="${sessionId}"]`);
       const topLevelPinItem = (sessionId: string) => topLevelPin(sessionId).locator("xpath=../..");
       await topLevelPin(descendant.id).waitFor();
       await topLevelPin(manager.id).waitFor();
       const hierarchyPinOrder = await pinnedList
-        .locator(':scope > [role="listitem"] > div > button[data-session-row]')
+        .locator(':scope > [role="listitem"] > div > a[data-session-row]')
         .evaluateAll(
           (rows, hierarchyIds) =>
             rows
@@ -734,14 +730,14 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       const managerChildren = managerItem.getByRole("list", {
         name: "Spawned sessions from Pinned hierarchy manager",
       });
-      await managerChildren.getByRole("button", { name: /^Open Ordinary manager child/ }).waitFor();
+      await managerChildren.getByRole("link", { name: /^Open Ordinary manager child/ }).waitFor();
       await managerChildren
-        .getByRole("button", { name: /^Open Lazy hierarchy intermediary/ })
+        .getByRole("link", { name: /^Open Lazy hierarchy intermediary/ })
         .waitFor();
       expect(await topLevelPin(descendant.id).count()).toBe(1);
-      expect(
-        await managerChildren.locator(`button[data-session-row="${descendant.id}"]`).count(),
-      ).toBe(0);
+      expect(await managerChildren.locator(`a[data-session-row="${descendant.id}"]`).count()).toBe(
+        0,
+      );
 
       // The intermediary retains an expand affordance for its ordinary child
       // even while pin ownership prunes the direct pinned child. Its lazy page
@@ -762,10 +758,10 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         name: "Spawned sessions from Lazy hierarchy intermediary",
       });
       await intermediaryChildren
-        .locator(`button[data-session-row="${intermediarySibling.id}"]`)
+        .locator(`a[data-session-row="${intermediarySibling.id}"]`)
         .waitFor();
       expect(
-        await intermediaryChildren.locator(`button[data-session-row="${descendant.id}"]`).count(),
+        await intermediaryChildren.locator(`a[data-session-row="${descendant.id}"]`).count(),
       ).toBe(0);
 
       // The descendant shortcut owns its unpinned leaf. Its nested list is
@@ -776,7 +772,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       const descendantChildren = descendantItem.getByRole("list", {
         name: "Spawned sessions from Pinned hierarchy descendant",
       });
-      await descendantChildren.locator(`button[data-session-row="${leaf.id}"]`).waitFor();
+      await descendantChildren.locator(`a[data-session-row="${leaf.id}"]`).waitFor();
       const descendantRow = topLevelPin(descendant.id);
       await descendantRow.focus();
       await page.keyboard.press("ArrowDown");
@@ -788,7 +784,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         await page.evaluate(() => document.activeElement?.getAttribute("data-session-row")),
       ).toBe(manager.id);
       const visiblePinIds = await pinnedList
-        .locator("button[data-session-row]")
+        .locator("a[data-session-row]")
         .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-session-row")));
       expect(new Set(visiblePinIds).size).toBe(visiblePinIds.length);
       await expectNoAxeViolations(page, ["[data-sessionpin-session-list]"]);
@@ -819,12 +815,12 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await page.evaluate(() => window.dispatchEvent(new Event("focus")));
       await Promise.all([pinsOnlyRefresh, descendantPointRead]);
       const topLevelPinnedDescendant = page.locator(
-        `[role="list"][aria-label="Pinned sessions"] > [role="listitem"] > div > button[data-session-row="${descendant.id}"]`,
+        `[role="list"][aria-label="Pinned sessions"] > [role="listitem"] > div > a[data-session-row="${descendant.id}"]`,
       );
       await waitFor(async () => (await topLevelPinnedDescendant.count()) === 0, {
         timeoutMs: 10_000,
       });
-      await intermediaryChildren.locator(`button[data-session-row="${descendant.id}"]`).waitFor();
+      await intermediaryChildren.locator(`a[data-session-row="${descendant.id}"]`).waitFor();
       expect(ordinaryChild.id).toBeTruthy();
     } finally {
       await context.close();
@@ -1152,15 +1148,15 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         expect(await page.getByRole("dialog").getAttribute("aria-label")).toBe(
           "Session navigation",
         );
-        const targetRow = navigation.getByRole("button", { name: /^Open Mobile pin/ });
+        const targetRow = navigation.getByRole("link", { name: /^Open Mobile pin/ });
         await targetRow.waitFor();
         // The active route row can render from its point read before the global
         // pin page arrives. Wait for a seeded shortcut so the count below
         // measures the fully loaded pinned section rather than that transient.
-        await navigation.getByRole("button", { name: /^Open Pinned mobile stress 7/ }).waitFor();
+        await navigation.getByRole("link", { name: /^Open Pinned mobile stress 7/ }).waitFor();
         expect(await navigation.getByRole("group", { name: "Pinned" }).count()).toBe(1);
         expect(
-          await navigation.getByRole("button", { name: /^Open Pinned mobile stress/ }).count(),
+          await navigation.getByRole("link", { name: /^Open Pinned mobile stress/ }).count(),
         ).toBe(7);
         await expectTouchTarget(targetRow);
         await expectTouchTarget(

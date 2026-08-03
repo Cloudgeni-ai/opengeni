@@ -1367,6 +1367,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         accountId: grant.accountId,
         workspaceId,
         sessionId,
+        subjectId: grant.subjectId,
         payload: event.payload,
         clientEventId: event.clientEventId ?? null,
       });

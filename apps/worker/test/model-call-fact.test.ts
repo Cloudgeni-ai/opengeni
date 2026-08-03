@@ -64,6 +64,49 @@ describe("recordAuthoritativeModelCallFact", () => {
     expect(factSpy).toHaveBeenCalledTimes(1);
   });
 
+  test("records the endpoint provider reported by managed Gateway billing", async () => {
+    const facts: Array<Record<string, unknown>> = [];
+    const factSpy = spyOn(opengeniDb, "recordModelCallFact").mockImplementation(
+      async (_db, input) => {
+        facts.push(input);
+      },
+    );
+    restores.push(() => factSpy.mockRestore());
+
+    await recordAuthoritativeModelCallFact({
+      db,
+      observability: { warn: () => undefined } as never,
+      accountId: ACCOUNT,
+      workspaceId: WORKSPACE,
+      sessionId: "sess-gateway",
+      turnId: "turn-gateway",
+      turnAttemptId: "attempt-gateway",
+      sourceKey: "response-gateway",
+      provider: "opengeni-gateway",
+      providerApi: "responses",
+      model: "deepseek-v4-flash-0731",
+      billing: {
+        billingPath: "opengeni_credits",
+        pricedCostMicros: 5,
+        upstreamProvider: "baseten",
+        normalizedUsage: {
+          telemetry: {
+            inputTokens: 9,
+            outputTokens: 8,
+            cachedTokens: 0,
+            cacheWriteTokens: null,
+            reasoningTokens: null,
+          },
+          totalTokens: 17,
+          rejectedFields: [],
+        },
+      },
+    });
+
+    expect(facts).toHaveLength(1);
+    expect(facts[0]).toMatchObject({ provider: "baseten", pricedCostMicros: 5 });
+  });
+
   test("external billing returns pricedCostMicros 0 for facts", async () => {
     const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined as never);
     restores.push(() => recordSpy.mockRestore());

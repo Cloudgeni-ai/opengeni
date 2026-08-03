@@ -248,7 +248,10 @@ function MarkdownCodeBlock({ children }: { children?: ReactNode }) {
           <CopyButton text={code} label="Copy code" reveal="group-hover" />
         </div>
       </div>
-      <pre className="overflow-x-auto overflow-y-hidden rounded-og-md bg-og-surface-1/70 px-3 py-2.5 font-og-mono text-og-sm leading-5 text-og-fg-muted [scrollbar-gutter:stable] [&>code]:block [&>code]:border-0 [&>code]:bg-transparent [&>code]:p-0 [&>code]:leading-5 [&>code]:text-inherit">
+      <pre
+        tabIndex={0}
+        className="overflow-x-auto overflow-y-hidden rounded-og-md bg-og-surface-1/70 px-3 py-2.5 font-og-mono text-og-sm leading-5 text-og-fg-muted [scrollbar-gutter:stable] [&>code]:block [&>code]:border-0 [&>code]:bg-transparent [&>code]:p-0 [&>code]:leading-5 [&>code]:text-inherit"
+      >
         {children}
       </pre>
     </div>
@@ -268,7 +271,7 @@ function MarkdownTable({ children, className, ...props }: ComponentPropsWithoutR
           />
         </div>
       </div>
-      <div className="overflow-x-auto">
+      <div className="overflow-x-auto" tabIndex={0}>
         <table
           ref={tableRef}
           className={cn("w-full min-w-0 border-collapse text-og-base", className)}

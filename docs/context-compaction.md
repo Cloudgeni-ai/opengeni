@@ -6,7 +6,7 @@ OpenGeni freezes a per-session compaction mode at create time
 | Mode | When | Mechanism |
 | --- | --- | --- |
 | `portable` | All non-Codex sessions; existing sessions (backfill); new Codex sessions when the workspace sets `codexCompactionDefault: "portable"` | Durable plaintext checkpoint (Codex CLI local path). Free mid-session provider switching. |
-| `remote_v2` | New Codex sessions by default (`codexCompactionDefault` absent or `"remote_v2"`) | Codex remote compaction v2 (wire `compaction_trigger` → opaque `{ type: "compaction", encrypted_content }`). On a valid compaction item, install and recompute usage — same as Codex CLI (no local “must shrink / must differ” gate). The Agents SDK rejects a bare trigger item, so OpenGeni emits `{ type: "unknown", providerData: { type: "compaction_trigger" } }` through `CompactionResponsesModel` and the Codex fetch normalizer restores the wire shape. Session is **Codex-only** for its lifetime (HTTP + worker admission). |
+| `remote_v2` | New Codex sessions by default (`codexCompactionDefault` absent or `"remote_v2"`) | Codex remote compaction v2 (wire `compaction_trigger` → opaque `{ type: "compaction", encrypted_content }`). On a valid compaction item, install and recompute usage — same as Codex CLI (no local “must shrink / must differ” gate). The compact request **must** reuse the ordinary turn prompt-cache prefix: model-visible tool schemas + the exact agent `instructions` + active history + `compaction_trigger` (CLI `base_instructions` / `model_visible_specs` parity). Empty instructions are rejected. Operator `/compact` on `remote_v2` builds the agent first so that prefix matches (portable `/compact` still skips prepareTools/sandbox). Retained cleartext keeps recent user/developer messages **including images** within the 64k budget. The Agents SDK rejects a bare trigger item, so OpenGeni emits `{ type: "unknown", providerData: { type: "compaction_trigger" } }` through `CompactionResponsesModel` and the Codex fetch normalizer restores the wire shape. Session is **Codex-only** for its lifetime (HTTP + worker admission). |
 
 There is no off switch, compatibility ladder, request-local history trim, or
 deterministic non-model fallback. A `remote_v2` session never silently falls
@@ -162,10 +162,12 @@ The replacement history is:
 2. one user-role summary item prefixed with Codex's `summary_prefix.md` text and
    marked `opengeni_context_summary: true`.
 
-Prior summaries and images are not kept as user boundaries. Durable machine
-inputs participate in the history being summarized like every other canonical
-model item. Assistant messages, reasoning, tool calls, and tool results leave
-the active model history but remain in inactive audit rows.
+Prior summaries are not kept as user boundaries. Portable retention strips
+images from retained user messages; **remote_v2** keeps `input_image` parts in
+the cleartext suffix (CLI parity). Durable machine inputs participate in the
+history being summarized like every other canonical model item. Assistant
+messages, reasoning, tool calls, and tool results leave the active model
+history but remain in inactive audit rows.
 
 On the **portable** path, the generated replacement must estimate strictly
 smaller than the active input, and its deterministic fingerprint must differ
@@ -262,7 +264,10 @@ same logical turn after replacement. While idle, the request creates one
 born-running `source="compaction"` maintenance execution on the existing turn
 ledger. That execution is not conversational work and is never a prompt-queue
 row; it exists to own model allocation, attempt fencing, recovery, and
-settlement, and it never prepares tools or a sandbox.
+settlement. Portable `/compact` still skips prepareTools/sandbox. `remote_v2`
+`/compact` prepares tools and builds the agent first so the compact request
+reuses the ordinary tools→instructions cache prefix, then settles without
+inference.
 
 The exact attempt that successfully installs the replacement clears the request
 in the same transaction. If there is no active history, the generated

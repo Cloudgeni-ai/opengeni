@@ -75,6 +75,7 @@ import {
   shouldStartOnTurnRecording,
   shouldRunTurnEndWorkspacePersistence,
   stableHumanInputRequestId,
+  structuredToolTransportForTurn,
   turnExecutionPolicyBillingIdentity,
   turnOperationCancellationFailure,
   unavailableMcpTurnInstructions,
@@ -2042,6 +2043,17 @@ describe("turn-time Modal private-registry warm", () => {
       "modal",
       ensureRegistryImage,
     );
+    await ensureTurnModalRegistryImage(
+      testSettings({
+        sandboxBackend: "modal",
+        modalImageRef:
+          "acr.example.com/[redacted:MODAL_PROFILE]/f4c-gecko@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        modalImageId: "im-1234567890123456789012",
+        modalImageRegistrySecret: "acr-credentials-gecko",
+      }),
+      "modal",
+      ensureRegistryImage,
+    );
     expect(ensureRegistryImage).not.toHaveBeenCalled();
   });
 });
@@ -3272,8 +3284,33 @@ describe("computerToolModeForTurn (explicit computer-use transport derivation)",
     expect(computerToolModeForTurn(resolved("api-key", "responses"))).toBe("hosted");
   });
 
+  test("Gateway Responses models do not inherit OpenAI hosted computer tools", () => {
+    expect(computerToolModeForTurn(resolved("vercel-gateway-managed", "responses"))).toBe(
+      "disabled",
+    );
+    expect(computerToolModeForTurn(resolved("vercel-gateway-workspace", "responses"))).toBe(
+      "disabled",
+    );
+  });
+
   test("the LEGACY global-client fallback (resolveTurnModel → null) → hosted EXPLICITLY", () => {
     expect(computerToolModeForTurn(null)).toBe("hosted");
+  });
+});
+
+describe("structuredToolTransportForTurn", () => {
+  const resolved = (kind: RegistryProviderKind) =>
+    ({ provider: { kind } }) as Parameters<typeof structuredToolTransportForTurn>[0];
+
+  test("keeps hosted tool types off Codex and both Gateway credential paths", () => {
+    expect(structuredToolTransportForTurn(resolved("codex-subscription"))).toBe(false);
+    expect(structuredToolTransportForTurn(resolved("vercel-gateway-managed"))).toBe(false);
+    expect(structuredToolTransportForTurn(resolved("vercel-gateway-workspace"))).toBe(false);
+  });
+
+  test("preserves hosted tool types for real Responses providers and the legacy path", () => {
+    expect(structuredToolTransportForTurn(resolved("api-key"))).toBe(true);
+    expect(structuredToolTransportForTurn(null)).toBe(true);
   });
 });
 
@@ -3328,5 +3365,9 @@ describe("acceptsPromptCacheKeyForTurn", () => {
   });
 });
 
-type RegistryProviderKind = "api-key" | "codex-subscription";
+type RegistryProviderKind =
+  | "api-key"
+  | "codex-subscription"
+  | "vercel-gateway-managed"
+  | "vercel-gateway-workspace";
 type ModelProviderApi = "responses" | "chat";

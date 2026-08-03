@@ -34,9 +34,14 @@ const infraSkill = {
 
 describe("workspace pack runtime resolution", () => {
   test("resolves to the global-image fallback when no pack declares a runtime", () => {
-    expect(workspacePackRuntimeFromPacks([])).toEqual({ sandboxImage: null, skills: [] });
+    expect(workspacePackRuntimeFromPacks([])).toEqual({
+      sandboxImage: null,
+      sandboxProviderImages: null,
+      skills: [],
+    });
     expect(workspacePackRuntimeFromPacks([pack({ id: "plain" })])).toEqual({
       sandboxImage: null,
+      sandboxProviderImages: null,
       skills: [],
     });
   });
@@ -54,6 +59,7 @@ describe("workspace pack runtime resolution", () => {
     expect(runtime.sandboxImage).toBe(
       "ghcr.io/example/infra-sandbox@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     );
+    expect(runtime.sandboxProviderImages).toBeNull();
     expect(runtime.skills).toEqual([
       {
         name: "infra-ops",
@@ -123,6 +129,40 @@ describe("pack sandbox image settings", () => {
     expect(settings.dockerImage).toBe("opengeni-sandbox:local");
     expect(settings.modalImageRef).toBeUndefined();
   });
+
+  test("clears a deployment-native Modal ID when the pack replaces its logical image", () => {
+    const derived = settingsWithPackSandboxImage(
+      {
+        ...settings,
+        modalImageRef:
+          "ghcr.io/example/deployment@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        modalImageId: "im-abcdefghijklmnopqrstuv",
+      } as Settings,
+      "ghcr.io/example/pack@sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+    );
+    expect(derived.modalImageId).toBeUndefined();
+  });
+
+  test("carries a provider-native Modal image ID with the digest-pinned pack image", () => {
+    const sandboxImage =
+      "ghcr.io/example/infra-sandbox@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const sandboxProviderImages = {
+      modal: { imageId: "im-1234567890123456789012" },
+    } as const;
+    const runtime = workspacePackRuntimeFromPacks([
+      pack({ id: "infra-runtime", sandboxImage, sandboxProviderImages }),
+    ]);
+    expect(runtime.sandboxProviderImages).toEqual(sandboxProviderImages);
+
+    const derived = settingsWithPackSandboxImage(
+      settings,
+      runtime.sandboxImage,
+      runtime.sandboxProviderImages,
+    );
+    expect(derived.dockerImage).toBe(sandboxImage);
+    expect(derived.modalImageRef).toBe(sandboxImage);
+    expect(derived.modalImageId).toBe("im-1234567890123456789012");
+  });
 });
 
 describe("rig sandbox image precedence (M3): rig > pack > deployment", () => {
@@ -162,6 +202,17 @@ describe("rig sandbox image precedence (M3): rig > pack > deployment", () => {
   test("a rig with no image is a pass-through (pack/deployment chain unchanged)", () => {
     const base = { dockerImage: DEPLOYMENT, modalImageRef: undefined } as unknown as Settings;
     expect(settingsWithRigImage(base, null)).toBe(base);
+  });
+
+  test("a rig image clears a lower-precedence provider-native Modal image ID", () => {
+    const base = {
+      dockerImage: DEPLOYMENT,
+      modalImageRef: PACK,
+      modalImageId: "im-1234567890123456789012",
+    } as unknown as Settings;
+    const resolved = settingsWithRigImage(base, RIG);
+    expect(resolved.modalImageRef).toBe(RIG);
+    expect(resolved.modalImageId).toBeUndefined();
   });
 });
 
