@@ -5772,6 +5772,57 @@ export async function getSlackInteractionByRoute(
   });
 }
 
+/**
+ * Resolve an already-durable Slack task to its canonical interaction.
+ *
+ * Client event ids are unique only inside one session, so this lookup also
+ * fences the exact workspace and Slack connection. The reservation id is the
+ * canonical Slack session identity both before and after binding; joining it
+ * lets a retry repair a crash after the task committed but before the route was
+ * bound. Two matches indicate a cross-session collision and fail closed rather
+ * than choosing an arbitrary route.
+ */
+export async function getSlackInteractionByClientEventId(
+  db: Database,
+  workspaceId: string,
+  connectionId: string,
+  clientEventId: string,
+): Promise<{ interaction: SlackInteraction; eventSessionId: string } | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({
+        interaction: schema.slackInteractions,
+        eventSessionId: schema.sessionEvents.sessionId,
+      })
+      .from(schema.slackInteractions)
+      .innerJoin(
+        schema.sessionEvents,
+        and(
+          eq(schema.sessionEvents.workspaceId, schema.slackInteractions.workspaceId),
+          eq(schema.sessionEvents.sessionId, schema.slackInteractions.sessionReservationId),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.slackInteractions.workspaceId, workspaceId),
+          eq(schema.slackInteractions.connectionId, connectionId),
+          eq(schema.sessionEvents.clientEventId, clientEventId),
+          eq(schema.sessionEvents.type, "user.message"),
+        ),
+      )
+      .limit(2);
+    if (rows.length > 1) {
+      throw new Error("Slack client event id resolved to multiple canonical interactions");
+    }
+    const row = rows[0];
+    if (!row) return null;
+    return {
+      interaction: mapSlackInteraction(row.interaction),
+      eventSessionId: row.eventSessionId,
+    };
+  });
+}
+
 export async function getSlackInteractionSessionAccess(
   db: Database,
   workspaceId: string,
