@@ -84,6 +84,37 @@ The dev stack can select another API or web port if the defaults are occupied.
 If that happens, update both base URLs and the Google authorized redirect URI
 to the exact ports printed by the dev stack.
 
+## Connection lifecycle and recovery
+
+The Capabilities card projects one explicit, durable state for the current
+subject-owned Google Drive connection:
+
+- **Connected** permits source browsing and configuration.
+- **Paused** is a local reversible stop. OpenGeni does not browse or use saved
+  Drive locations until the same connection is resumed.
+- **Token revoked** means Google rejected the refresh grant. Reconnect with the
+  same Google account to preserve the connection and configured locations.
+- **App removed** is terminal for the current deployment configuration. An
+  administrator must restore the Google OAuth app before reconnect can work.
+- **Reconnect required** covers other permanent credential failures that do not
+  prove a narrower cause.
+- **Re-consent required** means the grant no longer proves the selected-source
+  read capability, including known Google permission failures and legacy
+  metadata-only grants.
+- **Disconnected** keeps the row and its configuration as inactive audit truth.
+  A new account may be connected only after this local disconnect.
+
+Pause, resume, source changes, refresh transitions, disconnect, and reconnect
+all share the connection's `(id, version)` compare-and-set fence. Duplicate
+pause/resume/disconnect requests converge on the already-reached state, while a
+stale conflicting action returns a retryable conflict instead of overwriting
+newer credential or lifecycle truth.
+
+Only bounded OAuth error codes are used to classify permanent refresh failures.
+Google response descriptions, response bodies, tokens, and client secrets are
+never written to connection metadata or `lastError`, and the browser renders
+state-owned guidance rather than provider text.
+
 ## Sync configuration behavior
 
 The browser starts at **My Drive**. Checkboxes connect the current location or
@@ -147,8 +178,8 @@ They remain configuration only in this slice. Durable scheduler dispatch, source
 rows, content fetching and indexing, cursor processing, ACL projection,
 policy-UI wiring, and memory updates are not activated by the inventory planner.
 
-Disconnecting revokes the OpenGeni connection locally. It deliberately does not
-call Google's project-wide token revocation endpoint, which can invalidate
-other grants for the same Google OAuth project. Reconnect replaces the
-credential in place and refuses a different Google account; disconnect first
-to switch accounts.
+Disconnecting revokes the OpenGeni connection locally. The confirmation dialog
+states that this deliberately does not call Google's project-wide token
+revocation endpoint, which can invalidate other grants for the same Google OAuth
+project. Reconnect replaces the credential in place and refuses a different
+Google account; disconnect first to switch accounts.

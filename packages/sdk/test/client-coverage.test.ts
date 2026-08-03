@@ -997,12 +997,18 @@ describe("OpenGeniClient connections", () => {
     expect(updated).toEqual(connection);
     const deleted = await client.deleteConnection(WORKSPACE_ID, connection.id);
     expect(deleted).toEqual(connection);
+    const paused = await client.transitionGoogleDriveLifecycle(WORKSPACE_ID, connection.id, {
+      action: "pause",
+      expectedVersion: connection.version,
+    });
+    expect(paused).toEqual(connection);
     expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
       [
         `GET /v1/workspaces/${WORKSPACE_ID}/connections`,
         `POST /v1/workspaces/${WORKSPACE_ID}/connections`,
         `PATCH /v1/workspaces/${WORKSPACE_ID}/connections/${connection.id}`,
         `DELETE /v1/workspaces/${WORKSPACE_ID}/connections/${connection.id}`,
+        `PATCH /v1/workspaces/${WORKSPACE_ID}/connections/google-drive/${connection.id}/lifecycle`,
       ],
     );
   });

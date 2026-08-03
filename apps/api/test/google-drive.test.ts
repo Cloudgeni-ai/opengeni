@@ -108,6 +108,8 @@ function googleFixture(
     permissionId?: string;
     omitRefreshToken?: boolean;
     scopes?: string[];
+    refreshError?: { status: number; error: string; description: string };
+    fileListError?: { status: number; reason: string; message: string };
   } = {},
 ) {
   const tokenRequests: URLSearchParams[] = [];
@@ -121,6 +123,15 @@ function googleFixture(
           ? init.body
           : new URLSearchParams(typeof init?.body === "string" ? init.body : "");
       tokenRequests.push(body);
+      if (body.get("grant_type") === "refresh_token" && options.refreshError) {
+        return Response.json(
+          {
+            error: options.refreshError.error,
+            error_description: options.refreshError.description,
+          },
+          { status: options.refreshError.status },
+        );
+      }
       return Response.json({
         access_token: "google-access-token",
         ...(options.omitRefreshToken ? {} : { refresh_token: "google-refresh-token" }),
@@ -141,6 +152,18 @@ function googleFixture(
     }
     if (url.pathname === "/drive/v3/files") {
       fileListQueries.push(url.searchParams.get("q") ?? "");
+      if (options.fileListError) {
+        return Response.json(
+          {
+            error: {
+              code: options.fileListError.status,
+              message: options.fileListError.message,
+              errors: [{ reason: options.fileListError.reason }],
+            },
+          },
+          { status: options.fileListError.status },
+        );
+      }
       return Response.json({
         incompleteSearch: false,
         files: [
@@ -291,6 +314,7 @@ describe("Google Drive local source preview", () => {
         googlePermissionId: "google-permission-a",
         googleEmail: "drive.tester@example.com",
         accessMode: "readonly",
+        lifecycle: { state: "active", recoverable: true },
       },
     });
     expect(JSON.stringify(connected.connection)).not.toContain("google-access-token");
@@ -449,6 +473,83 @@ describe("Google Drive local source preview", () => {
     ).toHaveLength(0);
   });
 
+  test("pauses and resumes with idempotent version-fenced transitions", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const google = googleFixture();
+    const connected = await connect(workspace, google);
+    const authorization = await bearer(workspace, "subject-a", [
+      "connections:read",
+      "connections:write",
+    ]);
+    const lifecycleRequest = (action: "pause" | "resume", expectedVersion: number) =>
+      app(google.fetch).request(
+        `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/${connected.connection.id}/lifecycle`,
+        {
+          method: "PATCH",
+          headers: {
+            authorization,
+            "content-type": "application/json",
+            [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+          },
+          body: JSON.stringify({ action, expectedVersion }),
+        },
+      );
+
+    const [firstPause, duplicatePause] = await Promise.all([
+      lifecycleRequest("pause", connected.connection.version),
+      lifecycleRequest("pause", connected.connection.version),
+    ]);
+    expect(firstPause.status).toBe(200);
+    expect(duplicatePause.status).toBe(200);
+    const pausedBodies = (await Promise.all([firstPause.json(), duplicatePause.json()])) as Array<{
+      connection: { version: number; metadata: { lifecycle: { state: string } } };
+    }>;
+    expect(pausedBodies[0]?.connection.metadata.lifecycle.state).toBe("paused");
+    expect(pausedBodies[1]?.connection.metadata.lifecycle.state).toBe("paused");
+    expect(pausedBodies[0]?.connection.version).toBe(pausedBodies[1]?.connection.version);
+
+    google.apiAuthorizationHeaders.length = 0;
+    const blockedBrowse = await app(google.fetch).request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/${connected.connection.id}/browse?parentId=root`,
+      {
+        headers: {
+          authorization,
+          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+        },
+      },
+    );
+    expect(blockedBrowse.status).toBe(409);
+    expect(await blockedBrowse.json()).toMatchObject({
+      error: { message: "Google Drive is paused" },
+    });
+    expect(google.apiAuthorizationHeaders).toEqual([]);
+
+    const staleResume = await lifecycleRequest("resume", connected.connection.version);
+    expect(staleResume.status).toBe(409);
+    const paused = pausedBodies[0]!.connection;
+    const resumed = await lifecycleRequest("resume", paused.version);
+    expect(resumed.status).toBe(200);
+    expect(await resumed.json()).toMatchObject({
+      connection: {
+        status: "active",
+        version: paused.version + 1,
+        metadata: { lifecycle: { state: "active", recoverable: true } },
+      },
+    });
+
+    const browse = await app(google.fetch).request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/${connected.connection.id}/browse?parentId=root`,
+      {
+        headers: {
+          authorization,
+          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+        },
+      },
+    );
+    expect(browse.status).toBe(200);
+  });
+
   test("fails closed before provider reads when a legacy connection lacks recursive access", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -472,13 +573,35 @@ describe("Google Drive local source preview", () => {
     );
     expect(browse.status).toBe(401);
     expect((await browse.json()) as { error: { message: string } }).toMatchObject({
-      error: { message: "Google Drive needs to be reconnected with selected-source read access" },
+      error: {
+        message: "Google Drive needs permission re-consent for selected-source read access",
+      },
     });
     expect(google.apiAuthorizationHeaders).toEqual([]);
+    expect(
+      await getConnectionMetadata(
+        client.db,
+        workspace.workspaceId,
+        connected.connection.id,
+        "subject-a",
+      ),
+    ).toMatchObject({
+      status: "needs_reauth",
+      lastError: "google_drive_reconsent_required",
+      metadata: { lifecycle: { state: "reconsent_required", recoverable: true } },
+    });
 
     const reconnected = await connect(workspace, googleFixture(), connected.connection.id);
     expect(reconnected.callback.headers.get("location")).toContain("google_drive=connected");
-    expect(reconnected.connection.metadata).toMatchObject({ accessMode: "readonly" });
+    expect(reconnected.connection).toMatchObject({
+      id: connected.connection.id,
+      status: "active",
+      metadata: {
+        googlePermissionId: "google-permission-a",
+        accessMode: "readonly",
+        lifecycle: { state: "active", recoverable: true },
+      },
+    });
   });
 
   test("accepts a pasted Google Drive folder link and rejects lookalike hosts", async () => {
@@ -520,6 +643,118 @@ describe("Google Drive local source preview", () => {
       },
     );
     expect(lookalike.status).toBe(400);
+  });
+
+  test("classifies revoked grants and removed apps without retaining provider error bodies", async () => {
+    if (!available) return;
+    for (const fixture of [
+      {
+        error: "invalid_grant",
+        lifecycle: "token_revoked",
+        status: "needs_reauth",
+        recoverable: true,
+        lastError: "google_drive_token_revoked",
+      },
+      {
+        error: "invalid_client",
+        lifecycle: "app_removed",
+        status: "error",
+        recoverable: false,
+        lastError: "google_drive_app_removed",
+      },
+    ] as const) {
+      const workspace = await freshWorkspace();
+      const providerDescription = `provider-only-${fixture.error}-detail`;
+      const google = googleFixture({
+        refreshError: {
+          status: 400,
+          error: fixture.error,
+          description: providerDescription,
+        },
+      });
+      const connected = await connect(workspace, google);
+      await shared!.admin`
+        update connections
+        set expires_at = now() - interval '1 minute'
+        where id = ${connected.connection.id}
+      `;
+      google.apiAuthorizationHeaders.length = 0;
+      const browse = await app(google.fetch).request(
+        `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/${connected.connection.id}/browse?parentId=root`,
+        {
+          headers: {
+            authorization: await bearer(workspace, "subject-a", ["connections:read"]),
+            [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+          },
+        },
+      );
+      expect(browse.status).toBe(401);
+      const responseBody = JSON.stringify(await browse.json());
+      expect(responseBody).not.toContain(providerDescription);
+      expect(responseBody).not.toContain(fixture.error);
+      expect(google.apiAuthorizationHeaders).toEqual([]);
+      expect(google.tokenRequests).toHaveLength(2);
+
+      const persisted = await getConnectionMetadata(
+        client.db,
+        workspace.workspaceId,
+        connected.connection.id,
+        "subject-a",
+      );
+      expect(persisted).toMatchObject({
+        status: fixture.status,
+        lastError: fixture.lastError,
+        metadata: {
+          lifecycle: {
+            state: fixture.lifecycle,
+            recoverable: fixture.recoverable,
+          },
+        },
+      });
+      const serialized = JSON.stringify(persisted);
+      expect(serialized).not.toContain(providerDescription);
+      expect(serialized).not.toContain("google-access-token");
+      expect(serialized).not.toContain("google-refresh-token");
+    }
+  });
+
+  test("maps permission failures to re-consent without exposing Google response text", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const providerMessage = "sensitive file permission context";
+    const google = googleFixture({
+      fileListError: {
+        status: 403,
+        reason: "insufficientPermissions",
+        message: providerMessage,
+      },
+    });
+    const connected = await connect(workspace, google);
+    const browse = await app(google.fetch).request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/${connected.connection.id}/browse?parentId=root`,
+      {
+        headers: {
+          authorization: await bearer(workspace, "subject-a", ["connections:read"]),
+          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+        },
+      },
+    );
+    expect(browse.status).toBe(403);
+    const responseBody = JSON.stringify(await browse.json());
+    expect(responseBody).not.toContain(providerMessage);
+    expect(responseBody).not.toContain("insufficientPermissions");
+    expect(
+      await getConnectionMetadata(
+        client.db,
+        workspace.workspaceId,
+        connected.connection.id,
+        "subject-a",
+      ),
+    ).toMatchObject({
+      status: "needs_reauth",
+      lastError: "google_drive_reconsent_required",
+      metadata: { lifecycle: { state: "reconsent_required", recoverable: true } },
+    });
   });
 
   test("fails closed on account switching and generic credential writes", async () => {
@@ -572,6 +807,76 @@ describe("Google Drive local source preview", () => {
       allowSubjectOwned: true,
     });
     expect(credential?.credential.refresh_token).toBe("google-refresh-token");
+  });
+
+  test("disconnect is local, idempotent, provider-silent, and then permits account switching", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const first = googleFixture();
+    const connected = await connect(workspace, first);
+    const authorization = await bearer(workspace, "subject-a", [
+      "connections:read",
+      "connections:write",
+    ]);
+    const disconnect = () =>
+      app(first.fetch).request(
+        `/v1/workspaces/${workspace.workspaceId}/connections/${connected.connection.id}`,
+        {
+          method: "DELETE",
+          headers: {
+            authorization,
+            [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+          },
+        },
+      );
+    const [firstDisconnect, duplicateDisconnect] = await Promise.all([disconnect(), disconnect()]);
+    expect(firstDisconnect.status).toBe(200);
+    expect(duplicateDisconnect.status).toBe(200);
+    const firstBody = (await firstDisconnect.json()) as {
+      connection: { version: number; status: string; metadata: Record<string, unknown> };
+    };
+    const duplicateBody = (await duplicateDisconnect.json()) as {
+      connection: { version: number; status: string; metadata: Record<string, unknown> };
+    };
+    expect(firstBody.connection).toMatchObject({
+      status: "revoked",
+      version: connected.connection.version + 1,
+      metadata: { lifecycle: { state: "disconnected", recoverable: true } },
+    });
+    expect(duplicateBody).toMatchObject({
+      connection: {
+        status: "revoked",
+        version: firstBody.connection.version,
+        metadata: { lifecycle: { state: "disconnected" } },
+      },
+    });
+    expect(first.tokenRequests).toHaveLength(1);
+    expect(first.apiAuthorizationHeaders).toHaveLength(1);
+
+    const blockedBrowse = await app(first.fetch).request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/${connected.connection.id}/browse?parentId=root`,
+      {
+        headers: {
+          authorization,
+          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+        },
+      },
+    );
+    expect(blockedBrowse.status).toBe(409);
+    expect(first.apiAuthorizationHeaders).toHaveLength(1);
+
+    const second = googleFixture({ permissionId: "google-permission-b" });
+    const switched = await connect(workspace, second);
+    expect(switched.callback.headers.get("location")).toContain("google_drive=connected");
+    expect(switched.connection).toMatchObject({
+      subjectId: "subject-a",
+      status: "active",
+      metadata: {
+        googlePermissionId: "google-permission-b",
+        lifecycle: { state: "active", recoverable: true },
+      },
+    });
+    expect(switched.connection.id).not.toBe(connected.connection.id);
   });
 
   test("reports missing deployment credentials without creating a connection", async () => {

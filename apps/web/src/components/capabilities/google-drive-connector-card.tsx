@@ -4,6 +4,7 @@ import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { request as apiRequest } from "@/api";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import {
   Dialog,
   DialogContent,
@@ -13,22 +14,27 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Notice } from "@/components/ui/notice";
+import { Notice, type NoticeTone } from "@/components/ui/notice";
 import { Select } from "@/components/ui/select";
 import { useAppContext } from "@/context";
+import {
+  googleDriveAccountState,
+  googleDriveConnectionMetadata,
+  preferredGoogleDriveConnection,
+  type GoogleDriveAccountState,
+} from "@/lib/google-drive-connection";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import type {
   ConnectionMetadata,
   GoogleDriveBrowseItem,
   GoogleDriveBrowseResponse,
   GoogleDriveConnectionMetadata as GoogleDriveMetadata,
+  GoogleDriveLifecycleActionRequest,
   GoogleDriveOAuthStartResponse,
   GoogleDriveReadPolicy,
   GoogleDriveSyncCadence,
   GoogleDriveTargetScope,
 } from "@/types";
-
-const GOOGLE_DRIVE_PROVIDER_DOMAIN = "googleapis.com";
 
 type FolderCrumb = { id: string; name: string };
 type ConfiguredGoogleDriveSource = GoogleDriveBrowseItem & {
@@ -47,6 +53,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
   const [busy, setBusy] = useState(false);
   const [browseOpen, setBrowseOpen] = useState(false);
   const [browseBusy, setBrowseBusy] = useState(false);
+  const [disconnectOpen, setDisconnectOpen] = useState(false);
   const [items, setItems] = useState<GoogleDriveBrowseItem[]>([]);
   const [crumbs, setCrumbs] = useState<FolderCrumb[]>([{ id: "root", name: "My Drive" }]);
   const [nextPageToken, setNextPageToken] = useState<string | null>(null);
@@ -57,19 +64,12 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
   const [syncCadence, setSyncCadence] = useState<GoogleDriveSyncCadence>("hourly");
   const [readPolicy, setReadPolicy] = useState<GoogleDriveReadPolicy>("allow");
 
-  const connection = useMemo(
-    () =>
-      connections.find(
-        (candidate) =>
-          candidate.providerDomain === GOOGLE_DRIVE_PROVIDER_DOMAIN &&
-          candidate.kind === "oauth2" &&
-          candidate.status !== "revoked" &&
-          candidate.subjectId !== null &&
-          googleDriveMetadata(candidate.metadata) !== undefined,
-      ) ?? null,
-    [connections],
-  );
-  const metadata = connection ? googleDriveMetadata(connection.metadata) : undefined;
+  const connection = useMemo(() => preferredGoogleDriveConnection(connections), [connections]);
+  const accountState = googleDriveAccountState(connection, !loading);
+  const metadata = connection
+    ? (googleDriveConnectionMetadata(connection.metadata) ?? undefined)
+    : undefined;
+  const stateNotice = googleDriveStateNotice(accountState.state);
   const savedSources = configuredGoogleDriveSources(metadata);
   const savedDefaults = savedSources[0];
   const folderItems = items.filter((item) => item.kind === "folder");
@@ -136,18 +136,46 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
     }
   }
 
-  async function disconnect() {
+  async function transitionLifecycle(
+    action: GoogleDriveLifecycleActionRequest["action"],
+  ): Promise<void> {
     if (!connection || !canWrite) return;
     setBusy(true);
     try {
-      await client.deleteConnection(workspaceId, connection.id);
-      setConnections((current) => current.filter((item) => item.id !== connection.id));
+      const updated = await client.transitionGoogleDriveLifecycle(workspaceId, connection.id, {
+        action,
+        expectedVersion: connection.version,
+      });
+      setConnections((current) => current.map((item) => (item.id === updated.id ? updated : item)));
+      setBrowseOpen(false);
+      toast.success(action === "pause" ? "Google Drive paused" : "Google Drive resumed");
+    } catch (error) {
+      toast.error(
+        action === "pause" ? "Google Drive could not be paused" : "Google Drive could not resume",
+        {
+          description: error instanceof Error ? error.message : String(error),
+        },
+      );
+      await refreshConnections();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function disconnect(): Promise<boolean> {
+    if (!connection || !canWrite) return true;
+    setBusy(true);
+    try {
+      const revoked = await client.deleteConnection(workspaceId, connection.id);
+      setConnections((current) => current.map((item) => (item.id === revoked.id ? revoked : item)));
       setBrowseOpen(false);
       toast.success("Google Drive disconnected");
+      return true;
     } catch (error) {
       toast.error("Google Drive could not be disconnected", {
         description: error instanceof Error ? error.message : String(error),
       });
+      return false;
     } finally {
       setBusy(false);
     }
@@ -192,6 +220,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
       toast.error("Google Drive folder could not be opened", {
         description: error instanceof Error ? error.message : String(error),
       });
+      await refreshConnections();
       return null;
     } finally {
       setBrowseBusy(false);
@@ -301,6 +330,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
       toast.error("Google Drive sync could not be saved", {
         description: error instanceof Error ? error.message : String(error),
       });
+      await refreshConnections();
     } finally {
       setBusy(false);
     }
@@ -331,17 +361,40 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
                 <Loader2Icon className="size-3.5 animate-spin" />
                 Loading
               </Button>
-            ) : connection ? (
+            ) : connection && accountState.state !== "disconnected" ? (
               <>
-                <Button
-                  type="button"
-                  size="sm"
-                  disabled={busy || connection.status !== "active"}
-                  onClick={openBrowser}
-                >
-                  <FolderOpenIcon className="size-3.5" />
-                  {savedSources.length > 0 ? "Manage folders" : "Connect folders"}
-                </Button>
+                {accountState.state === "connected" ? (
+                  <>
+                    <Button
+                      type="button"
+                      size="sm"
+                      disabled={busy || !canWrite}
+                      onClick={openBrowser}
+                    >
+                      <FolderOpenIcon className="size-3.5" />
+                      {savedSources.length > 0 ? "Manage folders" : "Connect folders"}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      disabled={busy || !canWrite}
+                      onClick={() => void transitionLifecycle("pause")}
+                    >
+                      Pause
+                    </Button>
+                  </>
+                ) : null}
+                {accountState.state === "paused" ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={busy || !canWrite}
+                    onClick={() => void transitionLifecycle("resume")}
+                  >
+                    Resume
+                  </Button>
+                ) : null}
                 <Button
                   type="button"
                   variant="secondary"
@@ -349,14 +402,18 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
                   disabled={busy || !canWrite}
                   onClick={() => void connect(true)}
                 >
-                  Reconnect
+                  {accountState.state === "reconsent_required"
+                    ? "Re-consent"
+                    : accountState.state === "app_removed"
+                      ? "Retry reconnect"
+                      : "Reconnect"}
                 </Button>
                 <Button
                   type="button"
                   variant="ghost"
                   size="sm"
                   disabled={busy || !canWrite}
-                  onClick={() => void disconnect()}
+                  onClick={() => setDisconnectOpen(true)}
                 >
                   Disconnect
                 </Button>
@@ -366,7 +423,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
                 type="button"
                 size="sm"
                 disabled={busy || !canWrite}
-                onClick={() => connect()}
+                onClick={() => void connect()}
               >
                 {busy ? (
                   <Loader2Icon className="size-3.5 animate-spin" />
@@ -408,16 +465,20 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
           </div>
         ) : null}
 
-        {connection && metadata?.accessMode === "metadata_readonly" ? (
-          <Notice tone="waiting" className="mt-3">
-            Reconnect once to show Shared Drive names and enable document reading.
-          </Notice>
-        ) : (
-          <Notice tone="waiting" className="mt-3">
-            Folder setup works locally; document import is not built yet.
-          </Notice>
-        )}
+        <Notice tone={stateNotice.tone} title={stateNotice.title} className="mt-3">
+          {stateNotice.description}
+        </Notice>
       </section>
+
+      <ConfirmDialog
+        open={disconnectOpen}
+        onOpenChange={setDisconnectOpen}
+        title="Disconnect Google Drive?"
+        description="OpenGeni will stop using this local connection. Google may still list the OAuth grant because disconnecting here does not revoke every grant for the Google OAuth project."
+        confirmLabel="Disconnect Google Drive"
+        cancelAutoFocus
+        onConfirm={disconnect}
+      />
 
       <Dialog open={browseOpen} onOpenChange={setBrowseOpen}>
         <DialogContent className="max-h-[90vh] max-w-xl grid-rows-[auto_minmax(0,1fr)_auto_auto] overflow-hidden">
@@ -726,14 +787,67 @@ function googleDriveFailureMessage(reason: string | null): string {
   return "Check the local OAuth configuration and try again.";
 }
 
-function googleDriveMetadata(value: Record<string, unknown>): GoogleDriveMetadata | undefined {
-  if (
-    value.credentialRole !== "google_drive_metadata" ||
-    typeof value.googlePermissionId !== "string" ||
-    typeof value.googleEmail !== "string" ||
-    (value.accessMode !== "metadata_readonly" && value.accessMode !== "readonly")
-  ) {
-    return undefined;
+function googleDriveStateNotice(state: GoogleDriveAccountState["state"]): {
+  tone: NoticeTone;
+  title: string;
+  description: string;
+} {
+  if (state === "paused") {
+    return {
+      tone: "waiting",
+      title: "Google Drive is paused",
+      description:
+        "OpenGeni will not browse or use configured Drive locations until you resume this connection.",
+    };
   }
-  return value as GoogleDriveMetadata;
+  if (state === "token_revoked") {
+    return {
+      tone: "failed",
+      title: "Google no longer accepts this grant",
+      description: "Reconnect with the same Google account to continue using configured locations.",
+    };
+  }
+  if (state === "app_removed") {
+    return {
+      tone: "failed",
+      title: "The Google OAuth app is unavailable",
+      description: "Ask an administrator to restore the app, then retry reconnecting.",
+    };
+  }
+  if (state === "reconnect_required") {
+    return {
+      tone: "failed",
+      title: "Google Drive must be reconnected",
+      description:
+        "Reconnect with the same Google account to restore access to configured locations.",
+    };
+  }
+  if (state === "reconsent_required") {
+    return {
+      tone: "waiting",
+      title: "Google Drive needs permission re-consent",
+      description:
+        "Reconnect with the same Google account and approve the requested read access for configured locations.",
+    };
+  }
+  if (state === "disconnected") {
+    return {
+      tone: "muted",
+      title: "Google Drive is disconnected",
+      description:
+        "OpenGeni will not use this local connection. You can connect a different Google account; Google may still list the prior project-wide OAuth grant.",
+    };
+  }
+  if (state === "connected") {
+    return {
+      tone: "info",
+      title: "Google Drive is connected",
+      description: "Folder setup works locally; document import is not built yet.",
+    };
+  }
+  return {
+    tone: "waiting",
+    title: "Google Drive is not connected",
+    description: "Connect an account to select folders and Shared Drives.",
+  };
 }

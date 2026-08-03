@@ -3482,6 +3482,17 @@ export type UpdateConnectionInput = {
   updatedBySubjectId?: string | null;
 };
 
+export type TransitionConnectionStateInput = {
+  workspaceId: string;
+  connectionId: string;
+  visibleToSubjectId?: string | null;
+  expectedVersion: number;
+  status?: ConnectionStatus;
+  metadata: Record<string, unknown>;
+  lastError?: string | null;
+  updatedBySubjectId?: string | null;
+};
+
 /** Server-owned verification facts; public schemas expose them read-only and nullable. */
 export type ConnectionMetadataWithVerification = ConnectionMetadata & {
   verifiedInstallAt: string | null;
@@ -5311,6 +5322,53 @@ export async function updateConnection(
   );
 }
 
+async function transitionConnectionStateInScope(
+  db: Database,
+  input: TransitionConnectionStateInput,
+): Promise<ConnectionMetadataWithVerification | null> {
+  const [row] = await db
+    .update(schema.connections)
+    .set({
+      ...(input.status !== undefined ? { status: input.status } : {}),
+      metadata: input.metadata,
+      ...(input.lastError !== undefined ? { lastError: input.lastError } : {}),
+      version: sql`${schema.connections.version} + 1`,
+      ...(input.updatedBySubjectId !== undefined
+        ? { updatedBySubjectId: input.updatedBySubjectId }
+        : {}),
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(schema.connections.workspaceId, input.workspaceId),
+        eq(schema.connections.id, input.connectionId),
+        connectionSubjectVisibility(input.visibleToSubjectId),
+        eq(schema.connections.version, input.expectedVersion),
+      ),
+    )
+    .returning(connectionMetadataColumns);
+  return row ? mapConnectionMetadata(row) : null;
+}
+
+/**
+ * Applies a metadata/status lifecycle transition behind the connection's
+ * existing `(id, version)` fence. Unlike ordinary metadata edits, every
+ * transition advances the version so concurrent refresh, disconnect,
+ * reconnect, source-selection, and lifecycle operations cannot overwrite one
+ * another from stale snapshots.
+ */
+export async function transitionConnectionState(
+  db: Database,
+  input: TransitionConnectionStateInput,
+): Promise<ConnectionMetadataWithVerification | null> {
+  return await withConnectionSubjectRls(
+    db,
+    input.workspaceId,
+    input.visibleToSubjectId,
+    async (scopedDb) => await transitionConnectionStateInScope(scopedDb, input),
+  );
+}
+
 async function revokeConnectionInScope(
   db: Database,
   workspaceId: string,
@@ -5355,13 +5413,20 @@ export async function revokeConnection(
   workspaceId: string,
   connectionId: string,
   updatedBySubjectId?: string | null,
+  expectedVersion?: number,
 ): Promise<ConnectionMetadataWithVerification | null> {
   return await withConnectionSubjectRls(
     db,
     workspaceId,
     updatedBySubjectId,
     async (scopedDb) =>
-      await revokeConnectionInScope(scopedDb, workspaceId, connectionId, updatedBySubjectId),
+      await revokeConnectionInScope(
+        scopedDb,
+        workspaceId,
+        connectionId,
+        updatedBySubjectId,
+        expectedVersion,
+      ),
   );
 }
 

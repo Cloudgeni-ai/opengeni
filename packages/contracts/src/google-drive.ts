@@ -72,6 +72,59 @@ export type GoogleDriveSyncCadence = z.infer<typeof GoogleDriveSyncCadence>;
 export const GoogleDriveReadPolicy = z.enum(["allow", "ask", "block"]);
 export type GoogleDriveReadPolicy = z.infer<typeof GoogleDriveReadPolicy>;
 
+export const GoogleDriveConnectionLifecycleState = z.enum([
+  "active",
+  "paused",
+  "token_revoked",
+  "app_removed",
+  "disconnected",
+  "reconnect_required",
+  "reconsent_required",
+]);
+export type GoogleDriveConnectionLifecycleState = z.infer<
+  typeof GoogleDriveConnectionLifecycleState
+>;
+
+const GoogleDriveLifecycleObservedAt = z.string().datetime({ offset: true });
+export const GoogleDriveConnectionLifecycle = z.discriminatedUnion("state", [
+  z.object({
+    state: z.literal("active"),
+    recoverable: z.literal(true),
+    observedAt: GoogleDriveLifecycleObservedAt,
+  }),
+  z.object({
+    state: z.literal("paused"),
+    recoverable: z.literal(true),
+    observedAt: GoogleDriveLifecycleObservedAt,
+  }),
+  z.object({
+    state: z.literal("token_revoked"),
+    recoverable: z.literal(true),
+    observedAt: GoogleDriveLifecycleObservedAt,
+  }),
+  z.object({
+    state: z.literal("app_removed"),
+    recoverable: z.literal(false),
+    observedAt: GoogleDriveLifecycleObservedAt,
+  }),
+  z.object({
+    state: z.literal("disconnected"),
+    recoverable: z.literal(true),
+    observedAt: GoogleDriveLifecycleObservedAt,
+  }),
+  z.object({
+    state: z.literal("reconnect_required"),
+    recoverable: z.literal(true),
+    observedAt: GoogleDriveLifecycleObservedAt,
+  }),
+  z.object({
+    state: z.literal("reconsent_required"),
+    recoverable: z.literal(true),
+    observedAt: GoogleDriveLifecycleObservedAt,
+  }),
+]);
+export type GoogleDriveConnectionLifecycle = z.infer<typeof GoogleDriveConnectionLifecycle>;
+
 export const GoogleDriveSelectedSource = z.object({
   id: z.string().min(1).max(256),
   name: z.string().min(1).max(1024),
@@ -93,6 +146,7 @@ export const GoogleDriveConnectionMetadata = z
     googleDisplayName: z.string().min(1).max(512).nullable(),
     verifiedAt: z.string().datetime({ offset: true }),
     accessMode: z.enum(["metadata_readonly", "readonly"]),
+    lifecycle: GoogleDriveConnectionLifecycle.optional(),
     selectedSources: z.array(GoogleDriveSelectedSource).max(100).optional(),
     /** @deprecated Read `selectedSources`; retained while existing connections migrate. */
     selectedSource: GoogleDriveSelectedSource.nullable().optional(),
@@ -110,6 +164,12 @@ export const GoogleDriveOAuthStartResponse = z.object({
   expiresAt: z.string().datetime({ offset: true }),
 });
 export type GoogleDriveOAuthStartResponse = z.infer<typeof GoogleDriveOAuthStartResponse>;
+
+export const GoogleDriveLifecycleActionRequest = z.object({
+  action: z.enum(["pause", "resume"]),
+  expectedVersion: z.number().int().positive(),
+});
+export type GoogleDriveLifecycleActionRequest = z.infer<typeof GoogleDriveLifecycleActionRequest>;
 
 export const GoogleDriveBrowseItem = z.object({
   id: z.string().min(1).max(256),

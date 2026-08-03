@@ -82,6 +82,7 @@ import type {
   GetPackResponse,
   GitHubAppInfo,
   GitHubRepositoriesResponse,
+  GoogleDriveLifecycleActionRequest,
   KnowledgeMemory,
   KnowledgeMemorySearchRequest,
   ListApiKeysResponse,
@@ -2882,6 +2883,19 @@ export class OpenGeniClient {
     const response = await this.requestJson<ConnectionResponse>(
       "DELETE",
       `/v1/workspaces/${workspaceId}/connections/${connectionId}`,
+    );
+    return response.connection;
+  }
+
+  async transitionGoogleDriveLifecycle(
+    workspaceId: string,
+    connectionId: string,
+    request: GoogleDriveLifecycleActionRequest,
+  ): Promise<ConnectionMetadata> {
+    const response = await this.requestJson<ConnectionResponse>(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/connections/google-drive/${connectionId}/lifecycle`,
+      request,
     );
     return response.connection;
   }

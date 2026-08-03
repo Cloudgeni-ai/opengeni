@@ -29,6 +29,7 @@ import {
   revokeConnection,
   setConnectionStatus,
   storeIntegrationOAuthClient,
+  transitionConnectionState,
   type ConnectionBrokerDeps,
   type ConnectionCredentialForBroker,
   type Database,
@@ -446,6 +447,68 @@ describe("connections table and helpers", () => {
     const afterStatus = await getConnectionMetadata(db, ws.workspaceId, connection.id);
     expect(afterStatus?.status).toBe("needs_reauth");
     expect(afterStatus?.lastError).toBe("expired");
+  });
+
+  test("metadata lifecycle transitions advance the shared CAS fence", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const connection = await createConnection(db, {
+      ...ws,
+      subjectId: "subject-a",
+      providerDomain: "googleapis.com",
+      kind: "oauth2",
+      credentialEncrypted: enc({ access_token: "AC", refresh_token: "RF" }),
+      metadata: { lifecycle: { state: "active" } },
+    });
+
+    expect(
+      await transitionConnectionState(db, {
+        workspaceId: ws.workspaceId,
+        connectionId: connection.id,
+        visibleToSubjectId: "subject-b",
+        expectedVersion: connection.version,
+        metadata: { lifecycle: { state: "paused" } },
+      }),
+    ).toBeNull();
+
+    const transitioned = await transitionConnectionState(db, {
+      workspaceId: ws.workspaceId,
+      connectionId: connection.id,
+      visibleToSubjectId: "subject-a",
+      expectedVersion: connection.version,
+      status: "needs_reauth",
+      metadata: { lifecycle: { state: "reconnect_required" } },
+      lastError: "safe_internal_code",
+      updatedBySubjectId: "subject-a",
+    });
+    expect(transitioned).toMatchObject({
+      status: "needs_reauth",
+      version: connection.version + 1,
+      metadata: { lifecycle: { state: "reconnect_required" } },
+      lastError: "safe_internal_code",
+      updatedBySubjectId: "subject-a",
+    });
+
+    expect(
+      await transitionConnectionState(db, {
+        workspaceId: ws.workspaceId,
+        connectionId: connection.id,
+        visibleToSubjectId: "subject-a",
+        expectedVersion: connection.version,
+        metadata: { lifecycle: { state: "paused" } },
+      }),
+    ).toBeNull();
+    expect(
+      await recordConnectionTokenRefresh(db, {
+        id: connection.id,
+        version: connection.version,
+        workspaceId: ws.workspaceId,
+        subjectId: "subject-a",
+        credentialEncrypted: enc({ access_token: "new", refresh_token: "RF" }),
+        expiresAt: new Date(Date.now() + 3_600_000),
+        lastRefreshAt: new Date(),
+      }),
+    ).toBe(false);
   });
 
   test("a revoke cannot be undone by an in-flight refresh", async () => {
@@ -1244,6 +1307,95 @@ describe("buildConnectionTokenResolver", () => {
       connectionId: "conn_oauth",
     });
     expect(counts.status).toBe(1);
+  });
+
+  test("a provider adapter owns a bounded permanent-refresh lifecycle transition", async () => {
+    const stale = brokerCredential({
+      id: "conn_google",
+      workspaceId: "ws_google",
+      subjectId: "subject-a",
+      providerDomain: "googleapis.com",
+      kind: "oauth2",
+      credential: { access_token: "AC", refresh_token: "RF", token_type: "Bearer" },
+      expiresAt: new Date(Date.now() - 1_000),
+      version: 11,
+    });
+    const observed = [] as Array<Record<string, unknown>>;
+    const { deps, counts } = resolverDeps({
+      loadCredential: async () => stale,
+      refresh: async () => {
+        counts.refresh += 1;
+        throw new ConnectionRefreshHttpError(400, "invalid_grant");
+      },
+    });
+    const resolver = buildConnectionTokenResolver({} as Database, settings, deps, {
+      transitionPermanentRefreshFailure: async (failure) => {
+        observed.push(failure);
+        return true;
+      },
+    });
+    const result = await resolver({
+      workspaceId: "ws_google",
+      subjectId: "subject-a",
+      serverId: "google-drive",
+      destinationUrl: "https://www.googleapis.com/drive/v3/files",
+      connectionRef: {
+        providerDomain: "googleapis.com",
+        kind: "oauth2",
+        subjectScope: "subject",
+      },
+    });
+    expect(result).toMatchObject({ status: "auth_needed", reason: "refresh_failed" });
+    expect(observed).toEqual([
+      {
+        workspaceId: "ws_google",
+        connectionId: "conn_google",
+        connectionVersion: 11,
+        subjectId: "subject-a",
+        providerDomain: "googleapis.com",
+        httpStatus: 400,
+        oauthErrorCode: "invalid_grant",
+      },
+    ]);
+    expect(counts.status).toBe(0);
+  });
+
+  test("refresh errors retain only a bounded OAuth code, never the provider description", async () => {
+    let observedError: unknown;
+    try {
+      await refreshOAuthConnectionCredential(
+        brokerCredential({
+          kind: "oauth2",
+          providerDomain: "googleapis.com",
+          credential: {
+            access_token: "AC",
+            refresh_token: "RF",
+            token_type: "Bearer",
+            token_endpoint: "https://oauth2.googleapis.com/token",
+            client_id: "client-id",
+          },
+        }),
+        { providerDomain: "googleapis.com", kind: "oauth2" },
+        settings,
+        {
+          fetchImpl: async () =>
+            Response.json(
+              {
+                error: "invalid_grant",
+                error_description: "sensitive provider detail must never escape",
+              },
+              { status: 400 },
+            ),
+          dnsLookup: async () => [{ address: "142.250.72.234", family: 4 }],
+        },
+      );
+    } catch (error) {
+      observedError = error;
+    }
+    expect(observedError).toBeInstanceOf(ConnectionRefreshHttpError);
+    expect((observedError as ConnectionRefreshHttpError).oauthErrorCode).toBe("invalid_grant");
+    expect((observedError as Error).message).toBe("connection refresh failed with HTTP 400");
+    expect(JSON.stringify(observedError)).not.toContain("sensitive provider detail");
   });
 });
 
