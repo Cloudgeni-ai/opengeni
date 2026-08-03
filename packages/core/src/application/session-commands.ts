@@ -595,10 +595,12 @@ export async function controlHumanSessionWorkstream(
     ),
     interruptionCount: result.interruptionCount,
     wakeCount: result.wakeCount,
+    cancelledSessionCount: result.cancelledSessionCount,
+    cancelledTurnCount: result.cancelledTurnCount,
   };
-  await publishSessionEventIds(deps, context.workspaceId, context.sessionId, [
-    result.sessionControlEventId,
-  ]);
+  for (const affected of result.affectedSessionEvents) {
+    await publishSessionEventIds(deps, context.workspaceId, affected.sessionId, affected.eventIds);
+  }
   await publishWorkspaceControlEvent(deps, context.workspaceId, result.workspaceControlEventId);
   await requestControlWakeDispatch(deps, result.wakeCount);
   return response;

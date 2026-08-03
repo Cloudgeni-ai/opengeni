@@ -1076,6 +1076,11 @@ export function isRetainedRemoteV2Message(item: unknown): boolean {
  * Build the active history after Codex remote compaction v2:
  * newest retained user/developer messages within the CLI 64k budget plus the
  * opaque `{ type: "compaction", encrypted_content }` item.
+ *
+ * Unlike the portable rebuild, retained messages keep `input_image` parts
+ * (Codex CLI `truncate_retained_messages_for_remote_compaction`). Image-only
+ * messages charge at least 1 token against the retain budget, matching CLI
+ * `message_text_token_count(...).max(1)`.
  */
 export function buildRemoteV2ReplacementHistory(
   items: readonly CompactionItem[],
@@ -1090,12 +1095,15 @@ export function buildRemoteV2ReplacementHistory(
     const item = items[index]!;
     if (!isRetainedRemoteV2Message(item)) continue;
     const textTokens = estimateTextTokens(messageText(item));
-    retainedReversed.push(compactMessageToTokenBudget(item, remaining));
-    if (textTokens > remaining) {
-      remaining = 0;
-      break;
+    const chargeTokens = Math.max(1, textTokens);
+    if (chargeTokens <= remaining) {
+      retainedReversed.push(compactRemoteV2RetainedMessage(item, remaining));
+      remaining -= chargeTokens;
+      continue;
     }
-    remaining -= textTokens;
+    retainedReversed.push(compactRemoteV2RetainedMessage(item, remaining));
+    remaining = 0;
+    break;
   }
   const history = retainedReversed.reverse();
   history.push({
@@ -1202,6 +1210,33 @@ function compactMessageToTokenBudget(item: CompactionItem, maxTokens: number): C
   }
   next.content = contentWithoutImages(item);
   return next;
+}
+
+/**
+ * Retain a remote_v2 suffix message: keep images, truncate text only when the
+ * text budget is exceeded (CLI keeps InputImage parts through truncation).
+ */
+function compactRemoteV2RetainedMessage(item: CompactionItem, maxTokens: number): CompactionItem {
+  const text = messageText(item);
+  const next = { ...item };
+  if (estimateTextTokens(text) <= maxTokens) {
+    return next;
+  }
+  const truncated = truncateMiddleByEstimatedTokens(text, maxTokens);
+  const content = (item as { content?: unknown }).content;
+  if (!Array.isArray(content)) {
+    next.content = truncated;
+    return next;
+  }
+  const imageParts = content.filter(isImageContentPart);
+  next.content = [{ type: "input_text", text: truncated }, ...imageParts];
+  return next;
+}
+
+function isImageContentPart(part: unknown): boolean {
+  if (!part || typeof part !== "object") return false;
+  const type = (part as { type?: unknown }).type;
+  return type === "input_image" || type === "image_url";
 }
 
 function truncateMiddleByEstimatedTokens(text: string, maxTokens: number): string {

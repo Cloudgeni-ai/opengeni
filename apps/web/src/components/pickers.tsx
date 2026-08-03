@@ -42,7 +42,7 @@ type NavLevel = "providers" | "models" | "thinking";
 const BILLING_CLASS_HINT: Record<PickerBillingClass, string> = {
   opengeni_credits: "Will use credits",
   codex_subscription: "ChatGPT / Codex plan",
-  byok: "Your API key",
+  byok: "Billed to your AI Gateway",
 };
 
 const SLIDE_EASE = [0.22, 1, 0.36, 1] as const;
@@ -66,7 +66,7 @@ function billingClassForSelection(rows: PickerModelRow[], selectedId: string): P
 }
 
 function isCodexPickerRow(row: PickerModelRow): boolean {
-  return isCodexProductModel(row.id) || row.provider === "codex-subscription";
+  return isCodexProductModel(row.id) || row.catalog.source === "codex";
 }
 
 /** Keep rows visible; tighten selectable + reason for remote_v2. */
@@ -84,7 +84,13 @@ function applyCodexOnly(rows: PickerModelRow[], codexOnly: boolean): PickerModel
 
 function defaultNavState(rows: PickerModelRow[], modelId: string): PickerNavState {
   const selected = findPickerRow(rows, modelId);
-  if (!selected) return { level: "providers", rail: null, modelId: null };
+  if (!selected) {
+    const rails = new Set(rows.map((row) => row.billingClass));
+    const onlyRail = rails.size === 1 ? rows[0]?.billingClass : null;
+    return onlyRail
+      ? { level: "models", rail: onlyRail, modelId: null }
+      : { level: "providers", rail: null, modelId: null };
+  }
   // Land on the selected model's Thinking page (correct leaf for the current choice).
   return {
     level: "thinking",
@@ -226,9 +232,16 @@ export function ModelPickerMenu(
   const setNav = props.onNavChange ?? setLocalNav;
   const [direction, setDirection] = useState(1);
 
+  const effectiveNav =
+    nav.level === "providers" && groups.length === 1
+      ? { level: "models" as const, rail: groups[0]!.billingClass, modelId: null }
+      : nav;
   const activeGroup =
-    nav.rail === null ? undefined : groups.find((group) => group.billingClass === nav.rail);
-  const focusModel = nav.modelId === null ? undefined : findPickerRow(rows, nav.modelId);
+    effectiveNav.rail === null
+      ? undefined
+      : groups.find((group) => group.billingClass === effectiveNav.rail);
+  const focusModel =
+    effectiveNav.modelId === null ? undefined : findPickerRow(rows, effectiveNav.modelId);
   const selectedRow = findPickerRow(rows, props.model);
 
   const { latencyMode, loading, onLatencyModeChange } = props;
@@ -258,18 +271,18 @@ export function ModelPickerMenu(
   };
 
   const pageKey =
-    nav.level === "providers"
+    effectiveNav.level === "providers"
       ? "providers"
-      : nav.level === "models"
-        ? `models:${nav.rail ?? ""}`
-        : `thinking:${nav.modelId ?? ""}`;
+      : effectiveNav.level === "models"
+        ? `models:${effectiveNav.rail ?? ""}`
+        : `thinking:${effectiveNav.modelId ?? ""}`;
 
   let body: ReactNode = null;
   if (props.loading && rows.length === 0) {
     body = <p className="px-2 py-3 text-xs text-fg-subtle">Loading model catalog…</p>;
   } else if (groups.length === 0) {
     body = <p className="px-2 py-3 text-xs text-fg-subtle">No models available.</p>;
-  } else if (nav.level === "providers") {
+  } else if (effectiveNav.level === "providers") {
     body = (
       <div className="flex flex-col gap-0.5" data-testid="model-picker-providers">
         {groups.map((group) => (
@@ -285,14 +298,16 @@ export function ModelPickerMenu(
         ))}
       </div>
     );
-  } else if (nav.level === "models" && activeGroup) {
+  } else if (effectiveNav.level === "models" && activeGroup) {
     body = (
       <div data-testid="model-picker-models">
-        <BackHeader
-          label={activeGroup.label}
-          icon={<BillingClassMark billingClass={activeGroup.billingClass} />}
-          onBack={() => go({ level: "providers", rail: null, modelId: null }, -1)}
-        />
+        {groups.length > 1 ? (
+          <BackHeader
+            label={activeGroup.label}
+            icon={<BillingClassMark billingClass={activeGroup.billingClass} />}
+            onBack={() => go({ level: "providers", rail: null, modelId: null }, -1)}
+          />
+        ) : null}
         <div className="flex flex-col gap-0.5">
           {activeGroup.rows.map((row) => (
             <NavRow
@@ -312,7 +327,7 @@ export function ModelPickerMenu(
         </div>
       </div>
     );
-  } else if (nav.level === "thinking" && focusModel) {
+  } else if (effectiveNav.level === "thinking" && focusModel) {
     const isActiveModel = focusModel.id === props.model;
     const fastRunnable = runnableLatencyModesForModel(focusModel.catalog).includes("fast");
     body = (

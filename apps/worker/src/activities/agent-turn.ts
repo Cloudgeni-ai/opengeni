@@ -70,6 +70,9 @@ import {
   getEnrollment,
   abandonRecordingForTurnAttempt,
   markSessionAttemptQuiesced,
+  beginConnectorActionExecution,
+  completeConnectorActionExecution,
+  prepareConnectorActionApproval,
   type AppendEventInput,
   type ActiveSandboxPointer,
   type SandboxRecord,
@@ -94,6 +97,7 @@ import {
   composeAgentInstructions,
   summarizeForCompaction,
   requestRemoteCompactionV2,
+  serializedToolsForRemoteCompaction,
   REMOTE_COMPACTION_V2_BETA_FEATURE,
   REMOTE_COMPACTION_V2_IMPLEMENTATION,
   CompactionProviderResponseError,
@@ -123,6 +127,7 @@ import {
   type ModelCallUsageInput,
   type ModelCallUsageNormalization,
   type BuildAgentOptions,
+  type ConnectorActionPolicyHooks,
   type RunAgentStreamOptions,
   type TurnToolCancellationFence,
   type BackendUnresolvableCode,
@@ -137,6 +142,7 @@ import {
 import { connectionTokenResolverForTurn } from "./mcp-credentials";
 import {
   assertTurnExecutionPolicyMatchesConfigV1,
+  calculateGatewayReportedCostMicros,
   calculateModelUsageCostMicros,
   configuredModelPricing,
   configuredStaticUsageLimits,
@@ -146,6 +152,8 @@ import {
   serviceTierForLatencyMode,
   settingsWithResolvedModelContext,
   resolveTurnExecutionPolicyV1,
+  OPENGENI_GATEWAY_MODELS,
+  OPENGENI_GATEWAY_PROVIDER_ID,
   type ModelUsageInput,
   type ModelProviderApi,
   type RegistryProviderKind,
@@ -156,6 +164,7 @@ import {
   settingsWithCodexCredential,
   settingsWithEnabledCapabilityMcpServers,
   settingsWithSessionMcpServersForRun,
+  settingsWithWorkspaceGatewayCredential,
 } from "./capabilities";
 import {
   CODEX_USAGE_EXHAUSTED_PCT,
@@ -1180,6 +1189,8 @@ export async function processModelResponseUsageEvent(input: {
         externallyBilled: input.externallyBilled,
         usage: responseUsage.usage,
         normalizedUsage,
+        gatewayManaged: input.provider === OPENGENI_GATEWAY_PROVIDER_ID,
+        gatewayBilling: responseUsage.gatewayBilling,
         sourceKey,
         ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
         observability: input.observability,
@@ -1306,6 +1317,8 @@ export async function processCompactionModelUsageEvent(input: {
         externallyBilled: input.externallyBilled,
         usage: input.usage.usage,
         normalizedUsage,
+        gatewayManaged: input.provider === OPENGENI_GATEWAY_PROVIDER_ID,
+        gatewayBilling: input.usage.gatewayBilling,
         sourceKey,
         observability: input.observability,
       });
@@ -1769,9 +1782,11 @@ export async function reconcileActiveSandboxPointer(
 /**
  * Warm the Modal private-registry image for the image ref this turn actually
  * resolved, not only the deployment-global OPENGENI_MODAL_IMAGE_REF warmed at
- * worker boot. Packs can override `modalImageRef` per workspace/turn, so a
- * private pack image must be resolved before sandbox creation or Modal falls
- * back to the unauthenticated `fromTag` path.
+ * worker boot. A provider-native modalImageId bypasses registry import and is
+ * resolved by ModalImageSelector.fromId during create. Otherwise packs can
+ * override `modalImageRef` per workspace/turn, so a private pack image must be
+ * resolved before sandbox creation or Modal falls back to the unauthenticated
+ * `fromTag` path.
  */
 export async function ensureTurnModalRegistryImage(
   runSettings: Settings,
@@ -1779,6 +1794,9 @@ export async function ensureTurnModalRegistryImage(
   ensureRegistryImage: (settings: Settings) => Promise<void> = ensureModalRegistryImage,
 ): Promise<void> {
   if (sandboxCreationBackend !== "modal") {
+    return;
+  }
+  if (runSettings.modalImageId) {
     return;
   }
   if (!runSettings.modalImageRegistrySecret || !runSettings.modalImageRef) {
@@ -1841,6 +1859,8 @@ export function shouldStartOnTurnRecording(params: {
  *   • a "chat" (OpenAIChatCompletionsModel wire) provider → "disabled": it cannot
  *     receive a screenshot through a proven visual transport, so computer use fails
  *     closed instead of serializing the image as text.
+ *   • Vercel Gateway providers → "disabled": their curated models support ordinary
+ *     function tools and vision input, not OpenAI's hosted computer tool.
  *   • everything else — built-in Azure/OpenAI responses, registry "responses"
  *     providers, AND the LEGACY global-client fallback (resolveTurnModel returned
  *     null) — → "hosted": real Responses hosted-tool support.
@@ -1858,10 +1878,26 @@ export function computerToolModeForTurn(
   if (resolvedModel.provider.kind === "codex-subscription") {
     return "function-image";
   }
+  if (
+    resolvedModel.provider.kind === "vercel-gateway-managed" ||
+    resolvedModel.provider.kind === "vercel-gateway-workspace"
+  ) {
+    return "disabled";
+  }
   if (resolvedModel.provider.api === "chat") {
     return "disabled";
   }
   return "hosted";
+}
+
+/** Gateway models do not advertise OpenAI's hosted apply_patch/view_image tool types. */
+export function structuredToolTransportForTurn(
+  resolvedModel: { provider: { kind: RegistryProviderKind } } | null,
+): boolean {
+  if (!resolvedModel) return true;
+  return !["codex-subscription", "vercel-gateway-managed", "vercel-gateway-workspace"].includes(
+    resolvedModel.provider.kind,
+  );
 }
 
 /**
@@ -3077,11 +3113,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         mcpSettings,
         input.workspaceId,
       );
-      const capabilitySettings = await settingsWithCodexCredential(
+      const codexSettings = await settingsWithCodexCredential(
         db,
         input.workspaceId,
         mcpSettings,
         codexSubscriptionActive,
+      );
+      const capabilitySettings = await settingsWithWorkspaceGatewayCredential(
+        db,
+        input.workspaceId,
+        codexSettings,
       );
       runtime.configure(capabilitySettings);
       const session = await requireSession(db, input.workspaceId, input.sessionId);
@@ -4030,7 +4071,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // deployment default; a rig with no image (or a rig-less turn) is a
         // pass-through, leaving the pack/deployment chain exactly as today.
         ...settingsWithRigImage(
-          settingsWithPackSandboxImage(capabilitySettings, packRuntime.sandboxImage),
+          settingsWithPackSandboxImage(
+            capabilitySettings,
+            packRuntime.sandboxImage,
+            packRuntime.sandboxProviderImages,
+          ),
           rigVersion?.image ?? null,
         ),
         openaiModel: turn.model,
@@ -4299,17 +4344,61 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 ...(systemInstructions ? { systemInstructions } : {}),
                 ...(promptCacheKey ? { promptCacheKey } : {}),
               });
+      // Prompt-cache prefix for remote_v2 MUST match ordinary turns:
+      // tools → instructions → history. Filled after buildAgent for every
+      // compact path (including operator /compact, which now builds the agent
+      // first so it does not send empty tools/instructions).
+      let remoteCompactionTools: Awaited<ReturnType<typeof serializedToolsForRemoteCompaction>> =
+        [];
+      let remoteCompactionInstructions = "";
+      let remoteCompactionToolsReady = false;
+      let remoteCompactionAgent: Parameters<typeof serializedToolsForRemoteCompaction>[0] | null =
+        null;
       const remoteCompactionRequester =
         resolvedModel && isCodexTurn
           ? (s: Settings, m: Array<Record<string, unknown>>) =>
-              withCodexRemoteCompaction(() =>
-                requestRemoteCompactionV2(s, m, {
+              withCodexRemoteCompaction(async () => {
+                // Lazily serialize tools here so EmptyCompactionSummaryError is
+                // thrown inside the compaction try/settlement handlers, not as a
+                // raw activity failure before maybeCompactContext runs.
+                if (!remoteCompactionInstructions.trim()) {
+                  throw new EmptyCompactionSummaryError({
+                    stage: "remote_v2_instructions",
+                    reason: "agent_missing_system_instructions",
+                  });
+                }
+                if (!remoteCompactionToolsReady) {
+                  if (!remoteCompactionAgent) {
+                    throw new EmptyCompactionSummaryError({
+                      stage: "remote_v2_tools",
+                      reason: "agent_missing_for_tools",
+                    });
+                  }
+                  try {
+                    remoteCompactionTools =
+                      await serializedToolsForRemoteCompaction(remoteCompactionAgent);
+                  } catch (error) {
+                    // Tool schemas sit before instructions in the cache prefix.
+                    // Failing open to [] would reintroduce a massive pre-compact
+                    // cache bust — fail closed so we never send a tools mismatch
+                    // on purpose.
+                    throw new EmptyCompactionSummaryError({
+                      stage: "remote_v2_tools",
+                      reason: "serialize_tools_failed",
+                      error: String(error),
+                    });
+                  }
+                  remoteCompactionToolsReady = true;
+                }
+                return requestRemoteCompactionV2(s, m, {
                   client: resolvedModel.client,
                   model: turnExecutionPolicy.upstreamModelId,
+                  systemInstructions: remoteCompactionInstructions,
                   onUsage: recordCompactionUsage,
+                  tools: remoteCompactionTools,
                   ...(promptCacheKey ? { promptCacheKey } : {}),
-                }),
-              )
+                });
+              })
           : undefined;
       const publishCompactionLiveEvents = async (events: SessionEvent[]) => {
         await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, events);
@@ -4335,7 +4424,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           : {}),
       } as const;
 
-      if (turn.source === "compaction") {
+      // Operator /compact:
+      // - portable (incl. Codex portable): early maintenance path — no
+      //   prepareTools/sandbox; summarizer only needs composed instructions.
+      // - remote_v2: fall through to prepareTools/buildAgent so the compact
+      //   request reuses the ordinary tools→instructions cache prefix, then
+      //   settle without inference. (Requester is also wired for Codex portable
+      //   turns but unused there — gate on the frozen session mode.)
+      const compactionOnlyTurn = turn.source === "compaction";
+      const remoteV2CompactionNeedsAgentPrefix =
+        Boolean(remoteCompactionRequester) && session.codexCompactionMode === "remote_v2";
+      if (compactionOnlyTurn && !remoteV2CompactionNeedsAgentPrefix) {
         const persistentSessionSettings = {
           titleIsSet: Boolean(session.title?.trim()),
         };
@@ -5470,6 +5569,32 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         turnExecutionPolicy.providerId,
         turnExecutionPolicy.latencyMode,
       );
+      const connectorActionIdentity = {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId,
+        attemptId: input.attemptId,
+        executionGeneration,
+        initiator: {
+          kind: turn.initiator.kind,
+          subjectId: turn.initiator.subjectId,
+        },
+      } as const;
+      const connectorActionPolicy: ConnectorActionPolicyHooks = {
+        prepare: async (call) =>
+          await prepareConnectorActionApproval(db, connectorActionIdentity, call),
+        begin: async (call) =>
+          await beginConnectorActionExecution(db, connectorActionIdentity, call),
+        complete: async ({ requestId, outcome }) =>
+          await completeConnectorActionExecution(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            requestId,
+            attemptId: input.attemptId,
+            outcome,
+          }),
+      };
       const agent = runtime.buildAgent(modelRunSettings, turnResources, {
         reasoningEffort: turn.reasoningEffort,
         latencyMode: turnExecutionPolicy.latencyMode,
@@ -5516,6 +5641,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         ...(activeSandboxBackend ? { activeSandboxBackend } : {}),
         fileResourceDownloads,
         mcpServers: preparedTools.mcpServers,
+        resolvedMcpConnectionIds: preparedTools.resolvedMcpConnectionIds,
+        connectorActionPolicy,
         // LIVE by-reference connector namespaces (fills during this turn's
         // codex_apps tools/list): the codex tool_search description reads it per
         // model call so the model sees the account's real connected sources.
@@ -5551,7 +5678,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               // (built-in OpenAI/Azure = real hosted support; registry "chat"
               // providers = the SDK's own ChatCompletions detection) keeps the SDK
               // default.
-              structuredToolTransport: resolvedModel.provider.kind !== "codex-subscription",
+              structuredToolTransport: structuredToolTransportForTurn(resolvedModel),
               // EXPLICIT computer-use tool transport, derived from the resolved provider's
               // authoritative wire identity (codex → function-image, chat → disabled,
               // responses → hosted) so the runtime never string-sniffs the model instance's
@@ -5836,9 +5963,140 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           },
         );
       }
+      const agentInstructions = typeof agent.instructions === "string" ? agent.instructions : "";
       const compactSummarizer = compactionSummarizerFor(
-        typeof agent.instructions === "string" ? agent.instructions : undefined,
+        agentInstructions.trim() ? agentInstructions : undefined,
       );
+      if (remoteCompactionRequester) {
+        // Exact byte match with the ordinary turn prefix (CLI base_instructions).
+        // Tools serialize lazily inside the requester so setup failures settle as
+        // compaction failures rather than raw activity crashes.
+        remoteCompactionInstructions = agentInstructions;
+        remoteCompactionAgent = agent;
+      }
+
+      if (compactionOnlyTurn) {
+        const requested = await isSessionCompactionRequested(
+          db,
+          input.workspaceId,
+          input.sessionId,
+        );
+        let outcome: Awaited<ReturnType<typeof maybeCompactContext>> | null = null;
+        if (requested) {
+          try {
+            outcome = await waitForTurnOperation(
+              maybeCompactContext(
+                db,
+                modelRunSettings,
+                {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  turnId: turn.id,
+                  executionGeneration,
+                  attemptId: input.attemptId,
+                },
+                session.lastInputTokens,
+                compactSummarizer,
+                {
+                  force: true,
+                  clearRequestedCompaction: true,
+                  trigger: "operator",
+                  codexAccount: {
+                    currentCodexCredentialId: effectiveCodexCredentialId,
+                  },
+                  ...compactionModeOptions,
+                },
+              ),
+              cancellationSignal,
+              undefined,
+            );
+          } catch (error) {
+            // Codex retries retryable checkpoint-provider failures rather than
+            // treating them as a semantic compaction result. Keep the operator
+            // request pending and let the ordinary same-turn provider/capacity
+            // recovery path re-dispatch this exact maintenance execution.
+            if (shouldRecoverCompactionProviderFailure(error)) throw error;
+            if (error instanceof TurnAttemptFencedError) throw error;
+            const landmark = await settleFailedContextCompactionLandmark(
+              db,
+              {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: turn.id,
+                executionGeneration,
+                attemptId: input.attemptId,
+              },
+              {
+                clearRequestedCompaction: true,
+                publishLiveEvents: publishCompactionLiveEvents,
+              },
+            );
+            if (!isCompactionSummaryFailure(error)) throw error;
+            const errorMessage = String(redact(compactionFailureReasonFromError(error)));
+            if (
+              !(await settle!({
+                events: [
+                  {
+                    type: "turn.failed",
+                    payload: {
+                      error: errorMessage,
+                      code: "context_compaction_failed",
+                      retryable: false,
+                      recovery: "user_message",
+                      compacted: false,
+                    },
+                  },
+                  {
+                    type: "session.status.changed",
+                    payload: { status: "idle" },
+                  },
+                ],
+                turnStatus: "failed",
+                sessionStatus: "idle",
+                activeTurnId: null,
+                ...(landmark.requestConsumed ? {} : { consumeRequestedCompactionFailure: true }),
+              }))
+            ) {
+              return claimedResult({ status: "cancelled" });
+            }
+            turnMetricOutcome = "failed";
+            activityStatus = "idle";
+            activityError = error;
+            return claimedResult({ status: "idle" });
+          }
+          if (outcome.events.length > 0) {
+            if (outcome.compacted) {
+              recordContextCompaction(observability, "operator");
+            }
+            await publishCompactionOutcomeEvents(outcome.events);
+          }
+        }
+        if (
+          !(await settle!({
+            events: [
+              {
+                type: "turn.completed",
+                payload: {
+                  maintenance: "context_compaction",
+                  result: outcome?.compacted ? "compacted" : (outcome?.reason ?? "already_applied"),
+                },
+              },
+              { type: "session.status.changed", payload: { status: "idle" } },
+            ],
+            turnStatus: "completed",
+            sessionStatus: "idle",
+            activeTurnId: null,
+          }))
+        ) {
+          return claimedResult({ status: "cancelled" });
+        }
+        turnMetricOutcome = "completed";
+        activityStatus = "idle";
+        return claimedResult({ status: "idle" });
+      }
+
       // Pre-turn durable context compaction. When the single Codex-parity
       // threshold is crossed, this summarizes active history and rebuilds active
       // history as [user messages..., summary] BEFORE the model input is read.
@@ -8960,6 +9218,7 @@ export type ModelUsageBillingRecord = {
   /** Same quantity written to usage_events.model.cost when present; else 0. */
   pricedCostMicros: number;
   normalizedUsage: ModelCallUsageNormalization;
+  upstreamProvider?: string;
 };
 
 // Exported for unit testing the external-billing bypass; not part of the activity surface.
@@ -8974,6 +9233,8 @@ export async function recordModelUsageAndDebitCredits(
     turnAttemptId: string;
     model: string;
     externallyBilled: boolean;
+    gatewayManaged?: boolean;
+    gatewayBilling?: ModelResponseUsage["gatewayBilling"];
     usage?: ModelUsageInput | ModelCallUsageInput | null;
     normalizedUsage?: ModelCallUsageNormalization;
     sourceKey: string;
@@ -8989,6 +9250,20 @@ export async function recordModelUsageAndDebitCredits(
   const inputTokens = sanitizedUsage.inputTokens ?? 0;
   const outputTokens = sanitizedUsage.outputTokens ?? 0;
   const totalTokens = sanitizedUsage.totalTokens ?? 0;
+  const gatewayBilling = input.gatewayManaged ? input.gatewayBilling : undefined;
+  if (gatewayBilling) {
+    const gatewayModel = Object.values(OPENGENI_GATEWAY_MODELS).find(
+      (candidate) => candidate.productId === input.model,
+    );
+    if (
+      !gatewayModel ||
+      !(gatewayModel.providers as readonly string[]).includes(gatewayBilling.finalProvider)
+    ) {
+      throw new Error(
+        `AI Gateway reported unapproved provider ${gatewayBilling.finalProvider} for ${input.model}`,
+      );
+    }
+  }
   // An externally billed turn is paid outside OpenGeni, so it
   // consumes ZERO OpenGeni credits and must never feed an OpenGeni cap. A
   // codex/<slug> model has no entry in configuredModelPricing, so the normal path
@@ -9034,19 +9309,24 @@ export async function recordModelUsageAndDebitCredits(
     });
   }
   const shouldDebit = settings.billingMode === "stripe" || settings.usageLimitsMode === "managed";
-  if (!shouldDebit || totalTokens === 0) {
+  if (!shouldDebit || (totalTokens === 0 && !gatewayBilling)) {
     return {
       billingPath: "opengeni_credits",
       pricedCostMicros: 0,
       normalizedUsage,
+      ...(gatewayBilling ? { upstreamProvider: gatewayBilling.finalProvider } : {}),
     };
   }
   if (!configuredModelPricing(settings)[input.model]) {
     throw new Error(`Missing model pricing for ${input.model}`);
   }
-  const costMicros = calculateModelUsageCostMicros(settings, input.model, sanitizedUsage, {
-    latencyMode: input.latencyMode ?? "standard",
-  });
+  const costMicros = gatewayBilling
+    ? calculateGatewayReportedCostMicros(settings, input.model, gatewayBilling.inferenceCostUsd, {
+        inputTokens,
+      })
+    : calculateModelUsageCostMicros(settings, input.model, sanitizedUsage, {
+        latencyMode: input.latencyMode ?? "standard",
+      });
   await recordUsageEvent(db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
@@ -9082,6 +9362,7 @@ export async function recordModelUsageAndDebitCredits(
         // per-call debit record carries cache efficiency alongside the token
         // counts. 0 when the provider did not report cached tokens.
         cachedTokens: normalizedUsage.telemetry.cachedTokens ?? 0,
+        ...(gatewayBilling ? { gatewayProvider: gatewayBilling.finalProvider } : {}),
       },
     });
     recordCreditMicros(input.observability, "usage", result.debitedMicros);
@@ -9090,6 +9371,7 @@ export async function recordModelUsageAndDebitCredits(
     billingPath: "opengeni_credits",
     pricedCostMicros: costMicros,
     normalizedUsage,
+    ...(gatewayBilling ? { upstreamProvider: gatewayBilling.finalProvider } : {}),
   };
 }
 
@@ -9117,7 +9399,7 @@ export async function recordAuthoritativeModelCallFact(input: {
       turnId: input.turnId,
       turnAttemptId: input.turnAttemptId,
       sourceKey: input.sourceKey,
-      provider: input.provider,
+      provider: input.billing.upstreamProvider ?? input.provider,
       providerApi: input.providerApi,
       model: input.model,
       billingPath: input.billing.billingPath,

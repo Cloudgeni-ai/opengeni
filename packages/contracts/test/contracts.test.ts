@@ -477,6 +477,14 @@ describe("contracts", () => {
     expect(payload.metadata).toEqual({});
   });
 
+  test("accepts an explicit rig-less session", () => {
+    const payload = CreateSessionRequest.parse({
+      initialMessage: "inspect repo",
+      rigId: null,
+    });
+    expect(payload.rigId).toBeNull();
+  });
+
   test("accepts validated inline session skills", () => {
     const parsed = CreateSessionRequest.parse({
       initialMessage: "prepare release",
@@ -1508,6 +1516,7 @@ describe("capability pack runtime manifest fields", () => {
   test("packs without runtime fields keep their existing shape", () => {
     const pack = CapabilityPack.parse(baseManifest);
     expect(pack.sandboxImage).toBeUndefined();
+    expect(pack.sandboxProviderImages).toBeUndefined();
     expect(pack.skills).toEqual([]);
   });
 
@@ -1524,6 +1533,32 @@ describe("capability pack runtime manifest fields", () => {
       "SKILL.md",
       "references/runbook.md",
     ]);
+  });
+
+  test("binds a digest-pinned logical image to an immutable Modal image ID", () => {
+    const pack = CapabilityPack.parse({
+      ...baseManifest,
+      sandboxImage:
+        "ghcr.io/example/infra-sandbox@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      sandboxProviderImages: {
+        modal: { imageId: "im-1234567890123456789012" },
+      },
+    });
+    expect(pack.sandboxProviderImages?.modal?.imageId).toBe("im-1234567890123456789012");
+  });
+
+  test("rejects a Modal image ID without digest-pinned logical provenance", () => {
+    for (const sandboxImage of [undefined, "example.com/infra-sandbox:latest"]) {
+      expect(() =>
+        CapabilityPack.parse({
+          ...baseManifest,
+          ...(sandboxImage ? { sandboxImage } : {}),
+          sandboxProviderImages: {
+            modal: { imageId: "im-1234567890123456789012" },
+          },
+        }),
+      ).toThrow();
+    }
   });
 
   test("requires every skill to include a top-level SKILL.md", () => {

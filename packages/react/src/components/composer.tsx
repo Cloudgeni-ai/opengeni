@@ -851,12 +851,27 @@ type OwnedInputProps =
 export type ComposerInputProps = Omit<ComponentPropsWithoutRef<"textarea">, OwnedInputProps>;
 
 export const Input = forwardRef<HTMLTextAreaElement, ComposerInputProps>(function ComposerInput(
-  { rows = 1, placeholder, className, "aria-label": ariaLabel, ...props },
+  { rows = 1, placeholder, className, "aria-label": ariaLabel, autoFocus = false, ...props },
   forwardedRef,
 ) {
   const controller = useComposerController();
+  const autoFocusedRef = useRef(false);
   const paletteOpen =
     controller.paletteEnabled && controller.paletteMounted && controller.palette.open;
+
+  // Native autoFocus loses when the textarea mounts disabled (create-session draft
+  // hydrate). Retry once the controller becomes interactive.
+  useEffect(() => {
+    if (!autoFocus || controller.disabled || autoFocusedRef.current) return;
+    const frame = window.requestAnimationFrame(() => {
+      const textarea = controller.textareaRef.current;
+      if (!textarea || textarea.disabled) return;
+      autoFocusedRef.current = true;
+      textarea.focus();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [autoFocus, controller.disabled, controller.textareaRef]);
+
   return (
     <textarea
       {...props}
@@ -872,6 +887,7 @@ export const Input = forwardRef<HTMLTextAreaElement, ComposerInputProps>(functio
           : (placeholder ?? controller.messages.messagePlaceholder)
       }
       disabled={controller.disabled}
+      autoFocus={autoFocus && !controller.disabled}
       aria-label={ariaLabel ?? controller.messages.inputLabel}
       aria-keyshortcuts="Enter Meta+Enter Control+Enter Shift+Enter"
       aria-autocomplete={

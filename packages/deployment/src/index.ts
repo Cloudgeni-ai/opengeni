@@ -1373,6 +1373,9 @@ export function requiredRuntimeEnvVars(
   } else {
     vars.push("OPENGENI_OPENAI_API_KEY");
   }
+  if (env.OPENGENI_VERCEL_AI_GATEWAY_API_KEY) {
+    vars.push("OPENGENI_VERCEL_AI_GATEWAY_API_KEY");
+  }
   if (runtimeDatabaseUrlRequired(contract)) {
     vars.push("OPENGENI_DATABASE_URL");
   }
@@ -2146,7 +2149,7 @@ function runtimeEnvValues(
     valueEnv("OPENGENI_OPENAI_REASONING_EFFORT", env.OPENGENI_OPENAI_REASONING_EFFORT ?? "low"),
     valueEnv(
       "OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS",
-      env.OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS ?? "low,medium,high,xhigh",
+      env.OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS ?? "low,medium,high,xhigh,max",
     ),
     ...(inferredOpenAiProvider(env) === "azure"
       ? [
@@ -2168,6 +2171,9 @@ function runtimeEnvValues(
           requiredEnv("OPENGENI_AZURE_OPENAI_API_KEY", env.OPENGENI_AZURE_OPENAI_API_KEY),
         ]
       : [requiredEnv("OPENGENI_OPENAI_API_KEY", env.OPENGENI_OPENAI_API_KEY)]),
+    ...(env.OPENGENI_VERCEL_AI_GATEWAY_API_KEY
+      ? [requiredEnv("OPENGENI_VERCEL_AI_GATEWAY_API_KEY", env.OPENGENI_VERCEL_AI_GATEWAY_API_KEY)]
+      : []),
   ];
 
   if (contract.objectStorage.api === "azure-blob") {
@@ -2458,7 +2464,7 @@ function addRuntimeConfigHelmValues(
     "gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna";
   values["config.OPENGENI_OPENAI_REASONING_EFFORT"] = env.OPENGENI_OPENAI_REASONING_EFFORT ?? "low";
   values["config.OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS"] =
-    env.OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS ?? "low,medium,high,xhigh";
+    env.OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS ?? "low,medium,high,xhigh,max";
   for (const key of [
     "OPENGENI_ANALYTICS_ENABLED",
     "OPENGENI_ANALYTICS_CONSENT_REQUIRED",

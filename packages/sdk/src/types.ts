@@ -228,7 +228,7 @@ export type AcknowledgeStreamResponse = {
 export type ViewerHeartbeatRequest = { leaseEpoch: number };
 export type ViewerHeartbeatResponse = { alive: boolean };
 
-export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 export type LatencyMode = "standard" | "priority" | "fast";
 export type GitCredentialProvider = "github" | "gitlab" | "azure_devops";
 export type GitCredentialBindingId = string;
@@ -1898,6 +1898,11 @@ export type ModelCapabilitiesV1 = {
     responsesWebSocket: ModelCapabilityStateV1;
     realtimeAudio: ModelCapabilityStateV1;
   };
+  promptCaching?:
+    | (ModelCapabilityStateV1 & {
+        mode: "implicit" | "automatic" | "none";
+      })
+    | undefined;
   latencyModes: Array<{
     id: "standard" | "priority" | "fast";
     upstream: ModelCapabilitySupportV1;
@@ -1946,6 +1951,7 @@ export type ClientModel = {
   provider: string;
   providerLabel: string;
   api: "responses" | "chat";
+  source?: "opengeni" | "codex" | "workspace_gateway" | undefined;
   contextWindowTokens?: number | undefined;
   schemaVersion?: 1 | undefined;
   aliases?: string[] | undefined;
@@ -2360,7 +2366,25 @@ export type WorkspaceSettings = {
   maxNestedAgentDepth?: number | null | undefined;
   /** Default for new Codex sessions; absent ⇒ remote_v2. */
   codexCompactionDefault?: "remote_v2" | "portable" | undefined;
+  slackReactionSummon?: WorkspaceSlackReactionSummonSettings | undefined;
   [key: string]: unknown;
+};
+
+export type WorkspaceSlackReactionSummonSettings = {
+  enabled: boolean;
+  emoji: string;
+  channelPolicy: { mode: "bot_member" } | { mode: "allowlist"; channelIds: string[] };
+};
+
+export type SlackReactionChannel = {
+  id: string;
+  name: string | null;
+  isPrivate: boolean;
+};
+
+export type SlackReactionChannelListResponse = {
+  channels: SlackReactionChannel[];
+  nextCursor: string | null;
 };
 
 export type WorkspaceVoiceInputSettings = {
@@ -2373,6 +2397,7 @@ export type UpdateWorkspaceSettingsRequest = {
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   maxNestedAgentDepth?: number | null | undefined;
   codexCompactionDefault?: "remote_v2" | "portable" | undefined;
+  slackReactionSummon?: WorkspaceSlackReactionSummonSettings | undefined;
   [key: string]: unknown;
 };
 
@@ -2676,6 +2701,8 @@ export type SessionControlResponse = {
   effectiveControl: EffectiveSessionControl;
   interruptionCount: number;
   wakeCount: number;
+  cancelledSessionCount: number;
+  cancelledTurnCount: number;
 };
 
 export type WorkspaceInferenceControlResponse = {
@@ -3412,6 +3439,11 @@ export type CapabilityPack = {
   category: string;
   version: string;
   sandboxImage?: string | undefined;
+  sandboxProviderImages?:
+    | {
+        modal?: { imageId: string } | undefined;
+      }
+    | undefined;
   skills: CapabilityPackSkill[];
   tools: ToolRef[];
   connectors: CapabilityPackConnector[];
@@ -3430,6 +3462,11 @@ export type RegisterCapabilityPackRequest = {
   category: string;
   version: string;
   sandboxImage?: string | undefined;
+  sandboxProviderImages?:
+    | {
+        modal?: { imageId: string } | undefined;
+      }
+    | undefined;
   skills?:
     | {
         name: string;

@@ -8,6 +8,7 @@ import {
   type AccessContext,
   type GetWorkspaceCaptureResponse,
   type Session,
+  type SessionEvent,
   type WorkspaceCaptureManifest,
 } from "@opengeni/sdk";
 import { assertScreenshotPainted } from "@opengeni/testing";
@@ -284,6 +285,9 @@ async function main(): Promise<void> {
     reasoningEffort: "low",
     sandboxBackend: args.backend,
     sandbox: "new",
+    // Acceptance owns its complete execution fixture and must not inherit a
+    // mutable workspace-default rig with unrelated setup work.
+    rigId: null,
     idempotencyKey: `workbench-acceptance:${args.environment}:${args.sourceSha}:${args.runId}`,
     metadata: {
       origin: "workbench-live-acceptance",
@@ -300,6 +304,8 @@ async function main(): Promise<void> {
   if (settled.status !== "idle") {
     throw new Error(`acceptance fixture turn ended in ${settled.status}`);
   }
+  const fixtureToolOutputs = await listAllToolOutputEvents(cookieClient, workspaceId, session.id);
+  assertFixtureToolOutput(fixtureToolOutputs, marker);
   pass(checks, "functional.real-turn", "A real authenticated Modal turn settled successfully.");
 
   const captureResponse = await waitForCapture(
@@ -635,6 +641,39 @@ async function waitForCapture(
     await Bun.sleep(1_000);
   }
   throw new Error("capture did not become available before timeout");
+}
+
+async function listAllToolOutputEvents(
+  client: OpenGeniClient,
+  workspaceId: string,
+  sessionId: string,
+): Promise<SessionEvent[]> {
+  const collected: SessionEvent[] = [];
+  let cursor = 0;
+  while (true) {
+    const page = await client.listEvents(workspaceId, sessionId, {
+      after: cursor,
+      limit: 500,
+      mode: "forensic",
+      payloadMode: "full",
+      includeTypes: ["agent.toolCall.output"],
+    });
+    collected.push(...page);
+    const lastSequence = page.at(-1)?.sequence;
+    if (lastSequence !== undefined) cursor = lastSequence;
+    if (page.length < 500) return collected;
+  }
+}
+
+export function assertFixtureToolOutput(events: readonly SessionEvent[], marker: string): void {
+  const observed = events.some(
+    (event) =>
+      event.type === "agent.toolCall.output" &&
+      JSON.stringify(event.payload ?? {}).includes(marker),
+  );
+  if (!observed) {
+    throw new Error("acceptance fixture command did not emit its exact marker");
+  }
 }
 
 async function loadManifest(

@@ -4,6 +4,7 @@ import type { AccessContext, WorkspaceCaptureManifest } from "@opengeni/sdk";
 
 import {
   assertFixtureCapture,
+  assertFixtureToolOutput,
   assertDedicatedCanaryEmail,
   assertAcceptancePrincipalScopes,
   assertChangedFileLabelsContainRepositoryRoots,
@@ -309,6 +310,21 @@ describe("workbench live acceptance preflight", () => {
       .find((repo) => repo.root === "web")!
       .status.filter((item) => item.path !== "renamed.txt");
     expect(() => assertFixtureCapture(manifest, marker)).toThrow("renamed fixture status drifted");
+  });
+
+  test("requires the exact fixture marker in a tool output", () => {
+    const marker = "OPENGENI_WORKBENCH_ACCEPTANCE_001";
+    const event = {
+      type: "agent.toolCall.output",
+      payload: { output: `setup complete\n${marker}\n` },
+    } as never;
+    expect(() => assertFixtureToolOutput([event], marker)).not.toThrow();
+    expect(() =>
+      assertFixtureToolOutput(
+        [{ type: "agent.message.completed", payload: { text: marker } } as never],
+        marker,
+      ),
+    ).toThrow("acceptance fixture command did not emit its exact marker");
   });
 });
 

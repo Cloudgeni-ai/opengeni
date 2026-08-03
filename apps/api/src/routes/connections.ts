@@ -64,7 +64,7 @@ import {
 import {
   OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
   OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
-  OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
+  OPENGENI_SLACK_BOT_REQUESTED_SCOPES,
 } from "@opengeni/contracts";
 import { createSignedState, readSignedState } from "@opengeni/github";
 import { oauthStateTtlMs, requireIntegrationsStateSecret } from "../integrations/oauth-client";
@@ -152,7 +152,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     });
     const authorizationUrl = new URL("https://slack.com/oauth/v2/authorize");
     authorizationUrl.searchParams.set("client_id", slack.clientId);
-    authorizationUrl.searchParams.set("scope", OPENGENI_SLACK_BOT_REQUIRED_SCOPES.join(","));
+    authorizationUrl.searchParams.set("scope", OPENGENI_SLACK_BOT_REQUESTED_SCOPES.join(","));
     authorizationUrl.searchParams.set("redirect_uri", redirectUri);
     authorizationUrl.searchParams.set("state", state);
     return c.json(

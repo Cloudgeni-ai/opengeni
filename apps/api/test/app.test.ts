@@ -1338,9 +1338,16 @@ describe("GET /v1/config/client", () => {
     expect(config.apiContractRevision).toBe(OPENGENI_API_CONTRACT_REVISION);
     expect(config.models.length).toBeGreaterThan(0);
     expect(config.models.map((model) => model.id)).toEqual(configuredAllowedModels(settings));
-    // Built-in provider models project the openai/azure responses shape.
+    // Built-in deployment topology stays private in the client projection.
     const defaultModel = config.models.find((model) => model.id === settings.openaiModel);
-    expect(defaultModel).toMatchObject({ provider: "openai", api: "responses" });
+    expect(defaultModel).toMatchObject({
+      provider: "opengeni",
+      providerLabel: "OpenGeni",
+      source: "opengeni",
+      api: "responses",
+    });
+    expect(defaultModel).not.toHaveProperty("deployment");
+    expect(defaultModel).not.toHaveProperty("credentialSource");
   });
 
   test("keeps analytics off by default and exposes only configured public identifiers", async () => {
@@ -1377,11 +1384,15 @@ describe("GET /v1/config/client", () => {
 
     expect(config.defaultModel).toBe("codex/gpt-5.6-sol");
     expect(config.allowedModels).toContain("codex/gpt-5.6-sol");
-    expect(config.models.find((model) => model.id === config.defaultModel)).toMatchObject({
-      provider: "codex-subscription",
-      credentialSource: { kind: "connected_subscription", provider: "codex" },
+    const defaultModel = config.models.find((model) => model.id === config.defaultModel);
+    expect(defaultModel).toMatchObject({
+      provider: "codex",
+      providerLabel: "Codex",
+      source: "codex",
       billing: { upstreamPayer: "connected_subscription", metering: "external" },
     });
+    expect(defaultModel).not.toHaveProperty("deployment");
+    expect(defaultModel).not.toHaveProperty("credentialSource");
   });
 
   test("includes a registry model when OPENGENI_MODEL_PROVIDERS_JSON is set", async () => {
@@ -1412,21 +1423,19 @@ describe("GET /v1/config/client", () => {
     expect(glm).toMatchObject({
       id: "accounts/fireworks/models/glm-5p2",
       label: "GLM 5.2",
-      provider: "fireworks",
-      providerLabel: "Fireworks AI",
+      provider: "opengeni",
+      providerLabel: "OpenGeni",
+      source: "opengeni",
       api: "chat",
       contextWindowTokens: 1_048_576,
       schemaVersion: 1,
       aliases: [],
-      deployment: {
-        upstreamModelId: "accounts/fireworks/models/glm-5p2",
-        wireApi: "chat",
-      },
-      credentialSource: { kind: "deployment", mechanism: "api_key" },
       billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
     });
     expect(glm?.definitionVersion).toMatch(/^sha256:[a-f0-9]{64}$/u);
     expect(glm).not.toHaveProperty("availability");
+    expect(glm).not.toHaveProperty("deployment");
+    expect(glm).not.toHaveProperty("credentialSource");
     expect(JSON.stringify(config)).not.toContain("fw_test");
   });
 });

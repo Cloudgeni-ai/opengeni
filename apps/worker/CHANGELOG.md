@@ -1,5 +1,81 @@
 # @opengeni/worker-bundle
 
+## 0.15.2
+
+### Patch Changes
+
+- b4982fa: Pin DeepSeek V4 Flash and Kimi K3 to ordered, approved Vercel AI Gateway
+  provider routes, meter managed usage from Gateway-reported cost, and preserve
+  Kimi Responses tool continuity without exposing provider details in the UI.
+- Updated dependencies [e62495f]
+- Updated dependencies [b4982fa]
+- Updated dependencies [b4982fa]
+- Updated dependencies [70e6d56]
+  - @opengeni/contracts@0.31.2
+  - @opengeni/core@0.18.2
+  - @opengeni/config@0.10.2
+  - @opengeni/runtime@0.17.2
+  - @opengeni/db@0.22.3
+  - @opengeni/documents@0.2.71
+  - @opengeni/events@0.3.61
+  - @opengeni/github@0.4.18
+  - @opengeni/observability@0.4.5
+  - @opengeni/storage@0.2.55
+
+## 0.15.1
+
+### Patch Changes
+
+- 9c4d73d: Add curated OpenGeni-credit and workspace-key Vercel AI Gateway model paths for
+  DeepSeek V4 Flash and Kimi K3, including exact provider routing, cache-aware
+  pricing and metering, Responses tool continuity, provider-blind catalog UX, and
+  stable remote-compaction cache prefixes.
+- Updated dependencies [9c4d73d]
+  - @opengeni/config@0.10.1
+  - @opengeni/contracts@0.31.1
+  - @opengeni/core@0.18.1
+  - @opengeni/db@0.22.2
+  - @opengeni/runtime@0.17.1
+  - @opengeni/documents@0.2.70
+  - @opengeni/github@0.4.17
+  - @opengeni/storage@0.2.54
+  - @opengeni/events@0.3.60
+  - @opengeni/observability@0.4.4
+
+## 0.15.0
+
+### Minor Changes
+
+- 8b3e46f: Allow a digest-pinned capability-pack sandbox image to bind an immutable Modal image ID. OpenGeni now preserves the logical OCI digest on the lease, starts the provider-native image through `ModalImageSelector.fromId`, records the actual ID in the Modal session envelope, clears lower-precedence IDs when a rig overrides the image, and keeps catalog image metadata aligned with the runtime manifest.
+
+### Patch Changes
+
+- Updated dependencies [8b3e46f]
+  - @opengeni/config@0.10.0
+  - @opengeni/contracts@0.31.0
+  - @opengeni/core@0.18.0
+  - @opengeni/runtime@0.17.0
+  - @opengeni/db@0.22.1
+  - @opengeni/documents@0.2.69
+  - @opengeni/github@0.4.16
+  - @opengeni/storage@0.2.53
+  - @opengeni/events@0.3.59
+  - @opengeni/observability@0.4.3
+
+## 0.14.3
+
+### Patch Changes
+
+- e07eb52: Enforce frozen Allow, Ask, and Block connector action policies before provider execution while persisting metadata-only approval, decision, and outcome evidence.
+- Updated dependencies [e07eb52]
+- Updated dependencies [c4a0031]
+- Updated dependencies [4fcb6af]
+  - @opengeni/db@0.22.0
+  - @opengeni/runtime@0.16.3
+  - @opengeni/core@0.17.3
+  - @opengeni/documents@0.2.68
+  - @opengeni/events@0.3.58
+
 ## 0.14.2
 
 ### Patch Changes

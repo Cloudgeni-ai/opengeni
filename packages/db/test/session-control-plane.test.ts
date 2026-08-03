@@ -20,8 +20,10 @@ import {
   appendSessionEventsForTurnAttempt,
   appendSessionEventsWithLockedSessionUpdate,
   bootstrapWorkspace,
+  beginConnectorActionExecution,
   claimSessionWorkForAttempt,
   clearDurablePendingSessionToolCalls,
+  completeConnectorActionExecution,
   createDb,
   createSession,
   createSessionGoal,
@@ -34,6 +36,7 @@ import {
   getActiveSessionHistoryItems,
   getSession,
   getSessionGoal,
+  getSessionSystemUpdateOutboxByDedupeKey,
   getSessionTurn,
   listOutstandingSessionSystemUpdates,
   listSessionEvents,
@@ -48,6 +51,7 @@ import {
   getRecording,
   getLatestRunState,
   peekSessionWork,
+  prepareConnectorActionApproval,
   recoverSessionDispatch,
   reconcileSessionAttemptQuiescence,
   requestSessionCompaction,
@@ -63,6 +67,7 @@ import {
   settleSessionIdleWithParentOutbox,
   settleSessionAttemptInterruptions,
   submitHumanPromptInTransaction,
+  upsertConnectorActionPolicy,
   deleteSessionQueueItemInTransaction,
   withWorkspaceRls,
   withWorkspaceSubjectRls,
@@ -153,7 +158,7 @@ async function send(
 async function controlSession(
   grant: { accountId: string; workspaceId: string; subjectId: string },
   sessionId: string,
-  action: "pause" | "resume",
+  action: "pause" | "resume" | "cancel",
 ) {
   return await withWorkspaceRls(client.db, grant.workspaceId, (db) =>
     db.transaction((tx) =>
@@ -3681,7 +3686,7 @@ describe("clean session control plane", () => {
     }
   });
 
-  test("Pause and Resume are the only session lifecycle controls", async () => {
+  test("Pause and Resume preserve lifecycle while Cancel is terminal", async () => {
     const { grant, session } = await fixture();
     const paused = await controlSession(grant, session.id, "pause");
     expect(paused.control.state).toBe("paused");
@@ -3857,6 +3862,63 @@ describe("clean session control plane", () => {
         lineage: expect.objectContaining({ turnId: exhaustedTurn.id }),
       }),
     ]);
+
+    const parentPrompt = await send(grant, parent.id, "spawn a child that will be cancelled");
+    const parentAttemptId = crypto.randomUUID();
+    const parentTurn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      parent.id,
+      `session-${parent.id}`,
+      { attemptId: parentAttemptId },
+    );
+    expect(parentTurn?.id).toBe(parentPrompt.turn.id);
+    const cancelledChild = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "cancelled child",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+      parentSessionId: parent.id,
+      createdByActor: {
+        type: "agent_attempt",
+        attemptId: parentAttemptId,
+        sessionId: parent.id,
+        turnId: parentTurn!.id,
+        executionGeneration: parentTurn!.executionGeneration,
+      },
+    });
+    await send(grant, cancelledChild.id, "cancelled child");
+    expect(await controlSession(grant, cancelledChild.id, "cancel")).toMatchObject({
+      cancelledSessionCount: 1,
+      cancelledTurnCount: 1,
+    });
+    const cancellationDedupeKey = `child-completion:${cancelledChild.id}:cancelled`;
+    expect(
+      await getSessionSystemUpdateOutboxByDedupeKey(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        dedupeKey: cancellationDedupeKey,
+      }),
+    ).toMatchObject({
+      dedupeKey: cancellationDedupeKey,
+      classification: "info",
+      payload: {
+        type: "child_terminal_result",
+        childSessionId: cancelledChild.id,
+        status: "cancelled",
+      },
+      lineage: {
+        childSessionId: cancelledChild.id,
+        parentSessionId: parent.id,
+        parentTurnId: parentTurn!.id,
+      },
+      personalConnectionDelegations: [],
+    });
+    await controlSession(grant, cancelledChild.id, "cancel");
+    expect(await childOutboxes(cancelledChild.id)).toHaveLength(1);
   });
 
   test("Pause blocks a racing terminal settlement and Resume admits a new attempt of the same turn", async () => {
@@ -4593,6 +4655,7 @@ describe("clean session control plane", () => {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId!,
         sessionId: session.id,
+        subjectId: grant.subjectId,
         payload: { approvalId: "approval-race", decision: "approve" },
         clientEventId: `approval-a-${crypto.randomUUID()}`,
       }),
@@ -4600,6 +4663,7 @@ describe("clean session control plane", () => {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId!,
         sessionId: session.id,
+        subjectId: grant.subjectId,
         payload: { approvalId: "approval-race", decision: "reject" },
         clientEventId: `approval-b-${crypto.randomUUID()}`,
       }),
@@ -4677,6 +4741,7 @@ describe("clean session control plane", () => {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId!,
         sessionId: session.id,
+        subjectId: grant.subjectId,
         payload: { approvalId: "approval-stale", decision: "approve" },
         clientEventId: crypto.randomUUID(),
       }),
@@ -4686,10 +4751,347 @@ describe("clean session control plane", () => {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId!,
       sessionId: session.id,
+      subjectId: grant.subjectId,
       payload: { approvalId: "approval-current", decision: "approve" },
       clientEventId: crypto.randomUUID(),
     });
     expect(accepted.action).toBe("accepted");
+  });
+
+  test("connector policies enforce Allow/Ask/Block with frozen actors, idempotency, and secret-free audit", async () => {
+    const { grant, session } = await fixture();
+    const connectionId = `opaque-connection-${crypto.randomUUID()}`;
+    const serverId = "connector_docs";
+    const toolName = "perform_action";
+    for (const [actionName, policy] of [
+      ["read", "allow"],
+      ["write", "ask"],
+      ["delete", "block"],
+      ["reject", "ask"],
+    ] as const) {
+      const result = await upsertConnectorActionPolicy(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        subjectId: grant.subjectId,
+        connectionId,
+        serverId,
+        toolName,
+        actionName,
+        policy,
+      });
+      expect(result.changed).toBe(true);
+    }
+    const wildcardToolName = "perform_wildcard_action";
+    const wildcardPolicy = await upsertConnectorActionPolicy(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      subjectId: grant.subjectId,
+      connectionId,
+      serverId,
+      toolName: wildcardToolName,
+      actionName: "*",
+      policy: "block",
+    });
+    expect(wildcardPolicy.changed).toBe(true);
+    await send(grant, session.id, "exercise connector action policies");
+
+    const firstAttemptId = crypto.randomUUID();
+    const firstClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      attemptId: firstAttemptId,
+      trigger: { kind: "next" },
+    });
+    if (firstClaim.action !== "claimed") throw new Error(`claim failed: ${firstClaim.reason}`);
+    const firstIdentity = {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: firstClaim.turn.id,
+      attemptId: firstAttemptId,
+      executionGeneration: firstClaim.turn.executionGeneration,
+      initiator: firstClaim.turn.initiator,
+    };
+    const sensitiveFixture = `sensitive-fixture-${crypto.randomUUID()}`;
+    const call = (approvalId: string, action: string, value = sensitiveFixture) => ({
+      approvalId,
+      connectionId,
+      serverId,
+      toolName,
+      arguments: { action, payload: value },
+    });
+
+    const unmanaged = call("connector-unmanaged", "unmanaged");
+    expect(await prepareConnectorActionApproval(client.db, firstIdentity, unmanaged)).toEqual({
+      managed: false,
+      decision: "unmanaged",
+    });
+    expect(await beginConnectorActionExecution(client.db, firstIdentity, unmanaged)).toEqual({
+      allowed: true,
+      managed: false,
+    });
+
+    const allowCall = call("connector-allow", "read");
+    expect(await prepareConnectorActionApproval(client.db, firstIdentity, allowCall)).toMatchObject(
+      {
+        managed: true,
+        decision: "allow",
+      },
+    );
+    const allowAdmission = await beginConnectorActionExecution(client.db, firstIdentity, allowCall);
+    expect(allowAdmission).toMatchObject({ allowed: true, managed: true });
+    if (!allowAdmission.allowed || !allowAdmission.managed) throw new Error("allow was denied");
+    await completeConnectorActionExecution(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      requestId: allowAdmission.requestId,
+      attemptId: firstAttemptId,
+      outcome: "completed",
+    });
+    expect(await beginConnectorActionExecution(client.db, firstIdentity, allowCall)).toMatchObject({
+      allowed: false,
+      reason: "already_executed",
+    });
+
+    const askCall = call("connector-ask", "write");
+    const askPreparation = await prepareConnectorActionApproval(client.db, firstIdentity, askCall);
+    expect(askPreparation).toMatchObject({ managed: true, decision: "ask" });
+    expect(
+      await saveRunState(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: firstClaim.turn.id,
+        expectedExecutionGeneration: firstClaim.turn.executionGeneration,
+        expectedAttemptId: firstAttemptId,
+        serializedRunState: "connector-ask-state",
+        pendingApprovals: [{ id: askCall.approvalId }],
+      }),
+    ).toBe(true);
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: firstClaim.turn.id,
+      triggerEventId: firstClaim.turn.triggerEventId,
+      attemptId: firstAttemptId,
+      turnStatus: "requires_action",
+      sessionStatus: "requires_action",
+      activeTurnId: firstClaim.turn.id,
+      events: [{ type: "session.requiresAction", payload: { approvalId: askCall.approvalId } }],
+    });
+    const approver = `approver-${crypto.randomUUID()}`;
+    const acceptedAsk = await acceptSessionApprovalDecision(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      subjectId: approver,
+      payload: { approvalId: askCall.approvalId, decision: "approve" },
+      clientEventId: crypto.randomUUID(),
+    });
+    if (acceptedAsk.action !== "accepted") throw new Error("connector Ask was not accepted");
+
+    // Mutate the live policy after approval. The resumed execution must honor
+    // the original request snapshot, not re-resolve this new Block decision.
+    const changedPolicy = await upsertConnectorActionPolicy(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      subjectId: grant.subjectId,
+      connectionId,
+      serverId,
+      toolName,
+      actionName: "write",
+      policy: "block",
+    });
+    expect(changedPolicy.policy.version).toBe(2);
+
+    const secondAttemptId = crypto.randomUUID();
+    const secondClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      attemptId: secondAttemptId,
+      trigger: { kind: "approval", triggerEventId: acceptedAsk.event.id },
+    });
+    if (secondClaim.action !== "claimed") throw new Error(`resume failed: ${secondClaim.reason}`);
+    const secondIdentity = {
+      ...firstIdentity,
+      attemptId: secondAttemptId,
+      executionGeneration: secondClaim.turn.executionGeneration,
+      initiator: secondClaim.turn.initiator,
+    };
+    const askAdmission = await beginConnectorActionExecution(client.db, secondIdentity, askCall);
+    expect(askAdmission).toMatchObject({ allowed: true, managed: true });
+    if (!askAdmission.allowed || !askAdmission.managed) throw new Error("approved Ask was denied");
+    await completeConnectorActionExecution(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      requestId: askAdmission.requestId,
+      attemptId: secondAttemptId,
+      outcome: "completed",
+    });
+    await expect(
+      beginConnectorActionExecution(
+        client.db,
+        secondIdentity,
+        call(askCall.approvalId, "write", `${sensitiveFixture}-changed`),
+      ),
+    ).rejects.toThrow(/different immutable inputs/i);
+
+    const blockCall = call("connector-block", "delete");
+    expect(
+      await prepareConnectorActionApproval(client.db, secondIdentity, blockCall),
+    ).toMatchObject({
+      managed: true,
+      decision: "block",
+    });
+    expect(await beginConnectorActionExecution(client.db, secondIdentity, blockCall)).toMatchObject(
+      {
+        allowed: false,
+        reason: "blocked",
+      },
+    );
+
+    const actionLeakMarker = ["Bearer", "review", "marker", crypto.randomUUID()].join("-");
+    const requestBodyLeakMarker = `request-body-marker-${crypto.randomUUID()}`;
+    const toolResultLeakMarker = `tool-result-marker-${crypto.randomUUID()}`;
+    const responseLeakMarker = `response-marker-${crypto.randomUUID()}`;
+    const credentialHeaderName = ["auth", "orization"].join("");
+    const wildcardBlockCall = {
+      approvalId: "connector-wildcard-block",
+      connectionId,
+      serverId,
+      toolName: wildcardToolName,
+      arguments: {
+        action: actionLeakMarker,
+        headers: { [credentialHeaderName]: actionLeakMarker },
+        requestBody: { payload: requestBodyLeakMarker },
+        toolResult: toolResultLeakMarker,
+        response: { sensitive: responseLeakMarker },
+      },
+    };
+    expect(
+      await prepareConnectorActionApproval(client.db, secondIdentity, wildcardBlockCall),
+    ).toMatchObject({ managed: true, decision: "block" });
+
+    const rejectCall = call("connector-reject", "reject");
+    expect(
+      await prepareConnectorActionApproval(client.db, secondIdentity, rejectCall),
+    ).toMatchObject({
+      managed: true,
+      decision: "ask",
+    });
+    expect(
+      await saveRunState(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: secondClaim.turn.id,
+        expectedExecutionGeneration: secondClaim.turn.executionGeneration,
+        expectedAttemptId: secondAttemptId,
+        serializedRunState: "connector-reject-state",
+        pendingApprovals: [{ id: rejectCall.approvalId }],
+      }),
+    ).toBe(true);
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: secondClaim.turn.id,
+      triggerEventId: secondClaim.turn.triggerEventId,
+      attemptId: secondAttemptId,
+      turnStatus: "requires_action",
+      sessionStatus: "requires_action",
+      activeTurnId: secondClaim.turn.id,
+      events: [{ type: "session.requiresAction", payload: { approvalId: rejectCall.approvalId } }],
+    });
+    const rejected = await acceptSessionApprovalDecision(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      subjectId: approver,
+      payload: { approvalId: rejectCall.approvalId, decision: "reject" },
+      clientEventId: crypto.randomUUID(),
+    });
+    if (rejected.action !== "accepted") throw new Error("connector rejection was not accepted");
+    const thirdAttemptId = crypto.randomUUID();
+    const thirdClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      attemptId: thirdAttemptId,
+      trigger: { kind: "approval", triggerEventId: rejected.event.id },
+    });
+    if (thirdClaim.action !== "claimed")
+      throw new Error(`reject resume failed: ${thirdClaim.reason}`);
+    expect(
+      await beginConnectorActionExecution(
+        client.db,
+        {
+          ...firstIdentity,
+          attemptId: thirdAttemptId,
+          executionGeneration: thirdClaim.turn.executionGeneration,
+          initiator: thirdClaim.turn.initiator,
+        },
+        rejectCall,
+      ),
+    ).toMatchObject({ allowed: false, reason: "rejected" });
+
+    const evidence = await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => ({
+      requests: await db
+        .select()
+        .from(schema.connectorActionRequests)
+        .where(eq(schema.connectorActionRequests.sessionId, session.id)),
+      audits: await db
+        .select()
+        .from(schema.auditEvents)
+        .where(eq(schema.auditEvents.workspaceId, grant.workspaceId!)),
+    }));
+    const requestsByApproval = new Map(evidence.requests.map((row) => [row.approvalId, row]));
+    expect(requestsByApproval.get(allowCall.approvalId)?.status).toBe("completed");
+    expect(requestsByApproval.get(askCall.approvalId)).toMatchObject({
+      status: "completed",
+      decision: "approve",
+      decisionBySubjectId: approver,
+      initiatorKind: firstIdentity.initiator.kind,
+      initiatorSubjectId: firstIdentity.initiator.subjectId,
+      creationAttemptId: firstAttemptId,
+      executionAttemptId: secondAttemptId,
+    });
+    expect(requestsByApproval.get(blockCall.approvalId)?.status).toBe("blocked");
+    const wildcardRequest = requestsByApproval.get(wildcardBlockCall.approvalId);
+    expect(wildcardRequest).toMatchObject({
+      status: "blocked",
+      toolName: wildcardToolName,
+      actionName: "*",
+    });
+    expect(requestsByApproval.get(rejectCall.approvalId)).toMatchObject({
+      status: "rejected",
+      decision: "reject",
+      decisionBySubjectId: approver,
+      initiatorSubjectId: firstIdentity.initiator.subjectId,
+    });
+    const connectorAuditActions = evidence.audits
+      .filter((row) => row.action.startsWith("connector.action."))
+      .map((row) => row.action);
+    expect(connectorAuditActions).toContain("connector.action.approval_requested");
+    expect(connectorAuditActions).toContain("connector.action.approval_decided");
+    expect(connectorAuditActions).toContain("connector.action.blocked");
+    expect(connectorAuditActions).toContain("connector.action.execution_started");
+    expect(connectorAuditActions).toContain("connector.action.execution_completed");
+    expect(JSON.stringify(evidence)).not.toContain(sensitiveFixture);
+    const wildcardAudits = evidence.audits.filter(
+      (row) => row.metadata.requestId === wildcardRequest?.id,
+    );
+    const wildcardEvidence = JSON.stringify({ request: wildcardRequest, audits: wildcardAudits });
+    for (const marker of [
+      actionLeakMarker,
+      requestBodyLeakMarker,
+      toolResultLeakMarker,
+      responseLeakMarker,
+    ]) {
+      expect(wildcardEvidence).not.toContain(marker);
+    }
   });
 
   test("a committed session control command replays before its stale control fence is checked", async () => {
@@ -4724,6 +5126,223 @@ describe("clean session control plane", () => {
     });
     expect(replay.receipt.id).toBe(first.receipt.id);
     expect(await listWorkspaceControlEvents(client.db, grant.workspaceId!, 0, 10)).toHaveLength(1);
+  });
+
+  test("terminal cancellation drains a subtree and settles its active attempt as cancelled", async () => {
+    const { grant, session } = await fixture();
+    const child = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "child initial",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+      parentSessionId: session.id,
+    });
+    const rootPrompt = await send(grant, session.id, "root work");
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    expect(claimed?.id).toBe(rootPrompt.turn.id);
+    const childPrompt = await send(grant, child.id, "child queued work");
+
+    const cancelled = await controlSession(grant, session.id, "cancel");
+    expect(cancelled).toMatchObject({
+      replay: false,
+      control: { state: "paused" },
+      interruptionCount: 1,
+      wakeCount: 2,
+      cancelledSessionCount: 2,
+      cancelledTurnCount: 2,
+    });
+    expect(cancelled.affectedSessionEvents.map((entry) => entry.sessionId).sort()).toEqual(
+      [session.id, child.id].sort(),
+    );
+    expect((await getSession(client.db, grant.workspaceId!, session.id))?.status).toBe("cancelled");
+    expect((await getSession(client.db, grant.workspaceId!, child.id))?.status).toBe("cancelled");
+    expect((await getSessionTurn(client.db, grant.workspaceId!, childPrompt.turn.id))?.status).toBe(
+      "cancelled",
+    );
+    expect((await getSessionQueueSnapshot(client.db, grant.workspaceId!, child.id))?.items).toEqual(
+      [],
+    );
+
+    await expect(controlSession(grant, child.id, "resume")).rejects.toThrow(
+      "Cancelled session subtree cannot accept work",
+    );
+    await expect(send(grant, child.id, "must stay fenced")).rejects.toThrow(
+      "Cancelled session subtree cannot accept work",
+    );
+
+    const settled = await settleSessionAttemptInterruptions(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      attemptId,
+    );
+    expect(settled).toMatchObject({ action: "paused", outcome: "cancelled" });
+    expect((await getSessionTurn(client.db, grant.workspaceId!, rootPrompt.turn.id))?.status).toBe(
+      "cancelled",
+    );
+    expect((await getSession(client.db, grant.workspaceId!, session.id))?.status).toBe("cancelled");
+  });
+
+  test("terminal cancellation wakes a workflow parked without a live attempt", async () => {
+    const { grant, session } = await fixture();
+    const prompt = await send(grant, session.id, "wait for approval forever");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    expect(turn?.id).toBe(prompt.turn.id);
+    const settlement = await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: turn!.id,
+      triggerEventId: turn!.triggerEventId,
+      attemptId,
+      turnStatus: "requires_action",
+      sessionStatus: "requires_action",
+      activeTurnId: turn!.id,
+      runState: {
+        serializedRunState: JSON.stringify({ version: 1, interrupted: true }),
+        pendingApprovals: [{ id: "approval-without-deadline" }],
+      },
+      events: [
+        {
+          type: "session.requiresAction",
+          payload: { approvalId: "approval-without-deadline" },
+        },
+      ],
+    });
+    expect(settlement.action).toBe("settled");
+    expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
+      kind: "approval-wait",
+    });
+
+    const cancelled = await controlSession(grant, session.id, "cancel");
+    expect(cancelled).toMatchObject({
+      interruptionCount: 0,
+      wakeCount: 1,
+      cancelledSessionCount: 1,
+      cancelledTurnCount: 1,
+    });
+    expect((await getSessionTurn(client.db, grant.workspaceId!, turn!.id))?.status).toBe(
+      "cancelled",
+    );
+    expect((await getSession(client.db, grant.workspaceId!, session.id))?.status).toBe("cancelled");
+  });
+
+  test("terminal cancellation serializes a concurrent Send behind the terminal fence", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "queued before cancellation");
+    let cancellationApplied!: () => void;
+    const applied = new Promise<void>((resolve) => {
+      cancellationApplied = resolve;
+    });
+    let releaseCancellation!: () => void;
+    const release = new Promise<void>((resolve) => {
+      releaseCancellation = resolve;
+    });
+    const cancelling = withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db.transaction(async (tx) => {
+        const result = await mutateSessionControlInTransaction(tx as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          actor: { type: "human", subjectId: grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          action: "cancel",
+        });
+        cancellationApplied();
+        await release;
+        return result;
+      }),
+    );
+    await applied;
+
+    let sendSettled = false;
+    const racingSend = send(grant, session.id, "concurrent send")
+      .then(() => {
+        sendSettled = true;
+        throw new Error("concurrent Send unexpectedly succeeded");
+      })
+      .catch((error: unknown) => {
+        sendSettled = true;
+        throw error;
+      });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(sendSettled).toBe(false);
+    releaseCancellation();
+    await cancelling;
+    await expect(racingSend).rejects.toThrow("Cancelled session subtree cannot accept work");
+    expect(
+      (await getSessionQueueSnapshot(client.db, grant.workspaceId!, session.id))?.items,
+    ).toEqual([]);
+  });
+
+  test("terminal cancellation serializes child creation behind the terminal fence", async () => {
+    const { grant, session } = await fixture();
+    let cancellationApplied!: () => void;
+    const applied = new Promise<void>((resolve) => {
+      cancellationApplied = resolve;
+    });
+    let releaseCancellation!: () => void;
+    const release = new Promise<void>((resolve) => {
+      releaseCancellation = resolve;
+    });
+    const cancelling = withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db.transaction(async (tx) => {
+        const result = await mutateSessionControlInTransaction(tx as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          actor: { type: "human", subjectId: grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          action: "cancel",
+        });
+        cancellationApplied();
+        await release;
+        return result;
+      }),
+    );
+    await applied;
+
+    let childCreateSettled = false;
+    const racingChildCreate = createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "must stay fenced",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+      parentSessionId: session.id,
+    })
+      .then(() => {
+        childCreateSettled = true;
+        throw new Error("concurrent child creation unexpectedly succeeded");
+      })
+      .catch((error: unknown) => {
+        childCreateSettled = true;
+        throw error;
+      });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(childCreateSettled).toBe(false);
+    releaseCancellation();
+    await cancelling;
+    await expect(racingChildCreate).rejects.toThrow(
+      "Cancelled session subtree cannot create children",
+    );
   });
 
   test("a committed workspace control command replays before its stale revision is checked", async () => {

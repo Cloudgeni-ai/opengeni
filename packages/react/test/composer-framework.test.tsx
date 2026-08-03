@@ -539,6 +539,36 @@ describe("compound composer framework", () => {
     );
   });
 
+  test("autoFocus waits until the composer is interactive", async () => {
+    let setDisabled: ((value: boolean) => void) | null = null;
+    function Harness() {
+      const [value, setValue] = useState("");
+      const [disabled, set] = useState(true);
+      setDisabled = set;
+      return (
+        <ChatComposer
+          composer={fullComposer({ value, setValue, canSend: value.trim().length > 0 })}
+          disabled={disabled}
+          autoFocus
+        />
+      );
+    }
+    mounted = await renderComponent(<Harness />);
+    const textarea = mounted.container.querySelector("textarea");
+    expect(textarea?.disabled).toBe(true);
+    expect(document.activeElement).not.toBe(textarea);
+
+    await act(async () => {
+      setDisabled?.(false);
+      await new Promise<void>((resolve) => {
+        window.requestAnimationFrame(() => resolve());
+      });
+    });
+
+    expect(textarea?.disabled).toBe(false);
+    expect(document.activeElement).toBe(textarea);
+  });
+
   test("the compound composition is server-renderable with deterministic ownership markup", () => {
     const html = renderToString(<DeliveryOnlyComposer />);
     expect(html).toContain("data-og-composer-id");

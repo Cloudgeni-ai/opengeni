@@ -580,6 +580,8 @@ export class MockOpenGeniClient implements SessionClientLike {
       effectiveControl: this.effectiveControl(sessionId),
       interruptionCount: 0,
       wakeCount: 0,
+      cancelledSessionCount: 0,
+      cancelledTurnCount: 0,
     };
   }
 
@@ -1911,7 +1913,7 @@ const CLIENT_CONFIG: ClientConfig = {
     },
   ],
   defaultReasoningEffort: "medium",
-  allowedReasoningEfforts: ["none", "minimal", "low", "medium", "high", "xhigh"],
+  allowedReasoningEfforts: ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
   mcpServers: [{ id: "opengeni", name: "OpenGeni" }],
   fileUploads: { enabled: true, maxSizeBytes: 25 * 1024 * 1024 },
   productAccessMode: "managed",

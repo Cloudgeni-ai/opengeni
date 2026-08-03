@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   assertTurnExecutionPolicyMatchesConfigV1,
+  calculateGatewayReportedCostMicros,
   calculateModelUsageCostMicros,
   canonicalizeConfiguredModelId,
   configuredAllowedModels,
@@ -20,6 +21,11 @@ import {
   selectModelPricing,
   serviceTierForLatencyMode,
   withCodexCatalogProvider,
+  withWorkspaceGatewayCatalogProvider,
+  withWorkspaceGatewayCredential,
+  OPENGENI_GATEWAY_MODELS,
+  OPENGENI_GATEWAY_PROVIDER_ID,
+  WORKSPACE_GATEWAY_PROVIDER_ID,
 } from "../src";
 
 // A reusable Fireworks/GLM-5.2 registry JSON mirroring the doc's host example.
@@ -57,6 +63,142 @@ const codexRegistry = JSON.stringify([
     models: [{ id: "codex/gpt-5.6-sol", label: "gpt-5.6-sol", reasoningEffort: true }],
   },
 ]);
+
+describe("curated AI Gateway catalogue", () => {
+  test("adds the two managed models with exact routes, capabilities, and prices", () => {
+    const settings = {
+      ...getSettings(),
+      modelProvidersJson: "[]",
+      vercelAiGatewayApiKey: "vck_test",
+    };
+    const providers = configuredProviders(settings);
+    const gateway = providers.find((provider) => provider.id === OPENGENI_GATEWAY_PROVIDER_ID)!;
+    expect(gateway.kind).toBe("vercel-gateway-managed");
+    expect(gateway.api).toBe("responses");
+
+    const models = configuredModels(settings);
+    const deepseek = models.find(
+      (model) => model.id === OPENGENI_GATEWAY_MODELS.deepseek.productId,
+    )!;
+    const kimi = models.find((model) => model.id === OPENGENI_GATEWAY_MODELS.kimi.productId)!;
+    expect(deepseek.upstreamModelId).toBe(OPENGENI_GATEWAY_MODELS.deepseek.upstreamModelId);
+    expect(deepseek.requestPolicy).toEqual({
+      gateway: { only: ["baseten", "novita", "deepinfra"], caching: "auto" },
+    });
+    expect(deepseek.capabilities.promptCaching).toEqual({
+      upstream: "supported",
+      runnable: true,
+      mode: "implicit",
+    });
+    expect(kimi.upstreamModelId).toBe("moonshotai/kimi-k3");
+    expect(kimi.label).toBe("Kimi K3");
+    expect(kimi.aliases).toEqual([]);
+    expect(kimi.requestPolicy).toEqual({
+      gateway: { only: ["baseten", "fireworks"], caching: "auto" },
+    });
+    expect(kimi.capabilities.promptCaching).toEqual({
+      upstream: "supported",
+      runnable: true,
+      mode: "implicit",
+    });
+    expect(kimi.capabilities.latencyModes.map((mode) => mode.id)).toEqual(["standard"]);
+
+    expect(configuredModelPricing(settings)[deepseek.id]).toEqual({
+      inputMicrosPerMillionTokens: 140_000,
+      cachedInputMicrosPerMillionTokens: 28_000,
+      outputMicrosPerMillionTokens: 280_000,
+      marginBps: 2_500,
+    });
+    expect(configuredModelPricing(settings)[kimi.id]).toEqual({
+      inputMicrosPerMillionTokens: 3_000_000,
+      cachedInputMicrosPerMillionTokens: 300_000,
+      outputMicrosPerMillionTokens: 15_000_000,
+      marginBps: 2_500,
+    });
+  });
+
+  test("workspace overlay is externally billed and receives a key only at runtime", () => {
+    const base = { ...getSettings(), modelProvidersJson: "[]", vercelAiGatewayApiKey: undefined };
+    const catalog = withWorkspaceGatewayCatalogProvider(base);
+    const provider = configuredProviders(catalog).find(
+      (candidate) => candidate.id === WORKSPACE_GATEWAY_PROVIDER_ID,
+    )!;
+    expect(provider.kind).toBe("vercel-gateway-workspace");
+    expect(provider.apiKey).toBeUndefined();
+    expect(provider.credentialSource).toEqual({
+      kind: "workspace_connection",
+      mechanism: "api_key",
+    });
+    expect(provider.billing).toEqual({ upstreamPayer: "workspace", metering: "external" });
+
+    const runtime = withWorkspaceGatewayCredential(catalog, "vck_workspace");
+    expect(
+      configuredProviders(runtime).find(
+        (candidate) => candidate.id === WORKSPACE_GATEWAY_PROVIDER_ID,
+      )?.apiKey,
+    ).toBe("vck_workspace");
+  });
+
+  test("managed debit fallback uses the highest approved DeepSeek route", () => {
+    const settings = {
+      ...getSettings(),
+      modelProvidersJson: "[]",
+      vercelAiGatewayApiKey: "vck_test",
+    };
+    expect(
+      calculateModelUsageCostMicros(settings, OPENGENI_GATEWAY_MODELS.deepseek.productId, {
+        inputTokens: 1_000_000,
+        outputTokens: 1_000_000,
+        inputTokensDetails: { cached_tokens: 1_000_000 },
+      }),
+    ).toBe(385_000);
+  });
+
+  test("managed debit fallback applies normal Kimi cache-read pricing", () => {
+    const settings = {
+      ...getSettings(),
+      modelProvidersJson: "[]",
+      vercelAiGatewayApiKey: "vck_test",
+    };
+    expect(
+      calculateModelUsageCostMicros(settings, OPENGENI_GATEWAY_MODELS.kimi.productId, {
+        inputTokens: 1_000_000,
+        outputTokens: 0,
+        inputTokensDetails: { cached_tokens: 1_000_000 },
+      }),
+    ).toBe(375_000);
+  });
+
+  test("managed debit converts exact Gateway cost before applying margin", () => {
+    const settings = {
+      ...getSettings(),
+      modelProvidersJson: "[]",
+      vercelAiGatewayApiKey: "vck_test",
+    };
+    expect(
+      calculateGatewayReportedCostMicros(
+        settings,
+        OPENGENI_GATEWAY_MODELS.deepseek.productId,
+        "0.00000325",
+        { inputTokens: 9 },
+      ),
+    ).toBe(5);
+    expect(
+      calculateGatewayReportedCostMicros(
+        settings,
+        OPENGENI_GATEWAY_MODELS.deepseek.productId,
+        "1.23456789",
+      ),
+    ).toBe(1_543_210);
+    expect(() =>
+      calculateGatewayReportedCostMicros(
+        settings,
+        OPENGENI_GATEWAY_MODELS.deepseek.productId,
+        "NaN",
+      ),
+    ).toThrow("Invalid AI Gateway inference cost");
+  });
+});
 
 const grok45Capabilities = {
   reasoning: {
@@ -996,7 +1138,7 @@ describe("turn execution policy V1", () => {
       modelId: "codex/gpt-5.6-sol",
       requestedModelId: null,
       modelSource: "session",
-      reasoningEffort: "xhigh",
+      reasoningEffort: "max",
       reasoningSource: "session",
     });
     expect(policy).toMatchObject({
@@ -1006,6 +1148,7 @@ describe("turn execution policy V1", () => {
       credentialSource: { kind: "connected_subscription", provider: "codex" },
       billing: { upstreamPayer: "connected_subscription", metering: "external" },
     });
+    expect(policy.reasoningEffort).toBe("max");
   });
 });
 describe("Grok 4.5 explicit xAI registry contract", () => {

@@ -451,11 +451,15 @@ describe("OpenGeniClient", () => {
     });
   });
 
-  test("pause uses atomic control while approval posts a typed event", async () => {
+  test("pause and terminal cancel use atomic control while approval posts a typed event", async () => {
     const { client, requests } = makeClient(() =>
       jsonResponse({ event: makeEvent(5, "user.pause") }, 202),
     );
     await client.pauseSession(WORKSPACE_ID, SESSION_ID, { reason: "pause" });
+    await client.cancelSession(WORKSPACE_ID, SESSION_ID, {
+      reason: "host deleted",
+      clientEventId: "cancel-1",
+    });
     await client.sendApprovalDecision(WORKSPACE_ID, SESSION_ID, {
       approvalId: "ap-1",
       decision: "approve",
@@ -466,6 +470,11 @@ describe("OpenGeniClient", () => {
     });
     expect(JSON.parse(requests[0]!.body!).clientEventId).toEqual(expect.any(String));
     expect(JSON.parse(requests[1]!.body!)).toEqual({
+      action: "cancel",
+      reason: "host deleted",
+      clientEventId: "cancel-1",
+    });
+    expect(JSON.parse(requests[2]!.body!)).toEqual({
       type: "user.approvalDecision",
       payload: { approvalId: "ap-1", decision: "approve" },
     });

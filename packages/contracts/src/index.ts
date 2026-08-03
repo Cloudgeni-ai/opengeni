@@ -503,7 +503,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
   },
 };
 
-export const ReasoningEffort = z.enum(["none", "minimal", "low", "medium", "high", "xhigh"]);
+export const ReasoningEffort = z.enum(["none", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
 /** Provider service-tier / latency mode selected for a turn or session default. */
 export const LatencyMode = z.enum(["standard", "priority", "fast"]);
@@ -1183,6 +1183,57 @@ export const VOICE_INPUT_ACCEPTED_MIME_TYPES = [
 export const CodexCompactionMode = z.enum(["remote_v2", "portable"]);
 export type CodexCompactionMode = z.infer<typeof CodexCompactionMode>;
 
+export const SlackReactionEmojiName = z
+  .string()
+  .trim()
+  .min(1)
+  .max(64)
+  .regex(/^[a-z0-9_+-]+$/, "use the exact Slack emoji name without surrounding colons");
+export type SlackReactionEmojiName = z.infer<typeof SlackReactionEmojiName>;
+
+export const WorkspaceSlackReactionChannelPolicy = z.discriminatedUnion("mode", [
+  z.object({ mode: z.literal("bot_member") }).strict(),
+  z
+    .object({
+      mode: z.literal("allowlist"),
+      channelIds: z.array(z.string().trim().min(1).max(64)).max(100),
+    })
+    .strict(),
+]);
+export type WorkspaceSlackReactionChannelPolicy = z.infer<
+  typeof WorkspaceSlackReactionChannelPolicy
+>;
+
+export const WorkspaceSlackReactionSummonSettings = z
+  .object({
+    enabled: z.boolean(),
+    emoji: SlackReactionEmojiName,
+    channelPolicy: WorkspaceSlackReactionChannelPolicy,
+  })
+  .strict();
+export type WorkspaceSlackReactionSummonSettings = z.infer<
+  typeof WorkspaceSlackReactionSummonSettings
+>;
+
+export const SlackReactionChannel = z.object({
+  id: z.string().min(1).max(64),
+  name: z.string().min(1).max(256).nullable(),
+  isPrivate: z.boolean(),
+});
+export type SlackReactionChannel = z.infer<typeof SlackReactionChannel>;
+
+export const SlackReactionChannelListResponse = z.object({
+  channels: z.array(SlackReactionChannel).max(200),
+  nextCursor: z.string().max(1_024).nullable(),
+});
+export type SlackReactionChannelListResponse = z.infer<typeof SlackReactionChannelListResponse>;
+
+export const DEFAULT_WORKSPACE_SLACK_REACTION_SUMMON_SETTINGS = {
+  enabled: false,
+  emoji: "genie",
+  channelPolicy: { mode: "bot_member" },
+} as const satisfies WorkspaceSlackReactionSummonSettings;
+
 // Validates the KNOWN keys of workspaces.settings; passthrough keeps unknown
 // (future) keys rather than stripping them. memoryEnabled defaults off;
 // voiceInput defaults to enabled when the deployment has a provider.
@@ -1202,6 +1253,9 @@ export const WorkspaceSettingsSchema = z
     // Default compaction strategy for NEW Codex sessions created in this
     // workspace. Absent ⇒ remote_v2. Non-Codex sessions always freeze portable.
     codexCompactionDefault: CodexCompactionMode.optional(),
+    // Optional Slack reaction invocation. Absent/invalid fails closed to the
+    // disabled default via resolveWorkspaceSlackReactionSummonSettings.
+    slackReactionSummon: WorkspaceSlackReactionSummonSettings.optional(),
   })
   .passthrough();
 export type WorkspaceSettings = z.infer<typeof WorkspaceSettingsSchema>;
@@ -1235,6 +1289,39 @@ export function resolveWorkspaceVoiceInputEnabled(settings: unknown): boolean | 
   return null;
 }
 
+export function resolveWorkspaceSlackReactionSummonSettings(
+  settings: unknown,
+): WorkspaceSlackReactionSummonSettings {
+  const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
+  const configured = parsed.success ? parsed.data.slackReactionSummon : undefined;
+  if (!configured) {
+    return {
+      enabled: DEFAULT_WORKSPACE_SLACK_REACTION_SUMMON_SETTINGS.enabled,
+      emoji: DEFAULT_WORKSPACE_SLACK_REACTION_SUMMON_SETTINGS.emoji,
+      channelPolicy: { ...DEFAULT_WORKSPACE_SLACK_REACTION_SUMMON_SETTINGS.channelPolicy },
+    };
+  }
+  return configured.channelPolicy.mode === "allowlist"
+    ? {
+        ...configured,
+        channelPolicy: {
+          mode: "allowlist",
+          channelIds: [...new Set(configured.channelPolicy.channelIds)],
+        },
+      }
+    : { ...configured, channelPolicy: { mode: "bot_member" } };
+}
+
+export function workspaceSlackReactionChannelAllowed(
+  settings: WorkspaceSlackReactionSummonSettings,
+  channelId: string,
+): boolean {
+  return (
+    settings.channelPolicy.mode === "bot_member" ||
+    settings.channelPolicy.channelIds.includes(channelId)
+  );
+}
+
 // PATCH body for workspace settings: a partial top-level patch that merges into
 // the stored bag. Nested voiceInput/transcription updates are full replacements;
 // passthrough carries forward-compatible unknown keys.
@@ -1246,6 +1333,7 @@ export const UpdateWorkspaceSettingsRequest = z
     transcription: WorkspaceTranscriptionPolicy.optional(),
     maxNestedAgentDepth: NestedAgentDepthValue.nullable().optional(),
     codexCompactionDefault: CodexCompactionMode.optional(),
+    slackReactionSummon: WorkspaceSlackReactionSummonSettings.optional(),
   })
   .passthrough();
 export type UpdateWorkspaceSettingsRequest = z.infer<typeof UpdateWorkspaceSettingsRequest>;
@@ -3604,7 +3692,8 @@ export function reasoningEffortForMetadata(
     value === "low" ||
     value === "medium" ||
     value === "high" ||
-    value === "xhigh"
+    value === "xhigh" ||
+    value === "max"
     ? value
     : fallback;
 }
@@ -4246,7 +4335,7 @@ const WorkspaceControlReason = z
   );
 
 export const SessionControlRequest = z.object({
-  action: z.enum(["pause", "resume"]),
+  action: z.enum(["pause", "resume", "cancel"]),
   reason: WorkspaceControlReason.optional(),
   clientEventId: SessionOperationKey,
   expectedControlEtag: z.string().min(1).optional(),
@@ -4494,7 +4583,7 @@ export const SessionSystemUpdatePayload = z.discriminatedUnion("type", [
     .object({
       type: z.literal("child_terminal_result"),
       childSessionId: z.string().uuid(),
-      status: z.enum(["idle", "failed"]),
+      status: z.enum(["idle", "failed", "cancelled"]),
     })
     .passthrough(),
 ]);
@@ -5165,43 +5254,83 @@ export const CapabilityPack = z.preprocess(
     }
     return record;
   },
-  z.object({
-    id: z.string().min(1),
-    name: z.string().min(1),
-    description: z.string().min(1),
-    role: z.string().min(1),
-    category: z.string().min(1),
-    version: z.string().min(1),
-    // Container image ref (digest-pinned recommended) the pack's sessions run
-    // in. At most one enabled pack per workspace may declare one; with none,
-    // sessions use the deployment-wide image settings.
-    sandboxImage: z.string().trim().min(1).max(512).optional(),
-    // Skills delivered into the sandbox skill index when the pack is enabled.
-    skills: z
-      .array(CapabilityPackSkill)
-      .max(32)
-      .superRefine((skills, ctx) => {
-        const seen = new Set<string>();
-        skills.forEach((skill, index) => {
-          const key = skill.name.toLowerCase();
-          if (seen.has(key)) {
-            ctx.addIssue({
-              code: "custom",
-              message: `duplicate pack skill name: ${skill.name}`,
-              path: [index, "name"],
-            });
-          }
-          seen.add(key);
+  z
+    .object({
+      id: z.string().min(1),
+      name: z.string().min(1),
+      description: z.string().min(1),
+      role: z.string().min(1),
+      category: z.string().min(1),
+      version: z.string().min(1),
+      // Container image ref (digest-pinned recommended) the pack's sessions run
+      // in. At most one enabled pack per workspace may declare one; with none,
+      // sessions use the deployment-wide image settings.
+      sandboxImage: z.string().trim().min(1).max(512).optional(),
+      // Optional provider-native immutable identities for the exact logical
+      // sandboxImage above. These avoid re-importing a private registry image on
+      // every provider while preserving sandboxImage as the cross-provider image
+      // provenance and lease-conflict identity.
+      sandboxProviderImages: z
+        .object({
+          modal: z
+            .object({
+              imageId: z
+                .string()
+                .trim()
+                .regex(/^im-[A-Za-z0-9]{22}$/),
+            })
+            .strict()
+            .optional(),
+        })
+        .strict()
+        .optional(),
+      // Skills delivered into the sandbox skill index when the pack is enabled.
+      skills: z
+        .array(CapabilityPackSkill)
+        .max(32)
+        .superRefine((skills, ctx) => {
+          const seen = new Set<string>();
+          skills.forEach((skill, index) => {
+            const key = skill.name.toLowerCase();
+            if (seen.has(key)) {
+              ctx.addIssue({
+                code: "custom",
+                message: `duplicate pack skill name: ${skill.name}`,
+                path: [index, "name"],
+              });
+            }
+            seen.add(key);
+          });
+        })
+        .default([]),
+      tools: z.array(ToolRef).default([]),
+      connectors: z.array(CapabilityPackConnector).default([]),
+      knowledge: z.array(CapabilityPackKnowledge).default([]),
+      scheduledTaskTemplates: z.array(CapabilityPackScheduledTaskTemplate).default([]),
+      variableSet: CapabilityPackVariableSet.optional(),
+      metadata: z.record(z.string(), z.unknown()).default({}),
+    })
+    .superRefine((pack, ctx) => {
+      if (!pack.sandboxProviderImages?.modal) {
+        return;
+      }
+      if (!pack.sandboxImage) {
+        ctx.addIssue({
+          code: "custom",
+          message: "sandboxProviderImages.modal requires sandboxImage",
+          path: ["sandboxProviderImages", "modal"],
         });
-      })
-      .default([]),
-    tools: z.array(ToolRef).default([]),
-    connectors: z.array(CapabilityPackConnector).default([]),
-    knowledge: z.array(CapabilityPackKnowledge).default([]),
-    scheduledTaskTemplates: z.array(CapabilityPackScheduledTaskTemplate).default([]),
-    variableSet: CapabilityPackVariableSet.optional(),
-    metadata: z.record(z.string(), z.unknown()).default({}),
-  }),
+        return;
+      }
+      if (!/@sha256:[0-9a-f]{64}$/i.test(pack.sandboxImage)) {
+        ctx.addIssue({
+          code: "custom",
+          message:
+            "sandboxProviderImages.modal requires sandboxImage to be pinned by an OCI sha256 digest",
+          path: ["sandboxImage"],
+        });
+      }
+    }),
 );
 export type CapabilityPack = z.infer<typeof CapabilityPack>;
 
@@ -8005,6 +8134,8 @@ export const SessionControlResponse = z.object({
   effectiveControl: EffectiveSessionControl,
   interruptionCount: z.number().int().nonnegative(),
   wakeCount: z.number().int().nonnegative(),
+  cancelledSessionCount: z.number().int().nonnegative(),
+  cancelledTurnCount: z.number().int().nonnegative(),
 });
 export type SessionControlResponse = z.infer<typeof SessionControlResponse>;
 
@@ -8062,10 +8193,10 @@ export const CreateSessionRequest = withVariableSetIdAlias({
   variableSetId: z.string().uuid().optional(),
   environmentId: z.string().uuid().optional(),
   // The rig to bind this session to (M3). Its ACTIVE version is resolved and
-  // FROZEN onto the session at create. Omitted ⇒ the workspace's default rig
-  // (workspaces.default_rig_id) when set, else a rig-less session (today's
-  // behavior). An id that does not name a rig in the workspace is a 422.
-  rigId: z.string().uuid().optional(),
+  // FROZEN onto the session at create. Omitted ⇒ inherit the workspace default;
+  // null ⇒ explicitly create a rig-less session; UUID ⇒ bind that exact rig.
+  // An id that does not name a rig in the workspace is a 422.
+  rigId: z.string().uuid().nullable().optional(),
   goal: GoalSpec.optional(),
   clientEventId: SessionOperationKey.optional(),
   // Workspace-scoped CREATE idempotency key: collapses concurrent/retried
@@ -9084,6 +9215,9 @@ export const ModelCapabilitiesV1 = /* @__PURE__ */ defineModelContractSchema(() 
       responsesWebSocket: ModelCapabilityStateV1,
       realtimeAudio: ModelCapabilityStateV1,
     }),
+    promptCaching: ModelCapabilityStateV1.extend({
+      mode: z.enum(["implicit", "automatic", "none"]),
+    }).optional(),
     latencyModes: z.array(
       z.object({
         id: z.enum(["standard", "priority", "fast"]),
@@ -9299,6 +9433,7 @@ export const ClientModel = /* @__PURE__ */ defineModelContractSchema(() =>
     provider: z.string(), // provider id
     providerLabel: z.string(),
     api: z.enum(["responses", "chat"]),
+    source: z.enum(["opengeni", "codex", "workspace_gateway"]).optional(),
     contextWindowTokens: z.number().int().positive().optional(),
     // Additive normalized definition metadata. Optional so older server payloads
     // remain parseable; current servers project the complete V1 set.

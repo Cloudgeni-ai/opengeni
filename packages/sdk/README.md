@@ -239,6 +239,11 @@ const paused = await client.getQueue(workspaceId, sessionId);
 await client.resumeSession(workspaceId, sessionId, {
   expectedControlEtag: paused.effectiveControl.controlEtag,
 });
+// Cancel is irreversible: it drains and fences this session subtree.
+await client.cancelSession(workspaceId, sessionId, {
+  reason: "host record deleted",
+  clientEventId: crypto.randomUUID(),
+});
 await client.sendApprovalDecision(workspaceId, sessionId, { approvalId, decision: "approve" });
 ```
 
@@ -348,7 +353,7 @@ Every public endpoint group has typed methods:
 | Group | Methods |
 | --- | --- |
 | Access + workspaces | `getAccessContext`, `listWorkspaces`, `createWorkspace`, `getWorkspace`, `updateWorkspace` |
-| Sessions + events | `createSession`, `listSessions`, `getSession`, `updateSession`, `listEvents`, `sendEvent`, `sendMessage`, `steerMessage`, `pauseSession`, `resumeSession`, `sendApprovalDecision`, `streamEvents`, `openEventStream` |
+| Sessions + events | `createSession`, `listSessions`, `getSession`, `updateSession`, `listEvents`, `sendEvent`, `sendMessage`, `steerMessage`, `pauseSession`, `resumeSession`, `cancelSession`, `sendApprovalDecision`, `streamEvents`, `openEventStream` |
 | Machines (bring-your-own-compute) | `listMachines`, `machineMetricsSeries`, `swapActiveSandbox`, `mintEnrollToken`, `lookupDeviceEnrollment`, `approveDeviceEnrollment`, `denyDeviceEnrollment` |
 | Turn queue | `getQueue`, `moveQueueItem`, `editQueueItem`, `steerQueueItem`, `deleteQueueItem` |
 | Goal | `getGoal`, `updateGoal`, `pauseGoal`, `resumeGoal` |

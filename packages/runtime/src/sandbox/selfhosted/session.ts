@@ -807,8 +807,9 @@ export class SelfhostedSession {
    *  filesystem and is prepared by the agent itself, so there is nothing to stage.
    *  Present (not absent) so the SDK's provided-session manifest apply path — which
    *  requires `applyManifest()` OR `materializeEntry()` when the agent declares
-   *  entries — is satisfied without error. The selfhosted manifest declares no
-   *  entries, so in practice this is never invoked with a real entry. */
+   *  entries — is satisfied without error. A session swapped from a managed
+   *  sandbox can still present managed-only manifest entries here; they remain
+   *  intentionally unstaged on the user-owned machine. */
   async materializeEntry(_args: { path: string; entry: unknown; runAs?: string }): Promise<void> {
     return;
   }

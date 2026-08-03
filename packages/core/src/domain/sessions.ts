@@ -4,6 +4,7 @@ import {
   configuredAllowedModels,
   policyProviderIdForModel,
   resolveTurnExecutionPolicyV1,
+  WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
   type Settings,
 } from "@opengeni/config";
 import {
@@ -839,6 +840,9 @@ export function canonicalConfiguredModel(
   if (settings.codexSubscriptionEnabled && canonicalModel.startsWith(CODEX_MODEL_ID_PREFIX)) {
     return canonicalModel;
   }
+  if (canonicalModel.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX)) {
+    return canonicalModel;
+  }
   throw new HTTPException(422, { message: `model is not available: ${model}` });
 }
 
@@ -1251,9 +1255,10 @@ export async function createSessionForRequest(
         payload.variableSetId,
       )
     : null;
-  // RIG BINDING (M3). Resolve the rig this session rides — the EXPLICIT payload
-  // rigId when given, else the workspace default rig (workspaces.default_rig_id)
-  // — and FREEZE both the rig id and its currently-ACTIVE version onto the row.
+  // RIG BINDING (M3). Resolve the rig this session rides — a UUID binds that
+  // rig, null explicitly opts out, and omission inherits the workspace default
+  // (workspaces.default_rig_id) — then FREEZE both the rig id and its currently-
+  // ACTIVE version onto the row.
   // The session then rides that exact version for its whole life; a later
   // promote never moves it. Rig-less (both null) when neither resolves, which is
   // byte-for-byte today's behavior (zero extra work, zero row change).
@@ -1261,7 +1266,8 @@ export async function createSessionForRequest(
   //   - A stale workspace-default rig (deleted → FK-nulled, or somehow with no
   //     active version) degrades SILENTLY to rig-less: an operator-side default
   //     must never brick every create in the workspace.
-  const requestedRigId = payload.rigId ?? (await getWorkspaceDefaultRigId(db, workspaceId));
+  const requestedRigId =
+    payload.rigId === undefined ? await getWorkspaceDefaultRigId(db, workspaceId) : payload.rigId;
   let frozenRigId: string | null = null;
   let frozenRigVersionId: string | null = null;
   if (requestedRigId) {

@@ -33,6 +33,46 @@ function catalogModel(
 }
 
 describe("model-policy", () => {
+  test("omits disconnected subscription and workspace Gateway rails", () => {
+    const rows = projectPickerRows([
+      catalogModel({ id: "managed", label: "Managed", source: "opengeni" }),
+      catalogModel({
+        id: "codex/gpt-5.6-sol",
+        label: "Codex",
+        source: "codex",
+        credentialReadiness: {
+          status: "not_ready",
+          reason: "needs_reauth",
+          basis: "connection",
+          checkedAt: null,
+        },
+      }),
+      catalogModel({
+        id: "workspace-gateway/deepseek-v4-flash-0731",
+        label: "DeepSeek",
+        source: "workspace_gateway",
+        credentialReadiness: {
+          status: "not_ready",
+          reason: "needs_reauth",
+          basis: "connection",
+          checkedAt: null,
+        },
+      }),
+    ]);
+    expect(rows.map((row) => row.id)).toEqual(["managed"]);
+  });
+
+  test("labels a connected workspace Gateway as Your Gateway", () => {
+    const rows = projectPickerRows([
+      catalogModel({
+        id: "workspace-gateway/kimi-k3",
+        label: "Kimi K3",
+        source: "workspace_gateway",
+      }),
+    ]);
+    expect(rows[0]).toMatchObject({ billingClass: "byok", billingClassLabel: "Your Gateway" });
+  });
+
   test("groups catalog rows by billing class", () => {
     const rows = projectPickerRows([
       catalogModel({
@@ -62,7 +102,7 @@ describe("model-policy", () => {
         reasoning: {
           upstream: "supported",
           runnable: true,
-          efforts: ["low", "high"],
+          efforts: ["low", "high", "max"],
           defaultEffort: "low",
           required: false,
         },
@@ -83,7 +123,7 @@ describe("model-policy", () => {
         latencyModes: [{ id: "standard", upstream: "supported", runnable: true }],
       },
     });
-    expect(effortOptionsForModel(model)).toEqual(["low", "high"]);
+    expect(effortOptionsForModel(model)).toEqual(["low", "high", "max"]);
     expect(coerceReasoningEffortForModel(model, "xhigh")).toBe("low");
     expect(billingClassForModel(model)).toBe("opengeni_credits");
   });
