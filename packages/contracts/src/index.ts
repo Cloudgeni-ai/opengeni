@@ -4335,7 +4335,7 @@ const WorkspaceControlReason = z
   );
 
 export const SessionControlRequest = z.object({
-  action: z.enum(["pause", "resume"]),
+  action: z.enum(["pause", "resume", "cancel"]),
   reason: WorkspaceControlReason.optional(),
   clientEventId: SessionOperationKey,
   expectedControlEtag: z.string().min(1).optional(),
@@ -4583,7 +4583,7 @@ export const SessionSystemUpdatePayload = z.discriminatedUnion("type", [
     .object({
       type: z.literal("child_terminal_result"),
       childSessionId: z.string().uuid(),
-      status: z.enum(["idle", "failed"]),
+      status: z.enum(["idle", "failed", "cancelled"]),
     })
     .passthrough(),
 ]);
@@ -8134,6 +8134,8 @@ export const SessionControlResponse = z.object({
   effectiveControl: EffectiveSessionControl,
   interruptionCount: z.number().int().nonnegative(),
   wakeCount: z.number().int().nonnegative(),
+  cancelledSessionCount: z.number().int().nonnegative(),
+  cancelledTurnCount: z.number().int().nonnegative(),
 });
 export type SessionControlResponse = z.infer<typeof SessionControlResponse>;
 
