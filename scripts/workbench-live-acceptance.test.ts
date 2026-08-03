@@ -12,6 +12,7 @@ import {
   assertRepositoryChangesVisible,
   controlCancellationDurationMs,
   fixturePrompt,
+  isExpectedCaptureFileCancellation,
   openWorkspaceIfCollapsed,
   parseCookieHeader,
   parseLiveAcceptanceArgs,
@@ -22,6 +23,13 @@ import {
 } from "./workbench-live-acceptance";
 
 describe("workbench live acceptance preflight", () => {
+  test("ignores only an explicitly aborted superseded capture-file read", () => {
+    const path = "/v1/workspaces/workspace/sessions/session/workspace/capture/file";
+    expect(isExpectedCaptureFileCancellation(path, "net::ERR_ABORTED")).toBe(true);
+    expect(isExpectedCaptureFileCancellation(path, "net::ERR_FAILED")).toBe(false);
+    expect(isExpectedCaptureFileCancellation("/v1/config/client", "net::ERR_ABORTED")).toBe(false);
+  });
+
   test("keeps an open workspace open when Files hides the Changes panel", async () => {
     const selectors: string[] = [];
     let lookedUpCollapseControl = false;

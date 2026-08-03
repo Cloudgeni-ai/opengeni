@@ -9,6 +9,9 @@ import {
 } from "@opengeni/contracts";
 import {
   GOOGLE_DRIVE_CREDENTIAL_ROLE,
+  GOOGLE_DRIVE_FILE_SCOPE,
+  GOOGLE_DRIVE_FULL_SCOPE,
+  GOOGLE_DRIVE_METADATA_READONLY_SCOPE,
   GOOGLE_DRIVE_READONLY_SCOPE,
 } from "@opengeni/contracts/google-drive";
 import {
@@ -100,7 +103,13 @@ async function bearer(
   })}`;
 }
 
-function googleFixture(options: { permissionId?: string; omitRefreshToken?: boolean } = {}) {
+function googleFixture(
+  options: {
+    permissionId?: string;
+    omitRefreshToken?: boolean;
+    scopes?: string[];
+  } = {},
+) {
   const tokenRequests: URLSearchParams[] = [];
   const apiAuthorizationHeaders: string[] = [];
   const fileListQueries: string[] = [];
@@ -117,7 +126,7 @@ function googleFixture(options: { permissionId?: string; omitRefreshToken?: bool
         ...(options.omitRefreshToken ? {} : { refresh_token: "google-refresh-token" }),
         token_type: "Bearer",
         expires_in: 3600,
-        scope: GOOGLE_DRIVE_READONLY_SCOPE,
+        scope: (options.scopes ?? [GOOGLE_DRIVE_READONLY_SCOPE]).join(" "),
       });
     }
     apiAuthorizationHeaders.push(new Headers(init?.headers).get("authorization") ?? "");
@@ -310,6 +319,44 @@ describe("Google Drive local source preview", () => {
     expect(google.tokenRequests).toHaveLength(1);
   });
 
+  test("accepts an explicitly stronger Drive grant through the shared capability decision", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const google = googleFixture({ scopes: ["openid", GOOGLE_DRIVE_FULL_SCOPE] });
+    const connected = await connect(workspace, google);
+    expect(connected.callback.headers.get("location")).toContain("google_drive=connected");
+    expect(connected.connection).toMatchObject({
+      grantedScopes: ["openid", GOOGLE_DRIVE_FULL_SCOPE],
+      metadata: { accessMode: "readonly" },
+    });
+    expect(google.apiAuthorizationHeaders).toEqual(["Bearer google-access-token"]);
+  });
+
+  test("rejects partial Drive grants before identity lookup or credential persistence", async () => {
+    if (!available) return;
+    for (const scopes of [
+      [GOOGLE_DRIVE_FILE_SCOPE],
+      [GOOGLE_DRIVE_METADATA_READONLY_SCOPE],
+      ["openid", "email"],
+    ]) {
+      const workspace = await freshWorkspace();
+      const google = googleFixture({ scopes });
+      const start = await startConnection(workspace, google.fetch);
+      const state = new URL(start.authorizationUrl).searchParams.get("state");
+      const callback = await app(google.fetch).request(
+        `/v1/integrations/google-drive/callback?code=fixture-code&state=${encodeURIComponent(state!)}`,
+      );
+      expect(callback.status).toBe(302);
+      expect(callback.headers.get("location")).toContain("reason=scope_not_granted");
+      expect(google.apiAuthorizationHeaders).toEqual([]);
+      expect(
+        (await listConnectionsMetadata(client.db, workspace.workspaceId, "subject-a")).filter(
+          (connection) => connection.providerDomain === "googleapis.com",
+        ),
+      ).toEqual([]);
+    }
+  });
+
   test("browses metadata server-side and saves only connector configuration", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -400,6 +447,38 @@ describe("Google Drive local source preview", () => {
       select id from documents where workspace_id = ${workspace.workspaceId}
     `,
     ).toHaveLength(0);
+  });
+
+  test("fails closed before provider reads when a legacy connection lacks recursive access", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const google = googleFixture();
+    const connected = await connect(workspace, google);
+    await shared!.admin`
+      update connections
+      set granted_scopes = ${shared!.admin.json([GOOGLE_DRIVE_METADATA_READONLY_SCOPE])},
+          metadata = jsonb_set(metadata, '{accessMode}', '"metadata_readonly"'::jsonb)
+      where id = ${connected.connection.id}
+    `;
+    google.apiAuthorizationHeaders.length = 0;
+    const browse = await app(google.fetch).request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/${connected.connection.id}/browse?parentId=root`,
+      {
+        headers: {
+          authorization: await bearer(workspace, "subject-a", ["connections:read"]),
+          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+        },
+      },
+    );
+    expect(browse.status).toBe(401);
+    expect((await browse.json()) as { error: { message: string } }).toMatchObject({
+      error: { message: "Google Drive needs to be reconnected with selected-source read access" },
+    });
+    expect(google.apiAuthorizationHeaders).toEqual([]);
+
+    const reconnected = await connect(workspace, googleFixture(), connected.connection.id);
+    expect(reconnected.callback.headers.get("location")).toContain("google_drive=connected");
+    expect(reconnected.connection.metadata).toMatchObject({ accessMode: "readonly" });
   });
 
   test("accepts a pasted Google Drive folder link and rejects lookalike hosts", async () => {
