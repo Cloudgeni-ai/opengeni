@@ -1296,6 +1296,196 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(afterExactIngressReplay).toEqual({ inboxes: 3, messages: 3 });
   }, 60_000);
 
+  test("a reaction committed before route binding repairs the bind and acknowledgement without refetching context", async () => {
+    if (!available) return;
+    const channelId = "C_REACTION_UNBOUND_RETRY";
+    const rootTimestamp = "1706080000.000001";
+    const reactedTimestamp = "1706080000.000002";
+    const eventId = `E_REACTION_UNBOUND_${crypto.randomUUID()}`;
+    const value = await fixture({
+      grantedScopes: [...OPENGENI_SLACK_BOT_REQUESTED_SCOPES],
+      slackReactionSummon: {
+        enabled: true,
+        emoji: "genie",
+        channelPolicy: { mode: "allowlist", channelIds: [channelId] },
+      },
+    });
+    const contextKey = `${channelId}:${reactedTimestamp}`;
+    value.slack.reactionContexts.set(contextKey, {
+      messages: [
+        {
+          ts: rootTimestamp,
+          user: "U_UNBOUND_ROOT",
+          text: "Keep the committed task recoverable across route binding.",
+        },
+        {
+          ts: reactedTimestamp,
+          thread_ts: rootTimestamp,
+          user: value.ownerSlackUserId,
+          text: "Original task committed before the bind crash.",
+        },
+      ],
+    });
+    const event = reactionEvent({
+      teamId: value.teamId,
+      eventId,
+      userId: value.ownerSlackUserId,
+      channelId,
+      timestamp: reactedTimestamp,
+    });
+    expect((await postEvent(value.app, event)).status).toBe(200);
+
+    const suffix = crypto.randomUUID().replaceAll("-", "");
+    const functionName = `og_test_slack_bind_ambiguity_${suffix}`;
+    const triggerName = `og_test_slack_bind_ambiguity_${suffix}`;
+    await shared!.admin.unsafe(`
+      create function ${functionName}() returns trigger language plpgsql as $$
+      begin
+        if old.workspace_id = '${value.owner.workspaceId}'::uuid
+          and old.session_id is null
+          and new.session_id is not null
+        then
+          raise exception 'fixture ambiguous Slack route bind';
+        end if;
+        return new;
+      end;
+      $$;
+      create trigger ${triggerName}
+        before update on slack_interactions
+        for each row execute function ${functionName}();
+    `);
+    try {
+      expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
+    } finally {
+      await shared!.admin.unsafe(`
+        drop trigger if exists ${triggerName} on slack_interactions;
+        drop function if exists ${functionName}();
+      `);
+    }
+
+    const [afterBindFailure] = await shared!.admin<
+      {
+        interaction_id: string;
+        session_reservation_id: string;
+        session_id: string | null;
+        inbox_id: string;
+        inbox_status: string;
+        message_text: string;
+        message_count: number;
+      }[]
+    >`
+      select interaction.id as interaction_id,
+        interaction.session_reservation_id,
+        interaction.session_id,
+        inbox.id as inbox_id,
+        inbox.status as inbox_status,
+        max(event.payload ->> 'text') as message_text,
+        count(event.id)::int as message_count
+      from slack_interactions interaction
+      join slack_interaction_inbox inbox
+        on inbox.workspace_id = interaction.workspace_id
+        and inbox.connection_id = interaction.connection_id
+        and inbox.provider_event_id = ${eventId}
+      join session_events event
+        on event.workspace_id = interaction.workspace_id
+        and event.session_id = interaction.session_reservation_id
+        and event.client_event_id = ${`slack:${eventId}`}
+        and event.type = 'user.message'
+      where interaction.workspace_id = ${value.owner.workspaceId}
+      group by interaction.id, interaction.session_reservation_id,
+        interaction.session_id, inbox.id, inbox.status`;
+    if (!afterBindFailure) throw new Error("expected the unbound durable Slack reaction");
+    const interactionId = afterBindFailure.interaction_id;
+    const sessionReservationId = afterBindFailure.session_reservation_id;
+    const inboxId = afterBindFailure.inbox_id;
+    expect(afterBindFailure).toMatchObject({
+      interaction_id: expect.any(String),
+      session_reservation_id: expect.any(String),
+      session_id: null,
+      inbox_id: expect.any(String),
+      inbox_status: "pending",
+      message_text: expect.stringContaining("Original task committed before the bind crash."),
+      message_count: 1,
+    });
+    expect(value.slack.posts).toHaveLength(0);
+    const contextHitsBeforeRetry = value.slack.reactionContextHits.filter(
+      (hit) => hit === contextKey,
+    ).length;
+    expect(contextHitsBeforeRetry).toBe(1);
+    value.slack.reactionContexts.set(contextKey, {
+      messages: [
+        {
+          ts: rootTimestamp,
+          user: "U_UNBOUND_ROOT",
+          text: "MUTATED root that the repair must not fetch.",
+        },
+        {
+          ts: reactedTimestamp,
+          thread_ts: rootTimestamp,
+          user: value.ownerSlackUserId,
+          text: "MUTATED task text that the repair must not recompute.",
+        },
+      ],
+    });
+    await shared!.admin`
+      update slack_interaction_inbox
+      set retry_at = now()
+      where id = ${inboxId}`;
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
+
+    const [repaired] = await shared!.admin<
+      {
+        session_reservation_id: string;
+        session_id: string | null;
+        inbox_status: string;
+        message_text: string;
+        message_count: number;
+      }[]
+    >`
+      select interaction.session_reservation_id,
+        interaction.session_id,
+        inbox.status as inbox_status,
+        max(event.payload ->> 'text') as message_text,
+        count(event.id)::int as message_count
+      from slack_interactions interaction
+      join slack_interaction_inbox inbox
+        on inbox.workspace_id = interaction.workspace_id
+        and inbox.connection_id = interaction.connection_id
+        and inbox.provider_event_id = ${eventId}
+      join session_events event
+        on event.workspace_id = interaction.workspace_id
+        and event.session_id = interaction.session_reservation_id
+        and event.client_event_id = ${`slack:${eventId}`}
+        and event.type = 'user.message'
+      where interaction.id = ${interactionId}
+      group by interaction.session_reservation_id, interaction.session_id, inbox.status`;
+    const repairedMessageText = repaired?.message_text;
+    expect(repaired).toMatchObject({
+      session_reservation_id: sessionReservationId,
+      session_id: sessionReservationId,
+      inbox_status: "processed",
+      message_text: expect.stringContaining("Original task committed before the bind crash."),
+      message_count: 1,
+    });
+    expect(repairedMessageText).not.toContain("MUTATED task text");
+    expect(value.slack.reactionContextHits.filter((hit) => hit === contextKey)).toHaveLength(
+      contextHitsBeforeRetry,
+    );
+    expect(value.slack.posts).toHaveLength(1);
+
+    await shared!.admin`
+      update slack_interaction_inbox
+      set status = 'pending', claim_holder_id = null, claim_expires_at = null,
+        retry_at = now(), last_error_code = 'forced_retry', processed_at = null,
+        updated_at = now()
+      where id = ${inboxId}`;
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
+    expect(value.slack.reactionContextHits.filter((hit) => hit === contextKey)).toHaveLength(
+      contextHitsBeforeRetry,
+    );
+    expect(value.slack.posts).toHaveLength(1);
+  }, 60_000);
+
   test("reaction retrieval paginates to the exact message and pins it under the prompt budget", async () => {
     if (!available) return;
     const channelId = "C_REACTION_PAGED";

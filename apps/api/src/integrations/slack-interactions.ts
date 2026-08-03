@@ -722,13 +722,41 @@ async function processSlackReactionInboxEntry(
     clientEventId,
   );
   if (durableInteraction) {
-    if (
-      durableInteraction.visibility === "private" &&
-      durableInteraction.owningSubjectId !== grant.subjectId
-    ) {
+    const { interaction, eventSessionId } = durableInteraction;
+    const shouldRepairAcknowledgement =
+      interaction.sessionId === null ||
+      interaction.triggeringProviderEventId === entry.providerEventId;
+    if (interaction.sessionId !== null && interaction.sessionId !== eventSessionId) {
+      throw new SlackInteractionPermanentError("slack_reaction_event_conflict");
+    }
+    if (interaction.visibility === "private" && interaction.owningSubjectId !== grant.subjectId) {
       throw new SlackInteractionPermanentError("session_owner_mismatch");
     }
-    await reopenSlackInteractionDelivery(deps.db, durableInteraction);
+    if (interaction.sessionId === null && interaction.owningSubjectId !== grant.subjectId) {
+      throw new SlackInteractionRetryableError("slack_route_creation_pending");
+    }
+    const boundInteraction =
+      interaction.sessionId !== null
+        ? interaction
+        : await bindSlackInteractionSession(deps.db, {
+            ...interaction,
+            owningSubjectId: grant.subjectId,
+            sessionId: eventSessionId,
+          });
+    if (!boundInteraction) {
+      throw new Error("Durable Slack reaction route could not bind its reserved session");
+    }
+    await reopenSlackInteractionDelivery(deps.db, boundInteraction);
+    if (shouldRepairAcknowledgement) {
+      const client = await createOpenGeniSlackBotInteractionClient(deps, {
+        accountId: entry.accountId,
+        workspaceId: entry.workspaceId,
+        connectionId: entry.connectionId,
+        subjectId: grant.subjectId,
+        sessionId: eventSessionId,
+      });
+      await acknowledgeSlackReactionSession(deps, client, boundInteraction, settings.emoji);
+    }
     return;
   }
 
@@ -849,11 +877,23 @@ async function processSlackReactionInboxEntry(
     sessionId: session.id,
   });
   if (!bound) throw new Error("Slack reaction route could not bind its durable session");
+  await acknowledgeSlackReactionSession(deps, client, bound, settings.emoji);
+}
+
+async function acknowledgeSlackReactionSession(
+  deps: ApiRouteDeps,
+  client: OpenGeniSlackBotClient,
+  interaction: SlackInteraction,
+  emoji: string,
+) {
+  if (!interaction.sessionId) {
+    throw new Error("Slack reaction acknowledgement requires a bound session");
+  }
   await client.postMessage({
     operationId: deterministicUuid(`slack-reaction-ack:${interaction.id}`),
-    channelId: entry.slackChannelId,
-    threadTimestamp: context.threadTimestamp,
-    text: `OpenGeni started from the :${settings.emoji}: reaction. ${openSessionText(deps, entry.workspaceId, session.id)} If the intended action is unclear, OpenGeni will ask in this thread. Reply here to continue, or reply \`stop\` to stop.`,
+    channelId: interaction.slackChannelId,
+    threadTimestamp: interaction.slackThreadTs,
+    text: `OpenGeni started from the :${emoji}: reaction. ${openSessionText(deps, interaction.workspaceId, interaction.sessionId)} If the intended action is unclear, OpenGeni will ask in this thread. Reply here to continue, or reply \`stop\` to stop.`,
   });
 }
 
