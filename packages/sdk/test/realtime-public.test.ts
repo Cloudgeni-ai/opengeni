@@ -43,7 +43,7 @@ describe("@opengeni/sdk/realtime", () => {
     }
   });
 
-  test("projects canonical owner proof through the provider-neutral facade", () => {
+  test("preserves pre-controller owner presence while controller startup validates proof", () => {
     const storage = storageFixture();
     const model = "workspace-gateway/openai/gpt-realtime-mini" as const;
     const key = sessionRealtimeOwnerStorageKey(WORKSPACE_ID, SESSION_ID, model);
@@ -81,6 +81,46 @@ describe("@opengeni/sdk/realtime", () => {
     });
     expect(controller.snapshot().status).toBe("recovering");
     controller.close();
+
+    storage.setItem(key, "not-json");
+    expect(
+      hasStoredSessionRealtimeOwnerProof({
+        workspaceId: WORKSPACE_ID,
+        sessionId: SESSION_ID,
+        model,
+        storage,
+      }),
+    ).toBe(true);
+
+    const invalidController = createSessionRealtimeController({
+      client: {} as SessionRealtimeClientLike,
+      workspaceId: WORKSPACE_ID,
+      sessionId: SESSION_ID,
+      model,
+      storage,
+      setInterval: () => 0,
+      clearInterval: () => undefined,
+      setTimeout: () => 0,
+      clearTimeout: () => undefined,
+    });
+    expect(invalidController.snapshot().status).toBe("idle");
+    expect(storage.getItem(key)).toBeNull();
+    invalidController.close();
+
+    expect(
+      hasStoredSessionRealtimeOwnerProof({
+        workspaceId: WORKSPACE_ID,
+        sessionId: SESSION_ID,
+        model,
+        storage: {
+          getItem: () => {
+            throw new Error("storage unavailable");
+          },
+          setItem: () => undefined,
+          removeItem: () => undefined,
+        },
+      }),
+    ).toBe(false);
   });
 
   test("keeps the complete proxy-client contract structural and backend-facing", () => {

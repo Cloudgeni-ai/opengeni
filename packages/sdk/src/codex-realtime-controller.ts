@@ -162,9 +162,9 @@ export function sessionRealtimeOwnerStorageKey(
 }
 
 /**
- * Truthfully project whether this browser has resumable owner proof before the
- * lazily loaded controller is constructed. Invalid or cross-session records are
- * removed by the same parser used by controller recovery.
+ * Preserve the existing pre-controller owner-presence projection used by the
+ * lazy React control. The controller remains the sole authority that validates
+ * or removes malformed records once it is constructed.
  */
 export function hasStoredSessionRealtimeOwnerProof(input: {
   workspaceId: string;
@@ -173,13 +173,16 @@ export function hasStoredSessionRealtimeOwnerProof(input: {
   storage?: CodexRealtimeOwnerStorage | undefined;
 }): boolean {
   const storage = input.storage ?? defaultStorage();
-  return (
-    readOwnerRecord(
-      storage,
-      sessionRealtimeOwnerStorageKey(input.workspaceId, input.sessionId, input.model),
-      input,
-    ) !== null
-  );
+  if (!storage) return false;
+  try {
+    return (
+      storage.getItem(
+        sessionRealtimeOwnerStorageKey(input.workspaceId, input.sessionId, input.model),
+      ) !== null
+    );
+  } catch {
+    return false;
+  }
 }
 
 export type CreateCodexRealtimeControllerOptions = {
