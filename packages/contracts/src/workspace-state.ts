@@ -4,7 +4,9 @@ import {
   WorkspaceInstructionPolicyKind,
   WorkspaceInstructionPolicyProvenanceSource,
   WorkspaceInstructionPolicyRoleKey,
+  WorkspaceInstructionPolicyRoleSource,
   WorkspaceInstructionPolicyScope,
+  WorkspaceInstructionPolicySnapshotEntry,
 } from "./workspace-instruction-policies";
 
 export const WORKSPACE_STATE_MAX_ACTIVE_POLICY_HEADS = 32;
@@ -196,6 +198,112 @@ export const WorkspaceStateKnowledge = z.discriminatedUnion("availability", [
 ]);
 export type WorkspaceStateKnowledge = z.infer<typeof WorkspaceStateKnowledge>;
 
+export const WorkspaceStateGovernanceDriftStatus = z.enum([
+  "identical",
+  "changed",
+  "superseded",
+  "missing",
+  "unavailable",
+  "truncated",
+]);
+export type WorkspaceStateGovernanceDriftStatus = z.infer<
+  typeof WorkspaceStateGovernanceDriftStatus
+>;
+
+const WorkspaceStatePolicySnapshotAvailable = z
+  .object({
+    status: z.literal("available"),
+    id: z.string().uuid(),
+    createdAt: z.string().datetime(),
+    entryHash: z.string().regex(/^[0-9a-f]{64}$/),
+    policyRole: WorkspaceInstructionPolicyRoleKey.nullable(),
+    roleSource: WorkspaceInstructionPolicyRoleSource,
+    entries: z.array(WorkspaceInstructionPolicySnapshotEntry).max(3),
+  })
+  .strict();
+
+const WorkspaceStatePolicySnapshotMissing = z.object({ status: z.literal("missing") }).strict();
+
+const WorkspaceStatePreferenceSnapshotAvailable = z
+  .object({
+    status: z.literal("available"),
+    id: z.string().uuid(),
+    createdAt: z.string().datetime(),
+    descriptorHash: z.string().regex(/^[0-9a-f]{64}$/),
+    descriptorCount: Count.max(64),
+    truncated: z.boolean(),
+  })
+  .strict();
+
+const WorkspaceStatePreferenceSnapshotMissing = z.object({ status: z.literal("missing") }).strict();
+
+const WorkspaceStateGovernanceDrift = z
+  .object({
+    overall: WorkspaceStateGovernanceDriftStatus,
+    policy: z
+      .object({
+        status: WorkspaceStateGovernanceDriftStatus,
+        snapshotHash: z
+          .string()
+          .regex(/^[0-9a-f]{64}$/)
+          .nullable(),
+        currentHash: z
+          .string()
+          .regex(/^[0-9a-f]{64}$/)
+          .nullable(),
+        snapshotTargetCount: Count,
+        currentTargetCount: Count,
+      })
+      .strict(),
+    preferences: z
+      .object({
+        status: WorkspaceStateGovernanceDriftStatus,
+        snapshotHash: z
+          .string()
+          .regex(/^[0-9a-f]{64}$/)
+          .nullable(),
+        currentHash: z
+          .string()
+          .regex(/^[0-9a-f]{64}$/)
+          .nullable(),
+        snapshotDescriptorCount: Count,
+        currentDescriptorCount: Count,
+        snapshotTruncated: z.boolean(),
+        currentTruncated: z.boolean(),
+      })
+      .strict(),
+  })
+  .strict();
+
+export const WorkspaceStateAttemptGovernance = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("not_requested") }).strict(),
+  z
+    .object({
+      status: z.literal("unavailable"),
+      reason: z.literal("attempt_not_found_or_not_authorized"),
+      driftStatus: z.literal("unavailable"),
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal("available"),
+      attemptId: z.string().uuid(),
+      executionGeneration: z.number().int().positive(),
+      acceptedAt: z.string().datetime(),
+      policySnapshot: z.discriminatedUnion("status", [
+        WorkspaceStatePolicySnapshotAvailable,
+        WorkspaceStatePolicySnapshotMissing,
+      ]),
+      preferenceSnapshot: z.discriminatedUnion("status", [
+        WorkspaceStatePreferenceSnapshotAvailable,
+        WorkspaceStatePreferenceSnapshotMissing,
+      ]),
+      drift: WorkspaceStateGovernanceDrift,
+    })
+    .strict(),
+]);
+export type WorkspaceStateAttemptGovernance = z.infer<typeof WorkspaceStateAttemptGovernance>;
+
 export const WorkspaceStateResponse = z
   .object({
     workspaceId: z.string().uuid(),
@@ -208,12 +316,7 @@ export const WorkspaceStateResponse = z
             capturedAt: z.string().datetime(),
           })
           .strict(),
-        policySnapshot: z
-          .object({
-            status: z.literal("not_captured"),
-            reason: z.literal("workspace_instruction_policy_snapshot_not_implemented"),
-          })
-          .strict(),
+        attemptGovernance: WorkspaceStateAttemptGovernance,
       })
       .strict(),
     policy: WorkspaceStatePolicy,

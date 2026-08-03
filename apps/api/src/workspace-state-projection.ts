@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   KnowledgeMemoryKind,
   KnowledgeMemoryStatus,
@@ -10,6 +11,8 @@ import {
   WORKSPACE_STATE_TOPIC_MAX_CHARS,
   WorkspaceStateResponse,
   type WorkspaceInstructionPolicyListResponse,
+  type WorkspaceInstructionPolicySnapshot,
+  type WorkspaceStateGovernanceDriftStatus,
   type WorkspaceStateGap,
   type WorkspaceStateMemoryKindCounts,
   type WorkspaceStateMemoryStatusCounts,
@@ -23,13 +26,205 @@ type KnowledgeProjectionInput = {
   memories: WorkspaceStateMemoryRecord[];
 };
 
+type PreferenceGovernanceIdentity = {
+  id: string;
+  revisionId: string;
+  contentHash: string;
+  activeVersion: number;
+  scope: "organization" | "workspace" | "user";
+};
+
+type AttemptGovernanceProjectionInput =
+  | { status: "unavailable" }
+  | {
+      status: "available";
+      attemptId: string;
+      executionGeneration: number;
+      acceptedAt: string;
+      policySnapshot: WorkspaceInstructionPolicySnapshot | null;
+      preferenceSnapshot: {
+        id: string;
+        descriptorHash: string;
+        descriptors: PreferenceGovernanceIdentity[];
+        truncated: boolean;
+        createdAt: string;
+      } | null;
+      currentPreferences: {
+        descriptors: PreferenceGovernanceIdentity[];
+        truncated: boolean;
+      };
+    };
+
 export type WorkspaceStateProjectionInput = {
   workspaceId: string;
   generatedAt: string;
   workspaceAgentInstructions: string | null;
   policies: WorkspaceInstructionPolicyListResponse;
   knowledge: KnowledgeProjectionInput | null;
+  attemptGovernance?: AttemptGovernanceProjectionInput | null;
 };
+
+function hashIdentities(values: readonly string[]): string {
+  return createHash("sha256").update(values.join("\n"), "utf8").digest("hex");
+}
+
+function policyTargetKey(value: { kind: string; scope: string; roleKey: string | null }): string {
+  return `${value.kind}:${value.scope}:${value.roleKey ?? ""}`;
+}
+
+function policyIdentity(value: {
+  kind: string;
+  scope: string;
+  roleKey: string | null;
+  revisionId: string;
+  contentHash: string;
+  activationVersion: number;
+}): string {
+  return `${policyTargetKey(value)}:${value.revisionId}:${value.contentHash}:${value.activationVersion}`;
+}
+
+function preferenceIdentity(value: PreferenceGovernanceIdentity): string {
+  return `${value.scope}:${value.id}:${value.revisionId}:${value.contentHash}:${value.activeVersion}`;
+}
+
+function classifyIdentityDrift(
+  snapshotIdentities: readonly string[],
+  currentIdentities: readonly string[],
+  snapshotKeys: readonly string[],
+  currentKeys: readonly string[],
+): "identical" | "changed" | "superseded" {
+  if (snapshotIdentities.join("\n") === currentIdentities.join("\n")) return "identical";
+  return snapshotKeys.join("\n") === currentKeys.join("\n") ? "superseded" : "changed";
+}
+
+function overallDriftStatus(
+  policy: WorkspaceStateGovernanceDriftStatus,
+  preferences: WorkspaceStateGovernanceDriftStatus,
+): WorkspaceStateGovernanceDriftStatus {
+  for (const status of ["unavailable", "truncated", "missing", "changed", "superseded"] as const) {
+    if (policy === status || preferences === status) return status;
+  }
+  return "identical";
+}
+
+function attemptGovernanceProjection(input: WorkspaceStateProjectionInput) {
+  const governance = input.attemptGovernance ?? null;
+  if (governance === null) return { status: "not_requested" as const };
+  if (governance.status === "unavailable") {
+    return {
+      status: "unavailable" as const,
+      reason: "attempt_not_found_or_not_authorized" as const,
+      driftStatus: "unavailable" as const,
+    };
+  }
+
+  const policySnapshot = governance.policySnapshot;
+  let policyStatus: WorkspaceStateGovernanceDriftStatus = "missing";
+  let policySnapshotHash: string | null = null;
+  let policyCurrentHash: string | null = null;
+  let policySnapshotTargetCount = 0;
+  let policyCurrentTargetCount = 0;
+  if (policySnapshot) {
+    const snapshotEntries = [...policySnapshot.entries].sort((left, right) =>
+      policyTargetKey(left).localeCompare(policyTargetKey(right)),
+    );
+    const targetKeys = snapshotEntries.map(policyTargetKey);
+    const currentEntries = input.policies.activeHeads
+      .filter((head) => targetKeys.includes(policyTargetKey(head)))
+      .sort((left, right) => policyTargetKey(left).localeCompare(policyTargetKey(right)));
+    const snapshotIdentities = snapshotEntries.map(policyIdentity);
+    const currentIdentities = currentEntries.map(policyIdentity);
+    const currentKeys = currentEntries.map(policyTargetKey);
+    policyStatus = classifyIdentityDrift(
+      snapshotIdentities,
+      currentIdentities,
+      targetKeys,
+      currentKeys,
+    );
+    policySnapshotHash = hashIdentities(snapshotIdentities);
+    policyCurrentHash = hashIdentities(currentIdentities);
+    policySnapshotTargetCount = snapshotEntries.length;
+    policyCurrentTargetCount = currentEntries.length;
+  }
+
+  const preferenceSnapshot = governance.preferenceSnapshot;
+  const currentPreferences = [...governance.currentPreferences.descriptors].sort((left, right) =>
+    preferenceIdentity(left).localeCompare(preferenceIdentity(right)),
+  );
+  let preferenceStatus: WorkspaceStateGovernanceDriftStatus = "missing";
+  let preferenceSnapshotHash: string | null = null;
+  const currentPreferenceIdentities = currentPreferences.map(preferenceIdentity);
+  const currentPreferenceHash = hashIdentities(currentPreferenceIdentities);
+  let snapshotPreferenceCount = 0;
+  let snapshotPreferenceTruncated = false;
+  if (preferenceSnapshot) {
+    const snapshotPreferences = [...preferenceSnapshot.descriptors].sort((left, right) =>
+      preferenceIdentity(left).localeCompare(preferenceIdentity(right)),
+    );
+    const snapshotPreferenceIdentities = snapshotPreferences.map(preferenceIdentity);
+    const snapshotPreferenceKeys = snapshotPreferences.map((descriptor) => descriptor.id).sort();
+    const currentPreferenceKeys = currentPreferences.map((descriptor) => descriptor.id).sort();
+    preferenceSnapshotHash = hashIdentities(snapshotPreferenceIdentities);
+    snapshotPreferenceCount = snapshotPreferences.length;
+    snapshotPreferenceTruncated = preferenceSnapshot.truncated;
+    preferenceStatus =
+      preferenceSnapshot.truncated || governance.currentPreferences.truncated
+        ? "truncated"
+        : classifyIdentityDrift(
+            snapshotPreferenceIdentities,
+            currentPreferenceIdentities,
+            snapshotPreferenceKeys,
+            currentPreferenceKeys,
+          );
+  }
+
+  return {
+    status: "available" as const,
+    attemptId: governance.attemptId,
+    executionGeneration: governance.executionGeneration,
+    acceptedAt: governance.acceptedAt,
+    policySnapshot: policySnapshot
+      ? {
+          status: "available" as const,
+          id: policySnapshot.id,
+          createdAt: policySnapshot.createdAt,
+          entryHash: policySnapshot.entryHash,
+          policyRole: policySnapshot.policyRole,
+          roleSource: policySnapshot.roleSource,
+          entries: policySnapshot.entries,
+        }
+      : { status: "missing" as const },
+    preferenceSnapshot: preferenceSnapshot
+      ? {
+          status: "available" as const,
+          id: preferenceSnapshot.id,
+          createdAt: preferenceSnapshot.createdAt,
+          descriptorHash: preferenceSnapshot.descriptorHash,
+          descriptorCount: preferenceSnapshot.descriptors.length,
+          truncated: preferenceSnapshot.truncated,
+        }
+      : { status: "missing" as const },
+    drift: {
+      overall: overallDriftStatus(policyStatus, preferenceStatus),
+      policy: {
+        status: policyStatus,
+        snapshotHash: policySnapshotHash,
+        currentHash: policyCurrentHash,
+        snapshotTargetCount: policySnapshotTargetCount,
+        currentTargetCount: policyCurrentTargetCount,
+      },
+      preferences: {
+        status: preferenceStatus,
+        snapshotHash: preferenceSnapshotHash,
+        currentHash: currentPreferenceHash,
+        snapshotDescriptorCount: snapshotPreferenceCount,
+        currentDescriptorCount: currentPreferences.length,
+        snapshotTruncated: snapshotPreferenceTruncated,
+        currentTruncated: governance.currentPreferences.truncated,
+      },
+    },
+  };
+}
 
 function emptyMemoryStatusCounts(): WorkspaceStateMemoryStatusCounts {
   return Object.fromEntries(
@@ -227,10 +422,7 @@ export function projectWorkspaceState(
     generatedAt: input.generatedAt,
     truth: {
       current: { source: "read_time_projection", capturedAt: input.generatedAt },
-      policySnapshot: {
-        status: "not_captured",
-        reason: "workspace_instruction_policy_snapshot_not_implemented",
-      },
+      attemptGovernance: attemptGovernanceProjection(input),
     },
     policy: policyProjection(input),
     knowledge: input.knowledge
