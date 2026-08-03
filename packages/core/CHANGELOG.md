@@ -1,5 +1,20 @@
 # @opengeni/core
 
+## 0.17.3
+
+### Patch Changes
+
+- c4a0031: Add a fail-closed, secret-redacted, byte-bounded Workspace Memory Slack
+  publication policy and immutable projection contract, including deterministic
+  denial for secret-bearing selectors, malformed projection input, and
+  self-referential change lineage.
+- Updated dependencies [e07eb52]
+- Updated dependencies [4fcb6af]
+  - @opengeni/db@0.22.0
+  - @opengeni/runtime@0.16.3
+  - @opengeni/documents@0.2.68
+  - @opengeni/events@0.3.58
+
 ## 0.17.2
 
 ### Patch Changes
