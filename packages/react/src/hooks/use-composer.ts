@@ -272,19 +272,24 @@ function isSteeringSettlementEvent(event: SessionEvent): boolean {
   return STEERING_SETTLEMENT_EVENT_TYPES.has(event.type);
 }
 
+function steeringAcceptedEvent(
+  steering: ComposerSteeringState,
+  events: readonly SessionEvent[],
+): SessionEvent | undefined {
+  return events.find(
+    (event) =>
+      event.type === "user.message" &&
+      steering.clientEventId !== null &&
+      event.clientEventId === steering.clientEventId,
+  );
+}
+
 function steeringSettledByEvents(
   steering: ComposerSteeringState,
   events: readonly SessionEvent[],
 ): boolean {
   const acceptedEventId =
-    steering.triggerEventId ??
-    events.find(
-      (event) =>
-        event.type === "user.message" &&
-        steering.clientEventId !== null &&
-        event.clientEventId === steering.clientEventId,
-    )?.id ??
-    null;
+    steering.triggerEventId ?? steeringAcceptedEvent(steering, events)?.id ?? null;
   return events.some((event) => {
     if (steering.turnId && event.turnId === steering.turnId && isSteeringSettlementEvent(event)) {
       return true;
@@ -344,6 +349,7 @@ export function useComposer(
   );
   const pendingOperationRef = useRef<PendingComposerOperation | null>(initialPendingOperation);
   const steeringSettlementEventsRef = useRef<SessionEvent[]>([]);
+  const steeringRef = useRef(steering);
   const pendingClientEventId = useRef<string | null>(
     initialPendingOperation?.input.clientEventId ?? null,
   );
@@ -365,6 +371,9 @@ export function useComposer(
   useLayoutEffect(() => {
     onDraftAppliedRef.current = onDraftApplied;
   }, [onDraftApplied]);
+  useLayoutEffect(() => {
+    steeringRef.current = steering;
+  }, [steering]);
   // Read through a ref so a new extras closure (created every render by
   // callers passing inline functions) does not invalidate `send`.
   const sendExtrasRef = useRef(options.sendExtras);
@@ -577,6 +586,43 @@ export function useComposer(
     if (!sessionId || !durableDrafts) return;
     return registerSessionReconciler(sessionId, "composer", async () => await loadDraft(false));
   }, [durableDrafts, loadDraft, registerSessionReconciler, sessionId]);
+  const reconcileSteering = useCallback(async (): Promise<void> => {
+    if (!sessionId || !steeringRef.current) return;
+    const ownedTargetKey = targetKey;
+    let events: SessionEvent[];
+    try {
+      events = await client.listEvents(workspaceId, sessionId, {
+        includeTypes: [
+          "user.message",
+          "turn.started",
+          "turn.completed",
+          "turn.failed",
+          "turn.cancelled",
+          "turn.superseded",
+        ],
+        limit: 250,
+        payloadMode: "full",
+      });
+    } catch {
+      // Best effort: the live stream still settles steering when its event arrives.
+      return;
+    }
+    if (targetKeyRef.current !== ownedTargetKey) return;
+    setSteering((current) => {
+      if (!current) return current;
+      if (steeringSettledByEvents(current, events)) {
+        steeringSettlementEventsRef.current = [];
+        return null;
+      }
+      const accepted = steeringAcceptedEvent(current, events);
+      if (!accepted || current.triggerEventId) return current;
+      return {
+        ...current,
+        phase: "accepted",
+        triggerEventId: accepted.id,
+      };
+    });
+  }, [client, sessionId, targetKey, workspaceId]);
   useSessionEventTrigger(
     client,
     workspaceId,
@@ -599,6 +645,7 @@ export function useComposer(
       enabled: Boolean(sessionId) && (durableDrafts || steering !== null),
       ...(options.events !== undefined ? { events: options.events } : {}),
     },
+    reconcileSteering,
   );
 
   useEffect(() => {

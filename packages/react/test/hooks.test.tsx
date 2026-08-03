@@ -1753,6 +1753,57 @@ describe("useComposer queue-vs-steer", () => {
     await hook.unmount();
   });
 
+  test("reconciles a Steer that started before a standalone event stream went live", async () => {
+    const turn = fakeTurn({ id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" });
+    let accepted: SessionEvent | null = null;
+    let reconciliations = 0;
+    const client = fakeClient({
+      steerMessage: async (_workspaceId, _sessionId, input) => {
+        accepted = {
+          ...makeEvent(20, "user.message", { delivery: "steer" }),
+          clientEventId: typeof input === "string" ? undefined : input.clientEventId,
+        };
+        return { accepted, turn };
+      },
+      getSession: async () => ({ lastSequence: 21 }) as never,
+      listEvents: async () => {
+        reconciliations += 1;
+        return accepted
+          ? [
+              accepted,
+              {
+                ...makeEvent(21, "turn.started", { triggerEventId: accepted.id }),
+                turnId: turn.id,
+              },
+            ]
+          : [];
+      },
+      streamEvents: (_workspaceId, _sessionId, options) =>
+        (async function* () {
+          await options?.beforeLive?.();
+          yield* [] as SessionEvent[];
+        })(),
+    });
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          draftPersistence: "disabled",
+        }),
+      undefined,
+    );
+
+    await flushing(async () => {
+      expect(await hook.result.current.steer("Use the smaller patch")).toBe(true);
+    });
+    await flush();
+
+    expect(reconciliations).toBe(1);
+    expect(hook.result.current.steering).toBeNull();
+    await hook.unmount();
+  });
+
   test("removes the optimistic Steer projection when admission fails", async () => {
     const client = fakeClient({
       steerMessage: async () => {

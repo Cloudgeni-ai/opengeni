@@ -464,15 +464,17 @@ function delegationTranscript(
   inputTranscript: string,
 ): FinalizedTranscript[] {
   const selected = [...entries];
-  const last = selected.at(-1);
-  if (
-    inputTranscript.length > 0 &&
-    !(
-      last?.role === "user" &&
-      normalizedTranscript(last.text) === normalizedTranscript(inputTranscript)
-    )
-  ) {
-    selected.push({ role: "user", text: inputTranscript, turnId: "provider-delegation-input" });
+  const normalizedInput = normalizedTranscript(inputTranscript);
+  for (let index = selected.length - 1; index >= 0; index -= 1) {
+    const entry = selected[index];
+    if (
+      entry?.role === "user" &&
+      normalizedInput.length > 0 &&
+      normalizedTranscript(entry.text) === normalizedInput
+    ) {
+      selected.splice(index, 1);
+      break;
+    }
   }
   const bounded: FinalizedTranscript[] = [];
   let bytes = 0;

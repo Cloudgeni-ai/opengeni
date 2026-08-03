@@ -189,6 +189,12 @@ describe("session Codex realtime broker", () => {
     expect(captured?.instructions).toContain(
       "Do not claim that you cannot perform an action or lack access to tools",
     );
+    expect(captured?.instructions).toContain(
+      "queued_for_execution means it is waiting behind existing work",
+    );
+    expect(captured?.instructions).toContain(
+      "accepted_for_steering means it was given priority as a change of direction, while any prior work may still be yielding",
+    );
     expect(captured?.instructions).not.toContain("OpenGeni");
     expect(captured?.instructions).not.toContain("client delegation");
   });

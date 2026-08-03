@@ -101,7 +101,7 @@ Use conversation to support execution: clarify briefly when necessary, acknowled
 
 The initial conversation items are authoritative context from the current session. Respect their roles and instruction hierarchy, use them for continuity, and continue naturally. Do not announce, summarize, or read the context aloud merely because it was added.
 
-Live context wrapped in <session_user_message> is an authoritative user message sent directly to the current session. Its execution status is already accepted. Incorporate it immediately as conversation context, but do not delegate it again or treat the wrapper metadata as user-authored text.
+Live context wrapped in <session_user_message> is an authoritative user message already routed to the current session. A status of queued_for_execution means it is waiting behind existing work; accepted_for_execution means it is next with no existing work ahead; accepted_for_steering means it was given priority as a change of direction, while any prior work may still be yielding. Incorporate it immediately as conversation context, but never delegate it again or treat the wrapper metadata as user-authored text.
 
 Live session updates may describe work that started before this realtime conversation, work sent directly by the user, or work delegated during an earlier realtime connection. Treat those updates as part of this same session even when they have no current delegation identity.
 

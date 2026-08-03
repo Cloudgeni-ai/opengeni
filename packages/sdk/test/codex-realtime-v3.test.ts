@@ -234,6 +234,42 @@ describe("Codex realtime V3 bridge", () => {
     expect(call.text).toContain("<input>Do it &lt;safely&gt;</input>");
     expect(call.text).toContain("user: Please inspect &lt;this&gt; &amp; report");
     expect(call.text).toContain("assistant: I can inspect it.");
+    expect(call.text).not.toContain("user: Do it &lt;safely&gt;");
+    expect(call.text?.split("Do it &lt;safely&gt;")).toHaveLength(2);
+    bridge.close();
+  });
+
+  test("does not repeat a matching finalized request in the delegation transcript delta", async () => {
+    const requests: SyncSessionRealtimeLedgerRequest[] = [];
+    const bridge = createCodexRealtimeV3Bridge(
+      bridgeOptions({
+        sync: async (request) => {
+          requests.push(request);
+          return { accepted: [], outbound: [] };
+        },
+      }),
+    );
+    await bridge.ingest(transcript(1, "Run the checks"));
+    await bridge.ingest(
+      JSON.stringify({
+        type: "delegation.created",
+        event_id: "delegation-event-1",
+        item: {
+          id: "delegation-1",
+          type: "delegation",
+          target: "client",
+          content: [{ type: "input_text", text: "Run   the checks" }],
+        },
+      }),
+    );
+
+    const call = requests.flatMap((request) => request.entries ?? []).at(-1)!;
+    expect(call.text).toBe(
+      ["<realtime_delegation>", "  <input>Run   the checks</input>", "</realtime_delegation>"].join(
+        "\n",
+      ),
+    );
+    expect(call.payload).toMatchObject({ transcriptFenceTurnIds: ["turn-1"] });
     bridge.close();
   });
 
