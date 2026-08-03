@@ -394,6 +394,19 @@ export type { ChatComposerMessages } from "./components/composer";
 export { ModelPicker } from "./components/model-picker";
 export type { ModelPickerProps } from "./components/model-picker";
 export {
+  BillingClassMark,
+  ModelPolicyPicker,
+  ModelPolicyPickerMenu,
+  PickerAnimatedPage,
+  PickerBackHeader,
+  PickerNavRow,
+  defaultModelPolicyPickerMessages,
+} from "./components/model-policy-picker";
+export type {
+  ModelPolicyPickerMessages,
+  ModelPolicyPickerProps,
+} from "./components/model-policy-picker";
+export {
   advancedSourceSummary,
   availabilityReasonLabel,
   billingClassForModel,
@@ -404,7 +417,9 @@ export {
   findPickerRow,
   groupPickerRowsByBillingClass,
   labelLatencyMode,
+  labelReasoningEffort,
   payerSummaryForModel,
+  projectClientModelRows,
   projectPickerRows,
   runnableLatencyModesForModel,
   sortPickerRows,
