@@ -1,5 +1,11 @@
 # @opengeni/react
 
+## 0.38.1
+
+### Patch Changes
+
+- d299c54: Keep captured-file actions legible and ensure the hosted voice-options control meets its minimum target size.
+
 ## 0.38.0
 
 ### Patch Changes
