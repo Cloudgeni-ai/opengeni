@@ -1,6 +1,7 @@
 // The session view — live timeline plus one compact prompt queue above the
 // composer. Enter queues and Cmd/Ctrl+Enter steers; failed sessions stay
 // honest (reason + retry history) and revivable from the same composer.
+import { useMachines } from "@opengeni/react/machines";
 import { HumanInputSurface, MessageTimeline, SessionChrome } from "@opengeni/react/session-ui";
 import {
   creditExhaustedFromEvents,
@@ -37,6 +38,7 @@ import {
   UserMessageBody,
 } from "@/components/session/banners";
 import { useRail } from "@/components/rail/rail-context";
+import { CLOUD_SANDBOX_LABEL } from "@/components/session/sandbox-switcher";
 import { SubagentTree } from "@/components/session/subagents";
 import { SessionWorkspace } from "@/components/session/sandbox-workspace";
 import { Button } from "@/components/ui/button";
@@ -540,6 +542,9 @@ function SessionChatPane(props: {
 }) {
   const context = useAppContext();
   const modelCatalog = useWorkspaceModelCatalog(props.session.workspaceId);
+  const fleet = useMachines({ sessionId: props.session.id, pollIntervalMs: 5000 });
+  const computeLabel =
+    fleet.machines.find((machine) => machine.active)?.name ?? CLOUD_SANDBOX_LABEL;
   const terminal = isTerminalSessionStatus(props.session.status);
   const agentsSignal = useMemo(() => {
     const agents = props.agentNodes;
@@ -903,6 +908,7 @@ function SessionChatPane(props: {
               className="h-full"
               items={props.timeline}
               status={props.session.status}
+              computeLabel={computeLabel}
               renderMessageText={renderMessageText}
               onOpenSession={props.onOpenSession}
               onMemoryClick={props.onMemoryClick}

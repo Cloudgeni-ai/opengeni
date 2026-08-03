@@ -2,7 +2,11 @@ import { describe, expect, spyOn, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
 import { act } from "react";
 import { registerDom, renderComponent, flush } from "./render-hook";
-import { defaultToolRegistry, ActivityRail } from "../src/timeline";
+import {
+  defaultToolRegistry,
+  ActivityRail,
+  TimelineComputeLabelProvider,
+} from "../src/timeline";
 import type {
   AuthNeededItem,
   MemoryItem,
@@ -1794,6 +1798,74 @@ describe("turn fold — memory facet", () => {
       timelineEvent("turn.completed", {}),
     ]);
     expect(trigger?.textContent).toContain("1 memory updated");
+    await r.unmount();
+  });
+});
+
+describe("ask / run_on / exec collapsed previews", () => {
+  test("request_human_input shows Ask + first question, not Done", async () => {
+    const item = toolItem({
+      name: "request_human_input",
+      arguments: {
+        questions: [{ id: "q1", prompt: "Which region should we deploy to?", kind: "text" }],
+        allowSkip: false,
+      },
+      output: JSON.stringify({ requestId: "req-1", outcome: "answered" }),
+      status: "complete",
+    });
+    const r = await renderComponent(<ActivityRail items={[item]} />);
+    await flush();
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("Ask");
+    expect(text).toContain("Which region should we deploy to?");
+    expect(text).not.toContain("Done");
+    expect(text).not.toContain("Request human input");
+    await r.unmount();
+  });
+
+  test("run_on shows machine name from tool output + exec gist", async () => {
+    const item = toolItem({
+      name: "run_on",
+      arguments: {
+        target: "sandbox-abc",
+        op: { kind: "exec", cmd: "uname -a" },
+      },
+      output: JSON.stringify({
+        target: "sandbox-abc",
+        targetName: "studio-mac",
+        kind: "exec",
+        ok: true,
+        stdout: "Darwin\n",
+        exitCode: 0,
+      }),
+      status: "complete",
+    });
+    const r = await renderComponent(<ActivityRail items={[item]} />);
+    await flush();
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("Run on studio-mac");
+    expect(text).toContain("$ uname -a");
+    expect(text).not.toContain("Done");
+    await r.unmount();
+  });
+
+  test("exec_command prefixes preview with computeLabel", async () => {
+    const item = toolItem({
+      name: "exec_command",
+      arguments: { cmd: "pwd" },
+      output: "Chunk ID none\nProcess exited with code 0\nOutput:\n/workspace\n",
+      status: "complete",
+    });
+    const r = await renderComponent(
+      <TimelineComputeLabelProvider value="studio-mac">
+        <ActivityRail items={[item]} />
+      </TimelineComputeLabelProvider>,
+    );
+    await flush();
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("$ pwd");
+    expect(text).toContain("on studio-mac");
+    expect(text).toContain("/workspace");
     await r.unmount();
   });
 });

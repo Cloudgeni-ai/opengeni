@@ -83,6 +83,7 @@ import {
   readableMachineInputSource,
 } from "./machine-input-display";
 import { SESSION_STATUS_META, StatusDot } from "./session-status";
+import { TimelineComputeLabelProvider } from "../timeline/compute-label";
 import { EntranceAnimationProvider, useEntranceAnimation } from "../timeline/entrance";
 import { SeenActivityIdsProvider } from "../timeline/seen-activity-ids";
 import { TooltipProvider } from "./tooltip";
@@ -131,6 +132,11 @@ export type MessageTimelineProps = {
    * `createDefaultToolRegistry({ entries })` to add custom tool renderers.
    */
   toolRegistry?: ToolRegistry | undefined;
+  /**
+   * Display name of the session's active compute target (Connected Machine or
+   * cloud sandbox). When set, exec_command collapsed previews prefix `on {label}`.
+   */
+  computeLabel?: string | null | undefined;
   /** Customize collapsed turn facets for this timeline instance. */
   turnSummary?: TurnSummaryOptions | undefined;
   /** Follow new events when pinned to the bottom. Defaults to true. */
@@ -268,6 +274,7 @@ export function MessageTimeline({
   onReconnect,
   resolveProviderLogo,
   toolRegistry = defaultToolRegistry,
+  computeLabel = null,
   turnSummary,
   autoFollow = true,
   hasOlder = false,
@@ -1153,8 +1160,9 @@ export function MessageTimeline({
     <LightboxProvider>
       <FoldMemoryProvider value={foldMemoryRef.current}>
         <SeenActivityIdsProvider value={seenActivityIdsRef.current}>
-          <EntranceAnimationProvider value={!bulkRender}>
-            <TooltipProvider delayDuration={400}>
+          <TimelineComputeLabelProvider value={computeLabel ?? null}>
+            <EntranceAnimationProvider value={!bulkRender}>
+              <TooltipProvider delayDuration={400}>
               <div className={cn("og-root relative flex min-h-0 flex-col", className)}>
                 {/* Pinned: anchoring off so the tip-follow camera owns the motion.
           Unpinned: native scroll anchoring holds the reader's place. */}
@@ -1403,8 +1411,9 @@ export function MessageTimeline({
                   ) : null}
                 </AnimatePresence>
               </div>
-            </TooltipProvider>
-          </EntranceAnimationProvider>
+              </TooltipProvider>
+            </EntranceAnimationProvider>
+          </TimelineComputeLabelProvider>
         </SeenActivityIdsProvider>
       </FoldMemoryProvider>
     </LightboxProvider>

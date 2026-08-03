@@ -20403,21 +20403,9 @@ function validateAnsweredHumanInput(
           `Text question ${question.id} accepts one value`,
         );
       }
-      const value = values[0] ?? "";
-      const minLength = question.validation?.minLength;
-      const maxLength = question.validation?.maxLength;
-      if (minLength != null && value.length < minLength) {
-        throw new HumanInputResponseValidationError(
-          "INVALID_RESPONSE",
-          `Question ${question.id} is shorter than its minimum length`,
-        );
-      }
-      if (maxLength != null && value.length > maxLength) {
-        throw new HumanInputResponseValidationError(
-          "INVALID_RESPONSE",
-          `Question ${question.id} exceeds its maximum length`,
-        );
-      }
+      // Text answers have no agent-chosen char bounds — only the platform
+      // string cap on HumanInputAnswer.values. Ignore legacy minLength/maxLength
+      // still present on older persisted question JSON.
       continue;
     }
     if (other && !question.allowOther) {

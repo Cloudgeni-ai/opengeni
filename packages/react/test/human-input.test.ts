@@ -48,7 +48,6 @@ const questions: HumanInputQuestion[] = [
     options: [],
     required: true,
     allowOther: false,
-    validation: { minLength: 3 },
   },
   {
     id: "targets",
@@ -122,14 +121,14 @@ describe("answersFromDrafts", () => {
     });
   });
 
-  test("rejects missing required and invalid minimum-length answers locally", () => {
+  test("rejects missing required answers locally; text has no char min", () => {
     const missing = answersFromDrafts(questions, {});
     expect(Object.keys(missing.errors)).toEqual(["summary", "targets"]);
     expect(
       answersFromDrafts(questions.slice(0, 1), {
         summary: { values: ["no"], other: "", otherSelected: false },
-      }).errors.summary,
-    ).toContain("at least 3");
+      }).errors,
+    ).toEqual({});
   });
 
   test("uses host validation copy without replacing the native validator", () => {
@@ -330,7 +329,6 @@ describe("HumanInputForm async host boundary", () => {
               options: [],
               required: true,
               allowOther: false,
-              validation: { maxLength: 40 },
             },
           ],
           allowSkip: true,

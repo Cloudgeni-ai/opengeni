@@ -1003,8 +1003,6 @@ export type HumanInputQuestion = {
   allowOther: boolean;
   validation?:
     | {
-        minLength?: number | null | undefined;
-        maxLength?: number | null | undefined;
         minSelections?: number | null | undefined;
         maxSelections?: number | null | undefined;
       }

@@ -95,6 +95,9 @@ export type { FoldRestingState } from "./fold-memory";
 // seen activity ids (live tool enter across rail remounts)
 export { SeenActivityIdsProvider, useSeenActivityIds } from "./seen-activity-ids";
 
+// session compute label (host-supplied active machine / cloud sandbox name)
+export { TimelineComputeLabelProvider, useTimelineComputeLabel } from "./compute-label";
+
 // turn-collapse summary chip
 export { BUILT_IN_TURN_SUMMARY_FACET_IDS, TurnSummary, useTurnSettleOpen } from "./turn-summary";
 export type {

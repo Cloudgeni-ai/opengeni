@@ -24,8 +24,6 @@ export type HumanInputFormMessages = {
   deadlineLabel: string;
   formatDeadline: (value: string) => string;
   required: string;
-  minLength: (count: number) => string;
-  maxLength: (count: number) => string;
   otherRequired: string;
   minSelections: (count: number) => string;
   maxSelections: (count: number) => string;
@@ -49,8 +47,6 @@ export const defaultHumanInputFormMessages: HumanInputFormMessages = {
   deadlineLabel: "Expires",
   formatDeadline,
   required: "This question is required.",
-  minLength: (count) => `Enter at least ${count} characters.`,
-  maxLength: (count) => `Enter no more than ${count} characters.`,
   otherRequired: "Enter a value for Other.",
   minSelections: (count) => `Choose at least ${count} option${count === 1 ? "" : "s"}.`,
   maxSelections: (count) => `Choose no more than ${count} option${count === 1 ? "" : "s"}.`,
@@ -162,13 +158,16 @@ export function HumanInputForm({
         scrollHeight > clientHeight + 2 && scrollTop + clientHeight < scrollHeight - 4,
       );
     };
-    sync();
+    // Layout after paint: first sync can run before the max-height flex
+    // constraint resolves, which falsely reports no overflow.
+    const frame = requestAnimationFrame(sync);
     node.addEventListener("scroll", sync, { passive: true });
     const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(sync) : null;
     observer?.observe(node);
     const content = node.firstElementChild;
     if (content) observer?.observe(content);
     return () => {
+      cancelAnimationFrame(frame);
       node.removeEventListener("scroll", sync);
       observer?.disconnect();
     };
@@ -298,7 +297,13 @@ export function HumanInputForm({
       onSubmit={(event) => void submit(event)}
       aria-labelledby={titleId}
       className={cn(
-        "og-root flex min-h-0 max-h-[min(28rem,50dvh)] w-full flex-col overflow-hidden rounded-og-lg border border-og-status-waiting/35 bg-og-status-waiting/5 shadow-og-sm",
+        // Multi-question: pin height at the cap so the flex body gets a real
+        // box and overflow-y engages. max-height alone + percentage/`h-full`
+        // children often sizes to content and clips with no scroll.
+        "og-root flex min-h-0 w-full flex-col overflow-hidden rounded-og-lg border border-og-status-waiting/35 bg-og-status-waiting/5 shadow-og-sm",
+        singleQuestion
+          ? "max-h-[min(28rem,50dvh)]"
+          : "h-[min(28rem,50dvh)] max-h-[min(28rem,50dvh)]",
         className,
       )}
     >
@@ -355,15 +360,10 @@ export function HumanInputForm({
         </div>
       </header>
 
-      {/*
-        Outer flex-1 + overflow-hidden gets a definite height under max-h;
-        the inner scroller fills it. Putting overflow only on a growing
-        content-sized child never engages scroll.
-      */}
-      <div className="relative min-h-0 flex-1 overflow-hidden">
+      <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
         <div
           ref={scrollRef}
-          className="h-full overflow-y-auto overscroll-contain [scrollbar-gutter:stable]"
+          className="min-h-0 flex-1 overflow-y-auto overscroll-contain [scrollbar-gutter:stable]"
         >
           <fieldset disabled={busy} className="min-w-0 space-y-4 px-4 py-3">
             {request.questions.map((question, index) => {
@@ -416,7 +416,7 @@ export function HumanInputForm({
             className="pointer-events-none absolute inset-x-0 bottom-0 z-[1] flex flex-col items-center"
             aria-hidden="true"
           >
-            <div className="h-10 w-full bg-gradient-to-t from-og-surface-1 via-og-surface-1/80 to-transparent" />
+            <div className="h-10 w-full bg-gradient-to-t from-og-surface-1 via-og-surface-1/85 to-transparent" />
             <span className="-mt-5 mb-1 rounded-og-full bg-og-surface-1 px-2.5 py-0.5 text-og-xs font-medium text-og-fg-muted shadow-og-sm ring-1 ring-og-border/60">
               {messages.moreBelow}
             </span>
@@ -495,11 +495,6 @@ function QuestionControls({
     ]
       .filter(Boolean)
       .join(" ") || undefined;
-  const useSingleLine =
-    question.kind === "text" &&
-    question.validation?.maxLength != null &&
-    question.validation.maxLength <= 160;
-
   return (
     <>
       {showPromptChrome ? (
@@ -554,39 +549,21 @@ function QuestionControls({
       )}
 
       {question.kind === "text" ? (
-        useSingleLine ? (
-          <input
-            id={fieldId}
-            type="text"
-            value={draft.values[0] ?? ""}
-            onChange={(event) =>
-              onUpdate((current) => ({
-                ...current,
-                values: event.target.value ? [event.target.value] : [],
-              }))
-            }
-            aria-invalid={Boolean(error)}
-            aria-describedby={describedBy}
-            autoFocus={autoFocus}
-            className="w-full rounded-og-md border border-og-border bg-og-surface-1 px-3 py-2 text-og-sm text-og-fg outline-none placeholder:text-og-fg-subtle focus:border-og-accent"
-          />
-        ) : (
-          <textarea
-            id={fieldId}
-            value={draft.values[0] ?? ""}
-            onChange={(event) =>
-              onUpdate((current) => ({
-                ...current,
-                values: event.target.value ? [event.target.value] : [],
-              }))
-            }
-            aria-invalid={Boolean(error)}
-            aria-describedby={describedBy}
-            autoFocus={autoFocus}
-            rows={2}
-            className="min-h-14 w-full resize-y rounded-og-md border border-og-border bg-og-surface-1 px-3 py-2 text-og-sm text-og-fg outline-none placeholder:text-og-fg-subtle focus:border-og-accent"
-          />
-        )
+        <textarea
+          id={fieldId}
+          value={draft.values[0] ?? ""}
+          onChange={(event) =>
+            onUpdate((current) => ({
+              ...current,
+              values: event.target.value ? [event.target.value] : [],
+            }))
+          }
+          aria-invalid={Boolean(error)}
+          aria-describedby={describedBy}
+          autoFocus={autoFocus}
+          rows={2}
+          className="min-h-14 w-full resize-y rounded-og-md border border-og-border bg-og-surface-1 px-3 py-2 text-og-sm text-og-fg outline-none placeholder:text-og-fg-subtle focus:border-og-accent"
+        />
       ) : (
         <div
           role={question.kind === "single_select" ? "radiogroup" : "group"}
@@ -718,21 +695,7 @@ export function answersFromDrafts(
       errors[question.id] = messages.required;
       continue;
     }
-    if (question.kind === "text") {
-      const value = values[0] ?? "";
-      if (
-        value &&
-        question.validation?.minLength != null &&
-        value.length < question.validation.minLength
-      ) {
-        errors[question.id] = messages.minLength(question.validation.minLength);
-        continue;
-      }
-      if (question.validation?.maxLength != null && value.length > question.validation.maxLength) {
-        errors[question.id] = messages.maxLength(question.validation.maxLength);
-        continue;
-      }
-    } else {
+    if (question.kind !== "text") {
       const min = question.validation?.minSelections;
       const max = question.kind === "single_select" ? 1 : question.validation?.maxSelections;
       if (min != null && supplied < min) {

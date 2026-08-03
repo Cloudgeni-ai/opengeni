@@ -8607,10 +8607,10 @@ export const HumanInputQuestion = z
     options: z.array(HumanInputOption).max(20).default([]),
     required: z.boolean().default(true),
     allowOther: z.boolean().default(false),
+    // Selection bounds only — agents invent useless text char mins/maxes.
+    // Answer strings stay platform-capped on HumanInputAnswer (~8192).
     validation: z
       .object({
-        minLength: z.number().int().nonnegative().max(8192).nullable().optional(),
-        maxLength: z.number().int().positive().max(8192).nullable().optional(),
         minSelections: z.number().int().nonnegative().max(20).nullable().optional(),
         maxSelections: z.number().int().positive().max(20).nullable().optional(),
       })
@@ -8649,17 +8649,6 @@ export const HumanInputQuestion = z
       });
     }
     const validation = question.validation;
-    if (
-      validation?.minLength != null &&
-      validation?.maxLength != null &&
-      validation.minLength > validation.maxLength
-    ) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["validation"],
-        message: "minLength exceeds maxLength",
-      });
-    }
     if (
       validation?.minSelections != null &&
       validation?.maxSelections != null &&

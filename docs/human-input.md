@@ -80,8 +80,6 @@ type RequestHumanInputToolInput = {
     required: boolean;
     allowOther: boolean;
     validation?: {
-      minLength?: number | null;
-      maxLength?: number | null;
       minSelections?: number | null;
       maxSelections?: number | null;
     } | null;
@@ -91,11 +89,13 @@ type RequestHumanInputToolInput = {
 };
 ```
 
-The API validates the response again against the persisted questions. It
-rejects unknown or duplicate question/option ids, missing required answers,
-invalid `Other` use, the wrong cardinality, and length/selection-bound
-violations. User-controlled regular expressions are intentionally not part of
-the contract.
+Text answers have no agent-chosen character min/max (agents invent arbitrary
+`≥N chars` rules). Selection min/max remains. Answer strings stay
+platform-capped (~8192). The API validates the response again against the
+persisted questions: unknown or duplicate question/option ids, missing required
+answers, invalid `Other` use, and selection-bound violations. User-controlled
+regular expressions are intentionally not part of the contract. Legacy
+persisted `minLength`/`maxLength` on question JSON is ignored.
 
 ## API and permissions
 
