@@ -231,12 +231,13 @@ export async function createTemporalWorkflowClient(
     },
   };
   const documentIndexer: DocumentIndexClient = {
-    indexDocument: async ({ accountId, workspaceId, documentId }) => {
+    indexDocument: async (input) => {
+      const { documentId } = input;
       const workflowId = `document-index-${documentId}-${crypto.randomUUID()}`;
       await temporal.workflow.start("documentIndexWorkflow", {
         taskQueue: settings.temporalTaskQueue,
         workflowId,
-        args: [{ accountId, workspaceId, documentId }],
+        args: [input],
       });
     },
   };

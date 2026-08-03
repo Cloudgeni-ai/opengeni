@@ -48,7 +48,15 @@ export function createDocumentActivities(services: () => Promise<ActivityService
               }
             },
           },
+          { viewerSubjectId: input.authoritySubjectId },
         );
+        if (
+          document.authorityKind !== input.authorityKind ||
+          document.authorityWorkspaceId !== input.authorityWorkspaceId ||
+          document.authoritySubjectId !== input.authoritySubjectId
+        ) {
+          throw new Error("document authority changed before indexing");
+        }
         if (document.status === "ready") {
           await recordUsageEvent(lockedDb, {
             accountId: input.accountId,

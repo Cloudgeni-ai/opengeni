@@ -127,17 +127,23 @@ export function createAppComposition(deps: AppDependencies): {
       accountId,
       workspaceId,
       documentId,
+      authorityKind,
+      authorityWorkspaceId,
+      authoritySubjectId,
     }: {
       accountId: string;
       workspaceId: string;
       documentId: string;
+      authorityKind: import("@opengeni/contracts").DocumentAuthorityKind;
+      authorityWorkspaceId: string | null;
+      authoritySubjectId: string | null;
     }) => {
       if (!objectStorage) {
         throw new HTTPException(503, {
           message: "object storage is not configured",
         });
       }
-      return await indexDocumentNow(
+      const document = await indexDocumentNow(
         deps.db,
         objectStorage,
         workspaceId,
@@ -153,7 +159,16 @@ export function createAppComposition(deps: AppDependencies): {
             });
           },
         },
+        { viewerSubjectId: authoritySubjectId },
       );
+      if (
+        document.authorityKind !== authorityKind ||
+        document.authorityWorkspaceId !== authorityWorkspaceId ||
+        document.authoritySubjectId !== authoritySubjectId
+      ) {
+        throw new Error("document authority changed before indexing");
+      }
+      return document;
     },
   };
   // The API process's own agent-loop-free sandbox client — the API-direct

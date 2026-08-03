@@ -103,6 +103,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
         workspaceId,
         baseId: c.req.param("baseId"),
         createdBy: grant.subjectId,
+        initiatingSubjectId: grant.subjectId,
         access: { viewerSubjectId: grant.subjectId },
       });
       const wasCreated =
@@ -114,6 +115,9 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
               accountId: grant.accountId,
               workspaceId,
               documentId: document.id,
+              authorityKind: document.authorityKind,
+              authorityWorkspaceId: document.authorityWorkspaceId,
+              authoritySubjectId: document.authoritySubjectId,
             })) ?? document);
       if (indexed.status === "ready") {
         await recordWorkspaceUsage(deps, {
@@ -204,6 +208,9 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
             accountId: grant.accountId,
             workspaceId,
             documentId: document.id,
+            authorityKind: document.authorityKind,
+            authorityWorkspaceId: document.authorityWorkspaceId,
+            authoritySubjectId: document.authoritySubjectId,
           })) ?? queued;
         if (indexed.status === "ready") {
           await recordWorkspaceUsage(deps, {
@@ -353,12 +360,14 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       const document = await addDocumentToBase(db, {
         fileId,
         ...(payload.title ? { title: payload.title } : {}),
+        ...(payload.authorityKind ? { authorityKind: payload.authorityKind } : {}),
         ...(payload.visibility ? { visibility: payload.visibility } : {}),
         ...(payload.agentAccess !== undefined ? { agentAccess: payload.agentAccess } : {}),
         accountId: grant.accountId,
         workspaceId,
         baseId: defaultBase.id,
         createdBy: grant.subjectId,
+        initiatingSubjectId: grant.subjectId,
         curationStatus: "pending",
         access: { viewerSubjectId: grant.subjectId },
       });
@@ -371,6 +380,9 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
               accountId: grant.accountId,
               workspaceId,
               documentId: document.id,
+              authorityKind: document.authorityKind,
+              authorityWorkspaceId: document.authorityWorkspaceId,
+              authoritySubjectId: document.authoritySubjectId,
             })) ?? document);
       if (indexed.status === "ready") {
         await recordWorkspaceUsage(deps, {

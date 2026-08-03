@@ -29,4 +29,24 @@ describe("document access migrations", () => {
     });
     expect(sql).toContain("CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS");
   });
+
+  test("backfills immutable document and chunk authority before replacing FORCE-RLS policy", async () => {
+    const sql = await readFile(
+      join(migrationsDir, "0157_document_authority_foundation.sql"),
+      "utf8",
+    );
+
+    expect(sql.split(/\r?\n/, 1)[0]).toBe("-- deployment-mode: maintenance");
+    expect(sql).toContain(
+      `CASE WHEN "visibility" = 'private' THEN 'personal' ELSE 'workspace' END`,
+    );
+    expect(sql).toContain(`"authority_subject_id" = CASE WHEN "visibility" = 'private'`);
+    expect(sql).toContain("document_chunks_authority_guard");
+    expect(sql).toContain("document authority is immutable");
+    expect(sql).toContain("opengeni_private.scoped_knowledge_scope_visible");
+    expect(sql).toContain("DROP POLICY workspace_isolation");
+    expect(sql.indexOf('UPDATE "documents"')).toBeLessThan(
+      sql.indexOf('ALTER TABLE "documents" ALTER COLUMN "authority_kind" SET NOT NULL'),
+    );
+  });
 });

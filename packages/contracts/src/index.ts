@@ -3137,8 +3137,15 @@ export type KnowledgeSourceKind = z.infer<typeof KnowledgeSourceKind>;
 export const DocumentSearchMode = z.enum(["hybrid", "vector", "keyword"]);
 export type DocumentSearchMode = z.infer<typeof DocumentSearchMode>;
 
+// Durable document authority. Collections/bases are organizational metadata,
+// never an authorization boundary.
+export const DocumentAuthorityKind = z.enum(["organization", "workspace", "personal"]);
+export type DocumentAuthorityKind = z.infer<typeof DocumentAuthorityKind>;
+
 // 'workspace' documents are readable by anyone with workspace access;
 // 'private' documents are readable only by the grant subject that created them.
+// Retained as a compatibility projection over authorityKind:
+// personal -> private; organization/workspace -> workspace.
 export const DocumentVisibility = z.enum(["workspace", "private"]);
 export type DocumentVisibility = z.infer<typeof DocumentVisibility>;
 
@@ -3197,6 +3204,9 @@ export const Document = z.object({
   sourceUpdatedAt: z.string().nullable(),
   sourceVersion: z.string().nullable(),
   aclTags: z.array(z.string()),
+  authorityKind: DocumentAuthorityKind,
+  authorityWorkspaceId: z.string().uuid().nullable(),
+  authoritySubjectId: z.string().nullable(),
   visibility: DocumentVisibility,
   createdBy: z.string().nullable(),
   agentAccess: z.boolean(),
@@ -3232,6 +3242,9 @@ export const DocumentSearchResult = z.object({
   sourceUpdatedAt: z.string().nullable(),
   sourceVersion: z.string().nullable(),
   aclTags: z.array(z.string()),
+  authorityKind: DocumentAuthorityKind,
+  authorityWorkspaceId: z.string().uuid().nullable(),
+  authoritySubjectId: z.string().nullable(),
 });
 export type DocumentSearchResult = z.infer<typeof DocumentSearchResult>;
 
@@ -3253,6 +3266,7 @@ export const AddDocumentRequest = z.object({
   sourceUpdatedAt: z.string().datetime({ offset: true }).optional(),
   sourceVersion: z.string().min(1).optional(),
   aclTags: z.array(z.string().min(1)).optional(),
+  authorityKind: DocumentAuthorityKind.optional(),
   visibility: DocumentVisibility.optional(),
   agentAccess: z.boolean().optional(),
 });
@@ -3269,6 +3283,7 @@ export const CreateKnowledgeDropRequest = z
     fileId: z.string().uuid().optional(),
     filename: z.string().min(1).optional(),
     title: z.string().min(1).optional(),
+    authorityKind: DocumentAuthorityKind.optional(),
     visibility: DocumentVisibility.optional(),
     agentAccess: z.boolean().optional(),
   })

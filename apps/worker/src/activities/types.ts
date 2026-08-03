@@ -1,6 +1,7 @@
 import type { Settings } from "@opengeni/config";
 import type {
   ConnectionCredentialsPort,
+  DocumentAuthorityKind,
   EntitlementsPort,
   ScheduledTaskTriggerType,
   TurnInitiator,
@@ -298,6 +299,9 @@ export type IndexDocumentInput = {
   accountId: string;
   workspaceId: string;
   documentId: string;
+  authorityKind: DocumentAuthorityKind;
+  authorityWorkspaceId: string | null;
+  authoritySubjectId: string | null;
 };
 
 type ClaimedRunAgentTurnResult = {

@@ -10,15 +10,56 @@ import {
   heuristicCuration,
   parseCurationOutcome,
   parseDocumentBytes,
+  resolveDocumentAuthority,
 } from "../src";
 
 describe("documents", () => {
-  test("fails closed for private documents without the creating subject", () => {
-    const document = { visibility: "private", createdBy: "subject:owner" } as const;
+  test("fails closed for personal documents without the initiating subject", () => {
+    const document = {
+      authorityKind: "personal",
+      authoritySubjectId: "subject:owner",
+    } as const;
     expect(canViewDocument(document, undefined)).toBe(false);
     expect(canViewDocument(document, "subject:other")).toBe(false);
     expect(canViewDocument(document, "subject:owner")).toBe(true);
-    expect(canViewDocument({ visibility: "workspace", createdBy: null }, undefined)).toBe(true);
+    expect(
+      canViewDocument({ authorityKind: "workspace", authoritySubjectId: null }, undefined),
+    ).toBe(true);
+    expect(
+      canViewDocument({ authorityKind: "organization", authoritySubjectId: null }, undefined),
+    ).toBe(true);
+  });
+
+  test("resolves fixed authority tuples and deterministic legacy compatibility", () => {
+    const workspaceId = "11111111-1111-4111-8111-111111111111";
+    expect(resolveDocumentAuthority({ kind: "organization", workspaceId })).toEqual({
+      kind: "organization",
+      workspaceId: null,
+      subjectId: null,
+    });
+    expect(resolveDocumentAuthority({ kind: "workspace", workspaceId })).toEqual({
+      kind: "workspace",
+      workspaceId,
+      subjectId: null,
+    });
+    expect(
+      resolveDocumentAuthority({
+        legacyVisibility: "private",
+        workspaceId,
+        initiatingSubjectId: "subject:owner",
+      }),
+    ).toEqual({ kind: "personal", workspaceId, subjectId: "subject:owner" });
+    expect(() =>
+      resolveDocumentAuthority({ kind: "personal", workspaceId, initiatingSubjectId: null }),
+    ).toThrow("personal documents require an initiating subject");
+    expect(() =>
+      resolveDocumentAuthority({
+        kind: "organization",
+        legacyVisibility: "private",
+        workspaceId,
+        initiatingSubjectId: "subject:owner",
+      }),
+    ).toThrow("conflicts with legacy visibility");
   });
 
   test("parses uploaded text bytes into normalized document text", async () => {
