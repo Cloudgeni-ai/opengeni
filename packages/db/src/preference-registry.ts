@@ -558,6 +558,109 @@ export async function listPreferenceRegistry(
   });
 }
 
+export type PreferenceRegistryGovernanceIdentity = Pick<
+  PreferenceRegistryDescriptor,
+  "id" | "revisionId" | "contentHash" | "activeVersion" | "scope"
+>;
+
+export type CurrentPreferenceRegistryGovernanceMetadata = {
+  descriptors: PreferenceRegistryGovernanceIdentity[];
+  truncated: boolean;
+};
+
+/**
+ * Read the current active descriptor identities for one exact authenticated
+ * subject. Full preference values and even descriptor display text stay inside
+ * this DB boundary; Workspace State receives only stable revision metadata.
+ */
+export async function getCurrentPreferenceRegistryGovernanceMetadata(
+  db: Database,
+  input: { workspaceId: string; subjectId: string },
+): Promise<CurrentPreferenceRegistryGovernanceMetadata> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({
+        preference: schema.preferenceRegistryPreferences,
+        revision: schema.preferenceRegistryRevisions,
+      })
+      .from(schema.preferenceRegistryPreferences)
+      .innerJoin(
+        schema.preferenceRegistryRevisions,
+        and(
+          eq(
+            schema.preferenceRegistryRevisions.id,
+            schema.preferenceRegistryPreferences.activeRevisionId,
+          ),
+          eq(
+            schema.preferenceRegistryRevisions.accountId,
+            schema.preferenceRegistryPreferences.accountId,
+          ),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.preferenceRegistryPreferences.status, "active"),
+          or(
+            isNull(schema.preferenceRegistryRevisions.expiresAt),
+            gt(schema.preferenceRegistryRevisions.expiresAt, sql`transaction_timestamp()`),
+          ),
+        ),
+      )
+      .orderBy(
+        sql`case ${schema.preferenceRegistryPreferences.scope}
+          when 'organization' then 0
+          when 'workspace' then 1
+          when 'user' then 2
+          else 3
+        end`,
+        desc(schema.preferenceRegistryRevisions.precedenceRank),
+        asc(schema.preferenceRegistryPreferences.stableKey),
+        asc(schema.preferenceRegistryPreferences.id),
+      )
+      .limit(PREFERENCE_REGISTRY_DESCRIPTOR_MAX_COUNT + 1);
+
+    const bounded = boundPreferenceRegistryDescriptors(
+      rows.map(({ preference, revision }) =>
+        PreferenceRegistryDescriptor.parse({
+          id: preference.id,
+          stableKey: preference.stableKey,
+          title: revision.title,
+          description: revision.description,
+          scope: preference.scope,
+          activeVersion: preference.activationVersion,
+          revisionId: revision.id,
+          contentHash: revision.contentHash,
+          precedence: {
+            tier: preference.scope,
+            rank: revision.precedenceRank,
+            conflictStrategy: revision.conflictStrategy,
+            conflictsWith: revision.conflictsWith,
+          },
+          provenance: {
+            source: revision.provenanceSource,
+            sourceIdHash: revision.provenanceSourceId
+              ? contentHash(revision.provenanceSourceId)
+              : null,
+            trust: revision.trust,
+          },
+          expiresAt: revision.expiresAt ? iso(revision.expiresAt) : null,
+          retrievalHandle: `preference://${preference.id}/revisions/${revision.id}?sha256=${revision.contentHash}`,
+        }),
+      ),
+    );
+    return {
+      descriptors: bounded.descriptors.map((descriptor) => ({
+        id: descriptor.id,
+        revisionId: descriptor.revisionId,
+        contentHash: descriptor.contentHash,
+        activeVersion: descriptor.activeVersion,
+        scope: descriptor.scope,
+      })),
+      truncated: bounded.truncated,
+    };
+  });
+}
+
 export async function listPreferenceRegistryForAttempt(
   db: Database,
   input: PreferenceRegistryAttemptClaims & PreferenceRegistryListInput,

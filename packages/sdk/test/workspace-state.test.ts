@@ -13,10 +13,7 @@ describe("workspace state SDK", () => {
       generatedAt: "2026-07-30T12:00:00.000Z",
       truth: {
         current: { source: "read_time_projection", capturedAt: "2026-07-30T12:00:00.000Z" },
-        policySnapshot: {
-          status: "not_captured",
-          reason: "workspace_instruction_policy_snapshot_not_implemented",
-        },
+        attemptGovernance: { status: "not_requested" },
       },
       policy: {
         authority: "workspace_instruction_policy_heads",
@@ -90,8 +87,17 @@ describe("workspace state SDK", () => {
     });
 
     expect(await client.getWorkspaceState(WORKSPACE_ID)).toEqual(response);
+    expect(
+      await client.getWorkspaceState(WORKSPACE_ID, {
+        attemptId: "00000000-0000-4000-8000-000000000099",
+      }),
+    ).toEqual(response);
     expect(requests.map((request) => [request.method, request.url])).toEqual([
       ["GET", `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/workspace-state`],
+      [
+        "GET",
+        `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/workspace-state?attemptId=00000000-0000-4000-8000-000000000099`,
+      ],
     ]);
     expect(ContractWorkspaceStateResponse.safeParse(response).success).toBe(true);
 
