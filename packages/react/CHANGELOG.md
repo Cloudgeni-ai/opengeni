@@ -1,5 +1,19 @@
 # @opengeni/react
 
+## 0.37.0
+
+### Minor Changes
+
+- 1c49020: Publish the full model, reasoning-effort, and latency-mode picker used by the web app as a reusable, token-themed React component.
+
+### Patch Changes
+
+- Updated dependencies [13b961e]
+- Updated dependencies [e03397d]
+- Updated dependencies [4f15920]
+- Updated dependencies [3baaebd]
+  - @opengeni/sdk@0.37.0
+
 ## 0.36.2
 
 ### Patch Changes
